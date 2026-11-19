@@ -3409,7 +3409,7 @@ export class WorkerLoop {
       const pushed = resultReduced
         ? withMemberNotes(capStop === null ? notices.containedResult : `${capStop}\n\n${notices.containedResult}`, 'other', memberSaid).result
         : capStop === null ? memberTold.result
-          : withMemberNotes(truncate(`${capStop}\n\n${result}`), 'other', memberSaid).result;
+          : withMemberNotes(truncate(`${capStop}\n\n${withRefusals}`), 'other', memberSaid).result;
       await this.notificationRouter.notify({
         // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
         // engine itself cut off is the same false report as the `success` status was.

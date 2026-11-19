@@ -9616,8 +9616,11 @@ export class LynoxHTTPApi {
         // An owner's token that rewrites the instruction marks it, as a creation does
         // (`_ownerTokenWords`). The store reads the mark only with a title or description edit, and
         // only adds it: a schedule change marks nothing, and the owner's browser session clears none.
+        // A workflow's schedule is not marked, as at its creation: its instruction is the stamped
+        // steps, not its title, and a mark would start every run of it as after outside content.
         const { untrusted: _fromClient, ...edit } = body as Record<string, unknown>;
-        const tokenWords = this._ownerTokenWords(_req);
+        const scheduledWorkflow = engine.getRunHistory()?.getTrigger(params['id']!)?.pipeline_id;
+        const tokenWords = scheduledWorkflow ? undefined : this._ownerTokenWords(_req);
         task = taskManager.update(params['id']!, { ...edit, ...(tokenWords !== undefined ? { untrusted: tokenWords } : {}) } as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
       } catch (err: unknown) {
         if (this._answerTodoRefusal(res, err)) return;

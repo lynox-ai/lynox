@@ -1989,6 +1989,17 @@ describe('WorkerLoop', () => {
       expect(call?.[1], 'a reader must be able to tell the two apart').not.toContain('cost ceiling');
     });
 
+    it('a capped run\'s push carries a send it refused, after the stop and before the run\'s text', async () => {
+      const tm = makeTaskManager([makeTask()]);
+      const session = sessionStoppedAt({ cause: 'iteration_cap', pendingToolCount: 3 });
+      (session as unknown as { getOriginRefusals: () => unknown[] }).getOriginRefusals = () => [{ targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } }];
+      const router = makeNotificationRouter();
+      await new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+      const msg = (router.notify as unknown as { mock: { calls: Array<[NotificationMessage]> } }).mock.calls[0]?.[0];
+      expect(msg?.body).toMatch(/turn limit[\s\S]*\n\nThe trigger "Daily Report" did not send to "x@evil\.example"/);
+    });
+
     it('leaves a true end of turn alone', async () => {
       // The other side of the condition. `end_turn` is what the agent reports when it
       // finished by itself — including when the cost guard tripped on a turn that had no

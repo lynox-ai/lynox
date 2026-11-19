@@ -23496,6 +23496,19 @@ describe('an instruction the owner\'s token wrote does not count as the owner\'s
     expect(tm.getTrigger(id)!.schedule_cron).toBe('0 10 * * 1');
     expect(counts(id)).toBe(true);
   });
+
+  it('the owner\'s token renaming a workflow\'s schedule leaves it unmarked, as at its creation', async () => {
+    const id = await create(ownerSession());
+    // Only the trigger's workflow link matters here, not the workflow, so its key check is off for this one write.
+    edb.getDb().pragma('foreign_keys = OFF');
+    edb.getDb().prepare('UPDATE triggers SET target_workflow_id = ? WHERE id = ?').run('wf-1', id);
+    edb.getDb().pragma('foreign_keys = ON');
+    expect(tm.getTrigger(id)!.pipeline_id, 'positive control: a workflow\'s schedule').toBe('wf-1');
+    const res = await jsonFetch(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify({ title: 'Weekly report, renamed' }) });
+    expect(res.status).toBe(200);
+    expect(tm.getTrigger(id)!.title).toBe('Weekly report, renamed');
+    expect(tm.getTrigger(id)!.created_untrusted ?? null).toBeNull();
+  });
 });
 
 describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9, B6)', () => {
