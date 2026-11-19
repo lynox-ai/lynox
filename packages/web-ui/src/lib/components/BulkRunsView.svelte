@@ -36,6 +36,25 @@
 	const mandate = $derived(isMandateSession());
 	void loadSettingsViewer();
 
+	/** How far a run is, as „applied/total“, or „–“ while it reads its list; the same in the column and in the narrow date line. */
+	function countText(run: BulkRun): string {
+		return bulkReadsList(run) ? t('bulk.head.counts_pending') : `${run.applied}/${run.total}`;
+	}
+
+	/** The narrow line's separator. An expression keeps its spaces on the client and in server output alike;
+	 *  edge whitespace in markup, entities included, is trimmed in server output. */
+	const NARROW_SEP = ' · ';
+
+	/** The status chip in its two unbreakable parts: the phase with the suffix's „·“, and the suffix's word.
+	 *  „schreibt · gestoppt“ → „schreibt ·“ + „gestoppt“; without a suffix the phase alone. */
+	function chipParts(run: BulkRun): { head: string; tail: string | null } {
+		const phase = t(`bulk.phase.${run.phase}`);
+		if (!run.haltReason || bulkWaitsForStart(run)) return { head: phase, tail: null };
+		const suffix = t(bulkHaltSuffixKey(run));
+		const dot = /^·\s*/.exec(suffix);
+		return dot === null ? { head: phase, tail: suffix } : { head: `${phase} ·`, tail: suffix.slice(dot[0].length) };
+	}
+
 	function openRun(id: string | null): void {
 		const url = new URL($page.url);
 		if (id === null) url.searchParams.delete('run');
@@ -129,28 +148,34 @@
 							<tr class="text-left text-xs text-text-subtle border-b border-border">
 								<th class="py-2 pr-3 font-medium">{t('bulk.col.run')}</th>
 								<th class="py-2 pr-3 font-medium hidden sm:table-cell">{t('bulk.col.target')}</th>
-								<th class="py-2 pr-3 font-medium">{t('bulk.col.status')}</th>
+								<!-- w-px below sm: the status column takes only its longest unbreakable part, the run column the rest (U-352). -->
+								<th class="py-2 pr-3 font-medium w-px sm:w-auto" data-testid="bulk-col-status">{t('bulk.col.status')}</th>
 								<th class="py-2 pr-3 font-medium hidden sm:table-cell">{t('bulk.col.targets')}</th>
 								<th class="py-2 font-medium hidden sm:table-cell">{t('bulk.col.cost')}</th>
 							</tr>
 						</thead>
 						<tbody>
 							{#each runs as run (run.id)}
+								{@const chip = chipParts(run)}
 								<tr class="border-b border-border hover:bg-bg-muted cursor-pointer" onclick={() => openRun(run.id)}>
 									<td class="py-2 pr-3">
 										<button type="button" class="text-left hover:underline" onclick={(e) => { e.stopPropagation(); openRun(run.id); }}>{bulkListLabel(run, i18n, bulkReadsList(run))}</button>
-										<div class="text-xs text-text-subtle">{when(run.createdAt)}<span class="sm:hidden" data-testid="bulk-run-host-narrow">{` · ${bulkSystemName(run.targetSystem, i18n)}`}</span></div>
+										<!-- Below sm the count and target columns are hidden: the count leads the date line, and the
+										     host stands on a line of its own, broken only where it is wider than the line alone (U-352).
+										     The column's header is hidden too, so a screen reader hears the count with its name. While
+										     the run reads its list the title already says „– Ziele“: the line is the date alone. -->
+										<div class="text-xs text-text-subtle">{#if !bulkReadsList(run)}<span class="sr-only sm:hidden" data-testid="bulk-run-count-narrow-label">{`${t('bulk.col.targets')}: `}</span><span class="sm:hidden font-mono" data-testid="bulk-run-count-narrow">{countText(run)}</span><span class="sm:hidden">{NARROW_SEP}</span>{/if}{when(run.createdAt)}<span class="block sm:hidden [overflow-wrap:anywhere]" data-testid="bulk-run-host-narrow">{bulkSystemName(run.targetSystem, i18n)}</span></div>
 									</td>
 									<td class="py-2 pr-3 hidden sm:table-cell" data-testid="bulk-run-host">{bulkSystemName(run.targetSystem, i18n)}</td>
 									<td class="py-2 pr-3">
-										<span class="{chipClass} whitespace-nowrap {run.phase === 'done' ? 'bg-success/15 text-success' : run.haltReason && !bulkWaitsForStart(run) ? 'bg-warning/15 text-warning' : 'bg-bg-muted text-text-muted'}">
-											{t(`bulk.phase.${run.phase}`)}{run.haltReason && !bulkWaitsForStart(run) ? ` ${t(bulkHaltSuffixKey(run))}` : ''}
-										</span>
+										<!-- Below sm the chip may break after its „·“ and nowhere else, so the status column is as wide as
+										     its longest part and the run column gets the rest; from sm it stays on one line (U-352). -->
+										<span class="{chipClass} sm:whitespace-nowrap {run.phase === 'done' ? 'bg-success/15 text-success' : run.haltReason && !bulkWaitsForStart(run) ? 'bg-warning/15 text-warning' : 'bg-bg-muted text-text-muted'}" data-testid="bulk-run-phase"><span class="whitespace-nowrap">{chip.head}</span>{chip.tail !== null ? ' ' : ''}{#if chip.tail !== null}<span class="whitespace-nowrap">{chip.tail}</span>{/if}</span>
 										{#if run.writeForm === 'unmeasured'}
 											<span class="{chipClass} whitespace-nowrap bg-warning/15 text-warning">{t('bulk.unmeasured_chip')}</span>
 										{/if}
 									</td>
-									<td class="py-2 pr-3 hidden sm:table-cell font-mono text-xs" data-testid="bulk-run-count">{bulkReadsList(run) ? t('bulk.head.counts_pending') : `${run.applied}/${run.total}`}</td>
+									<td class="py-2 pr-3 hidden sm:table-cell font-mono text-xs" data-testid="bulk-run-count">{countText(run)}</td>
 									<!-- Nothing spent reads as a dash, the same as an empty cell elsewhere in the list (U-338). -->
 									<td class="py-2 hidden sm:table-cell font-mono text-xs" data-testid="bulk-run-cost">{run.costUsd > 0 ? formatCost(run.costUsd) : '–'}</td>
 								</tr>
