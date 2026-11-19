@@ -2407,6 +2407,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'recipients.confirm_body': { de: 'Dieser Trigger stammt aus der Zeit vor einem Update, darum weiss lynox nicht, wer ihn angelegt hat. Bestätigst du, zählen die Empfänger in dieser Anweisung als von dir genannt, und der Trigger sendet wieder an sie. Ändert jemand anderes den Trigger später, gilt deine Bestätigung nicht mehr.', en: 'This trigger dates from before an update, so lynox cannot tell who set it up. If you confirm, the recipients in these instructions count as named by you, and the trigger sends to them again. If someone else changes the trigger later, your confirmation no longer applies.' },
 	'recipients.confirm': { de: 'Bestätigen', en: 'Confirm' },
 	'recipients.cancel': { de: 'Abbrechen', en: 'Cancel' },
+	'recipients.instruction': { de: 'Anweisung', en: 'Instructions' },
 	'recipients.changed': { de: 'Nichts bestätigt: Der Trigger wurde inzwischen geändert. Sieh dir die neue Anweisung an und bestätige dann.', en: 'Nothing confirmed: the trigger has changed in the meantime. Look at the new instructions, then confirm.' },
 	'recipients.unconfirmed_hint': { de: 'Empfänger nicht bestätigt, sendet nicht', en: 'Recipients not confirmed, will not send' },
 	'triggers.manage_in_chat_prompt': { de: 'Ich möchte diesen Trigger anpassen:', en: "I'd like to adjust this trigger:" },

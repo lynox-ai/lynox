@@ -9325,8 +9325,10 @@ export class LynoxHTTPApi {
             stoppable: visible && loop?.runningStoppable(trigger.id) === true,
             workflow_awaits_stamp: workflow !== undefined && history?.workflowStampState(workflow) === 'awaits_owner_stamp',
             // A trigger from before its creator was recorded sends to nobody its instruction names
-            // until the owner confirms its recipients; the view offers that to the owner only.
-            recipients_unconfirmed: isOwnerPrincipal(principal) && recipientsConfirmable(trigger),
+            // until the owner confirms its recipients; the view offers that to the owner only, and
+            // only for a trigger whose run can send (an agent's or a workflow's run, not a reminder).
+            recipients_unconfirmed: isOwnerPrincipal(principal) && recipientsConfirmable(trigger)
+              && (trigger.effect === undefined || trigger.effect === null || trigger.effect === 'run_agent' || trigger.effect === 'run_workflow'),
             ...(isBulk ? { bulk_host: bulkSystem === undefined ? null : externalHostOf(bulkSystem) } : {}),
           };
         });

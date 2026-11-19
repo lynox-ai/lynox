@@ -686,10 +686,13 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         if (!isOwnerPrincipal(agent.principal)) {
           const trigger = managerRef.getTrigger(input.task_id, scopeFilter);
           if (trigger) w.run('mark', () => managerRef.markEditedBy(trigger.id, agent.principal, true), ifTrue);
-        } else if (agent.writeAuthor !== principalTag(OWNER_PRINCIPAL)) {
+        } else if (agent.writeAuthor !== principalTag(OWNER_PRINCIPAL)
+          && (input.title !== undefined || input.description !== undefined)) {
           // Under the owner's principal but not the owner's own turn (a trigger's or a workflow's
-          // run): the change is the run's, so the trigger's instruction stops counting as the
-          // owner's. An unknown author is marked as such, never left as the owner.
+          // run) changing the instruction (its title or description): the change is the run's, so
+          // the instruction stops counting as the owner's. An unknown author is marked as such,
+          // never left as the owner. A change that leaves the instruction as it is (its status,
+          // its schedule) keeps it the owner's.
           const trigger = managerRef.getTrigger(input.task_id, scopeFilter);
           if (trigger) w.run('mark', () => managerRef.markEditedByRun(trigger.id, agent.writeAuthor ?? 'unknown'), ifTrue);
         }

@@ -1383,7 +1383,8 @@ describe('LynoxHTTPApi', () => {
 
       it('the list flags such a trigger for the owner only', async () => {
         repayRateWindow();
-        const listed = [{ ...LEGACY, status: 'open' }, { ...LEGACY, id: 'own-1', created_by: 'owner', status: 'open' }];
+        // A reminder sends to nobody: no hint that it does not send.
+        const listed = [{ ...LEGACY, status: 'open' }, { ...LEGACY, id: 'own-1', created_by: 'owner', status: 'open' }, { ...LEGACY, id: 'remind-1', effect: 'notify', status: 'open' }];
         const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
         const saved = [ref['getTaskManager'], ref['getWorkerLoop']];
         ref['getTaskManager'] = () => ({ listTriggers: () => listed });
@@ -1391,8 +1392,8 @@ describe('LynoxHTTPApi', () => {
         try {
           const rowsFor = async (headers: Record<string, string>): Promise<Array<[string, unknown]>> =>
             ((await (await fetch(`${baseUrl}/api/triggers`, { headers })).json()) as { triggers: Array<{ id: string; recipients_unconfirmed?: boolean }> }).triggers.map((r) => [r.id, r.recipients_unconfirmed]);
-          expect(await rowsFor(owner())).toEqual([['old-1', true], ['own-1', false]]);
-          expect(await rowsFor({ cookie: `lynox_session=${webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token}` })).toEqual([['old-1', false], ['own-1', false]]);
+          expect(await rowsFor(owner())).toEqual([['old-1', true], ['own-1', false], ['remind-1', false]]);
+          expect(await rowsFor({ cookie: `lynox_session=${webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token}` })).toEqual([['old-1', false], ['own-1', false], ['remind-1', false]]);
         } finally { [ref['getTaskManager'], ref['getWorkerLoop']] = saved; }
       });
     });

@@ -98,8 +98,16 @@ describe('Task Tools', () => {
 
     it('a run with no recorded author is marked too, never left as the owner', async () => {
       const id = await owners('Bericht');
-      await taskUpdateTool.handler({ task_id: id, status: 'completed' }, makeAgent());
-      expect(row('Bericht').edited_by).toBe('unknown');
+      await taskUpdateTool.handler({ task_id: id, title: 'Bericht an alle' }, makeAgent());
+      expect(row('Bericht an alle').edited_by).toBe('unknown');
+    });
+
+    it('a run that leaves the instruction as it is (its status, its schedule) keeps it the owner\'s', async () => {
+      const id = await owners('Bericht');
+      await taskUpdateTool.handler({ task_id: id, schedule: '0 10 * * 1' }, { ...makeAgent(), writeAuthor: 'trigger:t-1' } as IAgent);
+      await taskUpdateTool.handler({ task_id: id, status: 'completed' }, { ...makeAgent(), writeAuthor: 'trigger:t-1' } as IAgent);
+      expect(row('Bericht').edited_by).toBeNull();
+      expect(ownerInstructionCounts(row('Bericht'))).toBe(true);
     });
 
     it('CONTROL: the owner\'s own turn changes it and it stays the owner\'s', async () => {

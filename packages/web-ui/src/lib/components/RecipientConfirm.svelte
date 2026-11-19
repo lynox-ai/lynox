@@ -106,7 +106,7 @@
 		<p class="text-warning">{t('triggers.confirm_failed')}</p>
 	{:else if preview}
 		<div data-recipient-instruction>
-			<span class="font-medium">{t('triggers.instruction')}:</span>
+			<span class="font-medium">{t('recipients.instruction')}:</span>
 			<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">{markHidden(instructionOf({ title: preview.title, description: preview.description || undefined }))}</p>
 			{#if preview.params}
 				<p class="mt-0.5"><span class="font-medium">{t('stamp.params')}:</span> <span class="rounded-[var(--radius-sm)] border border-border bg-bg px-1 [box-decoration-break:clone]">{paramsOf(preview.params).join(' · ')}</span></p>

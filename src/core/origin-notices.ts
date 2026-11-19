@@ -57,7 +57,7 @@ export interface OriginRefusal {
 /** Every character that reads as a quote mark: the initial and final quote punctuation of every
  *  script, and the look-alikes Unicode files elsewhere (fullwidth, primes, CJK corner brackets,
  *  ornaments). */
-const QUOTE_LIKE = /["`\p{Pi}\p{Pf}\u201A\u201E\uFF02\u2033\u2036\u301D\u301E\u301F\u300C\u300D\u300E\u300F\u2039\u203A\u275D\u275E\u275B\u275C\u2E42\uFF62\uFF63]/gu;
+const QUOTE_LIKE = /["`\p{Pi}\p{Pf}\u201A\u201E\uFF02\u2033\u2036\u301D\u301E\u301F\u300C\u300D\u300E\u300F\u2039\u203A\u275D\u275E\u275B\u275C\u2E42\uFF62\uFF63\u02BA\u02DD\u3003]/gu;
 
 /** A value for inside ASCII quotes: one line, and no quote of its own. */
 export function q(v: string): string {
