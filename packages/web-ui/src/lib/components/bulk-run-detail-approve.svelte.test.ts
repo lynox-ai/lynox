@@ -1805,7 +1805,7 @@ describe('the start of a judged run, in words', () => {
 		expect(count(target.textContent ?? '', step)).toBe(1);
 	});
 
-	it('tells a mandate once, in the notice at the end, that only the owner starts the run, for a listed run too', async () => {
+	it('tells a mandate once, in the owner-only notice and not in the start line, that only the owner starts the run, for a listed run too', async () => {
 		viewerOf = 'mandate';
 		for (const haltKey of ['listed', 'awaitingStart'] as const) {
 			run = judged({ haltKey });

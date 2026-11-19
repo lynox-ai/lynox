@@ -141,7 +141,7 @@ describe('a run\'s page as a mandate sees it', () => {
 		run = makeRun({ phase: 'planned', haltKey: 'awaitingStart', haltReason: 'engine English', total: 1, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
 		await renderDetail();
 		expect(buttonByText(t('bulk.start.read'))).toBeUndefined();
-		expect(target.textContent).toContain(t('bulk.owner_only_notice'));
+		expect((target.textContent ?? '').split(t('bulk.owner_only_notice')).length - 1).toBe(1);
 		expect(target.textContent).not.toContain(t('bulk.halt.wait_owner_only'));
 		expect(target.querySelector('[data-testid="bulk-awaiting-start"]')?.textContent).toBe(t('bulk.awaiting_start'));
 		expect(target.textContent).not.toContain(t('bulk.halt.awaitingStart_start').replace('{button}', t('bulk.start.read')));
