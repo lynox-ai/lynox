@@ -38,54 +38,6 @@ export function turnEndSettlesTools(stopReason: string | undefined): boolean {
 }
 
 /**
- * When a restored prompt was CREATED, in epoch ms.
- *
- * The countdown renders `timeoutMs - (now - receivedAt)`, so restoring a prompt
- * with `receivedAt = Date.now()` restarts its clock: a prompt three hours into
- * a 24h TTL rendered as 23:59:49, and did so again after every reload. The UI
- * was promising time the prompt did not have.
- *
- * `createdAt` comes from SQLite's `datetime()` — `'2026-09-06 10:58:40'`, UTC
- * but carrying no zone suffix, which `Date.parse` reads as LOCAL time. Parsing
- * it naively shifts the countdown by the viewer's offset (an hour or two of
- * imaginary or missing time in Zurich, ten in Auckland) — subtler than the bug
- * it replaces, and harder to catch.
- *
- * Falls back to `now` when the field is absent or unparseable — an older engine
- * that does not send it, or a malformed row. A restarted clock is wrong; a NaN
- * one renders nothing at all, which is worse.
- */
-export function promptCreatedAtMs(raw: unknown, now: number): number {
-	if (typeof raw !== 'string' || raw === '') return now;
-	const parsed = Date.parse(zoneQualify(raw));
-	if (!Number.isFinite(parsed)) return now;
-	// Clamped to `now` because the two clocks are different machines'. If the
-	// browser's runs behind the server's, `now - createdAt` goes negative and the
-	// countdown renders MORE than the timeout — 26:00:00 on a two-hour skew. The
-	// caller clamps the low end only, so without this the fix would close the
-	// over-promise on one side and open it on the other.
-	return Math.min(parsed, now);
-}
-
-/**
- * Turn a SQLite `datetime()` string into one `Date.parse` reads as UTC.
- *
- * Split out from {@link promptCreatedAtMs} so it can be tested as a STRING
- * transform. Asserting the parsed number instead would make the test agree with
- * a broken implementation on any machine already in UTC — and CI sets no `TZ`,
- * so GitHub runners are exactly that. The test would have been green against
- * nothing there while passing locally in Zurich for the wrong reason.
- *
- * A value that already carries a zone (`…Z`, `…+02:00`) is returned untouched:
- * qualifying it twice would be a parse error, and the engine is free to switch
- * to real ISO output without breaking this.
- */
-export function zoneQualify(raw: string): string {
-	const iso = raw.includes('T') ? raw : raw.replace(' ', 'T');
-	return /[Zz]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : `${iso}Z`;
-}
-
-/**
  * Whether {@link lostPromptRecheckVerdict}'s timer must be (re-)armed.
  *
  * The obvious guard — "a timer is pending, so do nothing" — skips the run that

@@ -1530,7 +1530,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.skip': { de: 'Überspringen', en: 'Skip' },
 	'chat.skipped': { de: 'Übersprungen', en: 'Skipped' },
 	'chat.dismiss': { de: 'Abbrechen', en: 'Cancel' },
-	'chat.prompt_timeout_left': { de: 'Verbleibende Zeit', en: 'Time remaining' },
+	'chat.prompt_expires_min': { de: 'Läuft ab in {n}\u00a0Min.', en: 'Expires in {n}\u00a0min' },
+	'chat.prompt_expires_s': { de: 'Läuft ab in {n}\u00a0s', en: 'Expires in {n}\u00a0s' },
 	// Provenance of a confirmation raised from inside a workflow step. Composed
 	// from these two halves rather than one sentence: a step can be reached
 	// without a named workflow (and vice versa), and a half-filled sentence

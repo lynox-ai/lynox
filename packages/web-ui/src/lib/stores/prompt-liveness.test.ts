@@ -4,8 +4,6 @@ import { fileURLToPath } from 'node:url';
 
 import {
 	turnEndSettlesTools,
-	promptCreatedAtMs,
-	zoneQualify,
 	lostPromptRecheckVerdict,
 	shouldArmRecheck,
 } from './prompt-liveness.js';
@@ -58,90 +56,6 @@ describe('turnEndSettlesTools', () => {
 		expect(turnEndSettlesTools('tool_use_v2')).toBe(true);
 		expect(turnEndSettlesTools('use')).toBe(true);
 		expect(turnEndSettlesTools('TOOL_USE')).toBe(true);
-	});
-});
-
-describe('promptCreatedAtMs', () => {
-	const NOW = Date.parse('2026-09-06T13:51:00Z');
-
-	// Kept, but it is NOT the guard for the UTC question — on a runner already
-	// in UTC (which CI is: no TZ is set anywhere in the workflows) this passes
-	// against a broken implementation too. `zoneQualify` below is the real one.
-	it('reads a zone-less SQLite timestamp as an instant', () => {
-		const parsed = promptCreatedAtMs('2026-09-06 10:58:40', NOW);
-		expect(parsed).toBe(Date.parse('2026-09-06T10:58:40Z'));
-		// And the consequence the user sees: ~2h52m elapsed, not ~0.
-		expect(Math.round((NOW - parsed) / 60_000)).toBe(172);
-	});
-
-	// The defect in one assertion: a prompt hours old must not read as new.
-	it('⭐ does not restart the clock for an old prompt', () => {
-		expect(promptCreatedAtMs('2026-09-06 10:58:40', NOW)).toBeLessThan(NOW);
-	});
-
-	it('accepts an ISO string that already carries a zone', () => {
-		expect(promptCreatedAtMs('2026-09-06T10:58:40Z', NOW)).toBe(Date.parse('2026-09-06T10:58:40Z'));
-		expect(promptCreatedAtMs('2026-09-06T12:58:40+02:00', NOW)).toBe(Date.parse('2026-09-06T10:58:40Z'));
-	});
-
-	/**
-	 * ⭐ The over-promise, closed on BOTH sides. The two timestamps come from
-	 * different machines. If the browser's clock runs behind the server's,
-	 * `now - createdAt` goes negative and the countdown renders MORE than the
-	 * timeout — the caller clamps only the low end. Without this the fix would
-	 * have swapped 23:59:49 for 26:00:00.
-	 */
-	it('⭐ never reports a creation time in the future, however skewed the clock', () => {
-		const twoHoursAhead = '2026-09-06T15:51:00Z';
-		expect(promptCreatedAtMs(twoHoursAhead, NOW)).toBe(NOW);
-		expect(promptCreatedAtMs(twoHoursAhead, NOW)).toBeLessThanOrEqual(NOW);
-	});
-
-	it('leaves an un-skewed timestamp alone', () => {
-		const parsed = promptCreatedAtMs('2026-09-06 10:58:40', NOW);
-		expect(parsed).toBe(Date.parse('2026-09-06T10:58:40Z'));
-	});
-
-	// Fallback, and it must be `now` rather than NaN: a restarted countdown is
-	// wrong, but a NaN one renders nothing at all.
-	it('falls back to now — never NaN — on a missing or malformed value', () => {
-		for (const bad of [undefined, null, '', 42, {}, 'not a date']) {
-			const out = promptCreatedAtMs(bad, NOW);
-			expect(Number.isFinite(out)).toBe(true);
-			expect(out).toBe(NOW);
-		}
-	});
-});
-
-describe('zoneQualify', () => {
-	// ⭐ THE POINT, and it is a STRING assertion on purpose. The defect is that
-	// `Date.parse` reads a zone-less timestamp as LOCAL time; asserting the
-	// resulting NUMBER would agree with a broken implementation on any machine
-	// in UTC, and CI sets no TZ — so on GitHub the number-based test is green
-	// against nothing. This one fails there too.
-	it('⭐ appends Z to a zone-less SQLite timestamp, regardless of runner TZ', () => {
-		expect(zoneQualify('2026-09-06 10:58:40')).toBe('2026-09-06T10:58:40Z');
-	});
-
-	it('replaces the space separator with T', () => {
-		expect(zoneQualify('2026-09-06 10:58:40')).toContain('T');
-		expect(zoneQualify('2026-09-06 10:58:40')).not.toContain(' ');
-	});
-
-	// Qualifying twice would produce '…Z Z' / '…+02:00Z' and fail to parse.
-	it('leaves a value that already carries a zone untouched', () => {
-		expect(zoneQualify('2026-09-06T10:58:40Z')).toBe('2026-09-06T10:58:40Z');
-		expect(zoneQualify('2026-09-06T12:58:40+02:00')).toBe('2026-09-06T12:58:40+02:00');
-		expect(zoneQualify('2026-09-06T12:58:40+0200')).toBe('2026-09-06T12:58:40+0200');
-		expect(zoneQualify('2026-09-06T10:58:40z')).toBe('2026-09-06T10:58:40z');
-	});
-
-	// The zone test must anchor at the END. A '+' inside the date would never
-	// appear, but an unanchored check would also treat '10:58:40' as zoned
-	// because of its own digits-and-colons shape.
-	it('does not mistake the time-of-day colons for a zone offset', () => {
-		expect(zoneQualify('2026-09-06 10:58:40')).toBe('2026-09-06T10:58:40Z');
-		expect(zoneQualify('2026-09-06T10:58:40')).toBe('2026-09-06T10:58:40Z');
 	});
 });
 
@@ -297,19 +211,18 @@ describe('chat store wires the prompt-liveness decisions', () => {
 		return fn.slice(0, fn.indexOf('\n}'));
 	}
 
-	// ⭐ The restore path must take the server's creation time. `Date.now()` here
-	// is the bug: it restarts the countdown on every reload.
-	it('⭐ restores prompts with the server createdAt, never with now', () => {
+	// ⭐ Both paths count down from the time the server says the question has left, read from the
+	// stored question's own end. Restoring with a full timeout from now restarts the countdown on
+	// every reload and promises time the question does not have.
+	it('⭐ restores prompts with the server\'s time left, never a full timeout', () => {
 		const body = restoreBody();
-		expect(body).toContain("promptCreatedAtMs(data['createdAt']");
-		expect(body).not.toContain('receivedAt: Date.now()');
+		expect(body.match(/\.\.\.promptClock\(data\)/g)?.length).toBe(2);
+		expect(body).not.toContain("data['timeoutMs']");
 	});
 
-	// The live path is the opposite: there, "now" IS the creation time, and
-	// reusing the restore value would be wrong.
-	it('keeps Date.now() on the live event path', () => {
-		const live = caseBody('prompt');
-		expect(live).toContain('receivedAt: Date.now()');
+	it('the live event path counts down from the server\'s time left too', () => {
+		expect(caseBody('prompt')).toContain('...promptClock(data)');
+		expect(caseBody('prompt')).not.toContain("data['timeoutMs']");
 	});
 
 	// Module state that outlives a thread, and the detach-reset guard cannot see

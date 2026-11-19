@@ -1,16 +1,14 @@
 /**
- * Format a remaining-seconds countdown as MM:SS or H:MM:SS.
- * The previous formula in ChatView (`Math.floor(s/60)`:`s%60`) showed
- * `1439:40` for the 24h resumable-prompt default instead of `23:59:40`.
+ * What a question's card says about the time it has left, or null for nothing. A day-long
+ * countdown ticking by the second makes pressure there is none of, so with an hour or more left
+ * the card shows no number. Under an hour it names whole minutes, rounded down so it never
+ * promises time the question does not have; under a minute, seconds.
  */
-export function formatCountdown(totalSeconds: number): string {
-	const safe = Math.max(0, Math.floor(totalSeconds));
-	const pad = (n: number) => String(n).padStart(2, '0');
-	const seconds = safe % 60;
-	const minutes = Math.floor(safe / 60) % 60;
-	const hours = Math.floor(safe / 3600);
-	if (hours > 0) return `${hours}:${pad(minutes)}:${pad(seconds)}`;
-	return `${minutes}:${pad(seconds)}`;
+export function promptExpiry(secondsLeft: number): { key: 'chat.prompt_expires_min' | 'chat.prompt_expires_s'; n: number } | null {
+	const safe = Math.max(0, Math.floor(secondsLeft));
+	if (safe >= 3600) return null;
+	if (safe >= 60) return { key: 'chat.prompt_expires_min', n: Math.floor(safe / 60) };
+	return { key: 'chat.prompt_expires_s', n: safe };
 }
 
 /**
