@@ -774,6 +774,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.undo.prepare': { de: 'Rücknahme vorbereiten', en: 'Prepare the undo' },
 	'bulk.undo.approve_title': { de: 'Rücknahme freigeben', en: 'Approve the undo' },
 	'bulk.undo.approve_explain': { de: '{n} Ziele bekommen ihren Wert von vorher zurück. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.', en: '{n} targets get their previous value back. Targets that someone has changed since then stay as they are.' },
+	'bulk.undo.approve_explain_one': { de: '1 Ziel bekommt seinen Wert von vorher zurück. Hat es seither jemand geändert, bleibt es, wie es ist.', en: '1 target gets its earlier value back. If someone has changed it since, it stays as it is.' },
 	'bulk.undo.creates': { de: 'Der ursprüngliche Lauf hat {k} Einträge neu angelegt. Die Rücknahme löscht sie, ausser jemand hat sie seither geändert:', en: 'The original run created {k} new entries. The undo deletes them unless someone has changed them since:' },
 	'bulk.undo.approve': { de: 'Rücknahme freigeben', en: 'Approve the undo' },
 	'activity.kpi.today': { de: 'Heute',         en: 'Today' },

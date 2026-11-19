@@ -830,6 +830,40 @@ describe('the markup a target changes (1010)', () => {
 	});
 });
 
+describe('the sentence over an undo\'s approval, by the number of targets', () => {
+	const undo = (update: number, create: number): void => {
+		run = makeRun({ kind: 'undo', sourceRunId: 'r0', total: update + create, changes: { update, create, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = Array.from({ length: update + create }, (_, i) => ({ seq: i + 1, key: `gid://shopify/Product/${i + 1}`, change: i < update ? 'update' as const : 'create' as const,
+			diff: fieldsDiff('Neu', 'Alt'), error: null, deselected: false }));
+	};
+	const explain = (): string | null | undefined => target.querySelector('[data-testid="bulk-undo-explain"]')?.textContent;
+
+	it.each([
+		['de', 1, 0, '1\u00a0Ziel bekommt seinen Wert von vorher zurück. Hat es seither jemand geändert, bleibt es, wie es ist.'],
+		['en', 1, 0, '1\u00a0target gets its earlier value back. If someone has changed it since, it stays as it is.'],
+		['de', 0, 1, '1\u00a0Ziel bekommt seinen Wert von vorher zurück. Hat es seither jemand geändert, bleibt es, wie es ist.'],
+	] as const)('names one target in the singular, with a no-break space after the 1 (%s, %i changed, %i created)', async (lang, update, create, text) => {
+		const before = getLocale();
+		setLocale(lang);
+		onTestFinished(() => setLocale(before));
+		undo(update, create);
+		await render();
+		expect(explain()).toBe(text);
+	});
+
+	it.each([
+		['de', '3 Ziele bekommen ihren Wert von vorher zurück. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.'],
+		['en', '3 targets get their previous value back. Targets that someone has changed since then stay as they are.'],
+	] as const)('keeps the plural for several targets, counting the ones a write created as well (%s)', async (lang, text) => {
+		const before = getLocale();
+		setLocale(lang);
+		onTestFinished(() => setLocale(before));
+		undo(2, 1);
+		await render();
+		expect(explain()).toBe(text);
+	});
+});
+
 describe('the reason under a value lynox leaves out, as the run\'s page words it', () => {
 	const invalid = (error: string, o: Partial<BulkTarget> = {}): BulkTarget[] => [
 		TARGETS[0]!, { seq: 2, key: 'gid://shopify/Product/2', change: 'invalid', diff: { kind: 'none' } as BulkTarget['diff'], error, deselected: false, ...o },

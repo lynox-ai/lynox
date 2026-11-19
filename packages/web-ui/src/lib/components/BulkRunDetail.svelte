@@ -1015,7 +1015,7 @@
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.undo.approve_title')}</h2>
 					<!-- The targets that get a value back; the entries the source created are listed apart. -->
-					<p class="text-sm">{tf('bulk.undo.approve_explain', { n: String(run.changes.update + run.changes.create) })}</p>
+					<p class="text-sm" data-testid="bulk-undo-explain">{tf(bulkOne('bulk.undo.approve_explain', run.changes.update + run.changes.create), { n: String(run.changes.update + run.changes.create) })}</p>
 					{#each targets.filter((x) => (x.markupChanges?.length ?? 0) > 0) as target (target.seq)}
 						<div class="text-sm" data-testid="bulk-undo-markup">
 							{@render targetName(target)}
