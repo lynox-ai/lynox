@@ -20557,6 +20557,37 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
       expect(sentParams()).not.toHaveProperty('expiring');
     });
 
+    it('refuses the connect while a refresh of the same store runs, and exchanges nothing', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { holdStoreRefreshForTests } = await import('../core/store-token-refresh.js');
+      const release = holdStoreRefreshForTests(PROFILE);
+      try {
+        const { cookie } = await arrangeHeld({ token: false });
+        const res = await call(signed(good()), cookie);
+        expect(res.status).toBe(409);
+        expect(await res.text()).toContain('renewing its access to this store right now');
+        expect(mockExchangeToken).not.toHaveBeenCalled();
+      } finally {
+        release();
+      }
+    });
+
+    it('holds the store against a refresh only until the connect returns', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { storeConnectsHeldForTests } = await import('../core/store-token-refresh.js');
+      const { cookie } = await arrangeHeld({ token: false });
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      expect(storeConnectsHeldForTests()).toBe(0);
+    });
+
+    it('records when the refresh token of an expiring connection runs out', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const before = Date.now();
+      const { cookie, store } = await arrange({ tokenBody: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600, refresh_token_expires_in: 7_776_000, scope: 'read_products,read_orders' }) });
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      expect(store.get(PROFILE)?.oauth_grant?.refresh_expires_at).toBeGreaterThanOrEqual(before + 7_776_000_000 - 1000);
+    });
+
     it('asks a store whose token already expires again when it is connected again', async () => {
       repayRateWindow(); // this file shares one per-IP rate window
       const { cookie } = await arrangeHeld({ token: true, expiresAt: Date.now() + 3_600_000 });
