@@ -876,9 +876,9 @@ describe('a stored parameter name in a grant refusal', () => {
     expect(mail).not.toContain('gmail');
     const headerStep = (id: string, headers: unknown) => ({ ...STEP_WITH_PARAM, id, input_template: { ...STEP_WITH_PARAM.input_template, headers } }) as InlinePipelineStep;
     expect(buildReviewedContract(ENTRY, [STEP_WITH_PARAM, headerStep(SENT, 'Authorization: x')], { month: '2026-09' }))
-      .toEqual({ error: 'Step #2 (id outside the allowed form) takes its request headers from a value, and a reviewed grant needs each header named.' });
+      .toEqual({ error: 'Step #2 (lynox does not show its id) takes its request headers from a value, and a reviewed grant needs each header named.' });
     expect(buildReviewedContract(ENTRY, [STEP_WITH_PARAM, headerStep(SENT, { Cookie: 'x' })], { month: '2026-09' }))
-      .toMatchObject({ error: expect.stringMatching(/^Step #2 \(id outside the allowed form\) sets /) });
+      .toMatchObject({ error: expect.stringMatching(/^Step #2 \(lynox does not show its id\) sets /) });
     expect(buildReviewedContract(ENTRY, [headerStep('s1', 'Authorization: x')], { month: '2026-09' }))
       .toEqual({ error: 'Step "s1" takes its request headers from a value, and a reviewed grant needs each header named.' });
   });

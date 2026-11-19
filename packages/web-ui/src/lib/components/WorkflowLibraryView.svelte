@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { paramAllowed } from '../workflow-param-allowed.js';
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
@@ -78,6 +79,17 @@
 	// has no answer; the sentence waits for a known mandate.
 	const ownerActs = $derived(viewer === 'owner' || isOwnerSession());
 	const mandate = $derived(viewer === 'mandate' || isMandateSession());
+	// What a parameter may take, by its contract: shown to the owner only, in the form, since a
+	// refusal no longer lists it (U-362). As text, never as markup.
+	function allowedFor(wf: SavedWorkflow, name: string) {
+		return paramAllowed(wf.capabilityContract, name, viewer === 'owner');
+	}
+	function boundsHint(min: number | undefined, max: number | undefined): string {
+		if (min !== undefined && max !== undefined) return tf('workflow_library.param_between', { min: String(min), max: String(max) });
+		if (min !== undefined) return tf('workflow_library.param_at_least', { min: String(min) });
+		if (max !== undefined) return tf('workflow_library.param_at_most', { max: String(max) });
+		return '';
+	}
 	let loading = $state(true);
 	let error = $state('');
 	let notice = $state('');
@@ -845,18 +857,36 @@
 			<p class="text-xs text-text-subtle mb-4">{t('workflow_library.params_hint')}</p>
 			<div class="space-y-3">
 				{#each paramModalWf.parameters ?? [] as param (param.name)}
+					{@const allowed = allowedFor(paramModalWf, param.name)}
 					<label class="block">
 						<span class="block text-xs font-medium mb-1">{param.name}</span>
 						{#if param.description}
 							<span class="block text-[10px] text-text-subtle mb-1">{param.description}</span>
 						{/if}
-						<input
+						{#if allowed?.values}
+							<select
+								bind:value={paramValues[param.name]}
+								data-param-choice={param.name}
+								onkeydown={(e) => { if (e.key === 'Escape') cancelParamModal(); }}
+								class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 text-[16px] md:text-sm focus:border-accent focus:outline-none"
+							>
+								<option value="">{t('workflow_library.param_choose')}</option>
+								{#each allowed.values as v (v)}
+									<option value={v}>{v}</option>
+								{/each}
+							</select>
+						{:else}
+							<input
 							bind:value={paramValues[param.name]}
 							type={param.type === 'date' ? 'date' : 'text'}
 							inputmode={param.type === 'number' ? 'decimal' : undefined}
 							onkeydown={(e) => { if (e.key === 'Enter') submitParamModal(); if (e.key === 'Escape') cancelParamModal(); }}
 							class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 text-[16px] md:text-sm focus:border-accent focus:outline-none"
 						/>
+						{/if}
+						{#if allowed && (allowed.min !== undefined || allowed.max !== undefined)}
+							<span data-param-bounds={param.name} class="block text-[10px] text-text-subtle mt-1">{boundsHint(allowed.min, allowed.max)}</span>
+						{/if}
 					</label>
 				{/each}
 			</div>
@@ -931,11 +961,25 @@
 				<div class="space-y-3 mb-1">
 					<p class="text-[10px] uppercase tracking-widest text-text-subtle">{t('workflow_library.params_title')}</p>
 					{#each scheduleModalWf.parameters ?? [] as param (param.name)}
+						{@const allowed = allowedFor(scheduleModalWf, param.name)}
 						<label class="block">
 							<span class="block text-xs font-medium mb-1">{param.name}</span>
 							{#if param.description}
 								<span class="block text-[10px] text-text-subtle mb-1">{param.description}</span>
 							{/if}
+							{#if allowed?.values}
+								<select
+									bind:value={paramValues[param.name]}
+									data-param-choice={param.name}
+									onchange={dropGrantPreview}
+									class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 text-[16px] md:text-sm focus:border-accent focus:outline-none"
+								>
+									<option value="">{t('workflow_library.param_choose')}</option>
+									{#each allowed.values as v (v)}
+										<option value={v}>{v}</option>
+									{/each}
+								</select>
+							{:else}
 							<input
 								bind:value={paramValues[param.name]}
 								type={param.type === 'date' ? 'date' : 'text'}
@@ -944,6 +988,10 @@
 								onkeydown={onScheduleKey}
 								class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 text-[16px] md:text-sm focus:border-accent focus:outline-none"
 							/>
+							{/if}
+							{#if allowed && (allowed.min !== undefined || allowed.max !== undefined)}
+								<span data-param-bounds={param.name} class="block text-[10px] text-text-subtle mt-1">{boundsHint(allowed.min, allowed.max)}</span>
+							{/if}
 						</label>
 					{/each}
 				</div>
