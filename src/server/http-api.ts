@@ -5676,7 +5676,8 @@ export class LynoxHTTPApi {
           if (csm?.hasChanges()) {
             res.write(`event: changeset_ready\ndata: ${JSON.stringify({ fileCount: csm.size, runId: csm.runId })}\n\n`);
           }
-          res.write(`event: done\ndata: ${JSON.stringify({ result, usage: session.getLastRunUsage() ?? undefined })}\n\n`);
+          // `notice`: the result is lynox's own sentence, not the model's (set by the engine only).
+          res.write(`event: done\ndata: ${JSON.stringify({ result, usage: session.getLastRunUsage() ?? undefined, notice: session.getLastRunNotice() })}\n\n`);
           res.end();
         }
       } catch (err: unknown) {
@@ -5696,7 +5697,7 @@ export class LynoxHTTPApi {
           // No `usage`: `getLastRunUsage` is set only by a run that succeeds, so here it would be
           // the PREVIOUS run's — and the chat footer takes it as this turn's.
           const msg = capForClient(maskForClient(err.message, { includeGeneric: true }));
-          res.write(`event: done\ndata: ${JSON.stringify({ result: msg })}\n\n`);
+          res.write(`event: done\ndata: ${JSON.stringify({ result: msg, notice: 'input_required' })}\n\n`);
           res.end();
         } else if (!aborted) {
           // Masked AND capped: this string is a runtime/provider error rendered

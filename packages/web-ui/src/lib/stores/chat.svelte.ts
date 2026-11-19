@@ -2595,8 +2595,13 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			const result = typeof data['result'] === 'string' ? data['result'] : '';
 			if (!msg.content && !streamedText && result.trim()) {
 				msg.content = result;
+				// The engine says when the result is its own sentence, not the model's (`notice`):
+				// shown as the note a reload shows, without the AI mark. Anything else stays text.
+				const notice = engineNotice(data['notice']);
 				// After any line already there (a typed answer to a confirmation), not over it.
-				msg.blocks = [...(msg.blocks ?? []), { type: 'text', text: result }];
+				msg.blocks = [...(msg.blocks ?? []), notice === undefined
+					? { type: 'text', text: result }
+					: { type: 'notice', code: notice, text: notice === 'run_blocked' && result.startsWith(RUN_BLOCKED_PREFIX) ? result.slice(RUN_BLOCKED_PREFIX.length) : result }];
 			}
 			// Budget threshold check — usage dashboard Phase 4. Dynamic import
 			// keeps the alerts code out of the initial chat-store bundle for
@@ -3416,6 +3421,13 @@ export async function reviewKnowledge(
 
 export function getMessages() {
 	return messages;
+}
+/** The codes `done.notice` may carry: a run the engine ended with a sentence of its own. */
+const ENGINE_NOTICES = ['content_refused', 'run_blocked', 'input_required'] as const;
+/** How the engine opens a blocked run's sentence; the note's title says it, so the line keeps the reason. */
+const RUN_BLOCKED_PREFIX = 'Run blocked: ';
+function engineNotice(value: unknown): (typeof ENGINE_NOTICES)[number] | undefined {
+	return ENGINE_NOTICES.find((c) => c === value);
 }
 /** A reply that holds a typed answer is kept when it ends empty: the answer was given. */
 function holdsTypedAnswer(msg: ChatMessage): boolean {

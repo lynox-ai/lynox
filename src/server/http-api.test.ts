@@ -251,6 +251,7 @@ const mockSessionInstance = {
   getModelTier: vi.fn().mockReturnValue('balanced'),
   getChangesetManager: vi.fn().mockReturnValue(null),
   getLastRunUsage: vi.fn().mockReturnValue(null),
+  getLastRunNotice: vi.fn().mockReturnValue(undefined),
   getAgent: vi.fn().mockReturnValue(null),
   sessionId: 'mock-session-id',
 };
@@ -2925,6 +2926,35 @@ describe('LynoxHTTPApi', () => {
       expect(text).not.toContain('event: error');
       expect(text).toContain('event: done');
       expect(text).toContain('Approve the refund?');
+    });
+
+    /** The `done` frame's data, parsed. */
+    function doneFrame(text: string): Record<string, unknown> {
+      const lines = text.split('\n');
+      const at = lines.findIndex((l) => l === 'event: done');
+      expect(at, 'a done frame').toBeGreaterThanOrEqual(0);
+      return JSON.parse(lines[at + 1]!.replace(/^data:\s*/, '')) as Record<string, unknown>;
+    }
+
+    it('done says when the result is lynox\'s own sentence, as the session reports it', async () => {
+      mockSessionRun.mockResolvedValueOnce('⚠ Request blocked by content policy: x. This request was not sent to the AI model.');
+      mockSessionInstance.getLastRunNotice.mockReturnValueOnce('content_refused');
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'x' }) });
+      expect(doneFrame(await res.text())).toMatchObject({ notice: 'content_refused' });
+    });
+
+    it('control: a model reply\'s done carries no notice', async () => {
+      mockSessionRun.mockResolvedValueOnce('Paris.');
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'capital of France' }) });
+      const done = doneFrame(await res.text());
+      expect(done['result']).toBe('Paris.');
+      expect('notice' in done).toBe(false);
+    });
+
+    it('a run that ended needing input is marked as lynox\'s own sentence too', async () => {
+      mockSessionRun.mockImplementationOnce(async () => { throw new InputRequiredError('Approve the refund?'); });
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'refund' }) });
+      expect(doneFrame(await res.text())).toMatchObject({ notice: 'input_required' });
     });
 
     it('echoes the run usage in the done event', async () => {

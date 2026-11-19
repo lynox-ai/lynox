@@ -199,6 +199,41 @@ describe('a message the content check refused is kept for the person, not for th
     expect(store.getThread(session.sessionId)?.title).toBe('My own name');
   });
 
+  it('the run says its result is lynox\'s own sentence, at each refusal and a blocked run — never for a model reply', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    session.promptUser = vi.fn().mockResolvedValue('deny');
+
+    await session.run(FLAGGED);
+    expect(session.getLastRunNotice()).toBe(CONTENT_REFUSED_NOTE);
+    await session.run(BLOCKED);
+    expect(session.getLastRunNotice()).toBe(CONTENT_REFUSED_NOTE);
+
+    // The next run that the model answers clears it: the mark belongs to one run.
+    mockProcess.mockResolvedValueOnce(endTurn('Paris.'));
+    expect(await session.run('what is the capital of France')).toContain('Paris.');
+    expect(session.getLastRunNotice()).toBeUndefined();
+
+    // A run hook that blocks before the model: the result is lynox's sentence too.
+    let block = true;
+    session.registerHooks({ onBeforeRun: async () => { if (block) throw new Error('AI budget for this period reached.'); } });
+    expect(await session.run('and of Spain')).toBe('Run blocked: AI budget for this period reached.');
+    expect(session.getLastRunNotice()).toBe('run_blocked');
+    block = false;
+    mockProcess.mockResolvedValueOnce(endTurn('Madrid.'));
+    await session.run('and of Spain');
+    expect(session.getLastRunNotice()).toBeUndefined();
+  });
+
+  it('an allowed flagged message the model answers is no notice of lynox', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    session.promptUser = vi.fn().mockResolvedValue('allow');
+    mockProcess.mockResolvedValueOnce(endTurn('answered'));
+    await session.run(FLAGGED);
+    expect(session.getLastRunNotice()).toBeUndefined();
+  });
+
   it('an internal run the check refuses keeps nothing in the thread', async () => {
     const engine = await boot();
     const session = engine.createSession();
