@@ -10,7 +10,7 @@
  * other stored or typed text back (`step-id.ts`).
  */
 import { placeholders } from './placeholders.js';
-import { isStepIdShape } from './step-id.js';
+import { isReservedStepId, isStepIdShape, reservedStepIdRefusal } from './step-id.js';
 
 interface RefStep {
   id: string;
@@ -58,6 +58,36 @@ function quotablePlaceholder(ref: string): boolean {
 /** A referenced step as a refusal shows it: its id when that has the step id shape, otherwise described. */
 function shownStep(name: string): string {
   return isStepIdShape(name) ? `step "${name}"` : 'a step whose id is outside the allowed form';
+}
+
+/**
+ * Why a run of `steps` in `context` is refused before its first step, or null. The runner asks this of
+ * every manifest it runs, a nested pipeline's included, so no caller skips it:
+ *
+ * - A step whose id is reserved (`RESERVED_STEP_IDS`), or is a key the run's context already holds:
+ *   its output would take that key's place in each step that reads it (`buildStepContext`), so a
+ *   reference meant for the context value would read the step's output. A stored workflow can hold
+ *   such an id from before a save refused it; it is renamed with `rename_step`.
+ * - A reference no run resolves ({@link templateRefIssue}).
+ *
+ * A step is named by its position and the field, never by its id: in a nested pipeline or a direct
+ * call the id is not checked against the shape before this.
+ */
+export function runStepsIssue(
+  steps: readonly RefStep[],
+  context: Readonly<Record<string, unknown>> = {},
+  path = 'agents',
+): string | null {
+  for (const [i, step] of steps.entries()) {
+    const where = `step #${String(i + 1)} (${path}[${String(i)}].id)`;
+    if (isReservedStepId(step.id)) {
+      return `${reservedStepIdRefusal(where, { refs: false })} In a saved workflow, rename the step with rename_step; the steps that read it follow.`;
+    }
+    if (Object.hasOwn(context, step.id)) {
+      return `${where}: the run's context already holds a value under this step's id, and the step's output would take its place. Give the step another id, or the value another name.`;
+    }
+  }
+  return templateRefIssue(steps, context, path);
 }
 
 /**

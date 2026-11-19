@@ -13,6 +13,7 @@ import type { SessionCounters } from '../types/agent.js';
 import type { IMemory } from '../types/memory.js';
 import { loadAgentDef } from './agent-registry.js';
 import { buildStepContext, contextForEventRun, resolveTaskTemplate, resolveInputTemplate } from './context.js';
+import { runStepsIssue } from './template-refs.js';
 import { shouldRunStep, buildConditionContext } from './conditions.js';
 import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, headlessStepModelOverride, resolveStepSlotCreds, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint, type ChatOrigin, type StepSpawnResult } from './runtime-adapter.js';
 import { computePhases } from './graph.js';
@@ -573,6 +574,12 @@ async function runManifestInGroup(
   if (preApproving) {
     throw new Error(`Invalid manifest: agents.${preApproving.id}.pre_approve: ${PRE_APPROVE_REMOVED}`);
   }
+
+  // Every manifest that runs, a nested pipeline's and a direct caller's included: a step id the
+  // context already uses, or a reference no run resolves (`template-refs.ts`).
+  // A caller outside the type system may leave `context` out, as the run's own spread allows.
+  const stepsIssue = runStepsIssue(manifest.agents, (manifest.context as Record<string, unknown> | undefined) ?? {});
+  if (stepsIssue !== null) throw new Error(`Invalid manifest: ${stepsIssue}`);
 
   assertGatesEnforceable(manifest, options.gateAdapter !== undefined);
   const agentsDir = options.agentsDir ?? config.agents_dir ?? join(process.cwd(), 'agents');

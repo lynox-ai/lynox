@@ -16,7 +16,9 @@ export function buildStepContext(
   outputs: Map<string, AgentOutput>,
   contextLimit = DEFAULT_CONTEXT_LIMIT,
 ): Record<string, unknown> {
-  const ctx: Record<string, unknown> = { ...globalContext };
+  // Without a prototype: a step id is a key here, and on a plain object `__proto__` would set the
+  // prototype instead of holding the step's output.
+  const ctx: Record<string, unknown> = Object.assign(Object.create(null) as Record<string, unknown>, globalContext);
   for (const fromId of step.input_from ?? []) {
     const out = outputs.get(fromId);
     if (out === undefined) {

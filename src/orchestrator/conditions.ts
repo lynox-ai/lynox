@@ -2,7 +2,8 @@ import type { ManifestCondition, AgentOutput } from '../types/orchestration.js';
 
 /**
  * Resolve a dot-notation path into an object.
- * Returns `undefined` if any segment is missing.
+ * Returns `undefined` if any segment is missing. Only an object's own properties count: a path
+ * never reads through to a prototype (`{{constructor.name}}`, `{{params.toString}}`).
  */
 export function getByPath(obj: Record<string, unknown>, path: string): unknown {
   const segments = path.split('.');
@@ -11,6 +12,7 @@ export function getByPath(obj: Record<string, unknown>, path: string): unknown {
     if (current === null || current === undefined || typeof current !== 'object') {
       return undefined;
     }
+    if (!Object.hasOwn(current, segment)) return undefined;
     current = (current as Record<string, unknown>)[segment];
   }
   return current;

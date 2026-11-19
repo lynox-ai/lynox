@@ -315,6 +315,15 @@ describe('run_workflow — inline steps', () => {
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
 
+  it('refuses an inline step with a reserved id before anything runs', async () => {
+    const result = await runWorkflowTool.handler(
+      { name: 'test', steps: [makeStep('fetch', 'first'), makeStep('params', 'second')] },
+      makePipelineAgent(),
+    );
+    expect(result).toBe('Error: step #2 (steps[1].id): "params", "__proto__" and "constructor" cannot be step ids, because a run already uses these names ("params" holds the workflow\'s parameters). Choose another id in the allowed form, for example fetch_orders. If other steps refer to this step, use the new id there too.');
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
   it('successfully executes a single-step pipeline', async () => {
     const agent = makePipelineAgent();
     mockRunManifest.mockResolvedValueOnce(makeRunState());
@@ -1274,6 +1283,18 @@ describe('run_workflow — a step id stored before ids had a shape', () => {
     await runWorkflowTool.handler({ workflow_id: pipelineId, modifications: [{ action: 'remove', step_id: 'fetch' }] } as never, makePipelineAgent());
     const manifest = mockRunManifest.mock.calls.at(-1)![0] as Manifest;
     expect(manifest.agents.map(a => a.id)).toEqual(['step-2']);
+  });
+
+  // A workflow stored with a step `params` before a save refused it: the run hands the runner the id
+  // as stored, next to the workflow's params, never renamed, so the runner's own check refuses it
+  // before any step (`reserved-step-ids.test.ts`).
+  it('a stored step id params reaches the runner as stored, beside the workflow\'s params', async () => {
+    const pipelineId = seedStoredPipeline([{ id: 'params', task: 'Fetch' }, { id: 'b', task: 'Use {{params.result}}', input_from: ['params'] }]);
+    await runWorkflowTool.handler({ workflow_id: pipelineId }, makePipelineAgent());
+    const manifest = mockRunManifest.mock.calls.at(-1)![0] as Manifest;
+    expect(manifest.agents.map(a => a.id)).toEqual(['params', 'b']);
+    expect(manifest.agents[1]!.input_from).toEqual(['params']);
+    expect(Object.hasOwn(manifest.context, 'params')).toBe(true);
   });
 
   it('refuses a stored reference outside the shape that names no step without quoting it', async () => {
