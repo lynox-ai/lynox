@@ -61,7 +61,7 @@ import { WallClockBudget } from '../server/wall-clock-budget.js';
 import type { AbortScope } from '../types/config.js';
 import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from '../orchestrator/workflow-stop.js';
 import { WORKFLOW_ENDED_MID_RUN_ERROR } from '../orchestrator/run-source.js';
-import { storedStepOrder } from '../orchestrator/step-id.js';
+import { runStepIds, stepRunNames, storedStepOrder } from '../orchestrator/step-id.js';
 import { failedRunBody } from './escalation-failure.js';
 import { asksOnlyViaAskUser } from '../orchestrator/human-in-the-loop.js';
 import { WorkflowQuestions } from './workflow-questions.js';
@@ -3582,9 +3582,15 @@ export class WorkerLoop {
       // build site is here, not a session).
       principal: runAs,
       // A mapped value reaches only a step's task text, where it is fenced as untrusted; asked
-      // by the runner of the workflow exactly as it read it, so no edit falls in between.
+      // by the runner of the workflow exactly as it read it, so no edit falls in between, and read
+      // as the run will execute it: a step id stored outside the shape runs under its run name, and
+      // its references move with it (`runStepIds`), so a reference the stored text shows as a param
+      // can be a step's output in the run. In the fields a run resolves, the copy refuses every
+      // reference the stored text would: a moved reference becomes a run name, never `params`.
+      // Only an id or an `input_from` entry outside the shape, whose text no run substitutes into,
+      // is read as its run name there.
       ...(event !== undefined ? { checkWorkflow: (p: PlannedPipeline) => {
-        const where = mappedValueOutsideTaskText(p.steps, event.mappedNames);
+        const where = mappedValueOutsideTaskText(runStepIds(p.steps, stepRunNames(p.steps)), event.mappedNames);
         return where === null ? null : `${EVENT_MAPPING_REFUSED} ${where}`;
       } } : {}),
       stopSignal: ownerStop,
