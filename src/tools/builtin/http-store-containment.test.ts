@@ -22,6 +22,15 @@ vi.mock('../../core/store-pass.js', async (importOriginal) => {
   };
 });
 
+const renewal = vi.hoisted(() => ({ result: false, urls: [] as string[] }));
+vi.mock('../../core/store-token-refresh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../core/store-token-refresh.js')>();
+  return {
+    ...actual,
+    renewStoreAfterUnauthorized: async (url: string) => { renewal.urls.push(url); return renewal.result; },
+  };
+});
+
 import dns from 'node:dns/promises';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -146,6 +155,35 @@ async function request(a: never, headers: Record<string, string> = {}): Promise<
 
 const containedRows = (): { container_kind: string; container_id: string; kind: string; connection_id: string }[] =>
   engineDb.getDb().prepare('SELECT container_kind, container_id, kind, connection_id FROM contained').all() as never;
+
+describe('a 401 from the store', () => {
+  const NOTE = 'The access token for this store had expired and the engine has renewed it. Send the same request once more';
+  beforeEach(() => { renewal.result = false; renewal.urls = []; });
+
+  it('asks the engine to renew the store\'s token, and tells the model to send once more when it did', async () => {
+    renewal.result = true;
+    storeAnswer = async () => new Response('{"errors":"[API] Invalid API key or access token"}', { status: 401, headers: { 'content-type': 'application/json' } });
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(renewal.urls).toEqual([URL_OK]);
+    expect(out).toContain(NOTE);
+    // The engine does not send it again itself: one request reached the store.
+    expect(atReceipt).toHaveLength(1);
+  });
+
+  it('says nothing of a renewal that did not happen', async () => {
+    storeAnswer = async () => new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } });
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(renewal.urls).toEqual([URL_OK]);
+    expect(out).not.toContain(NOTE);
+  });
+
+  it('asks for no renewal on an answer that is not a 401', async () => {
+    renewal.result = true;
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(renewal.urls).toEqual([]);
+    expect(out).not.toContain(NOTE);
+  });
+});
 
 describe('a request to the store under a thread', () => {
   it('contains the thread before the pass is minted, and the store sees the record when the request arrives', async () => {
