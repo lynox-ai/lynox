@@ -564,10 +564,10 @@
 {#snippet targetName(target: { key: string })}
 	{@const name = bulkTargetName(run?.targetSystem ?? '', target)}
 	{#if name.adminUrl === null}
-		<!-- A key breaks only after a hyphen or a dot, never inside a word (U-341); one longer than its
-		     column scrolls with the table. -->
+		<!-- A key breaks after a hyphen or a dot, never inside a word (U-341). In the table its column
+		     grows and scrolls; only a key with no such place that would leave a list's box is cut. -->
 		{@const parts = bulkKeyParts(bulkVisibleText(target.key))}
-		<code class="text-xs break-normal" data-testid="bulk-target-key">{#each parts as part, i (i)}{part}{#if i < parts.length - 1}<wbr />{/if}{/each}</code>
+		<code class="text-xs break-normal break-words" data-testid="bulk-target-key">{#each parts as part, i (i)}{part}{#if i < parts.length - 1}<wbr />{/if}{/each}</code>
 	{:else}
 		<a class="text-sm underline hover:text-text" href={name.adminUrl} target="_blank" rel="noopener noreferrer" title={t('bulk.target.open_admin')} data-testid="bulk-target-admin">{tf('bulk.target.product', { n: name.number ?? '' })}<span aria-hidden="true"> ↗</span></a>
 	{/if}

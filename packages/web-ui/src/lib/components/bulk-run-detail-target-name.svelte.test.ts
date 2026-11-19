@@ -283,6 +283,19 @@ describe('a target key in the preview', () => {
 		expect(before).toEqual(['tee-', 'abendruhe.', 'sommer-']);
 	});
 
+	// `overflow-wrap: break-word` does not narrow the table column (min-content stays the longest part),
+	// so there the key still breaks only at „-“ and „.“; in the undo lists, which do not scroll, a key with
+	// no such place is cut instead of running out of its box.
+	it('lets a key with no hyphen or dot be cut rather than leave its box', async () => {
+		run = makeRun({ phase: 'previewed', undone: 0, undoneBy: null, targetSystem: 'workspace', total: 1, applied: 0,
+			changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = [{ seq: 1, key: handle.replace(/[-.]/g, '_'), change: 'update', diff: fieldsDiff('', 'Neu'), error: null, deselected: false } as BulkTarget];
+		await render();
+		const key = target.querySelector('[data-testid="bulk-target-key"]');
+		expect(key?.querySelectorAll('wbr').length).toBe(0);
+		expect(key?.classList.contains('break-words')).toBe(true);
+	});
+
 	it('gives the target column a minimum width', async () => {
 		run = makeRun({ phase: 'previewed', undone: 0, undoneBy: null, targetSystem: 'workspace', total: 1, applied: 0,
 			changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
