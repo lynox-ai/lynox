@@ -1,5 +1,6 @@
 import type { ManifestStep, AgentOutput } from '../types/orchestration.js';
 import { getByPath } from './conditions.js';
+import { replacePlaceholders, solePlaceholder } from './placeholders.js';
 import { channels } from '../core/observability.js';
 import { detectInjectionAttempt, wrapUntrustedData } from '../core/data-boundary.js';
 
@@ -52,8 +53,12 @@ export function resolveTaskTemplate(
   task: string,
   context: Record<string, unknown>,
   isAccepted?: (path: string, value: unknown) => boolean,
+  /** Fence every step output, not only one the injection detector flags: a run whose input is a
+   *  third party's (a webhook event) can steer an earlier step's output in words no detector
+   *  knows. */
+  fenceStepOutputs = false,
 ): string {
-  return task.replace(/\{\{([^}]+)\}\}/g, (_match: string, rawPath: string) => {
+  return replacePlaceholders(task, (_match: string, rawPath: string) => {
     const path = rawPath.trim();
     const value = getByPath(context, path);
     // A function is not a value: `getByPath` walks the prototype, so `{{params.toString}}`
@@ -67,13 +72,11 @@ export function resolveTaskTemplate(
       if (isAccepted?.(path, value) === true) return str;
       return wrapUntrustedData(str, `workflow_param:${path}`);
     }
-    return detectInjectionAttempt(str).detected
+    return fenceStepOutputs || detectInjectionAttempt(str).detected
       ? wrapUntrustedData(str, `pipeline_step:${path}`)
       : str;
   });
 }
-
-const SOLE_PLACEHOLDER = /^\{\{\s*([^}]+)\s*\}\}$/;
 
 /**
  * Substitute `{{params.<name>}}` (and any `{{path}}`) placeholders inside a
@@ -116,15 +119,32 @@ function walk(value: unknown, context: Record<string, unknown>): unknown {
 }
 
 function substituteString(s: string, context: Record<string, unknown>): unknown {
-  const sole = SOLE_PLACEHOLDER.exec(s);
-  if (sole) {
-    const resolved = getByPath(context, sole[1]!.trim());
+  const sole = solePlaceholder(s);
+  if (sole !== null) {
+    const resolved = getByPath(context, sole.trim());
     return resolved === undefined ? s : resolved;
   }
-  return s.replace(/\{\{([^}]+)\}\}/g, (_match: string, rawPath: string) => {
+  return replacePlaceholders(s, (_match: string, rawPath: string) => {
     const path = rawPath.trim();
     const resolved = getByPath(context, path);
     if (resolved === undefined) return `{{${path}}}`;
     return typeof resolved === 'string' ? resolved : JSON.stringify(resolved);
   });
+}
+
+/**
+ * What a step agent of a run started by a third party's event reads as its context: without the
+ * run's params, which reach it only where its task names them, fenced; and with every earlier
+ * step's output fenced, since an event's text can steer it. The templates still resolve
+ * from the full context.
+ */
+export function contextForEventRun(context: Record<string, unknown>, step: ManifestStep): Record<string, unknown> {
+  const { params: _params, ...rest } = context;
+  for (const fromId of step.input_from ?? []) {
+    const out = rest[fromId];
+    if (out !== null && typeof out === 'object' && typeof (out as { result?: unknown }).result === 'string') {
+      rest[fromId] = { ...(out as object), result: wrapUntrustedData((out as { result: string }).result, `pipeline_step:${fromId}`) };
+    }
+  }
+  return rest;
 }

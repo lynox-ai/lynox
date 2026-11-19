@@ -5,6 +5,7 @@ import type { Manifest } from '../types/orchestration.js';
 import type { InlinePipelineStep, PipelineMode, PlannedPipeline } from '../types/index.js';
 import { findAutonomousViolations } from './human-in-the-loop.js';
 import { INLINE_CORE_TOOLS, INLINE_NAMED_ONLY_TOOLS } from './runtime-adapter.js';
+import { templateRefIssue } from './template-refs.js';
 
 /**
  * Default policy ceiling on workflow steps. The run-path enforcement points in
@@ -184,6 +185,11 @@ export function validateManifest(raw: unknown): Manifest {
   if (manifest.manifest_version === '1.1') {
     validateGraph(manifest.agents);
   }
+
+  // A `{{<id>.result}}` no run resolves would stay as raw text in the step's task: refused before the
+  // run, against the context this run brings (`template-refs.ts`).
+  const refIssue = templateRefIssue(manifest.agents, manifest.context);
+  if (refIssue) throw new Error(`Invalid manifest: ${refIssue}`);
 
   return manifest;
 }

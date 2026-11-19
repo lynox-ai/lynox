@@ -107,6 +107,17 @@ import type { PromptText } from '../../types/index.js';
  */
 export const MASS_SEND_THRESHOLD = 5;
 
+/**
+ * How many distinct recipients a mail has (addresses compared lower-cased, To, Cc and Bcc
+ * together), and whether that makes it a mass send. The one rule for the send's confirmation
+ * and for a mail shown in the approval queue.
+ */
+export function recipientSpread(recipients: ReadonlyArray<{ readonly address: string }>): { uniqueRecipientCount: number; isMassSend: boolean } {
+  const unique = new Set<string>();
+  for (const a of recipients) unique.add(a.address.toLowerCase());
+  return { uniqueRecipientCount: unique.size, isMassSend: unique.size > MASS_SEND_THRESHOLD };
+}
+
 export interface SendCoreInput {
   /** Account id; omit to use the registry default. */
   account?: string | undefined;
@@ -141,6 +152,13 @@ export interface SendCoreOptions {
    * rate-limit. Default false.
    */
   skipRateLimit?: boolean | undefined;
+  /**
+   * Every recipient of this send was one the owner had named, as the caller checked it. It is
+   * recorded on the sent log (`SentMailLogInput.originOwnerKnown`), and only such a send makes
+   * its recipients count as known later. Default false: a send approved on a card, and every
+   * caller that did not check, records false.
+   */
+  originOwnerKnown?: boolean | undefined;
 }
 
 /** A `beforeSend` outcome: the mail was filed (or refused) for approval, not sent. */
@@ -286,11 +304,9 @@ export async function prepareSend(
   const dedupBlock = checkRecipientDedup(allRecipients, input.subject);
   if (dedupBlock) return { ok: false, status: 'dedup_window', message: dedupBlock };
 
-  const uniqueRecipients = new Set<string>();
-  for (const a of allRecipients) uniqueRecipients.add(a.address.toLowerCase());
-  const isMassSend = uniqueRecipients.size > MASS_SEND_THRESHOLD;
+  const { isMassSend, uniqueRecipientCount } = recipientSpread(allRecipients);
 
-  return { ok: true, prepared: { provider, accountConfig, input, cc, bcc, isMassSend, uniqueRecipientCount: uniqueRecipients.size } };
+  return { ok: true, prepared: { provider, accountConfig, input, cc, bcc, isMassSend, uniqueRecipientCount } };
 }
 
 /** The send after its consent step: exactly what {@link prepareSend} fixed, then the dedup
@@ -358,31 +374,40 @@ export async function commitSend(
     }
   }
 
-  // Persist outbound for the Mail-Context-Sidebar. Observational data —
-  // a write failure must never roll back the user-visible send. Logged
-  // at debug so persistent schema/permission breakage stays diagnosable
-  // (silent swallow once cost us a week of missing sidebar history).
-  if (stateDb) {
-    try {
-      const sentLogInput: SentMailLogInput = {
-        accountId: provider.accountId,
-        messageId: result.messageId || `local-${String(Date.now())}`,
-        to: input.to,
-        cc,
-        bcc,
-        subject: input.subject,
-        bodyChars: sendInput.text.length,
-      };
-      if (input.inReplyTo !== undefined) sentLogInput.inReplyTo = input.inReplyTo;
-      if (followupId !== null) sentLogInput.followupId = followupId;
-      stateDb.recordSentMail(sentLogInput);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`[mail/send-core] recordSentMail failed: ${msg}\n`);
-    }
-  }
+  const sentLogInput: SentMailLogInput = {
+    accountId: provider.accountId,
+    messageId: result.messageId || `local-${String(Date.now())}`,
+    to: input.to,
+    cc,
+    bcc,
+    subject: input.subject,
+    bodyChars: sendInput.text.length,
+    originOwnerKnown: opts.originOwnerKnown === true,
+  };
+  if (input.inReplyTo !== undefined) sentLogInput.inReplyTo = input.inReplyTo;
+  if (followupId !== null) sentLogInput.followupId = followupId;
+  writeSentLog(ctx, sentLogInput);
 
   return { ok: true, result, followupId };
+}
+
+/**
+ * Persist a sent mail to the sent log (`mail_sent_log`): the outbound history of the inbox sidebar
+ * and the export, and, where `originOwnerKnown` is set, the record of recipients the owner named.
+ * Written by `sendMail` when its context carries the state database, and by the reply's commit.
+ * Observational data: a write failure must never roll back the user-visible send. Logged so persistent
+ * schema/permission breakage stays diagnosable (a silent swallow once cost a week of missing
+ * sidebar history). Without a state database (a minimal context) nothing is written.
+ */
+export function writeSentLog(ctx: MailContext | MailAccountLookup | undefined, entry: SentMailLogInput): void {
+  const stateDb = ctx && 'stateDb' in ctx ? ctx.stateDb : undefined;
+  if (!stateDb) return;
+  try {
+    stateDb.recordSentMail(entry);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`[mail/send-core] recordSentMail failed: ${msg}\n`);
+  }
 }
 
 /** Chars of the whitespace-flattened body rendered inline in the preview.

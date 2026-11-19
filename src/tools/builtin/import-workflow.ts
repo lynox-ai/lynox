@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import type { ToolEntry, PlannedPipeline } from '../../types/index.js';
+import { stepIdIssue } from '../../orchestrator/step-id.js';
 import { buildManifest, storePipeline } from './pipeline.js';
 import { validateManifest } from '../../orchestrator/validate.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { parseAndValidatePortable, PortableImportError } from '../../core/workflow-portable.js';
 import { getErrorMessage } from '../../core/utils.js';
+import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 
 interface ImportWorkflowInput {
   block?: string | undefined;
@@ -120,6 +122,7 @@ function renderConsent(
  */
 export const importWorkflowTool: ToolEntry<ImportWorkflowInput> = {
   undo: 'compensatable',
+  secretRefs: 'verbatim',
   definition: {
     name: 'import_workflow',
     description:
@@ -181,6 +184,11 @@ export const importWorkflowTool: ToolEntry<ImportWorkflowInput> = {
       ...(content.limits !== undefined ? { limits: content.limits } : {}),
     };
 
+    // A step id's shape first (`step-id.ts`): the graph check below quotes ids in its refusals, and a
+    // shared block's id is someone else's text.
+    const shapeIssue = stepIdIssue(planned.steps);
+    if (shapeIssue) return `Error: ${shapeIssue}`;
+
     // Same graph + shape gate every run/edit path runs (no dangling input_from, no
     // cycle, inline steps have a task, step ceiling). Reject a structurally broken
     // import here rather than deferring it to a failed run.
@@ -193,7 +201,11 @@ export const importWorkflowTool: ToolEntry<ImportWorkflowInput> = {
     // Persist via the fail-closed chokepoint (stamps schema_version; the contract
     // validation is a no-op since we carry no contract) + cache in memory.
     try {
-      runHistory.insertPlannedPipeline(planned, agent.principal);
+      const workflowId = planned.id;
+      withInstanceWrite(agent, { site: 'import_workflow#create', kind: 'create', store: 'workflows', target: () => [['workflow', workflowId]], main: ['pipeline'] }, (w) => {
+        w.run('pipeline', () => runHistory.insertPlannedPipeline(planned, agent.principal), ifReturned);
+        w.created('pipeline', workflowId);
+      });
     } catch (err: unknown) {
       return `Error: Could not save the imported workflow: ${getErrorMessage(err)}`;
     }

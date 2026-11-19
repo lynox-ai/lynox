@@ -23,15 +23,21 @@ const BYPASS: readonly RegExp[] = [
   /resolveSecretRefs\(/,
   /\.getAll\(\)/,
   /getSecretStore\(\)\??\.resolve\(/,
+  // Gives nothing readable, but whether another member's or the owner's token exists is information too.
+  /\b(secretStore|store|vault|secrets|inner|target)\??!?\.holds[?!]?\.?\(/,
+  /\b(inner|target)\??\.holds\??\.bind\(/,
+  /getSecretStore\(\)\??\.holds\??\.?\(/,
 ];
 
 /** `file|line text` → why it may stand. Keyed by text, not line number, so an edit elsewhere in the file keeps it. */
 const PINNED: Readonly<Record<string, string>> = {
   // The view itself and the stores it wraps.
   'core/profile-secret-view.ts|return (name: string): string | null => (hidden(name) ? null : target.resolve(name));': 'the view: resolves only what hiddenFromProfile lets through',
+  'core/profile-secret-view.ts|const holds = target.holds?.bind(target);': 'the view: answers holds only for what hiddenFromProfile lets through',
   'core/secret-scope.ts|return { resolve: (name) => (slots.has(name) ? inner.resolve(name) : null) };': 'a scope over a store: narrows, never widens',
   "core/secret-scope.ts|resolve: (name) => (permits(name, 'resolve') ? inner.resolve(name) : null),": 'a scope over a store: narrows, never widens',
   "core/secret-scope.ts|getMasked: (name) => (permits(name, 'getMasked') ? inner.getMasked(name) : null),": 'a scope over a store: narrows, never widens',
+  'core/secret-scope.ts|const innerHolds = inner.holds?.bind(inner);': 'a scope over a store: narrows, never widens',
   'core/secret-store.ts|getMasked(name: string): string | null {': 'the definition',
   'types/security.ts|getMasked(name: string): string | null;': 'the declaration',
   // Reads through the view: `secretStore` here is `secretsForProfile(...)` (http.ts attach).
@@ -45,18 +51,21 @@ const PINNED: Readonly<Record<string, string>> = {
   'tools/builtin/http.ts|return { inputs: oauthRenewalInputs(profile, stores.secretStore.resolve(slot)), ms };': 'hashed into a hold key after a renewal that went through; not sent',
   // Existence and fingerprint compares: the value decides a boolean, it is not sent or shown.
   'tools/builtin/api-setup.ts|if (store.resolve(name) !== null) left.push(name);': 'existence after delete, before a save',
+  // Raw on purpose: any token in a slot, a member's included, keeps the "not connected" line out;
+  // read through the view, a member's connection would read as not connected to the owner.
+  'tools/builtin/api-setup.ts|if (slots.some((name) => store.holds!(name))) return \'\';': 'view: existence of a token decides whether "not connected" is said',
   'core/api-store.ts|return secretStore?.resolve(k) ?? null;': 'delete purge: fingerprint compare',
   'core/api-store.ts|value = secretStore?.resolve(w.name) ?? null;': 'delete refusal: fingerprint compare',
   'core/engine.ts|read: (name, hash) => fingerprintStore.fingerprint(name, hash),': 'boot grant backfill: a digest into the grant record',
   // Fixed names that are no API profile's token slot.
   "core/engine.ts|?? this.secretStore?.resolve('GCP_PROJECT_ID')": 'fixed engine name',
-  "core/engine.ts|const mistralApiKey = this.secretStore?.resolve('LYNOX_INBOX_MISTRAL_API_KEY')": 'fixed engine name',
-  "core/engine.ts|?? this.secretStore?.resolve('MISTRAL_API_KEY')": 'fixed engine name',
+  "core/engine.ts|if (this.secretStore?.holds('GCP_PROJECT_ID') === true) this._recreateClient();": 'fixed engine name; existence only, decides a client rebuild',
+  "integrations/inbox/mistral-key.ts|const key = store?.resolve('LYNOX_INBOX_MISTRAL_API_KEY') ?? store?.resolve('MISTRAL_API_KEY')": 'fixed engine name',
+  "integrations/inbox/mistral-key.ts|const own = store?.resolve('LYNOX_INBOX_MISTRAL_API_KEY') ?? env['LYNOX_INBOX_MISTRAL_API_KEY'];": 'fixed engine name',
   "core/engine-init.ts|const vaultApiKey = vault.get('ANTHROPIC_API_KEY');": 'fixed engine name',
   "core/engine-init.ts|const mistralKey = vault.get('MISTRAL_API_KEY');": 'fixed engine name',
   'core/llm/provider-keys.ts|const primaryVault = secretStore?.resolve(slot);': 'LLM provider key slots',
   'core/llm/provider-keys.ts|const altVault = secretStore?.resolve(altSlot);': 'LLM provider key slots',
-  'core/llm/provider-keys.ts|if (secretStore.resolve(SLOT_MIGRATION_MARKER)) return null;': 'LLM provider key slots',
   'core/llm/provider-keys.ts|if (secretStore.resolve(slot)) return null;   // already has its own key': 'LLM provider key slots',
   'core/llm/provider-keys.ts|const value = (fromEnv && fromEnv.length > 0) ? fromEnv : secretStore.resolve(legacy);': 'LLM provider key slots',
   'tools/builtin/calendar.ts|const url = store.resolve(`${CALENDAR_FEED_PREFIX}${label}`);': 'calendar feed names',
@@ -67,12 +76,14 @@ const PINNED: Readonly<Record<string, string>> = {
   'server/http-api.ts|client_id: secrets.resolve(keys.id),': 'a preset client id, public',
   'server/http-api.ts|const priorId = secrets.resolve(keys.id);': 'a preset client id, public',
   // Names with the last characters of a value: the briefing and ask_secret's list.
-  'core/engine-init.ts|const names = visibleNames.map(n => `secret:${n} (${store!.getMasked(n)})`).join(\', \');': 'masked listing; reviewed separately',
-  "tools/builtin/ask-secret.ts|const listing = names.map(n => `${n} (${store!.getMasked(n) ?? '****'})`).join(', ');": 'masked listing; reviewed separately',
+  'core/engine-init.ts|if (holders.length === 0) free.push(`secret:${n} (${store.getMasked(n)})`);': 'masked listing; reviewed separately',
+  "tools/builtin/ask-secret.ts|const listing = free.map(n => `${n} (${store!.getMasked(n) ?? '****'})`).join(', ');": 'masked listing; reviewed separately',
   // Migration between instances: an admin route, refused to a mandate.
   'core/migration-import.ts|const value = vault.get(w.name);': 'admin migration restore',
   "server/http-api.ts|? { principal: OWNER_PRINCIPAL, actorKind: 'cp-migration' as const }": 'audit actor of a migration, no attach',
   "core/engine.ts|principal: OWNER_PRINCIPAL, action: 'connection.erasure.run-history',": 'audit actor of the connection erasure sweep, no attach',
+  "core/plan-takeover.ts|principal: OWNER_PRINCIPAL, action: 'plan.takeover', phase: 'done', correlationId: newCorrelationId(),": 'audit actor of the owner\'s takeover of a paused plan, no attach',
+  "core/session-store.ts|const summarySession = engine.createSession({ model: 'fast', principal: OWNER_PRINCIPAL });": 'the thread summary\'s session, built for the owner without tools, no attach',
   'core/migration-export.ts|const allSecrets = vault.getAll();': 'admin migration export, refused to a mandate before dispatch',
   'core/secret-vault.ts|const entries = oldVault.getAll();': 'vault re-key',
   'core/secret-store.ts|const entries = this.vault.getAll();': 'the store\'s own load',
@@ -87,7 +98,7 @@ const PINNED: Readonly<Record<string, string>> = {
   'tools/builtin/api-setup.ts|const ids = apiStore.getAll().filter((p) => connectionWaits(p, ends)).map((p) => p.id);': 'profile ids, no values',
   'core/transcribe/session-context.ts|return store.getAll().map((p) => p.name).filter((n) => n.length > 0);': 'profile names, no values',
   'integrations/push/web-push-channel.ts|for (const row of this.store.getAll()) {': 'push subscriptions, not the vault',
-  'server/http-api.ts|jsonResponse(res, 200, { profiles: store.getAll().map(withoutFingerprints), importWaiting: store.importWaitsOn() });': 'profiles without fingerprints',
+  'server/http-api.ts|jsonResponse(res, 200, { profiles: store.getAll().map((p) => ({ ...profileForReader(p, reader), reader_may_connect: mayStartConnect(reader, p) })), importWaiting: store.importWaitsOn() });': 'profiles as the reader may see them: no fingerprints, no account of another person\'s connection; plus whether this reader may start the connection, a yes or no from the same check as the connect start',
   'server/http-api.ts|secret: (name) => this.engine?.getSecretStore()?.resolve(name) ?? null,': 'webhook signature secret named by its connection row; compared, not sent',
 };
 
@@ -164,8 +175,8 @@ describe('bypasses of the member-connection view', () => {
 // place that removes it carries the check that keeps it off a member's live connection.
 const PROFILE_SAVES: Readonly<Record<string, string>> = {
   'tools/builtin/api-setup.ts|return apiStore.save(next, apisDir, { exchange, actor }).ok ? \'saved\' : \'not-saved\';': 'grant persist: spreads the stored profile, author kept',
-  'tools/builtin/api-setup.ts|const mergedSave = apiStore.save(merged, apisDir);': 'refine: applyRefine keeps the author',
-  'tools/builtin/api-setup.ts|const saved = apiStore.save(profile, apisDir);': 'create/update: author removed behind the owner-save check',
+  'tools/builtin/api-setup.ts|const mergedSave = w.run(\'save\', () => apiStore.save(merged, apisDir, { trailId: refineTrailId }), ifOk);': 'refine: applyRefine keeps the author',
+  'tools/builtin/api-setup.ts|const saved = w.run(\'save\', () => apiStore.save(profile, apisDir, { trailId: freshTrailId }), ifOk);': 'create/update: author removed behind the owner-save check',
   'tools/builtin/api-setup.ts|const saved = apiStore.save(next, apisDir);': 'adopt_connection: author removed once the connection waits',
   'server/http-api.ts|const saved = apiStore.save(': 'connect callback: spreads the stored profile, author kept',
 };

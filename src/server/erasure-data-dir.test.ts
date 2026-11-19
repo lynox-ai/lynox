@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { acquireSlot, EXPORT_SLOT_FILE, readSlot } from '../core/export-slot.js';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -153,6 +154,10 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
     for (const entry of DATA_DIR_INVENTORY) {
       const path = join(dir, entry.name);
       if (entry.erase.by === 'keep') {
+        // The export slot is the erasure's own lock: seeded with a placeholder it reads as a
+        // holder that may still run, and the erasure rightly refuses. The erasure takes and gives
+        // back the slot itself, so the file is not there afterwards either.
+        if (entry.name === EXPORT_SLOT_FILE) continue;
         if (!existsSync(path)) writeFileSync(path, mark(entry.name));
         if (statSync(path).isFile()) before.set(entry.name, readFileSync(path, 'utf8'));
         continue;
@@ -262,6 +267,30 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
     expect(heldDuring).toBe(true);
     expect(heldAfterFiles).toBe(true);
     expect(isBoundedJsonlQuiesced()).toBe(false);
+  }, 60_000);
+
+  it('holds the export slot while it wipes, so the export command (another process) cannot start beside it, and gives it back', async () => {
+    // The config reload runs after the file pass: the slot read there is the one the wipe holds.
+    const engine = (api as unknown as { engine: { reloadUserConfig: (...a: unknown[]) => unknown } }).engine;
+    const reload = engine.reloadUserConfig;
+    let heldDuring: string | null = null;
+    let commandRefused: boolean | null = null;
+    engine.reloadUserConfig = function (this: unknown, ...a: unknown[]) {
+      heldDuring = readSlot(dir)?.kind ?? 'free';
+      const attempt = acquireSlot(dir, 'export', 'command');
+      commandRefused = !attempt.ok;
+      if (attempt.ok) attempt.slot.release();
+      return reload.apply(this, a);
+    };
+    try {
+      const res = await erase();
+      expect(res.status).toBe(200);
+    } finally {
+      engine.reloadUserConfig = reload;
+    }
+    expect(heldDuring).toBe('erasure');
+    expect(commandRefused).toBe(true);
+    expect(readSlot(dir)).toBeNull();
   }, 60_000);
 
   it('refuses an entry with a directory it cannot read, before asking about unknown entries', async () => {

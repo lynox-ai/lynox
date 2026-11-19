@@ -10,9 +10,10 @@
  *   interactions:  contact_name, type, channel, summary, date
  */
 
-import type { DataStore, RowStamp } from './data-store.js';
+import type { DataStore, RowSource, RowStamp } from './data-store.js';
 import type { EngineDb } from './engine-db.js';
 import { SubjectStore, ambiguityError } from './subject-store.js';
+import { reducedErrorText } from './error-egress.js';
 import { RelationshipStore } from './relationship-store.js';
 import { CRM_CONTACTS, CRM_DEALS, CRM_INTERACTIONS, createParamsOf } from './crm-schema.js';
 
@@ -212,21 +213,33 @@ export class CRM {
   }
 
   /**
+   * Where the contact with this address came from (`DataStore.sourceOfRow`), or `null` when
+   * there is none. The address is normalized as {@link upsertContact} stores it.
+   */
+  contactOrigin(email: string): RowSource | null {
+    const normalized = email.trim().toLowerCase();
+    if (normalized.length === 0) return null;
+    this.ensureSchema();
+    return this.ds.sourceOfRow('contacts', 'email', normalized);
+  }
+
+  /**
    * Create or update a contact. Identity is the email address (unique key):
    * saving an existing email updates that contact (even under a new display
    * name); a new email inserts a new contact. Email is normalised to a
    * trimmed lower-case form so dedup and the inbox contact-resolver lookup
    * (which lower-cases on read) agree. A contact without an email is always
    * inserted (NULL emails do not collide) — phone-only dedup is out of scope.
-   * `stamp` says where the contact came from (see `RowStamp`).
+   * `stamp` says where the contact came from (see `RowStamp`). Returns the contact table's
+   * counts; the subject-graph mirror below is not in them.
    */
-  upsertContact(data: ContactData, stamp: RowStamp): void {
+  upsertContact(data: ContactData, stamp: RowStamp): { inserted: number; updated: number; errors: string[] } {
     this.ensureSchema();
     const normalized: ContactData =
       typeof data.email === 'string' && data.email.trim().length > 0
         ? { ...data, email: data.email.trim().toLowerCase() }
         : data;
-    this.ds.insertRecords({ collection: 'contacts', records: [normalized as unknown as Record<string, unknown>], stamp });
+    const written = this.ds.insertRecords({ collection: 'contacts', records: [normalized as unknown as Record<string, unknown>], stamp });
 
     // Foundation Rework v2 (S1c): additively mirror the contact into the
     // engine.db subject-graph behind the flag. Fully isolated — the ds_contacts
@@ -242,6 +255,7 @@ export class CRM {
         );
       }
     }
+    return written;
   }
 
   /**
@@ -309,9 +323,12 @@ export class CRM {
           mirrored++;
         } catch (err: unknown) {
           // One malformed row must not abort the batch; the name is plaintext PII,
-          // so it is omitted from the log (matches the live upsertContact path).
+          // so it is omitted from the log (matches the live upsertContact path). Reduced:
+          // a legacy table can hold a number where a string belongs, and Node's type
+          // error for it quotes the value (a phone number). This runs in the backfill CLI,
+          // where the instance-wide reduction is never on.
           process.stderr.write(
-            `[lynox:subject-graph] S2 contact backfill skipped a row: ${err instanceof Error ? err.message : String(err)}\n`,
+            `[lynox:subject-graph] S2 contact backfill skipped a row: ${reducedErrorText(err)}\n`,
           );
         }
       }

@@ -43,6 +43,15 @@ import { epochStartByTimeSql } from './grant-ledger.js';
  */
 
 const ENGINE_HKDF_INFO = 'lynox-engine-encryption';
+
+/**
+ * The key engine.db's encrypted columns are stored under, derived from the vault key. Exported for
+ * the data export, which reads a snapshot by raw SQL and must not open the live store (the
+ * constructor migrates or recreates it).
+ */
+export function deriveEngineEncKey(vaultKey: string): Buffer {
+  return Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HKDF_INFO, CRYPTO_KEY_LENGTH));
+}
 /** Separate label for the keyed-digest subkey: the MAC never shares a key with AES-GCM. */
 const ENGINE_HASH_HKDF_INFO = 'lynox-engine-keyed-hash';
 /**
@@ -1481,6 +1490,152 @@ const MIGRATIONS: string[] = [
   // it. 0 before the first page, and on every other run.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (53);
    ALTER TABLE bulk_runs ADD COLUMN list_last_id INTEGER NOT NULL DEFAULT 0;`,
+
+  // v54: how many sends to a bulk target ended without a clear answer (`unknown_sends`). Each
+  // send adds one before it leaves, and only that send's own refusal takes it back, so one
+  // unclear send keeps the target from being sent to again. A target sent to before this
+  // version and not written has an answer nobody recorded: it counts as one unclear send. That
+  // includes a target v18 marked sent for a `write_failed` from before v18, which may have failed
+  // before anything left; counting it unclear errs towards not sending twice.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (54);
+   ALTER TABLE bulk_targets ADD COLUMN unknown_sends INTEGER NOT NULL DEFAULT 0;
+   UPDATE bulk_targets SET unknown_sends = 1 WHERE write_sent = 1 AND applied_at IS NULL;`,
+  // v55: the name a grant was last shown under is read from the actor trail by grant id
+  // (`AuditLog.displayNameOf`). Only rows that carry a name are indexed, so a grant none of whose
+  // rows carries one is answered from the index instead of a walk over the whole trail.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (55);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_mandate_display ON audit_log(mandate_id, id) WHERE actor_display IS NOT NULL;`,
+
+  // v56 (owner's view of the actor trail): `plan_run` is the key a plan's run shares with every row
+  // written within it (the correlation id of its `plan:run` rows), so the view shows a run as one
+  // entry. `trail_form` is set on every row written from now on; the view shows only those, since
+  // a row from before could name a person for a read made after that person's access had ended.
+  // Existing rows keep both NULL: nothing is backfilled, and the update trigger stays.
+  // The view reads a run, a bulk run and a step whole by these keys, and the table is never pruned,
+  // so each gets an index; without one every page of the view scans the whole table.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (56);
+   ALTER TABLE audit_log ADD COLUMN plan_run TEXT;
+   ALTER TABLE audit_log ADD COLUMN trail_form INTEGER;
+   CREATE INDEX IF NOT EXISTS idx_audit_log_plan_run ON audit_log(plan_run);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_correlation ON audit_log(correlation_id);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_action_run ON audit_log(action, run_id);`,
+
+  // v57: a plan's pause after a mandate it depends on has provably ended (`plan-pause.ts`).
+  // `paused_at` carries the state (NULL: not paused), `paused_due_at` the run it was due for,
+  // `paused_for` who ended (JSON, one entry per mandate), `pause_noticed_at` whether the owner
+  // was told (NULL: not yet). Added whether or not the pause is switched on; unused they stay NULL.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (57);
+   ALTER TABLE triggers ADD COLUMN paused_at INTEGER;
+   ALTER TABLE triggers ADD COLUMN paused_due_at TEXT;
+   ALTER TABLE triggers ADD COLUMN paused_for TEXT;
+   ALTER TABLE triggers ADD COLUMN pause_noticed_at INTEGER;`,
+
+  // v58: the link domains the owner allows a judged run's verdicts to add (`start_domains`,
+  // encrypted JSON), given at the start that begins the judge. NULL on every run before this
+  // version and on every run started without one; the approval checksum names it only where set.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (58);
+   ALTER TABLE bulk_runs ADD COLUMN start_domains TEXT;`,
+
+  // v59 (PRD shopify-preset §20.2 item 4): a target the owner takes out of a previewed run before
+  // approving it. It keeps its after-state and is not written; the ledger's one definition of a
+  // writing target excludes it. NULL for every existing target: nothing is deselected.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (59);
+   ALTER TABLE bulk_targets ADD COLUMN deselected_at TEXT;`,
+
+  // v60: the owner's takeover of a paused plan (`plan-takeover.ts`). Each side of a plan — a
+  // trigger, a workflow — keeps the mandate marks the owner took over, as the mark stood:
+  // (tag, grant id, time) for the creator and for the last mandate editor. A mark equal to its
+  // covered copy is no member (`planMandate`); a new mandate edit clears the editor's copy in
+  // the same statement, so it is a member again. `covered_at` is when (unix seconds), for display.
+  // `paused_db_at` is the pause in the database's own clock (`unixepoch('now')`), the clock the
+  // marks are written in, so the takeover can tell a mark made after the pause (`plan-takeover.ts`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (60);
+   ALTER TABLE triggers ADD COLUMN paused_db_at INTEGER;
+   ALTER TABLE triggers ADD COLUMN covered_created_by TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_created_id TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_created_at TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_edited_by TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_edited_id TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_edited_at TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_at INTEGER;
+   ALTER TABLE workflows ADD COLUMN covered_created_by TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_created_id TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_created_at TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_edited_by TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_edited_id TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_edited_at TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_at INTEGER;`,
+  // v61: the webhook drain's columns. `attempt_id` names the
+  // run a `running` event belongs to, so the outcome of a run whose attempt was superseded
+  // writes nothing. `reported_at` is set once a dropped or failed event was reported to the owner,
+  // `unknown_reported_at` once a `running` event left behind by a lost process was reported as
+  // of unknown outcome — each is reported once.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (61);
+   ALTER TABLE inbound_events ADD COLUMN attempt_id TEXT;
+   ALTER TABLE inbound_events ADD COLUMN reported_at TEXT;
+   ALTER TABLE inbound_events ADD COLUMN unknown_reported_at TEXT;`,
+  // v62: the index the drain's sweeps read by, state and age across all triggers each tick. Its
+  // own migration, so that a database that already ran the one before it gets it too.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (62);
+   CREATE INDEX IF NOT EXISTS idx_inbound_events_state_received ON inbound_events(state, received_at);`,
+  // v63 (660a-1c S-2): an opaque id for each API profile, `apf_` and 16 hex, that a mandate's row
+  // in the instance trail names instead of the slug the model chose (which can carry a name). Only
+  // `kind = 'api'` rows get one; the boot fills any a row is still missing (`fillApiTrailIds`).
+  // `randomblob` is enough: the id is a label with no secret value.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (63);
+   ALTER TABLE connections ADD COLUMN trail_id TEXT;
+   UPDATE connections SET trail_id = 'apf_' || lower(hex(randomblob(8))) WHERE trail_id IS NULL AND kind = 'api';
+   CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_trail_id ON connections(trail_id);`,
+  // v64: the owner's advance warning before a mandate's known end (`plan-pause.ts`). One row per
+  // plan, mandate and end: a plan the mandate joins after the warning gets its own, and an
+  // extension (a new end) warns again. `claimed_at` is when a process took it, `delivered_at` when
+  // a channel of the owner accepted the warning; only a delivered row makes a pause say "warned".
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (64);
+   CREATE TABLE IF NOT EXISTS plan_advance_warnings (
+     trigger_id TEXT NOT NULL REFERENCES triggers(id) ON DELETE CASCADE,
+     mandate_id TEXT NOT NULL,
+     ends_at INTEGER NOT NULL,
+     claimed_at INTEGER NOT NULL,
+     delivered_at INTEGER,
+     PRIMARY KEY (trigger_id, mandate_id, ends_at)
+   );`,
+  // v65 (PRD shopify-preset §21.2 item 6): a written target whose read-back held markup the write
+  // never sent. Set with the applied record, never cleared; an undo does not write that `actual`
+  // back (§21.2 item 7 (b)). 0 for every existing target: none was checked.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (65);
+   ALTER TABLE bulk_targets ADD COLUMN shop_added_markup INTEGER NOT NULL DEFAULT 0;`,
+  // v66 (PRD shopify-preset §21.2 item 6): a written target whose store kept an HTML field otherwise
+  // than sent, within what the run may write — counted and named, not halted. 0 for every existing
+  // target: none was compared.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (66);
+   ALTER TABLE bulk_targets ADD COLUMN host_rewrote INTEGER NOT NULL DEFAULT 0;`,
+  // v67 (PRD shopify-preset §20.2 item 7): the context C a judged target was read with, encrypted
+  // like `before`, and which field of C held something shaped like a credential (its index in the
+  // rule's `context`), so the owner is told which one to clean. NULL for every existing target:
+  // none was read with a context.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (67);
+   ALTER TABLE bulk_targets ADD COLUMN context TEXT;
+   ALTER TABLE bulk_targets ADD COLUMN context_secret_field INTEGER;`,
+  // v68 (1010, PRD shopify-preset §20.2 item 5): with `new_link_domain`, the domain the refused link
+  // points to, encrypted like `before`, so the owner is told which one. NULL for every existing
+  // target: its page keeps the sentence without the domain.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (68);
+   ALTER TABLE bulk_targets ADD COLUMN link_domain TEXT;`,
+  // v69: the once-only pass that gave every workflow stamp from before the digest its digest
+  // (`workflow-stamp.ts`, `stampExistingWorkflows`). After it a stamp without a digest does not
+  // hold, so a definition a backfill or a restored file brings back waits for the owner instead
+  // of running on a stamp nobody took over its steps. `done=0` until the pass has run.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (69);
+   CREATE TABLE IF NOT EXISTS workflow_stamp_marker (
+     id   INTEGER PRIMARY KEY CHECK (id = 1),
+     done INTEGER NOT NULL DEFAULT 0
+   );
+   INSERT OR IGNORE INTO workflow_stamp_marker (id, done) VALUES (1, 0);`,
+  // v70: a grant's rows by grant, named or not (`AuditLog.mandatePrincipalOf`). The revoke row
+  // looks its person up once per revoked grant, also for a grant that never acted here; without
+  // this, a grant with no named row walks the whole trail.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (70);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_mandate ON audit_log(mandate_id, id);`,
 ];
 
 export interface EngineDbOptions {
@@ -1521,7 +1676,7 @@ export class EngineDb {
     // share a derived key.
     const vaultKey = encryptionKey ?? process.env['LYNOX_VAULT_KEY'] ?? '';
     if (vaultKey) {
-      this._encKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HKDF_INFO, CRYPTO_KEY_LENGTH));
+      this._encKey = deriveEngineEncKey(vaultKey);
       this._hashKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HASH_HKDF_INFO, CRYPTO_KEY_LENGTH));
       this._bindKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', STORE_BINDING_HKDF_INFO, CRYPTO_KEY_LENGTH));
     } else {
@@ -1549,6 +1704,12 @@ export class EngineDb {
   /** Mark the boot-time verb-graph backfill complete (idempotent). */
   markVerbBackfillDone(): void {
     this.db.prepare('UPDATE verb_backfill_marker SET done = 1 WHERE id = 1').run();
+  }
+
+  /** True once the boot pass that gave the workflow stamps from before the digest theirs has run (v69). */
+  isWorkflowStampPassDone(): boolean {
+    const row = this.db.prepare('SELECT done FROM workflow_stamp_marker WHERE id = 1').get() as { done: number } | undefined;
+    return row?.done === 1;
   }
 
   /** Drop the free pages and empty the WAL; see `scrubFreedPages` in `sqlite-constants.ts`. */

@@ -29,6 +29,8 @@
  * extension point: production callers pass nothing.
  */
 
+import { createHash } from 'node:crypto';
+
 /**
  * The words around a preset's customer text on the consent page, in the text's language. Each
  * one is binding customer text like the paragraphs, so it comes from here as approved. Absent,
@@ -66,6 +68,38 @@ export interface ConsentNotice {
 }
 
 /**
+ * The version of a customer text: the first 16 hex digits of a SHA-256 over everything the consent
+ * page shows of it — its language, its paragraphs, its frame and the names of its write scopes.
+ * Which of the write scopes a link asks for is left out: a page that lists fewer of them shows the
+ * same text. A change to any word gives a new version, and a consent recorded under the old one no
+ * longer reads as a consent to this text ({@link SHOPIFY_CONSENT_VERSION}).
+ */
+export function consentNoticeVersion(notice: ConsentNotice): string {
+  // A literal in a fixed order and the scope names sorted: the digest moves with the text only.
+  const shown = {
+    lang: notice.lang,
+    paragraphs: [...notice.paragraphs],
+    frame: notice.frame === undefined ? null : {
+      title: notice.frame.title, scopesIntro: notice.frame.scopesIntro, scopesNote: notice.frame.scopesNote,
+      button: notice.frame.button, afterButton: notice.frame.afterButton ?? null,
+    },
+    scopeNames: notice.scopeNames === undefined ? null
+      : Object.fromEntries(Object.keys(notice.scopeNames).sort().map((k) => [k, notice.scopeNames![k]])),
+  };
+  return createHash('sha256').update(JSON.stringify(shown)).digest('hex').slice(0, 16);
+}
+
+/**
+ * The version of the Shopify customer text a connection must have been confirmed under before a
+ * bulk run writes a field beyond a product's title and SEO texts (`shopifyConsentBlock`). Written
+ * out, not computed: a test holds it equal to {@link consentNoticeVersion} of the Shopify text, so
+ * a change to the text fails that test until this line is changed with it, in the same review.
+ */
+// One language today (`lang: 'de'`). A second one gets its own version, and the check must then
+// compare with the version of the language the page showed, not with this one constant.
+export const SHOPIFY_CONSENT_VERSION = 'bd121d2355d89db5';
+
+/**
  * What is wrong with a customer text's frame, empty when nothing is: a frame without names or
  * names without a frame, a write scope without a readable name, a name for a scope the text does
  * not cover, two scopes under one name, an empty title, line or button. A test holds every
@@ -100,6 +134,27 @@ export interface OAuthPresetParam {
   readonly pattern: RegExp;
   /** Said to the user when the value is missing or refused. */
   readonly describe: string;
+  /**
+   * The provider reads the value without regard to case. Saving a profile then writes it in
+   * lower case, so a name typed as the person sees it is kept rather than refused. The
+   * derivation still refuses anything `pattern` does not match.
+   */
+  readonly caseInsensitive?: true;
+}
+
+/**
+ * `params` with each value its preset reads without regard to case in lower case. Other names and
+ * values are returned as they are; the derivation decides whether they are acceptable.
+ */
+export function normalizedPresetParams<T extends Readonly<Record<string, unknown>>>(preset: OAuthPreset, params: T): T {
+  const out: Record<string, unknown> = { ...params };
+  for (const spec of preset.params) {
+    const value = out[spec.name];
+    // ASCII only: `toLowerCase` maps some non-ASCII letters onto ASCII ones (the Kelvin sign onto
+    // `k`), which would turn a value the pattern refuses into one it accepts.
+    if (spec.caseInsensitive === true && typeof value === 'string') out[spec.name] = value.replace(/[A-Z]/g, (c) => c.toLowerCase());
+  }
+  return out as T;
 }
 
 /**
@@ -133,9 +188,10 @@ export interface OAuthPreset {
    * The provider's API runs on the host the preset derives, one per account (Shopify: the
    * store's `{shop}.myshopify.com`), so every host the template can build is an API host of the
    * provider, and a profile's `base_url` has to be the host its own parameter derives
-   * ({@link presetStoreHost}). Only for a `template` host. The store hosts are not in `apiHosts`
-   * and `presetNotFollowed` does not claim them: while Shopify is closed, a profile on a store
-   * gets the closed text, not a pointer to this preset.
+   * ({@link presetStoreHost}). Only for a `template` host. The store hosts are not in `apiHosts`:
+   * `presetNotFollowed` claims them only when asked to (`storesClaimed`), which the engine does
+   * while the store exchange is switched on. While Shopify is closed, a profile on a store gets
+   * the closed text, not a pointer to a preset that cannot connect.
    */
   readonly apiOnDerivedHost?: true;
   /**
@@ -208,6 +264,13 @@ export interface OAuthPreset {
    */
   readonly callbackVerification?: 'shopify-hmac';
   /**
+   * The provider grants exactly what the link asks for, or less, unless the app at the provider
+   * holds more: a grant beyond the ask is then worth saying on the callback page. Absent for a
+   * provider that adds scopes of its own to every answer (an identity provider's defaults), where
+   * the comparison would say so on every connect.
+   */
+  readonly compareGrantedScope?: true;
+  /**
    * The provider's API version the engine's own requests name, where the provider versions its
    * API in the path. Absent: none. A provider that answers an unknown version with another one
    * (Shopify falls forward to the oldest supported) makes this a pin, not a default.
@@ -257,7 +320,7 @@ export interface PresetRegister {
  * product decision, not a build one: nothing here can be connected that nobody
  * has vouched for. Each entry names its source.
  */
-const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
+const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze<OAuthPreset[]>([
   {
     // Decided 2026-10-05 as the first provider. Endpoints from bexio's OpenID discovery
     // document (https://auth.bexio.com/realms/bexio/.well-known/openid-configuration, read
@@ -302,24 +365,25 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
       oneOf: ['contact_show', 'contact_edit'],
       why: 'the question before each write names the contact it concerns, and reading a contact needs one of these',
     }],
-    // Customer text, approved 2026-10-14. A change to a word needs a new approval; the test that
+    // Customer text, approved 2026-11-03. A change to a word needs a new approval; the test that
     // holds this text byte for byte is the reminder.
     consentNotice: {
       lang: 'de',
       writeScopes: ['contact_edit', 'note_edit', 'task_edit', 'kb_offer_edit', 'kb_invoice_edit'],
       paragraphs: [
-        'lynox kann in bexio Kontakte, Notizen, Aufgaben, Offerten und Rechnungen anlegen und ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt es dir vorher mit allem, was lynox an bexio schickt, und er geschieht erst nach deinem Ja. Das gilt auch, wenn lynox eine Zahlung auf einer Rechnung erfasst oder eine Rechnung storniert.',
-        'Die eine Ausnahme ist ein Sammellauf: Du siehst vorher die Liste aller Änderungen und bestätigst den Lauf einmal. Ein Sammellauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
-        'Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.',
+        'lynox kann in bexio Kontakte, Notizen, Aufgaben, Offerten und Rechnungen anlegen und ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt lynox vorher der Person, für die es gerade arbeitet, mit allem, was lynox an bexio schickt. Das kann auch jemand sein, dem der Inhaber dieser lynox-Instanz Zugang gegeben hat. Der Schritt geschieht erst nach einem Ja dieser Person oder des Inhabers; das Ja einer Person mit Zugang gilt für diese Verbindung, und lynox protokolliert jede solche Anfrage. Ohne ein solches Ja schreibt lynox nicht in bexio, auch nicht in einem geplanten Ablauf: Dort wartet der Schritt auf die Antwort, und kommt keine, unterbleibt er. Das gilt auch, wenn lynox eine Zahlung auf einer Rechnung erfasst oder eine Rechnung storniert.',
+        'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was in dieser Liste steht.',
+        'Für Buchhaltung, Bank und Lohn fragt lynox bei bexio keine Rechte an. Welche Rechte der Zugang am Ende erhält, legt bexio fest. Gewährt bexio mehr, als lynox anfragt, gilt auch dafür: kein Schreibschritt ohne Ja, ausser im Massenlauf wie oben.',
       ],
-      // The page around the text, approved 2026-10-21 (reviewed first), under the same
+      // The page around the text, approved 2026-10-21 (reviewed first), its line under the list
+      // 2026-11-03, under the same
       // rule: a changed word needs a new approval. The names follow bexio's own breadth, which
       // documents each of these scopes as write access to its resource and does not say what
       // that leaves out, so the line under the list says what it covers.
       frame: {
         title: 'Schreibrechte für bexio bestätigen',
-        scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in bexio:',
-        scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Das Recht ist damit breiter als das, was lynox damit tut.',
+        scopesIntro: 'lynox fragt bei bexio diese Schreibrechte an:',
+        scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Ein Massenlauf ändert nur, was in seiner Liste steht. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
         button: 'Zustimmen und weiter zu bexio',
         afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in bexio.',
       },
@@ -347,16 +411,54 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     authorizePath: '/admin/oauth/authorize',
     tokenPath: '/admin/oauth/access_token',
     // The store's subdomain, as Shopify names it: lower-case letters, digits and hyphens, not
-    // starting with a hyphen. Shopify itself admits upper case; the boundary does not.
-    params: [{ name: 'shop', pattern: /^[a-z0-9][a-z0-9-]*$/, describe: 'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case' }],
+    // starting with a hyphen, at most 63 of them (one DNS label). Shopify itself admits upper
+    // case; the boundary does not.
+    params: [{ name: 'shop', pattern: /^[a-z0-9][a-z0-9-]{0,62}$/, describe: 'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case', caseInsensitive: true }],
     requiredScopes: [],
-    // Read only. `read_all_orders` stays out: Shopify grants it only on request. Write scopes
-    // come with the bulk form, not with the connection.
-    allowedScopes: ['read_products', 'read_orders', 'read_customers', 'read_inventory', 'read_fulfillments'],
+    // `read_all_orders` stays out: Shopify grants it only on request. Two write scopes:
+    // `write_products`, and `write_files` for the bulk image form (`fileUpdate`, alt texts only,
+    // `shopify-graphql.ts`). A bulk run writes only through the engine's own write documents, and
+    // Shopify grants a write only to the token, so the scope sits on the connection. Each is
+    // asked for only when the profile names it. `write_themes` stays out: it reaches theme code
+    // (Liquid and scripts in the storefront), a different class of access.
+    allowedScopes: ['read_products', 'read_orders', 'read_customers', 'read_inventory', 'read_fulfillments', 'write_products', 'write_files'],
+    // Customer text. A change to a word needs a new approval; the test that holds this text byte
+    // for byte is the reminder. Shown before every link that asks for a write scope, a new
+    // connection's or a reconnect's. The second paragraph names no fields: a bulk run changes
+    // what its approved list holds, in any of its forms. The third says that the app, not the
+    // request, decides what the token holds (Shopify grants the app's configured scopes).
+    // The breadth of `write_files` under the list from shopify.dev, read 2026-11-10: the `File`
+    // interface and the objects that implement it (`GenericFile`, `MediaImage`, `Video`,
+    // `Model3d`), the `files` query and the file mutations (access-scopes); `fileUpdate` can
+    // replace a file's content while keeping its URL (mutations/fileUpdate).
+    consentNotice: {
+      lang: 'de',
+      writeScopes: ['write_products', 'write_files'],
+      paragraphs: [
+        'lynox kann in deinem Shopify-Store Produkte ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt lynox vorher der Person, für die es gerade arbeitet, mit allem, was lynox an Shopify schickt. Das kann auch jemand sein, dem der Inhaber dieser lynox-Instanz Zugang gegeben hat. Der Schritt geschieht erst nach einem Ja dieser Person oder des Inhabers; das Ja einer Person mit Zugang gilt für diese Verbindung, und lynox protokolliert jede solche Anfrage. Ohne ein solches Ja schreibt lynox nicht in Shopify, auch nicht in einem geplanten Ablauf: Dort wartet der Schritt auf die Antwort, und kommt keine, unterbleibt er.',
+        'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was in dieser Liste steht.',
+        'Für Bestellungen, Kunden, Lagerbestand und Versand fragt lynox bei Shopify keine Schreibrechte an. Welche Rechte der Zugang am Ende erhält, legt die App in deinem Shopify fest. Gewährt sie mehr, als lynox anfragt, gilt auch dafür: kein Schreibschritt ohne Ja, ausser im Massenlauf wie oben.',
+      ],
+      // The breadth under the list from shopify.dev, read 2026-10-28: write_products covers
+      // Product, ProductVariant and Collection (access-scopes); productCreate, productDelete,
+      // collectionCreate and productVariantsBulkUpdate, whose input carries the price, require it.
+      frame: {
+        title: 'Schreibrechte für Shopify bestätigen',
+        scopesIntro: 'lynox fragt bei Shopify diese Schreibrechte an:',
+        scopesNote: 'Ein Schreibzugriff auf Produkte gilt bei Shopify für alle Produkte und Kollektionen, also etwa anlegen, ändern und löschen, auch Preise und Varianten. Ein Schreibzugriff auf Dateien gilt für alle Dateien des Stores, also Bilder, Videos, 3D-Modelle und andere Dateien, etwa hochladen, ersetzen, umbenennen, Alt-Texte ändern und löschen. Ein Massenlauf ändert nur, was in seiner Liste steht. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
+        button: 'Zustimmen und weiter zu Shopify',
+        afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in Shopify.',
+      },
+      scopeNames: {
+        write_products: 'Produkte: Schreibzugriff',
+        write_files: 'Dateien: Schreibzugriff',
+      },
+    },
     scopeSeparator: ',',
     tokenHeaderName: 'X-Shopify-Access-Token',
     tokenBodyFormat: 'form',
     callbackVerification: 'shopify-hmac',
+    compareGrantedScope: true,
     // "Latest stable" on shopify.dev when read on 2026-10-13, supported until 2027-10-16. The
     // bulk run's GraphQL reads name it (`shopify-graphql.ts`); moving it is a reviewed change.
     adminApiVersion: '2026-10',
@@ -562,15 +664,36 @@ export function presetScopeNeedUnmet(preset: OAuthPreset, profileScope: string |
 }
 
 /**
+ * The built-in provider a profile goes through: its `auth.oauth.preset_id`, when `auth.type` is
+ * oauth2 and the register knows that id. Undefined otherwise — a static-credential profile that
+ * still carries a `preset_id` from an earlier shape goes through no provider, and an id this
+ * engine does not know names none. The one answer to "which built-in preset does this profile
+ * have", asked by the save path (`api_setup`), the renewal gate (`http_request`) and
+ * {@link presetNotFollowed}; three copies of it once differed on the `auth.type` check.
+ */
+export function builtInPresetOf(
+  profile: { readonly auth?: { readonly type?: string | undefined; readonly oauth?: { readonly preset_id?: string | undefined } | undefined } | undefined },
+  register: PresetRegister = OAUTH_PRESETS,
+): OAuthPreset | undefined {
+  if (profile.auth?.type !== 'oauth2') return undefined;
+  const presetId: unknown = profile.auth.oauth?.preset_id;
+  return typeof presetId === 'string' ? register.get(presetId) : undefined;
+}
+
+/**
  * The built-in provider whose API host a profile points at, when the profile does not go
  * through it: anything but `auth.type` oauth2 with that provider's `preset_id`. Undefined when
  * no provider claims the host, or when the profile follows the one that does. Asked where a
  * profile is saved (`api_setup`) and where a request attaches a profile's credentials
  * (`http_request`, for a write), so a profile saved before the save refused it writes nothing.
+ * With `storesClaimed`, a provider on its derived host ({@link OAuthPreset.apiOnDerivedHost})
+ * claims every host its template can build as well, so a profile with a pasted token on a store
+ * is refused and pointed at the preset.
  */
 export function presetNotFollowed(
   profile: { readonly base_url: string; readonly auth?: { readonly type: string; readonly oauth?: { readonly preset_id?: string | undefined } | undefined } | undefined },
   register: PresetRegister = OAUTH_PRESETS,
+  options: { readonly storesClaimed?: boolean } = {},
 ): OAuthPreset | undefined {
   let host: string;
   try {
@@ -579,9 +702,34 @@ export function presetNotFollowed(
     return undefined;
   }
   // Every provider that claims the host: a profile that follows any of them is in order.
-  const claiming = register.ids().map((id) => register.get(id)).filter((p): p is OAuthPreset => p?.apiHosts.includes(host) === true);
-  const follows = (preset: OAuthPreset): boolean => profile.auth?.type === 'oauth2' && profile.auth.oauth?.preset_id === preset.id;
-  return claiming.some(follows) ? undefined : claiming[0];
+  const claiming = register.ids().map((id) => register.get(id)).filter((p): p is OAuthPreset => p !== undefined
+    && (p.apiHosts.includes(host) || (options.storesClaimed === true && presetDerivesHost(p, host, register))));
+  const followed = builtInPresetOf(profile, register);
+  return claiming.some((preset) => followed?.id === preset.id) ? undefined : claiming[0];
+}
+
+/**
+ * Whether `host` (lowercased, without trailing dots) is one that `preset`'s template builds from a
+ * parameter the preset accepts: the store hosts of a provider on its derived host. Asked through
+ * {@link derivePresetEndpoints}, so a host whose parameter the preset refuses is not claimed.
+ */
+function presetDerivesHost(preset: OAuthPreset, host: string, register: PresetRegister): boolean {
+  if (preset.apiOnDerivedHost !== true || preset.host.kind !== 'template') return false;
+  // One placeholder (`OAuthPresetHost`): the host is the text around it with a value in between,
+  // and the preset's own derivation decides whether that value is one it accepts.
+  const [before = '', after = ''] = preset.host.template.split(`{${preset.host.param}}`);
+  if (!host.startsWith(before) || !host.endsWith(after)) return false;
+  return !('kind' in derivePresetEndpoints(preset.id, { [preset.host.param]: host.slice(before.length, host.length - after.length) }, register));
+}
+
+/**
+ * The parameters a profile of `preset` names in `auth.oauth.preset_params`, as the model is told to
+ * write them: `{"shop": "<shop>"} (shop: …)`. Empty for a preset without any.
+ */
+export function presetParamsForModel(preset: OAuthPreset): string {
+  if (preset.params.length === 0) return '';
+  const shape = `{${preset.params.map((p) => `"${p.name}": "<${p.name}>"`).join(', ')}}`;
+  return `${shape} (${preset.params.map((p) => `${p.name}: ${p.describe}`).join('; ')})`;
 }
 
 /**
@@ -660,4 +808,49 @@ export function presetRegisterOf(entries: readonly OAuthPreset[]): PresetRegiste
     get: (id: string): OAuthPreset | undefined => map.get(id),
     ids: (): string[] => [...map.keys()].sort(),
   });
+}
+
+/**
+ * The scopes a token answer's `scope` names (comma- or space-separated there), in its order, or
+ * `undefined` when the answer names none, an empty `scope` included. The connect callback and a
+ * renewal both record this as the grant's `granted_scope`.
+ */
+export function scopesOfAnswer(scope: unknown): string[] | undefined {
+  if (typeof scope !== 'string') return undefined;
+  const named = scope.split(/[\s,]+/).filter((s) => s !== '');
+  return named.length > 0 ? named : undefined;
+}
+
+/**
+ * The scopes a connection asks for, for a built-in provider whose grants are worth comparing
+ * ({@link OAuthPreset.compareGrantedScope}): the provider's required scopes plus the profile's
+ * own, possibly none. `undefined` when there is nothing to compare a grant with: any other
+ * profile, whose provider may add scopes of its own, and a scope the provider refuses, which
+ * never made a link.
+ */
+export function askedScopes(oauth: { readonly preset_id?: string | undefined; readonly scope?: string | undefined }): string[] | undefined {
+  const preset = OAUTH_PRESETS.get(oauth.preset_id ?? '');
+  if (preset?.compareGrantedScope !== true) return undefined;
+  const requested = presetScopeRequest(preset, oauth.scope);
+  return 'scopes' in requested ? [...requested.scopes] : undefined;
+}
+
+/** What `granted` holds that `asked` does not, in the order granted, each once. */
+export function scopesBeyondAsked(granted: readonly string[], asked: readonly string[]): string[] {
+  const known = new Set(asked);
+  return [...new Set(granted.filter((s) => !known.has(s)))];
+}
+
+/**
+ * How a text sends the model to a built-in provider's sign-in: the connect call, and what that call
+ * returns. "Give the user the link it returns" assumed a link; connect may answer without one,
+ * and a model told to pass a link on then looks for one or writes one (U-191, U-195). One
+ * text for every place that sends the model there, so a fix reaches all of them. `id` is a stored
+ * profile's id, which every path into the store checks; without one the text names "that profile".
+ */
+export function connectCallText(id?: string): string {
+  const call = id === undefined
+    ? 'call api_setup with action "connect" for that profile'
+    : `call api_setup with action "connect" and id "${id}"`;
+  return `${call}; that call returns the sign-in link for the user, or says why there is none.`;
 }

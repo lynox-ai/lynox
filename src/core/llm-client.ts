@@ -16,6 +16,7 @@ import { getProviderDescriptor } from '../types/index.js';
 import { OpenAIAdapter, type ApiKeyProvider } from './openai-adapter.js';
 import { createVertexOAuthProvider } from './vertex-oauth.js';
 import { withWireRules } from './llm-wire-rules.js';
+import { providerListApplies, refusedProviderClass, refusingClient } from './contained-providers.js';
 
 // Cached dynamic module reference — loaded once via initLLMProvider()
 type VertexCtor = new (opts: { projectId?: string | undefined; region?: string | undefined; accessToken?: string | undefined }) => Anthropic;
@@ -73,8 +74,17 @@ export function createLLMClient(opts: LLMClientOptions = {}): Anthropic {
   // 'vertex', openai → 'openai'. An unregistered key falls back to the Anthropic
   // client, matching the old `else` branch.
   const wireClient = getProviderDescriptor(provider)?.wireClient ?? 'anthropic';
+  // On an instance set up for a Shopify store, a client whose provider is not on the list
+  // (`contained-providers.ts`) is built as one that sends nothing. Checked here, where every
+  // model client is built; the Anthropic wire is checked below on the client itself, whose
+  // base URL and key are the ones it will use (the SDK reads ANTHROPIC_BASE_URL itself).
+  const listApplies = providerListApplies();
 
   if (wireClient === 'openai') {
+    if (listApplies && refusedProviderClass({
+      wire: 'openai', provider, baseURL: opts.apiBaseURL, apiKey: opts.apiKey,
+      googleVertexAuth: opts.openaiAuth === 'google-vertex',
+    }) !== null) return refusingClient();
     // Boot-time tolerance: we DELIBERATELY do NOT throw here on missing
     // apiBaseURL / openaiModelId / apiKey. BYOK tenants legitimately reach
     // this codepath at boot with an empty vault — the customer is meant to
@@ -95,6 +105,7 @@ export function createLLMClient(opts: LLMClientOptions = {}): Anthropic {
   }
 
   if (wireClient === 'vertex') {
+    if (listApplies) return refusingClient();
     if (!_vertexCtor) {
       throw new Error('Vertex provider not initialized. Call initLLMProvider("vertex") first.');
     }
@@ -108,13 +119,17 @@ export function createLLMClient(opts: LLMClientOptions = {}): Anthropic {
   // drops or rewrites the request fields a model rejects (llm-wire-rules.ts). The
   // OpenAI adapter does not: it translates every request itself, for models without
   // Anthropic wire rules.
-  if (opts.apiKey) {
-    return withWireRules(new Anthropic({ apiKey: opts.apiKey, baseURL: opts.apiBaseURL }));
-  }
-  if (opts.apiBaseURL) {
-    return withWireRules(new Anthropic({ baseURL: opts.apiBaseURL }));
-  }
-  return withWireRules(new Anthropic());
+  // Wrapping sends nothing, so the list is checked on the wrapped client, whose `baseURL`,
+  // `apiKey` and `authToken` are the SDK's own after its env defaults.
+  const client = opts.apiKey
+    ? withWireRules(new Anthropic({ apiKey: opts.apiKey, baseURL: opts.apiBaseURL }))
+    : opts.apiBaseURL
+      ? withWireRules(new Anthropic({ baseURL: opts.apiBaseURL }))
+      : withWireRules(new Anthropic());
+  if (listApplies && refusedProviderClass({
+    wire: 'anthropic', provider, baseURL: client.baseURL, apiKey: client.apiKey, authToken: client.authToken,
+  }) !== null) return refusingClient();
+  return client;
 }
 
 /** Get the currently active provider (set by initLLMProvider). */

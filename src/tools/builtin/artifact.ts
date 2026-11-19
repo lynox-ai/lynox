@@ -1,6 +1,9 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
-import { ArtifactPlaceholderError } from '../../core/artifact-store.js';
+import { ArtifactFileRefusedError, ArtifactPlaceholderError, ArtifactVersionRefusedError, isArtifactId } from '../../core/artifact-store.js';
+import { artifactRefusal } from './fs.js';
+import { chatThreadOf } from './private-thread.js';
+import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 
 interface ArtifactSaveInput {
   title: string;
@@ -16,6 +19,32 @@ interface ArtifactListInput {
 
 interface ArtifactDeleteInput {
   id: string;
+}
+
+/**
+ * The store's refusal of a link or a file with a second name at an artifact's file, worded for
+ * artifact_save: the same way out as the file tools give in the artifacts directory, a new
+ * artifact without the id (ux U-138 a).
+ */
+function saveRefusal(err: ArtifactFileRefusedError): string {
+  const cause = err.reason === 'link'
+    ? `${err.path}: a link on the way to the file is not followed; nothing was written`
+    : `${err.path} has more than one name (a hard link); artifact_save does not write such a file, so nothing was written`;
+  return artifactRefusal(cause, err.path.slice(err.path.lastIndexOf('/') + 1));
+}
+
+/**
+ * The same refusal met by artifact_restore. The content to keep is the version, which the model
+ * does not hold: it reads it at its path and saves it as a new artifact (ux U-138 b).
+ */
+function restoreRefusal(err: ArtifactFileRefusedError, id: string, version: number, versionPath: string): string {
+  const cause = err.reason === 'link'
+    ? `${err.path}: a link on the way to the file is not followed`
+    : `${err.path} has more than one name (a hard link); artifact_restore does not write such a file, so`;
+  return `${cause}${err.reason === 'link' ? ';' : ''} nothing was restored, and artifact ${id} is unchanged. ` +
+    `Tell the user that artifact ${id} could not be restored to v${version}, and that you are keeping v${version} as a new artifact instead. ` +
+    `Read v${version} with read_file at ${versionPath}, then call artifact_save without an id, with that content: passing ${id} would write to the same file. ` +
+    `In your reply, name the new artifact as the one that holds v${version}.`;
 }
 
 export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
@@ -59,49 +88,75 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
       );
     }
 
-    const artifact = store.save({
-      title: input.title,
-      content: input.content,
-      ...(input.type ? { type: input.type } : {}),
-      ...(input.description ? { description: input.description } : {}),
-      ...(input.id ? { id: input.id } : {}),
-    });
-
-    const action = input.id ? 'Updated' : 'Saved';
-    const path = store.pathFor(artifact.id);
-    const lines = [
-      `${action} artifact "${artifact.title}" (id: ${artifact.id}, v${artifact.version}).`,
-      `File: ${path}`,
-    ];
-
-    // Make an overwrite VISIBLE (it replaced existing content) and recoverable,
-    // instead of silently clobbering a good version (2026-06-04).
-    const ow = artifact.overwrite;
-    if (ow) {
-      const kb = (n: number): string => `${(n / 1024).toFixed(1)} KB`;
-      const pct = ow.previousBytes > 0
-        ? ` (${ow.newBytes >= ow.previousBytes ? '+' : ''}${Math.round((ow.newBytes - ow.previousBytes) / ow.previousBytes * 100)}%)`
-        : '';
-      lines.push(
-        `Replaced v${ow.previousVersion}: ${kb(ow.previousBytes)} → ${kb(ow.newBytes)}${pct}.` +
-        (ow.backupPath ? ` Previous version backed up to ${ow.backupPath} — read_file it to recover.` : ''),
-      );
-      if (ow.significant) {
-        lines.push(
-          `⚠ Large rewrite — the new content is less than half the previous size. ` +
-          `If you meant to make a targeted change rather than replace the whole document, ` +
-          `recover from the backup above and apply a find/replace edit instead.`,
-        );
-      }
+    try {
+      return saveArtifact(input, agent, store);
+    } catch (err) {
+      if (err instanceof ArtifactFileRefusedError) throw new Error(saveRefusal(err), { cause: err });
+      throw err;
     }
-
-    lines.push(
-      `To revise it, read_file this path and apply a targeted edit (find/replace) instead of ` +
-      `re-sending the whole document — the gallery picks up the change automatically.`,
-    );
-    return lines.join('\n');
   },
 };
+
+function saveArtifact(input: ArtifactSaveInput, agent: IAgent, store: NonNullable<IAgent['toolContext']['artifactStore']>): string {
+    const threadId = chatThreadOf(agent);
+    return withInstanceWrite(agent, {
+      site: 'artifact_save#save', kind: () => (isArtifactId(input.id) ? 'save' : 'create'), store: 'artifacts',
+      target: () => [['artifact', isArtifactId(input.id) ? input.id : undefined]],
+      main: ['save'],
+    }, (w) => {
+      const artifact = w.run('save', () => store.save({
+        title: input.title,
+        content: input.content,
+        ...(input.type ? { type: input.type } : {}),
+        ...(input.description ? { description: input.description } : {}),
+        ...(input.id ? { id: input.id } : {}),
+        // The chat that made it, so the gallery and the API can link back: the agent's own thread,
+        // or for a spawn_agent child or a workflow step the chat it runs for. The store keeps it on
+        // later saves: an edit from another chat does not move where the artifact came from.
+        ...(threadId ? { threadId } : {}),
+      }), ifReturned);
+      // Only an id the store chose: one passed in is the model's.
+      if (!input.id && !artifact.overwrite) w.created('save', artifact.id);
+
+      // Said by what the store did, not by what was asked: an id the index did not hold makes a
+      // new artifact, and the model must not report it as an update (ux U-138). The first line
+      // ends in "(id: …, vN)." and starts as isSuccessfulSaveResult expects: the chat reads the
+      // id from that line end, and the eviction its start.
+      const path = store.pathFor(artifact.id);
+      const lines = artifact.overwrite
+        ? [`Updated artifact "${artifact.title}" (id: ${artifact.id}, v${artifact.version}).`]
+        : [`Created a new artifact "${artifact.title}" (id: ${artifact.id}, v${artifact.version}).`];
+      if (!artifact.overwrite && input.id) lines.push(`No artifact with id ${input.id} existed, so this is a new one.`);
+      lines.push(`File: ${path}`);
+
+      // Make an overwrite VISIBLE (it replaced existing content) and recoverable,
+      // instead of silently clobbering a good version (2026-06-04).
+      const ow = artifact.overwrite;
+      if (ow) {
+        const kb = (n: number): string => `${(n / 1024).toFixed(1)} KB`;
+        const pct = ow.previousBytes > 0
+          ? ` (${ow.newBytes >= ow.previousBytes ? '+' : ''}${Math.round((ow.newBytes - ow.previousBytes) / ow.previousBytes * 100)}%)`
+          : '';
+        lines.push(
+          `Replaced v${ow.previousVersion}: ${kb(ow.previousBytes)} → ${kb(ow.newBytes)}${pct}.` +
+          (ow.backupPath ? ` Previous version backed up to ${ow.backupPath} — read_file it to recover.` : ''),
+        );
+        if (ow.significant) {
+          lines.push(
+            `⚠ Large rewrite — the new content is less than half the previous size. ` +
+            `If you meant to make a targeted change rather than replace the whole document, ` +
+            `recover from the backup above and apply a find/replace edit instead.`,
+          );
+        }
+      }
+
+      lines.push(
+        `To revise it, read_file this path and apply a targeted edit (find/replace) instead of ` +
+        `re-sending the whole document — the gallery picks up the change automatically.`,
+      );
+      return lines.join('\n');
+    });
+}
 
 export const artifactListTool: ToolEntry<ArtifactListInput> = {
   definition: {
@@ -147,8 +202,10 @@ export const artifactDeleteTool: ToolEntry<ArtifactDeleteInput> = {
     const store = agent.toolContext.artifactStore;
     if (!store) return 'Artifact store not available.';
 
-    const deleted = store.delete(input.id);
-    return deleted ? `Deleted artifact ${input.id}.` : `Artifact ${input.id} not found.`;
+    return withInstanceWrite(agent, { site: 'artifact_delete#delete', kind: 'delete', store: 'artifacts', target: () => [['artifact', isArtifactId(input.id) ? input.id : undefined]], main: ['delete'] }, (w) => {
+      const deleted = w.run('delete', () => store.delete(input.id), ifTrue);
+      return deleted ? `Deleted artifact ${input.id}.` : `Artifact ${input.id} not found.`;
+    });
   },
 };
 
@@ -211,8 +268,18 @@ export const artifactRestoreTool: ToolEntry<ArtifactRestoreInput> = {
     if (!store) return 'Artifact store not available.';
     let restored: ReturnType<typeof store.restore>;
     try {
-      restored = store.restore(input.id, input.version);
+      restored = withInstanceWrite(agent, {
+        site: 'artifact_restore#change', kind: 'change', store: 'artifacts',
+        target: () => [['artifact', isArtifactId(input.id) ? input.id : undefined], ['version', Number.isInteger(input.version) ? input.version : undefined]],
+        main: ['restore'],
+      }, (w) => w.run('restore', () => store.restore(input.id, input.version), ifNonNull));
     } catch (err) {
+      if (err instanceof ArtifactFileRefusedError) {
+        throw new Error(restoreRefusal(err, input.id, input.version, store.versionPathFor(input.id, input.version)), { cause: err });
+      }
+      if (err instanceof ArtifactVersionRefusedError) {
+        return `v${String(input.version)} of artifact ${input.id} is a link or has more than one name, so it was not read; nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`;
+      }
       if (!(err instanceof ArtifactPlaceholderError)) throw err;
       return `Could not restore — v${String(input.version)} of artifact ${input.id} holds only the engine's placeholder for a saved document, not a document. Nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`;
     }

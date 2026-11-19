@@ -396,8 +396,44 @@ export async function startManagedGoogleOAuth(): Promise<void> {
 	}
 }
 
-export async function claimManagedGoogleTokens(claimNonce: string): Promise<void> {
+/**
+ * What the engine can say about a parked claim, asked without claiming it:
+ * - `named`: the control plane named the account;
+ * - `unnamed`: it answered, and the grant carries no address. Not confirmable.
+ * - `unknown`: no answer to go by (older control plane, expired grant, error,
+ *   timeout). The dialog falls back to saying it cannot name the account.
+ */
+export type ClaimPreview = { kind: 'named'; email: string } | { kind: 'unnamed' } | { kind: 'unknown' };
+
+export async function previewManagedGoogleClaim(claimNonce: string, timeoutMs = 10_000): Promise<ClaimPreview> {
+	try {
+		const res = await fetch(`${getApiBase()}/google/claim-managed/preview`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ claim_nonce: claimNonce }),
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+		if (!res.ok) return { kind: 'unknown' };
+		const data = (await res.json()) as { email?: unknown; unnamed?: unknown } | null;
+		const email = typeof data?.email === 'string' ? data.email.trim() : '';
+		if (email.includes('@')) return { kind: 'named', email };
+		if (data?.unnamed === true) return { kind: 'unnamed' };
+		return { kind: 'unknown' };
+	} catch {
+		return { kind: 'unknown' };
+	}
+}
+
+/**
+ * How a claim ended: `claimed`; `kept` when the engine refused it before asking the control plane
+ * (`claim_kept: true`), so the nonce is still good there; `failed` for everything else, including
+ * no answer, where the nonce may already be spent.
+ */
+export type ManagedClaimOutcome = 'claimed' | 'kept' | 'failed';
+
+export async function claimManagedGoogleTokens(claimNonce: string): Promise<ManagedClaimOutcome> {
 	managedGoogleClaiming = true;
+	let outcome: ManagedClaimOutcome = 'failed';
 	try {
 		const res = await fetch(`${getApiBase()}/google/claim-managed`, {
 			method: 'POST',
@@ -405,16 +441,19 @@ export async function claimManagedGoogleTokens(claimNonce: string): Promise<void
 			body: JSON.stringify({ claim_nonce: claimNonce }),
 		});
 		if (res.ok) {
+			outcome = 'claimed';
 			addToast(t('integrations.google_connected_managed'), 'success');
 			await loadGoogleStatus();
 		} else {
-			const data = (await res.json().catch(() => ({}))) as { error?: string };
+			const data = (await res.json().catch(() => ({}))) as { error?: string; claim_kept?: unknown };
+			if (data.claim_kept === true) outcome = 'kept';
 			addToast(data.error ?? t('common.error'), 'error');
 		}
 	} catch {
 		addToast(t('common.error'), 'error');
 	}
 	managedGoogleClaiming = false;
+	return outcome;
 }
 
 /**

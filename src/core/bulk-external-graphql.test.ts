@@ -13,8 +13,9 @@ import { setPinnedTransportForTests } from './network-guard.js';
 import { mintStorePass } from './store-pass.js';
 import { externalClient, graphqlAnswer, type ExternalClient } from './bulk-external.js';
 import { createToolContext } from './tool-context.js';
-import { withShopifyRead } from '../tools/permission-guard.js';
+import { withShopifyApply, withShopifyRead } from '../tools/permission-guard.js';
 import { shopifyProductReadBody, type ShopifyRead } from './shopify-graphql.js';
+import { TARGET_MAX, httpTarget } from './audit-log.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 
 const HOST = 'acme.myshopify.com';
@@ -89,23 +90,76 @@ describe('graphqlRead — the request', () => {
 
   it('builds the body itself, and a value that does not fit sends nothing', async () => {
     expect((await client().graphqlRead(ENDPOINT, { form: 'shopify_product_read', gid: 'gid://shopify/Product/101 OR 1' })).kind).toBe('not_granted');
-    expect((await client().graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: -1 })).kind).toBe('not_granted');
+    expect((await client().graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: -1, filters: {} })).kind).toBe('not_granted');
     expect(sent).toHaveLength(0);
   });
 
   it('records the read with its form and bound value before it is sent, and sends nothing unrecorded', async () => {
     const rows: [string, string | undefined][] = [];
-    const listing = withShopifyRead(base, HOST, { phase: 'list', afterId: 7 });
+    const listing = withShopifyRead(base, HOST, { phase: 'list', afterId: 7, filters: {} });
     await client({ recordRead: (url, detail) => { rows.push([url, detail]); return true; } }).graphqlRead(ENDPOINT, R1);
-    await client({ contract: listing, recordRead: (url, detail) => { rows.push([url, detail]); return true; } }).graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: 7 });
-    expect(rows).toEqual([[ENDPOINT, `shopify_product_read ${P1}`], [ENDPOINT, 'shopify_products_list id:>7']]);
+    await client({ contract: listing, recordRead: (url, detail) => { rows.push([url, detail]); return true; } }).graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: 7, filters: {} });
+    const filtered = withShopifyRead(base, HOST, { phase: 'list', afterId: 7, filters: { product_type: 'Tee', vendor: 'Acme' } });
+    await client({ contract: filtered, recordRead: (url, detail) => { rows.push([url, detail]); return true; } })
+      .graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: 7, filters: { product_type: 'Tee', vendor: 'Acme' } });
+    expect(rows).toEqual([
+      [ENDPOINT, `shopify_product_read ${P1}`], [ENDPOINT, 'shopify_products_list id:>7'],
+      [ENDPOINT, 'shopify_products_list id:>7 AND product_type:"Tee" AND vendor:"Acme"'],
+    ]);
     expect((await client({ recordRead: () => false }).graphqlRead(ENDPOINT, R1)).kind).toBe('unrecorded');
-    expect(sent).toHaveLength(2);
+    expect(sent).toHaveLength(3);
+  });
+
+  it('records a list search too long for its row as the sent text cut at a value, the row as full as the trail\'s bound allows', async () => {
+    // Values of many lengths, so the room the row has is met at every distance from a value's end.
+    for (let L = 12; L <= 44; L++) {
+      const values = Array.from({ length: 50 }, (_, i) => `G${String(i).padStart(2, '0')}${'x'.repeat(L - 3)}`);
+      const filters = { product_type: values, vendor: 'Acme' };
+      const rows: string[] = [];
+      const listing = withShopifyRead(base, HOST, { phase: 'list', afterId: 7, filters });
+      await client({ contract: listing, recordRead: (url, detail) => { rows.push(`${httpTarget('POST', url)} ${detail!}`); return true; } })
+        .graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: 7, filters });
+      const row = rows[0]!;
+      // The row fits what the trail keeps, so the trail's own cut never reaches it.
+      expect(row.length, `L=${String(L)}`).toBeLessThanOrEqual(TARGET_MAX);
+      const m = /^(.* shopify_products_list (.*)) … \[cut here: (\d+) of 51 values left out\]$/.exec(row)!;
+      const sentQuery = `id:>7 AND (${values.map((v) => `product_type:"${v}"`).join(' OR ')}) AND vendor:"Acme"`;
+      expect(sentQuery.startsWith(m[2]!)).toBe(true);
+      expect(m[2]!.endsWith('"')).toBe(true);
+      const kept = [...m[2]!.matchAll(/product_type:"/g)].length;
+      expect(Number(m[3])).toBe(51 - kept);
+      // As full as the bound allows: one more value would not fit.
+      expect(`${m[1]!} OR product_type:"${values[kept]!}" … [cut here: ${String(50 - kept)} of 51 values left out]`.length, `L=${String(L)}`)
+        .toBeGreaterThan(TARGET_MAX);
+    }
+    expect(sent).toHaveLength(33);
   });
 
   it('caps the answer like a GET', async () => {
     answer = { status: 200, body: JSON.stringify({ data: { product: { id: P1, title: 'x'.repeat(2000) } } }) };
     expect((await client().graphqlRead(ENDPOINT, R1, undefined, 1000)).kind).toBe('too_large');
+  });
+});
+
+describe('graphqlWrite on a connected account', () => {
+  const AFTER = { title: 'Neu' };
+  const apply = withShopifyApply(base, HOST, { reads: [P1], writes: [{ form: 'shopify_product', gid: P1, after: AFTER }] });
+
+  it('sends the write the apply grant minted, though its form is not a measured one', async () => {
+    answer = { status: 200, body: JSON.stringify({ data: { productUpdate: { product: { id: P1 }, userErrors: [] } } }) };
+    const methods: string[] = [];
+    const reads: string[] = [];
+    expect((await client({ contract: apply, methods, recordRead: (url) => { reads.push(url); return true; } }).graphqlWrite(ENDPOINT, { form: 'shopify_product', gid: P1, after: AFTER })).kind).toBe('ok');
+    expect(sent).toHaveLength(1);
+    // Attached as the write it is, and recorded as no read.
+    expect(methods).toEqual(['POST']);
+    expect(reads).toEqual([]);
+  });
+
+  it('sends no write that was not minted: under a read grant, or another value under an apply grant', async () => {
+    expect((await client().graphqlWrite(ENDPOINT, { form: 'shopify_product', gid: P1, after: AFTER })).kind).toBe('not_granted');
+    expect((await client({ contract: apply }).graphqlWrite(ENDPOINT, { form: 'shopify_product', gid: P1, after: { title: 'Anders' } })).kind).toBe('not_granted');
+    expect(sent).toHaveLength(0);
   });
 });
 

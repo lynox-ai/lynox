@@ -14,6 +14,8 @@ export type SttProvider = 'mistral-voxtral' | 'whisper-cpp';
 let sttAvailable = $state(false);
 let sttProvider = $state<SttProvider | null>(null);
 let ttsAvailable = $state(false);
+/** The instance is connected to a Shopify store: no audio or text goes to a speech service. */
+let speechServiceOff = $state(false);
 let probed = false;
 let inflight: Promise<void> | null = null;
 
@@ -22,6 +24,7 @@ async function doProbe(): Promise<void> {
 		const res = await fetch(`${getApiBase()}/voice/info`);
 		if (!res.ok) return;
 		const data = (await res.json()) as {
+			speech_service_off?: unknown;
 			stt?: { available?: unknown; provider?: unknown } | undefined;
 			tts?: { available?: unknown } | undefined;
 		};
@@ -29,6 +32,7 @@ async function doProbe(): Promise<void> {
 		if (p === 'mistral-voxtral' || p === 'whisper-cpp') sttProvider = p;
 		if (data.stt?.available === true) sttAvailable = true;
 		if (data.tts?.available === true) ttsAvailable = true;
+		if (data.speech_service_off === true) speechServiceOff = true;
 	} catch {
 		/* best-effort — UI stays in the disabled-by-default state on failure */
 	}
@@ -46,4 +50,5 @@ export function ensureVoiceInfoProbed(): Promise<void> {
 
 export function isTtsAvailable(): boolean { return ttsAvailable; }
 export function isSttAvailable(): boolean { return sttAvailable; }
+export function isSpeechServiceOff(): boolean { return speechServiceOff; }
 export function getSttProvider(): SttProvider | null { return sttProvider; }

@@ -13,6 +13,8 @@
 // having to fabricate.
 
 import { getApiBase } from '../../config.svelte.js';
+
+import { saveFailedText, throwIfRefused } from '../../api/save-refusal.js';
 import { t } from '../../i18n.svelte.js';
 import { addToast } from '../toast.svelte.js';
 import { loadSecretStatuses, markSearxngRemoved } from './secrets.svelte.js';
@@ -77,14 +79,14 @@ export async function saveSearxng(): Promise<void> {
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ searxng_url: url }),
 		});
-		if (!res.ok) throw new Error();
+		await throwIfRefused(res);
 		searxngUrl = '';
 		searxngSaved = true;
 		searxngHealthy = null;
 		setTimeout(() => (searxngSaved = false), 2000);
 		await loadSecretStatuses();
-	} catch {
-		addToast(t('common.save_failed'), 'error');
+	} catch (e) {
+		addToast(saveFailedText(e, t('common.save_failed')), 'error');
 	}
 	searxngSaving = false;
 }
@@ -136,12 +138,12 @@ export async function removeSearxng(): Promise<void> {
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ searxng_url: null }),
 		});
-		if (!res.ok) throw new Error();
+		await throwIfRefused(res);
 		markSearxngRemoved();
 		searxngHealthy = null;
 		await loadSecretStatuses();
-	} catch {
-		addToast(t('common.save_failed'), 'error');
+	} catch (e) {
+		addToast(saveFailedText(e, t('common.save_failed')), 'error');
 	}
 	searxngSaving = false;
 }

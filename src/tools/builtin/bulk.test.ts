@@ -3,7 +3,7 @@ import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { mkdtempSync, rmSync, writeFileSync, readdirSync, readFileSync, statSync, mkdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { bulkPlanTool, bulkStatusTool } from './bulk.js';
+import { bulkPlanTool, bulkStatusTool, formatStatus, nothingToApprove, NOTHING_TO_APPROVE_NOTE, NO_PLACE_NOTE } from './bulk.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { DataStore } from '../../core/data-store.js';
 import { BulkLedger } from '../../core/bulk-ledger.js';
@@ -68,7 +68,7 @@ beforeEach(() => {
   mkdirSync(ws);
   setTenantWorkspace(ws);
   engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-  ledger = new BulkLedger(engineDb);
+  ledger = new BulkLedger(engineDb, null);
   store = new DataStore(join(dir, 'datastore.db'));
 });
 
@@ -444,6 +444,129 @@ describe('bulk_plan over data-store rows', () => {
   });
 });
 
+// A walk found the model sending the user to the run under a label and a menu the interface does
+// not show. The result the model writes its reply from asks it not to name a place: in every plan
+// the user is to start or approve, and in none with nothing to approve.
+describe('where the user finds a planned run', () => {
+  // The model reads the HTML bound from the constant, and the cost of a larger bound only where it
+  // applies (a list run); the eval measured this wording, so a change to it is a change to measure.
+  it('tells the model the HTML fields\' shared bound from the constant, and the list run\'s cost of a larger one', async () => {
+    const { JUDGE_MAX_HTML } = await import('../../core/bulk-judge-rule.js');
+    const judge = (bulkPlanTool.definition.input_schema as { properties: { judge: { properties: { schema: { description: string } } } } }).properties.judge;
+    const text = judge.properties.schema.description;
+    expect(text).toContain(`Set each text field's maxLength near the longest text the run writes in it: the list form's HTML fields (shopify: descriptionHtml; woocommerce: description, short_description) may take up to ${String(JUDGE_MAX_HTML)} together, and in a list run a larger maxLength makes the run hold fewer targets.`);
+    expect(JUDGE_MAX_HTML).toBe(32_000);
+  });
+
+  it('is not claimed to be nowhere: the description no longer says there is no screen for it', () => {
+    expect(bulkPlanTool.definition.description).not.toMatch(/no screen or button/);
+    expect(bulkPlanTool.definition.description).toContain('you cannot apply it.');
+  });
+
+  it('is left unnamed in a local plan the user approves, and not mentioned where there is nothing to approve', async () => {
+    writeFileSync(join(ws, 'plan.json'), JSON.stringify([{ target: 'inside.txt', after: 'y' }]));
+    expect(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'plan.json' }, agent())).toContain(NO_PLACE_NOTE);
+    writeFileSync(join(dir, 'outside.txt'), 'x');
+    writeFileSync(join(ws, 'none.json'), JSON.stringify([{ target: '../outside.txt', after: 'y' }]));
+    expect(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'none.json' }, agent())).not.toContain(NO_PLACE_NOTE);
+  });
+
+  it('is left unnamed in an external plan the user starts, and not mentioned where no target was valid', async () => {
+    writeFileSync(join(ws, 'src.json'), JSON.stringify([{ target: 'https://shop.example.com/products/1', after: { price: '1' } }]));
+    const started = await bulkPlanTool.handler({ target_system: 'http', target_host: 'shop.example.com', source_file: 'src.json' }, agent());
+    expect(started).toContain('External dry run recorded');
+    expect(started).toContain(NO_PLACE_NOTE);
+    writeFileSync(join(ws, 'bad.json'), JSON.stringify([{ target: 'not a url', after: { price: '1' } }]));
+    expect(await bulkPlanTool.handler({ target_system: 'http', target_host: 'shop.example.com', source_file: 'bad.json' }, agent())).not.toContain(NO_PLACE_NOTE);
+  });
+});
+
+// 1223 (ux, 1130 eval run 4): with every target refused, the model told the owner that approving
+// would write. The status says in one line that there is nothing to approve, and only then.
+describe('a previewed run in which nothing can be written', () => {
+  const APPROVE = 'Only the user can approve and apply it';
+  const plan = async (entries: { target: string; after: string }[]): Promise<{ result: string; runId: string }> => {
+    writeFileSync(join(ws, 'plan.json'), JSON.stringify(entries));
+    const result = await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'plan.json' }, agent());
+    return { result, runId: runIdOf(result) };
+  };
+
+  it('says there is nothing to approve when every target is invalid, in the plan and in bulk_status, and approving is refused', async () => {
+    writeFileSync(join(dir, 'outside.txt'), 'x');
+    const { result, runId } = await plan([{ target: '../outside.txt', after: 'y' }]);
+    expect(result).toContain('invalid 1 (path_outside_workspace 1)');
+    expect(result).toContain(NOTHING_TO_APPROVE_NOTE);
+    expect(result).not.toContain(APPROVE);
+    expect(await bulkStatusTool.handler({ run_id: runId }, agent())).toContain(NOTHING_TO_APPROVE_NOTE);
+    // The line states what the ledger does: such a run cannot be approved.
+    expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)! })).toMatchObject({ ok: false, reason: 'nothing_to_apply' });
+  });
+
+  it('says it when the rest is unchanged', async () => {
+    writeFileSync(join(ws, 'same.txt'), 'same');
+    writeFileSync(join(dir, 'outside.txt'), 'x');
+    const { result } = await plan([{ target: 'same.txt', after: 'same' }, { target: '../outside.txt', after: 'y' }]);
+    expect(result).toContain('unchanged 1, invalid 1');
+    expect(result).toContain(NOTHING_TO_APPROVE_NOTE);
+  });
+
+  it('does not say it when one target writes, and keeps the approval sentence', async () => {
+    writeFileSync(join(dir, 'outside.txt'), 'x');
+    const { result, runId } = await plan([{ target: 'inside.txt', after: 'y' }, { target: '../outside.txt', after: 'y' }]);
+    expect(result).toContain('create 1');
+    expect(result).not.toContain(NOTHING_TO_APPROVE_NOTE);
+    expect(result).toContain(APPROVE);
+    expect(await bulkStatusTool.handler({ run_id: runId }, agent())).not.toContain(NOTHING_TO_APPROVE_NOTE);
+  });
+
+  it('does not say it for a run with nothing invalid, nor when the owner took the writing target out', async () => {
+    writeFileSync(join(ws, 'same.txt'), 'same');
+    expect((await plan([{ target: 'same.txt', after: 'same' }])).result).not.toContain(NOTHING_TO_APPROVE_NOTE);
+    writeFileSync(join(dir, 'outside.txt'), 'x');
+    const { runId } = await plan([{ target: 'inside.txt', after: 'y' }, { target: '../outside.txt', after: 'y' }]);
+    const seq = ledger.getPreview(runId).find((t) => t.change === 'create')!.seq;
+    expect(ledger.deselectTarget(runId, seq, { checksum: ledger.computeChecksum(runId)! })).toMatchObject({ ok: true });
+    // The owner can put it back, so the run is not one in which nothing can be written.
+    expect(await bulkStatusTool.handler({ run_id: runId }, agent())).not.toContain(NOTHING_TO_APPROVE_NOTE);
+  });
+
+  it('says it for an external plan with no valid target, without telling the model to wait for a start', async () => {
+    writeFileSync(join(ws, 'src.json'), JSON.stringify([{ target: 'not a url', after: { price: '1' } }]));
+    const result = await bulkPlanTool.handler({ target_system: 'http', target_host: 'shop.example.com', source_file: 'src.json' }, agent());
+    expect(result).toContain('no target was valid, so there is nothing to read');
+    expect(result).toContain('invalid 1 (bad_url 1)');
+    expect(result).toContain(NOTHING_TO_APPROVE_NOTE);
+    expect(result).not.toContain('Only the user can start and approve it');
+    expect(result).not.toContain('Once the user has started it');
+    // Nor that it writes with a method, one target first.
+    expect(result).not.toMatch(/Writes with|applied to one target first/);
+  });
+
+  it('does not promise verdicts for a judged external plan with no valid target', async () => {
+    writeFileSync(join(ws, 'src.json'), JSON.stringify([{ target: 'not a url' }]));
+    const judge = { rule: 'Shorten the title.', schema: { type: 'object', properties: { title: { type: 'string', maxLength: 80 } }, required: ['title'] } };
+    const result = await bulkPlanTool.handler({ target_system: 'http', target_host: 'shop.example.com', source_file: 'src.json', judge } as Parameters<typeof bulkPlanTool.handler>[0], agent());
+    expect(result).toContain(NOTHING_TO_APPROVE_NOTE);
+    expect(result).not.toContain('no model is called until the user starts the run');
+  });
+
+  it('waits for every verdict, for the whole list and for the preview', async () => {
+    writeFileSync(join(dir, 'outside.txt'), 'x');
+    const { runId } = await plan([{ target: '../outside.txt', after: 'y' }]);
+    const s = ledger.getStatus(runId)!;
+    expect(nothingToApprove(s)).toBe(true);
+    expect(nothingToApprove({ ...s, judge: { tier: 'fast', unjudged: 1 } } as typeof s)).toBe(false);
+    expect(nothingToApprove({ ...s, judge: { tier: 'fast', unjudged: 0 } } as typeof s)).toBe(true);
+    expect(nothingToApprove({ ...s, list: { state: 'pending', pagesRead: 1 } } as typeof s)).toBe(false);
+    // A delete writes too: a run that only deletes has something to approve.
+    expect(nothingToApprove({ ...s, changes: { ...s.changes, delete: 1 } })).toBe(false);
+    for (const phase of ['planned', 'approved', 'writing', 'done', 'aborted', 'undone'] as const) {
+      expect(nothingToApprove({ ...s, phase }), phase).toBe(false);
+      expect(formatStatus({ ...s, phase }), phase).not.toContain(NOTHING_TO_APPROVE_NOTE);
+    }
+  });
+});
+
 describe('bulk_status on an instance without a vault key', () => {
   it('says the approval checksum does not bind — and says nothing when it does', async () => {
     const plan = (l: BulkLedger): string => l.recordDryRun({
@@ -455,7 +578,7 @@ describe('bulk_status on an instance without a vault key', () => {
 
     const bareDb = new EngineDb(join(dir, 'unkeyed.db'), '');
     try {
-      const bare = new BulkLedger(bareDb);
+      const bare = new BulkLedger(bareDb, null);
       const a = { toolContext: { bulkLedger: bare, dataStore: store } } as unknown as IAgent;
       expect(await bulkStatusTool.handler({ run_id: plan(bare) }, a)).toMatch(line);
       expect(await bulkStatusTool.handler({}, a)).toMatch(line);

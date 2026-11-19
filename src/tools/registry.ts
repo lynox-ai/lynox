@@ -13,6 +13,13 @@ export class ToolRegistry {
     return this;
   }
 
+  /** Remove a tool. True if it was registered; the version moves only then. */
+  unregister(name: string): boolean {
+    if (!this.tools.delete(name)) return false;
+    this._version++;
+    return true;
+  }
+
   getEntries(): ToolEntry[] {
     return [...this.tools.values()];
   }

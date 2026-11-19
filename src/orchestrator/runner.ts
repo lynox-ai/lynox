@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from './workflow-stop.js';
+import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR, workflowBoundError } from './workflow-stop.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
 import { join } from 'node:path';
@@ -12,20 +12,21 @@ import { checkSessionBudget, adjustSessionCost } from '../core/session-budget.js
 import type { SessionCounters } from '../types/agent.js';
 import type { IMemory } from '../types/memory.js';
 import { loadAgentDef } from './agent-registry.js';
-import { buildStepContext, resolveTaskTemplate, resolveInputTemplate } from './context.js';
+import { buildStepContext, contextForEventRun, resolveTaskTemplate, resolveInputTemplate } from './context.js';
 import { shouldRunStep, buildConditionContext } from './conditions.js';
-import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, headlessStepModelOverride, resolveStepSlotCreds, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint, type ChatOrigin } from './runtime-adapter.js';
+import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, headlessStepModelOverride, resolveStepSlotCreds, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint, type ChatOrigin, type StepSpawnResult } from './runtime-adapter.js';
 import { computePhases } from './graph.js';
 import { channels } from '../core/observability.js';
 import { currentRunGroup, openRunGroup } from '../core/run-group.js';
 import type { Manifest, RunState, RunHooks, GateAdapter, AgentOutput, ManifestStep } from '../types/orchestration.js';
-import { GateRejectedError, GateExpiredError } from '../types/orchestration.js';
+import { GateRejectedError, GateExpiredError, StepReportedFailureError } from '../types/orchestration.js';
 import type { RunHistory } from '../core/run-history.js';
 import { PromptBudget, promptBudgetLimit } from './prompt-budget.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from './result-truncate.js';
 import { parallelStepCapFor, PRE_APPROVE_REMOVED } from './validate.js';
-import { sourceRefusal, type RunSource } from './run-source.js';
+import { NestedRunEndedError, WORKFLOW_ENDED_MID_RUN_ERROR, WORKFLOW_END_CHECK_FAILED_ERROR, heldSource, isAuthorStop, sourceRefusal, type RunSource } from './run-source.js';
 import { childFilingContext } from '../core/approval-filing.js';
+import { OWNER_PRINCIPAL } from '../core/request-principal.js';
 
 export { loadManifestFile, validateManifest } from './validate.js';
 
@@ -54,7 +55,9 @@ export interface RunManifestOptions {
    * Who started the run. Every step agent is built for it, so a mandate's step runs under
    * the mandate's lock — its tool list is the parent's filtered one already, and the
    * principal is what also refuses the protected secrets and stamps the step's writes
-   * (PRD customer-granted-operator-access D1, §3.13 E5). Absent = the owner.
+   * (PRD customer-granted-operator-access D1, §3.13 E5). Absent = the owner: this is the
+   * public `runManifest` API, and its one default. Every engine entrypoint goes through
+   * `buildRunCtx`, which requires it.
    */
   principal?: import('../core/request-principal.js').RequestPrincipal | undefined;
   cachedOutputs?: Map<string, AgentOutput> | undefined;
@@ -134,6 +137,16 @@ export interface RunManifestOptions {
    * a value that changed on the way is not confirmed and keeps the boundary.
    */
   isAcceptedParam?: ((path: string, value: unknown) => boolean) | undefined;
+  /**
+   * Keep the run's params out of what a step agent reads (its `context`), while the step's task
+   * and captured call still resolve from them, and fence every earlier step's output it reads.
+   * Set for a run a webhook event started: its params are a third party's values, and a step
+   * should meet them only where its task names them, fenced as untrusted;
+   * an earlier step's output can carry them on. A step that needs a value its task does
+   * not name no longer has it: nothing makes that step fail, so its agent may go on without it.
+   * The workflow has to name the value in the task.
+   */
+  paramsKeptFromSteps?: boolean | undefined;
   /**
    * How a run under an accepted grant was started (`startedVia` of its origin, which
    * `runGuardedSavedWorkflow` hands to `runSavedWorkflow`), written to
@@ -223,6 +236,14 @@ export interface RunManifestOptions {
 }
 
 /**
+ * The options a run carries once it has started: the public default of `principal` (absent = the
+ * owner) is resolved once, where the run is entered (`runManifest`), so no step inside it can read
+ * an absent one and fall back somewhere else (register 1173). Every step spawner is handed this
+ * principal, and the census (`principal-sites.test.ts`) checks by type that it is never undefined.
+ */
+export type StartedRunOptions = RunManifestOptions & { principal: import('../core/request-principal.js').RequestPrincipal };
+
+/**
  * Inputs to {@link buildRunCtx}. `autonomy` is a **required key** (value may be
  * `undefined`) so every call site must consciously decide the run's permission
  * posture — the headless saved-workflow path passes `'autonomous'`, in-session
@@ -237,8 +258,9 @@ export interface RunCtxInput {
   parentTools?: ToolEntry[] | undefined;
   parentToolContext?: import('../types/index.js').ToolContext | undefined;
   parentActiveScopes?: import('../types/index.js').MemoryScopeRef[] | undefined;
-  /** See `RunManifestOptions.principal`. */
-  principal?: import('../core/request-principal.js').RequestPrincipal | undefined;
+  /** See `RunManifestOptions.principal`. Required here, unlike there: every entrypoint of the
+   *  engine names whom its run is for, the owner included (1055). */
+  principal: import('../core/request-principal.js').RequestPrincipal;
   parentMemory?: IMemory | null | undefined;
   userTimezone?: string | undefined;
   parentPrompt?: SubAgentPromptHandles | undefined;
@@ -248,6 +270,7 @@ export interface RunCtxInput {
   hooks?: RunHooks | undefined;
   capabilityContract?: CapabilityContract | undefined;
   isAcceptedParam?: ((path: string, value: unknown) => boolean) | undefined;
+  paramsKeptFromSteps?: boolean | undefined;
   startedVia?: string | undefined;
   observeToolCall?: StepToolRecorder | undefined;
   limits?: WorkflowLimits | undefined;
@@ -299,7 +322,7 @@ export interface RunCtxInput {
  * `runGuardedSavedWorkflow`, so adding a wrapper here would double-bill
  * (prd-review A3).
  */
-export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
+export function buildRunCtx(input: RunCtxInput): StartedRunOptions {
   return {
     source: input.source,
     autonomy: input.autonomy,
@@ -316,6 +339,7 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     hooks: input.hooks,
     capabilityContract: input.capabilityContract,
     isAcceptedParam: input.isAcceptedParam,
+    paramsKeptFromSteps: input.paramsKeptFromSteps,
     startedVia: input.startedVia,
     observeToolCall: input.observeToolCall,
     limits: input.limits,
@@ -386,13 +410,13 @@ export function workflowBoundExceeded(
 ): string | null {
   if (!limits) return null;
   if (limits.maxIterations !== undefined && iterations >= limits.maxIterations) {
-    return `Workflow exceeded its step limit (${limits.maxIterations}) — aborting to prevent a runaway.`;
+    return workflowBoundError('step', String(limits.maxIterations));
   }
   if (limits.maxWallClockMs !== undefined && Date.now() - startMs > limits.maxWallClockMs) {
-    return `Workflow exceeded its wall-clock limit (${Math.round(limits.maxWallClockMs / 1000)}s) — aborting to prevent a runaway.`;
+    return workflowBoundError('wall-clock', `${Math.round(limits.maxWallClockMs / 1000)}s`);
   }
   if (limits.maxSpendUsd !== undefined && stepCounters.costUSD > limits.maxSpendUsd) {
-    return `Workflow exceeded its spend limit ($${limits.maxSpendUsd.toFixed(2)}) — aborting to prevent a runaway.`;
+    return workflowBoundError('spend', `$${limits.maxSpendUsd.toFixed(2)}`);
   }
   return null;
 }
@@ -518,15 +542,18 @@ export function runManifest(
     return Promise.reject(err instanceof Error ? err : new Error(String(err)));
   }
   if (refused !== undefined) return Promise.reject(new Error(refused));
-  if (currentRunGroup() !== null) return runManifestInGroup(manifest, config, options);
-  const runId = options.runId ?? randomUUID();
-  return openRunGroup(runId, () => runManifestInGroup(manifest, config, { ...options, runId }));
+  // The public API's default, resolved once for the whole run (see `StartedRunOptions`). The
+  // step spawners resolve their own the same way (`spawnInline` and `spawnPipeline` are public API).
+  const started: StartedRunOptions = { ...options, principal: options.principal ?? OWNER_PRINCIPAL };
+  if (currentRunGroup() !== null) return runManifestInGroup(manifest, config, started);
+  const runId = started.runId ?? randomUUID();
+  return openRunGroup(runId, () => runManifestInGroup(manifest, config, { ...started, runId }));
 }
 
 async function runManifestInGroup(
   manifest: Manifest,
   config: LynoxUserConfig,
-  options: RunManifestOptions,
+  options: StartedRunOptions,
 ): Promise<RunState> {
   const depth = options.depth ?? 0;
   if (depth > MAX_PIPELINE_DEPTH) {
@@ -693,6 +720,7 @@ async function runManifestInGroup(
           startedVia: options.parentRunId !== undefined ? `nested:${options.parentRunId}` : options.startedVia,
         } : {}),
         ...(originThreadId !== undefined && originThreadId !== '' ? { originThreadId } : {}),
+        ...(options.chatOrigin?.runId !== undefined ? { startedByRunId: options.chatOrigin.runId } : {}),
       });
       grantRecorded = true;
     } catch { insertFailed = true; /* fire-and-forget — but see the two checks below */ }
@@ -720,10 +748,10 @@ async function runManifestInGroup(
   // Effective options carry the (possibly-augmented) parentPrompt so
   // executeStep / spawners pick up the per-run budget without mutating the
   // caller's options.
-  const withPrompt: RunManifestOptions = parentPrompt === options.parentPrompt
+  const withPrompt: StartedRunOptions = parentPrompt === options.parentPrompt
     ? options
     : { ...options, parentPrompt };
-  const effectiveOptions: RunManifestOptions = dropGrant
+  const effectiveOptions: StartedRunOptions = dropGrant
     ? { ...withPrompt, capabilityContract: undefined, isAcceptedParam: undefined }
     : withPrompt;
 
@@ -811,6 +839,33 @@ export async function retryManifest(
   });
 }
 
+/**
+ * Before each step (1100), read where the owner's stop is: a saved workflow whose maker's access
+ * has ended since the run started ends here, before its next step, as `sourceRefusal` refuses it
+ * at the start. A worker's plan run is also stopped by its sweep (`stopEndedStarters`); this is the
+ * same end for a run nothing else watches — the library's Run, a chat's `run_workflow` — and the
+ * worker records it as that sweep's stop. A sub-run (`runtime: 'pipeline'`) reads the saved
+ * workflow that holds it, so its own steps stop too, not only the outer ones (1184). A check that
+ * throws ends the run too, with an error of its own that does not say an access ended. A run that
+ * already ended on a cause of its own keeps it, as with the stop. True when the run must halt.
+ */
+export function stopForEndedAuthor(options: RunManifestOptions, state: RunState): boolean {
+  const saved = heldSource(options.source);
+  if (saved === undefined) return false;
+  let error: string | undefined;
+  try {
+    error = sourceRefusal(saved, options.depth ?? 0) !== undefined ? WORKFLOW_ENDED_MID_RUN_ERROR : undefined;
+  } catch {
+    error = WORKFLOW_END_CHECK_FAILED_ERROR;
+  }
+  if (error === undefined) return false;
+  if (state.status !== 'running') return true;
+  state.status = 'failed';
+  state.error = error;
+  state.completedAt = new Date().toISOString();
+  return true;
+}
+
 // --- Sequential execution (v1.0 behavior, zero behavior change) ---
 
 async function runSequential(
@@ -818,7 +873,7 @@ async function runSequential(
   state: RunState,
   config: LynoxUserConfig,
   agentsDir: string,
-  options: RunManifestOptions,
+  options: StartedRunOptions,
   stepCounters: SessionCounters,
   stepRows: StepRowAccumulator | undefined,
 ): Promise<void> {
@@ -885,7 +940,7 @@ async function runParallel(
   state: RunState,
   config: LynoxUserConfig,
   agentsDir: string,
-  options: RunManifestOptions,
+  options: StartedRunOptions,
   stepCounters: SessionCounters,
   stepRows: StepRowAccumulator | undefined,
 ): Promise<void> {
@@ -1030,7 +1085,7 @@ async function executeStep(
   state: RunState,
   config: LynoxUserConfig,
   agentsDir: string,
-  options: RunManifestOptions,
+  options: StartedRunOptions,
   stepCounters: SessionCounters,
   stepRows: StepRowAccumulator | undefined,
 ): Promise<StepResult> {
@@ -1048,6 +1103,12 @@ async function executeStep(
   // pool hands out after the stop (the scope can only abort agents that already exist).
   if (stoppedByOwner(options, state)) return 'halt';
   if (questionUnanswered(options, state)) return 'halt';
+  // A run already ended for its makers' access — by a sibling's sub-run, or by a check that threw
+  // once — starts no further step, even when reading the access again would now let it: the
+  // pool of a capped phase hands out every step it holds. Only that cause: a sibling's gate
+  // rejection or failure leaves the steps of its phase to finish, as the parallel contract says.
+  if (state.status !== 'running' && isAuthorStop(state.error)) return 'halt';
+  if (stopForEndedAuthor(options, state)) return 'halt';
 
   const stepStart = new Date().toISOString();
   // A2: the step's `pipeline_step` run id (declared before the try so the catch
@@ -1074,6 +1135,8 @@ async function executeStep(
 
   try {
     const stepContext = buildStepContext(state.globalContext, step, state.outputs, config.pipeline_context_limit);
+    // What the step agent reads; the templates below still resolve from `stepContext`.
+    const agentContext = options.paramsKeptFromSteps === true ? contextForEventRun(stepContext, step) : stepContext;
 
     // Use buildConditionContext for condition evaluation (includes ALL completed outputs)
     const condContext = buildConditionContext(state.globalContext, state.outputs);
@@ -1130,6 +1193,7 @@ async function executeStep(
                 contract: call.contract,
                 lift: call.grant,
                 filed: call.filed,
+                apiCost: call.apiCost,
               });
             } catch { /* best-effort: observability must never break the run */ }
           }
@@ -1139,12 +1203,12 @@ async function executeStep(
         }
       : undefined;
 
-    let r: { result: string; tokensIn: number; tokensOut: number; durationMs: number };
+    let r: StepSpawnResult;
 
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
     } else if (step.runtime === 'pipeline') {
-      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId, options.runTaint, options.parentActiveScopes, options.abortScope, options.isAcceptedParam, options.principal, options.parentToolContext, options.chatOrigin, options.parentChangeset);
+      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId, options.runTaint, options.parentActiveScopes, options.abortScope, options.isAcceptedParam, options.principal, options.parentToolContext, options.chatOrigin, options.parentChangeset, options.source);
       costUsd = 0; // Cost comes from sub-pipeline steps (tracked individually)
     } else if (step.runtime === 'inline') {
       if (!options.parentTools) {
@@ -1154,7 +1218,7 @@ async function executeStep(
       // resolves `{{params.*}}` with the untrusted-data boundary; the captured
       // `input_template` resolves the same params into the literal call the step
       // agent replays (no boundary — those are tool arguments, not prose).
-      const resolvedTask = step.task ? resolveTaskTemplate(step.task, stepContext, options.isAcceptedParam) : step.task;
+      const resolvedTask = step.task ? resolveTaskTemplate(step.task, stepContext, options.isAcceptedParam, options.paramsKeptFromSteps === true) : step.task;
       const resolvedInputTemplate = step.input_template
         ? resolveInputTemplate(step.input_template, stepContext)
         : step.input_template;
@@ -1170,7 +1234,7 @@ async function executeStep(
 
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.parentActiveScopes, options.abortScope, options.principal, options.chatOrigin, options.parentChangeset);
+      r = await spawnInline(resolvedStep, agentContext, config, options.parentTools, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.parentActiveScopes, options.abortScope, options.principal, options.chatOrigin, options.parentChangeset);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     } else {
@@ -1182,7 +1246,7 @@ async function executeStep(
 
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.abortScope, options.principal, options.parentToolContext, options.chatOrigin, options.parentChangeset);
+      r = await spawnViaAgent(step, agentDef, agentContext, config, options.gateAdapter, state.runId, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.abortScope, options.principal, options.parentToolContext, options.chatOrigin, options.parentChangeset);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     }
@@ -1192,6 +1256,11 @@ async function executeStep(
     stepTokensIn = r.tokensIn;
     stepTokensOut = r.tokensOut;
     stepDurationMs = r.durationMs;
+
+    // The step's agent reported that it could not complete its task (`fail_step`). Thrown here,
+    // after its spend is stamped like a gate rejection's, so the catch records what it cost and
+    // `on_failure` decides what follows — as for any step that failed.
+    if (r.reportedFailure !== undefined) throw new StepReportedFailureError(step.id, r.reportedFailure);
 
     // Gate point check after step completes (real and mock paths)
     if (manifest.gate_points.includes(step.id) && options.gateAdapter) {
@@ -1279,6 +1348,24 @@ async function executeStep(
     // aborted) or ends the run anyway: a stopped run does not carry on to the next step.
     if (stoppedByOwner(options, state)) return 'halt';
     if (questionUnanswered(options, state)) return 'halt';
+    // …and so does a sub-run that stopped for its makers' access: the run that holds it ends with
+    // that cause as the sub-run read it, whatever `on_failure` says. Only that error: a step that
+    // failed on its own keeps its outcome, and the next step's check reads the access again.
+    if (err instanceof NestedRunEndedError) {
+      if (state.status === 'running') {
+        state.status = 'failed';
+        state.error = err.runError;
+        state.completedAt = new Date().toISOString();
+      }
+      return 'halt';
+    }
+    // A sibling in the same phase already ended the run for its makers' access: the two branches
+    // below that would write the run's own cause leave it. This step's failure or rejection may
+    // follow from the same end, and only that cause tells the worker to stop the plan and the model
+    // not to start it again (1184, review r2). Under `continue` and `notify` nothing overwrites it,
+    // so the step's failure is still recorded and notified there (review r3).
+    const overwritesCause = err instanceof GateRejectedError || err instanceof GateExpiredError || manifest.on_failure === 'stop';
+    if (overwritesCause && state.status !== 'running' && isAuthorStop(state.error)) return 'halt';
 
     if (err instanceof GateRejectedError || err instanceof GateExpiredError) {
       state.status = 'rejected';
@@ -1287,9 +1374,11 @@ async function executeStep(
       return 'halt';
     }
 
+    const reported = err instanceof StepReportedFailureError;
     if (manifest.on_failure === 'stop') {
       state.status = 'failed';
       state.error = error.message;
+      state.errorReportedBy = reported ? { stepId: step.id, reason: error.message } : undefined;
       state.completedAt = new Date().toISOString();
       return 'halt';
     }
@@ -1306,6 +1395,7 @@ async function executeStep(
       costUsd: 0,
       skipped: false,
       error: error.message,
+      ...(reported ? { reportedFailure: true as const } : {}),
     });
 
     // 'notify' = continue + notification

@@ -46,7 +46,7 @@ function anyAnswer(): unknown {
     ok: true,
     status: 200,
     headers: new Headers({ 'content-type': 'text/plain' }),
-    json: async () => ({ items: [], files: [], values: [], calendars: {}, id: 'x', name: 'a.txt', mimeType: 'text/plain', size: '3', body: { content: [] }, title: 't' }),
+    json: async () => ({ items: [], files: [], values: [], calendars: {}, id: 'x', name: 'a.txt', mimeType: 'text/plain', size: '3', body: { content: [] }, title: 't', parents: ['folder1'] }),
     text: async () => 'abc',
   };
 }

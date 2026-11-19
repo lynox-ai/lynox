@@ -31,11 +31,32 @@ const SRC = join(dirname(fileURLToPath(import.meta.url)), '..');
  */
 const DIRISH = /lynoxdir|datadir|LYNOX_DIR|DATA_DIR/i;
 
+/**
+ * Can this file yield a name at all? Every record below needs one of two things in the
+ * file's text: a match for DIRISH (at the node itself, or in the initializer of an alias it
+ * resolves through), or a call to one of the two bounded-JSONL entry points. A file with
+ * neither is skipped before parsing, which is most of the tree (60 of 536 files pass on
+ * 2026-10-31); parsing all of them ran the two tests that scan into their 10 s timeout in CI.
+ * A path shape added to `walk` that does not rest on DIRISH or those names must widen this.
+ */
+function mayNameDataDirEntries(text: string): boolean {
+  return DIRISH.test(text) || /\b(appendBoundedJsonl|scanBoundedJsonl)\b/.test(text);
+}
+
+/** Computed once per file: two tests read it, and the scan is the slow part of this file. */
+let scanCache: Map<string, string[]> | undefined;
 function scanDataDirNames(): Map<string, string[]> {
+  scanCache ??= scanSource();
+  return scanCache;
+}
+
+function scanSource(): Map<string, string[]> {
   const found = new Map<string, string[]>();
 
   const visitFile = (file: string, label: string): void => {
-    const sf = ts.createSourceFile(file, readFileSync(file, 'utf-8'), ts.ScriptTarget.Latest, true);
+    const text = readFileSync(file, 'utf-8');
+    if (!mayNameDataDirEntries(text)) return;
+    const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
 
     // `const X = 'literal'`, so `join(dir, AGENT_MEMORY_DB_NAME)` resolves — and any
     // variable initialised FROM a dirish expression, so `const root = getLynoxDir()`

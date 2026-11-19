@@ -6,8 +6,8 @@ import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
 import type { NetworkPolicy } from '../types/index.js';
 import { isGuardedBaselineHost } from './llm/endpoint-allowlist.js';
 import { noteNetworkContact } from './call-connection.js';
-import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
-import { storePassBodyRefusal, storePassRefusal, type StorePass } from './store-pass.js';
+import { isShopifyAdminHost, isShopifyAdminUrl, SHOPIFY_HOST_HEADER, SHOPIFY_PAGES, SHOPIFY_REDIRECT } from './shopify-host.js';
+import { storePassBodyRefusal, storePassRefusal, storeRefusalNext, type StorePass } from './store-pass.js';
 
 /**
  * Reject outbound network targets that point at private / reserved / loopback /
@@ -19,15 +19,24 @@ import { storePassBodyRefusal, storePassRefusal, type StorePass } from './store-
  */
 
 /**
- * Parse a textual IPv6 address into its 16 bytes, or null if it isn't a plain
- * hextet IPv6 we can canonicalise (embedded IPv4 / malformed → null → caller
- * falls back to string checks). Handles `::` zero-compression and a zone id, so
- * every representation of the same address yields the same bytes — an
- * exact-string `=== '::1'` misses `0::1` / `0:0:0:0:0:0:0:1`, byte-form does not.
+ * Parse a textual IPv6 address into its 16 bytes, or null if it isn't one we can
+ * canonicalise (malformed → null → caller falls back to string checks). Handles
+ * `::` zero-compression, a zone id and a dotted IPv4 in the last 32 bits
+ * (`::ffff:127.0.0.1`), so every representation of the same address yields the
+ * same bytes — an exact-string `=== '::1'` misses `0::1` / `0:0:0:0:0:0:0:1`,
+ * byte-form does not.
  */
 function ipv6ToBytes(addr: string): number[] | null {
-  const s = (addr.split('%')[0] ?? addr); // strip zone id (fe80::1%eth0)
-  if (!s.includes(':') || s.includes('.')) return null; // embedded IPv4 handled by the caller's v4 path
+  let s = (addr.split('%')[0] ?? addr); // strip zone id (fe80::1%eth0)
+  if (!s.includes(':')) return null;
+  const lastColon = s.lastIndexOf(':');
+  const quad = s.slice(lastColon + 1);
+  if (quad.includes('.')) {
+    const octets = v4Octets(quad);
+    if (octets === null) return null;
+    const [a, b, c, d] = octets as [number, number, number, number];
+    s = `${s.slice(0, lastColon + 1)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
   const halves = s.split('::');
   if (halves.length > 2) return null; // at most one '::'
   const parseGroups = (part: string): number[] | null => {
@@ -50,64 +59,75 @@ function ipv6ToBytes(addr: string): number[] | null {
   return [...head, ...new Array<number>(fill).fill(0), ...tail];
 }
 
+/** The four octets of a dotted IPv4, or null when it is not one. */
+function v4Octets(text: string): number[] | null {
+  const parts = text.split('.');
+  if (parts.length !== 4 || !parts.every(p => /^\d{1,3}$/.test(p))) return null;
+  const nums = parts.map(Number);
+  return nums.some(n => n > 255) ? null : nums;
+}
+
+function isPrivateV4(octets: readonly number[]): boolean {
+  const [a, b, c] = octets as [number, number, number, number];
+  if (a === 127) return true;                              // loopback
+  if (a === 10) return true;                               // RFC1918
+  if (a === 172 && b >= 16 && b <= 31) return true;        // RFC1918
+  if (a === 192 && b === 168) return true;                 // RFC1918
+  if (a === 169 && b === 254) return true;                 // link-local / metadata
+  if (a === 100 && b >= 64 && b <= 127) return true;       // CGNAT
+  if (a === 198 && (b === 18 || b === 19)) return true;    // benchmarking
+  if (a === 192 && b === 0 && c === 0) return true;        // IETF protocol assignments
+  if (a === 0) return true;                                // "this network"
+  if (a >= 224) return true;                               // multicast + reserved
+  return false;
+}
+
+/**
+ * The IPv4 address an IPv6 address carries in a form a network may route to that IPv4, or null.
+ * Each form gets the v4 checks, so a private target is caught in every one, and a public one
+ * passes: an IPv6-only host behind DNS64 reaches public IPv4 through `64:ff9b::/96`.
+ */
+function embeddedV4(bytes: readonly number[]): number[] | null {
+  const zero = (from: number, to: number): boolean => bytes.slice(from, to).every(b => b === 0);
+  const at = (i: number): number => bytes[i] ?? 0;
+  if (zero(0, 12)) return bytes.slice(12, 16);                                                     // ::a.b.c.d, IPv4-compatible
+  if (zero(0, 10) && at(10) === 0xff && at(11) === 0xff) return bytes.slice(12, 16);               // ::ffff:a.b.c.d, mapped
+  if (zero(0, 8) && at(8) === 0xff && at(9) === 0xff && zero(10, 12)) return bytes.slice(12, 16);  // ::ffff:0:a.b.c.d, SIIT
+  if (at(1) === 0x64 && at(2) === 0xff && at(3) === 0x9b && zero(0, 1) && zero(4, 12)) return bytes.slice(12, 16); // 64:ff9b::/96, NAT64
+  if (at(0) === 0x20 && at(1) === 0x02) return bytes.slice(2, 6);                                  // 2002::/16, 6to4
+  return null;
+}
+
 export function isPrivateIP(ip: string): boolean {
-  // IPv4-mapped IPv6 — strip the prefix and run the v4 checks.
-  // Accepts both dotted (`::ffff:127.0.0.1`) and hex (`::ffff:7f00:1`) forms;
-  // hex is normalised to dotted by parsing the last two colon-separated groups
-  // as the high/low 16 bits of the embedded IPv4.
-  const lowered = ip.toLowerCase();
-  let mapped = lowered.startsWith('::ffff:') ? lowered.slice(7) : lowered;
-  if (!mapped.includes('.') && mapped.includes(':') && lowered.startsWith('::ffff:')) {
-    const groups = mapped.split(':');
-    if (groups.length === 2) {
-      const hi = groups[0] ?? '';
-      const lo = groups[1] ?? '';
-      if (/^[0-9a-f]{1,4}$/.test(hi) && /^[0-9a-f]{1,4}$/.test(lo)) {
-        const hiN = parseInt(hi, 16);
-        const loN = parseInt(lo, 16);
-        mapped = `${String((hiN >> 8) & 0xff)}.${String(hiN & 0xff)}.${String((loN >> 8) & 0xff)}.${String(loN & 0xff)}`;
-      }
-    }
-  }
-  const v4Parts = mapped.split('.');
-  if (v4Parts.length === 4 && v4Parts.every(p => /^\d{1,3}$/.test(p))) {
-    const nums = v4Parts.map(Number);
-    if (nums.some(n => n < 0 || n > 255)) return false;
-    const [a, b, c] = nums as [number, number, number, number];
-    if (a === 127) return true;                              // loopback
-    if (a === 10) return true;                               // RFC1918
-    if (a === 172 && b >= 16 && b <= 31) return true;        // RFC1918
-    if (a === 192 && b === 168) return true;                 // RFC1918
-    if (a === 169 && b === 254) return true;                 // link-local / metadata
-    if (a === 100 && b >= 64 && b <= 127) return true;       // CGNAT
-    if (a === 198 && (b === 18 || b === 19)) return true;    // benchmarking
-    if (a === 192 && b === 0 && c === 0) return true;        // IETF protocol assignments
-    if (a === 0) return true;                                // "this network"
-    if (a >= 224) return true;                               // multicast + reserved
-  }
   const normalized = ip.toLowerCase();
-  if (normalized.includes(':')) {
-    const bytes = ipv6ToBytes(normalized);
-    if (bytes) {
-      // Byte-form checks catch EVERY textual representation (canonical or not —
-      // `::1`, `0::1`, `0:0:0:0:0:0:0:1` all map to the same bytes), closing the
-      // exact-string `=== '::1'` bypass that let `0::1` reach loopback.
-      const b0 = bytes[0] ?? 0;
-      const b1 = bytes[1] ?? 0;
-      const b15 = bytes[15] ?? 0;
-      if (bytes.every(b => b === 0)) return true;                              // :: unspecified
-      if (bytes.slice(0, 15).every(b => b === 0) && b15 === 1) return true;    // ::1 loopback
-      if (b0 === 0xfe && (b1 & 0xc0) === 0x80) return true;                    // fe80::/10 link-local
-      if ((b0 & 0xfe) === 0xfc) return true;                                   // fc00::/7 unique-local
-      if (b0 === 0xff) return true;                                            // ff00::/8 multicast
-    } else {
-      // Unparseable (embedded IPv4, malformed) — conservative string fallback.
-      if (normalized === '::1' || normalized === '::') return true;
-      if (/^fe[89ab][0-9a-f]:/.test(normalized)) return true;   // link-local
-      if (/^f[cd][0-9a-f]{2}:/.test(normalized)) return true;   // unique local
-      if (/^ff[0-9a-f]{2}:/.test(normalized)) return true;      // multicast
-    }
+  if (!normalized.includes(':')) {
+    const octets = v4Octets(normalized);
+    return octets !== null && isPrivateV4(octets);
   }
+  const bytes = ipv6ToBytes(normalized);
+  if (bytes) {
+    // Byte-form checks catch EVERY textual representation (canonical or not —
+    // `::1`, `0::1`, `0:0:0:0:0:0:0:1` all map to the same bytes), closing the
+    // exact-string `=== '::1'` bypass that let `0::1` reach loopback.
+    const b0 = bytes[0] ?? 0;
+    const b1 = bytes[1] ?? 0;
+    const b15 = bytes[15] ?? 0;
+    if (bytes.every(b => b === 0)) return true;                              // :: unspecified
+    if (bytes.slice(0, 15).every(b => b === 0) && b15 === 1) return true;    // ::1 loopback
+    if (b0 === 0xfe && (b1 & 0xc0) === 0x80) return true;                    // fe80::/10 link-local
+    if ((b0 & 0xfe) === 0xfc) return true;                                   // fc00::/7 unique-local
+    if (b0 === 0xff) return true;                                            // ff00::/8 multicast
+    // 64:ff9b:1::/48, local-use NAT64: where the IPv4 sits depends on the prefix length the
+    // network chose, so the range is refused whole.
+    if (b0 === 0 && b1 === 0x64 && bytes[2] === 0xff && bytes[3] === 0x9b && bytes[4] === 0 && bytes[5] === 1) return true;
+    const v4 = embeddedV4(bytes);
+    return v4 !== null && isPrivateV4(v4);
+  }
+  // Unparseable (malformed) — conservative string fallback.
+  if (normalized === '::1' || normalized === '::') return true;
+  if (/^fe[89ab][0-9a-f]:/.test(normalized)) return true;   // link-local
+  if (/^f[cd][0-9a-f]{2}:/.test(normalized)) return true;   // unique local
+  if (/^ff[0-9a-f]{2}:/.test(normalized)) return true;      // multicast
   return false;
 }
 
@@ -757,14 +777,17 @@ export async function fetchPinned(url: string, init: RequestInit = {}, pass?: St
     // A store pass reaches its own store and nothing else (`store-pass.ts`), checked here on
     // the URL as it is finally sent, on every hop.
     const refusal = toStore ? storePassRefusal(parsed, headers, pass, init.method ?? 'GET') : 'a store pass reaches only its own store';
-    if (refusal !== null) throw new Error(`Blocked: request to a Shopify store refused: ${refusal}. Do not retry it with changed headers or a changed address.`);
+    if (refusal !== null) throw new Error(`Blocked: request to a Shopify store refused: ${refusal}. ${storeRefusalNext(refusal)}`);
     // The exchange's body is digested as the bytes it is sent as; a body that is not a string
     // is not the one serialised for it.
     if (pass.kind === 'exchange' && typeof init.body !== 'string') {
       throw new Error('Blocked: request to a Shopify store refused: the token exchange sends its body as a string. Do not retry it with changed headers or a changed address.');
     }
   } else if (toStore) {
-    throw new Error(`Blocked: ${SHOPIFY_UNAVAILABLE}`);
+    // Without a pass: a Host header that names a store while the URL does not is the header's
+    // fault; a store URL is a page fetch (web search, watch, discovery, calendar, connector),
+    // since the request tool sends a store's data only with a pass and refuses before here.
+    throw new Error(`Blocked: ${isShopifyAdminHost(parsed.hostname) ? SHOPIFY_PAGES : SHOPIFY_HOST_HEADER}`);
   }
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
   const { address: pinnedIp, family } = await resolveAndValidate(hostname);
@@ -780,8 +803,8 @@ export async function fetchPinned(url: string, init: RequestInit = {}, pass?: St
   const body = await materialiseBody(init.body);
   if (pass !== undefined) {
     // After the body is bytes: the exchange's pass names those bytes, and is spent here.
-    const bodyRefusal = storePassBodyRefusal(pass, body);
-    if (bodyRefusal !== null) throw new Error(`Blocked: request to a Shopify store refused: ${bodyRefusal}. Do not retry it with changed headers or a changed address.`);
+    const bodyRefusal = storePassBodyRefusal(pass, body, headers);
+    if (bodyRefusal !== null) throw new Error(`Blocked: request to a Shopify store refused: ${bodyRefusal}. ${storeRefusalNext(bodyRefusal)}`);
   }
 
   // Default port matches Node's URL behaviour (empty → protocol default).
@@ -815,6 +838,14 @@ function appendIncomingHeaders(target: Headers, src: IncomingHttpHeaders): void 
       target.append(name, String(value));
     }
   }
+}
+
+/**
+ * Throws the redirect refusal when a hop without a store pass leads to a Shopify store: the
+ * request did not go to one, so the store would be reached by whatever the server answered.
+ */
+export function refuseRedirectToStore(hopUrl: string): void {
+  if (isShopifyAdminUrl(hopUrl)) throw new Error(`Blocked: ${SHOPIFY_REDIRECT}`);
 }
 
 /**
@@ -857,6 +888,8 @@ export async function fetchWithPublicRedirects(
     } else {
       delete (hopInit as { body?: unknown }).body;
     }
+    // A hop to a store, from a request that was not one, is a redirect the engine does not follow.
+    if (i > 0 && opts.pass === undefined) refuseRedirectToStore(currentUrl);
     const response = await fetchPinned(currentUrl, hopInit, opts.pass);
 
     if (!REDIRECT_STATUSES.has(response.status)) {

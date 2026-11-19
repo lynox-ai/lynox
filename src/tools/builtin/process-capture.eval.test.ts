@@ -4,6 +4,7 @@ import { _resetPipelineStore, getPipeline } from './pipeline.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { scoreCapture, type CaptureExpectation } from '../../core/capture-rubric.js';
 import type { IAgent, ProcessRecord, LynoxUserConfig } from '../../types/index.js';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 
 // Mock the Haiku extraction (process-capture) so the eval is DETERMINISTIC: it
 // feeds a golden ProcessRecord (the model's output for a known trace) and grades
@@ -20,7 +21,7 @@ const mockConfig = { api_key: 'k' } as LynoxUserConfig;
 function makeAgent(runHistory: unknown): IAgent {
   const toolContext = createToolContext(mockConfig);
   toolContext.runHistory = runHistory as never;
-  return { name: 't', model: 'm', memory: null, tools: [], onStream: null, currentRunId: 'run-abc', currentThreadId: 'thread-1', toolContext } as unknown as IAgent;
+  return { principal: OWNER_PRINCIPAL, name: 't', model: 'm', memory: null, tools: [], onStream: null, currentRunId: 'run-abc', currentThreadId: 'thread-1', toolContext } as unknown as IAgent;
 }
 
 function mockHistory() {

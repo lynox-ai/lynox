@@ -15,6 +15,7 @@
  */
 
 const ALLOWLISTED_HOSTS: ReadonlySet<string> = new Set<string>([
+  'api.eu.mistral.ai',
   'api.mistral.ai',
   'api.anthropic.com',
   'api.openai.com',

@@ -9,7 +9,8 @@ import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { pv, joinPrompts } from '../../core/prompt-value.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
-import { namedTarget } from '../../core/audit-log.js';
+import { ADDRESS_PLACEHOLDER, namedTarget } from '../../core/audit-log.js';
+import { mailTargets, type SendTarget } from '../../core/send-target.js';
 
 // === Types ===
 
@@ -147,10 +148,18 @@ const CALENDAR_WRITE_ACTIONS = new Set<CalendarInput['action']>(['create_event',
 export function createCalendarTool(getAuth: () => GoogleAuth | null): ToolEntry<CalendarInput> {
   return {
     outwardWrite: (input) => (CALENDAR_WRITE_ACTIONS.has(input.action) ? input.action : null),
-    // Which calendars were read, never what they hold.
+    // The guests the event invites, read from the very body the request sends, so a guest given
+    // in `updates.attendees` counts as one given in `attendees`. A body that cannot be built is
+    // not sent, and names no one.
+    sendTargets: (input) => calendarSendTargets(input),
+    // Which calendars were read, never what they hold. A calendar id reads only as `primary` or
+    // the connected account's own address; any other is someone else's (a shared calendar
+    // carries its owner's address) and is replaced, since a recipient is not named in a row.
     outwardRead: (input) => {
-      if (input.action === 'list_events') return `list_events ${namedTarget([['calendar', input.calendar_id ?? 'primary']])}`;
-      if (input.action === 'free_busy') return `free_busy ${namedTarget([['calendars', (input.calendars ?? []).join(',')]])}`.trimEnd();
+      const own = getAuth()?.grantEmail?.trim().toLowerCase();
+      const forRow = (id: string): string => (id === 'primary' || (own !== undefined && own !== '' && id.trim().toLowerCase() === own) ? id : ADDRESS_PLACEHOLDER);
+      if (input.action === 'list_events') return `list_events ${namedTarget([['calendar', forRow(input.calendar_id ?? 'primary')]])}`;
+      if (input.action === 'free_busy') return `free_busy ${namedTarget([['calendars', (input.calendars ?? []).map(forRow).join(',')]])}`.trimEnd();
       return null;
     },
     destructive: {
@@ -428,6 +437,25 @@ const UPDATABLE_EVENT_FIELDS: ReadonlySet<string> = new Set([
   'summary', 'description', 'location', 'start', 'end', 'attendees',
   'colorId', 'transparency', 'visibility', 'reminders', 'recurrence', 'status',
 ]);
+
+/** The guest addresses a create or update would invite; `null` for an action that invites no one. */
+function calendarSendTargets(input: CalendarInput): SendTarget[] | null {
+  let body: Record<string, unknown>;
+  if (input.action === 'create_event') {
+    const built = buildEventCreate(input);
+    if (!built.ok) return [];
+    body = built.event;
+  } else if (input.action === 'update_event') {
+    const built = buildEventUpdates(input);
+    if (!built.ok) return [];
+    body = built.updates;
+  } else {
+    return null;
+  }
+  const guests = body['attendees'];
+  if (!Array.isArray(guests)) return [];
+  return mailTargets((guests as { email: string }[]).map((g) => g.email));
+}
 
 /** A guest as Google will invite it: by address only, so the confirmation shows all of it. */
 function normaliseGuest(entry: unknown): { email: string } | null {

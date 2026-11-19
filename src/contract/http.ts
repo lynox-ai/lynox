@@ -84,17 +84,35 @@ export interface ProviderIncidentRequest {
 // === Escalation notice — POST /internal/usage/:instanceId/escalation (engine → CP) ===
 
 /**
- * The engine tells the control plane that an escalation (a scheduled workflow
- * failed, or a watch found something) reached nobody: its push answered
- * `not_delivered` or `no_channel`. The CP may then mail the instance's owner
- * from a lynox sender, with a fixed text.
+ * What reached nobody, one fixed mail text each:
+ *  - `'escalation'` — a scheduled workflow failed, or a watch found something.
+ *  - `'question'`   — a scheduled run (a task or a workflow) asked its owner a
+ *    question and waits for the answer.
+ *
+ * Read by the control plane to accept a notice and pick its text. A control
+ * plane that predates a kind answers it with 400, and then no mail goes out at
+ * all; the engine cannot tell, so a new kind is deployed on the control plane
+ * before any engine sends it.
+ */
+export const ESCALATION_NOTICE_KINDS = ['escalation', 'question'] as const;
+export type EscalationNoticeKind = typeof ESCALATION_NOTICE_KINDS[number];
+
+/** Whether a parsed body field is a notice kind this contract knows. */
+export function isEscalationNoticeKind(value: unknown): value is EscalationNoticeKind {
+  return typeof value === 'string' && (ESCALATION_NOTICE_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * The engine tells the control plane that a notice reached nobody: its push
+ * answered `not_delivered` or `no_channel`. The CP may then mail the
+ * instance's owner from a lynox sender, with the fixed text for its `kind`.
  *
  * A class signal and nothing else: no schedule id, no title, no text from the
- * run. The CP's mail says that a notification did not arrive and where to look;
- * what happened stays in the instance.
+ * run, and never the question. The CP's mail says that a notification did not
+ * arrive and where to look; what happened stays in the instance.
  */
 export interface EscalationNoticeRequest {
-  kind: 'escalation';
+  kind: EscalationNoticeKind;
 }
 
 // === Usage status — GET /internal/usage/:instanceId/status (engine ← CP) ===
@@ -156,6 +174,44 @@ export interface UsageStatusResponse {
    * route again, so a control plane that lost the record gets it back.
    */
   exact_held?: boolean | undefined;
+}
+
+// === Usage status — request headers of GET /internal/usage/:instanceId/status (engine → CP) ===
+
+/**
+ * Where a managed engine's vault key came from, stated on every status poll so the control plane
+ * can see, per instance, whether the key it delivers is the one the engine runs on. The poll runs
+ * at start and on a fixed cadence whether or not the instance is used, which a usage flush does not.
+ *
+ *  - `'env'`       — `LYNOX_VAULT_KEY` came in the container's environment and has the key's form.
+ *  - `'malformed'` — it came in the environment but does not have the key's form.
+ *  - `'fallback'`  — the engine runs on a key from somewhere else: the volume's `.env`, the data
+ *    dir's `vault.key`, or one generated at this start.
+ *  - `'none'`      — the engine started without a key.
+ *
+ * A word, never the key or any part of it. The control plane stores a word from this list and
+ * ignores anything else.
+ */
+export const KEY_DELIVERY_WORDS = ['env', 'malformed', 'fallback', 'none'] as const;
+export type KeyDelivery = typeof KEY_DELIVERY_WORDS[number];
+
+/** Whether a header value is a word of {@link KEY_DELIVERY_WORDS}. */
+export function isKeyDelivery(value: unknown): value is KeyDelivery {
+  return typeof value === 'string' && (KEY_DELIVERY_WORDS as readonly string[]).includes(value);
+}
+
+/** The header names the status poll carries the statement in (lower case, as both sides read them). */
+export const KEY_DELIVERY_HEADER = 'x-key-delivery';
+export const KEY_LEN64_HEADER = 'x-key-len64';
+
+/**
+ * The statement as headers. `key_len64`: `'1'` when the key is 64 characters long (the length the
+ * control plane generates), `'0'` when it has another length, absent when there is no key. Both
+ * headers are absent on an engine that predates them; the control plane then keeps what it had.
+ */
+export interface UsageStatusRequestHeaders {
+  'x-key-delivery'?: KeyDelivery | undefined;
+  'x-key-len64'?: '0' | '1' | undefined;
 }
 
 // === Exact attach — POST /internal/instances/:instanceId/exact-attach (engine → CP) ===
@@ -292,8 +348,36 @@ export interface HealthBody {
   engine: {
     active_sessions: number;
     total_threads: number;
+    /**
+     * Whether durable knowledge runs: `on`; switched off: `off`; switched on but its store did
+     * not load at boot: `not_loaded`. A mandate login is refused on `off` and `not_loaded`, and
+     * the control plane reads this to tell the owner before a grant. One word, no reason: the
+     * route answers without auth. Absent from engines older than this field.
+     */
+    durable_memory?: DurableMemoryState | undefined;
   };
+  /**
+   * What a migration into this instance may hold in memory. A source reads it before it
+   * exports and decides per store whether the plaintext path fits:
+   * `baseline_mb + bundle + rest_factor * rest + (k - 1) * store <= import_limit_mb`, sizes in MiB.
+   * The destination checks a manifest with the same numbers, so a later release that
+   * re-measures them does not make an older source fail. Optional: absent on an engine that
+   * predates it, and a reader that does not migrate ignores it.
+   */
+  migration?: {
+    /** The memory the import may use: the container's limit, else the host's memory. */
+    import_limit_mb: number;
+    /** Resident memory before the first chunk arrives. */
+    baseline_mb: number;
+    /** Peak memory over the baseline per byte of a store rewritten in memory. */
+    k: number;
+    /** Memory per byte of the decoded non-database chunks. */
+    rest_factor: number;
+  } | undefined;
 }
+
+/** The `engine.durable_memory` word of {@link HealthBody}. */
+export type DurableMemoryState = 'on' | 'off' | 'not_loaded';
 
 // === Magic-link verify — POST /internal/auth/verify-magic (engine → CP) ===
 
@@ -595,6 +679,63 @@ export interface OAuthClaimResponse {
   email?: string;
 }
 
+/**
+ * The scopes lynox's own Google client (the control plane's broker) asks for at
+ * consent, in the order it sends them.
+ *
+ * Contract because the engine judges a claimed grant against its standard set
+ * (`computeScopeMode` in `src/integrations/google/google-auth.ts`, called from
+ * `src/server/http-api.ts`): a scope the broker stops asking for turns every
+ * new brokered grant into `legacy` there, with no error at either end. The
+ * engine's `STANDARD_SCOPES` and the scope list on the docs page a Workspace
+ * admin configures lynox from are held equal to this in this repo's tests.
+ * The control plane's broker list still is its own literal; it switches over
+ * to its vendored copy of this symbol in its own change, once this file has
+ * reached that copy. Until then the binding runs one way only.
+ *
+ * ⚠ What it does NOT bind: a tenant with a `google_oauth_scopes` override.
+ * The engine then judges against the override instead, and nothing here
+ * keeps that override in step with what the broker asks for.
+ */
+export const GOOGLE_BROKER_SCOPES = [
+  'openid',
+  'https://www.googleapis.com/auth/userinfo.email',
+  'https://www.googleapis.com/auth/calendar.events',
+  'https://www.googleapis.com/auth/calendar.freebusy',
+  'https://www.googleapis.com/auth/drive.file',
+] as const;
+
+// === OAuth claim preview — POST /internal/oauth/google/claim-preview (engine → CP) ===
+
+/**
+ * Which Google account a pending claim belongs to, asked BEFORE it is claimed.
+ *
+ * The claim consumes the grant, so the engine cannot learn the account from the
+ * claim and still ask the user whether to take it. What the control plane's
+ * preview route must do: read the same pending grant without consuming it; take
+ * the same request as the claim and the same instance authentication; bind the
+ * nonce to the same instance; leave the grant's expiry unchanged; and answer a
+ * nonce of another instance, an unknown one, an expired grant and a claimed one
+ * all alike (same status, same body), so the preview tells nobody whether a
+ * nonce was ever valid. The address goes to no log.
+ */
+export interface OAuthClaimPreviewRequest {
+  instance_id: string;
+  claim_nonce: string;
+}
+
+/**
+ * Only the address, never a token. For a grant that names no account (Google sent
+ * no `id_token`, or its address was not verified, or the token did not check
+ * out), the control plane must answer 200 WITHOUT `email`, not an error status:
+ * whoever runs the consent can arrange the second case, and the engine's dialog
+ * does not offer the claim on that 200 (nor on a 200 the engine cannot read). An error
+ * status instead makes the dialog fall back to letting the user decide.
+ */
+export interface OAuthClaimPreviewResponse {
+  email?: string;
+}
+
 // === OAuth refresh — POST /internal/oauth/{google,microsoft}/refresh (engine → CP) ===
 
 /**
@@ -820,6 +961,47 @@ export const MICROSOFT_OAUTH_CLAIM_PARAM = 'microsoft_oauth';
  * for the reason {@link MICROSOFT_OAUTH_CLAIM_PARAM} gives.
  */
 export const MICROSOFT_OAUTH_ERROR_PARAM = 'microsoft_oauth_error';
+
+/**
+ * The query parameter carrying the user's work address on the Microsoft connect start
+ * (`GET /oauth/microsoft/start`, browser → control plane), next to `instance_id` and the
+ * start token. The control plane resolves the tenant from the address's domain and sets
+ * `login_hint` from it; the engine only passes the address on (PRD-M365 §3.5).
+ *
+ * Next to the start token, not inside it. Signing it would protect nothing: the address
+ * comes from no authenticated source, and the engine that mints the token would sign
+ * whatever address it was given. What a start rests on is the token, which ties it to the
+ * instance whose owner asked for it (not to a browser), and the sign-in at Microsoft, which
+ * decides whose mailbox is connected. The address names neither. The control plane's start
+ * route owes the following:
+ *
+ *  1. **A hint only.** The connected identity and its `tid` come from the token exchange
+ *     alone (id_token, Graph `/me`). Nothing read from this parameter is stored, and it
+ *     decides nothing beyond `login_hint` and the tenant discovery. The `tid` the route
+ *     resolves from the address only checks that the sign-in went to the tenant the hint
+ *     named (`wrong_tenant`); it proves nothing about the address, because a different
+ *     address names a different tenant to compare with. A test signs in as someone other
+ *     than the address names and finds only the signed-in identity stored. A plan that
+ *     would store the address reopens the question of signing it.
+ *  2. **Checked before it is used.** At most 254 characters, exactly one `@`; the domain is
+ *     turned into its ASCII form first (an internationalised domain such as `müller.ch`
+ *     is valid), and that form is letters, digits and hyphens with at least one dot and is
+ *     what the discovery uses. `common`, `organizations` and
+ *     `consumers` are refused, or the start would fall back to a multi-tenant authority.
+ *     The authority and the `tid` the route keeps come only from the discovered directory
+ *     id, never from the raw domain, and `login_hint` is set as one encoded query value.
+ *  3. **Token first.** The start token is verified before the tenant discovery runs, and
+ *     the discovery is limited in rate and cached, so that a start link cannot drive
+ *     unbounded outbound lookups.
+ *  4. **Personal data in a URL.** The address is in a URL only on this last hop, from the
+ *     browser to the control plane; it reaches the engine in a request body. It still lands
+ *     in browser history and in whatever records the request URL. The control plane does
+ *     not log it, never echoes it in an error text or a redirect, and keeps it out of what
+ *     its error tracking reports about the request.
+ *
+ * Imported, never typed, for the reason {@link MICROSOFT_OAUTH_CLAIM_PARAM} gives.
+ */
+export const MICROSOFT_OAUTH_START_ADDRESS_PARAM = 'microsoft_work_address';
 
 // === Admin consent status — GET /internal/oauth/microsoft/adminconsent/status (engine → CP) ===
 

@@ -177,3 +177,155 @@ export const BROKER_START_GOLDEN = {
     'v1.1700000000.00112233445566778899aabbccddeeff.' +
     'de2dbbc230477eb6d6f2d5371045165091c39fae9e12b08fcb3fa8f7a0cb9e08',
 } as const;
+
+// === v2 — the start token bound to a provider (row 1224) ===
+//
+// v1 names no provider: neither its payload nor its key does. Once a second
+// broker start route exists (Microsoft), a v1 token the engine minted for a
+// Google start would verify at the Microsoft start of the same instance. v2
+// puts the provider INSIDE the signed payload, and the control plane verifies
+// with the provider of the ROUTE the token arrived at — so a token minted for
+// one provider fails the signature at the other. The provider is deliberately
+// not in the token's framing: what it is signed for is the route's business,
+// and a field the caller can read is a field a verifier might be tempted to
+// trust instead of the route.
+//
+// Rolled out expand/contract, like the env renames before it:
+//   1. this contract adds v2 next to v1; the control plane accepts v2 at every
+//      start route and v1 ONLY at the Google start (where every v1 token in the
+//      field came from) — so the gap is closed for Microsoft from the first day
+//      its route is mounted;
+//   2. the engine mints v2 once a control plane that accepts it is on prod;
+//   3. v1 acceptance, and the v1 symbols here, go after the fleet rollout.
+//
+// Same key derivation as v1 (`BROKER_START_PURPOSE`): the payloads open with
+// different version fields, so no v1 signature can be a v2 signature. The
+// `-v1` in that label names the KEY derivation, not the token version — it
+// stays as it is for v2 on purpose, and changing it breaks every v2 vector.
+//
+// A token minted for the wrong provider fails as a plain bad signature; the
+// control plane cannot tell it from a forgery, and that is accepted. The
+// provider the verifier uses must be the provider of the ROUTE handler, never
+// a query parameter or anything else the caller sends.
+
+/** Framing version of the provider-bound token. */
+export const BROKER_START_VERSION_V2 = 'v2';
+
+/** The providers a broker start route exists or is planned for. Closed set. */
+export const BROKER_START_PROVIDERS = ['google', 'microsoft'] as const;
+
+/** One of {@link BROKER_START_PROVIDERS}. */
+export type BrokerStartProvider = (typeof BROKER_START_PROVIDERS)[number];
+
+/** Narrowing for a value read off a route or a config. */
+export function isBrokerStartProvider(value: unknown): value is BrokerStartProvider {
+  return typeof value === 'string' && (BROKER_START_PROVIDERS as readonly string[]).includes(value);
+}
+
+/**
+ * The exact bytes both sides sign for a v2 token. Order and separator are the
+ * contract: `v2.<provider>.<instanceId>.<ts>.<nonce>`.
+ *
+ * Uniqueness holds for the reason {@link brokerStartPayload} gives, and the
+ * provider does not weaken it: it comes from a closed vocabulary without the
+ * separator and sits BEFORE the opaque instance id, so the first field after
+ * the version is always the whole provider.
+ */
+export function brokerStartPayloadV2(parts: {
+  provider: BrokerStartProvider;
+  instanceId: string;
+  ts: number;
+  nonce: string;
+}): string {
+  if (!isBrokerStartProvider(parts.provider)) {
+    throw new Error('brokerStartPayloadV2: provider must be one of BROKER_START_PROVIDERS');
+  }
+  // Safe integers only: from 1e21 on, `${ts}` renders with an exponent and a dot,
+  // which breaks the "ts is digits only" premise the uniqueness argument rests on.
+  if (!Number.isSafeInteger(parts.ts) || parts.ts < 0) {
+    throw new Error('brokerStartPayloadV2: ts must be a non-negative integer (unix seconds)');
+  }
+  // The other half of that argument: the nonce is fixed-length hex. v1 relies on
+  // its callers for this; v2 checks it, since a dotted nonce shifts the fields.
+  if (parts.nonce.length !== BROKER_START_NONCE_BYTES * 2 || !/^[0-9a-f]+$/.test(parts.nonce)) {
+    throw new Error('brokerStartPayloadV2: nonce must be BROKER_START_NONCE_BYTES bytes of lower-case hex');
+  }
+  return `${BROKER_START_VERSION_V2}.${parts.provider}.${parts.instanceId}.${parts.ts}.${parts.nonce}`;
+}
+
+/**
+ * Split a v2 token into its parts, or `null` if the framing is wrong. Framing
+ * only, like {@link parseBrokerStartToken}; a v1 token is `null` here.
+ */
+export function parseBrokerStartTokenV2(token: string): BrokerStartToken | null {
+  const parts = token.split('.');
+  if (parts.length !== 4) return null;
+  const [version, ts, nonce, sig] = parts as [string, string, string, string];
+  if (version !== BROKER_START_VERSION_V2) return null;
+  // No leading zeros, so one signature has exactly one token string, and within
+  // the safe-integer range for the reason `brokerStartPayloadV2` gives.
+  if (!/^(0|[1-9]\d*)$/.test(ts) || !Number.isSafeInteger(Number(ts))) return null;
+  if (nonce.length !== BROKER_START_NONCE_BYTES * 2 || !/^[0-9a-f]+$/.test(nonce)) return null;
+  if (sig.length !== 64 || !/^[0-9a-f]+$/.test(sig)) return null;
+  return { ts: Number(ts), nonce, sig };
+}
+
+/** The token versions a control plane may meet during the rollout. */
+export type BrokerStartVersion = typeof BROKER_START_VERSION | typeof BROKER_START_VERSION_V2;
+
+/**
+ * Parse either version and SAY which one parsed — the verifier needs it, because
+ * the version decides both the payload it recomputes and whether the route may
+ * accept the token at all ({@link brokerStartAcceptsVersion}). Parsing with the
+ * two functions above and `??` loses exactly that.
+ */
+export function parseAnyBrokerStartToken(token: string): (BrokerStartToken & { version: BrokerStartVersion }) | null {
+  const v2 = parseBrokerStartTokenV2(token);
+  if (v2) return { ...v2, version: BROKER_START_VERSION_V2 };
+  const v1 = parseBrokerStartToken(token);
+  if (v1) return { ...v1, version: BROKER_START_VERSION };
+  return null;
+}
+
+/**
+ * The acceptance rule of the rollout, in one place for both repos: v2 at every
+ * start route, v1 only at the Google start — every v1 token in the field was
+ * minted for Google, and a v1 token at any other route is the row-1224 gap.
+ * The contract step of the rollout deletes the v1 branch.
+ */
+export function brokerStartAcceptsVersion(provider: BrokerStartProvider, version: BrokerStartVersion): boolean {
+  if (version === BROKER_START_VERSION_V2) return true;
+  // Fail closed: only an explicit v1 at the Google start, never "anything else".
+  return version === BROKER_START_VERSION && provider === 'google';
+}
+
+/** Assemble a v2 token from its parts and a signature computed by the caller. */
+export function formatBrokerStartTokenV2(parts: BrokerStartToken): string {
+  return `${BROKER_START_VERSION_V2}.${parts.ts}.${parts.nonce}.${parts.sig}`;
+}
+
+/**
+ * The golden v2 vectors, one per provider, from the same fake fields and key as
+ * {@link BROKER_START_GOLDEN}. The engine's minter must produce `token` for its
+ * provider; the control plane's verifier must accept each token at its own
+ * provider's route and refuse it at the other's. That refusal is what row 1224
+ * asks for, and the pair is what lets both repos test it on the same bytes.
+ */
+export const BROKER_START_GOLDEN_V2 = {
+  instanceId: 'inst_TEST',
+  signingKey: 'TEST-SIGNING-KEY',
+  ts: 1700000000,
+  nonce: '00112233445566778899aabbccddeeff',
+  google: {
+    payload: 'v2.google.inst_TEST.1700000000.00112233445566778899aabbccddeeff',
+    token:
+      'v2.1700000000.00112233445566778899aabbccddeeff.' +
+      '79b7e314dba58dc76a0fdd0372e26d40d63413be68107b4e3f55b1f13a48a838',
+  },
+  microsoft: {
+    payload: 'v2.microsoft.inst_TEST.1700000000.00112233445566778899aabbccddeeff',
+    token:
+      'v2.1700000000.00112233445566778899aabbccddeeff.' +
+      '66fe9d89cd8a2ed728d28f898da0251dc2546b26bf30652e62a5ba27dd2d9b5c',
+  },
+} as const;

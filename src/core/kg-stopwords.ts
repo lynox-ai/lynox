@@ -135,7 +135,7 @@ export function isCleanupTarget(name: string): boolean {
 
 /**
  * Owners that make a possessive a TOPIC rather than a name. Deliberately tiny: the rule
- * fires on the owner, so "Aurelva Women's Health" and "Levi's" — real names carrying a
+ * fires on the owner, so "Morvanta Women's Health" and "Levi's" — real names carrying a
  * possessive — are untouched, while "Client's compliance risk" is caught by its owner.
  */
 const GENERIC_OWNERS = ['client', 'user', 'company', 'assistant', 'customer', 'operator', 'team', 'business'];

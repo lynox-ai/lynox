@@ -12,6 +12,7 @@
  * entity-extract, which must not block the chat turn.
  */
 import type { MemoryNamespace, MemoryScopeRef } from '../types/memory.js';
+import type { RequestPrincipal } from './request-principal.js';
 
 /** The minimal slice of KnowledgeLayer this module needs (keeps it testable). */
 export interface DocumentMemorySink {
@@ -122,6 +123,9 @@ export function pickDocumentScope(scopes: ReadonlyArray<MemoryScopeRef>): Memory
  * chunk written after it would carry the id and stay. A check here cannot reach a chunk
  * whose `store` call is already in flight when the switch is flipped, so the predicate is
  * also handed to `store` as `cancelled`, which asks it again after each of its own awaits.
+ *
+ * `principal`, the session's, is REQUIRED for the same reason: a mandate's upload archives
+ * nothing (660a-3) — see the guard below.
  */
 export async function ingestDocumentText(
 	sink: DocumentMemorySink,
@@ -136,8 +140,20 @@ export async function ingestDocumentText(
 		/** Whether the extractor cut the text. REQUIRED for the reason above: a caller that forgot
 		 *  it could store a cut document as a whole one. */
 		cutAtExtraction: boolean;
+		/** Who uploaded, as the session names it. */
+		principal: RequestPrincipal;
 	},
 ): Promise<number> {
+	// A mandate's upload is not archived (660a-3). The archive write is a knowledge entry with no
+	// row in the actor trail, and today a mandate never gets here: its requests pass only when the
+	// durable store is active, and then the guard below returns first. That is two conditions
+	// coupled by accident, not a rule, so the rule is said here, fail-closed. Only the mandate:
+	// the control plane's admin archives as before.
+	if (params.principal.kind === 'mandate') {
+		process.stderr.write('[lynox:trail] document archive skipped for a mandate\'s upload: it would leave no row\n');
+		return 0;
+	}
+
 	// Under the durable substrate this path is the LAST writer into the legacy
 	// agent-memory store, and writing there buys nothing: `recall` and the
 	// always-loaded block both read `knowledge_entries` and never see it, so the

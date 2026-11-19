@@ -42,6 +42,7 @@ function freshDb(): Database.Database {
       content_json TEXT NOT NULL,
       usage_json TEXT,
       display_only INTEGER NOT NULL DEFAULT 0,
+      author TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
@@ -51,6 +52,17 @@ function freshDb(): Database.Database {
 function makeMessage(role: 'user' | 'assistant', text: string): BetaMessageParam {
   return { role, content: text };
 }
+
+describe('ThreadStore.updateThread says whether a row matched', () => {
+  it('true for a thread it updated, false for an unknown id, false for no fields', () => {
+    const store = new ThreadStore(freshDb());
+    store.createThread('t1');
+    expect(store.updateThread('t1', { title: 'x' })).toBe(true);
+    expect(store.updateThread('t1', { primary_subject_id: null })).toBe(true);
+    expect(store.updateThread('nope', { title: 'x' })).toBe(false);
+    expect(store.updateThread('t1', {})).toBe(false);
+  });
+});
 
 describe('ThreadStore.appendMessages with threadUpdates (P1 contract)', () => {
   let db: Database.Database;

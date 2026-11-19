@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
+import { sourceDeletedSql, sourceKeptSql } from './relation-source.js';
 
 /**
  * RelationshipStore — the S1 write/read layer over `relationships`, the typed
@@ -13,6 +14,9 @@ import type { EngineDb } from './engine-db.js';
  * routes through `EngineDb.enc()` like the SubjectStore detail columns.
  *
  * S1a ships this UNWIRED (the flag-gated wiring lands in S1b).
+ *
+ * Every read leaves out an edge whose source memory the user deleted
+ * (`relation-source.ts`); only the export reads them, marked.
  */
 
 export interface RelationshipRow {
@@ -29,6 +33,22 @@ export interface RelationshipRow {
   created_at: string;
 }
 
+const KEPT = sourceKeptSql('r');
+
+/** What {@link RelationshipStore.createRelationship} takes. */
+export interface RelationshipParams {
+  id?: string | undefined;
+  fromSubjectId: string;
+  toSubjectId: string;
+  kind: string;
+  description?: string | undefined;
+  sourceMemoryId?: string | undefined;
+  confidence?: number | undefined;
+  since?: string | undefined;
+  until?: string | undefined;
+  notes?: string | undefined;
+}
+
 export class RelationshipStore {
   private readonly db: Database.Database;
 
@@ -41,38 +61,53 @@ export class RelationshipStore {
    * existing edge updates its description/confidence rather than duplicating it
    * (matches the legacy upsert-on-triple semantics + the conflict-detector's
    * "same triple twice" expectation).
+   *
+   * An edge keeps one source, and its description stays with that source, so
+   * deleting the memory that wrote a description hides it:
+   * - a re-assert from another memory takes the edge over, its description
+   *   replacing the old one even when empty;
+   * - an edge without a source (CRM, backfill) is not taken over by a memory, and
+   *   its description stays as it was;
+   * - a re-assert without a source (CRM) makes a sourced edge sourceless, with the
+   *   re-assert's own description: the memory no longer decides whether it shows.
    */
-  createRelationship(params: {
-    id?: string | undefined;
-    fromSubjectId: string;
-    toSubjectId: string;
-    kind: string;
-    description?: string | undefined;
-    sourceMemoryId?: string | undefined;
-    confidence?: number | undefined;
-    since?: string | undefined;
-    until?: string | undefined;
-    notes?: string | undefined;
-  }): string {
+  createRelationship(params: RelationshipParams): string {
+    return this.createRelationshipReporting(params).id;
+  }
+
+  /**
+   * {@link createRelationship}, saying whether the edge is new: `created` is true only when
+   * this call inserted it, false when it re-asserted an edge of the same triple. A derived
+   * write's outcome row counts new edges by it (660a-3); a re-assert is no new edge.
+   */
+  createRelationshipReporting(params: RelationshipParams): { id: string; created: boolean } {
     const existing = this.db.prepare(`
-      SELECT id FROM relationships
+      SELECT id, source_memory_id FROM relationships
       WHERE from_subject_id = ? AND to_subject_id = ? AND kind = ?
       LIMIT 1
-    `).get(params.fromSubjectId, params.toSubjectId, params.kind) as { id: string } | undefined;
+    `).get(params.fromSubjectId, params.toSubjectId, params.kind) as
+      { id: string; source_memory_id: string | null } | undefined;
 
     if (existing) {
+      const prev = existing.source_memory_id;
+      const next = params.sourceMemoryId ?? null;
+      const given = params.description ?? '';
+      // null keeps the stored description.
+      let description: string | null;
+      if (prev === null && next !== null) description = null;
+      else if (prev !== next) description = given;
+      else description = given === '' ? null : given;
       this.db.prepare(`
         UPDATE relationships
-        SET description = COALESCE(NULLIF(?, ''), description),
-            confidence = COALESCE(?, confidence), source_memory_id = COALESCE(?, source_memory_id),
+        SET description = COALESCE(?, description), source_memory_id = ?,
+            confidence = COALESCE(?, confidence),
             since = COALESCE(?, since), until = COALESCE(?, until), notes = COALESCE(?, notes)
         WHERE id = ?
       `).run(
-        params.description ?? '', params.confidence ?? null,
-        params.sourceMemoryId ?? null, params.since ?? null, params.until ?? null,
-        params.notes ?? null, existing.id,
+        description, prev === null ? null : next, params.confidence ?? null,
+        params.since ?? null, params.until ?? null, params.notes ?? null, existing.id,
       );
-      return existing.id;
+      return { id: existing.id, created: false };
     }
 
     const id = params.id ?? randomUUID();
@@ -85,25 +120,32 @@ export class RelationshipStore {
       params.description ?? '', params.sourceMemoryId ?? null,
       params.confidence ?? 1.0, params.since ?? null, params.until ?? null, params.notes ?? null,
     );
-    return id;
+    return { id, created: true };
+  }
+
+  /** Whether an edge of this triple exists, whatever its source's state. */
+  hasEdge(fromSubjectId: string, kind: string, toSubjectId: string): boolean {
+    return this.db.prepare(
+      'SELECT 1 FROM relationships WHERE from_subject_id = ? AND to_subject_id = ? AND kind = ? LIMIT 1',
+    ).get(fromSubjectId, toSubjectId, kind) !== undefined;
   }
 
   /** Outgoing edges from a subject, optionally filtered by kind. */
   getRelationshipsFrom(subjectId: string, kind?: string | undefined): RelationshipRow[] {
     if (kind) {
-      return this.db.prepare('SELECT * FROM relationships WHERE from_subject_id = ? AND kind = ?')
+      return this.db.prepare(`SELECT r.* FROM relationships r WHERE r.from_subject_id = ? AND r.kind = ? AND ${KEPT}`)
         .all(subjectId, kind) as RelationshipRow[];
     }
-    return this.db.prepare('SELECT * FROM relationships WHERE from_subject_id = ?').all(subjectId) as RelationshipRow[];
+    return this.db.prepare(`SELECT r.* FROM relationships r WHERE r.from_subject_id = ? AND ${KEPT}`).all(subjectId) as RelationshipRow[];
   }
 
   /** Incoming edges to a subject, optionally filtered by kind. */
   getRelationshipsTo(subjectId: string, kind?: string | undefined): RelationshipRow[] {
     if (kind) {
-      return this.db.prepare('SELECT * FROM relationships WHERE to_subject_id = ? AND kind = ?')
+      return this.db.prepare(`SELECT r.* FROM relationships r WHERE r.to_subject_id = ? AND r.kind = ? AND ${KEPT}`)
         .all(subjectId, kind) as RelationshipRow[];
     }
-    return this.db.prepare('SELECT * FROM relationships WHERE to_subject_id = ?').all(subjectId) as RelationshipRow[];
+    return this.db.prepare(`SELECT r.* FROM relationships r WHERE r.to_subject_id = ? AND ${KEPT}`).all(subjectId) as RelationshipRow[];
   }
 
   /**
@@ -115,22 +157,34 @@ export class RelationshipStore {
   getRelationshipsForSubject(subjectId: string, limit?: number | undefined): RelationshipRow[] {
     if (limit !== undefined) {
       return this.db.prepare(
-        'SELECT * FROM relationships WHERE from_subject_id = ? OR to_subject_id = ? ORDER BY created_at DESC LIMIT ?',
+        `SELECT r.* FROM relationships r WHERE (r.from_subject_id = ? OR r.to_subject_id = ?) AND ${KEPT} ORDER BY r.created_at DESC LIMIT ?`,
       ).all(subjectId, subjectId, limit) as RelationshipRow[];
     }
-    return this.db.prepare('SELECT * FROM relationships WHERE from_subject_id = ? OR to_subject_id = ?')
+    return this.db.prepare(`SELECT r.* FROM relationships r WHERE (r.from_subject_id = ? OR r.to_subject_id = ?) AND ${KEPT}`)
       .all(subjectId, subjectId) as RelationshipRow[];
+  }
+
+  /**
+   * {@link getRelationshipsForSubject} for the data export: the edges of a deleted
+   * source included and marked, since what is still stored belongs in the export
+   * until the reap removes it.
+   */
+  getRelationshipsForSubjectForExport(subjectId: string, limit: number): Array<RelationshipRow & { source_deleted: 0 | 1 }> {
+    return this.db.prepare(
+      `SELECT r.*, CASE WHEN ${sourceDeletedSql('r')} THEN 1 ELSE 0 END AS source_deleted FROM relationships r
+       WHERE r.from_subject_id = ? OR r.to_subject_id = ? ORDER BY r.created_at DESC LIMIT ?`,
+    ).all(subjectId, subjectId, limit) as Array<RelationshipRow & { source_deleted: 0 | 1 }>;
   }
 
   /** The most-recently-created relationships, capped — the edge set for the graph subgraph. */
   listRecent(limit: number): RelationshipRow[] {
     return this.db.prepare(
-      'SELECT * FROM relationships ORDER BY created_at DESC LIMIT ?',
+      `SELECT r.* FROM relationships r WHERE ${KEPT} ORDER BY r.created_at DESC LIMIT ?`,
     ).all(limit) as RelationshipRow[];
   }
 
   /** Total edge count. */
   count(): number {
-    return (this.db.prepare('SELECT COUNT(*) AS n FROM relationships').get() as { n: number }).n;
+    return (this.db.prepare(`SELECT COUNT(*) AS n FROM relationships r WHERE ${KEPT}`).get() as { n: number }).n;
   }
 }

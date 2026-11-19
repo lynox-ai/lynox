@@ -36,14 +36,22 @@ self.addEventListener('notificationclick', (event) => {
   // { data: { threadId } } → deep-link to that conversation via
   // `/app?thread=<id>` (the /app page's onMount resumes it), so a completed
   // background task opens its OWN thread instead of a blank new chat.
+  // The owner's approval push carries { data: { approvals } } → the list of mails
+  // waiting for approval; a mandate's push about the same mail carries no data.
   // Falls back to '/' for plain pushes (reminders, scheduled-send results).
   const data = event.notification.data || {};
   const itemId = data.itemId;
   const threadId = data.threadId;
+  const approvals = data.approvals;
+  // The owner's notice that plans are paused carries { data: { pausedPlans } } → the plans view,
+  // where each ended access is said in full.
+  const pausedPlans = data.pausedPlans;
   const target = itemId
     ? `/app/inbox?item=${encodeURIComponent(itemId)}`
-    : (threadId ? `/app?thread=${encodeURIComponent(threadId)}` : '/');
-  const deepLink = Boolean(itemId || threadId);
+    : (threadId
+      ? `/app?thread=${encodeURIComponent(threadId)}`
+      : (approvals ? '/app/approvals' : (pausedPlans ? '/app/hub?section=triggers' : '/')));
+  const deepLink = Boolean(itemId || threadId || approvals || pausedPlans);
 
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {

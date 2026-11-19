@@ -52,6 +52,7 @@ const CANDIDATES: Candidate[] = [
   // also says which ids were withdrawn. This list is not import-safe (main() runs on load),
   // so the online roster check reaches it only through that lockstep.
   { label: 'deepseek-v4p1-flash', provider: 'openai', modelId: 'accounts/fireworks/models/deepseek-v4p1-flash', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks' },
+  { label: 'deepseek-v4p1-flash-1017', provider: 'openai', modelId: 'accounts/fireworks/models/deepseek-v4p1-flash-1017', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks' },
   { label: 'gpt-oss-120b', provider: 'openai', modelId: 'accounts/fireworks/models/gpt-oss-120b', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks' },
   { label: 'minimax-m3', provider: 'openai', modelId: 'accounts/fireworks/models/minimax-m3', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks' },
 ];

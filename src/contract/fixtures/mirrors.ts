@@ -19,6 +19,7 @@ import type {
   UsageFlushRequest,
   UsageFlushResponse,
   UsageStatusResponse,
+  UsageStatusRequestHeaders,
   UsageSummaryResponse,
   HealthBody,
   MagicLinkVerifyRequest,
@@ -41,7 +42,8 @@ const HEALTH_BASE = {
     disk_total_gb: 100,
     disk_used_gb: 50,
   },
-  engine: { active_sessions: 0, total_threads: 0 },
+  engine: { active_sessions: 0, total_threads: 0, durable_memory: 'on' as const },
+  migration: { import_limit_mb: 1536, baseline_mb: 191, k: 7.1, rest_factor: 1.944 },
 };
 
 /** Fixture file name (relative to `fixtures/`) → its typed mirror. */
@@ -64,6 +66,13 @@ export const TYPED_MIRRORS: Record<string, unknown> = {
     balance_cents: 2985,
     allowed: true,
   } satisfies UsageFlushResponse,
+  'usage-status-request-headers.json': {
+    'x-key-delivery': 'env',
+    'x-key-len64': '1',
+  } satisfies UsageStatusRequestHeaders,
+  'usage-status-request-headers.none.json': {
+    'x-key-delivery': 'none',
+  } satisfies UsageStatusRequestHeaders,
   'usage-status-response.managed.json': {
     balance_cents: 2985,
     included_budget_cents: 3000,

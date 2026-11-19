@@ -21,11 +21,17 @@ import type { BulkWriteEffect } from '../types/index.js';
 import type { AttachedConnection } from './bulk-connection.js';
 import { coercePlainColumnValue, SYSTEM_COLUMNS } from './data-store.js';
 import {
-  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkFoundAsPlannedNote, bulkWriteCap, canonicalJson,
+  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, externalHostOf, sameValue,
   type ActualImage, type ApplyTarget, type BeforeImage, type BulkHaltReason, type BulkLedger, type BulkRunForApply, type BulkTargetError,
 } from './bulk-ledger.js';
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
 import { processUmask } from './workspace-rel.js';
+import { shopifySavedForm } from './shopify-saved-form.js';
+import { canonicalHtml, withinReadingBounds } from './html-tree.js';
+import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
+import { shopifyConsentBlock } from './bulk-shopify.js';
+import { isShopifyStoreHostName } from './shopify-graphql.js';
+import { sidecarReplaceMode, sidecarWriteModes } from './workspace-write-modes.js';
 import { statEntry, unlinkAt, WorkspaceAccessError, writeFileAt } from './workspace-fd.js';
 
 export type BulkEffect = BulkWriteEffect;
@@ -46,13 +52,22 @@ export interface TargetWriter {
   readonly readsBack?: boolean | undefined;
   /** The writer calls `write`'s `onSend` right before its request leaves, so a write stopped
    *  before that (a refused credential, a blocked host) does not count as sent. A writer
-   *  without it is taken to have sent whenever `write` is called. */
+   *  without it is taken to have sent whenever `write` is called. Such a writer also calls
+   *  `onRefused` once for a send the host refused (or that never left), right after its
+   *  answer; every other send that is not a success counts as one without a clear answer,
+   *  and the target is not sent to again. */
   readonly reportsSend?: boolean | undefined;
   /** A writer whose requests carry a stored credential (an external host): start noting the
    *  connections of what it sends from now on (`ExternalClient.track`). A local writer has none. */
   readonly track?: (() => () => AttachedConnection | null) | undefined;
-  read(key: string, fields: readonly string[] | null): Promise<BeforeImage | 'path_changed' | 'foreign'>;
-  write(key: string, after: BeforeImage, onSend?: () => void): Promise<string | { result: string; actual: ActualImage }>;
+  /** `titleNow`: the product title the same read answered, for a form the store saves in its
+   *  own way ({@link shopifySavedForm}); null where the answer holds none. Never part of the image. */
+  read(key: string, fields: readonly string[] | null): Promise<(BeforeImage & { readonly titleNow?: string | null }) | 'path_changed' | 'foreign'>;
+  /** `hostAddedMarkup`: the read-back holds markup the write never sent (PRD shopify-preset
+   *  §21.2 item 6). The target is written all the same — the value is in the store — and is
+   *  recorded with its mark; the run then halts. `hostRewrote`: the host stored the value otherwise
+   *  than sent, within what the run may write — counted on the target, not halted. */
+  write(key: string, after: BeforeImage, onSend?: () => void, onRefused?: () => void): Promise<string | { result: string; actual: ActualImage; hostAddedMarkup?: true; hostRewrote?: true }>;
 }
 
 /**
@@ -119,16 +134,45 @@ const MIN_RUN_BUDGET_MS = 60_000;
  *  than {@link bulkFailureLimit} in the pass. */
 const HALT_CONSECUTIVE = 3;
 
-function sameImage(a: BeforeImage, b: BeforeImage): boolean {
+/** Two images equal: both absent, or values equal — the run's HTML fields under `htmlEqual` ({@link sameValue}). */
+function sameImage(a: BeforeImage, b: BeforeImage, htmlFields: readonly string[] = []): boolean {
   if (a.absent || b.absent) return a.absent === b.absent;
-  return canonicalJson(a.value) === canonicalJson(b.value);
+  return sameValue(a.value, b.value, htmlFields);
 }
 
-function summarize(ledger: BulkLedger, runId: string, lead: string): string {
+/**
+ * A read holding what the store would have saved of a planned image ({@link shopifySavedForm}),
+ * with the title the read answered where the plan sets none. The read is taken as it is. A read
+ * without that title leaves the planned `seo_title` as it is: unknown is not equal.
+ */
+function sameInSavedForm(cur: BeforeImage & { readonly titleNow?: string | null }, planned: BeforeImage, htmlFields: readonly string[] = []): boolean {
+  if (cur.absent || planned.absent) return false;
+  const titleNow = cur.titleNow ?? null;
+  return sameValue(cur.value, shopifySavedForm(planned.value, titleNow), htmlFields);
+}
+
+/**
+ * The first HTML field of a target's after-state that would leave in other bytes than the
+ * canonical form the markup check read (1130), or null. A field equal to its before-image's value
+ * is the store's own and is not asked: the check skips it, and the ledger keeps it byte for byte.
+ */
+export function rawHtmlField(t: Pick<ApplyTarget, 'after' | 'expected'>, fields: readonly string[]): string | null {
+  if (fields.length === 0 || t.after.absent) return null;
+  const after = t.after.value;
+  if (typeof after !== 'object' || after === null || Array.isArray(after)) return null;
+  const was = !t.expected.absent && typeof t.expected.value === 'object' && t.expected.value !== null ? t.expected.value as Record<string, unknown> : {};
+  for (const f of fields) {
+    const v = (after as Record<string, unknown>)[f];
+    // A value beyond the reading bounds is not parsed: it counts as not canonical.
+    if (typeof v === 'string' && v !== was[f] && (!withinReadingBounds(v) || canonicalHtml(v) !== v)) return f;
+  }
+  return null;
+}
+
+function summarize(ledger: BulkLedger, runId: string, lead: string, say: BulkNotices = BULK_NOTICES.en): string {
   const s = ledger.getStatus(runId);
   if (!s) return lead;
-  return `${lead} Applied ${String(s.applied)}${bulkFoundAsPlannedNote(s.foundAsPlanned)}, failed ${String(s.failed)}, conflicts ${String(s.conflicts)}, ` +
-    `undone ${String(s.undone)} of ${String(s.total)} targets.`;
+  return `${lead} ${say.applyCounts(s)}`;
 }
 
 export interface BulkEffectDeps {
@@ -152,6 +196,15 @@ export interface BulkEffectDeps {
    * for every other.
    */
   trailFor: (run: BulkRunForApply) => BulkRunTrail | null;
+  /** The sentences of the outcome's summary, in the instance's notice language; English without. */
+  notices?: BulkNotices | undefined;
+  /**
+   * The grant of the Shopify connection a store host maps to (`OAuthGrantRecord`), read on every
+   * call of a Shopify run: which customer text it was confirmed under decides which fields the run
+   * may write (`shopifyConsentBlock`). Without it, or for a host no single connection maps to, no
+   * grant is known, and the run writes only what a connection confirmed under no text may.
+   */
+  shopifyGrantOf?: ((host: string) => unknown) | undefined;
 }
 
 /**
@@ -166,7 +219,7 @@ export interface BulkRunTrail {
    * Writes the row after the call. Never throws: a row before stands alone if this one fails.
    * The counts are `null` when the ledger could not be read for them, which is not "none".
    */
-  end(outcome: BulkEffectOutcome['status'] | 'error', written: number | null, failed: number | null): void;
+  end(outcome: BulkEffectOutcome['status'] | 'error', written: number | null, failed: number | null, planned: boolean): void;
 }
 
 /**
@@ -191,7 +244,7 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
       // the counts are unknown rather than zero.
       let after: { applied: number; failed: number } | null;
       try { after = deps.ledger.getRunForApply(runId) ?? null; } catch { after = null; }
-      o.trail.end(outcome?.status ?? 'error', after === null ? null : after.applied - o.applied, after === null ? null : after.failed - o.failed);
+      o.trail.end(outcome?.status ?? 'error', after === null ? null : after.applied - o.applied, after === null ? null : after.failed - o.failed, outcome?.planned === true);
     }
   }
 }
@@ -200,30 +253,59 @@ async function applyRunEffect(
   runId: string, effect: BulkEffect, deps: BulkEffectDeps, opened: (trail: BulkRunTrail, run: BulkRunForApply) => void,
 ): Promise<BulkEffectOutcome> {
   const { ledger } = deps;
+  const say = deps.notices ?? BULK_NOTICES.en;
   const now = deps.now ?? Date.now;
   const run = ledger.getRunForApply(runId);
-  if (!run) return { status: 'refused', summary: 'No bulk run with this id.' };
+  if (!run) return { status: 'refused', summary: say.noRun };
   if ((effect === 'bulk_undo') !== (run.kind === 'undo')) {
-    return { status: 'refused', summary: 'The trigger effect does not match the bulk run.' };
+    return { status: 'refused', summary: say.effectMismatch };
   }
   if (run.phase !== 'approved' && run.phase !== 'writing') {
-    return { status: 'refused', summary: summarize(ledger, runId, `Bulk run is ${run.phase}, not approved — nothing written.`) };
+    return { status: 'refused', summary: summarize(ledger, runId, say.notApproved(run.phase), say) };
   }
   if (run.haltReason !== null) {
-    return { status: 'refused', summary: summarize(ledger, runId, 'Bulk run is halted — resume it to continue.') };
+    return { status: 'refused', summary: summarize(ledger, runId, say.haltedResume, say) };
   }
   if (run.expiresAt === null || now() > Date.parse(run.expiresAt)) {
     ledger.halt(runId, BULK_HALT_REASONS.expired);
-    return { status: 'refused', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.expired}.`) };
+    return { status: 'refused', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.expired), say) };
   }
   if (run.approvalChecksum === null || ledger.computeChecksum(runId) !== run.approvalChecksum) {
     ledger.halt(runId, BULK_HALT_REASONS.checksum);
-    return { status: 'refused', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.checksum}.`) };
+    return { status: 'refused', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.checksum), say) };
+  }
+  // Approved before the store's bulk runs were switched off: it writes no further.
+  if (ledger.isWriteSwitchedOff(runId)) {
+    ledger.halt(runId, BULK_HALT_REASONS.shopifyWriteOff);
+    return { status: 'refused', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.shopifyWriteOff), say) };
+  }
+  // A run on a store host that is not a Shopify run by its rows (`shopifyApplyOf` null) writes
+  // nothing: neither the consent below nor the markup check before sending would read it.
+  const host = externalHostOf(run.targetSystem);
+  const apply = ledger.shopifyApplyOf(runId);
+  if (apply === null && host !== null && isShopifyStoreHostName(host)) {
+    ledger.halt(runId, BULK_HALT_REASONS.contract);
+    return { status: 'refused', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.contract), say) };
+  }
+  // A Shopify run that writes a field its connection was not confirmed for writes nothing: halted
+  // before its writer is built, on the first call and on every resume. An undo of a run that was not
+  // itself an undo restores what that run found and is not held back; an undo of an undo writes the
+  // new values again and is held like the run that first wrote them. Further down a chain every undo
+  // is held, also one that only restores: held too much, never too little.
+  const source = run.kind === 'undo' && run.sourceRunId !== null ? ledger.getRunForApply(run.sourceRunId) : null;
+  const restoresOnly = source !== null && source.kind !== 'undo';
+  if (!restoresOnly) {
+    const blocked = apply === null ? [] : shopifyConsentBlock(apply, host === null ? undefined : deps.shopifyGrantOf?.(host));
+    if (blocked.length > 0) {
+      ledger.halt(runId, BULK_HALT_REASONS.consentOutdated);
+      const nothingYet = run.applied === 0 && ledger.sentCount(runId) === 0;
+      return { status: 'refused', summary: summarize(ledger, runId, say.consentOutdated(blocked, nothingYet), say) };
+    }
   }
   const writer = deps.writerFor(run);
   if (!writer) {
     ledger.halt(runId, BULK_HALT_REASONS.unavailable);
-    return { status: 'refused', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.unavailable}.`) };
+    return { status: 'refused', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.unavailable), say) };
   }
   // Before anything of this call is read or written: a run whose row cannot be written does
   // not run.
@@ -233,13 +315,20 @@ async function applyRunEffect(
       trail.begin();
     } catch {
       ledger.halt(runId, BULK_HALT_REASONS.runUnrecorded);
-      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.runUnrecorded}.`) };
+      return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.runUnrecorded), say) };
     }
     opened(trail, run);
   }
   ledger.setPhase(runId, ['approved'], 'writing');
 
   const writingTotal = ledger.countWriting(runId);
+  // Compared under `htmlEqual` where a value is HTML: a store re-serialises a description.
+  const htmlFields = ledger.comparedAsHtml(runId);
+  // Compared also in the form the store saves a value in, on a Shopify product run only.
+  const savedForm = ledger.comparedInSavedForm(runId);
+  // Sent only in the canonical bytes the markup check read (1130), a Shopify run's and any other
+  // run's alike. Not an undo: it restores a before-image, the store's own bytes.
+  const sentCanonical = run.kind === 'undo' ? [] : ledger.htmlFieldsOf(runId);
   const pending = ledger.listPending(runId);
   const deadline = now() + Math.max(MIN_RUN_BUDGET_MS, pending.length * BULK_TARGET_BUDGET_MS);
   let consecutive = 0;
@@ -257,9 +346,9 @@ async function applyRunEffect(
     await yieldToLoop();
     const current = ledger.getRunForApply(runId);
     // Another loop on the same ledger closed the run: nothing is left for this one.
-    if (current?.phase === 'done') return { status: 'done', summary: summarize(ledger, runId, 'Bulk run done.') };
+    if (current?.phase === 'done') return { status: 'done', summary: summarize(ledger, runId, say.applyDone, say) };
     if (!current || current.phase !== 'writing' || current.haltReason !== null) {
-      return { status: 'halted', summary: summarize(ledger, runId, 'Bulk run stopped by another loop.') };
+      return { status: 'halted', summary: summarize(ledger, runId, say.otherLoop, say) };
     }
     // The owner's stop lands HERE, between targets and never inside a write: a target whose
     // write is under way when the stop arrives is finished and recorded first, so the ledger
@@ -277,10 +366,12 @@ async function applyRunEffect(
       continue;
     }
     if (now() > deadline) {
-      // An atomic run must not stop half written: out of time, it rolls back instead.
-      if (run.atomic) return rollBack(ledger, writer, run, now);
+      // An atomic run must not stop half written: out of time, it rolls back instead. One that
+      // has written nothing is not half written — a rollback would only end it for good, so it
+      // halts like any run and can be resumed (as `endStopped` does for the owner's stop).
+      if (run.atomic && ledger.listAppliedDesc(runId).length > 0) return rollBack(ledger, writer, run, now, say, 'time');
       ledger.halt(runId, BULK_HALT_REASONS.timeBudget);
-      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.timeBudget}.`) };
+      return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.timeBudget), say) };
     }
     if (!ledger.claimTarget(runId, seq, now())) continue;
     const target = ledger.loadTarget(runId, seq);
@@ -295,15 +386,26 @@ async function applyRunEffect(
       // The target is released unwritten; a resume takes it again.
       ledger.releaseClaim(runId, seq);
       ledger.halt(runId, outcome.reason);
-      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${outcome.reason}.`) };
+      return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', outcome.reason), say) };
     }
     if (outcome.kind === 'applied') {
-      ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual, via);
+      ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual, via, outcome.hostAddedMarkup === true, outcome.hostRewrote === true);
+      if (outcome.hostAddedMarkup === true) {
+        // Written and recorded with its mark first, so a halt that another loop's reason
+        // overwrites still leaves the target marked: the mark is the truth, not `halt_reason`.
+        ledger.halt(runId, BULK_HALT_REASONS.markupAddedByShop);
+        return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.markupAddedByShop), say) };
+      }
       consecutive = 0;
       continue;
     }
     ledger.recordFailed(runId, seq, outcome.kind, via);
-    if (run.atomic) return rollBack(ledger, writer, run, now);
+    // No new attempt, so no failure: the send that left it unclear was counted, halted the
+    // run, or belonged to a loop that died. Counting it on every pass would halt a small run
+    // at the same target on every resume. It neither extends nor breaks a run of failures.
+    // Only an external writer gives it, and an external run is never atomic.
+    if (outcome.kind === 'sent_unknown') continue;
+    if (run.atomic) return rollBack(ledger, writer, run, now, say);
     if (outcome.kind === 'conflict') {
       // A conflict is not a failure, and it breaks a run of failures.
       consecutive = 0;
@@ -313,11 +415,11 @@ async function applyRunEffect(
     const failed = ledger.getRunForApply(runId)?.failed ?? 0;
     if (consecutive >= HALT_CONSECUTIVE) {
       ledger.halt(runId, BULK_HALT_REASONS.consecutiveFailures);
-      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.consecutiveFailures}.`) };
+      return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.consecutiveFailures), say) };
     }
     if (failed > bulkFailureLimit(writingTotal)) {
       ledger.halt(runId, BULK_HALT_REASONS.failureRate);
-      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.failureRate}.`) };
+      return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.failureRate), say) };
     }
   }
 
@@ -334,7 +436,7 @@ async function applyRunEffect(
       // The probe's cap over a wider approval (its probe stopped holding since) is not the
       // approval's bound either: something changed underneath the run.
       const planned = !cappedByProbe && (ledger.getRunForApply(runId)?.failed ?? 0) === 0;
-      return { status: 'halted', ...(planned ? { planned: true as const } : {}), summary: summarize(ledger, runId, `Bulk run halted: ${reason}.`) };
+      return { status: 'halted', ...(planned ? { planned: true as const } : {}), summary: summarize(ledger, runId, say.halted('apply', reason), say) };
     }
     // The stop that came during the loop's last write, with the rest held by another loop:
     // no pass between targets is left to read it, and `pending` would re-arm the trigger and
@@ -346,45 +448,68 @@ async function applyRunEffect(
     // a loop whose lease lapsed. A live loop writing the same atomic run would race the
     // rollback's read of what was applied — that takes two processes on one engine.db.
     if (ownerStopped()) return endStopped();
-    return { status: 'pending', summary: summarize(ledger, runId, 'Bulk run waiting for targets another loop holds.') };
+    return { status: 'pending', summary: summarize(ledger, runId, say.otherLoopHolds, say) };
   }
   ledger.finish(run);
-  return { status: 'done', summary: summarize(ledger, runId, 'Bulk run done.') };
+  return { status: 'done', summary: summarize(ledger, runId, say.applyDone, say) };
 
   function ownerStopped(): boolean {
     return deps.signal?.aborted === true && deps.ownerStopped?.() === true;
   }
 
-  /** End the run on the owner's stop: an atomic run rolls back, any other is halted. */
+  /** End the run on the owner's stop: an atomic run with a recorded write rolls back, any other
+   *  is halted. An atomic run with no recorded write gives the rollback nothing to take back
+   *  (it reads the same record): rolling it back would only end it for good, so it is halted and
+   *  can be resumed like any other. A write a dead loop sent but did not record is found again
+   *  on that resume, as planned, and counted then. */
   async function endStopped(): Promise<BulkEffectOutcome> {
-    if (run!.atomic) {
-      const rolled = await rollBack(ledger, writer!, run!, now, 'stopped');
+    if (run!.atomic && ledger.listAppliedDesc(runId).length > 0) {
+      const rolled = await rollBack(ledger, writer!, run!, now, say, 'stopped');
       return { ...rolled, status: 'stopped' };
     }
     ledger.halt(runId, BULK_HALT_REASONS.stoppedByOwner);
-    return { status: 'stopped', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.stoppedByOwner}.`) };
+    return { status: 'stopped', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.stoppedByOwner), say) };
   }
 
   /** One claimed target: what to record for it. */
   async function writeOne(w: TargetWriter, t: ApplyTarget, carried: (() => AttachedConnection | null) | null):
-    Promise<{ kind: 'applied'; result: string; actual: ActualImage | null } | { kind: BulkTargetError } | { kind: 'halt'; reason: BulkHaltReason }> {
+    Promise<{ kind: 'applied'; result: string; actual: ActualImage | null; hostAddedMarkup?: true; hostRewrote?: true } | { kind: BulkTargetError } | { kind: 'halt'; reason: BulkHaltReason }> {
     try {
       const cur = await w.read(t.key, fieldsOf(t));
       if (cur === 'path_changed') return { kind: 'path_changed' };
-      if (cur !== 'foreign' && sameImage(cur, t.after)) {
+      if (cur !== 'foreign' && (sameImage(cur, t.after, htmlFields) || (savedForm && sameInSavedForm(cur, t.after, htmlFields)))) {
         // Found as planned: either a loop of this run wrote it and died before recording it
         // (the target is marked sent), or someone else set the value, and the run sends
         // nothing to it (`found_unsent`, {@link BulkLedger.recordApplied}). What is there is
         // also what an undo must expect.
-        return { kind: 'applied', result: 'already', actual: w.readsBack === true && !cur.absent ? { value: cur.value, estimated: false } : null };
+        // Found only under the HTML comparison is not counted as a rewrite: the comparison explains
+        // the store's form of the planned description, as for a read-back.
+        return {
+          kind: 'applied', result: 'already', actual: w.readsBack === true && !cur.absent ? { value: cur.value, estimated: false } : null,
+        };
       }
-      if (cur === 'foreign' || !sameImage(cur, t.expected)) return { kind: 'conflict' };
+      if (cur === 'foreign' || !sameImage(cur, t.expected, htmlFields)) return { kind: 'conflict' };
+      // The belt of 1130: an HTML field leaves in the canonical bytes the check read, which the
+      // ledger stores (`canonicalAfterOf`). Raw bytes here (a row stored before that) may carry a
+      // tag the check never saw, so nothing is sent and the run halts, as a Shopify write the
+      // mint leaves out does.
+      if (rawHtmlField(t, sentCanonical) !== null) return { kind: 'halt', reason: BULK_HALT_REASONS.contract };
+      // Still as expected, but an earlier send reached it without a clear answer: that write
+      // may land later or not be visible yet, and sending it again could carry the change out
+      // twice. A local writer's outcome is always known.
+      if (w.reportsSend === true && ledger.hasUnknownSend(runId, t.seq)) return { kind: 'sent_unknown' };
       // Marked as it leaves, with the connection it leaves under: a loop that dies before the
       // target is recorded still left a row saying whose credential reached the host.
       const sent = (): void => { ledger.markSent(runId, t.seq, carried?.() ?? null); };
+      const refused = (): void => { ledger.markRefused(runId, t.seq); };
       if (w.reportsSend !== true) sent();
-      const out = await w.write(t.key, t.after, sent);
-      return typeof out === 'string' ? { kind: 'applied', result: out, actual: null } : { kind: 'applied', result: out.result, actual: out.actual };
+      const out = await w.write(t.key, t.after, sent, refused);
+      if (typeof out === 'string') return { kind: 'applied', result: out, actual: null };
+      return {
+        kind: 'applied', result: out.result, actual: out.actual,
+        ...(out.hostAddedMarkup === true ? { hostAddedMarkup: true as const } : {}),
+        ...(out.hostRewrote === true ? { hostRewrote: true as const } : {}),
+      };
     } catch (err: unknown) {
       if (err instanceof BulkWriterHalt) return { kind: 'halt', reason: err.reason };
       if (err instanceof BulkRedirectError) return { kind: 'redirect' };
@@ -395,36 +520,49 @@ async function applyRunEffect(
 }
 
 /**
- * An atomic run hit a target it could not write: take back every target it wrote, newest
- * first, each only while it still holds what the run wrote, and end the run `aborted`.
- * Local only — an external target has no transaction to lean on (PRD §3.4).
+ * An atomic run hit a target it could not write, was stopped, or ran out of time: take back
+ * every target it wrote, newest first, each only while it still holds what the run wrote, and
+ * end the run `aborted`. A target left as it is keeps no `undone_at`, which is how the owner's
+ * view finds it. Local only — an external target has no transaction to lean on (PRD §3.4).
  */
 async function rollBack(
-  ledger: BulkLedger, writer: TargetWriter, run: BulkRunForApply, now: () => number,
-  cause: 'failed' | 'stopped' = 'failed',
+  ledger: BulkLedger, writer: TargetWriter, run: BulkRunForApply, now: () => number, say: BulkNotices,
+  cause: 'failed' | 'stopped' | 'time' = 'failed',
 ): Promise<BulkEffectOutcome> {
   let complete = true;
-  for (const t of ledger.listAppliedDesc(run.id)) {
+  // A target a dead loop sent to and never recorded is taken back too: its write may hold there,
+  // and a rollback that skipped it would call itself complete over a target the run changed.
+  const targets = [
+    ...ledger.listAppliedDesc(run.id).map((t) => ({ t, recorded: true })),
+    ...ledger.listSentUnrecordedDesc(run.id).map((t) => ({ t, recorded: false })),
+  ].sort((a, b) => b.t.seq - a.t.seq);
+  for (const { t, recorded } of targets) {
     try {
       // Local only (an external run is never atomic), so there are no fields to project on.
       const cur = await writer.read(t.key, null);
+      // Still as before the run: the unrecorded send never landed, and there is nothing to take back.
+      if (!recorded && cur !== 'path_changed' && cur !== 'foreign' && sameImage(cur, t.expected)) {
+        ledger.recordUnrecordedSettled(run.id, t.seq, now());
+        continue;
+      }
+      // Left as it is, and unmarked: the owner's view marks it as one to check by hand.
       if (cur === 'path_changed' || cur === 'foreign' || !sameImage(cur, t.after)) { complete = false; continue; }
       await writer.write(t.key, t.expected);
-      ledger.recordRolledBack(run, t.seq, now());
+      if (recorded) ledger.recordRolledBack(run, t.seq, now());
+      else ledger.recordUnrecordedSettled(run.id, t.seq, now());
     } catch {
       complete = false;
     }
   }
-  // The reason names the cause: a stopped run that read "could not be written" would tell
-  // the owner a target failed when none did.
+  // The reason names the cause: a stopped or timed-out run that read "could not be written"
+  // would tell the owner a target failed when none did.
   const reason = cause === 'stopped'
     ? (complete ? BULK_HALT_REASONS.atomicStoppedRolledBack : BULK_HALT_REASONS.atomicStoppedRollbackIncomplete)
-    : (complete ? BULK_HALT_REASONS.atomicRolledBack : BULK_HALT_REASONS.atomicRollbackIncomplete);
+    : cause === 'time'
+      ? (complete ? BULK_HALT_REASONS.atomicTimeRolledBack : BULK_HALT_REASONS.atomicTimeRollbackIncomplete)
+      : (complete ? BULK_HALT_REASONS.atomicRolledBack : BULK_HALT_REASONS.atomicRollbackIncomplete);
   ledger.setPhase(run.id, ['writing'], 'aborted', reason);
-  const lead = cause === 'stopped'
-    ? (complete ? 'Atomic bulk run stopped and rolled back.' : 'Atomic bulk run stopped; the rollback did not complete.')
-    : (complete ? 'Atomic bulk run aborted and rolled back.' : 'Atomic bulk run aborted; the rollback did not complete.');
-  return { status: 'aborted', summary: summarize(ledger, run.id, lead) };
+  return { status: 'aborted', summary: summarize(ledger, run.id, say.atomicEnded(cause, complete), say) };
 }
 
 // ── Target systems ────────────────────────────────────────────────────────────
@@ -581,8 +719,15 @@ export function anchoredWorkspaceWriter(): TargetWriter {
       // Something other than a file at the leaf (a link planted since the read) is not what the
       // run planned for — and a link's mode would be copied onto the new file.
       if (st !== null && st.type !== 'file') throw new Error('not a regular file');
-      const umask = processUmask();
-      writeFileAt(at.anchor, at.rel, after.value, {
+      const sidecar = sidecarWriteModes();
+      const umask = sidecar === null ? processUmask() : 0;
+      writeFileAt(at.anchor, at.rel, after.value, sidecar !== null ? {
+        // In sidecar mode the shell's pool keeps group read and write on what the run replaced
+        // (a pool file written under umask 022 is 0644), and a new file takes the layout's mode.
+        fileMode: st !== null ? sidecarReplaceMode(st.mode) : sidecar.fileMode,
+        dirMode: sidecar.dirMode,
+        group: sidecar.group,
+      } : {
         // The new file is the engine's: setuid and setgid are not carried over, as the kernel drops
         // them on a write to the file in place.
         fileMode: st !== null ? st.mode & ~0o6000 : 0o666 & ~umask,
@@ -627,7 +772,7 @@ export function dataStoreWriter(store: DataStore, collection: string): TargetWri
       if (row === null || typeof row !== 'object' || Array.isArray(row)) throw new Error('not a row');
       // Bulk apply runs in the worker, outside any conversation, so it holds no grant set:
       // the row reads as unknown, and an update keeps what the row already held beside it.
-      return store.putRowVerbatim(collection, row as Record<string, unknown>, { grants: null, runId: null });
+      return store.putRowVerbatim(collection, row as Record<string, unknown>, { grants: null, runId: null, writtenBy: null, untrusted: false });
     },
   };
 }

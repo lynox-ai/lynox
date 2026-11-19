@@ -16,6 +16,7 @@ describe('model-presets Wave 1 — new model registrations', () => {
       'claude-fable-5',
       'mistral-medium-2604',
       'accounts/fireworks/models/deepseek-v4p1-flash',
+      'accounts/fireworks/models/deepseek-v4p1-flash-1017',
       'accounts/fireworks/models/glm-5p3',
       'accounts/fireworks/models/glm-5p2',
       'accounts/fireworks/models/deepseek-v4-pro',
@@ -51,12 +52,12 @@ describe('model-presets Wave 1 — new model registrations', () => {
     expect(m.provenance).toBe('US');
   });
 
-  it('Mistral Medium 3.5 — verified $1.50/$7.50, 262k ctx, vision, EU', () => {
+  it('Mistral Medium 3.5 — verified $1.50/$7.50 list (× 1.1 on the EU endpoint), 262k ctx, vision, EU', () => {
     const m = MODEL_CAPABILITIES['mistral-medium-2604']!;
     expect(m.provider).toBe('openai');
     expect(m.contextWindow).toBe(262_144);
-    expect(m.pricing.input).toBe(1.5);
-    expect(m.pricing.output).toBe(7.5);
+    expect(m.pricing.input).toBe(1.65);
+    expect(m.pricing.output).toBe(8.25);
     // vision verified live 2026-07-22 (two image probes described correctly),
     // completing the check the verify-live-or-false convention owed here.
     expect(m.features.vision).toBe(true);
@@ -74,6 +75,17 @@ describe('model-presets Wave 1 — new model registrations', () => {
     expect(m.contextWindow).toBeGreaterThanOrEqual(1_000_000);
     expect(m.provenance).toBe('CN');
     // The suppression is what keeps this slot from answering "" below the bound.
+    expect(m.defaultReasoningEffort).toBe('none');
+  });
+
+  it('DeepSeek v4.1 Flash 1017 (Fireworks) — its own Standard row $0.30/$1.20, cached 0.006, 1M ctx, CN', () => {
+    // The FAST slot of BOTH efficient and balanced since 2026-10-27.
+    const m = MODEL_CAPABILITIES['accounts/fireworks/models/deepseek-v4p1-flash-1017']!;
+    expect(m.provider).toBe('openai');
+    expect(m.pricing).toEqual({ input: 0.30, output: 1.20, cacheWrite: 0.30, cacheRead: 0.006 });
+    expect(m.contextWindow).toBeGreaterThanOrEqual(1_000_000);
+    expect(m.provenance).toBe('CN');
+    // Re-measured 2026-10-27: without it a hard prompt at the fast budget answers "".
     expect(m.defaultReasoningEffort).toBe('none');
   });
 

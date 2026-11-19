@@ -26,6 +26,7 @@ process.emit = function (event: string, ...args: unknown[]) {
 export { Agent } from './core/agent.js';
 export type { SendStop, SendStopCause } from './core/agent.js';
 export { StreamProcessor } from './core/stream.js';
+export { StreamIncompleteError } from './core/stream-incomplete.js';
 // Residuum 4 of four (closing comment 2026-08-02). A tool OUTSIDE this
 // package — a plugin, an integration in pro — cannot signal "completed but
 // did not succeed" without this symbol, so its calls stay booked as
@@ -146,6 +147,7 @@ const pkg = require('../package.json') as { version: string };
 import { getErrorMessage } from './core/utils.js';
 import { normalizeAllowedOrigins } from './server/cross-site-write.js';
 import { installSignalShutdown } from './server/signal-shutdown.js';
+import { pinTlsFloor } from './core/tls-floor.js';
 
 /**
  * Resolve the default ORIGIN env var for `--http-api` boot.
@@ -171,6 +173,9 @@ export function resolveDefaultOrigin(opts: {
 }
 
 async function runCLI(): Promise<void> {
+  // First, before any command can open a connection (the installer checks a key over TLS
+  // before an engine exists): no launch flag may lower the TLS floor (core/tls-floor.ts).
+  pinTlsFloor();
   const args = argv.slice(2);
 
   // Load vault key from ~/.lynox/.env before anything else
@@ -192,9 +197,19 @@ Options:
   --project <dir>               Set project directory (loads .lynox/config.json)
   --data-dir <dir>              Override data directory (default: ~/.lynox)
 
+Installer without prompts (no terminal needed; exits non-zero on failure):
+  --non-interactive             Take every answer from the flags below and the environment
+  --accept-terms                Accept the terms of service (https://lynox.ai/terms)
+  --provider <name>             anthropic | mistral | openai-compatible | none (start without a key)
+  --model <id>                  Model for mistral or openai-compatible
+  --base-url <url>              Endpoint for openai-compatible (default: http://localhost:11434/v1)
+  --dir <path>                  Install directory (default: ./lynox)
+  --reconfigure                 Overwrite an existing setup in that directory
+  Keys are read from ANTHROPIC_API_KEY, MISTRAL_API_KEY or OPENAI_API_KEY, never from a flag.
+
 Environment:
   ANTHROPIC_API_KEY             Anthropic API key (required for anthropic provider)
-  LYNOX_API_BASE_URL            Base URL for non-Anthropic backends (e.g. https://api.mistral.ai/v1)
+  LYNOX_API_BASE_URL            Base URL for non-Anthropic backends (e.g. https://api.eu.mistral.ai/v1)
                                 (legacy ANTHROPIC_BASE_URL still accepted)
   MISTRAL_API_KEY               Mistral API key (provider: openai with Mistral endpoint)
   OPENAI_API_KEY                Bearer for generic OpenAI-compatible endpoints (experimental)
@@ -276,7 +291,7 @@ Docs: https://docs.lynox.ai
   // === Docker installer (--init / "init" subcommand) ===
   if (args.includes('--init') || args[0] === 'init') {
     const { runDockerInstaller } = await import('./cli/docker-installer.js');
-    await runDockerInstaller();
+    await runDockerInstaller(args);
     return;
   }
 
@@ -284,7 +299,7 @@ Docs: https://docs.lynox.ai
   // Power-user CLI modes (single-task, --watch, --manifest, --task, --output)
   // were removed pre-HN-launch; drive lynox via the Web UI or HTTP API instead.
   const { runDockerInstaller } = await import('./cli/docker-installer.js');
-  await runDockerInstaller();
+  await runDockerInstaller(args);
 }
 
 

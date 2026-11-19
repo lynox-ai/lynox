@@ -1,7 +1,11 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { collapseToSingleLine } from '../../core/sanitize.js';
-import { isPresetClientSecretName, presetClientSecretGuidance } from '../../core/oauth-presets.js';
+import { builtInPresetOf, connectCallText, isPresetClientSecretName, presetClientSecretGuidance } from '../../core/oauth-presets.js';
+import { tokenSlotNames, type ApiProfile } from '../../core/api-store.js';
+import { apiSetupTool } from './api-setup.js';
 import { toolLockFor } from '../../core/mandate-tool-lock.js';
+import { connectionTokenHolderName, connectionTokenHolders, describeConnectionTokens, FORGING_CHARS, sharedGrantOwner } from '../../core/profile-secret-view.js';
+import { vaultScopeOf, VAULT_SCOPE_ALL } from '../../core/secret-scope.js';
 
 interface AskSecretInput {
   name?: string | undefined;
@@ -36,14 +40,70 @@ const NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 const PROMPT_MAX_CHARS = 300;
 
 /**
- * What forges a quote rather than filling it: bidi overrides and isolates
- * (a span that reads forwards on screen and backwards in the store, so the
- * quote is no longer a quote) and the zero-width formatters (a box that looks
- * empty but is not). `collapseToSingleLine` covers neither — it handles C0/C1
- * and the exotic separators. LRM/RLM are left alone; see the note on the
- * client half in `chat-framing.ts`.
+ * What a mandate's turn gets instead of a dialog. The dialog would send what the person at the
+ * screen types to the vault route, which only the owner may write, so the key would leave their
+ * hands and be refused. It says who stores keys, what a saved profile does, and where the owner
+ * acts on it: the owner sees a release request only when lynox answers in the owner's own chat
+ * (`releaseRequestsNote`). It asks for nothing again: the refusal is prompt surface, and a retry
+ * instruction here would teach a loop.
  */
-const FORGING_CHARS = /[\u202A-\u202E\u2066-\u2069\u200B-\u200D\uFEFF]/g;
+export const MANDATE_SECRET_REFUSAL =
+  'Refused: in this session no key or password is entered. Only the owner of this instance stores keys. ' +
+  'A profile you save here asks the owner to release the keys it reads, and until the owner does, the engine ' +
+  'sends nothing under those keys. Tell the user to ask the owner to do it in a chat of the owner\'s own: ' +
+  'store the key there if it is not stored yet, and, if a profile saved here reads it, ask lynox there to release ' +
+  'it to that profile, naming the key and the profile. Do not ask for the key again, and never ask the user to ' +
+  'paste it into this chat.';
+
+/**
+ * A name in the vault that holds a connection's token is used through that connection's API
+ * profile: the `secret:` gate refuses a reference to it, so no text here offers one. Answered from
+ * the API store the engine wired; without one, no name counts as a token, and the texts stay as
+ * they were (the gate still refuses).
+ */
+function tokenHoldersFor(agent: IAgent): (name: string) => ReturnType<typeof connectionTokenHolders> {
+  const apiStore = agent.toolContext?.apiStore;
+  return (name) => (apiStore ? connectionTokenHolders(apiStore, name) : []);
+}
+
+/**
+ * The stored profile connected through a built-in provider that holds `name` as one of its token
+ * slots, stored or empty. Such a slot is filled only by that provider's sign-in, where the user
+ * sees what lynox may do there before it is granted: a value collected into it (a token the
+ * provider issued for something else, or a key of the user's own) would be sent as that
+ * connection's token past that screen, the reach `api_setup` refuses a profile with another
+ * sign-in on the provider's host for. Asked of the profiles, not of the vault, so the answer is
+ * the same whether the slot holds a value. A store that throws counts as holding it: the
+ * collect is refused rather than let through.
+ */
+function presetSlotHolder(agent: IAgent, name: string): ApiProfile | 'unknown' | undefined {
+  const apiStore = agent.toolContext?.apiStore;
+  if (!apiStore) return undefined;
+  try {
+    return apiStore.knownProfiles().find((p) => builtInPresetOf(p) !== undefined && tokenSlotNames(p).has(name));
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * What `api_setup` action "connect" answers for profile `id`, word for word, run as this agent would
+ * run it: the same principal, scope and tool context, and only when this agent has `api_setup`
+ * itself. Connect writes nothing (it reads the profile and the vault and builds a link to this
+ * instance; the sign-in state is made by the route when the link is opened), so asking it here
+ * leaves nothing behind. Null when the agent has no `api_setup`, or connect throws or answers
+ * nothing.
+ */
+async function connectAnswer(agent: IAgent, id: string): Promise<string | null> {
+  if (typeof agent.getAvailableTools !== 'function') return null;
+  if (!agent.getAvailableTools().some((t) => t.definition.name === apiSetupTool.definition.name)) return null;
+  try {
+    const out: unknown = await apiSetupTool.handler({ action: 'connect', id }, agent);
+    return typeof out === 'string' && out.trim() !== '' ? out : null;
+  } catch {
+    return null;
+  }
+}
 
 /** Collapse to one line and bound the length, ellipsising when it had to cut. */
 function boundPromptText(s: string): string {
@@ -125,11 +185,30 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
       if (names.length === 0) {
         return 'No secrets are stored in the vault yet. Use ask_secret (action:"collect") to add one.';
       }
-      const listing = names.map(n => `${n} (${store!.getMasked(n) ?? '****'})`).join(', ');
-      return `Secrets already in the vault — reference with secret:NAME, never re-collect an existing one:\n${listing}`;
+      const holdersOf = tokenHoldersFor(agent);
+      const free: string[] = [];
+      const tokens: ReturnType<typeof holdersOf>[] = [];
+      for (const n of names) {
+        const holder = holdersOf(n);
+        if (holder.length === 0) free.push(n);
+        else tokens.push(holder);
+      }
+      const sections: string[] = [];
+      if (free.length > 0) {
+        const listing = free.map(n => `${n} (${store!.getMasked(n) ?? '****'})`).join(', ');
+        sections.push(`Secrets already in the vault — reference with secret:NAME, never re-collect an existing one:\n${listing}`);
+      }
+      const tokenLine = describeConnectionTokens(tokens);
+      if (tokenLine !== undefined) sections.push(tokenLine);
+      return sections.join('\n');
     }
 
     // action: 'collect'
+    // A mandate is refused before anything else, decided like `list` on the principal of this
+    // turn: before the dialog, which would collect a key the vault refuses, and before the name
+    // checks, whose answers name the keys the owner already stores.
+    const principal = agent.principal as IAgent['principal'] | undefined;
+    if (principal === undefined || toolLockFor(principal) !== null) return MANDATE_SECRET_REFUSAL;
     if (!input.name || !input.prompt) {
       return 'Error: ask_secret with action:"collect" needs both `name` and `prompt`. To see what is already stored, call ask_secret with action:"list".';
     }
@@ -142,7 +221,6 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     if (isPresetClientSecretName(input.name)) {
       return `Error: not collected through ask_secret. ${presetClientSecretGuidance(input.name)}`;
     }
-
     // Reconcile an already-stored name BEFORE prompting. Two match classes with DIFFERENT
     // handling — the distinction is what keeps a legitimate SECOND key in the same vendor
     // namespace reachable:
@@ -155,16 +233,99 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     //    legitimately holds more than one distinct key, so blocking here would dead-end a
     //    genuine second key (and tempt referencing the WRONG existing one). Surface the
     //    sibling as a non-blocking hint on the prompt and STILL collect.
-    const nearMatches = agent.secretStore?.findNameMatches?.(input.name) ?? [];
+    const holdersOf = tokenHoldersFor(agent);
+    // A scoped view (a spawned child) lists only its own names, so the stored-name check below
+    // cannot see a token outside the scope, while its writes are not narrowed. A connection's token
+    // slot outside the scope is not the child's to collect, stored or not. Asked of scope
+    // membership (`explainUnresolved`), never of the vault: the answer reaches the model, and one
+    // drawn from existence would be an oracle over the vault.
+    if (agent.secretStore?.explainUnresolved?.(input.name) === 'out-of-scope' && holdersOf(input.name).length > 0) {
+      return `"${input.name}" is a connection's token slot outside this agent's vault scope, so it is not ` +
+        `collected here. This is a scope decision — whether the vault holds it is not something this agent ` +
+        `is told. Either proceed without it, or report back that this task needs secret_scope: "${input.name}".`;
+    }
+    // A sub-agent with a secret_scope asks only for names inside it, before the preset check below,
+    // which would ask api_setup to connect: a name outside the scope starts nothing. The reconcile below reads
+    // names through this agent's store, and a scoped view lists only the names in scope, so a
+    // stored key outside the scope looked absent: the dialog opened, and what the user entered
+    // replaced that key. Decided on scope membership, never on whether the name is stored, so
+    // the answer tells the sub-agent nothing about the vault (as `explainUnresolved` does). It
+    // loses nothing either: a value collected under a name outside its scope it could not read,
+    // not even through an API profile, which reads through the same view (`http.ts`). The text
+    // says where the result goes: a sub-agent that thought it spoke to the user asked for the key
+    // itself, and a result asking for it is passed on to the user, who would paste it in the chat.
+    const scope = vaultScopeOf(agent.secretStore);
+    if (scope !== VAULT_SCOPE_ALL && !scope.includes(input.name)) {
+      return `Not collected: "${input.name}" is outside this sub-agent's secret_scope, so it does not ask the user for it. `
+        + `Your result goes to the agent that started you, not to the user. In it, say that the task needs ${input.name} and stop: `
+        + `do not ask anyone to enter, paste or provide the key, and do not say whether it is stored. `
+        + `The agent that started you can collect it with ask_secret, or start you again with secret_scope naming it.`;
+    }
+    // A token slot of a profile on a built-in provider comes only from that provider's sign-in.
+    const presetHolder = presetSlotHolder(agent, input.name);
+    // A store that cannot list its profiles cannot say whether the name is such a slot: refused,
+    // and the answer says that it could not be checked, not that it is one.
+    if (presetHolder === 'unknown') {
+      return `Whether "${input.name}" is the token slot of a connection cannot be checked right now, so ask_secret ` +
+        `did not collect it and opened no input. Do not ask the user for it in the chat instead. Tell the user that ` +
+        `the API profiles could not be read just now and that this step can be tried again later.`;
+    }
+    if (presetHolder !== undefined) {
+      const provider = builtInPresetOf(presetHolder);
+      const via = provider === undefined ? 'a built-in provider' : `the built-in "${provider.id}" provider`;
+      // A profile sharing another one's grant is signed in through that one: connecting it on its own
+      // would split it off, so the connect is asked for the profile that holds the grant.
+      const apiStore = agent.toolContext?.apiStore;
+      const signsIn = (apiStore ? sharedGrantOwner(apiStore, presetHolder) : undefined) ?? presetHolder;
+      const id: unknown = signsIn.id;
+      const head = `"${input.name}" is a token slot of a profile on ${via}, so it is not collected ` +
+        `through ask_secret: its tokens come only from the provider's sign-in, where the user sees what lynox may ` +
+        `do there.`;
+      // Asked here rather than left to the model, which wrote a link of its own instead (measured, U-195).
+      const answer = typeof id === 'string' ? await connectAnswer(agent, id) : null;
+      if (answer !== null) {
+        // "Act on", not "pass on": the answer is written to the model, and may make the link
+        // conditional (a profile already connected) — U-195.
+        return `${head} lynox has already asked api_setup to connect profile "${id}"; its answer follows. Act on its ` +
+          `answer: give the user the sign-in link it contains, on the condition it states if it states one, or the ` +
+          `reason it gives. Do not ask the user for a token, and write no other link.` +
+          `\n\napi_setup connect answered: ${answer}`;
+      }
+      return `${head} To connect or reconnect, ${connectCallText(typeof id === 'string' ? id : undefined)} Do not ask the user for a token.`;
+    }
+    // `findNameMatches` leaves out the requested name itself. A token STORED under exactly that
+    // name is the case that matters most (collecting it would overwrite the connection's token), so
+    // it is added here and turned away below like a near-identical one. Stored, not merely named by
+    // a profile: an empty refresh slot is exactly what `api_setup` asks to be collected.
+    const stored = agent.secretStore?.listAgentVisibleNames?.() ?? [];
+    const matches = [
+      ...(agent.secretStore?.findNameMatches?.(input.name) ?? []),
+      ...(stored.includes(input.name) && holdersOf(input.name).length > 0 ? [input.name] : []),
+    ];
+    const isToken = new Set(matches.filter(n => holdersOf(n).length > 0));
     const normName = (s: string): string => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
     const reqNorm = normName(input.name);
-    const exactMatches = nearMatches.filter(n => normName(n) === reqNorm);
-    if (exactMatches.length > 0) {
-      const refs = exactMatches.map(n => `secret:${n}`).join(' or ');
+    const exactMatches = matches.filter(n => normName(n) === reqNorm);
+    // A connection's token is offered as no reference. When every exact match is one, the name
+    // still is not collected again: the value belongs to that connection, and a second copy under
+    // a near-identical name would only be refused at the gate too.
+    const exactFree = exactMatches.filter(n => !isToken.has(n));
+    if (exactMatches.length > 0 && exactFree.length === 0) {
+      const named = exactMatches.map(n => {
+        const who = connectionTokenHolderName(holdersOf(n));
+        return `"${n}"${who === null ? '' : ` (profile ${JSON.stringify(who)})`}`;
+      }).join(', ');
+      return `A key with the same name is already in the vault and holds a connection's token: ${named}. ` +
+        `It is used through that API profile, not referenced with secret:, and not collected again. ` +
+        `Only collect if you genuinely need a separate key under a clearly different name.`;
+    }
+    if (exactFree.length > 0) {
+      const refs = exactFree.map(n => `secret:${n}`).join(' or ');
       return `A key with the same name is already in the vault: ` +
-        `${exactMatches.map(n => `"${n}"`).join(', ')}. Reference ${refs} instead of collecting a duplicate. ` +
+        `${exactFree.map(n => `"${n}"`).join(', ')}. Reference ${refs} instead of collecting a duplicate. ` +
         `Only collect again if you genuinely need a separate key under a clearly different name.`;
     }
+    const nearMatches = matches.filter(n => !isToken.has(n));
     // Bounded, and the bound is not cosmetic: this hint is appended AFTER the
     // agent's (capped) text, so it is the tail of the string the dialog renders.
     // Left unbounded it grows ~64 chars per sibling key, and a vault with a

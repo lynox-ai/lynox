@@ -36,13 +36,14 @@ export interface ExecRequest {
 export type ParseResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
 /**
- * The effective timeout for a requested one: unset, non-finite or negative → the default;
+ * The effective timeout for a requested one: unset, non-finite, negative or below 1 ms → the default;
  * `0` or above the ceiling → the ceiling. Both sides apply it, so neither trusts the other.
  */
 export function capTimeout(requested: unknown): number {
   // `0` meant "no limit" to execSync; the nearest a sidecar call has is the ceiling.
   if (requested === 0) return MAX_EXEC_TIMEOUT_MS;
-  if (typeof requested !== 'number' || !Number.isFinite(requested) || requested <= 0) {
+  // Below 1 ms (a fraction) would floor to 0 and end the call at once: also the default.
+  if (typeof requested !== 'number' || !Number.isFinite(requested) || requested < 1) {
     return DEFAULT_BASH_TIMEOUT_MS;
   }
   return Math.min(Math.floor(requested), MAX_EXEC_TIMEOUT_MS);

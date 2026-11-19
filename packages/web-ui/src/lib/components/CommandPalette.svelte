@@ -6,6 +6,8 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { keepSettingsItem } from '../utils/billing-tier.js';
 	import Icon from '../primitives/Icon.svelte';
+	import { getApprovalsEnabled } from '../stores/approvals.svelte.js';
+	import { isMandateSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 
 	interface PaletteItem {
 		id: string;
@@ -20,6 +22,10 @@
 		// pattern SettingsIndex uses.
 		selfHostOnly?: boolean;
 		managedOnly?: boolean;
+		/** Shown only while the approval queue is on (its nav item shows then too). */
+		approvalsOnly?: boolean;
+		/** Hidden from a mandate's session, as in SettingsIndex (ux U-104). */
+		ownerOnly?: boolean;
 	}
 
 	let open = $state(false);
@@ -33,9 +39,10 @@
 	let managed = $state<boolean | null>(null);
 
 	$effect(() => {
+		const noteViewer = viewerNote();
 		fetch(`${getApiBase()}/config`)
 			.then(r => r.json())
-			.then((data: Record<string, unknown>) => { managed = !!data['managed']; })
+			.then((data: Record<string, unknown>) => { managed = !!data['managed']; noteViewer(data); })
 			.catch(() => { managed = false; });
 	});
 
@@ -46,6 +53,7 @@
 		// matches Desktop-Sidebar (after Chat/Inbox, before Hub) so palette
 		// search aligns with the nav-rail. Inbox is feature-flag gated and
 		// intentionally has no palette entry today — added when the flag GAs.
+		{ id: 'nav-approvals', label: t('nav.approvals'), group: t('cmd.nav'), action: () => goto('/app/approvals'), keywords: 'approvals freigabe freigeben warten wartet mails senden queue warteschlange', approvalsOnly: true },
 		{ id: 'nav-activity', label: t('nav.activity'), group: t('cmd.nav'), action: () => goto('/app/activity'), keywords: 'activity aktivität cost kosten history runs verbrauch usage' },
 		{ id: 'nav-automation', label: t('nav.automation'), group: t('cmd.nav'), action: () => goto('/app/hub'), keywords: 'workflows pipelines automation dag abläufe tasks aufgaben hub' },
 		{ id: 'nav-intelligence', label: t('nav.intelligence'), group: t('cmd.nav'), action: () => goto('/app/intelligence'), keywords: 'intelligence dashboards reports knowledge memory wissen graph insights kpi contacts kontakte crm' },
@@ -54,7 +62,7 @@
 		// IA reorg (D2) — 3rd-party API keys are low-frequency config; their home
 		// is Settings. Palette lands directly on the Settings route (skips the
 		// `?section=keys` redirect bounce).
-		{ id: 'nav-keys', label: t('settings.keys'), group: t('cmd.nav'), action: () => goto('/app/settings/llm/keys'), keywords: 'keys api schluessel settings einstellungen' },
+		{ id: 'nav-keys', label: t('settings.keys'), group: t('cmd.nav'), action: () => goto('/app/settings/llm/keys'), keywords: 'keys api schluessel settings einstellungen', ownerOnly: true },
 		// PRD-IA-V2 P3-PR-A2 — `settings.integrations` retired in favour of
 		// `settings.channels`. Keywords still include the old "integrations"
 		// term so muscle-memory queries still hit the right command.
@@ -87,7 +95,7 @@
 		// `keepItem()`-equivalent below filters these out on Managed). Reuses
 		// `settings.workspace.*` keys — no new i18n needed.
 		{ id: 'nav-workspace-backups', label: t('settings.workspace.backups'), group: t('cmd.nav'), action: () => goto('/app/settings/workspace/backups'), keywords: 'backups backup wiederherstellen restore schedule plan workspace system', selfHostOnly: true },
-		{ id: 'nav-workspace-security', label: t('settings.workspace.security'), group: t('cmd.nav'), action: () => goto('/app/settings/workspace/security'), keywords: 'security sicherheit vault schlüssel key engine token access workspace system', selfHostOnly: true },
+		{ id: 'nav-workspace-security', label: t('settings.workspace.security'), group: t('cmd.nav'), action: () => goto('/app/settings/workspace/security'), keywords: 'security sicherheit vault schlüssel key engine token access workspace system', selfHostOnly: true, ownerOnly: true },
 		{ id: 'nav-workspace-limits', label: t('settings.workspace.limits'), group: t('cmd.nav'), action: () => goto('/app/settings/workspace/limits'), keywords: 'limits caps spend ausgaben session day tag month monat http rate workspace system', selfHostOnly: true },
 		{ id: 'nav-workspace-updates', label: t('settings.workspace.updates'), group: t('cmd.nav'), action: () => goto('/app/settings/workspace/updates'), keywords: 'updates versions versionen upgrade engine startup workspace system', selfHostOnly: true },
 		// IA reorg (M6): ToolToggles unified from two tier-split mounts
@@ -109,7 +117,7 @@
 	// SettingsIndex uses. Default-null pattern (hide both kinds until probed)
 	// lives inside the helper, so the palette stays flash-free without
 	// reimplementing the rule.
-	const visibleItems = $derived(items.filter((i) => keepSettingsItem(i, managed)));
+	const visibleItems = $derived(items.filter((i) => keepSettingsItem(i, managed) && (!i.approvalsOnly || getApprovalsEnabled()) && !(i.ownerOnly && isMandateSession())));
 
 	const filtered = $derived(
 		query.trim()

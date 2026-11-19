@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { chunkDocumentText, chunkDocumentTextReportingCut, ingestDocumentText, pickDocumentScope, DEFAULT_MAX_CHARS, DEFAULT_MAX_CHUNKS, type DocumentMemorySink } from './document-ingest.js';
 import { MAX_EXTRACTED_CHARS } from './document-extract.js';
 import type { MemoryNamespace, MemoryScopeRef } from '../types/memory.js';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 
 describe('chunkDocumentText', () => {
 	it('returns [] for empty / whitespace-only text', () => {
@@ -94,7 +95,7 @@ describe('ingestDocumentText', () => {
 	it('stores one knowledge memory per chunk with document provenance', async () => {
 		const { sink, calls } = fakeSink();
 		const text = 'first paragraph\n\n' + 'y'.repeat(30);
-		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => false, cutAtExtraction: false });
+		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => false, cutAtExtraction: false, principal: OWNER_PRINCIPAL });
 
 		expect(n).toBe(calls.length);
 		expect(n).toBeGreaterThanOrEqual(1);
@@ -121,7 +122,7 @@ describe('ingestDocumentText', () => {
 	it('marks every chunk of a document the extractor cut, though it fits the chunk cap', async () => {
 		const { sink, calls } = fakeSink();
 		const text = ['a'.repeat(1900), 'b'.repeat(1900), 'c'.repeat(1900) + '\n[…truncated]'].join('\n\n');
-		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => false, cutAtExtraction: true });
+		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => false, cutAtExtraction: true, principal: OWNER_PRINCIPAL });
 
 		expect(n).toBe(3);
 		for (const c of calls) expect(c.text.startsWith(CUT_HEADER)).toBe(true);
@@ -131,7 +132,7 @@ describe('ingestDocumentText', () => {
 		const { sink, calls } = fakeSink();
 		// 101 paragraphs that each fill a chunk: the 101st is left out.
 		const text = Array.from({ length: 101 }, (_, i) => `${String(i)} ${'x'.repeat(1900)}`).join('\n\n');
-		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => false, cutAtExtraction: false });
+		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => false, cutAtExtraction: false, principal: OWNER_PRINCIPAL });
 
 		expect(n).toBe(100);
 		for (const c of calls) expect(c.text.startsWith(CUT_HEADER)).toBe(true);
@@ -140,7 +141,7 @@ describe('ingestDocumentText', () => {
 	it('does not mark a document that fits, up to exactly the chunk cap', async () => {
 		const { sink, calls } = fakeSink();
 		const text = Array.from({ length: 100 }, (_, i) => `${String(i)} ${'x'.repeat(1900)}`).join('\n\n');
-		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => false, cutAtExtraction: false });
+		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => false, cutAtExtraction: false, principal: OWNER_PRINCIPAL });
 
 		expect(n).toBe(100);
 		for (const c of calls) expect(c.text.startsWith('[Document: report.pdf]\n')).toBe(true);
@@ -148,7 +149,7 @@ describe('ingestDocumentText', () => {
 
 	it('stores nothing for an empty document', async () => {
 		const { sink, calls } = fakeSink();
-		const n = await ingestDocumentText(sink, { text: '   ', fileName: 'x.pdf', scope, threadId: 't', durableKnowledgeActive: false, isPrivate: () => false, cutAtExtraction: false });
+		const n = await ingestDocumentText(sink, { text: '   ', fileName: 'x.pdf', scope, threadId: 't', durableKnowledgeActive: false, isPrivate: () => false, cutAtExtraction: false, principal: OWNER_PRINCIPAL });
 		expect(n).toBe(0);
 		expect(calls.length).toBe(0);
 	});
@@ -158,7 +159,7 @@ describe('ingestDocumentText', () => {
 		// Same input that stores several chunks above — only the substrate differs, so a
 		// zero here can only come from the DK guard, not from an empty/short document.
 		const text = 'first paragraph\n\n' + 'y'.repeat(30);
-		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: true, isPrivate: () => false, cutAtExtraction: false });
+		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: true, isPrivate: () => false, cutAtExtraction: false, principal: OWNER_PRINCIPAL });
 		expect(n).toBe(0);
 		expect(calls).toHaveLength(0);
 	});
@@ -170,7 +171,7 @@ describe('ingestDocumentText', () => {
 		// self-hosted (flag-off) tenant.
 		const { sink, calls } = fakeSink();
 		const text = 'first paragraph\n\n' + 'y'.repeat(30);
-		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => false, cutAtExtraction: false });
+		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => false, cutAtExtraction: false, principal: OWNER_PRINCIPAL });
 		expect(n).toBeGreaterThanOrEqual(1);
 		expect(calls).toHaveLength(n);
 	});
@@ -178,7 +179,7 @@ describe('ingestDocumentText', () => {
 	it('stores nothing from a chat that is already private', async () => {
 		const { sink, calls } = fakeSink();
 		const text = 'first paragraph\n\n' + 'y'.repeat(30);
-		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => true, cutAtExtraction: false });
+		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => true, cutAtExtraction: false, principal: OWNER_PRINCIPAL });
 		expect(n).toBe(0);
 		expect(calls).toHaveLength(0);
 	});
@@ -187,7 +188,7 @@ describe('ingestDocumentText', () => {
 		const { sink, calls } = fakeSink();
 		const isPrivate = (): boolean => false;
 		const text = 'first paragraph\n\n' + 'y'.repeat(30);
-		await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate, cutAtExtraction: false });
+		await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate, cutAtExtraction: false, principal: OWNER_PRINCIPAL });
 		expect(calls.length).toBeGreaterThan(0);
 		for (const c of calls) expect(c.options?.cancelled).toBe(isPrivate);
 	});
@@ -200,12 +201,12 @@ describe('ingestDocumentText', () => {
 		const flipping: typeof sink = {
 			store: async (...args) => { const r = await sink.store(...args); privateMode = true; return r; },
 		};
-		const n = await ingestDocumentText(flipping, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => privateMode, cutAtExtraction: false });
+		const n = await ingestDocumentText(flipping, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => privateMode, cutAtExtraction: false, principal: OWNER_PRINCIPAL });
 		expect(n).toBe(1);
 		expect(calls).toHaveLength(1);
 		// Positive control: the same text, never private, is more than one chunk.
 		const control = fakeSink();
-		const all = await ingestDocumentText(control.sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => false, cutAtExtraction: false });
+		const all = await ingestDocumentText(control.sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => false, cutAtExtraction: false, principal: OWNER_PRINCIPAL });
 		expect(all).toBeGreaterThan(1);
 	});
 });

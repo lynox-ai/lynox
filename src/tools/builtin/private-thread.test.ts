@@ -10,6 +10,7 @@ import { rememberTool, memoryBlockEditTool, memoryRetireTool } from './knowledge
 import { memoryStoreTool, memoryUpdateTool } from './memory.js';
 import { privateThreadRefusal } from './private-thread.js';
 import type { IAgent } from '../../types/index.js';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 
 /**
  * In a private chat, the memory-writing tools refuse.
@@ -49,7 +50,7 @@ describe('memory-writing tools refuse in a private chat', () => {
     } as never;
     const memory = memoryMock();
     const agent = {
-      toolContext: ctx,
+      principal: OWNER_PRINCIPAL, toolContext: ctx,
       memory,
       sawUntrustedData: false,
       sawExternalContentTool: false,

@@ -117,4 +117,11 @@ describe('renderTriageList', () => {
     const out = renderTriageList([envelope({ uid: 7, snippet: 'hi' })]);
     expect(out).toContain('source="mail:unknown:envelope:7"');
   });
+
+  it('numbers from firstOrdinal, so a list split into groups numbers on', () => {
+    const out = renderTriageList([envelope({ uid: 7, snippet: 'a' }), envelope({ uid: 8, snippet: 'b' })], 'acct-1', undefined, 4);
+    expect(out).toMatch(/^4\. uid:7 /m);
+    expect(out).toMatch(/^5\. uid:8 /m);
+    expect(out).not.toMatch(/^1\. /m);
+  });
 });

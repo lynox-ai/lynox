@@ -11,6 +11,7 @@ import type { IAgent, ProcessRecord, LynoxUserConfig, PlannedPipeline } from '..
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
 import { WorkflowStore } from '../../core/workflow-store.js';
 import { runInCallSlot } from '../../core/call-connection.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 // === Mock process-capture (the Haiku extraction step) ===
 
@@ -70,6 +71,8 @@ function makeAgent(
 ): IAgent {
   const toolContext = createToolContext(userConfig);
   toolContext.runHistory = runHistory as never;
+  // A mandate's writes leave rows in the actor trail and are refused without one.
+  toolContext.auditLog = testAuditLog().log;
   return {
     name: 'test',
     model: 'test-model',
@@ -436,6 +439,31 @@ describe('save_workflow — workflow_id source', () => {
       expect(new WorkflowStore(engine).authorship(copyId)).toMatchObject({
         createdBy: null, mandateEditor: 'mandate:eva@firm.example', mandateEditorId: 'grant-eva', mandateEditedAt: '2026-03-21 12:00:00',
       });
+    } finally {
+      try { engine.close(); } catch { /* already closed */ }
+      history.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('saves a copy of a plan whose step id an old plan_task cut longer than ids now are, as step-<n>', async () => {
+    // An old plan_task cut a phase name to 60 characters; the save takes 40. The model cannot choose
+    // ids here, so the copy runs the old id as its position, its references with it.
+    const long = 'fetch_all_ad_spend_numbers_for_every_campaign_in_march';
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-promote-old-id-'));
+    const history = new RunHistory(join(dir, 'h.db'));
+    const engine = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engine);
+    try {
+      storePipeline('plan-789', makePlan({ steps: [{ id: long, task: 'Fetch' }, { id: 'write', task: `Write {{${long}.result}}`, input_from: [long] }] }));
+      const result = await saveWorkflowTool.handler({ name: 'Saved Ad Report', workflow_id: 'plan-789' }, makeAgent({}, history));
+      const { workflow_id: copyId } = JSON.parse(result) as { workflow_id: string };
+      const saved = JSON.parse(history.getPlannedPipeline(copyId)!.manifest_json) as PlannedPipeline;
+      expect(saved.steps.map(st => st.id)).toEqual(['step-1', 'write']);
+      expect(saved.steps[1]!.input_from).toEqual(['step-1']);
+      expect(saved.steps[1]!.task).toBe('Write {{step-1.result}}');
+      // The source plan keeps its own ids.
+      expect(getPipeline('plan-789')!.steps[0]!.id).toBe(long);
     } finally {
       try { engine.close(); } catch { /* already closed */ }
       history.close();

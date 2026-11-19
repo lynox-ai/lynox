@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { reviewChangeset } from './changeset-review.js';
 import type { ChangesetDiff } from '../types/index.js';
 import { EventEmitter } from 'node:events';
+import { stripAnsi } from './ansi.js';
 
 function makeStdin(keys: string[]): NodeJS.ReadStream {
   let idx = 0;
@@ -45,6 +46,7 @@ function makeDiff(overrides: Partial<ChangesetDiff> = {}): ChangesetDiff {
     absolutePath: '/tmp/test.txt',
     status: 'modified',
     diff: '--- a/test.txt\n+++ b/test.txt\n@@ -1 +1 @@\n-old\n+new',
+    compared: true,
     originalContent: 'old',
     ...overrides,
   };
@@ -103,6 +105,18 @@ describe('reviewChangeset', () => {
 
     expect(stdout.output).toContain('1 file modified');
     expect(stdout.output).toContain('1 file added');
+  });
+
+  it('shows "not compared" instead of line counts for a file shown with a note', async () => {
+    const stdout = makeStdout();
+    await reviewChangeset([
+      makeDiff({ file: 'big.bin', diff: '--- a/big.bin\n+++ b/big.bin\n(Content not compared: …)', compared: false }),
+      makeDiff(),
+    ], makeStdin(['a']), stdout);
+
+    const rows = stripAnsi(stdout.output).split('\n');
+    expect(rows.find((l) => l.includes('mod big.bin'))).toBe('  mod big.bin (not compared)');
+    expect(rows.find((l) => l.includes('mod test.txt'))).toBe('  mod test.txt (+1 -1)');
   });
 
   it('should color diff lines', async () => {

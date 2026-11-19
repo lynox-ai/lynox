@@ -23,9 +23,15 @@ const FIELD_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 export const JUDGE_MAX_FIELDS = 20;
 /** The longest a judged text field may be, in characters. */
 export const JUDGE_MAX_STRING = 2_000;
+/** The longest a judged HTML field may be, in characters: a field the run's list form declares
+ *  HTML (`htmlFieldsOfListForm`). Above the longest measured shop description (20,822, PRD
+ *  shopify-preset §21.4 item 10), with room for an admin value longer than the storefront's and a
+ *  rewrite that grows. */
+export const JUDGE_MAX_HTML = 32_000;
 /** The longest rule text. */
 export const JUDGE_MAX_RULE_CHARS = 4_000;
-/** The most a verdict may take in bytes, as {@link judgeAfterBound} counts it. */
+/** The most a verdict's fields that are not HTML may take together in bytes, as {@link judgeAfterBound}
+ *  counts them. The HTML fields are bounded together by {@link JUDGE_MAX_HTML} characters instead. */
 export const JUDGE_MAX_AFTER_BYTES = 32 * 1024;
 /** Bytes a number in a verdict may take as JSON: the longest a double prints is 25
  *  (`-0.0000012345678901234567`); rounded up. */
@@ -34,13 +40,41 @@ const NUMBER_BYTES = 32;
 const RESERVED_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
 
 export interface JudgeRule {
-  /** What the model is told to decide, per target. The owner's words, never a target's. */
+  /** What the model is told to decide, per target. Never a target's words, but not always the
+   *  owner's either: the agent may draft it from third-party data (keyword data for a shop's
+   *  meta texts), and the owner approves it without having written it. Nothing in the schema can
+   *  bar a string's content, so a field's value check carries that load (`seo-text.ts`). */
   rule: string;
   /** The verdict's shape over F, normalised by {@link normalizeJudgeRule}. */
   schema: ExtractSchema;
   /** The tier that places the judge's call: which provider serves it, and the gate and booking.
    *  The model is set per provider (`JUDGE_MODELS`), not by the tier. Default `fast`. */
   tier: ModelTier;
+  /** The verdict's shape. `envelope`: `{ keep, after }`, where `keep: true` leaves the target as it
+   *  is without the model repeating it. Absent: the flat verdict over F, as every rule planned
+   *  before the envelope was stored; such a rule keeps its hash, and its run its checksum. */
+  verdict?: 'envelope' | undefined;
+  /** The context C (PRD shopify-preset §20.2 item 7): fields the judge reads beside the record
+   *  and never writes — disjoint from F, never the id field, on a Shopify list only
+   *  {@link SHOPIFY_CONTEXT_FIELDS}. Shown to the owner before the start. Absent when none is
+   *  planned, never empty: a rule planned without C keeps its hash, and its run its checksum. */
+  context?: string[] | undefined;
+}
+
+/** The fields a Shopify product run may read as context C: the product's own texts and its
+ *  type, vendor and tags, flat as {@link shopifyContextOf} projects them. */
+export const SHOPIFY_CONTEXT_FIELDS: readonly string[] = Object.freeze([
+  'title', 'descriptionHtml', 'seo_title', 'seo_description', 'productType', 'vendor', 'tags',
+]);
+
+/** The names a context may take on a list of this form, or undefined where the form does not
+ *  bound them (a list that is not a store's: its elements' fields are the API's). A store form
+ *  that takes no judge yet takes no context either. */
+export function contextFieldsOfListForm(form: unknown): readonly string[] | undefined {
+  // A filtered product list (`shopify_filtered`) reads its products with the same document.
+  if (form === 'shopify' || form === 'shopify_filtered') return SHOPIFY_CONTEXT_FIELDS;
+  if (form === 'shopify_media') return [];
+  return undefined;
 }
 
 /** Targets with a verdict a write can use: not invalid (before the judge or by its answer), and
@@ -86,7 +120,7 @@ function refuseHidden(text: string, what: string, opts: { inPlace?: boolean } = 
   );
 }
 
-function normalizeProperty(name: string, raw: unknown): ExtractSchemaProperty {
+function normalizeProperty(name: string, raw: unknown, maxString: number): ExtractSchemaProperty {
   if (!isPlainObject(raw)) throw new BulkSourceError(`judge.schema: field ${name} must be an object with a type.`);
   if (Object.hasOwn(raw, 'pattern')) {
     // A regex the planner writes runs over output the target's text steers, before any length
@@ -105,8 +139,8 @@ function normalizeProperty(name: string, raw: unknown): ExtractSchemaProperty {
         return { type: 'string', enum: [...new Set(enumValues as string[])] };
       }
       const max = raw['maxLength'];
-      if (typeof max !== 'number' || !Number.isInteger(max) || max < 1 || max > JUDGE_MAX_STRING) {
-        throw new BulkSourceError(`judge.schema: text field ${name} needs maxLength (1–${String(JUDGE_MAX_STRING)}) or enum.`);
+      if (typeof max !== 'number' || !Number.isInteger(max) || max < 1 || max > maxString) {
+        throw new BulkSourceError(`judge.schema: text field ${name} needs maxLength (1–${String(maxString)}) or enum.`);
       }
       const min = raw['minLength'];
       if (min !== undefined && (typeof min !== 'number' || !Number.isInteger(min) || min < 0 || min > max)) {
@@ -130,14 +164,59 @@ function normalizeProperty(name: string, raw: unknown): ExtractSchemaProperty {
 }
 
 /**
- * Build the rule a run stores from what `bulk_plan` was given, or refuse it. `idField`: the
- * field a list identifies its elements by — a verdict never sets it.
+ * The context C a rule plans, or undefined for none: 0 to {@link JUDGE_MAX_FIELDS} top-level
+ * names under F's name rule, no duplicates, none of F, not the id field, and where `allowed` is
+ * given only its names. An empty list is no context, so it is left out of the rule.
  */
-export function normalizeJudgeRule(input: unknown, opts: { idField?: string | undefined } = {}): JudgeRule {
+function normalizeContext(
+  raw: unknown, fields: readonly string[], idField: string | undefined, allowed: readonly string[] | undefined,
+): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || raw.length > JUDGE_MAX_FIELDS) {
+    throw new BulkSourceError(`judge.context must be a list of 0–${String(JUDGE_MAX_FIELDS)} field names.`);
+  }
+  const seen = new Set<string>();
+  for (const name of raw) {
+    if (typeof name !== 'string' || !FIELD_RE.test(name) || RESERVED_NAMES.has(name)) {
+      throw new BulkSourceError('judge.context: a field name must be one top-level name (letters, digits, _), not __proto__, constructor or prototype.');
+    }
+    if (seen.has(name)) throw new BulkSourceError(`judge.context names ${name} twice.`);
+    if (fields.includes(name)) {
+      throw new BulkSourceError(`judge.context names ${name}, which judge.schema decides: a field is either read as context or decided, not both.`);
+    }
+    if (idField !== undefined && name === idField) {
+      throw new BulkSourceError('judge.context must not name the id field: the run reads it already, as the target.');
+    }
+    if (allowed !== undefined && !allowed.includes(name)) {
+      throw new BulkSourceError(`judge.context names ${name}, which this form does not read. It reads: ${allowed.join(', ')}.`);
+    }
+    seen.add(name);
+  }
+  return seen.size === 0 ? undefined : [...seen];
+}
+
+/**
+ * Build the rule a run stores from what `bulk_plan` was given, or refuse it. `idField`: the
+ * field a list identifies its elements by — a verdict never sets it, and the context never names
+ * it. `contextFields`: the names a context may take where the source's form bounds them (a
+ * Shopify list: {@link SHOPIFY_CONTEXT_FIELDS}); any name of F's rule without it. `htmlFields`:
+ * the fields the run's list form declares HTML, which may ask for up to {@link JUDGE_MAX_HTML}
+ * characters; every other text field up to {@link JUDGE_MAX_STRING}.
+ */
+export function normalizeJudgeRule(
+  input: unknown,
+  opts: { idField?: string | undefined; contextFields?: readonly string[] | undefined; htmlFields?: readonly string[] | undefined } = {},
+): JudgeRule {
   if (!isPlainObject(input)) throw new BulkSourceError('judge must be an object with rule and schema.');
   const rule = input['rule'];
-  if (typeof rule !== 'string' || rule.trim() === '' || rule.length > JUDGE_MAX_RULE_CHARS) {
+  if (typeof rule !== 'string' || rule.trim() === '') {
     throw new BulkSourceError(`judge.rule must be a text of 1–${String(JUDGE_MAX_RULE_CHARS)} characters.`);
+  }
+  if (rule.length > JUDGE_MAX_RULE_CHARS) {
+    // The counted length, so the model shortens by a number instead of an estimate.
+    throw new BulkSourceError(
+      `judge.rule has ${String(rule.length)} characters; it may have at most ${String(JUDGE_MAX_RULE_CHARS)}. Shorten it by at least ${String(rule.length - JUDGE_MAX_RULE_CHARS)}.`,
+    );
   }
   refuseHidden(rule, 'judge.rule');
   const rawSchema = input['schema'];
@@ -156,16 +235,46 @@ export function normalizeJudgeRule(input: unknown, opts: { idField?: string | un
     if (opts.idField !== undefined && name === opts.idField) {
       throw new BulkSourceError('judge.schema must not decide the id field: the run could not check it reads back the target it listed.');
     }
-    properties[name] = normalizeProperty(name, rawProps[name]);
+    properties[name] = normalizeProperty(name, rawProps[name], opts.htmlFields?.includes(name) === true ? JUDGE_MAX_HTML : JUDGE_MAX_STRING);
   }
   const schema: ExtractSchema = { type: 'object', properties, required: names, additionalProperties: false };
-  if (judgeAfterBound(schema) > JUDGE_MAX_AFTER_BYTES) {
+  // An HTML field is bounded by its own maxLength (JUDGE_MAX_HTML); the other fields together by
+  // the byte bound, as before.
+  const plain: ExtractSchema = { ...schema, properties: Object.fromEntries(Object.entries(properties).filter(([n]) => opts.htmlFields?.includes(n) !== true)) };
+  // Every HTML field together: one call's output cap (JUDGE_HTML_OUTPUT_CAP) is measured for one
+  // description of the longest length, not two (WooCommerce has two HTML fields).
+  const html = Object.entries(properties).filter(([n]) => opts.htmlFields?.includes(n) === true)
+    .reduce((sum, [, p]) => sum + (p.type !== 'string' ? 0 : p.enum ? Math.max(...p.enum.map((e) => [...e].length)) : p.maxLength ?? 0), 0);
+  if (html > JUDGE_MAX_HTML) {
+    throw new BulkSourceError(`judge.schema: the HTML fields together may ask for at most ${String(JUDGE_MAX_HTML)} characters; lower their maxLength values or shorten their choices.`);
+  }
+  if (judgeAfterBound(plain) > JUDGE_MAX_AFTER_BYTES) {
     throw new BulkSourceError('judge.schema allows a verdict larger than a bulk target may hold: lower the maxLength values.');
   }
   const tierRaw = input['tier'];
   const tier = tierRaw === undefined ? 'fast' : normalizeTier(typeof tierRaw === 'string' ? tierRaw : '');
   if (tier === undefined) throw new BulkSourceError('judge.tier must be fast, balanced or deep.');
-  return { rule, schema, tier };
+  const context = normalizeContext(input['context'], names, opts.idField, opts.contextFields);
+  // Left out, never `undefined`: `canonicalJson` writes an undefined key as null, and the rule's
+  // hash would change for every rule planned without a context.
+  return { rule, schema, tier, verdict: 'envelope', ...(context !== undefined ? { context } : {}) };
+}
+
+/** The schema the judge's call is bound by: the rule's own over F, or around it the envelope
+ *  `{ keep, after }`. `after` keeps F's `required` and `additionalProperties: false`, so a verdict
+ *  that changes a target names every field of F and no other; only `keep` is required, because
+ *  a kept target needs no `after` (a missing one on `keep: false` is refused after the call). */
+export function judgeCallSchema(rule: Pick<JudgeRule, 'schema' | 'verdict'>): ExtractSchema {
+  if (rule.verdict !== 'envelope') return rule.schema;
+  return {
+    type: 'object',
+    properties: {
+      keep: { type: 'boolean' },
+      after: { type: 'object', properties: rule.schema.properties, required: rule.schema.required ?? [], additionalProperties: false },
+    },
+    required: ['keep'],
+    additionalProperties: false,
+  };
 }
 
 /**
@@ -187,6 +296,9 @@ export function judgeAfterBound(schema: ExtractSchema): number {
       case 'boolean':
         bytes += 5;
         break;
+      case 'object':
+        bytes += judgeAfterBound(prop as unknown as ExtractSchema);
+        break;
       default:
         bytes += NUMBER_BYTES;
     }
@@ -197,11 +309,24 @@ export function judgeAfterBound(schema: ExtractSchema): number {
 /**
  * Output tokens a verdict call may take: the verdict's byte bound plus room for the tool call
  * around it — a token is at least one byte, so this is never too few below the cap — and at most
- * 8000. A reply cut off anyway is refused (`refuseCutOff`), never recorded: the bound decides
+ * 8000, or {@link JUDGE_HTML_OUTPUT_CAP} for a schema with a text field longer than
+ * {@link JUDGE_MAX_STRING}, which only an HTML field may be. A reply cut off anyway is refused (`refuseCutOff`), never recorded: the bound decides
  * how useful a large schema is, not whether a verdict is whole. A judge model that thinks before
  * it answers gets room on top (`judgeOutputBudget`); the call and the run's worst-case cost check
  * count that budget.
  */
 export function judgeMaxOutputTokens(schema: ExtractSchema): number {
-  return Math.min(8_000, Math.max(256, judgeAfterBound(schema) + 128));
+  return Math.min(judgeOutputCap(schema), Math.max(256, judgeAfterBound(schema) + 128));
 }
+
+/** The output cap of a verdict call: {@link JUDGE_HTML_OUTPUT_CAP} for a schema with a text field
+ *  longer than {@link JUDGE_MAX_STRING} — only an HTML field may be (`normalizeJudgeRule`) — and
+ *  8,000 otherwise (PRD shopify-preset §21.4 item 10). */
+function judgeOutputCap(schema: ExtractSchema): number {
+  const long = Object.values(schema.properties).some((p) => p.type === 'string' && (p.maxLength ?? 0) > JUDGE_MAX_STRING
+    || p.type === 'object' && judgeOutputCap(p as unknown as ExtractSchema) === JUDGE_HTML_OUTPUT_CAP);
+  return long ? JUDGE_HTML_OUTPUT_CAP : 8_000;
+}
+
+/** Output tokens a verdict call with an HTML field may take. */
+export const JUDGE_HTML_OUTPUT_CAP = 16_000;

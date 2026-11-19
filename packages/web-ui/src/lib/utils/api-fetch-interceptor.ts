@@ -11,7 +11,7 @@
 // stack a new wrapper on top of the already-wrapped fetch on every
 // change. The sentinel lives on `window` and survives HMR.
 
-import { markSessionExpired } from '../stores/session.svelte.js';
+import { markMandateMemoryBlocked, markSessionExpired } from '../stores/session.svelte.js';
 
 // Routes that legitimately 401 while the session is fine — wrong creds
 // during login, unauth check before login, etc. Triggering the
@@ -38,7 +38,14 @@ export function installApiFetchInterceptor(): void {
 					? args[0].href
 					: (args[0] as Request).url;
 			if (url.includes('/api/') && !AUTH_HANDSHAKE_PATHS.some(p => url.includes(p))) {
-				if (response.status === 401 || await endsTheSession(response)) markSessionExpired();
+				if (response.status === 401) {
+					markSessionExpired();
+				} else {
+					const code = await refusalCode(response);
+					if (code === 'mandate_revoked') markSessionExpired();
+					else if (code === 'mandate_memory_off') markMandateMemoryBlocked('off');
+					else if (code === 'mandate_memory_missing') markMandateMemoryBlocked('missing');
+				}
 			}
 		}
 		return response;
@@ -46,16 +53,18 @@ export function installApiFetchInterceptor(): void {
 }
 
 /**
- * Whether a 403 ends the session: the engine refuses a request of a delegated access that has
- * ended with `code: 'mandate_revoked'`. Every other 403 is a state of the view that got it
- * (a managed instance, an owner-only action) and stays the view's to show. Reads a clone,
- * so the caller still gets the whole body.
+ * The code of a 403 that is about the session, not the view: `mandate_revoked` (a delegated
+ * access that has ended) and `mandate_memory_off`/`_missing` (a delegated access this instance
+ * cannot let in while it runs without durable knowledge). Every other 403 is a state of the
+ * view that got it (a managed instance, an owner-only action) and stays the view's to show.
+ * Reads a clone, so the caller still gets the whole body.
  */
-async function endsTheSession(response: Response): Promise<boolean> {
+async function refusalCode(response: Response): Promise<string | null> {
 	try {
 		const body: unknown = await response.clone().json();
-		return typeof body === 'object' && body !== null && (body as { code?: unknown }).code === 'mandate_revoked';
+		const code = typeof body === 'object' && body !== null ? (body as { code?: unknown }).code : undefined;
+		return typeof code === 'string' ? code : null;
 	} catch {
-		return false;
+		return null;
 	}
 }

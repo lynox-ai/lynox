@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { evictSavedArtifactBodies, restoreEvictedBodies, containsEvictionMarker, isSuccessfulSaveResult, EVICTION_MIN_CHARS, EVICTION_NOTE, LEGACY_EVICTION_NOTE } from './artifact-eviction.js';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 
 const BIG = 'x'.repeat(EVICTION_MIN_CHARS + 1);
 
@@ -279,7 +280,7 @@ describe('contract with the real artifact_save handler', () => {
   // cannot catch that).
   async function runRealSave(input: Record<string, unknown>, store: unknown): Promise<string> {
     const { artifactSaveTool } = await import('../tools/builtin/artifact.js');
-    const agent = { toolContext: { artifactStore: store } } as never;
+    const agent = { principal: OWNER_PRINCIPAL, toolContext: { artifactStore: store } } as never;
     return artifactSaveTool.handler(input as never, agent);
   }
 

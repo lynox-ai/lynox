@@ -22,7 +22,7 @@ describe('push subscription and the end of a grant (real engine)', () => {
   let api: LynoxHTTPApi;
   let dir: string;
   const saved: Record<string, string | undefined> = {};
-  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE'];
+  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE', 'LYNOX_DURABLE_MEMORY_ENABLED'];
 
   const pushOf = (): WebPushNotificationChannel => {
     const p = (api as unknown as { pushChannel: WebPushNotificationChannel | null }).pushChannel;
@@ -42,6 +42,8 @@ describe('push subscription and the end of a grant (real engine)', () => {
     process.env['LYNOX_HTTP_SECRET'] = SECRET;
     process.env['LYNOX_ALLOW_PLAIN_HTTP'] = 'true';
     process.env['LYNOX_VAULT_KEY'] = `v-${randomBytes(12).toString('hex')}`;
+    // A mandate is let in only on the durable memory tools (660a-2), as on the fleet.
+    process.env['LYNOX_DURABLE_MEMORY_ENABLED'] = 'true';
     delete process.env['LYNOX_BILLING_TIER'];
     delete process.env['LYNOX_MANAGED_MODE'];
     reloadConfig();

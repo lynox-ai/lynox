@@ -10,6 +10,7 @@ import type { IAgent, MemoryScopeRef } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import type { RequestPrincipal } from '../../core/request-principal.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 let sharedTaskManager: TaskManager | null = null;
 let sharedHistory: RunHistory | null = null;
@@ -20,6 +21,8 @@ function makeAgent(scopes?: MemoryScopeRef[], principal: RequestPrincipal = OWNE
   // The workflow lookup `task_create` performs reads engine.db through the run
   // history, the way the WorkerLoop does.
   ctx.runHistory = sharedHistory;
+  // A mandate's writes leave rows in the actor trail and are refused without one.
+  ctx.auditLog = testAuditLog().log;
   return {
     name: 'test',
     model: 'claude-haiku-4-5-20251001',
@@ -59,7 +62,7 @@ describe('Task Tools', () => {
   describe('task_create', () => {
     it('should create a task', async () => {
       const result = await taskCreateTool.handler({ title: 'New task' }, makeAgent());
-      expect(result).toContain('Task created');
+      expect(result).toContain('Created: ');
       expect(result).toContain('New task');
     });
 
@@ -69,7 +72,7 @@ describe('Task Tools', () => {
         { title: 'Client work', scope: 'context:acme', priority: 'high' },
         agent,
       );
-      expect(result).toContain('Task created');
+      expect(result).toContain('Created: ');
       expect(result).toContain('HIGH');
     });
 
@@ -78,7 +81,7 @@ describe('Task Tools', () => {
         { title: 'Agent task', assignee: 'lynox' },
         makeAgent(),
       );
-      expect(result).toContain('Task created');
+      expect(result).toContain('Created: ');
       expect(result).toContain('@lynox');
     });
 
@@ -117,7 +120,7 @@ describe('Task Tools', () => {
         { title: 'Reply to client', description: 'send the report to john@acme.com', assignee: 'user', due_date: '2026-08-01' },
         makeAgent(),
       );
-      expect(result).toContain('Task created');
+      expect(result).toContain('Created: ');
     });
 
     it('should return error when manager not set', async () => {
@@ -143,7 +146,7 @@ describe('Task Tools', () => {
       expect(result).toMatch(/Error/);
       expect(result).toMatch(/description/i);
       expect(result).toMatch(/schedule|priority|assignee/i);
-      expect(result).not.toContain('Task created');
+      expect(result).not.toContain('Created: ');
       expect(result).not.toContain('Scheduled task');
     });
 
@@ -155,7 +158,18 @@ describe('Task Tools', () => {
         },
         makeAgent(),
       );
-      expect(result).toContain('Task created');
+      expect(result).toContain('Created: ');
+    });
+
+    it('does not create a watch whose address a server may read as a write', async () => {
+      const created = vi.spyOn(tm, 'createWatch');
+      for (const watch_url of ['https://example.com/items/5?_method=DELETE', 'https://example.com/items/5?x=1;_method=DELETE', 'https://example.com/items/5?_method=FROB', 'https://example.com/graphql?query=mutation%7BdeleteAll%7D']) {
+        const result = await taskCreateTool.handler({ title: 'Watch', watch_url }, makeAgent());
+        expect(result).toBe('Error: watch_url carries a method override (such as `_method=DELETE`) or a GraphQL mutation, which a server may run as a write instead of showing a page. No watch was created. Pass the address of the page without the override or the mutation.');
+      }
+      expect(created, 'no watch was stored').not.toHaveBeenCalled();
+      // Control: an ordinary query is watched.
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'https://example.com/items?page=2' }, makeAgent())).toContain('Watch task created');
     });
 
     it('floors a too-small watch interval at 5 minutes', async () => {
@@ -184,7 +198,7 @@ describe('Task Tools', () => {
         taskCreateTool.handler({ title: 'Sofort', assignee: 'lynox' }, makeAgent()),
       ]);
       for (const report of reports) {
-        expect(report, report).toMatch(/confirm it in Triggers/);
+        expect(report, report).toMatch(/confirm it under Automation › Triggers\./);
       }
       // …and the watch no longer claims to be watching already.
       expect(reports[0]).not.toMatch(/— watching /);
@@ -199,7 +213,36 @@ describe('Task Tools', () => {
         { title: 'Rückruf', assignee: 'rafael', due_date: '2027-01-01' },
         makeAgent(),
       );
-      expect(todo).not.toMatch(/confirm it in Triggers/);
+      expect(todo).not.toMatch(/confirm it under Automation › Triggers\./);
+    });
+
+    it('says where the row stands, read off the row and not the branch that made it', async () => {
+      // A to-do for a person stands under Tasks; a to-do for lynox becomes a trigger
+      // (`createsTrigger`) and is held back, so its consent sentence names Triggers.
+      const todo = await taskCreateTool.handler({ title: 'Rückruf', assignee: 'anna' }, makeAgent());
+      expect(todo).toMatch(/^Created: \[MEDIUM\] \S+ Rückruf @anna \[open\]\. It is listed under Automation › Tasks\.$/);
+      const forLynox = await taskCreateTool.handler({ title: 'Sofort', assignee: 'lynox' }, makeAgent());
+      expect(forLynox).toMatch(/^Created: .*\[open\] — it runs once you confirm it under Automation › Triggers\.$/m);
+      expect(forLynox).not.toContain('Automation › Tasks');
+      // A trigger that waits for no consent (a confirmed workflow's schedule) is listed under Triggers.
+      history.insertPlannedPipeline({
+        id: 'wf-where', name: 'Where', goal: 'report', steps: [],
+        reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
+      }, null);
+      history.setWorkflowConfirmedAt('wf-where', '2026-07-01T00:00:00.000Z');
+      const wf = await taskCreateTool.handler({ title: 'Where', assignee: 'lynox', workflow_id: 'wf-where', schedule: '0 9 * * 1' }, makeAgent());
+      expect(wf).toMatch(/\(schedule: 0 9 \* \* 1\)\. It is listed under Automation › Triggers\./);
+    });
+
+    it('tells a mandate\'s session that the owner confirms, not the person it works for', async () => {
+      const mandate: RequestPrincipal = { kind: 'mandate', email: 'helper@example.org', mandateId: 'grant-1' };
+      const report = await taskCreateTool.handler({ title: 'Wochenbericht', schedule: '0 7 * * 1' }, makeAgent(undefined, mandate));
+      expect(report).toContain(' — it runs only after the owner of this lynox confirms it under Automation › Triggers. The person in this chat has delegated access and cannot confirm it: tell them the owner has to.');
+      expect(report).not.toContain('once you confirm');
+      // …and the owner's own session keeps its sentence.
+      const own = await taskCreateTool.handler({ title: 'Wochenbericht', schedule: '0 7 * * 1' }, makeAgent());
+      expect(own).toContain(' — it runs once you confirm it under Automation › Triggers.');
+      expect(own).not.toContain('delegated access');
     });
 
     it('keeps a watch interval that is already above the floor', async () => {
@@ -218,7 +261,7 @@ describe('Task Tools', () => {
         },
         makeAgent(),
       );
-      expect(result).toContain('Task created');
+      expect(result).toContain('Created: ');
     });
 
     it('should still create real scheduled tasks via schedule parameter', async () => {
@@ -246,7 +289,7 @@ describe('Task Tools', () => {
       expect(result).toMatch(/Error/);
       expect(result).toMatch(/title/i);
       expect(result).toMatch(/schedule|priority/i);
-      expect(result).not.toContain('Task created');
+      expect(result).not.toContain('Created: ');
     });
 
     // Review nit: `tags` smuggles as `","tags":[...]` (array, not string value).
@@ -260,7 +303,7 @@ describe('Task Tools', () => {
       );
       expect(result).toMatch(/Error/);
       expect(result).toMatch(/tags/i);
-      expect(result).not.toContain('Task created');
+      expect(result).not.toContain('Created: ');
     });
 
     // Review nit: whitespace variants (`", "schedule" : "`) — regex uses `\s*`
@@ -275,7 +318,7 @@ describe('Task Tools', () => {
       );
       expect(result).toMatch(/Error/);
       expect(result).toMatch(/schedule/i);
-      expect(result).not.toContain('Task created');
+      expect(result).not.toContain('Created: ');
     });
 
     // Review concern: array-with-bracket value-side could over-match. Verify
@@ -288,7 +331,7 @@ describe('Task Tools', () => {
         },
         makeAgent(),
       );
-      expect(result).toContain('Task created');
+      expect(result).toContain('Created: ');
     });
 
     it('should schedule a one-shot future task via run_at', async () => {
@@ -383,6 +426,61 @@ describe('Task Tools', () => {
       expect(byTitle['From a clean turn']).toBeUndefined();
     });
 
+    // Each kind its own case, so the mark missing from one branch shows as that branch.
+    it.each([
+      ['cron', { schedule: '0 9 * * *' }],
+      ['watch', { watch_url: 'https://watched.example/page' }],
+      ['one-shot', { run_at: '2099-01-01T09:00:00' }],
+      // assignee lynox without a schedule: the manager files it as a manual trigger that runs now.
+      ['manual', {}],
+    ] as const)('marks a %s trigger a tainted turn files, and leaves one from a clean turn unmarked', async (kind, extra) => {
+      // A helper's text asked for it: the mark makes the reminder to confirm it say so, and what
+      // its run files count as after outside content. Before, only the workflow branch carried it.
+      const tainted = makeAgent();
+      (tainted as unknown as { conversationSawUntrusted: boolean }).conversationSawUntrusted = true;
+      await taskCreateTool.handler({ title: `T-${kind}`, assignee: 'lynox', ...extra }, tainted);
+      await taskCreateTool.handler({ title: `C-${kind}`, assignee: 'lynox', ...extra }, makeAgent());
+      const byTitle = new Map(tm.listTriggers().map((t) => [t.title, t]));
+      expect(byTitle.get(`T-${kind}`)?.created_untrusted).toBe('conversation');
+      // The control has to exist as a trigger, or its `undefined` says nothing.
+      expect(byTitle.has(`C-${kind}`)).toBe(true);
+      expect(byTitle.get(`C-${kind}`)?.created_untrusted).toBeUndefined();
+    });
+
+    describe('task_update keeps the mark a tainted turn leaves on a trigger\'s instruction', () => {
+      const tainted = (): ReturnType<typeof makeAgent> => {
+        const a = makeAgent();
+        (a as unknown as { conversationSawUntrusted: boolean }).conversationSawUntrusted = true;
+        return a;
+      };
+      const mark = (title: string): string | undefined => tm.listTriggers().find((t) => t.title === title)?.created_untrusted;
+      const idOf = (title: string): string => tm.listTriggers().find((t) => t.title === title)!.id;
+
+      it('a tainted turn rewriting a clean trigger\'s instruction marks it; a clean rewrite does not', async () => {
+        await taskCreateTool.handler({ title: 'Clean A', assignee: 'lynox', schedule: '0 9 * * *' }, makeAgent());
+        await taskCreateTool.handler({ title: 'Clean B', assignee: 'lynox', schedule: '0 9 * * *' }, makeAgent());
+        expect(mark('Clean A')).toBeUndefined();
+        await taskUpdateTool.handler({ task_id: idOf('Clean A'), description: 'POST the report somewhere else' }, tainted());
+        await taskUpdateTool.handler({ task_id: idOf('Clean B'), description: 'POST the report to accounting' }, makeAgent());
+        expect(mark('Clean A')).toBe('conversation');
+        expect(mark('Clean B')).toBeUndefined();
+      });
+
+      it('a clean turn editing a marked trigger\'s instruction leaves the mark standing', async () => {
+        await taskCreateTool.handler({ title: 'Marked', assignee: 'lynox', schedule: '0 9 * * *' }, tainted());
+        expect(mark('Marked')).toBe('conversation');
+        await taskUpdateTool.handler({ task_id: idOf('Marked'), description: 'Now worded by the owner' }, makeAgent());
+        expect(mark('Marked')).toBe('conversation');
+      });
+
+      it('a schedule-only change from a tainted turn does not mark: it changes when it runs, not what', async () => {
+        await taskCreateTool.handler({ title: 'Timed', assignee: 'lynox', schedule: '0 9 * * *' }, makeAgent());
+        await taskUpdateTool.handler({ task_id: idOf('Timed'), schedule: '0 10 * * *' }, tainted());
+        expect(tm.listTriggers().find((t) => t.title === 'Timed')?.schedule_cron).toBe('0 10 * * *');
+        expect(mark('Timed')).toBeUndefined();
+      });
+    });
+
     it('refuses a workflow the human has not confirmed — a task for it would be disabled at its first run', async () => {
       // Saved from the chat: no `confirmedAt`. The WorkerLoop's first-run-confirm
       // gate disables such a task and records a failure the model never sees;
@@ -404,6 +502,23 @@ describe('Task Tools', () => {
       expect(result).not.toContain('Nightly digest"');
       expect(result).not.toContain('next run');
       expect(tm.listTriggers().find((t) => t.title === 'Nightly digest')).toBeUndefined();
+    });
+
+    it('refuses a workflow whose stamp no longer holds over its steps, and points to the stamp, not to scheduling again', async () => {
+      // A `confirmedAt` without a digest over these steps (a raw write, a restored file): the
+      // owner's stamp does not hold, and the workflow waits for the owner to review it.
+      history.insertPlannedPipeline({
+        id: 'wf-changed', name: 'Changed', goal: 'g', steps: [{ id: 's1', task: 'post' }],
+        reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
+        confirmedAt: '2026-07-02T00:00:00.000Z',
+      } as Parameters<typeof history.insertPlannedPipeline>[0], null);
+      const result = await taskCreateTool.handler(
+        { title: 'Changed', assignee: 'lynox', workflow_id: 'wf-changed', schedule: '0 2 * * *' },
+        makeAgent(),
+      );
+      expect(result).toMatch(/^Error: workflow wf-changed waits for its owner to review its steps/);
+      expect(result).toContain('Automation → Workflows');
+      expect(tm.listTriggers().find((t) => t.title === 'Changed')).toBeUndefined();
     });
 
     it('refuses an interactive workflow before it ever reaches the confirmation advice', async () => {
@@ -640,6 +755,22 @@ describe('Task Tools', () => {
       expect(due(t.id)).toBe(false);
     });
 
+    it('tells a mandate that its schedule of a workflow waits for the owner, whatever the effect', async () => {
+      // The worker holds back any row a mandate created until the owner stamps it
+      // (`mandateNeedsOwnerStamp`), not only an agent run: the report says so for a workflow too.
+      history.insertPlannedPipeline({
+        id: 'wf-held', name: 'Held', goal: 'report', steps: [],
+        reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
+      }, null);
+      history.setWorkflowConfirmedAt('wf-held', '2026-07-01T00:00:00.000Z');
+      const report = await taskCreateTool.handler({ title: 'Weekly workflow', assignee: 'lynox', workflow_id: 'wf-held', schedule: '0 9 * * 1' }, makeAgent(undefined, mandate));
+      const t = tm.listTriggers({}).find((x) => x.title === 'Weekly workflow')!;
+      expect(t.effect).toBe('run_workflow');
+      expect(due(t.id)).toBe(false);
+      expect(report).toContain('The person in this chat has delegated access and cannot confirm it');
+      expect(report).not.toContain('It is listed under');
+    });
+
     it('control: the owner\'s task_update keeps the stamp, and the schedule stays due', async () => {
       const t = tm.create({ title: 'Daily notice', taskType: 'scheduled', assignee: 'lynox', nextRunAt: '2020-01-01T00:00:00.000Z', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: 'owner' });
       await taskUpdateTool.handler({ task_id: t.id, priority: 'high' }, makeAgent());
@@ -657,9 +788,104 @@ describe('Task Tools', () => {
 
     // To-dos: a mandate's turn reaches only those it created — see 'a mandate's turn and its
     // to-dos' below, which runs with the to-do reads on either store.
+    it('task_create schedules only the mandate\'s own workflows and the owner\'s', async () => {
+      const other: RequestPrincipal = { kind: 'mandate', email: 'second@example.org', mandateId: 'grant-9' };
+      // The same address under a renewed grant is the same mandate.
+      const renewed: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org', mandateId: 'grant-2' };
+      const save = (id: string, by: RequestPrincipal | null): void => {
+        history.insertPlannedPipeline({
+          id, name: id, goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
+        }, by);
+        history.setWorkflowConfirmedAt(id, '2026-07-01T00:00:00.000Z');
+      };
+      save('wf-other', other);
+      save('wf-own', renewed);
+      save('wf-owner', null);
+      save('wf-taken', renewed);
+      save('wf-taken', other);
+      const schedule = (id: string, by: RequestPrincipal): Promise<string> =>
+        taskCreateTool.handler({ title: `On ${id}`, assignee: 'lynox', workflow_id: id, schedule: '0 9 * * 1' }, makeAgent(undefined, by));
+      const scheduled = (id: string): boolean => tm.listTriggers({}).some((x) => x.pipeline_id === id);
+
+      expect(await schedule('wf-other', mandate)).toMatch(/^Error: workflow wf-other: Not scheduled: this workflow holds steps another person with delegated access/);
+      expect(await schedule('wf-taken', mandate)).toMatch(/^Error: workflow wf-taken: Not scheduled/);
+      expect(scheduled('wf-other')).toBe(false);
+      expect(scheduled('wf-taken')).toBe(false);
+      expect(await schedule('wf-own', mandate)).toContain('Workflow task created');
+      expect(await schedule('wf-owner', mandate)).toContain('Workflow task created');
+      // The owner schedules any workflow.
+      expect(await schedule('wf-other', OWNER_PRINCIPAL)).toContain('Workflow task created');
+      expect(scheduled('wf-other')).toBe(true);
+    });
+
+    // What the refusal advises (ux U-085): a newly written workflow is the mandate's own; a copy of
+    // the other's carries its mark and is refused like it; a change makes it the mandate's own,
+    // which is why the text advises against it rather than calling it a dead end.
+    it('task_create: a new workflow is the mandate\'s, a copy of another\'s is not, a change makes it its own', async () => {
+      const other: RequestPrincipal = { kind: 'mandate', email: 'second@example.org', mandateId: 'grant-9' };
+      const wf = (id: string) => ({ id, name: id, goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true });
+      const save = (id: string, by: RequestPrincipal | null, copiedFrom?: string): void => {
+        history.insertPlannedPipeline(wf(id), by, copiedFrom);
+        history.setWorkflowConfirmedAt(id, '2026-07-01T00:00:00.000Z');
+      };
+      save('wf-theirs', other);
+      save('wf-written', mandate);
+      save('wf-copied', mandate, 'wf-theirs');
+      save('wf-changed', other);
+      save('wf-changed', mandate);
+      const schedule = (id: string): Promise<string> =>
+        taskCreateTool.handler({ title: `On ${id}`, assignee: 'lynox', workflow_id: id, schedule: '0 9 * * 1' }, makeAgent(undefined, mandate));
+      expect(await schedule('wf-written')).toContain('Workflow task created');
+      expect(await schedule('wf-copied')).toMatch(/^Error: workflow wf-copied: Not scheduled: this workflow holds steps/);
+      expect(await schedule('wf-changed')).toContain('Workflow task created');
+      expect(await schedule('wf-theirs')).toMatch(/^Error: workflow wf-theirs: Not scheduled/);
+    });
+
+    it('task_create schedules the workflow it checked, not another one a prefix also names', async () => {
+      const save = (id: string): void => {
+        history.insertPlannedPipeline({ id, name: id, goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true }, mandate);
+        history.setWorkflowConfirmedAt(id, '2026-07-01T00:00:00.000Z');
+      };
+      save('wf-dup-1');
+      save('wf-dup-2');
+      const { getPipeline } = await import('./pipeline.js');
+      const checked = getPipeline('wf-dup', history)!.id;
+      expect(await taskCreateTool.handler({ title: 'Dup', assignee: 'lynox', workflow_id: 'wf-dup', schedule: '0 9 * * 1' }, makeAgent(undefined, mandate))).toContain('Workflow task created');
+      expect(tm.listTriggers({}).find((x) => x.title === 'Dup')!.pipeline_id).toBe(checked);
+    });
+
+    it('task_create refuses a mandate a workflow it cannot find, and lets the owner through to the worker', async () => {
+      expect(await taskCreateTool.handler({ title: 'Ghost', assignee: 'lynox', workflow_id: 'wf-nowhere', schedule: '0 9 * * 1' }, makeAgent(undefined, mandate)))
+        .toMatch(/^Error: workflow wf-nowhere: Not scheduled: lynox found no saved workflow with this id/);
+      expect(tm.listTriggers({}).some((x) => x.title === 'Ghost')).toBe(false);
+      expect(await taskCreateTool.handler({ title: 'Ghost', assignee: 'lynox', workflow_id: 'wf-nowhere', schedule: '0 9 * * 1' }, makeAgent())).toContain('Workflow task created');
+    });
+
+    it('task_create schedules the workflow its exact id names, not a longer one that starts with it', async () => {
+      const save = (id: string, by: RequestPrincipal | null): void => {
+        history.insertPlannedPipeline({ id, name: id, goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true }, by);
+        history.setWorkflowConfirmedAt(id, '2026-07-01T00:00:00.000Z');
+      };
+      // The longer id first, so a lookup in insertion order meets it before the exact one.
+      save('wf-exact-1x', { kind: 'mandate', email: 'second@example.org', mandateId: 'grant-9' });
+      save('wf-exact-1', mandate);
+      // The longer one in the process cache too, as an earlier lookup leaves it.
+      const { getPipeline } = await import('./pipeline.js');
+      expect(getPipeline('wf-exact-1x', history)?.id).toBe('wf-exact-1x');
+      expect(await taskCreateTool.handler({ title: 'Exact', assignee: 'lynox', workflow_id: 'wf-exact-1', schedule: '0 9 * * 1' }, makeAgent(undefined, mandate))).toContain('Workflow task created');
+      expect(tm.listTriggers({}).find((x) => x.title === 'Exact')!.pipeline_id).toBe('wf-exact-1');
+    });
+
+    it('task_create tells a mandate a stored workflow it cannot read apart from a missing one', async () => {
+      history.insertPlannedPipeline({ id: 'wf-garbled', name: 'g', goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true }, mandate);
+      engine.getDb().prepare("UPDATE workflows SET definition_json = '{' WHERE id = 'wf-garbled'").run();
+      expect(await taskCreateTool.handler({ title: 'Garbled', assignee: 'lynox', workflow_id: 'wf-garbled', schedule: '0 9 * * 1' }, makeAgent(undefined, mandate)))
+        .toMatch(/^Error: workflow wf-garbled: Not scheduled: lynox could not read who set up this workflow/);
+    });
+
     it('control: a mandate\'s task_create assigned to lynox makes a schedule', async () => {
       const result = await taskCreateTool.handler({ title: 'Mandate run', assignee: 'lynox' }, makeAgent(undefined, mandate));
-      expect(result).toMatch(/^Task created: /);
+      expect(result).toMatch(/^Created: /);
       expect(tm.listTriggers({}).some((x) => x.title === 'Mandate run')).toBe(true);
     });
   });
@@ -683,13 +909,13 @@ describe('Task Tools', () => {
       // promise the create path carried.
       const trigger = tm.createScheduled({ title: 'Bericht', scheduleCron: '0 9 * * 1', confirmedAt: new Date().toISOString() });
       const before = await taskUpdateTool.handler({ task_id: trigger.id, status: 'in_progress' }, makeAgent());
-      expect(before).not.toMatch(/confirm it in Triggers/);
+      expect(before).not.toMatch(/confirm it under Automation › Triggers\./);
 
       const after = await taskUpdateTool.handler(
         { task_id: trigger.id, description: 'Jetzt mit Vorjahresvergleich.' },
         makeAgent(),
       );
-      expect(after).toMatch(/confirm it in Triggers/);
+      expect(after).toMatch(/confirm it under Automation › Triggers\./);
     });
 
     // The create path's injection scan, on the edit of a trigger that already exists: the
@@ -1581,7 +1807,7 @@ describe.each([false, true])('a mandate\'s turn and its to-dos (subject graph %s
 
   it('task_create by a mandate makes a to-do recorded under its name', async () => {
     const result = await taskCreateTool.handler({ title: 'Mandate to-do' }, makeAgent(undefined, mandate));
-    expect(result).toMatch(/^Task created: /);
+    expect(result).toMatch(/^Created: /);
     const t = tm.list({}).find((x) => x.title === 'Mandate to-do')!;
     expect(t.created_by).toBe(TAG);
   });

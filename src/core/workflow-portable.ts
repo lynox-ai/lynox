@@ -226,6 +226,7 @@ const EnvelopeSchema = z.object({
   workflow: z.object({}).passthrough(),
 });
 
+/** The methods a portable contract may name, the same six the `http_request` schema offers; which of them only read is answered by `isReadMethod` (core/outbound-write.ts), never by this list. */
 const HTTP_METHOD_VALUES = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'] as const;
 
 /** Best-effort shape of an inbound contract — parsed for the consent render only

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
+import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 // `svelte` resolves to its server entry under node, where `mount` throws. The views are compiled
 // for the client, so they are mounted with the client entry, loaded by path.
@@ -19,6 +20,7 @@ let component: Record<string, unknown> | undefined;
 let putReply: { status: number; body: Record<string, unknown> };
 
 beforeEach(async () => {
+	resetSettingsViewer();
 	(await import('../i18n.svelte.js')).setLocale('en');
 	target = document.createElement('div');
 	document.body.appendChild(target);
@@ -124,6 +126,8 @@ describe('the API profiles view', () => {
 	it('gives the connection form to the profiles on a built-in provider, each with its own id', async () => {
 		const profile = (id: string, auth: unknown) => ({ id, name: `Profile ${id}`, base_url: 'https://api.example', description: 'd', auth });
 		vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+			// The owner's session: the connection form is the owner's.
+			if (String(url).endsWith('/config')) return new Response(JSON.stringify({ viewer: 'owner' }), { status: 200 });
 			if (String(url).endsWith('/api-profiles')) {
 				return new Response(JSON.stringify({ profiles: [
 					profile('shop-admin', { type: 'oauth2', oauth: { preset_id: 'shopify' } }),

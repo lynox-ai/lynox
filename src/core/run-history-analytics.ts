@@ -122,7 +122,14 @@ export function getToolStats(db: Database.Database, contextId: string, days: num
   }>;
 }
 
-export function getPipelineStepStats(db: Database.Database, days: number): Array<{
+/**
+ * Workflow runs started from these chats are left out (register 1118): a run's name and step ids
+ * are written by the chat that started it, so a reader who may not read that chat does not get
+ * them here either. As a JSON array, so the list is one parameter whatever its length.
+ */
+const notFromChats = (col: string): string => `(${col} IS NULL OR ${col} NOT IN (SELECT value FROM json_each(?)))`;
+
+export function getPipelineStepStats(db: Database.Database, days: number, hiddenChats: readonly string[] = []): Array<{
   step_id: string; manifest_name: string; avg_duration_ms: number;
   total_runs: number; fail_count: number; avg_cost_usd: number;
 }> {
@@ -139,14 +146,15 @@ export function getPipelineStepStats(db: Database.Database, days: number): Array
       -- getPipelineCostStats. This view GROUPs BY manifest_name, so a nested
       -- sub-pipeline (parent_run_id set) would add synthetic step-sub buckets.
       AND pr.parent_run_id IS NULL
+      AND ${notFromChats('pr.origin_thread_id')}
     GROUP BY psr.step_id, pr.manifest_name
-  `).all(`-${days} days`) as Array<{
+  `).all(`-${days} days`, JSON.stringify(hiddenChats)) as Array<{
     step_id: string; manifest_name: string; avg_duration_ms: number;
     total_runs: number; fail_count: number; avg_cost_usd: number;
   }>;
 }
 
-export function getPipelineCostStats(db: Database.Database, days: number): Array<{
+export function getPipelineCostStats(db: Database.Database, days: number, hiddenChats: readonly string[] = []): Array<{
   manifest_name: string; run_count: number; avg_cost_usd: number;
   total_cost_usd: number; avg_duration_ms: number;
 }> {
@@ -174,8 +182,9 @@ export function getPipelineCostStats(db: Database.Database, days: number): Array
       -- is a step-sub child, not a workflow the user ran; counting it would add
       -- a synthetic per-manifest bucket. Matches getRecentPipelineRuns.
       AND parent_run_id IS NULL
+      AND ${notFromChats('origin_thread_id')}
     GROUP BY manifest_name
-  `).all(`-${days} days`) as Array<{
+  `).all(`-${days} days`, JSON.stringify(hiddenChats)) as Array<{
     manifest_name: string; run_count: number; avg_cost_usd: number;
     total_cost_usd: number; avg_duration_ms: number;
   }>;

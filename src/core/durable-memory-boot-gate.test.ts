@@ -90,6 +90,8 @@ describe('Engine boot — the durable-memory tool swap is total in both directio
     expect(engine.getKnowledgeStore(), 'durable ON + healthy engine.db must wire the store').not.toBeNull();
     for (const t of DURABLE) expect(registered, `durable tool ${t}`).toContain(t);
     for (const t of LEGACY) expect(registered, `legacy tool ${t} must be absent when durable is on`).not.toContain(t);
+    // The mandate lock reads the answer the registration took (660a-2): durable tools, no lock.
+    expect(engine.getLegacyMemoryReason()).toBeNull();
   });
 
   it('durable ON but engine.db unopenable falls back to the LEGACY tools — never to neither', async () => {
@@ -107,6 +109,8 @@ describe('Engine boot — the durable-memory tool swap is total in both directio
     // fallback from the silent no-memory state.
     for (const t of LEGACY) expect(registered, `legacy tool ${t} must be present when the store is missing`).toContain(t);
     for (const t of DURABLE) expect(registered, `durable tool ${t} must NOT be registered over a null store`).not.toContain(t);
+    // The flag is on, the legacy tools are registered: the mandate lock must see that, not the flag.
+    expect(engine.getLegacyMemoryReason()).toBe('store_missing');
   });
 
   it('durable OFF registers the legacy tools and NO durable ones', async () => {
@@ -115,5 +119,6 @@ describe('Engine boot — the durable-memory tool swap is total in both directio
 
     for (const t of LEGACY) expect(registered, `legacy tool ${t}`).toContain(t);
     for (const t of DURABLE) expect(registered, `durable tool ${t} must be absent when the flag is off`).not.toContain(t);
+    expect(engine.getLegacyMemoryReason()).toBe('dk_off');
   });
 });

@@ -56,7 +56,7 @@ export const SECRET_SHAPES: ReadonlyArray<SecretShape> = [
   { label: 'AWS access key', kind: 'vendor', pattern: credentialShape(String.raw`AKIA`, String.raw`[A-Z0-9]{16}`) },
   { label: 'Google API key', kind: 'vendor', pattern: credentialShape(String.raw`AIza`, String.raw`[A-Za-z0-9_-]{35}`) },
   { label: 'Slack token', kind: 'vendor', pattern: credentialShape(String.raw`xox[bpoasr]-`, String.raw`[A-Za-z0-9-]{10,}`) },
-  { label: 'Shopify token', kind: 'vendor', pattern: credentialShape(String.raw`shp(at|ss|pa|ca)_`, String.raw`[A-Fa-f0-9]{20,}`) },
+  { label: 'Shopify token', kind: 'vendor', pattern: credentialShape(String.raw`shp(at|ss|pa|ca|rt)_`, String.raw`[A-Za-z0-9]{20,}`) },
   { label: 'JWT token', kind: 'jwt', pattern: new LinearJwtRegExp(JWT_SHAPE) },
   { label: 'Google OAuth token', kind: 'vendor', pattern: credentialShape(String.raw`ya29\.`, String.raw`[A-Za-z0-9_-]{20,}`) },
   { label: 'private key', kind: 'key-block', pattern: /-----BEGIN\s+(?:(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)\s+)?PRIVATE\s+KEY-----/ },

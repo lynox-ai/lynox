@@ -16,7 +16,11 @@
 // use `setTimeout` chains for sub-second precision; not currently needed.
 
 import type { NotificationRouter } from '../../core/notification-router.js';
+import type { InboxItem } from '../../types/index.js';
 import type { InboxStateDb } from './state.js';
+import { FLAGGED_REMINDER_TEXT } from './notifier.js';
+import { noticeLanguage } from '../../core/notice-language.js';
+import { WORKER_NOTICES } from '../../core/worker-notices.js';
 
 export interface ReminderPollerOptions {
   state: InboxStateDb;
@@ -30,6 +34,10 @@ export interface ReminderPollerOptions {
   now?: () => number;
   /** Side-channel for tests that need to know a tick completed. */
   onTick?: (firedCount: number) => void;
+  /** The instance's configured language, read per reminder; see `notice-language.ts`. */
+  language?: (() => string | undefined) | undefined;
+  /** Whether the sensitive check flagged the item's mail: its reminder then names no subject or reason. */
+  isFlagged?: ((item: InboxItem) => boolean) | undefined;
 }
 
 export interface ReminderPoller {
@@ -54,13 +62,15 @@ export function startReminderPoller(opts: ReminderPollerOptions): ReminderPoller
     let fired = 0;
     for (const item of wakeable) {
       try {
+        const language = noticeLanguage(opts.language?.());
         await opts.router.notify({
-          title: 'Erinnerung',
+          title: WORKER_NOTICES[language].reminderTitle,
           // Subject is plaintext — but it's the user's own mail, so the
           // notification body matches what they'd see in the inbox row.
           // Pre-v13 rows with empty subject fall back to the classifier
-          // reason which is always populated.
-          body: item.subject || item.reasonDe,
+          // reason which is always populated. A flagged mail's subject stays off the lock screen,
+          // as in the inbox push.
+          body: opts.isFlagged?.(item) === true ? FLAGGED_REMINDER_TEXT[language] : item.subject || item.reasonDe,
           priority: 'normal',
         });
       } catch {

@@ -46,20 +46,24 @@ describe('the workflow cards on a narrow or touch screen', () => {
     expect(classes, 'compact again only with a mouse at md and up').toEqual(expect.arrayContaining([
       'md:[@media(hover:hover)]:min-h-0', 'md:[@media(hover:hover)]:px-2', 'md:[@media(hover:hover)]:py-0.5', 'md:[@media(hover:hover)]:text-[10px]',
     ]));
-    expect(source.match(/\{actionSize\}/g) ?? [], 'the five actions and save/cancel').toHaveLength(7);
+    expect(source.match(/\{actionSize\}/g) ?? [], 'the six actions (stamp review included) and save/cancel').toHaveLength(8);
   });
 
   it('makes the rename field as tall as its buttons on touch', () => {
     expect(source).toMatch(/aria-label=\{t\('workflow_library\.rename'\)\}\s*class="[^"]*\bmin-h-11 md:\[@media\(hover:hover\)\]:min-h-0\b/);
   });
 
-  it('hides a disabled Run with the others on a desktop at rest, and shows it dimmed on hover or card focus', () => {
-    const run = /class="([^"]*disabled:cursor-not-allowed[^"]*)"/.exec(source)?.[1].split(/\s+/) ?? [];
-    expect(run).toEqual(expect.arrayContaining([
-      'disabled:opacity-50', 'md:[@media(hover:hover)]:disabled:opacity-0', 'group-hover:disabled:opacity-50',
-      // A disabled button takes no focus, so the card's focus is what shows it to a keyboard user.
-      'group-focus-within:disabled:opacity-50',
-    ]));
+  it('hides a disabled Run, Schedule or Edit with the others on a desktop at rest, and shows it dimmed on hover or card focus', () => {
+    // Every card action that can be disabled (Run; Schedule and Edit since UX-053/058) and is revealed on hover.
+    const disabled = [...source.matchAll(/class="([^"]*\{revealOnHover\}[^"]*disabled:cursor-not-allowed[^"]*)"/g)].map((m) => m[1]!.split(/\s+/));
+    expect(disabled).toHaveLength(3);
+    for (const classes of disabled) {
+      expect(classes).toEqual(expect.arrayContaining([
+        'disabled:opacity-50', 'md:[@media(hover:hover)]:disabled:opacity-0', 'group-hover:disabled:opacity-50',
+        // A disabled button takes no focus, so the card's focus is what shows it to a keyboard user.
+        'group-focus-within:disabled:opacity-50',
+      ]));
+    }
   });
 
   it('stacks the actions under the name below md, and caps them at half the row between md and lg', () => {

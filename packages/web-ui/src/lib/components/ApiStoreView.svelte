@@ -8,17 +8,23 @@
 	import Icon from '../primitives/Icon.svelte';
 	import PresetClientForm from './PresetClientForm.svelte';
 	import { connectionLine, type ConnectionLine, type OAuthGrantView } from '../utils/oauth-connection.js';
-	import { localDay, noticeShows, noticesByProfile, revokedAt, type ProviderNotice } from '../utils/provider-revocation.js';
+	import { localDay, noticesByProfile, revocationView, type ProviderNotice } from '../utils/provider-revocation.js';
 	import { connectHref } from '../oauth-connect-path.js';
+	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 
 	interface ApiEndpoint { method: string; path: string; description: string; }
-	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; oauth_grant?: OAuthGrantView & { state?: unknown; revoked_at?: unknown }; }
+	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; oauth_grant?: OAuthGrantView & { state?: unknown; revoked_at?: unknown };
+		/** Whether this reader's connect start goes through: a mandate's only for a profile it set up. */
+		reader_may_connect?: boolean; }
 
 	// Who connected the profile and with which provider account (`utils/oauth-connection.ts`).
 	function connectionText(line: ConnectionLine): string {
 		const who = line.by.kind === 'you' ? t('apis.connected_by_you')
+			: line.by.kind === 'owner' ? t('apis.connected_by_owner')
 			: tf('apis.connected_by', { who: line.by.kind === 'helper' ? line.by.address : line.by.tag });
-		const account = line.account === null ? t('apis.account_unknown') : tf('apis.account', { account: line.account });
+		const account = line.withheld ? t('apis.account_withheld')
+			: line.account === null ? t('apis.account_unknown') : tf('apis.account', { account: line.account });
 		return `${who} · ${account}`;
 	}
 
@@ -47,6 +53,13 @@
 	// The pending erasures a provider's revocation started, by profile id. Owner-only: a mandate's
 	// page gets a refusal and shows no notice; so does any other failure.
 	let notices = $state<Map<string, ProviderNotice>>(new Map());
+	// The time the notices are read against, moved on each minute: a hold or a deadline that passes
+	// while the page is open takes the way out and the dates away without a reload.
+	let now = $state(new Date());
+	$effect(() => {
+		const timer = setInterval(() => { now = new Date(); }, 60_000);
+		return () => clearInterval(timer);
+	});
 
 	async function loadNotices() {
 		try {
@@ -82,7 +95,13 @@
 		left = [];
 		try {
 			const res = await fetch(`${getApiBase()}/api-profiles/${encodeURIComponent(profile.id)}`, { method: 'DELETE' });
-			if (!res.ok) throw new Error();
+			if (!res.ok) {
+				// An engine that started without engine.db refuses every delete; it says so with a code.
+				const body = (await res.json().catch(() => null)) as { code?: unknown } | null;
+				error = t(body?.code === 'engine_less' ? 'apis.delete_engine_less' : 'apis.delete_failed');
+				deleting = null;
+				return;
+			}
 			left = apiDeleteNotice(await res.json().catch(() => null), tf);
 			profiles = profiles.filter(p => p.id !== profile.id);
 			if (expanded === profile.id) expanded = null;
@@ -112,14 +131,21 @@
 		void goto('/app');
 	}
 
-	$effect(() => { void loadProfiles(); /* catches and sets its error */ void loadNotices(); });
+	$effect(() => { void loadProfiles(); /* catches and sets its error */ void loadNotices(); void loadSettingsViewer(); });
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
+	<ViewerUnavailableNotice />
 	<div class="flex items-center justify-between mb-4">
 		<h1 class="text-xl font-light tracking-tight">{t('apis.title')}</h1>
 		<button onclick={createInChat} class="rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">+ {t('apis.create_in_chat')}</button>
 	</div>
+
+	{#if isMandateSession()}
+		<!-- A mandate's session: it sets up profiles in chat and connects its own, but
+		     deleting a profile and entering a built-in provider's app credentials are the owner's. -->
+		<p class="mb-4 border border-border rounded p-3 text-sm text-text-muted" data-testid="apis-owner-only">{t('apis.owner_only_notice')}</p>
+	{/if}
 
 	{#if error}
 		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
@@ -130,7 +156,8 @@
 		</div>
 	{/if}
 
-	{#if importWaiting.length > 0}
+	<!-- Repairing or deleting the waiting files is the owner's; only the owner's session is asked to. -->
+	{#if importWaiting.length > 0 && isOwnerSession()}
 		<div class="rounded-[var(--radius-md)] border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning mb-4 space-y-1" role="status" data-testid="api-import-waiting">
 			<p>{t('apis.import_waiting')}</p>
 			<ul class="list-disc pl-5 space-y-1">
@@ -166,28 +193,60 @@
 							class="px-3 text-sm text-text-subtle hover:text-text hover:bg-bg-muted transition-colors border-l border-border">
 							<Icon name="chat" size="xs" />
 						</button>
+						{#if isOwnerSession()}
 						<button onclick={() => deleteProfile(profile)}
 							disabled={deleting === profile.id}
 							aria-label={t('apis.delete')}
 							class="px-3 text-xs text-text-subtle hover:text-danger hover:bg-danger/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed border-l border-border">
 							{t('apis.delete')}
 						</button>
+						{/if}
 					</div>
-					{#if revokedAt(profile.oauth_grant)}
-						{@const revoked = revokedAt(profile.oauth_grant)!}
-						{@const notice = notices.get(profile.id)}
+					{#if revocationView(profile.oauth_grant, notices.get(profile.id), now)}
+						{@const view = revocationView(profile.oauth_grant, notices.get(profile.id), now)!}
 						<div class="border-t border-border px-4 py-3 space-y-2 text-xs text-text-muted" data-testid="api-revoked">
-							<p>{tf('apis.revoked_on', { date: localDay(revoked, getLocale()) })}</p>
-							{#if noticeShows(notice, new Date())}
-								<p data-testid="api-erasure-window">{tf('apis.erasure_window', { earliest: localDay(notice.holdUntil, getLocale()), latest: localDay(notice.deadline, getLocale()) })}</p>
-								<p data-testid="api-erasure-notice">{tf('apis.erasure_notice', { earliest: localDay(notice.holdUntil, getLocale()), latest: localDay(notice.deadline, getLocale()) })}</p>
+							{#if view.kind === 'revoked' || view.kind === 'pending'}
+								{@const since = view.kind === 'revoked' ? view.revokedAt : view.notice.revokedAt}
+								{#if since}<p>{tf('apis.revoked_on', { date: localDay(since, getLocale()) })}</p>{/if}
 							{/if}
-							<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
-							<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
-								class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
+							<!-- First the dates and the way out with its button; the long text below, closed. -->
+							{#if view.notice}
+								<p data-testid="api-erasure-window">{tf('apis.erasure_window', { earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) })}</p>
+								{#if view.kind === 'revoked' && view.avertable}
+									<p data-testid="api-erasure-avert">{t('apis.erasure_notice_avert')}</p>
+								{:else if view.kind === 'reconnected' && view.avertable}
+									<p data-testid="api-erasure-avert">{tf('apis.erasure_reconnected_avert', { who: view.who })}</p>
+								{:else if view.kind === 'connectedAgain'}
+									<p data-testid="api-erasure-avert">{t('apis.erasure_connected_again_avert')}</p>
+								{/if}
+							{/if}
+							{#if view.kind === 'revoked' || view.kind === 'connectedAgain' || (view.kind === 'reconnected' && view.avertable)}
+								{#if profile.reader_may_connect !== false}
+									<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
+									<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
+										class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
+								{:else}
+									<!-- No link (ux U-109): the server says `false` only to a mandate, which reconnects
+									     only a profile it set up; the line says why. -->
+									<p data-testid="api-reconnect-not-yours">{t('apis.reconnect_not_yours')}</p>
+								{/if}
+							{/if}
+							{#if view.notice && view.kind !== 'pending'}
+								{@const dates = { revoked: localDay(view.notice.revokedAt, getLocale()), earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) }}
+								<details data-testid="api-erasure-details">
+									<summary class="cursor-pointer text-text-subtle hover:text-text">{t('apis.erasure_details')}</summary>
+									{#if view.kind === 'revoked'}
+										<p class="mt-2" data-testid="api-erasure-notice">{tf('apis.erasure_notice', dates)} {t('apis.erasure_notice_tail')}</p>
+									{:else if view.kind === 'reconnected'}
+										<p class="mt-2" data-testid="api-erasure-reconnected">{tf('apis.erasure_reconnected_notice', { ...dates, who: view.who })}</p>
+									{:else if view.kind === 'connectedAgain'}
+										<p class="mt-2" data-testid="api-erasure-connected-again">{tf('apis.erasure_connected_again_notice', dates)}</p>
+									{/if}
+								</details>
+							{/if}
 						</div>
 					{/if}
-					{#if onBuiltInProvider(profile)}
+					{#if onBuiltInProvider(profile) && isOwnerSession()}
 						<div class="border-t border-border px-4 py-3">
 							<PresetClientForm profileId={profile.id} />
 						</div>

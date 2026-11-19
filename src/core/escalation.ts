@@ -1,5 +1,6 @@
 import type { ThreadStore } from './thread-store.js';
 import { isMandateTag } from './request-principal.js';
+import { stripHidden } from './hidden-text.js';
 import { summarizeDelivery, type DeliverySummary, type NotificationMessage, type NotificationRouter } from './notification-router.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 
@@ -7,9 +8,19 @@ export interface EscalateOpts {
   /** Stable source key — one escalation thread per key, bumped on repeat
    *  (e.g. a scheduled task id, so a flaky daily cron = one thread, not N). */
   key: string;
+  /** The thread's title and the push's. Not a turn: someone else may have written it. */
   title: string;
+  /**
+   * The `user` turn that fronts the body where the conversation needs one. The model reads it as
+   * words the owner wrote, so it is a fixed sentence of the engine's, never the title or anything
+   * a run read.
+   */
+  opener: string;
   /** The context the user needs — becomes the thread's seed message. */
   body: string;
+  /** What the push says instead of `body`, when the push speaks the owner's language and the seed
+   *  stays model context (ux Rest-P E15). Cut like `body`. */
+  pushBody?: string | undefined;
   /** Channel passthrough merged into the push (`threadId` is always added). */
   data?: Record<string, string> | undefined;
   /**
@@ -65,19 +76,19 @@ export function escalateToUser(
   opts: EscalateOpts,
 ): { threadId: string } | null {
   if (!threadStore) {
-    sendWakeup(router, { title: opts.title, body: opts.body, priority: 'high', ...(opts.data ? { data: opts.data } : {}) }, opts.onReported);
+    sendWakeup(router, { title: opts.title, body: opts.pushBody ?? opts.body, priority: 'high', ...(opts.data ? { data: opts.data } : {}) }, opts.onReported);
     return null;
   }
   const threadId = escalationThreadId(threadStore, opts.key);
   // INSERT OR IGNORE — first event creates the thread (+ its title); later events
   // keep the same row and just append + re-unread below.
-  threadStore.createThread(threadId, { title: opts.title });
+  threadStore.createThread(threadId, { title: stripHidden(opts.title) });
   // An escalation thread is the owner's. If a mandate's session ever holds this id, the
   // owner's detail must not land in a thread the mandate reaches: fall back to the bare push,
   // as without a thread store. `POST /api/sessions` refuses a mandate this id up front; this is
   // the second layer, for a row that got there any other way.
   if (isMandateTag(threadStore.getThread(threadId)?.created_by)) {
-    sendWakeup(router, { title: opts.title, body: opts.body, priority: 'high', ...(opts.data ? { data: opts.data } : {}) }, opts.onReported);
+    sendWakeup(router, { title: opts.title, body: opts.pushBody ?? opts.body, priority: 'high', ...(opts.data ? { data: opts.data } : {}) }, opts.onReported);
     return null;
   }
   // Seed the agent's detail as an `assistant` turn, fronted by a user-role
@@ -95,18 +106,23 @@ export function escalateToUser(
   const lastRole = apiMsgs.length > 0 ? apiMsgs[apiMsgs.length - 1]!.role : null;
   const startSeq = threadStore.getNextSeq(threadId);
   const currentCount = threadStore.getThread(threadId)?.message_count ?? 0;
+  // The turns the model reads when the owner replies, without the characters that render as
+  // nothing (`hidden-text.ts`): a plan's title and a run's error can carry text someone else wrote.
+  // The title is not one of them: a `user` turn speaks with the owner's voice, so it holds the
+  // engine's opener, and the title is named in the body, where it reads as the report's data.
   const seeds: BetaMessageParam[] = [];
   if (lastRole === null || lastRole === 'assistant') {
-    seeds.push({ role: 'user', content: [{ type: 'text', text: opts.title }] });
+    seeds.push({ role: 'user', content: [{ type: 'text', text: opts.opener }] });
   }
-  seeds.push({ role: 'assistant', content: [{ type: 'text', text: opts.body }] });
+  seeds.push({ role: 'assistant', content: [{ type: 'text', text: stripHidden(opts.body) }] });
   threadStore.appendMessages(threadId, seeds, startSeq, { message_count: currentCount + seeds.length });
   // Re-mark unread + bump updated_at → floats to the top of the thread list.
   threadStore.updateThread(threadId, { is_unread: true });
   // The push is the wakeup that points at the thread (not the payload).
+  const pushed = opts.pushBody ?? opts.body;
   sendWakeup(router, {
     title: opts.title,
-    body: opts.body.length > 200 ? opts.body.slice(0, 197) + '…' : opts.body,
+    body: pushed.length > 200 ? pushed.slice(0, 197) + '…' : pushed,
     priority: 'high',
     data: { ...(opts.data ?? {}), threadId },
   }, opts.onReported);

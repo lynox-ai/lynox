@@ -29,6 +29,7 @@ import type {
   SpeakStreamMeta,
 } from './types.js';
 import { mistralVoxtralTtsProvider, hasMistralVoxtralTts } from './mistral-voxtral-tts.js';
+import { providerListApplies } from '../contained-providers.js';
 import { prepareForSpeech } from './text-prep.js';
 import { isVoiceLanguageTag, pickVoiceForLanguage } from './voice-for-language.js';
 import type { VoiceChoice } from './voice-for-language.js';
@@ -78,6 +79,9 @@ function readConfigProvider(): ProviderChoice {
 }
 
 function resolveProvider(): SpeakProvider | null {
+  // On an instance connected to a Shopify store no text goes to a speech service, and the only
+  // provider is one (`contained-providers.ts`): reading aloud is off there.
+  if (providerListApplies()) return null;
   const choice = readEnvProvider() ?? readConfigProvider();
   if (choice === 'mistral') {
     return mistralVoxtralTtsProvider.isAvailable ? mistralVoxtralTtsProvider : null;
@@ -91,6 +95,7 @@ export function getActiveSpeakProvider(): SpeakProvider | null {
 }
 
 export function hasSpeakProvider(): boolean {
+  if (providerListApplies()) return false;
   return hasMistralVoxtralTts();
 }
 
@@ -148,9 +153,9 @@ function hasSpeakableContent(s: string): boolean {
  * Only when no voice was chosen does the language pick run. If the catalogue then has
  * no voice for the language, this returns no voice, the provider's default reads the
  * text, and a warning says the speaker does not match the text. It does not throw:
- * that would take a working feature away from German users. The current provider's
- * catalogue has no German voice (see `mistral-voxtral-tts.ts`), so German text is read
- * by a voice whose accent is not German.
+ * that would take a working feature away from German users. Should the provider's
+ * model refuse the voice picked here, the provider reads with its default voice
+ * instead (see `postSpeech` in `mistral-voxtral-tts.ts`).
  */
 async function resolveVoice(
   provider: SpeakProvider,

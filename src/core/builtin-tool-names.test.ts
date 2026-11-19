@@ -146,6 +146,22 @@ describe('BUILTIN_TOOL_NAMES', () => {
     expect(all.filter(n => !BUILTIN_TOOL_NAMES.has(n))).toEqual([]);
   });
 
+  it('fail_step is reserved, and no booted registry tool (the chat\'s tools) carries it', async () => {
+    expect(BUILTIN_TOOL_NAMES.has('fail_step')).toBe(true);
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-builtin-names-'));
+    dirs.push(dir);
+    setEnv('LYNOX_FEATURE_PLUGINS', '0');
+    const engine = await boot(dir);
+    const names = engine.getRegistry().getEntries().map(t => t.definition.name);
+    // A real registry, or the absence proves nothing.
+    expect(names.length).toBeGreaterThan(20);
+    expect(names).toContain('http_request');
+    expect(names).not.toContain('fail_step');
+    const catalog = Object.values(builtinTools).filter((v): v is ToolEntry =>
+      typeof v === 'object' && v !== null && typeof (v as { definition?: { name?: unknown } }).definition?.name === 'string');
+    expect(catalog.map(t => t.definition.name)).not.toContain('fail_step');
+  });
+
   it('reserves the names the engine decides by although no tool defines them', () => {
     for (const name of Object.keys(RESERVED_TOOL_NAMES)) expect(BUILTIN_TOOL_NAMES.has(name), name).toBe(true);
     expect(BUILTIN_TOOL_NAMES.has('mail_send')).toBe(true);
@@ -165,7 +181,7 @@ describe('every name the engine decides by is one no plugin tool can take', () =
     // EXTERNAL_CONTENT_TOOLS is the union of the two lists above, so they cover it.
     ['core/agent.ts', 'CONTRACT_EXTERNAL_TOOLS'],
     ['core/agent.ts', 'INTERNAL_TOOLS'], ['core/agent.ts', 'TOOL_TIMEOUT_EXEMPT'],
-    ['core/agent.ts', 'SECRET_RESOLUTION_EXEMPT'], ['core/containment.ts', 'CONTAINED_TOOLS'],
+    ['core/containment.ts', 'CONTAINED_TOOLS'],
     ['core/output-guard.ts', 'GOOGLE_READ_TOOLS'], ['core/output-guard.ts', 'OUTBOUND_TOOLS'],
     ['tools/permission-guard.ts', 'MAIL_WRITE_TOOLS'], ['integrations/mail/tools/index.ts', 'MAIL_WRITE_TOOLS'],
     ['orchestrator/runtime-adapter.ts', 'INLINE_EXCLUDED_TOOLS'], ['orchestrator/runtime-adapter.ts', 'INLINE_CORE_TOOLS'],

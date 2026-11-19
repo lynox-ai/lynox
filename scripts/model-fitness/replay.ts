@@ -56,6 +56,8 @@ export const CANDIDATES: Candidate[] = [
   // presets themselves). All `expect: 'escalate'` = the same floor hypothesis as above,
   // decided per body via --expect.
   { label: 'deepseek-v4p1-flash (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/deepseek-v4p1-flash', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
+  // The fast slot of both Fireworks presets since 2026-10-27, the provider's update of the line above.
+  { label: 'deepseek-v4p1-flash-1017 (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/deepseek-v4p1-flash-1017', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
   { label: 'gpt-oss-120b (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/gpt-oss-120b', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
   { label: 'minimax-m3 (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/minimax-m3', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
 ];

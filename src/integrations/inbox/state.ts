@@ -29,9 +29,13 @@ import type {
   InboxUserAction,
 } from '../../types/index.js';
 import { sanitizeHeader, stripHtmlAndInvisibles } from './classifier/sanitize.js';
+import { MAX_DESCRIPTION_RULES } from './rule-text.js';
 
 /** Sentinel used in single-user instances. Team-inbox lands in Phase 5+. */
 export const DEFAULT_TENANT_ID = 'default';
+
+/** No account left out — the default for the account filters below. */
+const NO_ACCOUNTS: ReadonlySet<string> = new Set<string>();
 
 // ── Input shapes ───────────────────────────────────────────────────────────
 
@@ -57,6 +61,8 @@ export interface InboxItemInput {
   snippet?: string | undefined;
   messageId?: string | undefined;
   inReplyTo?: string | undefined;
+  /** The rule that filed the item (v20). */
+  matchedRuleId?: string | undefined;
 }
 
 /**
@@ -126,7 +132,25 @@ export interface InboxRuleInput {
   action: InboxRuleAction;
   source: InboxRuleSource;
   createdAt?: Date | undefined;
+  /** What the rule is called (v20). */
+  name?: string | undefined;
 }
+
+/** A rule the agent proposes (`inbox_rule_propose`). It waits for the owner: no bucket, action or
+ *  source to choose — it can only send mail to `requires_user`, and applies only once confirmed. */
+export interface InboxRuleProposal {
+  tenantId?: string | undefined;
+  accountId: string;
+  matcherKind: InboxRuleMatcherKind;
+  matcherValue: string;
+  name: string;
+  runId?: string | undefined;
+}
+
+export type ProposeRuleResult =
+  | { ok: true; id: string }
+  | { ok: false; reason: 'limit'; pending: number }
+  | { ok: false; reason: 'description_limit'; descriptions: number };
 
 export type ThreadMessageDirection = 'inbound' | 'outbound' | 'unknown';
 
@@ -150,6 +174,8 @@ export interface ThreadMessageInput {
   fetchedAt?: Date | undefined;
   /** FK into inbox_items.id when this message is the decision row's mail. */
   inboxItemId?: string | undefined;
+  /** Whether it is an automatic reply; absent = not checked (stored as NULL). */
+  autoReply?: boolean | undefined;
 }
 
 export interface ThreadMessage {
@@ -170,6 +196,8 @@ export interface ThreadMessage {
   direction: ThreadMessageDirection;
   fetchedAt: Date;
   inboxItemId: string | undefined;
+  /** true = automatic reply, false = checked and not one, undefined = not checked. */
+  autoReply: boolean | undefined;
 }
 
 export interface ListItemsOptions {
@@ -195,6 +223,11 @@ export interface ListItemsOptions {
    * `bucket` is ignored (snoozed items can be in any bucket).
    */
   snoozedOnly?: boolean | undefined;
+  /**
+   * Only the items one rule filed (`matched_rule_id`; the rule's name is
+   * the topic). Combines with `bucket` and `q`; ignored with `snoozedOnly`.
+   */
+  ruleId?: string | undefined;
 }
 
 // ── Row shapes (camelCase mapped from snake_case columns) ──────────────────
@@ -227,6 +260,8 @@ interface ItemRow {
   // v13 reminder columns — 0/null on pre-v13 rows
   notify_on_unsnooze: number;
   notified_at: number | null;
+  // v20 — null on items no rule filed
+  matched_rule_id: string | null;
 }
 
 interface AuditRow {
@@ -249,6 +284,10 @@ interface RuleRow {
   action: string;
   created_at: number;
   source: string;
+  // v20
+  name: string | null;
+  confirmed_at: number | null;
+  run_id: string | null;
 }
 
 interface ThreadMessageRow {
@@ -269,6 +308,7 @@ interface ThreadMessageRow {
   direction: string;
   fetched_at: number;
   inbox_item_id: string | null;
+  auto_reply: number | null;
 }
 
 // ── Row → domain mappers ───────────────────────────────────────────────────
@@ -300,6 +340,7 @@ function rowToItem(row: ItemRow): InboxItem {
     inReplyTo: row.in_reply_to ?? undefined,
     notifyOnUnsnooze: row.notify_on_unsnooze === 1,
     notifiedAt: row.notified_at !== null ? new Date(row.notified_at) : undefined,
+    ...(row.matched_rule_id !== null && row.matched_rule_id !== undefined ? { matchedRuleId: row.matched_rule_id } : {}),
   };
 }
 
@@ -337,6 +378,7 @@ function rowToThreadMessage(row: ThreadMessageRow): ThreadMessage {
     direction,
     fetchedAt: new Date(row.fetched_at),
     inboxItemId: row.inbox_item_id ?? undefined,
+    autoReply: row.auto_reply === null ? undefined : row.auto_reply === 1,
   };
 }
 
@@ -351,6 +393,9 @@ function rowToRule(row: RuleRow): InboxRule {
     action: row.action as InboxRuleAction,
     createdAt: new Date(row.created_at),
     source: row.source as InboxRuleSource,
+    ...(row.name !== null ? { name: row.name } : {}),
+    ...(row.confirmed_at !== null ? { confirmedAt: new Date(row.confirmed_at) } : {}),
+    ...(row.run_id !== null ? { runId: row.run_id } : {}),
   };
 }
 
@@ -370,6 +415,14 @@ const MAX_LIST_LIMIT = 500;
  * (rather than discovering after the fact that state silently clipped).
  */
 export const MAX_ITEM_BODY_CHARS = 8 * 1024;
+
+/**
+ * The classifier version of an item a flagged follow-up raised to "requires you"
+ * (`raiseToRequiresUser`): the list shows why it is back while it has this value. The owner's next
+ * action or snooze turns it into {@link RAISED_SEEN_CLASSIFIER_VERSION}.
+ */
+export const RAISED_CLASSIFIER_VERSION = 'sensitive-follow-up';
+export const RAISED_SEEN_CLASSIFIER_VERSION = 'sensitive-follow-up:seen';
 
 export class InboxStateDb {
   constructor(private readonly db: Database.Database) {}
@@ -396,8 +449,8 @@ export class InboxStateDb {
            bucket, confidence, reason_de, classified_at, classifier_version,
            unsnooze_on_reply,
            from_address, from_name, subject, mail_date, snippet,
-           message_id, in_reply_to
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           message_id, in_reply_to, matched_rule_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (tenant_id, account_id, thread_key) DO NOTHING`,
       )
       .run(
@@ -419,6 +472,7 @@ export class InboxStateDb {
         input.snippet ?? null,
         input.messageId ?? null,
         input.inReplyTo ?? null,
+        input.matchedRuleId ?? null,
       ) as { changes: number };
     if (result.changes > 0) return id;
     // Race lost — another job inserted first. Return that row's id.
@@ -470,6 +524,8 @@ export class InboxStateDb {
    * bridge an inbox item (message-id) to the uid the mail tools key on without
    * a live IMAP round-trip. Null when the message isn't in the dedup table
    * (pre-classify-window or moved folder) → the caller falls back to mail_search.
+   * Null as well for uid 0: a mail kept across a restart while deferred comes back without a uid
+   * (`MailStateDb.deferredMail`), and no provider gives out 0.
    */
   getUidByMessageId(accountId: string, messageId: string): { uid: number; folder: string } | null {
     if (!messageId) return null;
@@ -478,7 +534,7 @@ export class InboxStateDb {
         'SELECT uid, folder FROM processed_mail_messages WHERE account_id = ? AND message_id = ? LIMIT 1',
       )
       .get(accountId, messageId);
-    return row ? { uid: row.uid, folder: row.folder } : null;
+    return row && row.uid > 0 ? { uid: row.uid, folder: row.folder } : null;
   }
 
   /**
@@ -513,6 +569,78 @@ export class InboxStateDb {
       )
       .get(messageId);
     return row ? rowToItem(row) : null;
+  }
+
+  /**
+   * The item whose thread holds a message with this Message-ID — a later message of the thread,
+   * not the one the item was filed from (`findItemByMessageId` covers that). Keyed on the
+   * Message-ID alone, for the same reason: a reply can leave from another account.
+   */
+  findItemByThreadMessageId(messageId: string, preferAccountId?: string): InboxItem | null {
+    if (!messageId) return null;
+    // The same message can sit in two accounts' threads (a customer wrote to both). The account
+    // the reply leaves from is the likelier one, so it wins; otherwise the newest item.
+    const row = this.db
+      .prepare<[string, string], ItemRow>(
+        `SELECT i.* FROM inbox_thread_messages t
+           JOIN inbox_items i
+             ON i.tenant_id = t.tenant_id AND i.account_id = t.account_id AND i.thread_key = t.thread_key
+          WHERE t.message_id = ?
+          ORDER BY (i.account_id = ?) DESC, i.classified_at DESC LIMIT 1`,
+      )
+      .get(messageId, preferAccountId ?? '');
+    return row ? rowToItem(row) : null;
+  }
+
+  /** Whether the thread store already holds this message for this account. */
+  hasThreadMessage(tenantId: string, accountId: string, messageId: string): boolean {
+    const row = this.db
+      .prepare<[string, string, string], { n: number }>(
+        'SELECT 1 AS n FROM inbox_thread_messages WHERE tenant_id = ? AND account_id = ? AND message_id = ? LIMIT 1',
+      )
+      .get(tenantId, accountId, messageId);
+    return row !== undefined;
+  }
+
+  /**
+   * Open a `replied` item again (a new message came into its thread). Only a `replied` item: an
+   * archived one keeps the user's choice, and so does a snooze: whether a reply wakes it is the
+   * user's `unsnooze_on_reply`, which the hook applies before this. The item takes the new message's date and
+   * moves to the top of its list: lists sort by `classified_at`, and the row shows `mail_date`, so
+   * a reopened item with the first mail's dates would sit far down with an old date. Neither
+   * column is read as "when the classifier ran" anywhere else. Returns whether the row changed.
+   */
+  reopenReplied(id: string, tenantId: string, mailDate: Date, at: Date = new Date()): boolean {
+    const result = this.db
+      .prepare<[number, number, string, string], unknown>(
+        `UPDATE inbox_items SET user_action = NULL, user_action_at = NULL, mail_date = ?, classified_at = ?
+          WHERE id = ? AND tenant_id = ? AND user_action = 'replied'`,
+      )
+      .run(mailDate.getTime(), at.getTime(), id, tenantId) as { changes: number };
+    return result.changes > 0;
+  }
+
+  /**
+   * Brings an item back to where the owner sees it, for a flagged message that arrived in its
+   * thread: "requires you", no user action, not snoozed, with the message's date at the top of its
+   * list. Only ever raises: an item that is open in "requires you" already is left alone, so the
+   * same state reached twice writes nothing. Returns whether the row changed.
+   */
+  raiseToRequiresUser(id: string, tenantId: string, mailDate: Date, at: Date = new Date()): boolean {
+    const now = at.getTime();
+    const result = this.db
+      .prepare<[number, number, string, string, number], unknown>(
+        `UPDATE inbox_items
+            SET bucket = 'requires_user', user_action = NULL, user_action_at = NULL,
+                snooze_until = NULL, snooze_condition = NULL, notify_on_unsnooze = 0,
+                classifier_version = '${RAISED_CLASSIFIER_VERSION}',
+                mail_date = ?, classified_at = ?
+          WHERE id = ? AND tenant_id = ?
+            AND NOT (bucket = 'requires_user' AND user_action IS NULL
+                     AND (snooze_until IS NULL OR snooze_until <= ?))`,
+      )
+      .run(mailDate.getTime(), now, id, tenantId, now) as { changes: number };
+    return result.changes > 0;
   }
 
   /**
@@ -658,6 +786,31 @@ export class InboxStateDb {
       return rows.map(rowToItem);
     }
 
+    // ── One rule's items ────────────────────────────────────────────────
+    // Built from parts rather than as a seventh hand-written variant: every value is a bound
+    // parameter, and the clauses are the same ones the variants below use.
+    if (opts.ruleId !== undefined) {
+      const where = ['tenant_id = ?', 'matched_rule_id = ?', '(snooze_until IS NULL OR snooze_until <= ?)'];
+      const params: Array<string | number> = [tenantId, opts.ruleId, now];
+      if (opts.bucket) {
+        where.push('bucket = ?');
+        params.push(opts.bucket);
+      }
+      const rq = opts.q?.trim() ?? '';
+      if (rq.length > 0) {
+        const p = `%${rq.replace(/[\\%_]/g, '\\$&')}%`;
+        where.push(`(subject LIKE ? ESCAPE '\\' OR from_address LIKE ? ESCAPE '\\' OR snippet LIKE ? ESCAPE '\\' OR reason_de LIKE ? ESCAPE '\\')`);
+        params.push(p, p, p, p);
+      }
+      params.push(limit, offset);
+      const ruleRows = this.db
+        .prepare<Array<string | number>, ItemRow>(
+          `SELECT * FROM inbox_items WHERE ${where.join(' AND ')} ORDER BY classified_at DESC LIMIT ? OFFSET ?`,
+        )
+        .all(...params);
+      return ruleRows.map(rowToItem);
+    }
+
     // PRD §"Search-Bar": LIKE-match across subject/from/snippet/reason.
     // SQLite LIKE is case-insensitive on ASCII (default LIKE collation);
     // diacritic-folding is a Phase 5 improvement when search becomes a
@@ -733,7 +886,10 @@ export class InboxStateDb {
     return (row?.c ?? 0) > 0;
   }
 
-  countItemsByBucket(tenantId: string = DEFAULT_TENANT_ID): Record<InboxBucket, number> {
+  countItemsByBucket(
+    tenantId: string = DEFAULT_TENANT_ID,
+    excludeAccounts: ReadonlySet<string> = NO_ACCOUNTS,
+  ): Record<InboxBucket, number> {
     // Mirrors listItems' snooze filter AND the client-side `!userAction`
     // filter applied in InboxView.svelte. Without the user_action exclusion
     // the badge sticks at the pre-archive number because SQL counts every
@@ -741,14 +897,15 @@ export class InboxStateDb {
     // marked-unhandled it.
     const now = Date.now();
     const rows = this.db
-      .prepare<[string, number], { bucket: string; c: number }>(
+      .prepare<[string, number, string], { bucket: string; c: number }>(
         `SELECT bucket, COUNT(*) as c FROM inbox_items
          WHERE tenant_id = ?
            AND (snooze_until IS NULL OR snooze_until <= ?)
            AND user_action IS NULL
+           AND account_id NOT IN (SELECT value FROM json_each(?))
          GROUP BY bucket`,
       )
-      .all(tenantId, now);
+      .all(tenantId, now, JSON.stringify([...excludeAccounts]));
     const counts: Record<InboxBucket, number> = {
       requires_user: 0,
       draft_ready: 0,
@@ -760,6 +917,44 @@ export class InboxStateDb {
       }
     }
     return counts;
+  }
+
+  /**
+   * The open items of one bucket, the rows `countItemsByBucket` counts: not snoozed, no user
+   * action, outside `excludeAccounts`. Newest classification first, as `listItems` orders.
+   */
+  listOpenItems(opts: {
+    tenantId?: string | undefined;
+    bucket: InboxBucket;
+    limit: number;
+    offset: number;
+    excludeAccounts?: ReadonlySet<string> | undefined;
+    /** Only the items this rule filed. */
+    ruleId?: string | undefined;
+  }): ReadonlyArray<InboxItem> {
+    const ruleId = opts.ruleId ?? null;
+    const rows = this.db
+      .prepare<[string, string, number, string | null, string | null, string, number, number], ItemRow>(
+        `SELECT * FROM inbox_items
+         WHERE tenant_id = ? AND bucket = ?
+           AND (snooze_until IS NULL OR snooze_until <= ?)
+           AND user_action IS NULL
+           AND (? IS NULL OR matched_rule_id = ?)
+           AND account_id NOT IN (SELECT value FROM json_each(?))
+         ORDER BY classified_at DESC, rowid DESC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(
+        opts.tenantId ?? DEFAULT_TENANT_ID,
+        opts.bucket,
+        Date.now(),
+        ruleId,
+        ruleId,
+        JSON.stringify([...(opts.excludeAccounts ?? NO_ACCOUNTS)]),
+        clampLimit(opts.limit),
+        Math.max(0, opts.offset),
+      );
+    return rows.map(rowToItem);
   }
 
   /**
@@ -834,39 +1029,52 @@ export class InboxStateDb {
    * older than `now - withinMs` are NOT reverted; callers surface this
    * as 410 Gone to the UI.
    */
-  undoBulkAction(
+  undoBulkAction(bulkId: string, now: Date = new Date(), withinMs: number = 60_000): number {
+    return this.undoBulkActionCounted(bulkId, now, withinMs).total;
+  }
+
+  /**
+   * {@link undoBulkAction} with what it did: `total` log rows taken, `reverted` items put back,
+   * `skipped` items left as they are because they changed since the bulk action.
+   */
+  undoBulkActionCounted(
     bulkId: string,
     now: Date = new Date(),
     withinMs: number = 60_000,
-  ): number {
+  ): { total: number; reverted: number; skipped: number } {
     const earliest = now.getTime() - withinMs;
     const rows = this.db
-      .prepare<[string, number], { id: string; item_id: string; prior_user_action: string | null; prior_user_action_at: number | null }>(
-        `SELECT id, item_id, prior_user_action, prior_user_action_at
+      .prepare<[string, number], { id: string; item_id: string; prior_user_action: string | null; prior_user_action_at: number | null; action: string }>(
+        `SELECT id, item_id, prior_user_action, prior_user_action_at, action
          FROM inbox_user_action_log
          WHERE bulk_id = ? AND undone_at IS NULL AND performed_at >= ?`,
       )
       .all(bulkId, earliest);
-    if (rows.length === 0) return 0;
+    if (rows.length === 0) return { total: 0, reverted: 0, skipped: 0 };
     const undoMs = now.getTime();
     const flipUndone = this.db.prepare(
       `UPDATE inbox_user_action_log SET undone_at = ? WHERE id = ?`,
     );
+    // Only an item still as the bulk action left it: one that changed since (a flagged message
+    // brought it back to "requires you") is not put back out of view.
     const restoreAction = this.db.prepare(
-      `UPDATE inbox_items SET user_action = ?, user_action_at = ? WHERE id = ?`,
+      `UPDATE inbox_items SET user_action = ?, user_action_at = ? WHERE id = ? AND user_action IS ?`,
     );
+    let reverted = 0;
     const txn = this.db.transaction(() => {
       for (const row of rows) {
         flipUndone.run(undoMs, row.id);
-        restoreAction.run(
+        const r = restoreAction.run(
           row.prior_user_action,
           row.prior_user_action_at,
           row.item_id,
-        );
+          row.action,
+        ) as { changes: number };
+        reverted += r.changes;
       }
     });
     txn();
-    return rows.length;
+    return { total: rows.length, reverted, skipped: rows.length - reverted };
   }
 
   /**
@@ -925,10 +1133,14 @@ export class InboxStateDb {
     tenantId: string = DEFAULT_TENANT_ID,
   ): boolean {
     const result = this.db
-      .prepare<[string | null, number | null, string, string], unknown>(
-        `UPDATE inbox_items SET user_action = ?, user_action_at = ? WHERE id = ? AND tenant_id = ?`,
+      .prepare<[string | null, number | null, string | null, string, string], unknown>(
+        // The owner's next action ends the "back here" of a raised item (`RAISED_CLASSIFIER_VERSION`).
+        `UPDATE inbox_items SET user_action = ?, user_action_at = ?,
+           classifier_version = CASE WHEN ? IS NOT NULL AND classifier_version = '${RAISED_CLASSIFIER_VERSION}'
+             THEN '${RAISED_SEEN_CLASSIFIER_VERSION}' ELSE classifier_version END
+         WHERE id = ? AND tenant_id = ?`,
       )
-      .run(action, action === null ? null : (at ?? new Date()).getTime(), id, tenantId) as { changes: number };
+      .run(action, action === null ? null : (at ?? new Date()).getTime(), action, id, tenantId) as { changes: number };
     return result.changes > 0;
   }
 
@@ -968,7 +1180,9 @@ export class InboxStateDb {
     const result = this.db
       .prepare<[number, string | null, number, number, string, string], unknown>(
         `UPDATE inbox_items
-         SET snooze_until = ?, snooze_condition = ?, unsnooze_on_reply = ?, notify_on_unsnooze = ?
+         SET snooze_until = ?, snooze_condition = ?, unsnooze_on_reply = ?, notify_on_unsnooze = ?,
+             classifier_version = CASE WHEN classifier_version = '${RAISED_CLASSIFIER_VERSION}'
+               THEN '${RAISED_SEEN_CLASSIFIER_VERSION}' ELSE classifier_version END
          WHERE id = ? AND tenant_id = ?`,
       )
       .run(
@@ -1120,6 +1334,22 @@ export class InboxStateDb {
     return id;
   }
 
+  /**
+   * The categories the sensitive check found in an item's own mail, from its audit: every branch
+   * that files a flagged mail records them there. A reader withholds the item's mail by this, and a
+   * push names no sender or subject for it.
+   */
+  sensitiveCategoriesAtIngest(item: Pick<InboxItem, 'id' | 'tenantId'>): string[] {
+    const found = new Set<string>();
+    for (const entry of this.listAuditForItem(item.id, item.tenantId)) {
+      let payload: unknown;
+      try { payload = JSON.parse(entry.payloadJson); } catch { continue; }
+      const cats = (payload as { sensitive_categories?: unknown } | null)?.sensitive_categories;
+      if (Array.isArray(cats)) for (const c of cats) if (typeof c === 'string' && c.length > 0) found.add(c);
+    }
+    return [...found];
+  }
+
   listAuditForItem(
     itemId: string,
     tenantId: string = DEFAULT_TENANT_ID,
@@ -1168,8 +1398,8 @@ export class InboxStateDb {
          message_id, in_reply_to,
          from_address, from_name, to_json, cc_json,
          subject, body_md, mail_date, snippet,
-         direction, fetched_at, inbox_item_id
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         direction, fetched_at, inbox_item_id, auto_reply
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (tenant_id, account_id, message_id) DO UPDATE SET
          body_md = CASE
            WHEN excluded.body_md IS NOT NULL
@@ -1179,7 +1409,8 @@ export class InboxStateDb {
          END,
          snippet = COALESCE(NULLIF(excluded.snippet, ''), inbox_thread_messages.snippet),
          mail_date = COALESCE(excluded.mail_date, inbox_thread_messages.mail_date),
-         inbox_item_id = COALESCE(excluded.inbox_item_id, inbox_thread_messages.inbox_item_id)`,
+         inbox_item_id = COALESCE(excluded.inbox_item_id, inbox_thread_messages.inbox_item_id),
+         auto_reply = COALESCE(excluded.auto_reply, inbox_thread_messages.auto_reply)`,
     );
     // ON CONFLICT DO UPDATE always reports `changes > 0` (insert or
     // update path), so we drop the result and query for the canonical
@@ -1203,6 +1434,7 @@ export class InboxStateDb {
       input.direction ?? 'inbound',
       (input.fetchedAt ?? new Date()).getTime(),
       input.inboxItemId ?? null,
+      input.autoReply === undefined ? null : input.autoReply ? 1 : 0,
     );
     this._selectThreadMessageIdByMsgIdStmt ??= this.db.prepare<[string, string, string], { id: string }>(
       `SELECT id FROM inbox_thread_messages
@@ -1309,14 +1541,18 @@ export class InboxStateDb {
 
   // ── Rules ────────────────────────────────────────────────────────────────
 
+  /**
+   * A rule the owner makes. It is confirmed as it is made: the only producer is the owner-only
+   * route. A rule the agent proposes goes through {@link proposeRule} instead and waits.
+   */
   insertRule(input: InboxRuleInput): string {
     const id = nextId('rul');
     const tenantId = input.tenantId ?? DEFAULT_TENANT_ID;
     const createdAt = (input.createdAt ?? new Date()).getTime();
     this.db
       .prepare(
-        `INSERT INTO inbox_rules (id, tenant_id, account_id, matcher_kind, matcher_value, bucket, action, created_at, source)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO inbox_rules (id, tenant_id, account_id, matcher_kind, matcher_value, bucket, action, created_at, source, name, confirmed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -1328,10 +1564,78 @@ export class InboxStateDb {
         input.action,
         createdAt,
         input.source,
+        input.name ?? null,
+        createdAt,
       );
     return id;
   }
 
+  /**
+   * A rule the agent proposes: unconfirmed, `requires_user`, source `agent`, with the proposing run.
+   * At most `maxPending` unconfirmed rules per account — counted and inserted under one write lock,
+   * so two runs cannot both pass the count.
+   */
+  proposeRule(input: InboxRuleProposal, maxPending: number, at: Date = new Date()): ProposeRuleResult {
+    const tenantId = input.tenantId ?? DEFAULT_TENANT_ID;
+    return this.db.transaction((): ProposeRuleResult => {
+      const { n } = this.db
+        .prepare<[string, string], { n: number }>(
+          'SELECT COUNT(*) AS n FROM inbox_rules WHERE tenant_id = ? AND account_id = ? AND confirmed_at IS NULL',
+        )
+        .get(tenantId, input.accountId) as { n: number };
+      if (n >= maxPending) return { ok: false, reason: 'limit', pending: n };
+      if (input.matcherKind === 'matches_description') {
+        const descriptions = this.countRulesOfKind(input.accountId, 'matches_description', tenantId);
+        if (descriptions >= MAX_DESCRIPTION_RULES) return { ok: false, reason: 'description_limit', descriptions };
+      }
+      const id = nextId('rul');
+      this.db
+        .prepare(
+          `INSERT INTO inbox_rules (id, tenant_id, account_id, matcher_kind, matcher_value, bucket, action, created_at, source, name, confirmed_at, run_id)
+           VALUES (?, ?, ?, ?, ?, 'requires_user', 'show', ?, 'agent', ?, NULL, ?)`,
+        )
+        .run(id, tenantId, input.accountId, input.matcherKind, input.matcherValue, at.getTime(), input.name, input.runId ?? null);
+      return { ok: true, id };
+    }).immediate();
+  }
+
+  /** How many rules of one kind an account has, waiting ones included. */
+  countRulesOfKind(accountId: string, kind: InboxRuleMatcherKind, tenantId: string = DEFAULT_TENANT_ID): number {
+    const { n } = this.db
+      .prepare<[string, string, string], { n: number }>(
+        'SELECT COUNT(*) AS n FROM inbox_rules WHERE tenant_id = ? AND account_id = ? AND matcher_kind = ?',
+      )
+      .get(tenantId, accountId, kind) as { n: number };
+    return n;
+  }
+
+  /** The owner confirms a waiting rule. True when the rule exists; confirming it again keeps the
+   *  first confirmation's time, so a retried click is not "not found". */
+  confirmRule(id: string, tenantId: string = DEFAULT_TENANT_ID, at: Date = new Date()): boolean {
+    const result = this.db
+      .prepare('UPDATE inbox_rules SET confirmed_at = COALESCE(confirmed_at, ?) WHERE id = ? AND tenant_id = ?')
+      .run(at.getTime(), id, tenantId) as { changes: number };
+    return result.changes > 0;
+  }
+
+  /** The rules that apply: confirmed ones only, in the order they were confirmed (the first match
+   *  wins). A proposal confirmed today ranks after an owner rule made yesterday, though it was
+   *  proposed before it; an owner's rule is confirmed when it is made. */
+  listConfirmedRulesForAccount(
+    accountId: string,
+    tenantId: string = DEFAULT_TENANT_ID,
+  ): ReadonlyArray<InboxRule> {
+    const rows = this.db
+      .prepare<[string, string], RuleRow>(
+        `SELECT * FROM inbox_rules
+         WHERE tenant_id = ? AND account_id = ? AND confirmed_at IS NOT NULL
+         ORDER BY confirmed_at ASC, created_at ASC, rowid ASC`,
+      )
+      .all(tenantId, accountId);
+    return rows.map(rowToRule);
+  }
+
+  /** Every rule of an account, waiting ones included — what the owner's rule view lists. */
   listRulesForAccount(
     accountId: string,
     tenantId: string = DEFAULT_TENANT_ID,
@@ -1346,11 +1650,18 @@ export class InboxStateDb {
     return rows.map(rowToRule);
   }
 
+  /** Deletes a rule and clears it from the items it filed; its name stays in their audit. */
   deleteRule(id: string, tenantId: string = DEFAULT_TENANT_ID): boolean {
-    const result = this.db
-      .prepare('DELETE FROM inbox_rules WHERE id = ? AND tenant_id = ?')
-      .run(id, tenantId) as { changes: number };
-    return result.changes > 0;
+    return this.db.transaction((): boolean => {
+      const result = this.db
+        .prepare('DELETE FROM inbox_rules WHERE id = ? AND tenant_id = ?')
+        .run(id, tenantId) as { changes: number };
+      if (result.changes === 0) return false;
+      this.db
+        .prepare('UPDATE inbox_items SET matched_rule_id = NULL WHERE tenant_id = ? AND matched_rule_id = ?')
+        .run(tenantId, id);
+      return true;
+    })();
   }
 }
 

@@ -1,13 +1,16 @@
 import { realpathSync, existsSync } from 'node:fs';
-import { effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint } from '../core/outbound-write.js';
+import { bodyMayWriteGraphql, effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint, isReadMethod, urlMayWriteGraphql } from '../core/outbound-write.js';
 import { isShopifyAdminHost } from '../core/shopify-host.js';
-import { isShopifyStoreHostName, shopifyGraphqlEndpoint, shopifyListBody, shopifyProductReadBody } from '../core/shopify-graphql.js';
+import { isShopifyStoreHostName, shopifyGraphqlEndpoint, shopifyListBody, shopifyMediaListBody, shopifyTargetReadBody, shopifyWriteRequest, type ShopifyListFilters, type ShopifyWrite } from '../core/shopify-graphql.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
 import { resolve, dirname, basename, join } from 'node:path';
 import type { AutonomyLevel, ProviderConfigSnapshot, ToolEntry, WarningPayload } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isWorkspaceActive, getWorkspaceCwd, READ_ONLY_ROOTS, isPathWithin } from '../core/workspace.js';
-import { proveBashCommand, BASH_OBSERVE_EVENT } from './bash-allowlist.js';
+import { proveBashCommand, BASH_OBSERVE_EVENT, type BashProof } from './bash-allowlist.js';
+import { shellIsolation } from '../core/shell-isolation.js';
+import { namesSidecarLabel } from '../core/workspace-root.js';
+import { getLynoxDir } from '../core/config.js';
 import { channels } from '../core/observability.js';
 import { globToRegex } from '../core/glob.js';
 import { detectInjectionAttempt } from '../core/data-boundary.js';
@@ -545,12 +548,25 @@ const UNATTENDED_ASK_BASH = DANGEROUS_BASH.filter((rule) => rule.unattended === 
  */
 export const DANGEROUS_AFTER_CRITICAL_BASH = DANGEROUS_BASH.filter((rule) => rule.unattended !== 'block');
 
+/** `/root/` and `.config/`: where the data dir of an install as root or of an XDG layout lives.
+ *  They step aside only for the data dir's own `artifacts/` and `workspace/`, which hold the
+ *  agent's files. Everywhere else they stay — in the rest of the data dir too, whose secrets
+ *  (`config.json`, `vault.db`, `http-secret`) the `.lynox/` rules miss when the data dir has
+ *  another name. */
+const ROOT_HOME = /^\/root\//;
+const CONFIG_DIR = /\.config\//;
+const HOME_LOCATIONS: ReadonlySet<RegExp> = new Set([ROOT_HOME, CONFIG_DIR]);
+
 const SENSITIVE_PATHS: RegExp[] = [
-  /^\/etc\//, /^\/usr\//, /^\/sys\//, /^\/proc\//, /^\/root\//,
+  /^\/etc\//, /^\/usr\//, /^\/sys\//, /^\/proc\//, ROOT_HOME,
   /\.(env|pem|key|p12|pfx|jks)$/,
   /id_(rsa|ed25519|ecdsa|dsa)/, /authorized_keys/, /known_hosts/,
-  /credentials/i, /\.netrc$/,
-  /\.(ssh|gnupg|aws|config|docker|kube|npm)\//,
+  // A file or folder whose name has the word (`credentials.json`, `credentials (1).json`,
+  // `.git-credentials`, `/run/credentials/`) — except a text document about them, whose one
+  // extension is a docs format: `client-credentials-guide.md` is asked about no more,
+  // `credentials.json.md` and a saved `credentials.html` still are.
+  /credentials(?![^/.]*\.(?:md|mdx|markdown|rst|adoc)$)[^/]*$/i, /credentials[^/]*\//i, /\.netrc$/,
+  /\.(ssh|gnupg|aws|docker|kube|npm)\//, CONFIG_DIR,
   /\.token$/, /\.secret$/,
   LYNOX_SECRET_FILES,
   LYNOX_DB_FILES,
@@ -565,8 +581,22 @@ const SENSITIVE_PATHS: RegExp[] = [
   /\.mozilla\//,
 ];
 
+const AGENT_FILE_DIRS = ['artifacts', 'workspace'] as const;
+
+/** Whether a path is one the guard asks about before it is read or written: a rule in
+ *  `SENSITIVE_PATHS`, with `/root/` and `.config/` stepping aside in the data dir's
+ *  `artifacts/` and `workspace/` (spelled as configured or resolved). */
+function isSensitivePath(path: string): boolean {
+  const dataDir = getLynoxDir();
+  const inOwnFiles = [resolve(dataDir), resolveRealPath(dataDir)].some((dir) =>
+    AGENT_FILE_DIRS.some((sub) => isPathWithin(path, join(dir, sub))));
+  return SENSITIVE_PATHS.some((re) => !(inOwnFiles && HOME_LOCATIONS.has(re)) && re.test(path));
+}
+
 function resolveRealPath(filePath: string): string {
   const resolved = resolve(filePath);
+  // In shell sidecar mode a workspace path is judged by its spelling, not looked up by name (D3).
+  if (namesSidecarLabel(resolved)) return resolved;
   if (existsSync(resolved)) {
     return realpathSync(resolved);
   }
@@ -683,12 +713,16 @@ function observeBashProof(toolName: string, input: unknown, autonomy: AutonomyLe
   if (!channels.securityFlagged.hasSubscribers) return;
   if (!input || typeof input !== 'object' || !('command' in input)) return;
   const command = String((input as { command: unknown }).command);
-  const proof = proveBashCommand(command, {
-    cwd: getWorkspaceCwd(),
-    home: process.env['HOME'],
-    readRoots: READ_ONLY_ROOTS,
-    isSensitive: (realPath) => SENSITIVE_PATHS.some((re) => re.test(realPath)),
-  });
+  // In shell sidecar mode the proof would resolve the command's paths here, by name, in a tree
+  // the command never runs in: not proven, and nothing is looked up (PRD shell-sidecar-activation D3).
+  const proof: BashProof = shellIsolation().kind === 'sidecar'
+    ? { proven: false, reason: 'sidecar', program: 'other' }
+    : proveBashCommand(command, {
+      cwd: getWorkspaceCwd(),
+      home: process.env['HOME'],
+      readRoots: READ_ONLY_ROOTS,
+      isSensitive: (realPath) => isSensitivePath(realPath),
+    });
   const current = !warning ? 'free' : warning.includes('[BLOCKED') ? 'blocked' : 'asks';
   channels.securityFlagged.publish({
     event_type: BASH_OBSERVE_EVENT,
@@ -738,16 +772,24 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
   // neither a `GET` nor a `HEAD`, and every request to a GraphQL endpoint, here and finally: granted only as one of its bodies,
   // refused otherwise — never handed on to the checks below, so a refusal does not rest on
   // what `httpMethods` happens to hold.
-  const shopifyRead = SHOPIFY_READS.get(contract);
-  if (shopifyRead !== undefined && (typeof obj.url !== 'string' || (method !== 'GET' && method !== 'HEAD') || isGraphqlEndpoint(obj.url))) {
-    return grantsShopifyRead(input, method, shopifyRead);
+  const shopify = SHOPIFY_GRANTS.get(contract);
+  if (shopify !== undefined && (typeof obj.url !== 'string' || !isReadMethod(method) || isGraphqlEndpoint(obj.url))) {
+    return grantsShopify(input, method, shopify);
   }
   if (!(contract.httpMethods ?? []).some(m => m.toUpperCase() === method)) return false;
   if (typeof obj.url !== 'string') return false;
   // No other contract grants a write to a GraphQL endpoint: there a read and every mutation the
   // token can run are the same POST to the same path, and nothing here reads the document. Read
   // from the URL alone, so it holds for the callers that never pass a body.
-  if (method !== 'GET' && method !== 'HEAD' && isGraphqlEndpoint(obj.url)) return false;
+  if (!isReadMethod(method) && isGraphqlEndpoint(obj.url)) return false;
+  // Nor a write to a GraphQL API whose URL does not say so (`api.monday.com/v2`): there the body
+  // decides whether a POST reads or runs any mutation the token can, so a grant that never read
+  // it would cover both. Read from the body the request sends.
+  const sent = input as { body?: unknown; headers?: unknown };
+  const sentHeaders = typeof sent.headers === 'object' && sent.headers !== null ? sent.headers as Record<string, string> : undefined;
+  if (!isReadMethod(method) && bodyMayWriteGraphql(sent.body, sentHeaders)) return false;
+  // The same for the URL: some servers read `query` from it before the body.
+  if (!isReadMethod(method) && urlMayWriteGraphql(obj.url)) return false;
 
   let parsed: URL;
   try {
@@ -926,53 +968,103 @@ function grantsListRead(input: object, url: string, method: string, constraints:
   return isReviewableUrl(parsedBase, base) && reviewableQuery(url.slice(q + 1), constraints);
 }
 
-/** What a minted Shopify read grants: one endpoint, and the exact bodies it may receive. */
-interface ShopifyReadGrant {
+/** What a minted Shopify grant admits: one endpoint, and the exact bodies it may receive. */
+interface ShopifyGrant {
   readonly endpoint: string;
-  /** The exact bodies — typed `unknown` so that whatever a caller passed, a missing body
+  /** The exact read bodies — typed `unknown` so that whatever a caller passed, a missing body
    *  included, is asked of the set itself, in one comparison. */
-  readonly bodies: ReadonlySet<unknown>;
+  readonly reads: ReadonlySet<unknown>;
+  /** The exact write bodies, the same way; empty for every grant but an approved run's apply. */
+  readonly writes: ReadonlySet<unknown>;
 }
 
 /**
- * The Shopify read grants of the contracts the engine minted in this process, held here and
+ * The Shopify grants of the contracts the engine minted in this process, held here and
  * never on the contract, like {@link LIST_QUERIES}: a stored, parsed or imported contract is a
  * new object and carries none, so no row, workflow or model-proposed contract can name one.
  */
-const SHOPIFY_READS = new WeakMap<CapabilityContract, ShopifyReadGrant>();
+const SHOPIFY_GRANTS = new WeakMap<CapabilityContract, ShopifyGrant>();
 
-/** Which read a contract is minted for. The phase is the form: each grant holds one form's bodies only. */
+/** Which read a contract is minted for. The phase is the form: each grant holds one form's bodies
+ *  only. A list's `filters` come from the run's stored source, `{}` for every product. */
 export type ShopifyReadPhase =
-  | { readonly phase: 'list'; readonly afterId: number }
+  /** A list of products, within the run's filters; `form` names it or is left out. */
+  | { readonly phase: 'list'; readonly afterId: number; readonly form?: 'shopify_products_list'; readonly filters: ShopifyListFilters }
+  /** A list of the products' images: it has no filters. */
+  | { readonly phase: 'list'; readonly afterId: number; readonly form: 'shopify_media_list' }
+  /** Each target is read by the document its GID's type names: a product's or an image's. */
   | { readonly phase: 'read'; readonly targets: readonly string[] };
 
 /**
  * A reviewed contract that also admits a bulk run's Shopify GraphQL reads on `host`: a `POST`
  * to the pinned endpoint whose body is, byte for byte, one the
- * engine builds here from its own documents — the list page after `afterId` in the list phase,
- * one product's read per target GID in the preview. Nothing else reaches that endpoint under
- * it, no `GET` included. The documents and variables are built here, never taken from the
- * caller: it names a phase, a host and the ledger's values, and a value that does not fit
- * (a host that is not exactly a store host, a cursor that is not a safe integer, a key that is
- * not a product GID) throws. So does a contract that grants a write verb: a run whose contract
- * names one is read everywhere else as a run that writes (`writeMethodOf`, the probe), and a
- * contract whose hosts are not exactly `host`: the grant's host is the contract's own. The
- * returned contract is a frozen copy; only it carries the grant, and copying it again (as
- * `withListQuery` does) drops the grant.
+ * engine builds here from its own documents — the list page after `afterId` in the list phase
+ * (of products within the run's filters, or of their images), one read per target GID in the
+ * preview (a product's or an image's, by the GID's type). Nothing else reaches that endpoint
+ * under it, no `GET` included. The documents and variables are built here, never taken from the
+ * caller: it names a phase, a host and the ledger's values, and a value that does not fit (a
+ * host that is not exactly a store host, a cursor that is not a safe integer, filters the value
+ * rule refuses, a key that is neither a product's nor an image's GID) throws. So does a contract
+ * that grants a write verb: a run whose contract names one is read everywhere else as a run that
+ * writes (`writeMethodOf`, the probe), and a contract whose hosts are not exactly `host`: the
+ * grant's host is the contract's own. The returned contract is a frozen copy; only it carries
+ * the grant, and copying it again (as `withListQuery` does) drops the grant.
  */
 export function withShopifyRead(contract: CapabilityContract, host: string, read: ShopifyReadPhase): CapabilityContract {
+  const bodies = read.phase === 'list'
+    ? [read.form === 'shopify_media_list' ? shopifyMediaListBody(read.afterId) : shopifyListBody(read.afterId, read.filters)]
+    : read.targets.map(shopifyTargetReadBody);
+  if (bodies.some((b) => b === null)) {
+    mintShopify(contract, host, [], []);
+    throw new Error('a Shopify read is only granted for a safe cursor, filters the value rule takes and product or image GIDs');
+  }
+  return mintShopify(contract, host, bodies as string[], []);
+}
+
+/** What an approved run's apply sends: each target's read, and each target's write of its after-state. */
+export interface ShopifyApplyPhase {
+  readonly reads: readonly string[];
+  readonly writes: readonly ShopifyWrite[];
+}
+
+/**
+ * A reviewed contract that also admits an approved Shopify run's writes, as {@link withShopifyRead}
+ * admits its reads: each target's read (the apply reads a target before and after it writes) and,
+ * for each target, the one write of the after-state the ledger holds for it — built here from the
+ * form's document, byte for byte, never taken from the caller. So the write binds the target and
+ * its value both: a target outside `writes`, or another value for one inside, builds another
+ * body and is refused. Minted only where an approved run is applied (`worker-loop.ts`), from that
+ * run's ledger rows; the same checks on the contract as for a read, and the same throw for a
+ * value that does not fit.
+ */
+export function withShopifyApply(contract: CapabilityContract, host: string, apply: ShopifyApplyPhase): CapabilityContract {
+  const reads = apply.reads.map(shopifyTargetReadBody);
+  const writes = apply.writes.map(shopifyWriteRequest);
+  if (reads.some((b) => b === null) || writes.some((b) => b === null)) {
+    mintShopify(contract, host, [], []);
+    throw new Error('a Shopify write is only granted for product or image GIDs and after-states their form can write');
+  }
+  return mintShopify(contract, host, reads as string[], writes as string[]);
+}
+
+/**
+ * The checks every Shopify grant makes on the contract it is minted on, then the frozen copy that
+ * carries it. A contract that is not reviewed, a host that is not exactly a store host, a contract
+ * whose hosts are not exactly `host`, or one that grants a write verb throws: a run whose contract
+ * names a write verb is read everywhere else as a run that writes with it (`writeMethodOf`, the
+ * probe), while a Shopify run writes only through its form.
+ */
+function mintShopify(contract: CapabilityContract, host: string, reads: readonly string[], writes: readonly string[]): CapabilityContract {
   if (contract.origin !== 'reviewed') throw new Error('a Shopify read is only granted by a reviewed contract');
   if (!isShopifyAdminHost(host) || !isShopifyStoreHostName(host)) throw new Error('a Shopify read is only granted on a store host');
   if (contract.hostPatterns.length !== 1 || contract.hostPatterns[0] !== host) throw new Error('a Shopify read is only granted on the contract\'s one host');
-  if ((contract.httpMethods ?? []).some((m) => m.toUpperCase() !== 'GET' && m.toUpperCase() !== 'HEAD')) {
+  if ((contract.httpMethods ?? []).some((m) => !isReadMethod(m.toUpperCase()))) {
     throw new Error('a Shopify read is only granted by a contract that grants no write verb');
   }
   const endpoint = shopifyGraphqlEndpoint(host);
   if (endpoint === null) throw new Error('the Shopify preset pins no API version');
-  const bodies = read.phase === 'list' ? [shopifyListBody(read.afterId)] : read.targets.map(shopifyProductReadBody);
-  if (bodies.some((b) => b === null)) throw new Error('a Shopify read is only granted for a safe cursor and product GIDs');
   const copy = Object.freeze({ ...contract });
-  SHOPIFY_READS.set(copy, Object.freeze({ endpoint, bodies: new Set(bodies as string[]) }));
+  SHOPIFY_GRANTS.set(copy, Object.freeze({ endpoint, reads: new Set(reads), writes: new Set(writes) }));
   return copy;
 }
 
@@ -985,16 +1077,29 @@ export function withShopifyRead(contract: CapabilityContract, host: string, read
  * `application/json` (with `charset=utf-8` at most), and nothing that writes — a second layer,
  * which a body equal to one of the engine's passes by construction.
  */
-function grantsShopifyRead(input: object, method: string, grant: ShopifyReadGrant): boolean {
+function grantsShopify(input: object, method: string, grant: ShopifyGrant): boolean {
   if (method !== 'POST') return false;
   const { url, body } = input as { url?: unknown; body?: unknown };
   if (url !== grant.endpoint) return false;
-  if (!grant.bodies.has(body)) return false;
+  const writes = grant.writes.has(body);
+  if (!writes && !grant.reads.has(body)) return false;
   const rawHeaders = (input as { headers?: unknown }).headers;
   if (rawHeaders === null || typeof rawHeaders !== 'object' || carriesUnreviewedHeader(rawHeaders)) return false;
   const headers = Object.fromEntries(Object.entries(rawHeaders as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
   const reading = graphqlWrite(headers, body);
-  return !('refusal' in reading) && !reading.mutates;
+  // A read body must not write, and a write body must be read as one: each set holds only its kind.
+  return !('refusal' in reading) && reading.mutates === writes;
+}
+
+/**
+ * Whether `body` is one of the write bodies an apply grant minted on `contract` holds
+ * ({@link withShopifyApply}): a write of the engine's own form, bound to this contract object.
+ * A stored or copied contract holds none, as for every grant here.
+ */
+export function isMintedShopifyWrite(contract: CapabilityContract | undefined, body: unknown): boolean {
+  if (contract === undefined) return false;
+  const grant = SHOPIFY_GRANTS.get(contract);
+  return grant !== undefined && grant.writes.has(body);
 }
 
 /** Max command length for regex safety checks (prevents ReDoS on adversarial inputs). */
@@ -1899,30 +2004,37 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   if (toolName === 'read_file' && input && typeof input === 'object' && 'path' in input) {
     const rawPath = resolve(asPath('path', String((input as { path: unknown }).path)));
     const filePath = resolveRealPath(rawPath);
-    for (const pattern of SENSITIVE_PATHS) {
-      // Check both raw (pre-symlink) and resolved path — /etc/ → /private/etc/ on macOS
-      if (pattern.test(rawPath) || pattern.test(filePath)) {
-        if (autonomy === 'autonomous') {
-          return hardBlock(framed`⚠ ${system(toolName)}: read sensitive path — "${agentText(filePath)}" [BLOCKED — this path contains system or security files]`);
-        }
-        return framed`⚠ ${system(toolName)}: read sensitive path — "${agentText(filePath)}" — this path contains system or security files`;
+    // Check both raw (pre-symlink) and resolved path — /etc/ → /private/etc/ on macOS
+    if (isSensitivePath(rawPath) || isSensitivePath(filePath)) {
+      if (autonomy === 'autonomous') {
+        return hardBlock(framed`⚠ ${system(toolName)}: read sensitive path — "${agentText(filePath)}" [BLOCKED — this path contains system or security files]`);
       }
+      return framed`⚠ ${system(toolName)}: read sensitive path — "${agentText(filePath)}" — this path contains system or security files`;
     }
   }
 
-  if (toolName === 'write_file' && input && typeof input === 'object' && 'path' in input) {
-    const filePath = resolveRealPath(asPath('path', String((input as { path: unknown }).path)));
-    for (const pattern of SENSITIVE_PATHS) {
-      if (pattern.test(filePath)) {
+  // edit_file is read for sensitive paths as write_file is. Not for the empty-content check (an
+  // edit replaces a string), and not for the project-directory check below: edit_file confines its
+  // own path to the workspace or the artifacts root (fs.ts `resolveWritablePath`), so measured
+  // against the process cwd that check would judge a path the tool never writes.
+  if ((toolName === 'write_file' || toolName === 'edit_file') && input && typeof input === 'object' && 'path' in input) {
+    const rawPath = asPath('path', String((input as { path: unknown }).path));
+    const filePath = resolveRealPath(rawPath);
+    // The file the tool writes, as its handler resolves it (`ToolEntry.writeTarget`): without a
+    // workspace a path is confined to the data dir's workspace and a link in it is followed, so the
+    // file written need not be the path as written. Both are read; null means the tool refuses it.
+    const target = entry?.writeTarget?.(rawPath) ?? null;
+    for (const judged of target !== null && target !== filePath ? [filePath, target] : [filePath]) {
+      if (isSensitivePath(judged)) {
         if (autonomy === 'autonomous') {
-          return hardBlock(framed`⚠ ${system(toolName)}: write to sensitive path — "${agentText(filePath)}" [BLOCKED — this path contains system or security files]`);
+          return hardBlock(framed`⚠ ${system(toolName)}: write to sensitive path — "${agentText(judged)}" [BLOCKED — this path contains system or security files]`);
         }
-        return framed`⚠ ${system(toolName)}: write to sensitive path — "${agentText(filePath)}" — this path contains system or security files`;
+        return framed`⚠ ${system(toolName)}: write to sensitive path — "${agentText(judged)}" — this path contains system or security files`;
       }
     }
     // Overwriting an existing file with empty content destroys it (rm bypass)
     const content = (input as { content?: unknown }).content;
-    if (typeof content === 'string' && content.trim() === '') {
+    if (toolName === 'write_file' && typeof content === 'string' && content.trim() === '') {
       if (autonomy === 'autonomous') {
         return hardBlock(framed`⚠ ${system(toolName)}: overwrite with empty content — "${agentText(filePath)}" [BLOCKED]`);
       }
@@ -1931,7 +2043,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     // In autonomous mode without workspace, restrict writes to project directory
     if (autonomy === 'autonomous' && !isWorkspaceActive()) {
       const cwd = resolveRealPath(process.cwd());
-      if (!isPathWithin(filePath, cwd)) {
+      if (toolName === 'write_file' && !isPathWithin(filePath, cwd)) {
         return hardBlock(framed`⚠ ${system(toolName)}: write outside project directory — "${agentText(filePath)}" [BLOCKED — I can only write files within the current project]`);
       }
     }
@@ -1943,26 +2055,22 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     const dirPath = dirRaw ? resolveRealPath(dirRaw) : '';
 
     if (dirPath) {
-      for (const pattern of [...SENSITIVE_PATHS, LYNOX_DIR]) {
-        if (pattern.test(dirRaw) || pattern.test(dirPath)) {
-          if (autonomy === 'autonomous') {
-            return hardBlock(framed`⚠ ${system(toolName)}: operate in sensitive directory — "${agentText(dirPath)}" [BLOCKED]`);
-          }
-          return framed`⚠ ${system(toolName)}: operate in sensitive directory — "${agentText(dirPath)}"`;
+      if (isSensitivePath(dirRaw) || isSensitivePath(dirPath) || LYNOX_DIR.test(dirRaw) || LYNOX_DIR.test(dirPath)) {
+        if (autonomy === 'autonomous') {
+          return hardBlock(framed`⚠ ${system(toolName)}: operate in sensitive directory — "${agentText(dirPath)}" [BLOCKED]`);
         }
+        return framed`⚠ ${system(toolName)}: operate in sensitive directory — "${agentText(dirPath)}"`;
       }
     }
 
     if (obj.operation === 'move' && typeof obj.destination === 'string') {
       const destRaw = resolve(asPath('destination', obj.destination));
       const destPath = resolveRealPath(destRaw);
-      for (const pattern of [...SENSITIVE_PATHS, LYNOX_DIR]) {
-        if (pattern.test(destRaw) || pattern.test(destPath)) {
-          if (autonomy === 'autonomous') {
-            return hardBlock(framed`⚠ ${system(toolName)}: move into sensitive path — "${agentText(destPath)}" [BLOCKED]`);
-          }
-          return framed`⚠ ${system(toolName)}: move files into sensitive path — "${agentText(destPath)}"`;
+      if (isSensitivePath(destRaw) || isSensitivePath(destPath) || LYNOX_DIR.test(destRaw) || LYNOX_DIR.test(destPath)) {
+        if (autonomy === 'autonomous') {
+          return hardBlock(framed`⚠ ${system(toolName)}: move into sensitive path — "${agentText(destPath)}" [BLOCKED]`);
         }
+        return framed`⚠ ${system(toolName)}: move files into sensitive path — "${agentText(destPath)}"`;
       }
 
       const cwd = resolveRealPath(process.cwd());
@@ -2046,7 +2154,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     // unwarned, and this branch was the last place that still needed the schema enum to
     // make that unreachable. DELETE never arrives here in autonomous mode — the branch
     // above returns for it.
-    if (!['GET', 'HEAD'].includes(method) && autonomy === 'autonomous') {
+    if (!isReadMethod(method) && autonomy === 'autonomous') {
       return framed`⚠ ${system(toolName)}: HTTP ${system(method)} — write operation, needs your OK`;
     }
   }

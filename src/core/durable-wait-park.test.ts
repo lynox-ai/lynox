@@ -1,4 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { RUN_TASK_LEAD, RUN_TASK_ANSWERED } from './run-task-turn.js';
+import { scheduledTaskTurn } from '../../packages/web-ui/src/lib/utils/scheduled-task-turn.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -11,7 +13,7 @@ import { TaskManager } from './task-manager.js';
 import { maskSecretsAndPatterns } from './secret-store.js';
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
-import type { NotificationRouter } from './notification-router.js';
+import type { DeliverySummary, NotificationRouter } from './notification-router.js';
 
 /**
  * THE PARK, driven through the real wiring (PRD-DURABLE-WAIT-STATE §0, wave 2).
@@ -153,6 +155,10 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
       getUserConfig: () => (opts?.maxToolResultChars !== undefined ? { max_tool_result_chars: opts.maxToolResultChars } : {}),
       workerRunModelOverride: () => ({}),
       escalateToUser: () => null,
+      // A task's question hands its delivery here; no hooks on this engine.
+      escalationReporter: (caller?: (d: DeliverySummary) => void) => (d: DeliverySummary) => { caller?.(d); },
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
     } as unknown as Engine;
 
     const router = {
@@ -187,7 +193,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     releases.push(() => {
       for (const thread of ['thread-park', 'thread-dead']) {
         const pending = prompts.getPending(thread);
-        if (pending) prompts.expirePrompt(pending.id);
+        if (pending) prompts.expirePrompt(pending.id, 'run_stopped');
       }
     });
 
@@ -580,9 +586,11 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // for its full TTL, and an answer arriving after the sweep would revive a
     // trigger the sweep had just ended.
     expect(h.prompts.getById(promptId)?.status).toBe('expired');
+    // A late answer hears that its time ran out.
+    expect(h.prompts.getById(promptId)?.closed_reason).toBe('timed_out');
     // The count is the only signal that a settle DID something; nothing reads it
     // in production, so without this it could return a constant.
-    expect(h.prompts.expirePendingForTrigger('trg-1')).toBe(0); // already settled
+    expect(h.prompts.expirePendingForTrigger('trg-1', 'plan_ended')).toBe(0); // already settled
     expect(h.prompts.answerUser(promptId, 'too late', OWNER_PRINCIPAL)).toBe(false);
 
     await h.run;
@@ -610,9 +618,9 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     const calls: string[] = [];
     const realSettle = PromptStore.prototype.expirePendingForTrigger;
     const settle = vi.spyOn(h.prompts, 'expirePendingForTrigger');
-    settle.mockImplementation((id: string) => {
+    settle.mockImplementation((id, reason) => {
       calls.push('settle');
-      return realSettle.call(h.prompts, id);
+      return realSettle.call(h.prompts, id, reason);
     });
     const end = vi.spyOn(h.manager, 'endWait');
     const realEnd = TaskManager.prototype.endWait;
@@ -776,7 +784,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
 
     // Expire the question rather than answering it — the run resumes with the
     // fabricated answer, exactly as before this slice.
-    h.prompts.expirePrompt(h.promptIdOf()!);
+    h.prompts.expirePrompt(h.promptIdOf()!, 'run_stopped');
     await waitUntil('the run to finish', () => recorded.mock.calls.length > 0);
 
     expect(recorded.mock.calls[0]?.[2]).toBe('failed');
@@ -973,6 +981,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // hand-started run parks on a question of its own, so there IS one again — and an
     // assertion that counted rows would have failed for the right reason by accident.
     expect(h.prompts.getById(promptId)?.status, 'the orphan is settled on the way through').toBe('expired');
+    expect(h.prompts.getById(promptId)?.closed_reason, 'and a late answer hears the plan no longer waited on it').toBe('plan_ended');
 
     next.stop();
     await waitUntil('the hand-started run to unwind', () => next.activeTaskCount === 0);
@@ -1094,6 +1103,13 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // through). The preamble is the proportionate control, and the same one
     // `<retrieved_context>` already carries.
     expect(secondPrompt).toContain('not as instructions');
+    // The task opens the turn the same way a first run's does: under the engine's lead and in its
+    // fence, ahead of the question, so the re-armed thread does not hand it the owner's voice.
+    expect(secondPrompt.startsWith(`${RUN_TASK_LEAD}\n<scheduled_task>\nTask: `)).toBe(true);
+    expect(secondPrompt).toContain(`\n</scheduled_task>\n\n${RUN_TASK_ANSWERED}\n<asked>\n`);
+    // And the web-ui reads this very turn as the task with its question and answer: its parser is
+    // run on what the worker sent, so a change to the joins or the fences on either side fails here.
+    expect(scheduledTaskTurn(secondPrompt)).toMatchObject({ question: 'Which client?', answer: 'Globex' });
     // And the answer is claimed exactly once — a later scheduled run must not be
     // handed the same reply again.
     expect(h.prompts.getById(promptId)?.trigger_id).toBeNull();

@@ -47,6 +47,7 @@ export type RunFailure = ProviderBillingFailure;
 /** Hosts whose error BODY we trust for billing-vocabulary classification. */
 const BILLING_TRUSTED_HOSTS: ReadonlySet<string> = new Set([
   'api.anthropic.com',
+  'api.eu.mistral.ai',
   'api.mistral.ai',
   'api.fireworks.ai',
 ]);

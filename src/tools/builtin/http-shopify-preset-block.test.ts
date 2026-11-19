@@ -4,7 +4,7 @@ import { fetchPinned } from '../../core/network-guard.js';
 import { derivePresetEndpoints } from '../../core/oauth-presets.js';
 import { exchangeToken, isTokenEndpointRefused, vetTokenEndpoint } from '../../core/oauth-token-exchange.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
-import { SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
+import { SHOPIFY_FETCH_TOKEN, SHOPIFY_PAGES } from '../../core/shopify-host.js';
 import { attachStoredCredential } from './http.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 
@@ -43,11 +43,11 @@ describe('a connected Shopify preset profile is still refused', () => {
     const vetted = vetTokenEndpoint(endpoints.tokenUrl, profile.custom_endpoint_ack);
     if (isTokenEndpointRefused(vetted)) throw new Error('fixture endpoint is not vetted');
     const result = await exchangeToken({ endpoint: vetted, params: { client_secret: 's' }, bodyFormat: 'form' }, undefined);
-    expect(result).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_UNAVAILABLE}` });
+    expect(result).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}` });
   });
 
   it('at the pinned fetch under both', async () => {
-    await expect(fetchPinned(`${STORE}/admin/api/2025-10/shop.json`)).rejects.toThrow(SHOPIFY_UNAVAILABLE);
-    await expect(fetchPinned(endpoints.tokenUrl, { method: 'POST' })).rejects.toThrow(SHOPIFY_UNAVAILABLE);
+    await expect(fetchPinned(`${STORE}/admin/api/2025-10/shop.json`)).rejects.toThrow(SHOPIFY_PAGES);
+    await expect(fetchPinned(endpoints.tokenUrl, { method: 'POST' })).rejects.toThrow(SHOPIFY_PAGES);
   });
 });

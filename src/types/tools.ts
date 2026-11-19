@@ -6,7 +6,9 @@ import type { IAgent, ProviderConfigSnapshot } from './agent.js';
 import type { AutonomyLevel, CostSnapshot } from './modes.js';
 import type { ModelTier } from './models.js';
 import type { UntrustedCause } from '../core/untrusted-signals.js';
-import type { CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
+import type { CallApiCost, CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
+import type { ContainedRefusalReason } from '../core/containment.js';
+import type { SendTarget } from '../core/send-target.js';
 
 export type ToolHandler<TInput = unknown> =
   (input: TInput, agent: IAgent) => Promise<string>;
@@ -55,6 +57,21 @@ export interface ToolEntry<TInput = unknown> {
    */
   requiresConfirmation?: boolean | undefined;
   /**
+   * `secret:NAME` references in this tool's input travel as written: the engine does not resolve
+   * them before the handler runs. Two kinds of tool declare it:
+   *
+   * - a tool that stores its input (a workflow it imports or edits): resolving would store a
+   *   plaintext credential where a reference belongs;
+   * - a tool that hands work to a child agent (`spawn_agent`, `run_workflow`): the child resolves
+   *   what it needs through its own store, under its own scope and consent, where it uses it.
+   *   Resolved here, the plaintext would travel in the child's task text, into its prompt and
+   *   its run history.
+   *
+   * Declared on the tool, not kept as a list of names: a tool that newly builds a child agent
+   * must declare it, and `secret-refs-verbatim.test.ts` fails when one does not.
+   */
+  secretRefs?: 'verbatim' | undefined;
+  /**
    * The tool can hand its write to the approval queue (`Agent.fileApproval`): in a run that
    * may file, the danger check lets an askable call through, and the handler files at its
    * consent step instead of asking. Declared by the tool, not derived from the guard's sets,
@@ -69,6 +86,23 @@ export interface ToolEntry<TInput = unknown> {
    * Returning the input unchanged is equivalent to omitting the hook.
    */
   redactInputForAudit?: ((input: TInput) => unknown) | undefined;
+  /**
+   * For a tool that answers a call it did not carry out with an ordinary string (a refusal, a
+   * failed check): the reason, read from that answer, or null when the call was done. A reason
+   * makes the returned answer a soft failure, exactly as a thrown `ToolSoftFailure` with that
+   * answer would: the model reads the same text, the ledger records the reason, and the call is
+   * not shown as done. The tool reads only its own answer's form, never content it passed on.
+   */
+  failureOf?: ((answer: string) => string | null) | undefined;
+  /**
+   * For a tool that writes a file named by its `path` field: the file it would write for that
+   * path, resolved as its handler resolves it (the workspace, a link in it, the artifacts
+   * directory), or `null` when the handler would refuse the path. The Permission Guard reads its
+   * sensitive-path rules against this as well as against the path as written, so a link or a
+   * confinement cannot put the file written out of the rules' sight. Declared here, next to the
+   * handler that resolves the same way, so the guard needs no import of the tool.
+   */
+  writeTarget?: ((path: string) => string | null) | undefined;
   /**
    * Declares this tool as destructive. The Permission Guard warns in
    * interactive mode and BLOCKS in autonomous mode based on this flag.
@@ -123,6 +157,26 @@ export interface ToolEntry<TInput = unknown> {
    * exactly when it is on `MANDATE_OUTWARD_READERS` (`mandate-tool-lock.ts`).
    */
   outwardRead?: ((input: TInput) => string | null) | undefined;
+  /**
+   * What a call reads of MAIL THE INSTANCE STORES — the inbox store, a copy of mail from
+   * outside — as the target it reads (an action, an item id), or `null` for a call that reads
+   * none. Never content. A mandate's call that returns a target leaves a `read` row before it
+   * runs and does not run without it, as for `outwardRead` (`Agent._recordOutwardRead`): mail
+   * is in the trail on every way it is read, the stored copy included (sec-core 2026-11-03).
+   * A tool a mandate may use declares this exactly when it is on `MANDATE_STORED_MAIL_READERS`.
+   */
+  storedMailRead?: ((input: TInput) => string | null) | undefined;
+  /**
+   * Where a call SENDS to, as the person would name it: each mail address and each host the
+   * call delivers to, normalized (`send-target.ts`), or `null` for a call that sends to no
+   * target the model chose (a read). Read from the input as the model wrote it, before any
+   * secret is resolved. A declaration that throws means the targets are unknown, and unknown
+   * counts as foreign. A tool reads its targets with the same parser its handler sends with,
+   * so the list checked is the list sent. An empty list is no assurance: it says the input
+   * names no target, not that the call sends to none (a reply without an override still goes
+   * to the mail's sender). A reader never treats `[]` as owner-known.
+   */
+  sendTargets?: ((input: TInput) => readonly SendTarget[] | null) | undefined;
   /**
    * When true, calling this tool ENDS the agent's turn: after the tool_result
    * is appended and checkpointed, the loop returns the turn's text instead of
@@ -218,7 +272,7 @@ export type StreamEvent =
   | { type: 'tool_call';   name: string; input: unknown;           agent: string; toolUseId?: string | undefined; subAgent?: string | undefined; subAgentId?: string | undefined }
   | { type: 'tool_progress'; tool: string; phase: string;          agent: string; subAgent?: string | undefined }
   | { type: 'api_cost'; tool: string; profileId: string; profileName: string;
-      endpoint: string; costUsd: number;                           agent: string; subAgent?: string | undefined }
+      endpoint: string; costUsd: number; source: 'response' | 'profile'; agent: string; subAgent?: string | undefined }
   /** `grant`: the write grant that let this call's write through (`GrantLift` says what the mark means and does not).
    *  `connection`: the connection and grant the call resolved its URL to (`CallConnection` says what the stamp means
    *  and does not); absent when nothing was resolved. Every agent's result carries it. The step recorder writes it
@@ -226,8 +280,10 @@ export type StreamEvent =
    *  `contract`: where the call stood toward the run's contract (`CallContract`). `filed`: how its filing for
    *  the owner's approval ended (`CallFiled`). Both reach the step's row the same way.
    *  `softFailure`: the call failed in a way the model reads as a plain result (`ToolSoftFailure`), so `isError`
-   *  stays unset, as in the model's own view and in a reloaded thread. The step recorder writes it as an error. */
-  | { type: 'tool_result'; name: string; result: string;           agent: string; toolUseId?: string | undefined; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined; grant?: GrantLift | undefined; connection?: CallConnection | undefined; contract?: CallContract | undefined; filed?: CallFiled | undefined; softFailure?: true | undefined }
+   *  stays unset, as in the model's own view and in a reloaded thread. The step recorder writes it as an error.
+   *  `contained`: the call was refused because the chat read data through a store connection
+   *  (`ContainedRefusal.reason`); the chat's view keys its "plan in a new chat" button on it. */
+  | { type: 'tool_result'; name: string; result: string;           agent: string; toolUseId?: string | undefined; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined; grant?: GrantLift | undefined; connection?: CallConnection | undefined; contract?: CallContract | undefined; filed?: CallFiled | undefined; apiCost?: CallApiCost | undefined; softFailure?: true | undefined; contained?: ContainedRefusalReason | undefined }
   | { type: 'spawn';       spawnId: string; subAgents: SpawnedSubAgent[];
       estimatedCostUSD?: number | undefined;                       agent: string }
   // 5s heartbeat for a running batch. `running` and the keys of `lastToolBySub`
@@ -256,7 +312,10 @@ export type StreamEvent =
   // child and forwarded by `spawn` — same stamp as `tool_call`/`tool_result`.
   | { type: 'error';       message: string; fatal?: boolean | undefined; agent: string; subAgent?: string | undefined; subAgentId?: string | undefined }
   | { type: 'warning';     code: string; detail?: string | undefined; agent: string }
-  | { type: 'retry';       attempt: number; maxAttempts: number; delayMs: number; reason: string; agent: string }
+  // `afterTurnEnd`: the failed attempt had already sent its `turn_end` (its reply reached
+  // `message_delta`), so a consumer that marks call boundaries at `turn_end` knows the end it
+  // saw was this attempt's own, not the previous call's.
+  | { type: 'retry';       attempt: number; maxAttempts: number; delayMs: number; reason: string; agent: string; afterTurnEnd?: boolean | undefined }
   | { type: 'cost_warning';  snapshot: CostSnapshot;               agent: string }
   | { type: 'continuation';  iteration: number; max: number;       agent: string }
 

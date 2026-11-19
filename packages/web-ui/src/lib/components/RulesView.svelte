@@ -26,6 +26,9 @@
 	import { listMailAccounts, type MailAccountView } from '../api/mail-accounts.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
+	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import { isInboxAvailable, loadInboxCounts } from '../stores/inbox.svelte.js';
 
 	type FormPreset = 'archive' | 'escalate' | 'silent';
@@ -102,6 +105,9 @@
 			appliedAccountId = defaultAcc.id;
 		}
 	});
+
+	// Whose session asks: changing the rules is the owner's, so a mandate's session reads them only.
+	$effect(() => { void loadSettingsViewer(); });
 
 	onDestroy(() => {
 		if (applyTimer !== null) clearTimeout(applyTimer);
@@ -221,6 +227,7 @@
 	role="region"
 	aria-label={t('inbox.rules_title')}
 >
+	<ViewerUnavailableNotice />
 	<div class="flex items-center justify-between flex-wrap gap-y-2 mb-4">
 		<h1 class="text-xl font-light tracking-tight">{t('inbox.rules_title')}</h1>
 		<a href="/app/inbox" class="text-[11px] text-text-subtle hover:text-text-muted font-mono py-1">← {t('inbox.rules_back')}</a>
@@ -232,6 +239,10 @@
 		</div>
 	{:else}
 		<p class="text-[12px] text-text-muted mb-4">{t('inbox.rules_intro')}</p>
+		{#if isMandateSession()}
+			<!-- A mandate's session: adding and deleting a rule are the owner's. -->
+			<div class="mb-4"><OwnerOnlyNotice /></div>
+		{/if}
 
 		<label class="block mb-4">
 			<span class="text-[11px] text-text-subtle uppercase tracking-widest">{t('inbox.rules_account_label')}</span>
@@ -263,7 +274,7 @@
 				<span class="text-[11px] text-text-subtle uppercase tracking-widest">
 					{rules.length} {rules.length === 1 ? '·' : ''}
 				</span>
-				{#if !formOpen}
+				{#if !formOpen && isOwnerSession()}
 					<button
 						type="button"
 						onclick={openForm}
@@ -272,7 +283,7 @@
 				{/if}
 			</div>
 
-			{#if formOpen}
+			{#if formOpen && isOwnerSession()}
 				<form
 					onsubmit={(e) => { e.preventDefault(); void submitForm(); }}
 					class="mb-4 rounded-[var(--radius-md)] border border-accent/30 bg-accent/5 p-4 space-y-3"
@@ -351,7 +362,9 @@
 										→ {t(ruleDisplayLabelKey(rule))}
 									</p>
 								</div>
-								{#if pendingDeleteId === rule.id}
+								{#if !isOwnerSession()}
+									<!-- No delete until the server said this is the owner's session: the rule is the owner's. -->
+								{:else if pendingDeleteId === rule.id}
 									<div class="flex items-center gap-1 shrink-0">
 										<button
 											type="button"

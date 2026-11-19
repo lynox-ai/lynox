@@ -25,6 +25,7 @@ import type {
   StepHint,
 } from '../types/index.js';
 import type { HostPolicyContext } from './network-guard.js';
+import { shellIsolation, type ShellIsolation } from './shell-isolation.js';
 
 /** Provider for cross-session HTTP rate limiting (implemented by RunHistory). */
 export interface ToolCallCountProvider {
@@ -110,6 +111,9 @@ export interface ToolContext {
   connectionErasureSweep: (() => void) | null;
 
   // ── Isolation (bash tool) ──
+  /** Where `bash` runs and, in sidecar mode, the workspace tree's fd (`shell-isolation.ts`). Built
+   *  once per process; the one source for every consumer — none reads the socket env. */
+  shellIsolation: ShellIsolation;
   isolationEnvOverride: Record<string, string> | undefined;
   isolationMinimalEnv: boolean;
 
@@ -159,6 +163,8 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
     artifactStore: null,
     bulkLedger: null,
     connectionErasureSweep: null,
+    // The process's object, never a default: a context made without an engine reads the same mode.
+    shellIsolation: shellIsolation(),
     isolationEnvOverride: undefined,
     isolationMinimalEnv: false,
     pendingStepHint: null,
@@ -180,6 +186,35 @@ export function isWildcardDomain(domain: string): boolean {
   const labels = domain.split('.');
   if (!labels.every((label) => label.length > 0)) return false;
   return !/^\d+$/.test(labels[labels.length - 1]!);
+}
+
+/**
+ * Marks a context that does not carry this instance's `network_policy`: one an agent built for
+ * itself because it was handed none (its policy reads `undefined`, which would otherwise count as
+ * "no policy"), and every copy taken of such a context. The provider-side web search is withheld for
+ * these (fail-closed, `providerSearchAdmitted` in agent.ts). The mark sits on the context, not the
+ * agent, so it travels wherever the context goes: a workflow step is handed the same object, a
+ * sub-agent a copy. It is an enumerable registered symbol, so an object spread keeps it and a
+ * second copy of this module reads the same key.
+ */
+const POLICY_UNREAD: unique symbol = Symbol.for('lynox.toolContext.policyUnread') as never;
+
+type Marked = ToolContext & { [POLICY_UNREAD]?: true };
+
+/** Marks `ctx` as not carrying the instance's network policy; returns it. */
+export function markPolicyUnread(ctx: ToolContext): ToolContext {
+  (ctx as Marked)[POLICY_UNREAD] = true;
+  return ctx;
+}
+
+/** Whether `ctx` does not carry the instance's network policy (see `markPolicyUnread`). */
+export function isPolicyUnread(ctx: ToolContext): boolean {
+  return (ctx as Marked)[POLICY_UNREAD] === true;
+}
+
+/** A shallow copy of `ctx` (distinct object, shared refs); the spread keeps its policy mark. */
+export function copyToolContext(ctx: ToolContext): ToolContext {
+  return { ...ctx };
 }
 
 /**
@@ -218,11 +253,13 @@ export function applyNetworkPolicy(
 }
 
 /**
- * Configure cross-session HTTP rate limits on a ToolContext.
+ * Configure cross-session HTTP rate limits on a ToolContext. `provider` is null when
+ * the history database did not open: a set limit then cannot be counted, and
+ * `http_request` refuses rather than send uncounted.
  */
 export function applyHttpRateLimits(
   ctx: ToolContext,
-  provider: ToolCallCountProvider,
+  provider: ToolCallCountProvider | null,
   hourlyLimit?: number,
   dailyLimit?: number,
 ): void {

@@ -18,10 +18,12 @@
 // backed by its registry. Engine registers them on its own ToolRegistry.
 
 import type { ToolEntry } from '../../types/index.js';
+import type { InboxBucket, InboxItem, InboxUserAction } from '../../types/inbox.js';
 import type { GoogleAuth } from '../google/google-auth.js';
 import { SCOPES } from '../google/scopes.js';
 import type { MailCredentialBackend } from './auth/app-password.js';
 import { MailCredentialStore, vaultKeyForAccount } from './auth/app-password.js';
+import { InboundMailDeferred } from './inbound-deferred.js';
 import { ImapSmtpProvider } from './providers/imap-smtp.js';
 import { OAuthGmailProvider } from './providers/oauth-gmail.js';
 import {
@@ -149,7 +151,10 @@ export interface OutboundContext {
 }
 
 export interface MailHooks {
-  /** Fires for every fresh (post-dedup, post-prefilter) inbound envelope. */
+  /**
+   * Fires for every fresh (post-dedup, post-prefilter) inbound envelope. A hook that cannot
+   * take the mail now throws `InboundMailDeferred`; the batch then stays unseen.
+   */
   onInboundMail?: (accountId: string, envelope: MailEnvelope) => Promise<void>;
 
   /** Fires after a successful mail_send or mail_reply. */
@@ -185,6 +190,97 @@ export interface MailHooks {
    * should surface through their own observability surface.
    */
   onAccountAdded?: (accountId: string, provider: MailProvider) => Promise<void>;
+
+  /**
+   * Not an event but a read: what the inbox classifier made of a thread, keyed as the
+   * watcher keys it (`resolveThreadKey`), or null when it has no item for it (inbox off,
+   * not yet classified, filtered as noise). The inbox keeps one item per thread and drops
+   * later mails of a known thread as duplicates, so a lookup by a single message would miss
+   * every mail after the first. `mail_triage` shows the verdict next to each message, so the
+   * chat answers from the same verdict as the inbox instead of judging a 200-character
+   * snippet again. Synchronous and must not throw.
+   */
+  inboxLabelOf?: (accountId: string, threadKey: string) => InboxLabel | null;
+
+  /**
+   * Not an event but a read: the inbox store as `inbox_read` sees it, the same rows the inbox
+   * view shows (`GET /api/inbox/counts`, `/items`, `/items/:id/full`, `/items/:id/thread`).
+   * Absent while the inbox is off. Wired with the runtime and replaced when it is rebuilt.
+   */
+  inboxReader?: InboxReader;
+  /**
+   * Not an event but a write: a rule the agent proposes (`inbox_rule_propose`). It waits for the
+   * owner and applies only once confirmed. Absent while the inbox is off.
+   */
+  inboxRuleProposer?: InboxRuleProposer;
+}
+
+/** What `inbox_rule_propose` may do: file one waiting rule, nothing else. */
+export interface InboxRuleProposer {
+  propose(input: {
+    accountId: string;
+    matcherKind: 'from' | 'subject_contains' | 'matches_description';
+    matcherValue: string;
+    name: string;
+    runId?: string | undefined;
+  }):
+    | { ok: true; id: string }
+    | { ok: false; reason: 'limit'; pending: number }
+    | { ok: false; reason: 'description_limit'; descriptions: number };
+  /** At most this many waiting proposals per account. */
+  readonly maxPending: number;
+}
+
+/** What `inbox_read` reads: the inbox store of one runtime, read-only. */
+export interface InboxReader {
+  /**
+   * Open items per bucket, counted as `GET /api/inbox/counts` counts them, leaving out the
+   * items of `exclude` (accounts).
+   */
+  countByBucket(exclude: ReadonlySet<string>): Record<InboxBucket, number>;
+  /** The open items of one bucket, the ones `countByBucket` counts, newest first; with `ruleId`,
+   *  only those that rule filed. */
+  listItems(bucket: InboxBucket, limit: number, offset: number, exclude: ReadonlySet<string>, ruleId?: string): ReadonlyArray<InboxItem>;
+  getItem(id: string): InboxItem | null;
+  /** The item's own message text, or null when none is stored (a skipped sensitive mail). */
+  bodyOf(item: InboxItem): string | null;
+  /** The thread's stored messages, newest first. */
+  threadOf(item: InboxItem, limit: number): ReadonlyArray<InboxThreadMessage>;
+  /**
+   * The sensitive categories the inbox found in the item's mail when it took it in, from the
+   * item's audit (none when it found none). The check ran on more of the mail than the store
+   * keeps, so a re-check of the stored text can miss what it found.
+   */
+  sensitiveAtIngest(item: InboxItem): ReadonlyArray<string>;
+  /** Accounts the inbox leaves out (`LYNOX_INBOX_DISABLED_ACCOUNTS`). */
+  disabledAccounts: ReadonlySet<string>;
+}
+
+/** One stored message of a thread, the fields `inbox_read` shows. */
+export interface InboxThreadMessage {
+  messageId: string;
+  fromAddress: string;
+  fromName?: string | undefined;
+  subject: string;
+  mailDate?: Date | undefined;
+  direction: 'inbound' | 'outbound' | 'unknown';
+  bodyMd?: string | undefined;
+  snippet?: string | undefined;
+  /** The inbox item this message was stored with, when the inbox stored it with one. */
+  inboxItemId?: string | undefined;
+}
+
+/** The inbox's verdict on one thread, as `mail_triage` shows it. */
+export interface InboxLabel {
+  bucket: InboxBucket;
+  /** Set once the user archived, replied to or snoozed the item. */
+  userAction?: InboxUserAction | undefined;
+  /**
+   * The classifier's one-line reason for the verdict (`reasonDe`). Written by a model from the
+   * mail itself, so it is the mail's text in other words: `mail_triage` shows it only inside the
+   * message's untrusted-data block, never in the framing.
+   */
+  reason?: string | undefined;
 }
 
 /**
@@ -301,9 +397,15 @@ export class MailContext {
           }
         }
 
-        // Fire inbound hook
+        // Fire inbound hook. Its errors are swallowed, except a deferral: that one ends the
+        // batch here, so the watcher leaves it unseen for the next tick (inbound-deferred.ts).
         if (this.hooks.onInboundMail) {
-          try { await this.hooks.onInboundMail(accountId, env); } catch { /* swallow */ }
+          try {
+            await this.hooks.onInboundMail(accountId, env);
+          } catch (err: unknown) {
+            if (err instanceof InboundMailDeferred) throw err;
+            /* swallow */
+          }
         }
       }
 

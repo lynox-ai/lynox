@@ -72,6 +72,76 @@
         "Rechne mir kurz aus: wenn 47 Eintraege in 11 Tagen entstehen, wie viele pro Tag sind das?",
         "Lies {FILE} und sag mir nur ob das Wort Preisliste vorkommt."
       ]
+    },
+    {
+      "id": "N4-run-instruction",
+      "expect": "silent",
+      "why": "Instructions for the job being done now: required sentences, a length limit, keywords, even phrased as binding. They describe the task, not the business; stored as a fact, a later chat applies them where they do not belong. Measured on a live probe (2026-10-27): the turn-end capture stored such a brief as 'the operator requires three legally binding sentences … in all product texts'. Written with real umlauts: quoted sentences in ASCII transliteration were read as a writing preference ('the operator writes without umlauts') and captured, which is a fixture artefact, not this failure. A write here can still be a genuine fact about the business (a product the shop carries), so read the written texts before scoring a MISS.",
+      "cases": [
+        "Schreib mir eine Produktbeschreibung für die Teekanne Lumen{N}. Vorgaben für diesen Text: höchstens 600 Zeichen, das Keyword «Glasteekanne» in den ersten 100 Zeichen, und diese zwei Sätze müssen wörtlich drin stehen: «Spülmaschinenfest.» und «Lieferung in 2 Werktagen.» Gib mir nur den Text zurück.",
+        "Überarbeite die Texte aller Gärgläser von Nordhain{N}. Verbindlich für diesen Lauf: keine Heilversprechen, keine fremden Marken, höchstens 4000 Zeichen pro Text, die Keywords «Fermentierglas» und «Gärglas» gehören in den Titel. Fang mit einem Beispieltext für ein 1-Liter-Fermentierglas an.",
+        "Mach mir einen Newsletter-Entwurf für Kaltwerk{N}: Betreff unter 50 Zeichen, drei Absätze, am Schluss zwingend der Satz «Abmelden jederzeit möglich.» und kein Ausrufezeichen im ganzen Text."
+      ]
+    },
+    {
+      "id": "S5-standing-rule",
+      "expect": "capture",
+      "why": "The control for N4: the same kind of rule, but the operator says it applies from now on. A change that silences N4 by suppressing every rule fails here. Written with real umlauts like N4, and with entity names of its own, so a rule stored here cannot be recalled into an N4 case of the same run.",
+      "cases": [
+        "Ab jetzt gilt für alle Produkttexte von Brava{N} dauerhaft: keine Heilversprechen und keine fremden Markennamen. Halte dich bitte auch in künftigen Chats daran.",
+        "Grundsätzlich und ab sofort: Rechnungen an Feldmark{N} gehen nur noch per Post, nie per E-Mail.",
+        "Eine feste Regel für die Zukunft: Kunden von Silvan{N} schreiben wir immer mit Sie an, nie mit Du."
+      ]
+    },
+    {
+      "id": "S6-standing-practice",
+      "expect": "capture",
+      "why": "The second control for N4, and the one S5 cannot be: a standing practice stated on its own, with no request attached and none of the words that mark a rule as lasting ('ab jetzt', 'immer', 'künftig'). A change that keeps only rules carrying those words passes S5 and fails here.",
+      "cases": [
+        "Zur Info: Bei Tannberg{N} siezen wir die Kunden.",
+        "Rechnungen an Quellhof{N} schicken wir per Post, die wollen keine PDFs.",
+        "Morgenrot{N} beliefern wir nur innerhalb der Schweiz."
+      ]
+    },
+    {
+      "id": "N6-verbless-briefing",
+      "expect": "silent",
+      "why": "N4 without a request verb: the operator lists requirements for texts as a briefing and names the first text, but never says 'schreib' or 'mach'. Every N4 case carries a verb, so a fix that keys on the verb would pass N4 and fail here. Read the written texts before scoring a MISS.",
+      "cases": [
+        "Vorgaben für die Texte zu Halde{N}: höchstens 500 Zeichen, keine Heilversprechen, das Keyword «Keramikfilter» im ersten Satz. Erster Text: der Wasserfilter Halde Mini.",
+        "Briefing Newsletter Sonnrain{N} — Betreff unter 40 Zeichen, zwei Absätze, Schlusssatz «Bis bald.», kein Ausrufezeichen. Thema: die neuen Kräutertees.",
+        "Kategorie Gärtöpfe bei Brunnmatt{N}, Titel maximal 60 Zeichen, Keyword «Gärtopf» vorne, keine Wirkversprechen. Zuerst der 5-Liter-Topf."
+      ]
+    },
+    {
+      "id": "N7-assistant-draft",
+      "expect": "silent",
+      "why": "A draft the operator orders, with nothing said about the company. Whatever the assistant writes about the company in it is invented; stored as a fact, a later chat reads it as true. Seen in the 998 eval runs (row 1103): a newsletter draft for a company with no details left 'the company plans to widen its range next quarter' as an active memory. A write here is a miss unless its text is a fact the operator's own turn stated. The runner counts every write, queued or active, from the capture pass and from the model's own remember tool alike; which path wrote it is in capture-telemetry.jsonl.",
+      "cases": [
+        "Schreib mir einen Newsletter für Kaltwerk{N}, drei kurze Absätze, freundlicher Ton.",
+        "Entwirf einen kurzen Über-uns-Text für die Website von Brunnhof{N}, etwa 80 Wörter.",
+        "Schreib einen kurzen Instagram-Post für Lindenwerk{N}, mit zwei passenden Hashtags."
+      ]
+    },
+    {
+      "id": "N8-product-text-draft",
+      "expect": "silent",
+      "why": "SEO and product texts ordered for a shop, with no company details: the kind of order a shop customer gives every week. Anything the draft says about the company (history, origin, values, certificates) is invented; stored as a fact, a later chat reads it as true. Product names and the shop name come from the operator's order and are no miss. The runner counts every write, queued or active, from the capture pass and from the model's own remember tool alike; read the texts.",
+      "cases": [
+        "Schreib eine SEO-optimierte Produktbeschreibung, etwa 120 Wörter, für die Gartenschere Schnittfix im Onlineshop von Astmühle{N}.",
+        "Formuliere Meta-Title und Meta-Description für die Kategorieseite Gartenwerkzeug im Onlineshop von Laubwinkel{N}.",
+        "Schreib einen kurzen Produkttext für die Ersatzklinge Kerbe 3 von Heckenhof{N}, mit drei Stichpunkten zu den Vorteilen."
+      ]
+    },
+    {
+      "id": "S7-draft-with-fact",
+      "expect": "capture",
+      "why": "The control for N7 and N8: a draft ordered the same way, but the operator also states a durable fact about the business. A change that silences N7 and N8 by not recording anything on a draft turn fails here. The fact is said, not asked for in the text, so it is not a job instruction (N4). The runner counts any write as a hit; read the texts: a write that keeps only the fact is a hit, one that keeps what the draft invented is a miss.",
+      "cases": [
+        "Schreib einen kurzen Über-uns-Text für Mühlbach{N}, etwa 80 Wörter. Zur Info: Wir sind seit 1950 ein Familienbetrieb und beschäftigen zwölf Leute.",
+        "Entwirf einen Newsletter für Sonnhalde{N}, drei kurze Absätze. Hintergrund: Seit diesem Monat liefern wir auch nach Österreich.",
+        "Schreib eine Produktbeschreibung für den Rucksack Gipfel 30 von Felsgrat{N}, etwa 100 Wörter. Alle unsere Rucksäcke werden in Portugal genäht."
+      ]
     }
   ]
 }

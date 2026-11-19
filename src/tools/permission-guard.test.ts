@@ -5,6 +5,9 @@ import type { CapabilityContract } from '../types/capability-contract.js';
 import type { WarningPayload } from '../types/tools.js';
 import { channels } from '../core/observability.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
+import { join } from 'node:path';
+import { getLynoxDir } from '../core/config.js';
+import { resetShellIsolationForTest, setShellIsolationForTest, type SidecarRoot } from '../core/shell-isolation.js';
 
 // Stub ToolEntry fixtures mirroring the real `destructive` declarations
 // in data-store.ts / artifact.ts / memory.ts / google-{drive,calendar,sheets,docs}.ts.
@@ -3421,6 +3424,19 @@ describe('bash allowlist observe mode', () => {
     }]);
   });
 
+  it('in shell sidecar mode records the call as not proven without resolving its paths here', () => {
+    const anchor = { kind: 'anchor', fd: -1, pathBuf: Buffer.from('/workspace') } as unknown as SidecarRoot['anchor'];
+    setShellIsolationForTest({ kind: 'sidecar', socket: '/run/exec.sock', root: { mode: 'sidecar', anchor, label: '/workspace' } });
+    try {
+      let verdict: string | null = 'unset';
+      const events = observe(() => { verdict = isDangerous('bash', { command: 'cat package.json' }, 'autonomous'); });
+      expect(verdict).toBeNull();
+      expect(events.map((e) => [e.decision, e.detail])).toEqual([['unproven', 'program=other;reason=sidecar;current=free']]);
+    } finally {
+      resetShellIsolationForTest();
+    }
+  });
+
   it('records an unproven call that runs today, and still lets it run', () => {
     let verdict: string | null = 'unset';
     const events = observe(() => { verdict = isDangerous('bash', { command: 'cat "package.json"' }, 'autonomous'); });
@@ -3791,6 +3807,35 @@ describe('bash rule scan: the shortcuts behind the verdicts', () => {
   });
 });
 
+// edit_file writes files as write_file does, so a sensitive path is asked about in a chat and
+// blocked in a run no one watches.
+describe('edit_file is guarded as write_file is', () => {
+  const edit = (path: string) => ({ path, old_string: 'a', new_string: 'b' });
+  it.each(['config/.env', 'home/.ssh/id_rsa', 'deploy.key', 'credentials.json'])('blocks an unattended edit of %s, as write_file is blocked', (path) => {
+    const write = isDangerous('write_file', { path, content: 'b' }, 'autonomous');
+    expect(write).toContain('write to sensitive path');
+    expect(isDangerous('edit_file', edit(path), 'autonomous')).toBe(write!.replace('write_file', 'edit_file'));
+  });
+  it('asks about an edit of a sensitive path in a chat', () => {
+    const result = isDangerous('edit_file', edit('config/.env'));
+    expect(result).toContain('edit_file: write to sensitive path');
+    expect(result).not.toContain('[BLOCKED');
+  });
+  // edit_file confines its own path (to the workspace or the artifacts root), so the guard does not
+  // measure it against the process cwd: neither a workspace file the CLI wrote nor an artifact.
+  it('leaves an unattended edit outside the cwd to the tool, while write_file there is blocked', () => {
+    for (const path of [join(getLynoxDir(), 'workspace', 'x.md'), join(getLynoxDir(), 'artifacts', 'a1b2c3d4.html')]) {
+      expect(isDangerous('write_file', { path, content: 'b' }, 'autonomous')).toContain('write outside project directory');
+      expect(isDangerous('edit_file', edit(path), 'autonomous')).toBeNull();
+    }
+  });
+  // An edit replaces a string; an empty new_string removes that string, not the file.
+  it('does not read an empty new_string as an emptied file', () => {
+    expect(isDangerous('edit_file', { path: `${process.cwd()}/subdir/file.txt`, old_string: 'a', new_string: '', content: '' }, 'autonomous')).toBeNull();
+    expect(isDangerous('write_file', { path: `${process.cwd()}/subdir/file.txt`, content: '' }, 'autonomous')).toContain('overwrite with empty content');
+  });
+});
+
 // The containment check shares the engine's predicate (workspace.ts `isPathWithin`): a name
 // that only starts with two dots is inside the project, a `..` component is not.
 describe('write_file outside the project — a name that starts with two dots', () => {
@@ -3954,5 +3999,34 @@ describe('contractGrants on a GraphQL endpoint', () => {
     expect(grants('GET', 'https://h.example/graphql')).toBe(true);
     expect(grants('HEAD', 'https://h.example/graphql')).toBe(true);
     expect(grants('POST', 'https://h.example/v1/a')).toBe(true);
+  });
+});
+
+describe('contractGrants on a GraphQL API whose URL does not say so', () => {
+  const contract = (origin?: 'reviewed') => ({
+    version: 7, ...(origin ? { origin } : {}), grantedTools: ['http_request'], httpMethods: ['GET', 'POST'],
+    hostPatterns: ['api.monday.com'], pathPatterns: ['/v2'], paramConstraints: {},
+  });
+  const JSON_CT = { 'content-type': 'application/json' };
+  const grants = (body: string | undefined, origin?: 'reviewed', headers: Record<string, string> = JSON_CT): boolean =>
+    contractGrants('http_request', { method: 'POST', url: 'https://api.monday.com/v2', headers, body }, contract(origin) as never);
+
+  it('grants no mutation a POST to the path would carry, nor a persisted query', () => {
+    expect(grants(JSON.stringify({ query: 'mutation { delete_item (item_id: 1) { id } }' }))).toBe(false);
+    expect(grants(JSON.stringify({ query: 'mutation { a }' }), 'reviewed')).toBe(false);
+    expect(grants(JSON.stringify({ documentId: 'abc' }))).toBe(false);
+  });
+
+  it('grants no write whose URL carries a mutation, whatever the body; CONTROL: a GET with one is not read here', () => {
+    const at = (method: string, url: string): boolean => contractGrants('http_request', { method, url, headers: JSON_CT, body: method === 'GET' ? undefined : '{}' }, contract() as never);
+    expect(at('POST', 'https://api.monday.com/v2?query=mutation%7Bx%7D')).toBe(false);
+    expect(at('POST', 'https://api.monday.com/v2?q=x')).toBe(true);
+    expect(at('GET', 'https://api.monday.com/v2?query=mutation%7Bx%7D')).toBe(true);
+  });
+
+  it('CONTROL: grants a read there, and a REST POST whose data names a subscription under a reviewed contract', () => {
+    expect(grants(JSON.stringify({ query: '{ boards { id } }' }))).toBe(true);
+    expect(grants('{"subscription":"premium"}', 'reviewed')).toBe(true);
+    expect(grants(undefined)).toBe(true);
   });
 });

@@ -36,21 +36,33 @@ interface MockedAgentShape {
   getCostSnapshot: () => import('../../types/index.js').CostSnapshot | null;
   getRecordedToolCallCount: () => number;
   getLastStop: () => import('../../core/agent.js').SendStop | null;
+  getHelperCostUsd: () => number;
+  getStoppedCallSessionCostUsd: () => number;
+  getCapOnlyCostUsd: () => number;
 }
 
 /** How many tool calls each constructed child reports having recorded. */
 let mockRecordedToolCalls = 0;
+/** The estimate of ended calls each constructed child reports (`getHelperCostUsd`). */
+let mockHelperCostUsd = 0;
 /** Why each constructed child says its `send()` ended (null = clean end_turn). */
 let mockLastStop: import('../../core/agent.js').SendStop | null = null;
 
-const { MockRunAbortedError } = vi.hoisted(() => ({
-  MockRunAbortedError: class RunAbortedError extends Error {
+const { MockRunAbortedError, MockContinuationLoopError } = vi.hoisted(() => {
+  class RunAbortedError extends Error {
     constructor(message = 'Run interrupted before completion') {
       super(message);
       this.name = 'RunAbortedError';
     }
-  },
-}));
+  }
+  class ContinuationLoopError extends RunAbortedError {
+    constructor(prefix: string) {
+      super(prefix);
+      this.name = 'ContinuationLoopError';
+    }
+  }
+  return { MockRunAbortedError: RunAbortedError, MockContinuationLoopError: ContinuationLoopError };
+});
 
 vi.mock('../../core/agent.js', () => ({
   Agent: vi.fn().mockImplementation(function (this: MockedAgentShape, config: {
@@ -89,6 +101,12 @@ vi.mock('../../core/agent.js', () => ({
     // `mockRecordedToolCalls` and then asserts the value REACHED updateRun.
     this.getRecordedToolCallCount = () => mockRecordedToolCalls;
     this.getLastStop = () => mockLastStop;
+    // By default no ended calls in a mocked child: nothing on its cost line beyond the
+    // snapshot, nothing to take back off the session cap, and no bound for the parent's ceiling. The real booking is pinned in
+    // `spawn-stopped-call-cost.test.ts`, against a real child agent.
+    this.getHelperCostUsd = () => mockHelperCostUsd;
+    this.getStoppedCallSessionCostUsd = () => 0;
+    this.getCapOnlyCostUsd = () => 0;
   }),
   // spawn.ts does `err instanceof RunAbortedError` in the failure catch; the
   // factory mock replaces the whole module, so this export must exist or the
@@ -103,10 +121,19 @@ vi.mock('../../core/agent.js', () => ({
       this.name = 'ToolLoopBreakError';
     }
   },
-  ContinuationLoopError: class ContinuationLoopError extends MockRunAbortedError {
-    constructor(prefix: string) {
-      super(prefix);
-      this.name = 'ContinuationLoopError';
+  ContinuationLoopError: MockContinuationLoopError,
+  // A continuation loop, as in agent.ts: the guard that names it must ask for it first.
+  ThinkingOnlyLoopError: class ThinkingOnlyLoopError extends MockContinuationLoopError {
+    constructor() {
+      super('Run stopped: two truncated turns in a row held only thinking');
+      this.name = 'ThinkingOnlyLoopError';
+    }
+  },
+  // As in agent.ts: a run-abort subclass, thrown by the guard on the reply's text.
+  ToolCallImitationError: class ToolCallImitationError extends MockRunAbortedError {
+    constructor() {
+      super('Run stopped: the reply wrote the same tool call out as text repeatedly instead of calling the tool');
+      this.name = 'ToolCallImitationError';
     }
   },
 }));
@@ -271,6 +298,7 @@ describe('spawn_agent tool', () => {
     mockCostSnapshot = null;
     mockCostSnapshotQueue = null;
     mockRecordedToolCalls = 0;
+    mockHelperCostUsd = 0;
     mockLastStop = null;
     testCounters = {
       httpRequests: 0,
@@ -374,6 +402,16 @@ describe('spawn_agent tool', () => {
     vi.mocked(MockAgent).mockClear();
     await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Analyze' }] }, makeAgent({ principal: MANDATE } as Partial<IAgent>));
     expect((vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['principal']).toEqual(MANDATE);
+  });
+
+  it('a child writes as its parent writes: a trigger run\'s child never writes as the owner', async () => {
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    vi.mocked(MockAgent).mockClear();
+    await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Analyze' }] }, makeAgent({ writeAuthor: 'trigger:t-1' } as Partial<IAgent>));
+    expect((vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['writeAuthor']).toBe('trigger:t-1');
+    vi.mocked(MockAgent).mockClear();
+    await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Analyze' }] }, makeAgent({} as Partial<IAgent>));
+    expect((vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['writeAuthor']).toBeNull();
   });
 
   // The approval queue's seam and the security review's conditions for the seam: a child of a
@@ -682,6 +720,20 @@ describe('spawn_agent tool', () => {
 
       const stopped = await rowsFor(() => mockSend.mockImplementationOnce(() => Promise.reject(new MockRunAbortedError())), 60_000);
       expect(stopped).toEqual(expect.objectContaining({ status: 'aborted', stopReason: 'aborted' }));
+
+      // A guard that stops it after the limit fired is the guard, in the row as in the refusal.
+      const { ThinkingOnlyLoopError } = await import('../../core/agent.js');
+      const guarded = await rowsFor(() => mockSend.mockImplementationOnce((_t: unknown, opts?: { disposableDeadline?: AbortSignal }) => new Promise((_r, reject) => {
+        opts?.disposableDeadline?.addEventListener('abort', () => reject(new ThinkingOnlyLoopError()), { once: true });
+      })), 30);
+      expect(guarded).toEqual(expect.objectContaining({ status: 'aborted', stopReason: 'thinking_loop' }));
+
+      // The same for the guard on a tool call written out as text.
+      const { ToolCallImitationError } = await import('../../core/agent.js');
+      const imitated = await rowsFor(() => mockSend.mockImplementationOnce((_t: unknown, opts?: { disposableDeadline?: AbortSignal }) => new Promise((_r, reject) => {
+        opts?.disposableDeadline?.addEventListener('abort', () => reject(new ToolCallImitationError()), { once: true });
+      })), 30);
+      expect(imitated).toEqual(expect.objectContaining({ status: 'aborted', stopReason: 'tool_call_imitation' }));
     }, 3000);
 
     it('a loop break that lands after the limit fired is still a loop break, not a timeout', async () => {
@@ -2706,7 +2758,8 @@ describe('spawn_agent tool', () => {
     });
 
     it('a sub-cent floor is REACHED by the solo figure, not rounded under it', () => {
-      // $0.00224576 is the cheapest priced id in this registry. Flooring it to four decimals
+      // $0.00224576 was the cheapest priced id in this registry at Mistral's list price (the EU
+      // rate makes it $0.002470336); it stays here as a sub-cent floor. Flooring it to four decimals
       // gives $0.0022 — under the floor, so a caller typing the printed figure is refused
       // again. The figure has to be ceiled because it is a figure to REACH.
       const cheapest = 0.00224576;
@@ -3649,11 +3702,13 @@ describe('spawn_agent tool', () => {
       // The ask here is sub-cent, which is what makes the assertion able to see its subject.
       // (2) The first version put its shares 0.19 % above the floor, so a routine price
       // refresh of one registry entry would flip it from "admitted + note" to "refused" and
-      // the failure would read as a formatter bug. $0.0095 across two children asking
-      // $0.005 leaves 5.7 % of margin.
+      // the failure would read as a formatter bug. (3) The Mistral EU price (list × 1.1) raised
+      // the 14B's floor to about $0.00495, over the $0.00475 shares, and two children over it
+      // need more than a cent, which renders with two decimals. So the children run on the 3B,
+      // whose floor is far under $0.00475: $0.0095 across two children asking $0.005.
       const { reloadConfig } = await import('../../core/config.js');
       vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
-        tiny: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'ministral-14b-2512' },
+        tiny: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'ministral-3b-2512' },
       }));
       reloadConfig();
       try {
@@ -3720,8 +3775,8 @@ describe('spawn_agent tool', () => {
           { agents: [{ name: 't1', task: 'A', profile: 'tiny' }, { name: 't2', task: 'B', profile: 'tiny' }] },
           agent,
         ).then(() => null, (e: unknown) => e as Error);
-        expect(err, 'refused: $0.001 each is under one $0.0045 turn').not.toBeNull();
-        expect(err!.message, 'the floor is readable').toMatch(/\$0\.0045/);
+        expect(err, 'refused: $0.001 each is under one $0.0049 turn').not.toBeNull();
+        expect(err!.message, 'the floor is readable').toMatch(/\$0\.0049/);
         expect(err!.message, 'and so is the share').toMatch(/\$0\.0010/);
         // ⚠ Scoped on purpose: this holds for THIS fixture, not for the function. Four
         // decimals narrow the class, they do not close it — anything below $0.00005 still
@@ -4362,6 +4417,46 @@ describe('spawn_agent tool', () => {
       expect(ctorArg.toolContext['runHistory']).toBe(sentinelRunHistory);
     });
 
+    // The provider-side web search, judged by the real gate (agent.ts) on the context the child is
+    // handed. The reachable case first: a child with a narrower tool list (no web_research) under
+    // deny-all starts from its parent's policy.
+    const childContext = async (parentCtx: import('../../core/tool-context.js').ToolContext, tools?: string[]): Promise<{ ctx: import('../../core/tool-context.js').ToolContext; toolNames: string[] }> => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      vi.mocked(MockAgent).mockClear();
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'narrow', task: 'Look something up', ...(tools ? { tools } : {}) }] },
+        makeAgent({ toolContext: parentCtx }),
+      );
+      const arg = vi.mocked(MockAgent).mock.calls[0]![0] as { tools: Array<{ definition: { name: string } }>; toolContext: import('../../core/tool-context.js').ToolContext };
+      return { ctx: arg.toolContext, toolNames: arg.tools.map((t) => t.definition.name) };
+    };
+    const actual = async (): Promise<{ providerSearchAdmitted: typeof import('../../core/agent.js').providerSearchAdmitted; tc: typeof import('../../core/tool-context.js') }> => ({
+      providerSearchAdmitted: (await vi.importActual<typeof import('../../core/agent.js')>('../../core/agent.js')).providerSearchAdmitted,
+      tc: await vi.importActual<typeof import('../../core/tool-context.js')>('../../core/tool-context.js'),
+    });
+
+    it('hands a child with no web_research the parent\'s deny-all, and the gate withholds the search', async () => {
+      const { providerSearchAdmitted, tc } = await actual();
+      const parent = tc.createToolContext({});
+      tc.applyNetworkPolicy(parent, 'deny-all', []);
+      const { ctx, toolNames } = await childContext(parent, ['read_file']);
+      expect(toolNames).not.toContain('web_research');
+      expect(ctx.networkPolicy).toBe('deny-all');
+      expect(providerSearchAdmitted(ctx)).toBe(false);
+    });
+
+    it('keeps the child of a parent with no policy of its own withheld, and the child of an open one offered', async () => {
+      const { providerSearchAdmitted, tc } = await actual();
+      const unread = tc.markPolicyUnread(tc.createToolContext({}));
+      const child = (await childContext(unread)).ctx;
+      expect(child).not.toBe(unread);
+      expect(tc.isPolicyUnread(child)).toBe(true);
+      expect(providerSearchAdmitted(child)).toBe(false);
+      // Control: the same context unmarked (the engine's, no policy) — the child is offered it.
+      const open = (await childContext(tc.createToolContext({}))).ctx;
+      expect(providerSearchAdmitted(open)).toBe(true);
+    });
+
     it('gives the child a SCOPED VIEW of the vault, not the parent store itself', async () => {
       const { Agent: MockAgent } = await import('../../core/agent.js');
       const parentStore = makeVault({ STRIPE_KEY: 'sk_live', HR_PAYROLL: 'pay' });
@@ -4669,6 +4764,26 @@ describe('spawn_agent tool', () => {
       expect(ctorArg.currentRunId).toBe(MINTED_ID);
     });
 
+    // Register 1116: a child of a workflow step, or of another child, has no thread of its own.
+    // Its run names the chat it runs for, so a helper's own such runs can be read as theirs; only
+    // a parent with neither records none.
+    it.each([
+      ['a parent in a chat', { currentThreadId: 'thread-789', originThreadId: 'chat-other' }, 'thread-789'],
+      ['a workflow step or child, which knows only the chat it runs for', { originThreadId: 'chat-1' }, 'chat-1'],
+      ['a parent with no chat at all', {}, ''],
+    ])('records the chat of %s', async (_label, threads, expected) => {
+      const insertRun = vi.fn().mockReturnValue('run-child');
+      const agent = makeAgent({
+        currentRunId: 'parent-run',
+        ...threads,
+        toolContext: { sessionCounters: testCounters, runHistory: { insertRun, updateRun: vi.fn() } } as unknown as import('../../core/tool-context.js').ToolContext,
+      });
+
+      await spawnAgentTool.handler({ agents: [{ name: 'step-child', task: 'Work' }] }, agent);
+
+      expect((insertRun.mock.calls[0]![0] as { sessionId: string }).sessionId).toBe(expected);
+    });
+
     it('the child inherits the parent\'s tool-call sink, so its calls are still recorded', async () => {
       // Half of the attribution fix, and the half that fails SILENTLY. The
       // child's own run id (asserted above) only reaches history if the child
@@ -4931,6 +5046,17 @@ describe('spawn_agent tool', () => {
         expect(onAfterRun.mock.calls.map((c) => c[1]), 'debited once, its own spend').toEqual([0.2]);
         expect((updateRun.mock.calls[0]![1] as { costUsd: number }).costUsd, 'recorded the same').toBe(0.2);
         expect(charged, 'the delegating ceiling sees the whole').toEqual([0.5]);
+      });
+
+      it('when it succeeds with an ended call on its cost line: the row adds the estimate, the debit does not', async () => {
+        delegated();
+        mockHelperCostUsd = 0.07;
+        const charged: number[] = [];
+        const { agent, onAfterRun, updateRun } = parent(charged);
+        await spawnAgentTool.handler({ agents: [{ name: 'delegator', task: 'x' }] }, agent);
+        expect((updateRun.mock.calls[0]![1] as { status: string }).status).toBe('completed');
+        expect((updateRun.mock.calls[0]![1] as { costUsd: number }).costUsd, 'own spend plus the estimate').toBeCloseTo(0.27, 12);
+        expect(onAfterRun.mock.calls.map((c) => c[1]), 'debited its own spend only').toEqual([0.2]);
       });
 
       it('when it fails', async () => {
@@ -5419,6 +5545,52 @@ describe('spawn_agent tool', () => {
       expect(arg.status).toBe('aborted');
       expect(arg.errorText).toBeUndefined(); // an intentional interruption is not an error to store
       expect(arg.stopReason).toBe('aborted');
+    });
+
+    it('a child a loop guard stopped is recorded aborted with the guard as the reason and its message as the error', async () => {
+      const { ToolLoopBreakError, ContinuationLoopError, ThinkingOnlyLoopError, ToolCallImitationError } = await import('../../core/agent.js');
+      const cases: Array<[Error, string]> = [
+        [new ToolCallImitationError(), 'tool_call_imitation'],
+        [new ToolLoopBreakError('repeat:x'), 'tool_loop_break'],
+        [new ContinuationLoopError('prefix'), 'continuation_loop'],
+        [new ThinkingOnlyLoopError(), 'thinking_loop'],
+      ];
+      for (const [err, reason] of cases) {
+        const updateRun = vi.fn();
+        const parentToolContext = {
+          sessionCounters: testCounters,
+          runHistory: { insertRun: vi.fn().mockReturnValue('run-guard-1'), updateRun },
+        } as unknown as import('../../core/tool-context.js').ToolContext;
+        mockSend.mockRejectedValueOnce(err);
+        const agent = makeAgent({ currentRunId: 'parent-guard', toolContext: parentToolContext });
+        await expect(spawnAgentTool.handler({ agents: [{ name: 'looping', task: 'x' }] }, agent)).rejects.toThrow();
+        const update = updateRun.mock.calls.find((c) => (c[1] as { status?: string }).status === 'aborted');
+        expect(update, reason).toBeDefined();
+        expect(update![1]).toEqual(expect.objectContaining({ status: 'aborted', stopReason: reason, errorText: err.message }));
+      }
+    });
+
+    it('a child a loop guard stopped after a vault key was refused keeps the refusal in its error', async () => {
+      const { ToolLoopBreakError } = await import('../../core/agent.js');
+      const updateRun = vi.fn();
+      const parentToolContext = {
+        sessionCounters: testCounters,
+        runHistory: { insertRun: vi.fn().mockReturnValue('run-guard-key'), updateRun },
+      } as unknown as import('../../core/tool-context.js').ToolContext;
+      mockSend.mockImplementationOnce(function (this: { secretStore: SecretStoreLike }) {
+        // The child asks for a key its spawn order did not name, then loops.
+        expect(this.secretStore.resolve('STRIPE_KEY')).toBeNull();
+        return Promise.reject(new ToolLoopBreakError('repeat:x'));
+      });
+      const agent = makeAgent({
+        currentRunId: 'parent-guard-key',
+        toolContext: parentToolContext,
+        secretStore: makeVault({ SHOPIFY_ACCESS_TOKEN: 'shp_tok', STRIPE_KEY: 'sk' }) as unknown as IAgent['secretStore'],
+      });
+      await expect(spawnAgentTool.handler({ agents: [{ name: 'looping', task: 'x', secret_scope: ['SHOPIFY_ACCESS_TOKEN'] }] }, agent)).rejects.toThrow();
+      const update = updateRun.mock.calls.find((c) => (c[1] as { status?: string }).status === 'aborted')![1] as { stopReason?: string; errorText?: string };
+      expect(update.stopReason).toBe('tool_loop_break');
+      expect(update.errorText).toMatch(/STRIPE_KEY/);
     });
 
     it('marks a failed section FAILED with the formatted error while a sibling still succeeds', async () => {

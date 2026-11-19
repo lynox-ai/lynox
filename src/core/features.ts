@@ -19,7 +19,10 @@ export type FeatureFlag =
   | 'workflow-reviewed-grant'
   | 'inbound-webhooks'
   | 'approval-queue'
-  | 'shopify-bulk-read';
+  | 'inbox-read'
+  | 'inbox-user-rules'
+  | 'shopify-bulk-read'
+  | 'bulk-runs';
 
 // Core feature flags (immutable)
 const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
@@ -33,7 +36,10 @@ const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
   'workflow-reviewed-grant': 'LYNOX_FEATURE_WORKFLOW_REVIEWED_GRANT',
   'inbound-webhooks': 'LYNOX_FEATURE_INBOUND_WEBHOOKS',
   'approval-queue': 'LYNOX_FEATURE_APPROVAL_QUEUE',
+  'inbox-read': 'LYNOX_FEATURE_INBOX_READ',
+  'inbox-user-rules': 'LYNOX_FEATURE_INBOX_USER_RULES',
   'shopify-bulk-read': 'LYNOX_FEATURE_SHOPIFY_BULK_READ',
+  'bulk-runs': 'LYNOX_FEATURE_BULK_RUNS',
 };
 
 const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
@@ -87,11 +93,26 @@ const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   // behaviour exactly. The store and its sweep work either way, so entries from an on-period
   // still expire and are purged after it is turned off.
   'approval-queue': false,
+  // The agent's read of the inbox store, `inbox_read` (`integrations/mail/tools/inbox-read.ts`):
+  // open items per bucket, a bucket's items, one item with its thread. Read-only. Default OFF,
+  // and off means the tool is not registered.
+  'inbox-read': false,
+  // Inbox rules the agent proposes and the owner confirms (`inbox_rule_propose`): a proposal
+  // applies to no mail until the owner confirms it. Default OFF until the rule view can show and
+  // confirm a proposal: off means the tool is not registered, so no proposal waits where nobody
+  // sees it. Confirmed rules, names and the filter by rule work either way.
+  'inbox-user-rules': false,
   // A bulk run may list a Shopify store's products and read their before-images through its
   // GraphQL API (`core/bulk-shopify.ts`). Such a run reads only: nothing can approve it until
   // a write form for the store exists. Default OFF; `bulk_plan` refuses the source with it off,
   // and every tick of a run planned while it was on halts the run once it is off.
   'shopify-bulk-read': false,
+  // Bulk runs on a managed pool tier (managed, managed_pro, managed_max), where the owner does
+  // not own the instance's budget: the control plane turns it on per instance, and only there
+  // (`bulkRunsOn` in `core/engine.ts`). With it on the owner may still turn bulk runs off in the
+  // config; with it off the config cannot turn them on. It has no effect on any other tier,
+  // where `bulk_runs_enabled` alone decides. Default OFF.
+  'bulk-runs': false,
 };
 
 // Dynamic registry for Pro/plugin feature flags

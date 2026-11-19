@@ -16,15 +16,39 @@ import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { PromptSegment, TabQuestion, SecretOutcome, PromptMeta, PromptOrigin } from '../types/index.js';
-import { OWNER_PRINCIPAL, isMandateTag, mandateIdOf, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
-import { maskCredentialInput, withoutTypedCredentials } from './secret-store.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateIdOf, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
+import { MandateKeyInputError, mandateCredentialInput, maskCredentialInput, withoutTypedCredentials } from './secret-store.js';
+
+/**
+ * A mandate's helper takes no key in this chat:
+ * an answer of theirs that reads as carrying one (`mandateCredentialInput`) is refused before any
+ * row stores it. The owner's answers are masked as before.
+ */
+function refuseMandateKey(by: RequestPrincipal, texts: ReadonlyArray<string | null>): void {
+  if (isOwnerPrincipal(by)) return;
+  if (texts.some((t) => t !== null && mandateCredentialInput(t) !== null)) throw new MandateKeyInputError();
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export type PromptType = 'ask_user' | 'ask_secret' | 'connect_mail';
 export type PromptStatus = 'pending' | 'answered' | 'expired';
-/** Why a question was closed without an answer, where that was not its own expiry. */
-export type PromptClosedReason = 'process_restarted' | 'mandate_ended' | 'thread_deleted';
+/**
+ * Why a question was closed without an answer. An answer that comes too late is told this
+ * reason, so the page can say what happened and what to do instead. A row closed before the
+ * reasons were written everywhere carries none.
+ */
+export type PromptClosedReason =
+  | 'process_restarted' // the engine restarted, and the run that asked is gone
+  | 'timed_out'         // its own time ran out
+  | 'run_stopped'       // the run that asked was stopped, or ran past its time limit
+  | 'run_taken_over'    // a newer message in the chat took over the stuck run that asked
+  | 'thread_deleted'    // the chat it was asked in was deleted
+  | 'mandate_ended'     // the access it was asked under ended
+  | 'plan_paused'       // its plan was paused, because the access the plan ran under ended
+  | 'plan_taken_over'   // the owner took its plan over
+  | 'plan_ended'        // its plan was no longer waiting on it, and was run again
+  | 'superseded';       // a question the agent asked replaced an open onboarding card
 
 export interface PendingPromptRow {
   id: string;
@@ -304,6 +328,7 @@ export class PromptStore {
   private _stmtAnswer: Database.Statement | undefined;
   private _stmtAnswerSecret: Database.Statement | undefined;
   private _stmtGetPending: Database.Statement | undefined;
+  private _stmtListPending: Database.Statement | undefined;
   private _stmtGetById: Database.Statement | undefined;
   private _stmtExpireOld: Database.Statement | undefined;
   private _stmtExpireUnparked: Database.Statement | undefined;
@@ -543,7 +568,7 @@ export class PromptStore {
         // ANSWERED card gets flipped to expired, and `/promote` then refuses it
         // with "Prompt not answered yet" — the basics the user typed never reach
         // durable knowledge.
-        `UPDATE pending_prompts SET status = 'expired'
+        `UPDATE pending_prompts SET status = 'expired', closed_reason = 'superseded'
           WHERE session_id = ? AND status = 'pending'
             AND json_valid(payload_json)
             AND json_extract(payload_json, '$.kind') = 'onboarding_basics'`,
@@ -564,8 +589,12 @@ export class PromptStore {
    * the row stores it and before the asking tool hands it to the model.
    *
    * `by` is the principal that answered, recorded beside the answer. Required on every way an
-   * answer is stored, so a new route cannot settle a question without saying who did. */
+   * answer is stored, so a new route cannot settle a question without saying who did.
+   *
+   * An answer from anyone but the owner that reads as carrying a key is not stored at all
+   * (`refuseMandateKey`): it throws `MandateKeyInputError`, and the question stays open. */
   answerUser(promptId: string, answer: string, by: RequestPrincipal): boolean {
+    refuseMandateKey(by, [answer]);
     const result = this._getAnswerStmt().run(withoutTypedCredentials(answer), principalTag(by), mandateIdOf(by) ?? null, promptId);
     const changed = result.changes > 0;
     if (changed) this._emitSettled(promptId);
@@ -575,6 +604,7 @@ export class PromptStore {
   /** Answer a multi-question (tabs) ask_user. Answers are stored as a JSON
    * string[] in the answer column. Ordering must match questions ordering. */
   answerUserTabs(promptId: string, answers: string[], by: RequestPrincipal): boolean {
+    refuseMandateKey(by, answers);
     // Shared UPDATE path: stores JSON-encoded array in the same `answer`
     // column single-question uses. Handler disambiguates by presence of
     // questions_json on the row.
@@ -590,8 +620,10 @@ export class PromptStore {
   /** Optional: persist partial answers so a reconnect mid-batch can restore
    * progress. Doesn't settle the prompt — the handler keeps awaiting. Masked
    * like a final answer, without the note: the partial goes back to the form,
-   * not to the model. */
-  setPartialAnswers(promptId: string, partial: (string | null)[]): boolean {
+   * not to the model. `by` as at `answerUser`: a mandate's partial that reads as carrying a key
+   * is not stored. */
+  setPartialAnswers(promptId: string, partial: (string | null)[], by: RequestPrincipal): boolean {
+    refuseMandateKey(by, partial);
     const masked = partial.map((a) => (a === null ? null : maskCredentialInput(a).text));
     const result = this._getSetPartialStmt().run(JSON.stringify(masked), promptId);
     return result.changes > 0;
@@ -633,6 +665,19 @@ export class PromptStore {
 
   getById(promptId: string): PendingPromptRow | undefined {
     return this._getGetByIdStmt().get(promptId) as PendingPromptRow | undefined;
+  }
+
+  /**
+   * Every pending (non-expired) question, as `getPending` reads it — at most one per session,
+   * which the unique index `idx_pending_prompts_session_unique` holds. The engine-posed
+   * onboarding card is left out, as `/pending-prompt` hides it. Read by `GET /api/runs/active`,
+   * which marks the threads a scheduled run's question waits in.
+   */
+  listPendingSessions(): Array<{ id: string; session_id: string; created_at: string }> {
+    const rows = this._getListPendingStmt().all() as Array<{ id: string; session_id: string; created_at: string; payload_json: string | null }>;
+    return rows
+      .filter((row) => !isOnboardingBasicsPayload(row.payload_json))
+      .map((row) => ({ id: row.id, session_id: row.session_id, created_at: row.created_at }));
   }
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
@@ -780,13 +825,13 @@ export class PromptStore {
    * Returns how many rows it settled; 0 is normal (the run may have drained its
    * own row already).
    */
-  expirePendingForTrigger(triggerId: string): number {
+  expirePendingForTrigger(triggerId: string, reason: PromptClosedReason): number {
     const rows = this.db
       .prepare(`SELECT id FROM pending_prompts WHERE trigger_id = ? AND status = 'pending'`)
       .all(triggerId) as { id: string }[];
     const result = this.db
-      .prepare(`UPDATE pending_prompts SET status = 'expired' WHERE trigger_id = ? AND status = 'pending'`)
-      .run(triggerId);
+      .prepare(`UPDATE pending_prompts SET status = 'expired', closed_reason = ? WHERE trigger_id = ? AND status = 'pending'`)
+      .run(reason, triggerId);
     for (const row of rows) this._emitSettled(row.id);
     return result.changes;
   }
@@ -889,11 +934,11 @@ export class PromptStore {
    * superseded by a fresh /run for the same session: the previous run is
    * stuck on `waitForSettled`, so the only way to drain it is to mark its
    * prompt expired and let the wait resolve. Idempotent. Returns true only
-   * the first time the prompt transitions out of 'pending'. */
-  expirePrompt(promptId: string): boolean {
+   * the first time the prompt transitions out of 'pending'. `reason` is what a late answer is told. */
+  expirePrompt(promptId: string, reason: PromptClosedReason): boolean {
     const result = this.db
-      .prepare(`UPDATE pending_prompts SET status = 'expired' WHERE id = ? AND status = 'pending'`)
-      .run(promptId);
+      .prepare(`UPDATE pending_prompts SET status = 'expired', closed_reason = ? WHERE id = ? AND status = 'pending'`)
+      .run(reason, promptId);
     const changed = result.changes > 0;
     if (changed) this._emitSettled(promptId);
     return changed;
@@ -1009,6 +1054,14 @@ export class PromptStore {
     `));
   }
 
+  private _getListPendingStmt(): Database.Statement {
+    return (this._stmtListPending ??= this.db.prepare(`
+      SELECT id, session_id, created_at, payload_json FROM pending_prompts
+      WHERE status = 'pending' AND ${NOT_EXPIRED}
+      ORDER BY created_at DESC
+    `));
+  }
+
   private _getGetByIdStmt(): Database.Statement {
     return (this._stmtGetById ??= this.db.prepare(`
       SELECT * FROM pending_prompts WHERE id = ?
@@ -1018,7 +1071,7 @@ export class PromptStore {
   private _getExpireOldStmt(): Database.Statement {
     return (this._stmtExpireOld ??= this.db.prepare(`
       UPDATE pending_prompts
-      SET status = 'expired'
+      SET status = 'expired', closed_reason = 'timed_out'
       WHERE status = 'pending' AND ${EXPIRED}
     `));
   }
@@ -1029,7 +1082,7 @@ export class PromptStore {
       SET status = 'expired',
           -- A question whose own TTL already ran out (during downtime, or in the minutes before
           -- the TTL sweep's next tick) expired; the restart is not why it is closed.
-          closed_reason = CASE WHEN ${NOT_EXPIRED} THEN 'process_restarted' ELSE NULL END
+          closed_reason = CASE WHEN ${NOT_EXPIRED} THEN 'process_restarted' ELSE 'timed_out' END
       WHERE status = 'pending' AND trigger_id IS NULL
     `));
   }

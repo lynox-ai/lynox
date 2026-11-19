@@ -1,0 +1,634 @@
+import { describe, it, expect } from 'vitest';
+import {
+  checkMarkup, droppedTagsOf, htmlFieldsOfListForm, markupChangesOf, markupOf, plainTextMarkupOf,
+  passiveItem, withinAllowlist, type MarkupCheckInput, type MarkupItem, type MarkupRefusal,
+} from './bulk-html.js';
+import { parseFragment, defaultTreeAdapter, html as p5 } from 'parse5';
+import { canonicalHtml } from './html-tree.js';
+
+const STORE = 'shop.example.com';
+
+function check(before: string | null, after: string, more: Partial<MarkupCheckInput> = {}): ReturnType<typeof checkMarkup> {
+  return checkMarkup({ before, after, storeHost: STORE, startDomains: [], ...more });
+}
+
+function reason(before: string | null, after: string, more: Partial<MarkupCheckInput> = {}): MarkupRefusal | 'ok' {
+  const r = check(before, after, more);
+  return r.ok ? 'ok' : r.reason;
+}
+
+function tree(value: string) {
+  return parseFragment(defaultTreeAdapter.createElement('div', p5.NS.HTML, []), value, { scriptingEnabled: true });
+}
+
+describe('markupOf', () => {
+  it('counts a bare element as a triple of its own, so a bare <script> is not invisible', () => {
+    const { triples, occurrences } = markupOf(tree('<script></script>'));
+    expect(triples).toEqual([{ namespace: 'html', element: 'script', attribute: null, value: null, inTemplate: false }]);
+    expect(occurrences).toEqual([{ kind: 'element', namespace: 'html', name: 'script', attributes: [], text: '', layout: null, inTemplate: false }]);
+  });
+
+  it('walks template contents and marks them', () => {
+    const { occurrences } = markupOf(tree('<template><iframe src="https://x.example/"></iframe></template>'));
+    expect(occurrences.map((o) => [o.name, o.inTemplate])).toEqual([['template', false], ['iframe', true]]);
+  });
+
+  it('carries the body of an SVG script, which the parser holds as text nodes', () => {
+    const { occurrences } = markupOf(tree('<svg><script>alert(1)</script></svg>'));
+    expect(occurrences.find((o) => o.name === 'script')).toMatchObject({ namespace: 'svg', text: 'alert(1)' });
+  });
+
+  it('names prefixed attributes with their prefix and sorts them', () => {
+    const { occurrences } = markupOf(tree('<svg><a xlink:href="https://x.example/" id="b"></a></svg>'));
+    expect(occurrences.find((o) => o.name === 'a')!.attributes).toEqual([['id', 'b'], ['xlink:href', 'https://x.example/']]);
+  });
+
+  it('counts comments, bogus ones included', () => {
+    const { occurrences } = markupOf(tree('<!-- a --><?x y>'));
+    expect(occurrences.map((o) => [o.kind, o.text])).toEqual([['comment', ' a '], ['comment', '?x y']]);
+  });
+});
+
+describe('checkMarkup: the allowlist and the multiset', () => {
+  it('passes a rewrite that adds only allowlisted elements and a link on the store', () => {
+    expect(reason('<p>Alt</p>', '<h2>Neu</h2><p><strong>Neu</strong> <em>und</em> <a href="/products/x">mehr</a></p><ul><li>a</li></ul><br>')).toBe('ok');
+  });
+
+  it('refuses an element outside the allowlist the before-image does not hold', () => {
+    expect(reason('<p>Alt</p>', '<p>Neu</p><iframe src="https://shop.example.com/x"></iframe>')).toBe('element_not_allowed');
+  });
+
+  it('passes an element outside the allowlist that the before-image holds the same way', () => {
+    const iframe = '<iframe src="https://shop.example.com/v"></iframe>';
+    expect(reason(`<p>Alt</p>${iframe}`, `<p>Neu</p>${iframe}`)).toBe('ok');
+  });
+
+  it('refuses a second copy of a held element (D1: compared as a multiset, not by name)', () => {
+    const iframe = '<iframe src="https://shop.example.com/v"></iframe>';
+    expect(reason(iframe, `${iframe}${iframe}`)).toBe('element_not_allowed');
+    expect(reason(iframe, `${iframe}<iframe src="https://shop.example.com/w"></iframe>`)).toBe('element_not_allowed');
+  });
+
+  it('refuses a changed src on a held iframe, on a domain the field already links to', () => {
+    expect(reason('<iframe src="https://shop.example.com/v"></iframe>', '<iframe src="https://shop.example.com/w"></iframe>')).toBe('element_not_allowed');
+  });
+
+  it('keeps the allowlist to the HTML namespace: an SVG a is outside it', () => {
+    expect(reason('<p>x</p>', '<p>x</p><svg><a href="/y">y</a></svg>')).toBe('element_not_allowed');
+    // The svg is held: only the a inside it can fall, and it falls as an element, not as a link.
+    expect(reason('<svg></svg>', '<svg><a>y</a></svg>')).toBe('element_not_allowed');
+  });
+
+  it('refuses a new img whatever its src, and passes a held one', () => {
+    const img = '<img src="https://cdn.example.com/a.jpg">';
+    expect(reason('<p>x</p>', `<p>x</p>${img}`)).toBe('new_img');
+    expect(reason('<p>x</p>', '<p>x</p><image src="/a.jpg">')).toBe('new_img');
+    expect(reason(`<p>x</p>${img}`, `<p>y</p>${img}`)).toBe('ok');
+  });
+
+  // The strings PRD shopify-preset §21.7 names: the rule reads the tree, not the text. A changed
+  // srcset entry, a changed xlink:href and an SVG animation are refused by the element and attribute
+  // rules (a counted attribute changed is a new occurrence), not by the domain rule.
+  it('refuses the strings the description write is checked against', () => {
+    expect(reason('<p>x</p>', '<p>x</p><img/src=x/onerror=y>')).toBe('new_img');
+    expect(reason('<p>x</p>', '<p>x</p><IMAGE src=x>')).toBe('new_img');
+    expect(reason('<p>x</p>', '<p>x</p><noscript><p title="</noscript><img src=x onerror=y>"></noscript>')).not.toBe('ok');
+    const held = '<img src="a.jpg" srcset="https://acme.myshopify.com/a 1x, https://acme.myshopify.com/b 2x">';
+    expect(reason(held, held.replace('acme.myshopify.com/b', 'evil.example/b'))).toBe('new_img');
+    expect(reason(held, held)).toBe('ok');
+    expect(reason('<svg><a xlink:href="https://acme.myshopify.com/x">t</a></svg>', '<svg><a xlink:href="https://evil.example/x">t</a></svg>')).not.toBe('ok');
+    expect(reason('<svg><rect></rect></svg>', '<svg><rect><animate attributeName="href" values="javascript:alert(1)"></animate></rect></svg>')).not.toBe('ok');
+  });
+
+  it('refuses a changed body of a held script or style, in every namespace', () => {
+    expect(reason('<script>a()</script>', '<script>b()</script>')).toBe('content_changed');
+    expect(reason('<style>p{}</style>', '<style>p{color:red}</style>')).toBe('content_changed');
+    expect(reason('<svg><script>a()</script></svg>', '<svg><script>b()</script></svg>')).toBe('content_changed');
+    expect(reason('<noscript>a</noscript>', '<noscript>b</noscript>')).toBe('content_changed');
+  });
+
+  it('refuses a changed noscript whose change lies only in an attribute\'s text, as Shopify keeps it', () => {
+    // What Shopify kept of the canonical noscript case: it parses with scripting off, so the
+    // case's `img` became attribute text of a `p` inside the noscript, as measured.
+    const kept = '<noscript><p title="&lt;/noscript&gt;&lt;img src=" x onerror="alert(1)">"&gt;</p></noscript>';
+    expect(reason(kept, kept)).toBe('ok');
+    expect(reason(kept, kept.replace('alert(1)', 'alert(2)'))).toBe('content_changed');
+    expect(reason(kept, kept.replace('&lt;img src=', '&lt;img src=y'))).toBe('content_changed');
+  });
+
+  it('refuses a held foreign script whose text moves between it and an element below it', () => {
+    const held = '<svg><script>a=1;/*b()*/<g></g><g></g></script></svg>';
+    expect(reason(held, '<svg><script>a=1;<g>/*</g>b()<g>*/</g></script></svg>')).toBe('content_changed');
+    // Control: held as it is, it passes.
+    expect(reason(held, held)).toBe('ok');
+  });
+
+  it('refuses a second bare script beside a held one', () => {
+    expect(reason('<script></script>', '<script></script><script></script>')).toBe('element_not_allowed');
+  });
+
+  it('tells an element inside a template from the same element outside it (N2)', () => {
+    expect(reason('<template><b id="x">t</b></template>', '<template><b id="x">t</b></template>')).toBe('ok');
+    expect(reason('<template><b id="x">t</b></template>', '<b id="x">t</b>')).toBe('element_not_allowed');
+  });
+
+  it('refuses a new or changed comment, a block-editor comment and a bogus one included', () => {
+    expect(reason('<p>a</p>', '<p>a</p><!-- x -->')).toBe('comment_added');
+    expect(reason('<!-- x --><p>a</p>', '<!-- y --><p>a</p>')).toBe('comment_added');
+    expect(reason('<p>a</p>', '<!-- wp:html --><p>a</p><!-- /wp:html -->')).toBe('comment_added');
+    expect(reason('<p>a</p>', '<p>a</p><?x <img src=x onerror=1>>')).toBe('comment_added');
+    expect(reason('<!-- wp:paragraph --><p>a</p><!-- /wp:paragraph -->', '<!-- wp:paragraph --><p>b</p><!-- /wp:paragraph -->')).toBe('ok');
+  });
+});
+
+describe('checkMarkup: attributes with their values', () => {
+  it('refuses a new attribute on an allowlisted element', () => {
+    expect(reason('<p>a</p>', '<p class="x">a</p>')).toBe('attribute_not_allowed');
+    expect(reason('<p>a</p>', '<p><a href="/x" title="t">a</a></p>')).toBe('attribute_not_allowed');
+  });
+
+  it('passes a held attribute with its value and refuses a changed value', () => {
+    expect(reason('<p class="x">a</p>', '<p class="x">b</p>')).toBe('ok');
+    expect(reason('<p class="x">a</p>', '<p class="y">b</p>')).toBe('attribute_not_allowed');
+  });
+
+  it('refuses an on* attribute even where the element holds the name with another value', () => {
+    expect(reason('<p onclick="a()">a</p>', '<p onclick="b()">a</p>')).toBe('attribute_not_allowed');
+  });
+});
+
+describe('checkMarkup: the domain rule', () => {
+  const link = (href: string, more: Partial<MarkupCheckInput> = {}, before = '<p>a</p>'): MarkupRefusal | 'ok' =>
+    reason(before, `<p>a <a href="${href}">b</a></p>`, more);
+
+  it('passes a relative path, which resolves to the store host', () => {
+    expect(link('/collections/all')).toBe('ok');
+    expect(link('https://shop.example.com/x')).toBe('ok');
+  });
+
+  it('refuses a host the store, the start list and the field do not name', () => {
+    expect(link('https://evil.example/')).toBe('new_link_domain');
+    expect(link('//evil.example/x')).toBe('new_link_domain');
+    expect(link('https://shop.example.com@evil.example/')).toBe('new_link_domain');
+  });
+
+  it('matches a start domain exactly or at a dot boundary only', () => {
+    expect(link('https://www.example.ch/', { startDomains: ['example.ch'] })).toBe('ok');
+    expect(link('https://example.ch/', { startDomains: ['example.ch'] })).toBe('ok');
+    expect(link('https://evilexample.ch/', { startDomains: ['example.ch'] })).toBe('new_link_domain');
+  });
+
+  it('passes a domain the before-image of the field already links to', () => {
+    expect(link('https://partner.example/b', {}, '<p><a href="https://partner.example/a">x</a></p>')).toBe('ok');
+  });
+
+  it('refuses control characters, U+FFFD and the backslash before resolving', () => {
+    expect(link('java&#x09;script:alert(1)')).toBe('url_control_char');
+    expect(link('/\\evil.example')).toBe('url_control_char');
+    expect(link('&#0;https://shop.example.com/')).toBe('url_control_char');
+  });
+
+  it('refuses a scheme other than http, https and mailto', () => {
+    expect(link('javascript:alert(1)')).toBe('url_scheme');
+    expect(link(' javascript:alert(1)')).toBe('url_scheme');
+    expect(link('data:text/html,x')).toBe('url_scheme');
+  });
+
+  it('checks a mailto by the domain of its one address', () => {
+    expect(link('mailto:info@example.ch', { startDomains: ['example.ch'] })).toBe('ok');
+    expect(link('mailto:info@evil.example')).toBe('new_link_domain');
+    expect(link('mailto:info@example.ch?bcc=x@evil.example', { startDomains: ['example.ch'] })).toBe('url_scheme');
+    expect(link('mailto:info@example.ch,x@evil.example', { startDomains: ['example.ch'] })).toBe('url_scheme');
+  });
+
+  it('refuses a mailto with a fragment', () => {
+    expect(link('mailto:info@example.ch#x', { startDomains: ['example.ch'] })).toBe('url_scheme');
+  });
+
+  it('takes a plain local part only, decoded once', () => {
+    expect(link('mailto:first.last+tag@example.ch', { startDomains: ['example.ch'] })).toBe('ok');
+    for (const local of ['boss;a', 'boss%3Ba', 'boss%253Ba', '%22a%22', 'a%25']) {
+      expect(link(`mailto:${local}@example.ch`, { startDomains: ['example.ch'] }), local).toBe('url_scheme');
+    }
+    // A broken escape is no address.
+    expect(link('mailto:a%ZZ@example.ch', { startDomains: ['example.ch'] })).toBe('url_scheme');
+  });
+
+  it('reads one address after decoding: an escaped @ is a second one', () => {
+    // Refused as an address, not judged by the domain after one of the two `@`.
+    expect(link('mailto:a%40evil.example@example.ch', { startDomains: ['example.ch', 'evil.example'] })).toBe('url_scheme');
+  });
+
+  it('checks the domain as it decodes, in ASCII only', () => {
+    expect(link('mailto:a@example%2Ech', { startDomains: ['example.ch'] })).toBe('ok');
+    expect(link('mailto:a@example.ch%23x', { startDomains: ['example.ch'] })).toBe('url_scheme');
+    // An internationalised domain only in Punycode, the form a web link's host takes.
+    expect(link('mailto:a@bücher.ch', { startDomains: ['bücher.ch', 'xn--bcher-kva.ch'] })).toBe('url_scheme');
+    expect(link('mailto:a@xn--bcher-kva.ch', { startDomains: ['xn--bcher-kva.ch'] })).toBe('ok');
+  });
+
+  it('compares a mail domain in lower case and without its closing dot', () => {
+    expect(link('mailto:Info@Example.CH', { startDomains: ['example.ch'] })).toBe('ok');
+    expect(link('mailto:info@example.ch.', { startDomains: ['example.ch'] })).toBe('ok');
+  });
+});
+
+describe('checkMarkup: hidden characters', () => {
+  it('refuses a hidden character the before-image does not hold, written or as an entity', () => {
+    expect(reason('<p>ab</p>', '<p>a​b</p>')).toBe('hidden_char');
+    expect(reason('<p>ab</p>', '<p>a&#x200B;b</p>')).toBe('hidden_char');
+    expect(reason('<p>ab</p>', '<p>ab</p><!--​-->')).toBe('comment_added');
+  });
+
+  it('counts per code point: as often as the before-image holds it passes, once more does not', () => {
+    expect(reason('<p>a​b</p>', '<p>neu a​b</p>')).toBe('ok');
+    expect(reason('<p>a​b</p>', '<p>a​b​c</p>')).toBe('hidden_char');
+  });
+});
+
+describe('checkMarkup: the canonical round trip', () => {
+  // Measured with parse5 8.0.1 (div context, scripting on): each serialises to a tree that
+  // serialises again to something else, and the first one turns an inert img live.
+  const unstable = [
+    '<math><mtext><table><mglyph><style><img src=x onerror=alert(1)>',
+    '<form><math><mtext></form><form><mglyph><style></math><img src onerror=alert(1)>',
+    '<form id=a><div></form><form id=b><input></form>',
+    // Closed at the end, so only the second parse tells them apart.
+    '<math><mtext><table><mglyph><style><img src=x onerror=alert(1)></style></mglyph></table></mtext></math>',
+    '<form><div></form><form><input></form></div>',
+    '<a><table><a>x</a></table></a>',
+  ];
+
+  it.each(unstable)('refuses a value whose canonical form is not stable: %s', (v) => {
+    expect(reason(v, v)).toBe('not_canonical');
+  });
+
+  // Each tree of the after-state is held against the before-image's tree of the same kind. They
+  // differ where the before-image itself does not round-trip, and only there.
+  it('holds the raw tree against the raw before-image: an img the raw before-image holds only as text', () => {
+    // The canonical trees of both are alike; only the raw ones tell the live img from the text.
+    const before = '<math><mtext><table><mglyph><style><img src=x onerror=alert(1)>';
+    const after = '<math><mtext><mglyph><style></style></mglyph><img src="x" onerror="alert(1)"><table></table></mtext></math>';
+    expect(reason(before, after)).toBe('element_not_allowed');
+  });
+
+  it('holds the canonical tree against the canonical before-image: a form the round trip of the before-image drops', () => {
+    const before = '<form id=a><div></form><form id=b><input></form>';
+    const after = '<form id="a"><div></div></form><form id="b"><input></form>';
+    expect(reason(before, after)).toBe('element_not_allowed');
+  });
+
+  it('passes a value whose canonical form differs from the input but is stable', () => {
+    expect(reason('<p>a</p>', '<P CLASS=x>a')).toBe('attribute_not_allowed');
+    expect(reason('<p class="x">a</p>', '<P CLASS=x>b')).toBe('ok');
+  });
+});
+
+describe('checkMarkup: what the page makes of the value (refuter round 1)', () => {
+  // In a fragment a tag open at the end is dropped; in the page the theme's next `>` closes it.
+  it.each([
+    '<img src=x onerror=alert(1) ',
+    '<p>ok</p><img src="https://evil.example/t.png" onerror="alert(1)" ',
+    '<a href="javascript:alert(1)" ',
+    '<svg onload=alert(1) ',
+    '<script ',
+    '<p title="',
+    '<p>a</p><!-- open',
+    '<p>a</p><textarea>',
+    '<lynox-end-of-value></lynox-end-of-value><img src=x onerror=1 ',
+  ])('refuses a value that leaves markup open at its end: %s', (v) => {
+    expect(reason('', v)).toBe('not_canonical');
+  });
+
+  it('passes a value that ends in plain markup, a block left open included', () => {
+    expect(reason('<p>a</p>', '<p>neu')).toBe('ok');
+    expect(reason('<p>a</p>', '<p>neu</p>\n')).toBe('ok');
+    expect(reason('<ul><li>a</li></ul>', '<ul><li>neu')).toBe('ok');
+  });
+
+  // Refuter round 2: an element left open takes the theme's markup after it.
+  it.each([
+    ['a held form, open', '<form action="https://partner.example/f"><input name="q"></form>', '<form action="https://partner.example/f"><input name="q">'],
+    ['a held form, closed by another end tag', '<div><form action="https://partner.example/f"></form></div>', '<div><form action="https://partner.example/f"></div>'],
+    ['a held template, open', '<template><p>t</p></template>', '<template><p>t</p>'],
+    ['a held table, open', '<table><tr><td>a</td></tr></table>', '<table><tr><td>a'],
+    ['a held table, open without a cell', '<table></table>', '<table>'],
+    ['a held math element, open', '<math><mi>x</mi></math>', '<math><mi>x'],
+    ['a link, open', '<p>x</p>', '<p>x <a href="/ok">l'],
+    ['strong, open', '<p>x</p>', '<p>x <strong>y'],
+  ])('refuses %s at the end', (_what, before, after) => {
+    expect(reason(before, after)).toBe('not_canonical');
+  });
+
+  it('holds nothing outside a template for what the template holds', () => {
+    expect(reason('<template><p onclick="alert(1)">x</p></template>', '<p onclick="alert(1)">x</p>')).toBe('attribute_not_allowed');
+    expect(reason('<template><p style="background:url(https://evil.example/t)">x</p></template>', '<p style="background:url(https://evil.example/t)">x</p>')).toBe('attribute_not_allowed');
+    expect(reason('<template><a href="javascript:alert(1)">x</a></template>', '<a href="javascript:alert(1)">x</a>')).toBe('url_scheme');
+    expect(reason('<template><p onclick="a()">x</p></template>', '<template><p onclick="a()">y</p></template>')).toBe('ok');
+  });
+
+  it('holds a handler, a style or a URL as often as the before-image does, not more', () => {
+    expect(reason('<p onclick="track()">a</p>', '<p onclick="track()">a</p><p onclick="track()">b</p>')).toBe('attribute_not_allowed');
+    expect(reason('<p style="color:red">a</p>', '<p style="color:red">a</p><p style="color:red">b</p>')).toBe('attribute_not_allowed');
+    expect(reason('<p onclick="track()">a</p>', '<p onclick="track()">neu</p>')).toBe('ok');
+  });
+
+  it('holds an id or a name as often as the before-image does: a copy would shadow what scripts look up', () => {
+    expect(reason('<p id="x">a</p>', '<p id="x">a</p><p id="x">b</p>')).toBe('attribute_not_allowed');
+    expect(reason('<a name="top">a</a>', '<a name="top">a</a><a name="top">b</a>')).toBe('attribute_not_allowed');
+    expect(reason('<p id="x">a</p>', '<p id="x">neu</p>')).toBe('ok');
+  });
+
+  it('holds any other attribute by its value alone: a class on every paragraph stays one', () => {
+    expect(reason('<p class="x">a</p><p class="x">b</p>', '<p class="x">a</p><p class="x">b</p><p class="x">c</p>')).toBe('ok');
+  });
+
+  it('allows the places real text puts a hidden character, across the whole field, not per text', () => {
+    const cut = Array.from({ length: 20 }, () => `<p>${'a­b'.repeat(30)}</p>`).join('');
+    expect(reason('<p>plain</p>', cut)).toBe('hidden_char');
+    expect(reason('<p>Silben­trennung</p>', '<p>Neue Silben­trennung und Baum­wolle</p>')).toBe('ok');
+    expect(reason('<ul><li>✔️ Bio</li></ul>', '<ul><li>✔️ Bio</li><li>✔️ Fair</li></ul>')).toBe('ok');
+    expect(reason('<p>Familie</p>', '<p>Familie \u{1F468}‍\u{1F469}‍\u{1F467}</p>')).toBe('ok');
+    // Outside those places, one more is one too many.
+    expect(reason('<p>ab</p>', '<p>a­ b</p>')).toBe('hidden_char');
+  });
+
+  it('takes a host with a trailing dot as the host', () => {
+    expect(reason('<p>a</p>', '<p><a href="https://shop.example.com./x">a</a></p>')).toBe('ok');
+  });
+
+  it('does not let a mail address open a web link to its domain, nor the other way', () => {
+    expect(reason('<a href="mailto:x@partner.example">m</a>', '<a href="mailto:x@partner.example">m</a><a href="https://partner.example/">w</a>')).toBe('new_link_domain');
+    expect(reason('<a href="https://partner.example/">w</a>', '<a href="https://partner.example/">w</a><a href="mailto:x@partner.example">m</a>')).toBe('new_link_domain');
+    expect(reason('<a href="mailto:x@partner.example">m</a>', '<a href="mailto:x@partner.example">m</a><a href="mailto:y@partner.example">n</a>')).toBe('ok');
+  });
+
+  it('checks a mail address as it decodes', () => {
+    expect(reason('<p>a</p>', '<p><a href="mailto:x@evil.example%0A.partner.example">m</a></p>', { startDomains: ['partner.example'] })).toBe('url_control_char');
+    expect(reason('<p>a</p>', '<p><a href="mailto:x@evil.example%20.partner.example">m</a></p>', { startDomains: ['partner.example'] })).toBe('url_control_char');
+  });
+
+  it('answers a deeply nested value without running out of stack', () => {
+    const deep = `<p>${'<strong>'.repeat(5000)}x`;
+    expect(() => check('', deep)).not.toThrow();
+    expect(() => markupChangesOf('d', '', deep)).not.toThrow();
+    expect(() => markupChangesOf('d', '', `<svg>${'<g>'.repeat(200000)}`)).not.toThrow();
+  });
+});
+
+describe('checkMarkup: tags the fragment drops', () => {
+  // Measured with parse5 8.0.1 (div context): each tag below is gone from the fragment's tree,
+  // its canonical form and its end, while the page reads it — attributes on its own element of
+  // that name, or the theme's element closed around the value.
+  const dropped = [
+    ['<body class="x" data-a="1"><p>a</p>', '<body class="x" data-a="1">'],
+    ['<html lang="x" title="t"><p>a</p>', '<html lang="x" title="t">'],
+    ['</div><p>a</p>', '</div>'],
+    ['<p>a</p></section><p>b</p>', '</section>'],
+    ['<head><p>a</p>', '<head>'],
+    // Text on both sides: the parser joins it into one node whose range covers the tag.
+    ['<p>a<body class="x">b</p>', '<body class="x">'],
+    ['<p>a</div>b</p>', '</div>'],
+    ['<p>a</p> </div> <p>b</p>', '</div>'],
+    ['<p>a&amp;<html lang="x">b</p>', '<html lang="x">'],
+  ] as const;
+
+  it.each(dropped)('refuses %s, names the stretch %s, and passes the value without the tag', (after, stretch) => {
+    const out = check('<p>a</p>', after);
+    expect(out).toEqual({ ok: false, reason: 'markup_dropped', detail: expect.stringContaining(stretch) });
+    expect(reason('<p>a</p>', after.replace(/<\/?(body|html|div|section|head)\b[^>]*>/, ''))).toBe('ok');
+  });
+
+  it('lets a text that swallowed a tag hold only the same tags, not a prefix of another tag', () => {
+    // A `>` inside a quoted value: a match cut there would be the same for both tags. The other tag
+    // is not held; the same one is, since the canonical form the run sends drops it (1130).
+    const before = '<p>x<body title="a>b">y</p>';
+    expect(reason(before, '<p>x<body title="a>" class="z">y</p>')).toBe('markup_dropped');
+    expect(reason(before, before)).toBe('ok');
+    // Without attributes, the same tags with what lies between them are held, a `>` in the text included.
+    expect(reason('<p>x</div>y > z</p>', '<p>w</div>y > z.</p>')).toBe('ok');
+    expect(reason('<p>x</div>y > z</p>', '<p>w</div>y</div> > z</p>')).toBe('markup_dropped');
+  });
+
+  it('passes an edit of the text around a held tag, and whitespace around it normalised', () => {
+    expect(reason('<p>Neu</div> Lieferzeit 3 Tage</p>', '<p>Neu</div> Lieferzeit 2 Tage</p>')).toBe('ok');
+    expect(reason('<p>a</p>\n</div>\n<p>b</p>', '<p>a</p></div><p>b</p>')).toBe('ok');
+  });
+
+  it('lets inert CDATA text of the before-image hold nothing live', () => {
+    const before = '<p>Info</p><svg><![CDATA[x> <body class="z">]]></svg>';
+    expect(reason(before, '<p>Info<body class="z">!</p><svg><![CDATA[x> <body class="z">]]></svg>')).toBe('markup_dropped');
+  });
+
+  it('passes a dropped tag without attributes the before-image holds the same way, and refuses a second copy', () => {
+    const before = '<p>a</p></div>';
+    expect(reason(before, '<p>b</p></div>')).toBe('ok');
+    expect(reason(before, '<p>b</p></div> </div>')).toBe('markup_dropped');
+    expect(reason(before, '<p>b</p></section>')).toBe('markup_dropped');
+  });
+
+  it('holds a dropped start tag with attributes only as often as the before-image carries it (1130)', () => {
+    // Read by the page where the after-state puts it. Held anyway: the run stores and sends the
+    // canonical form, which drops the stretch, so the shop's own stray tag is cleaned by the write
+    // (U-103), not refused. The send checks that the bytes are canonical (`rawHtmlField`).
+    for (const before of ['<template><body class="z"></template>', '<select><option>a</option><body class="z"></select>', '<body class="z"><p>a</p>']) {
+      expect(reason(before, '<p>a<body class="z">b</p>'), before).toBe('ok');
+      expect(reason(before, `${before}`), before).toBe('ok');
+      // A second copy is the value's own.
+      expect(reason(before, `<p>a<body class="z">b</p>${before}`), before).toBe('markup_dropped');
+    }
+    // Not carried: the value's own, refused.
+    expect(reason('<p>a</p>', '<p>a<body class="z">b</p>')).toBe('markup_dropped');
+    // An attribute after a slash is an attribute too, held by the bytes like any other.
+    expect(reason('<body/class=z><p>a</p>', '<body/class=z><p>b</p>')).toBe('ok');
+    // What the page would receive from either value: neither carries the stretch once canonical.
+    expect(droppedTagsOf(canonicalHtml('<p>a<body class="z">b</p>'))).toEqual([]);
+  });
+
+  it('finds nothing in markup the fragment keeps, however it is written', () => {
+    for (const v of [
+      '<p>a</p>', '<ul><li>a<li>b</ul>', '<b><p>x</b>y</p>', '<pre>\nx</pre>', '<p>a &amp; b&nbsp;c</p>',
+      '<p>a<br/>b</p>', '<svg><circle/></svg>', '<table><tr><td>a</td></tr></table>',
+      '<template><p>x</p></template>', '<p>a\r\nb</p>', '<!-- note --><p>a</p>', ' \n ',
+    ]) {
+      expect(droppedTagsOf(v), v).toEqual([]);
+    }
+  });
+
+  it('reads every dropped stretch, inside a template too', () => {
+    expect(droppedTagsOf('<p>a</span></p><template><p>b</p></div></template>')).toEqual(['</span>', '</div>']);
+    expect(droppedTagsOf('<svg><desc>a</div>b</desc></svg>')).toEqual(['</div>']);
+    // An SVG `title` or `style` is not raw text: the tokenizer reads tags in it.
+    expect(droppedTagsOf('<svg><title>a<body class="x">b</title></svg>')).toEqual(['<body class="x">']);
+    // Two tags in one text: one stretch from the first to the last, what lies between included.
+    expect(droppedTagsOf('<p>a<body class="x">b</div>c</p>')).toEqual(['<body class="x">b</div>']);
+  });
+
+  it('reads a < in raw text as a character, and one in ordinary text that opens nothing as text', () => {
+    for (const v of ['<style>a</div>b</style>', '<textarea>a<body>b</textarea>', '<p>a < b and 1<2</p>']) {
+      expect(droppedTagsOf(v), v).toEqual([]);
+    }
+  });
+});
+
+describe('plainTextMarkupOf', () => {
+  it('refuses a < or > the before-image does not hold', () => {
+    expect(plainTextMarkupOf('Shirt', 'Shirt <b>neu</b>')).toMatchObject({ ok: false, reason: 'markup_in_text' });
+    expect(plainTextMarkupOf('Shirt', 'Shirt >')).toMatchObject({ ok: false, reason: 'markup_in_text' });
+    expect(plainTextMarkupOf('Shirt', 'Shirt <')).toMatchObject({ ok: false, reason: 'markup_in_text' });
+  });
+
+  it('refuses a tag opening even where the before-image holds as many < and >', () => {
+    expect(plainTextMarkupOf('USB-C <> HDMI', 'USB-C <img src=x onerror=1> HDMI')).toMatchObject({ ok: false });
+  });
+
+  it('refuses a tag the before-image does not hold as written, though it holds another', () => {
+    expect(plainTextMarkupOf('Size <b> 10', '<img src=x onerror=alert(1)>')).toMatchObject({ ok: false, reason: 'markup_in_text' });
+    expect(plainTextMarkupOf('Size <b> 10', 'Grösse <b> 10')).toEqual({ ok: true });
+    // As many < and > on both sides; only counting the tags tells a second <b> apart.
+    expect(plainTextMarkupOf('<b> 1 < 2 > 3', '<b><b>')).toMatchObject({ ok: false, reason: 'markup_in_text' });
+    // A > inside quotes does not end the tag, for the browser nor here.
+    expect(plainTextMarkupOf('Kabel <b title=">"> 10 > 5 > 2', '<b title=">" onmouseover=alert(1) x> 10')).toMatchObject({ ok: false, reason: 'markup_in_text' });
+  });
+
+  it('passes what the before-image already holds, and inch marks', () => {
+    expect(plainTextMarkupOf('Set <3 Teile', 'Neues Set <3 Teile')).toEqual({ ok: true });
+    expect(plainTextMarkupOf('Monitor', '27" Monitor')).toEqual({ ok: true });
+    expect(plainTextMarkupOf(null, 'Monitor')).toEqual({ ok: true });
+  });
+});
+
+describe('markupChangesOf', () => {
+  it('names an added link with its full value and a removed image', () => {
+    const c = markupChangesOf('description', '<p>a</p><img src="/a.jpg">', '<p>a <a href="https://x.example/p?q=1">b</a></p>');
+    expect(c.added).toEqual([{ kind: 'element', namespace: 'html', element: 'a', attributes: [['href', 'https://x.example/p?q=1']], text: null, inTemplate: false }]);
+    expect(c.removed.map((i) => [i.element, i.attributes])).toEqual([['img', [['src', '/a.jpg']]]]);
+  });
+
+  it('leaves out a bare p that comes or goes', () => {
+    expect(markupChangesOf('d', '<p>a</p><p>b</p>', '<p>a</p>')).toEqual({ field: 'd', added: [], removed: [], addsOutsideAllowlist: false, addsOnlyPassive: true });
+    expect(markupChangesOf('d', '<p>a</p>', '<p>a</p><p>b</p>')).toEqual({ field: 'd', added: [], removed: [], addsOutsideAllowlist: false, addsOnlyPassive: true });
+  });
+
+  it('says whether an added item lies outside what a write may add (1010, ux U-092)', () => {
+    const outside = (before: string, after: string): boolean => markupChangesOf('d', before, after).addsOutsideAllowlist;
+    // Within: a link with its href only.
+    expect(outside('<p>a</p>', '<p>a <a href="/x">b</a></p>')).toBe(false);
+    // Outside, one condition each: an element off the list, a second attribute on a link, an
+    // attribute on another allowlisted element, raw text, a comment, an allowlisted element in a template.
+    expect(outside('<p>a</p>', '<p>a</p><img src="/i.jpg">')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a <a href="/x" target="_blank">b</a></p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p class="x">a</p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a</p><script>x()</script>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a</p><!-- c -->')).toBe(true);
+    expect(outside('<p>a</p><template></template>', '<p>a</p><template><p>b</p></template>')).toBe(true);
+    // A bare element off the list, which fails on the list alone; a link in SVG, which fails on
+    // its namespace alone; an href on an element that is not a link.
+    expect(outside('<p>a</p>', '<p>a</p><div>b</div>')).toBe(true);
+    expect(outside('<p>a</p><svg></svg>', '<p>a</p><svg><a href="/x">b</a></svg>')).toBe(true);
+    expect(outside('<p>a</p>', '<p href="/x">a</p>')).toBe(true);
+    // A link whose href the link check refuses: a script scheme, a mail link with a second recipient.
+    expect(outside('<p>a</p>', '<p>a <a href="javascript:steal()">b</a></p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a <a href="mailto:a@shop.example?bcc=x@evil.example">b</a></p>')).toBe(true);
+    expect(outside('<p>a</p>', '<p>a <a href="mailto:a@shop.example">b</a></p>')).toBe(false);
+    // A comment fails on its kind, its namespace and its name at once, and raw text lies only in
+    // elements off the list: parsed markup reaches neither condition alone (the next test does).
+    // Only what is added counts: a removed image does not.
+    expect(outside('<p>a</p><img src="/i.jpg">', '<p>a</p>')).toBe(false);
+  });
+
+  it('holds its kind and raw-text conditions alone, for an item no parse yields', () => {
+    // The kind and the raw text guard against an item that breaks the parser's invariants: a
+    // comment carrying an element's namespace and name, an allowlisted element carrying raw text.
+    const p: MarkupItem = { kind: 'element', namespace: 'html', element: 'p', attributes: [], text: null, inTemplate: false };
+    expect(withinAllowlist(p)).toBe(true);
+    expect(withinAllowlist({ ...p, kind: 'comment' })).toBe(false);
+    expect(withinAllowlist({ ...p, text: 'x' })).toBe(false);
+  });
+
+  // Which sentence an undo's approval shows (U-092): only harmless markup,
+  // or markup lynox cannot confirm is harmless. Fail-closed: whatever is not on the list is active.
+  it('tells added markup that only lays out text from markup lynox cannot confirm is harmless', () => {
+    const passive = (before: string, after: string): boolean => markupChangesOf('d', before, after).addsOnlyPassive;
+    const was = '<p>a</p>';
+    // Passive: the editor's own table, formatting, a comment node, a link with rel, a header cell's scope.
+    expect(passive(was, '<p>a</p><table width="100%"><tbody><tr><td>\u00a0x</td></tr></tbody></table>')).toBe(true);
+    expect(passive(was, '<p>a</p><div align="center"><span title="t">b</span> <b>c</b></div><hr>')).toBe(true);
+    expect(passive(was, '<p>a</p><!-- c -->')).toBe(true);
+    expect(passive(was, '<p>a <a href="/x" rel="nofollow">b</a></p>')).toBe(true);
+    expect(passive(was, '<p>a</p><table><tr><th scope="col" abbr="n">n</th></tr></table>')).toBe(true);
+    // Active: a script, the table with a style, and an iframe below a passive div (every element
+    // of an added subtree is an item of its own).
+    expect(passive(was, '<p>a</p><script>steal()</script>')).toBe(false);
+    expect(passive(was, '<p>a</p><table style="background:url(https://t.example/p)"><tr><td>x</td></tr></table>')).toBe(false);
+    expect(passive(was, '<p>a</p><div><iframe src="https://evil.example/"></iframe></div>')).toBe(false);
+    // By namespace, not by name: an SVG `a` and a MathML `table` are foreign.
+    expect(passive('<p>a</p><svg></svg>', '<p>a</p><svg><a href="/x">b</a></svg>')).toBe(false);
+    expect(passive('<p>a</p><math></math>', '<p>a</p><math><mtable></mtable></math>')).toBe(false);
+    // An element nobody listed, and one inside a template.
+    expect(passive(was, '<p>a</p><marquee>b</marquee>')).toBe(false);
+    expect(passive('<p>a</p><template></template>', '<p>a</p><template><p class="x">b</p></template>')).toBe(false);
+    // Active by name, each though the default would catch it.
+    for (const after of [
+      '<p onclick="x()">a</p>', '<p class="js-modal">a</p>', '<p id="cart">a</p>', '<p>a</p><form name="f"></form>',
+      '<p>a</p><img src="https://cdn.example/i.jpg">', '<p data-x="1">a</p>', '<p>a <a href="/x" target="_blank">b</a></p>',
+      '<blockquote cite="https://x.example/">a</blockquote>', '<table background="https://x.example/b.png"><tr><td>a</td></tr></table>',
+      '<p>a</p><form><button formaction="https://evil.example/">b</button></form>', '<p>a</p><svg><use xlink:href="#x"></use></svg>',
+      '<p>a</p><base href="https://evil.example/">', '<p>a</p><meta http-equiv="refresh" content="0;url=https://evil.example/">',
+      '<p>a</p><link rel="stylesheet" href="https://evil.example/s.css">', '<p>a</p><form><input name="q"></form>',
+      '<p>a</p><noscript><p>b</p></noscript>', '<p>a <a href="javascript:steal()">b</a></p>', '<p>a</p><object data="https://evil.example/x"></object>',
+      // An image by its name, not only by its `src`: one with only passive attributes is active too.
+      '<p>a</p><img alt="b">', '<p>a</p><img>',
+    ]) expect(passive(was, after), after).toBe(false);
+    // A `<!--` in raw text is no comment: it is a textarea's text, active as the element is.
+    expect(passive(was, '<p>a</p><textarea><!-- c --></textarea>')).toBe(false);
+    // An attribute passive on one element is not on another: `rel` and `href` only on an `a`,
+    // the cell attributes only on a `td` or `th`. And `name` is active on an `a`, too.
+    for (const after of [
+      '<p rel="nofollow">a</p>', '<div href="/x">a</div>', '<p scope="col">a</p>', '<div headers="h">a</div>',
+      '<p abbr="n">a</p>', '<p>a <a href="/x" name="cart">b</a></p>',
+    ]) expect(passive(was, after), after).toBe(false);
+  });
+
+  it('holds its namespace and raw-text conditions alone, for an item no parse yields', () => {
+    const td: MarkupItem = { kind: 'element', namespace: 'html', element: 'td', attributes: [], text: null, inTemplate: false };
+    expect(passiveItem(td)).toBe(true);
+    expect(passiveItem({ ...td, namespace: 'svg' })).toBe(false);
+    expect(passiveItem({ ...td, text: 'x' })).toBe(false);
+    expect(passiveItem({ ...td, inTemplate: true })).toBe(false);
+    expect(passiveItem({ kind: 'comment', namespace: '', element: '', attributes: [], text: 'c', inTemplate: true })).toBe(false);
+  });
+
+  it('names an allowlisted element with an attribute, and one inside a template', () => {
+    expect(markupChangesOf('d', '<p>a</p>', '<p class="x">a</p>').added.map((i) => [i.element, i.attributes])).toEqual([['p', [['class', 'x']]]]);
+    expect(markupChangesOf('d', '<p>a</p>', '<p>a</p><template><p>b</p></template>').added.map((i) => [i.element, i.inTemplate]))
+      .toEqual([['template', false], ['p', true]]);
+  });
+
+  it('names a removed link and a removed image', () => {
+    const c = markupChangesOf('d', '<p><a href="/x">a</a></p><img src="/i.jpg">', '<p>a</p>');
+    expect(c.removed.map((i) => i.element)).toEqual(['a', 'img']);
+  });
+
+  it('leaves bare allowlisted elements out and keeps a comment in', () => {
+    const c = markupChangesOf('description', '<p>a</p>', '<p>a</p><p><strong>b</strong></p><!-- c -->');
+    expect(c.added).toEqual([{ kind: 'comment', namespace: '', element: '', attributes: [], text: ' c ', inTemplate: false }]);
+    expect(c.removed).toEqual([]);
+  });
+});
+
+describe('htmlFieldsOfListForm', () => {
+  it('declares the description fields per list form and none without one', () => {
+    expect(htmlFieldsOfListForm('shopify')).toEqual(['descriptionHtml']);
+    expect(htmlFieldsOfListForm('woocommerce')).toEqual(['description', 'short_description']);
+    expect(htmlFieldsOfListForm(null)).toEqual([]);
+  });
+});
+
+describe('checkMarkup never throws', () => {
+  it('answers every input with a result', () => {
+    for (const v of ['', '<', '<!--', '\u0000', '<svg><![CDATA[x]]>', '<table><td>', '<a href="http://[::1">x</a>']) {
+      expect(() => check('', v)).not.toThrow();
+    }
+  });
+});

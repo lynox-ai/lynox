@@ -3,6 +3,7 @@
  * from a contained chat carries that chat's data, so a retry from another chat contains that chat
  * before any step runs, or nothing runs (`pipeline.ts`, retry mode).
  */
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -75,7 +76,7 @@ function chat(thread: string | undefined): IAgent {
   toolContext.containment = containment;
   toolContext.runHistory = history;
   toolContext.threadStore = threads.store as never;
-  return { toolContext, currentThreadId: thread, getAvailableTools: () => tools } as unknown as IAgent;
+  return { toolContext, principal: OWNER_PRINCIPAL, currentThreadId: thread, getAvailableTools: () => tools } as unknown as IAgent;
 }
 
 const ID = 'wf-retry';
@@ -98,7 +99,7 @@ beforeEach(() => {
   _resetPipelineStore();
   dir = mkdtempSync(join(tmpdir(), 'lynox-retry-contained-'));
   engineDb = new EngineDb(join(dir, 'engine.db'), '');
-  containment = new Containment(engineDb.getDb());
+  containment = new Containment(engineDb.getDb(), null);
   history = new RunHistory(join(dir, 'history.db'));
   threads = fakeThreads(['chat-shop', 'chat-other', 'chat-third']);
 });
@@ -164,3 +165,22 @@ describe('a retry of a run a contained chat started', () => {
     expect(mockRetryManifest).toHaveBeenCalledTimes(2);
   });
 });
+
+// run_workflow lets `secret:` references travel as written, so a step resolves them through the
+// caller's store; a retried step must get that store as a first run's step does.
+describe('a retry hands its steps the caller\'s secret store', () => {
+  it('passes the same store to the retried steps as to the first run\'s', async () => {
+    const secretStore = { resolve: vi.fn() };
+    const withStore = (thread: string): IAgent => Object.assign(chat(thread), { secretStore }) as IAgent;
+    storePipeline(ID, {
+      id: ID, name: 'report', goal: 'g', steps: [{ id: 's', task: 't' }], reasoning: 'r', estimatedCost: 0,
+      createdAt: new Date().toISOString(), executed: false, executionMode: 'tracked', template: false,
+    });
+    mockRunManifest.mockResolvedValueOnce(runState('failed'));
+    await runWorkflowTool.handler({ workflow_id: ID }, withStore('chat-shop'));
+    expect((mockRunManifest.mock.calls[0]![2] as { secretStore?: unknown }).secretStore).toBe(secretStore);
+    expect(await retry(withStore('chat-shop'))).toContain('store order 1001');
+    expect((mockRetryManifest.mock.calls[0]![3] as { secretStore?: unknown }).secretStore).toBe(secretStore);
+  });
+});
+

@@ -7,7 +7,7 @@ import type { SecretStoreLike, IsolationConfig } from './security.js';
 import type { AutonomyLevel } from './modes.js';
 import type { AgentWarning } from './models.js';
 import type { ConversationGrants } from '../core/conversation-grants.js';
-import type { CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
+import type { CallApiCost, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 
 export interface TabQuestion {
   question: string;
@@ -160,6 +160,8 @@ export type ToolCallRecorder = (call: {
   contract?: CallContract | undefined;
   /** How the call's filing for the owner's approval ended (`CallFiled`); absent when it filed nothing. */
   filed?: CallFiled | undefined;
+  /** The API request this call sent and its cost (`CallApiCost`); absent when it sent none. */
+  apiCost?: CallApiCost | undefined;
   /** The id of the `tool_use` block this call answers, as the model's turn carried it.
    *  A required key, so a producer cannot leave it out by accident; `undefined`
    *  only where no block id exists. */
@@ -327,6 +329,14 @@ export interface IAgent {
    */
   chargeExternalCost(usd: number): void;
   /**
+   * Book the upper bounds of a spawned child's ended calls against this run's cost ceiling
+   * only — never into its cost snapshot or a debit, as an ended call is never billed.
+   *
+   * REQUIRED for the same reason as {@link IAgent.chargeExternalCost}: without it a delegating
+   * run's ceiling would count less than its children's ceilings did, silently.
+   */
+  chargeExternalCapOnlyCost(usd: number): void;
+  /**
    * Dollars left under this run's cost ceiling, or `null` when it has none.
    *
    * ⚠ `null` is NO CEILING — self-host or BYOK without a configured budget — and not
@@ -388,6 +398,10 @@ export interface IAgent {
   recordToolCall?: ToolCallRecorder | undefined;
   /** The conversation's grant set — read by `spawn_agent` so a child adds to its root's set. */
   readonly conversationGrants?: ConversationGrants | undefined;
+  /** Who this agent's writes are recorded as (`RowStamp.writtenBy`): the run's author tag
+   *  (`runAuthorTag`), a workflow's (`workflowAuthorTag`), or a parent's for a sub-agent. Null or
+   *  absent is unknown. Never `owner` in a trigger's or a workflow's run. */
+  readonly writeAuthor?: string | null | undefined;
   /** Wave 1.2: has this run seen wrapped untrusted content? Read by the memory tools
    *  (`sourceUntrusted` evidence) and by spawn to propagate a child's taint to a parent
    *  that shares its Memory. */

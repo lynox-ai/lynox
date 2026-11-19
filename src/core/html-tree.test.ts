@@ -1,0 +1,243 @@
+import { describe, it, expect } from 'vitest';
+import { CONTENT_CARRYING_ELEMENTS, canonicalHtml, carriesContent, htmlEqual, htmlEqualIgnoringLayout, normalizeHtml, parseHtmlFragment, walkHtml } from './html-tree.js';
+
+/**
+ * The fixed cases of Shopify PRD §21.2 item 5 and §21.7 for `html-tree.ts`. The generated cases
+ * are in `html-tree.fuzz.test.ts`.
+ */
+
+// M6, run m6-2026-10-26T15-10-53-615Z on the development store: what was sent, and what Shopify
+// gave back (protocol `m10-protokoll.md`, "M6 HTML"). Byte for byte as in the run's answers.
+const M6_SENT = [
+  '<p  class="m6"   data-m6="1">Spaces &amp; entities: &lt;b&gt; &#169; &nbsp;é ü 😀</p>',
+  '<p>line<br>break<br/>self-closed<br />spaced</p>',
+  '<ul><li>one<ul><li>nested</li></ul></li><li>two</li></ul>',
+  '<!-- m6 comment -->',
+  '<p style="color: red">styled</p>',
+  '<a href="https://example.com/x?a=1&b=2" target="_blank" rel="noopener">link</a>',
+  '<script>window.m6=1</script>',
+  '<iframe src="https://example.com/embed"></iframe>',
+  '<P>UPPER</P><unknown-tag>custom</unknown-tag>',
+  '<p>unclosed',
+].join('\n');
+const M6_BACK = [
+  '<p class="m6" data-m6="1">Spaces &amp; entities: &lt;b&gt; © \u00a0é ü 😀</p>',
+  '<p>line<br>break<br>self-closed<br>spaced</p>',
+  '<ul>',
+  '<li>one<ul><li>nested</li></ul>',
+  '</li>',
+  '<li>two</li>',
+  '</ul>',
+  '<!-- m6 comment -->',
+  '<p style="color: red">styled</p>',
+  '<a href="https://example.com/x?a=1&amp;b=2" target="_blank" rel="noopener">link</a>',
+  '<script>window.m6=1</script>',
+  '<iframe src="https://example.com/embed"></iframe>',
+  '<p>UPPER</p><unknown-tag>custom</unknown-tag>',
+  '<p>unclosed</p>',
+].join('\n');
+// M6 of §16.8, the three-input measurement of 26.10.
+const M6_THREE: readonly (readonly [string, string])[] = [
+  ['<p>Text</p>', '<p>Text</p>'],
+  ['plain text without a tag', 'plain text without a tag'],
+  ['<p  class="x"  id="y">a&amp;b</p>', '<p class="x" id="y">a&amp;b</p>'],
+];
+
+describe('normalizeHtml: what it equates', () => {
+  it('equates what M6 sent with what Shopify gave back', () => {
+    expect(normalizeHtml(M6_BACK)).toBe(normalizeHtml(M6_SENT));
+    for (const [sent, back] of M6_THREE) expect(htmlEqual(sent, back), sent).toBe(true);
+  });
+
+  it('equates attribute order, quoting and spacing, and entity spellings', () => {
+    expect(htmlEqual('<a href="/x" title="t">a</a>', "<a  title='t' href=/x>a</a>")).toBe(true);
+    expect(htmlEqual('<p>&#169; &eacute; &amp;</p>', '<p>© é &amp;</p>')).toBe(true);
+    expect(htmlEqual('<p>a  \n\t b</p>', '<p>a b</p>')).toBe(true);
+  });
+
+  it('drops whitespace-only text between block boundaries: the M6 list re-layout', () => {
+    expect(htmlEqual('<ul><li>a</li><li>b</li></ul>', '<ul>\n<li>a</li>\n<li>b</li>\n</ul>')).toBe(true);
+    expect(htmlEqual('<p>a</p><p>b</p>', '<p>a</p>\n<p>b</p>')).toBe(true);
+    expect(htmlEqual('<li>one<ul><li>n</li></ul></li>', '<li>one<ul><li>n</li></ul>\n</li>')).toBe(true);
+    // The fragment's own start and end are block boundaries.
+    expect(htmlEqual('\n<p>a</p>\n', '<p>a</p>')).toBe(true);
+  });
+
+  it('is a string per tree, independent of how often it is asked', () => {
+    expect(normalizeHtml(M6_SENT)).toBe(normalizeHtml(M6_SENT));
+  });
+
+  it('carries every element\'s namespace', () => {
+    // An element's namespace follows from where it stands in the parsed tree, so no two values
+    // differ by a namespace alone; the encoding still has to carry it, or a consumer comparing
+    // subtrees could not tell an SVG `a` from an HTML one.
+    const tree = JSON.parse(normalizeHtml('<svg><a></a></svg><a></a>')) as [string, string, string, unknown, [string, string][]][];
+    expect([tree[0]![1], tree[0]![4][0]![1], tree[1]![1]]).toEqual(['http://www.w3.org/2000/svg', 'http://www.w3.org/2000/svg', 'http://www.w3.org/1999/xhtml']);
+  });
+});
+
+// Measured on a development store: the canonical bytes sent, and what Shopify gave back. Three
+// places, one LF each.
+describe('normalizeHtml: the line breaks a store lays a list or a table out with', () => {
+  const NEST_SENT = '<p><b>fett</b> <i>kursiv</i><span class="s">span</span><b>a</b><i>b</i></p><ul><li><strong>x</strong><ol><li>y<ul><li>z</li></ul></li></ol></li></ul>';
+  const NEST_BACK = '<p><b>fett</b> <i>kursiv</i><span class="s">span</span><b>a</b><i>b</i></p><ul><li>\n<strong>x</strong><ol><li>y<ul><li>z</li></ul>\n</li></ol>\n</li></ul>';
+  const TABLE_SENT = '<table><tbody><tr><td>a</td><td>b</td></tr></tbody></table>';
+  const TABLE_BACK = '<table><tbody><tr>\n<td>a</td>\n<td>b</td>\n</tr></tbody></table>';
+
+  it('equates what was sent with what Shopify gave back', () => {
+    expect(htmlEqual(NEST_SENT, NEST_BACK)).toBe(true);
+    expect(htmlEqual(TABLE_SENT, TABLE_BACK)).toBe(true);
+  });
+
+  // Each place, with its twins: a character other than whitespace there, and the same LF where
+  // whitespace shows (below `pre`, or an element whose `style` names `white-space`).
+  const places: readonly (readonly [string, string, string, readonly string[], boolean])[] = [
+    ['after <li>, before an inline element', '<ul><li><b>x</b></li></ul>', '<ul><li>\n<b>x</b></li></ul>',
+      ['<ul><li>y<b>x</b></li></ul>', '<ul><li> <b>x</b></li></ul>', '<ul><li>\n\n<b>x</b></li></ul>'], false],
+    ['before </li>, after a nested list', '<ul><li>a<ul><li>b</li></ul></li></ul>', '<ul><li>a<ul><li>b</li></ul>\n</li></ul>',
+      ['<ul><li>a<ul><li>b</li></ul>y</li></ul>'], true],
+    ['between the start of a tr, its cells and its end', '<table><tr><td>a</td><td>b</td></tr></table>', '<table><tr>\n<td>a</td>\n<td>b</td>\n</tr></table>',
+      ['<table><tr><td>a</td>y<td>b</td></tr></table>'], false],
+    ['between the cells of a tr, th too', '<table><tr><th>a</th><td>b</td></tr></table>', '<table><tr><th>a</th>\n<td>b</td></tr></table>', [], false],
+  ];
+  it.each(places)('equates a line break %s, and not its twins', (_name, sent, back, twins, blockRule) => {
+    expect(htmlEqual(sent, back)).toBe(true);
+    for (const twin of twins) expect(htmlEqual(sent, twin)).toBe(false);
+    // The same line break where whitespace shows is a change.
+    expect(htmlEqual(`<pre>${sent}</pre>`, `<pre>${back}</pre>`)).toBe(false);
+    // Below a style that names `white-space`, the widening does not reach; the place the block rule
+    // already explains is compared byte for byte there by `sameHtmlField` (`showsWhitespace`).
+    if (!blockRule) expect(htmlEqual(`<div style="white-space: pre-line">${sent}</div>`, `<div style="white-space: pre-line">${back}</div>`)).toBe(false);
+  });
+
+  it('does not equate a line break before text in a li, nor between inline elements', () => {
+    expect(htmlEqual('<ul><li>x</li></ul>', '<ul><li>\nx</li></ul>')).toBe(false);
+    expect(htmlEqual('<p><b>a</b><i>b</i></p>', '<p><b>a</b>\n<i>b</i></p>')).toBe(false);
+    // Only the first child of a li is the store's layout; further on, the LF is a shown space.
+    expect(htmlEqual('<ul><li><i>a</i><b>x</b></li></ul>', '<ul><li><i>a</i>\n<b>x</b></li></ul>')).toBe(false);
+    // A style on the li itself shows its whitespace too.
+    expect(htmlEqual('<ul><li style="white-space:pre"><b>x</b></li></ul>', '<ul><li style="white-space:pre">\n<b>x</b></li></ul>')).toBe(false);
+  });
+});
+
+describe('normalizeHtml: what it keeps apart (§21.7)', () => {
+  const apart: readonly (readonly [string, string, string])[] = [
+    ['whitespace between inline elements', '<b>a</b> <i>b</i>', '<b>a</b><i>b</i>'],
+    ['U+00A0 against a space', 'a&nbsp;b', 'a b'],
+    ['whitespace inside pre', '<pre>a  b</pre>', '<pre>a b</pre>'],
+    ['whitespace between blocks inside pre', '<pre><p>a</p>\n<p>b</p></pre>', '<pre><p>a</p><p>b</p></pre>'],
+    ['whitespace inside textarea', '<textarea>a  b</textarea>', '<textarea>a b</textarea>'],
+    ['whitespace inside a raw-text element', '<style>a  b</style>', '<style>a b</style>'],
+    ['a changed href', '<a href="https://a.example/x">l</a>', '<a href="https://a.example/y">l</a>'],
+    ['an added attribute', '<p>a</p>', '<p class="x">a</p>'],
+    ['an added bare element', '<p>a</p>', '<p>a</p><b></b>'],
+    ['one non-whitespace character', '<p>abc</p>', '<p>abd</p>'],
+    ['a script inside svg against one outside', '<svg><script>x</script></svg>', '<script>x</script>'],
+    ['a comment', '<p>a</p><!--x-->', '<p>a</p><!--y-->'],
+    ['a template\'s content', '<template><b>x</b></template>', '<template><i>x</i></template>'],
+    ['leading space inside a block', '<p> a</p>', '<p>a</p>'],
+    ['whitespace between a block and an inline element', '<p>a</p> <b>x</b>', '<p>a</p><b>x</b>'],
+    ['whitespace at the start of an inline parent, before a block', '<span> <p>x</p></span>', '<span><p>x</p></span>'],
+    ['U+00A0 alone between blocks', '<p>a</p>&nbsp;<p>b</p>', '<p>a</p><p>b</p>'],
+    ['whitespace inside an inline element below pre', '<pre><b>a  b</b></pre>', '<pre><b>a b</b></pre>'],
+    ['whitespace between foreign elements named like blocks', '<svg><section></section> <section></section></svg>', '<svg><section></section><section></section></svg>'],
+  ];
+  it.each(apart)('%s', (_name, a, b) => {
+    expect(htmlEqual(a, b)).toBe(false);
+  });
+});
+
+describe('htmlEqualIgnoringLayout: looser, for finding a marked value', () => {
+  it('equates a line break a store adds where normalizeHtml keeps it, at a cell and between inline elements', () => {
+    for (const [a, b] of [
+      ['<table><tr><td>\n<b>a</b></td></tr></table>', '<table><tr><td><b>a</b></td></tr></table>'],
+      ['<p>Neu</p>\n<script>steal()</script>', '<p>Neu</p><script>steal()</script>'],
+      ['<ul><li><b>a</b>\n</li></ul>', '<ul><li><b>a</b></li></ul>'],
+    ]) {
+      expect(htmlEqual(a!, b!), a).toBe(false);
+      expect(htmlEqualIgnoringLayout(a!, b!), a).toBe(true);
+    }
+  });
+
+  it('keeps apart what differs in text, element or attribute', () => {
+    expect(htmlEqualIgnoringLayout('<p>a b</p>', '<p>ab</p>')).toBe(false);
+    expect(htmlEqualIgnoringLayout('<p>a</p>', '<div>a</div>')).toBe(false);
+    expect(htmlEqualIgnoringLayout('<p class="x">a</p>', '<p>a</p>')).toBe(false);
+    expect(htmlEqualIgnoringLayout('<p>a</p><script>x()</script>', '<p>a</p>')).toBe(false);
+  });
+});
+
+describe('canonicalHtml', () => {
+  it('is parse5\'s serialisation: the tree, written out', () => {
+    expect(canonicalHtml('<P  class=x>a<br/>b')).toBe('<p class="x">a<br>b</p>');
+  });
+
+  // Measured with parse5 8.0.1, div context, scripting on (integrationen-3, re-measured by cp
+  // 2026-10-27): the round trip through serialisation changes the tree, so the second pass differs.
+  it.each([
+    '<math><mtext><table><mglyph><style><img src=x onerror=alert(1)>',
+    '<form><math><mtext></form><form><mglyph><style></math><img src onerror=alert(1)>',
+    '<form id=a><div></form><form id=b><input></form>',
+  ])('is not idempotent on %s', (v) => {
+    const once = canonicalHtml(v);
+    expect(canonicalHtml(once)).not.toBe(once);
+  });
+
+  it('is idempotent on the noscript case, whose raw-text content is text', () => {
+    const v = '<noscript><p title="</noscript><img src=x onerror=y>">';
+    const once = canonicalHtml(v);
+    expect(canonicalHtml(once)).toBe(once);
+    // With scripting on, noscript is raw text up to the first `</noscript>`: the attribute value
+    // a scripting-off reader sees is the noscript's content here, and the img after it is an
+    // element. That is the case: the markup check must read this tree, not the scripting-off one.
+    const els = walkHtml(parseHtmlFragment(v)).filter((n) => n.kind === 'element');
+    expect(els.map((n) => n.kind === 'element' && [n.name, n.content])).toEqual([['noscript', '<p title="'], ['img', null]]);
+  });
+});
+
+describe('walkHtml', () => {
+  it('walks template contents, marked, and foreign content with its namespace', () => {
+    const nodes = walkHtml(parseHtmlFragment('<template><img src=x></template><svg><script>s</script></svg>'));
+    const els = nodes.filter((n) => n.kind === 'element');
+    expect(els.map((n) => [n.name, n.inTemplate])).toEqual([['template', false], ['img', true], ['svg', false], ['script', false]]);
+    const svgScript = els[3]!;
+    expect(svgScript.kind === 'element' && [svgScript.namespace, svgScript.content]).toEqual(['http://www.w3.org/2000/svg', 's']);
+  });
+
+  it('carries the text of raw-text and RCDATA elements as content, and none of others', () => {
+    const els = walkHtml(parseHtmlFragment('<style>s</style><textarea>t</textarea><p>p</p>')).filter((n) => n.kind === 'element');
+    expect(els.map((n) => n.kind === 'element' && n.content)).toEqual(['s', 't', null]);
+  });
+
+  it('walks comments, in template contents too, and counts depth from the fragment', () => {
+    const nodes = walkHtml(parseHtmlFragment('<!--a--><p><b>x</b></p><template><!--b--></template>'));
+    expect(nodes.map((n) => [n.kind, n.kind === 'element' ? n.name : n.kind === 'comment' ? n.data : n.value, n.depth, n.inTemplate])).toEqual([
+      ['comment', 'a', 0, false], ['element', 'p', 0, false], ['element', 'b', 1, false], ['text', 'x', 2, false],
+      ['element', 'template', 0, false], ['comment', 'b', 1, true],
+    ]);
+  });
+
+  it('carries content for exactly the listed elements', () => {
+    // Pinned by hand: the walk's one rule, so that dropping an entry fails here and not only where
+    // an extraction that shares the mistake would have to show it.
+    expect([...CONTENT_CARRYING_ELEMENTS].sort()).toEqual(['iframe', 'noembed', 'noframes', 'noscript', 'plaintext', 'textarea', 'title', 'xmp']);
+    const SVG = 'http://www.w3.org/2000/svg', MATHML = 'http://www.w3.org/1998/Math/MathML', HTML = 'http://www.w3.org/1999/xhtml';
+    // In SVG and MathML only script and style carry content.
+    const names = ['script', 'style', 'a', 'title', 'textarea', 'noscript', 'p', 'mi', 'desc', 'foreignObject'];
+    for (const ns of [SVG, MATHML]) expect(names.filter((n) => carriesContent(ns, n)), ns).toEqual(['script', 'style']);
+    expect([carriesContent(HTML, 'title'), carriesContent(HTML, 'p')]).toEqual([true, false]);
+  });
+
+  it('enters only an HTML template as template content', () => {
+    // An SVG `template` is an ordinary foreign element: its children are its children.
+    const els = walkHtml(parseHtmlFragment('<svg><template><a></a></template></svg>')).filter((n) => n.kind === 'element');
+    expect(els.map((n) => n.kind === 'element' && [n.name, n.inTemplate])).toEqual([['svg', false], ['template', false], ['a', false]]);
+  });
+
+  it('keeps an attribute without a value, and a foreign attribute\'s namespace', () => {
+    const els = walkHtml(parseHtmlFragment('<p hidden>a</p><svg><a xlink:href="u"></a></svg>')).filter((n) => n.kind === 'element');
+    expect(els[0]!.kind === 'element' && els[0]!.attrs).toEqual([{ namespace: null, prefix: null, name: 'hidden', value: '' }]);
+    const a = els[2]!;
+    expect(a.kind === 'element' && a.attrs).toEqual([{ namespace: 'http://www.w3.org/1999/xlink', prefix: 'xlink', name: 'href', value: 'u' }]);
+  });
+});

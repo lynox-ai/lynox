@@ -99,12 +99,14 @@ const fireworks = (model_id: string): Omit<TierSlot, 'api_key'> => ({ provider: 
 // THE LADDER (reshaped 2026-08-10). Two Fireworks sets that differ in EXACTLY ONE
 // slot — the main — plus an EU set and an Anthropic set:
 //
-//   ⚡ efficient     deepseek-v4p1-flash · minimax-m3 · kimi-k3
-//   ⚖️ balanced      deepseek-v4p1-flash · glm-5p3    · kimi-k3
+//   ⚡ efficient     deepseek-v4p1-flash-1017 · minimax-m3 · kimi-k3
+//   ⚖️ balanced      deepseek-v4p1-flash-1017 · glm-5p3    · kimi-k3
 // (Both fast slots and balanced's main were REPINNED 2026-09-30 — the provider withdrew
 //  deepseek-v4-flash-0731 and glm-5p2. The measured bases below belong to the WITHDRAWN
 //  models; the successors rest on an operator decision, availability and behaviour, and
-//  no quality measurement. Read them as separate claims.)
+//  no quality measurement. Read them as separate claims. On 2026-10-27 both fast slots
+//  moved once more, to the provider's 1017 update of v4.1 Flash, on the same kind of
+//  basis.)
 // (An EU-only set was drafted and PULLED on 2026-08-11: a preset whose identity
 //  IS a residency promise must fail closed, and this one degraded silently to the
 //  base provider when a Mistral slot was dropped, while the disclosure panel kept
@@ -125,7 +127,8 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   // contradicted by the catalog note this same PR wrote). The old set paid $7.50/M
   // output for a main (mistral-medium) that the /model-smoke sweep found weakest on
   // open turns, while its deep slot already routed here.
-  //   fast  — deepseek-v4p1-flash, whose basis is NOT the bench in this sentence. The
+  //   fast  — deepseek-v4p1-flash-1017 (since 2026-10-27; before it v4p1-flash, same price),
+  //           whose basis is NOT the bench in this sentence. The
   //           bench belongs to deepseek-v4-flash-0731, WITHDRAWN by the provider on or
   //           before 2026-09-30 (404 measured live). The successor inherits the SLOT,
   //           not the result: operator decision on availability plus behaviour, at MORE
@@ -155,7 +158,7 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   efficient: {
     routing_mode: 'hybrid',
     tier_set: {
-      fast: fireworks('accounts/fireworks/models/deepseek-v4p1-flash'),
+      fast: fireworks('accounts/fireworks/models/deepseek-v4p1-flash-1017'),
       balanced: fireworks('accounts/fireworks/models/minimax-m3'),
       deep: fireworks('accounts/fireworks/models/kimi-k3'),
     },
@@ -205,7 +208,7 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   balanced: {
     routing_mode: 'hybrid',
     tier_set: {
-      fast: fireworks('accounts/fireworks/models/deepseek-v4p1-flash'),
+      fast: fireworks('accounts/fireworks/models/deepseek-v4p1-flash-1017'),
       balanced: fireworks('accounts/fireworks/models/glm-5p3'),
       deep: fireworks('accounts/fireworks/models/kimi-k3'),
     },
