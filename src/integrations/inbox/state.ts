@@ -29,6 +29,7 @@ import type {
   InboxUserAction,
 } from '../../types/index.js';
 import { sanitizeHeader, stripHtmlAndInvisibles } from './classifier/sanitize.js';
+import type { PrefilterRule } from '../mail/triage/rules.js';
 import { MAX_DESCRIPTION_RULES } from './rule-text.js';
 
 /** Sentinel used in single-user instances. Team-inbox lands in Phase 5+. */
@@ -63,6 +64,11 @@ export interface InboxItemInput {
   inReplyTo?: string | undefined;
   /** The rule that filed the item (v20). */
   matchedRuleId?: string | undefined;
+  /**
+   * The prefilter rule the mail met, if any (v23). Written, never shown: it
+   * lets the classifier's spend be counted per rule.
+   */
+  prefilterRule?: PrefilterRule | undefined;
 }
 
 /**
@@ -449,8 +455,8 @@ export class InboxStateDb {
            bucket, confidence, reason_de, classified_at, classifier_version,
            unsnooze_on_reply,
            from_address, from_name, subject, mail_date, snippet,
-           message_id, in_reply_to, matched_rule_id
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           message_id, in_reply_to, matched_rule_id, prefilter_rule
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (tenant_id, account_id, thread_key) DO NOTHING`,
       )
       .run(
@@ -473,6 +479,7 @@ export class InboxStateDb {
         input.messageId ?? null,
         input.inReplyTo ?? null,
         input.matchedRuleId ?? null,
+        input.prefilterRule ?? null,
       ) as { changes: number };
     if (result.changes > 0) return id;
     // Race lost — another job inserted first. Return that row's id.

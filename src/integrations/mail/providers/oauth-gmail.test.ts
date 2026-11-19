@@ -57,6 +57,8 @@ function metadataMessage(id: string, opts: {
   snippet?: string;
   labelIds?: string[];
   autoSubmitted?: string;
+  listId?: string;
+  listUnsubscribe?: string;
 } = {}): Record<string, unknown> {
   const headers: Array<{ name: string; value: string }> = [];
   if (opts.from) headers.push({ name: 'From', value: opts.from });
@@ -65,6 +67,8 @@ function metadataMessage(id: string, opts: {
   headers.push({ name: 'Date', value: '2026-04-26T19:46:35Z' });
   headers.push({ name: 'Message-ID', value: opts.messageId ?? `<${id}@gmail.com>` });
   if (opts.autoSubmitted) headers.push({ name: 'Auto-Submitted', value: opts.autoSubmitted });
+  if (opts.listId) headers.push({ name: 'List-Id', value: opts.listId });
+  if (opts.listUnsubscribe) headers.push({ name: 'List-Unsubscribe', value: opts.listUnsubscribe });
   return {
     id,
     threadId: opts.threadId ?? `thread-${id}`,
@@ -194,6 +198,24 @@ describe('OAuthGmailProvider — list', () => {
     const envs = await new OAuthGmailProvider(makeAccount(), makeAuth()).list();
     expect(envs[0]?.isAutoReply).toBe(true);
     expect(envs[0]?.isAutoReplied).toBe(false);
+  });
+
+  // The watcher reads `list`; Gmail returns only the metadata headers it is
+  // asked for, so the request must name List-Id.
+  it('asks for List-Id and carries the list identifier', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes('?labelIds')) return Promise.resolve(respondJson({ messages: [{ id: 'm1', threadId: 't1' }, { id: 'm2', threadId: 't2' }] }));
+      if (url.includes('messages/m1')) return Promise.resolve(respondJson(metadataMessage('m1', { listId: 'Acme News <news.acme.example>' })));
+      if (url.includes('messages/m2')) return Promise.resolve(respondJson(metadataMessage('m2', { listUnsubscribe: '<mailto:unsub@acme.example>' })));
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    const envs = await provider.list();
+    const metaUrl = fetchMock.mock.calls.map((c) => String(c[0])).find((u) => u.includes('messages/m1'))!;
+    expect(metaUrl).toContain('metadataHeaders=List-Id');
+    expect(envs.find((e) => e.messageId === '<m1@gmail.com>')?.listId).toBe('news.acme.example');
+    expect(envs.find((e) => e.messageId === '<m2@gmail.com>')?.listId, 'List-Unsubscribe alone is no list').toBeUndefined();
   });
 
   it('UNREAD label maps to absent \\Seen flag', async () => {
@@ -1107,7 +1129,7 @@ describe('OAuthGmailProvider under MailWatcher — a deferred mail', () => {
     });
     const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
     try {
-      await watcher.attach(provider, { intervalMs: 50, applyPrefilter: false });
+      await watcher.attach(provider, { intervalMs: 50 });
       // Until the second hand-over, not a fixed wait: two ticks on a loaded box take longer.
       for (let waited = 0; handed.length === 0 && waited < 5_000; waited += 25) {
         await new Promise((r) => setTimeout(r, 25));
@@ -1158,7 +1180,7 @@ describe('OAuthGmailProvider under MailWatcher — a deferred mail', () => {
       const w1 = new MailWatcher(before, async () => { deferred = true; throw new InboundMailDeferred('restore'); });
       const p1 = new OAuthGmailProvider(makeAccount(), makeAuth());
       try {
-        await w1.attach(p1, { intervalMs: 50, applyPrefilter: false });
+        await w1.attach(p1, { intervalMs: 50 });
         await waitFor(() => deferred);
       } finally {
         await w1.stopAll();
@@ -1173,7 +1195,7 @@ describe('OAuthGmailProvider under MailWatcher — a deferred mail', () => {
       const w2 = new MailWatcher(after, async (_a, envelopes) => { classified.push(...envelopes.map((e) => e.subject)); });
       const p2 = new OAuthGmailProvider(makeAccount(), makeAuth());
       try {
-        await w2.attach(p2, { intervalMs: 50, applyPrefilter: false });
+        await w2.attach(p2, { intervalMs: 50 });
         await waitFor(() => classified.length > 0);
       } finally {
         await w2.stopAll();

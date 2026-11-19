@@ -31,6 +31,7 @@ import {
   type MailWatchHandle,
   type MailWatchHandler,
   type MailWatchOptions,
+  listIdFromHeader,
 } from '../provider.js';
 import { currentCallSignal } from '../../../core/call-connection.js';
 import { processErrorText } from '../../../core/error-egress.js';
@@ -749,8 +750,9 @@ export class ImapSmtpProvider implements MailProvider {
             size: true,
             bodyStructure: true,
             bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
-            // The watcher lists new mail; without this header no listed mail is ever automatic.
-            headers: ['auto-submitted'],
+            // The watcher lists new mail; without these headers no listed mail is ever automatic
+            // and no List-Id reaches the inbox rules or the prefilter.
+            headers: ['auto-submitted', 'list-id'],
           },
           { uid: true },
         )) {
@@ -789,7 +791,7 @@ export class ImapSmtpProvider implements MailProvider {
           internalDate: true,
           size: true,
           bodyStructure: true,
-          headers: ['in-reply-to', 'references', 'auto-submitted'],
+          headers: ['in-reply-to', 'references', 'auto-submitted', 'list-id'],
         },
         { uid: true },
       ));
@@ -933,8 +935,9 @@ export class ImapSmtpProvider implements MailProvider {
             size: true,
             bodyStructure: true,
             bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
-            // The watcher lists new mail; without this header no listed mail is ever automatic.
-            headers: ['auto-submitted'],
+            // The watcher lists new mail; without these headers no listed mail is ever automatic
+            // and no List-Id reaches the inbox rules or the prefilter.
+            headers: ['auto-submitted', 'list-id'],
           },
           { uid: true },
         )) {
@@ -1213,6 +1216,7 @@ export class ImapSmtpProvider implements MailProvider {
       sizeBytes: msg.size,
       isAutoReply,
       isAutoReplied,
+      listId: listIdFromHeader(headers.get('list-id')),
     };
   }
 }
@@ -1260,12 +1264,15 @@ function sleep(ms: number): Promise<void> {
 
 function parseHeaders(raw: string): Map<string, string> {
   const out = new Map<string, string>();
-  for (const line of raw.split(/\r?\n/)) {
+  // Unfold first (RFC 5322 §2.2.3): a line that starts with a space or a tab
+  // continues the field above it. `List-Id: "Long name"\r\n <id>` is one field.
+  for (const line of raw.replace(/\r?\n(?=[ \t])/g, ' ').split(/\r?\n/)) {
     const idx = line.indexOf(':');
     if (idx <= 0) continue;
     const key = line.slice(0, idx).trim().toLowerCase();
     const value = line.slice(idx + 1).trim();
-    if (key && value) out.set(key, value);
+    // The first of a repeated field wins, as Gmail's header lookup does.
+    if (key && value && !out.has(key)) out.set(key, value);
   }
   return out;
 }

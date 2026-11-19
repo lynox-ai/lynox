@@ -625,6 +625,16 @@ const MIGRATIONS: string[] = [
    INSERT OR IGNORE INTO schema_version (version) VALUES (22);
    ALTER TABLE mail_sent_log ADD COLUMN origin_owner_known INTEGER NOT NULL DEFAULT 0;
    COMMIT;`,
+
+  // v23: which prefilter rule an inbox item's mail met (`automated_sender`,
+  // `bounce`, `newsletter_domain`, `bulk_subdomain`), NULL when none did. The watcher no
+  // longer drops mail on these rules, so an automated sender's mail now costs a
+  // classifier call; this column lets that spend be counted per rule. Not shown
+  // to the user. One transaction, as v17.
+  `BEGIN;
+   INSERT OR IGNORE INTO schema_version (version) VALUES (23);
+   ALTER TABLE inbox_items ADD COLUMN prefilter_rule TEXT;
+   COMMIT;`,
 ];
 
 export interface MailStateDbOptions {
