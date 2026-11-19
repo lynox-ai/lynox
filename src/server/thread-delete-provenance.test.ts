@@ -15,6 +15,7 @@ import type { KnowledgeLayer } from '../core/knowledge-layer.js';
 import type { PromptStore } from '../core/prompt-store.js';
 import type { RunHistory } from '../core/run-history.js';
 import { FALLBACK_MARKER } from '../core/connection-erasure.js';
+import { recordExecutedState, getExecutedResult } from '../tools/builtin/pipeline.js';
 
 /**
  * Deleting a chat keeps what was learned in it, and marks the source as a deleted chat.
@@ -416,7 +417,7 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
     let otherRun = '';
 
     /** A write into every content store, keyed on `runId` and `workflow`, as a run still going would do. */
-    function writeLate(db: Database.Database, runId: string, workflow: string, mark: string, tag: string): string {
+    function writeLate(db: Database.Database, runId: string, workflow: string, mark: string, tag: string, status: 'pending' | 'answered'): string {
       db.prepare('UPDATE runs SET response_text = ?, error_text = ? WHERE id = ?').run(`answer ${mark}`, `error ${mark}`, runId);
       db.prepare(`INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json) VALUES (?, ?, 'http_request', ?, ?)`)
         .run(`late-tc-${tag}`, runId, `{"v":"${mark}"}`, `out ${mark}`);
@@ -436,7 +437,7 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
         .run(runId, mark, mark, `{"n":"${mark}"}`);
       const question = `late-pp-${tag}`;
       db.prepare(`INSERT INTO pending_prompts (id, session_id, prompt_type, question, options_json, status, expires_at)
-        VALUES (?, ?, 'ask_user', ?, ?, 'pending', '2099-01-01T00:00:00.000Z')`).run(question, workflow, mark, `["${mark}"]`);
+        VALUES (?, ?, 'ask_user', ?, ?, ?, '2099-01-01T00:00:00.000Z')`).run(question, workflow, mark, `["${mark}"]`, status);
       return question;
     }
 
@@ -448,8 +449,9 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
       otherRun = seedRuns('t-late-other', `seed-${KEPT}`).runId;
       if ((await deleteChat('t-late')).status !== 200) throw new Error('fixture: delete failed');
       // Positive control: the same writes into the other chat keep their content (asserted below).
-      writeLate(runHistory().getDb(), otherRun, 'wf-t-late-other', KEPT, 'other');
-      lateQuestion = writeLate(runHistory().getDb(), seeded.runId, 'wf-t-late', MARK, 'gone');
+      // Answered, so the control leaves no open question in the shared engine.
+      writeLate(runHistory().getDb(), otherRun, 'wf-t-late-other', KEPT, 'other', 'answered');
+      lateQuestion = writeLate(runHistory().getDb(), seeded.runId, 'wf-t-late', MARK, 'gone', 'pending');
     });
 
     it.each(Object.keys(SEEDED))('%s holds nothing written after the delete', (table) => {
@@ -493,6 +495,43 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
       expect([text(spawned), text(adopted), text(inChat), text(step)]).toEqual([FALLBACK_MARKER, FALLBACK_MARKER, FALLBACK_MARKER, FALLBACK_MARKER]);
       expect(columnsHolding('pipeline_runs', MARK)).toEqual([]);
     });
+
+    it('a question a schedule parked under the chat\'s workflow is closed too', () => {
+      runHistory().getDb().prepare(`INSERT INTO pending_prompts (id, session_id, prompt_type, question, status, expires_at, trigger_id)
+        VALUES ('late-parked', 'wf-t-late', 'ask_user', ?, 'pending', '2099-01-01T00:00:00.000Z', 'trg-late')`).run(MARK);
+      expect(promptStore().getById('late-parked')).toMatchObject({ status: 'expired', closed_reason: 'thread_deleted', question: FALLBACK_MARKER });
+    });
+  });
+
+  it('deleting the thread a scheduled workflow asks in blanks the workflow itself, now and later', async () => {
+    const { ts } = stores();
+    const mark = `asks-${randomBytes(6).toString('hex')}`;
+    // A scheduled workflow's questions have their own thread, whose id is the workflow run's.
+    const workflow = randomUUID();
+    ts.createThread(workflow, { title: 'questions of a schedule' });
+    const db = runHistory().getDb();
+    db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, error) VALUES (?, 'wf', 'running', ?, ?)`).run(workflow, `{"p":"${mark}"}`, mark);
+    db.prepare(`INSERT INTO pipeline_step_results (pipeline_run_id, step_id, status, result) VALUES (?, 's1', 'ok', ?)`).run(workflow, mark);
+
+    expect((await deleteChat(workflow)).status).toBe(200);
+    db.prepare(`INSERT INTO pipeline_step_results (pipeline_run_id, step_id, status, result) VALUES (?, 's2', 'ok', ?)`).run(workflow, `later ${mark}`);
+
+    expect(columnsHolding('pipeline_runs', mark)).toEqual([]);
+    expect(columnsHolding('pipeline_step_results', mark)).toEqual([]);
+  });
+
+  it('deleting a chat forgets the outputs of its workflows that a retry would read', async () => {
+    const { ts } = stores();
+    const id = randomUUID();
+    ts.createThread(id, { title: 'ran a workflow' });
+    const state = { manifest: { name: 'wf', steps: [] }, state: { outputs: new Map() }, ranAs: 'owner' } as unknown as Parameters<typeof recordExecutedState>[1];
+    recordExecutedState(`wf-run-${id}`, { ...state, originThreadId: id });
+    recordExecutedState(`wf-other-${id}`, { ...state, originThreadId: randomUUID() });
+
+    expect((await deleteChat(id)).status).toBe(200);
+
+    expect(getExecutedResult(`wf-run-${id}`)).toBeUndefined();
+    expect(getExecutedResult(`wf-other-${id}`)).toBeDefined();
   });
 
   it('a failure in the third store answers 500 and changes nothing; deleting again clears every store', async () => {

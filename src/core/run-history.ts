@@ -25,7 +25,7 @@ import { migratePipelineBlob, CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline
 import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
 import { HISTORY_MARKERS_DDL } from './history-markers.js';
-import { deletedChatGuardDdl, dropDeletedChatGuardDdl } from './deleted-chat-guard.js';
+import { dropDeletedChatGuardDdl, installDeletedChatGuard } from './deleted-chat-guard.js';
 import { findHiddenChar, findHiddenInName, hiddenCharRefusal } from './hidden-text.js';
 import { stepIdIssue } from '../orchestrator/step-id.js';
 import { templateRefIssue } from '../orchestrator/template-refs.js';
@@ -1819,14 +1819,18 @@ export class RunHistory {
       zeroDeletedContent(db);
       db.pragma('foreign_keys = ON');
       this.db = db;
-      // The guard's triggers name content tables and columns; they go before the migrations, which
-      // may drop or rebuild those, and come back after them (`deleted-chat-guard.ts`).
-      db.exec(dropDeletedChatGuardDdl());
-      this._migrate();
-      db.transaction(() => {
-        const tables = new Set((db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>).map((r) => r.name));
-        db.exec(deletedChatGuardDdl(tables));
-      })();
+      // The guard's triggers name content tables and columns (`deleted-chat-guard.ts`). Before a
+      // pending migration they go, since it may drop or rename those; with none pending they stay
+      // until the install below swaps them in one transaction, so a second opener of a live file
+      // never leaves it unguarded. A migration that fails puts them back before the error leaves.
+      if (this._getVersion() < MIGRATIONS.length) db.exec(dropDeletedChatGuardDdl());
+      try {
+        this._migrate();
+      } catch (err) {
+        try { installDeletedChatGuard(db); } catch { /* the schema may be half way; the boot fails anyway */ }
+        throw err;
+      }
+      installDeletedChatGuard(db);
     } catch (err) {
       try { db.close(); } catch { /* best-effort */ }
       throw err;

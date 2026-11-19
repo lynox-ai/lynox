@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import BetterSqlite3 from 'better-sqlite3';
 import { RunHistory } from './run-history.js';
 import { FALLBACK_CONTENT_COLUMNS } from './connection-erasure.js';
 import { GUARDED_ROWS } from './deleted-chat-guard.js';
@@ -28,6 +29,21 @@ describe('deleted-chat guard', () => {
       const expected = Object.keys(FALLBACK_CONTENT_COLUMNS).flatMap((t) => [`deleted_chat_insert_${t}`, `deleted_chat_update_${t}`]).sort();
       expect(triggersOf(history)).toEqual(expected);
     } finally { history.close(); }
+  });
+
+  it('a migration that fails on open puts the triggers back before the error leaves', () => {
+    const first = open();
+    const before = triggersOf(first.history);
+    // The last migration runs again and fails: its column is already there.
+    const last = (first.history.getDb().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v;
+    first.history.getDb().prepare('DELETE FROM schema_version WHERE version = ?').run(last);
+    first.history.close();
+    expect(() => new RunHistory(join(first.dir, 'history.db'))).toThrow();
+    const raw = new BetterSqlite3(join(first.dir, 'history.db'));
+    try {
+      const names = (raw.prepare(`SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'deleted_chat_%' ORDER BY name`).all() as Array<{ name: string }>).map((r) => r.name);
+      expect(names).toEqual(before);
+    } finally { raw.close(); }
   });
 
   it('opens the same file again with the same triggers', () => {

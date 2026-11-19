@@ -15,6 +15,7 @@
  * The triggers are rebuilt from {@link FALLBACK_CONTENT_COLUMNS} on every open rather than written
  * as a migration, so a column added to that map is covered from the next start on.
  */
+import type Database from 'better-sqlite3';
 import { DELETED_CHAT_RUNS, FALLBACK_CONTENT_COLUMNS, FALLBACK_MARKER } from './connection-erasure.js';
 
 const IN_SCOPE = (expr: string): string => `${expr} IN (SELECT id FROM ${DELETED_CHAT_RUNS})`;
@@ -30,7 +31,7 @@ export const GUARDED_ROWS: Readonly<Record<string, string>> = {
   pending_prompts: `(${IN_SCOPE('NEW.session_id')} OR ${IN_DELETED_CHAT('NEW.session_id')})`,
   pipeline_runs: IN_SCOPE('NEW.id'),
   pipeline_step_results: IN_SCOPE('NEW.pipeline_run_id'),
-  pre_approval_events: `(${IN_SCOPE('NEW.run_id')} OR NEW.set_id IN (SELECT id FROM pre_approval_sets WHERE ${IN_SCOPE('run_id')}))`,
+  pre_approval_events: `(${IN_SCOPE('NEW.run_id')} OR EXISTS (SELECT 1 FROM pre_approval_sets WHERE id = NEW.set_id AND ${IN_SCOPE('run_id')}))`,
   pre_approval_sets: IN_SCOPE('NEW.run_id'),
   processes: IN_SCOPE('NEW.source_run_id'),
   run_tool_calls: IN_SCOPE('NEW.run_id'),
@@ -57,14 +58,27 @@ const JOINS: Readonly<Record<string, { readonly when: string; readonly columns: 
 const quote = (s: string): string => `'${s.replace(/'/g, "''")}'`;
 
 /**
- * Drops every trigger of the guard. Run before the migrations: a trigger left from the last start
- * names columns and tables a migration may drop or rebuild, and SQLite refuses that while a trigger
- * still names them. The guard is created again after the migrations ({@link deletedChatGuardDdl}).
+ * Drops every trigger of the guard. Run before a pending migration: a trigger left from the last
+ * start names columns and tables a migration may drop or rename, and SQLite refuses that while a
+ * trigger still names them. The guard is put back after the migrations ({@link installDeletedChatGuard}).
  */
 export function dropDeletedChatGuardDdl(): string {
   return Object.keys(FALLBACK_CONTENT_COLUMNS)
     .map((table) => `DROP TRIGGER IF EXISTS deleted_chat_insert_${table}; DROP TRIGGER IF EXISTS deleted_chat_update_${table};`)
     .join('\n');
+}
+
+/**
+ * Puts the guard in place on `db`: drops its triggers and creates them again for the content
+ * tables the file holds, in one transaction, so another connection sees either the old triggers or
+ * the new ones and never none.
+ */
+export function installDeletedChatGuard(db: Database.Database): void {
+  db.transaction(() => {
+    const tables = new Set((db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>).map((r) => r.name));
+    db.exec(dropDeletedChatGuardDdl());
+    db.exec(deletedChatGuardDdl(tables));
+  })();
 }
 
 /**
@@ -82,10 +96,10 @@ export function deletedChatGuardDdl(tables: ReadonlySet<string>): string {
     const held = (c: string): string => `(NEW."${c}" IS NOT NULL AND NEW."${c}" NOT IN ('', '{}', ${marker}))`;
     const anyHeld = columns.map(held).join(' OR ');
     const set = columns.map((c) => `"${c}" = CASE WHEN "${c}" IS NULL OR "${c}" IN ('', '{}') THEN "${c}" ELSE ${marker} END`).join(', ');
-    // A question asked under a deleted chat could only be answered there: it is closed as the
-    // delete closes the ones that were waiting then (`withdrawForDeletedThread`).
+    // A question asked under a deleted chat could only be answered there, and its text is blanked
+    // now: it is closed, also one a schedule parked, so nobody answers a question they cannot read.
     const close = table === 'pending_prompts'
-      ? ` UPDATE pending_prompts SET status = 'expired', closed_reason = 'thread_deleted' WHERE rowid = NEW.rowid AND status = 'pending' AND trigger_id IS NULL;`
+      ? ` UPDATE pending_prompts SET status = 'expired', closed_reason = 'thread_deleted' WHERE rowid = NEW.rowid AND status = 'pending';`
       : '';
     const blank = `UPDATE "${table}" SET ${set} WHERE ${key} = NEW.${key};`;
     const join = JOINS[table];

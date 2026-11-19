@@ -166,6 +166,21 @@ export function recordExecutedState(id: string, value: ExecutedState): void {
   executedStates.set(id, value);
 }
 
+/**
+ * Forgets what the workflow runs of a deleted chat produced: the runs `pipelineIds` and every run
+ * the chat started. A retry reads a run's step outputs from here, not from history.db, so without
+ * this a retry from another chat would write the deleted chat's outputs into a new run. Returns how
+ * many runs were forgotten.
+ */
+export function forgetExecutedStatesOfChat(threadId: string, pipelineIds: readonly string[]): number {
+  const ids = new Set(pipelineIds);
+  let forgotten = 0;
+  for (const [id, entry] of executedStates) {
+    if (ids.has(id) || entry.originThreadId === threadId) { executedStates.delete(id); forgotten += 1; }
+  }
+  return forgotten;
+}
+
 /** Get the pipeline store for listing */
 export function getPipelineStore(): Map<string, PlannedPipeline> {
   return pipelineStore;

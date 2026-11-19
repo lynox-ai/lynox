@@ -740,6 +740,17 @@ describe('T3 — the fallback blanks every content column it names and keeps the
     expect(text(other)).toBe(`other ${MARK}`);
   });
 
+  it('an erasure that leaves the chat standing does not keep its later writes blank', () => {
+    const db = history.getDb();
+    const runId = history.insertRun({ sessionId: 'thread-a', taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+    blankRunHistoryContent(db, { threadIds: ['thread-a'] });
+    db.prepare('UPDATE runs SET response_text = ? WHERE id = ?').run(`later ${MARK}`, runId);
+    expect((db.prepare('SELECT response_text AS r FROM runs WHERE id = ?').get(runId) as { r: string }).r).toBe(`later ${MARK}`);
+    blankRunHistoryRows(db, { threadIds: ['thread-a'], deletedChat: true });
+    db.prepare('UPDATE runs SET response_text = ? WHERE id = ?').run(`after delete ${MARK}`, runId);
+    expect((db.prepare('SELECT response_text AS r FROM runs WHERE id = ?').get(runId) as { r: string }).r).toBe(FALLBACK_MARKER);
+  });
+
   it('names every workflow it reached, nested ones included, and no other', () => {
     const db = history.getDb();
     db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, origin_thread_id) VALUES ('wf-a', 'wf', 'running', '{}', 'thread-a'), ('wf-b', 'wf', 'running', '{}', 'thread-b')`).run();
