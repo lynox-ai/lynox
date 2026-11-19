@@ -48,9 +48,10 @@ interface RunBearer {
  * knowledge chips). A message whose text differs from the server's (a reload while the answer was
  * still streaming keeps a longer local text) has no counterpart; its id then goes to the server's
  * answer whose bulk_plan call reported that very run, in the status line the engine writes for it
- * ("Bulk run <id> (…"), not wherever a refusal repeats a string the caller passed. The id stays the one this browser got from the
- * stream; the server's text only says where it belongs. Without either, the id is dropped, so no
- * button lands on another answer.
+ * ("Bulk run <id> (…"). A refusal that repeats a string the caller passed matches only if that string
+ * holds the whole line with this run's id, and the first match in the transcript, the plan's own
+ * answer, is taken. The id stays the one this browser got from the stream; the server's text only
+ * says where it belongs. Without either, the id is dropped.
  */
 export function carryPlannedBulkRuns(local: readonly RunBearer[], adopted: readonly RunBearer[]): void {
 	if (!local.some((m) => m.plannedBulkRunId !== undefined)) return;
