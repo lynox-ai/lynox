@@ -328,11 +328,14 @@ export function requiredGates(files) {
  * What it cannot see, stated so nobody reads more into it: a lock tightened by editing only its
  * condition (`if (role !== 'owner')`); a refusal spelled otherwise (a German text, a
  * `ForbiddenError`); a line that starts as a comment, even with code after it or inside a
- * template literal the user reads; a confirmation entry whose key line `UX_NEW_TEXT` does not
- * read (an unquoted key, a comment after `{`, a call such as `t({`); and the part of an entry
- * after a line, at the key's indent or less, that starts with `}` or looks like an entry opening
- * (a template literal's line can) when that part also moved no line count. Those stay the
- * author's to declare. And where it errs the other way, it asks for a review it did not need: a
+ * template literal the user reads (outside a confirmation entry); a confirmation whose key line
+ * `UX_NEW_TEXT` does not read (an unquoted key, a comment after `{`, a call such as `t({`, a
+ * plain string value) or whose text sits under another locale than `de:`/`en:`; and the part of a
+ * confirmation entry after a line, at the key's indent or less, that starts with `}` or looks like
+ * an entry opening (a flat file, a mixed indent, a template literal's line), unless the line
+ * count credits that part to the confirmation — it does not for a line only deleted, nor after a
+ * line starting with `}` at any indent or a nested line ending in `{`. Those stay the author's
+ * to declare. And where it errs the other way, it asks for a review it did not need: a
  * renamed file reads as all-new lines, as does a re-indented one, the inner lines of a multi-line
  * import or type are read as sites, a confirmation entry that only changes its indent or layout
  * reads as reworded, and so does any later change in a file whose last confirmation entry has no
