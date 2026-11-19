@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, uxJsonKeyChanges, UX_SELF_PATH, UX_LINE_MARK, deltaRangeErrors, deltaPredates, DELTA_LINE_MARK, DELTA_RANGE, wrongRunErrors, OTHER_REPO_MARKER } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, uxJsonKeyChanges, uxConfirmBlocks, UX_SELF_PATH, UX_LINE_MARK, deltaRangeErrors, deltaPredates, DELTA_LINE_MARK, DELTA_RANGE, wrongRunErrors, OTHER_REPO_MARKER } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -2610,6 +2610,30 @@ describe('gate-record — the `ux:` line', () => {
       expect(owed([F], { [F]: entry('A') }, { [F]: entry('A2') }).why).toEqual([`${F} changes what a confirmation asks the user to agree to`]);
       // Control: a changed text in the NEXT entry, which is no confirmation, stays `self`.
       expect(owed([F], { [F]: entry('A') }, { [F]: entry('A').replace("de: 'T'", "de: 'T2'") }).review).toBe(false);
+    });
+
+    it('a confirmation is compared as a whole block by key: a reworded text that stands in an earlier entry owes a review', () => {
+      const file = (de: string) => `\t'a.title': {\n\t\tde: 'Alles löschen?',\n\t},\n\t'x.delete_confirm': {\n\t\tde: '${de}',\n\t},`;
+      expect(owed([F], { [F]: file('Nur diesen löschen?') }, { [F]: file('Alles löschen?') }).why).toEqual([`${F} changes what a confirmation asks the user to agree to`]);
+    });
+
+    it('two confirmations swapping their lines owe a review: no line count goes up', () => {
+      const file = (a: string, b: string) => `\t'x.delete_confirm': {\n\t\tde: '${a}',\n\t},\n\t'y.send_confirm': {\n\t\tde: '${b}',\n\t},`;
+      expect(owed([F], { [F]: file('Löschen?', 'Senden?') }, { [F]: file('Senden?', 'Löschen?') }).why).toEqual([`${F} changes what a confirmation asks the user to agree to`]);
+    });
+
+    it('a confirmation that only gains a blank line or a new indent is not reworded', () => {
+      const base = `\t'x.delete_confirm': {\n\t\tde: 'Löschen?',\n\t\ten: 'Delete?',\n\t},`;
+      expect(owed([F], { [F]: base }, { [F]: base.replace("\n\t\ten:", "\n\n\t\ten:") }).review).toBe(false);
+      expect(owed([F], { [F]: base }, { [F]: base.replace(/\t/g, '  ') }).review).toBe(false);
+      // Control: the same entry with one changed word does owe it.
+      expect(owed([F], { [F]: base }, { [F]: base.replace('Delete?', 'Erase?') }).review).toBe(true);
+    });
+
+    it('a confirmation block ends at its closing line, a line ending in a brace, or the next entry', () => {
+      expect([...uxConfirmBlocks(`'a_confirm': {\n  de: 'A', en: 'B' },\nconst label = 'x';\n}`)]).toEqual([['a_confirm', "'a_confirm': {\nde: 'A', en: 'B' },"]]);
+      expect([...uxConfirmBlocks(`'a_confirm': {\n  de: 'A',\n'b_confirm': { de: 'B' },`)]).toEqual([['a_confirm', "'a_confirm': {\nde: 'A',"], ['b_confirm', "'b_confirm': { de: 'B' },"]]);
+      expect(uxConfirmBlocks(null).size).toBe(0);
     });
 
     it('a placeholder reason is refused through the reason path: a trailing period, dots, ellipses', () => {

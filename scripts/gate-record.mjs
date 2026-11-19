@@ -328,12 +328,14 @@ export function requiredGates(files) {
  * What it cannot see, stated so nobody reads more into it: a lock tightened by editing only its
  * condition (`if (role !== 'owner')`); a refusal spelled otherwise (a German text, a
  * `ForbiddenError`); a line that starts as a comment, even with code after it or inside a
- * template literal the user reads; a confirmation inside a multi-line entry whose new text
- * already stands in an earlier entry (a line counts only where its count went up, and is
- * credited to the first entry that holds it). Those stay the author's to declare. And where it
- * errs the other way, it asks for a review it did not need: a renamed file reads as all-new
- * lines, as does a re-indented one, and the inner lines of a multi-line import or type are read
- * as sites.
+ * template literal the user reads. Those stay the author's to declare. And where it errs the
+ * other way, it asks for a review it did not need: a renamed file reads as all-new lines, as does
+ * a re-indented one, the inner lines of a multi-line import or type are read as sites, and a
+ * confirmation entry that only changes its layout (one line to several) reads as reworded.
+ *
+ * A confirmation entry (a key naming `confirm`) is compared as a WHOLE BLOCK between the two
+ * ends, by key, not line by line: its wording is the consent, and a line count cannot see a
+ * reworded line whose text also stands in another entry, or two entries swapping their lines.
  *
  * Lines are compared as a MULTISET, read with `git cat-file`, never with `git diff`: a full diff
  * can run an author-chosen diff driver, which `--name-only` avoids for the file list and this
@@ -425,26 +427,55 @@ export function uxOwed({ files, base, head, read }) {
       // Is the key in the base as a KEY, in either quote — not merely as a substring somewhere.
       const inBase = (k) => new RegExp(`(['"])${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\1\\s*:`).test(b.value ?? '');
       const entries = added.map((l) => UX_NEW_TEXT.exec(l)).filter((m) => m !== null && UX_KEY_NAME.test(m[2]));
-      // An entry over several lines changes in its `de:`/`en:` lines while its key line stays:
-      // attribute every added line inside an open entry to that entry's key.
-      const inside = new Set();
-      let open = null;
-      const left = new Map(count);
-      for (const l of (h.value ?? '').split('\n')) {
-        const m = UX_NEW_TEXT.exec(l);
-        if (m !== null && /\{\s*$/.test(l)) { open = m[2]; continue; }
-        if (open !== null && /^\s*\}/.test(l)) { open = null; continue; }
-        if (open !== null && (left.get(l) ?? 0) > 0 && !UX_COMMENT.test(l)) { inside.add(open); left.set(l, left.get(l) - 1); }
-      }
+      // A confirmation is compared as a whole block per key, at both ends: an entry over several
+      // lines changes in its `de:`/`en:` lines while its key line stays, and those lines can move
+      // between entries without any line count going up.
+      const bBlocks = uxConfirmBlocks(b.value);
+      const hBlocks = uxConfirmBlocks(h.value);
+      const reworded = [...hBlocks].filter(([k, v]) => bBlocks.has(k) && bBlocks.get(k) !== v).map(([k]) => k);
+      // A confirmation both ends hold is judged by its block alone, so a re-indented key line is
+      // no rewording; every other changed entry still counts by its line.
+      const byBlock = (k) => bBlocks.has(k) && hBlocks.has(k);
       keys = {
         added: entries.filter((m) => !inBase(m[2])).map((m) => m[2]),
-        changed: [...entries.filter((m) => inBase(m[2])).map((m) => m[2]), ...[...inside].filter(inBase)],
+        changed: [...entries.filter((m) => inBase(m[2]) && !byBlock(m[2])).map((m) => m[2]), ...reworded],
       };
     }
     if (keys.added.some((k) => UX_KEY_NAME.test(k))) why.push(`${f} adds a user text that says what to do next`);
     else if (keys.changed.some((k) => /confirm/i.test(k))) why.push(`${f} changes what a confirmation asks the user to agree to`);
   }
   return { line: true, review: why.length > 0, why };
+}
+
+/**
+ * Each confirmation entry of a source file (a `UX_NEW_TEXT` line whose key names `confirm`) with
+ * its whole text, by key; the same key several times keeps every block, in order. An entry over
+ * several lines runs to its closing `}` line, to a line that ends in `}` or `},`, or to the next
+ * entry. Each line is trimmed, and blank and comment lines are dropped, so re-indenting or a
+ * blank line is no rewording. `null` text (an absent file) has none. Pure.
+ *
+ * @param {string|null} text
+ * @returns {Map<string, string>}
+ */
+export function uxConfirmBlocks(text) {
+  const out = new Map();
+  const add = (key, lines) => out.set(key, [...(out.has(key) ? [out.get(key)] : []), lines.join('\n')].join('\n\u0000\n'));
+  const all = (text ?? '').split('\n');
+  for (let i = 0; i < all.length; i++) {
+    const m = UX_NEW_TEXT.exec(all[i]);
+    if (m === null || !/confirm/i.test(m[2])) continue;
+    const body = [all[i].trim()];
+    if (/\{\s*$/.test(all[i])) {
+      for (let j = i + 1; j < all.length; j++) {
+        if (UX_NEW_TEXT.test(all[j])) break;
+        const l = all[j].trim();
+        if (l !== '' && !UX_COMMENT.test(l)) body.push(l);
+        if (/^\}/.test(l) || /\}\s*,?$/.test(l)) break;
+      }
+    }
+    add(m[2], body);
+  }
+  return out;
 }
 
 /**
