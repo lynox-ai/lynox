@@ -3646,6 +3646,33 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('a reload learns how long the question has left from its stored end, not a full timeout', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-prompt-expiry-'));
+      const history = new RunHistory(join(dir, 'history.db'));
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const store = new PromptStore(history.getDb());
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const original = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => store;
+      try {
+        // A fresh question has about a day.
+        store.insertAskUser('s-fresh', 'Go on?', ['Yes', 'No']);
+        const fresh = await (await jsonFetch('/api/sessions/s-fresh/pending-prompt')).json() as { expiresInMs?: number };
+        expect(fresh.expiresInMs).toBeGreaterThan(24 * 60 * 60_000 - 60_000);
+        expect(fresh.expiresInMs).toBeLessThanOrEqual(24 * 60 * 60_000);
+        // One asked hours ago (its end moved closer): the reload says what is left, 20 minutes.
+        const id = store.insertAskUser('s-old', 'Go on?', ['Yes', 'No']);
+        history.getDb().prepare('UPDATE pending_prompts SET expires_at = ? WHERE id = ?').run(new Date(Date.now() + 20 * 60_000).toISOString(), id);
+        const old = await (await jsonFetch('/api/sessions/s-old/pending-prompt')).json() as { expiresInMs?: number };
+        expect(old.expiresInMs).toBeGreaterThan(19 * 60_000);
+        expect(old.expiresInMs).toBeLessThanOrEqual(20 * 60_000);
+      } finally {
+        engineRef.getPromptStore = original;
+        history.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     it('reply returns 404 for no pending prompt', async () => {
       const res = await jsonFetch('/api/sessions/test/reply', {
         method: 'POST',
@@ -3877,7 +3904,13 @@ describe('LynoxHTTPApi', () => {
         }
         expect(pending?.question).toBe('rm -rf /?');
         store.answerUser(pending!.id, 'Deny', OWNER_PRINCIPAL);
-        expect(await res.text()).toContain('settled:Deny');
+        const text = await res.text();
+        expect(text).toContain('settled:Deny');
+        // The live question carries the time it has left, read from its stored end: about a day.
+        const frame = text.split('\n\n').find((f) => f.startsWith('event: prompt\n'));
+        const sent = JSON.parse(frame!.split('\n')[1]!.replace(/^data:\s*/, '')) as { expiresInMs?: number };
+        expect(sent.expiresInMs).toBeGreaterThan(24 * 60 * 60_000 - 60_000);
+        expect(sent.expiresInMs).toBeLessThanOrEqual(24 * 60 * 60_000);
       } finally {
         engineRef.getPromptStore = originalGetPromptStore;
         history.close();

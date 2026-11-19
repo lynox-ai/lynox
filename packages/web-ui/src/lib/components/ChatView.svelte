@@ -99,7 +99,7 @@
 	import { scheduledTaskTurn } from '../utils/scheduled-task-turn.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
-	import { formatCountdown } from '../utils/time.js';
+	import { promptExpiry } from '../utils/time.js';
 	import { toolCallLabel as resolveToolCallLabel, HIDDEN_TOOLS } from '../utils/tool-call-label.js';
 	import { shouldRenderArtifactCard, parseArtifactIdFromResult, artifactFenceHeader } from '../utils/artifact-inline.js';
 	import { isPipelineRunning } from '../utils/pipeline-status.js';
@@ -719,6 +719,9 @@
 		const timer = setInterval(update, 1000);
 		return () => clearInterval(timer);
 	});
+
+	/** What the card says about that time: nothing with an hour or more left. */
+	const promptExpiryShown = $derived(promptSecondsLeft !== null ? promptExpiry(promptSecondsLeft) : null);
 
 	// Secret prompt state
 	let secretValue = $state('');
@@ -3551,8 +3554,10 @@
 						</div>
 					{/if}
 					<div class="flex items-center gap-1.5 shrink-0">
-						{#if promptSecondsLeft !== null && promptSecondsLeft !== undefined}
-							<span class="text-[11px] font-mono tabular-nums {promptSecondsLeft < 60 ? 'text-warning' : 'text-text-subtle'}" title={t('chat.prompt_timeout_left')}>{formatCountdown(promptSecondsLeft)}</span>
+						<!-- Only when it matters (under an hour), in words; no aria-live, so a screen reader is
+						     not told every tick. -->
+						{#if promptExpiryShown}
+							<span class="text-[11px] tabular-nums {promptExpiryShown.key === 'chat.prompt_expires_s' ? 'text-warning' : 'text-text-subtle'}" data-prompt-expiry>{tf(promptExpiryShown.key, { n: String(promptExpiryShown.n) })}</span>
 						{/if}
 						{#if !isPermissionGuard && !isDeepConsent}
 							<button onclick={() => answerPrompt('__dismissed__')} class="p-1.5 rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors" aria-label={t('chat.dismiss')}>

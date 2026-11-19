@@ -540,6 +540,16 @@ const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 120;
 const RATE_MAX_LOOPBACK = 600; // Higher limit for Web UI proxy on same host
 const PROMPT_TIMEOUT_MS = 24 * 60 * 60_000; // 24 hours — prompts persist in SQLite, survive reconnects
+/** How long a stored question has left before it lapses, read from its own `expires_at` on the
+ *  server's clock at the moment it is sent. The chat counts down from this, not from when it
+ *  received the question, so a reload does not restart a full day; and a number, not a time, so
+ *  the two clocks need not agree. Undefined when the row or its time cannot be read: the chat
+ *  then shows no countdown rather than a guessed one. */
+function promptExpiresInMs(row: { expires_at: string } | undefined): number | undefined {
+  if (row === undefined) return undefined;
+  const at = new Date(row.expires_at).getTime();
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
+}
 const ORPHAN_PROMPT_WATCHDOG_MS = 10 * 60_000; // 10 min — orphaned-stream + pending-prompt slot free guard
 /** Run wall-clock: max wall-time a run may spend ACTIVELY COMPUTING. Human
  *  think-time on a pending prompt is paused out of this budget (#77), so this
@@ -5347,7 +5357,7 @@ export class LynoxHTTPApi {
         // withdrawn at birth (its run already stopped) is never announced.
         if (!aborted && !res.writableEnded && meta?.signal?.aborted !== true) {
           const data = JSON.stringify({
-            promptId, question, options, timeoutMs: PROMPT_TIMEOUT_MS,
+            promptId, question, options, timeoutMs: PROMPT_TIMEOUT_MS, expiresInMs: promptExpiresInMs(promptStore.getById(promptId)),
             // Omitted when there is nothing to distinguish (an all-frame
             // prompt), so the payload does not grow for un-migrated callers.
             segments: segments.some((s: PromptSegment) => s.kind === 'value') ? segments : undefined,
@@ -5389,7 +5399,7 @@ export class LynoxHTTPApi {
           pauseWallClock(); // parked on a human — don't spend the compute budget
           if (!aborted && !res.writableEnded && meta?.signal?.aborted !== true) {
             const data = JSON.stringify({
-              promptId, questions, timeoutMs: PROMPT_TIMEOUT_MS,
+              promptId, questions, timeoutMs: PROMPT_TIMEOUT_MS, expiresInMs: promptExpiresInMs(promptStore.getById(promptId)),
               ...originWireFields(meta),
             });
             res.write(`event: prompt_tabs\ndata: ${data}\n\n`);
@@ -5963,6 +5973,7 @@ export class LynoxHTTPApi {
         // blocked on.
         origin: parseOriginJson(row.origin_json),
         timeoutMs: PROMPT_TIMEOUT_MS,
+        expiresInMs: promptExpiresInMs(row),
         createdAt: row.created_at,
       });
     }, readsThread((p) => ({ thread: p['id'] ?? '' }))));

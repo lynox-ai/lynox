@@ -22,7 +22,7 @@ import {
 } from './chat-attribution.js';
 import { parseFollowUps, followUpsFromToolInput, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
 import { markCall, trimToMark, type CallMark } from './stream-attempt.js';
-import { turnEndSettlesTools, promptCreatedAtMs, lostPromptRecheckVerdict, shouldArmRecheck } from './prompt-liveness.js';
+import { turnEndSettlesTools, lostPromptRecheckVerdict, shouldArmRecheck } from './prompt-liveness.js';
 import { projectKnowledgeWrite, performRetire, performReview, reviewRequestBody, parseReviewFailure, carryKnowledgeWrites, allKnowledgeWrites, queueEntriesToChips, anchorKnowledgeChips, type KnowledgeWriteChip } from './knowledge-chip.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
@@ -2306,8 +2306,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				question: String(data['question'] ?? ''),
 				segments: parsePromptSegments(data['segments']),
 				options: data['options'] as string[] | undefined,
-				timeoutMs: data['timeoutMs'] as number | undefined,
-				receivedAt: Date.now(),
+				...promptClock(data),
 				promptId: data['promptId'] as string | undefined,
 				multiSelect: data['multi_select'] === true,
 				origin: originFromEvent(data),
@@ -2322,8 +2321,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			pendingTabsPrompt = {
 				promptId,
 				questions,
-				timeoutMs: typeof data['timeoutMs'] === 'number' ? data['timeoutMs'] : undefined,
-				receivedAt: Date.now(),
+				...promptClock(data),
 				origin: originFromEvent(data),
 			};
 			break;
@@ -3118,25 +3116,12 @@ export async function checkPendingPrompt(): Promise<PendingCard> {
 		// Restored the same way for every kind: a prompt that named its workflow
 		// while the stream was live must still name it after a reload (v52).
 		const origin = originFromPending(data['origin']);
-		// The countdown is `timeoutMs - (now - receivedAt)`, so `receivedAt` has
-		// to mean "when the prompt was CREATED", not "when this tab learned of
-		// it". Stamping `Date.now()` here restarts the clock on every reload:
-		// a prompt three hours into its 24h TTL rendered as 23:59:49 (observed
-		// 2026-09-06), i.e. the UI promises time the prompt does not have, and
-		// promises it again after each refresh. The server already sends
-		// `createdAt` — a SQLite `datetime()` string in UTC without a zone
-		// suffix, which `Date.parse` would otherwise read as LOCAL time, so
-		// normalise before parsing. Falls back to now when absent or unparseable
-		// (an old engine, a malformed row): a restarted clock is wrong, but a
-		// NaN one renders nothing at all.
-		const createdAt = promptCreatedAtMs(data['createdAt'], Date.now());
 		if (promptType === 'ask_user' && kind === 'tabs' && Array.isArray(data['questions'])) {
 			pendingTabsPrompt = {
 				promptId: String(data['promptId'] ?? ''),
 				questions: data['questions'] as TabsPromptQuestion[],
 				partialAnswers: Array.isArray(data['partialAnswers']) ? (data['partialAnswers'] as (string | null)[]) : undefined,
-				timeoutMs: data['timeoutMs'] as number | undefined,
-				receivedAt: createdAt,
+				...promptClock(data),
 				origin,
 			};
 			card = 'other';
@@ -3145,8 +3130,7 @@ export async function checkPendingPrompt(): Promise<PendingCard> {
 				question: String(data['question'] ?? ''),
 				segments: parsePromptSegments(data['segments']),
 				options: data['options'] as string[] | undefined,
-				timeoutMs: data['timeoutMs'] as number | undefined,
-				receivedAt: createdAt,
+				...promptClock(data),
 				promptId: data['promptId'] as string | undefined,
 				// Restore multi-select pills on reconnect (v33) — without this the
 				// prompt degraded to single-select after a reload mid-prompt.
@@ -3422,6 +3406,17 @@ export async function reviewKnowledge(
 export function getMessages() {
 	return messages;
 }
+/**
+ * A question's countdown, from the time the server says it has left (`expiresInMs`, read from
+ * the stored question's own end), counted from now. A reload asks the server again, so it does not
+ * restart a full day. Without it (an older engine) the card shows no countdown rather than a
+ * guessed one.
+ */
+function promptClock(data: Record<string, unknown>): { timeoutMs: number | undefined; receivedAt: number } {
+	const left = data['expiresInMs'];
+	return { timeoutMs: typeof left === 'number' && Number.isFinite(left) && left >= 0 ? left : undefined, receivedAt: Date.now() };
+}
+
 /** The codes `done.notice` may carry: a run the engine ended with a sentence of its own. */
 const ENGINE_NOTICES = ['content_refused', 'run_blocked'] as const;
 /** How the engine opens a hook's block; the note's title says it, so the line keeps the reason. */

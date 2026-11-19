@@ -1,37 +1,26 @@
-import { describe, expect, it } from 'vitest';
-import { formatCountdown } from './time.js';
+import { describe, it, expect } from 'vitest';
+import { promptExpiry } from './time.js';
 
-describe('formatCountdown', () => {
-	it('formats sub-minute as M:SS (M is 0)', () => {
-		expect(formatCountdown(0)).toBe('0:00');
-		expect(formatCountdown(7)).toBe('0:07');
-		expect(formatCountdown(59)).toBe('0:59');
+// A question's card names the time it has left only when it matters: nothing with an hour or more,
+// whole minutes under an hour (rounded down: never more time than there is), seconds under a minute.
+describe('promptExpiry', () => {
+	it('an hour or more left: no number', () => {
+		expect(promptExpiry(86_400)).toBeNull();
+		expect(promptExpiry(86_399)).toBeNull();
+		expect(promptExpiry(3600)).toBeNull();
 	});
 
-	it('formats minutes:seconds when under one hour', () => {
-		expect(formatCountdown(60)).toBe('1:00');
-		expect(formatCountdown(125)).toBe('2:05');
-		expect(formatCountdown(3599)).toBe('59:59');
+	it('under an hour: whole minutes, rounded down', () => {
+		expect(promptExpiry(3599)).toEqual({ key: 'chat.prompt_expires_min', n: 59 });
+		expect(promptExpiry(125)).toEqual({ key: 'chat.prompt_expires_min', n: 2 });
+		expect(promptExpiry(119.9)).toEqual({ key: 'chat.prompt_expires_min', n: 1 });
+		expect(promptExpiry(60)).toEqual({ key: 'chat.prompt_expires_min', n: 1 });
 	});
 
-	it('formats hours:minutes:seconds at and above one hour', () => {
-		expect(formatCountdown(3600)).toBe('1:00:00');
-		expect(formatCountdown(3661)).toBe('1:01:01');
-		expect(formatCountdown(7325)).toBe('2:02:05');
-	});
-
-	it('handles the 24h resumable-prompt default without overflow', () => {
-		// Regression for v1.3.5: showed `1439:40` instead of `23:59:40`.
-		expect(formatCountdown(86340)).toBe('23:59:00');
-		expect(formatCountdown(86380)).toBe('23:59:40');
-		expect(formatCountdown(86400)).toBe('24:00:00');
-	});
-
-	it('clamps negative input to 0:00', () => {
-		expect(formatCountdown(-5)).toBe('0:00');
-	});
-
-	it('floors non-integer seconds', () => {
-		expect(formatCountdown(7.9)).toBe('0:07');
+	it('under a minute: seconds', () => {
+		expect(promptExpiry(59)).toEqual({ key: 'chat.prompt_expires_s', n: 59 });
+		expect(promptExpiry(7.9)).toEqual({ key: 'chat.prompt_expires_s', n: 7 });
+		expect(promptExpiry(0)).toEqual({ key: 'chat.prompt_expires_s', n: 0 });
+		expect(promptExpiry(-5)).toEqual({ key: 'chat.prompt_expires_s', n: 0 });
 	});
 });
