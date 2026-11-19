@@ -7,6 +7,7 @@ import {
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
 	bulkSentenceParts, bulkSecretInContextKey, bulkFieldShapeText,
+	bulkKeyParts, BULK_KEY_PARTS_MAX,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -1743,5 +1744,23 @@ describe('bulkFieldShapeText with a negative zero or a negative bound', () => {
 	it('reads a negative value too small to show as 0, and keeps the sign of a negative bound', () => {
 		expect(bulkFieldShapeText({ type: 'number', minimum: -1e-30, maximum: 1 }, words, 'de-CH')).toBe('bulk.shape.number_range:0|1');
 		expect(bulkFieldShapeText({ type: 'number', minimum: -5, maximum: -0.5 }, words, 'en-GB')).toBe('bulk.shape.number_range:-5|-0.5');
+	});
+});
+
+describe('bulkKeyParts', () => {
+	it('cuts a key after each hyphen, dot and underscore and keeps its text', () => {
+		const key = 'a-b.c_d';
+		expect(bulkKeyParts(key)).toEqual(['a-', 'b.', 'c_', 'd']);
+		expect(bulkKeyParts(key).join('')).toBe(key);
+	});
+
+	// A key from the source can be a megabyte of separators: one part each would put a node per
+	// character on the page.
+	it('leaves a key longer than the limit whole, and cuts one at the limit', () => {
+		const at = '-'.repeat(BULK_KEY_PARTS_MAX);
+		expect(bulkKeyParts(at)).toHaveLength(BULK_KEY_PARTS_MAX);
+		const over = '-'.repeat(1_048_576);
+		expect(bulkKeyParts(over)).toEqual([over]);
+		expect(bulkKeyParts(`${at}-`)).toEqual([`${at}-`]);
 	});
 });

@@ -512,8 +512,13 @@ export function bulkMergeAnswer(
  *  (see `visible-text.ts`, which the approval queue shares). */
 export const bulkVisibleText: (text: string) => string = visibleText;
 
-/** A target key cut after each hyphen, dot and underscore, where it may break (U-341). */
+/** Above this length a key is not cut: a part per separator would cost a node each, without bound. */
+export const BULK_KEY_PARTS_MAX = 256;
+
+/** A target key cut after each hyphen, dot and underscore, where it may break (U-341). A key longer
+ *  than {@link BULK_KEY_PARTS_MAX} stays whole and wraps where it would leave its box. */
 export function bulkKeyParts(key: string): string[] {
+	if (key.length > BULK_KEY_PARTS_MAX) return [key];
 	return key.split(/(?<=[-._])/);
 }
 
