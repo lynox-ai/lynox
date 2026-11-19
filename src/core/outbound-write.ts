@@ -1031,9 +1031,10 @@ function jsonCandidates(read: string): string[] {
     nextAmp[i] = read[i] === '&' ? i : nextAmp[i + 1]!;
     nextBreak[i] = read[i] === '\n' ? i : nextBreak[i + 1]!;
   }
-  // `named`: the text since the last `=`, `&` or line break is a name (no space, nothing JSON
-  // starts with), so a `=` after it ends a form's name, also one inside a decoded value (`p=b=…`).
-  // Text with many `=` that are no form (`x = {`) starts no piece at each of them.
+  // `named`: the text since the last `=`, `&` or line break is a name (no space, and not starting
+  // the way JSON text starts; `meta[value]` is one), so a `=` after it ends a form's name, also one
+  // inside a decoded value (`p=b=…`). Text with many `=` that are no form (`x = {`, `={={`) starts
+  // no piece at each of them: the text between two such `=` starts with the piece before.
   let named = false;
   let since = 0;
   for (let i = 0; i < read.length; i++) {
@@ -1044,7 +1045,7 @@ function jsonCandidates(read: string): string[] {
       if ((i === 0 || before === '&' || (before === '=' && named)) && (i > 0 || nextAmp[i]! < read.length)) out.push(read.slice(i, nextAmp[i]));
       if ((i === 0 || before === '\n') && (i > 0 || nextBreak[i]! < read.length)) out.push(read.slice(i, nextBreak[i]));
     }
-    if (c === '=') named = /^[^\s{["]+$/.test(read.slice(since, i));
+    if (c === '=') named = /^[^\s{["]\S*$/.test(read.slice(since, i));
     else if (c === '&' || c === '\n') named = false;
     if (c === '=' || c === '&' || c === '\n') since = i + 1;
   }

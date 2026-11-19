@@ -1054,6 +1054,8 @@ describe('a secret inside JSON text inside a value', () => {
     expect(bodyForQuestion(`p=${encodeURIComponent(`b=${escaped}`)}`, mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
     expect(bodyForQuestion(`p=b%3D${encodeURIComponent(encodeURIComponent(escaped))}`, mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
     expect(bodyForQuestion(`p=${encodeURIComponent(`b=${plainInner}`)}`, mask, FORM)).toEqual({ text: 'p = b={"token":"***cret"}', escapedSecret: false });
+    // A name with brackets, as many frameworks write a nested field.
+    expect(bodyForQuestion(`p=${encodeURIComponent(`meta[value]=${escaped}`)}`, mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
   });
 
   it('one JSON document per line, and a multipart part, are read line by line', () => {
