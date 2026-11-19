@@ -8,13 +8,6 @@ import { headerListForNote } from '../core/write-notes.js';
 import { shownParamName } from './workflow-params.js';
 import { isStepIdShape, shownStepId } from './step-id.js';
 
-/**
- * A contract's host or path as a refusal may quote it. Both are stored text and the refusal reaches
- * the model, so only one of a plain shape is quoted, else it is described.
- */
-const PLAIN_HOST_SHAPE = /^[A-Za-z0-9*.-]{1,253}$/;
-const PLAIN_PATH_SHAPE = /^[A-Za-z0-9/_.~%*-]{1,200}$/;
-const shownStored = (text: string, shape: RegExp, described: string): string => (shape.test(text) ? `"${text}"` : described);
 
 /**
  * Base `params.<name>` reference. Captures the base name up to the next path
@@ -117,7 +110,7 @@ export function validateContractAgainstSteps(planned: {
   const unconstrained = [...referenced].filter(p => !constrained.has(p));
   if (unconstrained.length > 0) {
     return (
-      `Capability-contract is invalid: parameter(s) ${unconstrained.map((p) => shownParamName(p)).join(', ')} flow into a ` +
+      `Capability-contract is invalid: parameter(s) ${[...new Set(unconstrained.map((p) => shownParamName(p)))].join(', ')} flow into a ` +
       `tool call but declare no constraint (enum/regex/min-max). A contract-governed workflow ` +
       `must constrain every re-targetable parameter so a run cannot redirect an outbound call.`
     );
@@ -369,18 +362,21 @@ export function reviewedContractShapeError(contract: CapabilityContract, steps: 
   }
   if (contract.hostPatterns.length !== 1) return 'a reviewed grant names exactly one host.';
   const host = contract.hostPatterns[0]!;
-  if (normaliseReviewedHost(host) !== host) return `host ${shownStored(host, PLAIN_HOST_SHAPE, '(outside the plain form)')} is not a literal lowercase host name.`;
+  if (normaliseReviewedHost(host) !== host) return 'the host is not a literal lowercase host name.';
   const paths = contract.pathPatterns;
   if (paths.length === 0 || paths.length > MAX_REVIEWED_PATHS) {
     return `a reviewed grant names between 1 and ${MAX_REVIEWED_PATHS} paths.`;
   }
-  for (const path of paths) {
-    if (!isLiteralReviewedPath(path)) return `path ${shownStored(path, PLAIN_PATH_SHAPE, '(outside the plain form)')} is not a literal absolute path.`;
+  // Host and paths are stored text, and this refusal reaches the model: a path is named by its
+  // place, and neither is quoted.
+  for (const [at, path] of paths.entries()) {
+    const place = paths.length === 1 ? 'the path' : `path #${String(at + 1)}`;
+    if (!isLiteralReviewedPath(path)) return `${place} is not a literal absolute path.`;
     if (isMailProviderTarget(`https://${host}${path}`)) {
-      return `https://${host}${path} is a mail provider's API, and a grant does not cover it. To send from this mailbox, send from the chat, where lynox asks before each email.`;
+      return `the address of ${place} is a mail provider's API, and a grant does not cover it. To send from this mailbox, send from the chat, where lynox asks before each email.`;
     }
     if (isGraphqlEndpoint(`https://${host}${path}`)) {
-      return `https://${host}${path} is a GraphQL endpoint, where a read and every mutation are the same ${writes[0]!}, and a grant does not cover it. Run it from the chat, where lynox asks before each mutation.`;
+      return `the address of ${place} is a GraphQL endpoint, where a read and every mutation are the same ${writes[0]!}, and a grant does not cover it. Run it from the chat, where lynox asks before each mutation.`;
     }
   }
   const referenced = new Set<string>();

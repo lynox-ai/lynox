@@ -22,17 +22,12 @@ export function shownParamName(name: string, index?: number): string {
 }
 
 /**
- * A contract's allowed values as a refusal may list them: each one plain (ASCII letters, digits and
- * `_ . : @ + -`, at most 64) and at most ten of them, else only how many there are. The values are
- * stored text, and the refusal reaches the model.
+ * A contract's allowed values as a refusal says them: by how many there are, never by their text.
+ * The values are stored text and the refusal reaches the model; a list of plain words still reads
+ * as a sentence, so no shape makes them safe to list.
  */
-const PLAIN_VALUE_SHAPE = /^[A-Za-z0-9_.:@+-]{1,64}$/;
-const MAX_LISTED_VALUES = 10;
-
 export function shownAllowedValues(values: readonly unknown[]): string {
-  if (values.length === 0) return 'one of: (none)';
-  const plain = values.length <= MAX_LISTED_VALUES && values.every((v) => (typeof v === 'string' || (typeof v === 'number' && Number.isFinite(v))) && PLAIN_VALUE_SHAPE.test(String(v)));
-  if (plain) return `one of: ${values.map(String).join(', ')}`;
+  if (values.length === 0) return "one of the values the workflow's contract allows, and it allows none";
   return values.length === 1 ? "the one value the workflow's contract allows" : `one of the ${String(values.length)} values the workflow's contract allows`;
 }
 
