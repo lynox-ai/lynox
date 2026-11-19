@@ -124,7 +124,9 @@ export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSear
     // Once foreign content is in the conversation, a read URL with a query can carry data out:
     // a page that was read can ask for `https://host/?q=<what the chat holds>`. Such a read goes
     // through the same origin check as a send. A URL without a query stays a plain read.
-    // Not covered: data in the path or in the host name.
+    // Not covered: data in the path, in the host name or in userinfo; a redirect hop (only the URL
+    // the model wrote is checked, so an open redirect on an owner-named host passes); and the same
+    // read through `http_request` GET.
     sendTargetsWhenLatched: (input) => (input.action === 'read' && typeof input.url === 'string' && readUrlHasQuery(input.url) ? hostTargets(input.url) : null),
     definition: {
       name: 'web_research',

