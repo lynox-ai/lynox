@@ -683,7 +683,7 @@ export function blankRunHistoryContent(historyDb: Database.Database, scope: Fall
  * images can stay in the WAL until a later checkpoint. Returns the number of rows changed and the
  * workflows reached, whose questions a caller may have to close.
  */
-export function blankRunHistoryRows(historyDb: Database.Database, scope: FallbackScope): { readonly rows: number; readonly pipelineIds: readonly string[] } {
+export function blankRunHistoryRows(historyDb: Database.Database, scope: FallbackScope): { readonly rows: number; readonly pipelineIds: readonly string[]; readonly workflowIds: readonly string[] } {
   const byThread = 'threadIds' in scope;
   // A bound that does not read as a time would compare as text and reach nothing, which would
   // then be reported as a clean run.
@@ -735,11 +735,13 @@ export function blankRunHistoryRows(historyDb: Database.Database, scope: Fallbac
       changed += historyDb.prepare(`UPDATE "${table}" SET ${set} WHERE ${where}`).run({ marker: FALLBACK_MARKER, ...params }).changes;
     }
     const pipelineIds = (historyDb.prepare('SELECT id FROM erase_pipelines').all() as Array<{ id: string }>).map((r) => r.id);
+    // The workflows those runs executed: a run's id is its own, the workflow's is `workflow_id`.
+    const workflowIds = (historyDb.prepare('SELECT DISTINCT workflow_id AS id FROM pipeline_runs WHERE workflow_id IS NOT NULL AND id IN (SELECT id FROM erase_pipelines)').all() as Array<{ id: string }>).map((r) => r.id);
     // A chat delete keeps what it reached blank: a run or workflow still going writes into these
     // ids afterwards, and the guard's triggers blank it there (`deleted-chat-guard.ts`).
     if (byThread && scope.deletedChat === true) historyDb.exec(`INSERT OR IGNORE INTO ${DELETED_CHAT_RUNS} (id) SELECT id FROM erase_runs UNION SELECT id FROM erase_pipelines;`);
     historyDb.exec('DELETE FROM erase_runs; DELETE FROM erase_pipelines;');
-    return { rows: changed, pipelineIds };
+    return { rows: changed, pipelineIds, workflowIds };
   })();
 }
 

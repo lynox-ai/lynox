@@ -29,7 +29,7 @@ vi.mock('../../orchestrator/validate.js', async (importOriginal) => {
   return { ...actual, validateManifest: (m: unknown) => m };
 });
 
-import { runWorkflowTool, storePipeline, _resetPipelineStore } from './pipeline.js';
+import { runWorkflowTool, storePipeline, _resetPipelineStore, forgetExecutedStatesOfChat } from './pipeline.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { RunHistory } from '../../core/run-history.js';
 import { Containment, CONTAINED_READ_REFUSAL } from '../../core/containment.js';
@@ -101,7 +101,7 @@ beforeEach(() => {
   engineDb = new EngineDb(join(dir, 'engine.db'), '');
   containment = new Containment(engineDb.getDb(), null);
   history = new RunHistory(join(dir, 'history.db'));
-  threads = fakeThreads(['chat-shop', 'chat-other', 'chat-third']);
+  threads = fakeThreads(['chat-shop', 'chat-other', 'chat-third', 'chat-gone-1', 'chat-gone-2']);
 });
 afterEach(() => {
   history.close();
@@ -163,6 +163,32 @@ describe('a retry of a run a contained chat started', () => {
     containment.contain({ kind: 'thread', id: 'chat-shop' }, { kind: 'api', connectionId: 'shop-a' });
     expect(await retry(chat('chat-shop'))).toContain('store order 1001');
     expect(mockRetryManifest).toHaveBeenCalledTimes(2);
+  });
+});
+
+// A chat delete forgets the outputs of the workflows its runs executed (`forgetExecutedStatesOfChat`).
+// Each test deletes a chat of its own: the forgotten chats stay forgotten for the module.
+describe('a retry after the chat that ran the workflow was deleted', () => {
+  const NO_PREVIOUS = /No previous execution found/;
+  // A refused retry leaves its queued answer unused, and clearing the mocks keeps it queued.
+  beforeEach(() => { mockRetryManifest.mockReset(); });
+
+  it('finds nothing to retry once a retry from another chat made that chat the origin', async () => {
+    await firstRun('chat-gone-1');
+    expect(await retry(chat('chat-other'))).toContain('store order 1001');
+    forgetExecutedStatesOfChat('chat-gone-1', [ID]);
+    expect(await retry(chat('chat-third'))).toMatch(NO_PREVIOUS);
+    expect(mockRetryManifest).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not keep what a retry running across the delete ends with', async () => {
+    await firstRun('chat-gone-2');
+    mockRetryManifest.mockImplementationOnce(async () => {
+      forgetExecutedStatesOfChat('chat-gone-2', [ID]);
+      return runState('completed');
+    });
+    expect(await runWorkflowTool.handler({ workflow_id: ID, retry: true }, chat('chat-other'))).toContain('store order 1001');
+    expect(await retry(chat('chat-third'))).toMatch(NO_PREVIOUS);
   });
 });
 

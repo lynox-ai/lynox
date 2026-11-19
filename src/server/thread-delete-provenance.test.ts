@@ -547,8 +547,9 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
     const workflow = `wf-retried-${id}`;
     const quiet = `wf-quiet-${id}`;
     const db = runHistory().getDb();
+    // A run has its own id; the workflow it executed is `workflow_id`, which the retry cache is keyed by.
     for (const wf of [workflow, quiet]) {
-      db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, origin_thread_id) VALUES (?, 'wf', 'completed', '{}', ?)`).run(wf, id);
+      db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, origin_thread_id, workflow_id) VALUES (?, 'wf', 'completed', '{}', ?, ?)`).run(`run-of-${wf}`, id, wf);
     }
     const state = { manifest: { name: 'wf', steps: [] }, state: { outputs: new Map() }, ranAs: 'owner' } as unknown as Parameters<typeof recordExecutedState>[1];
     // The retry records the state again with the retrying chat as its origin; the outputs are this chat's.

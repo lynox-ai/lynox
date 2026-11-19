@@ -6566,13 +6566,14 @@ export class LynoxHTTPApi {
       // leaves the chat and its runs as they were, and deleting again does all of it.
       const runHistory = engine.getRunHistory();
       let workflows: readonly string[] = [];
+      let workflowIds: readonly string[] = [];
       // Loaded before the delete, so nothing after its commit awaits (see below).
       const { forgetExecutedStatesOfChat } = await import('../tools/builtin/pipeline.js');
       try {
         if (runHistory) {
           const { blankRunHistoryRows } = await import('../core/connection-erasure.js');
           runHistory.getDb().transaction(() => {
-            workflows = blankRunHistoryRows(runHistory.getDb(), { threadIds: [id], deletedChat: true }).pipelineIds;
+            ({ pipelineIds: workflows, workflowIds } = blankRunHistoryRows(runHistory.getDb(), { threadIds: [id], deletedChat: true }));
             threadStore.deleteThread(id);
             runHistory.deleteWireSnapshotsForThread(id);
           })();
@@ -6596,7 +6597,7 @@ export class LynoxHTTPApi {
         }
       }
       // A retry reads a workflow's step outputs from memory, not from the file: those go as well.
-      forgetExecutedStatesOfChat(id, workflows);
+      forgetExecutedStatesOfChat(id, workflowIds);
       jsonResponse(res, 200, { ok: true });
     }, OWN));
 

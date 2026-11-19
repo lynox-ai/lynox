@@ -172,7 +172,7 @@ export function recordExecutedState(id: string, value: ExecutedState): void {
 
 /** Chats deleted in this process, whose workflow outputs are no longer kept for a retry. Ids only. */
 const deletedChats = new Set<string>();
-/** Workflows those chats reached in history.db, by id: what the origin above does not name. */
+/** The workflows those chats' runs executed (`pipeline_runs.workflow_id`): what the origin above does not name. */
 const deletedWorkflows = new Set<string>();
 const MAX_DELETED_CHATS = 10_000;
 
@@ -190,12 +190,13 @@ function remember(set: Set<string>, value: string): void {
  * so without this a retry from another chat would write the deleted chat's outputs into a new run.
  * Returns how many were forgotten now.
  */
-export function forgetExecutedStatesOfChat(threadId: string, pipelineIds: readonly string[]): number {
+export function forgetExecutedStatesOfChat(threadId: string, workflowIds: readonly string[]): number {
   remember(deletedChats, threadId);
-  for (const id of pipelineIds) remember(deletedWorkflows, id);
-  // By id as well as by origin: a retry from another chat makes that chat the origin of the state
-  // (see the retry's record), while the outputs it holds are still the ones this chat's run made.
-  const ids = new Set(pipelineIds);
+  for (const id of workflowIds) remember(deletedWorkflows, id);
+  // By workflow as well as by origin: a retry from another chat makes that chat the origin of the
+  // state (see the retry's record), while the outputs it holds are still the ones this chat's run
+  // made. That forgets another chat's state of the same workflow too: its retry then asks for a run.
+  const ids = new Set(workflowIds);
   let forgotten = 0;
   for (const [id, entry] of executedStates) {
     if (ids.has(id) || entry.originThreadId === threadId) { executedStates.delete(id); forgotten += 1; }
@@ -1405,7 +1406,10 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       // this chat is its origin from here on: it carries the first origin's rows if that one was
       // contained, and its own if a re-run step contained it. Keeping the first origin would let
       // the next retry from a third chat skip the check while this chat is contained.
-      recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint, originThreadId: reader ?? origin, ranAs: principalKey(runAs), ranDigest: prev.ranDigest });
+      // Forgotten while this retry ran (a chat whose outputs it carries was deleted): not kept again.
+      if (executedStates.get(planned.id) === prev) {
+        recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint, originThreadId: reader ?? origin, ranAs: principalKey(runAs), ranDigest: prev.ranDigest });
+      }
       debitInSessionWorkflowCost(deps, state, prev.manifest.agents, prev.state.outputs);
       const text = formatResult(state, planned.name, resultLimit, prev.manifest.agents.map(a => a.id));
       // Set last: a throw above returns an error, and the end row must not say success then.
