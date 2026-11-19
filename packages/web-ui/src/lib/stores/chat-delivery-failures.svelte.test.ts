@@ -511,7 +511,7 @@ describe('why a question was closed, and the lost answer as a draft (UX-064, UX-
 });
 
 describe('an answer that names no question', () => {
-	type Setup = { prompt: Record<string, unknown>; answer?: string; open?: boolean; onPending?: () => void };
+	type Setup = { prompt: Record<string, unknown>; answer?: string; open?: boolean | 'secret' | 'down'; onPending?: () => void };
 	async function answerWith({ prompt, answer = 'Yes', open = true, onPending }: Setup): Promise<{ replies: number; pendingAsked: number; drafted: string[] }> {
 		const drafted: string[] = [];
 		store.registerComposerDraft((text) => { drafted.push(text); return true; });
@@ -521,6 +521,8 @@ describe('an answer that names no question', () => {
 			if (url.endsWith('/pending-prompt')) {
 				pendingAsked++;
 				onPending?.();
+				if (open === 'down') return json({ error: 'unavailable' }, 503);
+				if (open === 'secret') return json({ pending: true, promptType: 'ask_secret', promptId: 'p-secret', secretName: 'SHOP_TOKEN', question: 'Your shop token?' });
 				return open
 					? json({ pending: true, promptType: 'ask_user', promptId: 'p-open', question: 'Send this mail?', options: ['Yes', 'No'] })
 					: json({ pending: false });
@@ -554,6 +556,19 @@ describe('an answer that names no question', () => {
 		expect(store.getPendingPermission()).toBeNull();
 		expect(drafted).toEqual([]);
 		expect(store.getChatError()).toBe(await say('chat.reply_needs_question_none'));
+	});
+
+	it('does not say no question is open when the open question could not be fetched', async () => {
+		const { pendingAsked } = await answerWith({ prompt: {}, open: 'down' });
+		expect(pendingAsked, 'the open question was not asked for, so this proves nothing').toBeGreaterThan(0);
+		expect(store.getChatError()).toBe(await say('chat.reply_needs_question'));
+	});
+
+	it('does not say no question is open when the open question is of another kind', async () => {
+		const { pendingAsked } = await answerWith({ prompt: {}, open: 'secret' });
+		expect(pendingAsked).toBeGreaterThan(0);
+		expect(store.getPendingSecretPrompt(), 'the secret question did not come back, so this proves nothing').not.toBeNull();
+		expect(store.getChatError()).toBe(await say('chat.reply_needs_question'));
 	});
 
 	// The server gives this code only to an answer without an id; a client that sent one anyway

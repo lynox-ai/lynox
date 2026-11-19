@@ -2767,8 +2767,9 @@ async function reportReply(sid: string, outcome: ReplyOutcome, answer: string | 
 		if (sessionId !== sid) return;
 		// The answer does not go back into the message field: which question is open now is not
 		// known to match the one answered (a mail to send, say), and one keystroke would answer it.
-		const open = pendingPermission !== null || pendingTabsPrompt !== null || pendingSecretPrompt !== null || pendingMailConnect !== null;
-		chatError = t(open ? 'chat.reply_needs_question' : 'chat.reply_needs_question_none');
+		// "Nothing is open" only when the server said so; a failed check says nothing either way.
+		const none = pendingCheckAnswered && pendingPermission === null && pendingTabsPrompt === null && pendingSecretPrompt === null && pendingMailConnect === null;
+		chatError = t(none ? 'chat.reply_needs_question_none' : 'chat.reply_needs_question');
 		chatErrorDetail = null;
 		return;
 	}
@@ -3074,8 +3075,13 @@ export type PendingCard = 'question' | 'decision' | 'other' | null;
  * Check the server for a pending prompt that survived a disconnect/refresh.
  * Restores pendingPermission or pendingSecretPrompt so the UI re-shows it, and says which card.
  */
+/** Whether the last `checkPendingPrompt` got the server's answer: a failed check knows nothing
+ *  about what is open, so it must not be read as "nothing is open". */
+let pendingCheckAnswered = false;
+
 export async function checkPendingPrompt(): Promise<PendingCard> {
 	const sid = sessionId;
+	pendingCheckAnswered = false;
 	if (!sid) return null;
 	let card: PendingCard = null;
 	try {
@@ -3086,6 +3092,7 @@ export async function checkPendingPrompt(): Promise<PendingCard> {
 		// The chat may have changed while the request ran: the card belongs to the chat it was
 		// asked for, and set now it would show in another one.
 		if (sessionId !== sid) return null;
+		pendingCheckAnswered = true;
 		if (!data['pending']) return null;
 
 		const promptType = data['promptType'] as string;
