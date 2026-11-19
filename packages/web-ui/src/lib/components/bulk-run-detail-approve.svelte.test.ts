@@ -1830,6 +1830,8 @@ describe('the start of a judged run, in words', () => {
 		await render();
 		const restartHint = (): HTMLElement | null => target.querySelector('[data-testid="bulk-restart-hint"]');
 		expect(restartHint()?.textContent).toBe(t('bulk.restart.hint_cap'));
+		// The restart's own words: a new limit, and the step goes on rather than starts.
+		expect(t('bulk.restart.hint_cap')).toBe('Trag zuerst ein neues Kostenlimit ein, dann lässt sich die Beurteilung fortsetzen.');
 		const button = buttonByText(t('bulk.restart.judge'))!;
 		expect(button.disabled).toBe(true);
 		expect(button.getAttribute('aria-describedby')).toBe('bulk-restart-hint');
