@@ -19,7 +19,7 @@ import { hostTargets } from '../../core/send-target.js';
  */
 export function readUrlHasQuery(url: string): boolean {
   try {
-    return new URL(url.trim()).search.length > 1;
+    return new URL(url.trim()).search !== '';
   } catch {
     return true;
   }

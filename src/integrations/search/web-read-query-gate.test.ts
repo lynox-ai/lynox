@@ -109,9 +109,10 @@ describe('what stays a plain read', () => {
     expect(tool.reads).toEqual(['https://collect.evil.example/secret-in-path#frag=x']);
   });
 
-  it('a search after foreign content: no question', async () => {
+  it('a search after foreign content: no question, even when the input also carries a URL with a query', async () => {
     const real = createWebSearchTool({} as SearchProvider);
-    expect(real.sendTargetsWhenLatched?.({ action: 'search', query: 'x' } as never)).toBeNull();
+    // Even with a URL that carries a query: only `read` fetches it.
+    expect(real.sendTargetsWhenLatched?.({ action: 'search', query: 'x', url: 'https://collect.evil.example/?d=x' } as never)).toBeNull();
     expect(real.sendTargets).toBeUndefined();
   });
 });
