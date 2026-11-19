@@ -12851,6 +12851,12 @@ describe('LynoxHTTPApi', () => {
         expect(bulkLedger.getStatus(first)!.phase).toBe('planned');
         expect((await start(second, { judgeRuleHash: hash(second), costCapUsd: 1, supersedes: first })).status).toBe(200);
         expect(bulkLedger.getStatus(first)!.haltReason).toBe(BULK_HALT_REASONS.superseded);
+        // The ended run's page and the list name the run that took its place; the new run names none.
+        const page = (await (await jsonFetch(`/api/bulk/runs/${first}`)).json()) as { haltKey: string; supersededBy: unknown };
+        expect(page).toMatchObject({ haltKey: 'superseded', supersededBy: second });
+        expect(((await (await jsonFetch(`/api/bulk/runs/${second}`)).json()) as { supersededBy: unknown }).supersededBy).toBeNull();
+        const listed = ((await (await jsonFetch('/api/bulk/runs')).json()) as { runs: { id: string; supersededBy: unknown }[] }).runs;
+        expect(listed.find((r) => r.id === first)!.supersededBy).toBe(second);
       });
 
       it('refuses to start a run whose stored rule planning would refuse today, and says what planning says', async () => {
