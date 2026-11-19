@@ -96,8 +96,10 @@ else
   echo "✓ Watch task fetch blocks redirects"
 fi
 
-# Check pipeline template resolution is single-pass (no recursive re-interpretation)
-if grep -q 'resolveTaskTemplate' src/orchestrator/context.ts && grep -q '\.replace(' src/orchestrator/context.ts; then
+# Check pipeline template resolution is single-pass (no recursive re-interpretation): the task is
+# resolved through the shared scanner, which builds its output from the original text and never
+# reads a replacement again. The behaviour itself is tested in tests/security/agent-security.test.ts.
+if grep -qF 'return replacePlaceholders(task,' src/orchestrator/context.ts && grep -qF 'export function replacePlaceholders(' src/orchestrator/placeholders.ts; then
   echo "✓ Pipeline template resolution uses single-pass replace"
 else
   echo "❌ orchestrator/context.ts may use unsafe recursive template resolution"
