@@ -9134,6 +9134,28 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(escaped.prompt).not.toHaveBeenCalled();
     });
 
+    it('a secret written escaped inside JSON text inside a value is refused for a mandate and never shown to the owner', async () => {
+      const stored = 'hunter2secret';
+      const mask = (t: string) => t.replaceAll(stored, '[stored]');
+      const body = JSON.stringify({ value: `{"token":"\\u0068${stored.slice(1)}"}` });
+
+      const mandate = agent270({ principal: MANDATE, mask });
+      const out = await visible({ url: 'https://h.example/a', method: 'POST', body }, mandate.agent);
+      expect(out).toContain('Blocked: the body of this POST to h.example sends a stored secret. Nothing was sent.');
+      expect(mandate.prompt).not.toHaveBeenCalled();
+
+      const owner = agent270({ mask });
+      await visible({ url: 'https://h.example/a', method: 'POST', body }, owner.agent);
+      const q = question(owner.prompt, 0);
+      expect(q).not.toContain('unter2secret');
+      expect(q).toContain('"value"');
+
+      // Control: the same JSON text holding a value that is no secret is asked in a mandate's session.
+      const control = agent270({ principal: MANDATE, mask });
+      await visible({ url: 'https://h.example/a', method: 'POST', body: JSON.stringify({ value: '{"token":"\\u0068unter2other"}' }) }, control.agent);
+      expect(control.prompt).toHaveBeenCalledTimes(1);
+    });
+
     // The query by the body's rule: shown whole up to the same limit on the bytes sent; over it a
     // mandate is refused and the owner asked with the keys.
     const queryOfBytes = (bytes: number): string => `x=${'a'.repeat(bytes - 2)}`;

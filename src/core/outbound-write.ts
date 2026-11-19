@@ -936,10 +936,90 @@ function serverReadings(text: string): Set<string> {
 /** Whether a server reading of `text` holds a secret `mask` knows. Asked of text the mask
  *  already ran over: a secret left after a reading was written in a form the mask did not see. */
 function hidesEncodedSecret(text: string, mask: (text: string) => string): boolean {
-  for (const read of serverReadings(text)) {
+  const readings = serverReadings(text);
+  for (const read of readings) {
     if (mask(read) !== read) return true;
   }
-  return false;
+  return jsonTextHides(text, readings, mask);
+}
+
+/**
+ * How many times JSON text inside a value is read: a value that is JSON text, a string in it
+ * that is JSON text again, and one more. A server that parses such a value reads its strings
+ * unescaped, so a secret written there with an escape (`s…`) is one the mask did not see.
+ * JSON text deeper than this counts as holding a secret (it is not read, so it is not shown),
+ * and so does JSON text whose strings, read, add up to more than {@link JSON_TEXT_BUDGET_CHARS}.
+ */
+const JSON_TEXT_DEPTH = 3;
+/** The most characters the server readings of the strings of JSON text inside one value may add
+ *  up to, each reading counted with 64 characters on top: every one is masked once more. */
+const JSON_TEXT_BUDGET_CHARS = 600_000;
+
+/**
+ * Whether JSON text in a server reading of `text`, or of one side of a `name=value` pair in it
+ * (a form body, a query), holds a secret `mask` knows in one of its strings (keys and values),
+ * as that string or in a server reading of it, and so on down to {@link JSON_TEXT_DEPTH}.
+ * `readings` are those of `text`, taken once by the caller.
+ */
+function jsonTextHides(text: string, readings: Iterable<string>, mask: (text: string) => string): boolean {
+  const seen = new Set<string>();
+  let left = JSON_TEXT_BUDGET_CHARS;
+  const hides = (t: string, ofT: Iterable<string>, depth: number): boolean => {
+    for (const reads of [ofT, ...formSides(t).map(serverReadings)]) {
+      for (const read of reads) {
+        for (const s of jsonStrings(read)) {
+          if (seen.has(s)) continue;
+          seen.add(s);
+          if (depth >= JSON_TEXT_DEPTH) return true;
+          const ofS = serverReadings(s);
+          for (const r of ofS) {
+            left -= r.length + 64;
+            if (left < 0) return true;
+            if (mask(r) !== r) return true;
+          }
+          if (hides(s, ofS, depth + 1)) return true;
+        }
+      }
+    }
+    return false;
+  };
+  return hides(text, readings, 0);
+}
+
+/** Both sides of every `name=value` pair of `text` read as a form, the way a server splits it
+ *  before it decodes; only a side that may read as JSON text (it starts with `{`, `[` or `"`, or
+ *  with an escape that may turn into one). None when `text` has no `&` or `=`. */
+function formSides(text: string): string[] {
+  if (!/[&=]/.test(text)) return [];
+  return text.split('&')
+    .flatMap((pair) => {
+      const at = pair.indexOf('=');
+      return at < 0 ? [pair] : [pair.slice(0, at), pair.slice(at + 1)];
+    })
+    .filter((side) => /^[\s+]*[{["%]/.test(side));
+}
+
+/** Every string (key and value) of `text` parsed as JSON, at any depth of its structure; none
+ *  when it does not parse, or is not an object, an array or a string. */
+function jsonStrings(text: string): string[] {
+  if (!/^\s*[{["]/.test(text)) return [];
+  let parsed: unknown;
+  try { parsed = JSON.parse(text); } catch { return []; }
+  const out: string[] = [];
+  // Walked without recursion: the structure may be nested deeper than the call stack.
+  const stack: unknown[] = [parsed];
+  while (stack.length > 0) {
+    const v = stack.pop();
+    if (typeof v === 'string') out.push(v);
+    else if (Array.isArray(v)) stack.push(...v);
+    else if (v !== null && typeof v === 'object') {
+      for (const [k, x] of Object.entries(v)) {
+        out.push(k);
+        stack.push(x);
+      }
+    }
+  }
+  return out;
 }
 
 /**
@@ -950,9 +1030,12 @@ function hidesEncodedSecret(text: string, mask: (text: string) => string): boole
  * `caf�-secret`. A secret only the shown reading holds is masked in it.
  */
 function shownPiece(raw: string, read: string, mask: (text: string) => string): string {
-  for (const other of serverReadings(raw)) {
+  const readings = serverReadings(raw);
+  for (const other of readings) {
     if (other !== read && mask(other) !== other) return '***';
   }
+  // JSON text whose string holds a secret only unescaped: the shown reading would show it escaped.
+  if (jsonTextHides(raw, readings, mask)) return '***';
   return mask(read);
 }
 
