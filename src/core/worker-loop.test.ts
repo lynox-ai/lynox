@@ -2139,6 +2139,45 @@ describe('WorkerLoop', () => {
     expect(recorded).toMatch(/^The trigger "Daily Report" did not send to "x@evil\.example": you did not name this recipient; it comes from content lynox read\. A run without you cannot ask\. If it should go out anyway, ask lynox in the chat, and lynox will ask you\.\n\nBericht erstellt\.$/);
   });
 
+  it('a send the run tried again shows its refusal once; another target gets its own line', async () => {
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession('Bericht erstellt.');
+    const x = { targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } };
+    const y = { targets: { values: ['y@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } };
+    (session as unknown as { getOriginRefusals: () => unknown[] }).getOriginRefusals = () => [x, { ...x }, y];
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    const recorded = String(vi.mocked(tm.recordTaskRun).mock.calls[0]![1]);
+    expect(recorded.match(/did not send to "x@evil\.example"/g)).toHaveLength(1);
+    expect(recorded.match(/did not send to "y@evil\.example"/g)).toHaveLength(1);
+  });
+
+  it('a run that fails after a refused send still says the refusal in its recorded result, before the error', async () => {
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession(new Error('provider down'));
+    (session as unknown as { getOriginRefusals: () => unknown[] }).getOriginRefusals = () => [{ targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } }];
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    const recorded = vi.mocked(tm.recordTaskRun).mock.calls[0]![1];
+    expect(recorded).toMatch(/^The trigger "Daily Report" did not send to "x@evil\.example": .* ask lynox in the chat, and lynox will ask you\.\n\n.*provider down/s);
+  });
+
+  it('CONTROL: a run that fails without a refused send records only the error', async () => {
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession(new Error('provider down'));
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    const recorded = vi.mocked(tm.recordTaskRun).mock.calls[0]![1];
+    expect(recorded).toContain('provider down');
+    expect(recorded).not.toContain('did not send to');
+  });
+
   it('records success and sends notification on successful task', async () => {
     const task = makeTask();
     const tm = makeTaskManager([task]);
