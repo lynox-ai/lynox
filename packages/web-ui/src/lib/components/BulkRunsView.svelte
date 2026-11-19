@@ -145,8 +145,9 @@
 									<td class="py-2 pr-3">
 										<button type="button" class="text-left hover:underline" onclick={(e) => { e.stopPropagation(); openRun(run.id); }}>{bulkListLabel(run, i18n, bulkReadsList(run))}</button>
 										<!-- Below sm the count and target columns are hidden: the count leads the date line, and the
-										     host stands on a line of its own, broken only where it is wider than the line alone (U-338). -->
-										<div class="text-xs text-text-subtle"><span class="sm:hidden font-mono" data-testid="bulk-run-count-narrow">{countText(run)}</span><span class="sm:hidden">{' · '}</span>{when(run.createdAt)}<span class="block sm:hidden [overflow-wrap:anywhere]" data-testid="bulk-run-host-narrow">{bulkSystemName(run.targetSystem, i18n)}</span></div>
+										     host stands on a line of its own, broken only where it is wider than the line alone (U-338).
+										     The column's header is hidden too, so a screen reader hears the count with its name. -->
+										<div class="text-xs text-text-subtle"><span class="sr-only sm:hidden" data-testid="bulk-run-count-narrow-label">{`${t('bulk.col.targets')}: `}</span><span class="sm:hidden font-mono" data-testid="bulk-run-count-narrow">{countText(run)}</span><span class="sm:hidden">{' · '}</span>{when(run.createdAt)}<span class="block sm:hidden [overflow-wrap:anywhere]" data-testid="bulk-run-host-narrow">{bulkSystemName(run.targetSystem, i18n)}</span></div>
 									</td>
 									<td class="py-2 pr-3 hidden sm:table-cell" data-testid="bulk-run-host">{bulkSystemName(run.targetSystem, i18n)}</td>
 									<td class="py-2 pr-3">

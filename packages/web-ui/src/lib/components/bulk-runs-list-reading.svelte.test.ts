@@ -160,10 +160,11 @@ describe('the runs list at phone width', () => {
 			.filter((tr) => tr.querySelector('[data-testid="bulk-run-count"]'))
 			.map((tr) => ({ tr, line: tr.querySelector<HTMLElement>('[data-testid="bulk-run-host-narrow"]')!.parentElement! }));
 	}
-	/** The text a width shows: below sm everything, a block on its own line; from sm without what is sm:hidden. */
+	/** The text a width shows on screen: below sm everything but what is only for screen readers, a block on its own
+	 *  line; from sm without what is sm:hidden. */
 	const shown = (el: HTMLElement, wide: boolean): string => [...el.childNodes].map((n) => {
 		if (!(n instanceof HTMLElement)) return n.textContent ?? '';
-		if (wide && n.classList.contains('sm:hidden')) return '';
+		if (n.classList.contains('sr-only') || (wide && n.classList.contains('sm:hidden'))) return '';
 		return (n.classList.contains('block') ? '\n' : '') + (n.textContent ?? '');
 	}).join('');
 
@@ -182,9 +183,16 @@ describe('the runs list at phone width', () => {
 		for (const { line, tr } of lines) {
 			const count = line.querySelector<HTMLElement>('[data-testid="bulk-run-count-narrow"]')!;
 			// The narrow count reads as the column does, and the column still shows from sm only.
-			expect(count.textContent).toBe(tr.querySelector('[data-testid="bulk-run-count"]')!.textContent);
+			const column = tr.querySelector<HTMLElement>('[data-testid="bulk-run-count"]')!;
+			expect(count.textContent).toBe(column.textContent);
+			expect(column.classList.contains('hidden') && column.classList.contains('sm:table-cell')).toBe(true);
 			expect(count.classList.contains('sm:hidden')).toBe(true);
-			expect(line.firstElementChild).toBe(count);
+			// The column's header is hidden below sm: a screen reader hears the count after its name.
+			const label = line.querySelector<HTMLElement>('[data-testid="bulk-run-count-narrow-label"]')!;
+			expect(label.textContent).toBe('Ziele: ');
+			expect(label.classList.contains('sr-only') && label.classList.contains('sm:hidden')).toBe(true);
+			expect(line.firstElementChild).toBe(label);
+			expect(label.nextElementSibling).toBe(count);
 			const host = line.querySelector<HTMLElement>('[data-testid="bulk-run-host-narrow"]')!;
 			// Its own line, so it starts at the line's edge. overflow-wrap:anywhere lets a host wider than the line
 			// break, and lets the table shrink the column to the phone's width instead of pushing the status out.
