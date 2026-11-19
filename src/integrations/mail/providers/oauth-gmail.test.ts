@@ -1129,7 +1129,7 @@ describe('OAuthGmailProvider under MailWatcher — a deferred mail', () => {
     });
     const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
     try {
-      await watcher.attach(provider, { intervalMs: 50, applyPrefilter: false });
+      await watcher.attach(provider, { intervalMs: 50 });
       // Until the second hand-over, not a fixed wait: two ticks on a loaded box take longer.
       for (let waited = 0; handed.length === 0 && waited < 5_000; waited += 25) {
         await new Promise((r) => setTimeout(r, 25));
@@ -1180,7 +1180,7 @@ describe('OAuthGmailProvider under MailWatcher — a deferred mail', () => {
       const w1 = new MailWatcher(before, async () => { deferred = true; throw new InboundMailDeferred('restore'); });
       const p1 = new OAuthGmailProvider(makeAccount(), makeAuth());
       try {
-        await w1.attach(p1, { intervalMs: 50, applyPrefilter: false });
+        await w1.attach(p1, { intervalMs: 50 });
         await waitFor(() => deferred);
       } finally {
         await w1.stopAll();
@@ -1195,7 +1195,7 @@ describe('OAuthGmailProvider under MailWatcher — a deferred mail', () => {
       const w2 = new MailWatcher(after, async (_a, envelopes) => { classified.push(...envelopes.map((e) => e.subject)); });
       const p2 = new OAuthGmailProvider(makeAccount(), makeAuth());
       try {
-        await w2.attach(p2, { intervalMs: 50, applyPrefilter: false });
+        await w2.attach(p2, { intervalMs: 50 });
         await waitFor(() => classified.length > 0);
       } finally {
         await w2.stopAll();

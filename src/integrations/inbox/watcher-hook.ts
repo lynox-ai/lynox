@@ -450,8 +450,9 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     //     budget should not pay for. The reason says only what the mail
     //     claims; its sender is written by whoever sent it. An automated sender (no-reply, notifications, alerts) is
     //     classified like any mail: real invoices and warnings come from
-    //     there. A user's rule decides first, and the sensitive check comes
-    //     before this.
+    //     there. A user's from, subject and list-id rule decides first (a rule
+    //     on a description is applied later, by the classifier's runner), and
+    //     the sensitive check comes before this.
     if (filed !== undefined && !sensitive.isSensitive) {
       const itemId = opts.state.insertItemWithAudit(
         {

@@ -193,6 +193,10 @@ export class MailWatcher {
         //    provider poll loop serializes ticks) and left a crash's mail
         //    seen yet unprocessed. The hook is thread-idempotent
         //    (findItemByThread short-circuit), so a retry cannot double-insert.
+        //    A throw inside the classifier hook is swallowed upstream in
+        //    MailContext's wrapper; the one throw let through is
+        //    `InboundMailDeferred`, which a hook uses to keep the mail unseen
+        //    for the next tick.
         try {
           await this.handler(accountId, survivors);
           this.state.markSeenBatch(accountId, survivors);
