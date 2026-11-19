@@ -283,15 +283,18 @@ describe('a target key in the preview', () => {
 		expect(before).toEqual(['tee-', 'abendruhe.', 'sommer-']);
 	});
 
-	// `overflow-wrap: break-word` does not narrow the table column (min-content stays the longest part),
-	// so there the key still breaks only at „-“ and „.“; in the undo lists, which do not scroll, a key with
-	// no such place is cut instead of running out of its box.
-	it('lets a key with no hyphen or dot be cut rather than leave its box', async () => {
-		run = makeRun({ phase: 'previewed', undone: 0, undoneBy: null, targetSystem: 'workspace', total: 1, applied: 0,
+	// In an undo's approval list, which does not scroll, a key with no hyphen or dot gets no break point
+	// of its own but `break-words`, so the browser may cut it where it would leave its box. That the
+	// table still breaks only at „-“ and „.“ is measured in a browser, not here.
+	it('gives a key with no hyphen or dot in an undo list no break point of its own and the break-words class', async () => {
+		run = makeRun({ kind: 'undo', phase: 'previewed', undone: 0, undoneBy: null, sourceRunId: 'r0', targetSystem: 'workspace', total: 1, applied: 0,
 			changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
-		targets = [{ seq: 1, key: handle.replace(/[-.]/g, '_'), change: 'update', diff: fieldsDiff('', 'Neu'), error: null, deselected: false } as BulkTarget];
+		const link = { kind: 'element', namespace: 'html', element: 'a', attributes: [['href', 'https://partner.example/aktion']], text: null, inTemplate: false };
+		targets = [{ seq: 1, key: handle.replace(/[-.]/g, '_'), change: 'update', diff: fieldsDiff('', 'Neu'), error: null, deselected: false,
+			markupChanges: [{ field: 'notes_html', added: [], removed: [link], addsOutsideAllowlist: false }] } as unknown as BulkTarget];
 		await render();
-		const key = target.querySelector('[data-testid="bulk-target-key"]');
+		const key = target.querySelector('[data-testid="bulk-undo-markup"] [data-testid="bulk-target-key"]');
+		expect(key?.textContent).toBe('tee_abendruhe_sommer_2026');
 		expect(key?.querySelectorAll('wbr').length).toBe(0);
 		expect(key?.classList.contains('break-words')).toBe(true);
 	});

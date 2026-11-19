@@ -512,7 +512,7 @@ export function bulkMergeAnswer(
  *  (see `visible-text.ts`, which the approval queue shares). */
 export const bulkVisibleText: (text: string) => string = visibleText;
 
-/** A target key cut after each hyphen and dot, the only places it may break (U-341). */
+/** A target key cut after each hyphen and dot, where it may break (U-341). */
 export function bulkKeyParts(key: string): string[] {
 	return key.split(/(?<=[-.])/);
 }
