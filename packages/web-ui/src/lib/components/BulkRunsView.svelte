@@ -41,6 +41,10 @@
 		return bulkReadsList(run) ? t('bulk.head.counts_pending') : `${run.applied}/${run.total}`;
 	}
 
+	/** The narrow line's separator. An expression keeps its spaces on the client and in server output alike;
+	 *  edge whitespace in markup, entities included, is trimmed in server output. */
+	const NARROW_SEP = ' · ';
+
 	/** The status chip in its two unbreakable parts: the phase with the suffix's „·“, and the suffix's word.
 	 *  „schreibt · gestoppt“ → „schreibt ·“ + „gestoppt“; without a suffix the phase alone. */
 	function chipParts(run: BulkRun): { head: string; tail: string | null } {
@@ -160,7 +164,7 @@
 										     host stands on a line of its own, broken only where it is wider than the line alone (U-352).
 										     The column's header is hidden too, so a screen reader hears the count with its name. While
 										     the run reads its list the title already says „– Ziele“: the line is the date alone. -->
-										<div class="text-xs text-text-subtle">{#if !bulkReadsList(run)}<span class="sr-only sm:hidden" data-testid="bulk-run-count-narrow-label">{`${t('bulk.col.targets')}: `}</span><span class="sm:hidden font-mono" data-testid="bulk-run-count-narrow">{countText(run)}</span><span class="sm:hidden">&#32;·&#32;</span>{/if}{when(run.createdAt)}<span class="block sm:hidden [overflow-wrap:anywhere]" data-testid="bulk-run-host-narrow">{bulkSystemName(run.targetSystem, i18n)}</span></div>
+										<div class="text-xs text-text-subtle">{#if !bulkReadsList(run)}<span class="sr-only sm:hidden" data-testid="bulk-run-count-narrow-label">{`${t('bulk.col.targets')}: `}</span><span class="sm:hidden font-mono" data-testid="bulk-run-count-narrow">{countText(run)}</span><span class="sm:hidden">{NARROW_SEP}</span>{/if}{when(run.createdAt)}<span class="block sm:hidden [overflow-wrap:anywhere]" data-testid="bulk-run-host-narrow">{bulkSystemName(run.targetSystem, i18n)}</span></div>
 									</td>
 									<td class="py-2 pr-3 hidden sm:table-cell" data-testid="bulk-run-host">{bulkSystemName(run.targetSystem, i18n)}</td>
 									<td class="py-2 pr-3">
