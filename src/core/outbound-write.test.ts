@@ -1032,12 +1032,12 @@ describe('a secret inside JSON text inside a value', () => {
     expect(bodyForQuestion(JSON.stringify({ value: many(1200) }), mask)).toEqual({ unshowable: 'escaped-secret' });
   });
 
-  it('JSON text with many short strings is read, not counted as unread', () => {
+  it('JSON text with many short strings and no secret is shown, not counted as unread', () => {
     const many = JSON.stringify(Array.from({ length: 8000 }, (_, i) => `v${i}`));
     expect('text' in bodyForQuestion(JSON.stringify({ value: many }), mask)).toBe(true);
   });
 
-  it('a wide array in JSON text is read without running out of stack', () => {
+  it('a wide array in JSON text with no secret is shown, without running out of stack', () => {
     const wide = `[${Array(200_000).fill('1').join(',')}]`;
     expect(() => bodyForQuestion(JSON.stringify({ value: wide }), mask)).not.toThrow();
     expect('text' in bodyForQuestion(JSON.stringify({ value: wide }), mask)).toBe(true);
@@ -1063,6 +1063,42 @@ describe('a secret inside JSON text inside a value', () => {
     const part = (inner: string) => `--b\r\nContent-Type: application/json\r\n\r\n${inner}\r\n--b--`;
     expect(bodyForQuestion(part(escaped), mask, 'multipart/form-data; boundary=b')).toEqual({ unshowable: 'escaped-secret' });
     expect('text' in bodyForQuestion(part(plainInner), mask, 'multipart/form-data; boundary=b')).toBe(true);
+  });
+
+  it('a JSON document over several lines, as a client writes a multipart part, is read', () => {
+    const pretty = (token: string) => `{\r\n  "token": "${token}"\r\n}`;
+    const part = (inner: string) => `--b\r\nContent-Type: application/json\r\n\r\n${inner}\r\n--b--`;
+    const MULTI = 'multipart/form-data; boundary=b';
+    expect(bodyForQuestion(part(pretty(`\\u0068${STORED.slice(1)}`)), mask, MULTI)).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion(`${pretty(`\\u0068${STORED.slice(1)}`)}x`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+    // Control: the same part with no escape is shown, the secret masked.
+    expect(bodyForQuestion(part(pretty(STORED)), mask, MULTI)).toMatchObject({ escapedSecret: false });
+  });
+
+  it('JSON text a lenient parser reads and a strict parse refuses is read', () => {
+    const e = `\\u0068${STORED.slice(1)}`;
+    for (const lenient of [`{"t":"${e}","n":NaN}`, `[Infinity,"${e}"]`, `{"t":"${e}",}`]) {
+      expect(() => JSON.parse(lenient)).toThrow();
+      expect(bodyForQuestion(JSON.stringify({ value: lenient }), mask)).toEqual({ unshowable: 'escaped-secret' });
+    }
+    // A second level inside such text: its escapes are read again.
+    const twice = `{"inner":${JSON.stringify(escaped)},"n":NaN}`;
+    expect(bodyForQuestion(JSON.stringify({ value: twice }), mask)).toEqual({ unshowable: 'escaped-secret' });
+    // An escape other than `\u`: a stored value with a slash, written `\/`.
+    const slashMask = (t: string) => t.replaceAll('hunter2/secret', '***');
+    expect(bodyForQuestion(JSON.stringify({ value: '{"t":"hunter2\\/secret","n":NaN}' }), slashMask)).toEqual({ unshowable: 'escaped-secret' });
+    // Control: lenient JSON text with no secret is shown.
+    expect('text' in bodyForQuestion(JSON.stringify({ value: '{"t":"\\u0068i","n":NaN}' }), mask)).toBe(true);
+  });
+
+  it('such text in a query, a header, a path and a form inside a decoded value is read too', () => {
+    const nan = `{"a":NaN,"token":"\\u0068${STORED.slice(1)}"}`;
+    expect(queryForQuestion(`?p=${encodeURIComponent(nan)}`, mask)).toEqual({ text: 'p = ***', secret: true, escaped: true });
+    expect(headersForQuestion({ 'X-Meta': nan }, mask, () => 'show')).toEqual({ unshowable: { reason: 'escaped-secret', name: 'X-Meta' } });
+    expect(pathHoldsSecret(`https://h.example/a/${encodeURIComponent(nan)}`, mask)).toBe(true);
+    // A nested form whose name has a space, or starts with a bracket.
+    expect(bodyForQuestion(`p=${encodeURIComponent(`my name=${escaped}`)}`, mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
+    expect(bodyForQuestion(`p=${encodeURIComponent(`[0]=${escaped}`)}`, mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
   });
 
   it('JSON text after a byte order mark is read', () => {

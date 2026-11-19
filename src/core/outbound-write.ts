@@ -962,7 +962,8 @@ const JSON_TEXT_BUDGET_CHARS = 2_000_000;
  * {@link JSON_TEXT_DEPTH}. JSON text is looked for in every server reading of `text` and of each
  * side of a `name=value` pair in it (a form body, a query; split before it is decoded, the way a
  * server splits it), whole, from each `=` or `&` to the next `&` (a form inside a decoded value),
- * and line by line (one JSON document per line, a multipart part). `readings` are those of
+ * and line by line (one JSON document per line, a multipart part); and each such reading with
+ * its JSON escapes read, also where no strict parse accepts the text. `readings` are those of
  * `text`, taken once by the caller. `unread` is what JSON text past the depth or the budget counts
  * as: `true` (holding a secret) for a decision, `false` for the reading a masked one is compared
  * with (`pathHoldsSecret`).
@@ -973,6 +974,17 @@ function jsonTextHides(text: string, readings: Iterable<string>, mask: (text: st
   const hides = (t: string, ofT: Iterable<string>, depth: number): boolean => {
     for (const reads of [ofT, ...formSides(t).map(serverReadings)]) {
       for (const read of reads) {
+        // A parser reads the escapes of JSON text wherever the text starts, also text a strict
+        // parse refuses (`NaN`, a trailing comma) and a document over several lines: the reading
+        // with its escapes read, and that reading's, down to the depth, holds no secret either.
+        for (let u = read, k = 0; k < JSON_TEXT_DEPTH; k++) {
+          const next = jsonUnescaped(u);
+          if (next === u) break;
+          // Not charged: it costs at most a few times the reading, and a reading is one of the
+          // few of `text` and of its form sides, which a string's are charged for below.
+          if (mask(next) !== next) return true;
+          u = next;
+        }
         for (const candidate of jsonCandidates(read)) {
           left -= 32;
           if (left < 0) return unread;
@@ -1051,6 +1063,14 @@ function jsonCandidates(read: string): string[] {
   }
   return out;
 }
+
+/** `text` with every escape JSON text knows read (`h`, `\"`, `\\`, `\/`, `\n` …), once. */
+function jsonUnescaped(text: string): string {
+  if (!text.includes('\\')) return text;
+  return text.replace(/\\(?:u([0-9a-fA-F]{4})|(["\\/bfnrt]))/g, (_, hex: string | undefined, c: string | undefined) =>
+    hex !== undefined ? String.fromCharCode(parseInt(hex, 16)) : JSON_ESCAPES[c!]!);
+}
+const JSON_ESCAPES: Record<string, string> = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' };
 
 /** Every string literal (key and value, each of two equal keys too) of `text` when it parses as
  *  JSON (an object, an array or a string), after spaces and a byte order mark, which a server
