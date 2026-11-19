@@ -43,6 +43,7 @@ import {
   type MailWatchHandle,
   type MailWatchHandler,
   type MailWatchOptions,
+  listIdFromHeader,
 } from '../provider.js';
 import { decodeBytes, bodyQuarantinePlaceholder } from './charset.js';
 import { googleFetch } from '../../../core/connector-egress.js';
@@ -476,7 +477,7 @@ function buildListQuery(opts: MailListOptions): string {
 }
 
 function metadataHeaders(): string[] {
-  return ['From', 'To', 'Cc', 'Subject', 'Date', 'Message-ID', 'In-Reply-To', 'References', 'Reply-To', 'Auto-Submitted'];
+  return ['From', 'To', 'Cc', 'Subject', 'Date', 'Message-ID', 'In-Reply-To', 'References', 'Reply-To', 'Auto-Submitted', 'List-Id'];
 }
 
 function wrapGmailError(err: unknown, fallback: string): MailError {
@@ -797,6 +798,7 @@ export class OAuthGmailProvider implements MailProvider {
       sizeBytes: msg.sizeEstimate,
       isAutoReply: isAutoSubmitted(header(headers, 'Auto-Submitted')),
       isAutoReplied: isAutoRepliedHeader(header(headers, 'Auto-Submitted')),
+      listId: listIdFromHeader(header(headers, 'List-Id')),
     };
   }
 

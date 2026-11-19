@@ -4,7 +4,10 @@
 // further. Every rule that fires saves an LLM call (~$0.001/msg on Haiku),
 // and the PRD targets ~60% skip rate from these alone.
 //
-// Phase 0 only ships sender-pattern + List-Unsubscribe rules. The "known
+// Phase 0 only ships sender-pattern rules; no header decides here. A mail
+// that carries a `List-Id` header is kept out of the watcher's silent drop
+// (`watch.ts`), and `mailingListOf` below decides whether the inbox hook files
+// it as mail from a mailing list. The "known
 // contact in CRM" and "thread reply inherits classification" rules are
 // Phase 2 territory because they need CRM/state coupling.
 
@@ -20,6 +23,32 @@ export interface PrefilterDecision {
 
 const KEEP: PrefilterDecision = { category: 'unknown', reason: undefined };
 
+/**
+ * The one place that decides what counts as mail from a mailing list: the
+ * list-id when it does, `undefined` when not. A `List-Id` header decides,
+ * unless the list sits under the domain of a mailbox connected here
+ * (`ownDomains`): a group address such as `info@` set up as a Google group
+ * stamps a list-id on every mail, and that mail is the business's own, not a
+ * newsletter. `info.firma.ch` is under `firma.ch`; `firma.ch.example` is not.
+ */
+export function mailingListOf(env: MailEnvelope, ownDomains: ReadonlyArray<string>): string | undefined {
+  const id = env.listId;
+  if (id === undefined) return undefined;
+  // A trailing dot names the same domain (`info.firma.ch.`).
+  const lower = id.toLowerCase().replace(/\.$/, '');
+  for (const domain of ownDomains) {
+    const own = domain.toLowerCase();
+    if (lower === own || lower.endsWith(`.${own}`)) return undefined;
+  }
+  return id;
+}
+
+/** The domain part of an address, lowercased; empty when there is none. */
+export function domainOf(address: string): string {
+  const at = address.lastIndexOf('@');
+  return at < 0 ? '' : address.slice(at + 1).trim().toLowerCase();
+}
+
 const NOREPLY_PATTERN = /^(?:no-?reply|donotreply|do-not-reply|notifications?|alerts?|mailer-?daemon|postmaster)@/i;
 
 /**
@@ -27,15 +56,11 @@ const NOREPLY_PATTERN = /^(?:no-?reply|donotreply|do-not-reply|notifications?|al
  * message should be skipped entirely, 'unknown' when an LLM (or human)
  * still needs to look at it.
  *
- * `headers` is optional — pass it when you have the parsed RFC 5322 headers
- * (lowercase keys) to enable List-Unsubscribe detection.
+ * No header decides here. `List-Unsubscribe` is set by transactional senders
+ * too (invoices, receipts), so it is no mark of bulk mail. Mail with a
+ * `List-Id` is handled by the watcher and the inbox hook, see above.
  */
-export function prefilter(env: MailEnvelope, headers?: ReadonlyMap<string, string>): PrefilterDecision {
-  // Rule 1: List-Unsubscribe header → bulk mail
-  if (headers && (headers.has('list-unsubscribe') || headers.has('list-id'))) {
-    return { category: 'noise', reason: 'list-unsubscribe header' };
-  }
-
+export function prefilter(env: MailEnvelope): PrefilterDecision {
   // Rule 2: noreply / notifications / mailer-daemon sender
   for (const addr of env.from) {
     if (NOREPLY_PATTERN.test(addr.address)) {
@@ -56,8 +81,9 @@ export function prefilter(env: MailEnvelope, headers?: ReadonlyMap<string, strin
   //   (`mail.stripe.com`) AND set `List-Unsubscribe` only sometimes;
   //   real marketing campaigns use 3+ levels (`mail.notifications.…`)
   //   or carry `List-Unsubscribe`. Require 3+ subdomain levels here so
-  //   genuine transactional 2-level domains pass through; List-Unsubscribe
-  //   sends are already caught by Rule 1.
+  //   genuine transactional 2-level domains pass through. A 2-level sender
+  //   that only carries `List-Unsubscribe` reaches the classifier: nothing
+  //   here drops it on that header (it marks invoices too).
   for (const addr of env.from) {
     const at = addr.address.lastIndexOf('@');
     if (at < 0) continue;
