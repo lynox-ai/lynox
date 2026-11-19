@@ -962,6 +962,9 @@ export class Session {
       // An internal (compaction) run must NOT return the block string — it would
       // be injected as the thread's authoritative summary. Throw instead.
       if (runOptions?.internal === true) throw new InternalRunBlockedError(reason);
+      // Kept for the person, not for the model, as the content check's refusals are: a reload
+      // shows the message and the note the live chat showed.
+      persistRefusedTurn(threadStore, this.sessionId, task, reason, 'run_blocked');
       this._lastRunNotice = 'run_blocked';
       return reason;
     }
@@ -997,6 +1000,7 @@ export class Session {
           // inline render fallback. `warning` (not `error`) keeps the failed
           // user turn intact — the block is transient (credit re-syncs).
           await this.onStream?.({ type: 'warning', code: 'run_blocked', detail: reason, agent: this.agent?.name ?? 'lynox' });
+          persistRefusedTurn(threadStore, this.sessionId, task, reason, 'run_blocked');
           this._lastRunNotice = 'run_blocked';
           return `Run blocked: ${reason}`;
         }

@@ -231,22 +231,26 @@ export function persistCompactionMarker(
 }
 
 /**
- * Keep a message the content check refused, and the sentence saying why, in the thread as
- * display-only rows. The run ends before the model is called and before the user's turn is
- * stored, so without these rows a reload shows neither what the person wrote nor why nothing
- * came. display_only keeps both out of the model's context: the next turn does not read the
- * refused request, nor the refusal as something it said.
+ * Keep a message that never reached the model, and the sentence saying why, in the thread as
+ * display-only rows: the content check refused it (`content_refused`), or the daily/monthly budget
+ * or a run hook blocked the run (`run_blocked`). The run ends before the model is called and before
+ * the user's turn is stored, so without these rows a reload shows neither what the person wrote nor
+ * why nothing came. display_only keeps both out of the model's context: the next turn does not read
+ * the refused request, nor the refusal as something it said.
  *
- * The message is stored as written, as an ordinary turn would be. The sentence goes in the
- * note's `detail`, the words the chat showed when the run ended. Returns whether the rows were
- * written; a write that fails leaves the thread as it was, and the run still ends with its
- * sentence.
+ * The message is stored as written, as an ordinary turn would be (text, or the blocks of a message
+ * with attachments). The sentence goes in the note's `detail`, the words the chat showed when the
+ * run ended — for a blocked run the reason without its `Run blocked: ` prefix, as the live note
+ * shows it: under the note's fixed text, as its detail line, never as its body. Returns whether the
+ * rows were written; a write that fails leaves the thread as it was, and the run still ends with
+ * its sentence.
  */
 export function persistRefusedTurn(
   threadStore: ThreadStore | null,
   sessionId: string,
-  task: string,
+  task: string | unknown[],
   sentence: string,
+  code: EngineNoticeCode = CONTENT_REFUSED_NOTE,
 ): boolean {
   if (!threadStore) return false;
   try {
@@ -255,7 +259,7 @@ export function persistRefusedTurn(
       sessionId,
       [
         { role: 'user', content: task },
-        { role: 'assistant', content: buildDisplayNoteContent(CONTENT_REFUSED_NOTE, sanitizeNoteDetail(sentence)) },
+        { role: 'assistant', content: buildDisplayNoteContent(code, sanitizeNoteDetail(sentence)) },
       ],
       threadStore.getNextSeq(sessionId),
     );
