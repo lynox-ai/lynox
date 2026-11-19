@@ -564,8 +564,9 @@
 {#snippet targetName(target: { key: string })}
 	{@const name = bulkTargetName(run?.targetSystem ?? '', target)}
 	{#if name.adminUrl === null}
-		<!-- A key breaks after a hyphen or a dot (U-341). In the table that is the only place: its column
-		     grows and scrolls. In the undo lists, which do not scroll, a part longer than the box is cut. -->
+		<!-- A key breaks after a hyphen, a dot or an underscore (U-341). In the table that is the only
+		     place: its column grows and scrolls. In the undo lists, which do not scroll, a part longer
+		     than the box is cut. -->
 		{@const parts = bulkKeyParts(bulkVisibleText(target.key))}
 		<code class="text-xs break-normal break-words" data-testid="bulk-target-key">{#each parts as part, i (i)}{part}{#if i < parts.length - 1}<wbr />{/if}{/each}</code>
 	{:else}

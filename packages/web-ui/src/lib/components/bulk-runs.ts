@@ -512,9 +512,9 @@ export function bulkMergeAnswer(
  *  (see `visible-text.ts`, which the approval queue shares). */
 export const bulkVisibleText: (text: string) => string = visibleText;
 
-/** A target key cut after each hyphen and dot, where it may break (U-341). */
+/** A target key cut after each hyphen, dot and underscore, where it may break (U-341). */
 export function bulkKeyParts(key: string): string[] {
-	return key.split(/(?<=[-.])/);
+	return key.split(/(?<=[-._])/);
 }
 
 /** At most this many characters of a refused link's domain on the page (U-311). */
