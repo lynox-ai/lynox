@@ -2666,20 +2666,23 @@ describe('gate-record — the `ux:` line', () => {
       expect(uxConfirmBlocks(null).size).toBe(0);
     });
 
-    it('a confirmation inside another keeps its own block, and the outer one holds its key line', () => {
-      expect([...uxConfirmBlocks(`'a_confirm': {\n\t'a_confirm': {\n\t\tde: 'X',\n\t},\n\tde: 'Y',\n},`)]).toEqual([
-        ['a_confirm', JSON.stringify([`'a_confirm': {\n\t'a_confirm': {\n\tde: 'Y',\n},`, `\t'a_confirm': {\n\t\tde: 'X',\n\t},`])],
-      ]);
+    it('a confirmation inside another keeps its own block, and the outer one holds a digest of it', () => {
+      const [outer, inner] = JSON.parse(uxConfirmBlocks(`'a_confirm': {\n\t'a_confirm': {\n\t\tde: 'X',\n\t},\n\tde: 'Y',\n},`).get('a_confirm') ?? '[]') as string[];
+      expect(inner).toBe(`\t'a_confirm': {\n\t\tde: 'X',\n\t},`);
+      expect(outer).toMatch(/^'a_confirm': \{\n\0[0-9a-f]{64}\n\tde: 'Y',\n\},$/);
       const two = (x: string, y: string) => `'a_confirm': {\n\t'b_confirm': {\n\t\tde: '${x}',\n\t},\n\tde: '${y}',\n},`;
       expect(owed([F], { [F]: two('X', 'Y') }, { [F]: two('X2', 'Y') }).review).toBe(true);
       expect(owed([F], { [F]: two('X', 'Y') }, { [F]: two('X', 'Y2') }).review).toBe(true);
       expect(owed([F], { [F]: two('X', 'Y') }, { [F]: two('Y', 'X') }).review).toBe(true);
       // The inner entry moved below the outer one's own line: neither block's lines change, its place does.
       expect(owed([F], { [F]: two('X', 'Y') }, { [F]: `'a_confirm': {\n\tde: 'Y',\n\t'b_confirm': {\n\t\tde: 'X',\n\t},\n},` }).review).toBe(true);
+      // Two confirmations holding the same inner key swap places: every line stays, only what each one holds moves.
+      const pair = (a: string, b: string) => `export const t = {\n  '${a}': {\n    'confirm': {\n      de: 'Löschen',\n    },\n  },\n  '${b}': {\n    'confirm': {\n      de: 'Archivieren',\n    },\n  },\n};`;
+      expect(owed([F], { [F]: pair('delete_confirm', 'archive_confirm') }, { [F]: pair('archive_confirm', 'delete_confirm') }).review).toBe(true);
     });
 
     it('deeply nested confirmations cost the length of the file, not its length times their depth', () => {
-      const f = Array.from({ length: 300 }, (_, i) => `${' '.repeat(i)}'k${i}_confirm': {`).join('\n');
+      const f = Array.from({ length: 300 }, (_, i) => `${' '.repeat(i)}'k${i}_confirm': {\n${' '.repeat(i + 1)}de: 'v${i}',`).join('\n');
       let total = 0;
       for (const v of uxConfirmBlocks(f).values()) total += v.length;
       expect(total).toBeLessThan(3 * f.length);

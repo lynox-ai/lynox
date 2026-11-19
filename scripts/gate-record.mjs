@@ -38,6 +38,7 @@
  * cannot judge (`wrongRunErrors`: lynox-pro's checkout, or a local branch name as `--base`).
  */
 
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
@@ -476,10 +477,10 @@ export function uxOwed({ files, base, head, read }) {
  * literal indented deeper than the key, or at any indent unless they start with `}` or look like
  * an entry opening. Lines are kept as they are, blank and comment-like ones too: inside a
  * template literal they are what the user reads, so a new indent counts as a change. A
- * confirmation inside another keeps its lines in its own block, and the outer block holds the
- * inner one's key line where they stood: every line is kept once, so a file of deeply nested
- * confirmations costs its length, not its length times its depth, and a change inside the inner
- * entry still changes a confirmation's block. `null` text (an absent file) has none. Pure.
+ * confirmation inside another keeps its lines in its own block, and the outer block holds, where
+ * they stood, a digest of that block: every line is kept once, so a file of deeply nested
+ * confirmations costs its length, not its length times its depth, and the outer block still
+ * changes with what it holds, wherever that moves. `null` text (an absent file) has none. Pure.
  *
  * @param {string|null} text
  * @returns {Map<string, string>}
@@ -490,7 +491,13 @@ export function uxConfirmBlocks(text) {
   // The open entries, innermost last; their indents rise, so a line that ends one also ends
   // every entry inside it, and a line that ends none ends nothing further out.
   const open = [];
-  const end = (e) => { out.get(e.key)[e.slot] = e.body.join('\n'); };
+  // An entry's text goes into its own block; the entry that holds it gets, where it stood, a
+  // digest of it, filled in when it ends (always before the entry around it).
+  const end = (e) => {
+    const text = e.body.join('\n');
+    out.get(e.key)[e.slot] = text;
+    if (e.outer !== null) e.outer.body[e.held] = `\0${createHash('sha256').update(text).digest('hex')}`;
+  };
   for (const l of (text ?? '').split('\n')) {
     const t = l.trim();
     const at = t === '' ? Infinity : indent(l);
@@ -504,12 +511,16 @@ export function uxConfirmBlocks(text) {
     }
     const m = UX_NEW_TEXT.exec(l);
     if (m !== null) while (open.length > 0 && at <= open[open.length - 1].at) end(open.pop());
-    if (open.length > 0) open[open.length - 1].body.push(l);
-    if (m === null || !/confirm/i.test(m[2])) continue;
+    const outer = open.length > 0 ? open[open.length - 1] : null;
+    if (m === null || !/confirm/i.test(m[2])) {
+      if (outer !== null) outer.body.push(l);
+      continue;
+    }
     if (!out.has(m[2])) out.set(m[2], []);
-    open.push({ key: m[2], at, body: [l], slot: out.get(m[2]).push('') - 1 });
+    const held = outer === null ? -1 : outer.body.push('') - 1;
+    open.push({ key: m[2], at, body: [l], slot: out.get(m[2]).push('') - 1, outer, held });
   }
-  for (const e of open) end(e);
+  while (open.length > 0) end(open.pop());
   return new Map([...out].map(([k, v]) => [k, JSON.stringify(v)]));
 }
 
