@@ -12033,7 +12033,7 @@ export class LynoxHTTPApi {
         return;
       }
 
-      const token = mintBrokerStartToken(instanceId, httpSecret);
+      const token = mintBrokerStartToken('google', instanceId, httpSecret);
       const url =
         `${controlPlaneUrl}/oauth/google/start` +
         `?instance_id=${encodeURIComponent(instanceId)}` +
