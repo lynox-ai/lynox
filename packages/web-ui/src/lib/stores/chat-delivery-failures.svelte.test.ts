@@ -500,3 +500,30 @@ describe('why a question was closed, and the lost answer as a draft (UX-064, UX-
 		expect(field).toBe('my answer');
 	});
 });
+
+describe('an answer the server takes for no question (409 prompt_id_required)', () => {
+	it('is not read as answered: the open question comes back with its id, a sentence says so, and the answer is not sent again', async () => {
+		const { t } = await import('../i18n.svelte.js');
+		let pendingAsked = 0;
+		const run = openRun((url) => {
+			if (url.endsWith('/reply')) return json({ error: 'A question is open: answer it with its promptId.', code: 'prompt_id_required' }, 409);
+			if (url.endsWith('/pending-prompt')) {
+				pendingAsked++;
+				return json({ pending: true, promptType: 'ask_user', promptId: 'p-open', question: 'Send this mail?', options: ['Yes', 'No'] });
+			}
+			return json({});
+		});
+		void store.sendMessage('go');
+		await settle();
+		// A prompt event without an id: the answer goes out without one.
+		run.send('prompt', { question: 'Go on?', options: ['Yes', 'No'] });
+		await settle();
+		await store.replyPermission('Yes');
+		await settle();
+		expect(calls.filter((u) => u.endsWith('/reply')), 'the answer was sent again to whatever is open').toHaveLength(1);
+		expect(pendingAsked).toBeGreaterThan(0);
+		expect(store.getPendingPermission()?.promptId).toBe('p-open');
+		expect(store.getChatError()).toBe(t('chat.reply_needs_question'));
+		expect(toasts).toEqual([]);
+	});
+});

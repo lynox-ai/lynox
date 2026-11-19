@@ -2756,6 +2756,15 @@ async function reportReply(sid: string, outcome: ReplyOutcome, answer: string | 
 		chatErrorDetail = null;
 		return;
 	}
+	if (outcome === 'id_required') {
+		// Nothing was answered. The open question comes back with its id, to be answered again on
+		// purpose: sending the same answer to it unasked could approve what the person never saw.
+		if (sessionId !== sid) return;
+		await checkPendingPrompt();
+		chatError = t('chat.reply_needs_question');
+		chatErrorDetail = null;
+		return;
+	}
 	if (outcome === 'settled' || sessionId !== sid) return;
 	if (chatError !== null && chatError !== closedReplySentence) return;
 	// Who reads it decides the way out where only the owner can act. Unknown reads as the owner,
@@ -2803,8 +2812,9 @@ export async function postTabProgress(promptId: string, partial: (string | null)
 /** How a reply ended: `lost` when the server could not be reached or failed twice, `closed` when
  *  it answered 410 (a closed question, with the reason the server gave, or null), `key_refused`
  *  when it refused the answer as carrying a key (422 `mandate_key_input`), and `settled` for
- *  every other final word. */
-type ReplyOutcome = 'settled' | 'lost' | 'key_refused' | { readonly closed: ClosedCode | null };
+ *  every other final word except `id_required`: the answer went without the question's id
+ *  (409 `prompt_id_required`), so nothing was answered. */
+type ReplyOutcome = 'settled' | 'lost' | 'key_refused' | 'id_required' | { readonly closed: ClosedCode | null };
 
 /** POST a reply with a single retry on a network error or 5xx. The server is idempotent for
  *  repeat promptIds (returns 200 with `idempotent: true`), so retrying is safe. Never rejects. */
@@ -2826,6 +2836,12 @@ async function postReplyWithRetry(url: string, body: Record<string, unknown>): P
 				let detail: string | null = null;
 				try { detail = await res.text(); } catch { /* no body */ }
 				if (isKeyInputRefusal(422, detail)) return 'key_refused';
+			}
+			// Sent without the question's id: nothing was answered, the open question waits.
+			if (res.status === 409) {
+				let code: unknown;
+				try { code = ((await res.clone().json()) as { code?: unknown } | null)?.code; } catch { /* no body */ }
+				if (code === 'prompt_id_required') return 'id_required';
 			}
 			// 5xx → retry once
 			if (res.status >= 500) {
