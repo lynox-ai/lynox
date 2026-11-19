@@ -24,6 +24,8 @@ const CONTRACT: CapabilityContract = {
   version: 1, grantedTools: ['http_request'], httpMethods: ['POST'], hostPatterns: ['api.partner.example'], pathPatterns: ['/v1/invoices'],
   paramConstraints: { region: { enum: ['ch', 'de'] }, count: { min: 1, max: 10 } },
 };
+/** A workflow saved without a contract (an explicit `undefined` would take the default). */
+const NONE = Symbol('no contract');
 const WITHOUT_VALUES = { version: 1, grantedTools: ['http_request'], httpMethods: ['POST'], hostPatterns: ['api.partner.example'], pathPatterns: ['/v1/invoices'] };
 
 const saved: Record<string, string | undefined> = {};
@@ -63,15 +65,27 @@ describe('the workflow library shows each reader the contract it may read (real 
     mandateCookie = m;
     ownerCookie = o;
     const history = (api as unknown as Inner).engine.getRunHistory()!;
-    const save = (id: string, author: Parameters<typeof history.insertPlannedPipeline>[1]): void => {
+    const save = (id: string, author: Parameters<typeof history.insertPlannedPipeline>[1], contract: unknown = CONTRACT): void => {
       history.insertPlannedPipeline({
         id, name: id, goal: 'g', steps: [{ id: 's1', task: 't' }], reasoning: '', estimatedCost: 0,
-        createdAt: '2026-01-01T00:00:00.000Z', template: true, capabilityContract: CONTRACT,
+        createdAt: '2026-01-01T00:00:00.000Z', template: true, ...(contract === NONE ? {} : { capabilityContract: contract as CapabilityContract }),
       }, author);
     };
     save('wf-owner', { kind: 'owner' });
     save('wf-ida', { kind: 'mandate', email: 'ida@example.invalid', mandateId: 'TEST-MANDATE-IDA' });
     save('wf-ole', { kind: 'mandate', email: 'ole@example.invalid', mandateId: 'TEST-MANDATE-OLE' });
+    // A contract with a field the consent does not show, as an import or a later version may store.
+    save('wf-extra', { kind: 'owner' }, { ...CONTRACT, extraField: 'only-the-owner-reads-this' });
+    // A stored contract that is not an object, and a workflow with none.
+    save('wf-junk', { kind: 'owner' }, ['api.partner.example']);
+    save('wf-none', { kind: 'owner' }, NONE);
+    // A workflow whose authorship cannot be read: refused to a mandate as `unreadable`.
+    save('wf-unread', { kind: 'owner' });
+    const read = history.getWorkflowAuthorship.bind(history);
+    history.getWorkflowAuthorship = (id: string) => {
+      if (id === 'wf-unread') throw new Error('authorship read failed');
+      return read(id);
+    };
   }, 120_000);
 
   afterAll(async () => {
@@ -94,7 +108,10 @@ describe('the workflow library shows each reader the contract it may read (real 
   it('gives the owner every contract whole, allowed values and bounds included, by cookie and by bearer', async () => {
     for (const headers of [{ cookie: `lynox_session=${ownerCookie}` }, { authorization: `Bearer ${SECRET}` }]) {
       const cards = await library(headers);
-      for (const id of ['wf-owner', 'wf-ida', 'wf-ole']) expect(cards.get(id)?.capabilityContract).toEqual(CONTRACT);
+      for (const id of ['wf-owner', 'wf-ida', 'wf-ole', 'wf-unread']) expect(cards.get(id)?.capabilityContract).toEqual(CONTRACT);
+      expect(cards.get('wf-extra')?.capabilityContract).toEqual({ ...CONTRACT, extraField: 'only-the-owner-reads-this' });
+      expect(cards.get('wf-junk')?.capabilityContract).toEqual(['api.partner.example']);
+      expect(cards.get('wf-none')).not.toHaveProperty('capabilityContract');
     }
   });
 
@@ -108,15 +125,27 @@ describe('the workflow library shows each reader the contract it may read (real 
     // Another mandate's: listed as not its to schedule, without anything of its contract.
     expect(cards.get('wf-ole')?.schedule_refusal).toBe('foreign');
     expect(cards.get('wf-ole')).not.toHaveProperty('capabilityContract');
+    // One whose authorship cannot be read: refused the same way, and its contract withheld too.
+    expect(cards.get('wf-unread')?.schedule_refusal).toBe('unreadable');
+    expect(cards.get('wf-unread')).not.toHaveProperty('capabilityContract');
   });
 
-  it('puts no allowed value, bound, host or path of a workflow the mandate may not schedule anywhere in its answer', async () => {
+  it('gives a mandate only the fields the consent shows, so a field a contract gains is not one of them', async () => {
+    const cards = await library({ cookie: `lynox_session=${mandateCookie}` });
+    expect(cards.get('wf-extra')?.capabilityContract).toEqual(WITHOUT_VALUES);
+    // A stored contract that is not an object reaches a mandate as nothing, and one with none as none.
+    expect(cards.get('wf-junk')).not.toHaveProperty('capabilityContract');
+    expect(cards.get('wf-none')).not.toHaveProperty('capabilityContract');
+  });
+
+  it('puts no allowed value, bound or unshown field anywhere in a mandate\'s answer, and no host or path of a workflow it may not schedule', async () => {
     (api as unknown as Inner).rateCounts.clear();
     const res = await fetch(`${base}/api/workflows/library`, { headers: { cookie: `lynox_session=${mandateCookie}` } });
     const text = await res.text();
-    for (const stored of ['"ch"', '"de"', '"min"', '"max"', 'paramConstraints']) expect(text).not.toContain(stored);
-    // The hosts and paths it reads are those of its own and the owner's workflows: two, not three.
-    expect(text.split('api.partner.example').length - 1).toBe(2);
-    expect(text.split('/v1/invoices').length - 1).toBe(2);
+    for (const stored of ['"ch"', '"de"', '"min"', '"max"', 'paramConstraints', 'only-the-owner-reads-this']) expect(text).not.toContain(stored);
+    // The hosts and paths it reads are those of the workflows it may schedule with a contract it can
+    // read (its own, the owner's, the owner's with an extra field): three of the six that hold one.
+    expect(text.split('api.partner.example').length - 1).toBe(3);
+    expect(text.split('/v1/invoices').length - 1).toBe(3);
   });
 });

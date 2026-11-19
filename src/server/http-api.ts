@@ -245,6 +245,12 @@ function mayStartConnect(principal: RequestPrincipal, profile: ApiProfile | unde
 const free = (why: string): MandateStance => ({ kind: 'free', why });
 /** A GET that only reads. */
 const READS: MandateStance = { kind: 'reads' };
+/**
+ * The fields of a workflow's capability contract that a schedule's consent shows (the library's
+ * schedule dialog lists the tools, and the methods, hosts and paths a run may write to). Listed,
+ * not subtracted: a field a contract gains later reaches no one but the owner until it is named here.
+ */
+const CONSENT_CONTRACT_FIELDS = ['version', 'grantedTools', 'httpMethods', 'hostPatterns', 'pathPatterns'] as const;
 
 interface DynamicRoute {
   method: string;
@@ -8669,16 +8675,16 @@ export class LynoxHTTPApi {
           askingSteps: mode === 'interactive' ? stepsThatAsk(fullSteps) : [],
           ...(typeof parsed.confirmedAt === 'string' ? { confirmedAt: parsed.confirmedAt } : {}),
           // The contract, as far as this viewer may read it: the owner reads it all. Anyone else reads
-          // no allowed values or bounds (the run form shows them to the owner only), and no contract
-          // at all of a workflow it may not schedule: what a schedule's consent shows is only for the
-          // workflows it may schedule.
+          // only what a schedule's consent shows (`CONSENT_CONTRACT_FIELDS`), never the allowed values
+          // or bounds (enum, min, max, regex: the run form shows them to the owner only), and nothing
+          // of a workflow it may not schedule.
           ...(() => {
             const contract = parsed.capabilityContract;
             if (contract === undefined) return {};
             if (ownerViews) return { capabilityContract: contract };
-            if (refusal !== null || contract === null || typeof contract !== 'object') return {};
-            const { paramConstraints: _withheld, ...shown } = contract as Record<string, unknown>;
-            return { capabilityContract: shown };
+            if (refusal !== null || contract === null || typeof contract !== 'object' || Array.isArray(contract)) return {};
+            const stored = contract as Record<string, unknown>;
+            return { capabilityContract: Object.fromEntries(CONSENT_CONTRACT_FIELDS.filter((k) => Object.hasOwn(stored, k)).map((k) => [k, stored[k]])) };
           })(),
           // A workflow a mandate shaped, or whose steps changed after its stamp, runs only after the
           // owner stamped its steps as they are (`workflow-stamp.ts`): the same state the run and
