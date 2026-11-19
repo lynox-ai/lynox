@@ -686,6 +686,9 @@ export function handRunCovers(grant: HandRunGrant | null, t: { created_by?: stri
   return isMandateTag(lastParty) && lastParty === principalTag(grant.principal);
 }
 
+/** The refusal notice of a run that ended by throwing, carried from the run to where the failure is recorded. */
+const ORIGIN_NOTICE_OF_ERROR = new WeakMap<object, string>();
+
 export class WorkerLoop {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false; // prevent overlapping ticks
@@ -729,7 +732,8 @@ export class WorkerLoop {
   #originRefusedNotice(task: TriggerRecord, refusals: readonly OriginRefusal[]): string | null {
     if (refusals.length === 0) return null;
     const lang = noticeLanguage(this.engine.config?.language);
-    return refusals.map((r) => originRunNotice(task.title, r, lang)).join('\n');
+    // One line per target and origin: a run that tried the same send again refused one thing, not two.
+    return [...new Set(refusals.map((r) => originRunNotice(task.title, r, lang)))].join('\n');
   }
 
   /** The worker's own sentences in the instance's notice language, read per notice (`notice-language.ts`). */
@@ -2331,7 +2335,9 @@ export class WorkerLoop {
       // Nor is a run a non-owner started by hand: a retry carries no request, so it would run as
       // the schedule's run, not the request's (§3.12 point 6, "once per request").
       const taskManager = this.engine.getTaskManager();
-      const willRetry = this.#recordRun(taskManager, task.id, errorMsg, status, entry);
+      const refusedNotice = typeof err === 'object' && err !== null ? ORIGIN_NOTICE_OF_ERROR.get(err) : undefined;
+      const recordedError = refusedNotice === undefined ? errorMsg : `${refusedNotice}\n\n${errorMsg}`;
+      const willRetry = this.#recordRun(taskManager, task.id, recordedError, status, entry);
 
       // If the task was parked on a human it was interrupted while waiting.
       // It used to be RESOLVED with 'Task failed while waiting for your
@@ -3285,11 +3291,20 @@ export class WorkerLoop {
     // not given comes from this trigger, by whom it was set up.
     const instructionCounts = ownerInstructionCounts(task);
     const runOrigin = this.#triggerSendOrigin(task, instructionCounts);
-    const result = await session.run(prompt, {
-      triggerOrigin: task.source, triggerId: task.id, principal: runAs,
-      ...(instructionCounts ? { ownerInstruction: `${task.title}\n${task.description}` } : {}),
-      ...(runOrigin !== undefined ? { sendOrigin: runOrigin } : {}),
-    });
+    let result: string;
+    try {
+      result = await session.run(prompt, {
+        triggerOrigin: task.source, triggerId: task.id, principal: runAs,
+        ...(instructionCounts ? { ownerInstruction: `${task.title}\n${task.description}` } : {}),
+        ...(runOrigin !== undefined ? { sendOrigin: runOrigin } : {}),
+      });
+    } catch (err: unknown) {
+      // A run that fails, times out or is stopped after a send was refused still says so in its
+      // recorded result: the owner learns of the refusal from the result, not from the model.
+      const refusedBeforeEnd = this.#originRefusedNotice(task, session.getOriginRefusals?.() ?? []);
+      if (refusedBeforeEnd !== null && typeof err === 'object' && err !== null) ORIGIN_NOTICE_OF_ERROR.set(err, refusedBeforeEnd);
+      throw err;
+    }
     // A send this run refused because the owner did not name its target is said in the result,
     // with where the target came from and the way through the chat.
     const originRefused = this.#originRefusedNotice(task, session.getOriginRefusals?.() ?? []);
