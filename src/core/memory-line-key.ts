@@ -25,8 +25,9 @@ export function stripLinePrefixes(line: string): string {
  *
  * Only the hash is stored, never the text. Its limit: the hash of a short line is open to a
  * guess-and-compare, so a line removed by `memory_delete` (a soft delete, whose twin rows stay
- * recoverable too) leaves a key a guess can confirm. The erasures remove the keys of the lines
- * they erase.
+ * recoverable too) leaves a key a guess can confirm, and so does a line the memory upkeep
+ * removes. The erasures — the memory view's erase (`MemoryFacade.delete`) and the wipe of all
+ * data — remove the keys of the lines they erase.
  */
 export function untrustedLineKey(line: string): string | null {
   const body = stripLinePrefixes(line).toLowerCase();

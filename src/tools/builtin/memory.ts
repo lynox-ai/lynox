@@ -68,7 +68,7 @@ function cameInUntrusted(agent: IAgent, lines: readonly string[], namespace: Mem
  * the mark from); a lookup that fails marks every line, so a broken graph does not pass for a
  * clean one.
  */
-function untrustedLinesOf(agent: IAgent, namespace: MemoryNamespace): (line: string) => boolean {
+function untrustedLinesOf(agent: IAgent, namespace: MemoryNamespace, onFailure: 'mark' | 'throw' = 'mark'): (line: string) => boolean {
   const kg = agent.toolContext.knowledgeLayer;
   if (!kg?.untrustedTextsIn && !kg?.untrustedLineKeysIn) return () => false;
   let texts: string[];
@@ -76,7 +76,10 @@ function untrustedLinesOf(agent: IAgent, namespace: MemoryNamespace): (line: str
   try {
     texts = (kg.untrustedTextsIn?.(namespace) ?? []).map(t => t.toLowerCase());
     keys = kg.untrustedLineKeysIn?.(namespace) ?? new Set<string>();
-  } catch {
+  } catch (err: unknown) {
+    // A writer deciding what to record asks with 'throw': a failed lookup refuses its write
+    // rather than record every line it touches as marked for good.
+    if (onFailure === 'throw') throw err;
     return () => true;
   }
   if (texts.length === 0 && keys.size === 0) return () => false;
@@ -91,8 +94,8 @@ function untrustedLinesOf(agent: IAgent, namespace: MemoryNamespace): (line: str
 
 /**
  * Record `lines` — written to the flat file of `namespace` — as marked, before they are written:
- * a write whose mark cannot be recorded throws here and is not made. No graph, nothing to record
- * (the read paths then mark nothing either).
+ * a write whose mark cannot be recorded throws here and is not made (`refusedUnmarked`). No
+ * graph, nothing to record (the read paths then mark nothing either).
  */
 function recordUntrustedLines(agent: IAgent, namespace: MemoryNamespace, lines: readonly string[]): void {
   const kg = agent.toolContext.knowledgeLayer;
@@ -101,6 +104,16 @@ function recordUntrustedLines(agent: IAgent, namespace: MemoryNamespace, lines: 
   // the text handed in: both are recorded.
   const mask = agent.memory?.maskText?.bind(agent.memory);
   kg.markUntrustedLines(namespace, [...new Set(lines.flatMap(l => [...untrustedLineKeys(l), ...(mask ? untrustedLineKeys(mask(l)) : [])]))]);
+}
+
+/** Run a writer's mark decision and record; a failure refuses the write with this answer. */
+function refusedUnmarked(record: () => void): string | null {
+  try {
+    record();
+    return null;
+  } catch {
+    return 'Not written: whether this text came in untrusted could not be recorded, and memory text is not written without that. Nothing was changed; try again.';
+  }
 }
 
 /** `text` with each line `isUntrusted` holds for wrapped as untrusted data. */
@@ -394,8 +407,15 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
     });
     const memory = agent.memory;
     // Before the write: a line written on an untrusted turn is recorded as marked (it has no
-    // source line to inherit a mark from). A failed record throws, and nothing is written.
-    if (sourceUntrusted) recordUntrustedLines(agent, input.namespace, [input.content]);
+    // source line to inherit a mark from). A failed record refuses the write. A line the file
+    // already holds is not recorded: storing a copy of it adds no text, and recording it would
+    // let an untrusted turn mark the user's own lines for good.
+    if (sourceUntrusted) {
+      const held = new Set(untrustedLineKeys((scopeRef ? await memory.loadScoped(input.namespace, scopeRef) : await memory.load(input.namespace)) ?? ''));
+      const refusal = refusedUnmarked(() => recordUntrustedLines(agent, input.namespace,
+        input.content.split('\n').filter(l => { const k = untrustedLineKey(l); return k !== null && !held.has(k); })));
+      if (refusal !== null) return refusal;
+    }
     return withInstanceWrite(agent, { site: 'memory_store#create', kind: 'create', store: 'memory', target: () => memoryTarget(input.namespace, ['scope', scopeRef]), main: ['append'] }, async (w) => {
       if (scopeRef) {
         await w.run('append', () => memory.appendScoped(input.namespace, input.content, scopeRef), ifTrue);
@@ -628,22 +648,30 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
     // The lines this edit would produce are recorded as marked before it is made, the way
     // `updateScoped` makes it (first occurrence replaced): when the turn is untrusted, or when
     // a line the edit rewrites was marked — new text derived from a marked line keeps its mark.
+    // Lines are counted, not looked up: a rewritten line can still stand elsewhere in the file.
+    const countLines = (lines: readonly string[]): Map<string, number> => lines.reduce((m, l) => m.set(l, (m.get(l) ?? 0) + 1), new Map<string, number>());
+    const gained = (from: Map<string, number>, to: Map<string, number>): string[] => [...to].filter(([l, n]) => l.trim() && n > (from.get(l) ?? 0)).map(([l]) => l);
+    const beforeCount = countLines(before.split('\n'));
+    let marksEdit = false;
     if (input.old_content && before.includes(input.old_content)) {
-      const beforeLines = before.split('\n');
-      const afterLines = before.replace(input.old_content, input.new_content).split('\n');
-      const prior = new Set(beforeLines);
-      const after = new Set(afterLines);
-      const produced = afterLines.filter(l => l.trim() && !prior.has(l));
-      const isMarked = untrustedLinesOf(agent, input.namespace);
-      if (produced.length > 0 && (deriveTurnUntrusted(agent) || beforeLines.some(l => l.trim() && !after.has(l) && isMarked(l)))) {
-        recordUntrustedLines(agent, input.namespace, produced);
-      }
+      const afterCount = countLines(before.replace(input.old_content, input.new_content).split('\n'));
+      const refusal = refusedUnmarked(() => {
+        const isMarked = untrustedLinesOf(agent, input.namespace, 'throw');
+        marksEdit = deriveTurnUntrusted(agent) || gained(afterCount, beforeCount).some(isMarked);
+        if (marksEdit) recordUntrustedLines(agent, input.namespace, gained(beforeCount, afterCount));
+      });
+      if (refusal !== null) return refusal;
     }
     const exact = await withInstanceWrite(agent, { site: 'memory_update#exact', kind: 'change', store: 'memory', target: () => memoryTarget(input.namespace, ['scope', scopeRef]), main: ['update'] }, async (w) => {
       const exactOk = await w.run('update', () => (scopeRef
         ? memory.updateScoped(input.namespace, input.old_content, input.new_content, scopeRef)
         : memory.update(input.namespace, input.old_content, input.new_content)), ifTrue);
 
+      if (exactOk && marksEdit) {
+        // What the file holds after the write is recorded as well: an edit of the same file in
+        // between can make the write differ from the prediction above.
+        recordUntrustedLines(agent, input.namespace, gained(beforeCount, countLines((await readFile()).split('\n'))));
+      }
       if (exactOk) {
         // Mirror to KG so entity re-extraction picks up the corrected text — but NOT on a
         // turn that read external content. `updateMemoryText` re-extracts entities into the
@@ -732,12 +760,16 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
     const replacesUntrusted = cameInUntrusted(agent, linesToRewrite.map(l => l.originalLine), input.namespace);
     // Recorded as marked before anything is written: a superseded line keeps its own mark, and
     // the new line is marked when the turn is untrusted or it replaces a marked line.
-    const isMarked = untrustedLinesOf(agent, input.namespace);
-    const rewritesMarked = linesToRewrite.filter(l => isMarked(l.originalLine)).map(l => l.markedLine);
-    recordUntrustedLines(agent, input.namespace, [
-      ...rewritesMarked,
-      ...(deriveTurnUntrusted(agent) || rewritesMarked.length > 0 ? [input.new_content] : []),
-    ]);
+    // (A superseded line is recorded too: marked by its row alone, its mark would end with it.)
+    const fallbackRefusal = refusedUnmarked(() => {
+      const isMarked = untrustedLinesOf(agent, input.namespace, 'throw');
+      const rewritesMarked = linesToRewrite.filter(l => isMarked(l.originalLine)).map(l => l.markedLine);
+      recordUntrustedLines(agent, input.namespace, [
+        ...rewritesMarked,
+        ...(deriveTurnUntrusted(agent) || rewritesMarked.length > 0 ? [input.new_content] : []),
+      ]);
+    });
+    if (fallbackRefusal !== null) return fallbackRefusal;
 
     // Persist via the same scoped/unscoped path the memory abstraction uses.
     // The IMemory interface doesn't expose a bulk "save" for scoped writes,
@@ -980,9 +1012,14 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
     const sourceUntrusted = deriveTurnUntrusted(agent) || cameInUntrusted(agent, [matchedLine], input.namespace, fromRef);
     // The result quotes the line, so a line that came in untrusted is quoted wrapped as such.
     const quoteUntrusted = untrustedLinesOf(agent, input.namespace)(matchedLine);
-    // The copy is the same line in the same namespace, so a recorded mark already covers it;
-    // recorded again when the turn is untrusted or the line is marked another way (its row).
-    if (quoteUntrusted || deriveTurnUntrusted(agent)) recordUntrustedLines(agent, input.namespace, [matchedLine]);
+    // The copy is the original line word for word, in the same namespace: a recorded mark
+    // already covers it. It is recorded when the original is marked another way (its row alone,
+    // whose mark would end when the row is retired). The turn cannot change the copy's text, so
+    // an untrusted turn alone does not record it — that would let it mark the user's own lines.
+    const promoteRefusal = refusedUnmarked(() => {
+      if (untrustedLinesOf(agent, input.namespace, 'throw')(matchedLine)) recordUntrustedLines(agent, input.namespace, [matchedLine]);
+    });
+    if (promoteRefusal !== null) return promoteRefusal;
 
     const memory = agent.memory;
     return withInstanceWrite(agent, { site: 'memory_promote#move', kind: 'move', store: 'memory', target: () => memoryTarget(input.namespace, ['from', fromRef], ['to', toRef]), main: ['append', 'delete'] }, async (w) => {

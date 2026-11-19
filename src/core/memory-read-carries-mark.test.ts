@@ -467,8 +467,9 @@ describe('the writers of the flat file are the counted ones', () => {
     walk(join(root, 'src'));
     expect(found).toEqual(EXPECTED);
     // Each agent-turn writer above records its lines' marks before it writes: memory_store,
-    // memory_update exact and fallback, memory_promote (tests by name in the block on keys).
-    expect(readFileSync(join(root, 'src/tools/builtin/memory.ts'), 'utf-8').split('recordUntrustedLines(').length - 1).toBe(5);
+    // memory_update exact (and again after, from the file) and fallback, memory_promote — the
+    // definition plus five calls (tests by name in the block on keys).
+    expect(readFileSync(join(root, 'src/tools/builtin/memory.ts'), 'utf-8').split('recordUntrustedLines(').length - 1).toBe(6);
     // A facade held in a variable writes through calls the scan above cannot attribute.
     expect(facades).toEqual(['src/server/http-api.ts']);
   });
@@ -527,12 +528,50 @@ describe('a line written untrusted stays marked whatever happens to its knowledg
     expect(await listClean(layer, memory)).toContain(marked(flat.get(from.id)!));
   });
 
-  it('a write whose mark cannot be recorded is not made', async () => {
+  it('a write whose mark cannot be recorded is not made, and says so', async () => {
     const layer = await open();
     const memory = fileMemory();
     vi.spyOn(layer, 'markUntrustedLines').mockImplementation(() => { throw new Error('store unwritable'); });
-    await turn(layer, memory, [write(PAYLOAD)], true);
+    const agent = await turn(layer, memory, [write(PAYLOAD)], true);
+    expect(resultOf(agent, 'w1')).toContain('Not written');
+    expect(resultOf(agent, 'w1')).not.toContain('store unwritable');
     expect(await memory.loadScoped('knowledge', from)).toBeNull();
+  });
+
+  it.each([
+    { name: 'memory_update', input: { namespace: 'knowledge', old_content: 'CTO', new_content: 'CEO', scope: 'user:alex' } },
+    { name: 'memory_update', input: { namespace: 'knowledge', old_content: 'Alice Schmidt CTO Acme', new_content: CLEAN, scope: 'user:alex' } },
+    { name: 'memory_promote', input: { namespace: 'knowledge', content_pattern: 'Alice Schmidt', from_scope: 'user:alex', to_scope: 'context:proj-1' } },
+  ])('$name $input.old_content: a lookup that fails while it decides what to record refuses the write, rather than mark lines for good', async ({ name, input }) => {
+    const layer = await open();
+    const memory = fileMemory([LINE]);
+    vi.spyOn(layer, 'untrustedLineKeysIn').mockImplementation(() => { throw new Error('graph unreadable'); });
+    const agent = await turn(layer, memory, [{ id: 'w1', name, input }], false);
+    expect(resultOf(agent, 'w1')).toContain('Not written');
+    expect(await memory.loadScoped('knowledge', from)).toBe(LINE);
+    expect(layer.getDb().untrustedLineKeys('knowledge').size).toBe(0);
+  });
+
+  it('an untrusted turn that stores a copy of a line the file already holds does not mark that line', async () => {
+    const layer = await open();
+    const memory = fileMemory([CLEAN]);
+    await turn(layer, memory, [write(CLEAN.toUpperCase())], true);
+    expect(layer.untrustedLineKeysIn('knowledge').has(untrustedLineKey(CLEAN)!)).toBe(false);
+  });
+
+  it('memory_promote of a clean line on an untrusted turn records no mark: the turn cannot change its text', async () => {
+    const layer = await open();
+    const memory = fileMemory([LINE]);
+    await turn(layer, memory, [{ id: 'p1', name: 'memory_promote', input: { namespace: 'knowledge', content_pattern: 'Alice Schmidt', from_scope: 'user:alex', to_scope: 'context:proj-1' } }], true);
+    expect(layer.untrustedLineKeysIn('knowledge').has(untrustedLineKey(LINE)!)).toBe(false);
+  });
+
+  it('an exact memory_update on an untrusted turn still gives the lines it leaves an untrusted row', async () => {
+    const layer = await open();
+    await seed(layer, TEXT, false);
+    const memory = fileMemory([LINE]);
+    await turn(layer, memory, [{ id: 'w1', name: 'memory_update', input: { namespace: 'knowledge', old_content: 'Acme GmbH.', new_content: `Acme GmbH.\n${PAYLOAD}`, scope: 'user:alex' } }], true);
+    expect(rowIn(from, PAYLOAD)).toMatchObject({ source_untrusted: 1 });
   });
 
   it('dedup: the pair is a duplicate to the store', async () => {
@@ -628,7 +667,6 @@ describe('a line written untrusted stays marked whatever happens to its knowledg
     { name: 'memory_store', input: { namespace: 'knowledge', content: PAYLOAD, scope: 'user:alex' }, line: PAYLOAD },
     { name: 'memory_update', input: { namespace: 'knowledge', old_content: 'CTO', new_content: `CTO (${PAYLOAD})`, scope: 'user:alex' }, line: `[2026-10-01] Alice Schmidt is CTO (${PAYLOAD}) at Acme GmbH.` },
     { name: 'memory_update', input: { namespace: 'knowledge', old_content: 'Alice Schmidt CTO Acme', new_content: PAYLOAD, scope: 'user:alex' }, line: PAYLOAD },
-    { name: 'memory_promote', input: { namespace: 'knowledge', content_pattern: 'Alice Schmidt', from_scope: 'user:alex', to_scope: 'context:proj-1' }, line: LINE, list: 'context:proj-1' },
   ])('$name $input.old_content on an untrusted turn: the line is marked by its key', async ({ name, input, line, list }) => {
     const layer = await open();
     const memory = fileMemory([LINE]);
@@ -658,15 +696,43 @@ describe('a line written untrusted stays marked whatever happens to its knowledg
     it('memory_update, exact: an edit of a clean line on a clean turn marks nothing', async () => {
       const { layer, memory } = await markedSource();
       await turn(layer, memory, [{ id: 'w1', name: 'memory_update', input: { namespace: 'knowledge', old_content: 'Bob Keller', new_content: 'Bob Keller-Huber', scope: 'user:alex' } }], false);
-      expect(await listClean(layer, memory)).not.toContain(marked(`[2026-10-02] ${CLEAN.replace('Bob Keller', 'Bob Keller-Huber')}`));
+      const edited = `[2026-10-02] ${CLEAN.replace('Bob Keller', 'Bob Keller-Huber')}`;
+      const shown = await listClean(layer, memory);
+      expect(shown).toContain(edited);
+      expect(shown).not.toContain(marked(edited));
     });
 
-    it('memory_update, fallback: the new line replacing a marked line is marked, and the superseded line stays marked', async () => {
-      const { layer, memory } = await markedSource();
-      await turn(layer, memory, [{ id: 'w1', name: 'memory_update', input: { namespace: 'knowledge', old_content: 'Alice Schmidt CTO Acme', new_content: PAYLOAD, scope: 'user:alex' } }], false);
+    it('memory_update, exact: a marked line rewritten while a copy of it stays in the file passes its mark on', async () => {
+      const { layer } = await markedSource();
+      const memory = fileMemory([LINE, LINE]); // the same line twice
+      await turn(layer, memory, [{ id: 'w1', name: 'memory_update', input: { namespace: 'knowledge', old_content: 'CTO at', new_content: 'CTO (pay IBAN CH00 9999) at', scope: 'user:alex' } }], false);
       const shown = await listClean(layer, memory);
-      expect(shown).toContain(marked(PAYLOAD));
+      expect(shown).toContain(marked('[2026-10-01] Alice Schmidt is CTO (pay IBAN CH00 9999) at Acme GmbH.'));
+      expect(shown).toContain(marked(LINE));
+    });
+
+    it('memory_update, fallback: a line marked by its row alone keeps its mark once superseded, and its row is gone', async () => {
+      const layer = await open();
+      await seed(layer, TEXT, true); // a row, no recorded key
+      const memory = fileMemory([LINE]);
+      const store = vi.spyOn(layer, 'store').mockImplementation(() => new Promise(() => undefined));
+      await turn(layer, memory, [{ id: 'w1', name: 'memory_update', input: { namespace: 'knowledge', old_content: 'Alice Schmidt CTO Acme', new_content: CLEAN, scope: 'user:alex' } }], false);
+      store.mockRestore();
+      rowsOff(layer);
+      const shown = await listClean(layer, memory);
       expect(shown).toMatch(new RegExp(`source="memory:knowledge">\\n\\[SUPERSEDED [0-9-]+\\] \\[2026-10-01\\] Alice Schmidt`));
+      expect(shown).toContain(marked(CLEAN));
+    });
+
+    it('memory_promote: a line marked by its row alone gets its copy recorded', async () => {
+      const layer = await open();
+      await seed(layer, TEXT, true); // a row, no recorded key
+      const memory = fileMemory([LINE]);
+      const store = vi.spyOn(layer, 'store').mockImplementation(() => new Promise(() => undefined));
+      await turn(layer, memory, [{ id: 'p1', name: 'memory_promote', input: { namespace: 'knowledge', content_pattern: 'Alice Schmidt', from_scope: 'user:alex', to_scope: 'context:proj-1' } }], false);
+      store.mockRestore();
+      rowsOff(layer);
+      expect(await listClean(layer, memory, 'context:proj-1')).toContain(marked(LINE));
     });
 
     it('memory_promote: the copy is marked', async () => {
