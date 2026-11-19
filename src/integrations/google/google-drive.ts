@@ -10,6 +10,7 @@ import { pv } from '../../core/prompt-value.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
 import { namedTarget, withoutAddresses } from '../../core/audit-log.js';
+import { mailTargets } from '../../core/send-target.js';
 
 // === Types ===
 
@@ -125,6 +126,8 @@ const DRIVE_WRITE_ACTIONS = new Set<DriveInput['action']>(['upload', 'create_doc
 export function createDriveTool(getAuth: () => GoogleAuth | null): ToolEntry<DriveInput> {
   return {
     outwardWrite: (input) => (DRIVE_WRITE_ACTIONS.has(input.action) ? input.action : null),
+    // A share sends the file to the address it names. No other action names a recipient.
+    sendTargets: (input) => (input.action !== 'share' ? null : input.email ? mailTargets([input.email]) : []),
     // A search names only that it searched: its query can name a customer. `move` reads the
     // file's folders before it moves it.
     outwardRead: (input) => {

@@ -25,6 +25,8 @@ import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 import { sameBoundValues, acceptedValueMatcher, type GrantDecision } from '../../core/workflow-grant.js';
 import { escapeHiddenInJson, fixedRunRefusal, hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
+import { templateRefIssue, templateRefStep } from '../../orchestrator/template-refs.js';
+import { isStepIdShape, runStepIds, shownStepId, stepIdIssue, stepRunNames } from '../../orchestrator/step-id.js';
 import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
 import { chatThreadOf } from './private-thread.js';
@@ -320,19 +322,26 @@ function buildProgressHooks(pipelineStreamHandler: EmittingStreamHandler | null,
 }
 
 /** @internal exported for tests: the run's result as the calling model reads it. */
-export function formatResult(state: RunState, name: string, resultLimit?: number): string {
+export function formatResult(state: RunState, name: string, resultLimit?: number, stepOrder?: readonly string[]): string {
   // The name and the step ids are names, which take none of the places real text puts a character
   // that renders as nothing; each goes in as a placeholder and is escaped on its own below.
   const nonce = randomUUID();
   const names: string[] = [];
   const asName = (value: string): string => `__lynox_name_${names.push(value) - 1}_${nonce}__`;
+  // A step id outside the shape (`step-id.ts`) goes in by its position in `stepOrder`, never as its
+  // text. A stored workflow's run already carries its steps under their run names (`runStepIds`).
+  const asStepId = (id: string): string => {
+    if (isStepIdShape(id)) return asName(id);
+    const at = stepOrder?.indexOf(id) ?? -1;
+    return shownStepId(id, at === -1 ? undefined : at);
+  };
   const steps: PipelineStepResult[] = [];
   let totalDuration = 0;
   let totalCost = 0;
 
   for (const [, output] of state.outputs) {
     steps.push({
-      stepId: asName(output.stepId),
+      stepId: asStepId(output.stepId),
       result: truncateResult(output.result, resultLimit),
       durationMs: output.durationMs,
       tokensIn: output.tokensIn,
@@ -344,7 +353,7 @@ export function formatResult(state: RunState, name: string, resultLimit?: number
       // fixed sentence instead, as one level up in a nested run (`spawnPipeline`), and where the
       // reason is: diagnose_workflow_run shows it, quoted (U-192).
       // The step id inside it is a name too: escaped like the `stepId` field (`asName`).
-      error: output.reportedFailure === true ? reportedFailureForCaller(asName(output.stepId)) : output.error,
+      error: output.reportedFailure === true ? reportedFailureForCaller(asStepId(output.stepId)) : output.error,
     });
     totalDuration += output.durationMs;
     totalCost += output.costUsd;
@@ -359,7 +368,7 @@ export function formatResult(state: RunState, name: string, resultLimit?: number
   // run's error (the reason) stays out (U-192 1b). A step already named above is not named twice.
   const runLevelNotice = reportedBy !== undefined
     && ![...state.outputs.values()].some(o => o.stepId === reportedBy && o.reportedFailure === true)
-    ? reportedFailureForCaller(asName(reportedBy)) : undefined;
+    ? reportedFailureForCaller(asStepId(reportedBy)) : undefined;
   const result: PipelineResult = {
     pipelineId: state.runId,
     name: asName(name),
@@ -462,6 +471,11 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
   if (steps.length > maxSteps) {
     return `Error: Workflow exceeds maximum of ${maxSteps} steps (got ${steps.length}).`;
   }
+
+  // A step id has a limited shape (`step-id.ts`): a run's result and its diagnosis show it to the
+  // model. Checked before the duplicate check, so no refusal quotes an id outside it back.
+  const shapeIssue = stepIdIssue(steps);
+  if (shapeIssue) return `Error: ${shapeIssue}`;
 
   // Validate unique IDs
   const ids = new Set<string>();
@@ -646,6 +660,9 @@ export interface RunSavedWorkflowResult {
   /** For a refusal whose `error` names stored text: the same refusal in words lynox wrote alone,
    *  for a sink that may not carry stored text (`FixedTextError`). */
   fixedError?: string | undefined;
+  /** For a refusal because a step refers to the output of a step its run cannot read
+   *  (`templateRefIssue`): that step's position, 1-based, which the owner is told in fixed words. */
+  unresolvedRefStep?: number | undefined;
 }
 
 /**
@@ -881,7 +898,8 @@ export async function runSavedWorkflow(
     };
   }
 
-  // Asked of the workflow as read here, so no edit can fall between the check and the run.
+  // Asked of the workflow as read here, so no edit can fall between the check and the run. As stored:
+  // the owner's stamp binds the stored definition, so the check must see that, not a renamed copy.
   const refused = runtime?.checkWorkflow?.(planned) ?? null;
   if (refused !== null) return { ok: false, error: refused };
 
@@ -934,7 +952,9 @@ export async function runSavedWorkflow(
   // Each step's task without the characters that render as nothing: the save refuses them now,
   // but a workflow saved before that still carries them, and a hidden clause would run as part
   // of the step's instruction. Stripped, not refused, so it keeps running on what can be seen.
-  const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s, task: stripHidden(s.task) }));
+  // A step id stored before ids had a shape runs as `step-<n>`, so nothing the run writes quotes it.
+  // The names come from the stored plan as stored, as every other reader computes them.
+  const steps: InlinePipelineStep[] = runStepIds(planned.steps.map(s => ({ ...s, task: stripHidden(s.task) })), stepRunNames(planned.steps));
   if (steps.length === 0) {
     return { ok: false, error: 'Workflow has no steps to execute.' };
   }
@@ -944,6 +964,13 @@ export async function runSavedWorkflow(
   }
 
   const writeNotes = new Set<string>();
+
+  // A reference no run resolves (`template-refs.ts`), here before `validateManifest` refuses it, so
+  // the caller can tell the owner which step in fixed words (`unresolvedRefStep`).
+  const refIssue = templateRefIssue(steps, { params: bound.params });
+  if (refIssue !== null) {
+    return { ok: false, error: `Workflow execution failed: Invalid manifest: ${refIssue}`, unresolvedRefStep: templateRefStep(refIssue) };
+  }
 
   try {
     // Honour the workflow's stored failure strategy instead of hardcoding 'stop'
@@ -1343,7 +1370,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       // the next retry from a third chat skip the check while this chat is contained.
       recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint, originThreadId: reader ?? origin, ranAs: principalKey(runAs), ranDigest: prev.ranDigest });
       debitInSessionWorkflowCost(deps, state, prev.manifest.agents, prev.state.outputs);
-      const text = formatResult(state, planned.name, resultLimit);
+      const text = formatResult(state, planned.name, resultLimit, prev.manifest.agents.map(a => a.id));
       // Set last: a throw above returns an error, and the end row must not say success then.
       retryOutcome = state.status === 'completed' && !memberRefused ? 'success' : 'failed';
       return text;
@@ -1391,20 +1418,24 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     // One run's changes: drop a step or change its task. Ids and the step list change only in the
     // stored workflow (`update_workflow_steps`), where they are saved and checked.
     if (input.modifications.some(m => m.action !== 'remove' && m.action !== 'update_task')) {
-      return 'Error: run_workflow changes a run\'s steps with "remove" and "update_task" only. To add or rename a step, edit the workflow with update_workflow_steps.';
+      return 'Error: run_workflow changes a run\'s steps with "remove" and "update_task" only. To add or rename a step, or change what a step reads (set_input_from), edit the workflow with update_workflow_steps.';
     }
     const error = applyModifications(steps, input.modifications);
     if (error) return error;
   }
   // Each step's task without the characters that render as nothing, after the modifications too.
   for (const s of steps) s.task = stripHidden(s.task);
+  // A step id stored before ids had a shape runs as `step-<n>`, after the modifications (which
+  // address steps by their stored id), so nothing the run writes quotes it. The names come from the
+  // stored plan, so a removed step does not shift them.
+  const runSteps = runStepIds(steps, stepRunNames(planned.steps));
 
-  if (steps.length === 0) {
+  if (runSteps.length === 0) {
     return 'Error: All steps were removed. Nothing to execute.';
   }
 
   const maxSteps = maxStepsFor(deps.config);
-  if (steps.length > maxSteps) {
+  if (runSteps.length > maxSteps) {
     return `Error: Workflow exceeds maximum of ${maxSteps} steps.`;
   }
 
@@ -1414,7 +1445,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   try {
     const manifest = buildManifest(
       planned.name,
-      steps,
+      runSteps,
       input.on_failure ?? 'stop',
       { params: bound.params },
     );
@@ -1477,7 +1508,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     }
 
     debitInSessionWorkflowCost(deps, state, manifest.agents, null);
-    const text = formatResult(state, planned.name, resultLimit);
+    const text = formatResult(state, planned.name, resultLimit, runSteps.map(s => s.id));
     // Set last: a throw above returns an error, and the end row must not say success then.
     outcome = state.status === 'completed' && !memberRefused ? 'success' : 'failed';
     return text;

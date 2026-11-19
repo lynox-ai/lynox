@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { ToolEntry, PlannedPipeline } from '../../types/index.js';
+import { stepIdIssue } from '../../orchestrator/step-id.js';
 import { buildManifest, storePipeline } from './pipeline.js';
 import { validateManifest } from '../../orchestrator/validate.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
@@ -182,6 +183,11 @@ export const importWorkflowTool: ToolEntry<ImportWorkflowInput> = {
       ...(content.on_failure !== undefined ? { on_failure: content.on_failure } : {}),
       ...(content.limits !== undefined ? { limits: content.limits } : {}),
     };
+
+    // A step id's shape first (`step-id.ts`): the graph check below quotes ids in its refusals, and a
+    // shared block's id is someone else's text.
+    const shapeIssue = stepIdIssue(planned.steps);
+    if (shapeIssue) return `Error: ${shapeIssue}`;
 
     // Same graph + shape gate every run/edit path runs (no dangling input_from, no
     // cycle, inline steps have a task, step ceiling). Reject a structurally broken
