@@ -6,6 +6,7 @@
  *
  */
 
+import { recipientConfirmDigest, recipientsConfirmable } from '../core/recipient-confirm.js';
 import { errorText, errorTextReduced, processErrorText } from '../core/error-egress.js';
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
@@ -56,6 +57,7 @@ import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js
 import { openRunGroup } from '../core/run-group.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
+import type { UntrustedCause } from '../core/untrusted-signals.js';
 import { getLynoxDir, loadConfig, describePinForDisplay, admitBackgroundModel, poolEndpointFor, POOL_ANTHROPIC_ENDPOINT, POOL_MISTRAL_ENDPOINTS } from '../core/config.js';
 import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
@@ -1910,6 +1912,18 @@ const ERASURE_MANY_UNKNOWN = 20;
 
 // ── Server Class ─────────────────────────────────────────────────────────────
 
+/** Longer than any message a person types into the composer: such a `typed` is not recorded. */
+export const TYPED_TEXT_MAX = 20_000;
+
+/**
+ * The run's typed text from a request: the client's `typed` field, only when it is a non-empty
+ * string found word for word in the request's task, cleaned like the task. Anything else: none.
+ */
+export function typedOf(typed: unknown, taskText: string): { typedText: string } | undefined {
+  if (typeof typed !== 'string' || typed.trim() === '' || typed.length > TYPED_TEXT_MAX || !taskText.includes(typed)) return undefined;
+  return { typedText: withoutTypedCredentials(stripUntrustedSeparators(typed)) };
+}
+
 export class LynoxHTTPApi {
   private engine: Engine | null = null;
   private clientErrorResolver: (() => SecretStoreLike | null) | null = null;
@@ -2895,6 +2909,20 @@ export class LynoxHTTPApi {
   /** What the browser attached on its own, for `_refusedAsAmbientCrossSite`. */
   private _ambientOf(req: IncomingMessage, secret: string | undefined): 'none' | 'no-secret' | 'cookie' {
     return !secret ? 'no-secret' : (this._authOrigin.get(req) ?? '').startsWith('cookie:') ? 'cookie' : 'none';
+  }
+
+  /**
+   * The mark a trigger's instruction gets when the owner's token, not the owner's browser
+   * session, wrote it (`created_untrusted`), or undefined when the words count as the owner's.
+   * The same line `typed` draws: a token's client (a script, an integration) passes on text it
+   * did not have typed, so the targets it names must not be owner-known in the trigger's run
+   * (`ownerInstructionCounts`). Stored as the cause a webhook event's content gets, content that
+   * reached the engine from outside: every reader takes it as not clean. A mandate's write is
+   * marked by its own rules, so only the owner's principal is looked at here.
+   */
+  private _ownerTokenWords(req: IncomingMessage): UntrustedCause | undefined {
+    if (!isOwnerPrincipal(this._principalOf(req))) return undefined;
+    return this._ambientOf(req, process.env['LYNOX_HTTP_SECRET']) === 'none' ? 'external-tool' : undefined;
   }
 
   /** The route a request matches, as registered (`/api/x/:id`), or null for none. */
@@ -5023,6 +5051,15 @@ export class LynoxHTTPApi {
         principal: this._principalOf(req),
         // Said by the client that will show the review (the web UI), for this run only.
         showsChangesetReview: b?.['shows_changeset_review'] === true,
+        // Only what the person typed, kept apart from the loaded context and the files above:
+        // the boundary is this string, not a sentinel in the composed message, which loaded
+        // content could carry itself. Never derived from `task`: a task can be a prefill (a
+        // mail's subject, a chip, a retry), which the person did not write. The client sends
+        // `typed` only for a message started from an empty composer, and it counts only when it
+        // stands in this request's task word for word. Only from the owner's browser session, as
+        // "Confirm recipients" takes it: a token's client (a script, an integration) passes on
+        // text it did not have typed, and it must not make an address in it the owner's.
+        ...(this._ambientOf(req, process.env['LYNOX_HTTP_SECRET']) !== 'none' ? (typedOf(b?.['typed'], taskText) ?? {}) : {}),
       };
       // Every question this run asks carries who runs it (§3.13 E2): taken from the request
       // that started the run, never read later from the session, whose principal moves on
@@ -9305,6 +9342,11 @@ export class LynoxHTTPApi {
             running: visible,
             stoppable: visible && loop?.runningStoppable(trigger.id) === true,
             workflow_awaits_stamp: workflow !== undefined && history?.workflowStampState(workflow) === 'awaits_owner_stamp',
+            // A trigger from before its creator was recorded sends to nobody its instruction names
+            // until the owner confirms its recipients; the view offers that to the owner only, and
+            // only for a trigger whose run can send (an agent's or a workflow's run, not a reminder).
+            recipients_unconfirmed: isOwnerPrincipal(principal) && recipientsConfirmable(trigger)
+              && (trigger.effect === undefined || trigger.effect === null || trigger.effect === 'run_agent' || trigger.effect === 'run_workflow'),
             ...(isBulk ? { bulk_host: bulkSystem === undefined ? null : externalHostOf(bulkSystem) } : {}),
           };
         });
@@ -9420,6 +9462,12 @@ export class LynoxHTTPApi {
           if (this._refuseUnlessOwner(_req, res, 'grant a workflow unattended writes')) return;
           const { workflowGrantEnabled, acceptWorkflowGrant } = await import('../core/workflow-grant.js');
           if (!workflowGrantEnabled()) { errorResponse(res, 403, 'Granting a workflow unattended writes is not enabled on this instance.'); return; }
+          // A grant makes the contract's hosts count as named by the owner, so it is given in the
+          // owner's browser session only, as recipients are confirmed: never with a token.
+          if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+            errorResponse(res, 403, 'Unattended writes are granted only in the owner\'s browser session, not with a token.', 'session_only');
+            return;
+          }
           if (typeof rawGrant !== 'object' || rawGrant === null || Array.isArray(rawGrant)) { errorResponse(res, 400, 'Invalid "grant".'); return; }
           const g = rawGrant as Record<string, unknown>;
           const engineDb = engine.getEngineDb();
@@ -9494,9 +9542,12 @@ export class LynoxHTTPApi {
         // non-run_agent effects.
         // Only the owner's request stamps; a mandate's trigger lands unconfirmed, like one
         // the agent tool creates.
+        // The stamp below is the same either way; only whose words the instruction counts as differs.
+        const tokenWords = this._ownerTokenWords(_req);
         const baseParams = {
           title, description, assignee, dueDate, createdBy, createdMandateId,
           ...(byOwner ? { confirmedAt: new Date().toISOString(), confirmedBy: createdBy } : {}),
+          ...(tokenWords !== undefined ? { createdUntrusted: tokenWords } : {}),
         };
         const task = scheduleCron
           ? taskManager.createScheduled({ ...baseParams, scheduleCron })
@@ -9569,8 +9620,15 @@ export class LynoxHTTPApi {
       try {
         // `untrusted` is what the agent's turn had taken in (task_update reads it off the agent); a
         // request does not get to say it, so it is dropped here rather than stored as sent.
+        // An owner's token that rewrites the instruction marks it, as a creation does
+        // (`_ownerTokenWords`). The store reads the mark only with a title or description edit, and
+        // only adds it: a schedule change marks nothing, and the owner's browser session clears none.
+        // A workflow's schedule is not marked, as at its creation: its instruction is the stamped
+        // steps, not its title, and a mark would start every run of it as after outside content.
         const { untrusted: _fromClient, ...edit } = body as Record<string, unknown>;
-        task = taskManager.update(params['id']!, edit as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
+        const scheduledWorkflow = engine.getRunHistory()?.getTrigger(params['id']!)?.pipeline_id;
+        const tokenWords = scheduledWorkflow ? undefined : this._ownerTokenWords(_req);
+        task = taskManager.update(params['id']!, { ...edit, ...(tokenWords !== undefined ? { untrusted: tokenWords } : {}) } as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
       } catch (err: unknown) {
         if (this._answerTodoRefusal(res, err)) return;
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
@@ -9771,7 +9829,13 @@ export class LynoxHTTPApi {
     }, ownerOnly('see what a schedule would be confirmed with')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/confirm', async (_req, res, params, body) => {
-      // Only the owner stamps (§3.12 point 2).
+      // Only the owner stamps (§3.12 point 2), and only in their browser session, as recipients
+      // are confirmed: a token, the owner's included, could otherwise stamp a schedule a run it
+      // started had just written, and that schedule would then run as the owner's instruction.
+      if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+        errorResponse(res, 403, 'A schedule is confirmed only in the owner\'s browser session, not with a token.', 'session_only');
+        return;
+      }
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       if (this._refusePaused(_req, res, taskManager, params['id']!, 'confirm')) return;
@@ -9852,6 +9916,41 @@ export class LynoxHTTPApi {
       }
       jsonResponse(res, 200, { ...triggerForRoute(out.trigger, this._principalOf(_req)), runsAs: out.runsAs });
     }, ownerOnly('take over a plan')));
+
+    // "Confirm recipients" (`recipient-confirm.ts`): the owner, in a browser session, makes a
+    // trigger from before its creator was recorded count as their own. The preview shows the
+    // instruction and its digest; the confirmation sends the digest back and records the owner
+    // as the trigger's creator, and nothing else. A token is refused, the owner's included: a
+    // script or a tool must never be able to make an instruction the owner's.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/triggers/:id/confirm-recipients-preview', async (_req, res, params) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'Run history')) return;
+      const t = history.getTrigger(params['id']!);
+      if (!t) { errorResponse(res, 404, 'Trigger not found'); return; }
+      if (!recipientsConfirmable(t)) { errorResponse(res, 409, 'This trigger has no recipients to confirm.', 'not_confirmable'); return; }
+      jsonResponse(res, 200, {
+        title: t.title, description: t.description ?? '', effect: t.effect ?? null,
+        pipeline_id: t.pipeline_id ?? null, params: t.pipeline_params ?? null, watch_config: t.watch_config ?? null,
+        expect: recipientConfirmDigest(t),
+      });
+    }, ownerOnly('confirm a trigger\'s recipients')));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/triggers/:id/confirm-recipients', async (req, res, params, body) => {
+      if (this._ambientOf(req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+        errorResponse(res, 403, 'Recipients are confirmed only in the owner\'s browser session, not with a token.', 'session_only');
+        return;
+      }
+      const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
+        ? (body as { expect: string }).expect : undefined;
+      if (expected === undefined) { errorResponse(res, 400, '"expect" is required: confirm from the preview.', 'expect_required'); return; }
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'Run history')) return;
+      const out = history.confirmTriggerRecipients(params['id']!, expected);
+      if (out === 'not_found') { errorResponse(res, 404, 'Trigger not found'); return; }
+      if (out === 'changed') { errorResponse(res, 409, 'Nothing confirmed: the trigger has changed in the meantime.', 'changed'); return; }
+      if (out === 'not_confirmable') { errorResponse(res, 409, 'This trigger has no recipients to confirm.', 'not_confirmable'); return; }
+      jsonResponse(res, 200, { confirmed: true });
+    }, ownerOnly('confirm a trigger\'s recipients')));
 
     // Run a trigger immediately, off-schedule (the Triggers-home "Run now"
     // control). Delegates to the WorkerLoop so the manual run goes through the
