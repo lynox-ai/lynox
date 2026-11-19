@@ -434,6 +434,45 @@ describe('the webhook drain', () => {
     expect(eventOf(t, id).reason).toContain('uses the event value "note"');
   });
 
+  // A step id stored before ids had a shape runs under its run name, and its references move with
+  // it: a reference the stored text shows as an unmapped param is a step's output in the run.
+  it('refuses a run in which a reference reads as a param only before the run renames its step', async () => {
+    runner.steps.value = [
+      { id: 'params ', task: 'Summarize the order' },
+      { id: 'call', task: 'Call it', tool: 'http_request', input_from: ['params '], input_template: { method: 'GET', url: '{{params .result}}' } },
+    ];
+    runner.run.mockImplementation(async (...args: unknown[]) => {
+      const opts = args[3] as { checkWorkflow?: (p: { steps: unknown[] }) => string | null };
+      const refused = opts.checkWorkflow?.({ steps: runner.steps.value }) ?? null;
+      return refused === null ? { ok: true, status: 'completed', runId: 'run-1' } : { ok: false, error: refused };
+    });
+    const t = sharedTrigger({ note: '/note' });
+    const id = deliver(t, { note: 'hello' });
+    await loop.tick();
+    await settled(t, id, 'failed');
+    expect(eventOf(t, id).reason).toContain('Step "call" uses "{{step-1.result}}" outside its task text');
+  });
+
+  // An id outside the shape that holds braces is renamed in the run; the reference the run executes
+  // is the one in the input template, and that is the one refused, by the step's run name.
+  it('refuses the reference the run executes, by the run name of a step stored with braces in its id', async () => {
+    runner.steps.value = [
+      { id: 's1', task: 'Summarize the order' },
+      { tool: '{{params.foo', id: '}}{{s1.x}}', task: 'Call it', input_from: ['s1'], input_template: { url: '{{s1.result}}' } },
+    ];
+    runner.run.mockImplementation(async (...args: unknown[]) => {
+      const opts = args[3] as { checkWorkflow?: (p: { steps: unknown[] }) => string | null };
+      const refused = opts.checkWorkflow?.({ steps: runner.steps.value }) ?? null;
+      return refused === null ? { ok: true, status: 'completed', runId: 'run-1' } : { ok: false, error: refused };
+    });
+    const t = sharedTrigger({ note: '/note' });
+    const id = deliver(t, { note: 'hello' });
+    await loop.tick();
+    await settled(t, id, 'failed');
+    expect(eventOf(t, id).reason).toContain('Step "step-2" uses "{{s1.result}}" outside its task text');
+    expect(eventOf(t, id).reason).not.toContain('{{s1.x}}');
+  });
+
   it('CONTROL: a mapped value used only in task text runs', async () => {
     runner.steps.value = [{ id: 'fetch', task: 'Answer {{params.note}}', tool: 'http_request', input_template: { method: 'GET', url: 'https://shop.example/x' } }];
     runner.run.mockImplementation(async (...args: unknown[]) => {
