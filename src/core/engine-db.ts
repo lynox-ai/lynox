@@ -1636,6 +1636,10 @@ const MIGRATIONS: string[] = [
   // this, a grant with no named row walks the whole trail.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (70);
    CREATE INDEX IF NOT EXISTS idx_audit_log_mandate ON audit_log(mandate_id, id);`,
+  // v71: the run that superseded a judged run (`BulkLedger.resumePreview`). Set with the halt, so the
+  // ended run's page can link the run that took its place; null on every run before and on any other end.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (71);
+   ALTER TABLE bulk_runs ADD COLUMN superseded_by TEXT;`,
 ];
 
 export interface EngineDbOptions {
