@@ -972,42 +972,35 @@ function jsonTextHides(text: string, readings: Iterable<string>, mask: (text: st
   const seen = new Set<string>();
   let left = JSON_TEXT_BUDGET_CHARS;
   const hides = (t: string, ofT: Iterable<string>, depth: number): boolean => {
+    // A string a parser reads at `depth`: in its server readings, and as JSON text again, one
+    // level down. Past the depth it is not read: it counts as `unread`.
+    const readsAs = (s: string): boolean => {
+      if (seen.has(s)) return false;
+      seen.add(s);
+      if (depth >= JSON_TEXT_DEPTH) return unread;
+      const ofS = serverReadings(s);
+      for (const r of ofS) {
+        // Charged here, checked by the next piece `hides` reads: there always is one.
+        left -= r.length + 32;
+        if (mask(r) !== r) return true;
+      }
+      return hides(s, ofS, depth + 1);
+    };
     for (const reads of [ofT, ...formSides(t).map(serverReadings)]) {
       for (const read of reads) {
         // A parser reads the escapes of JSON text wherever the text starts, also text a strict
-        // parse refuses (`NaN`, a trailing comma) and a document over several lines: the reading
-        // with its escapes read, its server readings, and so on down to the depth, holds no
-        // secret either; escapes left past the depth count as `unread`, as JSON text does.
-        for (let u = read, k = 0; ; k++) {
-          const next = jsonUnescaped(u);
-          if (next === u) break;
-          if (k >= JSON_TEXT_DEPTH) return unread;
-          for (const r of serverReadings(next)) {
-            // Charged here, checked by the first candidate below: there always is one.
-            left -= r.length + 32;
-            if (mask(r) !== r) return true;
-          }
-          u = next;
-        }
+        // parse refuses (`NaN`, a trailing comma) and a document over several lines: such a
+        // reading, its escapes read, is read on as a string in JSON text is. One a strict parse
+        // takes is read string by string below, and is not paid for twice.
+        const unescaped = jsonBody(read) === undefined ? jsonUnescaped(read) : read;
+        if (unescaped !== read && readsAs(unescaped)) return true;
         for (const candidate of jsonCandidates(read)) {
           left -= 32;
           if (left < 0) return unread;
           const strings = jsonStrings(candidate);
           if (strings.length > 0) left -= candidate.length;
           for (const s of strings) {
-            if (seen.has(s)) continue;
-            seen.add(s);
-            if (depth >= JSON_TEXT_DEPTH) {
-              if (unread) return true;
-              continue;
-            }
-            const ofS = serverReadings(s);
-            for (const r of ofS) {
-              // Charged here, checked by the next piece `hides` reads below: there always is one.
-              left -= r.length + 32;
-              if (mask(r) !== r) return true;
-            }
-            if (hides(s, ofS, depth + 1)) return true;
+            if (readsAs(s)) return true;
           }
         }
       }
@@ -1076,15 +1069,23 @@ function jsonUnescaped(text: string): string {
 }
 const JSON_ESCAPES: Record<string, string> = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' };
 
+/** `text` from its first character that is no space (or byte order mark) when it parses as JSON
+ *  (an object, an array or a string); `undefined` otherwise. */
+function jsonBody(text: string): string | undefined {
+  // Sliced, not replaced: no copy of a long text that is no JSON.
+  const body = text.slice(Math.max(0, text.search(/\S/)));
+  if (!/^[{["]/.test(body)) return undefined;
+  try { JSON.parse(body); } catch { return undefined; }
+  return body;
+}
+
 /** Every string literal (key and value, each of two equal keys too) of `text` when it parses as
  *  JSON (an object, an array or a string), after spaces and a byte order mark, which a server
  *  reading bytes may drop; none otherwise. Read from the text, not from the parse: a parse keeps
  *  only the last of two equal keys, and a server may read the other. */
 function jsonStrings(text: string): string[] {
-  // Sliced, not replaced: no copy of a long text that is no JSON.
-  const body = text.slice(Math.max(0, text.search(/\S/)));
-  if (!/^[{["]/.test(body)) return [];
-  try { JSON.parse(body); } catch { return []; }
+  const body = jsonBody(text);
+  if (body === undefined) return [];
   const out: string[] = [];
   for (const [literal] of body.matchAll(/"(?:[^"\\]|\\.)*"/g)) out.push(JSON.parse(literal) as string);
   return out;

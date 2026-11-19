@@ -1032,6 +1032,16 @@ describe('a secret inside JSON text inside a value', () => {
     expect(bodyForQuestion(JSON.stringify({ value: many(1200) }), mask)).toEqual({ unshowable: 'escaped-secret' });
   });
 
+  it('JSON text three levels deep, of the size a question shows, with no secret is shown', () => {
+    // Strict JSON is read string by string; its escapes are not read a second time over the whole.
+    const record = (i: number) => ({ id: i, url: `https://ex.com/p?q=a+b&x=${i}%20`, desc: 'Line\n"two"' });
+    const inner = JSON.stringify({ items: Array.from({ length: 450 }, (_, i) => record(i)) });
+    const body = JSON.stringify({ p: JSON.stringify({ q: inner }) });
+    expect(body.length).toBeGreaterThan(50_000);
+    expect(body.length).toBeLessThan(64 * 1024);
+    expect('text' in bodyForQuestion(body, mask, 'application/json')).toBe(true);
+  });
+
   it('JSON text with many short strings and no secret is shown, not counted as unread', () => {
     const many = JSON.stringify(Array.from({ length: 8000 }, (_, i) => `v${i}`));
     expect('text' in bodyForQuestion(JSON.stringify({ value: many }), mask)).toBe(true);
@@ -1094,6 +1104,13 @@ describe('a secret inside JSON text inside a value', () => {
     const escapedTimes = (n: number) => { let t = 'a\\nb'; for (let i = 1; i < n; i++) t = JSON.stringify(t); return t; };
     expect('text' in bodyForQuestion(`x ${escapedTimes(3)}`, mask, 'text/plain')).toBe(true);
     expect(bodyForQuestion(`x ${escapedTimes(4)}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+    // Such text whose escapes, read and decoded, give JSON text again: read on as a string is.
+    const chain = `\\u002522\\u00255Cu0068${STORED.slice(1)}\\u002522`;
+    expect(bodyForQuestion(`{"t":"${chain}","n":NaN}`, mask, 'application/json')).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion(`x \\u00255Cu0068${STORED.slice(1)}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+    // Control: text that starts like JSON text and is none, with an escape JSON does not know,
+    // is shown as it is, not read literal by literal.
+    expect(bodyForQuestion('{ "a": "\\x41", ', mask, 'text/plain')).toEqual({ text: '{ "a": "\\x41", ', escapedSecret: false });
     // An escape other than `\u`: a stored value with a slash, written `\/`.
     const slashMask = (t: string) => t.replaceAll('hunter2/secret', '***');
     expect(bodyForQuestion(JSON.stringify({ value: '{"t":"hunter2\\/secret","n":NaN}' }), slashMask)).toEqual({ unshowable: 'escaped-secret' });
