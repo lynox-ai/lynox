@@ -211,7 +211,7 @@ describe('the runs list at phone width', () => {
 
 	// Below sm the status chip may break after its „·“ and nowhere else (U-352): each part keeps its words
 	// together, and from sm the chip stays on one line. A chip without a suffix is one unbreakable part.
-	it('lets the status chip break only after its „·“ below sm, in DE and EN', async () => {
+	it('keeps each part of the status chip whole and leaves the space after its „·“ as its only break below sm, in DE and EN', async () => {
 		runs = [
 			makeRun({ id: 'stopped', total: 3, applied: 1, phase: 'writing', haltReason: 'stopped', haltKey: 'stoppedByOwner' }),
 			makeRun({ id: 'halted', total: 3, applied: 1, phase: 'aborted', atomic: true, haltReason: 'x', haltKey: 'atomicRolledBack' }),
