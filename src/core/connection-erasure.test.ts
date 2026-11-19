@@ -9,6 +9,7 @@ import { ApiStore, type ApiProfile } from './api-store.js';
 import { RunHistory } from './run-history.js';
 import {
   blankRunHistoryContent,
+  blankRunHistoryRows,
   coveredGrantSet,
   erasureOnDeleteEnabled,
   erasureRecords,
@@ -736,6 +737,13 @@ describe('T3 — the fallback blanks every content column it names and keeps the
     expect([text(step), text(inner)]).toEqual([FALLBACK_MARKER, FALLBACK_MARKER]);
     expect((db.prepare('SELECT input_json AS i FROM run_tool_calls WHERE run_id = ?').get(step) as { i: string }).i).toBe(FALLBACK_MARKER);
     expect(text(other)).toBe(`other ${MARK}`);
+  });
+
+  it('names every workflow it reached, nested ones included, and no other', () => {
+    const db = history.getDb();
+    db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, origin_thread_id) VALUES ('wf-a', 'wf', 'running', '{}', 'thread-a'), ('wf-b', 'wf', 'running', '{}', 'thread-b')`).run();
+    db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, parent_run_id) VALUES ('wf-a-inner', 'wf2', 'running', '{}', 'wf-a')`).run();
+    expect([...blankRunHistoryRows(db, { threadIds: ['thread-a'] }).pipelineIds].sort()).toEqual(['wf-a', 'wf-a-inner']);
   });
 
   it('a period given in ISO form reaches exactly the runs inside it', () => {
