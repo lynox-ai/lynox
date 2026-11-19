@@ -767,6 +767,14 @@ export function bulkLabel(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>,
 	return i18n.tf(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`, { n, target: bulkSystemName(run.targetSystem, i18n) });
 }
 
+/** A run's label in the list: the same as `bulkLabel` without the host, which the row names once
+ *  on its own (below sm in the date line, from sm in the target column). */
+export function bulkListLabel(run: Pick<BulkRun, 'kind' | 'total'>, i18n: BulkI18n, countsPending = false): string {
+	const one = !countsPending && run.total === 1 ? '_one' : '';
+	const n = countsPending ? i18n.t('bulk.head.counts_pending') : String(run.total);
+	return i18n.tf(run.kind === 'undo' ? `bulk.list_label_undo${one}` : `bulk.list_label${one}`, { n });
+}
+
 /** The line about targets that held another value than expected when lynox last read them, or
  *  null when there are none. Worded for every case: after a send without a clear answer lynox did
  *  send to them (so not "not written"), an undo expects what its source wrote (so not "since the
