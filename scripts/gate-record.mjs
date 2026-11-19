@@ -58,6 +58,25 @@ import { proseWarnings } from './disclosure-vocabulary-scan.mjs';
  */
 const MARK = ['gate', 'record'].join('-');
 
+/**
+ * Text inside a workflow command (`::error::…`, `::warning::…`), escaped the way GitHub's own
+ * toolkit does it: `%`, CR and LF become `%25`, `%0D`, `%0A`. A message can quote PR text, and the
+ * runner reads a command at the start of every line, where a lone CR may count as a line break too.
+ * Unescaped, a body line like `x\r::add-mask::…` would end the annotation and start a command of
+ * its own. The annotation still shows `%0A` as a line break.
+ */
+export function commandText(text) {
+  return String(text).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+}
+
+/**
+ * Plain log text, one printed line per line of it, each behind the mark: no line of a note that
+ * quotes PR text can then begin with `::` and be read as a command.
+ */
+export function logLines(text) {
+  for (const line of String(text).split(/\r\n|\r|\n/)) console.log(`${MARK}: ${line}`);
+}
+
 /** Gate names the record may claim. An unknown name is a typo, not a new gate. */
 const KNOWN_GATES = new Set(['code-review', 'security', 'delta', 'prd', 'staging-walk', 'legal']);
 
@@ -1764,13 +1783,13 @@ function main() {
   };
   const verdict = evaluate({ body, title, commits, head: args.head ?? '', files, author: args.author ?? '', visibility, ux, delta });
 
-  for (const n of verdict.notes ?? []) console.log(`${MARK}: ${n}`);
+  for (const n of verdict.notes ?? []) logLines(n);
   for (const w of verdict.warnings ?? []) console.log(`::warning::${MARK}: ${w}`);
   if (verdict.ok) {
     console.log(`${MARK}: ok`);
     return;
   }
-  for (const e of verdict.errors) console.log(`::error::${MARK}: ${e}`);
+  for (const e of verdict.errors) console.log(`::error::${MARK}: ${commandText(e)}`);
   process.exitCode = 1;
 }
 

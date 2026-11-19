@@ -8,7 +8,7 @@
  *
  * So each test names the thing that would otherwise slip through.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { existsSync, readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, uxJsonKeyChanges, uxConfirmBlocks, UX_SELF_PATH, UX_LINE_MARK, deltaRangeErrors, deltaPredates, DELTA_LINE_MARK, DELTA_RANGE, wrongRunErrors, OTHER_REPO_MARKER } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, uxJsonKeyChanges, uxConfirmBlocks, UX_SELF_PATH, UX_LINE_MARK, deltaRangeErrors, deltaPredates, DELTA_LINE_MARK, DELTA_RANGE, wrongRunErrors, OTHER_REPO_MARKER, commandText, logLines } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -1175,6 +1175,72 @@ describe('gate-record — a public body names no register row', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
       rmSync(old.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a body line with a carriage return stays inside the annotation, through the CLI', () => {
+    // The runner reads a workflow command at the start of a line, and a lone CR may end a line for
+    // it. The record parser splits at LF only, so `x<CR>::warning::…` is one junk line, quoted in the
+    // error. Escaped, it cannot start a command of its own.
+    const dir = mkdtempSync(join(tmpdir(), 'gr-cr-'));
+    const script = fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url));
+    const old = oldBase();
+    try {
+      const ev = join(dir, 'event.json');
+      const files = join(dir, 'files.txt');
+      const rec = record({ head: old.sha.slice(0, 8) }).replace(/```\n$/, 'not a field\r::warning::forged\n```\n');
+      writeFileSync(ev, JSON.stringify({ pull_request: { title: 'Fix the thing', body: rec } }));
+      writeFileSync(files, CODE.join('\n'));
+      const env = { ...process.env };
+      delete env.REPO_PRIVATE;
+      delete env.GITHUB_REPOSITORY;
+      const r = spawnSync(process.execPath, [script, '--event-file', ev, '--head', old.sha, '--base', old.sha, '--files-file', files, '--repo-visibility', 'public'], { cwd: old.dir, encoding: 'utf8', env });
+      expect(r.status, r.stdout + r.stderr).toBe(1);
+      // The control: the line was read and quoted, so the escaping below had something to escape.
+      expect(r.stdout).toContain('not a field%0D::warning::forged');
+      expect(r.stdout).not.toContain('\r');
+      const starts = r.stdout.split(/\r\n|\r|\n/).map((l) => l.trimStart());
+      expect(starts.filter((l) => l.startsWith('::warning::forged'))).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(old.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a note that quotes a carriage return keeps every line behind the mark, through the CLI', () => {
+    // A note can quote what the PR brings (a file name in the review note, the author here). Printed
+    // raw, `<CR>::warning::…` would begin a line the runner reads as a command.
+    const dir = mkdtempSync(join(tmpdir(), 'gr-cr-note-'));
+    const script = fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url));
+    const old = oldBase();
+    try {
+      const ev = join(dir, 'event.json');
+      const files = join(dir, 'files.txt');
+      writeFileSync(ev, JSON.stringify({ pull_request: { title: 'Fix the thing', body: record({ head: old.sha.slice(0, 8) }) } }));
+      writeFileSync(files, CODE.join('\n'));
+      const env = { ...process.env };
+      delete env.REPO_PRIVATE;
+      delete env.GITHUB_REPOSITORY;
+      const r = spawnSync(process.execPath, [script, '--event-file', ev, '--head', old.sha, '--base', old.sha, '--files-file', files, '--author', 'x\r::warning::forged[bot]', '--repo-visibility', 'public'], { cwd: old.dir, encoding: 'utf8', env });
+      // The control: the note was printed with the author in it, so there was something to keep behind the mark.
+      expect(r.stdout).toContain('gate-record: author x');
+      const lines = r.stdout.split(/\r\n|\r|\n/);
+      expect(lines.filter((l) => l.trimStart().startsWith('::warning::forged'))).toEqual([]);
+      expect(lines).toContain('gate-record: ::warning::forged[bot] is a bot — dependency PRs merge through their own workflow');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(old.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('escapes a workflow command message the way the toolkit does, and prints notes line by line behind the mark', () => {
+    expect(commandText('50% a\r::x::\nb')).toBe('50%25 a%0D::x::%0Ab');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      logLines('one\r::add-mask::two\r\nthree\nfour');
+      expect(log.mock.calls.map((c) => c[0])).toEqual(['gate-record: one', 'gate-record: ::add-mask::two', 'gate-record: three', 'gate-record: four']);
+    } finally {
+      log.mockRestore();
     }
   });
 
