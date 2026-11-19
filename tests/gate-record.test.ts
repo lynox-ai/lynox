@@ -2626,6 +2626,11 @@ describe('gate-record — the `ux:` line', () => {
       const base = `\t'x.delete_confirm': {\n\t\tde: 'Löschen?',\n\t\ten: 'Delete?',\n\t},\n\t'y.title': {\n\t\tde: 'T',\n\t},`;
       expect(owed([F], { [F]: base }, { [F]: base.replace("\n\t\ten:", "\n\n\t\ten:") }).review).toBe(true);
       expect(owed([F], { [F]: base }, { [F]: base.replace("\t\ten: 'Delete?'", "\t\t  en: 'Delete?'") }).review).toBe(true);
+      // In a template literal: a blank line, a new indent, a line that reads like a comment.
+      const tpl = (body: string) => `\t'x_confirm': {\n\t\tde: \`Löschen?\n${body}\n\`,\n\t},`;
+      for (const [a, b] of [['Alles.', '\nAlles.'], ['Alles.', '  Alles.'], ['Alles.', '* Alles.'], ['Alles.', '// Alles.']]) {
+        expect(owed([F], { [F]: tpl(a) }, { [F]: tpl(b) }).review, b).toBe(true);
+      }
       // Control: a changed text in the next entry, which is no confirmation, stays `self`.
       expect(owed([F], { [F]: base }, { [F]: base.replace("de: 'T'", "de: 'T2'") }).review).toBe(false);
     });
@@ -2652,13 +2657,20 @@ describe('gate-record — the `ux:` line', () => {
       expect(owed([F], { [F]: onKey('B') }, { [F]: onKey('B2') }).review).toBe(true);
     });
 
-    it('a confirmation block ends at its own closing line or at the next entry or code at its indent', () => {
+    it('a confirmation block ends at its own closing line or at the next entry at its indent', () => {
       expect([...uxConfirmBlocks(`  'a_confirm': {\n    de: 'A',\n  },\n  'b.title': {\n    de: 'T',\n  },`)]).toEqual([['a_confirm', JSON.stringify(["  'a_confirm': {\n    de: 'A',\n  },"])]]);
       expect([...uxConfirmBlocks(`  'a_confirm': { de: 'A' },\n  'b_confirm': { de: 'B' },\n};\nconst x = 1;`)]).toEqual([
         ['a_confirm', JSON.stringify(["  'a_confirm': { de: 'A' },"])],
         ['b_confirm', JSON.stringify(["  'b_confirm': { de: 'B' },\n};"])],
       ]);
       expect(uxConfirmBlocks(null).size).toBe(0);
+    });
+
+    it('a flat or mixed-indent file still owes a review where a child entry cuts the block: the line count is read too', () => {
+      const flat = (b: string) => `'x_confirm': {\n'title': { de: 'A' },\n'body': { de: '${b}' },\n},`;
+      expect(owed([F], { [F]: flat('B') }, { [F]: flat('B2') }).review).toBe(true);
+      const mixed = (b: string) => `    'x_confirm': {\n\t\t'title': { de: 'A' },\n\t\tde: '${b}',\n    },`;
+      expect(owed([F], { [F]: mixed('B') }, { [F]: mixed('B2') }).review).toBe(true);
     });
 
     it('a placeholder reason is refused through the reason path: a trailing period, dots, ellipses', () => {
