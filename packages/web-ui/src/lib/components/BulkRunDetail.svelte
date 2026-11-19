@@ -140,7 +140,7 @@
 					if (!ok) retryAfter = lastRetryAfter;
 				} else {
 					// The same step: the page takes the run's progress from the ask, so the working line,
-					// the head's counts, the cost and a pause move with the run. Every other count stays
+					// the head's counts, the warning about unclear sends, the cost and a pause move with the run. Every other count stays
 					// as loaded, with the targets and their marks it speaks of; no input is offered then.
 					run = {
 						...current, applied: body.applied, conflicts: body.conflicts, failed: body.failed, heads: body.heads, sentUnknown: body.sentUnknown, judge: body.judge,

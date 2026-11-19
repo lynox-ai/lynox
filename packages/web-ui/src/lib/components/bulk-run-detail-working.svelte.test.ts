@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
-import { BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkWorkingStep, bulkWorkingLine, bulkHeadCounts, type BulkHeads } from './bulk-runs.js';
+import { BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkWorkingStep, bulkWorkingLine, bulkHeadCounts, bulkConflictsText, type BulkHeads } from './bulk-runs.js';
 import { t, tf, getLocale, setLocale } from '../i18n.svelte.js';
 import { formatCost } from '../format.js';
 
@@ -409,14 +409,28 @@ describe('the head names every target once', () => {
 		expect(done(2, { unclear: 2 })).toBe('2 Ziele: 0 geschrieben · 0 Konflikte · 2 unklar, ob angekommen · 0 fehlgeschlagen');
 	});
 
-	it('calls the targets not written open while the run may still write them, and not written once it has ended', () => {
+	it('calls the rest open while the run may still write it, and with no result once it has ended, never not written', () => {
 		expect(done(3, { written: 1, open: 2 }, 'apply', 'writing')).toBe('3 Ziele: 1 geschrieben · 0 Konflikte · 0 fehlgeschlagen · 2 offen');
 		for (const phase of ['done', 'aborted', 'undone'] as const) {
-			expect(done(3, { written: 1, open: 2 }, 'apply', phase), phase).toBe('3 Ziele: 1 geschrieben · 0 Konflikte · 0 fehlgeschlagen · 2 nicht geschrieben');
+			expect(done(3, { written: 1, open: 2 }, 'apply', phase), phase).toBe('3 Ziele: 1 geschrieben · 0 Konflikte · 0 fehlgeschlagen · 2 ohne Ergebnis');
 		}
-		// A run that ended before it wrote anything: the three zeros and the targets not written.
+		// A run that ended before it wrote anything: the three zeros and the rest, with no result.
 		expect(bulkHeadCounts(null, { kind: 'apply', phase: 'aborted', total: 4, applied: 0, conflicts: 0, failed: 0, heads: { ...NONE, open: 4 } }, i18n))
-			.toBe('4 Ziele: 0 geschrieben · 0 Konflikte · 0 fehlgeschlagen · 4 nicht geschrieben');
+			.toBe('4 Ziele: 0 geschrieben · 0 Konflikte · 0 fehlgeschlagen · 4 ohne Ergebnis');
+	});
+
+	it('says arrival unclear in the singular and arrivals unclear in the plural in EN', () => {
+		const before = getLocale();
+		onTestFinished(() => setLocale(before));
+		setLocale('en');
+		expect(done(1, { unclear: 1 }, 'apply', 'writing')).toBe('1 target: 0 written · 0 conflicts · 1 arrival unclear · 0 failed');
+		expect(done(3, { unclear: 3 }, 'apply', 'writing')).toBe('3 targets: 0 written · 0 conflicts · 3 arrivals unclear · 0 failed');
+	});
+
+	it('the conflicts paragraph counts the head\'s conflicts: a written target two loops raced on is not one lynox left as it was', () => {
+		expect(bulkConflictsText({ conflicts: 1, heads: { ...NONE, written: 1 } }, i18n)).toBeNull();
+		expect(bulkConflictsText({ conflicts: 1, heads: { ...NONE, conflict: 1 } }, i18n)).toBe(t('bulk.conflicts_one'));
+		expect(bulkConflictsText({ conflicts: 2 }, i18n)).toBe(tf('bulk.conflicts', { n: '2' }));
 	});
 
 	it('an atomic run rolled back counts the failed target with the ones taken back, and the page still says why it stopped', async () => {
@@ -425,7 +439,7 @@ describe('the head names every target once', () => {
 			heads: { ...NONE, takenBack: 6, settled: 1, open: 3 },
 		});
 		await render();
-		expect(counts()).toBe('10 Ziele: 0 geschrieben · 7 zurückgenommen · 0 Konflikte · 0 fehlgeschlagen · 3 nicht geschrieben');
+		expect(counts()).toBe('10 Ziele: 0 geschrieben · 7 zurückgenommen · 0 Konflikte · 0 fehlgeschlagen · 3 ohne Ergebnis');
 		expect(shown()).toContain(t('bulk.halt.atomicRolledBack'));
 	});
 
