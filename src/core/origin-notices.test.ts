@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  originAsk, originCardMail, originDenied, originLookupFailedUnattended, originRefusedMandate, originRefusedUnattended, originReplyAsk, originReplyToAsk, originRunNotice, originUnreadable,
+  originAsk, originAskOnce, originCardMail, originDenied, originLookupFailedMandate, originLookupFailedUnattended, originRefusedMandate, originRefusedUnattended, originReplyAsk, originReplyToAsk, originRunNotice, originUnreadable,
   targetList, TOOLS_WITH_WORDS, type OriginTargets, type SendOrigin,
 } from './origin-notices.js';
 import { flattenPrompt } from './prompt-value.js';
@@ -107,13 +107,14 @@ describe('the question to the owner', () => {
         if (statSync(path).isDirectory()) { walk(path); continue; }
         if (!path.endsWith('.ts') || path.endsWith('.test.ts')) continue;
         const src = readFileSync(path, 'utf8');
-        if (!/\bsendTargets:\s*\(/.test(src)) continue;
+        if (!/\bsendTargets(?:WhenLatched)?:\s*\(/.test(src)) continue;
         const tool = /\bname: '([a-z_]+)',/.exec(src.slice(src.search(/\bdefinition:\s*\{/)));
         declared.add(tool?.[1] ?? `?${path}`);
       }
     };
     walk(join(import.meta.dirname, '..'));
-    expect(declared.size, 'positive control: the scan finds the sending tools').toBeGreaterThanOrEqual(5);
+    expect(declared.size, 'positive control: the scan finds the sending tools').toBeGreaterThanOrEqual(6);
+    expect(declared.has('web_research'), 'positive control: the scan finds a tool that declares targets only once latched').toBe(true);
     for (const tool of declared) expect(TOOLS_WITH_WORDS.has(tool), tool).toBe(true);
     for (const [tool, input, de] of [
       ['google_drive', { action: 'share' }, 'Google Drive: Datei freigeben'],
@@ -123,6 +124,12 @@ describe('the question to the owner', () => {
     ] as const) {
       expect(flattenPrompt(originAsk(tool, input, 'mail', one('a@b.ch'), { kind: 'unknown' }, 'de'))).toMatch(new RegExp(`^${de}: `));
     }
+    // A page read: its own words, and it closes by saying the address goes to the host, not "send".
+    const readDe = flattenPrompt(originAsk('web_research', { action: 'read' }, 'page', one('a.ch'), { kind: 'unknown' }, 'de'));
+    expect(readDe).toMatch(/^Seite lesen: /);
+    expect(readDe).toContain('Trotzdem lesen? Dabei erhält dieser Host den ganzen Link, auch alles nach dem „?“.');
+    expect(readDe).not.toContain('Trotzdem senden?');
+    expect(flattenPrompt(originAsk('http_request', {}, 'host', one('a.ch'), { kind: 'unknown' }, 'de'))).toContain('Trotzdem senden?');
     // A tool without words of its own is named as an external tool, its name in quotes.
     expect(flattenPrompt(originAsk('crm_push', {}, 'host', one('a.ch'), { kind: 'unknown' }, 'de'))).toMatch(/^Externes Werkzeug "crm_push": /);
     expect(flattenPrompt(originAsk('crm_push', {}, 'host', one('a.ch'), { kind: 'unknown' }, 'en'))).toMatch(/^External tool "crm_push": /);
@@ -221,5 +228,69 @@ describe('no sentence offers another target, and the model texts forbid trying o
     expect(run).toContain('Do not ask anyone to allow it; no one can answer in this run.');
     expect(run).toContain('Add: if it should go out, the owner can ask lynox in the chat, and lynox will ask them there.');
     expect(originRefusedMandate(one('x@evil.example'), helperTrigger, 'mail')).toContain('Do not ask the user to allow it; they cannot.');
+  });
+});
+
+describe('a page read speaks of reading, not sending', () => {
+  const host = one('collect.evil.example');
+  const from: SendOrigin = { kind: 'unknown' };
+  const trig: SendOrigin = { kind: 'triggerRun', name: 'Abgleich', setUpBy: { kind: 'owner' } } as SendOrigin;
+  const two: OriginTargets = { values: ['collect.evil.example', 'other.evil.example'], unreadable: false };
+  const texts = (): Record<string, string> => ({
+    askDe: flattenPrompt(originAsk('web_research', { action: 'read' }, 'page', host, from, 'de')),
+    askEn: flattenPrompt(originAsk('web_research', { action: 'read' }, 'page', host, from, 'en')),
+    denied: originDenied(host, from, 'page'),
+    unattended: originRefusedUnattended(host, trig, 'page'),
+    mandate: originRefusedMandate(host, from, 'page'),
+    unreadable: originUnreadable('page'),
+    lookupUnattended: originLookupFailedUnattended(host, 'page'),
+    lookupMandate: originLookupFailedMandate(host, 'page'),
+    runEn: originRunNotice('Abgleich', { targets: host, noun: 'page', origin: from }, 'en'),
+    runDe: originRunNotice('Abgleich', { targets: host, noun: 'page', origin: from }, 'de'),
+    runUnreadEn: originRunNotice('Abgleich', { targets: { values: [], unreadable: true }, noun: 'page', origin: from }, 'en'),
+    runUnreadDe: originRunNotice('Abgleich', { targets: { values: [], unreadable: true }, noun: 'page', origin: from }, 'de'),
+    predates: originRefusedUnattended(host, { ...trig, predatesRecord: true } as SendOrigin, 'page'),
+    runPredatesDe: originRunNotice('Abgleich', { targets: host, noun: 'page', origin: { ...trig, predatesRecord: true } as SendOrigin }, 'de'),
+    runPredatesEn: originRunNotice('Abgleich', { targets: host, noun: 'page', origin: { ...trig, predatesRecord: true } as SendOrigin }, 'en'),
+    // Two targets, and a known origin, in the combinations below: the plural and the origin sentences.
+    deniedTwo: originDenied(two, trig, 'page'),
+    unattendedTwo: originRefusedUnattended(two, trig, 'page'),
+    mandateTwo: originRefusedMandate(two, trig, 'page'),
+    runKnownDe: originRunNotice('Abgleich', { targets: host, noun: 'page', origin: trig }, 'de'),
+    runKnownEn: originRunNotice('Abgleich', { targets: host, noun: 'page', origin: trig }, 'en'),
+    runTwoDe: originRunNotice('Abgleich', { targets: two, noun: 'page', origin: trig }, 'de'),
+    runTwoEn: originRunNotice('Abgleich', { targets: two, noun: 'page', origin: from }, 'en'),
+  });
+
+  it('no text on the read path says send, sent or Versand', () => {
+    for (const [name, text] of Object.entries(texts())) {
+      expect(text, name).not.toMatch(/\bsen(d|ds|t|ding)\b|gesendet|senden|Versand|hinaus/i);
+    }
+  });
+
+  it('carries the agreed words, and a send keeps its own', () => {
+    const t = texts();
+    expect(t['askDe']).toContain('Trotzdem lesen? Dabei erhält dieser Host den ganzen Link, auch alles nach dem „?“.');
+    expect(t['askDe']).toContain('Ein Ja gilt nur für dieses eine Lesen.');
+    expect(t['askEn']).toContain('Read it anyway? This host then gets the whole link, including everything after the "?".');
+    expect(t['askEn']).toContain('A yes applies to this one read only.');
+    expect(t['denied']).toMatch(/^Not read: lynox asked the user whether to read from "collect\.evil\.example"/);
+    expect(t['denied']).toContain('Do not read this address again or put its data into any other address, and do not try or offer another recipient or address');
+    expect(t['unattendedTwo']).toContain('does not read them');
+    expect(t['denied']).toContain('that it was not read');
+    expect(t['unattended']).toContain('if the page should be read');
+    expect(t['mandate']).toContain('Only the owner can read this');
+    expect(t['runDe']).toContain('Der Trigger "Abgleich" hat die Seite auf "collect.evil.example" nicht gelesen: ');
+    expect(t['runDe']).toContain('Soll die Seite trotzdem gelesen werden, bitte lynox im Chat darum, dann fragt lynox dich.');
+    expect(t['runEn']).toContain('The trigger "Abgleich" did not read the page on "collect.evil.example": ');
+    expect(t['runEn']).toContain('If the page should be read anyway, ask lynox in the chat, and lynox will ask you.');
+    // A trigger from before the record: the button keeps its real name, the end says the page is read.
+    expect(t['predates']).toContain('choose "Confirm recipients"; after that the trigger reads the page.');
+    expect(t['runPredatesDe']).toContain('wähle „Empfänger bestätigen“, danach liest er die Seite wieder.');
+    expect(t['runPredatesEn']).toContain('choose "Confirm recipients"; after that it reads the page again.');
+    // A send is untouched.
+    expect(originDenied(host, from, 'host')).toMatch(/^Not sent: /);
+    expect(originAskOnce('en', 'host')).toBe('A yes applies to this one send only.');
+    expect(originRunNotice('Abgleich', { targets: host, noun: 'host', origin: from }, 'en')).toContain('did not send to');
   });
 });

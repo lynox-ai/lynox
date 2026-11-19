@@ -5151,12 +5151,18 @@ export class Agent implements IAgent {
    *   asked with a blocked question, which a run nobody watches refuses before it is stored. A
    *   yes holds for this call only: nothing is added, and the slot is not `allKnown`.
    */
-  private async _checkSendOrigin(tc: BetaToolUseBlock, tool: ToolEntry, filingCall: boolean, guardRefuses = false): Promise<{ refusal: BetaToolResultBlockParam } | { origin?: CallTargetOrigin | undefined }> {
-    if (tool.sendTargets === undefined) return {};
+  private async _checkSendOrigin(tc: BetaToolUseBlock, tool: ToolEntry, filingCall: boolean, guardRefuses: boolean, taintedBefore: boolean): Promise<{ refusal: BetaToolResultBlockParam } | { origin?: CallTargetOrigin | undefined }> {
+    // `sendTargetsWhenLatched` counts only when the conversation had taken in foreign content BEFORE
+    // this call's batch: a reading tool arms the latch for its own call before this check runs, so
+    // the latch as it stands now would gate the first read of a clean conversation. The flags hold
+    // where no latch object exists too (a headless run).
+    const declared = tool.sendTargets
+      ?? (tool.sendTargetsWhenLatched !== undefined && taintedBefore ? tool.sendTargetsWhenLatched : undefined);
+    if (declared === undefined) return {};
     let targets: readonly SendTarget[] | null;
     let targetsUnread = false;
     try {
-      targets = tool.sendTargets(tc.input);
+      targets = declared(tc.input);
     } catch {
       targets = [];
       targetsUnread = true;
@@ -5166,7 +5172,7 @@ export class Agent implements IAgent {
     // empty one, a recipient field that yields none) refuses the whole call, in every session and
     // without a question: a yes to a target nobody can see would hold for anything.
     if (targetsUnread) {
-      const unreadNoun: TargetNoun = tc.name === 'http_request' ? 'host' : 'mail';
+      const unreadNoun: TargetNoun = tc.name === 'web_research' ? 'page' : tc.name === 'http_request' ? 'host' : 'mail';
       try { this.onOriginRefused?.({ targets: { values: [], unreadable: true }, noun: unreadNoun, origin: this.originOfTargets() }); } catch { /* the refusal stands */ }
       if (guardRefuses) return {};
       const text = originUnreadable(unreadNoun);
@@ -5184,7 +5190,7 @@ export class Agent implements IAgent {
     const lookupFailed = foreign.some((v) => v.verdict === 'unreadable');
     const shownTargets = foreign.map((v) => v.target.value);
     const shown: OriginTargets = { values: shownTargets, unreadable: false };
-    const noun: TargetNoun = foreign[0]!.target.kind === 'host' ? 'host' : 'mail';
+    const noun: TargetNoun = tc.name === 'web_research' ? 'page' : foreign[0]!.target.kind === 'host' ? 'host' : 'mail';
     // A source that could not be read leaves where the target comes from unchecked: every report of
     // it (the run's result, the approval card, the question, the model texts) says it is not known,
     // never the origin it would have had.
@@ -5207,7 +5213,7 @@ export class Agent implements IAgent {
     };
     const refuseUnattended = (): Promise<{ refusal: BetaToolResultBlockParam }> => {
       try { this.onOriginRefused?.({ targets: shown, noun, origin }); } catch { /* the refusal stands */ }
-      return refuse(lookupFailed ? originLookupFailedUnattended(shown) : originRefusedUnattended(shown, origin));
+      return refuse(lookupFailed ? originLookupFailedUnattended(shown, noun) : originRefusedUnattended(shown, origin, noun));
     };
     // Someone the owner let in answers this session's questions themselves: asking them would
     // protect nothing. A target the owner named goes out as it would for the owner.
@@ -5373,7 +5379,7 @@ export class Agent implements IAgent {
     // A call the guard refuses below without asking anyone (a run with no prompt) keeps the guard's
     // refusal, which names the write; it is refused either way.
     const guardRefusesUnasked = effectiveSignal !== null && !filingCall && !this.promptUser;
-    const originCheck = await this._checkSendOrigin(tc, tool, filingCall, guardRefusesUnasked);
+    const originCheck = await this._checkSendOrigin(tc, tool, filingCall, guardRefusesUnasked, taintedBeforeThisCall);
     if ('refusal' in originCheck) return originCheck.refusal;
     if (effectiveSignal && !filingCall) {
       if (this.promptUser) {
