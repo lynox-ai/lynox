@@ -255,10 +255,11 @@ describe('Agent Security Audit', () => {
       expect(resolveInputTemplate({ q: '{{s1.result}}' }, inputCtx), 'a whole-string input template must not resolve a placeholder inside a step result').toEqual({ q: '{{params.k}}' });
       // The behaviour above covers the paths it calls. A second resolver on a path no test drives
       // is caught here when it is written the usual ways: an escaped brace (`\\{`), a regex that
-      // opens with a bare pair (`/{{`), a brace class (`[{]`), or a bare `'{{'` literal (a split or
+      // opens with a bare pair (`/{{`), the class `[{]`, or a bare `'{{'` literal (a split or
       // indexOf by hand); and the scanner is called as often as today (twice replacePlaceholders,
       // once solePlaceholder, never placeholders). A bare pair later in a regex, a brace spelled
-      // another way (`\\x7b`, a char code) or a moved call is not caught; review covers that.
+      // another way (`\\x7b`, a char code, another class), an aliased import or a moved call is
+      // not caught; review covers that.
       expect(contextContent, 'context.ts must not match {{ with a regex of its own').not.toMatch(/\\\{|\/\{\{|\[\{\]/);
       expect(contextContent, 'context.ts must not look for {{ by hand').not.toMatch(/(['"`])\{\{\1/);
       expect(contextContent.match(/\breplacePlaceholders\(/g)?.length, 'replacePlaceholders is called in exactly two places').toBe(2);
