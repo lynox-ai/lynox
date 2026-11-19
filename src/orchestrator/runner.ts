@@ -577,9 +577,12 @@ async function runManifestInGroup(
 
   // Every manifest that runs, a nested pipeline's and a direct caller's included: a step id the
   // context already uses, or a reference no run resolves (`template-refs.ts`).
-  // A caller outside the type system may leave `context` out, as the run's own spread allows.
-  const stepsIssue = runStepsIssue(manifest.agents, (manifest.context as Record<string, unknown> | undefined) ?? {});
-  if (stepsIssue !== null) throw new Error(`Invalid manifest: ${stepsIssue}`);
+  // A caller outside the type system may leave `context` out, as the run's own spread allows. A
+  // nested run's steps are a `runtime: 'pipeline'` step's `pipeline` list, which no saved workflow holds.
+  const nested = depth > 0;
+  const stepsIssue = runStepsIssue(manifest.agents, (manifest.context as Record<string, unknown> | undefined) ?? {},
+    nested ? 'pipeline' : 'agents', { saved: !nested });
+  if (stepsIssue !== null) throw new Error(`Invalid manifest: ${nested ? 'in a nested pipeline, ' : ''}${stepsIssue}`);
 
   assertGatesEnforceable(manifest, options.gateAdapter !== undefined);
   const agentsDir = options.agentsDir ?? config.agents_dir ?? join(process.cwd(), 'agents');

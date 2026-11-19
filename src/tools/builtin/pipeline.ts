@@ -25,7 +25,7 @@ import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 import { sameBoundValues, acceptedValueMatcher, type GrantDecision } from '../../core/workflow-grant.js';
 import { escapeHiddenInJson, fixedRunRefusal, hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
-import { templateRefIssue, templateRefStep } from '../../orchestrator/template-refs.js';
+import { runStepsIssue, stepIdCollision, templateRefStep } from '../../orchestrator/template-refs.js';
 import { isStepIdShape, runStepIds, shownStepId, stepIdIssue, stepRunNames } from '../../orchestrator/step-id.js';
 import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
@@ -476,6 +476,12 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
   // model. Checked before the duplicate check, so no refusal quotes an id outside it back.
   const shapeIssue = stepIdIssue(steps);
   if (shapeIssue) return `Error: ${shapeIssue}`;
+
+  // A step id the run's context already uses (`template-refs.ts`): an inline context key, or `params`
+  // beside it. Refused here, by the place in the list the model wrote, before anything is estimated.
+  const inlineContext = input.context ?? {};
+  const collision = stepIdCollision(steps, { ...inlineContext, params: inlineContext }, 'steps', { saved: false });
+  if (collision) return `Error: ${collision}`;
 
   // Validate unique IDs
   const ids = new Set<string>();
@@ -965,9 +971,10 @@ export async function runSavedWorkflow(
 
   const writeNotes = new Set<string>();
 
-  // A reference no run resolves (`template-refs.ts`), here before `validateManifest` refuses it, so
-  // the caller can tell the owner which step in fixed words (`unresolvedRefStep`).
-  const refIssue = templateRefIssue(steps, { params: bound.params });
+  // A step id the run's context already uses, or a reference no run resolves (`template-refs.ts`),
+  // here before the runner refuses it, so the caller can tell the owner which step in fixed words
+  // (`unresolvedRefStep`) and does not retry a run that cannot start.
+  const refIssue = runStepsIssue(steps, { params: bound.params }, 'steps');
   if (refIssue !== null) {
     return { ok: false, error: `Workflow execution failed: Invalid manifest: ${refIssue}`, unresolvedRefStep: templateRefStep(refIssue) };
   }

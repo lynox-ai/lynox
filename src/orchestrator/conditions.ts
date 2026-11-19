@@ -75,7 +75,8 @@ export function buildConditionContext(
   globalContext: Record<string, unknown>,
   outputs: Map<string, AgentOutput>,
 ): Record<string, unknown> {
-  const ctx: Record<string, unknown> = { ...globalContext };
+  // Without a prototype, as `buildStepContext`: a step id is a key here.
+  const ctx: Record<string, unknown> = Object.assign(Object.create(null) as Record<string, unknown>, globalContext);
   for (const [id, out] of outputs) {
     if (!out.skipped) {
       ctx[id] = { result: out.result, costUsd: out.costUsd, error: out.error };

@@ -77,17 +77,32 @@ export function runStepsIssue(
   steps: readonly RefStep[],
   context: Readonly<Record<string, unknown>> = {},
   path = 'agents',
+  { saved = true }: { saved?: boolean } = {},
+): string | null {
+  return stepIdCollision(steps, context, path, { saved }) ?? templateRefIssue(steps, context, path);
+}
+
+/**
+ * The first part of {@link runStepsIssue}: a step whose id is reserved or is a key of `context`, or
+ * null. `saved: false` where the steps cannot be a saved workflow's (a nested pipeline, an inline
+ * run), so the refusal does not point at `rename_step`.
+ */
+export function stepIdCollision(
+  steps: readonly RefStep[],
+  context: Readonly<Record<string, unknown>>,
+  path = 'agents',
+  { saved = true }: { saved?: boolean } = {},
 ): string | null {
   for (const [i, step] of steps.entries()) {
     const where = `step #${String(i + 1)} (${path}[${String(i)}].id)`;
     if (isReservedStepId(step.id)) {
-      return `${reservedStepIdRefusal(where, { refs: false })} In a saved workflow, rename the step with rename_step; the steps that read it follow.`;
+      return reservedStepIdRefusal(where, { refs: false }) + (saved ? ' In a saved workflow, rename the step with rename_step; the steps that read it follow.' : '');
     }
     if (Object.hasOwn(context, step.id)) {
       return `${where}: the run's context already holds a value under this step's id, and the step's output would take its place. Give the step another id, or the value another name.`;
     }
   }
-  return templateRefIssue(steps, context, path);
+  return null;
 }
 
 /**

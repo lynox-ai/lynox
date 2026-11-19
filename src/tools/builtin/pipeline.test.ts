@@ -324,6 +324,15 @@ describe('run_workflow — inline steps', () => {
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
 
+  it('refuses an inline step whose id is a key of the inline context, before anything runs', async () => {
+    const result = await runWorkflowTool.handler(
+      { name: 'test', steps: [makeStep('fetch', 'first'), makeStep('customer', 'second')], context: { customer: 'Acme' } },
+      makePipelineAgent(),
+    );
+    expect(result).toBe('Error: step #2 (steps[1].id): the run\'s context already holds a value under this step\'s id, and the step\'s output would take its place. Give the step another id, or the value another name.');
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
   it('successfully executes a single-step pipeline', async () => {
     const agent = makePipelineAgent();
     mockRunManifest.mockResolvedValueOnce(makeRunState());
@@ -1532,6 +1541,17 @@ describe('runSavedWorkflow', () => {
     expect(result.error).toContain('(in a saved workflow: set_input_from)');
     // The worker tells the owner which step, in fixed words (`WorkerNotices.workflowRefUnresolved`).
     expect(result.unresolvedRefStep).toBe(2);
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
+  it('a stored workflow with a reserved step id is refused before the run, with the step the owner is told', async () => {
+    const id = seedSavedWorkflow({ steps: [{ id: 'params', task: 'Fetch' }, { id: 'sum', task: 'Sum {{params.result}}', input_from: ['params'] }] });
+    const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { principal: OWNER_PRINCIPAL });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('step #1 (steps[0].id): "params", "__proto__" and "constructor" cannot be step ids');
+    expect(result.error).toContain('In a saved workflow, rename the step with rename_step');
+    // Named as a step the owner repairs, so the worker does not retry a run that cannot start.
+    expect(result.unresolvedRefStep).toBe(1);
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
 

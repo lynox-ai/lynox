@@ -4,7 +4,7 @@ import { applyModifications } from './workflow-edit.js';
 import { stepIdIssue, isReservedStepId } from './step-id.js';
 import { runStepsIssue } from './template-refs.js';
 import { buildStepContext, resolveTaskTemplate } from './context.js';
-import { getByPath } from './conditions.js';
+import { buildConditionContext, getByPath } from './conditions.js';
 import type { Manifest, ManifestStep, AgentOutput } from '../types/orchestration.js';
 import type { LynoxUserConfig } from '../types/index.js';
 import type { InlinePipelineStep } from '../types/pipeline.js';
@@ -84,16 +84,29 @@ describe('the runner checks the steps of every manifest it runs', () => {
     const unresolved: ManifestStep = { id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'a', task: 'A' }, { id: 'b', task: 'B {{a.result}}' }] };
     const refused = await runManifest(manifest([unresolved]), CONFIG, ADHOC);
     expect(refused.status).toBe('failed');
-    expect(refused.error).toMatch(/Invalid manifest: step #2 \(agents\[1\]\.task\)/);
+    expect(refused.error).toMatch(/^Invalid manifest: in a nested pipeline, step #2 \(pipeline\[1\]\.task\)/);
 
     const reserved: ManifestStep = { id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'constructor', task: 'A' }] };
     const state = await runManifest(manifest([reserved]), CONFIG, ADHOC);
     expect(state.status).toBe('failed');
-    expect(state.error).toContain(`Invalid manifest: step #1 (agents[0].id): "params", "__proto__" and "constructor" ${RESERVED}`);
+    expect(state.error).toBe(`Invalid manifest: in a nested pipeline, step #1 (pipeline[0].id): "params", "__proto__" and "constructor" ${RESERVED} ("params" holds the workflow's parameters). Choose another id in the allowed form, for example fetch_orders.`);
+  });
+
+  // The nested run's context is its pipeline step's context, which holds the outer steps it reads.
+  it('refuses a nested step named like an outer step its pipeline step reads', async () => {
+    const state = await runManifest(manifest([
+      { id: 'a', agent: 'a', runtime: 'mock' },
+      { id: 'outer', agent: 'outer', runtime: 'pipeline', input_from: ['a'], pipeline: [{ id: 'a', task: 'Inner' }] },
+    ]), CONFIG, ADHOC);
+    expect(state.status).toBe('failed');
+    expect(state.error).toBe('Invalid manifest: in a nested pipeline, step #1 (pipeline[0].id): the run\'s context already holds a value under this step\'s id, and the step\'s output would take its place. Give the step another id, or the value another name.');
   });
 
   it('runStepsIssue reads the reserved ids before the context keys and the references', () => {
     expect(runStepsIssue([{ id: 'params' }], { params: {} })).toContain(RESERVED);
+    expect(runStepsIssue([{ id: 'b', task: 'B {{a.result}}' }, { id: 'a' }], { b: 1 })).toContain('the run\'s context already holds a value');
+    expect(runStepsIssue([{ id: 'b', task: 'B {{a.result}}' }, { id: 'params' }], {})).toContain(RESERVED);
+    expect(runStepsIssue([{ id: 'b', task: 'B {{a.result}}' }, { id: 'a' }], {})).toMatch(/^step #1 \(agents\[0\]\.task\)/);
     expect(runStepsIssue([{ id: 'ok', task: 'fine' }], { params: {} })).toBeNull();
   });
 });
@@ -107,6 +120,12 @@ describe('a run\'s context reads only its own keys', () => {
     expect(Object.hasOwn(ctx, '__proto__')).toBe(true);
     expect(getByPath(ctx, '__proto__.result')).toBe('STEP');
     expect(getByPath(ctx, 'params.month')).toBe('May');
+  });
+
+  it('the condition context holds a step named __proto__ as a key too', () => {
+    const ctx = buildConditionContext({ params: { month: 'May' } }, new Map([['__proto__', out('STEP')]]));
+    expect(Object.getPrototypeOf(ctx)).toBeNull();
+    expect(getByPath(ctx, '__proto__.result')).toBe('STEP');
   });
 
   it('a path never reads through to a prototype', () => {

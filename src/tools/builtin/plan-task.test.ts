@@ -579,6 +579,15 @@ describe('plan_task schema (D2 mechanism)', () => {
 });
 
 describe('phasesToPipelineSteps', () => {
+  it('gives a phase named like a reserved step id another id', () => {
+    const steps = phasesToPipelineSteps([
+      { name: 'Params', steps: ['Collect'] },
+      { name: 'Constructor', steps: ['Build'], depends_on: ['Params'] },
+    ]);
+    expect(steps.map(s => s.id)).toEqual(['params-2', 'constructor-2']);
+    expect(steps[1]!.input_from).toEqual(['params-2']);
+  });
+
   it('should convert phases to pipeline steps with dependencies', () => {
     const steps = phasesToPipelineSteps([
       { name: 'Fetch Data', steps: ['Call API', 'Parse JSON'] },

@@ -35,10 +35,11 @@ export function stepIdRefusal(where: string, { refs = true }: { refs?: boolean }
 
 /**
  * Ids in the shape that a step still cannot take, because the context of a run already uses the
- * name: `params` holds the workflow's parameters (`{{params.<name>}}`), and every object reads
- * `__proto__` and `constructor` through to its prototype. A step under one of them would take that
- * place in the context of each step that reads it (`buildStepContext`), so a reference meant for the
- * parameters would read the step's output instead.
+ * name: `params` holds the workflow's parameters (`{{params.<name>}}`), and a plain object reads
+ * `__proto__` and `constructor` through to its prototype. A step under `params` would take its place
+ * in the context of each step that reads it (`buildStepContext`), so a reference meant for the
+ * parameters would read the step's output instead. The contexts are built without a prototype, so
+ * the other two are kept out for any reader that is not.
  */
 export const RESERVED_STEP_IDS: ReadonlySet<string> = new Set(['params', '__proto__', 'constructor']);
 
