@@ -557,7 +557,7 @@ describe('a planned description on a list run (PRD shopify-preset §20.2 item 5,
     expect(ledger.getPreview(id).map((t) => [t.error, t.linkDomain])).toEqual([['new_link_domain', 'evil.example'], ['new_link_domain', 'evil.example']]);
   });
 
-  it('stores the refused link\'s domain only in a column the export map lists as encrypted', async () => {
+  it('stores the refused link\'s domain encrypted, never in plain text, in a column the export map lists as encrypted', async () => {
     await previewed({ description: '<p>New <a href="https://evil.example/x">deal</a></p>' });
     const listed = EXPORT_TABLES['engine.db'].include;
     const db = engineDb.getDb();
@@ -572,6 +572,17 @@ describe('a planned description on a list run (PRD shopify-preset §20.2 item 5,
       }
     }
     expect(holding).toContain('bulk_targets.link_domain');
+    const cells = db.prepare(`SELECT link_domain FROM bulk_targets WHERE link_domain IS NOT NULL`).all() as Array<{ link_domain: string }>;
+    expect(cells.length).toBeGreaterThan(0);
+    for (const { link_domain } of cells) expect(engineDb.dec(link_domain)).toBe('evil.example');
+    // Nowhere in either table in plain text.
+    for (const table of ['bulk_runs', 'bulk_targets']) {
+      const cols = (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name);
+      for (const col of cols) {
+        const n = (db.prepare(`SELECT count(*) AS n FROM ${table} WHERE typeof("${col}") = 'text' AND instr("${col}", 'evil.example') > 0`).get() as { n: number }).n;
+        expect(n, `${table}.${col}`).toBe(0);
+      }
+    }
     const unlisted = holding.filter((tc) => { const [t, c] = tc.split('.') as [string, string]; return !(listed[t]?.encrypted ?? []).includes(c); });
     expect(unlisted).toEqual([]);
   });
