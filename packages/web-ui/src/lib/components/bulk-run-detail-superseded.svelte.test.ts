@@ -5,7 +5,7 @@ import { t, getLocale, setLocale } from '../i18n.svelte.js';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
 
 // A judged run the owner replaced by starting another one in its place says so in its halt line, and
-// links the run that took its place, as an undone run links its undo (U-342). Without the id (an older
+// links the run that took its place, as an undone run links its undo (U-353). Without the id (an older
 // engine, or a run replaced before the engine kept it) the sentence stands alone.
 
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');

@@ -11,7 +11,7 @@ import { judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 
 // A judged run the owner replaces by starting another one in its place keeps the id of that run,
-// so its page can link the run that took its place (U-342). Only the run that ended so carries it.
+// so its page can link the run that took its place (U-353). Only the run that ended so carries it.
 
 const HOST = 'shop.example.com';
 const LIST = `https://${HOST}/wp-json/wc/v3/products`;
