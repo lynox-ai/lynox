@@ -5,6 +5,9 @@ import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 import { isGraphqlEndpoint } from '../core/outbound-write.js';
 import { isReviewedHeaderName } from '../tools/permission-guard.js';
 import { headerListForNote } from '../core/write-notes.js';
+import { shownParamName } from './workflow-params.js';
+import { isStepIdShape, shownStepId } from './step-id.js';
+
 
 /**
  * Base `params.<name>` reference. Captures the base name up to the next path
@@ -107,7 +110,7 @@ export function validateContractAgainstSteps(planned: {
   const unconstrained = [...referenced].filter(p => !constrained.has(p));
   if (unconstrained.length > 0) {
     return (
-      `Capability-contract is invalid: parameter(s) ${unconstrained.join(', ')} flow into a ` +
+      `Capability-contract is invalid: parameter(s) ${[...new Set(unconstrained.map((p) => shownParamName(p)))].join(', ')} flow into a ` +
       `tool call but declare no constraint (enum/regex/min-max). A contract-governed workflow ` +
       `must constrain every re-targetable parameter so a run cannot redirect an outbound call.`
     );
@@ -359,18 +362,21 @@ export function reviewedContractShapeError(contract: CapabilityContract, steps: 
   }
   if (contract.hostPatterns.length !== 1) return 'a reviewed grant names exactly one host.';
   const host = contract.hostPatterns[0]!;
-  if (normaliseReviewedHost(host) !== host) return `host "${host}" is not a literal lowercase host name.`;
+  if (normaliseReviewedHost(host) !== host) return 'the host is not a literal lowercase host name.';
   const paths = contract.pathPatterns;
   if (paths.length === 0 || paths.length > MAX_REVIEWED_PATHS) {
     return `a reviewed grant names between 1 and ${MAX_REVIEWED_PATHS} paths.`;
   }
-  for (const path of paths) {
-    if (!isLiteralReviewedPath(path)) return `path "${path}" is not a literal absolute path.`;
+  // Host and paths are stored text, and this refusal reaches the model: a path is named by its
+  // place, and neither is quoted.
+  for (const [at, path] of paths.entries()) {
+    const place = paths.length === 1 ? 'the path' : `path #${String(at + 1)}`;
+    if (!isLiteralReviewedPath(path)) return `${place} is not a literal absolute path.`;
     if (isMailProviderTarget(`https://${host}${path}`)) {
-      return `https://${host}${path} is a mail provider's API, and a grant does not cover it. To send from this mailbox, send from the chat, where lynox asks before each email.`;
+      return `the address of ${place} is a mail provider's API, and a grant does not cover it. To send from this mailbox, send from the chat, where lynox asks before each email.`;
     }
     if (isGraphqlEndpoint(`https://${host}${path}`)) {
-      return `https://${host}${path} is a GraphQL endpoint, where a read and every mutation are the same ${writes[0]!}, and a grant does not cover it. Run it from the chat, where lynox asks before each mutation.`;
+      return `the address of ${place} is a GraphQL endpoint, where a read and every mutation are the same ${writes[0]!}, and a grant does not cover it. Run it from the chat, where lynox asks before each mutation.`;
     }
   }
   const referenced = new Set<string>();
@@ -378,14 +384,14 @@ export function reviewedContractShapeError(contract: CapabilityContract, steps: 
     for (const p of paramsReferencedInTemplate(step.input_template)) referenced.add(p);
   }
   for (const [name, c] of Object.entries(contract.paramConstraints)) {
-    if (!referenced.has(name)) return `parameter "${name}" is constrained but flows into no tool call.`;
+    if (!referenced.has(name)) return `parameter ${shownParamName(name)} is constrained but flows into no tool call.`;
     const keys = Object.keys(c).filter((k) => (c as Record<string, unknown>)[k] !== undefined);
     if (keys.length !== 1 || !Array.isArray(c.enum) || c.enum.length !== 1) {
-      return `parameter "${name}" must be bound to exactly one value.`;
+      return `parameter ${shownParamName(name)} must be bound to exactly one value.`;
     }
   }
   for (const name of referenced) {
-    if (!(name in contract.paramConstraints)) return `parameter "${name}" flows into a tool call and is not bound to a value.`;
+    if (!(name in contract.paramConstraints)) return `parameter ${shownParamName(name)} flows into a tool call and is not bound to a value.`;
   }
   return null;
 }
@@ -398,15 +404,16 @@ export function reviewedContractShapeError(contract: CapabilityContract, steps: 
  * that could be checked here, so it is refused too. A step without a template writes its
  * call at run time, and only the run can refuse its headers.
  */
-function reviewedHeaderError(step: InlinePipelineStep): string | null {
+function reviewedHeaderError(step: InlinePipelineStep, index: number): string | null {
+  const label = isStepIdShape(step.id) ? `"${step.id}"` : shownStepId(step.id, index);
   const template = step.input_template;
   if (template === undefined || !('headers' in template) || template['headers'] === undefined) return null;
   const headers = template['headers'];
   if (headers === null || typeof headers !== 'object' || Array.isArray(headers)) {
-    return `Step "${step.id}" takes its request headers from a value, and a reviewed grant needs each header named.`;
+    return `Step ${label} takes its request headers from a value, and a reviewed grant needs each header named.`;
   }
   const refused = Object.keys(headers).filter((name) => !isReviewedHeaderName(name));
-  return refused.length === 0 ? null : `Step "${step.id}" sets ${headerListForNote(refused)}, which a run under a reviewed grant may not set.`;
+  return refused.length === 0 ? null : `Step ${label} sets ${headerListForNote(refused)}, which a run under a reviewed grant may not set.`;
 }
 
 /**
@@ -430,7 +437,7 @@ export function buildReviewedContract(
     for (const name of paramsReferencedInTemplate(step.input_template)) {
       const value = boundParams[name];
       if (typeof value !== 'string' && typeof value !== 'number') {
-        return { error: `Parameter "${name}" flows into a tool call and needs a text or number value for this schedule.` };
+        return { error: `Parameter ${shownParamName(name)} flows into a tool call and needs a text or number value for this schedule.` };
       }
       paramConstraints[name] = { enum: [value] };
     }
@@ -449,8 +456,8 @@ export function buildReviewedContract(
   // Checked here, where a person is about to accept, and not in the shape a save checks: an
   // edit drops the grant anyway (`update_workflow`), and refusing it for headers the dropped
   // grant would have refused helps nobody. Without this, every run of an accepted grant fails.
-  for (const step of steps ?? []) {
-    const headerError = reviewedHeaderError(step);
+  for (const [at, step] of (steps ?? []).entries()) {
+    const headerError = reviewedHeaderError(step, at);
     if (headerError !== null) return { error: headerError };
   }
   return { contract };
