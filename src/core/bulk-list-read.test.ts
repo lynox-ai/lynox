@@ -19,6 +19,7 @@ import { SecretStore } from './secret-store.js';
 import { WorkerLoop } from './worker-loop.js';
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
 import { BULK_MAX_SOURCE_BYTES } from './bulk-plan.js';
+import { EXPORT_TABLES } from './export-tables.js';
 import { setPinnedTransportForTests, type PinnedTransportInput } from './network-guard.js';
 import { createToolContext } from './tool-context.js';
 import { detectSecretInContent } from '../tools/builtin/http.js';
@@ -554,6 +555,25 @@ describe('a planned description on a list run (PRD shopify-preset §20.2 item 5,
     const id = await previewed({ description: '<p>New <a href="https://Evil.Example./x">deal</a></p>' });
     // The host as the check read it: lower case, the trailing dot dropped.
     expect(ledger.getPreview(id).map((t) => [t.error, t.linkDomain])).toEqual([['new_link_domain', 'evil.example'], ['new_link_domain', 'evil.example']]);
+  });
+
+  it('stores the refused link\'s domain only in a column the export map lists as encrypted', async () => {
+    await previewed({ description: '<p>New <a href="https://evil.example/x">deal</a></p>' });
+    const listed = EXPORT_TABLES['engine.db'].include;
+    const db = engineDb.getDb();
+    // Every column of the ledger's tables that holds a value as the store encrypts it, as written by
+    // the run above, must be in the map: the map is what migration and the keyless check read.
+    const holding: string[] = [];
+    for (const table of ['bulk_runs', 'bulk_targets']) {
+      const cols = (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name);
+      for (const col of cols) {
+        const n = (db.prepare(`SELECT count(*) AS n FROM ${table} WHERE typeof("${col}") = 'text' AND "${col}" GLOB 'enc:*'`).get() as { n: number }).n;
+        if (n > 0) holding.push(`${table}.${col}`);
+      }
+    }
+    expect(holding).toContain('bulk_targets.link_domain');
+    const unlisted = holding.filter((tc) => { const [t, c] = tc.split('.') as [string, string]; return !(listed[t]?.encrypted ?? []).includes(c); });
+    expect(unlisted).toEqual([]);
   });
 
   it('keeps no domain a plan spells only percent-encoded (1010)', async () => {
