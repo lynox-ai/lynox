@@ -624,6 +624,20 @@ async function jsonFetch(path: string, opts: RequestInit = {}): Promise<Response
   return fetch(`${baseUrl}${path}`, { ...opts, headers });
 }
 
+/**
+ * The owner's browser session, without the token: a schedule is confirmed and a grant accepted
+ * only there. A request carrying both counts as the token, so the bearer is left out.
+ */
+async function ownerSessionFetch(path: string, opts: RequestInit = {}): Promise<Response> {
+  const headers: Record<string, string> = {
+    cookie: `lynox_session=${webUiLoginSession(TEST_SECRET, null)!.token}`,
+    'sec-fetch-site': 'same-origin',
+    ...(opts.headers as Record<string, string> | undefined),
+  };
+  if (opts.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+  return fetch(`${baseUrl}${path}`, { ...opts, headers });
+}
+
 /** The confirm body the view sends: the digest from the schedule's stamp preview. */
 async function confirmBody(id: string): Promise<string> {
   const shown = await (await jsonFetch(`/api/tasks/${id}/stamp-preview`)).json() as { expect: string };
@@ -2290,7 +2304,9 @@ describe('LynoxHTTPApi', () => {
       });
 
       describe('switch on', () => {
-        beforeEach(() => { vi.stubEnv('LYNOX_FEATURE_WORKFLOW_REVIEWED_GRANT', '1'); });
+        // The secret is set here too: the `unstubAllEnvs` after each test above takes it away, and
+        // without it every caller is the owner, so a token could not be told from a session.
+        beforeEach(() => { vi.stubEnv('LYNOX_FEATURE_WORKFLOW_REVIEWED_GRANT', '1'); vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET); });
 
         // PRD 3b-2 §4.3: the preview asks the same predicate as the schedule route.
         it.each([
@@ -2318,7 +2334,7 @@ describe('LynoxHTTPApi', () => {
 
         it('the acceptance schedules and writes the grant with the schedule\'s id and the request\'s auth origin', async () => {
           await withGrantServices(async () => {
-            const res = await jsonFetch('/api/tasks', {
+            const res = await ownerSessionFetch('/api/tasks', {
               method: 'POST',
               body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: CRON, params: VALUES, grant: { ...GRANT, checksum: await shownChecksum(), name: 'Ada' } }),
             });
@@ -2337,12 +2353,25 @@ describe('LynoxHTTPApi', () => {
 
         it('answers 409 when the accepted grant is not the one shown', async () => {
           await withGrantServices(async () => {
-            const res = await jsonFetch('/api/tasks', {
+            const res = await ownerSessionFetch('/api/tasks', {
               method: 'POST',
               body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: CRON, params: { month: '2026-07' }, grant: { ...GRANT, checksum: await shownChecksum() } }),
             });
             expect(res.status).toBe(409);
             expect(setGrant).not.toHaveBeenCalled();
+          });
+        });
+
+        it('a token, the owner\'s included, cannot accept a grant: nothing is written or scheduled', async () => {
+          await withGrantServices(async () => {
+            const res = await jsonFetch('/api/tasks', {
+              method: 'POST',
+              body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: CRON, params: VALUES, grant: { ...GRANT, checksum: await shownChecksum(), name: 'Ada' } }),
+            });
+            expect(res.status).toBe(403);
+            expect(((await res.json()) as { code?: string }).code).toBe('session_only');
+            expect(setGrant).not.toHaveBeenCalled();
+            expect(mockTaskCreatePipeline).not.toHaveBeenCalled();
           });
         });
       });
@@ -11001,7 +11030,8 @@ describe('LynoxHTTPApi', () => {
         ['/api/tasks/bulk-r/confirm', 'POST', await confirmBody('bulk-r')],
       ];
       for (const [path, method, body] of calls) {
-        const res = await jsonFetch(path.replace(/\/$/, ''), { method, ...(body ? { body } : {}) });
+        const send = path.endsWith('/confirm') ? ownerSessionFetch : jsonFetch;
+        const res = await send(path.replace(/\/$/, ''), { method, ...(body ? { body } : {}) });
         expect(res.status, `${method} ${path}`).toBe(409);
         expect(((await res.json()) as { error: string }).error, path).toBe(new BulkTriggerLockedError().message);
       }
@@ -11017,15 +11047,26 @@ describe('LynoxHTTPApi', () => {
 
     // triggers-consent — the human consent surface.
     it('POST /api/tasks/:id/confirm confirms a trigger (200)', async () => {
-      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') });
+      const res = await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') });
       expect(res.status).toBe(200);
       const body = await res.json() as { confirmed_at: string };
       expect(body.confirmed_at).toBeTruthy();
     });
 
+    it('POST /api/tasks/:id/confirm with a token, the owner\'s included, stamps nothing (403): a schedule is confirmed in the owner\'s session', async () => {
+      // Set here, not left to the file's setup: a block above takes it away with `unstubAllEnvs`,
+      // and without it every caller is the owner.
+      vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+      mockConfirmTrigger.mockClear();
+      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { code?: string }).code).toBe('session_only');
+      expect(mockConfirmTrigger).not.toHaveBeenCalled();
+    });
+
     it('POST /api/tasks/:id/confirm returns 404 for a trigger gone by the time it is stamped', async () => {
       mockConfirmTrigger.mockReturnValueOnce(undefined);
-      const res = await jsonFetch('/api/tasks/nope/confirm', { method: 'POST', body: await confirmBody('nope') });
+      const res = await ownerSessionFetch('/api/tasks/nope/confirm', { method: 'POST', body: await confirmBody('nope') });
       expect(res.status).toBe(404);
     });
 
@@ -11035,7 +11076,7 @@ describe('LynoxHTTPApi', () => {
       ref['getRunHistory'] = () => ({ getTrigger: () => undefined });
       try {
         mockConfirmTrigger.mockClear();
-        const res = await jsonFetch('/api/tasks/nope/confirm', { method: 'POST', body: JSON.stringify({ expect: 'any' }) });
+        const res = await ownerSessionFetch('/api/tasks/nope/confirm', { method: 'POST', body: JSON.stringify({ expect: 'any' }) });
         expect(res.status).toBe(404);
         expect(mockConfirmTrigger).not.toHaveBeenCalled();
       } finally {
@@ -11049,7 +11090,7 @@ describe('LynoxHTTPApi', () => {
       ['a digest that is not a string', JSON.stringify({ expect: 1 })],
     ])('POST /api/tasks/:id/confirm with %s stamps nothing (400): the owner confirms from the preview', async (_label, body) => {
       mockConfirmTrigger.mockClear();
-      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', ...(body !== undefined ? { body } : {}) });
+      const res = await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', ...(body !== undefined ? { body } : {}) });
       expect(res.status).toBe(400);
       const answer = (await res.json()) as { error: string; code: string };
       expect(answer.error).toContain('"expect" is required');
@@ -22073,7 +22114,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
     });
 
     it('may not confirm a schedule', async () => {
-      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' });
+      const res = await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST' });
       expect(res.status).toBe(403);
       expect(((await res.json()) as { error: string }).error).toContain('Only the owner');
       expect(mockConfirmTrigger).not.toHaveBeenCalled();
@@ -22452,7 +22493,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
     });
 
     it('confirms a schedule, recorded as the owner, and its changes leave no mark', async () => {
-      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') })).status).toBe(200);
+      expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') })).status).toBe(200);
       expect(mockConfirmTrigger).toHaveBeenCalledWith('task-1', undefined, 'owner', undefined);
       await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ title: 'new' }) });
       expect(mockTaskMarkEditedBy).not.toHaveBeenCalled();
@@ -22487,7 +22528,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
 
         // A connection added since the preview: the digest no longer matches, nothing is stamped.
         profiles = [crm, { ...crm, id: 'crm2-api', name: 'CRM 2', oauth_grant: { ...crm.oauth_grant, grant_id: 'grant-2' } }];
-        const stale = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) });
+        const stale = await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) });
         expect(stale.status).toBe(409);
         // The one 409 that asks for another look carries its own code; the view reloads only on it.
         expect(((await stale.json()) as { code?: unknown }).code).toBe('changed');
@@ -22497,22 +22538,22 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         // confirms it.
         profiles = [crm];
         trigger.title = 'Report, then mail every customer';
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(409);
+        expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(409);
         // A digest shown for another schedule of the same mandate does not confirm this one.
         const other = { ...trigger, id: 'task-2' };
         ref['getRunHistory'] = () => ({ getTrigger: (id: string) => (id === 'task-1' ? trigger : id === 'task-2' ? other : undefined) });
         const otherShown = await (await jsonFetch('/api/tasks/task-2/stamp-preview')).json() as { expect: string };
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: otherShown.expect }) })).status).toBe(409);
+        expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: otherShown.expect }) })).status).toBe(409);
         expect(mockConfirmTrigger).not.toHaveBeenCalled();
         const again = await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json() as { expect: string };
 
         // The list it showed, on the schedule it showed: stamped with it.
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: again.expect }) })).status).toBe(200);
+        expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: again.expect }) })).status).toBe(200);
         expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', { wf: null, entries: [expect.objectContaining({ profile: 'crm-api', grant: 'grant-secret-1' })] });
 
         // Without the digest: nothing is stamped, not even without a list.
         mockConfirmTrigger.mockClear();
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(400);
+        expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(400);
         expect(mockConfirmTrigger).not.toHaveBeenCalled();
 
         // A mandate's backup or notice never uses a connection: nothing is listed or shown for it.
@@ -22520,7 +22561,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
           Object.assign(trigger, { effect });
           const none = await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json() as { expect: string; connections: unknown[]; by: unknown };
           expect([none.connections, none.by]).toEqual([[], null]);
-          expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: none.expect }) })).status).toBe(200);
+          expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: none.expect }) })).status).toBe(200);
           expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', undefined);
         }
         Object.assign(trigger, { effect: 'run_agent' });
@@ -22529,7 +22570,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         Object.assign(trigger, { created_by: 'owner', created_mandate_id: undefined });
         const own = await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json() as { expect: string; connections: unknown[] };
         expect(own.connections).toEqual([]);
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: own.expect }) })).status).toBe(200);
+        expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: own.expect }) })).status).toBe(200);
         expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', undefined);
       } finally {
         ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
@@ -22566,14 +22607,14 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         // The workflow was confirmed again since the preview: the list shown went with the
         // earlier confirmation, so it does not confirm this one.
         mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W', confirmedAt: '2026-10-09T00:00:00.000Z' } : undefined));
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(409);
+        expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(409);
         mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W', confirmedAt: WF } : undefined));
         // The schedule changes while the confirm looks the list up: the read after it decides.
         editAfter = reads + 1;
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(409);
+        expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(409);
         expect(mockConfirmTrigger).not.toHaveBeenCalled();
         editAfter = Infinity;
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(200);
+        expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(200);
         expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', { wf: WF, entries: [expect.objectContaining({ profile: 'crm-api', grant: 'grant-1' })] });
         // A workflow nobody confirmed: the preview says so, and the view offers no confirm (a
         // confirmed schedule on it is switched off by its first run).
@@ -22588,7 +22629,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
     it('confirming a workflow schedule never stamps the workflow, which every schedule naming it shares', async () => {
       mockConfirmTrigger.mockReturnValueOnce({ id: 'task-1', effect: 'run_workflow', pipeline_id: 'wf-sched', confirmed_at: '2026-10-08T00:00:00.000Z' });
       storeWf(); // an unstamped workflow
-      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') })).status).toBe(200);
+      expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') })).status).toBe(200);
       expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
     });
 

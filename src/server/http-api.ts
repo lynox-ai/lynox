@@ -9461,6 +9461,12 @@ export class LynoxHTTPApi {
           if (this._refuseUnlessOwner(_req, res, 'grant a workflow unattended writes')) return;
           const { workflowGrantEnabled, acceptWorkflowGrant } = await import('../core/workflow-grant.js');
           if (!workflowGrantEnabled()) { errorResponse(res, 403, 'Granting a workflow unattended writes is not enabled on this instance.'); return; }
+          // A grant makes the contract's hosts count as named by the owner, so it is given in the
+          // owner's browser session only, as recipients are confirmed: never with a token.
+          if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+            errorResponse(res, 403, 'Unattended writes are granted only in the owner\'s browser session, not with a token.', 'session_only');
+            return;
+          }
           if (typeof rawGrant !== 'object' || rawGrant === null || Array.isArray(rawGrant)) { errorResponse(res, 400, 'Invalid "grant".'); return; }
           const g = rawGrant as Record<string, unknown>;
           const engineDb = engine.getEngineDb();
@@ -9822,7 +9828,13 @@ export class LynoxHTTPApi {
     }, ownerOnly('see what a schedule would be confirmed with')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/confirm', async (_req, res, params, body) => {
-      // Only the owner stamps (§3.12 point 2).
+      // Only the owner stamps (§3.12 point 2), and only in their browser session, as recipients
+      // are confirmed: a token, the owner's included, could otherwise stamp a schedule a run it
+      // started had just written, and that schedule would then run as the owner's instruction.
+      if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+        errorResponse(res, 403, 'A schedule is confirmed only in the owner\'s browser session, not with a token.', 'session_only');
+        return;
+      }
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       if (this._refusePaused(_req, res, taskManager, params['id']!, 'confirm')) return;
