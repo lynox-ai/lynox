@@ -225,6 +225,8 @@ describe('the runs list at phone width', () => {
 				expect(chip.classList.contains('whitespace-nowrap')).toBe(false);
 				const parts = [...chip.children] as HTMLElement[];
 				for (const p of parts) expect(p.classList.contains('whitespace-nowrap')).toBe(true);
+				// Nothing around the chip takes that one break away again.
+				for (let el = chip.parentElement; el !== null && el !== target; el = el.parentElement) expect(el.classList.contains('whitespace-nowrap')).toBe(false);
 				return { text: chip.textContent!, parts: parts.map((p) => p.textContent!) };
 			});
 		};
