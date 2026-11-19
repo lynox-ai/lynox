@@ -1668,7 +1668,7 @@
 	// card that came back: that card may ask something else, and a button with focus is one key away.
 	let chatErrorBanner = $state<HTMLDivElement | null>(null);
 	$effect(() => {
-		if (chatError !== null && (chatError === t('chat.reply_needs_question.same') || chatError === t('chat.reply_needs_question.other'))) {
+		if (chatError !== null && (chatError === t('chat.reply_needs_question') || chatError === t('chat.reply_needs_question_none'))) {
 			chatErrorBanner?.focus();
 		}
 	});

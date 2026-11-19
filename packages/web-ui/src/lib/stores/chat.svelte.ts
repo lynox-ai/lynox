@@ -2719,7 +2719,7 @@ export async function replyPermission(answer: string): Promise<void> {
 	// Without the question's id the answer is not sent: the server would take it for whatever
 	// question is open by then, so the open one is brought back to be answered by name.
 	if (!promptId) { await reportReply(sid, 'id_required', draftable); return; }
-	await reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId }), draftable, promptId);
+	await reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId }), draftable);
 }
 
 /** One-shot reply for a multi-question tabs prompt. Answers are ordered to
@@ -2745,7 +2745,7 @@ export async function replyPermissionTabs(answers: string[]): Promise<void> {
  * the answer again is the way, `answer` goes back into the message field if that is empty, and
  * the sentence says so only then.
  */
-async function reportReply(sid: string, outcome: ReplyOutcome, answer: string | null, askedId?: string): Promise<void> {
+async function reportReply(sid: string, outcome: ReplyOutcome, answer: string | null): Promise<void> {
 	if (outcome === 'lost') { addToast(t('chat.error_connection'), 'error', 6000); return; }
 	if (outcome === 'key_refused') {
 		// Not stored: the question is still open, so its card comes back. A typed answer goes back
@@ -2765,13 +2765,10 @@ async function reportReply(sid: string, outcome: ReplyOutcome, answer: string | 
 		if (sessionId !== sid) return;
 		await checkPendingPrompt();
 		if (sessionId !== sid) return;
-		// The answer goes back into the message field only for the same question: under another one
-		// (a mail to send, say) one keystroke would give it an answer meant for something else.
-		const same = askedId !== undefined && pendingPermission?.promptId === askedId;
-		// A skip (`__dismissed__`) is no text to give back (`draftOfAnswer`).
-		const draft = same && answer !== null ? draftOfAnswer(answer) : null;
-		if (draft !== null && composerDraft !== null) composerDraft(draft);
-		chatError = t(same ? 'chat.reply_needs_question.same' : 'chat.reply_needs_question.other');
+		// The answer does not go back into the message field: which question is open now is not
+		// known to match the one answered (a mail to send, say), and one keystroke would answer it.
+		const open = pendingPermission !== null || pendingTabsPrompt !== null || pendingSecretPrompt !== null || pendingMailConnect !== null;
+		chatError = t(open ? 'chat.reply_needs_question' : 'chat.reply_needs_question_none');
 		chatErrorDetail = null;
 		return;
 	}
