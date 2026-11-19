@@ -29,7 +29,7 @@ function actorOf(agent: IAgent): InstanceActor {
 }
 
 /** The act a derived write follows from: its site and row. Absent for the owner, who has none. */
-function trailOf(site: 'memory_store#create' | 'memory_update#fallback' | 'memory_promote#move', correlationId: string | undefined): { site: typeof site; correlationId: string } | undefined {
+function trailOf(site: 'memory_store#create' | 'memory_update#exact' | 'memory_update#fallback' | 'memory_promote#move', correlationId: string | undefined): { site: typeof site; correlationId: string } | undefined {
   return correlationId === undefined ? undefined : { site, correlationId };
 }
 
@@ -58,6 +58,17 @@ function cameInUntrusted(agent: IAgent, lines: readonly string[], namespace: Mem
 
 const SUPERSEDED_PREFIX_RE = /^\[SUPERSEDED \d{4}-\d{2}-\d{2}\]\s*/;
 
+/** A flat line without the prefixes the writers put before its text, in any order: the date
+ *  (`status` lines get one even in front of a `[SUPERSEDED …]` marker) and the marker. */
+function stripLinePrefixes(line: string): string {
+  let rest = line.trim();
+  for (;;) {
+    const next = rest.replace(SUPERSEDED_PREFIX_RE, '').replace(DATE_PREFIX_RE, '');
+    if (next === rest) return rest;
+    rest = next;
+  }
+}
+
 /**
  * Which flat lines of `namespace` came in untrusted, for a path that hands them to the model.
  * A line is marked when an active knowledge row written untrusted contains its text; such a
@@ -77,7 +88,7 @@ function untrustedLinesOf(agent: IAgent, namespace: MemoryNamespace): (line: str
   }
   if (texts.length === 0) return () => false;
   return (line) => {
-    const body = line.replace(SUPERSEDED_PREFIX_RE, '').replace(DATE_PREFIX_RE, '').trim().toLowerCase();
+    const body = stripLinePrefixes(line).toLowerCase();
     return body.length > 0 && texts.some(t => t.includes(body));
   };
 }
@@ -597,6 +608,12 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
     // Try the exact substring path first (pre-#529 behaviour). When that
     // succeeds, KG mirror sync runs as before.
     const memory = agent.memory;
+    // On an untrusted turn the lines the edit leaves behind get an untrusted row (below); the
+    // file is read first to tell which lines are new.
+    const untrustedTurn = deriveTurnUntrusted(agent);
+    const before = untrustedTurn && agent.toolContext.knowledgeLayer
+      ? ((scopeRef ? await memory.loadScoped(input.namespace, scopeRef) : await memory.load(input.namespace)) ?? '')
+      : '';
     const exact = await withInstanceWrite(agent, { site: 'memory_update#exact', kind: 'change', store: 'memory', target: () => memoryTarget(input.namespace, ['scope', scopeRef]), main: ['update'] }, async (w) => {
       const exactOk = await w.run('update', () => (scopeRef
         ? memory.updateScoped(input.namespace, input.old_content, input.new_content, scopeRef)
@@ -610,7 +627,7 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
         // updated above (it edits content the user can already see); the trust-sensitive KG
         // re-extraction is skipped — the KG keeps its prior extraction until a clean-turn edit.
         const kg = agent.toolContext.knowledgeLayer;
-        if (kg && !deriveTurnUntrusted(agent)) {
+        if (kg && !untrustedTurn) {
           const defaultScope: MemoryScopeRef = scopeRef
             ?? agent.activeScopes?.[0]
             ?? { type: 'context', id: '' };
@@ -636,6 +653,20 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
           })).catch((err: unknown) => {
             // The re-extraction's own failure stays swallowed as before; a refused row is said.
             if (err instanceof InstanceWriteUnrecorded) process.stderr.write('[lynox:trail] derived knowledge write refused: its row could not be written (memory_update)\n');
+          });
+        } else if (kg) {
+          // On an untrusted turn the lines the edit leaves behind get a row of their own, written
+          // untrusted, as memory_store writes one: the flat file now holds text no existing row
+          // covers, and a read path marks a line only where an untrusted row contains it. The
+          // whole lines, not `new_content`: the edit replaces a substring, so a line can join
+          // attacker text to text that was there before.
+          const prior = new Set(before.split('\n'));
+          const left = before.replace(input.old_content, input.new_content).split('\n').filter(l => l.trim() && !prior.has(l));
+          const rowScope: MemoryScopeRef = scopeRef ?? agent.activeScopes?.[0] ?? { type: 'context', id: '' };
+          publishMemoryStore({
+            namespace: input.namespace, content: left.length > 0 ? left.join('\n') : input.new_content, scopeType: rowScope.type, scopeId: rowScope.id,
+            sourceThreadId: chatThreadOf(agent), sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: true,
+            actor: actorOf(agent), trail: trailOf('memory_update#exact', w.correlationId),
           });
         }
         return scopeRef
