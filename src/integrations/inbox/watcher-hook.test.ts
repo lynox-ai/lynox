@@ -696,7 +696,36 @@ describe('createInboxClassifierHook — prefilter rules', () => {
   });
 
   // Anyone can write a List-Id, so a list-id rule must not carry a mail with
-  // a code past the sensitive check (a from rule keeps its precedence).
+  // a code past the sensitive check, in any mode.
+  for (const mode of ['mask', 'allow'] as const) {
+    it(`a list-id rule that files as handled does not silence a sensitive mail (mode ${mode})`, async () => {
+      const ruleId = inbox.insertRule({
+        accountId: ACCOUNT.id, matcherKind: 'list_id', matcherValue: LIST,
+        bucket: 'auto_handled', action: 'archive', source: 'on_demand',
+      });
+      const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts, sensitiveMode: mode });
+      const coded = { subject: 'Your verification code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' };
+      expect(await hook(ACCOUNT.id, envelope({ listId: LIST, ...coded }))).toBe('sensitive_skipped');
+      const item = inbox.listItems()[0]!;
+      expect(item.bucket).toBe('requires_user');
+      expect(queue.enqueue).not.toHaveBeenCalled();
+      const payload = JSON.parse(inbox.listAuditForItem(item.id)[0]!.payloadJson) as Record<string, unknown>;
+      expect(payload['rule_withheld']).toBe(ruleId);
+    });
+
+    it(`a list-id rule that files as needing the user still applies to a sensitive mail (mode ${mode})`, async () => {
+      inbox.insertRule({
+        accountId: ACCOUNT.id, matcherKind: 'list_id', matcherValue: LIST,
+        bucket: 'requires_user', action: 'show', source: 'on_demand',
+      });
+      const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts, sensitiveMode: mode });
+      const coded = { subject: 'Your verification code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' };
+      expect(await hook(ACCOUNT.id, envelope({ listId: LIST, ...coded }))).toBe('rule_applied');
+      expect(inbox.listItems()[0]).toMatchObject({ bucket: 'requires_user', reasonDe: `Regel: list_id = ${LIST}` });
+      expect(queue.enqueue).not.toHaveBeenCalled();
+    });
+  }
+
   it('a list-id rule does not outrank the sensitive check', async () => {
     inbox.insertRule({
       accountId: ACCOUNT.id,

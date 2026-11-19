@@ -325,16 +325,13 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     // without it, so the rule's audit records it too: the store keeps 200 characters of what
     // the check read, and a reader of the item (`inbox_read`) withholds the mail by this.
     const sensitive = analyzeSensitiveContent({ subject, body: env.snippet });
-    const matched = opts.rules.match({
+    const rule = opts.rules.match({
       accountId,
       tenantId: opts.tenantId,
       from: fromAddress,
       subject,
       listId: env.listId,
     });
-    // Any sender can write a `List-Id`, so a list-id rule does not outrank
-    // the sensitive check: a mail with a code or a credential goes on to it.
-    const rule = matched !== null && matched.matcherKind === 'list_id' && sensitive.isSensitive ? null : matched;
     // Only the sender the user sees decides: with several From addresses, a
     // newsletter domain behind a contact's address must not file it as handled.
     const pre = prefilter({ ...env, from: env.from.slice(0, 1) });
@@ -346,7 +343,8 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     const envelopeFields = { ...envelopeToItemInputFields(env), prefilterRule: pre.rule };
     // A rule that would file a sensitive mail as handled does not apply:
     // the mail goes to "requires you" as a sensitive skip, whatever the mode, so neither a rule nor
-    // the classifier silences it. The owner's own rules included.
+    // the classifier silences it. The owner's own rules included, and a list-id rule too: any
+    // sender can write a `List-Id`. A rule that files it as needing the user still applies.
     const withheldRule = rule && rule.bucket === 'auto_handled' && sensitive.isSensitive ? rule : null;
 
     if (rule && !withheldRule) {
