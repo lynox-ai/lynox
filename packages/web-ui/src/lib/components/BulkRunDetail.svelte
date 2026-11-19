@@ -649,6 +649,14 @@
 				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{sentUnknownText}</p>
 			{/if}
 
+			{#if approving && ownerActs && run.judgeRule}
+				<!-- What the values were decided by, for the owner who approves them: the rule the start showed (U-335). -->
+				<div data-testid="bulk-approve-rule">
+					<h2 class="text-sm font-medium mb-1">{t('bulk.start.rule')}</h2>
+					<p class="text-sm whitespace-pre-wrap rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">{bulkVisibleText(run.judgeRule.rule)}</p>
+					<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t('bulk.approve.rule_drafted')}</p>
+				</div>
+			{/if}
 			{#if run.kind === 'apply' && targets.length > 0}
 				<div>
 					<h2 class="text-sm font-medium mb-2">{tf('bulk.preview.title', { k: String(targets.length), n: String(run.total) })}</h2>
@@ -775,6 +783,8 @@
 					<div>
 						<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.rule')}</h3>
 						<p class="text-sm whitespace-pre-wrap rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">{bulkVisibleText(run.judgeRule.rule)}</p>
+						<!-- The agent wrote the rule, from the owner's words or from data it read: the owner checks it (U-335). -->
+						<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t('bulk.start.rule_drafted')}</p>
 					</div>
 					<div>
 						<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.fields')}</h3>
