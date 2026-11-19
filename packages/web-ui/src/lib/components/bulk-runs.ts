@@ -915,30 +915,27 @@ export function bulkRollbackLeft(run: Pick<BulkRun, 'phase' | 'haltKey'>, target
 	return bulkRollbackIncomplete(run) && target.written === true && target.undone !== true;
 }
 
-/** The Shopify fields whose value is the product's own text. A product type, vendor or tag
- *  several products share is what those fields are for. */
-const SHOPIFY_OWN_TEXT_FIELDS: ReadonlySet<string> = new Set(['title', 'descriptionHtml', 'seo_title', 'seo_description']);
-
 /** Per target the owner still writes: how many OTHER targets get the same new value in the same
  *  field. A judge can give different products one value (three products with one SEO title), and
- *  the preview showed each row alone. Only fields that hold a target's own text count: on a
- *  Shopify store its title, description, SEO title and SEO description; elsewhere a text value.
- *  Field changes only, by their exact new text; an empty or missing value is no value. On a run
- *  without a judge, a field in which every target that writes it gets one value is not marked:
+ *  the preview showed each row alone. Only text values count, a target's own text such as a
+ *  product's title or an image's alt text; a target that writes a list, a number or a flag into a
+ *  field is not counted for that field at all. Field changes only, by their exact new text; an
+ *  empty or missing value is no value, though a target that clears the field still writes it. On
+ *  a run without a judge, a field in which every target that writes it gets one value is not marked:
  *  that is the order („set every SEO title to …“), not a duplicate. A judged run has no fixed
  *  value, so one value for all its targets is marked. A target that shares values in several
  *  fields counts its largest group. Targets without a shared value are absent. */
 export function bulkSameValueOthers(
 	targets: readonly Pick<BulkTarget, 'seq' | 'change' | 'diff' | 'deselected'>[],
-	{ shopify, judged }: { shopify: boolean; judged: boolean },
+	{ judged }: { judged: boolean },
 ): Map<number, number> {
 	// Per field: who writes it, and who gets which value.
 	const byField = new Map<string, { writers: Set<number>; values: Map<string, Set<number>> }>();
 	for (const x of targets) {
 		if (x.deselected || (x.change !== 'update' && x.change !== 'create') || x.diff.kind !== 'fields') continue;
 		for (const { field, after } of x.diff.fields) {
-			// A list, a number or a flag is no target's own text; on Shopify only its text fields are.
-			if ((shopify && !SHOPIFY_OWN_TEXT_FIELDS.has(field)) || (after !== null && after !== undefined && typeof after !== 'string')) continue;
+			// A list, a number or a flag is no target's own text.
+			if (after !== null && after !== undefined && typeof after !== 'string') continue;
 			let f = byField.get(field);
 			if (f === undefined) { f = { writers: new Set(), values: new Map() }; byField.set(field, f); }
 			// Every target that writes the field counts toward „all“, also one that clears it.

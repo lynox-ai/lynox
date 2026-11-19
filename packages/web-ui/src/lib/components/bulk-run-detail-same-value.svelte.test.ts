@@ -8,9 +8,9 @@ import { bulkSameValueOthers } from './bulk-runs.js';
 
 // A judge can give different products one new value: three products got one SEO title in a
 // preview, and each row showed alone. The preview now marks every target whose new value in a
-// field another target also gets, and says above the list how many there are. A field in which
-// every target that writes it gets one value is the order („set every SEO title to …“), not a
-// duplicate, and is not marked.
+// field another target also gets, and says above the list how many there are. On a run without a
+// judge, a field in which every target that writes it gets one value is the order („set every SEO
+// title to …“), not a duplicate, and is not marked; a judged run has no such order.
 
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
 type SvelteClient = {
@@ -158,9 +158,9 @@ describe('a preview where several targets get one new value', () => {
 	});
 });
 
-// A Shopify run without a judge unless a test says otherwise.
-const same = (ts: BulkTarget[], o: { shopify?: boolean; judged?: boolean } = {}): Map<number, number> =>
-	bulkSameValueOthers(ts, { shopify: true, judged: false, ...o });
+// A run without a judge unless a test says otherwise.
+const same = (ts: BulkTarget[], o: { judged?: boolean } = {}): Map<number, number> =>
+	bulkSameValueOthers(ts, { judged: false, ...o });
 
 describe('which targets share a value', () => {
 	it('compares within one field only', () => {
@@ -199,17 +199,12 @@ describe('which targets share a value', () => {
 		expect(m.get(3)).toBe(2);
 	});
 
-	it('marks on a Shopify store only its text fields, not product type, vendor or tags', () => {
-		const odd = tgt(9, fields(['productType', 'B'], ['vendor', 'B'], ['tags', 'B'], ['title', 'B']));
-		for (const field of ['productType', 'vendor', 'tags']) {
-			expect(same([tgt(1, fields([field, 'A'])), tgt(2, fields([field, 'A'])), odd]).size, field).toBe(0);
-		}
-		expect(same([tgt(1, fields(['title', 'A'])), tgt(2, fields(['title', 'A'])), odd]).get(1)).toBe(1);
-		expect(same([tgt(1, fields(['descriptionHtml', 'A'])), tgt(2, fields(['descriptionHtml', 'A'])), tgt(3, fields(['descriptionHtml', 'B']))]).get(1)).toBe(1);
+	it('marks an image\'s alt text like any other text', () => {
+		expect(same([tgt(1, fields(['alt', 'Produktbild'])), tgt(2, fields(['alt', 'Produktbild'])), tgt(3, fields(['alt', 'Snowboard von vorn']))]).get(1)).toBe(1);
 	});
 
-	it('marks elsewhere only text values, not a list, a number or a flag', () => {
-		const other = { shopify: false };
+	it('marks only text values, not a list, a number or a flag', () => {
+		const other = {};
 		const odd = (v: unknown): BulkTarget => tgt(9, fields(['f', v]));
 		expect(same([tgt(1, fields(['f', ['a']])), tgt(2, fields(['f', ['a']])), odd(['b'])], other).size).toBe(0);
 		expect(same([tgt(1, fields(['f', 5])), tgt(2, fields(['f', 5])), odd(6)], other).size).toBe(0);
@@ -217,8 +212,6 @@ describe('which targets share a value', () => {
 		expect(same([tgt(1, fields(['f', 'a'])), tgt(2, fields(['f', 'a'])), odd('b')], other).get(1)).toBe(1);
 		// A target that writes no text there does not count toward „every target gets one value“.
 		expect(same([tgt(1, fields(['f', 'a'])), tgt(2, fields(['f', 'a'])), odd(['b'])], other).size).toBe(0);
-		// A product type is text on another system, so it counts there.
-		expect(same([tgt(1, fields(['productType', 'a'])), tgt(2, fields(['productType', 'a'])), tgt(3, fields(['productType', 'b']))], other).get(1)).toBe(1);
 	});
 
 	it('marks one value that every target of a judged run gets', () => {
@@ -229,7 +222,7 @@ describe('which targets share a value', () => {
 	});
 
 	it('keeps a field whose name holds a NUL apart from another field and value', () => {
-		const m = same([tgt(1, fields(['a\u0000b', 'c'])), tgt(2, fields(['a', 'b\u0000c'])), tgt(3, fields(['a', 'x'], ['a\u0000b', 'y']))], { shopify: false });
+		const m = same([tgt(1, fields(['a\u0000b', 'c'])), tgt(2, fields(['a', 'b\u0000c']))]);
 		expect(m.size).toBe(0);
 	});
 
