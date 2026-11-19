@@ -9924,6 +9924,33 @@ describe('LynoxHTTPApi', () => {
       return (async () => { try { await test(); } finally { for (const k of Object.keys(origs)) engineRef[k] = origs[k]; } })();
     }
 
+    it('masks the engine\'s env secrets in the bundle, which have no credential shape', async () => {
+      // Made up and without a credential shape: only the env value set can mask it.
+      const canary = 'zQ7bundlecanaryPq9Lm2Xv4';
+      const saved = process.env['LYNOX_VAULT_KEY'];
+      try {
+        await swapEngine({
+          getThreadStore: () => ({ getThread: () => ({ id: 't1', title: `debug ${canary}` }), getMessages: () => [], getMessageCount: () => 0 }),
+          getRunHistory: () => ({
+            getRunsBySession: () => [], getRunToolCalls: () => [], getPromptSnapshot: () => null,
+            getCompactionEventsBySession: () => [], getWireSnapshotsForRun: () => [],
+          }),
+        }, async () => {
+          delete process.env['LYNOX_VAULT_KEY'];
+          const control = await jsonFetch('/api/threads/t1/debug-export');
+          expect(await control.text(), 'control: without the env value the title shows').toContain(canary);
+          process.env['LYNOX_VAULT_KEY'] = canary;
+          const res = await jsonFetch('/api/threads/t1/debug-export');
+          expect(res.status).toBe(200);
+          const body = await res.text();
+          expect(body).toContain('debug');
+          expect(body).not.toContain(canary);
+        });
+      } finally {
+        if (saved === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = saved;
+      }
+    });
+
     it('never carries a bulk run\'s targets, even with a ledger holding them (build plan B §5)', async () => {
       const MARK = 'ZXQ-BULK-BEFORE-IMAGE';
       const dir = mkdtempSync(join(tmpdir(), 'lynox-bulk-debug-'));

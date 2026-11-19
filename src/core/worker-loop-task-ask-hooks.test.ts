@@ -87,7 +87,7 @@ const TASK: TriggerRecord = {
 };
 
 /** Starts the task, whose agent turn asks its owner and parks; resolves once the question is pushed. */
-async function askingTask(o: { reporter: Engine['escalationReporter']; pushOutcome: 'delivered' | 'failed' | 'reached_others' }): Promise<{
+async function askingTask(o: { reporter: Engine['escalationReporter']; pushOutcome: 'delivered' | 'failed' | 'reached_others'; question?: string; options?: string[] }): Promise<{
   outcomes: Array<[string, DeliverySummary]>;
   starts: string[];
   notified: NotificationMessage[];
@@ -116,7 +116,7 @@ async function askingTask(o: { reporter: Engine['escalationReporter']; pushOutco
     sessionId: SESSION_ID, _recreateAgent: vi.fn(), getAgent: () => null, getLastRunStop: () => null,
     promptUser: undefined as ((q: string, opts?: string[]) => Promise<string>) | undefined,
     run: vi.fn(async () => {
-      await session.promptUser!('Which supplier?', ['A', 'B']);
+      await session.promptUser!(o.question ?? 'Which supplier?', o.options ?? ['A', 'B']);
       return 'Done.';
     }),
   };
@@ -145,6 +145,24 @@ async function askingTask(o: { reporter: Engine['escalationReporter']; pushOutco
   if (!await settles(() => notified.some((m) => m.inquiry !== undefined))) throw new Error('the task never pushed its question');
   return { outcomes, starts, notified };
 }
+
+describe('a scheduled task question that leaves the box, on an engine without a store', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it('carries no env secret in the question or its options', async () => {
+    // Made up and without a credential shape: only the env value set can mask it.
+    const canary = 'zQ7offboxcanaryPq9Lm2Xv4';
+    vi.stubEnv('LYNOX_VAULT_KEY', canary);
+    const h = await askingTask({
+      reporter: (() => undefined) as unknown as Engine['escalationReporter'],
+      pushOutcome: 'delivered',
+      question: `Use the key ${canary}?`, options: [`yes ${canary}`, 'no'],
+    });
+    const pushed = JSON.stringify(h.notified.map((m) => m.inquiry));
+    expect(pushed).toContain('Use the key');
+    expect(pushed).not.toContain(canary);
+  });
+});
 
 // Each case boots a managed engine: about 1 s alone, but one of six runs on a loaded machine
 // passed the 10 s default.

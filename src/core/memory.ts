@@ -597,7 +597,9 @@ export class Memory implements IMemory {
     // search text is never a real edit → refuse it.
     if (!oldText || !current || !current.includes(oldText)) return false;
 
-    const raw = current.replace(oldText, newText);
+    // Masked like an appended line: the replacement reaches the same file.
+    const safeNew = this.maskFn ? this.maskFn(newText) : newText;
+    const raw = current.replace(oldText, safeNew);
     const updated = trimMemoryContent(raw);
     if (this._flatFileEnabled) {
       const dir = this._scopeDir(scope);

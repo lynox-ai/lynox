@@ -4240,6 +4240,42 @@ describe('the two properties the comments claim, which nothing was checking', ()
     expect(log.split('\n').filter((l) => l !== '').length, 'the detail forged a second log line').toBe(1);
   });
 
+  it('without a store masker, masks the engine\'s env secrets in the failure detail', async () => {
+    const canary = 'zQ7renewalPq9Lm2Xv4';
+    const past = Date.now() - 1000;
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+    }));
+    const written: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/oauth/token')) throw new Error(`connect ECONNREFUSED ${canary}`);
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    vi.stubEnv('LYNOX_HTTP_SECRET', canary);
+    try {
+      const { httpRequestTool } = await import('./http.js');
+      // No `mask` option: this vault has no `maskAll`.
+      await httpRequestTool.handler(
+        { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
+        makeAgent(apiStore, makeVault(SEED)),
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
+    const log = written.filter((w) => w.includes('oauth token renewal')).join('');
+    expect(log, 'the renewal failure was not logged at all, so this proves nothing about masking').toContain('ECONNREFUSED');
+    expect(log, 'an env secret reached stderr').not.toContain(canary);
+  });
+
   /**
    * The THROWN failure, which is the worst one this path has and was the one
    * left untested.

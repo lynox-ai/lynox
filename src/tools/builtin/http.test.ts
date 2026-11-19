@@ -9269,6 +9269,43 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(await visible({ url: 'https://harmless-value.h.example/a', method: 'POST', body: '{}' }, headless(MANDATE))).toContain('to harmless-value.h.example requires user consent');
     });
 
+    // Without a store, the engine's own env secrets stand in for the stored ones: a mandate's write
+    // whose host carries one is refused, and a header carrying one is not shown in the question.
+    it('without a store, a host holding an env secret is refused in a mandate session; the same host without it is asked', async () => {
+      const canary = 'zq7hostcanarypq9lm2xv4';
+      const saved = process.env['LYNOX_VAULT_KEY'];
+      try {
+        delete process.env['LYNOX_VAULT_KEY'];
+        const control = agent270({ principal: MANDATE });
+        await visible({ url: `https://${canary}.h.example/a`, method: 'POST', body: '{}' }, control.agent);
+        expect(control.prompt, 'control: without the env value it is asked').toHaveBeenCalledTimes(1);
+        process.env['LYNOX_VAULT_KEY'] = canary;
+        const refused = agent270({ principal: MANDATE });
+        const out = await visible({ url: `https://${canary}.h.example/a`, method: 'POST', body: '{}' }, refused.agent);
+        expect(out).toContain('Blocked: the host of this POST sends a stored secret.');
+        expect(out).not.toContain(canary);
+        expect(refused.prompt).not.toHaveBeenCalled();
+      } finally {
+        if (saved === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = saved;
+      }
+    });
+
+    it('without a store, the question does not show an env secret a header carries', async () => {
+      const canary = 'zQ7headercanaryPq9Lm2Xv4';
+      const saved = process.env['LYNOX_VAULT_KEY'];
+      process.env['LYNOX_VAULT_KEY'] = canary;
+      try {
+        const asked = agent270();
+        await visible({ url: 'https://h.example/a', method: 'POST', body: '{}', headers: { 'X-Note': `note ${canary}` } } as never, asked.agent);
+        expect(asked.prompt).toHaveBeenCalledTimes(1);
+        const shown = question(asked.prompt, 0);
+        expect(shown).toContain('X-Note');
+        expect(shown).not.toContain(canary);
+      } finally {
+        if (saved === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = saved;
+      }
+    });
+
     // A value the host holds only in part — it starts in the userinfo, or the host starts with
     // `https:` and no `//` — or holds tab-split is in no host the checks above read whole.
     it('the refusal for want of a person to ask does not name a host that holds a stored value in part or in another form', async () => {

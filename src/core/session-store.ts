@@ -6,6 +6,7 @@ import type { ThreadRecord } from './thread-store.js';
 import { hydrateApiMessages } from './run-stop.js';
 import { threadIsContained } from './containment.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
+import { maskEngineEnvSecrets } from './secret-store.js';
 
 const VERBATIM_THRESHOLD = 80;
 const RECENT_COUNT = 40;
@@ -99,7 +100,7 @@ async function generateThreadSummary(
     // threads.summary rides backup / migration-export / debug-export and is read back
     // on resume, so a raw secret must not live there (mirror compact()'s pre-persist mask).
     const secretStore = engine.getSecretStore();
-    if (secretStore) summary = secretStore.maskSecrets(summary);
+    summary = secretStore ? secretStore.maskSecrets(summary) : maskEngineEnvSecrets(summary);
 
     const threadStore = engine.getThreadStore();
     if (threadStore) {

@@ -321,6 +321,9 @@ export function diffPreviewText(rawPath: string): string {
 }
 
 export const TOOL_AUDIT_INPUT_MAX_CHARS = 2000;
+/** How far past {@link TOOL_AUDIT_INPUT_MAX_CHARS} the input is masked before it is cut: longer than
+ *  any credential, so one that starts before the cut is found whole. */
+const TOOL_AUDIT_MASK_MARGIN = 1024;
 
 export type SendStopCause = 'end_turn' | 'max_tokens' | 'iteration_cap' | 'budget_cap' | 'absolute_cap';
 
@@ -2155,8 +2158,8 @@ export class Agent implements IAgent {
     // resolve to a DIFFERENT VENDOR than the conversation's model on a hybrid tenant, so
     // an unmasked excerpt ships a typed-in credential to a provider the user never chose
     // for this chat.
-    const safeQuestion = this.secretStore ? this.secretStore.maskSecrets(question) : question;
-    const safeAnswer = this.secretStore ? this.secretStore.maskSecrets(text) : text;
+    const safeQuestion = this.secretStore ? this.secretStore.maskSecrets(question) : maskEngineEnvSecrets(question);
+    const safeAnswer = this.secretStore ? this.secretStore.maskSecrets(text) : maskEngineEnvSecrets(text);
     // Read on the UNWRAPPED halves — `buildCaptureExcerpt` wraps the whole excerpt, so
     // asking the built string would fire for every turn and silently restore the turn-wide
     // routing this per-fact split exists to narrow. Returns WHICH structural reason fired
@@ -2543,7 +2546,7 @@ export class Agent implements IAgent {
     // untrusted turn does not ROUTE the capture, it CANCELS it. There is no queue entry to
     // find afterwards, so without the line above this abstention leaves no trace at all.
     if (turnUntrusted) return;
-    const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
+    const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : maskEngineEnvSecrets(text);
     this._scheduleMemoryExtraction(gate.memory.maybeUpdate(
       safeText, this._loopToolCount, this.currentThreadId ?? this.originThreadId, this.currentRunId,
       // Read when the extraction returns, not now: see the same re-read on the durable path.
@@ -4625,7 +4628,7 @@ export class Agent implements IAgent {
    *  a secret straddling it is still recognised. Its message leaves the agent: into the ledger,
    *  the failed run's record and its note. */
   private _maskedNeedsInput(err: InputRequiredError): InputRequiredError {
-    return new InputRequiredError(this.secretStore ? this.secretStore.maskSecrets(err.question) : err.question);
+    return new InputRequiredError(this.secretStore ? this.secretStore.maskSecrets(err.question) : maskEngineEnvSecrets(err.question));
   }
 
   /** Longest tool input shown whole in a secret prompt; longer inputs are refused, not cut. */
@@ -4882,7 +4885,7 @@ export class Agent implements IAgent {
    * operator comparing the two cannot tell a truncated row from a complete one.
    */
   private _ledgerReason(raw: string): string {
-    const masked = this.secretStore ? this.secretStore.maskSecrets(raw) : raw;
+    const masked = this.secretStore ? this.secretStore.maskSecrets(raw) : maskEngineEnvSecrets(raw);
     const flat = masked.replace(/[\x00-\x1f\x7f\u0085\u2028\u2029]/g, ' ');
     if (flat.length <= Agent.MAX_LEDGER_REASON_CHARS) return flat;
     // The marker lives INSIDE the bound \u2014 the bound is the guarantee, not the
@@ -5560,8 +5563,10 @@ export class Agent implements IAgent {
 
       const duration = timer.end();
       const auditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
-      const rawInput = JSON.stringify(auditInput).slice(0, TOOL_AUDIT_INPUT_MAX_CHARS);
-      const safeInput = this.secretStore ? this.secretStore.maskSecrets(rawInput) : rawInput;
+      // Masked before the final cut, over a margin past it: a secret across the cut would otherwise
+      // keep its first part. The margin bounds the work for a large input (a file's content).
+      const rawInput = JSON.stringify(auditInput).slice(0, TOOL_AUDIT_INPUT_MAX_CHARS + TOOL_AUDIT_MASK_MARGIN);
+      const safeInput = (this.secretStore ? this.secretStore.maskSecrets(rawInput) : maskEngineEnvSecrets(rawInput)).slice(0, TOOL_AUDIT_INPUT_MAX_CHARS);
       // Persist through the injected sink, which knows the run because WE tell
       // it: `currentRunId` is this agent's own run, so a spawned child books
       // onto its own row instead of its parent's. The channel below stays for
@@ -5652,8 +5657,8 @@ export class Agent implements IAgent {
       // A failed call can still have taken data in (an error's text, a partial read).
       this._noteConversationGrant(tc.name, callSlot, false);
       const errAuditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
-      const rawErrInput = JSON.stringify(errAuditInput).slice(0, TOOL_AUDIT_INPUT_MAX_CHARS);
-      const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;
+      const rawErrInput = JSON.stringify(errAuditInput).slice(0, TOOL_AUDIT_INPUT_MAX_CHARS + TOOL_AUDIT_MASK_MARGIN);
+      const safeErrInput = (this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : maskEngineEnvSecrets(rawErrInput)).slice(0, TOOL_AUDIT_INPUT_MAX_CHARS);
       // A failed call is recorded like a successful one — it consumed the same
       // budget and counts against the same rate limits.
       this._recordToolCall(tc.name, safeErrInput, ledgerMessage, duration, true, callSlot.connection, tc.id, this._factsOfCall(tc, callSlot));

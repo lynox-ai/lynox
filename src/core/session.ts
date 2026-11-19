@@ -84,6 +84,7 @@ import { shopifyExchangeSwitchOn } from '../tools/builtin/http.js';
 import type { RunHistory } from './run-history.js';
 import type { LynoxContext, MemoryScopeRef } from '../types/index.js';
 import type { SecretStore } from './secret-store.js';
+import { maskEngineEnvSecrets } from './secret-store.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
 import type { DataStore } from './data-store.js';
@@ -1729,7 +1730,7 @@ export class Session {
             status: isAbort ? 'aborted' : 'failed',
             // A loop guard's stop is an abort too; the reason tells it from a stop by the user.
             ...(guardStop !== null ? { stopReason: guardStop } : {}),
-            errorText: secretStore ? secretStore.maskSecrets(errorDetail) : errorDetail,
+            errorText: secretStore ? secretStore.maskSecrets(errorDetail) : maskEngineEnvSecrets(errorDetail),
           });
         } catch {
           // Fire-and-forget

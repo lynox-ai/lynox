@@ -551,6 +551,29 @@ describe('Agent', () => {
   // -- _loop() behavior via send() --
 
   describe('_loop() behavior', () => {
+    it('end_turn without a store: memory extraction gets the text with env secrets masked', async () => {
+      const canary = 'zQ7memorycanaryPq9Lm2Xv4';
+      const saved = process.env['LYNOX_VAULT_KEY'];
+      process.env['LYNOX_VAULT_KEY'] = canary;
+      try {
+        const memory = {
+          load: vi.fn(), save: vi.fn(), append: vi.fn(), delete: vi.fn().mockResolvedValue(0),
+          update: vi.fn().mockResolvedValue(false), render: vi.fn().mockReturnValue(''),
+          hasContent: vi.fn().mockReturnValue(false), loadAll: vi.fn(), maybeUpdate: vi.fn(),
+          appendScoped: vi.fn(), loadScoped: vi.fn(), deleteScoped: vi.fn().mockResolvedValue(0),
+          updateScoped: vi.fn().mockResolvedValue(false),
+        };
+        mockProcess.mockResolvedValueOnce(endTurnResponse(`The key is ${canary}`));
+        const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', memory });
+        await agent.send('Question');
+        const text = memory.maybeUpdate.mock.calls[0]?.[0] as string;
+        expect(text).toContain('The key is');
+        expect(text).not.toContain(canary);
+      } finally {
+        if (saved === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = saved;
+      }
+    });
+
     it('end_turn: extracts text and calls memory.maybeUpdate', async () => {
       const memory = {
         load: vi.fn(),
@@ -3148,6 +3171,79 @@ describe('Agent', () => {
   });
 
   describe('toolEnd publish includes input', () => {
+    // Made up and without a credential shape: only the env value set can mask it.
+    const envCanary = 'zQ7inputcanaryPq9Lm2Xv4';
+    for (const [label, impl, success] of [
+      ['success', () => vi.fn().mockResolvedValue('ok'), true],
+      ['failure', () => vi.fn().mockRejectedValue(new Error('oops')), false],
+    ] as const) {
+      it(`masks an env secret in the input without a store, on tool ${label}`, async () => {
+        const { channels } = await import('./observability.js');
+        vi.mocked(channels.toolEnd.publish).mockClear();
+        const saved = process.env['LYNOX_VAULT_KEY'];
+        process.env['LYNOX_VAULT_KEY'] = envCanary;
+        try {
+          const tool = makeTool('env_tool', impl());
+          mockProcess
+            .mockResolvedValueOnce(toolUseResponse([{ id: `tu-env-${label}`, name: 'env_tool', input: { cmd: `echo ${envCanary}` } }]))
+            .mockResolvedValueOnce(endTurnResponse('done'));
+          const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+          await agent.send('go');
+          const call = vi.mocked(channels.toolEnd.publish).mock.calls.find(c => (c[0] as { success: boolean }).success === success);
+          expect(call).toBeDefined();
+          const input = (call![0] as { input?: string }).input ?? '';
+          expect(input).toContain('echo');
+          expect(input).not.toContain(envCanary);
+        } finally {
+          if (saved === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = saved;
+        }
+      });
+    }
+
+    it('masks an env secret in a soft failure\'s reason without a store', async () => {
+      const { channels } = await import('./observability.js');
+      vi.mocked(channels.toolEnd.publish).mockClear();
+      const saved = process.env['LYNOX_VAULT_KEY'];
+      process.env['LYNOX_VAULT_KEY'] = envCanary;
+      try {
+        const tool = makeTool('soft_tool', vi.fn(async () => { throw new ToolSoftFailure('upstream refused', `upstream said ${envCanary}`); }));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu-soft-env', name: 'soft_tool', input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('done'));
+        const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+        await agent.send('go');
+        const call = vi.mocked(channels.toolEnd.publish).mock.calls.find(c => (c[0] as { name: string }).name === 'soft_tool');
+        expect(call).toBeDefined();
+        const error = (call![0] as { error?: string }).error ?? '';
+        expect(error).toContain('upstream said');
+        expect(error).not.toContain(envCanary);
+      } finally {
+        if (saved === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = saved;
+      }
+    });
+
+    it('masks an env secret that straddles the input\'s cut, leaving none of it', async () => {
+      const { channels } = await import('./observability.js');
+      vi.mocked(channels.toolEnd.publish).mockClear();
+      const saved = process.env['LYNOX_VAULT_KEY'];
+      process.env['LYNOX_VAULT_KEY'] = envCanary;
+      try {
+        const tool = makeTool('cut_tool', vi.fn().mockResolvedValue('ok'));
+        // `{"data":"` is 9 characters: the canary starts 6 before the cut at 2000.
+        const input = { data: `${'x'.repeat(2000 - 9 - 6)}${envCanary}` };
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu-cut-env', name: 'cut_tool', input }]))
+          .mockResolvedValueOnce(endTurnResponse('done'));
+        const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+        await agent.send('go');
+        const call = vi.mocked(channels.toolEnd.publish).mock.calls.find(c => (c[0] as { name: string }).name === 'cut_tool');
+        const published = (call![0] as { input?: string }).input ?? '';
+        expect(published).not.toContain(envCanary.slice(0, 6));
+      } finally {
+        if (saved === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = saved;
+      }
+    });
+
     it('publishes truncated input on tool success', async () => {
       const { channels } = await import('./observability.js');
       const tool = makeTool('my_tool', vi.fn().mockResolvedValue('ok'));
@@ -6745,6 +6841,24 @@ describe('ask_user with no question path ends the run as "needs input"', () => {
     // The call beside it in the same batch finished rather than being cut off.
     expect(sibling.handler).toHaveBeenCalledTimes(1);
     expect(siblingFinished, 'the run ended only after its slow sibling settled').toBe(true);
+  });
+
+  it('without a store, the error masks the engine\'s env secrets in the question', async () => {
+    const canary = 'zQ7askcanaryPq9Lm2Xv4';
+    const saved = process.env['LYNOX_VAULT_KEY'];
+    process.env['LYNOX_VAULT_KEY'] = canary;
+    try {
+      mockProcess.mockResolvedValueOnce(toolUseResponse([
+        { id: 'tu_ask_env', name: 'ask_user', input: { question: `Use key ${canary} for the payout?` } },
+      ]));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [askUserTool] });
+      const err = await agent.send('Pay out').then(() => null, (e: unknown) => e);
+      expect(err).toBeInstanceOf(InputRequiredError);
+      expect((err as Error).message).toContain('for the payout?');
+      expect((err as Error).message).not.toContain(canary);
+    } finally {
+      if (saved === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = saved;
+    }
   });
 
   it('the error names the question, masked through the vault before it leaves the agent', async () => {

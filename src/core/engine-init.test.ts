@@ -17,7 +17,11 @@ vi.mock('./memory.js', () => ({
 }));
 vi.mock('./features.js', () => ({ isFeatureEnabled: () => false }));
 vi.mock('./secret-vault.js', () => ({ SecretVault: vi.fn() }));
-vi.mock('./secret-store.js', () => ({ SecretStore: vi.fn() }));
+vi.mock('./secret-store.js', async (importOriginal) => ({
+  SecretStore: vi.fn(),
+  // The real one: without a store, the memory masks with it.
+  maskEngineEnvSecrets: (await importOriginal<typeof import('./secret-store.js')>()).maskEngineEnvSecrets,
+}));
 vi.mock('./config.js', () => ({
   setVaultApiKeyExists: vi.fn(),
   getLynoxDir: vi.fn().mockReturnValue('/tmp/.lynox'),
@@ -191,6 +195,20 @@ describe('initMemoryInstance — provider-resolved key', () => {
     } finally {
       if (prev === undefined) delete process.env['MISTRAL_API_KEY'];
       else process.env['MISTRAL_API_KEY'] = prev;
+    }
+  });
+
+  it('without a store, wires a masker for the engine\'s env secrets into the memory', async () => {
+    const canary = 'zQ7memfilecanaryPq9Lm2Xv4';
+    const prev = process.env['LYNOX_VAULT_KEY'];
+    process.env['LYNOX_VAULT_KEY'] = canary;
+    try {
+      await initMemoryInstance({ memory: true } as unknown as LynoxConfig, {} as LynoxUserConfig, [], 'ctx1', null);
+      const maskFn = memoryCtorSpy.mock.calls[0]![4] as ((t: string) => string) | undefined;
+      expect(typeof maskFn).toBe('function');
+      expect(maskFn!(`key ${canary}`)).not.toContain(canary);
+    } finally {
+      if (prev === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = prev;
     }
   });
 

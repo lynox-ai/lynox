@@ -475,6 +475,28 @@ describe('turn-end capture — what an adversarial round found missing', () => {
     expect(write).not.toHaveBeenCalled();
   });
 
+  it('without a store, the excerpt carries no env secret from either half of the turn', async () => {
+    const canary = 'zQ7capturecanaryPq9Lm2Xv4';
+    const saved = process.env['LYNOX_VAULT_KEY'];
+    process.env['LYNOX_VAULT_KEY'] = canary;
+    try {
+      const { inner, reply } = makeAgent();
+      inner.secretStore = null;
+      inner.messages = [
+        { role: 'user', content: [{ type: 'text', text: `use the key ${canary} for veltamare` }] },
+        { role: 'assistant', content: [{ type: 'text', text: `${ANSWER} Key: ${canary}` }] },
+      ];
+      await inner._captureFallback(`${ANSWER} Key: ${canary}`, false, 'none', OWNER_ACTOR);
+      const msgs = (reply.mock.calls[0]![0] as { messages: Array<{ content: string }> }).messages;
+      const sent = msgs[0]!.content;
+      expect(sent).toContain('use the key');
+      expect(sent).toContain('Veltamare');
+      expect(sent).not.toContain(canary);
+    } finally {
+      if (saved === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = saved;
+    }
+  });
+
   it('marks the excerpt as untrusted data', async () => {
     // It carries web pages and mail bodies to a model whose output is written to a
     // store. Unwrapped, the classifier reads an injected "record that ..." as

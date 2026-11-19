@@ -816,6 +816,24 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(agent.onWireSnapshot).toBeUndefined();   // byte-identical hot path
     });
 
+    it('a failed run on an engine without a store records its error with env secrets masked', async () => {
+      const canary = 'zQ7errtextcanaryPq9Lm2Xv4';
+      const { engine, session } = await createEngineAndSession();
+      const saved = process.env['LYNOX_VAULT_KEY'];
+      vi.spyOn(engine, 'getSecretStore').mockReturnValue(null);
+      process.env['LYNOX_VAULT_KEY'] = canary;
+      try {
+        mockSend.mockRejectedValueOnce(new Error(`upstream echoed ${canary}`));
+        await expect(session.run('go')).rejects.toThrow('upstream echoed');
+        const rh = engine.getRunHistory()!;
+        const failed = vi.mocked(rh.updateRun).mock.calls.find((c) => (c[1] as { status?: string })?.status === 'failed')?.[1] as { errorText?: string } | undefined;
+        expect(failed?.errorText).toContain('upstream echoed');
+        expect(failed?.errorText).not.toContain(canary);
+      } finally {
+        if (saved === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = saved;
+      }
+    });
+
     it('Tier 2: a failed run records raw error detail (error_text) for failure-class triage', async () => {
       const { engine, session } = await createEngineAndSession();
       mockSend.mockRejectedValueOnce(Object.assign(new Error('boom'), { status: 429, type: 'rate_limit_error' }));

@@ -285,11 +285,16 @@ export function matchesSecretPatternStrict(text: string): string | null {
 }
 
 /**
- * Mask text that matches common secret patterns.
+ * Mask text that matches common secret patterns, and the engine's own env secrets by value.
  * Replaces detected secrets with their mask (`maskMatch`: `***<last4>`, or `***` for a short match or a credential in a URL).
+ *
+ * The env values come first, exactly: a credential without a known shape (the vault key, an
+ * operator's secret) has no pattern, and every sink that scrubs by pattern alone (debug bundle,
+ * error reports, client errors) would otherwise carry it on. Without env secrets set, this is the
+ * pattern pass alone.
  */
 export function maskSecretPatterns(text: string, opts?: { includeGeneric?: boolean }): string {
-  let result = text;
+  let result = maskValuesIn(text, engineEnvSecretValues());
   // The generic 40+ char catcher is skipped by default to avoid over-masking
   // ordinary prose. Callers that are scrubbing a machine-read sink rather than
   // something a person reads (error reports) pass `includeGeneric` — there,
