@@ -11,7 +11,7 @@ import { commitTakeover, type TakeoverCoreDeps, type TakeoverPrompts } from './t
 
 interface State { readonly expect: string }
 
-function setup(opts: { audit?: 'ok' | 'throws' | null } = {}) {
+function setup(opts: { audit?: 'ok' | 'throws' | null; prompts?: null } = {}) {
   const db = new Database(':memory:');
   db.exec('CREATE TABLE written (v TEXT)');
   const recorded: unknown[] = [];
@@ -27,7 +27,7 @@ function setup(opts: { audit?: 'ok' | 'throws' | null } = {}) {
     getAnsweredForTrigger: () => undefined,
     releaseTrigger: () => false,
   };
-  const deps: TakeoverCoreDeps = { db, triggers: { getById: () => undefined, endWait: () => undefined } as never, isLive: () => false, audit, prompts };
+  const deps: TakeoverCoreDeps = { db, triggers: { getById: () => undefined, endWait: () => undefined } as never, isLive: () => false, audit, prompts: opts.prompts === null ? null : prompts };
   const rows = (): number => (db.prepare('SELECT COUNT(*) AS n FROM written').get() as { n: number }).n;
   return { db, deps, recorded, cleared, rows };
 }
@@ -84,5 +84,26 @@ describe('commitTakeover', () => {
     const r = commitTakeover(s.deps, 'd1', () => ({ stop: 'not_found' as const }), () => ['p1'], () => 'done' as const);
     expect(r).toBe('not_found');
     expect(s.cleared).toEqual([]);
+  });
+  it('without the prompt store, refuses with prompts when there are plans to settle, and writes nothing', () => {
+    const s = setup({ prompts: null });
+    const r = commitTakeover(s.deps, 'd1', () => ({ ok: { expect: 'd1' } as State }), () => ['p1'], () => {
+      s.db.prepare("INSERT INTO written VALUES ('x')").run();
+      return 'done' as const;
+    });
+    expect(r).toEqual({ kind: 'refused', refusal: 'prompts' });
+    expect(s.rows()).toBe(0);
+  });
+
+  it('without the prompt store, writes and records when there is no plan to settle', () => {
+    const s = setup({ prompts: null });
+    const r = commitTakeover(s.deps, 'd1', () => ({ ok: { expect: 'd1' } as State }), () => [], (_st, _now, record) => {
+      s.db.prepare("INSERT INTO written VALUES ('x')").run();
+      record({ action: 'x.takeover' } as never);
+      return 'done' as const;
+    });
+    expect(r).toBe('done');
+    expect(s.rows()).toBe(1);
+    expect(s.recorded).toHaveLength(1);
   });
 });

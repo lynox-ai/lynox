@@ -192,7 +192,7 @@ describe('readPreview', () => {
 			{ ...p, expect: '' }, { ...p, expect: 1 }, { ...p, by: 1 },
 			{ ...p, subject: undefined }, { ...p, subject: [] }, { ...p, subject: { ...sub, id: 1 } }, { ...p, subject: { ...sub, title: null } },
 			{ ...p, subject: { ...sub, effect: 1 } }, { ...p, subject: { ...sub, wf: {} } }, { ...p, subject: { ...sub, description: undefined } },
-			{ ...p, workflow: { name: 'W' } }, { ...p, workflow: 'W' },
+			{ ...p, workflow: { name: 'W' } }, { ...p, workflow: 'W' }, { ...p, workflow: { name: 'W', confirmed: true, ended: 'yes' } },
 			{ ...p, connections: undefined }, { ...p, connections: [{ id: 'c', profile: 'CRM', provider: 'x' }] }, { ...p, connections: [null] },
 		];
 		expect(bad.map((b) => readPreview(b))).toEqual(bad.map(() => null));

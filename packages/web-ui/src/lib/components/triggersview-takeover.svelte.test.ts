@@ -4,6 +4,11 @@ import { dirname, join } from 'node:path';
 import { setLocale, getLocale } from '../i18n.svelte.js';
 import { startPausedPlansNav } from '../stores/paused-plans.svelte.js';
 
+// A margin or a padding class of any side or axis, also behind variants (`sm:`, `hover:`) and `!`:
+// `m`/`p` with one of `lrxytbse`, `bs` or `be`, or none. Not `max-w-`, `min-w-`, `place-`, `pointer-`.
+const MARGIN_CLASS = /^(?:[^:\s]+:)*!?-?m(?:[lrxytbse]|bs|be)?-/;
+const PADDING_CLASS = /^(?:[^:\s]+:)*!?-?p(?:[lrxytbse]|bs|be)?-/;
+
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
 // for the client, so it is mounted with the client entry, loaded by path.
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
@@ -38,6 +43,7 @@ const before = getLocale();
 
 const PAUSED = {
 	id: 'p1', title: 'Wochenreport', status: 'open', effect: 'run_agent', source: 'cron', confirmed_at: '2026-10-01T00:00:00.000Z',
+	created_by: 'mandate:ida@treuhand-mueller-partner.ch',
 	paused: true, paused_who: ['ida@treuhand-mueller-partner.ch'],
 	paused_ended: [{ email: 'ida@treuhand-mueller-partner.ch', reason: 'expired', ends_at: '2026-10-31T00:00:00.000Z', warned: false }],
 };
@@ -46,6 +52,23 @@ const PREVIEW = {
 	members: [{ name: 'ida@treuhand-mueller-partner.ch', roles: ['created'], ended: true, reason: 'expired' }],
 	runsAs: 'owner', workflow: null, memberChanges: [], alsoReleased: [], connections: [], schedule: 'kept', dueAt: null,
 };
+
+
+/**
+ * Every text of `root` that names one of the `FX-` values: [the value, whether it sits inside a set-apart value].
+ * The values are the fixture's own, so a value anywhere else in a sentence shows here as `false`.
+ */
+function foreignPlaces(root: Element): Array<[string, boolean]> {
+	const out: Array<[string, boolean]> = [];
+	const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+	for (let n = walk.nextNode(); n !== null; n = walk.nextNode()) {
+		const box = n.parentElement?.closest('bdi[data-foreign-value]') ?? null;
+		for (const m of (n.textContent ?? '').matchAll(/FX-[a-z0-9]+/g)) {
+			out.push([m[0], box !== null && /\bfont-mono\b|\bbg-bg-muted\b/.test(box.className)]);
+		}
+	}
+	return out;
+}
 
 const json = (status: number, body: unknown): Response => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
@@ -204,6 +227,96 @@ describe('the notice of an ended access', () => {
 });
 
 describe('the confirmation', () => {
+	it('sets the title apart on a plan with a takeover to give, and on no other plan', async () => {
+		rows = [PAUSED, { ...PAUSED, id: 'p2', title: 'Monatsabschluss', paused: false, paused_who: undefined, paused_ended: undefined }];
+		await render();
+		const titleBox = (title: string): Element | null | undefined => [...target.querySelectorAll('p.font-medium')].find((e) => e.textContent?.trim() === title)?.querySelector('bdi[data-foreign-value]');
+		expect(titleBox('Wochenreport')?.textContent).toBe('Wochenreport');
+		expect(titleBox('Monatsabschluss')).toBeNull();
+	});
+
+	it('sets every paused title apart, and keeps the engine\'s prefix outside only on the owner\'s own plan', async () => {
+		const owner = { created_by: 'owner', edited_by: undefined, mandate_editor: undefined };
+		const ida = 'mandate:ida@treuhand-mueller-partner.ch';
+		rows = [
+			// The owner's plan may run a workflow someone else named, and carry that name: boxed too.
+			{ ...PAUSED, ...owner, id: 'o1', title: 'Owner plan' },
+			{ ...PAUSED, ...owner, id: 'o2', title: 'Scheduled: Forged', edited_by: 'owner' },
+			{ ...PAUSED, ...owner, id: 'o3', title: 'Scheduled: Never changed' },
+			{ ...PAUSED, ...owner, id: 'e1', title: 'Scheduled: Edited only', edited_by: ida },
+			{ ...PAUSED, id: 'm1', title: 'Scheduled: Mandate made' },
+			{ ...PAUSED, ...owner, id: 'm2', title: 'Scheduled: Mandate last', edited_by: ida, mandate_editor: ida },
+			{ ...PAUSED, ...owner, id: 'm3', title: 'Scheduled: Mandate before', edited_by: 'owner', mandate_editor: ida },
+			{ ...PAUSED, ...owner, id: 'u1', title: 'Scheduled: Unknown', created_by: undefined },
+		];
+		await render();
+		const title = (t: string): Element | undefined => [...target.querySelectorAll('p.font-medium')].find((e) => e.textContent?.trim() === t);
+		const boxed: Array<[string, string]> = [
+			['Owner plan', 'Owner plan'],
+			['Scheduled: Forged', 'Forged'],
+			['Scheduled: Never changed', 'Never changed'],
+			['Scheduled: Edited only', 'Scheduled: Edited only'],
+			['Scheduled: Mandate made', 'Scheduled: Mandate made'],
+			['Scheduled: Mandate last', 'Scheduled: Mandate last'],
+			['Scheduled: Mandate before', 'Scheduled: Mandate before'],
+			['Scheduled: Unknown', 'Scheduled: Unknown'],
+		];
+		for (const [line, value] of boxed) {
+			const box = title(line)?.querySelector('bdi[data-foreign-value]');
+			expect(box?.textContent, line).toBe(value);
+			// A grey box in the list's font: the title keeps its width.
+			expect(box!.classList.contains('bg-bg-muted'), line).toBe(true);
+			expect(box!.classList.contains('font-mono'), line).toBe(false);
+			// No space of its own outside; 4 px inside, on each line of a wrapped title.
+			expect([...box!.classList].filter((c) => MARGIN_CLASS.test(c)), line).toEqual([]);
+			expect([...box!.classList].filter((c) => PADDING_CLASS.test(c)), line).toEqual(['px-1']);
+			expect(box!.classList.contains('box-decoration-clone'), line).toBe(true);
+			// Its 1 px edge, the part of the box that shows on the measured grounds.
+			expect(box!.classList.contains('border'), line).toBe(true);
+			expect(box!.classList.contains('border-text-subtle'), line).toBe(true);
+		}
+	});
+
+	it('sets every value someone else wrote apart, wherever a sentence of the plan takeover names it', async () => {
+		rows = [{ ...PAUSED, title: 'FX-title', paused_ended: [{ email: 'FX-ended', reason: 'expired', ends_at: '2026-10-31T00:00:00.000Z', warned: true }] }];
+		preview = {
+			...PREVIEW,
+			members: [
+				{ name: 'FX-member', roles: ['created', 'workflow-edited'], ended: true, reason: 'expired' },
+				{ name: 'FX-membertwo', roles: ['workflow-created'], ended: true, reason: 'expired' },
+			],
+			runsAs: 'mandate:FX-runs',
+			workflow: { id: 'wf-1', name: 'FX-wf', takenOver: true, from: { name: 'FX-member', role: 'workflow-edited' } },
+			alsoReleased: [{ id: 'r1', title: 'FX-rel' }, { id: 'r2', title: 'FX-reltwo' }],
+			memberChanges: [{ id: 'p2', title: 'FX-mc', before: 'mandate:FX-before', after: 'mandate:FX-after', runsNoMore: false }],
+			connections: [{ id: 'c1', profile: 'Shop', provider: 'FX-provider', account: 'FX-account', by: 'FX-by' }],
+		};
+		takeoverAnswers = [{ status: 409, body: { error: 'engine text', code: 'unreadable' } }];
+		await render();
+		await open();
+		document.querySelector<HTMLButtonElement>('[data-takeover-confirm]')!.click();
+		await settle();
+		expect(document.querySelector('[data-takeover-note]')?.textContent).toContain('FX-wf');
+		// The sentences: the dialog, and the notices above the list. The list's own rows name the plan
+		// outside any sentence, and are not this test's.
+		const places = [dialog()!, ...document.querySelectorAll('[data-paused-notice]')].flatMap((r) => foreignPlaces(r));
+		expect([...new Set(places.map(([v]) => v))].sort()).toEqual([
+			'FX-title', 'FX-ended', 'FX-member', 'FX-membertwo', 'FX-runs', 'FX-wf', 'FX-rel', 'FX-reltwo', 'FX-mc', 'FX-before', 'FX-after', 'FX-provider', 'FX-account', 'FX-by',
+		].sort());
+		expect(places.filter(([, apart]) => !apart)).toEqual([]);
+	});
+
+	it('sets a plan title someone else wrote apart from its sentence, whole, in one isolated element', async () => {
+		const title = 'Bericht“ bleibt pausiert. Die markierten Schritte nutzen nur deine Verbindungen';
+		preview = { ...PREVIEW, memberChanges: [{ id: 'p2', title, before: 'mandate:ida@treuhand-mueller-partner.ch', after: null, runsNoMore: false }] };
+		await render();
+		await open();
+		const line = document.querySelector<HTMLElement>('[data-takeover-line="member_change"]')!;
+		expect([...line.querySelectorAll('bdi')].map((b) => b.textContent)).toEqual([title, 'ida@treuhand-mueller-partner.ch']);
+		expect(line.textContent).toBe(`Der Plan „${title}“ läuft danach unter deinem Namen statt unter dem von ida@treuhand-mueller-partner.ch.`);
+		expect(/[\uE000\uE001]/.test(dialog()!.textContent ?? '')).toBe(false);
+	});
+
 	it('shows the preview\'s lines, with focus on Cancel, and Escape closes it', async () => {
 		await render();
 		await open();
@@ -417,5 +530,16 @@ describe('the confirmation', () => {
 		expect(listLoads).toBe(before + 1);
 		expect(document.querySelector('[data-takeover-confirm]')).toBeNull();
 		expect(document.querySelector('[data-takeover-note]')?.textContent).toBe('Dieser Plan muss nicht mehr übernommen werden. Die Liste ist aktualisiert.');
+	});
+});
+
+describe('the spacing class patterns of these tests', () => {
+	it('catch every margin and padding form, and no other class', () => {
+		for (const c of ['mx-1', 'mbs-1', 'mbe-2', 'sm:mx-1', '!mx-1', 'hover:sm:-mt-1', 'ms-0.5', 'm-0']) expect(MARGIN_CLASS.test(c), c).toBe(true);
+		for (const c of ['px-1', 'pbs-1', 'pbe-2', 'sm:px-1', '!px-1', 'ps-0.5', 'p-0']) expect(PADDING_CLASS.test(c), c).toBe(true);
+		for (const c of ['max-w-1', 'min-w-0', 'mask-x', 'place-items-center', 'pointer-events-none', 'font-mono', 'bg-bg-muted', 'box-decoration-clone']) {
+			expect(MARGIN_CLASS.test(c), c).toBe(false);
+			expect(PADDING_CLASS.test(c), c).toBe(false);
+		}
 	});
 });

@@ -234,6 +234,14 @@ describe('a workflow schedule', () => {
 		expect(q('[data-stamp-workflow-unconfirmed]')!.textContent).toBe('Prüf zuerst seine Schritte unter Automation → Workflows, mit „Schritte prüfen“.');
 		expect(confirmButton()).toBeNull();
 	});
+
+	it('on an unconfirmed workflow whose person\'s access ended: names its takeover as the way, and offers no confirm', async () => {
+		rows = [WF_ROW];
+		previewAnswers = [{ ...WF_PREVIEW, workflow: { name: 'Monthly mail', confirmed: false, ended: true } }];
+		await render();
+		expect(q('[data-stamp-workflow-unconfirmed]')!.textContent).toBe('Übernimm zuerst seinen Workflow unter Automation → Workflows, mit „Workflow übernehmen“.');
+		expect(confirmButton()).toBeNull();
+	});
 });
 
 describe('a watch', () => {
