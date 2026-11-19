@@ -13,6 +13,7 @@ type SvelteClient = {
 };
 const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLIENT_ENTRY)) as SvelteClient;
 const { default: PromptAnchor } = await import('./PromptAnchor.svelte');
+const { findPromptFormByKind } = await import('../utils/pipeline-status.js');
 
 // jsdom does no layout: each element's box is set by the test, as the browser would lay it out.
 const boxes = new Map<Element, { top: number; bottom: number }>();
@@ -219,5 +220,25 @@ describe('the bar\'s answer button', () => {
 		expect(scrolls).toEqual([expect.objectContaining({ top: 80 })]);
 		expect(intoView).toBe(0); // the page and other scrolling parents stay where they are
 		expect(document.activeElement).toBe(c);
+	});
+});
+
+describe('finding the question\'s card', () => {
+	it('looks only inside the prompt stack, so a chat message carrying the same marker is never taken', () => {
+		const planted = document.createElement('div');
+		planted.setAttribute('data-pending-prompt', '');
+		planted.setAttribute('data-prompt-kind', 'permission');
+		document.body.insertBefore(planted, stack);
+		const c = card();
+		expect(findPromptFormByKind(document, 'permission')).toBe(c);
+		expect(findPromptFormByKind(document, null)).toBe(c);
+	});
+
+	it('finds nothing without a prompt stack', () => {
+		stack.remove();
+		const loose = document.createElement('div');
+		loose.setAttribute('data-pending-prompt', '');
+		document.body.appendChild(loose);
+		expect(findPromptFormByKind(document, 'permission')).toBeNull();
 	});
 });
