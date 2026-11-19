@@ -57,6 +57,7 @@ import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js
 import { openRunGroup } from '../core/run-group.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
+import type { UntrustedCause } from '../core/untrusted-signals.js';
 import { getLynoxDir, loadConfig, describePinForDisplay, admitBackgroundModel, poolEndpointFor, POOL_ANTHROPIC_ENDPOINT, POOL_MISTRAL_ENDPOINTS } from '../core/config.js';
 import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
@@ -2910,6 +2911,20 @@ export class LynoxHTTPApi {
     return !secret ? 'no-secret' : (this._authOrigin.get(req) ?? '').startsWith('cookie:') ? 'cookie' : 'none';
   }
 
+  /**
+   * The mark a trigger's instruction gets when the owner's token, not the owner's browser
+   * session, wrote it (`created_untrusted`), or undefined when the words count as the owner's.
+   * The same line `typed` draws: a token's client (a script, an integration) passes on text it
+   * did not have typed, so the targets it names must not be owner-known in the trigger's run
+   * (`ownerInstructionCounts`). Stored as the cause a webhook event's content gets, content that
+   * reached the engine from outside: every reader takes it as not clean. A mandate's write is
+   * marked by its own rules, so only the owner's principal is looked at here.
+   */
+  private _ownerTokenWords(req: IncomingMessage): UntrustedCause | undefined {
+    if (!isOwnerPrincipal(this._principalOf(req))) return undefined;
+    return this._ambientOf(req, process.env['LYNOX_HTTP_SECRET']) === 'none' ? 'external-tool' : undefined;
+  }
+
   /** The route a request matches, as registered (`/api/x/:id`), or null for none. */
   private _routeTemplateOf(method: string, pathname: string): string | null {
     return this._matchRoute(method, pathname)?.path ?? null;
@@ -3001,7 +3016,8 @@ export class LynoxHTTPApi {
   /**
    * E2 (§3.13): a mandate answers only a question its own run asked. Every question the route
    * could answer is checked — the one named by id and the one pending on the session, which a
-   * body without an id answers — so no request reaches a question the check did not see. Both are
+   * body without an id answers on the secret and mailbox routes (`/reply` refuses one) — so no
+   * request reaches a question the check did not see. Both are
    * checked even when an id is given, which refuses more than that request could reach. The question
    * of a scheduled run carries the owner, or the mandate its stamped plan acts for (`planOf`),
    * which then answers it as its own run's question (N1). With no question at all the route
@@ -6078,13 +6094,13 @@ export class LynoxHTTPApi {
         return;
       }
 
-      // Only a body without a promptId answers the session's open question (legacy clients).
+      // Without a promptId nothing is answered: the open question may not be the one the answer
+      // was meant for (the one the client saw closed, and another opened in its place). The
+      // question carries its id in the `prompt` event and in `/pending-prompt`; nothing is recorded.
       const pending = ps.getPending(params['id']!);
       if (pending && pending.prompt_type === 'ask_user' && !pending.questions_json) {
-        if (!this._answerRecorded(_req, res, by, pending.id)) return;
-        let answered: boolean;
-        try { answered = ps.answerUser(pending.id, answer, by); } catch (err) { if (keyInputRefused(res, err)) return; throw err; }
-        if (answered) { jsonResponse(res, 200, { ok: true }); return; }
+        errorResponse(res, 409, 'A question is open: answer it with its promptId.', 'prompt_id_required');
+        return;
       }
 
       errorResponse(res, 404, 'No pending prompt');
@@ -9446,6 +9462,12 @@ export class LynoxHTTPApi {
           if (this._refuseUnlessOwner(_req, res, 'grant a workflow unattended writes')) return;
           const { workflowGrantEnabled, acceptWorkflowGrant } = await import('../core/workflow-grant.js');
           if (!workflowGrantEnabled()) { errorResponse(res, 403, 'Granting a workflow unattended writes is not enabled on this instance.'); return; }
+          // A grant makes the contract's hosts count as named by the owner, so it is given in the
+          // owner's browser session only, as recipients are confirmed: never with a token.
+          if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+            errorResponse(res, 403, 'Unattended writes are granted only in the owner\'s browser session, not with a token.', 'session_only');
+            return;
+          }
           if (typeof rawGrant !== 'object' || rawGrant === null || Array.isArray(rawGrant)) { errorResponse(res, 400, 'Invalid "grant".'); return; }
           const g = rawGrant as Record<string, unknown>;
           const engineDb = engine.getEngineDb();
@@ -9520,9 +9542,12 @@ export class LynoxHTTPApi {
         // non-run_agent effects.
         // Only the owner's request stamps; a mandate's trigger lands unconfirmed, like one
         // the agent tool creates.
+        // The stamp below is the same either way; only whose words the instruction counts as differs.
+        const tokenWords = this._ownerTokenWords(_req);
         const baseParams = {
           title, description, assignee, dueDate, createdBy, createdMandateId,
           ...(byOwner ? { confirmedAt: new Date().toISOString(), confirmedBy: createdBy } : {}),
+          ...(tokenWords !== undefined ? { createdUntrusted: tokenWords } : {}),
         };
         const task = scheduleCron
           ? taskManager.createScheduled({ ...baseParams, scheduleCron })
@@ -9595,8 +9620,15 @@ export class LynoxHTTPApi {
       try {
         // `untrusted` is what the agent's turn had taken in (task_update reads it off the agent); a
         // request does not get to say it, so it is dropped here rather than stored as sent.
+        // An owner's token that rewrites the instruction marks it, as a creation does
+        // (`_ownerTokenWords`). The store reads the mark only with a title or description edit, and
+        // only adds it: a schedule change marks nothing, and the owner's browser session clears none.
+        // A workflow's schedule is not marked, as at its creation: its instruction is the stamped
+        // steps, not its title, and a mark would start every run of it as after outside content.
         const { untrusted: _fromClient, ...edit } = body as Record<string, unknown>;
-        task = taskManager.update(params['id']!, edit as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
+        const scheduledWorkflow = engine.getRunHistory()?.getTrigger(params['id']!)?.pipeline_id;
+        const tokenWords = scheduledWorkflow ? undefined : this._ownerTokenWords(_req);
+        task = taskManager.update(params['id']!, { ...edit, ...(tokenWords !== undefined ? { untrusted: tokenWords } : {}) } as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
       } catch (err: unknown) {
         if (this._answerTodoRefusal(res, err)) return;
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
@@ -9797,7 +9829,13 @@ export class LynoxHTTPApi {
     }, ownerOnly('see what a schedule would be confirmed with')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/confirm', async (_req, res, params, body) => {
-      // Only the owner stamps (§3.12 point 2).
+      // Only the owner stamps (§3.12 point 2), and only in their browser session, as recipients
+      // are confirmed: a token, the owner's included, could otherwise stamp a schedule a run it
+      // started had just written, and that schedule would then run as the owner's instruction.
+      if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+        errorResponse(res, 403, 'A schedule is confirmed only in the owner\'s browser session, not with a token.', 'session_only');
+        return;
+      }
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       if (this._refusePaused(_req, res, taskManager, params['id']!, 'confirm')) return;
@@ -12094,7 +12132,7 @@ export class LynoxHTTPApi {
         return;
       }
 
-      const token = mintBrokerStartToken(instanceId, httpSecret);
+      const token = mintBrokerStartToken('google', instanceId, httpSecret);
       const url =
         `${controlPlaneUrl}/oauth/google/start` +
         `?instance_id=${encodeURIComponent(instanceId)}` +

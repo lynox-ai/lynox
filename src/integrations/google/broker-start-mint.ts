@@ -11,21 +11,21 @@
 // which is exactly the arrangement that let the two sides drift apart in the
 // first place.
 //
-// What is meant to keep them agreeing is the contract's `BROKER_START_GOLDEN`:
-// one vector, travelling to the control plane with the rest of the contract, that
-// this minter must produce (`broker-start-mint.test.ts`) and the control
-// plane's verifier must accept. It is meant to replace two independently chosen
-// vectors, one per repo, that nothing compared; this side drives it now, the
-// control plane's side switches over in its own change after the vendored copy
-// carries it.
+// What keeps them agreeing is the contract's golden vectors, travelling to the
+// control plane with the rest of the contract: `BROKER_START_GOLDEN_V2`, one per
+// provider, which this repo's signer must produce over the v2 payload
+// (`broker-start-mint.test.ts`) and the control plane's verifier must accept.
+// The minter mints v2 only; the v1 vector (`BROKER_START_GOLDEN`) stays pinned
+// for the control plane's v1 acceptance until the contract step removes v1.
 
 import { createHmac, randomBytes } from 'node:crypto';
 import {
   BROKER_START_NONCE_BYTES,
   BROKER_START_PURPOSE,
-  brokerStartPayload,
-  formatBrokerStartToken,
+  brokerStartPayloadV2,
+  formatBrokerStartTokenV2,
 } from '../../contract/broker-start.js';
+import type { BrokerStartProvider } from '../../contract/broker-start.js';
 
 /**
  * The signing key, domain-separated from every other use of the instance secret.
@@ -52,18 +52,27 @@ export function signBrokerStartPayload(payload: string, instanceSecret: string):
  * Connect button that broke for no reason. The nonce is the reason this returns
  * a value instead of taking one.
  *
+ * It mints the provider-bound v2 token (contract `brokerStartPayloadV2`): the
+ * control plane verifies it with the provider of the start route it arrives at,
+ * so a token minted for one provider's connect cannot start another's. The v1
+ * minting this replaced named no provider. Only a control plane that verifies
+ * v2 accepts it; an engine minting v2 against an older one gets `bad_signature`
+ * on every Connect, which is why this ships only after such a control plane is
+ * in production.
+ *
  * `now` is injected so the TTL edge is testable without moving the clock.
  */
 export function mintBrokerStartToken(
+  provider: BrokerStartProvider,
   instanceId: string,
   instanceSecret: string,
   now: number = Date.now(),
 ): string {
-  // Unix SECONDS, floored: `brokerStartPayload` throws on a non-integer `ts`,
+  // Unix SECONDS, floored: `brokerStartPayloadV2` throws on a non-safe-integer `ts`,
   // and it throws rather than rounding because a fractional timestamp there
   // collapses two different tenants onto the same payload bytes.
   const ts = Math.floor(now / 1000);
   const nonce = randomBytes(BROKER_START_NONCE_BYTES).toString('hex');
-  const sig = signBrokerStartPayload(brokerStartPayload({ instanceId, ts, nonce }), instanceSecret);
-  return formatBrokerStartToken({ ts, nonce, sig });
+  const sig = signBrokerStartPayload(brokerStartPayloadV2({ provider, instanceId, ts, nonce }), instanceSecret);
+  return formatBrokerStartTokenV2({ ts, nonce, sig });
 }

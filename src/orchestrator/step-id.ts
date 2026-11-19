@@ -1,4 +1,5 @@
 import { stripHiddenInName } from '../core/hidden-text.js';
+import { placeholders, replacePlaceholders } from './placeholders.js';
 /**
  * The shape of a workflow step's id. An id reaches the model wherever a run, a diagnosis or an edit
  * names its step, and the owner needs it to repair a plan, so it cannot be left out. Its shape is
@@ -132,7 +133,7 @@ export type RunnableStep = { id: string; task: string; input_from?: string[] | u
 /** The first segment of each `{{…}}` placeholder in a text. */
 function placeholderHeads(text: unknown): string[] {
   if (typeof text !== 'string') return [];
-  return [...text.matchAll(/\{\{([^}]+)\}\}/g)].map(m => m[1]!.trim().split('.')[0]!);
+  return placeholders(text).map(p => p.inner.trim().split('.')[0]!);
 }
 
 function templateStrings(value: unknown): string[] {
@@ -228,7 +229,7 @@ export function runStepIds<T extends RunnableStep>(steps: readonly T[], names: R
   if (names.size === 0) return [...steps];
   // Longest first, so an id that begins with another one is matched whole.
   const olds = [...names.keys()].sort((a, b) => b.length - a.length);
-  const inText = (text: string): string => text.replace(/\{\{([^}]+)\}\}/g, (match: string, raw: string) => {
+  const inText = (text: string): string => replacePlaceholders(text, (match: string, raw: string) => {
     const path = raw.trim();
     if (path === 'params' || path.startsWith('params.')) return match;
     const old = olds.find(o => path === o || path.startsWith(`${o}.`));
