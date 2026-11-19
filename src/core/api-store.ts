@@ -461,6 +461,8 @@ export interface OAuthGrantRecord {
    * callback).
    */
   refresh_expires_at?: number | undefined;
+  /** The {@link refresh_expires_at} the owner was last told about (`claimStoreReconnectHints`). */
+  reconnect_hint_for?: number | undefined;
   /**
    * The connection's current grant (PRD connection-attribution A1/A2): an opaque id for one
    * epoch of the connection, recorded in engine.db `connection_grants`. Not OAuth-specific —

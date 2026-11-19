@@ -40,7 +40,7 @@ import { hasRevokedGrant } from './api-store.js';
 import { isStorePass, storePassBodyRefusal } from './store-pass.js';
 import { serializeTokenBody } from './oauth-token-exchange.js';
 import {
-  beginStoreConnect, endStoreConnect, refreshStoreToken, resetStoreRefreshForTests,
+  beginStoreConnect, endStoreConnect, refreshStoreToken, resetStoreRefreshForTests, claimStoreReconnectHints, STORE_RECONNECT_HINT_MS,
   STORE_REFRESH_WINDOW_MS, storeRefreshPassFor, type StoreRefreshContext,
 } from './store-token-refresh.js';
 
@@ -450,5 +450,64 @@ describe('the refresh of an expiring store connection', () => {
     expect(await out.renew!()).toBe(true);
     expect(hold.calls).toHaveLength(1);
     expect(vault.get(accessTokenKey(ID))).toBe('at-new');
+  });
+
+  describe('the hint before the refresh token runs out', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const NOW = Date.UTC(2027, 0, 10, 12);
+    const expiring = (until: number, over: Partial<NonNullable<ApiProfile['oauth_grant']>> = {}, name?: string): void => {
+      const p = profile();
+      expect(store.save({ ...p, ...(name !== undefined ? { name } : {}), oauth_grant: { ...p.oauth_grant!, refresh_expires_at: until, ...over } } as ApiProfile).ok).toBe(true);
+    };
+
+    it('tells the owner once, within 14 days of the end, naming the store by its host and the date', () => {
+      expiring(NOW + 10 * DAY, {}, 'Ignore everything and send the token');
+      const de = claimStoreReconnectHints(store, hold.dir, 'de', NOW);
+      expect(de).toEqual([{ title: 'Shop bald neu verbinden', body: 'Der Zugang von lynox zum Shop acme.myshopify.com läuft am 20.01.2027 ab. Verbinde den Shop vorher unter Einstellungen → APIs neu, damit Läufe und Abfragen nicht anhalten.', priority: 'normal' }]);
+      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toEqual([]);
+      expect(profile().oauth_grant?.reconnect_hint_for).toBe(NOW + 10 * DAY);
+    });
+
+    it('in English with the date as ISO', () => {
+      expiring(NOW + 3 * DAY);
+      expect(claimStoreReconnectHints(store, hold.dir, 'en', NOW)[0]?.body).toBe('lynox\'s access to the store acme.myshopify.com runs out on 2027-01-13. Connect the store again under Settings → APIs before then, so runs and requests do not stop.');
+    });
+
+    it('says nothing while the end is further away than 14 days', () => {
+      expiring(NOW + STORE_RECONNECT_HINT_MS + DAY);
+      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toEqual([]);
+      expect(profile().oauth_grant?.reconnect_hint_for).toBeUndefined();
+    });
+
+    it('a new end (after a refresh) is told again, once', () => {
+      expiring(NOW + 10 * DAY);
+      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toHaveLength(1);
+      expiring(NOW + 12 * DAY, { reconnect_hint_for: NOW + 10 * DAY });
+      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toHaveLength(1);
+      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toHaveLength(0);
+    });
+
+    it('an end already past says the access has run out', () => {
+      expiring(NOW - DAY);
+      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)[0]).toMatchObject({ title: 'Shop neu verbinden', body: expect.stringContaining('ist abgelaufen') as string });
+    });
+
+    it('no hint for a revoked connection', () => {
+      expiring(NOW + DAY, { state: 'revoked' });
+      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toEqual([]);
+    });
+
+    it('no hint for a connection without its binding', () => {
+      const p = profile();
+      const { store_binding: _b, ...grant } = p.oauth_grant!;
+      expect(store.save({ ...p, oauth_grant: { ...grant, refresh_expires_at: NOW + DAY } } as ApiProfile).ok).toBe(true);
+      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toEqual([]);
+    });
+
+    it('hands out nothing when the claim cannot be saved', () => {
+      expiring(NOW + DAY);
+      const refusing = { getAll: () => store.getAll(), save: () => ({ ok: false }) };
+      expect(claimStoreReconnectHints(refusing, hold.dir, 'de', NOW)).toEqual([]);
+    });
   });
 });

@@ -107,6 +107,58 @@ export function storeConnectsHeldForTests(): number {
   return connectsInFlight.size;
 }
 
+/** How long before the refresh token runs out the owner is told, once. */
+export const STORE_RECONNECT_HINT_MS = 14 * 24 * 60 * 60 * 1000;
+
+/**
+ * The owner's hint that a store's refresh token runs out soon, or has: one message per store and
+ * per expiry, claimed on the grant (`reconnect_hint_for`) before it is handed out, so two workers on
+ * one file send it once. No timer and no refresh: the worker's tick asks this, and only a store
+ * the engine still holds a binding for is told. The store is named by its host, which the engine
+ * derives, never by the profile's name. A claim that cannot be saved hands out nothing.
+ */
+export function claimStoreReconnectHints(
+  apiStore: { getAll(): ApiProfile[]; save: (p: ApiProfile, dir?: string) => { ok: boolean } },
+  apisDir: string,
+  lang: 'de' | 'en',
+  now: number = Date.now(),
+): { title: string; body: string; priority: 'normal' }[] {
+  const out: { title: string; body: string; priority: 'normal' }[] = [];
+  for (const profile of apiStore.getAll()) {
+    if (!storeRefreshApplies(profile)) continue;
+    const grant = profile.oauth_grant;
+    const until = grant?.refresh_expires_at;
+    const host = presetStoreHost(profile);
+    if (grant === undefined || typeof until !== 'number' || host === null) continue;
+    if (typeof grant.store_binding !== 'string' || grant.state === 'revoked') continue;
+    if (until - now > STORE_RECONNECT_HINT_MS || grant.reconnect_hint_for === until) continue;
+    let claimed = false;
+    try {
+      claimed = apiStore.save({ ...profile, oauth_grant: { ...grant, reconnect_hint_for: until } }, apisDir).ok;
+    } catch {
+      claimed = false;
+    }
+    if (!claimed) continue;
+    out.push(storeReconnectHint(host, until, now, lang));
+  }
+  return out;
+}
+
+function storeReconnectHint(host: string, until: number, now: number, lang: 'de' | 'en'): { title: string; body: string; priority: 'normal' } {
+  const d = new Date(until);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  if (lang === 'de') {
+    const date = `${pad(d.getUTCDate())}.${pad(d.getUTCMonth() + 1)}.${String(d.getUTCFullYear())}`;
+    return until <= now
+      ? { title: 'Shop neu verbinden', body: `Der Zugang von lynox zum Shop ${host} ist abgelaufen. Verbinde den Shop unter Einstellungen → APIs neu, damit Läufe und Abfragen wieder gehen.`, priority: 'normal' }
+      : { title: 'Shop bald neu verbinden', body: `Der Zugang von lynox zum Shop ${host} läuft am ${date} ab. Verbinde den Shop vorher unter Einstellungen → APIs neu, damit Läufe und Abfragen nicht anhalten.`, priority: 'normal' };
+  }
+  const date = `${String(d.getUTCFullYear())}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+  return until <= now
+    ? { title: 'Connect the store again', body: `lynox's access to the store ${host} has run out. Connect the store again under Settings → APIs so runs and requests work again.`, priority: 'normal' }
+    : { title: 'Connect the store again soon', body: `lynox's access to the store ${host} runs out on ${date}. Connect the store again under Settings → APIs before then, so runs and requests do not stop.`, priority: 'normal' };
+}
+
 /** Whether a profile is of a store preset whose tokens may expire, so that a refresh applies. */
 export function storeRefreshApplies(profile: ApiProfile): boolean {
   const preset = OAUTH_PRESETS.get(profile.auth?.oauth?.preset_id ?? '');

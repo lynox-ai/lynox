@@ -8,6 +8,8 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
+import { join } from 'node:path';
+import { claimStoreReconnectHints } from './store-token-refresh.js';
 import { recipientsConfirmable } from './recipient-confirm.js';
 import { errorText, errorTextReduced, FixedTextError, processErrorText } from './error-egress.js';
 import { containThreadFrom, threadIsContained } from './containment.js';
@@ -1517,6 +1519,20 @@ export class WorkerLoop {
         process.stderr.write(
           `[lynox:worker] consent reminder failed: ${err instanceof Error ? err.message : String(err)}\n`,
         );
+      }
+
+      // The owner's hint that a store's access runs out soon (`store-token-refresh.ts`): only with a
+      // channel, claimed on the grant before it is sent. No timer and no refresh of its own.
+      try {
+        const apiStore = this.engine.getApiStore();
+        if (apiStore && this.notificationRouter.hasChannels()) {
+          const { getLynoxDir } = await import('./config.js');
+          for (const message of claimStoreReconnectHints(apiStore, join(getLynoxDir(), 'apis'), noticeLanguage(this.engine.config?.language))) {
+            void this.notificationRouter.notify(message);
+          }
+        }
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:worker] store reconnect hint failed: ${processErrorText(err)}\n`);
       }
 
       // The owner's notice of paused plans (`plan-pause.ts`), in the reminder's order: only with a
