@@ -20,6 +20,7 @@ vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
 
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
+let runBodies: Array<Record<string, unknown>> = [];
 
 const SCRIPT = '<script>window.__x = 1</script>';
 const WF = {
@@ -47,6 +48,7 @@ async function open(viewer: 'owner' | 'mandate'): Promise<void> {
 	vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
 		const path = new URL(String(input), 'http://localhost').pathname.replace(/^\/api/, '');
 		if ((init?.method ?? 'GET') === 'GET' && path === '/workflows/library') return new Response(JSON.stringify({ workflows: [WF], viewer }), { status: 200 });
+		if (init?.method === 'POST' && path === '/workflows/wf-1/run') { runBodies.push(JSON.parse(String(init.body))); return new Response('{}', { status: 200 }); }
 		return new Response('{}', { status: 404 });
 	}));
 	const { default: WorkflowLibraryView } = await import('./WorkflowLibraryView.svelte');
@@ -68,6 +70,7 @@ beforeEach(() => {
 	target = document.createElement('div');
 	document.body.appendChild(target);
 	delete (window as { __x?: number }).__x;
+	runBodies = [];
 });
 
 afterEach(() => {
@@ -88,6 +91,26 @@ describe('the run form shows the owner what a parameter may take', () => {
 		expect((window as { __x?: number }).__x).toBeUndefined();
 		expect(bounds('count')?.textContent?.trim()).toBe('Zwischen 1 und 10');
 		expect(choice('count')).toBeNull();
+	});
+
+	it('runs with the value chosen, and not before one is chosen', async () => {
+		await open('owner');
+		await press('Ausführen');
+		(target.querySelector('input[inputmode="decimal"]') as HTMLInputElement).value = '5';
+		target.querySelector('input[inputmode="decimal"]')!.dispatchEvent(new Event('input', { bubbles: true }));
+		await settle();
+		const runIn = (): HTMLElement => [...target.querySelectorAll<HTMLElement>('[role="dialog"] button')].find((b) => b.textContent?.trim() === 'Ausführen')!;
+		runIn().click();
+		await settle();
+		expect(runBodies, 'no run without a chosen value').toEqual([]);
+		const select = choice('region')!;
+		select.value = 'de';
+		select.dispatchEvent(new Event('change', { bubbles: true }));
+		await settle();
+		runIn().click();
+		await settle();
+		expect(runBodies).toHaveLength(1);
+		expect(runBodies[0]?.['params']).toMatchObject({ region: 'de', count: '5' });
 	});
 
 	it('shows the same in the schedule form', async () => {

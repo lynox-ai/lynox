@@ -144,9 +144,9 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     let hiddenText = false;
     steps.forEach((s, i) => {
       // An id with a character that does not show is outside the shape too: named by its position alone.
-      if (findHiddenInName(s.id, 'id') !== null) { named.add(i); hiddenText = true; fixes.push(`rename_step for step #${i + 1} ${OUTSIDE_SHAPE}: step_id "#${i + 1}", value a new id in that form, for example fetch_orders; the steps that read it follow`); }
+      if (findHiddenInName(s.id, 'id') !== null) { named.add(i); hiddenText = true; fixes.push(`rename_step for step #${i + 1} ${OUTSIDE_SHAPE}: step_id "#${i + 1}", value a new id of 1 to ${STEP_ID_MAX} characters (a-z, 0-9, _ or -), for example fetch_orders; the steps that read it follow`); }
       // An id stored before step ids had a shape (`step-id.ts`): named by its position, never its text.
-      else if (!isStepIdShape(s.id)) { named.add(i); outsideShape = true; shapeFix.set(i, `rename_step for step #${i + 1} ${OUTSIDE_SHAPE}: step_id "#${i + 1}", value a new id in that form, for example fetch_orders; the steps that read it follow`); fixes.push(shapeFix.get(i)!); }
+      else if (!isStepIdShape(s.id)) { named.add(i); outsideShape = true; shapeFix.set(i, `rename_step for step #${i + 1} ${OUTSIDE_SHAPE}: step_id "#${i + 1}", value a new id of 1 to ${STEP_ID_MAX} characters (a-z, 0-9, _ or -), for example fetch_orders; the steps that read it follow`); fixes.push(shapeFix.get(i)!); }
       if (findHiddenChar(s.task) !== null) { named.add(i); hiddenText = true; fixes.push(`update_task for step #${i + 1}: step_id "#${i + 1}", value its task typed again in your own words`); }
     });
     // A step stored with the id `#<n>` is what `#<n>` names (`stepIndex`): each one that takes a

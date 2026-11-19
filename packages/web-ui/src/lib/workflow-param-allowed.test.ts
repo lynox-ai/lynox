@@ -15,6 +15,10 @@ describe('what the run form shows a parameter may take', () => {
 		expect(paramAllowed(contract, 'count', true)).toEqual({ min: 1, max: 10 });
 	});
 
+	it('offers each value once, though the contract lists it twice', () => {
+		expect(paramAllowed({ paramConstraints: { r: { enum: ['7', 7, 'ch', 'ch'] } } }, 'r', true)).toEqual({ values: ['7', 'ch'] });
+	});
+
 	it('gives anyone who is not the owner nothing, though the contract holds it', () => {
 		expect(paramAllowed(contract, 'region', false)).toBeNull();
 		expect(paramAllowed(contract, 'count', false)).toBeNull();

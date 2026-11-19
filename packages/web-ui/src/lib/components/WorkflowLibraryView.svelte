@@ -74,7 +74,7 @@
 	let viewer = $state<string | undefined>(undefined);
 	// Running, renaming and deleting a workflow are the owner's (`ownerOnly` in http-api.ts). Whose
 	// session it is comes from the shared store, which this page loads itself; the library's own
-	// `viewer` counts too once the engine sends it (today `GET /api/workflows/library` does not).
+	// `viewer` counts too (`GET /api/workflows/library` sends it).
 	// The buttons wait for a known owner, so a mandate never sees them, not even while the store
 	// has no answer; the sentence waits for a known mandate.
 	const ownerActs = $derived(viewer === 'owner' || isOwnerSession());
@@ -497,7 +497,12 @@
 				notice = t('workflow_library.stamp.reopen_schedule');
 				return;
 			}
-			paramValues = Object.fromEntries((fresh.parameters ?? []).map((p) => [p.name, paramValues[p.name] ?? '']));
+			// A value kept across the stamp detour stays only if the fresh contract still allows it.
+			paramValues = Object.fromEntries((fresh.parameters ?? []).map((p) => {
+				const kept = paramValues[p.name] ?? '';
+				const values = allowedFor(fresh, p.name)?.values;
+				return [p.name, values === undefined || values.includes(kept) ? kept : ''];
+			}));
 			grantPreview = null;
 			scheduleModalWf = fresh;
 		} catch {

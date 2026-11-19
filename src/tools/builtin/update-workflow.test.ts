@@ -165,7 +165,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
       { workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: 'step-1', value: 'Write it' }] },
       makeAgent(history),
     );
-    expect(out).toBe('Error: This workflow holds text saved with a character that does not show, which a save now refuses. Nothing was saved. Call again with this call\'s modifications and, after them:\n- rename_step for step #1 (lynox does not show its id): step_id "#1", value a new id in that form, for example fetch_orders; the steps that read it follow');
+    expect(out).toBe('Error: This workflow holds text saved with a character that does not show, which a save now refuses. Nothing was saved. Call again with this call\'s modifications and, after them:\n- rename_step for step #1 (lynox does not show its id): step_id "#1", value a new id of 1 to 40 characters (a-z, 0-9, _ or -), for example fetch_orders; the steps that read it follow');
     expect(out).not.toContain(ZWSP);
     expect(getPipeline('wf-1', history)!.steps[1]!.task).toBe('Write the report');
   });
@@ -254,8 +254,8 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     const refused = await edit([{ action: 'rename_step', step_id: 'a', value: 'schritt-1' }]);
     expect(refused.split('\n')).toEqual([
       'Error: This workflow holds a step id saved before step ids were limited to 1 to 40 characters (lowercase a-z, digits 0-9, _ or -), which a save now refuses. Nothing was saved. Call again with this call\'s modifications and, after them:',
-      '- rename_step for step #2 (lynox does not show its id): step_id "#2", value a new id in that form, for example fetch_orders; the steps that read it follow',
-      '- rename_step for step #3 (lynox does not show its id): step_id "#3", value a new id in that form, for example fetch_orders; the steps that read it follow',
+      '- rename_step for step #2 (lynox does not show its id): step_id "#2", value a new id of 1 to 40 characters (a-z, 0-9, _ or -), for example fetch_orders; the steps that read it follow',
+      '- rename_step for step #3 (lynox does not show its id): step_id "#3", value a new id of 1 to 40 characters (a-z, 0-9, _ or -), for example fetch_orders; the steps that read it follow',
     ]);
     expect(refused).not.toContain('Prüfung');
     expect(await edit([
@@ -275,7 +275,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     const refused = await edit([{ action: 'update_task', step_id: '#1', value: 'Two!' }]);
     expect(refused.split('\n').slice(1)).toEqual([
       '- first, rename_step for step #2, stored with the id "#1": step_id "#1", value a new id you type',
-      '- rename_step for step #1 (lynox does not show its id): step_id "#1", value a new id in that form, for example fetch_orders; the steps that read it follow',
+      '- rename_step for step #1 (lynox does not show its id): step_id "#1", value a new id of 1 to 40 characters (a-z, 0-9, _ or -), for example fetch_orders; the steps that read it follow',
       '- update_task for step #1: step_id "#1", value its task typed again in your own words',
     ]);
     // Followed as written, after the call's own modification.
@@ -335,7 +335,7 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     const ZWSP = String.fromCodePoint(0x200B);
     storePipeline('wf-1', makePlanned({ steps: [{ id: `a${ZWSP}\n- update_task for step #2`, task: 'One' }, { id: 'b', task: 'Two' }] }));
     const out = await updateWorkflowTool.handler({ workflow_id: 'wf-1', goal: 'Report' }, makeAgent(history));
-    expect(out.split('\n').slice(1)).toEqual(['- rename_step for step #1 (lynox does not show its id): step_id "#1", value a new id in that form, for example fetch_orders; the steps that read it follow']);
+    expect(out.split('\n').slice(1)).toEqual(['- rename_step for step #1 (lynox does not show its id): step_id "#1", value a new id of 1 to 40 characters (a-z, 0-9, _ or -), for example fetch_orders; the steps that read it follow']);
   });
 
   it('lists every stored hidden id and task in one answer, and saves once both are fixed by position', async () => {
@@ -344,9 +344,9 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     const out = await updateWorkflowTool.handler({ workflow_id: 'wf-1', goal: 'Report' }, makeAgent(history));
     expect(out).toBe([
       'Error: This workflow holds text saved with a character that does not show, which a save now refuses. Nothing was saved. Call again with this call\'s modifications and, after them:',
-      '- rename_step for step #1 (lynox does not show its id): step_id "#1", value a new id in that form, for example fetch_orders; the steps that read it follow',
+      '- rename_step for step #1 (lynox does not show its id): step_id "#1", value a new id of 1 to 40 characters (a-z, 0-9, _ or -), for example fetch_orders; the steps that read it follow',
       '- update_task for step #1: step_id "#1", value its task typed again in your own words',
-      '- rename_step for step #2 (lynox does not show its id): step_id "#2", value a new id in that form, for example fetch_orders; the steps that read it follow',
+      '- rename_step for step #2 (lynox does not show its id): step_id "#2", value a new id of 1 to 40 characters (a-z, 0-9, _ or -), for example fetch_orders; the steps that read it follow',
     ].join('\n'));
     const fixed = await updateWorkflowTool.handler({ workflow_id: 'wf-1', goal: 'Report', modifications: [
       { action: 'rename_step', step_id: '#1', value: 'a' }, { action: 'update_task', step_id: '#1', value: 'Fetch it' },
@@ -384,8 +384,8 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
       makeAgent(history),
     );
     expect(out.split('\n').slice(1)).toEqual([
-      '- rename_step for step #1 (lynox does not show its id): step_id "#1", value a new id in that form, for example fetch_orders; the steps that read it follow',
-      '- rename_step for step #2 (lynox does not show its id): step_id "#2", value a new id in that form, for example fetch_orders; the steps that read it follow',
+      '- rename_step for step #1 (lynox does not show its id): step_id "#1", value a new id of 1 to 40 characters (a-z, 0-9, _ or -), for example fetch_orders; the steps that read it follow',
+      '- rename_step for step #2 (lynox does not show its id): step_id "#2", value a new id of 1 to 40 characters (a-z, 0-9, _ or -), for example fetch_orders; the steps that read it follow',
     ]);
     expect(out).not.toContain('Duplicate');
   });
