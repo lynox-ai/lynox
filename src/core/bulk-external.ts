@@ -419,6 +419,11 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
       ? { url, method: gated, headers: { 'content-type': 'application/json' }, body: payload }
       : { url, method: gated };
     if (gated === null || !contractGrants('http_request', asked, deps.contract)) return { kind: 'not_granted' };
+    // A GraphQL request without `writes` is a read below: attached as one, trailed as one, its
+    // answer never read as a write's. The contract grants a minted write body whatever the option
+    // says, so sent as a read it would go out recorded as a read. A write body the apply grant
+    // minted therefore goes only as a write, never through the read option.
+    if (graphql !== undefined && graphql.writes !== true && isMintedShopifyWrite(deps.contract, payload)) return { kind: 'not_granted' };
     // A path that sends to a third party or issues something bindingly is asked on its own,
     // every time (`outbound-write.ts`); a bulk run has no one to ask, so no grant covers it.
     if (isOutboundEffectWrite(url, gated)) return { kind: 'not_granted' };
