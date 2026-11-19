@@ -1779,4 +1779,123 @@ describe('the start of a judged run, in words', () => {
 		expect(target.textContent).toContain(tf('bulk.start.supersede', { cost: '0.50 USD' }));
 		expect(target.textContent).not.toContain('$0.50');
 	});
+
+	// A run that waits for its start has no halt to name (U-339): no „Angehalten“ row, and the page
+	// says what to do once, in its start line or the list sentence under it.
+	const headTerms = (): string[] => [...target.querySelectorAll('dl dt')].map((dt) => dt.textContent?.trim() ?? '');
+	const startLine = (): string => target.querySelector('[data-testid="bulk-awaiting-start"]')?.textContent ?? '';
+	const count = (text: string, part: string): number => text.split(part).length - 1;
+
+	it('shows an owner\'s listed run no halt row and says once to check the targets and start', async () => {
+		run = judged();
+		await render();
+		expect(headTerms()).not.toContain(t('bulk.head.halted'));
+		const listedStep = tf('bulk.halt.listed_start', { button: t('bulk.start.judge') });
+		expect(target.textContent).not.toContain(listedStep);
+		expect(count(target.textContent ?? '', tf('bulk.start.listed_judge', { n: '3' }))).toBe(1);
+		expect(startLine()).toBe(t('bulk.awaiting_start'));
+	});
+
+	it('names the start button of a waiting run without a list in its start line, not in a halt row', async () => {
+		run = judged({ haltKey: 'awaitingStart', list: null });
+		await render();
+		expect(headTerms()).not.toContain(t('bulk.head.halted'));
+		const step = tf('bulk.halt.awaitingStart_start', { button: t('bulk.start.judge') });
+		expect(startLine()).toBe(`${t('bulk.awaiting_start')} ${step}`);
+		expect(count(target.textContent ?? '', step)).toBe(1);
+	});
+
+	it('tells a mandate in the start line that only the owner starts the run, for a listed run too', async () => {
+		viewerOf = 'mandate';
+		for (const haltKey of ['listed', 'awaitingStart'] as const) {
+			run = judged({ haltKey });
+			await render();
+			expect(headTerms(), haltKey).not.toContain(t('bulk.head.halted'));
+			expect(startLine(), haltKey).toBe(`${t('bulk.awaiting_start')} ${t('bulk.halt.wait_owner_only')}`);
+			unmount(component!);
+			component = undefined;
+		}
+	});
+
+	it('keeps the halt row for a run that halted after it started', async () => {
+		run = judged({ haltKey: 'unavailable' });
+		await render();
+		expect(headTerms()).toContain(t('bulk.head.halted'));
+		expect(target.querySelector('[data-testid="bulk-awaiting-start"]')).toBeNull();
+	});
+
+	// The restart that needs a new limit says why its button is disabled, as the start does (U-339).
+	it('says under a restart on its limit that a new limit is missing, and links it to both buttons', async () => {
+		run = judged({ haltKey: 'costCap', costUsd: 0.25, costCapUsd: 0.25 });
+		await render();
+		const restartHint = (): HTMLElement | null => target.querySelector('[data-testid="bulk-restart-hint"]');
+		expect(restartHint()?.textContent).toBe(t('bulk.restart.hint_cap'));
+		const button = buttonByText(t('bulk.restart.judge'))!;
+		expect(button.disabled).toBe(true);
+		expect(button.getAttribute('aria-describedby')).toBe('bulk-restart-hint');
+		expect(restartHint()!.id).toBe('bulk-restart-hint');
+		type(capField(), '9');
+		await settle();
+		expect(restartHint()).toBeNull();
+		expect(button.getAttribute('aria-describedby')).toBeNull();
+		// A too low amount has its own line, not this one.
+		type(capField(), '0.1');
+		await settle();
+		expect(restartHint()).toBeNull();
+		// The supersede button carries the same link while the field is empty.
+		type(capField(), '');
+		refuseResume = 'supersede_required';
+		type(capField(), '9');
+		buttonByText(t('bulk.restart.judge'))!.click();
+		await settle();
+		type(capField(), '');
+		await settle();
+		expect(buttonByText(t('bulk.start.supersede_yes'))!.getAttribute('aria-describedby')).toBe('bulk-restart-hint');
+	});
+
+	it('has no restart hint for a restart that needs no new limit', async () => {
+		run = judged({ haltKey: 'unavailable' });
+		await render();
+		expect(target.querySelector('[data-testid="bulk-restart-hint"]')).toBeNull();
+		expect(buttonByText(t('bulk.restart.judge'))!.getAttribute('aria-describedby')).toBeNull();
+	});
+
+	// Shapes say an equal length once, and write numbers as the UI language does (U-339).
+	it('says „exactly“ for an equal length and writes numbers in the UI language\'s form', async () => {
+		const schema = { properties: {
+			code: { type: 'string', minLength: 5, maxLength: 5 },
+			body: { type: 'string', minLength: 10, maxLength: 32000 },
+			factor: { type: 'number', minimum: 1e-7, maximum: 1.5 },
+		} };
+		run = judged({ judgeRule: { rule: 'r', tier: 'standard', schema } });
+		await render();
+		expect(fieldLines()).toEqual([
+			`code: ${tf('bulk.shape.text_exact', { n: '5' })}`,
+			// Swiss German groups thousands with an apostrophe; which one the runtime's ICU writes varies.
+			`body: ${tf('bulk.shape.text_range', { min: '10', max: new Intl.NumberFormat('de-CH').format(32000) })}`,
+			`factor: ${tf('bulk.shape.number_range', { min: '0.0000001', max: '1.5' })}`,
+		]);
+		expect(new Intl.NumberFormat('de-CH').format(32000)).toMatch(/^32['’]000$/);
+		expect(t('bulk.shape.text_exact')).toBe('Text, genau {n} Zeichen');
+		unmount(component!);
+		component = undefined;
+		const before = getLocale();
+		onTestFinished(() => setLocale(before));
+		setLocale('en');
+		await render();
+		expect(fieldLines()).toEqual([
+			'code: Text, exactly 5 characters',
+			`body: ${tf('bulk.shape.text_range', { min: '10', max: '32,000' })}`,
+			`factor: ${tf('bulk.shape.number_range', { min: '0.0000001', max: '1.5' })}`,
+		]);
+	});
+
+	// The focus ring stands 4px outside the domain field; the label keeps more room than that.
+	it('leaves room between the domain field and its label for the focus ring', async () => {
+		run = judged({ startDomains: null });
+		await render();
+		const label = domainField().closest('label')!;
+		expect(label.classList.contains('space-y-2')).toBe(true);
+		expect(label.classList.contains('space-y-1')).toBe(false);
+	});
 });

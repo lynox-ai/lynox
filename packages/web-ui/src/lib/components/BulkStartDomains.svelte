@@ -31,7 +31,8 @@
 
 <div class="text-sm space-y-1" data-testid="bulk-start-domains">
 	{#if editable}
-		<label class="block space-y-1">
+		<!-- space-y-2: the focus ring stands 4px outside the field and must not touch the label (U-339). -->
+		<label class="block space-y-2">
 			<span>{t('bulk.start_domains.label')}</span>
 			<textarea
 				class="w-full rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 font-mono text-sm"
