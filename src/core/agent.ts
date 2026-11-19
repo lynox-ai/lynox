@@ -5605,7 +5605,16 @@ export class Agent implements IAgent {
         // (`GrantLift`, `CallConnection`).
         const grant = grantLiftOf(callSlot);
         const connection = callSlot.connection;
-        await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name, toolUseId: tc.id, ...(softMasked !== null ? { softFailure: true as const } : {}), ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}), ...this._eventFactsOfCall(tc, callSlot) });
+        // The call has settled and is in the ledger above. A throw from delivering its event (a
+        // step's stream handler, a closed response) is not the call failing: caught here, it does
+        // not reach the `catch` below, which would record the same call a second time as an error,
+        // emit a second result for it and tell the model a call that worked had failed.
+        try {
+          await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name, toolUseId: tc.id, ...(softMasked !== null ? { softFailure: true as const } : {}), ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}), ...this._eventFactsOfCall(tc, callSlot) });
+        } catch (emitErr: unknown) {
+          // Only the error's kind: its text is the stream's, not the call's.
+          process.stderr.write(`[lynox:agent] a ${tc.name} call was recorded, but its result event could not be delivered (${emitErr instanceof Error ? emitErr.name : 'unknown error'})\n`);
+        }
       }
       return {
         type: 'tool_result',

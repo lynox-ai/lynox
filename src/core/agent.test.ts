@@ -88,6 +88,7 @@ vi.mock('./observability.js', () => ({
 }));
 
 import { Agent, readForDiffPreview, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS, raceRunAbort, TOOL_ABANDONED_MESSAGE, toolStoppedMessage, TOOL_STOPPED_RESULT_NOTE } from './agent.js';
+import { createStepStreamHandler } from '../orchestrator/runtime-adapter.js';
 import { InputRequiredError } from './input-required.js';
 import { askUserTool } from '../tools/builtin/ask-user.js';
 import type { WireSnapshot } from './wire-capture.js';
@@ -3564,6 +3565,43 @@ describe('Agent', () => {
 
   describe('recordToolCall sink', () => {
     type RecordedCall = { runId?: string | undefined; toolName: string; inputJson: string; outputJson: string; durationMs: number; isError: boolean };
+
+    it('records a call once when its success event throws, never again as an error, and gives the model its result', async () => {
+      const recorded: RecordedCall[] = [];
+      const steps: Array<{ toolName: string; isError: boolean }> = [];
+      // A step's recorder sits behind the agent's stream, as a run wires it; the stream throws
+      // once, after the step has written the result.
+      const step = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (r) => { steps.push({ toolName: r.toolName, isError: r.isError }); } });
+      let threw = false;
+      const onStream = async (e: StreamEvent): Promise<void> => {
+        step(e);
+        if (e.type === 'tool_result' && !threw) { threw = true; throw new Error('step recorder gone'); }
+      };
+      const tool = makeTool('ok_tool', vi.fn(async () => 'fine'));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu-ok', name: 'ok_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+      const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [tool], onStream, recordToolCall: (c) => { recorded.push(c as RecordedCall); } });
+      const logged: string[] = [];
+      const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => { logged.push(String(chunk)); return true; });
+      try {
+        await agent.send('go');
+      } finally {
+        spy.mockRestore();
+      }
+      expect(threw).toBe(true);
+      expect(recorded.filter(c => c.toolName === 'ok_tool').map(c => c.isError)).toEqual([false]);
+      expect(steps.filter(s => s.toolName === 'ok_tool').map(s => s.isError)).toEqual([false]);
+      // The model reads the call's own result, not the stream's error.
+      const block = agent.getMessages()
+        .flatMap(m => (Array.isArray((m as { content: unknown }).content) ? (m as { content: Array<{ type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }> }).content : []))
+        .find(b => b.type === 'tool_result' && b.tool_use_id === 'tu-ok');
+      expect(block?.is_error).toBeUndefined();
+      expect(JSON.stringify(block?.content)).toContain('fine');
+      // The log names the error's kind, never its text.
+      expect(logged.filter(l => l.includes('could not be delivered'))).toEqual(['[lynox:agent] a ok_tool call was recorded, but its result event could not be delivered (Error)\n']);
+      expect(logged.join('')).not.toContain('step recorder gone');
+    });
 
     describe('the connection a call resolved', () => {
       // Source-connection PRD, first build cut. The http resolver notes the profile
