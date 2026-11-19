@@ -226,7 +226,7 @@ describe('the run list names an aborted run as its page does, without „angehal
 			at('4', { phase: 'aborted', haltKey: 'mandateEnded', haltReason: 'engine English', checksum: null }),
 			at('5', { phase: 'writing', haltKey: 'stoppedByOwner', haltReason: 'engine English', applied: 1 }),
 		]);
-		expect([...chips].sort()).toEqual(['abgebrochen', 'abgebrochen', 'ersetzt', 'gestoppt', 'schreibt · gestoppt']);
+		expect(chips).toEqual(['gestoppt', 'ersetzt', 'abgebrochen', 'abgebrochen', 'schreibt · gestoppt']);
 	});
 
 	it('reads in English as approved', async () => {
@@ -235,6 +235,6 @@ describe('the run list names an aborted run as its page does, without „angehal
 			at('1', { ...ROLLED_BACK, haltKey: 'atomicStoppedRollbackIncomplete', applied: 1 }),
 			at('2', { phase: 'aborted', haltKey: 'superseded', haltReason: 'engine English', checksum: null }),
 		]);
-		expect([...chips].sort()).toEqual(['replaced', 'stopped']);
+		expect(chips).toEqual(['stopped', 'replaced']);
 	});
 });
