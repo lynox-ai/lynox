@@ -969,14 +969,11 @@ const JSON_TEXT_BUDGET_CHARS = 2_000_000;
  */
 function jsonTextHides(text: string, readings: Iterable<string>, mask: (text: string) => string, unread = true): boolean {
   const seen = new Set<string>();
-  const parsed = new Set<string>();
   let left = JSON_TEXT_BUDGET_CHARS;
   const hides = (t: string, ofT: Iterable<string>, depth: number): boolean => {
     for (const reads of [ofT, ...formSides(t).map(serverReadings)]) {
       for (const read of reads) {
         for (const candidate of jsonCandidates(read)) {
-          if (parsed.has(candidate)) continue;
-          parsed.add(candidate);
           left -= 32;
           if (left < 0) return unread;
           const strings = jsonStrings(candidate);
@@ -1023,19 +1020,33 @@ function formSides(text: string): string[] {
  *  multipart part). Only a piece that starts like JSON text, after spaces. */
 function jsonCandidates(read: string): string[] {
   const out = [read];
-  const starts = (s: string) => /[\s{["]/.test(s);
+  if (!/[=&\n]/.test(read)) return out;
+  // The next `&` and the next line break at or after each position, found in one pass from the
+  // end, so a reading with many pieces costs its length, not its length per piece.
+  const nextAmp = new Int32Array(read.length + 1);
+  const nextBreak = new Int32Array(read.length + 1);
+  nextAmp[read.length] = read.length;
+  nextBreak[read.length] = read.length;
+  for (let i = read.length - 1; i >= 0; i--) {
+    nextAmp[i] = read[i] === '&' ? i : nextAmp[i + 1]!;
+    nextBreak[i] = read[i] === '\n' ? i : nextBreak[i + 1]!;
+  }
+  // `named`: the text since the last `=`, `&` or line break is a name (no space, nothing JSON
+  // starts with), so a `=` after it ends a form's name, also one inside a decoded value (`p=b=…`).
+  // Text with many `=` that are no form (`x = {`) starts no piece at each of them.
+  let named = false;
+  let since = 0;
   for (let i = 0; i < read.length; i++) {
+    const c = read[i]!;
     const before = i === 0 ? '' : read[i - 1]!;
-    if (!starts(read[i]!)) continue;
-    // A piece that runs from the start to the end is the reading itself, already in.
-    if (i === 0 || before === '=' || before === '&') {
-      const end = read.indexOf('&', i);
-      if (i > 0 || end >= 0) out.push(read.slice(i, end < 0 ? read.length : end));
+    if (/[\s{["]/.test(c)) {
+      // A piece that runs from the start to the end is the reading itself, already in.
+      if ((i === 0 || before === '&' || (before === '=' && named)) && (i > 0 || nextAmp[i]! < read.length)) out.push(read.slice(i, nextAmp[i]));
+      if ((i === 0 || before === '\n') && (i > 0 || nextBreak[i]! < read.length)) out.push(read.slice(i, nextBreak[i]));
     }
-    if (i === 0 || before === '\n') {
-      const end = read.indexOf('\n', i);
-      if (i > 0 || end >= 0) out.push(read.slice(i, end < 0 ? read.length : end));
-    }
+    if (c === '=') named = /^[^\s{["]+$/.test(read.slice(since, i));
+    else if (c === '&' || c === '\n') named = false;
+    if (c === '=' || c === '&' || c === '\n') since = i + 1;
   }
   return out;
 }
