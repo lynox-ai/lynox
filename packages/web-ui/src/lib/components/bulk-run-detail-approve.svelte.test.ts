@@ -1853,6 +1853,7 @@ describe('the start of a judged run, in words', () => {
 		type(capField(), '');
 		await settle();
 		expect(buttonByText(t('bulk.start.supersede_yes'))!.getAttribute('aria-describedby')).toBe('bulk-restart-hint');
+		expect(restartHint()?.textContent).toBe(t('bulk.restart.hint_cap'));
 	});
 
 	it('has no restart hint for a restart that needs no new limit', async () => {

@@ -6,7 +6,7 @@ import {
 	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkPhaseKey, bulkPhaseHasSuffix, bulkStepLabelKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
-	bulkSentenceParts, bulkSecretInContextKey,
+	bulkSentenceParts, bulkSecretInContextKey, bulkFieldShapeText,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -1726,5 +1726,17 @@ describe('bulkSecretInContextKey', () => {
 		expect(bulkSecretInContextKey(true, false)).toBe('bulk.invalid.secret_in_context');
 		expect(bulkSecretInContextKey(false, true)).toBe('bulk.invalid.secret_in_context_column');
 		expect(bulkSecretInContextKey(false, false)).toBe('bulk.invalid.secret_in_context_field');
+	});
+});
+
+// A schema arrives as JSON, where -0 survives `JSON.parse`; the shape reads 0, as it did before
+// numbers were formatted in the UI language.
+describe('bulkFieldShapeText with a negative zero', () => {
+	const words: BulkI18n = { t: (k) => k, tf: (k, v) => `${k}:${Object.values(v).join('|')}` };
+	it('reads a schema\'s -0 as 0 in both UI languages', () => {
+		const shape = JSON.parse('{"type":"integer","minimum":-0,"maximum":9}') as unknown;
+		expect(Object.is((shape as { minimum: number }).minimum, -0)).toBe(true);
+		expect(bulkFieldShapeText(shape, words, 'de-CH')).toBe('bulk.shape.integer_range:0|9');
+		expect(bulkFieldShapeText(shape, words, 'en-GB')).toBe('bulk.shape.integer_range:0|9');
 	});
 });
