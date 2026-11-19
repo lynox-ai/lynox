@@ -98,4 +98,9 @@ describe('a judged run another one replaced', () => {
     expect(ledger.getStatus(second)).toBeNull();
     expect(ledger.getStatus(first)!.supersededBy).toBeNull();
   });
+
+  it('finds the runs to unlink by index, so a delete does not scan every run', () => {
+    const plan = engineDb.getDb().prepare('EXPLAIN QUERY PLAN SELECT id FROM bulk_runs WHERE superseded_by = ?').all('x') as { detail: string }[];
+    expect(plan.map((r) => r.detail).join(' ')).toContain('idx_bulk_runs_superseded');
+  });
 });
