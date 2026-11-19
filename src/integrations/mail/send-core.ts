@@ -467,10 +467,11 @@ export function buildBodyBlock(body: string): PromptText {
 /**
  * Render an address list for a preview: one line, each address flattened.
  *
- * `mail_send` gets its recipients from `parseAddressList`, which already drops
- * any segment containing CR/LF. `mail_reply` does NOT: its default recipient is
- * `original.envelope.replyTo[0] ?? original.envelope.from[0]` and its Cc comes
- * from `original.envelope.to`/`.cc` — parsed IMAP values that never pass
+ * `mail_send`, and `mail_reply`'s `to`/`cc` overrides, get their recipients from
+ * `parseAddressList`, which already drops any segment containing CR/LF.
+ * `mail_reply`'s default recipient does NOT: it is
+ * `original.envelope.replyTo[0] ?? original.envelope.from[0]`, and reply_all's Cc
+ * comes from `original.envelope.to`/`.cc` — parsed IMAP values that never pass
  * through `parseAddress`. The guarantee is therefore not uniform across
  * callers, so the preview does not depend on it.
  */
