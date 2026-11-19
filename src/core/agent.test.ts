@@ -6814,9 +6814,8 @@ describe('ask_user with no question path ends the run as "needs input"', () => {
   });
 
   it('the run still ends as "needs input" when delivering the call\'s result event throws', async () => {
-    mockProcess
-      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_ask', name: 'ask_user', input: { question: 'Approve the refund?' } }]))
-      .mockResolvedValueOnce(endTurnResponse('carried on'));
+    // One model turn only: a second response queued here would outlive the test and answer the next one.
+    mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu_ask', name: 'ask_user', input: { question: 'Approve the refund?' } }]));
     const onStream = async (e: StreamEvent): Promise<void> => {
       if (e.type === 'tool_result') throw new Error('stream gone');
     };
