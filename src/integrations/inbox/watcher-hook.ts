@@ -27,7 +27,7 @@
 import type { MailAuthType, MailEnvelope } from '../mail/provider.js';
 import { domainOf, mailingListOf, prefilter } from '../mail/triage/rules.js';
 import { resolveThreadKey } from '../mail/thread-key.js';
-import type { InboxChannel, InboxItem } from '../../types/index.js';
+import type { InboxChannel, InboxItem, InboxRule } from '../../types/index.js';
 import type { ClassifierPromptInput } from './classifier/index.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxQueuePayload } from './runner.js';
@@ -354,7 +354,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           threadKey,
           bucket: rule.bucket,
           confidence: 1,
-          reasonDe: `Regel: ${rule.matcherKind} = ${rule.matcherValue}`,
+          reasonDe: ruleReasonDe(rule),
           classifiedAt: new Date(),
           classifierVersion: `rule:${rule.id}`,
           matchedRuleId: rule.id,
@@ -621,4 +621,15 @@ function writeThreadMessageFromEnvelope(
   if (args.envelopeFields.snippet !== undefined) input.snippet = args.envelopeFields.snippet;
   if (args.bodyMd !== undefined) input.bodyMd = args.bodyMd;
   state.insertThreadMessage(input);
+}
+
+/** The reason a rule's item shows: what the rule matched, named in words, never a field name. */
+function ruleReasonDe(rule: InboxRule): string {
+  switch (rule.matcherKind) {
+    case 'from': return `Regel: Absender = ${rule.matcherValue}`;
+    case 'subject_contains': return `Regel: Betreff enthält ${rule.matcherValue}`;
+    case 'list_id': return `Regel: Verteilerliste = ${rule.matcherValue}`;
+    // A rule on a description is applied by the classifier's runner, named.
+    case 'matches_description': return `Regel: ${rule.name ?? 'ohne Namen'}`;
+  }
 }
