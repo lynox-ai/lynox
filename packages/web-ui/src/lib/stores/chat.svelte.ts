@@ -2764,6 +2764,8 @@ async function reportReply(sid: string, outcome: ReplyOutcome, answer: string | 
 		// purpose: sending the same answer to it unasked could approve what the person never saw.
 		if (sessionId !== sid) return;
 		await checkPendingPrompt();
+		// A typed answer goes back into the message field, in memory only, to be sent again on purpose.
+		if (answer !== null && composerDraft !== null) composerDraft(answer);
 		chatError = t('chat.reply_needs_question');
 		chatErrorDetail = null;
 		return;

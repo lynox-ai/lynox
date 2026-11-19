@@ -530,9 +530,12 @@ describe('an answer that names no question', () => {
 		return { replies: calls.filter((u) => u.endsWith('/reply')).length, pendingAsked };
 	}
 
-	it('is not sent without the question\'s id: the open question comes back with its id and a sentence says so', async () => {
+	it('is not sent without the question\'s id: the open question comes back with its id, a sentence says so, and a typed answer goes back into the message field', async () => {
 		const { t } = await import('../i18n.svelte.js');
+		const drafted: string[] = [];
+		store.registerComposerDraft((text) => { drafted.push(text); return true; });
 		const { replies, pendingAsked } = await answerWith({});
+		expect(drafted).toEqual(['Yes']);
 		expect(replies, 'an answer without an id went out, to whatever is open').toBe(0);
 		expect(pendingAsked).toBeGreaterThan(0);
 		expect(store.getPendingPermission()?.promptId).toBe('p-open');
@@ -547,5 +550,6 @@ describe('an answer that names no question', () => {
 		expect(pendingAsked).toBeGreaterThan(0);
 		expect(store.getPendingPermission()?.promptId).toBe('p-open');
 		expect(store.getChatError()).toBe(t('chat.reply_needs_question'));
+		expect(toasts).toEqual([]);
 	});
 });

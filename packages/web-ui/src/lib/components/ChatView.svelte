@@ -1340,6 +1340,9 @@
 		for (let idx = 0; idx < batchAnswers.length; idx++) {
 			const prevPromptId = getPendingPermission()?.promptId;
 			void replyPermission(batchAnswers[idx]!); /* never rejects; a reply that does not arrive is reported */
+			// A question without its id is not answered (`replyPermission` brings the open one back
+			// instead), and that one is not the next of this batch: stop, so no later answer lands on it.
+			if (prevPromptId === undefined) break;
 			if (idx + 1 < batchAnswers.length) {
 				const arrived = await waitForNextPrompt(prevPromptId);
 				if (!arrived) break; // tool errored or completed early — stop sending
