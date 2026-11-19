@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { paramAllowed } from '../workflow-param-allowed.js';
+	import { keptParamValues, paramAllowed } from '../workflow-param-allowed.js';
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
@@ -498,11 +498,7 @@
 				return;
 			}
 			// A value kept across the stamp detour stays only if the fresh contract still allows it.
-			paramValues = Object.fromEntries((fresh.parameters ?? []).map((p) => {
-				const kept = paramValues[p.name] ?? '';
-				const values = allowedFor(fresh, p.name)?.values;
-				return [p.name, values === undefined || values.includes(kept) ? kept : ''];
-			}));
+			paramValues = keptParamValues(fresh.parameters ?? [], paramValues, fresh.capabilityContract, viewer === 'owner');
 			grantPreview = null;
 			scheduleModalWf = fresh;
 		} catch {

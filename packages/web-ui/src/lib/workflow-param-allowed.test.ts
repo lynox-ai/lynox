@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { paramAllowed } from './workflow-param-allowed.js';
+import { keptParamValues, paramAllowed } from './workflow-param-allowed.js';
 
 const contract = {
 	paramConstraints: {
@@ -32,5 +32,24 @@ describe('what the run form shows a parameter may take', () => {
 		// Only the contract's own keys: an inherited name reads nothing.
 		expect(paramAllowed(contract, 'constructor', true)).toBeNull();
 		expect(paramAllowed(contract, '__proto__', true)).toBeNull();
+		const inherited = { paramConstraints: Object.create({ region: { enum: ['x'] } }) as object };
+		expect(paramAllowed(inherited, 'region', true)).toBeNull();
+	});
+});
+
+describe('the values a form keeps when it opens again', () => {
+	const params = [{ name: 'region' }, { name: 'note' }];
+	const contract = { paramConstraints: { region: { enum: ['ch', 'de'] } } };
+
+	it('keeps a value the contract still allows, and free text as typed', () => {
+		expect(keptParamValues(params, { region: 'de', note: 'hi' }, contract, true)).toEqual({ region: 'de', note: 'hi' });
+	});
+
+	it('drops a value the fresh contract no longer allows, so the form asks again', () => {
+		expect(keptParamValues(params, { region: 'at', note: 'hi' }, contract, true)).toEqual({ region: '', note: 'hi' });
+	});
+
+	it('starts a parameter that is new with nothing', () => {
+		expect(keptParamValues(params, { region: 'ch' }, contract, true)).toEqual({ region: 'ch', note: '' });
 	});
 });

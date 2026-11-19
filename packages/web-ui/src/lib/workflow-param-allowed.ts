@@ -27,3 +27,20 @@ export function paramAllowed(contract: unknown, name: string, ownerView: boolean
 	if (typeof max === 'number' && Number.isFinite(max)) out.max = max;
 	return Object.keys(out).length === 0 ? null : out;
 }
+
+/**
+ * The values a form keeps when it opens again on a fresh copy of the workflow (after the stamp
+ * detour): each parameter keeps what was typed or chosen, unless its contract no longer allows it.
+ */
+export function keptParamValues(
+	parameters: readonly { name: string }[],
+	previous: Readonly<Record<string, string>>,
+	contract: unknown,
+	ownerView: boolean,
+): Record<string, string> {
+	return Object.fromEntries(parameters.map((p) => {
+		const kept = Object.hasOwn(previous, p.name) ? previous[p.name] ?? '' : '';
+		const values = paramAllowed(contract, p.name, ownerView)?.values;
+		return [p.name, values === undefined || values.includes(kept) ? kept : ''];
+	}));
+}
