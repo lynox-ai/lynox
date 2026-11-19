@@ -15,8 +15,8 @@
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import BulkStartDomains from './BulkStartDomains.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked,
-		type BulkRunDetailData, type BulkTarget,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked,
+		type BulkRunDetailData, type BulkTarget, type BulkSentencePart,
 	} from './bulk-runs.js';
 
 	let { runId, onBack, onOpen }: { runId: string; onBack: () => void; onOpen: (id: string) => void } = $props();
@@ -548,7 +548,9 @@
 
 <!-- A field's name (U-333): the host's readable name where lynox has one, as its own word; else the
      name the planner set, in a value box, so it does not read as a word of lynox's. -->
-{#snippet fieldName(field: string)}{@const key = bulkFieldLabelKey(host, field)}{#if key !== null}{t(key)}{:else}<span class="rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono text-text" data-testid="bulk-field-own-name">{bulkVisibleText(field)}</span>{/if}{/snippet}
+{#snippet fieldName(field: string)}{@const key = bulkFieldLabelKey(host, field)}{#if key !== null}{t(key)}{:else}<bdi class="rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono text-text" data-testid="bulk-field-own-name">{bulkVisibleText(field)}</bdi>{/if}{/snippet}
+{#snippet fieldNames(fields: readonly string[])}{#each fields as f, i (i)}{i > 0 ? ', ' : ''}{@render fieldName(f)}{/each}{/snippet}
+{#snippet sentence(parts: BulkSentencePart[], fields: readonly string[])}{#each parts as part, i (i)}{#if 'slot' in part}{@render fieldNames(fields)}{:else}{part.text}{/if}{/each}{/snippet}
 
 <!-- A target's new value with a mark behind each hidden character it adds where text may carry
      one: the word in the text, the kind and code point only in the label. -->
@@ -572,7 +574,7 @@
 	{#each target.markupChanges ?? [] as change (change.field)}
 		{@const list = bulkMarkupList(change, undo, shopify ? bulkFieldNamesText(host, [change.field], t) : bulkVisibleText(change.field), view)}
 		<div class="mt-1 text-xs [overflow-wrap:anywhere]" data-testid="bulk-markup">
-			{#if list.head}<div class="text-text-subtle">{list.head}</div>{/if}
+			{#if list.head}<div class="text-text-subtle" data-testid="bulk-markup-head">{@render sentence(bulkSentenceParts(view.t('bulk.markup.head'), 'field', {}), [change.field])}</div>{/if}
 			{#if list.restoresNote}<p class={list.restoresActive ? 'text-warning' : 'text-text-subtle'} data-testid="bulk-markup-restores-note">{list.restoresNote}</p>{/if}
 			<ul class="space-y-0.5">
 				{#each list.lines as markupLine, i (i)}
@@ -708,7 +710,7 @@
 											{/if}
 											{@render markupList(target, false)}
 											{#if target.change === 'invalid' && target.error}
-												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, view, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store', listForm: run.listForm, judgesHtml: run.judgesHtml, markedDate: target.shopMarkedAt ? markedDateText(target.shopMarkedAt) : null, startDomains: ownerActs && bulkTakesStartDomains(run), linkDomain: target.linkDomain })}</p>
+												<p class="text-sm" data-testid="bulk-invalid-text">{#if target.error === 'secret_in_context' && target.contextField !== undefined}{@render sentence(bulkSentenceParts(view.t(bulkSecretInContextKey(shopify, run.targetSystem === 'data_store')), 'field', {}), [target.contextField])}{:else}{bulkInvalidText(target.error, shopify, managed, view, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store', listForm: run.listForm, judgesHtml: run.judgesHtml, markedDate: target.shopMarkedAt ? markedDateText(target.shopMarkedAt) : null, startDomains: ownerActs && bulkTakesStartDomains(run), linkDomain: target.linkDomain })}{/if}</p>
 												{#if target.error === 'shortcode_changed' && target.refusedValues}
 													{#each target.refusedValues as { field, value, codePoints } (field)}
 														{#if target.refusedValues.length > 1}<div class="mt-1 text-xs text-text-subtle" data-testid="bulk-refused-field">{@render fieldName(field)}:</div>{/if}
@@ -725,7 +727,7 @@
 												</div>
 											{/if}
 											{#if target.sentUnchanged && target.sentUnchanged.length > 0}
-												<div class="text-xs text-text-subtle">{tf('bulk.preview.sent_unchanged', { fields: bulkFieldNamesText(host, target.sentUnchanged, t) })}</div>
+												<div class="text-xs text-text-subtle" data-testid="bulk-sent-unchanged">{@render sentence(bulkSentenceParts(t('bulk.preview.sent_unchanged'), 'fields', {}), target.sentUnchanged)}</div>
 											{/if}
 										</td>
 									</tr>
@@ -985,9 +987,7 @@
 			{:else if atProbe && run.probe}
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.probe.title')}</h2>
-					<p class="text-sm">{run.probe.fields.length > 0
-						? tf(run.probe.found === true ? 'bulk.probe.explain_found' : 'bulk.probe.explain', { target: probeLabel, provider, field: bulkFieldNamesText(host, run.probe.fields, t) })
-						: tf(run.probe.found === true ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_whole', { target: probeLabel, provider })}</p>
+					<p class="text-sm" data-testid="bulk-probe-explain">{#if run.probe.fields.length > 0}{@render sentence(bulkSentenceParts(t(run.probe.found === true ? 'bulk.probe.explain_found' : 'bulk.probe.explain'), 'field', { target: probeLabel, provider }), run.probe.fields)}{:else}{tf(run.probe.found === true ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_whole', { target: probeLabel, provider })}{/if}</p>
 					{#if hiddenCount}
 						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-hidden-count">{hiddenCount}</p>
 					{/if}

@@ -4966,14 +4966,37 @@ describe('LynoxHTTPApi', () => {
       });
     }
 
-    it('reply without a promptId (the legacy path) records the answerer too', async () => {
+    it('reply without a promptId answers nothing and records nothing, and names the way to answer', async () => {
       await withStore(async (store, rows) => {
         api.setPrincipalResolverForTesting(() => EVA);
         const id = store.insertAskUser('s-legacy', 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: EVA });
         const res = await jsonFetch('/api/sessions/s-legacy/reply', { method: 'POST', body: JSON.stringify({ answer: 'B' }) });
-        expect(res.status).toBe(200);
+        expect(res.status).toBe(409);
+        expect((await res.json() as { code?: string }).code).toBe('prompt_id_required');
+        expect(by(store, id)).toEqual({ status: 'pending', answered_by: null, answered_mandate_id: null });
+        expect(answerRows(rows)).toEqual([]);
+        // The way to answer: the id the open question carries.
+        const open = await (await jsonFetch('/api/sessions/s-legacy/pending-prompt')).json() as { promptId?: string };
+        expect(open.promptId).toBe(id);
+        expect((await jsonFetch('/api/sessions/s-legacy/reply', { method: 'POST', body: JSON.stringify({ promptId: open.promptId, answer: 'B' }) })).status).toBe(200);
         expect(by(store, id)).toEqual({ status: 'answered', answered_by: 'mandate:eva@example.invalid', answered_mandate_id: 'grant-1' });
-        expect(answerRows(rows)).toEqual([{ target: `prompt:${id}`, phase: 'attempt' }]);
+      });
+    });
+
+    it('reply without a promptId does not answer a confirmation that opened after the question the client saw', async () => {
+      await withStore(async (store) => {
+        // The client saw the model's question offering `Yes`; it closed, and a tool's own
+        // confirmation (a mail send asks `Yes`/`No`) opened in its place.
+        const seen = store.insertAskUser('s-swap', 'Go on?', ['Yes', 'No']);
+        expect(store.expirePrompt(seen, 'timed_out')).toBe(true);
+        const send = store.insertAskUser('s-swap', 'Send this mail?', ['Yes', 'No']);
+        const late = await jsonFetch('/api/sessions/s-swap/reply', { method: 'POST', body: JSON.stringify({ answer: 'Yes' }) });
+        expect(late.status).toBe(409);
+        expect(store.getById(send)?.status).toBe('pending');
+        expect(store.getById(send)?.answer ?? null).toBeNull();
+        // Named, it is answered.
+        expect((await jsonFetch('/api/sessions/s-swap/reply', { method: 'POST', body: JSON.stringify({ promptId: send, answer: 'Yes' }) })).status).toBe(200);
+        expect(store.getById(send)?.answer).toBe('Yes');
       });
     });
 
@@ -5008,7 +5031,6 @@ describe('LynoxHTTPApi', () => {
     });
 
     const NO_PROMPT_ID: Array<[label: string, ask: (store: import('../core/prompt-store.js').PromptStore, sid: string) => string, path: string, body: Record<string, unknown>]> = [
-      ['reply (legacy)', (s, sid) => s.insertAskUser(sid, 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: EVA }), 'reply', { answer: 'B' }],
       ['secret-saved', (s, sid) => s.insertAskSecret(sid, 'API_KEY', 'Paste the key', undefined, undefined, { principal: EVA }), 'secret-saved', { status: 'saved' }],
       ['mail-connected', (s, sid) => s.insertConnectMail(sid, 'Connect the office mailbox?', '{}', undefined, { principal: EVA }), 'mail-connected', { status: 'connected' }],
     ];

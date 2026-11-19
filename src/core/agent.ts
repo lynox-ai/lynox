@@ -1140,6 +1140,21 @@ export class Agent implements IAgent {
     return { contract: this._contractOfCall(tc), ...(grant !== undefined ? { grant } : {}), ...(filed !== undefined ? { filed } : {}), ...(apiCost !== undefined ? { apiCost } : {}) };
   }
 
+  /** Deliver the result event of a call that has settled and is already in the ledger. A throw
+   *  from delivering it (a step's stream handler, a closed response) is not the call's outcome:
+   *  caught here, it cannot make the call's own `catch` record the call a second time, emit a
+   *  second result for it, tell the model a call that worked had failed, or keep a call that
+   *  needs input from ending the run. The caller builds the event from facts the ledger write
+   *  above it has already read. Only the error's kind is logged: its text is the stream's. */
+  private async _emitSettledResult(toolName: string, event: Parameters<EmittingStreamHandler>[0]): Promise<void> {
+    if (!this.onStream) return;
+    try {
+      await this.onStream(event);
+    } catch (emitErr: unknown) {
+      process.stderr.write(`[lynox:agent] a ${toolName} call was recorded, but its result event could not be delivered (${emitErr instanceof Error ? emitErr.name : 'unknown error'})\n`);
+    }
+  }
+
   /** The part of {@link _factsOfCall} the result event adds; `grant` already rides on it. The step
    *  recorder builds a workflow step's row from this event, so the API request rides on it too. */
   private _eventFactsOfCall(tc: BetaToolUseBlock, slot: CallSlot): { contract: CallContract; filed?: CallFiled; apiCost?: CallApiCost } {
@@ -5605,7 +5620,9 @@ export class Agent implements IAgent {
         // (`GrantLift`, `CallConnection`).
         const grant = grantLiftOf(callSlot);
         const connection = callSlot.connection;
-        await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name, toolUseId: tc.id, ...(softMasked !== null ? { softFailure: true as const } : {}), ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}), ...this._eventFactsOfCall(tc, callSlot) });
+        // The call is in the ledger above; a throw from delivering its event must not reach the
+        // `catch` below and record it a second time as an error (`_emitSettledResult`).
+        await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name, toolUseId: tc.id, ...(softMasked !== null ? { softFailure: true as const } : {}), ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}), ...this._eventFactsOfCall(tc, callSlot) });
       }
       return {
         type: 'tool_result',
@@ -5671,11 +5688,14 @@ export class Agent implements IAgent {
         // A failed call keeps its connection stamp as well, as its ledger row above does.
         const grant = grantLiftOf(callSlot);
         const connection = callSlot.connection;
-        await this.onStream({ type: 'tool_result', name: tc.name, result: message, agent: this.name, toolUseId: tc.id, isError: true, ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}), ...this._eventFactsOfCall(tc, callSlot) });
+        // A throw from delivering it must not skip the end of the run below for a call that needs
+        // input, nor hand the stream's error text to the model in place of the call's.
+        await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: message, agent: this.name, toolUseId: tc.id, isError: true, ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}), ...this._eventFactsOfCall(tc, callSlot) });
       }
       // ⛔ …and then it ends the RUN, not the call: re-thrown, never returned as an error
       // result the model would read and work around (`input-required.ts`). AFTER the
-      // bookkeeping above, so the call is in the ledger and the UI's tool block closes.
+      // bookkeeping above, so the call is in the ledger and, when its event was delivered, the
+      // UI's tool block closes.
       if (askedNobody !== undefined) {
         this._needsInputStreamed.add(askedNobody); // the batch must not stream it a second time
         throw askedNobody;
