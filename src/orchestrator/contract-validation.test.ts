@@ -119,7 +119,7 @@ describe('validateContractAgainstSteps', () => {
       });
       expect(err, `param "${name}" must be caught as referenced-but-unconstrained`).not.toBeNull();
       // Named, but a stored name outside the allowed form only by a description, never its text.
-      expect(err).toContain(name === 'target-host' ? '"target-host"' : '(name outside the allowed form)');
+      expect(err).toContain(name === 'target-host' ? '"target-host"' : '(lynox does not show its name)');
       if (name !== 'target-host') expect(err).not.toContain(name);
     }
   });

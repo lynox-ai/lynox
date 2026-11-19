@@ -9,16 +9,22 @@ export type ParamBindResult =
  * A parameter name as a message may quote it. The messages here reach the model (a run's error) and
  * the owner, and a name stored by an earlier save can hold any visible text, a sentence included.
  * A name of ASCII letters, digits, `_` and `-` (at most 40, as a step id) is quoted; any other is
- * named by its place in the workflow's parameters when that is known, else described. Never the
+ * named by its place in the workflow's parameters, counted from 1 as the run form lists them
+ * (`Parameter 2 (lynox does not show its name)`), or described where no place is known. Never the
  * stored text. ASCII, not any letter: a script without spaces carries a sentence in one token,
  * and some letters (U+3164 and its kin) read as blanks.
  */
 const PARAM_NAME_SHAPE = /^[A-Za-z0-9_-]{1,40}$/;
-export const PARAM_NAME_OUTSIDE_SHAPE = '(name outside the allowed form)';
+export const PARAM_NAME_NOT_SHOWN = '(lynox does not show its name)';
+
+/** Whether a refusal quotes this parameter name as it is. */
+export function isShownParamName(name: string): boolean {
+  return PARAM_NAME_SHAPE.test(name);
+}
 
 export function shownParamName(name: string, index?: number): string {
   if (PARAM_NAME_SHAPE.test(name)) return `"${name}"`;
-  return index === undefined ? PARAM_NAME_OUTSIDE_SHAPE : `#${String(index + 1)} ${PARAM_NAME_OUTSIDE_SHAPE}`;
+  return index === undefined ? PARAM_NAME_NOT_SHOWN : `${String(index + 1)} ${PARAM_NAME_NOT_SHOWN}`;
 }
 
 /**
@@ -27,13 +33,13 @@ export function shownParamName(name: string, index?: number): string {
  * as a sentence, so no shape makes them safe to list.
  */
 export function shownAllowedValues(values: readonly unknown[]): string {
-  if (values.length === 0) return "one of the values the workflow's contract allows, and it allows none";
-  return values.length === 1 ? "the one value the workflow's contract allows" : `one of the ${String(values.length)} values the workflow's contract allows`;
+  if (values.length === 0) return "one of the values this workflow allows, and it allows none";
+  return values.length === 1 ? "the one value this workflow allows" : `one of the ${String(values.length)} values this workflow allows`;
 }
 
 /** A contract's bound as a refusal may say it: a finite number as it is, else described. */
 function shownBound(bound: unknown, word: 'minimum' | 'maximum'): string {
-  return typeof bound === 'number' && Number.isFinite(bound) ? String(bound) : `the ${word} the workflow's contract sets`;
+  return typeof bound === 'number' && Number.isFinite(bound) ? String(bound) : `the ${word} this workflow sets`;
 }
 
 /**
@@ -80,7 +86,7 @@ export function bindWorkflowParameters(
         continue;
       }
       if (!requireAll) continue; // leave unbound → placeholder stays unresolved
-      return { ok: false, error: `Missing required parameter ${shown}.` };
+      return { ok: false, error: isShownParamName(param.name) ? `Missing required parameter ${shown}.` : `Missing required parameter: Parameter ${shown}.` };
     }
     const coerced = coerceParam(raw, param, shown);
     if (!coerced.ok) return coerced;
