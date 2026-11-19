@@ -34,43 +34,59 @@
 	const counterLabel = $derived(t('prompt_anchor.question_n').replace('{n}', String(promptCount)));
 	const runForLabel = $derived(elapsed ? t('prompt_anchor.run_for').replace('{duration}', elapsed) : null);
 
-	// The bar points to a question that is off screen. While the question's form is on screen it shows
-	// the question once, there; the bar would only repeat it. Watched with an IntersectionObserver on
-	// the form (which clips by the chat's scroll area), and a MutationObserver that follows the form
-	// when the next question replaces it.
-	let sight = $state<PromptFormSight>({ kind: 'pending' });
+	// The bar points to a question that is off screen. While the question's opening line is on screen it
+	// shows the question once, there; the bar would only repeat it. The card sits in the scrolling stack
+	// above the input, which never lets the whole card leave — so the measure is the card's TOP inside
+	// the visible part of that stack, read on every scroll and resize and when the page changes (which
+	// also finds the next question's card). An IntersectionObserver reports only threshold crossings and
+	// misses a card taller than its stack scrolling under its own top.
+	// Keyed on the question's kind and id, not the prop object: the head is rebuilt whenever any field of
+	// the pending question changes, and re-measuring from scratch on each would blink the bar.
+	const promptKind = $derived(prompt.kind);
+	const promptKey = $derived(prompt.promptId ?? prompt.question);
+	let sight = $state<PromptFormSight>({ kind: 'seen', inView: true });
 	const shown = $derived(promptAnchorShown(sight));
 	$effect(() => {
-		const kind = prompt.kind;
-		void prompt.promptId;
-		if (typeof document === 'undefined' || typeof IntersectionObserver === 'undefined' || typeof MutationObserver === 'undefined') {
+		const kind = promptKind;
+		void promptKey;
+		if (typeof document === 'undefined' || typeof window === 'undefined' || typeof MutationObserver === 'undefined') {
 			sight = { kind: 'unobservable' };
 			return;
 		}
-		// `undefined` = not looked yet, so the first look always settles `sight` (also when it finds nothing).
-		let target: HTMLElement | null | undefined = undefined;
-		const io = new IntersectionObserver((entries) => {
-			const last = entries[entries.length - 1];
-			if (last && last.target === target) sight = { kind: 'seen', inView: promptFormInView(last) };
-		}, { threshold: [0, 0.25, 0.5, 0.75, 1] });
-		const follow = (): void => {
+		let frame = 0;
+		const measure = (): void => {
+			frame = 0;
 			const el = findPromptFormByKind(document, kind);
-			if (el === target) return;
-			if (target) io.unobserve(target);
-			target = el;
-			if (el) { sight = { kind: 'pending' }; io.observe(el); } else sight = { kind: 'absent' };
+			if (!el) { sight = { kind: 'absent' }; return; }
+			const scroller = el.closest<HTMLElement>('[data-chat-stack]');
+			const view = scroller?.getBoundingClientRect();
+			const top = Math.max(view?.top ?? 0, 0);
+			const bottom = Math.min(view?.bottom ?? window.innerHeight, window.innerHeight);
+			const inView = promptFormInView(el.getBoundingClientRect(), top, bottom);
+			if (sight.kind !== 'seen' || sight.inView !== inView) sight = { kind: 'seen', inView };
 		};
-		follow();
-		const mo = new MutationObserver(follow);
-		mo.observe(document.body, { childList: true, subtree: true });
-		return () => { mo.disconnect(); io.disconnect(); };
+		const schedule = (): void => { if (frame === 0) frame = requestAnimationFrame(measure); };
+		measure();
+		const mo = new MutationObserver(schedule);
+		mo.observe(document.querySelector('[data-chat-stack]') ?? document.body, { childList: true, subtree: true });
+		// Scroll does not bubble; captured at the document it is seen for the stack and the page alike.
+		document.addEventListener('scroll', schedule, { capture: true, passive: true });
+		window.addEventListener('resize', schedule, { passive: true });
+		return () => {
+			mo.disconnect();
+			document.removeEventListener('scroll', schedule, { capture: true });
+			window.removeEventListener('resize', schedule);
+			if (frame !== 0) cancelAnimationFrame(frame);
+		};
 	});
 
 	function expandInlinePrompt(): void {
 		if (typeof document === 'undefined') return;
 		const el = findPromptFormByKind(document, prompt.kind);
 		if (!el) return;
-		el.scrollIntoView({ behavior: scrollBehaviorForMotion(prefersReducedMotion()), block: 'center' });
+		// To the card's top, where the question opens: centred, a card taller than its stack would keep
+		// the question cut off and this bar on screen.
+		el.scrollIntoView({ behavior: scrollBehaviorForMotion(prefersReducedMotion()), block: 'start' });
 		el.focus({ preventScroll: true });
 	}
 </script>

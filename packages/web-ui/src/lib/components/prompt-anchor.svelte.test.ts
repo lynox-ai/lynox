@@ -14,26 +14,14 @@ type SvelteClient = {
 const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLIENT_ENTRY)) as SvelteClient;
 const { default: PromptAnchor } = await import('./PromptAnchor.svelte');
 
-/** A stand-in IntersectionObserver: the test says what the browser would report for each target. */
-class FakeIO {
-	static all: FakeIO[] = [];
-	readonly targets = new Set<Element>();
-	constructor(private readonly cb: (entries: unknown[]) => void) { FakeIO.all.push(this); }
-	observe(el: Element): void { this.targets.add(el); }
-	unobserve(el: Element): void { this.targets.delete(el); }
-	disconnect(): void { this.targets.clear(); }
-	report(el: Element, visiblePx: number, heightPx = 300): void {
-		if (!this.targets.has(el)) return;
-		this.cb([{ target: el, isIntersecting: visiblePx > 0, intersectionRect: { height: visiblePx }, boundingClientRect: { height: heightPx } }]);
-	}
-}
-function report(el: Element, visiblePx: number, heightPx?: number): void {
-	for (const io of FakeIO.all) io.report(el, visiblePx, heightPx);
-	flushSync();
-}
+// jsdom does no layout: each element's box is set by the test, as the browser would lay it out.
+const boxes = new Map<Element, { top: number; bottom: number }>();
+function place(el: Element, top: number, bottom: number): void { boxes.set(el, { top, bottom }); }
+const realRect = Element.prototype.getBoundingClientRect;
+const realRaf = globalThis.requestAnimationFrame;
 
-const realIO = (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver;
 let host: HTMLElement;
+let stack: HTMLElement;
 let app: Record<string, unknown> | null = null;
 
 function card(kind = 'permission'): HTMLElement {
@@ -41,7 +29,7 @@ function card(kind = 'permission'): HTMLElement {
 	el.setAttribute('data-pending-prompt', '');
 	el.setAttribute('data-prompt-kind', kind);
 	el.textContent = 'Delete the release branch?';
-	document.body.appendChild(el);
+	stack.appendChild(el);
 	return el;
 }
 async function anchor(promptId = 'p1'): Promise<void> {
@@ -49,95 +37,118 @@ async function anchor(promptId = 'p1'): Promise<void> {
 	flushSync();
 	await tick();
 }
+/** The user scrolls (or the page changes): the bar re-measures on the next frame. */
+async function scrolled(): Promise<void> {
+	stack.dispatchEvent(new Event('scroll'));
+	flushSync();
+	await tick();
+}
 const bar = (): Element | null => host.querySelector('[data-prompt-anchor]');
 
 beforeEach(() => {
-	FakeIO.all = [];
-	(globalThis as { IntersectionObserver?: unknown }).IntersectionObserver = FakeIO;
 	document.body.innerHTML = '';
+	boxes.clear();
+	Element.prototype.getBoundingClientRect = function (this: Element) {
+		const b = boxes.get(this) ?? { top: 0, bottom: 0 };
+		return { top: b.top, bottom: b.bottom, height: b.bottom - b.top, left: 0, right: 0, width: 0, x: 0, y: b.top, toJSON: () => ({}) } as DOMRect;
+	};
+	globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => { cb(0); return 1; };
+	Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 });
+	stack = document.createElement('div');
+	stack.setAttribute('data-chat-stack', '');
+	document.body.appendChild(stack);
+	place(stack, 500, 800);
 	host = document.createElement('div');
 	document.body.appendChild(host);
 });
 afterEach(() => {
 	if (app) unmount(app);
 	app = null;
-	(globalThis as { IntersectionObserver?: unknown }).IntersectionObserver = realIO;
+	Element.prototype.getBoundingClientRect = realRect;
+	globalThis.requestAnimationFrame = realRaf;
 });
 
 describe('the bar above the input points to a question that is off screen', () => {
 	it('stays away while the question card is on screen, so the question shows once', async () => {
-		const c = card();
+		place(card(), 520, 700);
 		await anchor();
-		report(c, 300);
 		expect(bar()).toBeNull();
 	});
 
-	it('shows, with the question, once the card is scrolled out of view, and goes again when it is back', async () => {
+	it('shows, with the question, once the card\'s top has scrolled out of its stack, and goes when it is back', async () => {
 		const c = card();
+		place(c, 520, 900);
 		await anchor();
-		report(c, 300);
-		report(c, 0);
+		expect(bar()).toBeNull();
+		place(c, 420, 800); // scrolled under the stack's top edge; the buttons still show
+		await scrolled();
 		expect(bar()?.textContent).toContain('Delete the release branch?');
-		report(c, 300);
+		place(c, 520, 900);
+		await scrolled();
 		expect(bar()).toBeNull();
 	});
 
-	it('counts a sliver of the card\'s bottom edge as out of view: the question text is at its top', async () => {
-		const c = card();
+	it('shows when the card\'s opening line is below the visible part', async () => {
+		place(card(), 780, 1000);
 		await anchor();
-		report(c, 20);
 		expect(bar()).not.toBeNull();
-		report(c, 48);
-		expect(bar()).toBeNull();
-	});
-
-	it('counts a card smaller than a line as in view when all of it shows', async () => {
-		const c = card();
-		await anchor();
-		report(c, 30, 30);
-		expect(bar()).toBeNull();
-	});
-
-	it('does not flash before the browser reports', async () => {
-		card();
-		await anchor();
-		expect(bar()).toBeNull();
 	});
 
 	it('follows the card when the next question replaces it', async () => {
 		const first = card();
+		place(first, 520, 700);
 		await anchor();
-		report(first, 300);
+		expect(bar()).toBeNull();
 		first.remove();
 		const second = card();
+		place(second, 300, 700);
+		await new Promise((r) => setTimeout(r, 0)); // the MutationObserver's delivery
+		flushSync();
 		await tick();
-		await new Promise((r) => setTimeout(r, 0));
-		report(second, 0);
-		expect(bar()).not.toBeNull();
-		report(first, 300); // the old card no longer counts
 		expect(bar()).not.toBeNull();
 	});
 
-	it('shows when there is no card to watch or no observer, as it always did', async () => {
-		await anchor();
-		expect(bar()).not.toBeNull();
-		if (app) unmount(app);
-		app = null;
-		(globalThis as { IntersectionObserver?: unknown }).IntersectionObserver = undefined;
-		card();
+	it('shows when there is no card to point to, as it always did', async () => {
 		await anchor();
 		expect(bar()).not.toBeNull();
 	});
 
-	it('never takes the focus when it appears', async () => {
+	it('never takes the focus when it appears, and its button stays in the tab order', async () => {
 		const c = card();
 		const input = document.createElement('textarea');
 		document.body.appendChild(input);
 		input.focus();
+		place(c, 520, 700);
 		await anchor();
-		report(c, 0);
+		place(c, 100, 700);
+		await scrolled();
 		expect(bar()).not.toBeNull();
 		expect(document.activeElement).toBe(input);
-		expect(bar()?.querySelector('button')?.tabIndex).not.toBe(-1);
+		expect(bar()?.querySelector('button')?.tabIndex).toBe(0);
+	});
+
+	it('stops listening once it is gone', async () => {
+		const c = card();
+		place(c, 520, 700);
+		await anchor();
+		if (app) unmount(app);
+		app = null;
+		place(c, 100, 700);
+		await scrolled();
+		expect(host.querySelector('[data-prompt-anchor]')).toBeNull();
+	});
+});
+
+describe('the bar\'s answer button', () => {
+	it('takes the user to the card\'s top, where the question opens, and focuses the card', async () => {
+		const c = card();
+		c.tabIndex = -1;
+		const calls: unknown[] = [];
+		c.scrollIntoView = (arg?: boolean | ScrollIntoViewOptions): void => { calls.push(arg); };
+		place(c, 100, 700);
+		await anchor();
+		(bar()?.querySelector('button') as HTMLButtonElement).click();
+		expect(calls).toEqual([expect.objectContaining({ block: 'start' })]);
+		expect(document.activeElement).toBe(c);
 	});
 });

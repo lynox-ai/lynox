@@ -236,23 +236,33 @@ describe('isPipelineRunning', () => {
 });
 
 describe('promptFormInView / promptAnchorShown', () => {
-	const entry = (isIntersecting: boolean, visible: number, height: number) => ({ isIntersecting, intersectionRect: { height: visible }, boundingClientRect: { height } });
+	const card = (top: number, height = 300) => ({ top, bottom: top + height });
 
-	it('counts the question as seen once its first line shows, not a sliver', () => {
-		expect(promptFormInView(entry(true, 48, 300))).toBe(true);
-		expect(promptFormInView(entry(true, 47, 300))).toBe(false);
-		expect(promptFormInView(entry(false, 300, 300))).toBe(false);
+	it('counts the question as seen while its opening line is inside the visible part', () => {
+		expect(promptFormInView(card(100), 100, 400)).toBe(true);
+		expect(promptFormInView(card(353), 100, 400)).toBe(true); // a pixel of rounding either way
+		expect(promptFormInView(card(354), 100, 400)).toBe(false);
 	});
 
-	it('counts a card smaller than a line as seen when all of it shows', () => {
-		expect(promptFormInView(entry(true, 30, 30))).toBe(true);
-		expect(promptFormInView(entry(true, 29, 30))).toBe(false);
+	it('does not count a card whose top has scrolled away, even with its buttons showing', () => {
+		expect(promptFormInView(card(99), 100, 400)).toBe(true);
+		expect(promptFormInView(card(98), 100, 400)).toBe(false);
+		expect(promptFormInView(card(-200), 0, 400)).toBe(false);
+	});
+
+	it('counts a card shorter than a line when all of it shows', () => {
+		expect(promptFormInView(card(370, 30), 100, 400)).toBe(true);
+		expect(promptFormInView(card(371, 30), 100, 400)).toBe(true);
+		expect(promptFormInView(card(372, 30), 100, 400)).toBe(false);
+	});
+
+	it('counts nothing as seen in an area with no height', () => {
+		expect(promptFormInView(card(0, 0), 0, 0)).toBe(false);
 	});
 
 	it('shows the bar only for a question off screen, or where it cannot know', () => {
 		expect(promptAnchorShown({ kind: 'seen', inView: true })).toBe(false);
 		expect(promptAnchorShown({ kind: 'seen', inView: false })).toBe(true);
-		expect(promptAnchorShown({ kind: 'pending' })).toBe(false);
 		expect(promptAnchorShown({ kind: 'absent' })).toBe(true);
 		expect(promptAnchorShown({ kind: 'unobservable' })).toBe(true);
 	});
