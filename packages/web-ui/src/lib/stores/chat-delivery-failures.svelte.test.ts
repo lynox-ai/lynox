@@ -530,7 +530,7 @@ describe('an answer that names no question', () => {
 		return { replies: calls.filter((u) => u.endsWith('/reply')).length, pendingAsked };
 	}
 
-	it('is not sent without the question\'s id: the open question comes back with its id, a sentence says so, and a typed answer goes back into the message field', async () => {
+	it('is not sent without the question\'s id: the open question comes back with its id, a sentence says so, and the answer goes back into the message field', async () => {
 		const { t } = await import('../i18n.svelte.js');
 		const drafted: string[] = [];
 		store.registerComposerDraft((text) => { drafted.push(text); return true; });
@@ -543,6 +543,29 @@ describe('an answer that names no question', () => {
 		expect(toasts).toEqual([]);
 	});
 
+	it('a skip sent without the question\'s id puts no marker into the message field', async () => {
+		const drafted: string[] = [];
+		store.registerComposerDraft((text) => { drafted.push(text); return true; });
+		let pendingAsked = 0;
+		const run = openRun((url) => {
+			if (url.endsWith('/pending-prompt')) {
+				pendingAsked++;
+				return json({ pending: true, promptType: 'ask_user', promptId: 'p-open', question: 'Send this mail?', options: ['Yes', 'No'] });
+			}
+			return json({});
+		});
+		void store.sendMessage('go');
+		await settle();
+		run.send('prompt', { question: 'Go on?', options: ['Yes', 'No'] });
+		await settle();
+		await store.replyPermission('__dismissed__');
+		await settle();
+		expect(pendingAsked, 'the open question was not brought back, so this proves nothing').toBeGreaterThan(0);
+		expect(drafted).toEqual([]);
+	});
+
+	// The server gives this code only to an answer without an id; a client that sent one anyway
+	// (an older or foreign client's card) is handled the same way.
 	it('a 409 prompt_id_required is not read as answered, and the answer is not sent again', async () => {
 		const { t } = await import('../i18n.svelte.js');
 		const { replies, pendingAsked } = await answerWith({ promptId: 'p-seen' });
