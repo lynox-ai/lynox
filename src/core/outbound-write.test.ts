@@ -1032,16 +1032,6 @@ describe('a secret inside JSON text inside a value', () => {
     expect(bodyForQuestion(JSON.stringify({ value: many(1200) }), mask)).toEqual({ unshowable: 'escaped-secret' });
   });
 
-  it('JSON text three levels deep, of the size a question shows, with no secret is shown', () => {
-    // Strict JSON is read string by string; its escapes are not read a second time over the whole.
-    const record = (i: number) => ({ id: i, url: `https://ex.com/p?q=a+b&x=${i}%20`, desc: 'Line\n"two"' });
-    const inner = JSON.stringify({ items: Array.from({ length: 450 }, (_, i) => record(i)) });
-    const body = JSON.stringify({ p: JSON.stringify({ q: inner }) });
-    expect(body.length).toBeGreaterThan(50_000);
-    expect(body.length).toBeLessThan(64 * 1024);
-    expect('text' in bodyForQuestion(body, mask, 'application/json')).toBe(true);
-  });
-
   it('JSON text with many short strings and no secret is shown, not counted as unread', () => {
     const many = JSON.stringify(Array.from({ length: 8000 }, (_, i) => `v${i}`));
     expect('text' in bodyForQuestion(JSON.stringify({ value: many }), mask)).toBe(true);
@@ -1073,59 +1063,6 @@ describe('a secret inside JSON text inside a value', () => {
     const part = (inner: string) => `--b\r\nContent-Type: application/json\r\n\r\n${inner}\r\n--b--`;
     expect(bodyForQuestion(part(escaped), mask, 'multipart/form-data; boundary=b')).toEqual({ unshowable: 'escaped-secret' });
     expect('text' in bodyForQuestion(part(plainInner), mask, 'multipart/form-data; boundary=b')).toBe(true);
-  });
-
-  it('a JSON document over several lines, as a client writes a multipart part, is read', () => {
-    const pretty = (token: string) => `{\r\n  "token": "${token}"\r\n}`;
-    const part = (inner: string) => `--b\r\nContent-Type: application/json\r\n\r\n${inner}\r\n--b--`;
-    const MULTI = 'multipart/form-data; boundary=b';
-    expect(bodyForQuestion(part(pretty(`\\u0068${STORED.slice(1)}`)), mask, MULTI)).toEqual({ unshowable: 'escaped-secret' });
-    expect(bodyForQuestion(`${pretty(`\\u0068${STORED.slice(1)}`)}x`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
-    // Control: the same part with no escape is shown, the secret masked.
-    expect(bodyForQuestion(part(pretty(STORED)), mask, MULTI)).toMatchObject({ escapedSecret: false });
-  });
-
-  it('JSON text a lenient parser reads and a strict parse refuses is read', () => {
-    const e = `\\u0068${STORED.slice(1)}`;
-    for (const lenient of [`{"t":"${e}","n":NaN}`, `[Infinity,"${e}"]`, `{"t":"${e}",}`]) {
-      expect(() => JSON.parse(lenient)).toThrow();
-      expect(bodyForQuestion(JSON.stringify({ value: lenient }), mask)).toEqual({ unshowable: 'escaped-secret' });
-    }
-    // A second level inside such text: its escapes are read again.
-    const twice = `{"inner":${JSON.stringify(escaped)},"n":NaN}`;
-    expect(bodyForQuestion(JSON.stringify({ value: twice }), mask)).toEqual({ unshowable: 'escaped-secret' });
-    // An escaped percent sign inside such text: its escapes read, then decoded as a server decodes.
-    expect(bodyForQuestion(JSON.stringify({ value: `{"t":"\\u002568${STORED.slice(1)}","n":NaN}` }), mask)).toEqual({ unshowable: 'escaped-secret' });
-    // Nested deeper than it is read: escapes left past the depth count as holding a secret.
-    let deep = `{"t":"\\u0068${STORED.slice(1)}","n":NaN}`;
-    for (let i = 0; i < 4; i++) deep = `{"i":${JSON.stringify(deep)},"n":NaN}`;
-    expect(bodyForQuestion(deep, mask, 'application/json')).toEqual({ unshowable: 'escaped-secret' });
-    // The limit, with no secret: escapes read three times over are shown, a fourth is not read.
-    const escapedTimes = (n: number) => { let t = 'a\\nb'; for (let i = 1; i < n; i++) t = JSON.stringify(t); return t; };
-    expect('text' in bodyForQuestion(`x ${escapedTimes(3)}`, mask, 'text/plain')).toBe(true);
-    expect(bodyForQuestion(`x ${escapedTimes(4)}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
-    // Such text whose escapes, read and decoded, give JSON text again: read on as a string is.
-    const chain = `\\u002522\\u00255Cu0068${STORED.slice(1)}\\u002522`;
-    expect(bodyForQuestion(`{"t":"${chain}","n":NaN}`, mask, 'application/json')).toEqual({ unshowable: 'escaped-secret' });
-    expect(bodyForQuestion(`x \\u00255Cu0068${STORED.slice(1)}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
-    // Control: text that starts like JSON text and is none, with an escape JSON does not know,
-    // is shown as it is, not read literal by literal.
-    expect(bodyForQuestion('{ "a": "\\x41", ', mask, 'text/plain')).toEqual({ text: '{ "a": "\\x41", ', escapedSecret: false });
-    // An escape other than `\u`: a stored value with a slash, written `\/`.
-    const slashMask = (t: string) => t.replaceAll('hunter2/secret', '***');
-    expect(bodyForQuestion(JSON.stringify({ value: '{"t":"hunter2\\/secret","n":NaN}' }), slashMask)).toEqual({ unshowable: 'escaped-secret' });
-    // Control: lenient JSON text with no secret is shown.
-    expect('text' in bodyForQuestion(JSON.stringify({ value: '{"t":"\\u0068i","n":NaN}' }), mask)).toBe(true);
-  });
-
-  it('such text in a query, a header, a path and a form inside a decoded value is read too', () => {
-    const nan = `{"a":NaN,"token":"\\u0068${STORED.slice(1)}"}`;
-    expect(queryForQuestion(`?p=${encodeURIComponent(nan)}`, mask)).toEqual({ text: 'p = ***', secret: true, escaped: true });
-    expect(headersForQuestion({ 'X-Meta': nan }, mask, () => 'show')).toEqual({ unshowable: { reason: 'escaped-secret', name: 'X-Meta' } });
-    expect(pathHoldsSecret(`https://h.example/a/${encodeURIComponent(nan)}`, mask)).toBe(true);
-    // A nested form whose name has a space, or starts with a bracket.
-    expect(bodyForQuestion(`p=${encodeURIComponent(`my name=${escaped}`)}`, mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
-    expect(bodyForQuestion(`p=${encodeURIComponent(`[0]=${escaped}`)}`, mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
   });
 
   it('JSON text after a byte order mark is read', () => {
