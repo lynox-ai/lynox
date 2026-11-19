@@ -842,9 +842,15 @@ export class TriggerStore {
    * session turn the owner did not write): `edited_by` takes the run's tag, so the trigger's
    * instruction no longer counts as the owner's (`ownerInstructionCounts`). The stamp stays: the
    * run acted for the owner, and the schedule keeps running as before.
+   *
+   * A trigger a mandate created or last changed keeps that mark: the hold that waits for the
+   * owner's stamp reads `COALESCE(edited_by, created_by)`, and a run's tag in its place would
+   * release it. Its instruction does not count as the owner's either way.
    */
   markEditedByRun(id: string, runTag: string): boolean {
-    return this.db.prepare(`UPDATE triggers SET edited_by = ?, updated_at = datetime('now') WHERE id = ?`).run(runTag, id).changes > 0;
+    return this.db.prepare(
+      `UPDATE triggers SET edited_by = ?, updated_at = datetime('now') WHERE id = ? AND COALESCE(edited_by, created_by, '') NOT LIKE ?`,
+    ).run(runTag, id, MANDATE_TAG_LIKE).changes > 0;
   }
 
   /**
