@@ -149,8 +149,29 @@ describe('mappedValueOutsideTaskText keeps a mapped value to task text', () => {
     expect(mappedValueOutsideTaskText([step], ['subject'])).toContain('uses "{{s1.result}}" outside its task text');
     const mappedNext = { ...step, input_template: { a: '{{params.month', b: '{{params.note}}' } };
     expect(mappedValueOutsideTaskText([mappedNext], ['note'])).toContain('uses the event value "note"');
-    // A key is read on its own as well.
-    expect(mappedValueOutsideTaskText([call({ '{{params.note}}': 'x' })], ['note'])).toContain('uses the event value "note"');
+    // A key is read on its own as well: here the open `{{` in the value before it would swallow it.
+    expect(mappedValueOutsideTaskText([call({ a: '{{params.month', '{{params.note}}': 'x' })], ['note'])).toContain('uses the event value "note"');
+  });
+
+  // JSON escapes a newline or a quote; the resolver reads the name raw and trims it, so the check does too.
+  it('reads a name with white space or a quote in it as the resolver does', () => {
+    expect(mappedValueOutsideTaskText([call({ u: '{{params.note\n}}' })], ['note'])).toContain('uses the event value "note"');
+    expect(mappedValueOutsideTaskText([call({ u: '{{params.\tnote }}' })], ['note'])).toContain('uses the event value "note"');
+  });
+
+  it('visits each string once, however deep the template nests', () => {
+    // Copying every string below each level costs depth × strings: seconds at this size.
+    let nested: unknown[] = Array.from({ length: 50 }, (_, i) => `leaf ${String(i)}`);
+    for (let d = 0; d < 1_500; d++) nested = [...Array.from({ length: 50 }, (_, i) => `v${String(d)}-${String(i)}`), nested];
+    const t0 = performance.now();
+    expect(mappedValueOutsideTaskText([call({ deep: nested })], ['note'])).toBeNull();
+    expect(performance.now() - t0).toBeLessThan(500);
+  });
+
+  it('quotes a placeholder in a refusal with its line breaks and quotes escaped', () => {
+    const out = mappedValueOutsideTaskText([call({ u: '{{s1\n"x".result}}' })], []);
+    expect(out).toContain('uses "{{s1\\n\\"x\\".result}}" outside its task text');
+    expect(out).not.toContain('\n"x"');
   });
 
   it('lets a mapped value through in task text, and an unmapped one anywhere', () => {

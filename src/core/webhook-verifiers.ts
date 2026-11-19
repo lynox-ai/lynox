@@ -246,18 +246,26 @@ export function connectionShopHost(row: ConnectionRow | undefined): string | nul
 }
 
 /**
- * Every string in `value`, each key and each value on its own, as the resolver reads them
- * (`resolveInputTemplate` substitutes in each string leaf separately). Read as one stringified
- * text instead, a `{{` left open in one string would run on into the next and hide a reference
- * there behind the first one's `params`.
+ * Every string in `value`, each value and each key on its own. The resolver substitutes in each
+ * string value separately (`resolveInputTemplate`), so that is how the check reads them; read as one
+ * stringified text instead, a `{{` left open in one string would run on into the next and hide a
+ * reference there behind the first one's `params`, and JSON's escapes would change a name the
+ * resolver reads raw. Keys are never substituted; they are read too, as before, because the step's
+ * input is shown to its model. One list is filled as the walk goes, so the cost is one visit per
+ * string at any depth.
  */
-function fieldStrings(value: unknown): string[] {
-  if (typeof value === 'string') return [value];
-  if (Array.isArray(value)) return value.flatMap(fieldStrings);
-  if (value !== null && typeof value === 'object') {
-    return Object.entries(value as Record<string, unknown>).flatMap(([k, v]) => [k, ...fieldStrings(v)]);
+function fieldStrings(value: unknown, into: string[] = []): string[] {
+  if (typeof value === 'string') {
+    into.push(value);
+  } else if (Array.isArray(value)) {
+    for (const v of value) fieldStrings(v, into);
+  } else if (value !== null && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      into.push(k);
+      fieldStrings(v, into);
+    }
   }
-  return [];
+  return into;
 }
 
 /**
@@ -278,7 +286,7 @@ export function mappedValueOutsideTaskText(steps: readonly InlinePipelineStep[],
       // context key `params[0]`, not `params`.
       const segments = inner.trim().split('.').map((x) => x.trim());
       if (segments[0] !== 'params') {
-        return `Step "${step.id}" uses "{{${inner.trim()}}}" outside its task text. In a run an event started, an earlier step's output can carry the event's text, and there it would choose what the step executes with. Refer to it only in a step's task text.`;
+        return `Step "${step.id}" uses "{{${JSON.stringify(inner.trim()).slice(1, -1)}}}" outside its task text. In a run an event started, an earlier step's output can carry the event's text, and there it would choose what the step executes with. Refer to it only in a step's task text.`;
       }
       const name = segments[1];
       if (name === undefined || mapped.has(name)) {
