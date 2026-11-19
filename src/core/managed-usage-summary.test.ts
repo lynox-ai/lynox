@@ -101,6 +101,7 @@ describe('contract fixtures: /summary parse side', () => {
 
   it.each([
     'usage-summary-response.managed.json',
+    'usage-summary-response.managed.plan-switch.json',
     'usage-summary-response.not-managed.json',
   ])('accepts and passes through %s unchanged', async (name) => {
     const fixture = load(name);

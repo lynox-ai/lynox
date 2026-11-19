@@ -113,6 +113,26 @@ export const TYPED_MIRRORS: Record<string, unknown> = {
       source: 'stripe-billing',
     },
   } satisfies UsageSummaryResponse,
+  'usage-summary-response.managed.plan-switch.json': {
+    managed: true,
+    tier: 'managed_pro',
+    budget_cents: 3000,
+    topup_cents: 500,
+    available_cents: 7000,
+    used_cents: 1800,
+    balance_cents: 5200,
+    period: {
+      start_iso: '2026-01-01T00:00:00.000Z',
+      end_iso: '2026-02-01T00:00:00.000Z',
+      source: 'stripe-billing',
+    },
+    plan_switch_credit: {
+      credit_cents: 3500,
+      tier: 'managed_pro',
+      full_budget_cents: 10000,
+      full_from_iso: '2026-02-01T00:00:00.000Z',
+    },
+  } satisfies UsageSummaryResponse,
   'usage-summary-response.not-managed.json': {
     managed: false,
   } satisfies UsageSummaryResponse,
