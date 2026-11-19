@@ -160,8 +160,7 @@ export function bulkTakesStartDomains(run: Pick<BulkRunDetailData, 'judge' | 'li
 export function bulkHaltHeadKey(run: Pick<BulkRun, 'haltKey'> & Partial<Pick<BulkRun, 'phase'>>): 'bulk.head.stopped' | 'bulk.head.halted' | 'bulk.head.discarded' | 'bulk.head.aborted' | 'bulk.head.replaced' {
 	// A discarded run reads "Discarded" next to the sentence and the chip that say so (U-324).
 	if (run.haltKey === 'discarded') return 'bulk.head.discarded';
-	// The owner's stop reads the same with or without an atomic rollback after it.
-	if (run.haltKey === 'stoppedByOwner' || run.haltKey === 'atomicStoppedRolledBack' || run.haltKey === 'atomicStoppedRollbackIncomplete') return 'bulk.head.stopped';
+	if (bulkOwnerStopped(run)) return 'bulk.head.stopped';
 	if (run.phase === 'aborted') return run.haltKey === 'superseded' ? 'bulk.head.replaced' : 'bulk.head.aborted';
 	return 'bulk.head.halted';
 }
@@ -180,7 +179,14 @@ export function bulkPhaseHasSuffix(run: Pick<BulkRun, 'phase' | 'haltKey' | 'hal
 
 /** The same distinction for the suffix on a run's phase in the list. */
 export function bulkHaltSuffixKey(run: Pick<BulkRun, 'haltKey'>): 'bulk.stopped_suffix' | 'bulk.halted_suffix' {
-	return run.haltKey === 'stoppedByOwner' ? 'bulk.stopped_suffix' : 'bulk.halted_suffix';
+	return bulkOwnerStopped(run) ? 'bulk.stopped_suffix' : 'bulk.halted_suffix';
+}
+
+/** The halts an owner's stop ends in: the same act reads the same with or without the atomic
+ *  rollback after it, on the run page and in the list (U-342). */
+const BULK_OWNER_STOPS = new Set(['stoppedByOwner', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete']);
+function bulkOwnerStopped(run: Pick<BulkRun, 'haltKey'>): boolean {
+	return run.haltKey !== null && BULK_OWNER_STOPS.has(run.haltKey);
 }
 
 /** The start a waiting run takes: read its targets, read its list, start its judging — or none,

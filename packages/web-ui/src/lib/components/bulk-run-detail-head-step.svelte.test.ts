@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { readable } from 'svelte/store';
 import { getLocale, setLocale } from '../i18n.svelte.js';
 import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
-import { bulkStep, type BulkRunDetailData, type BulkTarget } from './bulk-runs.js';
+import { bulkHaltSuffixKey, bulkStep, type BulkRunDetailData, type BulkTarget } from './bulk-runs.js';
 
 // The step chips mark the step a run stands at; the word over a halt says whether it can go on
 // from there (U-342). An approved run that halted before it sent anything stands at its approval
@@ -160,6 +160,11 @@ describe('an aborted run reads that it cannot go on', () => {
 			unmount(component!);
 			component = undefined;
 		}
+	});
+
+	it('the run list names the atomic stop a stop too, and a halt lynox made a halt', () => {
+		for (const haltKey of ['stoppedByOwner', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete']) expect(bulkHaltSuffixKey({ haltKey }), haltKey).toBe('bulk.stopped_suffix');
+		for (const haltKey of ['atomicRolledBack', 'atomicTimeRolledBack', null]) expect(bulkHaltSuffixKey({ haltKey }), String(haltKey)).toBe('bulk.halted_suffix');
 	});
 
 	it('a run a newer one replaced before its approval reads „Ersetzt“ and marks no step', async () => {
