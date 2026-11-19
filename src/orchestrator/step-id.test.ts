@@ -301,6 +301,12 @@ describe('a run of a plan stored before step ids had a shape (runStepIds)', () =
     expect(out[2]!.task).toBe('{{step-1.result}}');
   });
 
+  it('moves {{Fetch it.result}} to step "Fetch it" also in a run whose copy dropped that step', () => {
+    const stored = [{ id: 'Fetch it', task: 'A' }, { id: 'Fetch it.result', task: 'R' }, { id: 'send', task: '{{Fetch it.result}}', input_from: ['Fetch it', 'Fetch it.result'] }];
+    const out = runStepIds([stored[1]!, stored[2]!], stepRunNames(stored));
+    expect(out[1]!.task).toBe('{{step-1.result}}');
+  });
+
   it('still moves {{a.b.result}} to step a.b, whose id reads as no context key', () => {
     const out = runStepIds([{ id: 'a', task: 'A' }, { id: 'a.b', task: 'B' }, { id: 'send', task: 'Send {{a.b.result}}', input_from: ['a', 'a.b'] }]);
     expect(out[2]!.task).toBe('Send {{step-2.result}}');

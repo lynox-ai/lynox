@@ -11,6 +11,30 @@ function steps(): InlinePipelineStep[] {
 }
 
 describe('applyModifications (shared workflow-step mutation)', () => {
+  it('renaming a stored step a.result beside a step a leaves {{a.result}} on step a, as a run reads it', () => {
+    const s: InlinePipelineStep[] = [
+      { id: 'a', task: 'A' },
+      { id: 'a.result', task: 'R' },
+      { id: 'send', task: 'Send {{a.result}}', input_from: ['a', 'a.result'], input_template: { body: '{{a.result}}' } },
+    ];
+    expect(applyModifications(s, [{ action: 'rename_step', step_id: '#2', value: 'x' }])).toBeNull();
+    expect(s.map(st => st.id)).toEqual(['a', 'x', 'send']);
+    expect(s[2]!.input_from).toEqual(['a', 'x']);
+    expect(s[2]!.task).toBe('Send {{a.result}}');
+    expect(s[2]!.input_template).toEqual({ body: '{{a.result}}' });
+  });
+
+  it('renaming step a beside a stored a.result still moves {{a.result}} with a (CONTROL)', () => {
+    const s: InlinePipelineStep[] = [
+      { id: 'a', task: 'A' },
+      { id: 'a.result', task: 'R' },
+      { id: 'send', task: 'Send {{a.result}}', input_from: ['a', 'a.result'] },
+    ];
+    expect(applyModifications(s, [{ action: 'rename_step', step_id: 'a', value: 'b' }])).toBeNull();
+    expect(s[2]!.task).toBe('Send {{b.result}}');
+    expect(s[2]!.input_from).toEqual(['b', 'a.result']);
+  });
+
   it('applies an ordered batch — add then remove the same id is valid', () => {
     const s = steps();
     const mods: StepModification[] = [

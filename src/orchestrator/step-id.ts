@@ -221,6 +221,21 @@ export function stepRunIds(steps: readonly RunnableStep[]): Map<string, string> 
 const CONTEXT_ENTRY_KEYS = ['result', 'costUsd'] as const;
 
 /**
+ * Whether a stored id reads as another step's id plus a key of that step's context entry
+ * (`a.result` beside a step `a`), so a `{{a.result}}` placeholder means step a's result, not this
+ * step. `ids` holds the other steps' ids; any id in the shape counts too, since a run that dropped
+ * step `a` still read `{{a.result}}` as a's. Such an id never takes a placeholder: not when a run
+ * names it (`runStepIds`), not when a rename moves it (workflow-edit.ts).
+ */
+export function readsAsContextKey(id: string, ids: ReadonlySet<string>): boolean {
+  return CONTEXT_ENTRY_KEYS.some(k => {
+    if (!id.endsWith(`.${k}`)) return false;
+    const head = id.slice(0, -(k.length + 1));
+    return ids.has(head) || isStepIdShape(head);
+  });
+}
+
+/**
  * A run's copy of a plan's steps, where every id outside the allowed shape runs under its name from
  * {@link stepRunNames}, so nothing the run writes on the way (a timeout, a refused replay, a graph or
  * manifest error) quotes the stored text. Each reference moves with its step: an `input_from` entry
@@ -228,22 +243,17 @@ const CONTEXT_ENTRY_KEYS = ['result', 'costUsd'] as const;
  * touched. `names` defaults to those of `steps`; a run that changed its copy (a removed step) passes
  * the names of the stored plan. Steps in the shape, and plans with none outside it, come back as they were.
  *
- * A placeholder is never moved to a stored id that reads as another step's id plus a key of that
- * step's context entry (`a.result` beside a step `a`): before run names, `{{a.result}}` read step
- * a's result, and it keeps reading it. The step itself and its `input_from` entries still move.
+ * A placeholder is never moved to a stored id that {@link readsAsContextKey}: before run names,
+ * `{{a.result}}` read step a's result, and it keeps reading it. The step itself and its
+ * `input_from` entries still move.
  */
 export function runStepIds<T extends RunnableStep>(steps: readonly T[], names: ReadonlyMap<string, string> = stepRunNames(steps)): T[] {
   if (names.size === 0) return [...steps];
-  // Another step's id: one of this copy, a stored one outside the shape, or any id in the shape (a
-  // run whose copy dropped step `a` still read `{{a.result}}` as a's, then found nothing).
+  // Another step's id: one of this copy or a stored one outside the shape (a run whose copy dropped
+  // a step passes the stored plan's names).
   const ids = new Set<string>([...steps.map(s => s.id), ...names.keys()]);
-  const readsAsEntryKey = (old: string): boolean => CONTEXT_ENTRY_KEYS.some(k => {
-    if (!old.endsWith(`.${k}`)) return false;
-    const head = old.slice(0, -(k.length + 1));
-    return ids.has(head) || isStepIdShape(head);
-  });
   // Longest first, so an id that begins with another one is matched whole.
-  const olds = [...names.keys()].filter(o => !readsAsEntryKey(o)).sort((a, b) => b.length - a.length);
+  const olds = [...names.keys()].filter(o => !readsAsContextKey(o, ids)).sort((a, b) => b.length - a.length);
   const inText = (text: string): string => replacePlaceholders(text, (match: string, raw: string) => {
     const path = raw.trim();
     if (path === 'params' || path.startsWith('params.')) return match;

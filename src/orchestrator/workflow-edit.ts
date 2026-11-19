@@ -1,6 +1,6 @@
 import type { InlinePipelineStep } from '../types/pipeline.js';
 import { findHiddenInName, stripHiddenInName } from '../core/hidden-text.js';
-import { isStepIdShape, stepIdRefusal, stepRunIds } from './step-id.js';
+import { isStepIdShape, readsAsContextKey, stepIdRefusal, stepRunIds } from './step-id.js';
 import { fieldReferencing } from './template-refs.js';
 import { replacePlaceholders, splitLeadingSpace } from './placeholders.js';
 
@@ -261,6 +261,10 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
             + `which the new id would turn into a reference to ${renamed}. Choose another id.`;
         }
       }
+      // A stored id that reads as another step's id plus a context key (`a.result` beside `a`)
+      // takes no placeholder when a run names it, so a rename moves none either: `{{a.result}}`
+      // keeps reading step a. Its input_from entries still move.
+      const keepsPlaceholders = readsAsContextKey(from, new Set(steps.filter((_, i) => i !== idx).map(s => s.id)));
       steps[idx]!.id = to;
       for (const s of steps) {
         // A `{{<from>.…}}` is a reference only in a step that lists `from` in its input_from: the
@@ -268,7 +272,7 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
         // text, such as a placeholder a tool hands on to the system it writes to, and stays as written.
         const reads = s.input_from?.includes(from) === true;
         if (s.input_from) s.input_from = s.input_from.map(dep => (dep === from ? to : dep));
-        if (!reads) continue;
+        if (!reads || keepsPlaceholders) continue;
         s.task = renamedRefs(s.task, from, to);
         if (s.input_template) s.input_template = renamedInTemplate(s.input_template, from, to) as Record<string, unknown>;
       }
