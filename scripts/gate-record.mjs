@@ -475,30 +475,41 @@ export function uxOwed({ files, base, head, read }) {
  * entries, a value that starts on the key line and goes on below, and the lines of a template
  * literal indented deeper than the key, or at any indent unless they start with `}` or look like
  * an entry opening. Lines are kept as they are, blank and comment-like ones too: inside a
- * template literal they are what the user reads, so a new indent counts as a change. `null` text
- * (an absent file) has none. Pure.
+ * template literal they are what the user reads, so a new indent counts as a change. A
+ * confirmation inside another keeps its lines in its own block, and the outer block holds the
+ * inner one's key line where they stood: every line is kept once, so a file of deeply nested
+ * confirmations costs its length, not its length times its depth, and a change inside the inner
+ * entry still changes a confirmation's block. `null` text (an absent file) has none. Pure.
  *
  * @param {string|null} text
  * @returns {Map<string, string>}
  */
 export function uxConfirmBlocks(text) {
   const out = new Map();
-  const all = (text ?? '').split('\n');
   const indent = (l) => /^\s*/.exec(l)[0].length;
-  for (let i = 0; i < all.length; i++) {
-    const m = UX_NEW_TEXT.exec(all[i]);
-    if (m === null || !/confirm/i.test(m[2])) continue;
-    const at = indent(all[i]);
-    const body = [all[i]];
-    for (let j = i + 1; j < all.length; j++) {
-      const l = all[j];
-      const t = l.trim();
-      if (t !== '' && indent(l) <= at && t.startsWith('}')) { body.push(l); break; }
-      if (t !== '' && indent(l) <= at && UX_NEW_TEXT.test(l)) break;
-      body.push(l);
+  // The open entries, innermost last; their indents rise, so a line that ends one also ends
+  // every entry inside it, and a line that ends none ends nothing further out.
+  const open = [];
+  const end = (e) => { out.get(e.key)[e.slot] = e.body.join('\n'); };
+  for (const l of (text ?? '').split('\n')) {
+    const t = l.trim();
+    const at = t === '' ? Infinity : indent(l);
+    if (t.startsWith('}')) {
+      const ended = [];
+      while (open.length > 0 && at <= open[open.length - 1].at) ended.push(open.pop());
+      if (ended.length > 0) ended[0].body.push(l);
+      else if (open.length > 0) open[open.length - 1].body.push(l);
+      for (const e of ended) end(e);
+      continue;
     }
-    out.set(m[2], [...(out.get(m[2]) ?? []), body.join('\n')]);
+    const m = UX_NEW_TEXT.exec(l);
+    if (m !== null) while (open.length > 0 && at <= open[open.length - 1].at) end(open.pop());
+    if (open.length > 0) open[open.length - 1].body.push(l);
+    if (m === null || !/confirm/i.test(m[2])) continue;
+    if (!out.has(m[2])) out.set(m[2], []);
+    open.push({ key: m[2], at, body: [l], slot: out.get(m[2]).push('') - 1 });
   }
+  for (const e of open) end(e);
   return new Map([...out].map(([k, v]) => [k, JSON.stringify(v)]));
 }
 

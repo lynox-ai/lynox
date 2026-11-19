@@ -2666,6 +2666,25 @@ describe('gate-record — the `ux:` line', () => {
       expect(uxConfirmBlocks(null).size).toBe(0);
     });
 
+    it('a confirmation inside another keeps its own block, and the outer one holds its key line', () => {
+      expect([...uxConfirmBlocks(`'a_confirm': {\n\t'a_confirm': {\n\t\tde: 'X',\n\t},\n\tde: 'Y',\n},`)]).toEqual([
+        ['a_confirm', JSON.stringify([`'a_confirm': {\n\t'a_confirm': {\n\tde: 'Y',\n},`, `\t'a_confirm': {\n\t\tde: 'X',\n\t},`])],
+      ]);
+      const two = (x: string, y: string) => `'a_confirm': {\n\t'b_confirm': {\n\t\tde: '${x}',\n\t},\n\tde: '${y}',\n},`;
+      expect(owed([F], { [F]: two('X', 'Y') }, { [F]: two('X2', 'Y') }).review).toBe(true);
+      expect(owed([F], { [F]: two('X', 'Y') }, { [F]: two('X', 'Y2') }).review).toBe(true);
+      expect(owed([F], { [F]: two('X', 'Y') }, { [F]: two('Y', 'X') }).review).toBe(true);
+      // The inner entry moved below the outer one's own line: neither block's lines change, its place does.
+      expect(owed([F], { [F]: two('X', 'Y') }, { [F]: `'a_confirm': {\n\tde: 'Y',\n\t'b_confirm': {\n\t\tde: 'X',\n\t},\n},` }).review).toBe(true);
+    });
+
+    it('deeply nested confirmations cost the length of the file, not its length times their depth', () => {
+      const f = Array.from({ length: 300 }, (_, i) => `${' '.repeat(i)}'k${i}_confirm': {`).join('\n');
+      let total = 0;
+      for (const v of uxConfirmBlocks(f).values()) total += v.length;
+      expect(total).toBeLessThan(3 * f.length);
+    });
+
     it('a flat or mixed-indent file still owes a review where a child entry cuts the block: the line count is read too', () => {
       const flat = (b: string) => `'x_confirm': {\n'title': { de: 'A' },\n'body': { de: '${b}' },\n},`;
       expect(owed([F], { [F]: flat('B') }, { [F]: flat('B2') }).review).toBe(true);
