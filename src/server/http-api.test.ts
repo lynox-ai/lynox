@@ -3666,6 +3666,28 @@ describe('LynoxHTTPApi', () => {
         const old = await (await jsonFetch('/api/sessions/s-old/pending-prompt')).json() as { expiresInMs?: number };
         expect(old.expiresInMs).toBeGreaterThan(19 * 60_000);
         expect(old.expiresInMs).toBeLessThanOrEqual(20 * 60_000);
+        // A run parked on the question whose stream closed (the reload itself): the orphan
+        // watchdog ends the question at its deadline, before its stored end. Injected as the
+        // close leaves it, as the stale-run test above does.
+        const slots = (api as unknown as { runningSessions: Map<string, { streamAlive: boolean; takeover: () => void; lastEventAt: number; orphanDeadlineAt?: number }> }).runningSessions;
+        store.insertAskUser('s-parked', 'Go on?', ['Yes', 'No']);
+        slots.set('s-parked', { streamAlive: false, takeover: () => {}, lastEventAt: Date.now(), orphanDeadlineAt: Date.now() + 10 * 60_000 });
+        try {
+          const parked = await (await jsonFetch('/api/sessions/s-parked/pending-prompt')).json() as { expiresInMs?: number };
+          expect(parked.expiresInMs).toBeGreaterThan(9 * 60_000);
+          expect(parked.expiresInMs).toBeLessThanOrEqual(10 * 60_000);
+          // Control: while its stream is alive, the watchdog does not apply.
+          slots.get('s-parked')!.streamAlive = true;
+          const live = await (await jsonFetch('/api/sessions/s-parked/pending-prompt')).json() as { expiresInMs?: number };
+          expect(live.expiresInMs).toBeGreaterThan(24 * 60 * 60_000 - 60_000);
+          // The stored end still wins when it comes first.
+          slots.get('s-parked')!.streamAlive = false;
+          slots.get('s-parked')!.orphanDeadlineAt = Date.now() + 2 * 24 * 60 * 60_000;
+          const later = await (await jsonFetch('/api/sessions/s-parked/pending-prompt')).json() as { expiresInMs?: number };
+          expect(later.expiresInMs).toBeLessThanOrEqual(24 * 60 * 60_000);
+        } finally {
+          slots.delete('s-parked');
+        }
       } finally {
         engineRef.getPromptStore = original;
         history.close();

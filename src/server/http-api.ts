@@ -545,10 +545,14 @@ const PROMPT_TIMEOUT_MS = 24 * 60 * 60_000; // 24 hours — prompts persist in S
  *  received the question, so a reload does not restart a full day; and a number, not a time, so
  *  the two clocks need not agree. Undefined when the row or its time cannot be read: the chat
  *  then shows no countdown rather than a guessed one. */
-function promptExpiresInMs(row: { expires_at: string } | undefined): number | undefined {
+function promptExpiresInMs(row: { expires_at: string } | undefined, endsEarlierAt?: number): number | undefined {
   if (row === undefined) return undefined;
-  const at = new Date(row.expires_at).getTime();
-  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
+  const stored = new Date(row.expires_at).getTime();
+  if (!Number.isFinite(stored)) return undefined;
+  // A run parked on the question whose stream has closed (a reload) is ended by the orphan
+  // watchdog, which expires the question with it: that end comes first.
+  const at = endsEarlierAt !== undefined && endsEarlierAt < stored ? endsEarlierAt : stored;
+  return Math.max(0, at - Date.now());
 }
 const ORPHAN_PROMPT_WATCHDOG_MS = 10 * 60_000; // 10 min — orphaned-stream + pending-prompt slot free guard
 /** Run wall-clock: max wall-time a run may spend ACTIVELY COMPUTING. Human
@@ -1941,7 +1945,13 @@ export class LynoxHTTPApi {
    *  question can be a scheduled run's instead, asked beside a working chat run; reading it by
    *  thread alone took that run over and let the scheduled run's question lapse. A slot without
    *  `parked` is read by the thread's question, as before. */
-  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: (reason: PromptClosedReason) => void; lastEventAt: number; parked?: () => boolean }>();
+  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: (reason: PromptClosedReason) => void; lastEventAt: number; parked?: () => boolean; orphanDeadlineAt?: number }>();
+  /** When the orphan watchdog will end a session's open question: only while a run is parked
+   *  on it with its stream closed. Undefined otherwise. */
+  private orphanDeadlineOf(sessionId: string): number | undefined {
+    const slot = this.runningSessions.get(sessionId);
+    return slot !== undefined && !slot.streamAlive ? slot.orphanDeadlineAt : undefined;
+  }
   /**
    * True while `DELETE /api/data` stops the running chat runs and wipes the stores.
    * `/run` refuses while it is set, checked right before it takes a slot with no
@@ -5601,7 +5611,12 @@ export class LynoxHTTPApi {
         // Mark this run's stream as dead so a fresh /run on the same session
         // can take it over if the agent is parked on a pending prompt.
         const slot = this.runningSessions.get(sessionId);
-        if (slot) slot.streamAlive = false;
+        if (slot) {
+          slot.streamAlive = false;
+          // When the watchdog below ends this session's question: a question's card must not
+          // promise time past it (see promptExpiresInMs).
+          slot.orphanDeadlineAt = Date.now() + ORPHAN_PROMPT_WATCHDOG_MS;
+        }
         // Orphan watchdog (armed in BOTH branches). 10 min after the stream
         // dies, if the run is parked on a still-pending prompt that nobody
         // reconnected to answer, free the slot. Pre-1.5.0 such a slot could sit
@@ -5973,7 +5988,7 @@ export class LynoxHTTPApi {
         // blocked on.
         origin: parseOriginJson(row.origin_json),
         timeoutMs: PROMPT_TIMEOUT_MS,
-        expiresInMs: promptExpiresInMs(row),
+        expiresInMs: promptExpiresInMs(row, this.orphanDeadlineOf(params['id']!)),
         createdAt: row.created_at,
       });
     }, readsThread((p) => ({ thread: p['id'] ?? '' }))));

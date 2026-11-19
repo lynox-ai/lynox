@@ -144,6 +144,17 @@ describe('the time a question has left, on its card', () => {
 		});
 	}
 
+	it('never more than there is: just under two minutes says 1, just under one minute says seconds', async () => {
+		await ask('en', { timeoutMs: DAY, expiresInMs: 119_400 });
+		expect(expiry()?.textContent).toBe('Expires in 1\u00a0min');
+		svelte.unmount(component!);
+		component = undefined;
+		store.newChat();
+		await ask('en', { timeoutMs: DAY, expiresInMs: 59_400 });
+		expect(expiry()?.textContent).toMatch(/^Expires in (58|59)\u00a0s$/);
+		expect(expiry()?.className).toContain('text-warning');
+	});
+
 	it('an engine that does not say the time left: no countdown, not one guessed from a full day', async () => {
 		await ask('de', { timeoutMs: 120_000 });
 		expect(card()).toContain('Send the offer to the customer?');

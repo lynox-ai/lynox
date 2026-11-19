@@ -712,7 +712,8 @@
 		if (!p?.timeoutMs || !p.receivedAt) { promptSecondsLeft = null; return; }
 		const update = () => {
 			const elapsed = Date.now() - p.receivedAt!;
-			const left = Math.max(0, Math.ceil((p.timeoutMs! - elapsed) / 1000));
+			// Rounded down: the card never says more time than there is.
+			const left = Math.max(0, Math.floor((p.timeoutMs! - elapsed) / 1000));
 			promptSecondsLeft = left;
 		};
 		update();
