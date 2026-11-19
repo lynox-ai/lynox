@@ -64,6 +64,20 @@
 		paused_who?: string[];
 		// How and when each of those accesses ended, for the owner only: the notices above the list.
 		paused_ended?: PausedEnded[];
+		// A bulk run's trigger: the host its run works on, or null where it has none (`GET /api/triggers`).
+		bulk_host?: string | null;
+	}
+
+	// A bulk run's trigger is titled with its run id, which the model reads; the list names it by
+	// its stage and host instead (U-324). Every other trigger by its title.
+	const BULK_STAGE_KEYS: Readonly<Record<string, string>> = {
+		bulk_preview: 'triggers.bulk.preview', bulk_judge: 'triggers.bulk.judge', bulk_apply: 'triggers.bulk.apply', bulk_undo: 'triggers.bulk.undo',
+	};
+	function shownTitle(trigger: Trigger): string {
+		const key = trigger.effect === undefined ? undefined : BULK_STAGE_KEYS[trigger.effect];
+		if (key === undefined) return trigger.title;
+		const host = trigger.bulk_host ?? null;
+		return host === null || host === '' ? t(key) : `${t(key)} · ${host}`;
 	}
 
 	// How often the list is reloaded while the tab is visible, so a run that started on its
@@ -581,8 +595,9 @@
 							<!-- Wrapping, so the badges move to their own line on a narrow card instead
 							     of squeezing the title: the badges are `shrink-0` and the title clamps. -->
 							<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-								<!-- A plan to take over: its title is someone else's value, as in the notice above (`pausedTitleLine`). -->
-								<p class="text-sm font-medium line-clamp-2 break-words">{#if pausedOpen(trigger)}<MarkedLine text={pausedTitleLine(trigger)} mono={false} />{:else}{trigger.title}{/if}</p>
+								<!-- A plan to take over: its title is someone else's value, as in the notice above (`pausedTitleLine`).
+								     A bulk run's trigger is named by its stage and host instead (`shownTitle`); it offers no takeover. -->
+								<p class="text-sm font-medium line-clamp-2 break-words" data-trigger-title>{#if pausedOpen(trigger) && !(trigger.effect ?? '').startsWith('bulk_')}<MarkedLine text={pausedTitleLine(trigger)} mono={false} />{:else}{shownTitle(trigger)}{/if}</p>
 								<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{typeLabel(trigger)}</span>
 								{#if trigger.enabled === 0}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning">{t('triggers.paused')}</span>

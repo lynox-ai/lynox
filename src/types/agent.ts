@@ -398,6 +398,10 @@ export interface IAgent {
   recordToolCall?: ToolCallRecorder | undefined;
   /** The conversation's grant set — read by `spawn_agent` so a child adds to its root's set. */
   readonly conversationGrants?: ConversationGrants | undefined;
+  /** Who this agent's writes are recorded as (`RowStamp.writtenBy`): the run's author tag
+   *  (`runAuthorTag`), a workflow's (`workflowAuthorTag`), or a parent's for a sub-agent. Null or
+   *  absent is unknown. Never `owner` in a trigger's or a workflow's run. */
+  readonly writeAuthor?: string | null | undefined;
   /** Wave 1.2: has this run seen wrapped untrusted content? Read by the memory tools
    *  (`sourceUntrusted` evidence) and by spawn to propagate a child's taint to a parent
    *  that shares its Memory. */

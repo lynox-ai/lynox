@@ -27,7 +27,7 @@ import {
   type ListedLedgerCell, type ListedValue, type PlainColumn, type PlainHeader, type PlainStore,
 } from './migration-rekey.js';
 import type { MigrationCeiling } from './migration-ceiling.js';
-import { MAX_HEALTH_BYTES, NoPlainForm, choosePlainPaths, plainOffer, readDestinationHealth, rewriteLedgersForPlain, rewriteStoreForPlain } from './migration-plain-source.js';
+import { MAX_HEALTH_BYTES, NoPlainForm, choosePlainPaths, plainFormRefusal, plainOffer, readDestinationHealth, rewriteLedgersForPlain, rewriteStoreForPlain } from './migration-plain-source.js';
 import { MigrationExporter } from './migration-export.js';
 
 const SRC = 'source-vault-key-for-the-plaintext-path-2026';
@@ -1355,6 +1355,85 @@ describe('the source chooses each store\'s path the way the destination judges i
 
   it('a store without a plaintext form takes the raw path', () => {
     expect(choosePlainPaths(base({ stores: [{ store: 'history.db', plainBytes: null, rawBytes: 1 }] })).get('history.db')).toEqual({ path: 'raw', reason: 'no-plain-form' });
+  });
+});
+
+describe('the source judges a store by its raw size before building its plaintext form', () => {
+  const ceiling = (over: Partial<MigrationCeiling> = {}): MigrationCeiling => ({ import_limit_mb: 100, baseline_mb: 0, k: 2, rest_factor: 1, ...over });
+  const input = (over: Partial<Parameters<typeof plainFormRefusal>[0]> = {}): Parameters<typeof plainFormRefusal>[0] => ({
+    ceiling: ceiling(), rawBytes: 10 * MIB, othersBytes: 20 * MIB, restBytes: 20 * MIB, maxTotalBytes: 500 * MIB,
+    source: { limitMb: 1e9, rssMb: 200, rssNowMb: 200, baseMb: 80, k: 5, formedBytes: 0 }, ...over,
+  });
+
+  it('allows a store at the destination\'s bound and refuses one byte over it', () => {
+    // headroom = 100 - 20 - 1 * 20 = 60 MiB; at k 2 the largest store is 30 MiB.
+    expect(plainFormRefusal(input({ rawBytes: 30 * MIB }))).toBeNull();
+    expect(plainFormRefusal(input({ rawBytes: 30 * MIB + 1 }))).toBe('memory');
+  });
+
+  it('allows a store at the source\'s own bound and refuses one byte over it, whatever the destination announces', () => {
+    const vast = ceiling({ import_limit_mb: 1e12 });
+    expect(plainFormRefusal(input({ ceiling: vast, rawBytes: 480 * MIB }))).toBeNull();
+    expect(plainFormRefusal(input({ ceiling: vast, rawBytes: 480 * MIB + 1 }))).toBe('bounds');
+  });
+
+  it('allows a store whose rewrite fits this instance\'s own memory and refuses one byte more, whatever the destination announces', () => {
+    // 200 MiB resident + 80 MiB fixed + 5 * 100 MiB = 780 MiB.
+    const vast = ceiling({ import_limit_mb: 1e12 });
+    const own = { limitMb: 780, rssMb: 200, rssNowMb: 200, baseMb: 80, k: 5, formedBytes: 0 };
+    expect(plainFormRefusal(input({ ceiling: vast, source: own, rawBytes: 100 * MIB }))).toBeNull();
+    expect(plainFormRefusal(input({ ceiling: vast, source: own, rawBytes: 100 * MIB + 1 }))).toBe('source-memory');
+    expect(plainFormRefusal(input({ ceiling: vast, source: { ...own, rssMb: 200.001 }, rawBytes: 100 * MIB }))).toBe('source-memory');
+    // The fixed part counts on its own: a thousandth of a MiB more of it is over.
+    expect(plainFormRefusal(input({ ceiling: vast, source: { ...own, baseMb: 80.001 }, rawBytes: 100 * MIB }))).toBe('source-memory');
+    // A store judged after others counts them too: 50 MiB let through leave room for 50 more.
+    expect(plainFormRefusal(input({ ceiling: vast, source: { ...own, formedBytes: 50 * MIB }, rawBytes: 50 * MIB }))).toBeNull();
+    expect(plainFormRefusal(input({ ceiling: vast, source: { ...own, formedBytes: 50 * MIB }, rawBytes: 50 * MIB + 1 }))).toBe('source-memory');
+    // Memory grown since the first rewrite counts too, for this store alone: the joint line would
+    // let 50 MiB through, the memory now does not.
+    expect(plainFormRefusal(input({ ceiling: vast, source: { ...own, formedBytes: 50 * MIB, rssNowMb: 450 }, rawBytes: 50 * MIB }))).toBeNull();
+    expect(plainFormRefusal(input({ ceiling: vast, source: { ...own, formedBytes: 50 * MIB, rssNowMb: 450.001 }, rawBytes: 50 * MIB }))).toBe('source-memory');
+  });
+
+  it('counts the source\'s fixed part even for a tiny store', () => {
+    // A store of 1 byte next to 700 MiB resident fits under 780 only without the fixed part.
+    const vast = ceiling({ import_limit_mb: 1e12 });
+    expect(plainFormRefusal(input({ ceiling: vast, source: { limitMb: 780, rssMb: 700, rssNowMb: 700, baseMb: 80, k: 5, formedBytes: 0 }, rawBytes: 1 }))).toBe('source-memory');
+    expect(plainFormRefusal(input({ ceiling: vast, source: { limitMb: 781, rssMb: 700, rssNowMb: 700, baseMb: 80, k: 5, formedBytes: 0 }, rawBytes: 1 }))).toBeNull();
+  });
+
+  it('refuses when it cannot judge its own memory', () => {
+    for (const source of [{ limitMb: Number.NaN, rssMb: 1, baseMb: 80, k: 5 }, { limitMb: 1e9, rssMb: -1, baseMb: 80, k: 5 }, { limitMb: 1e9, rssMb: 1, baseMb: 80, k: 0.5 }, { limitMb: 1e9, rssMb: 1, baseMb: Number.NaN, k: 5 }, { limitMb: 1e9, rssMb: 1, baseMb: -1, k: 5 }, { limitMb: 1e9, rssMb: 1, baseMb: 80, k: 5, formedBytes: Number.NaN }, { limitMb: 1e9, rssMb: 1, baseMb: 80, k: 5, formedBytes: -1 }, { limitMb: 1e9, rssMb: 1, baseMb: 80, k: 5, rssNowMb: Number.NaN }, { limitMb: 1e9, rssMb: 1, baseMb: 80, k: 5, rssNowMb: -1 }].map((x) => ({ formedBytes: 0, rssNowMb: 1, ...x }))) {
+      expect(plainFormRefusal(input({ rawBytes: 1, source }))).toBe('source-memory');
+    }
+  });
+
+  it('refuses on numbers it cannot judge', () => {
+    expect(plainFormRefusal(input({ rawBytes: 1, ceiling: ceiling({ k: 0.5 }) }))).toBe('memory');
+    expect(plainFormRefusal(input({ rawBytes: 1, ceiling: ceiling({ import_limit_mb: Number.NaN }) }))).toBe('memory');
+  });
+
+  it('is never stricter than the later choice: what it refuses, choosePlainPaths would send raw', () => {
+    // A store whose plaintext form is its raw size (the smallest it can be) and that the check
+    // refuses is judged raw by the choice too; one the check allows at the bound is judged plain.
+    const c = ceiling();
+    const choice = (rawBytes: number) => choosePlainPaths({
+      ceiling: c, stores: [{ store: 'engine.db', plainBytes: rawBytes, rawBytes }],
+      otherBytes: 20 * MIB, otherDatabaseBytes: 0, sweeps: null, sweepsCapBytes: 64 * MIB,
+    }).get('engine.db');
+    expect(choice(30 * MIB)).toEqual({ path: 'plain' });
+    expect(choice(30 * MIB + 1)).toEqual({ path: 'raw', reason: 'memory' });
+  });
+
+  it('a store\'s plaintext form is not smaller than its raw snapshot, which the check relies on', () => {
+    const src = tmp();
+    seedStores(src, SRC);
+    for (const store of ['engine.db', 'history.db'] as const) {
+      const image = readFileSync(join(src, store));
+      const r = rewriteStoreForPlain(image, store, { key: keyOf(store, SRC) });
+      expect(r.counts.decrypted).toBeGreaterThan(0);
+      expect(r.payload.length).toBeGreaterThan(image.length);
+    }
   });
 });
 

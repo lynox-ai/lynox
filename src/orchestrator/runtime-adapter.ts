@@ -1,4 +1,4 @@
-import { OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
+import { OWNER_PRINCIPAL, workflowAuthorTag, type RequestPrincipal } from '../core/request-principal.js';
 import { NestedRunEndedError, heldSource, isAuthorStop, type RunSource } from './run-source.js';
 import { MANDATE_WITHHELD_TOOLS, toolLockFor } from '../core/mandate-tool-lock.js';
 import type { CallApiCost, CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
@@ -1054,6 +1054,8 @@ export async function spawnViaAgent(
     // And the run's principal, so a mandate's step runs under the mandate's lock. Absent is the
     // public API's owner, resolved here so the agent is never handed an undefined one (1173).
     principal: principal ?? OWNER_PRINCIPAL,
+    // A workflow step writes as the workflow, never as the owner who started or saved it.
+    writeAuthor: workflowAuthorTag(stepRunId),
     onStream: createStepStreamHandler({
       onTokens: (i, o) => { tokensIn += i; tokensOut += o; },
       recordToolCall,
@@ -1559,6 +1561,8 @@ export async function spawnInline(
     // And the run's principal, so a mandate's step runs under the mandate's lock. Absent is the
     // public API's owner, resolved here so the agent is never handed an undefined one (1173).
     principal: principal ?? OWNER_PRINCIPAL,
+    // A workflow step writes as the workflow, never as the owner who started or saved it.
+    writeAuthor: workflowAuthorTag(stepRunId),
     onStream: createStepStreamHandler({
       onTokens: (i, o) => { tokensIn += i; tokensOut += o; },
       recordToolCall,
