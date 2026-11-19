@@ -4493,9 +4493,13 @@ describe('LynoxHTTPApi', () => {
         // Client disconnects mid-run → fire the server's close handler.
         serverReq!.emit('close');
 
-        const slot = runningSessions.get('disc-noprompt');
+        const slot = runningSessions.get('disc-noprompt') as { streamAlive: boolean; orphanDeadlineAt?: number } | undefined;
         expect(slot?.streamAlive).toBe(false);            // close handler ran...
         expect(mockSessionAbort).not.toHaveBeenCalled();  // ...but did NOT abort.
+        // ...and noted when the orphan watchdog would end a question the run parks on, which
+        // a reload's countdown reads.
+        expect(slot?.orphanDeadlineAt).toBeGreaterThan(Date.now() + 9 * 60_000);
+        expect(slot?.orphanDeadlineAt).toBeLessThanOrEqual(Date.now() + 10 * 60_000);
       } finally {
         server.off('request', captureReq);
         clientReq.destroy();
