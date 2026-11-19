@@ -93,6 +93,20 @@ describe('a preview where several targets get one new value', () => {
 		expect(chipOf(4)).toBeNull();
 	});
 
+	it('says the chip and the sentence in English', async () => {
+		localStorage.setItem('lynox-locale', 'en');
+		const { setLocale } = await import('../i18n.svelte.js');
+		setLocale('en');
+		try {
+			await render();
+			expect(chipOf(1)).toBe('same as 2 others');
+			expect(target.querySelector('[data-testid="bulk-same-value-count"]')?.textContent).toBe('3 products get the same value as another product. They are marked in the preview.');
+		} finally {
+			setLocale('de');
+			localStorage.removeItem('lynox-locale');
+		}
+	});
+
 	it('names the number of products above the preview', async () => {
 		await render();
 		expect(target.querySelector('[data-testid="bulk-same-value-count"]')?.textContent).toBe('3 Produkte bekommen denselben Wert wie ein anderes Produkt. Sie sind in der Vorschau markiert.');
@@ -128,6 +142,14 @@ describe('a preview where several targets get one new value', () => {
 		expect(target.querySelector('[data-testid="bulk-same-value-count"]')).toBeNull();
 	});
 
+	it('marks every target of a judged run that gives all of them one value', async () => {
+		run = makeRun({ judge: { tier: 'standard', unjudged: 0 } });
+		targets = [1, 2, 3, 4].map((seq) => tgt(seq, fields(['seo_title', SAME])));
+		await render();
+		for (const seq of [1, 2, 3, 4]) expect(chipOf(seq)).toBe('gleich wie bei 3 anderen');
+		expect(target.querySelector('[data-testid="bulk-same-value-count"]')?.textContent).toBe('4 Produkte bekommen denselben Wert wie ein anderes Produkt. Sie sind in der Vorschau markiert.');
+	});
+
 	it('does not mark a run that is past its preview', async () => {
 		run = makeRun({ phase: 'done', applied: 4 });
 		await render();
@@ -136,31 +158,36 @@ describe('a preview where several targets get one new value', () => {
 	});
 });
 
+// A Shopify run without a judge unless a test says otherwise.
+const same = (ts: BulkTarget[], o: { shopify?: boolean; judged?: boolean } = {}): Map<number, number> =>
+	bulkSameValueOthers(ts, { shopify: true, judged: false, ...o });
+
 describe('which targets share a value', () => {
 	it('compares within one field only', () => {
-		const m = bulkSameValueOthers([tgt(1, fields(['seo_title', 'X'])), tgt(2, fields(['seo_description', 'X']))]);
+		const m = same([tgt(1, fields(['seo_title', 'X'])), tgt(2, fields(['seo_description', 'X']))]);
 		expect(m.size).toBe(0);
 	});
 
 	it('leaves out a target the owner took out, and one that writes nothing', () => {
-		const m = bulkSameValueOthers([
+		const m = same([
 			tgt(1, fields(['seo_title', 'X'])),
 			tgt(2, fields(['seo_title', 'X']), { deselected: true }),
 			tgt(3, fields(['seo_title', 'X']), { change: 'unchanged' }),
 			tgt(4, fields(['seo_title', 'X']), { change: 'invalid' }),
+			tgt(7, fields(['seo_title', 'X']), { change: 'delete' }),
 			tgt(5, fields(['seo_title', 'Y'])),
 		]);
 		expect(m.size).toBe(0);
-		expect(bulkSameValueOthers([tgt(1, fields(['seo_title', 'X'])), tgt(5, fields(['seo_title', 'X']), { change: 'create' }), tgt(6, fields(['seo_title', 'Y']))]).get(1)).toBe(1);
+		expect(same([tgt(1, fields(['seo_title', 'X'])), tgt(5, fields(['seo_title', 'X']), { change: 'create' }), tgt(6, fields(['seo_title', 'Y']))]).get(1)).toBe(1);
 	});
 
 	it('does not count empty or missing values as one value', () => {
-		const m = bulkSameValueOthers([tgt(1, fields(['seo_title', ''])), tgt(2, fields(['seo_title', ''])), tgt(3, fields(['seo_title', '  '])), tgt(4, fields(['seo_title', '  '])), tgt(5, fields(['seo_title', null])), tgt(6, fields(['seo_title', null]))]);
+		const m = same([tgt(1, fields(['seo_title', ''])), tgt(2, fields(['seo_title', ''])), tgt(3, fields(['seo_title', '  '])), tgt(4, fields(['seo_title', '  '])), tgt(5, fields(['seo_title', null])), tgt(6, fields(['seo_title', null]))]);
 		expect(m.size).toBe(0);
 	});
 
 	it('gives a target that shares two fields its largest group', () => {
-		const m = bulkSameValueOthers([
+		const m = same([
 			tgt(1, fields(['seo_description', 'D'], ['seo_title', 'T'])),
 			tgt(2, fields(['seo_description', 'D'], ['seo_title', 'T'])),
 			tgt(3, fields(['seo_description', 'D'])),
@@ -172,32 +199,66 @@ describe('which targets share a value', () => {
 		expect(m.get(3)).toBe(2);
 	});
 
+	it('marks on a Shopify store only its text fields, not product type, vendor or tags', () => {
+		const odd = tgt(9, fields(['productType', 'B'], ['vendor', 'B'], ['tags', 'B'], ['title', 'B']));
+		for (const field of ['productType', 'vendor', 'tags']) {
+			expect(same([tgt(1, fields([field, 'A'])), tgt(2, fields([field, 'A'])), odd]).size, field).toBe(0);
+		}
+		expect(same([tgt(1, fields(['title', 'A'])), tgt(2, fields(['title', 'A'])), odd]).get(1)).toBe(1);
+		expect(same([tgt(1, fields(['descriptionHtml', 'A'])), tgt(2, fields(['descriptionHtml', 'A'])), tgt(3, fields(['descriptionHtml', 'B']))]).get(1)).toBe(1);
+	});
+
+	it('marks elsewhere only text values, not a list, a number or a flag', () => {
+		const other = { shopify: false };
+		const odd = (v: unknown): BulkTarget => tgt(9, fields(['f', v]));
+		expect(same([tgt(1, fields(['f', ['a']])), tgt(2, fields(['f', ['a']])), odd(['b'])], other).size).toBe(0);
+		expect(same([tgt(1, fields(['f', 5])), tgt(2, fields(['f', 5])), odd(6)], other).size).toBe(0);
+		expect(same([tgt(1, fields(['f', true])), tgt(2, fields(['f', true])), odd(false)], other).size).toBe(0);
+		expect(same([tgt(1, fields(['f', 'a'])), tgt(2, fields(['f', 'a'])), odd('b')], other).get(1)).toBe(1);
+		// A target that writes no text there does not count toward „every target gets one value“.
+		expect(same([tgt(1, fields(['f', 'a'])), tgt(2, fields(['f', 'a'])), odd(['b'])], other).size).toBe(0);
+		// A product type is text on another system, so it counts there.
+		expect(same([tgt(1, fields(['productType', 'a'])), tgt(2, fields(['productType', 'a'])), tgt(3, fields(['productType', 'b']))], other).get(1)).toBe(1);
+	});
+
+	it('marks one value that every target of a judged run gets', () => {
+		const all = [1, 2, 3].map((seq) => tgt(seq, fields(['seo_title', 'The Collection Snowboard online kaufen'])));
+		expect(same(all).size).toBe(0);
+		const m = same(all, { judged: true });
+		expect([...m.entries()]).toEqual([[1, 2], [2, 2], [3, 2]]);
+	});
+
+	it('keeps a field whose name holds a NUL apart from another field and value', () => {
+		const m = same([tgt(1, fields(['a\u0000b', 'c'])), tgt(2, fields(['a', 'b\u0000c'])), tgt(3, fields(['a', 'x'], ['a\u0000b', 'y']))], { shopify: false });
+		expect(m.size).toBe(0);
+	});
+
 	it('compares the exact text', () => {
-		expect(bulkSameValueOthers([tgt(1, fields(['seo_title', 'Gas'])), tgt(2, fields(['seo_title', 'gas']))]).size).toBe(0);
+		expect(same([tgt(1, fields(['seo_title', 'Gas'])), tgt(2, fields(['seo_title', 'gas']))]).size).toBe(0);
 	});
 
 	it('does not mark one value that every writing target gets, and does mark it once one target differs', () => {
 		const all = Array.from({ length: 17 }, (_, i) => tgt(i + 1, fields(['seo_title', 'Direkt vom Hof'])));
-		expect(bulkSameValueOthers(all).size).toBe(0);
+		expect(same(all).size).toBe(0);
 		const oneDiffers = [...all.slice(0, 16), tgt(17, fields(['seo_title', 'Anders']))];
-		const m = bulkSameValueOthers(oneDiffers);
+		const m = same(oneDiffers);
 		expect(m.size).toBe(16);
 		expect(m.get(1)).toBe(15);
 		expect(m.has(17)).toBe(false);
 	});
 
 	it('counts a target that clears the field as writing it', () => {
-		const m = bulkSameValueOthers([tgt(1, fields(['seo_title', 'X'])), tgt(2, fields(['seo_title', 'X'])), tgt(3, fields(['seo_title', '']))]);
+		const m = same([tgt(1, fields(['seo_title', 'X'])), tgt(2, fields(['seo_title', 'X'])), tgt(3, fields(['seo_title', '']))]);
 		expect(m.get(1)).toBe(1);
 	});
 
-	it('drops the mark once the owner takes out the one target that differed', () => {
-		const m = bulkSameValueOthers([tgt(1, fields(['seo_title', 'X'])), tgt(2, fields(['seo_title', 'X'])), tgt(3, fields(['seo_title', 'Y']), { deselected: true })]);
+	it('leaves the one differing target out of the writers once the owner took it out', () => {
+		const m = same([tgt(1, fields(['seo_title', 'X'])), tgt(2, fields(['seo_title', 'X'])), tgt(3, fields(['seo_title', 'Y']), { deselected: true })]);
 		expect(m.size).toBe(0);
 	});
 
 	it('marks a part group in one field while another field holds one value for all', () => {
-		const m = bulkSameValueOthers([
+		const m = same([
 			tgt(1, fields(['seo_title', 'Hof'], ['seo_description', 'D'])),
 			tgt(2, fields(['seo_title', 'Hof'], ['seo_description', 'D'])),
 			tgt(3, fields(['seo_title', 'Hof'], ['seo_description', 'E'])),
