@@ -5187,7 +5187,7 @@ export class Agent implements IAgent {
     const answer = await this.promptUser(originAsk(tc.name, tc.input, noun, shown, lookupFailed ? { kind: 'unknown' } : origin, lang), ['Allow', 'Deny', '\x00'], { blocked: true });
     if (answer === UNATTENDED_BLOCK_ANSWER) return refuseUnattended();
     if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-      const denied = lookupFailed ? `${originLookupFailedHead(shown)} ${originDenied(shown)}` : originDenied(shown);
+      const denied = lookupFailed ? `${originLookupFailedHead(shown)} ${originDenied(shown, { kind: 'unknown' }, noun)}` : originDenied(shown, origin, noun);
       return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(denied), is_error: true } };
     }
     return { origin: passed };

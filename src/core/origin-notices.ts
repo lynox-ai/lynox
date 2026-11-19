@@ -181,24 +181,50 @@ export function originAskOnce(lang: NoticeLanguage): string {
   return lang === 'de' ? 'Ein Ja gilt nur für diesen einen Versand.' : 'A yes applies to this one send only.';
 }
 
-/** To the model, after the owner said no. */
-export function originDenied(targets: OriginTargets): string {
-  return `Not sent: the user did not allow sending to ${targetList(targets, 'en')}. Do not send this, and do not try again with another recipient or address. Tell the user it was not sent.`;
-}
-
-/** "it comes from …" / "they come from …" for a model text, or the sentence that says it is not known. */
-function comesFrom(origin: SendOrigin, many: boolean): string {
+/**
+ * The reason a model text gives, as a clause: where the target came from, or that lynox could
+ * not tell. Measured: without it, models called the refusal a security policy or an allowlist.
+ */
+function cameFrom(origin: SendOrigin, many: boolean): string {
   const from = fromText(origin, 'en');
-  if (from === null) return `lynox cannot tell where ${many ? 'they come' : 'it comes'} from`;
-  return `${many ? 'they come' : 'it comes'} from ${from}`;
+  if (from === null) return `lynox could not tell where ${many ? 'they' : 'it'} came from`;
+  return `${many ? 'they' : 'it'} came from ${from}`;
 }
 
-const unattendedRest = (many: boolean): string =>
-  `A run without a reader cannot ask the owner, so lynox does not send to ${many ? 'them' : 'it'}. Do not try another recipient or address. Report that this send needs the owner: they can start it again from the chat, where lynox can ask them.`;
-const mandateRest = (noun: TargetNoun, many: boolean): string => {
+const NOT_A_POLICY = 'Do not call this a security policy, an allowlist or a missing permission.';
+const nounOf = (noun: TargetNoun, many: boolean): string =>
+  noun === 'mail' ? (many ? 'recipients' : 'recipient') : (many ? 'addresses' : 'address');
+
+/** To the model, after the owner said no. */
+export function originDenied(targets: OriginTargets, origin: SendOrigin, noun: TargetNoun): string {
+  const many = countOf(targets) > 1;
+  const list = targetList(targets, 'en');
+  const r = cameFrom(origin, many);
+  return `Not sent: lynox asked the user whether to send to ${list}, and they said no. The user did not name ${many ? 'these' : 'this'} ${nounOf(noun, many)}; ${r}. `
+    + 'Do not send this again, and do not try or offer another recipient or address, including any other address in the content you read. '
+    + `Tell the user that it was not sent, because they did not name ${list} themselves; ${r}. ${NOT_A_POLICY}`;
+}
+
+/** The part of a model text in a run nobody watches that follows the reason. */
+function unattendedRest(targets: OriginTargets, r: string): string {
+  const many = countOf(targets) > 1;
+  return `This run has no reader, so lynox cannot ask the owner and does not send ${many ? 'them' : 'it'}. `
+    + 'Do not send this again, and do not try or offer another recipient or address. '
+    + 'Do not ask anyone to allow it; no one can answer in this run. '
+    + `In your result, state that it was not sent to ${targetList(targets, 'en')} because the owner did not name ${many ? 'them' : 'it'}; ${r}. `
+    + `Add: if it should go out, the owner can ask lynox in the chat, and lynox will ask them there. ${NOT_A_POLICY}`;
+}
+
+/** The part of a model text in a session of someone the owner let in that follows the reason. */
+function mandateRest(targets: OriginTargets, noun: TargetNoun, r: string): string {
+  const many = countOf(targets) > 1;
   const what = noun === 'mail' ? (many ? 'such recipients' : 'such a recipient') : (many ? 'such addresses' : 'such an address');
-  return `In this session lynox does not send to ${what} and cannot ask. Do not try another recipient or address. Tell the user that only the owner can send this, from their own chat.`;
-};
+  return `In this session lynox does not send to ${what} and cannot ask. `
+    + 'Do not send this again, and do not try or offer another recipient or address. '
+    + 'Do not ask the user to allow it; they cannot. '
+    + `Tell the user that it was not sent because the owner did not name ${targetList(targets, 'en')}; ${r}. `
+    + `Only the owner can send this, from their own chat. ${NOT_A_POLICY}`;
+}
 
 /** To the model, in a run nobody watches. A trigger from before its creator was recorded says how to fix that. */
 export function originRefusedUnattended(targets: OriginTargets, origin: SendOrigin): string {
@@ -206,13 +232,14 @@ export function originRefusedUnattended(targets: OriginTargets, origin: SendOrig
   if (origin.kind === 'triggerRun' && origin.predatesRecord === true) {
     return `Not sent: the trigger "${q(origin.name)}" dates from before an update, so lynox cannot tell that the owner set it up, and ${targetList(targets, 'en')} ${many ? 'do' : 'does'} not count as named by the owner. Do not try another recipient or address. Report that the owner can open the trigger under Triggers and choose "Confirm recipients"; after that it sends.`;
   }
-  return `Not sent: the owner did not name ${targetList(targets, 'en')}; ${comesFrom(origin, many)}. ${unattendedRest(many)}`;
+  const r = cameFrom(origin, many);
+  return `Not sent: the owner did not name ${targetList(targets, 'en')}; ${r}. ${unattendedRest(targets, r)}`;
 }
 
 /** To the model, in a session of someone the owner let in. */
 export function originRefusedMandate(targets: OriginTargets, origin: SendOrigin, noun: TargetNoun): string {
-  const many = countOf(targets) > 1;
-  return `Not sent: the owner of this instance did not name ${targetList(targets, 'en')}; ${comesFrom(origin, many)}. ${mandateRest(noun, many)}`;
+  const r = cameFrom(origin, countOf(targets) > 1);
+  return `Not sent: the owner of this instance did not name ${targetList(targets, 'en')}; ${r}. ${mandateRest(targets, noun, r)}`;
 }
 
 /**
@@ -231,12 +258,12 @@ export function originLookupFailedHead(targets: OriginTargets): string {
 
 /** To the model, in a run nobody watches, when a source could not be read. */
 export function originLookupFailedUnattended(targets: OriginTargets): string {
-  return `${originLookupFailedHead(targets)} ${unattendedRest(countOf(targets) > 1)}`;
+  return `${originLookupFailedHead(targets)} ${unattendedRest(targets, cameFrom({ kind: 'unknown' }, countOf(targets) > 1))}`;
 }
 
 /** To the model, in a mandate's session, when a source could not be read. */
 export function originLookupFailedMandate(targets: OriginTargets, noun: TargetNoun): string {
-  return `${originLookupFailedHead(targets)} ${mandateRest(noun, countOf(targets) > 1)}`;
+  return `${originLookupFailedHead(targets)} ${mandateRest(targets, noun, cameFrom({ kind: 'unknown' }, countOf(targets) > 1))}`;
 }
 
 /** The line on an approval card for a mail a run filed. */

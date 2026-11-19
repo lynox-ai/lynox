@@ -420,7 +420,7 @@ describe('google_calendar tool', () => {
       expect(asked[0]).toBe('Update event ev1\nThese fields change:\nsummary: Moved\n\nGoogle Calendar: change event: you did not name the recipient "x@evil.example". lynox cannot tell where it comes from. Send anyway?\n\nA yes applies to this one send only.');
       expect(metas[0]).toEqual({ blocked: true });
       expect(patches()).toEqual([]);
-      expect(result).toContain('Not sent: the user did not allow sending to "x@evil.example"');
+      expect(result).toContain('Not sent: lynox asked the user whether to send to "x@evil.example", and they said no.');
     });
 
     it('the guests are read before the question: a yes is never asked for an update that is then refused', async () => {

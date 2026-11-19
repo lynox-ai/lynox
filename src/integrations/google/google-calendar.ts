@@ -310,7 +310,7 @@ export function createCalendarTool(getAuth: () => GoogleAuth | null): ToolEntry<
             return guestCheck.refused(originRefusedUnattended(guestCheck.targets, guestCheck.origin));
           }
           if (answer.toLowerCase() !== 'yes' && answer !== '1') {
-            return guestCheck.kind === 'ask' ? originDenied(guestCheck.targets) : 'Action cancelled by user.';
+            return guestCheck.kind === 'ask' ? originDenied(guestCheck.targets, guestCheck.origin, 'mail') : 'Action cancelled by user.';
           }
         }
 

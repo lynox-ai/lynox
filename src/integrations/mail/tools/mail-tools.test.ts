@@ -2279,7 +2279,7 @@ describe('where a reply\'s recipient comes from, and what the sent log calls own
   it('in a run nobody watches the blocked question is refused, and nothing is sent', async () => {
     const { agent } = replyAgent(UNATTENDED_BLOCK_ANSWER);
     const out = await createMailReplyTool(registry, ctx).handler({ uid: 12, body: 'Gerne.' }, agent);
-    expect(out).toContain('Not sent: the owner did not name "alice@example.com"; it comes from a mail from "alice@example.com" that lynox read.');
+    expect(out).toContain('Not sent: the owner did not name "alice@example.com"; it came from a mail from "alice@example.com" that lynox read.');
     expect(provider.send).not.toHaveBeenCalled();
   });
 
@@ -2351,7 +2351,10 @@ describe('where a reply\'s recipient comes from, and what the sent log calls own
   it('a no to the question where a recipient comes from tells the model it was not allowed, not that it was cancelled', async () => {
     const { agent } = replyAgent('No');
     const out = await createMailReplyTool(registry, ctx).handler({ uid: 12, body: 'Gerne.' }, agent);
-    expect(out).toBe('Not sent: the user did not allow sending to "alice@example.com". Do not send this, and do not try again with another recipient or address. Tell the user it was not sent.');
+    expect(out).toContain('Not sent: lynox asked the user whether to send to "alice@example.com", and they said no. The user did not name this recipient; it came from ');
+    expect(out).toContain('Do not send this again, and do not try or offer another recipient or address, including any other address in the content you read. Tell the user that it was not sent, because they did not name "alice@example.com" themselves;');
+    expect(out).toContain('Do not call this a security policy, an allowlist or a missing permission.');
+    expect(out).not.toContain('cancelled');
     expect(provider.send).not.toHaveBeenCalled();
   });
 

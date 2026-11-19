@@ -145,7 +145,7 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         if (!isApproval(answer)) {
           // A no to the question where a recipient comes from is said as such, so the model does
           // not try another recipient.
-          return unnamed.length > 0 ? originDenied(targets) : 'mail_reply cancelled by user.';
+          return unnamed.length > 0 ? originDenied(targets, origin, 'mail') : 'mail_reply cancelled by user.';
         }
 
         // Owner-named in the log only when the dispatcher checked every recipient and found it
