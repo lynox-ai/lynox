@@ -10,6 +10,7 @@ import { rerankSearchResults } from './search-reranker.js';
 import { currentCallSignal } from '../../core/call-connection.js';
 import { delegatedRedirects, httpTarget, outwardReadRecorder } from '../../core/audit-log.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
+import { turnIsLocked } from '../../core/mandate-tool-lock.js';
 
 interface WebSearchInput {
   action: 'search' | 'read';
@@ -96,11 +97,21 @@ function looksLikeApiSetupResearch(query?: string, url?: string): boolean {
  *  treats it as system guidance, not page content. Kept short — the system
  *  prompt already has the full HARD RULES; this is the just-in-time
  *  pointer the model sees right next to the docs it's about to act on. */
+const API_SETUP_REMINDER_STORE_LINE = '- Hold `ask_secret` until the user explicitly signals readiness ("done", "have the token"). Don\'t open the secret prompt mid-walkthrough.';
 const API_SETUP_AGENT_REMINDER = `
 **Agent reminder (auto-injected because this looks like API-setup research):**
 - Match the user's stated use case to the scopes/permissions in these docs. Don't default to read-only — if the user said "optimize", "update", "sync", "post", "manage", they need \`write_*\` scopes too. Cite the exact scope names from the docs you just read.
 - Don't recommend any scope / endpoint / UI path you didn't see in these results. If the docs are incomplete, do another web_research call before guiding the user.
-- Hold \`ask_secret\` until the user explicitly signals readiness ("done", "have the token"). Don't open the secret prompt mid-walkthrough.`;
+${API_SETUP_REMINDER_STORE_LINE}`;
+
+/** The reminder a locked turn (a mandate's) gets: no key is entered there (U-185). */
+const API_SETUP_AGENT_REMINDER_LOCKED = API_SETUP_AGENT_REMINDER.replace(API_SETUP_REMINDER_STORE_LINE,
+  '- In this session no key is entered: when the walkthrough reaches the credential, tell the user that the owner of this instance has to store it.');
+
+/** The reminder for this turn: the locked one in a locked turn. */
+function apiSetupReminder(agent: IAgent): string {
+  return turnIsLocked(agent.principal) ? API_SETUP_AGENT_REMINDER_LOCKED : API_SETUP_AGENT_REMINDER;
+}
 
 export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSearchInput> {
   return {
@@ -210,7 +221,7 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           const { wrapUntrustedData } = await import('../../core/data-boundary.js');
           const wrapped = wrapUntrustedData(formatted, 'web_search');
           return looksLikeApiSetupResearch(input.query, undefined)
-            ? wrapped + '\n' + API_SETUP_AGENT_REMINDER
+            ? wrapped + '\n' + apiSetupReminder(agent)
             : wrapped;
         } catch (err: unknown) {
           // Returned, not thrown, so the agent reads it and adapts — unchanged.
@@ -232,7 +243,7 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           const { wrapUntrustedData } = await import('../../core/data-boundary.js');
           const wrapped = wrapUntrustedData(parts.join('\n'), 'web_page');
           return looksLikeApiSetupResearch(undefined, input.url)
-            ? wrapped + '\n' + API_SETUP_AGENT_REMINDER
+            ? wrapped + '\n' + apiSetupReminder(agent)
             : wrapped;
         } catch (err: unknown) {
           // The single biggest source of the false green: ~35 of 63 reads in one

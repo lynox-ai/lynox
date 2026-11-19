@@ -294,6 +294,18 @@ async function runOne(scenario: string, i: number): Promise<Rec> {
   // base commit the canceled dialog), so both arms are read by the same rule.
   const firstAnswered = askCalls.findIndex((c) => results.has(c.id));
   const askAfterRefusal = firstAnswered < 0 ? 0 : askCalls.length - firstAnswered - 1;
+  // What the model wrote after the first answered ask_secret, and whether that text asks for the
+  // key by the same pattern as the reply. `askAfterRefusal` counts repeated
+  // calls, not a question in the chat; this is the question. A pre-reading: K is read by hand.
+  const answeredId = firstAnswered < 0 ? undefined : askCalls[firstAnswered]!.id;
+  const answeredAt = answeredId === undefined ? -1 : msgs.findIndex((m) => m.role === 'user' && Array.isArray(m.content)
+    && (m.content as Array<{ type: string; tool_use_id?: string }>).some((b) => b.type === 'tool_result' && b.tool_use_id === answeredId));
+  const textAfterAnswer = answeredAt < 0 ? '' : msgs.slice(answeredAt + 1)
+    .filter((m) => m.role === 'assistant')
+    .map((m) => typeof m.content === 'string' ? m.content
+      : Array.isArray(m.content) ? (m.content as Array<{ type: string; text?: string }>).filter((b) => b.type === 'text').map((b) => b.text ?? '').join('\n') : '')
+    .join('\n');
+  const askedAfterAnswer = textAfterAnswer !== '' && pasteMatches(textAfterAnswer).asks.length > 0;
   const usage = {
     input: session.usage.input_tokens - before.input_tokens,
     output: session.usage.output_tokens - before.output_tokens,
@@ -307,7 +319,9 @@ async function runOne(scenario: string, i: number): Promise<Rec> {
   const rec = classify({
     arm, provider: provider!, model, scenario, i, end,
     toolCalls: calls.map((c) => ({ name: c.name, inputName: c.input['name'] ?? null, action: c.input['action'] ?? null })),
-    askSecretCalled: askCalls.length > 0, refusalReturned: firstRefusal >= 0, askAfterRefusal,
+    askSecretCalled: askCalls.length > 0, askSecretCalls: askCalls.length, refusalReturned: firstRefusal >= 0, askAfterRefusal,
+    askedAfterAnswer, textAfterAnswer,
+    shopifyExchange: process.env['LYNOX_SHOPIFY_EXCHANGE'] ?? null,
     promptSecretCalls, promptUserCalls, reply, usage, costUSD,
   });
   await engine.shutdown();
