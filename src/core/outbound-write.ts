@@ -987,8 +987,8 @@ function jsonTextHides(text: string, readings: Iterable<string>, mask: (text: st
             }
             const ofS = serverReadings(s);
             for (const r of ofS) {
+              // Charged here, checked by the next piece `hides` reads below: there always is one.
               left -= r.length + 32;
-              if (left < 0) return unread;
               if (mask(r) !== r) return true;
             }
             if (hides(s, ofS, depth + 1)) return true;
