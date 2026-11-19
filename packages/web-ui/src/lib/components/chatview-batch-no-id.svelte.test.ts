@@ -73,7 +73,7 @@ afterEach(() => {
 // without its id: that answer is not sent, the open question comes back, and the batch stops,
 // so the second answer is not sent to the question that came back.
 describe('a v1 batch whose question has no id', () => {
-	it('stops after the first answer: no answer of the batch is sent to the question that came back', async () => {
+	it('stops after the first answer: no answer of the batch is sent to the question that came back, and focus goes to the sentence', async () => {
 		run = sseStream();
 		const replies: unknown[] = [];
 		const seen: string[] = [];
@@ -123,5 +123,7 @@ describe('a v1 batch whose question has no id', () => {
 		for (let i = 0; i < 10; i++) await settle();
 		expect(replies, 'an answer of the batch was sent').toEqual([]);
 		expect(store.getPendingPermission()?.promptId, `requests: ${seen.join(' ')}`).toBe('p-open');
+		// The focus sits on the sentence, not on a button of the card that came back (U-346).
+		expect(document.activeElement?.getAttribute('role'), 'focus is not on the sentence').toBe('alert');
 	});
 });

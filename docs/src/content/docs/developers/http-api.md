@@ -147,7 +147,7 @@ Returns `{"pending": false}` or the full prompt data:
 
 #### Replying to prompts
 
-A reply names its question with `promptId` (from the `prompt` event or `/pending-prompt`); a repeat with the same `promptId` is idempotent. A reply without `promptId` answers nothing: while a question is open it gets `409` with code `prompt_id_required`.
+A reply names its question with `promptId` (from the `prompt` event or `/pending-prompt`); a repeat with the same `promptId` is idempotent. A reply without `promptId` answers nothing: while a single question is open it gets `409` with code `prompt_id_required`, otherwise `404`.
 
 ```bash
 POST /api/sessions/:id/reply

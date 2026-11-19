@@ -511,12 +511,16 @@ describe('why a question was closed, and the lost answer as a draft (UX-064, UX-
 });
 
 describe('an answer that names no question', () => {
-	async function answerWith(prompt: Record<string, unknown>): Promise<{ replies: number; pendingAsked: number }> {
+	type Setup = { prompt: Record<string, unknown>; answer?: string; onPending?: () => void };
+	async function answerWith({ prompt, answer = 'Yes', onPending }: Setup): Promise<{ replies: number; pendingAsked: number; drafted: string[] }> {
+		const drafted: string[] = [];
+		store.registerComposerDraft((text) => { drafted.push(text); return true; });
 		let pendingAsked = 0;
 		const run = openRun((url) => {
 			if (url.endsWith('/reply')) return json({ error: 'A question is open: answer it with its promptId.', code: 'prompt_id_required' }, 409);
 			if (url.endsWith('/pending-prompt')) {
 				pendingAsked++;
+				onPending?.();
 				return json({ pending: true, promptType: 'ask_user', promptId: 'p-open', question: 'Send this mail?', options: ['Yes', 'No'] });
 			}
 			return json({});
@@ -525,54 +529,57 @@ describe('an answer that names no question', () => {
 		await settle();
 		run.send('prompt', { question: 'Go on?', options: ['Yes', 'No'], ...prompt });
 		await settle();
-		await store.replyPermission('Yes');
+		await store.replyPermission(answer);
 		await settle();
-		return { replies: calls.filter((u) => u.endsWith('/reply')).length, pendingAsked };
+		return { replies: calls.filter((u) => u.endsWith('/reply')).length, pendingAsked, drafted };
 	}
+	const say = async (key: string): Promise<string> => (await import('../i18n.svelte.js')).t(key);
 
-	it('is not sent without the question\'s id: the open question comes back with its id, a sentence says so, and the answer goes back into the message field', async () => {
-		const { t } = await import('../i18n.svelte.js');
-		const drafted: string[] = [];
-		store.registerComposerDraft((text) => { drafted.push(text); return true; });
-		const { replies, pendingAsked } = await answerWith({});
-		expect(drafted).toEqual(['Yes']);
+	it('is not sent without the question\'s id: the open question comes back, the field stays empty, and the sentence says another question is open', async () => {
+		const { replies, pendingAsked, drafted } = await answerWith({ prompt: {} });
 		expect(replies, 'an answer without an id went out, to whatever is open').toBe(0);
 		expect(pendingAsked).toBeGreaterThan(0);
 		expect(store.getPendingPermission()?.promptId).toBe('p-open');
-		expect(store.getChatError()).toBe(t('chat.reply_needs_question'));
+		expect(drafted).toEqual([]);
+		expect(store.getChatError()).toBe(await say('chat.reply_needs_question.other'));
 		expect(toasts).toEqual([]);
 	});
 
-	it('a skip sent without the question\'s id puts no marker into the message field', async () => {
-		const drafted: string[] = [];
-		store.registerComposerDraft((text) => { drafted.push(text); return true; });
-		let pendingAsked = 0;
-		const run = openRun((url) => {
-			if (url.endsWith('/pending-prompt')) {
-				pendingAsked++;
-				return json({ pending: true, promptType: 'ask_user', promptId: 'p-open', question: 'Send this mail?', options: ['Yes', 'No'] });
-			}
-			return json({});
-		});
-		void store.sendMessage('go');
-		await settle();
-		run.send('prompt', { question: 'Go on?', options: ['Yes', 'No'] });
-		await settle();
-		await store.replyPermission('__dismissed__');
-		await settle();
+	// The server gives this code only to an answer without an id; a client that sent one anyway
+	// (an older or foreign client's card) is handled the same way, and is not sent again.
+	it('a 409 prompt_id_required for the question still open gives the answer back and says so', async () => {
+		const { replies, drafted } = await answerWith({ prompt: { promptId: 'p-open' } });
+		expect(replies, 'the answer was sent again').toBe(1);
+		expect(store.getPendingPermission()?.promptId).toBe('p-open');
+		expect(drafted).toEqual(['Yes']);
+		expect(store.getChatError()).toBe(await say('chat.reply_needs_question.same'));
+		expect(toasts).toEqual([]);
+	});
+
+	it('a 409 prompt_id_required when another question opened gives nothing back and says another question is open', async () => {
+		const { replies, drafted } = await answerWith({ prompt: { promptId: 'p-seen' } });
+		expect(replies, 'the answer was sent again').toBe(1);
+		expect(store.getPendingPermission()?.promptId).toBe('p-open');
+		expect(drafted).toEqual([]);
+		expect(store.getChatError()).toBe(await say('chat.reply_needs_question.other'));
+	});
+
+	it('a skip puts no marker into the message field', async () => {
+		const { pendingAsked, drafted } = await answerWith({ prompt: { promptId: 'p-open' }, answer: '__dismissed__' });
 		expect(pendingAsked, 'the open question was not brought back, so this proves nothing').toBeGreaterThan(0);
 		expect(drafted).toEqual([]);
 	});
 
-	// The server gives this code only to an answer without an id; a client that sent one anyway
-	// (an older or foreign client's card) is handled the same way.
-	it('a 409 prompt_id_required is not read as answered, and the answer is not sent again', async () => {
-		const { t } = await import('../i18n.svelte.js');
-		const { replies, pendingAsked } = await answerWith({ promptId: 'p-seen' });
-		expect(replies, 'the answer was sent again to whatever is open').toBe(1);
-		expect(pendingAsked).toBeGreaterThan(0);
-		expect(store.getPendingPermission()?.promptId).toBe('p-open');
-		expect(store.getChatError()).toBe(t('chat.reply_needs_question'));
-		expect(toasts).toEqual([]);
+	it('gives a multi-select answer back as its labels', async () => {
+		const { drafted } = await answerWith({ prompt: { promptId: 'p-open', options: ['A', 'B', 'C'], multi_select: true }, answer: JSON.stringify(['A', 'C']) });
+		expect(drafted).toEqual(['A, C']);
+	});
+
+	it('leaves another chat alone when the person switched to it while the open question was fetched', async () => {
+		const { pendingAsked, drafted } = await answerWith({ prompt: { promptId: 'p-open' }, onPending: () => store.newChat() });
+		expect(pendingAsked, 'the open question was not fetched, so this proves nothing').toBeGreaterThan(0);
+		expect(drafted).toEqual([]);
+		expect(store.getChatError()).not.toBe(await say('chat.reply_needs_question.same'));
+		expect(store.getChatError()).not.toBe(await say('chat.reply_needs_question.other'));
 	});
 });
