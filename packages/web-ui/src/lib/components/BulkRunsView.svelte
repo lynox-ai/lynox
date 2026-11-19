@@ -36,6 +36,11 @@
 	const mandate = $derived(isMandateSession());
 	void loadSettingsViewer();
 
+	/** How far a run is, as „applied/total“, or „–“ while it reads its list; the same in the column and in the narrow date line. */
+	function countText(run: BulkRun): string {
+		return bulkReadsList(run) ? t('bulk.head.counts_pending') : `${run.applied}/${run.total}`;
+	}
+
 	function openRun(id: string | null): void {
 		const url = new URL($page.url);
 		if (id === null) url.searchParams.delete('run');
@@ -139,7 +144,9 @@
 								<tr class="border-b border-border hover:bg-bg-muted cursor-pointer" onclick={() => openRun(run.id)}>
 									<td class="py-2 pr-3">
 										<button type="button" class="text-left hover:underline" onclick={(e) => { e.stopPropagation(); openRun(run.id); }}>{bulkListLabel(run, i18n, bulkReadsList(run))}</button>
-										<div class="text-xs text-text-subtle">{when(run.createdAt)}<span class="sm:hidden" data-testid="bulk-run-host-narrow">{` · ${bulkSystemName(run.targetSystem, i18n)}`}</span></div>
+										<!-- Below sm the count and target columns are hidden: the count leads the date line, and the
+										     host stands on a line of its own, broken only where it is wider than the line alone (U-338). -->
+										<div class="text-xs text-text-subtle"><span class="sm:hidden font-mono" data-testid="bulk-run-count-narrow">{countText(run)}</span><span class="sm:hidden">{' · '}</span>{when(run.createdAt)}<span class="block sm:hidden break-words" data-testid="bulk-run-host-narrow">{bulkSystemName(run.targetSystem, i18n)}</span></div>
 									</td>
 									<td class="py-2 pr-3 hidden sm:table-cell" data-testid="bulk-run-host">{bulkSystemName(run.targetSystem, i18n)}</td>
 									<td class="py-2 pr-3">
@@ -150,7 +157,7 @@
 											<span class="{chipClass} whitespace-nowrap bg-warning/15 text-warning">{t('bulk.unmeasured_chip')}</span>
 										{/if}
 									</td>
-									<td class="py-2 pr-3 hidden sm:table-cell font-mono text-xs" data-testid="bulk-run-count">{bulkReadsList(run) ? t('bulk.head.counts_pending') : `${run.applied}/${run.total}`}</td>
+									<td class="py-2 pr-3 hidden sm:table-cell font-mono text-xs" data-testid="bulk-run-count">{countText(run)}</td>
 									<!-- Nothing spent reads as a dash, the same as an empty cell elsewhere in the list (U-338). -->
 									<td class="py-2 hidden sm:table-cell font-mono text-xs" data-testid="bulk-run-cost">{run.costUsd > 0 ? formatCost(run.costUsd) : '–'}</td>
 								</tr>

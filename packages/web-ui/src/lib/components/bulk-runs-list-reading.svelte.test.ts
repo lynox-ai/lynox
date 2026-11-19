@@ -101,7 +101,7 @@ describe('the runs list while a run reads its list', () => {
 	});
 });
 
-// The row names its host once (U-338): below sm in the date line, from sm in the target column. The
+// The row names its host once (U-338): below sm under the date line, from sm in the target column. The
 // title is the size alone, an undo says so in front, and a run that spent nothing shows „–“.
 describe('the runs list names a run\'s host once', () => {
 	async function mountList(): Promise<HTMLTableRowElement[]> {
@@ -124,7 +124,7 @@ describe('the runs list names a run\'s host once', () => {
 			expect(tr.textContent!.split('demo.myshopify.com').length - 1).toBe(2);
 			const narrow = tr.querySelector('[data-testid="bulk-run-host-narrow"]')!;
 			const wide = tr.querySelector('[data-testid="bulk-run-host"]')!;
-			expect(narrow.textContent).toBe(' · demo.myshopify.com');
+			expect(narrow.textContent).toBe('demo.myshopify.com');
 			expect(narrow.classList.contains('sm:hidden')).toBe(true);
 			expect(wide.textContent).toBe('demo.myshopify.com');
 			expect(wide.classList.contains('hidden') && wide.classList.contains('sm:table-cell')).toBe(true);
@@ -145,5 +145,50 @@ describe('the runs list names a run\'s host once', () => {
 		runs = [makeRun({ id: 'none', costUsd: 0 }), makeRun({ id: 'unknown', costUsd: null as unknown as number }), makeRun({ id: 'spent', costUsd: 0.25 })];
 		const costs = (await mountList()).map((tr) => tr.querySelector('[data-testid="bulk-run-cost"]')!.textContent);
 		expect(costs).toEqual(['–', '–', '$0.25']);
+	});
+});
+
+// Below sm the count and target columns are hidden (U-338). The date line then leads with the count, as
+// the column reads it, and the host stands on a line of its own that breaks only where it is wider than
+// the line alone, not after the date mid-value. From sm the line is the date alone, as before.
+describe('the runs list at phone width', () => {
+	async function dateLines(): Promise<{ line: HTMLElement; tr: HTMLTableRowElement }[]> {
+		const { default: BulkRunsView } = await import('./BulkRunsView.svelte');
+		component = mount(BulkRunsView, { target });
+		await settle();
+		return [...target.querySelectorAll<HTMLTableRowElement>('tbody tr')]
+			.filter((tr) => tr.querySelector('[data-testid="bulk-run-count"]'))
+			.map((tr) => ({ tr, line: tr.querySelector<HTMLElement>('[data-testid="bulk-run-host-narrow"]')!.parentElement! }));
+	}
+	/** The text a width shows: below sm everything, a block on its own line; from sm without what is sm:hidden. */
+	const shown = (el: HTMLElement, wide: boolean): string => [...el.childNodes].map((n) => {
+		if (!(n instanceof HTMLElement)) return n.textContent ?? '';
+		if (wide && n.classList.contains('sm:hidden')) return '';
+		return (n.classList.contains('block') ? '\n' : '') + (n.textContent ?? '');
+	}).join('');
+
+	it('leads the date line with the count and puts the host on its own line, and from sm shows the date alone', async () => {
+		runs = [
+			makeRun({ id: 'part', total: 3, applied: 1, phase: 'writing', haltReason: 'stopped', haltKey: 'stoppedByOwner', targetSystem: 'http:lynox-demo-shop.myshopify.com' }),
+			makeRun({ id: 'reading', list: { state: 'pending' } }),
+		];
+		const lines = await dateLines();
+		const date = /\d{2}[./]\d{2}[./]\d{4}, \d{2}:\d{2}/.exec(lines[0]!.line.textContent!)![0];
+		expect(lines.map(({ line }) => shown(line, false))).toEqual([
+			`1/3 · ${date}\nlynox-demo-shop.myshopify.com`,
+			`– · ${date}\ndemo.myshopify.com`,
+		]);
+		expect(lines.map(({ line }) => shown(line, true))).toEqual([date, date]);
+		for (const { line, tr } of lines) {
+			const count = line.querySelector<HTMLElement>('[data-testid="bulk-run-count-narrow"]')!;
+			// The narrow count reads as the column does, and the column still shows from sm only.
+			expect(count.textContent).toBe(tr.querySelector('[data-testid="bulk-run-count"]')!.textContent);
+			expect(count.classList.contains('sm:hidden')).toBe(true);
+			expect(line.firstElementChild).toBe(count);
+			const host = line.querySelector<HTMLElement>('[data-testid="bulk-run-host-narrow"]')!;
+			// Its own line, so it starts at the line's edge; overflow-wrap breaks only a word wider than the line.
+			expect([...host.classList]).toEqual(expect.arrayContaining(['block', 'sm:hidden', 'break-words']));
+			expect(line.lastElementChild).toBe(host);
+		}
 	});
 });
