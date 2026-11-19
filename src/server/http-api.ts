@@ -2988,7 +2988,8 @@ export class LynoxHTTPApi {
   /**
    * E2 (§3.13): a mandate answers only a question its own run asked. Every question the route
    * could answer is checked — the one named by id and the one pending on the session, which a
-   * body without an id answers — so no request reaches a question the check did not see. Both are
+   * body without an id answers on the secret and mailbox routes (`/reply` refuses one) — so no
+   * request reaches a question the check did not see. Both are
    * checked even when an id is given, which refuses more than that request could reach. The question
    * of a scheduled run carries the owner, or the mandate its stamped plan acts for (`planOf`),
    * which then answers it as its own run's question (N1). With no question at all the route

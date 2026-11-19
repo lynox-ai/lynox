@@ -47,8 +47,10 @@ function openRun(route: (url: string) => Response | Promise<Response>): { send: 
 
 describe('a prompt answer that does not arrive', () => {
 	it('is reported after the retry, and the call resolves', async () => {
-		openRun((url) => { if (url.endsWith('/reply')) throw new TypeError('Failed to fetch'); return json({}); });
+		const run = openRun((url) => { if (url.endsWith('/reply')) throw new TypeError('Failed to fetch'); return json({}); });
 		void store.sendMessage('go');
+		await settle();
+		run.send('prompt', { question: 'Go on?', options: ['yes', 'no'], promptId: 'p1' });
 		await settle();
 		await expect(store.replyPermission('yes')).resolves.toBeUndefined();
 		expect(toasts).toEqual([expect.objectContaining({ type: 'error' })]);
@@ -56,18 +58,25 @@ describe('a prompt answer that does not arrive', () => {
 	});
 
 	it('says nothing when it arrives, or when the server gives a final answer such as 400', async () => {
-		openRun(() => json({}));
+		const ok = openRun(() => json({}));
 		void store.sendMessage('go');
 		await settle();
+		ok.send('prompt', { question: 'Go on?', options: ['yes', 'no'], promptId: 'p1' });
+		await settle();
 		await store.replyPermission('yes');
+		expect(calls.filter((u) => u.endsWith('/reply'))).toHaveLength(1);
 		expect(toasts).toEqual([]);
 
 		vi.resetModules();
 		store = await import('./chat.svelte.js');
-		openRun((url) => (url.endsWith('/reply') ? json({ error: 'bad answer' }, 400) : json({})));
+		calls = [];
+		const bad = openRun((url) => (url.endsWith('/reply') ? json({ error: 'bad answer' }, 400) : json({})));
 		void store.sendMessage('go');
 		await settle();
+		bad.send('prompt', { question: 'Go on?', options: ['yes', 'no'], promptId: 'p2' });
+		await settle();
 		await store.replyPermission('yes');
+		expect(calls.filter((u) => u.endsWith('/reply'))).toHaveLength(1);
 		expect(toasts).toEqual([]);
 	});
 });
@@ -501,9 +510,8 @@ describe('why a question was closed, and the lost answer as a draft (UX-064, UX-
 	});
 });
 
-describe('an answer the server takes for no question (409 prompt_id_required)', () => {
-	it('is not read as answered: the open question comes back with its id, a sentence says so, and the answer is not sent again', async () => {
-		const { t } = await import('../i18n.svelte.js');
+describe('an answer that names no question', () => {
+	async function answerWith(prompt: Record<string, unknown>): Promise<{ replies: number; pendingAsked: number }> {
 		let pendingAsked = 0;
 		const run = openRun((url) => {
 			if (url.endsWith('/reply')) return json({ error: 'A question is open: answer it with its promptId.', code: 'prompt_id_required' }, 409);
@@ -515,15 +523,29 @@ describe('an answer the server takes for no question (409 prompt_id_required)', 
 		});
 		void store.sendMessage('go');
 		await settle();
-		// A prompt event without an id: the answer goes out without one.
-		run.send('prompt', { question: 'Go on?', options: ['Yes', 'No'] });
+		run.send('prompt', { question: 'Go on?', options: ['Yes', 'No'], ...prompt });
 		await settle();
 		await store.replyPermission('Yes');
 		await settle();
-		expect(calls.filter((u) => u.endsWith('/reply')), 'the answer was sent again to whatever is open').toHaveLength(1);
+		return { replies: calls.filter((u) => u.endsWith('/reply')).length, pendingAsked };
+	}
+
+	it('is not sent without the question\'s id: the open question comes back with its id and a sentence says so', async () => {
+		const { t } = await import('../i18n.svelte.js');
+		const { replies, pendingAsked } = await answerWith({});
+		expect(replies, 'an answer without an id went out, to whatever is open').toBe(0);
 		expect(pendingAsked).toBeGreaterThan(0);
 		expect(store.getPendingPermission()?.promptId).toBe('p-open');
 		expect(store.getChatError()).toBe(t('chat.reply_needs_question'));
 		expect(toasts).toEqual([]);
+	});
+
+	it('a 409 prompt_id_required is not read as answered, and the answer is not sent again', async () => {
+		const { t } = await import('../i18n.svelte.js');
+		const { replies, pendingAsked } = await answerWith({ promptId: 'p-seen' });
+		expect(replies, 'the answer was sent again to whatever is open').toBe(1);
+		expect(pendingAsked).toBeGreaterThan(0);
+		expect(store.getPendingPermission()?.promptId).toBe('p-open');
+		expect(store.getChatError()).toBe(t('chat.reply_needs_question'));
 	});
 });

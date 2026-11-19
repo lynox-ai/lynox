@@ -2716,6 +2716,9 @@ export async function replyPermission(answer: string): Promise<void> {
 	pendingPermission = null;
 	// The prompt is gone from the screen either way; an answer that did not arrive is said aloud.
 	const sid = sessionId;
+	// Without the question's id the answer is not sent: the server would take it for whatever
+	// question is open by then, so the open one is brought back to be answered by name.
+	if (!promptId) { await reportReply(sid, 'id_required', draftable); return; }
 	await reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId }), draftable);
 }
 
