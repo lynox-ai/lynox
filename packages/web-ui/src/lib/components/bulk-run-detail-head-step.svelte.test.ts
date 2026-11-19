@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { readable } from 'svelte/store';
 import { getLocale, setLocale } from '../i18n.svelte.js';
 import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
-import { bulkStep, type BulkRunDetailData } from './bulk-runs.js';
+import { bulkStep, type BulkRunDetailData, type BulkTarget } from './bulk-runs.js';
 
 // The step chips mark the step a run stands at; the word over a halt says whether it can go on
 // from there (U-342). An approved run that halted before it sent anything stands at its approval
@@ -53,7 +53,14 @@ beforeEach(() => {
 		const u = String(url);
 		const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 		if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
-		if (/\/targets\?/.test(u)) return reply({ targets: [] });
+		// The run's targets, page by page: a run whose rollback left targets loads them whole.
+		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
+		if (page) {
+			const all: BulkTarget[] = Array.from({ length: run.total }, (_, i) => ({
+				seq: i + 1, key: `gid://shopify/Product/${String(i + 1)}`, change: 'update', diff: { kind: 'none' } as BulkTarget['diff'], error: null, deselected: false,
+			}));
+			return reply({ targets: all.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
+		}
 		return reply(run);
 	}));
 });
@@ -112,6 +119,11 @@ describe('the chip marks where a halted run stands', () => {
 			changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 }, applied: 0, conflicts: 0, failed: 0, sentUnknown: 0 };
 		expect(bulkStep(base)).toBe('approval');
 		for (const k of ['applied', 'conflicts', 'failed', 'sentUnknown'] as const) expect(bulkStep({ ...base, [k]: 1 }), k).toBe('run');
+		// A count the page was not given is not taken for none.
+		for (const k of ['applied', 'conflicts', 'failed', 'sentUnknown'] as const) {
+			const { [k]: _gone, ...without } = base;
+			expect(bulkStep(without), `${k} missing`).toBe('run');
+		}
 	});
 });
 
@@ -127,6 +139,27 @@ describe('an aborted run reads that it cannot go on', () => {
 		const { chip, heads } = await render(ROLLED_BACK);
 		expect(chip).toBe('Lauf');
 		expect(heads).toContain('Abgebrochen');
+	});
+
+	it('so does one whose rollback did not complete, and one whose engine sent no halt key', async () => {
+		for (const haltKey of ['atomicRollbackIncomplete', null]) {
+			const { chip, heads } = await render({ ...ROLLED_BACK, haltKey, applied: 1 });
+			expect(chip, String(haltKey)).toBe('Lauf');
+			expect(heads, String(haltKey)).toContain('Abgebrochen');
+			unmount(component!);
+			component = undefined;
+		}
+	});
+
+	it('an atomic run the owner stopped reads „Gestoppt“, rolled back or not completely, and stands at its run', async () => {
+		for (const haltKey of ['atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete']) {
+			const { chip, heads } = await render({ ...ROLLED_BACK, haltKey });
+			expect(chip, haltKey).toBe('Lauf');
+			expect(heads, haltKey).toContain('Gestoppt');
+			expect(heads, haltKey).not.toContain('Abgebrochen');
+			unmount(component!);
+			component = undefined;
+		}
 	});
 
 	it('a run a newer one replaced before its approval reads „Ersetzt“ and marks no step', async () => {
@@ -149,14 +182,17 @@ describe('an aborted run reads that it cannot go on', () => {
 	});
 
 	it('control: a run halted while it read or judged before its approval is halted, not aborted', async () => {
-		const { heads } = await render({ ...halted, phase: 'planned', checksum: null });
+		const { chip, heads } = await render({ ...halted, phase: 'planned', checksum: null });
+		expect(chip).toBe('geplant');
 		expect(heads).toContain('Angehalten');
 		expect(heads).not.toContain('Abgebrochen');
 	});
 
 	it('reads in English as approved', async () => {
 		setLocale('en');
-		expect((await render(ROLLED_BACK)).heads).toContain('Aborted');
+		const rolled = await render(ROLLED_BACK);
+		expect(rolled.heads).toContain('Aborted');
+		expect(rolled.chip).toBe('run');
 		unmount(component!);
 		component = undefined;
 		expect((await render({ phase: 'aborted', haltKey: 'superseded', haltReason: 'engine English', checksum: null })).heads).toContain('Replaced');

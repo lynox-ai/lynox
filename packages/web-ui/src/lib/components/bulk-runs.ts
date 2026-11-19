@@ -154,12 +154,14 @@ export function bulkTakesStartDomains(run: Pick<BulkRunDetailData, 'judge' | 'li
 
 /** The word over a halted run's cause: it says whether the run can go on from there (U-342). An
  *  owner's stop is a stop, not a halt: „angehalten“ is the word of a run that stopped where its
- *  approval, a failure or a limit told it to and can be continued. An aborted run cannot: it
- *  reads „abgebrochen“, or „ersetzt“ where a newer run took its place. */
+ *  approval, a failure or a limit told it to and can be continued. An aborted run cannot: one
+ *  lynox ended reads „abgebrochen“, or „ersetzt“ where a newer run took its place; one the owner
+ *  stopped reads „gestoppt“ as any owner's stop. */
 export function bulkHaltHeadKey(run: Pick<BulkRun, 'haltKey'> & Partial<Pick<BulkRun, 'phase'>>): 'bulk.head.stopped' | 'bulk.head.halted' | 'bulk.head.discarded' | 'bulk.head.aborted' | 'bulk.head.replaced' {
 	// A discarded run reads "Discarded" next to the sentence and the chip that say so (U-324).
 	if (run.haltKey === 'discarded') return 'bulk.head.discarded';
-	if (run.haltKey === 'stoppedByOwner') return 'bulk.head.stopped';
+	// The owner's stop reads the same with or without an atomic rollback after it.
+	if (run.haltKey === 'stoppedByOwner' || run.haltKey === 'atomicStoppedRolledBack' || run.haltKey === 'atomicStoppedRollbackIncomplete') return 'bulk.head.stopped';
 	if (run.phase === 'aborted') return run.haltKey === 'superseded' ? 'bulk.head.replaced' : 'bulk.head.aborted';
 	return 'bulk.head.halted';
 }
@@ -1137,9 +1139,10 @@ export function bulkStep(run: BulkStepRun): BulkStepName | null {
 	return 'done';
 }
 
-/** Whether the run has sent nothing yet: nothing written, in conflict, failed or sent unknown. */
+/** Whether the run has sent nothing yet: nothing written, in conflict, failed or sent unknown. A
+ *  count the page was not given does not count as none: the run then stands at its run. */
 function bulkSentNothing(run: BulkStepRun): boolean {
-	return (run.applied ?? 0) + (run.conflicts ?? 0) + (run.failed ?? 0) + (run.sentUnknown ?? 0) === 0;
+	return [run.applied, run.conflicts, run.failed, run.sentUnknown].every((n) => n === 0);
 }
 
 /** The i18n key of a step's chip. An undone run's last step reads as the list reads its phase
