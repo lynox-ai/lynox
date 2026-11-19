@@ -6,6 +6,15 @@ import { isGraphqlEndpoint } from '../core/outbound-write.js';
 import { isReviewedHeaderName } from '../tools/permission-guard.js';
 import { headerListForNote } from '../core/write-notes.js';
 import { shownParamName } from './workflow-params.js';
+import { isStepIdShape, shownStepId } from './step-id.js';
+
+/**
+ * A contract's host or path as a refusal may quote it. Both are stored text and the refusal reaches
+ * the model, so only one of a plain shape is quoted, else it is described.
+ */
+const PLAIN_HOST_SHAPE = /^[A-Za-z0-9*.-]{1,253}$/;
+const PLAIN_PATH_SHAPE = /^[A-Za-z0-9/_.~%*-]{1,200}$/;
+const shownStored = (text: string, shape: RegExp, described: string): string => (shape.test(text) ? `"${text}"` : described);
 
 /**
  * Base `params.<name>` reference. Captures the base name up to the next path
@@ -108,7 +117,7 @@ export function validateContractAgainstSteps(planned: {
   const unconstrained = [...referenced].filter(p => !constrained.has(p));
   if (unconstrained.length > 0) {
     return (
-      `Capability-contract is invalid: parameter(s) ${unconstrained.join(', ')} flow into a ` +
+      `Capability-contract is invalid: parameter(s) ${unconstrained.map((p) => shownParamName(p)).join(', ')} flow into a ` +
       `tool call but declare no constraint (enum/regex/min-max). A contract-governed workflow ` +
       `must constrain every re-targetable parameter so a run cannot redirect an outbound call.`
     );
@@ -360,13 +369,13 @@ export function reviewedContractShapeError(contract: CapabilityContract, steps: 
   }
   if (contract.hostPatterns.length !== 1) return 'a reviewed grant names exactly one host.';
   const host = contract.hostPatterns[0]!;
-  if (normaliseReviewedHost(host) !== host) return `host "${host}" is not a literal lowercase host name.`;
+  if (normaliseReviewedHost(host) !== host) return `host ${shownStored(host, PLAIN_HOST_SHAPE, '(outside the plain form)')} is not a literal lowercase host name.`;
   const paths = contract.pathPatterns;
   if (paths.length === 0 || paths.length > MAX_REVIEWED_PATHS) {
     return `a reviewed grant names between 1 and ${MAX_REVIEWED_PATHS} paths.`;
   }
   for (const path of paths) {
-    if (!isLiteralReviewedPath(path)) return `path "${path}" is not a literal absolute path.`;
+    if (!isLiteralReviewedPath(path)) return `path ${shownStored(path, PLAIN_PATH_SHAPE, '(outside the plain form)')} is not a literal absolute path.`;
     if (isMailProviderTarget(`https://${host}${path}`)) {
       return `https://${host}${path} is a mail provider's API, and a grant does not cover it. To send from this mailbox, send from the chat, where lynox asks before each email.`;
     }
@@ -399,15 +408,16 @@ export function reviewedContractShapeError(contract: CapabilityContract, steps: 
  * that could be checked here, so it is refused too. A step without a template writes its
  * call at run time, and only the run can refuse its headers.
  */
-function reviewedHeaderError(step: InlinePipelineStep): string | null {
+function reviewedHeaderError(step: InlinePipelineStep, index: number): string | null {
+  const label = isStepIdShape(step.id) ? `"${step.id}"` : shownStepId(step.id, index);
   const template = step.input_template;
   if (template === undefined || !('headers' in template) || template['headers'] === undefined) return null;
   const headers = template['headers'];
   if (headers === null || typeof headers !== 'object' || Array.isArray(headers)) {
-    return `Step "${step.id}" takes its request headers from a value, and a reviewed grant needs each header named.`;
+    return `Step ${label} takes its request headers from a value, and a reviewed grant needs each header named.`;
   }
   const refused = Object.keys(headers).filter((name) => !isReviewedHeaderName(name));
-  return refused.length === 0 ? null : `Step "${step.id}" sets ${headerListForNote(refused)}, which a run under a reviewed grant may not set.`;
+  return refused.length === 0 ? null : `Step ${label} sets ${headerListForNote(refused)}, which a run under a reviewed grant may not set.`;
 }
 
 /**
@@ -450,8 +460,8 @@ export function buildReviewedContract(
   // Checked here, where a person is about to accept, and not in the shape a save checks: an
   // edit drops the grant anyway (`update_workflow`), and refusing it for headers the dropped
   // grant would have refused helps nobody. Without this, every run of an accepted grant fails.
-  for (const step of steps ?? []) {
-    const headerError = reviewedHeaderError(step);
+  for (const [at, step] of (steps ?? []).entries()) {
+    const headerError = reviewedHeaderError(step, at);
     if (headerError !== null) return { error: headerError };
   }
   return { contract };

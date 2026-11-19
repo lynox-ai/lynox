@@ -8,15 +8,37 @@ export type ParamBindResult =
 /**
  * A parameter name as a message may quote it. The messages here reach the model (a run's error) and
  * the owner, and a name stored by an earlier save can hold any visible text, a sentence included.
- * A name of letters, digits, `_` and `-` (at most 64) is quoted; any other is named by its place in
- * the workflow's parameters when that is known, else described. Never the stored text.
+ * A name of ASCII letters, digits, `_` and `-` (at most 40, as a step id) is quoted; any other is
+ * named by its place in the workflow's parameters when that is known, else described. Never the
+ * stored text. ASCII, not any letter: a script without spaces carries a sentence in one token,
+ * and some letters (U+3164 and its kin) read as blanks.
  */
-const PARAM_NAME_SHAPE = /^[\p{L}\p{N}_-]{1,64}$/u;
+const PARAM_NAME_SHAPE = /^[A-Za-z0-9_-]{1,40}$/;
 export const PARAM_NAME_OUTSIDE_SHAPE = '(name outside the allowed form)';
 
 export function shownParamName(name: string, index?: number): string {
   if (PARAM_NAME_SHAPE.test(name)) return `"${name}"`;
   return index === undefined ? PARAM_NAME_OUTSIDE_SHAPE : `#${String(index + 1)} ${PARAM_NAME_OUTSIDE_SHAPE}`;
+}
+
+/**
+ * A contract's allowed values as a refusal may list them: each one plain (ASCII letters, digits and
+ * `_ . : @ + -`, at most 64) and at most ten of them, else only how many there are. The values are
+ * stored text, and the refusal reaches the model.
+ */
+const PLAIN_VALUE_SHAPE = /^[A-Za-z0-9_.:@+-]{1,64}$/;
+const MAX_LISTED_VALUES = 10;
+
+export function shownAllowedValues(values: readonly unknown[]): string {
+  if (values.length === 0) return 'one of: (none)';
+  const plain = values.length <= MAX_LISTED_VALUES && values.every((v) => (typeof v === 'string' || (typeof v === 'number' && Number.isFinite(v))) && PLAIN_VALUE_SHAPE.test(String(v)));
+  if (plain) return `one of: ${values.map(String).join(', ')}`;
+  return values.length === 1 ? "the one value the workflow's contract allows" : `one of the ${String(values.length)} values the workflow's contract allows`;
+}
+
+/** A contract's bound as a refusal may say it: a finite number as it is, else described. */
+function shownBound(bound: unknown, word: 'minimum' | 'maximum'): string {
+  return typeof bound === 'number' && Number.isFinite(bound) ? String(bound) : `the ${word} the workflow's contract sets`;
 }
 
 /**
@@ -98,7 +120,7 @@ export function applyConstraint(
   // save by `validateContractAgainstSteps`; this is the defence-in-depth half.)
   if (c.enum !== undefined) {
     if (!c.enum.some(e => e === value)) {
-      return { ok: false, error: `Parameter ${shown} must be one of: ${c.enum.join(', ') || '(none)'}.` };
+      return { ok: false, error: `Parameter ${shown} must be ${shownAllowedValues(c.enum)}.` };
     }
   }
   if (c.regex !== undefined) {
@@ -129,10 +151,10 @@ export function applyConstraint(
       return { ok: false, error: `Parameter ${shown} must be a numeric parameter for its min/max constraint.` };
     }
     if (c.min !== undefined && value < c.min) {
-      return { ok: false, error: `Parameter ${shown} must be >= ${c.min}.` };
+      return { ok: false, error: `Parameter ${shown} must be >= ${shownBound(c.min, 'minimum')}.` };
     }
     if (c.max !== undefined && value > c.max) {
-      return { ok: false, error: `Parameter ${shown} must be <= ${c.max}.` };
+      return { ok: false, error: `Parameter ${shown} must be <= ${shownBound(c.max, 'maximum')}.` };
     }
   }
   return { ok: true };
