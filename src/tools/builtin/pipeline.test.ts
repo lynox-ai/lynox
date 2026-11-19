@@ -1550,8 +1550,10 @@ describe('runSavedWorkflow', () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain('step #1 (steps[0].id): "params", "__proto__" and "constructor" cannot be step ids');
     expect(result.error).toContain('In a saved workflow, rename the step with rename_step');
-    // Named as a step the owner repairs, so the worker does not retry a run that cannot start.
-    expect(result.unresolvedRefStep).toBe(1);
+    // Named as a step the owner renames, so the worker does not retry a run that cannot start, and
+    // not as an unresolved reference, which the owner would be told something false about.
+    expect(result.reservedIdStep).toBe(1);
+    expect(result.unresolvedRefStep).toBeUndefined();
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
 

@@ -25,7 +25,7 @@ import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 import { sameBoundValues, acceptedValueMatcher, type GrantDecision } from '../../core/workflow-grant.js';
 import { escapeHiddenInJson, fixedRunRefusal, hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
-import { runStepsIssue, stepIdCollision, templateRefStep } from '../../orchestrator/template-refs.js';
+import { stepIdCollision, templateRefIssue, templateRefStep } from '../../orchestrator/template-refs.js';
 import { isStepIdShape, runStepIds, shownStepId, stepIdIssue, stepRunNames } from '../../orchestrator/step-id.js';
 import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
@@ -669,6 +669,9 @@ export interface RunSavedWorkflowResult {
   /** For a refusal because a step refers to the output of a step its run cannot read
    *  (`templateRefIssue`): that step's position, 1-based, which the owner is told in fixed words. */
   unresolvedRefStep?: number | undefined;
+  /** For a refusal because a step's id is one a run already uses (`stepIdCollision`): that step's
+   *  position, 1-based, which the owner is told in fixed words. */
+  reservedIdStep?: number | undefined;
 }
 
 /**
@@ -972,9 +975,14 @@ export async function runSavedWorkflow(
   const writeNotes = new Set<string>();
 
   // A step id the run's context already uses, or a reference no run resolves (`template-refs.ts`),
-  // here before the runner refuses it, so the caller can tell the owner which step in fixed words
-  // (`unresolvedRefStep`) and does not retry a run that cannot start.
-  const refIssue = runStepsIssue(steps, { params: bound.params }, 'steps');
+  // here before the runner refuses it, so the caller can tell the owner which step and why in fixed
+  // words (`reservedIdStep`, `unresolvedRefStep`) and does not retry a run that cannot start.
+  const runContext = { params: bound.params };
+  const collision = stepIdCollision(steps, runContext, 'steps');
+  if (collision !== null) {
+    return { ok: false, error: `Workflow execution failed: Invalid manifest: ${collision}`, reservedIdStep: templateRefStep(collision) };
+  }
+  const refIssue = templateRefIssue(steps, runContext);
   if (refIssue !== null) {
     return { ok: false, error: `Workflow execution failed: Invalid manifest: ${refIssue}`, unresolvedRefStep: templateRefStep(refIssue) };
   }
