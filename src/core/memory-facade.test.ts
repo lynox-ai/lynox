@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { untrustedLineKey } from './memory-line-key.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,14 +12,15 @@ import type { KnowledgeLayer } from './knowledge-layer.js';
  * knowledge layer (the recall authority), so a UI edit/delete actually changes what
  * the agent recalls. These pin the sync matrix + the empty-oldText guard (the T1 bug).
  */
-interface KgCalls { store: string[]; deactivate: string[]; erase: string[]; update: Array<[string, string]> }
+interface KgCalls { store: string[]; deactivate: string[]; erase: string[]; update: Array<[string, string]>; forget: string[][] }
 function spyKg(opts: { throws?: boolean } = {}): { kg: KnowledgeLayer; calls: KgCalls } {
-  const calls: KgCalls = { store: [], deactivate: [], erase: [], update: [] };
+  const calls: KgCalls = { store: [], deactivate: [], erase: [], update: [], forget: [] };
   const kg = {
     store: async (text: string): Promise<unknown> => { if (opts.throws) throw new Error('kg down'); calls.store.push(text); return {}; },
     deactivateByPattern: async (pattern: string): Promise<number> => { if (opts.throws) throw new Error('kg down'); calls.deactivate.push(pattern); return 1; },
     eraseByPattern: async (pattern: string): Promise<number> => { if (opts.throws) throw new Error('kg down'); calls.erase.push(pattern); return 1; },
     updateMemoryText: async (o: string, n: string): Promise<boolean> => { if (opts.throws) throw new Error('kg down'); calls.update.push([o, n]); return true; },
+    forgetUntrustedLines: (_ns: string, keys: string[]): number => { calls.forget.push(keys); return keys.length; },
   } as unknown as KnowledgeLayer;
   return { kg, calls };
 }
@@ -65,6 +67,7 @@ describe('MemoryFacade — doc↔KG mutation sync', () => {
     expect(n).toBe(1);
     expect(await memory.load('knowledge') ?? '').not.toContain('Acme');
     expect(calls.erase).toEqual(['Acme']);
+    expect(calls.forget).toEqual([[untrustedLineKey('fact about Acme')]]); // the erased line's mark goes too
     // No flat-file match STILL erases the KG: a document-ingest row has no flat-file
     // twin, so the old `if (count > 0)` gate is exactly what left it unforgettable.
     await facade.delete('knowledge', 'nonexistent');

@@ -2,7 +2,7 @@ import type { ToolEntry, MemoryNamespace, IAgent, MemoryScopeRef } from '../../t
 import { ALL_NAMESPACES } from '../../types/index.js';
 import { publishMemoryStore } from '../../core/observability.js';
 import { runOutsideCallSlot } from '../../core/call-connection.js';
-import { DATE_PREFIX_RE } from '../../core/memory-facade.js';
+import { DATE_PREFIX_RE, stripLinePrefixes, untrustedLineKey, untrustedLineKeys } from '../../core/memory-line-key.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { parseScopeString, formatScopeRef, isMoreSpecific, SCOPE_PARAM_DESCRIPTION } from '../../core/scope-resolver.js';
 import { estimateTokens } from '../../core/llm-helper.js';
@@ -56,41 +56,51 @@ function cameInUntrusted(agent: IAgent, lines: readonly string[], namespace: Mem
   return false;
 }
 
-const SUPERSEDED_PREFIX_RE = /^\[SUPERSEDED \d{4}-\d{2}-\d{2}\]\s*/;
-
-/** A flat line without the prefixes the writers put before its text, in any order: the date
- *  (`status` lines get one even in front of a `[SUPERSEDED …]` marker) and the marker. */
-function stripLinePrefixes(line: string): string {
-  let rest = line.trim();
-  for (;;) {
-    const next = rest.replace(SUPERSEDED_PREFIX_RE, '').replace(DATE_PREFIX_RE, '');
-    if (next === rest) return rest;
-    rest = next;
-  }
-}
-
 /**
- * Which flat lines of `namespace` came in untrusted, for a path that hands them to the model.
- * A line is marked when an active knowledge row written untrusted contains its text; such a
- * line goes to the model wrapped as untrusted data, which marks the turn that reads it, so the
- * text cannot be stored again as trusted. A line no row vouches either way for is not marked
- * (no graph, no row: there is nothing to read the mark from); a lookup that fails marks every
- * line, so a broken graph does not pass for a clean one.
+ * Which flat lines of `namespace` came in untrusted, for a path that hands them to the model —
+ * and, at write time, whether a line a writer derives new text from was marked. A line is
+ * marked when its key (`untrustedLineKey`) was recorded: a writer of the flat file records the
+ * lines it writes on an untrusted turn, or derives from a marked line (`recordUntrustedLines`).
+ * It is also marked when an active knowledge row written untrusted (or at the
+ * `external_unverified` tier, an upload) contains its text. Such a line goes to the model
+ * wrapped as untrusted data, which marks the turn that reads it, so the text cannot be stored
+ * again as trusted. A line neither vouches for is not marked (no graph: there is nothing to read
+ * the mark from); a lookup that fails marks every line, so a broken graph does not pass for a
+ * clean one.
  */
 function untrustedLinesOf(agent: IAgent, namespace: MemoryNamespace): (line: string) => boolean {
   const kg = agent.toolContext.knowledgeLayer;
-  if (!kg?.untrustedTextsIn) return () => false;
+  if (!kg?.untrustedTextsIn && !kg?.untrustedLineKeysIn) return () => false;
   let texts: string[];
+  let keys: ReadonlySet<string>;
   try {
-    texts = kg.untrustedTextsIn(namespace).map(t => t.toLowerCase());
+    texts = (kg.untrustedTextsIn?.(namespace) ?? []).map(t => t.toLowerCase());
+    keys = kg.untrustedLineKeysIn?.(namespace) ?? new Set<string>();
   } catch {
     return () => true;
   }
-  if (texts.length === 0) return () => false;
+  if (texts.length === 0 && keys.size === 0) return () => false;
   return (line) => {
+    const key = untrustedLineKey(line);
+    if (key === null) return false;
+    if (keys.has(key)) return true;
     const body = stripLinePrefixes(line).toLowerCase();
-    return body.length > 0 && texts.some(t => t.includes(body));
+    return texts.some(t => t.includes(body));
   };
+}
+
+/**
+ * Record `lines` — written to the flat file of `namespace` — as marked, before they are written:
+ * a write whose mark cannot be recorded throws here and is not made. No graph, nothing to record
+ * (the read paths then mark nothing either).
+ */
+function recordUntrustedLines(agent: IAgent, namespace: MemoryNamespace, lines: readonly string[]): void {
+  const kg = agent.toolContext.knowledgeLayer;
+  if (!kg?.markUntrustedLines || lines.length === 0) return;
+  // The append path masks secrets before it writes, so the line in the file can differ from
+  // the text handed in: both are recorded.
+  const mask = agent.memory?.maskText?.bind(agent.memory);
+  kg.markUntrustedLines(namespace, [...new Set(lines.flatMap(l => [...untrustedLineKeys(l), ...(mask ? untrustedLineKeys(mask(l)) : [])]))]);
 }
 
 /** `text` with each line `isUntrusted` holds for wrapped as untrusted data. */
@@ -383,6 +393,9 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
       runId: agent.currentRunId,
     });
     const memory = agent.memory;
+    // Before the write: a line written on an untrusted turn is recorded as marked (it has no
+    // source line to inherit a mark from). A failed record throws, and nothing is written.
+    if (sourceUntrusted) recordUntrustedLines(agent, input.namespace, [input.content]);
     return withInstanceWrite(agent, { site: 'memory_store#create', kind: 'create', store: 'memory', target: () => memoryTarget(input.namespace, ['scope', scopeRef]), main: ['append'] }, async (w) => {
       if (scopeRef) {
         await w.run('append', () => memory.appendScoped(input.namespace, input.content, scopeRef), ifTrue);
@@ -612,6 +625,20 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
     // file is read before and after the edit to tell which lines are new.
     const readFile = async (): Promise<string> => (scopeRef ? await memory.loadScoped(input.namespace, scopeRef) : await memory.load(input.namespace)) ?? '';
     const before = agent.toolContext.knowledgeLayer ? await readFile() : '';
+    // The lines this edit would produce are recorded as marked before it is made, the way
+    // `updateScoped` makes it (first occurrence replaced): when the turn is untrusted, or when
+    // a line the edit rewrites was marked — new text derived from a marked line keeps its mark.
+    if (input.old_content && before.includes(input.old_content)) {
+      const beforeLines = before.split('\n');
+      const afterLines = before.replace(input.old_content, input.new_content).split('\n');
+      const prior = new Set(beforeLines);
+      const after = new Set(afterLines);
+      const produced = afterLines.filter(l => l.trim() && !prior.has(l));
+      const isMarked = untrustedLinesOf(agent, input.namespace);
+      if (produced.length > 0 && (deriveTurnUntrusted(agent) || beforeLines.some(l => l.trim() && !after.has(l) && isMarked(l)))) {
+        recordUntrustedLines(agent, input.namespace, produced);
+      }
+    }
     const exact = await withInstanceWrite(agent, { site: 'memory_update#exact', kind: 'change', store: 'memory', target: () => memoryTarget(input.namespace, ['scope', scopeRef]), main: ['update'] }, async (w) => {
       const exactOk = await w.run('update', () => (scopeRef
         ? memory.updateScoped(input.namespace, input.old_content, input.new_content, scopeRef)
@@ -703,6 +730,14 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
     // The new line replaces the marked ones, so it keeps their mark: read from their knowledge
     // rows in any scope of the namespace (the flat line does not say which scope its row has).
     const replacesUntrusted = cameInUntrusted(agent, linesToRewrite.map(l => l.originalLine), input.namespace);
+    // Recorded as marked before anything is written: a superseded line keeps its own mark, and
+    // the new line is marked when the turn is untrusted or it replaces a marked line.
+    const isMarked = untrustedLinesOf(agent, input.namespace);
+    const rewritesMarked = linesToRewrite.filter(l => isMarked(l.originalLine)).map(l => l.markedLine);
+    recordUntrustedLines(agent, input.namespace, [
+      ...rewritesMarked,
+      ...(deriveTurnUntrusted(agent) || rewritesMarked.length > 0 ? [input.new_content] : []),
+    ]);
 
     // Persist via the same scoped/unscoped path the memory abstraction uses.
     // The IMemory interface doesn't expose a bulk "save" for scoped writes,
@@ -945,6 +980,9 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
     const sourceUntrusted = deriveTurnUntrusted(agent) || cameInUntrusted(agent, [matchedLine], input.namespace, fromRef);
     // The result quotes the line, so a line that came in untrusted is quoted wrapped as such.
     const quoteUntrusted = untrustedLinesOf(agent, input.namespace)(matchedLine);
+    // The copy is the same line in the same namespace, so a recorded mark already covers it;
+    // recorded again when the turn is untrusted or the line is marked another way (its row).
+    if (quoteUntrusted || deriveTurnUntrusted(agent)) recordUntrustedLines(agent, input.namespace, [matchedLine]);
 
     const memory = agent.memory;
     return withInstanceWrite(agent, { site: 'memory_promote#move', kind: 'move', store: 'memory', target: () => memoryTarget(input.namespace, ['from', fromRef], ['to', toRef]), main: ['append', 'delete'] }, async (w) => {
