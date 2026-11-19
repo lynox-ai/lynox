@@ -1395,6 +1395,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	// A message the content check did not send: the body is the engine's own sentence (the note's
 	// detail), the words the chat showed when the run ended; this line only stands in when it is missing.
 	'chat.note.content_refused.title': { de: 'Inhaltsprüfung', en: 'Content check' },
+	'chat.note.run_blocked.title': { de: 'Vor dem Senden geprüft', en: 'Checked before sending' },
+	'chat.note.run_blocked': { de: 'Diese Nachricht ging nicht an das KI-Modell.', en: 'This message was not sent to the AI model.' },
 	'chat.note.content_refused': { de: 'Diese Nachricht ging nicht an das KI-Modell.', en: 'This message was not sent to the AI model.' },
 	'chat.note.context_compacted.title': { de: 'Unterhaltung zusammengefasst', en: 'Conversation summarized' },
 	'chat.note.context_compacted': { de: 'Der Verlauf wurde hier gekürzt, um Kontext freizugeben. Frühere Nachrichten bleiben in deiner Historie, aber der Agent arbeitet ab hier mit einer Zusammenfassung. Fehlt etwas Wichtiges, erinnere ihn kurz daran.', en: 'The history was summarized here to free up context. Earlier messages stay in your history, but the agent now works from a summary. If something important is missing, just remind it.' },

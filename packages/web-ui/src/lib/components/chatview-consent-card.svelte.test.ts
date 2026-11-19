@@ -258,13 +258,16 @@ describe('text typed as the answer', () => {
 			expect(lines()).toEqual([`${i18n.t('chat.typed_answer')} "${locale === 'de' ? 'ja' : 'yes'}"`]);
 			expect(store.getChatError()).toBe(i18n.t('chat.consent_unrecognised'));
 			// The run's result comes after the line, not over it.
-			run.send('done', { result: 'Not sent to the AI model.' });
+			run.send('done', { result: 'Not sent to the AI model.', notice: 'content_refused' });
 			await settle();
 			svelte.flushSync();
 			expect(lines()).toHaveLength(1);
 			expect(target.textContent).toContain('Not sent to the AI model.');
 			const text = target.textContent ?? '';
 			expect(text.indexOf(i18n.t('chat.typed_answer'))).toBeLessThan(text.indexOf('Not sent to the AI model.'));
+			// lynox's own sentence, under the typed answer: a lynox note, not the AI model's words.
+			expect(target.querySelector('[data-engine-notice]')?.textContent).toContain('Not sent to the AI model.');
+			expect(target.querySelector('.ai-badge')).toBeNull();
 		});
 	}
 
