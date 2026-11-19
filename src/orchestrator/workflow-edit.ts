@@ -2,6 +2,7 @@ import type { InlinePipelineStep } from '../types/pipeline.js';
 import { findHiddenInName, stripHiddenInName } from '../core/hidden-text.js';
 import { isStepIdShape, stepIdRefusal, stepRunIds } from './step-id.js';
 import { fieldReferencing } from './template-refs.js';
+import { replacePlaceholders, splitLeadingSpace } from './placeholders.js';
 
 /**
  * A single step-level edit to a workflow's step list. The vocabulary is shared
@@ -116,7 +117,8 @@ function ambiguousText(steps: readonly InlinePipelineStep[], id: string, what: s
 
 /** `text` with every `{{<from>…}}` reference to a step's output pointed at `to`. */
 function renamedRefs(text: string, from: string, to: string): string {
-  return text.replace(/\{\{(\s*)([^}]+)\}\}/g, (match: string, ws: string, path: string) => {
+  return replacePlaceholders(text, (match: string, inner: string) => {
+    const [ws, path] = splitLeadingSpace(inner);
     // As `resolveTaskTemplate` reads a path: trimmed, the step id up to the first dot.
     if (path.trimEnd() !== from && !path.startsWith(`${from}.`)) return match;
     return `{{${ws}${to}${path.slice(from.length)}}}`;
