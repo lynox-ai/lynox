@@ -27,6 +27,7 @@ import { EngineDb } from '../core/engine-db.js';
 import { ApprovalStore, type ApprovalFiling } from '../core/approval-store.js';
 import { MandateEnds } from '../core/mandate-ends.js';
 import { secretsForProfile } from '../core/profile-secret-view.js';
+import { billingTierSet, eraseRefusal } from '../core/sidecar-refusals.js';
 import type { ApiProfile } from '../core/api-store.js';
 import type { SecretStoreLike } from '../types/index.js';
 import type { MailConnectPromptData } from '../types/agent.js';
@@ -593,6 +594,21 @@ function portOf(instance: { boundPort: number | undefined }): number {
 }
 
 let api: InstanceType<typeof LynoxHTTPApi>;
+
+/**
+ * Every grant live, as sign-in leaves the grant of a session it let in. For tests that set a
+ * mandate's principal directly and so skip sign-in: a change asks again whether its grant is
+ * live, and the mock engine has no store, which counts as ended.
+ */
+function liveMandateEnds(): void {
+  let orig: unknown;
+  beforeEach(() => {
+    const engine = (api as unknown as { engine: Record<string, unknown> }).engine;
+    orig = engine['getMandateEnds'];
+    engine['getMandateEnds'] = () => ({ record: (): void => {}, isLive: (): boolean => true });
+  });
+  afterEach(() => { (api as unknown as { engine: Record<string, unknown> }).engine['getMandateEnds'] = orig; });
+}
 let baseUrl: string;
 
 function authHeaders(): Record<string, string> {
@@ -1277,6 +1293,36 @@ describe('LynoxHTTPApi', () => {
       expect(await viewerOf(webUiLoginSession(TEST_SECRET, null)!.token)).toBe('owner');
     });
 
+    it('GET /api/config hands the Web UI the switch the engine refusals name their way out by', async () => {
+      const keys = ['LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE'] as const;
+      const saved = keys.map(k => process.env[k]);
+      onTestFinished(() => { keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; }); });
+      for (const k of keys) delete process.env[k];
+      const owner = webUiLoginSession(TEST_SECRET, null)!.token;
+      const config = async (): Promise<{ managed: unknown; billing_tier_set: unknown }> => {
+        repayRateWindow();
+        const res = await fetch(`${baseUrl}/api/config`, { headers: { cookie: `lynox_session=${owner}` } });
+        expect(res.status).toBe(200);
+        return (await res.json()) as { managed: unknown; billing_tier_set: unknown };
+      };
+      // A value that does not normalize comes back raw in `managed`, where the Web UI's `isManaged()` does not
+      // count it; the engine counts it, and so does the switch.
+      for (const [value, managed, set] of [[undefined, undefined, false], ['managed', 'managed', true], ['gold', 'gold', true]] as const) {
+        if (value === undefined) delete process.env['LYNOX_BILLING_TIER'];
+        else process.env['LYNOX_BILLING_TIER'] = value;
+        const body = await config();
+        expect([body.managed, body.billing_tier_set]).toEqual([managed, set]);
+        expect(eraseRefusal().includes('support@lynox.ai')).toBe(set);
+      }
+      // The legacy alias alone counts the same, also behind an empty canonical name.
+      process.env['LYNOX_BILLING_TIER'] = '';
+      process.env['LYNOX_MANAGED_MODE'] = 'eu';
+      expect((await config()).billing_tier_set).toBe(true);
+      expect(eraseRefusal()).toContain('support@lynox.ai');
+      delete process.env['LYNOX_MANAGED_MODE'];
+      delete process.env['LYNOX_BILLING_TIER'];
+    });
+
     it('takes a target out of a bulk run, or puts it back, for the owner only', async () => {
       repayRateWindow();
       const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
@@ -1912,6 +1958,7 @@ describe('LynoxHTTPApi', () => {
   });
 
   describe('POST /api/tasks — schedule a saved workflow (Slice B2)', () => {
+    liveMandateEnds();
     // This file shares ONE per-IP rate window; the requests of this block are paid back so a
     // test thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
     const rateCounts = (): Map<string, { count: number }> =>
@@ -4832,6 +4879,7 @@ describe('LynoxHTTPApi', () => {
   // principal on every route that stores one; a mandate's answer also leaves a row in its trail
   // naming the question, written before the answer is stored.
   describe('an answer records who gave it', () => {
+    liveMandateEnds();
     const EVA: RequestPrincipal = { kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' };
     type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
     type Ref = { getPromptStore: () => unknown; getAuditLog: () => unknown };
@@ -4918,14 +4966,37 @@ describe('LynoxHTTPApi', () => {
       });
     }
 
-    it('reply without a promptId (the legacy path) records the answerer too', async () => {
+    it('reply without a promptId answers nothing and records nothing, and names the way to answer', async () => {
       await withStore(async (store, rows) => {
         api.setPrincipalResolverForTesting(() => EVA);
         const id = store.insertAskUser('s-legacy', 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: EVA });
         const res = await jsonFetch('/api/sessions/s-legacy/reply', { method: 'POST', body: JSON.stringify({ answer: 'B' }) });
-        expect(res.status).toBe(200);
+        expect(res.status).toBe(409);
+        expect((await res.json() as { code?: string }).code).toBe('prompt_id_required');
+        expect(by(store, id)).toEqual({ status: 'pending', answered_by: null, answered_mandate_id: null });
+        expect(answerRows(rows)).toEqual([]);
+        // The way to answer: the id the open question carries.
+        const open = await (await jsonFetch('/api/sessions/s-legacy/pending-prompt')).json() as { promptId?: string };
+        expect(open.promptId).toBe(id);
+        expect((await jsonFetch('/api/sessions/s-legacy/reply', { method: 'POST', body: JSON.stringify({ promptId: open.promptId, answer: 'B' }) })).status).toBe(200);
         expect(by(store, id)).toEqual({ status: 'answered', answered_by: 'mandate:eva@example.invalid', answered_mandate_id: 'grant-1' });
-        expect(answerRows(rows)).toEqual([{ target: `prompt:${id}`, phase: 'attempt' }]);
+      });
+    });
+
+    it('reply without a promptId does not answer a confirmation that opened after the question the client saw', async () => {
+      await withStore(async (store) => {
+        // The client saw the model's question offering `Yes`; it closed, and a tool's own
+        // confirmation (a mail send asks `Yes`/`No`) opened in its place.
+        const seen = store.insertAskUser('s-swap', 'Go on?', ['Yes', 'No']);
+        expect(store.expirePrompt(seen, 'timed_out')).toBe(true);
+        const send = store.insertAskUser('s-swap', 'Send this mail?', ['Yes', 'No']);
+        const late = await jsonFetch('/api/sessions/s-swap/reply', { method: 'POST', body: JSON.stringify({ answer: 'Yes' }) });
+        expect(late.status).toBe(409);
+        expect(store.getById(send)?.status).toBe('pending');
+        expect(store.getById(send)?.answer ?? null).toBeNull();
+        // Named, it is answered.
+        expect((await jsonFetch('/api/sessions/s-swap/reply', { method: 'POST', body: JSON.stringify({ promptId: send, answer: 'Yes' }) })).status).toBe(200);
+        expect(store.getById(send)?.answer).toBe('Yes');
       });
     });
 
@@ -4960,7 +5031,6 @@ describe('LynoxHTTPApi', () => {
     });
 
     const NO_PROMPT_ID: Array<[label: string, ask: (store: import('../core/prompt-store.js').PromptStore, sid: string) => string, path: string, body: Record<string, unknown>]> = [
-      ['reply (legacy)', (s, sid) => s.insertAskUser(sid, 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: EVA }), 'reply', { answer: 'B' }],
       ['secret-saved', (s, sid) => s.insertAskSecret(sid, 'API_KEY', 'Paste the key', undefined, undefined, { principal: EVA }), 'secret-saved', { status: 'saved' }],
       ['mail-connected', (s, sid) => s.insertConnectMail(sid, 'Connect the office mailbox?', '{}', undefined, { principal: EVA }), 'mail-connected', { status: 'connected' }],
     ];
@@ -5632,6 +5702,61 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('POST /api/secrets/validate-key on an instance connected to a Shopify store checks no key and sends nothing', async () => {
+      // This file shares ONE per-IP rate window: the requests below are paid back after.
+      const rc = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+      const rcBefore = new Map([...rc].map(([k, v]) => [k, v.count]));
+      const { setPinnedTransportForTests } = await import('../core/network-guard.js');
+      const { PROVIDER_NOT_ON_LIST_REFUSAL } = await import('../core/contained-providers.js');
+      // Both ways out of the route: Anthropic's and Mistral's probes use the global fetch, a typed
+      // base URL the pinned transport. Each answers 401, so a probe that went out reads `invalid`
+      // with its own reason, never the refusal.
+      const pinnedHosts: string[] = [];
+      const restoreTransport = setPinnedTransportForTests(async (input) => {
+        pinnedHosts.push(input.hostname);
+        return new Response('{}', { status: 401 });
+      });
+      const realFetch = globalThis.fetch;
+      const PROVIDER_HOSTS = ['https://api.anthropic.com', 'https://api.eu.mistral.ai'];
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((u, init) =>
+        PROVIDER_HOSTS.some((h) => String(u).startsWith(h)) ? Promise.resolve(new Response('{}', { status: 401 })) : realFetch(u, init));
+      const toProviders = (): number => fetchSpy.mock.calls.filter(([u]) => PROVIDER_HOSTS.some((h) => String(u).startsWith(h))).length + pinnedHosts.length;
+      const probes = [
+        { provider: 'anthropic', key: ['sk', 'ant', 'typed'].join('-') },
+        { provider: 'mistral', key: 'typed-mistral-key' },
+        { provider: 'openai', key: 'typed-key', api_base_url: 'https://api.mistral.ai/v1' },
+        { provider: 'custom', key: 'typed-key', api_base_url: 'https://api.mistral.ai/v1' },
+      ];
+      // Set by hand, not vi.stubEnv: unstubAllEnvs would also drop the file's other env settings.
+      const prev = process.env['LYNOX_SHOPIFY_EXCHANGE'];
+      try {
+        process.env['LYNOX_SHOPIFY_EXCHANGE'] = '1';
+        for (const body of probes) {
+          const res = await jsonFetch('/api/secrets/validate-key', { method: 'POST', body: JSON.stringify(body) });
+          expect(res.status, body.provider).toBe(200);
+          // The page picks its sentence by this exact code (web UI `utils/setup-key-check.ts`).
+          expect(await res.json(), body.provider).toEqual({ state: 'invalid', error: PROVIDER_NOT_ON_LIST_REFUSAL, code: 'provider_list_own_key' });
+        }
+        expect(toProviders()).toBe(0);
+        // Control: without the switch a probe goes out to its provider and is not refused. Only the
+        // two with a fixed endpoint: a typed base URL is first resolved for real, which a test
+        // without network would fail for a reason that is not this one.
+        delete process.env['LYNOX_SHOPIFY_EXCHANGE'];
+        for (const body of probes.filter((p) => p.api_base_url === undefined)) {
+          const before = toProviders();
+          const res = await jsonFetch('/api/secrets/validate-key', { method: 'POST', body: JSON.stringify(body) });
+          const json = await res.json() as { state?: string; error?: string };
+          expect(json.error, body.provider).not.toBe(PROVIDER_NOT_ON_LIST_REFUSAL);
+          expect(toProviders(), body.provider).toBe(before + 1);
+        }
+      } finally {
+        fetchSpy.mockRestore();
+        restoreTransport();
+        for (const [k, e] of rc) e.count = rcBefore.get(k) ?? 0;
+        if (prev === undefined) delete process.env['LYNOX_SHOPIFY_EXCHANGE']; else process.env['LYNOX_SHOPIFY_EXCHANGE'] = prev;
+      }
+    });
+
     it('PUT stores a secret', async () => {
       const res = await jsonFetch('/api/secrets/NEW_KEY', {
         method: 'PUT',
@@ -6001,7 +6126,7 @@ describe('LynoxHTTPApi', () => {
     const reEsc = (t: string): string => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     /** The note, then right after it the form with the one button, posting the note's version. */
     const noteThenButton = (note: string, button: string, version = '3'): RegExp =>
-      new RegExp(`<p data-connect-note="${version}">${reEsc(note)}</p><form method="post" action="\\?shown_scopes=[^"]*&amp;shown_note=${version}"><button type="submit">${reEsc(button)}</button></form>`);
+      new RegExp(`<p data-connect-note="${version}">${reEsc(note)}</p><form method="post" action="\\?shown_scopes=[^"]*&amp;shown_note=${version}(?:&amp;shown_consent=[0-9a-f]{16})?"><button type="submit">${reEsc(button)}</button></form>`);
 
     it('shows a mandate\'s session the note before a connect that only reads, and starts nothing', async () => {
       const r = await connect(TAG, true, 'books', { method: 'GET', lang: 'de-CH,de;q=0.9,en;q=0.8' });
@@ -6046,7 +6171,7 @@ describe('LynoxHTTPApi', () => {
       const scope = 'openid offline_access contact_show kb_invoice_edit note_edit';
       const page = await connect(TAG, true, 'books', { method: 'GET', scope });
       const action = /<form method="post" action="([^"]+)">/.exec(page.text)?.[1]?.replaceAll('&amp;', '&') ?? '';
-      expect(action).toMatch(/^\?shown_scopes=.+&shown_note=3$/);
+      expect(action).toMatch(/^\?shown_scopes=.+&shown_note=3&shown_consent=[0-9a-f]{16}$/);
       const without = await connect(TAG, true, 'books', { method: 'POST', scope, query: action.replace('&shown_note=3', '') });
       expect(without.status).toBe(409);
       expect(without.text).toContain('another note than the page you confirmed');
@@ -6195,14 +6320,14 @@ describe('LynoxHTTPApi', () => {
     // approved; change it only with a new approval.
     const APPROVED = [
       'lynox kann in bexio Kontakte, Notizen, Aufgaben, Offerten und Rechnungen anlegen und ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt lynox vorher der Person, für die es gerade arbeitet, mit allem, was lynox an bexio schickt. Das kann auch jemand sein, dem der Inhaber dieser lynox-Instanz Zugang gegeben hat. Der Schritt geschieht erst nach einem Ja dieser Person oder des Inhabers; das Ja einer Person mit Zugang gilt für diese Verbindung, und lynox protokolliert jede solche Anfrage. Ohne ein solches Ja schreibt lynox nicht in bexio, auch nicht in einem geplanten Ablauf: Dort wartet der Schritt auf die Antwort, und kommt keine, unterbleibt er. Das gilt auch, wenn lynox eine Zahlung auf einer Rechnung erfasst oder eine Rechnung storniert.',
-      'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
-      'Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.',
+      'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was in dieser Liste steht.',
+      'Für Buchhaltung, Bank und Lohn fragt lynox bei bexio keine Rechte an. Welche Rechte der Zugang am Ende erhält, legt bexio fest. Gewährt bexio mehr, als lynox anfragt, gilt auch dafür: kein Schreibschritt ohne Ja, ausser im Massenlauf wie oben.',
     ];
     // The page around it, approved 2026-10-21 under the same rule.
     const APPROVED_FRAME = {
       title: 'Schreibrechte für bexio bestätigen',
-      scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in bexio:',
-      scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Ein Massenlauf nutzt davon nur einen kleinen Teil. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
+      scopesIntro: 'lynox fragt bei bexio diese Schreibrechte an:',
+      scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Ein Massenlauf ändert nur, was in seiner Liste steht. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
       button: 'Zustimmen und weiter zu bexio',
       afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in bexio.',
     };
@@ -6261,7 +6386,10 @@ describe('LynoxHTTPApi', () => {
       }
     }
     // What the page's form posts to: the scopes it was shown for, in the order the link asks.
-    const SHOWN = '?shown_scopes=openid+offline_access+contact_show+kb_invoice_edit+note_edit';
+    const SHOWN_SCOPES = '?shown_scopes=openid+offline_access+contact_show+kb_invoice_edit+note_edit';
+    // The version of the bexio customer text the page shows (`consentNoticeVersion`), held below.
+    const BEXIO_VERSION = '3347d732bbb7b688';
+    const SHOWN = `${SHOWN_SCOPES}&shown_consent=${BEXIO_VERSION}`;
     const confirm = { method: 'POST', contentType: 'application/x-www-form-urlencoded', body: '', query: SHOWN };
 
     it('holds the approved wording in the preset, byte for byte', async () => {
@@ -6305,30 +6433,36 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
-      it('without one, is a plain frame in the text\'s language: German for a German text', () => {
+      it('without one, is a plain frame in the text\'s language: German for a German text', async () => {
+        const { consentNoticeVersion } = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
+        const v = consentNoticeVersion(TEXT);
         expect(consentPageHtml(TEXT, SCOPES)).toBe(oauthPageHtml('de', 'Verbindung bestätigen',
           '<h1>Verbindung bestätigen</h1>'
           + '<div lang="de"><p>Erster Absatz.</p><p>Zweiter &amp; &lt;letzter&gt;.</p></div>'
           + '<p>Schreibrechte, die diese Verbindung verlangt: kb_invoice_edit, note_edit</p>'
-          + '<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit"><button type="submit">Weiter</button></form>'));
+          + `<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit&amp;shown_consent=${v}">`+'<button type="submit">Weiter</button></form>'));
       });
 
-      it('without one, is the English plain frame for a text in any other language', () => {
+      it('without one, is the English plain frame for a text in any other language', async () => {
+        const { consentNoticeVersion } = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
+        const v = consentNoticeVersion({ ...TEXT, lang: 'fr' });
         expect(consentPageHtml({ ...TEXT, lang: 'fr' }, SCOPES)).toBe(oauthPageHtml('en', 'Authorization',
           '<h1>Authorization</h1>'
           + '<div lang="fr"><p>Erster Absatz.</p><p>Zweiter &amp; &lt;letzter&gt;.</p></div>'
           + '<p>Write access this connection asks for: kb_invoice_edit, note_edit</p>'
-          + '<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit"><button type="submit">Continue</button></form>'));
+          + `<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit&amp;shown_consent=${v}">`+'<button type="submit">Continue</button></form>'));
       });
 
-      it('with one, is wholly in the text\'s language and names each write access in the order asked', () => {
+      it('with one, is wholly in the text\'s language and names each write access in the order asked', async () => {
+        const { consentNoticeVersion } = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
+        const v = consentNoticeVersion({ ...TEXT, frame: FRAME, scopeNames: NAMES });
         expect(consentPageHtml({ ...TEXT, frame: FRAME, scopeNames: NAMES }, SCOPES)).toBe(oauthPageHtml('de', 'Titel',
           '<h1>Titel</h1>'
           + '<p>Erster Absatz.</p><p>Zweiter &amp; &lt;letzter&gt;.</p>'
           + '<p>Vor der Liste:</p>'
           + '<ul><li>Rechnungen: Schreibzugriff</li><li>Notizen: Schreibzugriff</li></ul>'
           + '<p class="small">Nach der Liste.</p>'
-          + '<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit"><button type="submit">Zustimmen</button></form>'
+          + `<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit&amp;shown_consent=${v}">`+'<button type="submit">Zustimmen</button></form>'
           + '<p class="small">Nach dem Knopf.</p>'));
       });
 
@@ -6363,7 +6497,7 @@ describe('LynoxHTTPApi', () => {
         + `<p>${APPROVED_FRAME.scopesIntro}</p>`
         + `<ul><li>${APPROVED_NAMES.kb_invoice_edit}</li><li>${APPROVED_NAMES.note_edit}</li></ul>`
         + `<p class="small">${APPROVED_FRAME.scopesNote}</p>`
-        + `<form method="post" action="${SHOWN}"><button type="submit">${APPROVED_FRAME.button}</button></form>`
+        + `<form method="post" action="${SHOWN.replace('&', '&amp;')}"><button type="submit">${APPROVED_FRAME.button}</button></form>`
         + `<p class="small">${APPROVED_FRAME.afterButton}</p>`));
       // Sent with the frame's one stylesheet admitted, and nothing else.
       expect(r.csp).toBe(OAUTH_CONSENT_CSP);
@@ -6389,6 +6523,46 @@ describe('LynoxHTTPApi', () => {
       const link = new URL(r.location);
       expect(link.host).toBe('auth.bexio.com');
       expect(link.searchParams.get('scope')?.split(' ')).toEqual(expect.arrayContaining(['kb_invoice_edit', 'note_edit']));
+    });
+
+    // The callback records as asked what this cookie carries, so it has to be exactly what the
+    // link asks for and the page showed: the scopes the confirmation was checked against.
+    it('signs into the cookie exactly the scopes the confirmed link asks for', async () => {
+      const r = await open(WRITING, confirm);
+      expect(r.status).toBe(302);
+      const value = decodeURIComponent((r.state ?? '').split(';')[0]!.slice('lynox_profile_oauth_state='.length));
+      const { verifyProfileOAuthState } = await import('../core/oauth-state-cookie.js');
+      const read = verifyProfileOAuthState(value, TEST_SECRET, Math.floor(Date.now() / 1000));
+      expect(read?.asked).toEqual(new URL(r.location).searchParams.get('scope')?.split(' '));
+      expect(read?.asked).toEqual(SHOWN_SCOPES.slice('?shown_scopes='.length).split('+'));
+      // And the version of the text the page showed, which the callback records.
+      expect(read?.consent).toBe(BEXIO_VERSION);
+    });
+
+    it('holds the version the page carries equal to the text\'s', async () => {
+      const presets = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
+      expect(presets.consentNoticeVersion(presets.OAUTH_PRESETS.get('bexio')!.consentNotice!)).toBe(BEXIO_VERSION);
+    });
+
+    // A page rendered before the text changed: the confirmation does not hold for the new text.
+    // Refused before anything goes to the provider: no cookie, no redirect.
+    it.each([
+      ['without the version it showed', SHOWN_SCOPES],
+      ['for another version of the text', `${SHOWN_SCOPES}&shown_consent=0123456789abcdef`],
+    ])('refuses a confirmation %s, and sends nothing to the provider', async (_label, query) => {
+      const r = await open(WRITING, { ...confirm, query });
+      expect(r.status).toBe(409);
+      expect(r.text).toContain('changed while you had the page open');
+      expect(r.state).toBeNull();
+      expect(r.location).toBe('');
+    });
+
+    it('refuses a confirmation when the profile now asks for more than the page showed, and sets no cookie', async () => {
+      const r = await open(`${WRITING} contact_edit`, confirm);
+      expect(r.status).toBe(409);
+      expect(r.text).toContain('asks for other access than the page you confirmed showed');
+      expect(r.state).toBeNull();
+      expect(r.location).toBe('');
     });
 
     it.each([
@@ -9810,6 +9984,7 @@ describe('LynoxHTTPApi', () => {
     // started it, and by nobody else, on any route about it: the dispatcher checks the chat a
     // route names (`readsThread`), and the lists leave the chat's text out.
     describe('a contained chat is read only by the owner and by whoever started it', () => {
+      liveMandateEnds();
       const EVA: RequestPrincipal = { kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' };
       type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
       let cookieResolver: Resolver;
@@ -11130,6 +11305,28 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    it('GET /api/triggers gives a bulk run\'s trigger the host its run works on, null without one or when its run cannot be read, and no other trigger the field', async () => {
+      const bulk = [
+        { id: 'bulk-ext', title: 'Bulk run r-ext', effect: 'bulk_apply', bulk_run_id: 'r-ext' },
+        { id: 'bulk-store', title: 'Bulk preview r-store', effect: 'bulk_preview', bulk_run_id: 'r-store' },
+        { id: 'bulk-gone', title: 'Bulk undo r-gone', effect: 'bulk_undo', bulk_run_id: 'r-gone' },
+        // A run whose read throws: its row shows no host, and the list stands.
+        { id: 'bulk-bad', title: 'Bulk judge r-bad', effect: 'bulk_judge', bulk_run_id: 'r-bad' },
+        { id: 'trg-agent', title: 'agent', effect: 'run_agent' },
+      ];
+      const systems: Record<string, string> = { 'r-ext': 'http:demo-shop.myshopify.com', 'r-store': 'data_store' };
+      await withEngine({
+        getTaskManager: () => ({ listTriggers: () => bulk }),
+        getWorkerLoop: () => null,
+        getBulkLedger: () => ({ getRunForApply: (id: string) => { if (id === 'r-bad') throw new Error('SQLITE_CORRUPT'); return systems[id] === undefined ? null : { targetSystem: systems[id] }; } }),
+      }, async () => {
+        const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+        expect(triggers.map((t) => [t.id, Object.hasOwn(t, 'bulk_host') ? t['bulk_host'] : 'absent'])).toEqual([
+          ['bulk-ext', 'demo-shop.myshopify.com'], ['bulk-store', null], ['bulk-gone', null], ['bulk-bad', null], ['trg-agent', 'absent'],
+        ]);
+      });
+    });
+
     it('GET /api/triggers says false for every row when there is no worker loop', async () => {
       await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => null }, async () => {
         expect(await flagsOf()).toEqual([['trg-agent', false, false], ['trg-backup', false, false], ['trg-idle', false, false]]);
@@ -12128,6 +12325,32 @@ describe('LynoxHTTPApi', () => {
       rmSync(bulkDir, { recursive: true, force: true });
     });
 
+    describe('discarding a run before approving it', () => {
+      it('discards a previewed run, answers it as discarded, and an approval of it is refused afterwards', async () => {
+        repayRateWindow();
+        const id = planRun();
+        const checksum = bulkLedger.computeChecksum(id)!;
+        const res = await jsonFetch(`/api/bulk/runs/${id}/discard`, { method: 'POST', body: '{}' });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ phase: 'aborted', haltKey: 'discarded' });
+        const approve = await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum }) });
+        expect(approve.status).toBe(409);
+        expect(bulkLedger.getStatus(id)!.phase).toBe('aborted');
+      });
+
+      it('refuses an approved run by its code and leaves it approved, and answers 404 for a run that is not there', async () => {
+        repayRateWindow();
+        const id = planRun();
+        const ok = bulkLedger.approve(id, { checksum: bulkLedger.computeChecksum(id)!, maxTargets: 1 });
+        if (!ok.ok) throw new Error(ok.reason);
+        const res = await jsonFetch(`/api/bulk/runs/${id}/discard`, { method: 'POST', body: '{}' });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: 'not_discardable' });
+        expect(bulkLedger.getStatus(id)!.phase).toBe('approved');
+        expect((await jsonFetch('/api/bulk/runs/no-such-run/discard', { method: 'POST', body: '{}' })).status).toBe(404);
+      });
+    });
+
     describe('taking a target out before approving (PRD shopify-preset §20.2 item 4)', () => {
       it('deselects with the checksum the owner saw, answers the new one, and puts it back', async () => {
         repayRateWindow();
@@ -12331,6 +12554,16 @@ describe('LynoxHTTPApi', () => {
       expect(shown['writeFormNote']).toBeNull();
       // A store's product list without a filter names an empty set, so the page says every status is read.
       expect(shown['listFilters']).toEqual({});
+      // The page words a target it leaves out and the halt's step by the stored form and whether the
+      // judge decides the description.
+      expect([shown['listForm'], shown['judgesHtml']]).toEqual(['shopify', false]);
+      const judge = normalizeJudgeRule({ rule: 'Write a description.', schema: { descriptionHtml: { type: 'string', maxLength: 100 } } }, { htmlFields: ['descriptionHtml'] });
+      const judgedSource = parseListSource(host, { form: 'shopify', filters: { vendor: 'Acme' }, after: judgeTemplate(judge) }, 'PATCH', () => null);
+      bulkDb.getDb().prepare('DELETE FROM bulk_runs').run();
+      const judged = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source: judgedSource, readContract: listReadContract(host, judgedSource), judge });
+      if (!judged.ok) throw new Error('not planned');
+      const judgedShown = await (await jsonFetch(`/api/bulk/runs/${judged.status.id}`)).json() as Record<string, unknown>;
+      expect([judgedShown['listForm'], judgedShown['judgesHtml']]).toEqual(['shopify_filtered', true]);
     });
 
     it('shows a list whose stored filters were changed past what a parse takes by its host, without failing and with no store filters, and a withdrawn path as its address', async () => {
@@ -12363,6 +12596,7 @@ describe('LynoxHTTPApi', () => {
       expect(shown['listStartChecksum']).toBe(bulkLedger.listStartChecksum(id));
       expect(shown['list']).toMatchObject({ state: 'pending', filters: { category: '12' }, idField: 'id', method: 'PUT', after: { status: 'draft' } });
       expect(shown['listNote']).toBe(BULK_LIST_NOTE);
+      expect(shown['listForm']).toBe('woocommerce');
 
       const resume = (body: unknown): Promise<Response> => jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify(body) });
       expect((await resume({})).status).toBe(400);
@@ -12400,6 +12634,35 @@ describe('LynoxHTTPApi', () => {
       // Not the network policy: a GID read as an address would be refused there. The store's
       // credential needs a store pass, which the S5 measurement exercises (PRD shopify-preset §16.10).
       expect(bulkLedger.getStatus(id)!.phase).toBe('previewed');
+    });
+
+    // A write the mint leaves out (PRD shopify-preset §21.7, #4c) leaves the run a Shopify run: the
+    // approve and resume routes check its reach at the store's endpoint, as for any Shopify run.
+    it('checks the reach of a Shopify run whose description write the mint leaves out at its store\'s endpoint, on approve and on resume', async () => {
+      const host = 'acme.myshopify.com';
+      const gid = 'gid://shopify/Product/7';
+      const source = parseListSource(host, { form: 'shopify', after: { descriptionHtml: '<p>Neu</p>' } }, 'PATCH', () => null);
+      const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      expect(bulkLedger.resumePreview(id, Date.now(), { listChecksum: bulkLedger.listStartChecksum(id)! }).ok).toBe(true);
+      bulkLedger.recordListPage(id, { page: 1, items: [{ key: gid, id: gid }], bytes: 10, lastId: 7 });
+      expect(bulkLedger.finishList(id, () => listReadContract(host, source))).toBe('listed');
+      expect(bulkLedger.resumePreview(id).ok).toBe(true);
+      bulkLedger.recordRead(id, 0, { before: { descriptionHtml: '<p>Alt</p>' } });
+      expect(bulkLedger.finishPreview(id)).toBe(true);
+      // Past the preview's check, as a ledger changed after it would hold it.
+      bulkDb.getDb().prepare('UPDATE bulk_targets SET after_planned = ? WHERE run_id = ? AND seq = 0')
+        .run(bulkDb.enc(JSON.stringify({ descriptionHtml: '<p>Neu</p><script>steal()</script>' })), id);
+      const body = JSON.stringify({ checksum: bulkLedger.computeChecksum(id), unmeasuredConfirmed: true, maxTargets: 1 });
+      for (const route of ['approve', 'resume']) {
+        const refused = await jsonFetch(`/api/bulk/runs/${id}/${route}`, { method: 'POST', body });
+        expect(((await refused.json()) as { error: string }).error, route).toMatch(/stored credential for this run's host cannot be attached/);
+        expect(refused.status, route).toBe(409);
+      }
+      expect(bulkLedger.getStatus(id)!.phase).toBe('previewed');
+      // The write is left out; the run stays one the routes read as a Shopify run.
+      expect(bulkLedger.shopifyApplyOf(id)).toMatchObject({ reads: [gid], writes: [] });
     });
 
     // A bulk run writes, and a profile on bexio's API that does not go through the provider gets
@@ -12447,6 +12710,8 @@ describe('LynoxHTTPApi', () => {
         const id = judgedRun();
         const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
         expect(shown['judgeRule']).toEqual({ rule: RULE.rule, schema: RULE.schema, tier: 'fast' });
+        // A data-store run reads no list and has no HTML field.
+        expect([shown['listForm'], shown['judgesHtml']]).toEqual([null, false]);
         expect(shown['judgeRuleHash']).toBe(bulkLedger.getJudgeRuleForOwner(id)!.hash);
         expect(typeof shown['judgeModel']).toBe('string');
         // Who judges, as the start names it: the provider whose decided model this is, and the
@@ -17984,6 +18249,7 @@ describe('POST /api/push/subscribe', () => {
 // channel's rules (who it reaches, the end, the caps) are its own tests; here the routes hand it
 // the request's principal and refuse what is not the mandate's. The owner is the control.
 describe('push routes and a mandate\'s session', () => {
+  liveMandateEnds();
   const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'eva@example.invalid', mandateId: 'TEST-MANDATE-1' };
   const sub = (endpoint: string) => ({ subscription: { endpoint, keys: { p256dh: 'p', auth: 'a' } } });
   const rateCounts = (): Map<string, { count: number }> =>
@@ -19989,7 +20255,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     mockSecretSet.mockReset();
   });
 
-  async function arrange(opts: { base?: string; oauthExtra?: Record<string, unknown>; tokenBody?: string; by?: import('../core/oauth-state-cookie.js').ConnectingPrincipal } = {}): Promise<{ cookie: string; store: InstanceType<Awaited<typeof import('../core/api-store.js')>['ApiStore']> }> {
+  async function arrange(opts: { base?: string; oauthExtra?: Record<string, unknown>; tokenBody?: string; by?: import('../core/oauth-state-cookie.js').ConnectingPrincipal; asked?: string[]; consent?: string } = {}): Promise<{ cookie: string; store: InstanceType<Awaited<typeof import('../core/api-store.js')>['ApiStore']> }> {
     const { ApiStore } = await import('../core/api-store.js');
     const store = new ApiStore();
     expect(store.register({
@@ -20007,7 +20273,11 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     mockExchangeToken.mockReset();
     mockExchangeToken.mockResolvedValue({ ok: true, status: 200, responseOk: true, text: opts.tokenBody ?? JSON.stringify({ access_token: 'at-1', scope: 'read_products,read_orders' }) });
     const { signProfileOAuthState } = await import('../core/oauth-state-cookie.js');
-    const cookie = signProfileOAuthState({ state: STATE, profileId: PROFILE, verifier: VERIFIER, by: opts.by ?? { tag: 'owner' } }, TEST_SECRET, Math.floor(Date.now() / 1000));
+    // What the confirmed start signs: the scopes its link asks for, as the route computes them.
+    const { askedScopes } = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
+    const scope = opts.oauthExtra?.['scope'];
+    const asked = opts.asked ?? askedScopes({ preset_id: 'shopify', scope: typeof scope === 'string' ? scope : undefined }) ?? [];
+    const cookie = signProfileOAuthState({ state: STATE, profileId: PROFILE, verifier: VERIFIER, by: opts.by ?? { tag: 'owner' }, asked, consent: opts.consent }, TEST_SECRET, Math.floor(Date.now() / 1000));
     if (cookie === null) throw new Error('fixture could not be signed');
     return { cookie: `lynox_profile_oauth_state=${encodeURIComponent(cookie)}`, store };
   }
@@ -20187,6 +20457,41 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products', 'write_products']);
   });
 
+  // What counts as asked is what the confirmed start signed. A save between the start and the
+  // callback that adds a scope changes the next link, not this consent: the grant does not record
+  // it as asked, and the page names it as granted beyond the ask.
+  it('records as asked what the start signed, not the profile as the callback reads it', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const { cookie, store } = await arrange({ oauthExtra: { scope: 'read_products' }, asked: ['read_products'], tokenBody: JSON.stringify({ access_token: 'at-1', scope: 'read_products,write_files' }) });
+    const before = store.get(PROFILE)!;
+    expect(store.register({ ...before, auth: { ...before.auth!, oauth: { ...before.auth!.oauth!, scope: 'read_products write_files' } } })).toBe(true);
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('The provider granted more access than this connection asks for: write_files.');
+    expect(store.get(PROFILE)?.oauth_grant?.asked_scope).toEqual(['read_products']);
+    expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products', 'write_files']);
+  });
+
+  // Which customer text the person confirmed is what the confirmed start signed: recorded with its
+  // time, and a start whose page showed no text records none.
+  it('records the version of the customer text the start signed', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const shown = await arrange({ consent: '0123456789abcdef' });
+    const before = Date.now();
+    expect((await call(signed(good()), shown.cookie)).status).toBe(200);
+    const grant = shown.store.get(PROFILE)?.oauth_grant;
+    expect(grant?.consent_version).toBe('0123456789abcdef');
+    expect(Date.parse(grant?.consented_at ?? '')).toBeGreaterThanOrEqual(before - 1000);
+  });
+
+  it('records no version for a start whose page showed no text', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const none = await arrange();
+    expect((await call(signed(good()), none.cookie)).status).toBe(200);
+    expect(none.store.get(PROFILE)?.oauth_grant?.consent_version).toBeUndefined();
+    expect(none.store.get(PROFILE)?.oauth_grant?.consented_at).toBeUndefined();
+  });
+
   it('says only "Connected" for a grant narrower than the ask, and records it as granted', async () => {
     repayRateWindow(); // this file shares one per-IP rate window
     const { cookie, store } = await arrange({ oauthExtra: { scope: 'read_products read_orders' }, tokenBody: JSON.stringify({ access_token: 'at-1', scope: 'read_products' }) });
@@ -20271,6 +20576,22 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
       });
     });
     afterEach(() => { engineRef()['getMandateEnds'] = origEnds; engineRef()['getSecretReleases'] = origReleases; });
+
+    // Only the owner's yes counts: a mandate's reconnect records no version, drops the owner's it
+    // replaced, and a run of a new form stays held while a run of the old one writes.
+    it('records no version for a mandate\'s reconnect, and drops the owner\'s it replaced', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID }, consent: '0123456789abcdef' });
+      store.register({ ...store.get(PROFILE)!, created_by: TAG, oauth_grant: { origin: 'callback', consent_version: '0123456789abcdef', consented_at: '2026-11-27T10:00:00.000Z' } });
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      const grant = store.get(PROFILE)?.oauth_grant;
+      expect(grant).toMatchObject({ connected_by: TAG, connected_mandate_id: MID });
+      expect(grant?.consent_version).toBeUndefined();
+      expect(grant?.consented_at).toBeUndefined();
+      const { shopifyConsentBlock } = await import('../core/bulk-shopify.js');
+      expect(shopifyConsentBlock({ form: 'shopify_product', writes: [{ after: { descriptionHtml: '<p>a</p>' } }] }, grant)).toEqual(['descriptionHtml']);
+      expect(shopifyConsentBlock({ form: 'shopify_product', writes: [{ after: { seo_title: 'a' } }] }, grant)).toEqual([]);
+    });
 
     it('control: stores the token for a mandate when the profile still names the store', async () => {
       repayRateWindow(); // this file shares one per-IP rate window
@@ -21552,6 +21873,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       origin: 'callback', state: 'revoked', revoked_fp: 'dead-fp', revoked_at: '2026-01-01T00:00:00.000Z',
       minted_by: 'old-client-fp', minted_for: 'old-token-fp', connected_by: 'mandate:eva@kanzlei.example',
       connected_mandate_id: 'm-old', a_future_field: 'from the old grant',
+      consent_version: '0123456789abcdef', consented_at: '2026-01-01T00:00:00.000Z',
     } as import('../core/api-store.js').OAuthGrantRecord;
     const { cookie, store } = await arrange({ grant: old });
 
@@ -21561,7 +21883,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     expect(res.status).toBe(200);
 
     const grant = store.get(PROFILE)?.oauth_grant ?? {};
-    expect(Object.keys(grant).sort()).toEqual(['connected_by', 'minted_by', 'minted_for', 'origin', 'state', 'written']);
+    expect(Object.keys(grant).sort()).toEqual(['asked_scope', 'connected_by', 'minted_by', 'minted_for', 'origin', 'state', 'written']);
     expect(grant).toMatchObject({ origin: 'callback', state: 'connected', connected_by: 'owner' });
   });
 });
@@ -21593,6 +21915,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
   }
 
   describe('as a mandate', () => {
+    liveMandateEnds();
     beforeEach(() => {
       asMandate();
       mockTaskCreate.mockClear(); mockTaskCreatePipeline.mockClear(); mockSetWorkflowConfirmedAt.mockClear();
@@ -21632,7 +21955,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       expect(mockConfirmTrigger).not.toHaveBeenCalled();
     });
 
-    it.each(['approve', 'resume', 'confirm-probe', 'undo'])('may not %s a bulk run', async (verb) => {
+    it.each(['approve', 'resume', 'confirm-probe', 'undo', 'discard'])('may not %s a bulk run', async (verb) => {
       const res = await jsonFetch(`/api/bulk/runs/run-1/${verb}`, { method: 'POST', body: '{}' });
       expect(res.status).toBe(403);
       expect(((await res.json()) as { error: string }).error).toContain('Only the owner');
@@ -22181,6 +22504,7 @@ describe('mayStopRun — who may stop a run (§3.13 E7)', () => {
 // after, joined by one correlation id; a request whose attempt cannot be written is refused
 // and does not act. The owner leaves no trail here. The rows are read from a real engine.db.
 describe('actor trail — what a mandate\'s request leaves in audit_log', () => {
+  liveMandateEnds();
   const MANDATE: RequestPrincipal = {
     kind: 'mandate', email: 'recipient@example.invalid', display: 'TEST-DISPLAY', mandateId: 'TEST-MANDATE-1',
   };
@@ -22430,9 +22754,9 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
 
   describe('DELETE /api/workflows/:id', () => {
     // Owner-only: deleting a workflow silences every schedule that runs it. The stance refuses a
-    // mandate before dispatch reaches the trail writer, so it leaves no row: nothing was
-    // attempted. The day the route opens, the dispatcher records it like every other change.
-    it('refuses a mandate before anything runs: nothing deleted, no row', async () => {
+    // mandate before dispatch reaches the change's trail writer, so no attempt row: nothing was
+    // attempted. The refusal itself is one `refused` row, so the owner sees what was tried.
+    it('refuses a mandate before anything runs: nothing deleted, one refused row', async () => {
       const deletePlannedPipeline = vi.fn().mockReturnValue(true);
       await withEngine({ getRunHistory: () => ({ deletePlannedPipeline }) }, async () => {
         asMandate();
@@ -22441,7 +22765,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
         expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can delete a workflow.');
       });
       expect(deletePlannedPipeline).not.toHaveBeenCalled();
-      expect(rows()).toEqual([]);
+      expect(rows().map((r) => [r.action, r.target, r.phase])).toEqual([['DELETE /api/workflows/:id', '/api/workflows/wf-1', 'refused']]);
     });
   });
 
@@ -22535,6 +22859,25 @@ describe('mandate stance of every user route', () => {
 
   it('allows `reads` only on a GET', () => {
     expect(users().filter(r => r.stance?.kind === 'reads' && r.method !== 'GET').map(name)).toEqual([]);
+  });
+
+  // The customer texts of the Shopify and bexio presets say a bulk run writes without asking at each
+  // change only after the OWNER confirmed its list. Every route that releases a run's writes —
+  // approving it, confirming its probe, resuming it, planning its undo, whose approval is the same
+  // approve route — and every route that changes the list it confirms (taking a target out or
+  // putting it back) refuses everyone else. A new writing bulk route joins the set by its path.
+  it('lets only the owner release the writes of a bulk run, its undo included', () => {
+    const writing = users().filter(r => WRITE.has(r.method) && r.path.startsWith('/api/bulk/'));
+    expect(writing.map(name).sort()).toEqual([
+      'POST /api/bulk/runs/stance-probe/approve',
+      'POST /api/bulk/runs/stance-probe/confirm-probe',
+      'POST /api/bulk/runs/stance-probe/discard',
+      'POST /api/bulk/runs/stance-probe/resume',
+      'POST /api/bulk/runs/stance-probe/targets/stance-probe/deselect',
+      'POST /api/bulk/runs/stance-probe/targets/stance-probe/reselect',
+      'POST /api/bulk/runs/stance-probe/undo',
+    ]);
+    expect(writing.filter(r => r.stance?.kind !== 'owner-only').map(name), 'Zustimmungstext Absatz 2: nur der Inhaber gibt einen Massenlauf frei').toEqual([]);
   });
 
   // Register 1112: a GET about one chat (by its id, a live run's or a recorded run's) names the chat,
@@ -22642,7 +22985,7 @@ describe('mandate stance of every user route', () => {
   });
 
   describe('owner-only is applied, not only declared', () => {
-    const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+    const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid', mandateId: 'TEST-MANDATE-1' };
     const rateCounts = (): Map<string, { count: number }> =>
       (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
     let windowBefore = new Map<string, number>();
@@ -22691,7 +23034,7 @@ describe('mandate stance of every user route', () => {
 });
 
 describe('PUT /api/secrets/:name and a mandate', () => {
-  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid', mandateId: 'TEST-MANDATE-1' };
   afterEach(() => { api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL); });
 
   async function put(principal: RequestPrincipal, slot: string): Promise<{ status: number; set: ReturnType<typeof vi.fn> }> {
@@ -22735,11 +23078,12 @@ describe('PUT /api/secrets/:name and a mandate', () => {
 
 
 describe('a mandate and a to-do', () => {
+  liveMandateEnds();
   // A to-do records who created it; a mandate changes only its own, a rule TaskManager checks
   // on the row it resolves (the witnesses over real stores are in 'a mandate's own to-dos over
   // the task routes'). Here: the routes hand TaskManager the principal and answer its refusal.
   // A trigger is marked.
-  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid', mandateId: 'TEST-MANDATE-1' };
   afterEach(() => {
     api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
     mockTaskMarkEditedBy.mockReturnValue(true);
@@ -22819,7 +23163,8 @@ describe('a mandate and a to-do', () => {
 // stores (history.db with every migration, the engine.db mirror, the audit log), once with the
 // to-do reads on history.db and once on engine.db.
 describe.each([false, true])('a mandate\'s own to-dos over the task routes (subject graph %s)', (graph) => {
-  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+  liveMandateEnds();
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid', mandateId: 'TEST-MANDATE-1' };
   const M = 'mandate:recipient@example.invalid';
   const rateCounts = (): Map<string, { count: number }> =>
     (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
@@ -22955,9 +23300,10 @@ describe.each([false, true])('a mandate\'s own to-dos over the task routes (subj
 });
 
 describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9, B6)', () => {
+  liveMandateEnds();
   // Real stores over a real history.db (every migration, v57 included); only the session
   // objects are mocks, each told who ran in it last.
-  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid', mandateId: 'TEST-MANDATE-1' };
   const M = 'mandate:recipient@example.invalid';
   const OWN = '11111111-1111-4111-8111-111111111111';
   const FOREIGN = '22222222-2222-4222-8222-222222222222';
@@ -23340,6 +23686,44 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
     });
   });
 
+  // The Web UI's migration done step names the target's support whatever the source runs as. That holds
+  // because a target takes a migration only with a tier set: every import route turns it down otherwise,
+  // on the same switch the refusals name their way out by. A route that took one without would leave the
+  // done step naming the wrong way out.
+  it('takes a migration in only where the refusals name support as the way out', async () => {
+    const routes = [
+      ['GET', '/api/migration/handshake'], ['POST', '/api/migration/handshake'], ['POST', '/api/migration/manifest'],
+      ['POST', '/api/migration/chunk'], ['POST', '/api/migration/restore'],
+    ] as const;
+    // As a source sends it: the target's migration token, nothing else.
+    const TOKEN = 'a'.repeat(64);
+    const refused = async (method: string, path: string): Promise<boolean> => {
+      const res = await fetch(`${baseUrl}${path}`, {
+        method, headers: { 'x-migration-token': TOKEN, 'Content-Type': 'application/json' }, ...(method === 'POST' ? { body: '{}' } : {}),
+      });
+      const body = (await res.json().catch(() => ({}))) as { error?: unknown };
+      // Past the token check in every case, so the route itself decides.
+      expect(body.error, `${method} ${path}`).not.toMatch(/migration token/i);
+      return res.status === 404 && body.error === 'Migration import only available on managed instances';
+    };
+    const cases = [
+      ['no tier', {}],
+      ['a canonical tier', { LYNOX_BILLING_TIER: 'managed' }],
+      ['a tier that does not normalize', { LYNOX_BILLING_TIER: 'gold' }],
+      ['the legacy alias behind an empty canonical name', { LYNOX_BILLING_TIER: '', LYNOX_MANAGED_MODE: 'eu' }],
+    ] as const;
+    for (const [label, env] of cases) {
+      await withEnv({ ...SELF_HOSTED, LYNOX_MIGRATION_TOKEN: TOKEN, LYNOX_VAULT_KEY: undefined, ...env }, async () => {
+        const supportNamed = billingTierSet();
+        // Control: both sides of the switch occur in the table.
+        expect(supportNamed, label).toBe(label !== 'no tier');
+        for (const [method, path] of routes) {
+          expect(await refused(method, path), `${label}: ${method} ${path}`).toBe(!supportNamed);
+        }
+      });
+    }
+  });
+
   it('on a self-hosted instance with two secrets, the admin bearer keeps the user routes', async () => {
     await withEnv(SELF_HOSTED, async () => {
       expect((await as(ADMIN, USER_ROUTE)).status).toBe(200);
@@ -23380,6 +23764,26 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
       expect(res.status).toBe(503);
       expect(((await res.json()) as { error: string }).error).toBe('Migration not available — missing vault key');
     });
+  });
+
+  it('refuses a second handshake while a migration session runs, with a code the source tells apart', async () => {
+    const token = randomBytes(32).toString('hex');
+    const holder = api as unknown as { _migrationImporter: { cleanup(): void } | null };
+    try {
+    await withEnv({ ...MANAGED, LYNOX_MIGRATION_TOKEN: token, LYNOX_VAULT_KEY: 'a-vault-key-for-the-session-code-test' }, async () => {
+      const first = await fetch(`${baseUrl}/api/migration/handshake`, { headers: { 'x-migration-token': token } });
+      expect(first.status).toBe(200);
+      const second = await fetch(`${baseUrl}/api/migration/handshake`, { headers: { 'x-migration-token': token } });
+      expect(second.status).toBe(400);
+      const body = (await second.json()) as { error: string; code?: string };
+      expect(body.code).toBe('migration_session_active');
+      expect(body.error.startsWith('Migration session already active')).toBe(true);
+    });
+    } finally {
+      // Leave no session behind for the tests after this one, also when an assertion fails.
+      holder._migrationImporter?.cleanup();
+      holder._migrationImporter = null;
+    }
   });
 
   it('with no secret at all, a local request is admin, on a managed instance too', async () => {
@@ -23662,7 +24066,7 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
         const origEnds = engine['getMandateEnds'];
         engine['getAuditLog'] = () => null;
         // A store that takes the empty list, so the route answers 200 when it runs at all.
-        engine['getMandateEnds'] = () => ({ revoke: () => false });
+        engine['getMandateEnds'] = () => ({ revoke: () => false, isLive: () => true });
         const revoke = (): Promise<Response> => as(ADMIN, '/api/admin/mandates/revoke', { method: 'POST', body: JSON.stringify({ revoked_mandate_ids: [] }) }, freshBase);
         try {
           await withEnv(MANAGED, async () => {
@@ -24516,7 +24920,7 @@ describe('PUT /api/secrets/:name and a built-in provider\'s client secret', () =
 });
 
 describe('the connection form of a built-in provider (/api/api-profiles/:id/client)', () => {
-  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid', mandateId: 'TEST-MANDATE-1' };
   const SHOP = {
     id: 'shop-admin', name: 'Shop', base_url: 'https://acme.myshopify.com/admin/api/2026-04', description: 'd',
     auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' } },

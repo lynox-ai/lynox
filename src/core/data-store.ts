@@ -17,6 +17,7 @@ import type {
 import type { SubjectColumnBridge } from './subject-store.js';
 import type { CollectionShape } from './crm-schema.js';
 import { UNKNOWN_GRANT } from './conversation-grants.js';
+import { deriveTurnUntrusted, type UntrustedSignals } from './untrusted-signals.js';
 import type { IAgent } from '../types/agent.js';
 
 // === Constants ===
@@ -52,13 +53,17 @@ const VALID_COLUMN_NAME_RE = /^[a-z][a-z0-9_]{0,62}$/;
 /** The system columns a reader sees and a filter, sort or aggregate may name. */
 const VISIBLE_META_COLUMNS = ['_id', '_created_at', '_updated_at'] as const;
 /**
- * The two columns that say where a row's content came from (PRD connection-attribution
- * A5): `_source_grants`, a JSON array of the grant ids the writing conversation held
- * (`unknown` among them when it read something no grant names), and `_source_run_id`,
- * the run that wrote it last. NULL in both is a row from before the columns existed.
- * No read method but the export returns them, and no filter may name them.
+ * The columns that say where a row's content came from. `_source_grants` (PRD
+ * connection-attribution A5), a JSON array of the grant ids the writing conversation held
+ * (`unknown` among them when it read something no grant names); `_source_run_id`, the run
+ * that wrote it last; `_written_by`, who wrote it last (`RowStamp.writtenBy`); and
+ * `_written_untrusted`, `'1'` once any write to the row came from a turn that had read
+ * content from outside, and never cleared by a later write. NULL is a row from before the
+ * columns existed, and a NULL `_written_by` is unknown, never the owner. The store writes
+ * all of them itself; no user column may take their names. No read method but the export
+ * and {@link DataStore.sourceOfRow} returns them, and no filter may name them.
  */
-export const SOURCE_COLUMNS = ['_source_grants', '_source_run_id'] as const;
+export const SOURCE_COLUMNS = ['_source_grants', '_source_run_id', '_written_by', '_written_untrusted'] as const;
 /** Every column the store writes itself. No user column may take one of these names. */
 export const SYSTEM_COLUMNS: ReadonlySet<string> = new Set<string>([...VISIBLE_META_COLUMNS, ...SOURCE_COLUMNS]);
 
@@ -67,24 +72,56 @@ export const SYSTEM_COLUMNS: ReadonlySet<string> = new Set<string>([...VISIBLE_M
  * conversation grant set (`ConversationGrants.members()`); `null` means the writer holds
  * no set at all, which is stored as `["unknown"]`, not as the empty set: an empty set
  * says "nothing was resolved", a missing one says nothing. `runId` is the writing run.
+ * `writtenBy` is the writer's author tag (`IAgent.writeAuthor`): `owner` only for a run the
+ * owner typed, never for a trigger's or a workflow's run; `null` is unknown. `untrusted` is
+ * whether the writing turn had read content from outside (`deriveTurnUntrusted`).
  */
 export interface RowStamp {
   grants: readonly string[] | null;
   runId: string | null;
+  writtenBy: string | null;
+  untrusted: boolean;
 }
 
 /**
  * The stamp of a write an agent makes: its conversation grant set, which a pipeline step
- * and a sub-agent share with the conversation that started them, and its run.
+ * and a sub-agent share with the conversation that started them, its run, who it writes as,
+ * and whether its turn had read content from outside. An agent no run has named an author
+ * for writes as unknown.
  */
-export function rowStampOf(agent: Pick<IAgent, 'conversationGrants' | 'currentRunId'>): RowStamp {
-  return { grants: agent.conversationGrants?.members() ?? null, runId: agent.currentRunId ?? null };
+export function rowStampOf(agent: Pick<IAgent, 'conversationGrants' | 'currentRunId' | 'writeAuthor' | keyof UntrustedSignals>): RowStamp {
+  return {
+    grants: agent.conversationGrants?.members() ?? null,
+    runId: agent.currentRunId ?? null,
+    writtenBy: agent.writeAuthor ?? null,
+    untrusted: deriveTurnUntrusted(agent),
+  };
 }
 
-/** The two bound values of a stamp. Read before any write starts, so a missing stamp throws. */
-function stampValues(stamp: RowStamp): [string, string | null] {
+/** The bound values of a stamp, in {@link SOURCE_COLUMNS} order. Read before any write starts, so a missing stamp throws. */
+function stampValues(stamp: RowStamp): [string, string | null, string | null, string | null] {
   const grants = stamp.grants === null ? [UNKNOWN_GRANT] : [...new Set(stamp.grants)].sort();
-  return [JSON.stringify(grants), stamp.runId];
+  return [JSON.stringify(grants), stamp.runId, stamp.writtenBy ?? null, stamp.untrusted === true ? '1' : null];
+}
+
+/**
+ * The upsert's SET terms for who wrote a row: `_written_by` is the last writer, and
+ * `_written_untrusted` stays `'1'` once any writer set it, so a clean write after an
+ * untrusted one does not make the row clean again.
+ */
+function writtenBySet(tableName: string): string {
+  return `"_written_by" = excluded."_written_by", "_written_untrusted" = CASE WHEN "${tableName}"."_written_untrusted" = '1' `
+    + `OR excluded."_written_untrusted" = '1' THEN '1' ELSE NULL END`;
+}
+
+/** Where a row came from, as {@link DataStore.sourceOfRow} reads it. */
+export interface RowSource {
+  /** The last writer's author tag; `null` is unknown. */
+  writtenBy: string | null;
+  /** Whether any write to the row came from a turn that had read content from outside. */
+  untrusted: boolean;
+  /** The union of the grant sets of every writer; `unknown` among them when one is unknown. */
+  grants: readonly string[];
 }
 
 /**
@@ -215,7 +252,7 @@ export class DataStore {
    */
   private _subjectBridge: SubjectColumnBridge | null = null;
 
-  /** Collections whose table is known to carry both {@link SOURCE_COLUMNS}. */
+  /** Collections whose table is known to carry every one of {@link SOURCE_COLUMNS}. */
   private readonly _sourceReady = new Set<string>();
 
   constructor(dbPath?: string | undefined) {
@@ -414,7 +451,7 @@ export class DataStore {
     this.db.prepare(`ALTER TABLE "${tableName}" ADD COLUMN "${col}" TEXT`).run();
   }
 
-  /** Throws unless the collection's table carries both {@link SOURCE_COLUMNS}. */
+  /** Throws unless the collection's table carries every one of {@link SOURCE_COLUMNS}. */
   private _assertSourceColumns(collection: string): void {
     if (this._sourceReady.has(collection)) return;
     const cols = this.db.prepare('SELECT name FROM pragma_table_info(?)').all(`ds_${collection}`) as Array<{ name: string }>;
@@ -534,8 +571,7 @@ export class DataStore {
       '_id INTEGER PRIMARY KEY AUTOINCREMENT',
       '_created_at TEXT NOT NULL',
       '_updated_at TEXT NOT NULL',
-      '_source_grants TEXT',
-      '_source_run_id TEXT',
+      ...SOURCE_COLUMNS.map(c => `${c} TEXT`),
     ];
     for (const col of columns) {
       let def = `"${col.name}" ${TYPE_MAP[col.type]}`;
@@ -598,7 +634,7 @@ export class DataStore {
     const { collection, records } = params;
     // Before anything else and outside the per-record catch below, so a caller that
     // passes no stamp gets an error rather than a warning per skipped record.
-    const [sourceGrants, sourceRunId] = stampValues(params.stamp);
+    const stampCells = stampValues(params.stamp);
 
     if (records.length === 0) {
       return { inserted: 0, updated: 0, errors: [] };
@@ -645,7 +681,7 @@ export class DataStore {
         .filter(c => !uniqueKey.includes(c))
         .map(c => `"${c}" = excluded."${c}"`);
       const updateSet = [...updateCols, '"_updated_at" = excluded."_updated_at"',
-        sourceGrantsUnion(tableName), '"_source_run_id" = excluded."_source_run_id"'].join(', ');
+        sourceGrantsUnion(tableName), '"_source_run_id" = excluded."_source_run_id"', writtenBySet(tableName)].join(', ');
       sql = `INSERT INTO "${tableName}" (${colList}) VALUES (${placeholders}) ON CONFLICT(${keyCols}) DO UPDATE SET ${updateSet}`;
     } else {
       sql = `INSERT INTO "${tableName}" (${colList}) VALUES (${placeholders})`;
@@ -662,7 +698,7 @@ export class DataStore {
         const record = records[i]!;
         try {
           // Validate and coerce values
-          const values: unknown[] = [now, now, sourceGrants, sourceRunId];
+          const values: unknown[] = [now, now, ...stampCells];
           for (const col of userCols) {
             const val = record[col];
             if (val === undefined || val === null) {
@@ -718,7 +754,7 @@ export class DataStore {
    * per-record errors: one row, one outcome.
    */
   putRowVerbatim(collection: string, row: Record<string, unknown>, stamp: RowStamp): 'inserted' | 'updated' {
-    const [sourceGrants, sourceRunId] = stampValues(stamp);
+    const stampCells = stampValues(stamp);
     const info = this._getCollectionMeta(collection);
     if (!info) throw new Error(`Collection "${collection}" not found.`);
     const uniqueKey = info.unique_key ? info.unique_key.split(',') : [];
@@ -743,7 +779,8 @@ export class DataStore {
     const now = new Date().toISOString();
     const allCols = ['_created_at', '_updated_at', ...SOURCE_COLUMNS, ...columns.map(c => c.name)];
     const updateSet = [...columns.filter(c => c.name !== keyCol).map(c => `"${c.name}" = excluded."${c.name}"`),
-      '"_updated_at" = excluded."_updated_at"', sourceGrantsUnion(tableName), '"_source_run_id" = excluded."_source_run_id"'].join(', ');
+      '"_updated_at" = excluded."_updated_at"', sourceGrantsUnion(tableName), '"_source_run_id" = excluded."_source_run_id"',
+      writtenBySet(tableName)].join(', ');
     const sql = `INSERT INTO "${tableName}" (${allCols.map(c => `"${c}"`).join(', ')}) VALUES (${allCols.map(() => '?').join(', ')})` +
       ` ON CONFLICT("${keyCol}") DO UPDATE SET ${updateSet}`;
     // Identifiers come from the collection's own metadata (an existing collection, a
@@ -758,7 +795,7 @@ export class DataStore {
         }
         outcome = 'inserted';
       }
-      this.db.prepare(sql).run(now, now, sourceGrants, sourceRunId, ...values);
+      this.db.prepare(sql).run(now, now, ...stampCells, ...values);
       // One row in or none: the count moves by the probe's answer, no table scan per write.
       // Unlike insertRecords this does not re-derive the count, so drift left by another
       // path stays until the next insertRecords/deleteRecords recount.
@@ -875,6 +912,39 @@ export class DataStore {
     const tableName = `ds_${params.collection}`;
     const selectSql = `SELECT * FROM "${tableName}" WHERE _id > ? ORDER BY _id ASC LIMIT ?`;
     return this.db.prepare(selectSql).all(params.afterId ?? 0, limit) as Record<string, unknown>[];
+  }
+
+  /**
+   * Where the rows whose `keyColumn` equals `value` came from, or `null` when no row does
+   * (or the collection or column does not exist). Read from the columns the store writes
+   * itself, never from a user column. When more than one row matches, the answer is the
+   * least trusting one: untrusted if any is, a writer only when all name the same, and the
+   * union of their grants.
+   */
+  sourceOfRow(collection: string, keyColumn: string, value: string | number): RowSource | null {
+    if (!COLLECTION_NAME_RE.test(collection) || RESERVED_NAMES.has(collection)) return null;
+    const info = this._getCollectionMeta(collection);
+    if (!info) return null;
+    const columns = JSON.parse(info.schema_json) as DataStoreColumnDef[];
+    if (!columns.some(c => c.name === keyColumn) || !VALID_COLUMN_NAME_RE.test(keyColumn)) return null;
+    this._assertSourceColumns(collection);
+    const rows = this.db.prepare(
+      `SELECT "_written_by" AS w, "_written_untrusted" AS u, "_source_grants" AS g FROM "ds_${collection}" WHERE "${keyColumn}" = ?`,
+    ).all(value) as Array<{ w: string | null; u: string | null; g: string | null }>;
+    if (rows.length === 0) return null;
+    const grants = new Set<string>();
+    for (const row of rows) {
+      let parsed: unknown = null;
+      try { parsed = row.g === null ? null : JSON.parse(row.g); } catch { parsed = null; }
+      if (!Array.isArray(parsed) || parsed.length === 0) { grants.add(UNKNOWN_GRANT); continue; }
+      for (const g of parsed) grants.add(typeof g === 'string' ? g : UNKNOWN_GRANT);
+    }
+    const first = rows[0]!.w;
+    return {
+      writtenBy: rows.every(r => r.w === first) ? first : null,
+      untrusted: rows.some(r => r.u === '1'),
+      grants: [...grants].sort(),
+    };
   }
 
   /**

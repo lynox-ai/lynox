@@ -42,6 +42,7 @@ function freshDb(): Database.Database {
       content_json TEXT NOT NULL,
       usage_json TEXT,
       display_only INTEGER NOT NULL DEFAULT 0,
+      author TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);

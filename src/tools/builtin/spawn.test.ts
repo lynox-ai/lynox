@@ -404,6 +404,16 @@ describe('spawn_agent tool', () => {
     expect((vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['principal']).toEqual(MANDATE);
   });
 
+  it('a child writes as its parent writes: a trigger run\'s child never writes as the owner', async () => {
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    vi.mocked(MockAgent).mockClear();
+    await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Analyze' }] }, makeAgent({ writeAuthor: 'trigger:t-1' } as Partial<IAgent>));
+    expect((vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['writeAuthor']).toBe('trigger:t-1');
+    vi.mocked(MockAgent).mockClear();
+    await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Analyze' }] }, makeAgent({} as Partial<IAgent>));
+    expect((vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['writeAuthor']).toBeNull();
+  });
+
   // The approval queue's seam and the security review's conditions for the seam: a child of a
   // run nobody watches files under its parent's trigger and names the root run; the trigger
   // comes from the parent agent, never from the tool's input; a chat's child gets nothing.
