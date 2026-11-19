@@ -246,6 +246,21 @@ export function connectionShopHost(row: ConnectionRow | undefined): string | nul
 }
 
 /**
+ * Every string in `value`, each key and each value on its own, as the resolver reads them
+ * (`resolveInputTemplate` substitutes in each string leaf separately). Read as one stringified
+ * text instead, a `{{` left open in one string would run on into the next and hide a reference
+ * there behind the first one's `params`.
+ */
+function fieldStrings(value: unknown): string[] {
+  if (typeof value === 'string') return [value];
+  if (Array.isArray(value)) return value.flatMap(fieldStrings);
+  if (value !== null && typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>).flatMap(([k, v]) => [k, ...fieldStrings(v)]);
+  }
+  return [];
+}
+
+/**
  * Where a webhook run's step would execute with something an event can choose outside its task
  * text, or `null` when nothing does. Only a step's
  * `task` fences a value as untrusted; a captured call's `input_template` and every other field
@@ -258,8 +273,7 @@ export function mappedValueOutsideTaskText(steps: readonly InlinePipelineStep[],
   const mapped = new Set(mappedNames);
   for (const step of steps) {
     const { task: _task, ...rest } = step;
-    const text = JSON.stringify(rest);
-    for (const { inner } of placeholders(text)) {
+    for (const { inner } of fieldStrings(rest).flatMap((text) => placeholders(text))) {
       // Split as the resolver does (`getByPath`, on `.` only): `{{params[0].result}}` names the
       // context key `params[0]`, not `params`.
       const segments = inner.trim().split('.').map((x) => x.trim());

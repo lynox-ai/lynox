@@ -142,6 +142,17 @@ describe('mappedValueOutsideTaskText keeps a mapped value to task text', () => {
     expect(mappedValueOutsideTaskText([call({ url: '{{params[0].result}}' })], [])).toContain('uses "{{params[0].result}}"');
   });
 
+  // The resolver substitutes in each string on its own, so the check reads each on its own too:
+  // a `{{` left open in one string must not run on into the next and hide what is there.
+  it('reads each string on its own, so one left open does not hide a reference in the next', () => {
+    const step = { id: 'fetch', task: 'Fetch it', tool: 'http_request', input_from: ['s1'], input_template: { a: '{{params.note', b: '{{s1.result}}' } };
+    expect(mappedValueOutsideTaskText([step], ['subject'])).toContain('uses "{{s1.result}}" outside its task text');
+    const mappedNext = { ...step, input_template: { a: '{{params.month', b: '{{params.note}}' } };
+    expect(mappedValueOutsideTaskText([mappedNext], ['note'])).toContain('uses the event value "note"');
+    // A key is read on its own as well.
+    expect(mappedValueOutsideTaskText([call({ '{{params.note}}': 'x' })], ['note'])).toContain('uses the event value "note"');
+  });
+
   it('lets a mapped value through in task text, and an unmapped one anywhere', () => {
     expect(mappedValueOutsideTaskText([{ id: 's', task: 'Answer {{params.note}}' }], ['note'])).toBeNull();
     expect(mappedValueOutsideTaskText([call({ url: '{{params.month}}' })], ['note'])).toBeNull();
