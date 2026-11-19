@@ -331,6 +331,13 @@ vi.mock('../core/engine.js', () => ({
       getRun: mockHistoryGetRun,
       getRunToolCalls: mockHistoryGetRunToolCalls,
       deleteWireSnapshotsForThread: mockDeleteWireSnapshotsForThread,
+      // An empty history.db for the chat delete's blanking: it reaches no run here. What it
+      // blanks is tested on a real engine in thread-delete-provenance.test.ts.
+      getDb: () => ({
+        transaction: <A extends unknown[], R>(fn: (...a: A) => R) => (...a: A): R => fn(...a),
+        exec: () => undefined,
+        prepare: () => ({ run: () => ({ changes: 0 }), all: () => [] }),
+      }),
       getFailedToolUseIds: mockGetFailedToolUseIds,
       getStats: mockHistoryGetStats,
       getCostByDay: mockHistoryGetCostByDay,

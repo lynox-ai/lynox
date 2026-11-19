@@ -6578,7 +6578,7 @@ export class LynoxHTTPApi {
           threadStore.deleteThread(id);
         }
       } catch (err: unknown) {
-        process.stderr.write(`[lynox:thread-delete] Not deleted, removing the chat and the content of its runs failed for thread ${id.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox:thread-delete] Not deleted, removing the chat and the content of its runs failed for thread ${id.slice(0, 8)}: ${errorText(err, errorTextReduced(engine.getToolContext().containment, { threadId: id }))}\n`);
         jsonResponse(res, 500, { error: 'The chat was not deleted: removing it and the content of its runs ran into an error.' });
         return;
       }
