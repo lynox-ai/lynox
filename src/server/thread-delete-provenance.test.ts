@@ -557,7 +557,6 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
     forgetExecutedStatesOfChat(retrier, []);
   });
 
-
   it('a question a schedule parked in the chat before the delete is closed too', async () => {
     const { ts } = stores();
     const id = randomUUID();
