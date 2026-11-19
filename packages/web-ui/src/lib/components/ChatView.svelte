@@ -30,6 +30,7 @@
 		submitMailConnect,
 		cancelMailConnect,
 		getChatError,
+		getUnmatchedAnswerCount,
 		getChatErrorDetail,
 		getRetryStatus,
 		getIsOffline,
@@ -125,7 +126,7 @@
 	import { isAutoSpeakEnabled } from '../stores/autospeak.svelte.js';
 	import { isVoiceAutoSendEnabled } from '../stores/voice-autosend.svelte.js';
 	import { goto, afterNavigate } from '$app/navigation';
-	import { onMount, tick } from 'svelte';
+	import { onMount, tick, untrack } from 'svelte';
 	import { isMistralPresetBase } from '../utils/mistral-endpoint.js';
 
 	// Welcome screen state
@@ -1344,6 +1345,9 @@
 		for (let idx = 0; idx < batchAnswers.length; idx++) {
 			const prevPromptId = getPendingPermission()?.promptId;
 			void replyPermission(batchAnswers[idx]!); /* never rejects; a reply that does not arrive is reported */
+			// A question without its id is not answered (`replyPermission` brings the open one back
+			// instead), and that one is not the next of this batch: stop, so no later answer lands on it.
+			if (prevPromptId === undefined) break;
 			if (idx + 1 < batchAnswers.length) {
 				const arrived = await waitForNextPrompt(prevPromptId);
 				if (!arrived) break; // tool errored or completed early — stop sending
@@ -1665,6 +1669,15 @@
 	);
 	const pendingMailConnect = $derived(getPendingMailConnect());
 	const chatError = $derived(getChatError());
+	// After an answer that named no question, focus goes to the sentence, not to a button of the
+	// card that came back: that card may ask something else, and a button with focus is one key away.
+	let chatErrorBanner = $state<HTMLDivElement | null>(null);
+	// Runs on each such answer, and only then: not on a language switch or a later error.
+	let unmatchedSeen = untrack(() => getUnmatchedAnswerCount());
+	$effect(() => {
+		const n = getUnmatchedAnswerCount();
+		if (n > unmatchedSeen) { unmatchedSeen = n; untrack(() => chatErrorBanner)?.focus(); }
+	});
 	const chatErrorDetail = $derived(getChatErrorDetail());
 	const runInterrupted = $derived(getRunInterrupted());
 	const retryStatus = $derived(getRetryStatus());
@@ -3264,7 +3277,7 @@
 			{/if}
 
 			{#if chatError}
-				<div role="alert" class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger flex items-center justify-between gap-3">
+				<div role="alert" tabindex="-1" bind:this={chatErrorBanner} class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger flex items-center justify-between gap-3">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" /></svg>
 					<!-- eslint-disable-next-line svelte/no-at-html-tags -- chatError is HTML-escaped right here before the one link substitution, which keeps http(s) and relative URLs only -->
 					<span class="flex-1">{@html chatError
