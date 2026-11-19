@@ -120,7 +120,7 @@ function serve(s: Shop): () => void {
 
 const url = (i: number | string): string => `https://${HOST}/products/${String(i)}`;
 
-function client(opts: { attach?: boolean; methods?: string[]; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean; connection?: (url: string, method: string) => AttachedConnection | null } = {}): ExternalClient {
+function client(opts: { attach?: boolean; methods?: string[]; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean; connection?: (url: string, method: string) => AttachedConnection | null; renew?: (url: string) => Promise<boolean> } = {}): ExternalClient {
   return externalClient({
     contract: opts.contract ?? mintBulkContract(HOST, [0, 1, 2, 3, 'x'].map(url)),
     hostPolicy: createToolContext({}),
@@ -135,6 +135,7 @@ function client(opts: { attach?: boolean; methods?: string[]; contract?: Capabil
     scan: opts.scan ?? detectSecretInContent,
     connectedAccount: opts.connectedAccount ?? (() => false),
     recordRead: null,
+    renewAfterUnauthorized: opts.renew,
   });
 }
 
@@ -615,6 +616,92 @@ describe('applying an external run', () => {
     } finally {
       restore();
     }
+  });
+
+  describe('a 401 to a token the engine can renew (a store connection whose token expires)', () => {
+    it('renews once and sends the same write once more, which lands', async () => {
+      const s = shop();
+      s.sequence = new Map([['PATCH /products/0', [401]]]);
+      const restore = serve(s);
+      try {
+        const renewed: string[] = [];
+        const refused: number[] = [];
+        const c = client({ renew: async (u) => { renewed.push(u); return true; } });
+        expect((await c.write(url(0), 'PATCH', { price: '13.00' }, undefined, undefined, () => { refused.push(1); })).kind).toBe('ok');
+        expect(renewed).toEqual([url(0)]);
+        expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(2);
+        expect(s.items.get('/products/0')?.['price']).toBe('13.00');
+        // The refused first send is not reported as a refusal: the write went through.
+        expect(refused).toEqual([]);
+      } finally {
+        restore();
+      }
+    });
+
+    it('a token that runs out in the middle of a run is renewed there, and the run writes every target', async () => {
+      const s = shop();
+      // Targets 0 is written on the old token; at target 1 the hour is up.
+      s.sequence = new Map([['PATCH /products/1', [401]]]);
+      const restore = serve(s);
+      try {
+        let renewals = 0;
+        const c = client({ renew: async () => { renewals++; return true; } });
+        const runId = await approvedRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+        const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+        expect(out.status).not.toBe('halted');
+        expect(ledger.getStatus(runId)).toMatchObject({ applied: 3, failed: 0 });
+        expect(renewals).toBe(1);
+        expect([0, 1, 2].map((i) => s.items.get(`/products/${String(i)}`)?.['price'])).toEqual(['15.00', '15.00', '15.00']);
+      } finally {
+        restore();
+      }
+    });
+
+    it('a second 401 after the renewal halts the run as before, and nothing is renewed twice', async () => {
+      const s = shop();
+      s.special.set('PATCH /products/0', { status: 401 });
+      const restore = serve(s);
+      try {
+        let renewals = 0;
+        const c = client({ renew: async () => { renewals++; return true; } });
+        const runId = await approvedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+        const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+        expect(out.status).toBe('halted');
+        expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.unauthorized, applied: 0 });
+        expect(renewals).toBe(1);
+        expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(2);
+      } finally {
+        restore();
+      }
+    });
+
+    it('when nothing was renewed, the request is not sent again', async () => {
+      const s = shop();
+      s.special.set('PATCH /products/0', { status: 401 });
+      const restore = serve(s);
+      try {
+        const c = client({ renew: async () => false });
+        expect((await c.write(url(0), 'PATCH', { price: '13.00' })).kind).toBe('unauthorized');
+        expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
+      } finally {
+        restore();
+      }
+    });
+
+    it('a 403 is not a token that ran out: no renewal, no second send', async () => {
+      const s = shop();
+      s.special.set('PATCH /products/0', { status: 403 });
+      const restore = serve(s);
+      try {
+        let renewals = 0;
+        const c = client({ renew: async () => { renewals++; return true; } });
+        expect((await c.write(url(0), 'PATCH', { price: '13.00' })).kind).toBe('unauthorized');
+        expect(renewals).toBe(0);
+        expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
+      } finally {
+        restore();
+      }
+    });
   });
 
   it('halts at the first target on a refused or missing credential, leaving it unwritten and resumable', async () => {

@@ -319,6 +319,12 @@ export interface ExternalClientDeps {
   /** The profile's own rate limit: null when a request may go, else it may not. */
   rateLimit: (hostname: string) => string | null;
   /**
+   * After the host answered 401 to the stored credential: renews it where the engine can (a store
+   * connection whose token expires, `store-token-refresh.ts`), true when a new one is stored. The
+   * request is then sent once more; a second 401 halts the run as before. Absent: no renewal.
+   */
+  renewAfterUnauthorized?: ((url: string) => Promise<boolean>) | undefined;
+  /**
    * The secret-pattern scan `http_request` runs on what it sends (`detectSecretInContent`):
    * non-null when `text` looks like it carries a secret. Required, so no caller can build a
    * client that sends unscanned. `http_request`'s separate GET check is not run here: a bulk
@@ -398,6 +404,23 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     method: 'GET' | BulkWriteMethod, url: string, body: unknown, signal: AbortSignal | undefined,
     onSend?: () => void, onRefused?: () => void, maxBytes: number = BULK_MAX_TARGET_BYTES,
     graphql?: { body: string; detail: string; writes?: true },
+  ): Promise<ExternalRead> => {
+    const status: { http?: number } = {};
+    let answer = await sendOnce(method, url, body, signal, onSend, maxBytes, graphql, status);
+    // A 401 to a token that can be renewed: renewed once, and the same request sent once more. A
+    // 401 was not acted on, so a write sent again is not a second write.
+    if (answer.kind === 'unauthorized' && status.http === 401 && deps.renewAfterUnauthorized !== undefined && await deps.renewAfterUnauthorized(url)) {
+      answer = await sendOnce(method, url, body, signal, onSend, maxBytes, graphql, {});
+    }
+    if (refusedAnswer(answer)) onRefused?.();
+    return answer;
+  };
+  const sendOnce = async (
+    method: 'GET' | BulkWriteMethod, url: string, body: unknown, signal: AbortSignal | undefined,
+    onSend: (() => void) | undefined, maxBytes: number,
+    graphql: { body: string; detail: string; writes?: true } | undefined,
+    /** Receives the HTTP status the host answered with, when it answered. */
+    status: { http?: number },
   ): Promise<ExternalRead> => {
     // Whatever the plan or the approval decided: nothing is sent to a mail API, and a write
     // halts the run (`blocked`). Reads too — a run that may not write one has no use for them.
@@ -483,6 +506,7 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
       }
       // The body streams after the headers: a reset or a timeout there is a failed read
       // like one before them, never an exception out of the effect.
+      status.http = res.status;
       try {
         const read = await readResponse(res, now(), isReadMethod(method) || graphql !== undefined, maxBytes);
         if (graphql === undefined) return read;
@@ -492,7 +516,6 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
         return { kind: 'failed' };
       }
     })();
-    if (refusedAnswer(answer)) onRefused?.();
     return answer;
   };
   return {

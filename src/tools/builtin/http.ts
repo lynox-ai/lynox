@@ -2427,11 +2427,18 @@ async function attachEngineManagedAuth(
     // `secretAccess` audit event in the real store, so the swap buys three vault
     // reads of a credential on a request that was never going to be sent.
     const expiresAt = profile.auth?.oauth?.token_expires_at;
-    // A store preset's token is never renewed here (B3): only the callback mints it, and it
-    // binds it to the store there. A renewal would replace a bound token with an unbound one.
-    // Asked before the refresh slot is read, so a store connection costs no vault read for it.
+    // A store preset's token is never renewed by the exchange below (B3): only the callback mints
+    // it, and it binds it to the store there. A store whose tokens expire is refreshed in the
+    // engine instead (`store-token-refresh.ts`), under a pass that only a connection whose binding
+    // holds gets, and the refresh binds the new token again. Asked before the refresh slot is
+    // read, so a store connection costs no vault read for the exchange's checks.
     if (attachPreset?.apiOnDerivedHost === true && typeof expiresAt === 'number' && Date.now() >= expiresAt - OAUTH_REFRESH_BUFFER_MS) {
-      process.stderr.write(`[lynox:http] oauth token renewal skipped for profile "${profile.id}": a store connection is renewed by connecting it again\n`);
+      if (attachPreset.expiringParam !== undefined && toolContext !== undefined) {
+        const { refreshStoreToken } = await import('../../core/store-token-refresh.js');
+        await refreshStoreToken(profile.id, 'due', { toolContext: { ...toolContext, apiStore }, secretStore, principal: agent.principal, runId: agent.currentRunId });
+      } else {
+        process.stderr.write(`[lynox:http] oauth token renewal skipped for profile "${profile.id}": a store connection is renewed by connecting it again\n`);
+      }
     } else if (typeof expiresAt === 'number' && Date.now() >= expiresAt - OAUTH_REFRESH_BUFFER_MS) {
       // Asked HERE rather than inside the renewal because only this scope can
       // answer the second argument: whether the vault actually holds a refresh
@@ -2510,7 +2517,9 @@ async function attachEngineManagedAuth(
       // Step 7: the token in the slot is the one the callback bound to this profile and store.
       const storeHost = presetStoreHost(profile);
       const origin = storeHost === null ? null : `https://${storeHost}`;
-      const bound = profile.oauth_grant?.store_binding;
+      // From the profile as read after the refresh above, with the token: a refresh binds its new
+      // token in the same save, and the profile this attach began with still holds the old binding.
+      const bound = held.oauth_grant?.store_binding;
       const digest = origin === null ? null : toolContext?.storeBindingDigest?.(profile.id, origin, resolved) ?? null;
       if (origin === null || typeof bound !== 'string' || digest === null || !digestsEqual(digest, bound)) {
         return { refusal: `Error: the Shopify store connection of api_profile "${profile.id}" is not the one this engine connected, so nothing was sent to the store. Connect it again with api_setup action "connect".` };
@@ -4241,6 +4250,16 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           // Either URL unparseable — treat as same-origin and make no redirect claim.
         }
         wrapped += `\n\n**[Agent reminder — the engine did not attach this profile's credential]**\n${auth.hint({ crossOriginRedirect })}\nUntil then the request goes out with only the headers you set yourself.`;
+      }
+
+      // A store whose token expires answers 401 once the hour is up: the engine refreshes it here,
+      // at most once a minute per store, and says so outside the wrap. The request is not sent
+      // again by the engine; the model sends it once more, and a second 401 stays a 401.
+      if (response.status === 401 && toolContext?.apiStore && agent.secretStore && isShopifyAdminUrl(input.url)) {
+        const { renewStoreAfterUnauthorized } = await import('../../core/store-token-refresh.js');
+        if (await renewStoreAfterUnauthorized(input.url, { toolContext, secretStore: agent.secretStore, principal: agent.principal, runId: agent.currentRunId })) {
+          wrapped += '\n\n**[Engine note — the store\'s access was renewed]**\nThe access token for this store had expired and the engine has renewed it. Send the same request once more; nothing was changed by the request above.';
+        }
       }
 
       // OAuth2 401-hint: append OUTSIDE the untrusted_data wrap so the
