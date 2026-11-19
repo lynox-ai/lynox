@@ -211,7 +211,8 @@ describe('the runs list at phone width', () => {
 
 	// Below sm the status chip may break after its „·“ and nowhere else (U-352): each part keeps its words
 	// together, and from sm the chip stays on one line. A chip without a suffix is one unbreakable part.
-	it('keeps each part of the status chip whole and leaves the space after its „·“ as its only break below sm, in DE and EN', async () => {
+	// jsdom does no layout, so this checks the classes and text that give that result, not the result.
+	it('marks the status chip\'s parts nowrap and the chip itself only from sm, with a plain space after its „·“ between the parts, in DE and EN', async () => {
 		runs = [
 			makeRun({ id: 'stopped', total: 3, applied: 1, phase: 'writing', haltReason: 'stopped', haltKey: 'stoppedByOwner' }),
 			makeRun({ id: 'halted', total: 3, applied: 1, phase: 'aborted', atomic: true, haltReason: 'x', haltKey: 'atomicRolledBack' }),
