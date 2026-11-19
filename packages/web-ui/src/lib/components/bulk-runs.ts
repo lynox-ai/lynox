@@ -842,10 +842,10 @@ export function bulkSecretInContextKey(shopify: boolean, dataStore: boolean): st
 export function bulkFieldShapeText(shape: unknown, i18n: BulkI18n, locale = 'en-GB'): string | null {
 	if (typeof shape !== 'object' || shape === null) return null;
 	const s = shape as Record<string, unknown>;
-	// Numbers as the UI language writes them (32’000, 0.0000001), never as JavaScript prints them (1e-7);
-	// a schema's -0 reads 0, as it did before.
-	const format = new Intl.NumberFormat(locale, { maximumFractionDigits: 20 });
-	const num = (v: unknown): string | null => (typeof v === 'number' && Number.isFinite(v) ? format.format(v === 0 ? 0 : v) : null);
+	// Numbers as the UI language writes them (32’000, 0.0000001), never as JavaScript prints them (1e-7).
+	// A value that reads as zero has no sign: a schema's -0, or a negative value too small to show.
+	const format = new Intl.NumberFormat(locale, { maximumFractionDigits: 20, signDisplay: 'negative' });
+	const num = (v: unknown): string | null => (typeof v === 'number' && Number.isFinite(v) ? format.format(v) : null);
 	switch (s['type']) {
 		case 'string': {
 			if (bulkFieldChoices(s) !== null) return i18n.t('bulk.shape.choice');

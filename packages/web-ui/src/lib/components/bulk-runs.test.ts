@@ -1730,13 +1730,18 @@ describe('bulkSecretInContextKey', () => {
 });
 
 // A schema arrives as JSON, where -0 survives `JSON.parse`; the shape reads 0, as it did before
-// numbers were formatted in the UI language.
-describe('bulkFieldShapeText with a negative zero', () => {
+// numbers were formatted in the UI language. So does a negative value too small to show, while a
+// negative bound keeps its sign.
+describe('bulkFieldShapeText with a negative zero or a negative bound', () => {
 	const words: BulkI18n = { t: (k) => k, tf: (k, v) => `${k}:${Object.values(v).join('|')}` };
 	it('reads a schema\'s -0 as 0 in both UI languages', () => {
 		const shape = JSON.parse('{"type":"integer","minimum":-0,"maximum":9}') as unknown;
 		expect(Object.is((shape as { minimum: number }).minimum, -0)).toBe(true);
 		expect(bulkFieldShapeText(shape, words, 'de-CH')).toBe('bulk.shape.integer_range:0|9');
 		expect(bulkFieldShapeText(shape, words, 'en-GB')).toBe('bulk.shape.integer_range:0|9');
+	});
+	it('reads a negative value too small to show as 0, and keeps the sign of a negative bound', () => {
+		expect(bulkFieldShapeText({ type: 'number', minimum: -1e-30, maximum: 1 }, words, 'de-CH')).toBe('bulk.shape.number_range:0|1');
+		expect(bulkFieldShapeText({ type: 'number', minimum: -5, maximum: -0.5 }, words, 'en-GB')).toBe('bulk.shape.number_range:-5|-0.5');
 	});
 });
