@@ -3,6 +3,7 @@ import type { KnowledgeKind, MemoryBlockEditMode } from '../../types/memory.js';
 import { matchesSecretPattern, maskSecretPatterns } from '../../core/secret-store.js';
 import { BlockEditError, BlockOverLimitError, checkKnowledgeText } from '../../core/knowledge-store.js';
 import { getErrorMessage } from '../../core/utils.js';
+import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { appendCaptureTelemetry } from '../../core/capture-telemetry.js';
 import type { UntrustedCause } from '../../core/untrusted-signals.js';
 import { deriveTurnUntrusted, describeTurnUntrusted } from '../../core/untrusted-signals.js';
@@ -304,7 +305,12 @@ export const recallTool: ToolEntry<RecallInput> = {
         const tenantMasked = agent.secretStore ? agent.secretStore.maskSecrets(e.text) : e.text;
         // The [id] prefix is the handle `memory_retire` takes — without it the
         // agent has no way to reference an entry it wants retired.
-        return `- [${e.id.slice(0, 8)}] ${maskSecretPatterns(tenantMasked)}${tierTag(e.sourceType)}`;
+        const text = maskSecretPatterns(tenantMasked);
+        // An entry at the unverified tier came in from outside and no person vouched for it:
+        // its text reaches the model wrapped as untrusted data, which marks the turn that
+        // reads it, so the text cannot be stored again as trusted.
+        const shown = e.sourceType === 'external_unverified' ? wrapUntrustedData(text, 'recall') : text;
+        return `- [${e.id.slice(0, 8)}] ${shown}${tierTag(e.sourceType)}`;
       })
       .join('\n') + waitingLine;
   },
