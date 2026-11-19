@@ -8,7 +8,6 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
-import { renewStoreAfterUnauthorized } from './store-token-refresh.js';
 import { recipientsConfirmable } from './recipient-confirm.js';
 import { errorText, errorTextReduced, FixedTextError, processErrorText } from './error-egress.js';
 import { containThreadFrom, threadIsContained } from './containment.js';
@@ -2721,8 +2720,6 @@ export class WorkerLoop {
           return { id: profile.id, grantId: typeof grantId === 'string' && grantId !== '' ? grantId : null };
         },
         rateLimit: (hostname) => apiStore.checkRateLimit(hostname),
-        // A store whose token expires is renewed once on a 401, and the request sent again.
-        renewAfterUnauthorized: (url) => renewStoreAfterUnauthorized(url, { toolContext: { ...toolContext, apiStore }, secretStore, principal: OWNER_PRINCIPAL, runId: run.id }),
         scan: detectSecretInContent,
         connectedAccount: (url) => connectedAccountProfiles(url, apiStore).length > 0,
         recordRead: bulkReadRecorder(run, auditLog, outwardReadRecorder, httpTarget),

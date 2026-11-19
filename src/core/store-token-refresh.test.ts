@@ -36,10 +36,11 @@ import { GrantLedger } from './grant-ledger.js';
 import { ApiStore, accessTokenKey, refreshTokenKey, type ApiProfile } from './api-store.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
+import { hasRevokedGrant } from './api-store.js';
 import { isStorePass, storePassBodyRefusal } from './store-pass.js';
 import { serializeTokenBody } from './oauth-token-exchange.js';
 import {
-  beginStoreConnect, endStoreConnect, refreshStoreToken, renewStoreAfterUnauthorized, resetStoreRefreshForTests,
+  beginStoreConnect, endStoreConnect, refreshStoreToken, resetStoreRefreshForTests,
   STORE_REFRESH_WINDOW_MS, storeRefreshPassFor, type StoreRefreshContext,
 } from './store-token-refresh.js';
 
@@ -103,7 +104,7 @@ describe('the refresh of an expiring store connection', () => {
     vault.set(refreshTokenKey(ID), 'rt-old');
     const base: ApiProfile = {
       id: ID, name: 'Acme', base_url: ORIGIN, description: 'Acme store',
-      auth: { type: 'oauth2', vault_keys: [], oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET', token_expires_at: Date.now() - 60_000 } },
+      auth: { type: 'oauth2', vault_keys: [], oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET', token_expires_at: Date.now() - 60_000, grant_type: 'refresh_token' } },
       custom_endpoint_ack: { accepted: true, hosts: ['acme.myshopify.com'], accepted_at: '2026-10-18T00:00:00.000Z' },
     } as ApiProfile;
     expect(store.save(base).ok).toBe(true);
@@ -150,6 +151,9 @@ describe('the refresh of an expiring store connection', () => {
     expect(p.oauth_grant?.written?.find((w) => w.name === accessTokenKey(ID))?.fp).toBe(tokenFingerprint('at-new'));
     expect(p.oauth_grant?.written?.find((w) => w.name === refreshTokenKey(ID))?.fp).toBe(tokenFingerprint('rt-new'));
     expect(clearanceAsked).toBe(1);
+    // The owner's refresh leaves no trail row, but its outcome line, with no token in it.
+    expect(lines().some((l) => l.includes(`token refresh for api_profile "${ID}" outcome=ok (due)`))).toBe(true);
+    for (const secret of ['at-old', 'at-new', 'rt-old', 'rt-new', 'csecret']) expect(lines().join('').includes(secret)).toBe(false);
   });
 
   it('sends the refresh grant built from the vault, to the store\'s own token endpoint, under a pass over exactly that body', async () => {
@@ -184,11 +188,25 @@ describe('the refresh of an expiring store connection', () => {
     expect(vault.get(refreshTokenKey(ID))).toBe('rt-old');
   });
 
-  it('mints no pass for a client the preset does not name', async () => {
+  it('mints no pass for a client the preset does not name, and says so instead of failing silently', async () => {
     const p = profile();
     expect(store.save({ ...p, auth: { ...p.auth, oauth: { ...p.auth!.oauth, client_secret_key: 'OTHER_SECRET' } } } as ApiProfile).ok).toBe(true);
     vault.set('OTHER_SECRET', 'another-providers-key');
-    expect(await storeRefreshPassFor(ID, ctx())).toBeUndefined();
+    expect(await storeRefreshPassFor(ID, ctx())).toBe('client-misnamed');
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('client-misnamed');
+    expect(hold.calls).toHaveLength(0);
+    expect(lines().some((l) => l.includes('outcome=client-misnamed'))).toBe(true);
+    // The request that found the token due is refused with that reason.
+    const { attachStoredCredential } = await import('../tools/builtin/http.js');
+    const { bindingsAsMigrated } = await import('../../tests/helpers/vault-bindings.js');
+    resetStoreRefreshForTests();
+    const c = ctx();
+    expect(await attachStoredCredential(`${ORIGIN}/admin/api/2025-10/shop.json`, {}, false, {
+      apiStore: store, secretStore: c.secretStore, principal: OWNER_PRINCIPAL, mandateEnds: null, secretReleases: null,
+      exactClearance: c.toolContext.exactClearance, storeBindingDigest: bind,
+      containment: { contain: () => undefined, holds: () => true, isContained: () => false } as never,
+      vaultNameBindings: bindingsAsMigrated(store), shellIsolation: c.toolContext.shellIsolation,
+    }, { bulkRunId: 'run-1' }, {})).toBeNull();
   });
 
   it('mints no pass with the store exchange switched off', async () => {
@@ -205,11 +223,23 @@ describe('the refresh of an expiring store connection', () => {
     expect(lines().some((l) => l.includes('another scope than the one granted'))).toBe(true);
   });
 
-  it('an answer that names no scope is not stored either', async () => {
+  it('an answer that names no scope is stored, and the granted scope stays', async () => {
     const { scope: _s, ...noScope } = RENEWED;
     hold.answer = async () => answer(noScope);
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('renewed');
+    expect(vault.get(accessTokenKey(ID))).toBe('at-new');
+    expect(profile().oauth_grant?.granted_scope).toEqual(SCOPE.split(','));
+  });
+
+  it('once the binding is gone, no further refresh gets a pass', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    hold.answer = async () => answer({ ...RENEWED, scope: 'read_customers' });
     expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
-    expect(vault.get(accessTokenKey(ID))).toBe('at-old');
+    expect(profile().oauth_grant?.store_binding).toBeUndefined();
+    vi.setSystemTime(Date.now() + STORE_REFRESH_WINDOW_MS + 1000);
+    expect(await storeRefreshPassFor(ID, ctx())).toBeUndefined();
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('not-run');
+    expect(hold.calls).toHaveLength(1);
   });
 
   it('stores nothing when the vault changed while the refresh ran, and ends the connection (compare-and-swap)', async () => {
@@ -218,8 +248,10 @@ describe('the refresh of an expiring store connection', () => {
     expect(vault.get(accessTokenKey(ID))).toBe('at-old');
     expect(vault.get(refreshTokenKey(ID))).toBe('rt-written-meanwhile');
     expect(profile().oauth_grant?.store_binding).toBeUndefined();
-    // Nothing tried again with the spent refresh token.
+    // Nothing tried again with the spent refresh token, and a lost compare is no revocation.
     expect(hold.calls).toHaveLength(1);
+    expect(hasRevokedGrant(profile())).toBe(false);
+    expect(lines().some((l) => l.includes('outcome=cas-lost'))).toBe(true);
   });
 
   it('the access slot changing meanwhile ends it the same way', async () => {
@@ -228,14 +260,33 @@ describe('the refresh of an expiring store connection', () => {
     expect(vault.get(accessTokenKey(ID))).toBe('at-written-meanwhile');
   });
 
-  it('a refusal by the store ends the connection and leaves the vault as it was', async () => {
+  it('the store\'s invalid_grant ends the connection, records the grant as revoked, and leaves the vault as it was', async () => {
     hold.answer = async () => answer({ error: 'invalid_grant', error_description: 'secret-looking provider text rt-old' }, 400);
     expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
     expect(vault.get(accessTokenKey(ID))).toBe('at-old');
     expect(profile().oauth_grant?.store_binding).toBeUndefined();
+    expect(hasRevokedGrant(profile())).toBe(true);
+    expect(profile().oauth_grant?.revoked_fp).toBe(tokenFingerprint('rt-old'));
     // The answer's body reaches no log line.
-    expect(lines().some((l) => l.includes('invalid_grant') || l.includes('rt-old'))).toBe(false);
+    expect(lines().some((l) => l.includes('secret-looking provider text') || l.includes('rt-old'))).toBe(false);
   });
+
+  it('another refusal (400 without invalid_grant) ends the connection but records no revocation', async () => {
+    hold.answer = async () => answer({ error: 'invalid_request' }, 400);
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
+    expect(profile().oauth_grant?.store_binding).toBeUndefined();
+    expect(hasRevokedGrant(profile())).toBe(false);
+  });
+
+  for (const status of [429, 500, 503, 408]) {
+    it(`a passing error (HTTP ${String(status)}) leaves the connection as it was: binding kept, nothing revoked`, async () => {
+      hold.answer = async () => answer({ error: 'invalid_grant' }, status);
+      expect(await refreshStoreToken(ID, 'due', ctx())).toBe('not-run');
+      expect(profile().oauth_grant?.store_binding).toBe(bind(ID, ORIGIN, 'at-old'));
+      expect(hasRevokedGrant(profile())).toBe(false);
+      expect(vault.get(refreshTokenKey(ID))).toBe('rt-old');
+    });
+  }
 
   it('no answer at all leaves the connection as it was', async () => {
     hold.answer = async () => ({ ok: false, message: 'socket hang up' });
@@ -331,10 +382,23 @@ describe('the refresh of an expiring store connection', () => {
     expect(Object.entries(headers).find(([k]) => k.toLowerCase() === 'x-shopify-access-token')?.[1]).toBe('at-old');
   });
 
-  it('after a 401 renews only the connection of the store the request went to', async () => {
-    expect(await renewStoreAfterUnauthorized('https://other.myshopify.com/admin/api/2025-10/graphql.json', ctx())).toBe(false);
+  it('the attach hands back a renewal for exactly the connection it attached, which a 401 uses', async () => {
+    const p = profile();
+    expect(store.save({ ...p, auth: { ...p.auth, oauth: { ...p.auth!.oauth, token_expires_at: Date.now() + 3_600_000 } } } as ApiProfile).ok).toBe(true);
+    const { attachStoredCredential } = await import('../tools/builtin/http.js');
+    const { bindingsAsMigrated } = await import('../../tests/helpers/vault-bindings.js');
+    const c = ctx();
+    const out: { pass?: StorePass | undefined; renew?: (() => Promise<boolean>) | undefined } = {};
+    await attachStoredCredential(`${ORIGIN}/admin/api/2025-10/shop.json`, {}, false, {
+      apiStore: store, secretStore: c.secretStore, principal: OWNER_PRINCIPAL, mandateEnds: null, secretReleases: null,
+      exactClearance: c.toolContext.exactClearance, storeBindingDigest: bind,
+      containment: { contain: () => undefined, holds: () => true, isContained: () => false } as never,
+      vaultNameBindings: bindingsAsMigrated(store), shellIsolation: c.toolContext.shellIsolation,
+    }, { bulkRunId: 'run-1' }, out);
     expect(hold.calls).toHaveLength(0);
-    expect(await renewStoreAfterUnauthorized(`${ORIGIN}/admin/api/2025-10/graphql.json`, ctx())).toBe(true);
+    expect(out.renew).toBeDefined();
+    expect(await out.renew!()).toBe(true);
+    expect(hold.calls).toHaveLength(1);
     expect(vault.get(accessTokenKey(ID))).toBe('at-new');
   });
 });

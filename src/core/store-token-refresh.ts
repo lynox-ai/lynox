@@ -34,7 +34,6 @@ import { tokenFingerprint } from './oauth-refresh-failure.js';
 import { exchangeToken, isTokenEndpointRefused, serializeTokenBody, tokenExpiryFrom, vetTokenEndpoint, type VettedTokenEndpoint } from './oauth-token-exchange.js';
 import { isOwnerPrincipal, type RequestPrincipal } from './request-principal.js';
 import { newCorrelationId, type AuditEntry } from './audit-log.js';
-import { normalizeHostForMatch } from './shopify-host.js';
 import { mintStoreRefreshPass, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from './store-pass.js';
 import type { ToolContext } from './tool-context.js';
 import type { IAgent } from '../types/index.js';
@@ -56,7 +55,15 @@ export interface StoreRefreshContext {
  * that changes the connection; the stored token stays as it was. `dead`: the store refused the
  * refresh or its answer could not be kept, and the connection has to be made again.
  */
-export type StoreRefreshOutcome = 'renewed' | 'not-run' | 'dead';
+export type StoreRefreshOutcome = 'renewed' | 'not-run' | 'dead' | 'client-misnamed';
+
+/**
+ * The refusal for a store connection whose client is not under the preset's own vault names: its
+ * token cannot be renewed, and nothing is sent. Fixed text, for the model and the log.
+ */
+export function storeClientMisnamedText(profileId: string): string {
+  return `the Shopify store connection of api_profile "${profileId}" does not keep its app's client ID and secret under the names this provider uses (SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET), so its expiring token cannot be renewed and nothing was sent to the store. Connect it again with api_setup action "connect".`;
+}
 
 const refreshesInFlight = new Map<string, Promise<StoreRefreshOutcome>>();
 const connectsInFlight = new Map<string, number>();
@@ -132,14 +139,14 @@ export interface StoreRefreshPlan {
  *  2. the shell-exec sidecar;
  *  3. the profile is of a store preset that asks for expiring tokens, on its own store's host,
  *     whose token endpoint is that store's and passes the endpoint vetting;
- *  4. the profile's client is the preset's own pair of vault names, and its refresh token is in
- *     the profile's own derived slot;
+ *  4. the profile's client is the preset's own pair of vault names (`client-misnamed` otherwise,
+ *     which the attach names), and its refresh token is in the profile's own derived slot;
  *  5. the binding the callback recorded holds over the access token now in the vault, for this
  *     profile and the store's origin;
  *  6. client id, client secret and refresh token are in the vault;
  *  7. the control plane's clearance, as for the connect's exchange.
  */
-export async function storeRefreshPassFor(profileId: string, ctx: StoreRefreshContext): Promise<StoreRefreshPlan | undefined> {
+export async function storeRefreshPassFor(profileId: string, ctx: StoreRefreshContext): Promise<StoreRefreshPlan | 'client-misnamed' | undefined> {
   const { toolContext, secretStore } = ctx;
   if (!shopifyExchangeSwitchOn()) return undefined;
   if (controlPlaneFromEnv() === null || !toolContext.exactClearance || !toolContext.storeBindingDigest) return undefined;
@@ -161,7 +168,7 @@ export async function storeRefreshPassFor(profileId: string, ctx: StoreRefreshCo
   const endpoint = vetTokenEndpoint(endpoints.tokenUrl, profile.custom_endpoint_ack);
   if (isTokenEndpointRefused(endpoint)) return undefined;
   const client = presetClientKeys(preset.id);
-  if (oauth.client_id_key !== client.id || oauth.client_secret_key !== client.secret) return undefined;
+  if (oauth.client_id_key !== client.id || oauth.client_secret_key !== client.secret) return 'client-misnamed';
   const refreshSlot = refreshTokenKey(profile.id);
   if (oauth.refresh_token_key !== undefined && oauth.refresh_token_key !== refreshSlot) return undefined;
   const bound = profile.oauth_grant?.store_binding;
@@ -218,21 +225,16 @@ export function refreshStoreToken(profileId: string, trigger: 'due' | 'unauthori
   return run;
 }
 
-/**
- * After a store answered 401 to the stored token: refresh the connection of the store `url` goes
- * to, if it is one whose token expires. True when a new token is stored, and the caller may send
- * the request once more. Never throws.
- */
-export async function renewStoreAfterUnauthorized(url: string, ctx: StoreRefreshContext): Promise<boolean> {
-  let host: string;
-  try { host = new URL(url).hostname; } catch { return false; }
-  const profile = ctx.toolContext.apiStore?.getByHostname(host);
-  if (profile === undefined || !storeRefreshApplies(profile) || presetStoreHost(profile) !== normalizeHostForMatch(host)) return false;
-  return (await refreshStoreToken(profile.id, 'unauthorized', ctx)) === 'renewed';
-}
-
 function logLine(profileId: string, what: string): void {
   process.stderr.write(`[lynox:store] token refresh for api_profile "${profileId}" ${what}\n`);
+}
+
+/**
+ * The one line every refresh that ran ends with, for the owner and a bulk run as for a mandate:
+ * profile, outcome and a fixed reason. Never a token, a body or the store's answer.
+ */
+function outcomeLine(profileId: string, outcome: 'ok' | 'not-run' | 'dead' | 'scope-mismatch' | 'cas-lost' | 'client-misnamed', trigger: 'due' | 'unauthorized', why: string): void {
+  logLine(profileId, `outcome=${outcome} (${trigger}): ${why}`);
 }
 
 /** The `attempt` row of a mandate's refresh, `null` for the owner, `'refused'` when it cannot be written. */
@@ -273,9 +275,14 @@ async function runRefresh(profileId: string, trigger: 'due' | 'unauthorized', ct
     try { ctx.toolContext.auditLog?.record({ ...trail, phase }); } catch { /* the attempt row stands alone */ }
   };
   const plan = await storeRefreshPassFor(profileId, ctx);
+  if (plan === 'client-misnamed') {
+    endTrail('failed');
+    outcomeLine(profileId, 'client-misnamed', trigger, 'the client is not under the preset\'s vault names');
+    return 'client-misnamed';
+  }
   if (plan === undefined) {
     endTrail('failed');
-    logLine(profileId, 'not started: the connection does not qualify for a refresh (binding, client, refresh token or clearance)');
+    outcomeLine(profileId, 'not-run', trigger, 'the connection does not qualify for a refresh (binding, refresh token or clearance)');
     return 'not-run';
   }
   const exchanged = await exchangeToken({ endpoint: plan.endpoint, params: plan.params, bodyFormat: plan.bodyFormat }, ctx.toolContext as ToolContext, undefined, plan.pass);
@@ -283,45 +290,60 @@ async function runRefresh(profileId: string, trigger: 'due' | 'unauthorized', ct
   if (!exchanged.ok) {
     // Nothing came back: whether the store spent the refresh token is unknown, and the next attempt
     // after the window finds out. The stored token is left as it is.
-    logLine(profileId, 'failed: the store did not answer; the stored token is unchanged');
+    outcomeLine(profileId, 'not-run', trigger, 'the store did not answer; the stored token is unchanged');
     return 'not-run';
   }
   if (!exchanged.responseOk) {
-    // The store refused the refresh token: expired, revoked or already spent. Only a new connect helps.
-    return endConnection(profileId, ctx, plan, `ended: the store refused the refresh with HTTP ${String(exchanged.status)}`);
+    // 400 and 401 are the store refusing the refresh token: expired, revoked or already spent. Only
+    // a new connect helps, and only an explicit `invalid_grant` records the grant as revoked. Any
+    // other status (429, 5xx, a proxy's 408) says nothing about the token: it stays as it was.
+    if (exchanged.status !== 400 && exchanged.status !== 401) {
+      outcomeLine(profileId, 'not-run', trigger, `the store answered HTTP ${String(exchanged.status)}; the stored token is unchanged`);
+      return 'not-run';
+    }
+    return endConnection(profileId, ctx, plan, 'dead', trigger, `the store refused the refresh with HTTP ${String(exchanged.status)}`, invalidGrant(exchanged.text));
   }
   let parsed: { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown; refresh_token_expires_in?: unknown; scope?: unknown };
   try {
     parsed = JSON.parse(exchanged.text) as typeof parsed;
   } catch {
-    return endConnection(profileId, ctx, plan, 'ended: the store\'s answer was not readable');
+    return endConnection(profileId, ctx, plan, 'dead', trigger, 'the store\'s answer was not readable');
   }
   const access = parsed.access_token;
-  if (typeof access !== 'string' || access === '') return endConnection(profileId, ctx, plan, 'ended: the store\'s answer carried no access token');
+  if (typeof access !== 'string' || access === '') return endConnection(profileId, ctx, plan, 'dead', trigger, 'the store\'s answer carried no access token');
   const rotated = typeof parsed.refresh_token === 'string' && parsed.refresh_token !== '' ? parsed.refresh_token : null;
   const { getLynoxDir } = await importConfig();
 
   // From here to the save nothing yields: what the compare reads is what the writes replace.
   const profile = apiStore.get(profileId);
   if (profile === undefined) return 'not-run';
+  // An answer that names a scope must name the one granted; one that names none leaves the
+  // granted scope as it was (a refresh cannot widen what the app was granted).
   const granted = profile.oauth_grant?.granted_scope;
   const answered = scopesOfAnswer(parsed.scope);
-  if (granted === undefined || answered === undefined || !sameScopes(granted, answered)) {
-    return endConnection(profileId, ctx, plan, 'ended: the store\'s answer named another scope than the one granted; nothing was stored');
+  if (granted === undefined || (answered !== undefined && !sameScopes(granted, answered))) {
+    return endConnection(profileId, ctx, plan, 'scope-mismatch', trigger, 'the store\'s answer named another scope than the one granted; nothing was stored');
   }
   const accessKey = accessTokenKey(profileId);
   const refreshKey = refreshTokenKey(profileId);
   if (ctx.secretStore.resolve(accessKey) !== plan.presented.access
     || ctx.secretStore.resolve(refreshKey) !== plan.presented.refresh
     || profile.oauth_grant?.store_binding !== plan.presented.binding) {
-    return endConnection(profileId, ctx, plan, 'ended: the vault changed while the refresh ran; nothing was stored');
+    return endConnection(profileId, ctx, plan, 'cas-lost', trigger, 'the vault changed while the refresh ran; nothing was stored');
   }
   const binding = ctx.toolContext.storeBindingDigest?.(profileId, plan.origin, access) ?? null;
-  if (binding === null) return endConnection(profileId, ctx, plan, 'ended: the new token could not be bound to the store; nothing was stored');
+  if (binding === null) return endConnection(profileId, ctx, plan, 'dead', trigger, 'the new token could not be bound to the store; nothing was stored');
 
   const replacedAccessFp = apiStore.currentFingerprint(accessKey);
-  setSecret(accessKey, access);
-  if (rotated !== null) setSecret(refreshKey, rotated);
+  try {
+    setSecret(accessKey, access);
+    if (rotated !== null) setSecret(refreshKey, rotated);
+  } catch {
+    // The vault may hold the new access token beside the old binding, and the refresh token the
+    // store spent: every request to the store refuses on the binding, and says to connect again.
+    outcomeLine(profileId, 'dead', trigger, 'writing the new tokens to the vault failed; connect the store again');
+    return 'dead';
+  }
   const liveRefresh = rotated ?? plan.presented.refresh;
   const writes: WrittenSecret[] = [{ name: accessKey, fp: tokenFingerprint(access) }];
   if (rotated !== null) writes.push({ name: refreshKey, fp: tokenFingerprint(rotated) });
@@ -363,10 +385,10 @@ async function runRefresh(profileId: string, trigger: 'due' | 'unauthorized', ct
   if (!saved) {
     // The vault holds the new tokens, the profile the old binding: every request to the store now
     // refuses on the binding and says to connect again, the safe direction.
-    logLine(profileId, 'ended: the new tokens are in the vault but the profile could not be saved; connect the store again');
+    outcomeLine(profileId, 'dead', trigger, 'the new tokens are in the vault but the profile could not be saved; connect the store again');
     return 'dead';
   }
-  logLine(profileId, `renewed (${trigger})`);
+  outcomeLine(profileId, 'ok', trigger, 'new tokens stored and bound');
   return 'renewed';
 }
 
@@ -386,7 +408,16 @@ function sameScopes(a: readonly string[], b: readonly string[]): boolean {
  * with, so every request to the store refuses and says to connect again. The tokens in the vault
  * stay where they are; a new connect replaces them.
  */
-async function endConnection(profileId: string, ctx: StoreRefreshContext, plan: StoreRefreshPlan, why: string): Promise<StoreRefreshOutcome> {
+async function endConnection(
+  profileId: string,
+  ctx: StoreRefreshContext,
+  plan: StoreRefreshPlan,
+  outcome: 'dead' | 'scope-mismatch' | 'cas-lost',
+  trigger: 'due' | 'unauthorized',
+  why: string,
+  /** The store said `invalid_grant`: the grant is recorded as revoked, for the refusal that names it. */
+  revoked = false,
+): Promise<StoreRefreshOutcome> {
   const apiStore = ctx.toolContext.apiStore;
   if (apiStore) {
     try {
@@ -395,13 +426,26 @@ async function endConnection(profileId: string, ctx: StoreRefreshContext, plan: 
       // meanwhile carries its own binding, which stays.
       const now = apiStore.get(profileId);
       if (now?.oauth_grant !== undefined && now.oauth_grant.store_binding === plan.presented.binding) {
-        const { store_binding: _gone, ...grant } = now.oauth_grant;
+        const { store_binding: _gone, ...rest } = now.oauth_grant;
+        const grant: OAuthGrantRecord = revoked
+          ? { ...rest, state: 'revoked', revoked_fp: tokenFingerprint(plan.presented.refresh), revoked_at: new Date().toISOString() }
+          : rest;
         apiStore.save({ ...now, oauth_grant: grant } as ApiProfile, join(getLynoxDir(), 'apis'), { actor: ctx.principal });
       }
     } catch {
       // The binding stays; the store refuses the spent token itself, and the next refresh ends here again.
     }
   }
-  logLine(profileId, why);
+  outcomeLine(profileId, outcome, trigger, revoked ? `${why} (invalid_grant: recorded as revoked)` : why);
   return 'dead';
+}
+
+/** Whether a refused refresh's answer is the store's `invalid_grant`. Reads the one field, nothing else. */
+function invalidGrant(text: string): boolean {
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown };
+    return parsed.error === 'invalid_grant';
+  } catch {
+    return false;
+  }
 }

@@ -1078,6 +1078,12 @@ interface AttachedAuth {
    */
   pass?: StorePass | undefined;
   /**
+   * For a request to a store whose token expires: renews this profile's token once, after the
+   * store answered 401 to it (`store-token-refresh.ts`), with the vault view this attach read it
+   * through. True when a new token is stored. Absent for any other request.
+   */
+  renew?: (() => Promise<boolean>) | undefined;
+  /**
    * The profile whose credential filled {@link slot}: set with it and only with it. For an
    * oauth2 profile it is read after the renewal, in the same synchronous stretch as the token
    * (a renewal can save the profile, and an exchange it makes can mint), so its grant is the one
@@ -2434,8 +2440,11 @@ async function attachEngineManagedAuth(
     // read, so a store connection costs no vault read for the exchange's checks.
     if (attachPreset?.apiOnDerivedHost === true && typeof expiresAt === 'number' && Date.now() >= expiresAt - OAUTH_REFRESH_BUFFER_MS) {
       if (attachPreset.expiringParam !== undefined && toolContext !== undefined) {
-        const { refreshStoreToken } = await import('../../core/store-token-refresh.js');
-        await refreshStoreToken(profile.id, 'due', { toolContext: { ...toolContext, apiStore }, secretStore, principal: agent.principal, runId: agent.currentRunId });
+        const { refreshStoreToken, storeClientMisnamedText } = await import('../../core/store-token-refresh.js');
+        const outcome = await refreshStoreToken(profile.id, 'due', { toolContext: { ...toolContext, apiStore }, secretStore, principal: agent.principal, runId: agent.currentRunId });
+        // Named, not silent: a token that cannot be renewed for this reason would fail on its own
+        // within minutes, with nothing to say why.
+        if (outcome === 'client-misnamed') return { refusal: `Error: ${storeClientMisnamedText(profile.id)}` };
       } else {
         process.stderr.write(`[lynox:http] oauth token renewal skipped for profile "${profile.id}": a store connection is renewed by connecting it again\n`);
       }
@@ -2530,7 +2539,13 @@ async function attachEngineManagedAuth(
       // they refuse has contained the chat without anything sent, the safe direction.
       const minted = await mintStorePassFor(toolContext!, container, { kind: 'api', connectionId: profile.id }, origin, oauthSlot, oauthValue);
       if ('refusal' in minted) return { refusal: `Error: ${minted.refusal}` };
-      return { ...put(oauthSlot, oauthValue), pass: minted.pass };
+      const renew = attachPreset?.expiringParam !== undefined && toolContext !== undefined
+        ? async (): Promise<boolean> => {
+          const { refreshStoreToken } = await import('../../core/store-token-refresh.js');
+          return (await refreshStoreToken(profile.id, 'unauthorized', { toolContext: { ...toolContext, apiStore }, secretStore, principal: agent.principal, runId: agent.currentRunId })) === 'renewed';
+        }
+        : undefined;
+      return { ...put(oauthSlot, oauthValue), pass: minted.pass, renew };
     }
     return put(oauthSlot, oauthValue);
   }
@@ -4255,9 +4270,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // A store whose token expires answers 401 once the hour is up: the engine refreshes it here,
       // at most once a minute per store, and says so outside the wrap. The request is not sent
       // again by the engine; the model sends it once more, and a second 401 stays a 401.
-      if (response.status === 401 && toolContext?.apiStore && agent.secretStore && isShopifyAdminUrl(input.url)) {
-        const { renewStoreAfterUnauthorized } = await import('../../core/store-token-refresh.js');
-        if (await renewStoreAfterUnauthorized(input.url, { toolContext, secretStore: agent.secretStore, principal: agent.principal, runId: agent.currentRunId })) {
+      let storeRenewed = false;
+      if (response.status === 401 && auth.renew !== undefined) {
+        storeRenewed = await auth.renew();
+        if (storeRenewed) {
           wrapped += '\n\n**[Engine note — the store\'s access was renewed]**\nThe access token for this store had expired and the engine has renewed it. Send the same request once more; nothing was changed by the request above.';
         }
       }
@@ -4269,7 +4285,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // set — the 2026-05-18 Shopify failure mode: stale vault
       // access_token + agent ping-ponged the user through "re-paste from
       // admin UI" instead of calling `api_setup fetch_token`.
-      if (response.status === 401 && toolContext?.apiStore) {
+      // Not after a renewal: the note above already says what to do, and this reminder would
+      // say the opposite (connect again, or fetch a token).
+      if (response.status === 401 && toolContext?.apiStore && !storeRenewed) {
         try {
           const reqHostname = new URL(input.url).hostname;
           const matchedProfile = toolContext.apiStore.getByHostname(reqHostname);
@@ -4534,7 +4552,7 @@ export async function attachStoredCredential(
    *  the run is the container a request to a store is contained under (`core/containment.ts`). */
   container: { bulkRunId: string },
   /** Receives the store pass minted for this request, which the caller hands to its send. */
-  out?: { pass?: StorePass | undefined } | undefined,
+  out?: { pass?: StorePass | undefined; renew?: (() => Promise<boolean>) | undefined } | undefined,
 ): Promise<ApiProfile | null> {
   const auth = await attachEngineManagedAuth(
     url,
@@ -4552,6 +4570,9 @@ export async function attachStoredCredential(
     write,
     { bulkRunId: container.bulkRunId },
   );
-  if (out !== undefined && auth.refusal === undefined) out.pass = auth.pass;
+  if (out !== undefined && auth.refusal === undefined) {
+    out.pass = auth.pass;
+    out.renew = auth.renew;
+  }
   return auth.slot !== undefined && auth.refusal === undefined ? auth.profile ?? null : null;
 }

@@ -125,17 +125,17 @@ function client(opts: { attach?: boolean; methods?: string[]; contract?: Capabil
     contract: opts.contract ?? mintBulkContract(HOST, [0, 1, 2, 3, 'x'].map(url)),
     hostPolicy: createToolContext({}),
     ackHosts: undefined,
-    attach: async (u, headers, method) => {
+    attach: async (u, headers, method, out) => {
       opts.methods?.push(method);
       if (opts.attach === false) return null;
       headers['authorization'] = `Bearer ${TOKEN}`;
+      if (opts.renew !== undefined && out !== undefined) out.renew = () => opts.renew!(u);
       return opts.connection ? opts.connection(u, method) : { id: 'fixture', grantId: 'grant-1' };
     },
     rateLimit: opts.rateLimit ?? (() => null),
     scan: opts.scan ?? detectSecretInContent,
     connectedAccount: opts.connectedAccount ?? (() => false),
     recordRead: null,
-    renewAfterUnauthorized: opts.renew,
   });
 }
 
@@ -631,8 +631,8 @@ describe('applying an external run', () => {
         expect(renewed).toEqual([url(0)]);
         expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(2);
         expect(s.items.get('/products/0')?.['price']).toBe('13.00');
-        // The refused first send is not reported as a refusal: the write went through.
-        expect(refused).toEqual([]);
+        // The first send was refused and is reported so, once; the second landed.
+        expect(refused).toEqual([1]);
       } finally {
         restore();
       }
@@ -670,6 +670,8 @@ describe('applying an external run', () => {
         expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.unauthorized, applied: 0 });
         expect(renewals).toBe(1);
         expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(2);
+        // Both sends were refused and reported so: the target is unwritten and resumable, not unclear.
+        expect(ledger.listPending(runId)).toEqual([0, 1]);
       } finally {
         restore();
       }
