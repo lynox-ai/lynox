@@ -90,7 +90,7 @@ import type { DataStore } from './data-store.js';
 import { pv } from './prompt-value.js';
 import type { BatchIndex } from './batch-index.js';
 import type { PluginManager } from './plugins.js';
-import { OWNER_PRINCIPAL, principalTag } from './request-principal.js';
+import { OWNER_PRINCIPAL, principalTag, runAuthorTag } from './request-principal.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { turnIsLocked } from './mandate-tool-lock.js';
 import { ConversationGrants } from './conversation-grants.js';
@@ -203,6 +203,9 @@ export interface RunOptions {
    *  this undefined → `runs.trigger_origin` NULL). A SEPARATE dimension from
    *  `run_type`; observability only, never gates money. */
   triggerOrigin?: string | undefined;
+  /** The trigger this run is a run of, for the author its typed turn is recorded with
+   *  (`runAuthorTag`): a trigger's turn is never recorded as the owner's. */
+  triggerId?: string | undefined;
   /** Who started this run (PRD customer-granted-operator-access D1, §3.13): a mandate's run
    *  gets the mandate's tool lock. ABSENT MEANS "THE SAME AS BEFORE", never "the owner": the
    *  compaction summary run this session starts on its own passes none, and must not lift
@@ -422,6 +425,9 @@ export class Session {
    * library's default; the engine's own places name theirs (principal-sites.test.ts).
    */
   private _principal: RequestPrincipal = OWNER_PRINCIPAL;
+  /** The tag this session's current (or last) run writes with (`runAuthorTag`). Null before the
+   *  first run: nothing is written as anyone's then. */
+  private _runAuthor: string | null = null;
   /** A run of someone other than the owner happened in this session, or its thread's row named
    *  another creator when it opened (PRD B6, see `_run`). Never reset. */
   private _foreignRunHere = false;
@@ -863,6 +869,9 @@ export class Session {
     // Sticky for this session: someone other than the owner has run here (B6 below). Not left to
     // the thread row alone, which depends on the route refusing a mandate on another's thread.
     if (this._principal.kind !== 'owner') this._foreignRunHere = true;
+    // Who this run writes as, set before any rebuild like the principal. An internal run
+    // (compaction) keeps the author of the run it serves.
+    if (runOptions?.internal !== true) this._runAuthor = runAuthorTag(this._principal, runOptions);
     if (runOptions?.internal !== true) this._stopBeforeSend = false;
     // Before anything that could rebuild the agent below, like the principal: every rebuild
     // of this run marks its agent by what this run's client said, never by an earlier run.
@@ -1213,6 +1222,8 @@ export class Session {
     // mandate's run reuses. `_createAgent` also builds every new agent with it, which is
     // what carries it across a rebuild in the middle of this run.
     this.agent.principal = this._principal;
+    // Who this run's writes are recorded as, on the agent that will send, for the same reason.
+    this.agent.writeAuthor = this._runAuthor;
 
     const usageBefore = { ...this.usage };
 
@@ -1311,6 +1322,7 @@ export class Session {
           [{ role: 'user', content: userContent as BetaMessageParam['content'] }],
           runStartSeq,
           { message_count: totalBefore + 1 },
+          this._runAuthor ?? undefined,
         );
         userTurnPrePersisted = true;
       } catch {
@@ -2840,6 +2852,8 @@ export class Session {
       // of the last run: a rebuild in the middle of a mandate's run (compaction, a tier
       // override, a registry change) must not hand the model the tools the lock withholds.
       principal: this._principal,
+      // Who the rebuilt agent writes as: the run in flight's author, as the principal above.
+      writeAuthor: this._runAuthor,
       // ⛔ CARRIED ACROSS THE REBUILD. Without this line every rebuild mints a fresh,
       // empty scope and orphans whatever is registered — a later `abort()` then reaches
       // nothing. `_createAgent` is reached from the ctor, `addTool` and every rebuild that

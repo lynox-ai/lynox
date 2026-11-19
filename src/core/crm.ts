@@ -10,7 +10,7 @@
  *   interactions:  contact_name, type, channel, summary, date
  */
 
-import type { DataStore, RowStamp } from './data-store.js';
+import type { DataStore, RowSource, RowStamp } from './data-store.js';
 import type { EngineDb } from './engine-db.js';
 import { SubjectStore, ambiguityError } from './subject-store.js';
 import { reducedErrorText } from './error-egress.js';
@@ -210,6 +210,17 @@ export class CRM {
 
     const result = this.ds.queryRecords({ collection: 'contacts', filter, limit: 1 });
     return (result.rows[0] as unknown as ContactRecord | undefined) ?? null;
+  }
+
+  /**
+   * Where the contact with this address came from (`DataStore.sourceOfRow`), or `null` when
+   * there is none. The address is normalized as {@link upsertContact} stores it.
+   */
+  contactOrigin(email: string): RowSource | null {
+    const normalized = email.trim().toLowerCase();
+    if (normalized.length === 0) return null;
+    this.ensureSchema();
+    return this.ds.sourceOfRow('contacts', 'email', normalized);
   }
 
   /**

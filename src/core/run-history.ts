@@ -26,6 +26,8 @@ import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
 import { HISTORY_MARKERS_DDL } from './history-markers.js';
 import { findHiddenChar, findHiddenInName, hiddenCharRefusal } from './hidden-text.js';
+import { stepIdIssue } from '../orchestrator/step-id.js';
+import { templateRefIssue } from '../orchestrator/template-refs.js';
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
 
@@ -1642,6 +1644,13 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (72);
    ALTER TABLE pipeline_runs ADD COLUMN started_by_run_id TEXT;
    CREATE INDEX IF NOT EXISTS idx_pipeline_runs_started_by ON pipeline_runs(started_by_run_id);`,
+  // v73: who wrote a thread message (`ThreadMessageRecord.author`): a `principalTag` for a turn
+  // the person typed, or a run's own tag (`trigger:<id>`) for a turn a trigger started, which is
+  // never `owner`, not even for the owner's own trigger (`runAuthorTag`). NULL on every older
+  // row and on every row the engine writes itself (assistant turns, tool results, notes), and
+  // NULL means unknown: it is never read as the owner's. No backfill.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (73);
+   ALTER TABLE thread_messages ADD COLUMN author TEXT;`,
 ];
 
 /** What {@link RunHistory.readWorkflowGrant} found for a grant id. */
@@ -2159,6 +2168,24 @@ export class RunHistory {
    * Ordered by run creation, then `rowid` to disambiguate same-second runs
    * (`runs.created_at` has second granularity), then per-run sequence.
    */
+  /**
+   * The tool_use ids of this session's calls the ledger records as failed: thrown and soft
+   * failures alike (`is_error = 1`). Calls written before `tool_use_id` and `is_error` existed
+   * have neither and are not in it. Workflow steps' replayed calls are left out, as in
+   * `getSessionToolCalls`.
+   */
+  getFailedToolUseIds(sessionId: string): Set<string> {
+    const rows = this.db.prepare(`
+      SELECT tc.tool_use_id AS id FROM run_tool_calls tc
+      JOIN runs r ON r.id = tc.run_id
+      WHERE r.session_id = ?
+        AND r.run_type != 'pipeline_step'
+        AND tc.is_error = 1
+        AND tc.tool_use_id IS NOT NULL
+    `).all(sessionId) as Array<{ id: string }>;
+    return new Set(rows.map((r) => r.id));
+  }
+
   getSessionToolCalls(sessionId: string): ToolCallRecord[] {
     const rows = this.db.prepare(`
       SELECT tc.* FROM run_tool_calls tc
@@ -3433,6 +3460,14 @@ export class RunHistory {
     }) ?? planned.steps.reduce<ReturnType<typeof findHiddenInName>>(
       (hit, s, i) => hit ?? (typeof s.id === 'string' ? findHiddenInName(s.id, `steps[${i}].id`) : null), null);
     if (hidden) throw new Error(hiddenCharRefusal('workflow', hidden));
+    // A step's id has a limited shape (`step-id.ts`): it reaches the model next to lynox's own words.
+    // Every producer saves here, so no new plan carries a free-form id; one stored before the limit
+    // is shown by its position, and `update_workflow_steps` names the rename it needs first.
+    const shapeIssue = stepIdIssue(planned.steps);
+    if (shapeIssue) throw new Error(shapeIssue);
+    // A `{{<id>.result}}` no run could resolve is refused at the save, not met as raw text in a run.
+    const refIssue = templateRefIssue(planned.steps);
+    if (refIssue) throw new Error(refIssue);
     const contractError = validateContractAgainstSteps(planned);
     if (contractError) throw new Error(contractError);
     // S3f write-cutover: write the workflow definition DIRECTLY to engine.db. The

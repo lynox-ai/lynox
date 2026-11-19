@@ -46,12 +46,35 @@ export const MIGRATION_MEMORY = {
   restFactor: 1.944,
   /**
    * Peak over the baseline per byte of a store rewritten in memory. For the raw path the runs
-   * measured 3.48 / 2.83 / 2.31 at 25.8 / 82.5 / 206.3 MiB; the plaintext path does not exist
-   * yet, so this is the earlier in-memory rewrite spike's all-rows figure (7.1, one run,
-   * ciphertext to ciphertext), a reference and not a proven bound, until the build that adds
-   * the plaintext path measures it.
+   * measured 3.48 / 2.83 / 2.31 at 25.8 / 82.5 / 206.3 MiB. The plaintext path is not measured
+   * yet: its destination half re-encrypts in memory in steps (`migration-rekey.ts`), its source
+   * half is not built. Until the same driver measures both, this is the earlier in-memory rewrite
+   * spike's all-rows figure (7.1, one run, ciphertext to ciphertext), a reference and not a
+   * proven bound; no source sends a plaintext store before that measurement.
    */
   k: 7.1,
+  /**
+   * The SOURCE's peak on the plaintext path, over its resident memory before the first rewrite
+   * (the raw snapshots are held by then): `kSourceBaseMb + kSource` MiB per MiB of the stores on
+   * that path together. It is a line above every reading, not a fit; the peak is not proportional
+   * to the stores (a fixed part plus a falling slope), so a factor alone would undercount small ones.
+   * Measured 2026-11-17 in the engine image (sha256:3fe4b651b272b3e7dba17e6b5e9e5c42d9af1dc2dbf491c6692af06a85dc8c8d,
+   * core 9d9c96b4), one container per run with `--memory=1536m --memory-swap=1536m` (the tenant
+   * container's limit), node 22.23; engine.db with 4 KiB encrypted memories and history.db with
+   * 4 KiB encrypted run answers, both on the plaintext path, the own-memory check let through to
+   * read the peak; VmHWM reset after the fixture. Peak over that resident memory, two runs each,
+   * by engine.db + history.db in MiB: 12.7 + 0 → 102.2 / 102.7; 36.7 + 0 → 238.3 / 237.9;
+   * 84.7 + 0 → 448.4 / 440.8; 156.7 + 0 → 757.2 / 759.4; 216.7 + 0 → 977.4 / 965.8;
+   * 156.7 + 0.4 → 746.3 / 761.7; 156.7 + 48.4 → 971.1 / 985.9; 108.7 + 108.4 → 1031.1 / 1014.8;
+   * 48.7 + 156.4 → 964.6 / 977.6; 12.7 + 156.4 → 845.8 / 827.5. `90 + 5.0 · S` is above each,
+   * by 10.6 % at the closest (12.7 + 156.4). S is the store files' size; the check reads the
+   * snapshot's, taken to be about as large for these stores (written once, never deleted from;
+   * assumed, not measured). Not covered: other
+   * row shapes (many small rows, large blobs), the host's swap and load, and the merge ledgers'
+   * plaintext form (built after the stores', only for ledgers within the 64 MiB cap).
+   */
+  kSourceBaseMb: 90,
+  kSource: 5.0,
 } as const;
 
 /**
@@ -111,6 +134,12 @@ export function readImportLimitMb(
 
 let cachedLimitMb: number | null = null;
 
+/** This process's memory limit in MiB (`readImportLimitMb`), read once per process. */
+export function ownMemoryLimitMb(): number {
+  cachedLimitMb ??= readImportLimitMb();
+  return cachedLimitMb;
+}
+
 /** The `migration` block of the health body. The limit is read once per process. */
 export function migrationCeiling(): MigrationCeiling {
   cachedLimitMb ??= readImportLimitMb();
@@ -125,7 +154,12 @@ export function migrationCeiling(): MigrationCeiling {
 export interface MigrationSizes {
   /** The bundle's total original size in bytes, the store included. */
   bundleBytes: number;
-  /** The decoded non-database chunks in bytes. */
+  /**
+   * The non-database chunks in bytes, at their original size as they travel (the merge ledgers
+   * at their raw form's), not at their decoded size: the rest factor was measured that way (the
+   * R run's rest was the bundle). So the rest is part of the bundle, and a bundle smaller than
+   * the store and the rest is malformed, not merely large.
+   */
   restBytes: number;
   /** The store's payload in bytes. */
   storeBytes: number;
@@ -151,10 +185,13 @@ export function storePath(ceiling: MigrationCeiling, sizes: MigrationSizes): Sto
 /**
  * The largest store, in bytes, that takes the plaintext path next to `otherBytes` of other
  * chunks (the rest among them) and `restBytes` of decoded rest: the predicate solved for S,
- * with B = otherBytes + S. Negative when nothing fits.
+ * with B = otherBytes + S. Negative when nothing fits, and -1 for inputs `storePath` would
+ * not judge (a k below 1, a number that is not finite or is negative); never NaN, and Infinity
+ * only for a limit so large that the product overflows (the source's own checks still apply).
  */
 export function maxPlainStoreBytes(ceiling: MigrationCeiling, otherBytes: number, restBytes: number): number {
   const { import_limit_mb: limit, baseline_mb: baseline, k, rest_factor: restFactor } = ceiling;
+  if (![limit, baseline, k, restFactor, otherBytes, restBytes].every(usable) || k < 1) return -1;
   const headroomMb = limit - baseline - otherBytes / MIB - restFactor * (restBytes / MIB);
   return Math.floor((headroomMb * MIB) / k);
 }

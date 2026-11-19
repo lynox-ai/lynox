@@ -47,6 +47,8 @@ let targetLimits: number[];
 // The run's targets as the engine serves them, page by page.
 let allTargets: BulkTarget[];
 let r1Fails = false;
+// While set, an ask for a later page of targets waits for it.
+let laterPageHeld: Promise<void> | null = null;
 
 beforeEach(() => {
 	vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
@@ -63,6 +65,7 @@ beforeEach(() => {
 	targetLimits = [];
 	allTargets = [];
 	r1Fails = false;
+	laterPageHeld = null;
 	Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
 	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const u = String(url);
@@ -75,6 +78,7 @@ beforeEach(() => {
 			const ts = targetStatuses.shift() ?? 200;
 			if (ts !== 200) return new Response('{}', { status: ts, headers: { 'Content-Type': 'application/json', ...(retryAfter !== null ? { 'Retry-After': retryAfter } : {}) } });
 			const off = Number(/offset=(\d+)/.exec(u)?.[1]);
+			if (off > 0 && laterPageHeld !== null) await laterPageHeld;
 			return reply({ targets: allTargets.slice(off, off + targetLimits.at(-1)!) });
 		}
 		runAsks++;
@@ -262,6 +266,52 @@ describe('a run being written', () => {
 		run = writing(60, 5);
 		await pass(BULK_FOLLOW_MS * 3);
 		expect(countLine()).toBe(before);
+	});
+
+	// The run stops working while the owner asks for the rest, and the quiet load that follows is
+	// refused: it replaces no list, so the rest the owner asked for is still appended.
+	it('appends the rest the owner asked for when the load after the run stopped was refused', async () => {
+		allTargets = many(300);
+		// No rewritten target: the page loads a first page only.
+		run = writing(10, 0);
+		await render();
+		const showAll = (): HTMLButtonElement | undefined => [...target.querySelectorAll('button')].find((b) => /300/.test(b.textContent ?? ''));
+		expect(showAll()).toBeDefined();
+		let release = (): void => {};
+		laterPageHeld = new Promise<void>((r) => { release = r; });
+		showAll()!.click();
+		await settle();
+		const asked = runAsks;
+		run = { ...writing(300, 0), phase: 'done' };
+		nextStatuses = [200, 429];
+		retryAfter = '20';
+		await pass(BULK_FOLLOW_MS);
+		// The follow ask, then the load's ask, which is refused.
+		expect(runAsks).toBe(asked + 2);
+		release();
+		await settle();
+		expect(showAll()).toBeUndefined();
+		expect(target.querySelectorAll('tbody tr').length).toBe(300);
+	});
+
+	// The run ends while the owner asks for the rest, and its load brings every target: the rest
+	// that answers after it is not appended a second time.
+	it('appends no rest the owner asked for to a list a load has since replaced', async () => {
+		allTargets = many(300);
+		run = writing(10, 0);
+		await render();
+		const showAll = (): HTMLButtonElement | undefined => [...target.querySelectorAll('button')].find((b) => /300/.test(b.textContent ?? ''));
+		let release = (): void => {};
+		laterPageHeld = new Promise<void>((r) => { release = r; });
+		showAll()!.click();
+		await settle();
+		// A rewritten target: the page now loads every target.
+		run = { ...writing(300, 3), phase: 'done' };
+		await pass(BULK_FOLLOW_MS);
+		expect(target.querySelectorAll('tbody tr').length).toBe(300);
+		release();
+		await settle();
+		expect(target.querySelectorAll('tbody tr').length).toBe(300);
 	});
 
 	it('asks for no targets while the run works', async () => {

@@ -616,6 +616,8 @@ export class Agent implements IAgent {
   recordToolCall?: ToolCallRecorder | undefined;
   /** See `AgentConfig.conversationGrants`. Undefined: nothing records what this agent read. */
   conversationGrants?: ConversationGrants | undefined;
+  /** See `IAgent.writeAuthor`. Set per run by the session; null is unknown. */
+  writeAuthor: string | null = null;
   /** See `AgentConfig.conversationRoot`. */
   readonly conversationRoot: boolean;
   /** See `AgentConfig.turnEndUsageCounted`. */
@@ -1139,6 +1141,21 @@ export class Agent implements IAgent {
     return { contract: this._contractOfCall(tc), ...(grant !== undefined ? { grant } : {}), ...(filed !== undefined ? { filed } : {}), ...(apiCost !== undefined ? { apiCost } : {}) };
   }
 
+  /** Deliver the result event of a call that has settled and is already in the ledger. A throw
+   *  from delivering it (a step's stream handler, a closed response) is not the call's outcome:
+   *  caught here, it cannot make the call's own `catch` record the call a second time, emit a
+   *  second result for it, tell the model a call that worked had failed, or keep a call that
+   *  needs input from ending the run. The caller builds the event from facts the ledger write
+   *  above it has already read. Only the error's kind is logged: its text is the stream's. */
+  private async _emitSettledResult(toolName: string, event: Parameters<EmittingStreamHandler>[0]): Promise<void> {
+    if (!this.onStream) return;
+    try {
+      await this.onStream(event);
+    } catch (emitErr: unknown) {
+      process.stderr.write(`[lynox:agent] a ${toolName} call was recorded, but its result event could not be delivered (${emitErr instanceof Error ? emitErr.name : 'unknown error'})\n`);
+    }
+  }
+
   /** The part of {@link _factsOfCall} the result event adds; `grant` already rides on it. The step
    *  recorder builds a workflow step's row from this event, so the API request rides on it too. */
   private _eventFactsOfCall(tc: BetaToolUseBlock, slot: CallSlot): { contract: CallContract; filed?: CallFiled; apiCost?: CallApiCost } {
@@ -1627,6 +1644,7 @@ export class Agent implements IAgent {
     this._stepFailTool = config.stepFailTool;
     this.recordToolCall = config.recordToolCall;
     this.conversationGrants = config.conversationGrants;
+    this.writeAuthor = config.writeAuthor ?? null;
     this.conversationRoot = config.conversationRoot === true;
     this.turnEndUsageCounted = config.turnEndUsageCounted === true;
     this.spawnDepth = config.spawnDepth ?? 0;
@@ -5459,6 +5477,9 @@ export class Agent implements IAgent {
       // the tool used to return. Only `softFailureReason` diverges, and it
       // reaches nothing but `toolEnd`. See tool-soft-failure.ts.
       let softFailureReason: string | null = null;
+      // Only a thrown soft failure replaces the answer; one read by `failureOf` leaves it, and with
+      // it everything the model would have read, the stop note below included.
+      let thrownSoftFailure = false;
       let result: string;
       try {
         result = Agent.TOOL_TIMEOUT_EXEMPT.has(tc.name)
@@ -5481,6 +5502,18 @@ export class Agent implements IAgent {
         if (!isToolSoftFailure(err)) throw err;
         result = err.agentVisibleResult;
         softFailureReason = err.reason;
+        thrownSoftFailure = true;
+      }
+      // A tool that answers a call it did not carry out with a plain string says so through
+      // `failureOf`: the same soft failure as a thrown one, read from the answer it returned. The
+      // answer stays what the model reads. A reader that throws decides nothing: the call has
+      // already happened, and the worst it leaves is the ✓ it would have had without the reader.
+      if (softFailureReason === null && tool.failureOf !== undefined) {
+        try {
+          softFailureReason = tool.failureOf(result);
+        } catch {
+          softFailureReason = null;
+        }
       }
       // A write inside the instance was refused for want of its row: the handler may have turned
       // the throw into a result of its own, which must not read as if the entry were made.
@@ -5548,11 +5581,11 @@ export class Agent implements IAgent {
       // returns normally — and one that listens may return what it had when the stop came. A
       // call that reads from outside (`outwardRead`) and writes nothing outside says so. Only a
       // declared read counts: a tool that declares neither may write locally (a memory, a file),
-      // and a write's result is what it did. A soft failure is no result that may be partial, and
+      // and a write's result is what it did. A thrown soft failure is no result that may be partial, and
       // a result that already speaks of the stop (`ownStopSentence`) is left alone. After the
       // cap, so it is never cut off. The declarations are read only on a stopped run, and one
       // that throws on this input leaves the result as it is: the call already happened.
-      if (callSlot.stoppedByRun === true && softFailureReason === null && callSlot.ownStopSentence !== true && Agent._readsOutsideOnly(tool, tc.input)) {
+      if (callSlot.stoppedByRun === true && !thrownSoftFailure && callSlot.ownStopSentence !== true && Agent._readsOutsideOnly(tool, tc.input)) {
         sanitizedResult += `\n\n${TOOL_STOPPED_RESULT_NOTE}`;
       }
 
@@ -5603,7 +5636,9 @@ export class Agent implements IAgent {
         // (`GrantLift`, `CallConnection`).
         const grant = grantLiftOf(callSlot);
         const connection = callSlot.connection;
-        await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name, toolUseId: tc.id, ...(softMasked !== null ? { softFailure: true as const } : {}), ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}), ...this._eventFactsOfCall(tc, callSlot) });
+        // The call is in the ledger above; a throw from delivering its event must not reach the
+        // `catch` below and record it a second time as an error (`_emitSettledResult`).
+        await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name, toolUseId: tc.id, ...(softMasked !== null ? { softFailure: true as const } : {}), ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}), ...this._eventFactsOfCall(tc, callSlot) });
       }
       return {
         type: 'tool_result',
@@ -5669,11 +5704,14 @@ export class Agent implements IAgent {
         // A failed call keeps its connection stamp as well, as its ledger row above does.
         const grant = grantLiftOf(callSlot);
         const connection = callSlot.connection;
-        await this.onStream({ type: 'tool_result', name: tc.name, result: message, agent: this.name, toolUseId: tc.id, isError: true, ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}), ...this._eventFactsOfCall(tc, callSlot) });
+        // A throw from delivering it must not skip the end of the run below for a call that needs
+        // input, nor hand the stream's error text to the model in place of the call's.
+        await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: message, agent: this.name, toolUseId: tc.id, isError: true, ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}), ...this._eventFactsOfCall(tc, callSlot) });
       }
       // ⛔ …and then it ends the RUN, not the call: re-thrown, never returned as an error
       // result the model would read and work around (`input-required.ts`). AFTER the
-      // bookkeeping above, so the call is in the ledger and the UI's tool block closes.
+      // bookkeeping above, so the call is in the ledger and, when its event was delivered, the
+      // UI's tool block closes.
       if (askedNobody !== undefined) {
         this._needsInputStreamed.add(askedNobody); // the batch must not stream it a second time
         throw askedNobody;
