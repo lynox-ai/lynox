@@ -7,8 +7,9 @@
 //   1. Already classified for this (account, thread)?  -> skip (re-classify
 //      is Phase 3+ scope).
 //   2. Matches a user-confirmed inbox_rules row?       -> write the item +
-//      audit directly with `actor: 'rule_engine'`. No LLM cost. A list-id
-//      rule gives way to sensitive content (anyone writes a List-Id).
+//      audit directly with `actor: 'rule_engine'`. No LLM cost. A rule of
+//      any kind that would file sensitive content as handled gives way to
+//      step 3; one that files it as needing the user applies.
 //   2b. List mail under a domain connected here, from  -> dropped, as the
 //      a noise sender (a newsletter the group relayed)?   watcher drops noise.
 //   3. Sensitive content (OTP, credentials)?           -> by `sensitiveMode`.
