@@ -141,6 +141,9 @@ describe('the refresh of an expiring store connection', () => {
     const p = profile();
     expect(p.oauth_grant?.store_binding).toBe(bind(ID, ORIGIN, 'at-new'));
     expect(p.oauth_grant?.grant_id).toBe(grantBefore);
+    // The grant records the new values as its own, so a later save does not read them as foreign.
+    expect(p.oauth_grant?.fingerprints?.[accessTokenKey(ID)]).toBe(`k-${tokenFingerprint('at-new')}`);
+    expect(p.oauth_grant?.fingerprints?.[refreshTokenKey(ID)]).toBe(`k-${tokenFingerprint('rt-new')}`);
     expect(p.oauth_grant?.minted_for).toBe(tokenFingerprint('rt-new'));
     expect(p.auth?.oauth?.token_expires_at).toBeGreaterThanOrEqual(before + 3_600_000 - 1000);
     expect(p.oauth_grant?.refresh_expires_at).toBeGreaterThanOrEqual(before + 7_776_000_000 - 1000);
@@ -164,10 +167,12 @@ describe('the refresh of an expiring store connection', () => {
     const plan = await storeRefreshPassFor(ID, ctx());
     expect(plan).toBeDefined();
     const sent = (params: Record<string, string>): string | null => storePassBodyRefusal(plan!.pass, Buffer.from(serializeTokenBody(params, plan!.bodyFormat)), {});
+    // The foreign bodies first: a body the pass covers spends it, and a spent pass refuses anything.
+    const foreign = 'the body sent is not the token exchange that was verified';
+    expect(sent({ ...plan!.params, refresh_token: 'rt-someone-else' })).toBe(foreign);
+    expect(sent({ ...plan!.params, grant_type: 'client_credentials' })).toBe(foreign);
+    expect(sent({ ...plan!.params, grant_type: 'authorization_code', code: 'c' })).toBe(foreign);
     expect(sent({ ...plan!.params })).toBeNull();
-    expect(sent({ ...plan!.params, refresh_token: 'rt-someone-else' })).not.toBeNull();
-    expect(sent({ ...plan!.params, grant_type: 'client_credentials' })).not.toBeNull();
-    expect(sent({ ...plan!.params, grant_type: 'authorization_code', code: 'c' })).not.toBeNull();
   });
 
   it('mints no pass when the binding does not hold over the access token in the vault, and sends nothing', async () => {

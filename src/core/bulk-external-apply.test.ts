@@ -681,7 +681,10 @@ describe('applying an external run', () => {
       const restore = serve(s);
       try {
         const c = client({ renew: async () => false });
-        expect((await c.write(url(0), 'PATCH', { price: '13.00' })).kind).toBe('unauthorized');
+        const refused: number[] = [];
+        expect((await c.write(url(0), 'PATCH', { price: '13.00' }, undefined, undefined, () => { refused.push(1); })).kind).toBe('unauthorized');
+        // A refusal that stands is reported, once.
+        expect(refused).toEqual([1]);
         expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
       } finally {
         restore();
