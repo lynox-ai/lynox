@@ -15420,13 +15420,15 @@ export class LynoxHTTPApi {
         const { MigrationExporter } = await import('../core/migration-export.js');
         const { TARGET_BODY_CAPS, TARGET_BODY_TIMEOUT_MS, TARGET_REQUEST_TIMEOUTS_MS, TargetAnswerTooSlow, TargetDidNotAnswer, TransferOutOfTime, askTarget, capText, transferDeadlineMs, isConnectionFailure, discardBody, durationText, readTargetBody, readTargetJson, relayedReport, relayedText } = await import('../core/migration-target-reply.js');
         // Why an answer of the target could not be used, in the user's words.
-        type Why = 'large' | 'format' | 'slow' | 'broken' | 'silent' | 'unreachable';
+        type Why = 'large' | 'format' | 'slow' | 'broken' | 'silent' | 'unreachable' | 'unsent' | 'failed';
         const why = (w: Why, cap: number, unread: string, waited: number = TARGET_BODY_TIMEOUT_MS): string =>
           w === 'large' ? `its answer is over ${capText(cap)}${unread}`
             : w === 'format' ? 'its answer is not in the expected format'
               : w === 'slow' ? `it did not finish its answer within ${durationText(TARGET_BODY_TIMEOUT_MS)}`
                 : w === 'silent' ? `it did not answer within ${durationText(waited)}`
                   : w === 'unreachable' ? 'it could not be reached'
+                    : w === 'unsent' ? 'lynox could not send its request to it'
+                      : w === 'failed' ? 'the request to it failed'
                     : 'the connection broke before its answer was complete';
         // Nothing leaves the instance before the handshake is complete: the first request is this
         // one, and the data goes only with the manifest and the chunks.
@@ -15438,21 +15440,29 @@ export class LynoxHTTPApi {
         const NO_REASON = 'The target instance gave no readable reason.';
         const handshakeFailed = (w: Why): string =>
           `lynox could not set up the connection to the target instance: ${why(w, TARGET_BODY_CAPS.handshake, ', so lynox did not read it', TARGET_REQUEST_TIMEOUTS_MS.handshake)}. Nothing was transferred. ${AGAIN}`;
-        /**
-         * A request to the target with its deadline for the answer to start. Past it, or when the
-         * connection fails, the step's own words (`words`); the transport's text never reaches the user.
-         */
         // The whole transfer's deadline (from the manifest on) and the stop it says.
         let transfer: AbortSignal | undefined;
         let outOfTime = (): string => '';
-        const ask = async (path: string, init: RequestInit, ms: number, words: (w: 'silent' | 'unreachable') => string): Promise<Response> => {
+        /**
+         * A request to the target with its deadline for the answer to start. Past it, when the
+         * connection fails, when the request did not go out (the network guard refusing the address
+         * the name now resolves to, or a name that does not resolve), or on any other error (an
+         * answer that cannot be read as one), the step's own words (`words`); the error's own text
+         * never reaches the user.
+         */
+        const ask = async (path: string, init: RequestInit, ms: number, words: (w: 'silent' | 'unreachable' | 'unsent' | 'failed') => string): Promise<Response> => {
           try {
             return await askTarget(fetchPinned, `${targetUrl}${path}`, init, ms, transfer);
           } catch (err: unknown) {
             if (err instanceof TransferOutOfTime) throw new Error(outOfTime());
             if (err instanceof TargetDidNotAnswer) throw new Error(words('silent'));
             if (isConnectionFailure(err)) throw new Error(words('unreachable'));
-            throw err;
+            // Refused before anything was sent: the guard, which also turns a name that does not
+            // resolve (in time) into its refusal.
+            const unsent = err instanceof Error && err.message.startsWith('Blocked:');
+            // Only the error's kind: its text can carry the address the target's name resolved to.
+            process.stderr.write(`[lynox:http] migration: a request to the target ${unsent ? 'did not go out' : 'failed'} (${err instanceof Error ? err.name : 'unknown error'})\n`);
+            throw new Error(words(unsent ? 'unsent' : 'failed'));
           }
         };
 
@@ -15599,7 +15609,7 @@ export class LynoxHTTPApi {
           method: 'POST',
           headers: migrationHeaders,
           body: JSON.stringify(manifest),
-        }, TARGET_REQUEST_TIMEOUTS_MS.manifest, (w) => `${w === 'silent' ? `The target instance did not answer within ${durationText(TARGET_REQUEST_TIMEOUTS_MS.manifest)}.` : 'lynox could not reach the target instance.'} lynox stopped before sending your data. ${AGAIN}`);
+        }, TARGET_REQUEST_TIMEOUTS_MS.manifest, (w) => `${w === 'silent' ? `The target instance did not answer within ${durationText(TARGET_REQUEST_TIMEOUTS_MS.manifest)}.` : w === 'unsent' ? 'lynox could not send its request to the target instance.' : w === 'failed' ? 'The request to the target instance failed.' : 'lynox could not reach the target instance.'} lynox stopped before sending your data. ${AGAIN}`);
         if (!mRes.ok) {
           // A refusal of the manifest itself (4xx), not the target failing or busy (5xx, 429).
           manifestRefused = mRes.status >= 400 && mRes.status < 500 && mRes.status !== 429;
@@ -15621,7 +15631,7 @@ export class LynoxHTTPApi {
             method: 'POST',
             headers: migrationHeaders,
             body: JSON.stringify(chunks[i]),
-          }, TARGET_REQUEST_TIMEOUTS_MS.chunk, (w) => `${w === 'silent' ? `The target instance did not answer within ${durationText(TARGET_REQUEST_TIMEOUTS_MS.chunk)} while receiving part ${String(i + 1)} of the data.` : `lynox lost the connection to the target instance while sending part ${String(i + 1)} of the data.`} lynox stopped; the target instance has not restored anything. ${AGAIN}`);
+          }, TARGET_REQUEST_TIMEOUTS_MS.chunk, (w) => `${w === 'silent' ? `The target instance did not answer within ${durationText(TARGET_REQUEST_TIMEOUTS_MS.chunk)} while receiving part ${String(i + 1)} of the data.` : w === 'unsent' ? `lynox could not send part ${String(i + 1)} of the data to the target instance.` : w === 'failed' ? `The request with part ${String(i + 1)} of the data to the target instance failed.` : `lynox lost the connection to the target instance while sending part ${String(i + 1)} of the data.`} lynox stopped; the target instance has not restored anything. ${AGAIN}`);
           if (!cRes.ok) throw await refusal(cRes, `The target instance refused part ${String(i + 1)} of ${String(chunks.length)} of the data.`);
           await discardBody(cRes);
         }
