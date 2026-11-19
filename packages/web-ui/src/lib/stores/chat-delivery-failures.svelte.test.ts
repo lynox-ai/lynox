@@ -511,7 +511,7 @@ describe('why a question was closed, and the lost answer as a draft (UX-064, UX-
 });
 
 describe('an answer that names no question', () => {
-	type Setup = { prompt: Record<string, unknown>; answer?: string; open?: boolean | 'secret' | 'down'; onPending?: () => void };
+	type Setup = { prompt: Record<string, unknown>; answer?: string; open?: boolean | 'secret' | 'down' | 'null'; onPending?: () => void };
 	async function answerWith({ prompt, answer = 'Yes', open = true, onPending }: Setup): Promise<{ replies: number; pendingAsked: number; drafted: string[] }> {
 		const drafted: string[] = [];
 		store.registerComposerDraft((text) => { drafted.push(text); return true; });
@@ -522,6 +522,7 @@ describe('an answer that names no question', () => {
 				pendingAsked++;
 				onPending?.();
 				if (open === 'down') return json({ error: 'unavailable' }, 503);
+				if (open === 'null') return json(null);
 				if (open === 'secret') return json({ pending: true, promptType: 'ask_secret', promptId: 'p-secret', secretName: 'SHOP_TOKEN', question: 'Your shop token?' });
 				return open
 					? json({ pending: true, promptType: 'ask_user', promptId: 'p-open', question: 'Send this mail?', options: ['Yes', 'No'] })
@@ -562,6 +563,38 @@ describe('an answer that names no question', () => {
 		const { pendingAsked } = await answerWith({ prompt: {}, open: 'down' });
 		expect(pendingAsked, 'the open question was not asked for, so this proves nothing').toBeGreaterThan(0);
 		expect(store.getChatError()).toBe(await say('chat.reply_needs_question'));
+	});
+
+	it('does not say no question is open when the server\'s answer is not an object', async () => {
+		const { pendingAsked } = await answerWith({ prompt: {}, open: 'null' });
+		expect(pendingAsked, 'the open question was not asked for, so this proves nothing').toBeGreaterThan(0);
+		expect(store.getChatError()).toBe(await say('chat.reply_needs_question'));
+	});
+
+	it('does not take another check\'s word that nothing is open when its own check failed', async () => {
+		// The other check answers "nothing open" only after this answer's own check has started,
+		// and this answer's own check fails.
+		let releaseOther: () => void = () => {};
+		let other: Promise<unknown> = Promise.resolve();
+		let pendingAsked = 0;
+		const run = openRun((url) => {
+			if (!url.endsWith('/pending-prompt')) return json({});
+			pendingAsked++;
+			if (pendingAsked === 1) return new Promise<Response>((resolve) => { releaseOther = () => resolve(json({ pending: false })); });
+			releaseOther();
+			return other.then(() => json({ error: 'unavailable' }, 503));
+		});
+		void store.sendMessage('go');
+		await settle();
+		run.send('prompt', { question: 'Go on?', options: ['Yes', 'No'] });
+		await settle();
+		// A check started elsewhere (a reconnect, say) is under way when the answer is given.
+		other = store.checkPendingPrompt();
+		await store.replyPermission('Yes');
+		await other;
+		await settle();
+		expect(pendingAsked, 'the two checks did not both run, so this proves nothing').toBe(2);
+		expect(store.getChatError()).toBe(await (await import('../i18n.svelte.js')).t('chat.reply_needs_question'));
 	});
 
 	it('does not say no question is open when the open question is of another kind', async () => {

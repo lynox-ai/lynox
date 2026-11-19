@@ -2718,7 +2718,7 @@ export async function replyPermission(answer: string): Promise<void> {
 	const sid = sessionId;
 	// Without the question's id the answer is not sent: the server would take it for whatever
 	// question is open by then, so the open one is brought back to be answered by name.
-	if (!promptId) { await reportReply(sid, 'id_required', draftable); return; }
+	if (!promptId) { await reportReply(sid, 'id_required', null); return; }
 	await reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId }), draftable);
 }
 
@@ -2763,14 +2763,16 @@ async function reportReply(sid: string, outcome: ReplyOutcome, answer: string | 
 		// Nothing was answered. The open question comes back with its id, to be answered again on
 		// purpose: sending the same answer to it unasked could approve what the person never saw.
 		if (sessionId !== sid) return;
-		await checkPendingPrompt();
+		let answered = false;
+		await checkPendingPrompt(() => { answered = true; });
 		if (sessionId !== sid) return;
 		// The answer does not go back into the message field: which question is open now is not
 		// known to match the one answered (a mail to send, say), and one keystroke would answer it.
 		// "Nothing is open" only when the server said so; a failed check says nothing either way.
-		const none = pendingCheckAnswered && pendingPermission === null && pendingTabsPrompt === null && pendingSecretPrompt === null && pendingMailConnect === null;
+		const none = answered && pendingPermission === null && pendingTabsPrompt === null && pendingSecretPrompt === null && pendingMailConnect === null;
 		chatError = t(none ? 'chat.reply_needs_question_none' : 'chat.reply_needs_question');
 		chatErrorDetail = null;
+		unmatchedAnswerCount++;
 		return;
 	}
 	if (outcome === 'settled' || sessionId !== sid) return;
@@ -3075,24 +3077,22 @@ export type PendingCard = 'question' | 'decision' | 'other' | null;
  * Check the server for a pending prompt that survived a disconnect/refresh.
  * Restores pendingPermission or pendingSecretPrompt so the UI re-shows it, and says which card.
  */
-/** Whether the last `checkPendingPrompt` got the server's answer: a failed check knows nothing
- *  about what is open, so it must not be read as "nothing is open". */
-let pendingCheckAnswered = false;
-
-export async function checkPendingPrompt(): Promise<PendingCard> {
+export async function checkPendingPrompt(onAnswered?: () => void): Promise<PendingCard> {
 	const sid = sessionId;
-	pendingCheckAnswered = false;
 	if (!sid) return null;
 	let card: PendingCard = null;
 	try {
 		// `sessionId` is `sid` here (no await between); the polled-routes list names this spelling.
 		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/pending-prompt`);
 		if (!res.ok) return null;
-		const data = (await res.json()) as Record<string, unknown>;
+		const body: unknown = await res.json();
+		if (body === null || typeof body !== 'object') return null;
+		const data = body as Record<string, unknown>;
 		// The chat may have changed while the request ran: the card belongs to the chat it was
 		// asked for, and set now it would show in another one.
 		if (sessionId !== sid) return null;
-		pendingCheckAnswered = true;
+		// This call got the server's word on what is open; a failed one knows nothing about it.
+		onAnswered?.();
 		if (!data['pending']) return null;
 
 		const promptType = data['promptType'] as string;
@@ -3516,6 +3516,12 @@ export function getRunStartedAt(): number | null {
 export function getRunPromptCount(): number {
 	return runPromptCount;
 }
+/** Bumped each time an answer named no question: the chat moves focus to the sentence then. */
+let unmatchedAnswerCount = $state(0);
+export function getUnmatchedAnswerCount(): number {
+	return unmatchedAnswerCount;
+}
+
 export function getChatError() {
 	return chatError;
 }

@@ -30,6 +30,7 @@
 		submitMailConnect,
 		cancelMailConnect,
 		getChatError,
+		getUnmatchedAnswerCount,
 		getChatErrorDetail,
 		getRetryStatus,
 		getIsOffline,
@@ -125,7 +126,7 @@
 	import { isAutoSpeakEnabled } from '../stores/autospeak.svelte.js';
 	import { isVoiceAutoSendEnabled } from '../stores/voice-autosend.svelte.js';
 	import { goto, afterNavigate } from '$app/navigation';
-	import { onMount, tick } from 'svelte';
+	import { onMount, tick, untrack } from 'svelte';
 	import { isMistralPresetBase } from '../utils/mistral-endpoint.js';
 
 	// Welcome screen state
@@ -1667,10 +1668,11 @@
 	// After an answer that named no question, focus goes to the sentence, not to a button of the
 	// card that came back: that card may ask something else, and a button with focus is one key away.
 	let chatErrorBanner = $state<HTMLDivElement | null>(null);
+	// Runs on each such answer, and only then: not on a language switch or a later error.
+	let unmatchedSeen = untrack(() => getUnmatchedAnswerCount());
 	$effect(() => {
-		if (chatError !== null && (chatError === t('chat.reply_needs_question') || chatError === t('chat.reply_needs_question_none'))) {
-			chatErrorBanner?.focus();
-		}
+		const n = getUnmatchedAnswerCount();
+		if (n > unmatchedSeen) { unmatchedSeen = n; untrack(() => chatErrorBanner)?.focus(); }
 	});
 	const chatErrorDetail = $derived(getChatErrorDetail());
 	const runInterrupted = $derived(getRunInterrupted());
