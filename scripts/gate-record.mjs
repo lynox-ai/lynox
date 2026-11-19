@@ -59,22 +59,25 @@ import { proseWarnings } from './disclosure-vocabulary-scan.mjs';
 const MARK = ['gate', 'record'].join('-');
 
 /**
- * Text inside a workflow command (`::error::…`, `::warning::…`), escaped the way GitHub's own
- * toolkit does it: `%`, CR and LF become `%25`, `%0D`, `%0A`. A message can quote PR text, and the
- * runner reads a command at the start of every line, where a lone CR may count as a line break too.
- * Unescaped, a body line like `x\r::add-mask::…` would end the annotation and start a command of
- * its own. The annotation still shows `%0A` as a line break.
+ * The message of an `::error::` line, escaped the way GitHub's own toolkit does it: `%`, CR and LF
+ * become `%25`, `%0D`, `%0A`. A message can quote PR text, and the runner reads a command at the
+ * start of every line, where a lone CR counts as a line break too. Unescaped, a body line like
+ * `not a field<CR>::add-mask::…` would end the annotation and start a command of its own. The
+ * annotation still shows `%0A` as a line break. The older `##[cmd]` form is no concern here: the
+ * runner tries it only on a line that is not already a `::` command.
  */
 export function commandText(text) {
   return String(text).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
 }
 
 /**
- * Plain log text, one printed line per line of it, each behind the mark: no line of a note that
- * quotes PR text can then begin with `::` and be read as a command.
+ * Plain log text, one printed line per line of it, each behind the mark, so no line of a note that
+ * quotes PR text can begin with `::`. A plain line still meets the runner's older command form,
+ * `##[cmd]data`, which it finds ANYWHERE in a line: a file name like `a/##[add-mask]b.ts` in a note
+ * would hide text for the rest of the job. `##[` is printed as `# #[`.
  */
 export function logLines(text) {
-  for (const line of String(text).split(/\r\n|\r|\n/)) console.log(`${MARK}: ${line}`);
+  for (const line of String(text).split(/\r\n|\r|\n/)) console.log(`${MARK}: ${line.replace(/##\[/g, '# #[')}`);
 }
 
 /** Gate names the record may claim. An unknown name is a typo, not a new gate. */

@@ -1180,8 +1180,9 @@ describe('gate-record — a public body names no register row', () => {
 
   it('a body line with a carriage return stays inside the annotation, through the CLI', () => {
     // The runner reads a workflow command at the start of a line, and a lone CR may end a line for
-    // it. The record parser splits at LF only, so `x<CR>::warning::…` is one junk line, quoted in the
-    // error. Escaped, it cannot start a command of its own.
+    // it. The record parser splits at LF only, so `not a field<CR>::warning::…` is one junk line,
+    // quoted in the error. Escaped, it cannot start a command of its own. (`x<CR>…` would not do: `\s`
+    // takes the CR, and the line reads as an unknown field `x`, which prints nothing.)
     const dir = mkdtempSync(join(tmpdir(), 'gr-cr-'));
     const script = fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url));
     const old = oldBase();
@@ -1196,7 +1197,8 @@ describe('gate-record — a public body names no register row', () => {
       delete env.GITHUB_REPOSITORY;
       const r = spawnSync(process.execPath, [script, '--event-file', ev, '--head', old.sha, '--base', old.sha, '--files-file', files, '--repo-visibility', 'public'], { cwd: old.dir, encoding: 'utf8', env });
       expect(r.status, r.stdout + r.stderr).toBe(1);
-      // The control: the line was read and quoted, so the escaping below had something to escape.
+      // The control: the junk line was quoted, so the escaping below had something to escape.
+      expect(r.stdout).toContain('record line `not a field');
       expect(r.stdout).toContain('not a field%0D::warning::forged');
       expect(r.stdout).not.toContain('\r');
       const starts = r.stdout.split(/\r\n|\r|\n/).map((l) => l.trimStart());
@@ -1208,8 +1210,8 @@ describe('gate-record — a public body names no register row', () => {
   });
 
   it('a note that quotes a carriage return keeps every line behind the mark, through the CLI', () => {
-    // A note can quote what the PR brings (a file name in the review note, the author here). Printed
-    // raw, `<CR>::warning::…` would begin a line the runner reads as a command.
+    // A note can quote multi-line text (a git or JSON error message about a file of the PR). The
+    // author stands in for it here. Printed raw, `<CR>::warning::…` would begin a command line.
     const dir = mkdtempSync(join(tmpdir(), 'gr-cr-note-'));
     const script = fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url));
     const old = oldBase();
@@ -1233,12 +1235,36 @@ describe('gate-record — a public body names no register row', () => {
     }
   });
 
+  it('a note that quotes the older `##[cmd]` form prints it defused, through the CLI', () => {
+    // The runner finds `##[cmd]` anywhere in a line that is not a `::` command, so the mark in front
+    // does not stop it. A file name in a review note can carry it; the author stands in here.
+    const dir = mkdtempSync(join(tmpdir(), 'gr-legacy-note-'));
+    const script = fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url));
+    const old = oldBase();
+    try {
+      const ev = join(dir, 'event.json');
+      const files = join(dir, 'files.txt');
+      writeFileSync(ev, JSON.stringify({ pull_request: { title: 'Fix the thing', body: record({ head: old.sha.slice(0, 8) }) } }));
+      writeFileSync(files, CODE.join('\n'));
+      const env = { ...process.env };
+      delete env.REPO_PRIVATE;
+      delete env.GITHUB_REPOSITORY;
+      const r = spawnSync(process.execPath, [script, '--event-file', ev, '--head', old.sha, '--base', old.sha, '--files-file', files, '--author', 'x##[warning]forged[bot]', '--repo-visibility', 'public'], { cwd: old.dir, encoding: 'utf8', env });
+      // The control: the note was printed with the author in it.
+      expect(r.stdout).toContain('gate-record: author x# #[warning]forged[bot] is a bot');
+      expect(r.stdout).not.toContain('##[');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(old.dir, { recursive: true, force: true });
+    }
+  });
+
   it('escapes a workflow command message the way the toolkit does, and prints notes line by line behind the mark', () => {
     expect(commandText('50% a\r::x::\nb')).toBe('50%25 a%0D::x::%0Ab');
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
-      logLines('one\r::add-mask::two\r\nthree\nfour');
-      expect(log.mock.calls.map((c) => c[0])).toEqual(['gate-record: one', 'gate-record: ::add-mask::two', 'gate-record: three', 'gate-record: four']);
+      logLines('one\r::add-mask::two\r\nthree ##[add-mask]x ###[warning]y\nfour');
+      expect(log.mock.calls.map((c) => c[0])).toEqual(['gate-record: one', 'gate-record: ::add-mask::two', 'gate-record: three # #[add-mask]x ## #[warning]y', 'gate-record: four']);
     } finally {
       log.mockRestore();
     }
