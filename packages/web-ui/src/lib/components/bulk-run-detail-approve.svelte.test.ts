@@ -840,7 +840,7 @@ describe('the sentence over an undo\'s approval, by the number of targets', () =
 
 	it.each([
 		['de', 1, 0, '1\u00a0Ziel bekommt seinen Wert von vorher zurück. Hat es seither jemand geändert, bleibt es, wie es ist.'],
-		['en', 1, 0, '1\u00a0target gets its earlier value back. If someone has changed it since, it stays as it is.'],
+		['en', 1, 0, '1\u00a0target gets its previous value back. If someone has changed it since then, it stays as it is.'],
 		['de', 0, 1, '1\u00a0Ziel bekommt seinen Wert von vorher zurück. Hat es seither jemand geändert, bleibt es, wie es ist.'],
 	] as const)('names one target in the singular, with a no-break space after the 1 (%s, %i changed, %i created)', async (lang, update, create, text) => {
 		const before = getLocale();
@@ -852,9 +852,9 @@ describe('the sentence over an undo\'s approval, by the number of targets', () =
 	});
 
 	it.each([
-		['de', '3 Ziele bekommen ihren Wert von vorher zurück. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.'],
-		['en', '3 targets get their previous value back. Targets that someone has changed since then stay as they are.'],
-	] as const)('keeps the plural for several targets, counting the ones a write created as well (%s)', async (lang, text) => {
+		['de', '3\u00a0Ziele bekommen ihren Wert von vorher zurück. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.'],
+		['en', '3\u00a0targets get their previous value back. Targets that someone has changed since then stay as they are.'],
+	] as const)('keeps the plural for several targets, with a no-break space after the number, counting the ones a write created as well (%s)', async (lang, text) => {
 		const before = getLocale();
 		setLocale(lang);
 		onTestFinished(() => setLocale(before));
