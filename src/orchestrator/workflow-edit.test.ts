@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { applyModifications, type StepModification } from './workflow-edit.js';
+import { runStepIds } from './step-id.js';
 import type { InlinePipelineStep } from '../types/pipeline.js';
 
 function steps(): InlinePipelineStep[] {
@@ -22,6 +23,10 @@ describe('applyModifications (shared workflow-step mutation)', () => {
     expect(s[2]!.input_from).toEqual(['a', 'x']);
     expect(s[2]!.task).toBe('Send {{a.result}}');
     expect(s[2]!.input_template).toEqual({ body: '{{a.result}}' });
+    // As a run reads the stored plan before the rename: still step a.
+    const before = runStepIds([{ id: 'a', task: 'A' }, { id: 'a.result', task: 'R' }, { id: 'send', task: 'Send {{a.result}}', input_from: ['a', 'a.result'] }]);
+    expect(runStepIds(s)[2]!.task).toBe(before[2]!.task);
+    expect(runStepIds(s)[2]!.task).toBe('Send {{a.result}}');
   });
 
   it('renaming step a beside a stored a.result still moves {{a.result}} with a (CONTROL)', () => {
