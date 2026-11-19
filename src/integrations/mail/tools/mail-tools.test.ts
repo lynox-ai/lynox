@@ -651,6 +651,7 @@ describe('mail_reply tool', () => {
     for (const to of ['a@x.test\r\nBcc: b@x.test', 'a@x.test\u0000']) {
       const refused = await tool.handler({ uid: 80, body: 'Thanks.', to }, agent).catch((e: unknown) => e);
       expect(String(refused)).not.toContain('Reply sent');
+      expect(String(refused)).toContain('the "to" override holds no valid address');
     }
     expect(provider.send, 'a recipient with CR/LF or NUL is never sent to').not.toHaveBeenCalled();
     expect(promptUser, 'nothing is offered for confirmation').not.toHaveBeenCalled();

@@ -309,7 +309,7 @@ export async function prepareReply(
     return {
       ok: false,
       message: input.to
-        ? 'mail_reply error: the "to" override holds no usable address (a value with a line break or control character is dropped). Nothing was sent.'
+        ? 'mail_reply error: the "to" override holds no valid address (each needs an @; a value with a line break or control character is dropped). Nothing was sent.'
         : 'mail_reply error: could not determine recipient — original message has no From or Reply-To, and no "to" override was given.',
     };
   }
