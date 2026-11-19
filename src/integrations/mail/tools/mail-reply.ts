@@ -16,7 +16,7 @@ import {
   type MailSendResult,
 } from '../provider.js';
 import type { MailContext } from '../context.js';
-import { buildBodyBlock, checkSendAccount, previewAddressList, recipientFieldTargets, previewSendingAccount, quotedPreviewValue, resolveSendingAddress, writeSentLog } from '../send-core.js';
+import { buildBodyBlock, checkSendAccount, parseAddressList, previewAddressList, recipientFieldTargets, previewSendingAccount, quotedPreviewValue, resolveSendingAddress, writeSentLog } from '../send-core.js';
 import { reflowMailBody } from '../body-reflow.js';
 import { pv, singleLine } from '../../../core/prompt-value.js';
 import { resolveThreadKey } from '../thread-key.js';
@@ -484,28 +484,6 @@ export async function commitReply(
     });
   } catch { /* reconcile is best-effort — never fail an already-sent reply */ }
   return `Reply sent from ${sendProvider.accountId}.\nMessage-ID: ${result.messageId}\nAccepted: ${result.accepted.join(', ') || '(none)'}${result.rejected.length > 0 ? `\nRejected: ${result.rejected.join(', ')}` : ''}`;
-}
-
-function parseAddressList(input: string | undefined): MailAddress[] {
-  if (!input) return [];
-  return input
-    .split(',')
-    .map(s => s.trim())
-    .filter(s => s.length > 0)
-    .map(parseAddress)
-    .filter((a): a is MailAddress => a !== null);
-}
-
-function parseAddress(raw: string): MailAddress | null {
-  const angle = raw.match(/^\s*(?:"?([^"<]*?)"?\s*)?<([^>]+)>\s*$/);
-  if (angle) {
-    const name = angle[1]?.trim();
-    const address = angle[2]?.trim();
-    if (!address || !address.includes('@')) return null;
-    return name ? { name, address } : { address };
-  }
-  if (raw.includes('@')) return { address: raw };
-  return null;
 }
 
 /** Accept yes/ja/ok/1/y as approval — anything else is denial. */

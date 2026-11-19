@@ -645,6 +645,25 @@ describe('mail_reply tool', () => {
   // is markdown-rendered in the web UI. A newline there opens a block-level
   // HTML comment that swallows the recipients, the body quote and the oversize
   // warning, leaving a blank prompt to approve. The subject must stay one line.
+  it('drops a to/cc override that carries a line break or control character, as mail_send does', async () => {
+    provider.fetch.mockResolvedValue(makeMessage(envelope(80, { messageId: '<o80@x>', from: 'alice@example.com', subject: 'Hi' }), 'Original.'));
+    provider.send.mockResolvedValue({ messageId: '<r@x>', accepted: ['bob@x.test'], rejected: [] });
+    const promptUser = vi.fn(async () => 'Yes');
+    const agent = { ...OWNER_AGENT, promptUser } as unknown as IAgent;
+    const tool = createMailReplyTool(registry);
+
+    const refused = await tool.handler({ uid: 80, body: 'Thanks.', to: 'a@x.test\r\nBcc: b@x.test' }, agent).catch((e: unknown) => e);
+    expect(provider.send, 'a recipient with CR/LF is never sent to').not.toHaveBeenCalled();
+    expect(promptUser, 'nothing is offered for confirmation').not.toHaveBeenCalled();
+    expect(String(refused)).not.toContain('Reply sent');
+
+    await tool.handler({ uid: 80, body: 'Thanks.', to: 'bob@x.test', cc: 'carol@x.test\u0000, dave@x.test' }, agent);
+    expect(provider.send).toHaveBeenCalledTimes(1);
+    const sent = provider.send.mock.calls[0]![0] as { to: Array<{ address: string }>; cc?: Array<{ address: string }> };
+    expect(sent.to.map((a) => a.address)).toEqual(['bob@x.test']);
+    expect((sent.cc ?? []).map((a) => a.address)).toEqual(['dave@x.test']);
+  });
+
   it('the reply confirmation shows the address the reply goes out from', async () => {
     provider.fetch.mockResolvedValue(makeMessage(envelope(78, { messageId: '<o78@x>', from: 'alice@example.com', subject: 'Hi' }), 'Original.'));
     provider.send.mockResolvedValue({ messageId: '<r@x>', accepted: ['alice@example.com'], rejected: [] });
