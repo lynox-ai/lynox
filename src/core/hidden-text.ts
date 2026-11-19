@@ -41,7 +41,9 @@ const KNOWN_FIELDS: ReadonlySet<string> = new Set([
 
 /** The first hidden character in any string of `value` (strings, arrays and plain objects,
  *  depth-first, keys as well as values), or `null`. A key is a name, not running text, so it
- *  takes none of the places real text may carry one. */
+ *  takes none of the places real text may carry one. The path quotes the top-level keys by
+ *  their text, so pass an object whose top-level keys are the caller's own literals; a key
+ *  below the top level outside the known field names is named by its position. */
 export function findHiddenChar(value: unknown, path = ''): HiddenChar | null {
   if (typeof value === 'string') {
     const at = hiddenCharIndexes(value);
