@@ -123,17 +123,32 @@ export function isPipelineRunning(
  * the bare `[data-pending-prompt]` first-match would race the kind that
  * `selectPendingPromptHead` prioritises (secret > permission > tabs).
  * PromptAnchor's [Antworten] jump uses this so the scroll target matches.
+ *
+ * Looked up only inside the chat's prompt stack (`[data-chat-stack]`), never in the whole page: a chat
+ * message is rendered markdown that keeps `data-*` attributes, so a message could carry an element
+ * that matches the selector and would come first in the document — taking the jump, and the bar's
+ * reading of whether the question is on screen. No stack, no form.
  */
 export function findPromptFormByKind(
 	doc: Document | undefined,
 	kind: PromptKind | null,
 ): HTMLElement | null {
-	if (!doc) return null;
+	const stack = doc?.querySelector<HTMLElement>('[data-chat-stack]');
+	if (!stack) return null;
 	if (kind) {
-		const el = doc.querySelector<HTMLElement>(`[data-pending-prompt][data-prompt-kind="${kind}"]`);
+		const el = stack.querySelector<HTMLElement>(`[data-pending-prompt][data-prompt-kind="${kind}"]`);
 		if (el) return el;
 	}
-	return doc.querySelector<HTMLElement>('[data-pending-prompt]');
+	return stack.querySelector<HTMLElement>('[data-pending-prompt]');
+}
+
+/**
+ * Where the question opens inside its form: the element marked `data-prompt-question`, else the form's
+ * own top. The form starts with padding and, for a workflow's question, a line naming the workflow —
+ * neither says what is asked.
+ */
+export function promptQuestionElement(form: HTMLElement): HTMLElement {
+	return form.querySelector<HTMLElement>('[data-prompt-question]') ?? form;
 }
 
 /**

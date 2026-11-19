@@ -19,6 +19,11 @@ const boxes = new Map<Element, { top: number; bottom: number }>();
 function place(el: Element, top: number, bottom: number): void { boxes.set(el, { top, bottom }); }
 const realRect = Element.prototype.getBoundingClientRect;
 const realRaf = globalThis.requestAnimationFrame;
+const realCaf = globalThis.cancelAnimationFrame;
+/** Queued animation frames: run only when the test says a frame has passed, as a browser would. */
+const frames = new Map<number, FrameRequestCallback>();
+let nextFrame = 1;
+function frame(): void { const due = [...frames.values()]; frames.clear(); for (const cb of due) cb(0); }
 
 let host: HTMLElement;
 let stack: HTMLElement;
@@ -40,6 +45,7 @@ async function anchor(promptId = 'p1'): Promise<void> {
 /** The user scrolls (or the page changes): the bar re-measures on the next frame. */
 async function scrolled(): Promise<void> {
 	stack.dispatchEvent(new Event('scroll'));
+	frame();
 	flushSync();
 	await tick();
 }
@@ -52,7 +58,10 @@ beforeEach(() => {
 		const b = boxes.get(this) ?? { top: 0, bottom: 0 };
 		return { top: b.top, bottom: b.bottom, height: b.bottom - b.top, left: 0, right: 0, width: 0, x: 0, y: b.top, toJSON: () => ({}) } as DOMRect;
 	};
-	globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => { cb(0); return 1; };
+	frames.clear();
+	nextFrame = 1;
+	globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => { const id = nextFrame++; frames.set(id, cb); return id; };
+	globalThis.cancelAnimationFrame = (id: number): void => { frames.delete(id); };
 	Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 });
 	stack = document.createElement('div');
 	stack.setAttribute('data-chat-stack', '');
@@ -66,6 +75,7 @@ afterEach(() => {
 	app = null;
 	Element.prototype.getBoundingClientRect = realRect;
 	globalThis.requestAnimationFrame = realRaf;
+	globalThis.cancelAnimationFrame = realCaf;
 });
 
 describe('the bar above the input points to a question that is off screen', () => {
@@ -103,6 +113,7 @@ describe('the bar above the input points to a question that is off screen', () =
 		const second = card();
 		place(second, 300, 700);
 		await new Promise((r) => setTimeout(r, 0)); // the MutationObserver's delivery
+		frame();
 		flushSync();
 		await tick();
 		expect(bar()).not.toBeNull();
@@ -134,21 +145,79 @@ describe('the bar above the input points to a question that is off screen', () =
 		if (app) unmount(app);
 		app = null;
 		place(c, 100, 700);
-		await scrolled();
+		stack.dispatchEvent(new Event('scroll'));
+		expect(frames.size).toBe(0);
 		expect(host.querySelector('[data-prompt-anchor]')).toBeNull();
+	});
+
+	it('measures once per frame however often the stack scrolls', async () => {
+		const c = card();
+		place(c, 520, 700);
+		await anchor();
+		for (let i = 0; i < 5; i++) stack.dispatchEvent(new Event('scroll'));
+		expect(frames.size).toBe(1);
+	});
+
+	it('keeps its listeners when the view changes, instead of setting them up again', async () => {
+		const c = card();
+		place(c, 520, 700);
+		const added: string[] = [];
+		const realAdd = document.addEventListener.bind(document);
+		document.addEventListener = ((type: string, ...rest: unknown[]) => { added.push(type); return (realAdd as (...a: unknown[]) => void)(type, ...rest); }) as typeof document.addEventListener;
+		try {
+			await anchor();
+			place(c, 100, 700);
+			await scrolled();
+			place(c, 520, 700);
+			await scrolled();
+			expect(added.filter((t) => t === 'scroll')).toHaveLength(1);
+		} finally {
+			document.addEventListener = realAdd;
+		}
+	});
+
+	it('reads where the question opens, not the card\'s padding or workflow line above it', async () => {
+		const c = card();
+		const q = document.createElement('pre');
+		q.setAttribute('data-prompt-question', '');
+		c.appendChild(q);
+		place(c, 480, 800); // the card's top line (padding, workflow name) is under the stack's edge…
+		place(q, 520, 700); // …the question itself shows
+		await anchor();
+		expect(bar()).toBeNull();
+		place(c, 520, 800);
+		place(q, 470, 700); // the card's top shows, the question has gone under the edge
+		await scrolled();
+		expect(bar()).not.toBeNull();
+	});
+
+	it('is not steered by an element a chat message carries outside the prompt stack', async () => {
+		const planted = document.createElement('div');
+		planted.setAttribute('data-pending-prompt', '');
+		planted.setAttribute('data-prompt-kind', 'permission');
+		document.body.insertBefore(planted, stack);
+		place(planted, 100, 200); // on screen
+		const c = card();
+		place(c, 300, 700); // the real question is under the stack's top edge
+		await anchor();
+		expect(bar()).not.toBeNull();
 	});
 });
 
 describe('the bar\'s answer button', () => {
-	it('takes the user to the card\'s top, where the question opens, and focuses the card', async () => {
+	it('scrolls only the stack, to the card\'s top where the question opens, and focuses the card', async () => {
 		const c = card();
 		c.tabIndex = -1;
-		const calls: unknown[] = [];
-		c.scrollIntoView = (arg?: boolean | ScrollIntoViewOptions): void => { calls.push(arg); };
-		place(c, 100, 700);
+		let intoView = 0;
+		c.scrollIntoView = (): void => { intoView += 1; };
+		const scrolls: unknown[] = [];
+		stack.scrollTo = ((arg: ScrollToOptions) => { scrolls.push(arg); }) as typeof stack.scrollTo;
+		stack.scrollTop = 200;
+		place(c, 380, 900); // 120 px above the stack's top (500)
 		await anchor();
 		(bar()?.querySelector('button') as HTMLButtonElement).click();
-		expect(calls).toEqual([expect.objectContaining({ block: 'start' })]);
+		expect(scrolls).toEqual([expect.objectContaining({ top: 80 })]);
+		expect(intoView).toBe(0); // the page and other scrolling parents stay where they are
 		expect(document.activeElement).toBe(c);
 	});
 });

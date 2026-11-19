@@ -2,7 +2,7 @@
 	import { t } from '../i18n.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
 	import type { PendingPromptHead } from '../stores/chat.svelte.js';
-	import { findPromptFormByKind, formatRunElapsed, prefersReducedMotion, promptAnchorShown, promptFormInView, scrollBehaviorForMotion, type PromptFormSight } from '../utils/pipeline-status.js';
+	import { findPromptFormByKind, formatRunElapsed, prefersReducedMotion, promptAnchorShown, promptFormInView, promptQuestionElement, scrollBehaviorForMotion, type PromptFormSight } from '../utils/pipeline-status.js';
 
 	interface Props {
 		prompt: PendingPromptHead;
@@ -36,10 +36,11 @@
 
 	// The bar points to a question that is off screen. While the question's opening line is on screen it
 	// shows the question once, there; the bar would only repeat it. The card sits in the scrolling stack
-	// above the input, which never lets the whole card leave — so the measure is the card's TOP inside
-	// the visible part of that stack, read on every scroll and resize and when the page changes (which
-	// also finds the next question's card). An IntersectionObserver reports only threshold crossings and
-	// misses a card taller than its stack scrolling under its own top.
+	// above the input, which never lets the whole card leave — so the measure is where the QUESTION opens
+	// (`promptQuestionElement`) inside the visible part of that stack. It is read on every scroll and
+	// resize, when the stack's content changes (which also finds the next question's card) and when the
+	// stack or the card changes size. An IntersectionObserver reports only threshold crossings and misses
+	// a card taller than its stack scrolling under its own top.
 	// Keyed on the question's kind and id, not the prop object: the head is rebuilt whenever any field of
 	// the pending question changes, and re-measuring from scratch on each would blink the bar.
 	const promptKind = $derived(prompt.kind);
@@ -53,27 +54,37 @@
 			sight = { kind: 'unobservable' };
 			return;
 		}
+		const stack = document.querySelector<HTMLElement>('[data-chat-stack]');
+		const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => schedule());
+		let watched: HTMLElement | null = null;
 		let frame = 0;
+		let last: boolean | 'absent' | null = null;
 		const measure = (): void => {
 			frame = 0;
 			const el = findPromptFormByKind(document, kind);
-			if (!el) { sight = { kind: 'absent' }; return; }
-			const scroller = el.closest<HTMLElement>('[data-chat-stack]');
-			const view = scroller?.getBoundingClientRect();
-			const top = Math.max(view?.top ?? 0, 0);
-			const bottom = Math.min(view?.bottom ?? window.innerHeight, window.innerHeight);
-			const inView = promptFormInView(el.getBoundingClientRect(), top, bottom);
-			if (sight.kind !== 'seen' || sight.inView !== inView) sight = { kind: 'seen', inView };
+			if (el !== watched) {
+				if (watched) ro?.unobserve(watched);
+				if (el) ro?.observe(el);
+				watched = el;
+			}
+			// Compared against `last`, never against `sight`: reading `sight` here would make it a
+			// dependency of this effect, and every change of view would tear the listeners down.
+			if (!el || !stack) { if (last !== 'absent') { last = 'absent'; sight = { kind: 'absent' }; } return; }
+			const view = stack.getBoundingClientRect();
+			const inView = promptFormInView(promptQuestionElement(el).getBoundingClientRect(), Math.max(view.top, 0), Math.min(view.bottom, window.innerHeight));
+			if (last !== inView) { last = inView; sight = { kind: 'seen', inView }; }
 		};
-		const schedule = (): void => { if (frame === 0) frame = requestAnimationFrame(measure); };
+		function schedule(): void { if (frame === 0) frame = requestAnimationFrame(measure); }
 		measure();
 		const mo = new MutationObserver(schedule);
-		mo.observe(document.querySelector('[data-chat-stack]') ?? document.body, { childList: true, subtree: true });
+		mo.observe(stack ?? document.body, { childList: true, subtree: true, characterData: true });
+		if (stack) ro?.observe(stack);
 		// Scroll does not bubble; captured at the document it is seen for the stack and the page alike.
 		document.addEventListener('scroll', schedule, { capture: true, passive: true });
 		window.addEventListener('resize', schedule, { passive: true });
 		return () => {
 			mo.disconnect();
+			ro?.disconnect();
 			document.removeEventListener('scroll', schedule, { capture: true });
 			window.removeEventListener('resize', schedule);
 			if (frame !== 0) cancelAnimationFrame(frame);
@@ -84,9 +95,15 @@
 		if (typeof document === 'undefined') return;
 		const el = findPromptFormByKind(document, prompt.kind);
 		if (!el) return;
-		// To the card's top, where the question opens: centred, a card taller than its stack would keep
-		// the question cut off and this bar on screen.
-		el.scrollIntoView({ behavior: scrollBehaviorForMotion(prefersReducedMotion()), block: 'start' });
+		// Scrolls the stack alone, to where the question opens — not `scrollIntoView`, which moves every
+		// scrolling ancestor (on a phone with the keyboard open, the page itself). To the card's top, not
+		// centred: a card taller than its stack would keep the question cut off and this bar on screen.
+		const stack = el.closest<HTMLElement>('[data-chat-stack]');
+		if (stack) {
+			// To the card's own top: its padding and the workflow line above the question come along.
+			const top = stack.scrollTop + el.getBoundingClientRect().top - stack.getBoundingClientRect().top;
+			stack.scrollTo({ top: Math.max(0, top), behavior: scrollBehaviorForMotion(prefersReducedMotion()) });
+		}
 		el.focus({ preventScroll: true });
 	}
 </script>
