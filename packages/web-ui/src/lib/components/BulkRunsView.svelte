@@ -144,7 +144,8 @@
 							<tr class="text-left text-xs text-text-subtle border-b border-border">
 								<th class="py-2 pr-3 font-medium">{t('bulk.col.run')}</th>
 								<th class="py-2 pr-3 font-medium hidden sm:table-cell">{t('bulk.col.target')}</th>
-								<th class="py-2 pr-3 font-medium">{t('bulk.col.status')}</th>
+								<!-- w-px below sm: the status column takes only its longest unbreakable part, the run column the rest (U-338). -->
+								<th class="py-2 pr-3 font-medium w-px sm:w-auto" data-testid="bulk-col-status">{t('bulk.col.status')}</th>
 								<th class="py-2 pr-3 font-medium hidden sm:table-cell">{t('bulk.col.targets')}</th>
 								<th class="py-2 font-medium hidden sm:table-cell">{t('bulk.col.cost')}</th>
 							</tr>

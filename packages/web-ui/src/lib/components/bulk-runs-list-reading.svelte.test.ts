@@ -228,11 +228,14 @@ describe('the runs list at phone width', () => {
 				return { text: chip.textContent!, parts: parts.map((p) => p.textContent!) };
 			});
 		};
+		// The status column is as narrow as its longest part below sm, its natural width from sm.
+		const head = (): HTMLElement => target.querySelector<HTMLElement>('[data-testid="bulk-col-status"]')!;
 		expect(await chips()).toEqual([
 			{ text: 'schreibt · gestoppt', parts: ['schreibt ·', 'gestoppt'] },
 			{ text: 'abgebrochen · angehalten', parts: ['abgebrochen ·', 'angehalten'] },
 			{ text: 'Vorschau bereit', parts: ['Vorschau bereit'] },
 		]);
+		expect(head().classList.contains('w-px') && head().classList.contains('sm:w-auto')).toBe(true);
 		unmount(component!);
 		component = undefined;
 		setLocale('en');
