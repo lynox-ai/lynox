@@ -976,13 +976,17 @@ function jsonTextHides(text: string, readings: Iterable<string>, mask: (text: st
       for (const read of reads) {
         // A parser reads the escapes of JSON text wherever the text starts, also text a strict
         // parse refuses (`NaN`, a trailing comma) and a document over several lines: the reading
-        // with its escapes read, and that reading's, down to the depth, holds no secret either.
-        for (let u = read, k = 0; k < JSON_TEXT_DEPTH; k++) {
+        // with its escapes read, its server readings, and so on down to the depth, holds no
+        // secret either; escapes left past the depth count as `unread`, as JSON text does.
+        for (let u = read, k = 0; ; k++) {
           const next = jsonUnescaped(u);
           if (next === u) break;
-          // Not charged: it costs at most a few times the reading, and a reading is one of the
-          // few of `text` and of its form sides, which a string's are charged for below.
-          if (mask(next) !== next) return true;
+          if (k >= JSON_TEXT_DEPTH) return unread;
+          for (const r of serverReadings(next)) {
+            // Charged here, checked by the first candidate below: there always is one.
+            left -= r.length + 32;
+            if (mask(r) !== r) return true;
+          }
           u = next;
         }
         for (const candidate of jsonCandidates(read)) {

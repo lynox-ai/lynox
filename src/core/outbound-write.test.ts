@@ -1084,6 +1084,16 @@ describe('a secret inside JSON text inside a value', () => {
     // A second level inside such text: its escapes are read again.
     const twice = `{"inner":${JSON.stringify(escaped)},"n":NaN}`;
     expect(bodyForQuestion(JSON.stringify({ value: twice }), mask)).toEqual({ unshowable: 'escaped-secret' });
+    // An escaped percent sign inside such text: its escapes read, then decoded as a server decodes.
+    expect(bodyForQuestion(JSON.stringify({ value: `{"t":"\\u002568${STORED.slice(1)}","n":NaN}` }), mask)).toEqual({ unshowable: 'escaped-secret' });
+    // Nested deeper than it is read: escapes left past the depth count as holding a secret.
+    let deep = `{"t":"\\u0068${STORED.slice(1)}","n":NaN}`;
+    for (let i = 0; i < 4; i++) deep = `{"i":${JSON.stringify(deep)},"n":NaN}`;
+    expect(bodyForQuestion(deep, mask, 'application/json')).toEqual({ unshowable: 'escaped-secret' });
+    // The limit, with no secret: escapes read three times over are shown, a fourth is not read.
+    const escapedTimes = (n: number) => { let t = 'a\\nb'; for (let i = 1; i < n; i++) t = JSON.stringify(t); return t; };
+    expect('text' in bodyForQuestion(`x ${escapedTimes(3)}`, mask, 'text/plain')).toBe(true);
+    expect(bodyForQuestion(`x ${escapedTimes(4)}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
     // An escape other than `\u`: a stored value with a slash, written `\/`.
     const slashMask = (t: string) => t.replaceAll('hunter2/secret', '***');
     expect(bodyForQuestion(JSON.stringify({ value: '{"t":"hunter2\\/secret","n":NaN}' }), slashMask)).toEqual({ unshowable: 'escaped-secret' });
