@@ -508,6 +508,39 @@ describe('where the user finds a planned run', () => {
   });
 });
 
+// The chat opens a recorded run's page with a button; the engine tells it the run's id on the stream.
+describe('the id the chat gets for the button that opens a planned run', () => {
+  const watched = (events: unknown[]): IAgent => ({
+    toolContext: { bulkLedger: ledger, dataStore: store, streamHandler: (e: unknown) => { events.push(e); } },
+    currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL,
+  }) as unknown as IAgent;
+
+  it('is the id the ledger gave a local plan, sent once', async () => {
+    const events: unknown[] = [];
+    writeFileSync(join(ws, 'plan.json'), JSON.stringify([{ target: 'inside.txt', after: 'y' }]));
+    const id = runIdOf(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'plan.json' }, watched(events)));
+    expect(ledger.getStatus(id)).not.toBeNull();
+    expect(events).toEqual([{ type: 'bulk_run_planned', runId: id }]);
+  });
+
+  it('is the id the ledger gave an external plan, sent once', async () => {
+    const events: unknown[] = [];
+    writeFileSync(join(ws, 'src.json'), JSON.stringify([{ target: 'https://shop.example.com/products/1', after: { price: '1' } }]));
+    const id = runIdOf(await bulkPlanTool.handler({ target_system: 'http', target_host: 'shop.example.com', source_file: 'src.json' }, watched(events)));
+    expect(ledger.getStatus(id)).not.toBeNull();
+    expect(events).toEqual([{ type: 'bulk_run_planned', runId: id }]);
+  });
+
+  it('is not sent when the plan is refused and no run is recorded', async () => {
+    const events: unknown[] = [];
+    expect(await bulkPlanTool.handler({ target_system: 'workspace' }, watched(events))).toMatch(/^Error: /);
+    writeFileSync(join(ws, 'bad.json'), 'not json');
+    expect(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'bad.json' }, watched(events))).toMatch(/^Error: /);
+    expect(ledger.listRuns()).toEqual([]);
+    expect(events).toEqual([]);
+  });
+});
+
 // 1223 (ux, 1130 eval run 4): with every target refused, the model told the owner that approving
 // would write. The status says in one line that there is nothing to approve, and only then.
 describe('a previewed run in which nothing can be written', () => {

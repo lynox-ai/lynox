@@ -334,7 +334,11 @@ export type StreamEvent =
   // is worse than no gate because it looks like a control.
   | { type: 'knowledge_write'; id: string; subject?: string | undefined; kind?: string | undefined;
       status: 'active' | 'pending_review'; text: string; agent: string;
-      cause?: UntrustedCause | undefined };
+      cause?: UntrustedCause | undefined }
+  // bulk_plan recorded a run this turn. A CLIENT-ONLY signal for the button that opens the run's
+  // page: the id is the ledger's own (minted by the ledger, never taken from the model's text), and
+  // the event never enters model context.
+  | { type: 'bulk_run_planned'; runId: string };
 
 export type StreamHandler = (event: StreamEvent) => void | Promise<void>;
 

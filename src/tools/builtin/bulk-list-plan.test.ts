@@ -101,6 +101,18 @@ describe('bulk_plan with source_list', () => {
     expect(ledger.listRuns()).toHaveLength(1);
   });
 
+  it('tells the chat the id the ledger gave the list run, and nothing when it refuses the plan', async () => {
+    const events: unknown[] = [];
+    const watched = { toolContext: { bulkLedger: ledger, streamHandler: (e: unknown) => { events.push(e); } }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL } as unknown as IAgent;
+    const args = { target_system: 'http', target_host: HOST, source_list: { path: PATH, after: { status: 'draft' } } } as Parameters<typeof bulkPlanTool.handler>[0];
+    const first = runIdOf(await bulkPlanTool.handler(args, watched));
+    expect(ledger.getListRun(first)).not.toBeNull();
+    expect(events).toEqual([{ type: 'bulk_run_planned', runId: first }]);
+    ledger.resumePreview(first, Date.now(), { listChecksum: ledger.listStartChecksum(first)! });
+    expect(await bulkPlanTool.handler(args, watched)).toMatch(/^Error: another external dry run/);
+    expect(events).toHaveLength(1);
+  });
+
   it('says, once the list is read, that the targets wait for the user\'s second start', async () => {
     const id = runIdOf(await plan());
     ledger.resumePreview(id, Date.now(), { listChecksum: ledger.listStartChecksum(id)! });

@@ -313,6 +313,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'activity.tab.bulk':      { de: 'Massenläufe', en: 'Bulk runs' },
 	// Bulk runs (PRD bulk-changes-reversible §3.9). The unmeasured note and its confirmation are the approved texts, word for word.
 	'bulk.title': { de: 'Massenläufe', en: 'Bulk runs' },
+	'bulk.chat.open_run': { de: 'Massenlauf öffnen', en: 'Open bulk run' },
 	'bulk.intro': { de: 'Änderungen über viele Ziele. Jeder Lauf zeigt erst eine Vorschau und schreibt erst nach deiner Freigabe. Was lynox geschrieben hat, kannst du zurücknehmen, solange es seither niemand geändert hat. Was versendet wurde, lässt sich nicht zurückholen.', en: 'Changes across many targets. Every run shows a preview first and writes only after you approve it. You can take back what lynox wrote, as long as nobody has changed it since. Anything that was sent cannot be taken back.' },
 	'bulk.col.run': { de: 'Lauf', en: 'Run' },
 	'bulk.col.target': { de: 'Ziel', en: 'Target' },

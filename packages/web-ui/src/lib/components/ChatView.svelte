@@ -78,6 +78,7 @@
 	import { footerChipSeparator, footerStatParts } from '../stores/chat-usage.js';
 	import { formatCompactionDelta } from '../stores/compaction-result.js';
 	import { taskPreview } from '../stores/follow-ups.js';
+	import { bulkRunHref, followUpsWithoutRun } from '../stores/planned-bulk-run.js';
 	import { batchTotals, foldToolRows, worstStatus } from '../stores/chat-attribution.js';
 	import { approvalNoteLines } from './approvals.js';
 	import { getApprovalsViewer } from '../stores/approvals.svelte.js';
@@ -3113,6 +3114,17 @@
 							     sentence names this button. -->
 							<div class="pt-1">{@render planNewChatButton()}</div>
 						{/if}
+						{#if msg.plannedBulkRunId}
+							<!-- bulk_plan recorded a run: open its page. The id is the ledger's, from the
+							     stream, never the model's text (U-361). -->
+							<div class="pt-1">
+								<a
+									href={bulkRunHref(msg.plannedBulkRunId)}
+									class="inline-flex items-center rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2.5 py-1 text-[13px] md:text-xs text-accent-text hover:bg-accent/20"
+									data-open-bulk-run
+								>{t('bulk.chat.open_run')}</a>
+							</div>
+						{/if}
 					</div>
 				{/if}
 			{/each}
@@ -3125,7 +3137,8 @@
 			<!-- Follow-up suggestion chips -->
 			{#if !isStreaming && messages.length > 0}
 				{@const lastAssistant = messages[messages.length - 1]}
-				{#if lastAssistant?.role === 'assistant' && lastAssistant.followUps?.length}
+				{@const shownFollowUps = lastAssistant?.role === 'assistant' ? followUpsWithoutRun(lastAssistant.followUps ?? [], lastAssistant.plannedBulkRunId) : []}
+				{#if shownFollowUps.length > 0}
 					<!-- The chip shows what it will SEND, not only what it is called.
 					     Clicking runs `task` as a full agent turn with the whole tool
 					     set and no second confirmation, so the click is the only
@@ -3146,7 +3159,7 @@
 					     When the task only restates the label there is no second line:
 					     a line that always repeats itself is one people stop reading. -->
 					<div class="flex flex-wrap gap-2 mt-1">
-						{#each lastAssistant.followUps as fu}
+						{#each shownFollowUps as fu}
 							{@const preview = taskPreview(fu)}
 							<button
 								onclick={() => takeFollowUp(fu)}

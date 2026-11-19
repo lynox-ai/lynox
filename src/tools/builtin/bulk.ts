@@ -284,6 +284,7 @@ function planListChecked(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger
   if (!out.ok) {
     return 'Error: another external dry run is still reading its targets. Wait until bulk_status shows it previewed, then plan again.';
   }
+  announcePlannedRun(agent, out.status.id);
   return [
     'List dry run recorded — nothing was sent, read or written. Nothing is read until the user starts it outside this chat.',
     formatStatus(out.status),
@@ -329,6 +330,13 @@ export const RUN_PLACE_NOTE = `The user finds this run in lynox under ${BULK_RUN
   'Only the owner of this lynox can start or approve it. ' +
   'If you say where it is, use exactly these labels, in the language of the interface; name no other tab, page, menu, button or link, and make up no link or address. ' +
   'You do not know the run\'s address or what its page shows step by step, so give no URL and no button names or steps beyond this.';
+
+// The chat opens a recorded run's page with a button under the answer. The run id goes to the web UI
+// on the stream only, as the ledger minted it; the model's text never shapes the address, and the
+// model is not told about the button, so the result above stays as it was measured.
+function announcePlannedRun(agent: IAgent, runId: string): void {
+  void agent.toolContext.streamHandler?.({ type: 'bulk_run_planned', runId });
+}
 
 /** What a planner is told about a judged run. Counts and rules only — never a verdict. */
 const JUDGE_NOTE = 'With judge, no model is called until the user starts the run outside this chat and sets a spend limit for it. ' +
@@ -487,6 +495,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         if (!out.ok) {
           return 'Error: another external dry run is still reading its targets. Wait until bulk_status shows it previewed, then plan again.';
         }
+        announcePlannedRun(agent, out.status.id);
         return [
           out.status.phase === 'planned'
             ? 'External dry run recorded — nothing was sent or written. Nothing is read either until the user starts it outside this chat.'
@@ -508,6 +517,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         atomic: input.atomic === true,
         judge,
       });
+      announcePlannedRun(agent, status.id);
       return [
         'Dry run recorded — nothing was written to any target.',
         formatStatus(status),
