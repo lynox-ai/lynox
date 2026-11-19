@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { resolveTaskTemplate } from '../../src/orchestrator/context.js';
+import { resolveInputTemplate, resolveTaskTemplate } from '../../src/orchestrator/context.js';
 
 const SRC = join(import.meta.dirname, '../../src');
 
@@ -241,21 +241,29 @@ describe('Agent Security Audit', () => {
       // its output from the original text and never reads a replacement again.
       expect(contextContent, 'context.ts must contain resolveTaskTemplate').toContain('resolveTaskTemplate');
       expect(contextContent, 'resolveTaskTemplate must resolve through replacePlaceholders').toMatch(/return replacePlaceholders\(task,/);
-      // And the behaviour itself: a step result that holds a placeholder stays as text.
+      // And the behaviour itself: a placeholder inside a step result stays as text, whether it
+      // names a param or another step, in a task and in a captured call's input template (which
+      // goes into tool arguments unfenced).
       const resolved = resolveTaskTemplate('{{s1.result}}', { s1: { result: '{{params.secret}}' }, params: { secret: 'zz-not-resolved-9' } });
       expect(resolved, 'a placeholder inside a step result must not be resolved').not.toContain('zz-not-resolved-9');
       expect(resolved).toContain('{{params.secret}}');
-      // The behaviour above covers the paths it calls. A second resolver on a path no test drives
-      // is caught here instead: every `{{…}}` resolver in this file goes through the scanner, at
-      // the places it is called today (resolveTaskTemplate and substituteString replace, the
-      // whole-string test in substituteString). No escaped brace (a regex, or `new RegExp('\\{…')`)
-      // and no bare `'{{'` literal (a split or indexOf by hand) is left.
-      expect(contextContent, 'context.ts must not match {{…}} with a regex of its own').not.toMatch(/\\\{/);
+      const viaStep = resolveTaskTemplate('{{s1.result}}', { s1: { result: '{{s2.result}}' }, s2: { result: 'zz-not-resolved-8' } });
+      expect(viaStep, 'a step reference inside a step result must not be resolved').not.toContain('zz-not-resolved-8');
+      const inInput = resolveInputTemplate({ q: '{{s1.result}} x' }, { s1: { result: '{{params.k}}' }, params: { k: 'zz-not-resolved-7' } });
+      expect(JSON.stringify(inInput), 'an input template must not resolve a placeholder inside a step result').not.toContain('zz-not-resolved-7');
+      // The behaviour above covers the paths it calls. A second resolver written the usual ways
+      // on a path no test drives is caught here instead: no regex with an escaped or a bare brace
+      // pair (`\\{\\{`, `/{{`, `[{]`), no bare `'{{'` literal (a split or indexOf by hand), and
+      // the scanner called only where it is today (resolveTaskTemplate and substituteString
+      // replace, the whole-string test in substituteString). A brace spelled another way
+      // (`\\x7b`, a char code) is not caught; review covers that.
+      expect(contextContent, 'context.ts must not match {{ with a regex of its own').not.toMatch(/\\\{|\/\{\{|\[\{\]/);
       expect(contextContent, 'context.ts must not look for {{ by hand').not.toMatch(/(['"`])\{\{\1/);
       expect(contextContent.match(/\breplacePlaceholders\(/g)?.length, 'replacePlaceholders is called in exactly two places').toBe(2);
       expect(contextContent.match(/\bsolePlaceholder\(/g)?.length, 'solePlaceholder is called in exactly one place').toBe(1);
       // Ensure there is no recursive call or while loop for template resolution
       const fnMatch = contextContent.match(/function resolveTaskTemplate[\s\S]*?^}/m);
+      expect(fnMatch, 'resolveTaskTemplate must be found as a function declaration').not.toBeNull();
       if (fnMatch) {
         const fnBody = fnMatch[0];
         // Remove the function signature line, then check the body for recursive calls
