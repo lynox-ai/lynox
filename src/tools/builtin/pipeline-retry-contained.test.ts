@@ -176,6 +176,9 @@ describe('a retry after the chat that ran the workflow was deleted', () => {
   it('finds nothing to retry once a retry from another chat made that chat the origin', async () => {
     await firstRun('chat-gone-1');
     expect(await retry(chat('chat-other'))).toContain('store order 1001');
+    // Both runs record the workflow they executed, the id the delete forgets by (`pipeline_runs.workflow_id`).
+    expect((mockRunManifest.mock.calls[0]![2] as { workflowId?: unknown }).workflowId).toBe(ID);
+    expect((mockRetryManifest.mock.calls[0]![3] as { workflowId?: unknown }).workflowId).toBe(ID);
     forgetExecutedStatesOfChat('chat-gone-1', [ID]);
     expect(await retry(chat('chat-third'))).toMatch(NO_PREVIOUS);
     expect(mockRetryManifest).toHaveBeenCalledTimes(1);

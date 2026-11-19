@@ -161,8 +161,6 @@ export function recordExecutedState(id: string, value: ExecutedState): void {
   executedStates.delete(id);
   // A run a deleted chat started that ends after the delete: its outputs are not kept for a retry.
   if (value.originThreadId !== undefined && deletedChats.has(value.originThreadId)) return;
-  // One a deleted chat reached by its runs but that records no chat of its own (no parent agent).
-  if (value.originThreadId === undefined && deletedWorkflows.has(id)) return;
   if (executedStates.size >= MAX_EXECUTED_STATES) {
     const oldest = executedStates.keys().next().value;
     if (oldest !== undefined) executedStates.delete(oldest);
@@ -172,8 +170,6 @@ export function recordExecutedState(id: string, value: ExecutedState): void {
 
 /** Chats deleted in this process, whose workflow outputs are no longer kept for a retry. Ids only. */
 const deletedChats = new Set<string>();
-/** The workflows those chats' runs executed (`pipeline_runs.workflow_id`): what the origin above does not name. */
-const deletedWorkflows = new Set<string>();
 const MAX_DELETED_CHATS = 10_000;
 
 function remember(set: Set<string>, value: string): void {
@@ -183,6 +179,8 @@ function remember(set: Set<string>, value: string): void {
   }
   set.add(value);
 }
+// A run without a chat records no origin and has none in history.db either, so no chat delete
+// reaches it; a run nested under one is the runner's, and records nothing here.
 
 /**
  * Forgets what the workflows a deleted chat started produced, and keeps forgetting what one still
@@ -192,7 +190,6 @@ function remember(set: Set<string>, value: string): void {
  */
 export function forgetExecutedStatesOfChat(threadId: string, workflowIds: readonly string[]): number {
   remember(deletedChats, threadId);
-  for (const id of workflowIds) remember(deletedWorkflows, id);
   // By workflow as well as by origin: a retry from another chat makes that chat the origin of the
   // state (see the retry's record), while the outputs it holds are still the ones this chat's run
   // made. That forgets another chat's state of the same workflow too: its retry then asks for a run.
