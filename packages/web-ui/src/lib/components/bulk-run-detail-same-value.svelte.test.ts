@@ -164,7 +164,7 @@ const same = (ts: BulkTarget[], o: { judged?: boolean } = {}): Map<number, numbe
 
 describe('which targets share a value', () => {
 	it('compares within one field only', () => {
-		const m = same([tgt(1, fields(['seo_title', 'X'])), tgt(2, fields(['seo_description', 'X']))]);
+		const m = same([tgt(1, fields(['seo_title', 'X'])), tgt(2, fields(['seo_description', 'X'])), tgt(3, fields(['seo_title', 'Y']))]);
 		expect(m.size).toBe(0);
 	});
 
