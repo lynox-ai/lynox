@@ -1687,12 +1687,12 @@ describe('bulkHiddenCountText', () => {
 
 describe('a run the owner discarded before approving it, as the list and the step chip name it', () => {
 	const DISCARDED = 'the owner discarded this run before approving it';
-	it('reads "discarded" without the halted suffix; every other aborted run reads as before', () => {
+	it('reads "discarded" without the halted suffix; another end before approval reads "aborted"', () => {
 		expect(bulkPhaseKey({ phase: 'aborted', haltKey: 'discarded' })).toBe('bulk.phase.discarded');
 		expect(bulkPhaseHasSuffix({ phase: 'aborted', haltKey: 'discarded', haltReason: DISCARDED })).toBe(false);
 		// The twins: another end before approval, and a run that is not aborted.
-		expect(bulkPhaseKey({ phase: 'aborted', haltKey: 'superseded' })).toBe('bulk.phase.aborted');
-		expect(bulkPhaseHasSuffix({ phase: 'aborted', haltKey: 'superseded', haltReason: 'x' })).toBe(true);
+		expect(bulkPhaseKey({ phase: 'aborted', haltKey: 'mandateEnded' })).toBe('bulk.phase.aborted');
+		expect(bulkPhaseHasSuffix({ phase: 'aborted', haltKey: 'mandateEnded', haltReason: 'x' })).toBe(false);
 		expect(bulkPhaseKey({ phase: 'previewed', haltKey: null })).toBe('bulk.phase.previewed');
 		expect(bulkPhaseHasSuffix({ phase: 'previewed', haltKey: null, haltReason: null })).toBe(false);
 	});
