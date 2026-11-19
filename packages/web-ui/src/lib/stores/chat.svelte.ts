@@ -2763,13 +2763,13 @@ async function reportReply(sid: string, outcome: ReplyOutcome, answer: string | 
 		// Nothing was answered. The open question comes back with its id, to be answered again on
 		// purpose: sending the same answer to it unasked could approve what the person never saw.
 		if (sessionId !== sid) return;
-		let answered = false;
-		await checkPendingPrompt(() => { answered = true; });
+		let saidNoneOpen = false;
+		await checkPendingPrompt((nothingOpen) => { saidNoneOpen = nothingOpen; });
 		if (sessionId !== sid) return;
 		// The answer does not go back into the message field: which question is open now is not
 		// known to match the one answered (a mail to send, say), and one keystroke would answer it.
 		// "Nothing is open" only when the server said so; a failed check says nothing either way.
-		const none = answered && pendingPermission === null && pendingTabsPrompt === null && pendingSecretPrompt === null && pendingMailConnect === null;
+		const none = saidNoneOpen;
 		chatError = t(none ? 'chat.reply_needs_question_none' : 'chat.reply_needs_question');
 		chatErrorDetail = null;
 		unmatchedAnswerCount++;
@@ -3077,7 +3077,7 @@ export type PendingCard = 'question' | 'decision' | 'other' | null;
  * Check the server for a pending prompt that survived a disconnect/refresh.
  * Restores pendingPermission or pendingSecretPrompt so the UI re-shows it, and says which card.
  */
-export async function checkPendingPrompt(onAnswered?: () => void): Promise<PendingCard> {
+export async function checkPendingPrompt(onAnswered?: (nothingOpen: boolean) => void): Promise<PendingCard> {
 	const sid = sessionId;
 	if (!sid) return null;
 	let card: PendingCard = null;
@@ -3085,14 +3085,12 @@ export async function checkPendingPrompt(onAnswered?: () => void): Promise<Pendi
 		// `sessionId` is `sid` here (no await between); the polled-routes list names this spelling.
 		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/pending-prompt`);
 		if (!res.ok) return null;
-		const body: unknown = await res.json();
-		if (body === null || typeof body !== 'object') return null;
-		const data = body as Record<string, unknown>;
+		const data = (await res.json()) as Record<string, unknown>;
 		// The chat may have changed while the request ran: the card belongs to the chat it was
 		// asked for, and set now it would show in another one.
 		if (sessionId !== sid) return null;
 		// This call got the server's word on what is open; a failed one knows nothing about it.
-		onAnswered?.();
+		onAnswered?.(!data['pending']);
 		if (!data['pending']) return null;
 
 		const promptType = data['promptType'] as string;

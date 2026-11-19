@@ -511,7 +511,7 @@ describe('why a question was closed, and the lost answer as a draft (UX-064, UX-
 });
 
 describe('an answer that names no question', () => {
-	type Setup = { prompt: Record<string, unknown>; answer?: string; open?: boolean | 'secret' | 'down' | 'null'; onPending?: () => void };
+	type Setup = { prompt: Record<string, unknown>; answer?: string; open?: boolean | 'secret' | 'down' | 'null' | 'unknown'; onPending?: () => void };
 	async function answerWith({ prompt, answer = 'Yes', open = true, onPending }: Setup): Promise<{ replies: number; pendingAsked: number; drafted: string[] }> {
 		const drafted: string[] = [];
 		store.registerComposerDraft((text) => { drafted.push(text); return true; });
@@ -523,6 +523,7 @@ describe('an answer that names no question', () => {
 				onPending?.();
 				if (open === 'down') return json({ error: 'unavailable' }, 503);
 				if (open === 'null') return json(null);
+				if (open === 'unknown') return json({ pending: true, promptType: 'a_kind_this_client_does_not_know', promptId: 'p-new' });
 				if (open === 'secret') return json({ pending: true, promptType: 'ask_secret', promptId: 'p-secret', secretName: 'SHOP_TOKEN', question: 'Your shop token?' });
 				return open
 					? json({ pending: true, promptType: 'ask_user', promptId: 'p-open', question: 'Send this mail?', options: ['Yes', 'No'] })
@@ -595,6 +596,12 @@ describe('an answer that names no question', () => {
 		await settle();
 		expect(pendingAsked, 'the two checks did not both run, so this proves nothing').toBe(2);
 		expect(store.getChatError()).toBe(await (await import('../i18n.svelte.js')).t('chat.reply_needs_question'));
+	});
+
+	it('does not say no question is open when the server says one is open, of a kind this client cannot show', async () => {
+		const { pendingAsked } = await answerWith({ prompt: {}, open: 'unknown' });
+		expect(pendingAsked, 'the open question was not asked for, so this proves nothing').toBeGreaterThan(0);
+		expect(store.getChatError()).toBe(await say('chat.reply_needs_question'));
 	});
 
 	it('does not say no question is open when the open question is of another kind', async () => {
