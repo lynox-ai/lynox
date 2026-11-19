@@ -148,7 +148,7 @@ describe('the runs list names a run\'s host once', () => {
 	});
 });
 
-// Below sm the count and target columns are hidden (U-338). The date line then leads with the count, as
+// Below sm the count and target columns are hidden (U-352). The date line then leads with the count, as
 // the column reads it, and the host stands on a line of its own that breaks only where it is wider than
 // the line alone, not after the date mid-value. From sm the line is the date alone, as before.
 describe('the runs list at phone width', () => {
@@ -209,7 +209,7 @@ describe('the runs list at phone width', () => {
 		expect(label.nextElementSibling).toBe(count);
 	});
 
-	// Below sm the status chip may break after its „·“ and nowhere else (U-338): each part keeps its words
+	// Below sm the status chip may break after its „·“ and nowhere else (U-352): each part keeps its words
 	// together, and from sm the chip stays on one line. A chip without a suffix is one unbreakable part.
 	it('lets the status chip break only after its „·“ below sm, in DE and EN', async () => {
 		runs = [

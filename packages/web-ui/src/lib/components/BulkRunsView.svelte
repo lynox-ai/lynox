@@ -144,7 +144,7 @@
 							<tr class="text-left text-xs text-text-subtle border-b border-border">
 								<th class="py-2 pr-3 font-medium">{t('bulk.col.run')}</th>
 								<th class="py-2 pr-3 font-medium hidden sm:table-cell">{t('bulk.col.target')}</th>
-								<!-- w-px below sm: the status column takes only its longest unbreakable part, the run column the rest (U-338). -->
+								<!-- w-px below sm: the status column takes only its longest unbreakable part, the run column the rest (U-352). -->
 								<th class="py-2 pr-3 font-medium w-px sm:w-auto" data-testid="bulk-col-status">{t('bulk.col.status')}</th>
 								<th class="py-2 pr-3 font-medium hidden sm:table-cell">{t('bulk.col.targets')}</th>
 								<th class="py-2 font-medium hidden sm:table-cell">{t('bulk.col.cost')}</th>
@@ -157,7 +157,7 @@
 									<td class="py-2 pr-3">
 										<button type="button" class="text-left hover:underline" onclick={(e) => { e.stopPropagation(); openRun(run.id); }}>{bulkListLabel(run, i18n, bulkReadsList(run))}</button>
 										<!-- Below sm the count and target columns are hidden: the count leads the date line, and the
-										     host stands on a line of its own, broken only where it is wider than the line alone (U-338).
+										     host stands on a line of its own, broken only where it is wider than the line alone (U-352).
 										     The column's header is hidden too, so a screen reader hears the count with its name. While
 										     the run reads its list the title already says „– Ziele“: the line is the date alone. -->
 										<div class="text-xs text-text-subtle">{#if !bulkReadsList(run)}<span class="sr-only sm:hidden" data-testid="bulk-run-count-narrow-label">{`${t('bulk.col.targets')}: `}</span><span class="sm:hidden font-mono" data-testid="bulk-run-count-narrow">{countText(run)}</span><span class="sm:hidden">{' · '}</span>{/if}{when(run.createdAt)}<span class="block sm:hidden [overflow-wrap:anywhere]" data-testid="bulk-run-host-narrow">{bulkSystemName(run.targetSystem, i18n)}</span></div>
@@ -165,7 +165,7 @@
 									<td class="py-2 pr-3 hidden sm:table-cell" data-testid="bulk-run-host">{bulkSystemName(run.targetSystem, i18n)}</td>
 									<td class="py-2 pr-3">
 										<!-- Below sm the chip may break after its „·“ and nowhere else, so the status column is as wide as
-										     its longest part and the run column gets the rest; from sm it stays on one line (U-338). -->
+										     its longest part and the run column gets the rest; from sm it stays on one line (U-352). -->
 										<span class="{chipClass} sm:whitespace-nowrap {run.phase === 'done' ? 'bg-success/15 text-success' : run.haltReason && !bulkWaitsForStart(run) ? 'bg-warning/15 text-warning' : 'bg-bg-muted text-text-muted'}" data-testid="bulk-run-phase"><span class="whitespace-nowrap">{chip.head}</span>{#if chip.tail !== null}{' '}<span class="whitespace-nowrap">{chip.tail}</span>{/if}</span>
 										{#if run.writeForm === 'unmeasured'}
 											<span class="{chipClass} whitespace-nowrap bg-warning/15 text-warning">{t('bulk.unmeasured_chip')}</span>
