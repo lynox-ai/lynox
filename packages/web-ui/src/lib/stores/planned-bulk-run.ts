@@ -47,7 +47,8 @@ interface RunBearer {
  * message's id goes to its counterpart in the adopted list (same role and text, in order, as for the
  * knowledge chips). A message whose text differs from the server's (a reload while the answer was
  * still streaming keeps a longer local text) has no counterpart; its id then goes to the server's
- * answer whose bulk_plan call reported that very run. The id stays the one this browser got from the
+ * answer whose bulk_plan call reported that very run, in the status line the engine writes for it
+ * ("Bulk run <id> (…"), not wherever a refusal repeats a string the caller passed. The id stays the one this browser got from the
  * stream; the server's text only says where it belongs. Without either, the id is dropped, so no
  * button lands on another answer.
  */
@@ -67,7 +68,7 @@ export function carryPlannedBulkRuns(local: readonly RunBearer[], adopted: reado
 		const id = src.plannedBulkRunId;
 		if (id === undefined) continue;
 		target ??= adopted.find((m) => m.role === 'assistant'
-			&& m.toolCalls?.some((tc) => tc.name === 'bulk_plan' && (tc.result ?? '').includes(id)) === true);
+			&& m.toolCalls?.some((tc) => tc.name === 'bulk_plan' && (tc.result ?? '').includes(`Bulk run ${id} (`)) === true);
 		if (target && target.plannedBulkRunId === undefined) target.plannedBulkRunId = id;
 	}
 }

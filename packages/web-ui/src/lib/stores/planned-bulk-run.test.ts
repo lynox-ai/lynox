@@ -97,6 +97,14 @@ describe('carryPlannedBulkRuns', () => {
 		expect(adopted[0]!.plannedBulkRunId).toBeUndefined();
 	});
 
+	it('does not take the id from a bulk_plan refusal that only repeats it', () => {
+		const adopted: Array<{ role: string; content: string; toolCalls?: Array<{ name: string; result?: string }>; plannedBulkRunId?: string }> = [
+			{ role: 'assistant', content: 'Fehler.', toolCalls: [{ name: 'bulk_plan', result: `Error: the dry run failed: no collection ${RUN}` }] },
+		];
+		carryPlannedBulkRuns([{ role: 'assistant', content: 'Geplant.', plannedBulkRunId: RUN }], adopted);
+		expect(adopted[0]!.plannedBulkRunId).toBeUndefined();
+	});
+
 	it('puts it nowhere when the answer has no twin', () => {
 		const adopted: Array<{ role: string; content: string; plannedBulkRunId?: string }> = [{ role: 'assistant', content: 'Anders.' }];
 		carryPlannedBulkRuns([{ role: 'assistant', content: 'Geplant.', plannedBulkRunId: RUN }], adopted);

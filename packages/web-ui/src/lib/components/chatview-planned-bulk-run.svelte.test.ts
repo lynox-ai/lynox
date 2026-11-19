@@ -165,9 +165,10 @@ describe('the button that opens a bulk run bulk_plan recorded', () => {
 		await settle();
 		svelte.flushSync();
 		expect(links().map((a) => a.getAttribute('href'))).toEqual([`/app/activity?tab=bulk&run=${RUN}`]);
+		expect(links()[0]!.closest('.ai-message-wrap')).not.toBeNull();
 	});
 
-	it('stays on the server\'s answer whose bulk_plan call reported the run, when the page was reloaded mid-answer', async () => {
+	it('stays when the chat takes the server\'s transcript mid-answer, whose text differs from the one on screen', async () => {
 		await turnThenRender('Plane den Lauf', [...planned(RUN), ['text', { text: 'Geplant. Du findest ihn unter Aktivität.' }]]);
 		// The server kept the answer only up to the tool round.
 		transcript = [

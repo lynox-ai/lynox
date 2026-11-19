@@ -515,10 +515,13 @@ describe('the id the chat gets for the button that opens a planned run', () => {
     currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL,
   }) as unknown as IAgent;
 
-  it('is the id the ledger gave a local plan, sent once', async () => {
+  it('is the id the ledger gave a local plan, sent once, and the result names it in the line the web UI looks for', async () => {
     const events: unknown[] = [];
     writeFileSync(join(ws, 'plan.json'), JSON.stringify([{ target: 'inside.txt', after: 'y' }]));
-    const id = runIdOf(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'plan.json' }, watched(events)));
+    const result = await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'plan.json' }, watched(events));
+    const id = runIdOf(result);
+    // After a reload mid-answer the web UI finds the answer by this line (packages/web-ui planned-bulk-run.ts).
+    expect(result).toContain(`Bulk run ${id} (`);
     expect(ledger.getStatus(id)).not.toBeNull();
     expect(events).toEqual([{ type: 'bulk_run_planned', runId: id }]);
   });
