@@ -226,12 +226,12 @@ describe('the runs list at phone width', () => {
 				expect(chip.classList.contains('whitespace-nowrap')).toBe(false);
 				const parts = [...chip.children] as HTMLElement[];
 				for (const p of parts) expect(p.classList.contains('whitespace-nowrap')).toBe(true);
-				// Nothing around the chip takes that one break away again.
+				// No ancestor up to the mount target carries `whitespace-nowrap`.
 				for (let el = chip.parentElement; el !== null && el !== target; el = el.parentElement) expect(el.classList.contains('whitespace-nowrap')).toBe(false);
 				return { text: chip.textContent!, parts: parts.map((p) => p.textContent!) };
 			});
 		};
-		// The status column is as narrow as its longest part below sm, its natural width from sm.
+		// The status column's header is marked `w-px` below sm and `sm:w-auto` from sm.
 		const head = (): HTMLElement => target.querySelector<HTMLElement>('[data-testid="bulk-col-status"]')!;
 		expect(await chips()).toEqual([
 			{ text: 'schreibt · gestoppt', parts: ['schreibt ·', 'gestoppt'] },
