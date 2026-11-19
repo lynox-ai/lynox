@@ -21,6 +21,18 @@ function place(el: Element, top: number, bottom: number): void { boxes.set(el, {
 const realRect = Element.prototype.getBoundingClientRect;
 const realRaf = globalThis.requestAnimationFrame;
 const realCaf = globalThis.cancelAnimationFrame;
+const realRO = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+/** A stand-in ResizeObserver: the test says when an observed element changed size. */
+class FakeRO {
+	static all: FakeRO[] = [];
+	readonly targets = new Set<Element>();
+	constructor(private readonly cb: () => void) { FakeRO.all.push(this); }
+	observe(el: Element): void { this.targets.add(el); }
+	unobserve(el: Element): void { this.targets.delete(el); }
+	disconnect(): void { this.targets.clear(); }
+	resized(el: Element): void { if (this.targets.has(el)) this.cb(); }
+}
+function resized(el: Element): void { for (const ro of FakeRO.all) ro.resized(el); }
 /** Queued animation frames: run only when the test says a frame has passed, as a browser would. */
 const frames = new Map<number, FrameRequestCallback>();
 let nextFrame = 1;
@@ -61,6 +73,8 @@ beforeEach(() => {
 	};
 	frames.clear();
 	nextFrame = 1;
+	FakeRO.all = [];
+	(globalThis as { ResizeObserver?: unknown }).ResizeObserver = FakeRO;
 	globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => { const id = nextFrame++; frames.set(id, cb); return id; };
 	globalThis.cancelAnimationFrame = (id: number): void => { frames.delete(id); };
 	Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 });
@@ -77,6 +91,7 @@ afterEach(() => {
 	Element.prototype.getBoundingClientRect = realRect;
 	globalThis.requestAnimationFrame = realRaf;
 	globalThis.cancelAnimationFrame = realCaf;
+	(globalThis as { ResizeObserver?: unknown }).ResizeObserver = realRO;
 });
 
 describe('the bar above the input points to a question that is off screen', () => {
@@ -149,6 +164,47 @@ describe('the bar above the input points to a question that is off screen', () =
 		stack.dispatchEvent(new Event('scroll'));
 		expect(frames.size).toBe(0);
 		expect(host.querySelector('[data-prompt-anchor]')).toBeNull();
+	});
+
+	it('re-measures when the stack or the card changes size, with no scroll', async () => {
+		const c = card();
+		place(c, 520, 700);
+		await anchor();
+		expect(bar()).toBeNull();
+		place(c, 450, 700); // something above the card in the stack grew
+		resized(stack);
+		frame(); flushSync(); await tick();
+		expect(bar()).not.toBeNull();
+		place(c, 520, 700);
+		resized(c);
+		frame(); flushSync(); await tick();
+		expect(bar()).toBeNull();
+	});
+
+	it('watches the next card\'s size, not the replaced one\'s', async () => {
+		const first = card();
+		place(first, 520, 700);
+		await anchor();
+		first.remove();
+		const second = card();
+		place(second, 520, 700);
+		await new Promise((r) => setTimeout(r, 0));
+		frame(); flushSync(); await tick();
+		expect(FakeRO.all.some((ro) => ro.targets.has(second))).toBe(true);
+		expect(FakeRO.all.some((ro) => ro.targets.has(first))).toBe(false);
+	});
+
+	it('re-measures when text in the stack changes', async () => {
+		const c = card();
+		const note = document.createTextNode('waiting');
+		stack.insertBefore(note, c);
+		place(c, 520, 700);
+		await anchor();
+		place(c, 450, 700);
+		note.data = 'a longer line that pushes the card down';
+		await new Promise((r) => setTimeout(r, 0));
+		frame(); flushSync(); await tick();
+		expect(bar()).not.toBeNull();
 	});
 
 	it('measures once per frame however often the stack scrolls', async () => {
