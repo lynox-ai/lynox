@@ -94,10 +94,10 @@ function rowsIn(scope: MemoryScopeRef): (Mark & { text: string })[] {
       .all(scope.type, scope.id) as (Mark & { text: string })[];
   } finally { db.close(); }
 }
-function rowById(id: string): Mark {
+function rowById(id: string): Mark & { text: string } {
   const db = new Database(join(current!.dir, 'mem.db'), { readonly: true });
   try {
-    return db.prepare('SELECT source_untrusted, source_type, is_active FROM memories WHERE id = ?').get(id) as Mark;
+    return db.prepare('SELECT text, source_untrusted, source_type, is_active FROM memories WHERE id = ?').get(id) as Mark & { text: string };
   } finally { db.close(); }
 }
 
@@ -210,16 +210,17 @@ describe('memory_update keeps the mark of the lines it replaces', () => {
     expect(newRow()).toMatchObject({ source_untrusted: 0, source_type: 'agent_inferred' });
   });
 
-  it('an exact edit of an untrusted line on a clean turn keeps the row untrusted', async () => {
+  it('an exact edit of an untrusted line on a clean turn changes its text and keeps the row untrusted', async () => {
     const layer = await open();
     const id = await seed(layer, { sourceUntrusted: true });
     const agent = cleanAgent(layer, { updateScoped: vi.fn(async () => true) });
+    const EDITED = 'Alice Schmidt is CEO at Acme GmbH.';
     const out = await memoryUpdateTool.handler(
-      { namespace: 'knowledge', old_content: 'CTO', new_content: 'CEO', scope: 'user:alex' },
+      { namespace: 'knowledge', old_content: TEXT, new_content: EDITED, scope: 'user:alex' },
       agent,
     );
     expect(out).toContain('Updated content');
     await settle();
-    expect(rowById(id)).toMatchObject({ source_untrusted: 1, source_type: 'external_unverified' });
+    expect(rowById(id)).toMatchObject({ text: EDITED, source_untrusted: 1, source_type: 'external_unverified' });
   });
 });
