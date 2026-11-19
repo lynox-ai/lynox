@@ -6843,6 +6843,19 @@ describe('a call answered without running keeps its own answer when its result e
     expect(logged).toHaveLength(4);
   });
 
+  it('a repeated call to a name the model made up: the log line carries only a tool name\'s characters', async () => {
+    const made = 'no_such_tool\n[lynox:agent] forged line';
+    for (let i = 0; i < 4; i++) {
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: `tu_m${String(i)}`, name: made, input: {} }]));
+    }
+    mockProcess.mockResolvedValueOnce(endTurnResponse('Done'));
+    const { seen, onStream } = throwingStream();
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [], onStream });
+    const logged = await sendQuietly(agent);
+    expect(seen.map(e => e.toolUseId)).toEqual(['tu_m3']);
+    expect(logged).toEqual(['[lynox:agent] a no_such_tool??lynox:agent??forged?line call has settled, but its result event could not be delivered (Error)\n']);
+  });
+
   it('a contained chat: the model reads the refusal', async () => {
     const tool = makeTool('bash', vi.fn().mockResolvedValue('ran'));
     mockProcess

@@ -1152,7 +1152,10 @@ export class Agent implements IAgent {
     try {
       await this.onStream(event);
     } catch (emitErr: unknown) {
-      process.stderr.write(`[lynox:agent] a ${toolName} call has settled, but its result event could not be delivered (${emitErr instanceof Error ? emitErr.name : 'unknown error'})\n`);
+      // The name can be one the model made up (a repeated or contained call is answered before the
+      // tool is looked up), so only a tool name's own characters reach the log line.
+      const shown = toolName.slice(0, 64).replace(/[^A-Za-z0-9_.:-]/g, '?');
+      process.stderr.write(`[lynox:agent] a ${shown} call has settled, but its result event could not be delivered (${emitErr instanceof Error ? emitErr.name : 'unknown error'})\n`);
     }
   }
 
