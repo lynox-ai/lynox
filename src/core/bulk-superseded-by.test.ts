@@ -84,4 +84,18 @@ describe('a judged run another one replaced', () => {
     expect(ledger.getStatus(first)!.phase).toBe('planned');
     expect(ledger.getStatus(first)!.supersededBy).toBeNull();
   });
+
+  it('names no run once the newer run is deleted, instead of one that is gone', () => {
+    const first = listed();
+    expect(startJudge(first).ok).toBe(true);
+    ledger.haltPreview(first, BULK_HALT_REASONS.timeBudget);
+    const second = listed();
+    expect(startJudge(second, first).ok).toBe(true);
+    expect(ledger.getStatus(first)!.supersededBy).toBe(second);
+    // Pruning deletes a run row like this; the older, replaced run stays.
+    engineDb.getDb().prepare('DELETE FROM bulk_targets WHERE run_id = ?').run(second);
+    engineDb.getDb().prepare('DELETE FROM bulk_runs WHERE id = ?').run(second);
+    expect(ledger.getStatus(second)).toBeNull();
+    expect(ledger.getStatus(first)!.supersededBy).toBeNull();
+  });
 });

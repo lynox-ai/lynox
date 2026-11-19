@@ -1638,8 +1638,10 @@ const MIGRATIONS: string[] = [
    CREATE INDEX IF NOT EXISTS idx_audit_log_mandate ON audit_log(mandate_id, id);`,
   // v71: the run that superseded a judged run (`BulkLedger.resumePreview`). Set with the halt, so the
   // ended run's page can link the run that took its place; null on every run before and on any other end.
+  // Pruning may delete the newer run first: like `source_run_id`, the link then falls back to null
+  // instead of naming a run that is gone.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (71);
-   ALTER TABLE bulk_runs ADD COLUMN superseded_by TEXT;`,
+   ALTER TABLE bulk_runs ADD COLUMN superseded_by TEXT REFERENCES bulk_runs(id) ON DELETE SET NULL;`,
 ];
 
 export interface EngineDbOptions {
