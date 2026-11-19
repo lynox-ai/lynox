@@ -138,6 +138,7 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       conversation_grants: { about: 'permissions you gave within a conversation' },
       tenants: { about: 'separate budgets an older version of the software could set up; current versions no longer write here' },
       deleted_threads: { about: 'which conversations were deleted, and when' },
+      deleted_chat_runs: { about: 'which runs and workflows belonged to a deleted conversation' },
       security_events: { about: 'security checks that stopped or flagged something' },
       threads: { about: 'older copy of your conversations, from before a software update' },
       thread_messages: { about: 'older copy of conversation messages, from before a software update' },

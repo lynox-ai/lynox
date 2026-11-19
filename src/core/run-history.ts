@@ -25,6 +25,7 @@ import { migratePipelineBlob, CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline
 import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
 import { HISTORY_MARKERS_DDL } from './history-markers.js';
+import { deletedChatGuardDdl, dropDeletedChatGuardDdl } from './deleted-chat-guard.js';
 import { findHiddenChar, findHiddenInName, hiddenCharRefusal } from './hidden-text.js';
 import { stepIdIssue } from '../orchestrator/step-id.js';
 import { templateRefIssue } from '../orchestrator/template-refs.js';
@@ -1818,7 +1819,17 @@ export class RunHistory {
       zeroDeletedContent(db);
       db.pragma('foreign_keys = ON');
       this.db = db;
-      this._migrate();
+      // The guard's triggers name content tables and columns (`deleted-chat-guard.ts`); a migration
+      // may drop or rename those, which SQLite refuses while a trigger names them. So they go, the
+      // migrations run (each one a savepoint) and they come back, in one transaction: another
+      // connection to a live file sees the old triggers or the new ones, never none, and a
+      // migration that fails leaves them as they were.
+      db.transaction(() => {
+        db.exec(dropDeletedChatGuardDdl());
+        this._migrate();
+        const tables = new Set((db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>).map((r) => r.name));
+        db.exec(deletedChatGuardDdl(tables));
+      })();
     } catch (err) {
       try { db.close(); } catch { /* best-effort */ }
       throw err;

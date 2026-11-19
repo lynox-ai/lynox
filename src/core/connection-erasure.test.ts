@@ -551,6 +551,7 @@ describe('T3 — the fallback blanks every content column it names and keeps the
     contained_threads: 'thread ids and the kind and id of the connection they were contained for',
     conversation_grants: 'thread and grant ids',
     deleted_threads: 'ids of deleted chats',
+    deleted_chat_runs: 'ids of the runs and workflows of deleted chats',
     exact_marker_mirror: 'a marker and the instance id it was set for',
     metrics: 'computed numbers',
     model_provenance_backfill_marker: 'a marker',
@@ -737,6 +738,17 @@ describe('T3 — the fallback blanks every content column it names and keeps the
     expect([text(step), text(inner)]).toEqual([FALLBACK_MARKER, FALLBACK_MARKER]);
     expect((db.prepare('SELECT input_json AS i FROM run_tool_calls WHERE run_id = ?').get(step) as { i: string }).i).toBe(FALLBACK_MARKER);
     expect(text(other)).toBe(`other ${MARK}`);
+  });
+
+  it('an erasure that leaves the chat standing does not keep its later writes blank', () => {
+    const db = history.getDb();
+    const runId = history.insertRun({ sessionId: 'thread-a', taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+    blankRunHistoryContent(db, { threadIds: ['thread-a'] });
+    db.prepare('UPDATE runs SET response_text = ? WHERE id = ?').run(`later ${MARK}`, runId);
+    expect((db.prepare('SELECT response_text AS r FROM runs WHERE id = ?').get(runId) as { r: string }).r).toBe(`later ${MARK}`);
+    blankRunHistoryRows(db, { threadIds: ['thread-a'], deletedChat: true });
+    db.prepare('UPDATE runs SET response_text = ? WHERE id = ?').run(`after delete ${MARK}`, runId);
+    expect((db.prepare('SELECT response_text AS r FROM runs WHERE id = ?').get(runId) as { r: string }).r).toBe(FALLBACK_MARKER);
   });
 
   it('names every workflow it reached, nested ones included, and no other', () => {
