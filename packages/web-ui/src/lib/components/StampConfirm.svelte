@@ -8,6 +8,7 @@
 	import { t, tf } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { instructionOf, markHidden, watchOf } from '../utils/trigger-consent.js';
+	import MarkedLine from './MarkedLine.svelte';
 	import { confirmable, connectionsSentence, hiddenIn, hiddenNote, hidesText, paramsOf, readPreview, shownAs, type StampPreview } from '../utils/stamp-confirm.js';
 
 	interface Props {
@@ -159,7 +160,7 @@
 			<p data-stamp-model><span class="font-medium">{t('stamp.model')}:</span> {markHidden(s.model_tier)}</p>
 		{/if}
 		{#if sentence}
-			<p class="text-text" data-stamp-connections>{sentence}</p>
+			<p class="text-text break-words" data-stamp-connections><MarkedLine text={sentence} /></p>
 		{:else if mode === 'check'}
 			<p data-stamp-none>{t('stamp.none')}</p>
 		{/if}

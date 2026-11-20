@@ -8,6 +8,7 @@
 
 import { t, tf } from '../i18n.svelte.js';
 import { markHidden, marksHidden, watchOf } from './trigger-consent.js';
+import { shownValue } from './plan-takeover.js';
 
 /** `GET /api/tasks/:id/stamp-preview` (owner only). */
 export interface StampPreview {
@@ -96,19 +97,30 @@ export function usesConnections(row: StampRow): boolean {
 	return row.effect === 'run_agent' || row.effect === 'run_workflow';
 }
 
+/**
+ * A value someone else wrote (a person's name, a provider read from a host, an account's label) as
+ * the stamp's sentences show it: the characters {@link hiddenIn} looks for marked first, so "marked
+ * above" still points at a mark, then set apart as a value (`shownValue`), so a label cannot read
+ * as lynox's words. The view draws it with `MarkedLine`.
+ */
+function foreignValue(text: string): string {
+	return shownValue(markHidden(text));
+}
+
 /** A provider with the account, or "account unknown" (legal POS-069: the line never stays empty). */
 function connectionText(c: StampPreview['connections'][number]): string {
-	return `${markHidden(c.provider)} (${c.account !== null && c.account !== '' ? markHidden(c.account) : t('stamp.account_unknown')})`;
+	return `${foreignValue(c.provider)} (${c.account !== null && c.account !== '' ? foreignValue(c.account) : t('stamp.account_unknown')})`;
 }
 
 /**
  * The sentence the owner confirms beside (legal POS-069, a binding text): whose own logins the plan
- * would use, and which. Null when the list is empty.
+ * would use, and which. Null when the list is empty. Every value in it is someone else's
+ * ({@link foreignValue}); lynox's own fallback for an unnamed person is not.
  */
 export function connectionsSentence(p: StampPreview): string | null {
 	if (p.connections.length === 0) return null;
 	return tf('stamp.connections', {
-		person: markHidden(p.by ?? t('takeover.connection_someone')),
+		person: p.by !== null ? foreignValue(p.by) : t('takeover.connection_someone'),
 		connections: p.connections.map(connectionText).join(', '),
 	});
 }
@@ -148,8 +160,8 @@ export interface StampListed {
 
 /** One entry of {@link StampListed} as the row says it: provider, account, and how it stands. */
 export function listedLine(e: StampListed['entries'][number]): string {
-	const provider = e.provider !== null ? markHidden(e.provider) : t('stamp.state_removed');
-	const account = e.account !== null && e.account !== '' ? markHidden(e.account) : t('stamp.account_unknown');
+	const provider = e.provider !== null ? foreignValue(e.provider) : t('stamp.state_removed');
+	const account = e.account !== null && e.account !== '' ? foreignValue(e.account) : t('stamp.account_unknown');
 	return `${provider} (${account}): ${t(`stamp.state_${e.state}`)}`;
 }
 

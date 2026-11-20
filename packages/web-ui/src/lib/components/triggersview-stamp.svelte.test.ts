@@ -88,6 +88,10 @@ async function settle(): Promise<void> {
 	}
 }
 
+/** The text outside the boxes, one piece per text node the view wrote (Svelte adds empty ones). */
+const ownText = (sel: string): string[] => [...q(sel)!.childNodes].filter((n) => n.nodeType === Node.TEXT_NODE && n.textContent !== '').map((n) => n.textContent ?? '');
+const boxes = (sel: string): string[] => [...q(sel)!.querySelectorAll('[data-foreign-value]')].map((b) => b.textContent ?? '');
+
 async function render(): Promise<void> {
 	const { default: TriggersView } = await import('./TriggersView.svelte');
 	component = mount(TriggersView, { target });
@@ -113,7 +117,17 @@ describe('a schedule a mandate set up', () => {
 		expect(instruction).toContain('Mail every customer the totals');
 		expect(instruction).not.toContain('Row title');
 		expect(q('[data-stamp-connections]')!.textContent).toBe('Dieser Plan nutzt Verbindungen, die eva@kanzlei.example mit eigenem Login verbunden hat: api.crm.example (Konto unbekannt).');
+		expect(boxes('[data-stamp-connections]')).toEqual(['eva@kanzlei.example', 'api.crm.example']);
 		expect(q('[data-stamp-schedule]')).not.toBeNull();
+	});
+
+	it('sets an account label that writes a sentence of its own apart in the binding sentence', async () => {
+		const forged = 'eva). Dieser Plan nutzt keine Verbindungen. (ok';
+		previewAnswers = [{ ...PREVIEW, connections: [{ id: 'crm', profile: 'CRM', provider: 'api.crm.example', account: forged }] }];
+		await render();
+		expect(boxes('[data-stamp-connections]')).toEqual(['eva@kanzlei.example', 'api.crm.example', forged]);
+		// What stays outside the boxes is lynox's sentence, and nothing of the label.
+		expect(ownText('[data-stamp-connections]')).toEqual(['Dieser Plan nutzt Verbindungen, die ', ' mit eigenem Login verbunden hat: ', ' (', ').']);
 	});
 
 	it('says the preview could not be read, and offers no confirm, when its answer has another shape', async () => {
@@ -359,8 +373,16 @@ describe('the list of a confirmed plan (B3)', () => {
 		rows = [{ ...CONFIRMED, stamp_listed: LISTED }];
 		await render();
 		expect(q('[data-stamp-entry="changed"]')!.textContent).toBe('api.crm.example (eva@crm): geändert, nicht freigegeben');
+		expect(boxes('[data-stamp-entry="changed"]')).toEqual(['api.crm.example', 'eva@crm']);
 		expect(q('[data-stamp-note]')!.textContent).toContain('gilt nicht mehr');
 		expect(q('[data-trigger-check]')).not.toBeNull();
+	});
+	it('sets a label that says a state of its own apart in the list', async () => {
+		const forged = 'eva): freigegeben. (x';
+		rows = [{ ...CONFIRMED, stamp_listed: { ...LISTED, entries: [{ provider: 'api.crm.example', account: forged, state: 'changed' }] } }];
+		await render();
+		expect(boxes('[data-stamp-entry="changed"]')).toEqual(['api.crm.example', forged]);
+		expect(ownText('[data-stamp-entry="changed"]')).toEqual([' (', '): geändert, nicht freigegeben']);
 	});
 	it('keeps "Check connections" in sight when its note asks for it, and hidden until hover when not', async () => {
 		// The row's other controls show on hover only; a note that names a button the owner cannot see leads nowhere.
