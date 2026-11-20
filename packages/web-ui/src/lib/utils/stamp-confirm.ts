@@ -7,8 +7,9 @@
 // preview's `expect`: what the owner reads is what is stamped, or the engine answers 409 `changed`.
 
 import { t, tf } from '../i18n.svelte.js';
+import { fillTemplate } from '../i18n-fill.js';
 import { markHidden, marksHidden, watchOf } from './trigger-consent.js';
-import { shownWholeValue } from './plan-takeover.js';
+import { setApart } from './plan-takeover.js';
 
 /** `GET /api/tasks/:id/stamp-preview` (owner only). */
 export interface StampPreview {
@@ -99,13 +100,13 @@ export function usesConnections(row: StampRow): boolean {
 
 /**
  * A value someone else wrote (a person's name, a provider read from a host, an account's label) as
- * the stamp's sentences show it: the characters {@link hiddenIn} looks for marked first, so "marked
- * above" still points at a mark, then set apart as a value (`shownWholeValue`), so a label cannot read
- * as lynox's words. The view draws it with `MarkedLine`. Never cut: a host is read from its end,
- * and the owner binds themselves to this sentence, so they read every character of it.
+ * the stamp's sentences show it: marked by `markHidden` and by nothing else, the set {@link hiddenIn}
+ * checks, so every mark has its "marked above" note and a name with an emoji or a joiner reads as
+ * written; then set apart (`setApart`), so a label cannot read as lynox's words. Not cut: a host is
+ * read from its end. The view draws it with `MarkedLine`.
  */
 function foreignValue(text: string): string {
-	return shownWholeValue(markHidden(text));
+	return setApart(markHidden(text));
 }
 
 /**
@@ -124,15 +125,28 @@ function connectionText(c: StampPreview['connections'][number]): string {
 
 /**
  * The sentence the owner confirms beside (legal POS-069, a binding text): whose own logins the plan
- * would use, and which. Null when the list is empty. Every value in it is someone else's
- * ({@link foreignValue}); lynox's own fallback for an unnamed person is not.
+ * would use, and which, as the view lays it out — its words up to the list (`lead`), then one
+ * connection per line, each with the comma or the closing words that follow it in the sentence.
+ * Read in order, the parts are the sentence word for word ({@link connectionsSentence}). Null when
+ * the list is empty. Every value in it is someone else's ({@link foreignValue}); lynox's own
+ * fallback for an unnamed person is not.
  */
-export function connectionsSentence(p: StampPreview): string | null {
+export function connectionsParts(p: StampPreview): { lead: string; items: string[] } | null {
 	if (p.connections.length === 0) return null;
-	return tf('stamp.connections', {
-		person: says(p.by) ? foreignValue(p.by) : t('takeover.connection_someone'),
-		connections: p.connections.map(connectionText).join(', '),
-	});
+	const vars = { person: says(p.by) ? foreignValue(p.by) : t('takeover.connection_someone') };
+	const template = t('stamp.connections');
+	const at = template.indexOf('{connections}');
+	const texts = p.connections.map(connectionText);
+	// A wording without the list's place: the whole sentence, the list joined into it.
+	if (at < 0) return { lead: fillTemplate(template, { ...vars, connections: texts.join(', ') }), items: [] };
+	const tail = fillTemplate(template.slice(at + '{connections}'.length), vars);
+	return { lead: fillTemplate(template.slice(0, at), vars), items: texts.map((x, i) => (i < texts.length - 1 ? `${x},` : `${x}${tail}`)) };
+}
+
+/** {@link connectionsParts} as one line of text. */
+export function connectionsSentence(p: StampPreview): string | null {
+	const parts = connectionsParts(p);
+	return parts === null ? null : [parts.lead.trimEnd(), ...parts.items].filter((x) => x !== '').join(' ');
 }
 
 /** What the preview's workflow parameters say, one `name: value` per entry; none when unreadable. */

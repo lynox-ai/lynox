@@ -681,7 +681,7 @@
 								{@const note = listedNote(listed, pausedOpen(trigger))}
 								<div class="mt-2 text-xs text-text-muted" data-stamp-listed>
 									<span class="font-medium">{t('stamp.listed_heading')}:</span>
-									<ul class="mt-0.5">
+									<ul class="mt-0.5 list-disc pl-4 space-y-0.5">
 										{#each listed.entries as entry}
 											<li class="break-words" data-stamp-entry={entry.state}><MarkedLine text={listedLine(entry)} /></li>
 										{/each}

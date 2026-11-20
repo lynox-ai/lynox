@@ -127,7 +127,18 @@ describe('a schedule a mandate set up', () => {
 		await render();
 		expect(boxes('[data-stamp-connections]')).toEqual(['eva@kanzlei.example', 'api.crm.example', forged]);
 		// What stays outside the boxes is lynox's sentence, and nothing of the label.
-		expect(ownText('[data-stamp-connections]')).toEqual(['Dieser Plan nutzt Verbindungen, die ', ' mit eigenem Login verbunden hat: ', ' (', ').']);
+		expect(ownText('[data-stamp-connections]')).toEqual(['Dieser Plan nutzt Verbindungen, die ', ' mit eigenem Login verbunden hat: ']);
+		expect(ownText('[data-stamp-connection]')).toEqual([' (', ').']);
+	});
+
+	it('lists each connection of the binding sentence on its own line', async () => {
+		previewAnswers = [{ ...PREVIEW, connections: [
+			{ id: 'crm', profile: 'CRM', provider: 'api.crm.example', account: 'eva@crm' },
+			{ id: 'shop', profile: 'Shop', provider: 'shop.example', account: null },
+		] }];
+		await render();
+		const lines = [...target.querySelectorAll('[data-stamp-connections] li[data-stamp-connection]')].map((li) => li.textContent);
+		expect(lines).toEqual(['api.crm.example (eva@crm),', 'shop.example (Konto unbekannt).']);
 	});
 
 	it('says the preview could not be read, and offers no confirm, when its answer has another shape', async () => {

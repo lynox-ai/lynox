@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mandateNeedsOwnerStamp } from '../../../../../src/core/request-principal.js';
 import { setLocale, getLocale } from '../i18n.svelte.js';
 import { segments, VALUE_CLOSE, VALUE_OPEN } from './plan-takeover.js';
-import { awaitsOwnerStamp, confirmable, connectionsSentence, hiddenIn, hiddenNote, hidesText, listedLine, listedNote, paramsOf, readPreview, shownAs, stampable, usesConnections, type StampPreview } from './stamp-confirm.js';
+import { awaitsOwnerStamp, confirmable, connectionsParts, connectionsSentence, hiddenIn, hiddenNote, hidesText, listedLine, listedNote, paramsOf, readPreview, shownAs, stampable, usesConnections, type StampPreview } from './stamp-confirm.js';
 
 /** A value someone else wrote, between the marks `shownValue` sets. */
 const v = (x: string): string => `${VALUE_OPEN}${x}${VALUE_CLOSE}`;
@@ -187,6 +187,33 @@ describe('what the preview shows', () => {
 			for (const b of [boxed[0]!, boxed[2]!]) expect(b, JSON.stringify(hidden)).toMatch(/⟨U\+(FEFF|2028|2029)⟩/);
 			expect(hiddenIn(p)).toBe('plan');
 			expect(listedLine({ provider: 'crm.example', account: hidden, state: 'listed' })).toMatch(/⟨U\+(FEFF|2028|2029)⟩/);
+		}
+	});
+
+	it('lays the sentence out one connection per line, and its parts read as the sentence', () => {
+		const p = preview({ connections: [
+			{ id: 'a', profile: 'CRM', provider: 'api.crm.example', account: 'eva@crm' },
+			{ id: 'b', profile: 'Shop', provider: 'shop.example', account: null },
+		] });
+		setLocale('de');
+		const de = connectionsParts(p)!;
+		expect(de.lead).toBe(`Dieser Plan nutzt Verbindungen, die ${v('eva@kanzlei.example')} mit eigenem Login verbunden hat: `);
+		expect(de.items).toEqual([`${v('api.crm.example')} (${v('eva@crm')}),`, `${v('shop.example')} (Konto unbekannt).`]);
+		expect(de.lead + de.items.join(' ')).toBe(connectionsSentence(p));
+		setLocale('en');
+		const en = connectionsParts(p)!;
+		expect(en.items).toEqual([`${v('api.crm.example')} (${v('eva@crm')}),`, `${v('shop.example')} (account unknown).`]);
+		expect(en.lead + en.items.join(' ')).toBe(connectionsSentence(p));
+		expect(connectionsParts(preview())).toBeNull();
+	});
+
+	it('shows a name with an emoji or a joiner as written, with no mark the note does not explain', () => {
+		setLocale('en');
+		for (const name of ['Eva \u2764\uFE0F', 'Fam \u{1F468}\u200D\u{1F469}', 'Mi\u200Cr']) {
+			const p = preview({ by: name, connections: [{ id: 'a', profile: 'P', provider: 'crm.example', account: name }] });
+			const boxed = segments(connectionsSentence(p)!).filter((x) => x.foreign).map((x) => x.text);
+			expect(boxed, JSON.stringify(name)).toEqual([name, 'crm.example', name]);
+			expect(hiddenIn(p)).toBeNull();
 		}
 	});
 
