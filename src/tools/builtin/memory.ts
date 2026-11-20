@@ -652,13 +652,17 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
     const countLines = (lines: readonly string[]): Map<string, number> => lines.reduce((m, l) => m.set(l, (m.get(l) ?? 0) + 1), new Map<string, number>());
     const gained = (from: Map<string, number>, to: Map<string, number>): string[] => [...to].filter(([l, n]) => l.trim() && n > (from.get(l) ?? 0)).map(([l]) => l);
     const beforeCount = countLines(before.split('\n'));
+    // A line whose text the file already holds is not recorded (as in memory_store): it adds no
+    // text, and recording it would let an untrusted turn mark the user's own line for good.
+    const heldBefore = new Set(untrustedLineKeys(before));
+    const newText = (lines: readonly string[]): string[] => lines.filter(l => { const k = untrustedLineKey(l); return k !== null && !heldBefore.has(k); });
     let marksEdit = false;
     if (input.old_content && before.includes(input.old_content)) {
       const afterCount = countLines(before.replace(input.old_content, input.new_content).split('\n'));
       const refusal = refusedUnmarked(() => {
         const isMarked = untrustedLinesOf(agent, input.namespace, 'throw');
         marksEdit = deriveTurnUntrusted(agent) || gained(afterCount, beforeCount).some(isMarked);
-        if (marksEdit) recordUntrustedLines(agent, input.namespace, gained(beforeCount, afterCount));
+        if (marksEdit) recordUntrustedLines(agent, input.namespace, newText(gained(beforeCount, afterCount)));
       });
       if (refusal !== null) return refusal;
     }
@@ -670,7 +674,13 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
       if (exactOk && marksEdit) {
         // What the file holds after the write is recorded as well: an edit of the same file in
         // between can make the write differ from the prediction above.
-        recordUntrustedLines(agent, input.namespace, gained(beforeCount, countLines((await readFile()).split('\n'))));
+        // The edit has landed and the prediction was recorded: a failure here is said where an
+        // operator sees it, not handed to the model as the edit's result.
+        try {
+          recordUntrustedLines(agent, input.namespace, newText(gained(beforeCount, countLines((await readFile()).split('\n')))));
+        } catch {
+          process.stderr.write(`[lynox:memory] untrusted mark after an exact edit not recorded (${input.namespace})\n`);
+        }
       }
       if (exactOk) {
         // Mirror to KG so entity re-extraction picks up the corrected text — but NOT on a
@@ -761,12 +771,16 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
     // Recorded as marked before anything is written: a superseded line keeps its own mark, and
     // the new line is marked when the turn is untrusted or it replaces a marked line.
     // (A superseded line is recorded too: marked by its row alone, its mark would end with it.)
+    const heldNow = new Set(untrustedLineKeys(content ?? ''));
     const fallbackRefusal = refusedUnmarked(() => {
       const isMarked = untrustedLinesOf(agent, input.namespace, 'throw');
       const rewritesMarked = linesToRewrite.filter(l => isMarked(l.originalLine)).map(l => l.markedLine);
       recordUntrustedLines(agent, input.namespace, [
         ...rewritesMarked,
-        ...(deriveTurnUntrusted(agent) || rewritesMarked.length > 0 ? [input.new_content] : []),
+        // The new content's lines the file already holds are not recorded (as in memory_store).
+        ...(deriveTurnUntrusted(agent) || rewritesMarked.length > 0
+          ? input.new_content.split('\n').filter(l => { const k = untrustedLineKey(l); return k !== null && !heldNow.has(k); })
+          : []),
       ]);
     });
     if (fallbackRefusal !== null) return fallbackRefusal;

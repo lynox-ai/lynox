@@ -552,10 +552,20 @@ describe('a line written untrusted stays marked whatever happens to its knowledg
     expect(layer.getDb().untrustedLineKeys('knowledge').size).toBe(0);
   });
 
-  it('an untrusted turn that stores a copy of a line the file already holds does not mark that line', async () => {
+  it('an untrusted turn that stores a copy of a line the file already holds records no lasting mark for that line', async () => {
     const layer = await open();
     const memory = fileMemory([CLEAN]);
     await turn(layer, memory, [write(CLEAN.toUpperCase())], true);
+    expect(layer.untrustedLineKeysIn('knowledge').has(untrustedLineKey(CLEAN)!)).toBe(false);
+  });
+
+  it.each([
+    { old_content: 'Placeholder entry', new_content: CLEAN }, // exact: a second copy of the clean line
+    { old_content: 'nothing like this anywhere', new_content: CLEAN }, // fallback: appended copy
+  ])('memory_update on an untrusted turn that writes a copy of a held line ($old_content) records no lasting mark for it', async ({ old_content, new_content }) => {
+    const layer = await open();
+    const memory = fileMemory([CLEAN, 'Placeholder entry']);
+    await turn(layer, memory, [{ id: 'w1', name: 'memory_update', input: { namespace: 'knowledge', old_content, new_content, scope: 'user:alex' } }], true);
     expect(layer.untrustedLineKeysIn('knowledge').has(untrustedLineKey(CLEAN)!)).toBe(false);
   });
 
