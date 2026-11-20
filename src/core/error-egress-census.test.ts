@@ -219,7 +219,7 @@ const JUDGED = [
  */
 const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string }[]> = {
   'core/config.ts': [
-    { marker: 'Invalid config in', count: 1, why: 'a schema issue about the local config file; the issue message names the field and the expected type, not the value read' },
+    { marker: 'Invalid config in', count: 1, why: 'a schema issue about the local config file; the issue message names the expected type, a fixed refine text or an unknown key, never the value read' },
   ],
   'core/workflow-questions.ts': [
     { marker: 'asking a workflow question failed', count: 1, why: 'lynox constants, a session id, or the SQLite insert; the question text is bound, never quoted' },
@@ -532,6 +532,7 @@ it('sees a name declared with a raw form, also inside a call, and a logger hande
     'process.stderr.write(`h ${msg.slice(0, 80)}\\n`);',
     'process.stderr.write(`i ${result.body}\\n`);',
     'process.stderr.write(`ok ${JSON.stringify({ body: 1 })}\\n`);',
+    'process.stderr.write(`ok ${msg.length}\\n`);',
   ].join('\n');
   expect(census('probe.ts', src).map((l) => l.split(':')[1]?.split(' ')[0])).toEqual(['2', '3', '4', '7', '12', '14', '15', '19', '21', '22']);
 });
