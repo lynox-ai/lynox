@@ -6,8 +6,8 @@ import type { ToolEntry, PromptText } from '../types/index.js';
 
 /**
  * A connected API's host counts for reads after foreign content when the owner chose it: the
- * exact `base_url` host of a profile the owner accepted at a save or saved in a turn free of
- * foreign content. Never for a send, never for a profile a mandate wrote.
+ * exact `base_url` host of a profile the owner accepted at a save or saved in a tool batch that
+ * began before any foreign content. Never for a send, never for a profile a mandate wrote.
  */
 
 vi.mock('@anthropic-ai/sdk', () => {
@@ -59,14 +59,14 @@ describe('ApiStore.readKnownHosts', () => {
   });
 });
 
-describe('api_setup stamps a save the owner made in a clean turn', () => {
+describe('api_setup stamps a save the owner made in a batch that began clean', () => {
   beforeEach(() => { lynoxDir = mkdtempSync(join(tmpdir(), 'lynox-read-known-')); });
   afterEach(() => { rmSync(lynoxDir, { recursive: true, force: true }); });
 
   function agentFor(store: ApiStore, tainted: boolean, run: { writeAuthor?: string; sendOrigin?: unknown } = { writeAuthor: 'owner' }) {
     return {
       principal: OWNER_PRINCIPAL,
-      conversationSawUntrusted: tainted,
+      batchStartedTainted: () => tainted,
       ...run,
       sessionCounters: { httpRequests: 0 },
       promptUser: async () => 'Allow',
@@ -75,7 +75,7 @@ describe('api_setup stamps a save the owner made in a clean turn', () => {
     } as never;
   }
 
-  it('a clean turn stamps the host; a turn after foreign content does not, and drops a stamp the input carries', async () => {
+  it('a batch that began clean stamps the host; one that began after foreign content does not, and drops a stamp the input carries', async () => {
     const store = new ApiStore();
     const clean = await apiSetupTool.handler({ action: 'create', profile: profile('crm', 'https://api.crm.example/v1') }, agentFor(store, false)) as string;
     expect(clean).toContain('Created API profile');
@@ -87,6 +87,14 @@ describe('api_setup stamps a save the owner made in a clean turn', () => {
     expect(store.get('crm')?.owner_clean_host).toBeUndefined();
     // The host still counts, by the acceptance the owner answered at this save, not by the stamp.
     expect(store.get('crm')?.custom_endpoint_ack?.accepted).toBe(true);
+  });
+
+  it('an agent that cannot say how its batch began does not stamp', async () => {
+    const store = new ApiStore();
+    const agent = { ...(agentFor(store, false) as object), batchStartedTainted: undefined } as never;
+    const out = await apiSetupTool.handler({ action: 'create', profile: profile('crm', 'https://api.crm.example/v1') }, agent) as string;
+    expect(out).toContain('Created API profile');
+    expect(store.get('crm')?.owner_clean_host).toBeUndefined();
   });
 
   for (const [label, run] of [

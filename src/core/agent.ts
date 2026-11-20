@@ -1158,6 +1158,15 @@ export class Agent implements IAgent {
    * consent gate inside `http_request` — run inside a batch and so see the same snapshot.
    * Outside a batch the fallback is the state right now, which can only refuse more.
    */
+  /**
+   * Whether the batch the running call belongs to started after the conversation had taken in
+   * foreign content. Every call runs inside a batch (`_executeOne` is reached only from there);
+   * read outside one it answers `true`, the side that grants less.
+   */
+  batchStartedTainted(): boolean {
+    return this._taintBeforeBatch ?? true;
+  }
+
   governingContract(): GoverningContract {
     const contract = this.capabilityContract;
     if (contract === undefined) return { contract: undefined, withheld: 'none' };
