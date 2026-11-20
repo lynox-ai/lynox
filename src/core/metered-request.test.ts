@@ -4,7 +4,7 @@ import type { Engine, LynoxHooks } from './engine.js';
 import type { SessionCounters } from '../types/index.js';
 import { fireBeforeRunGate, reportMeteredCost, debitInRunHelperCost } from './metered-request.js';
 import { openRunGroup } from './run-group.js';
-import { SINGLE_CALL_WORST_CASE_CENTS } from './run-admission.js';
+import { RunAdmissionRefusedError, SINGLE_CALL_WORST_CASE_CENTS } from './run-admission.js';
 import { configurePersistentBudget, resetPersistentBudget } from './session-budget.js';
 
 function makeCounters(): SessionCounters {
@@ -89,6 +89,14 @@ describe('fireBeforeRunGate — a single call under a balance-bounded admission'
     ]), 'fast');
     expect(result.blockedReason).toBe('refused');
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('says whether a refusal was one within the balance', async () => {
+    // Kills: a flag set on every refusal (a credit-exhausted title would then be retried).
+    const held = await fireBeforeRunGate(makeEngine([{ onBeforeRun: () => { throw new RunAdmissionRefusedError('held'); } }]), 'fast');
+    const plain = await fireBeforeRunGate(makeEngine([{ onBeforeRun: () => { throw new Error('exhausted'); } }]), 'fast');
+    expect(held.refusedWithinBalance).toBe(true);
+    expect(plain.refusedWithinBalance).toBe(false);
   });
 });
 

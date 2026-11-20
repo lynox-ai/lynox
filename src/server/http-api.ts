@@ -11521,7 +11521,7 @@ export class LynoxHTTPApi {
       const sttSpends = getActiveTranscribeProvider()?.name !== 'whisper-cpp';
       const sttGate = sttSpends
         ? await fireBeforeRunGate(engine, 'fast')
-        : { runId: randomUUID(), blockedReason: null, capReached: null };
+        : { runId: randomUUID(), blockedReason: null, capReached: null, refusedWithinBalance: false };
       if (sttGate.blockedReason) {
         errorResponse(res, 402, sttGate.blockedReason);
         return;

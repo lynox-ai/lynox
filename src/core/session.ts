@@ -541,6 +541,13 @@ export class Session {
    *  compaction's session-shared mutations — the cheap-tier `_model`/agent swap
    *  AND the buffer reset+reload. Cleared when the compaction settles. */
   private _compactionInFlight: Promise<void> | null = null;
+  /** Runs of this session whose admission is held (set aside, not yet given back). */
+  private _admissionsHeld = 0;
+  /**
+   * An LLM title refused only because a run held the balance: tried once more when the
+   * last held admission is given back ({@link _retryRefusedTitle}). Null when none waits.
+   */
+  private _titleAfterRelease: { firstMessage: string; placeholder: string } | null = null;
   /**
    * A stop that arrived while this turn had not yet reached the agent. `Agent.send` starts
    * each run on a fresh controller, so an `abort()` landing in the awaits before it (a
@@ -930,8 +937,22 @@ export class Session {
     try {
       return await this._runAdmitted(task, runOptions, admission);
     } finally {
-      admission.current?.release();
+      if (admission.current !== null) {
+        admission.current.release();
+        this._admissionsHeld--;
+        if (this._admissionsHeld === 0) this._retryRefusedTitle();
+      }
     }
+  }
+
+  /** The one retry of a title refused while a run held the balance; see {@link _titleAfterRelease}. */
+  private _retryRefusedTitle(): void {
+    const waiting = this._titleAfterRelease;
+    if (waiting === null) return;
+    this._titleAfterRelease = null;
+    // Only while the thread still carries the placeholder: a rename or a later title wins.
+    if (this.engine.getThreadStore()?.getThread(this.sessionId)?.title !== waiting.placeholder) return;
+    void this._generateLLMTitle(waiting.firstMessage, waiting.placeholder, true);
   }
 
   private async _runAdmitted(
@@ -1068,6 +1089,7 @@ export class Session {
     let runCostCeilingUSD: number | undefined;
     try {
       admission.current = await fireAdmissionHooks(this.engine.getHooks(), preRunContext.runId, preRunContext);
+      this._admissionsHeld++;
       const ceilingCents = admission.current.maxCostCents;
       if (ceilingCents !== undefined) {
         if (!(ceilingCents > 0)) throw new Error(RUN_CEILING_NOTHING_FREE);
@@ -2626,7 +2648,7 @@ export class Session {
    * caller. `fast` resolves against the active provider, so under hybrid it
    * follows the configured fast-tier model.
    */
-  private async _generateLLMTitle(firstMessage: string, placeholder: string): Promise<void> {
+  private async _generateLLMTitle(firstMessage: string, placeholder: string, isRetry = false): Promise<void> {
     try {
       const provider = getActiveProvider();
       // `fast` may map to a different provider under a hybrid tier_set — build
@@ -2643,7 +2665,16 @@ export class Session {
       // worth spending against an empty balance. The gate also checks the
       // instance's spending caps, which this run already passed at its start.
       const titleGate = await fireBeforeRunGate(this.engine, 'fast');
-      if (titleGate.blockedReason !== null) return;
+      if (titleGate.blockedReason !== null) {
+        // Refused only because the balance is held by a run of this session (the run that
+        // asked for the title holds all of it while it runs): wait for that run to give it
+        // back and try ONCE more, through the same gate. Refused again, it stays silent.
+        if (titleGate.refusedWithinBalance && !isRetry) {
+          this._titleAfterRelease = { firstMessage, placeholder };
+          if (this._admissionsHeld === 0) this._retryRefusedTitle();
+        }
+        return;
+      }
       const prompt = LLM_TITLE_PROMPT;
       const stream = titleClient.beta.messages.stream({
         model: fastSnap.modelId,
