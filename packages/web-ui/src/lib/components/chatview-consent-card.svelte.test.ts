@@ -217,6 +217,15 @@ describe('a tool\'s own confirmation', () => {
 		expect(buttons(bar)[0]).toBe('Bestätigen');
 	});
 
+	it('an adjust on a plan is acknowledged as neither approved nor denied', async () => {
+		i18n.setLocale('de');
+		const bar = await renderPrompt(['proceed', 'adjust', 'cancel'], 'plan');
+		await click(bar, i18n.t('chat.consent.adjust'));
+		expect(replies.map((r) => r.answer)).toEqual(['adjust']);
+		expect(target.textContent).not.toContain(i18n.t('chat.permission_denied_running'));
+		expect(target.textContent).not.toContain(i18n.t('chat.permission_running'));
+	});
+
 	it('a plan says that writing is a way to answer; the others do not', async () => {
 		i18n.setLocale('de');
 		let bar = await renderPrompt(['proceed', 'adjust', 'cancel'], 'plan');

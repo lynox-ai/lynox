@@ -2240,6 +2240,18 @@ describe('mail_send and mail_reply send on the `send` key only', () => {
     expect(provider.send).not.toHaveBeenCalled();
   });
 
+  it('a reply to a mail without a subject goes out under the same subject on every instance', async () => {
+    provider.fetch.mockResolvedValue(makeMessage(envelope(305, { messageId: '<k305@x>', from: 'alice@example.com', subject: '' }), 'Original.'));
+    provider.send.mockResolvedValue({ messageId: '<r305@x>', accepted: ['alice@example.com'], rejected: [] });
+    let prompt = '';
+    const agent = { dialogLanguage: 'de', promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'send'; } } as unknown as IAgent;
+    await createMailReplyTool(registry).handler({ uid: 305, body: 'Danke.' }, agent);
+    expect(prompt).toContain('**Auf „(kein Betreff)“ antworten?**');
+    expect(provider.send).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(provider.send.mock.calls[0])).toContain('Re: (no subject)');
+    expect(JSON.stringify(provider.send.mock.calls[0])).not.toContain('kein Betreff');
+  });
+
   it('asks in German on a German instance, values as they are', async () => {
     let prompt = '';
     const agent = { dialogLanguage: 'de', promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'cancel'; } } as unknown as IAgent;

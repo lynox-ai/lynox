@@ -90,7 +90,7 @@ describe('planTaskTool', () => {
         { summary: 'Test', steps: ['Step'] },
         agent,
       );
-      expect(JSON.parse(result), answer).toEqual({ approved: false, feedback: answer });
+      expect(JSON.parse(result), answer).toEqual({ approved: false, feedback: `The plan was not approved. Instead of answering with a button, the user wrote: ${answer}` });
     }
   });
 
@@ -156,7 +156,7 @@ describe('planTaskTool', () => {
     );
     const parsed = JSON.parse(result) as { approved: boolean; feedback: string };
     expect(parsed.approved).toBe(false);
-    expect(parsed.feedback).toBe('Use PostgreSQL instead');
+    expect(parsed.feedback).toBe('The plan was not approved. Instead of answering with a button, the user wrote: Use PostgreSQL instead');
   });
 
   // --- Business-friendly presentation ---

@@ -2970,7 +2970,7 @@ export class WorkerLoop {
         promptId = promptStore.insertQuestion({ blocked: meta?.blocked === true, attended: false }, session.sessionId, question, options, undefined, storedSegments, undefined, task.id, {
           principal: runAs,
           handRun: active?.handRun === true,
-        }, meta?.consent);
+        }, meta?.consent, meta?.consentAction);
       } catch (err: unknown) {
         if (err instanceof UnattendedBlockError) return UNATTENDED_BLOCK_ANSWER;
         throw err;

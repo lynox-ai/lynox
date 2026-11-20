@@ -464,7 +464,9 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
       return JSON.stringify({ approved: false, feedback: 'User canceled the plan.' });
     }
     if (consent === 'dismissed') return JSON.stringify({ approved: false, feedback: PLAN_NOT_ANSWERED });
-    const feedback = consent === 'adjust' ? 'User wants adjustments. Ask what to change.' : answer;
+    const feedback = consent === 'adjust'
+      ? 'User wants adjustments. Ask what to change.'
+      : `The plan was not approved. Instead of answering with a button, the user wrote: ${answer}`;
     return JSON.stringify({ approved: false, feedback });
   },
 };

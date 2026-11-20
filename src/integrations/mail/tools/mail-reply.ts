@@ -270,9 +270,11 @@ export async function prepareReply(
   const origMessageId = original.envelope.messageId;
   const newReferences = [original.references, origMessageId].filter((s): s is string => typeof s === 'string' && s.length > 0).join(' ');
 
+  // The subject that goes out (and the dedup key): the mail's own, the same on every instance.
+  // Only the question shows a missing subject in the owner's language.
   const subject = original.envelope.subject.startsWith('Re:')
     ? original.envelope.subject
-    : `Re: ${original.envelope.subject || said.noSubject}`;
+    : `Re: ${original.envelope.subject || '(no subject)'}`;
 
   // Per-recipient dedup window — block before showing the confirm
   // prompt so a retry storm can't pile up approval requests.

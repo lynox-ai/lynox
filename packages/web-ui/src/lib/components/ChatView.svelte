@@ -1306,8 +1306,9 @@
 		// slot until the next assistant token streams or a short timeout.
 		// A click on one of the engine's confirmations, by its key; typed text is no key.
 		const decided = pendingPermission.consent !== undefined ? consentAnswer(pendingPermission.consent, answer) : undefined;
-		if (decided !== undefined) {
-			approvalInflight = { question: pendingPermission.question, answer: decided === 'deny' || decided === 'cancel' || decided === 'adjust' ? 'n' : 'y' };
+		// An adjust asks what to change and the run goes on: it is acknowledged as neither.
+		if (decided !== undefined && decided !== 'adjust') {
+			approvalInflight = { question: pendingPermission.question, answer: decided === 'deny' || decided === 'cancel' ? 'n' : 'y' };
 			if (approvalInflightTimer) clearTimeout(approvalInflightTimer);
 			approvalInflightTimer = setTimeout(() => { approvalInflight = null; approvalInflightTimer = null; }, 6000);
 		}
