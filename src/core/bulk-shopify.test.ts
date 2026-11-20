@@ -1484,7 +1484,7 @@ describe('applying a Shopify run', () => {
   describe('a connection not confirmed under the current text', () => {
     const CURRENT = { consent_version: SHOPIFY_CONSENT_VERSION, consented_at: '2026-11-27T10:00:00.000Z' };
     /** The run applied under exactly `grant`. */
-    const applyRaw = (id: string, grant: unknown, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply'): Promise<{ status: string; summary: string }> => runBulkEffect(id, effect, {
+    const applyRaw = (id: string, grant: unknown, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply'): Promise<{ status: string; summary: string; pushSummary?: string }> => runBulkEffect(id, effect, {
       ledger, trailFor: () => null, shopifyGrantOf: (host) => (host === HOST ? grant : undefined),
       writerFor: (run) => bulkWriterFor(run, null, (r) => externalRunWriter(r, ledger, (rr, _q, _r, shopifyApply) => {
         const stored = rr.contractJson === null ? null : parseBulkContract(rr.contractJson);
@@ -1657,7 +1657,9 @@ describe('applying a Shopify run', () => {
         expect(s.requests).toEqual([]);
         expect(JSON.stringify(s.products.get(10))).toBe(product);
         expect(ledger.getStatus(id)).toMatchObject({ applied: 0, failed: 0, sentUnknown: 0 });
-        expect(out.summary).toContain('lynox wrote nothing. When connecting, lynox did not ask Shopify for permission to change products. What to do is under Bulk runs.');
+        expect(out.summary).toContain('lynox wrote nothing. When this Shopify connection was set up, lynox did not ask for permission to change products.');
+        // The push says it shorter and points to the run page; the run result keeps the way.
+        expect(out.pushSummary).toContain('lynox wrote nothing. When connecting, lynox did not ask Shopify for permission to change products. What to do is under Bulk runs.');
         // The short reason the run page and a push show, in both languages.
         expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.productWriteNotAsked);
         expect(BULK_NOTICES.en.halted('apply', BULK_HALT_REASONS.productWriteNotAsked)).toContain('This Shopify connection may not change products. Ask lynox in the chat how to get that permission, then have the run planned again.');
@@ -1670,7 +1672,8 @@ describe('applying a Shopify run', () => {
         expect(out.status).toBe('refused');
         expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.productWriteNotAsked);
         expect(s.requests).toEqual([]);
-        expect(out.summary).toContain('lynox wrote nothing. Shopify does not let this connection change products. What to do is under Bulk runs.');
+        expect(out.summary).toContain('lynox wrote nothing. Shopify did not give this connection permission to change products. Allow it in the app settings in Shopify, then ask lynox in the chat to connect Shopify again and plan the run again.');
+        expect(out.pushSummary).toContain('lynox wrote nothing. Shopify does not let this connection change products. What to do is under Bulk runs.');
       });
 
       it('writes once the connection asked for write_products and was granted it', async () => {

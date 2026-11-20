@@ -124,6 +124,9 @@ export interface BulkEffectOutcome {
   planned?: true;
   /** Engine-authored, counts only. Recorded as the trigger's run result. */
   summary: string;
+  /** Set where the push says the same shorter than `summary`, so that it fits the web-push cut;
+   *  the run result keeps `summary`, the way included. */
+  pushSummary?: string;
 }
 
 /** A run left `pending` is tried again after this. */
@@ -303,7 +306,11 @@ async function applyRunEffect(
       if (access !== 'writable') {
         ledger.halt(runId, BULK_HALT_REASONS.productWriteNotAsked);
         const nothingYet = run.applied === 0 && ledger.sentCount(runId) === 0;
-        return { status: 'refused', summary: summarize(ledger, runId, say.productWriteNotAsked(access, nothingYet), say) };
+        return {
+          status: 'refused',
+          summary: summarize(ledger, runId, say.productWriteNotAsked(access, nothingYet), say),
+          pushSummary: summarize(ledger, runId, say.productWriteNotAskedPush(access, nothingYet), say),
+        };
       }
     }
     const blocked = apply === null ? [] : shopifyConsentBlock(apply, grant);

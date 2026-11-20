@@ -429,15 +429,24 @@ describe('the notice tables', () => {
       const leads = [b.notApproved('approved'), b.haltedResume, b.otherLoop, b.otherLoopHolds, b.notReadyToJudge('approved', true),
         b.notReadyToRead('approved', true), ...(['stopped', 'time', 'failed'] as const).flatMap((cause) => [b.atomicEnded(cause, true), b.atomicEnded(cause, false)])];
       for (const lead of leads) expect([lang, lead, `${lead} ${warning}`.length <= REMINDER_BODY_MAX]).toEqual([lang, lead, true]);
-      // A product run its connection may not write: every version, before and after a first write, keeps
-      // the lead at most 180, the warning after it whole, and with four-digit counts fits the cut whole.
+      // A product run its connection may not write is pushed in its short version: in every version,
+      // before and after a first write, the lead stays at most 180 and the warning after it whole, and
+      // with four-digit written and total counts it fits the cut whole. Each version names its cause
+      // and points to the run page.
       const fourDigits = b.applyCounts({ applied: 9_999, foundAsPlanned: 0, failed: 0, conflicts: 0, undone: 0, total: 9_999, sentUnknown: 0 });
+      const cause = { de: { not_asked: 'nicht um das Recht gebeten', not_granted: 'erlaubt dieser Verbindung nicht' },
+        en: { not_asked: 'did not ask Shopify for permission', not_granted: 'does not let this connection' } }[lang];
       for (const access of ['not_asked', 'not_granted'] as const) {
         for (const nothingYet of [true, false]) {
-          const lead = b.productWriteNotAsked(access, nothingYet);
-          expect([lang, access, nothingYet, lead.length <= 180]).toEqual([lang, access, nothingYet, true]);
-          expect([lang, access, nothingYet, `${lead} ${warning}`.length <= REMINDER_BODY_MAX]).toEqual([lang, access, nothingYet, true]);
-          expect([lang, access, nothingYet, `${lead} ${fourDigits}`.length <= REMINDER_BODY_MAX]).toEqual([lang, access, nothingYet, true]);
+          const lead = b.productWriteNotAskedPush(access, nothingYet);
+          const at = [lang, access, nothingYet];
+          expect([...at, lead.length <= 180]).toEqual([...at, true]);
+          expect([...at, `${lead} ${warning}`.length <= REMINDER_BODY_MAX]).toEqual([...at, true]);
+          expect([...at, `${lead} ${fourDigits}`.length <= REMINDER_BODY_MAX]).toEqual([...at, true]);
+          expect([...at, lead.includes(cause[access])]).toEqual([...at, true]);
+          expect([...at, lead.startsWith(b.productWriteNotAsked(access, nothingYet).slice(0, 12))]).toEqual([...at, true]);
+          expect([...at, lead.startsWith(nothingYet ? (lang === 'de' ? 'lynox hat nichts' : 'lynox wrote nothing') : (lang === 'de' ? 'lynox schreibt nichts mehr' : 'lynox writes nothing more'))]).toEqual([...at, true]);
+          expect([...at, lead.endsWith(lang === 'de' ? 'steht unter Massenläufe.' : 'is under Bulk runs.')]).toEqual([...at, true]);
         }
       }
       const counts = b.applyCounts(c);
