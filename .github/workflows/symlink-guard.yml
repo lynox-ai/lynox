@@ -8,6 +8,8 @@ name: symlink-guard
 # It reads every commit the pull request adds, not only the net diff: a link added and removed
 # again is still in the branch's history, and the pull request shows that history. It never prints
 # a link's target, because this job's log is public.
+#
+# Honesty note: this is only a gate if it is a REQUIRED status check.
 
 on:
   pull_request:

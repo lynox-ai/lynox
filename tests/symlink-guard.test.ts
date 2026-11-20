@@ -11,9 +11,12 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const SCRIPT = fileURLToPath(new URL('../scripts/symlink-guard.mjs', import.meta.url));
+// Imported as well as run: the rule itself is tested on its own, and a script that does not load
+// fails this whole file rather than one case.
+const { linkProblem } = await import(pathToFileURL(SCRIPT).href) as { linkProblem: (path: string, target: string, isLink?: (p: string) => boolean) => string | null };
 
 /** Git exports `GIT_DIR` and friends inside hooks; left in place they point the fixture at this repository. */
 const CLEAN_ENV = { ...process.env, GIT_DIR: undefined, GIT_WORK_TREE: undefined, GIT_INDEX_FILE: undefined } as NodeJS.ProcessEnv;
@@ -43,6 +46,40 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
+});
+
+describe('linkProblem', () => {
+  it('refuses an absolute target', () => {
+    expect(linkProblem('node_modules', '/home/x/node_modules')).toBe('absolute');
+  });
+
+  it('refuses a backslash, a colon or a control character: Windows paths, and text behind a NUL', () => {
+    expect(linkProblem('node_modules', 'C:\\Users\\x\\node_modules')).toBe('unusual');
+    expect(linkProblem('node_modules', 'C:/Users/x')).toBe('unusual');
+    expect(linkProblem('node_modules', 'C:foo')).toBe('unusual');
+    expect(linkProblem('node_modules', '\\\\server\\share')).toBe('unusual');
+    expect(linkProblem('node_modules', '..\\..\\home\\u')).toBe('unusual');
+    expect(linkProblem('node_modules', 'ok\u0000/home/u/secret')).toBe('unusual');
+  });
+
+  it('refuses a relative target that leads out of the tree, from the link\'s own directory', () => {
+    expect(linkProblem('node_modules', '../other/node_modules')).toBe('outside');
+    expect(linkProblem('a/node_modules', '../../x')).toBe('outside');
+    expect(linkProblem('a/b/c', 'd/../../../../x')).toBe('outside');
+    expect(linkProblem('x', './..')).toBe('outside');
+  });
+
+  it('refuses a target that steps onto another link, which text normalisation would read as a directory', () => {
+    const isLink = (p: string): boolean => p === 'd';
+    expect(linkProblem('e', 'd/d/../outside', isLink)).toBe('throughLink');
+    expect(linkProblem('e', 'd', isLink)).toBe('throughLink');
+  });
+
+  it('CONTROL: lets a relative target inside the tree pass', () => {
+    expect(linkProblem('a/b/link', '../c')).toBeNull();
+    expect(linkProblem('a/link', 'd/../e')).toBeNull();
+    expect(linkProblem('link', 'docs/guide.md', (p) => p === 'other')).toBeNull();
+  });
 });
 
 describe('symlink-guard', () => {
@@ -99,7 +136,50 @@ describe('symlink-guard', () => {
     commitAll('main moves');
     git('merge', '-q', '--no-ff', '-m', 'merge', 'side');
     const head = git('rev-parse', 'HEAD');
+    const r = guard(base, head);
+    expect(r.status).toBe(1);
+    // Read once, in the side's commit: the merge itself adds nothing against both parents.
+    expect(r.err.match(/adds the link/g)).toHaveLength(1);
+  });
+
+  it('turns red on a link only the merge commit itself introduces', () => {
+    const base = commitAll('base');
+    git('checkout', '-q', '-b', 'side');
+    writeFileSync(join(dir, 'side.md'), 's\n');
+    commitAll('side moves');
+    git('checkout', '-q', 'main');
+    writeFileSync(join(dir, 'other.md'), 'y\n');
+    commitAll('main moves');
+    git('merge', '-q', '--no-ff', '--no-commit', 'side');
+    symlinkSync('/abs/node_modules', join(dir, 'node_modules'));
+    git('add', '-A');
+    git('commit', '-q', '-m', 'merge with a link');
+    const head = git('rev-parse', 'HEAD');
+    const r = guard(base, head);
+    expect(r.status).toBe(1);
+    expect(r.err).toContain('"node_modules"');
+  });
+
+  it('turns red on a link whose target changes to one outside the tree', () => {
+    symlinkSync('docs', join(dir, 'link'));
+    mkdirSync(join(dir, 'docs'));
+    writeFileSync(join(dir, 'docs', 'a.md'), 'a\n');
+    const base = commitAll('base with an inside link');
+    rmSync(join(dir, 'link'));
+    symlinkSync('/abs/elsewhere', join(dir, 'link'));
+    const head = commitAll('retarget');
+    expect(git('diff-tree', '-r', '--no-commit-id', '--name-status', head)).toMatch(/^M\tlink$/m);
     expect(guard(base, head).status).toBe(1);
+  });
+
+  it('turns red on a link that leads out through another link', () => {
+    const base = commitAll('base');
+    symlinkSync('.', join(dir, 'd'));
+    symlinkSync('d/d/../outside', join(dir, 'e'));
+    const head = commitAll('two links');
+    const r = guard(base, head);
+    expect(r.status).toBe(1);
+    expect(r.err).toContain('"e" with a target that passes through another link');
   });
 
   it('CONTROL: stays green on a link with a relative target inside the tree', () => {
