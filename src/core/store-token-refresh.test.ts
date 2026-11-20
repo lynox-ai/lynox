@@ -299,6 +299,28 @@ describe('the refresh of an expiring store connection', () => {
     expect(lines().some((l) => l.includes('outcome=cas-lost'))).toBe(true);
   });
 
+  it('a connect that saved its own binding while the refresh ran is left as it is, and nothing says to connect again', async () => {
+    hold.answer = async () => {
+      vault.set(refreshTokenKey(ID), 'rt-of-the-new-connect');
+      const p = profile();
+      expect(store.save({ ...p, oauth_grant: { ...p.oauth_grant!, store_binding: 'binding-of-the-new-connect' } } as ApiProfile).ok).toBe(true);
+      return answer(RENEWED);
+    };
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('not-run');
+    expect(profile().oauth_grant?.store_binding).toBe('binding-of-the-new-connect');
+    expect(profile().oauth_grant?.state).not.toBe('refresh-dead');
+    expect(lines().some((l) => l.includes('outcome=cas-lost') && l.includes('left as it is'))).toBe(true);
+  });
+
+  it('a grant already revoked stays revoked when its refresh ends', async () => {
+    const p = profile();
+    expect(store.save({ ...p, oauth_grant: { ...p.oauth_grant!, state: 'revoked', revoked_fp: 'fp-before', revoked_at: new Date().toISOString() } } as ApiProfile).ok).toBe(true);
+    hold.answer = async () => answer({ error: 'invalid_grant' }, 400);
+    await refreshStoreToken(ID, 'due', ctx());
+    expect(profile().oauth_grant?.state).toBe('revoked');
+    expect(profile().oauth_grant?.revoked_fp).toBe('fp-before');
+  });
+
   it('the access slot changing meanwhile ends it the same way', async () => {
     hold.answer = async () => { vault.set(accessTokenKey(ID), 'at-written-meanwhile'); return answer(RENEWED); };
     expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');

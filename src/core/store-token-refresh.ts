@@ -62,7 +62,7 @@ export type StoreRefreshOutcome = 'renewed' | 'not-run' | 'dead' | 'client-misna
  * token cannot be renewed, and nothing is sent. Fixed text, for the model and the log.
  */
 export function storeClientMisnamedText(profileId: string, sent: boolean): string {
-  return `the Shopify store connection of api_profile "${profileId}" does not keep its app's client ID and secret under the names this provider uses (SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET), so its expiring token cannot be renewed${sent ? '' : ' and nothing was sent to the store'}. Update the profile with api_setup action "update" so auth.oauth.client_id_key and client_secret_key name those two vault entries (store the app's values under them first if they are not there yet), then send the request again.`;
+  return `the Shopify store connection of api_profile "${profileId}" does not keep its app's client ID and secret under the names this provider uses (SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET), so its expiring token cannot be renewed${sent ? '' : ' and nothing was sent to the store'}. Update the profile with api_setup action "update" so auth.oauth.client_id_key and client_secret_key name those two vault entries, then send the request again. If the app's client ID and secret are not stored under those names yet, the owner enters them in the profile's connection form under Settings → APIs; do not ask for them in the chat.`;
 }
 
 const refreshesInFlight = new Map<string, Promise<StoreRefreshOutcome>>();
@@ -503,6 +503,9 @@ async function endConnection(
   invalidGrantSaid = false,
 ): Promise<StoreRefreshOutcome> {
   const apiStore = ctx.toolContext.apiStore;
+  // Whether this ended the connection. A connect that saved meanwhile, or a save that failed,
+  // leaves it as it is: then nothing says to connect again.
+  let ended = false;
   if (apiStore) {
     try {
       const { getLynoxDir } = await importConfig();
@@ -511,14 +514,20 @@ async function endConnection(
       const now = apiStore.get(profileId);
       if (now?.oauth_grant !== undefined && now.oauth_grant.store_binding === plan.presented.binding) {
         const { store_binding: _gone, ...rest } = now.oauth_grant;
-        const grant: OAuthGrantRecord = { ...rest, state: 'refresh-dead' };
-        apiStore.save({ ...now, oauth_grant: grant } as ApiProfile, join(getLynoxDir(), 'apis'), { actor: ctx.principal });
+        // A revocation stays one: saving it as anything else would lift it (`ApiStore.save`).
+        const grant: OAuthGrantRecord = { ...rest, state: rest.state === 'revoked' ? 'revoked' : 'refresh-dead' };
+        ended = apiStore.save({ ...now, oauth_grant: grant } as ApiProfile, join(getLynoxDir(), 'apis'), { actor: ctx.principal }).ok;
       }
     } catch {
       // The binding stays; the store refuses the spent token itself, and the next refresh ends here again.
     }
   }
-  outcomeLine(profileId, outcome, trigger, invalidGrantSaid ? `${why} (invalid_grant)` : why);
+  const said = invalidGrantSaid ? `${why} (invalid_grant)` : why;
+  if (!ended) {
+    outcomeLine(profileId, outcome, trigger, `${said}; the connection was left as it is (connected again meanwhile, or not saved)`);
+    return 'not-run';
+  }
+  outcomeLine(profileId, outcome, trigger, said);
   return 'dead';
 }
 

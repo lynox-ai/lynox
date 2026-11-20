@@ -2540,7 +2540,7 @@ async function attachEngineManagedAuth(
       const digest = origin === null ? null : toolContext?.storeBindingDigest?.(profile.id, origin, resolved) ?? null;
       if (origin === null || typeof bound !== 'string' || digest === null || !digestsEqual(digest, bound)) {
         // An expiring connection whose binding a refresh took away ended there: a bulk run says so.
-        const ended = typeof bound !== 'string' && attachPreset?.expiringParam !== undefined && typeof held.auth?.oauth?.token_expires_at === 'number';
+        const ended = typeof bound !== 'string' && attachPreset?.expiringParam !== undefined && (held.oauth_grant?.state === 'refresh-dead' || typeof held.auth?.oauth?.token_expires_at === 'number');
         return { refusal: `Error: the Shopify store connection of api_profile "${profile.id}" is not the one this engine connected, so nothing was sent to the store. Connect it again with api_setup action "connect".`, reconnect: ended ? 'ended' : undefined };
       }
       // Step 6b, the containment and the pass: after every refusal above, so a request refused

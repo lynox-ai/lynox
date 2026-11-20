@@ -20444,7 +20444,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     mockSecretSet.mockReset();
   });
 
-  async function arrange(opts: { base?: string; oauthExtra?: Record<string, unknown>; tokenBody?: string; by?: import('../core/oauth-state-cookie.js').ConnectingPrincipal; asked?: string[]; consent?: string } = {}): Promise<{ cookie: string; store: InstanceType<Awaited<typeof import('../core/api-store.js')>['ApiStore']> }> {
+  async function arrange(opts: { base?: string; oauthExtra?: Record<string, unknown>; tokenBody?: string; by?: import('../core/oauth-state-cookie.js').ConnectingPrincipal; asked?: string[]; consent?: string; grant?: Record<string, unknown> } = {}): Promise<{ cookie: string; store: InstanceType<Awaited<typeof import('../core/api-store.js')>['ApiStore']> }> {
     const { ApiStore } = await import('../core/api-store.js');
     const store = new ApiStore();
     expect(store.register({
@@ -20454,7 +20454,8 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
         vault_keys: ['SHOP_CLIENT_ID'],
         oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', ...(opts.oauthExtra ?? {}) },
       },
-    })).toBe(true);
+      ...(opts.grant !== undefined ? { oauth_grant: opts.grant } : {}),
+    } as never)).toBe(true);
     mockGetApiStore.mockReturnValue(store);
     mockSecretResolve.mockImplementation((n: string) => (n === 'SHOP_CLIENT_ID' ? 'id-1' : CLIENT_SECRET));
     // A vetted endpoint stands in for the store's: what is under test is what happens before it.
@@ -20523,9 +20524,9 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
 
   describe('the ask for an expiring token in the code exchange', () => {
     /** Arranges the profile with or without a token in its vault slot, and the stamp it holds. */
-    async function arrangeHeld(held: { token: boolean; refresh?: boolean; expiresAt?: number }): Promise<{ cookie: string }> {
+    async function arrangeHeld(held: { token: boolean; refresh?: boolean; expiresAt?: number; grant?: Record<string, unknown> }): Promise<{ cookie: string; store: Awaited<ReturnType<typeof arrange>>['store'] }> {
       const { accessTokenKey, refreshTokenKey } = await vi.importActual<typeof import('../core/api-store.js')>('../core/api-store.js');
-      const out = await arrange(held.expiresAt === undefined ? {} : { oauthExtra: { token_expires_at: held.expiresAt } });
+      const out = await arrange({ ...(held.expiresAt === undefined ? {} : { oauthExtra: { token_expires_at: held.expiresAt } }), ...(held.grant !== undefined ? { grant: held.grant } : {}) });
       mockSecretResolve.mockImplementation((n: string) => {
         if (n === accessTokenKey(PROFILE)) return held.token ? 'at-old' : null;
         if (n === refreshTokenKey(PROFILE)) return held.refresh === true ? 'rt-old' : null;
@@ -20596,6 +20597,20 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
       const { cookie } = await arrangeHeld({ token: true, refresh: true });
       expect((await call(signed(good()), cookie)).status).toBe(200);
       expect(sentParams()['expiring']).toBe('1');
+    });
+
+    it('asks again by the refresh end the grant records, with no refresh token in the slot', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { cookie } = await arrangeHeld({ token: true, grant: { origin: 'callback', state: 'refresh-dead', refresh_expires_at: Date.now() + 86_400_000 } });
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      expect(sentParams()['expiring']).toBe('1');
+    });
+
+    it('a connect after the refresh ended (refresh-dead) leaves the grant connected again', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { cookie, store } = await arrangeHeld({ token: false, grant: { origin: 'callback', state: 'refresh-dead' } });
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      expect(store.get(PROFILE)?.oauth_grant?.state).not.toBe('refresh-dead');
     });
 
     it('decides by what the engine keeps, not by token_expires_at, which a profile update can write', async () => {

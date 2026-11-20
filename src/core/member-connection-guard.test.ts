@@ -193,7 +193,7 @@ const PROFILE_SAVES: Readonly<Record<string, string>> = {
   'tools/builtin/api-setup.ts|const saved = apiStore.save(next, apisDir);': 'adopt_connection: author removed once the connection waits',
   'server/http-api.ts|const saved = apiStore.save(': 'connect callback: spreads the stored profile, author kept',
   'core/store-token-refresh.ts|saved = apiStore.save(': 'store refresh: spreads the stored profile, author kept',
-  "core/store-token-refresh.ts|apiStore.save({ ...now, oauth_grant: grant } as ApiProfile, join(getLynoxDir(), 'apis'), { actor: ctx.principal });": 'store refresh ended: spreads the stored profile, author kept',
+  "core/store-token-refresh.ts|ended = apiStore.save({ ...now, oauth_grant: grant } as ApiProfile, join(getLynoxDir(), 'apis'), { actor: ctx.principal }).ok;": 'store refresh ended: spreads the stored profile, author kept',
   'core/store-token-refresh.ts|claimed = apiStore.save({ ...profile, oauth_grant: { ...grant, reconnect_hint_for: until } }, apisDir).ok;': 'reconnect hint claim: spreads the stored profile, author kept',
 };
 /** Each removal of the author, with what must stand in the lines before it. */
