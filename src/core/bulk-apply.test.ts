@@ -1047,10 +1047,12 @@ describe('a target taken over by a second loop while the first still runs', () =
     expect([state.get('k001'), state.get('k002')]).toEqual(['v1', 'v2']);
     expect(bWrites).toBeLessThanOrEqual(1);
     expect(ledger.getStatus(runId)!.haltReason).toBe(reason);
-    // B recorded the target it held: written (a writer halt left it unwritten), or a conflict on markup.
+    // B recorded the target it held: A's writer halt left it unwritten, so B wrote it; on markup
+    // A's write landed with the host's addition, so B found it changed and left it, a conflict.
     const seq0 = engineDb.getDb().prepare('SELECT applied_at IS NOT NULL AS applied, error, claimed_at FROM bulk_targets WHERE run_id = ? AND seq = 0').get(runId) as { applied: number; error: string | null; claimed_at: string | null };
     expect(seq0.claimed_at).toBeNull();
-    expect(seq0.applied === 1 || seq0.error === 'conflict').toBe(true);
+    if (markup) expect([seq0.applied, seq0.error]).toEqual([0, 'conflict']);
+    else expect([seq0.applied, seq0.error]).toEqual([1, null]);
   });
 
   it('a loop that lost its target does not overwrite the end the other loop gave the run', async () => {

@@ -408,7 +408,8 @@ async function applyRunEffect(
       const recorded = ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual, via, outcome.hostAddedMarkup === true, outcome.hostRewrote === true, held.since);
       // Recorded with its mark first where this loop still holds the target, so a halt that
       // another loop's reason overwrites still leaves it marked: the mark is the truth, not
-      // `halt_reason`. Where the other loop holds it, that loop records what it finds there.
+      // `halt_reason`. Where the other loop holds it, that loop records what it finds there, or
+      // gives it back unrecorded on a halt of its own, and a resume reads it again.
       if (outcome.hostAddedMarkup === true) return haltRun(BULK_HALT_REASONS.markupAddedByShop, lost || !recorded);
       if (!recorded) continue;
       consecutive = 0;
