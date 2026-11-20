@@ -12209,8 +12209,14 @@ export class LynoxHTTPApi {
           await google.setTokens(tokens);
           jsonResponse(res, 200, { ok: true, scopes: tokens.scopes });
         } catch (err: unknown) {
-          // The claim answer carries the tokens: a parse error names the position, never the text around it.
-          const msg = err instanceof SyntaxError ? `Claim answer ${jsonFault(err)}` : err instanceof Error ? err.message : String(err);
+          if (err instanceof SyntaxError) {
+            // The claim answer carries the tokens: the log names the position, never the text around
+            // it, and the owner gets a code the page words for them.
+            process.stderr.write(`[lynox:google] the claim answer is ${jsonFault(err)}\n`);
+            jsonResponse(res, 500, { error: 'Google could not be connected', code: 'google_claim_invalid' });
+            return;
+          }
+          const msg = err instanceof Error ? err.message : String(err);
           errorResponse(res, 500, msg);
         }
       });

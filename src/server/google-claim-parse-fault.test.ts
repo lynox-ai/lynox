@@ -90,9 +90,15 @@ async function claim(base: string): Promise<Response> {
 describe('a claim answer that does not parse', () => {
   let b: Booted;
   beforeAll(async () => { b = await boot(true); }, 60_000);
-  afterAll(async () => { await b.close(); });
+  afterAll(async () => { vi.restoreAllMocks(); await b.close(); });
 
-  it('fails without quoting the tokens it carried', async () => {
+  it('fails with a code for the page, names the fault in the log, and quotes the tokens in neither', async () => {
+    const stderr: string[] = [];
+    const write = process.stderr.write.bind(process.stderr);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array, ...rest: unknown[]) => {
+      stderr.push(String(chunk));
+      return (write as (c: string | Uint8Array, ...r: unknown[]) => boolean)(chunk, ...rest);
+    });
     const raw = `{"access_token": ${TOKEN}, "refresh_token": "r"}`;
     expect(() => JSON.parse(raw)).toThrow(/ya29\.CLAI/);
     cpAnswer = () => Promise.resolve(new Response(raw, { status: 200, headers: { 'content-type': 'application/json' } }));
@@ -100,8 +106,12 @@ describe('a claim answer that does not parse', () => {
     expect(seen.some((s) => s.url === `${CP}/internal/oauth/google/claim`)).toBe(true);
     expect(res.status).toBe(500);
     const text = await res.text();
-    expect(text).toContain('not valid JSON');
+    expect(JSON.parse(text)).toMatchObject({ code: 'google_claim_invalid' });
     expect(text).not.toContain('ya29');
     expect(text).not.toContain('access_token');
+    expect(text).not.toContain('JSON');
+    const logged = stderr.join('');
+    expect(logged).toMatch(/\[lynox:google\] the claim answer is not valid JSON/);
+    expect(logged).not.toContain('ya29');
   });
 });
