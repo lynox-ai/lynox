@@ -7,6 +7,8 @@
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import Icon from '../primitives/Icon.svelte';
 	import PresetClientForm from './PresetClientForm.svelte';
+	import MarkedLine from './MarkedLine.svelte';
+	import { shownValue } from '../utils/plan-takeover.js';
 	import { connectionLine, type ConnectionLine, type OAuthGrantView } from '../utils/oauth-connection.js';
 	import { localDay, noticesByProfile, revocationView, type ProviderNotice } from '../utils/provider-revocation.js';
 	import { connectHref } from '../oauth-connect-path.js';
@@ -18,13 +20,14 @@
 		/** Whether this reader's connect start goes through: a mandate's only for a profile it set up. */
 		reader_may_connect?: boolean; }
 
-	// Who connected the profile and with which provider account (`utils/oauth-connection.ts`).
+	// Who connected the profile and with which provider account (`utils/oauth-connection.ts`). A
+	// person's address and an account's label are someone else's values, set apart (`MarkedLine`).
 	function connectionText(line: ConnectionLine): string {
 		const who = line.by.kind === 'you' ? t('apis.connected_by_you')
 			: line.by.kind === 'owner' ? t('apis.connected_by_owner')
-			: tf('apis.connected_by', { who: line.by.kind === 'helper' ? line.by.address : line.by.tag });
+			: tf('apis.connected_by', { who: shownValue(line.by.kind === 'helper' ? line.by.address : line.by.tag) });
 		const account = line.withheld ? t('apis.account_withheld')
-			: line.account === null ? t('apis.account_unknown') : tf('apis.account', { account: line.account });
+			: line.account === null ? t('apis.account_unknown') : tf('apis.account', { account: shownValue(line.account) });
 		return `${who} · ${account}`;
 	}
 
@@ -184,7 +187,7 @@
 								{#if profile.auth}<span class="text-xs rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{profile.auth.type}</span>{/if}
 							</div>
 							<p class="text-xs text-text-subtle mt-1 font-mono">{profile.base_url}</p>
-							{#if connectionLine(profile.oauth_grant)}<p class="text-xs text-text-muted mt-1" data-testid="api-connection">{connectionText(connectionLine(profile.oauth_grant)!)}</p>{/if}
+							{#if connectionLine(profile.oauth_grant)}<p class="text-xs text-text-muted mt-1" data-testid="api-connection"><MarkedLine text={connectionText(connectionLine(profile.oauth_grant)!)} /></p>{/if}
 							{#if profile.description}<p class="text-xs text-text-muted mt-1">{profile.description}</p>{/if}
 						</button>
 						<button onclick={() => manageInChat(profile)}

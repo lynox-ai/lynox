@@ -227,12 +227,18 @@ describe('the notice of an ended access', () => {
 });
 
 describe('the confirmation', () => {
-	it('sets the title apart on a plan with a takeover to give, and on no other plan', async () => {
-		rows = [PAUSED, { ...PAUSED, id: 'p2', title: 'Monatsabschluss', paused: false, paused_who: undefined, paused_ended: undefined }];
+	it('sets the title apart on a plan with a takeover to give or one a person with access wrote, and on no plan of the owner\'s alone', async () => {
+		const live = { paused: false, paused_who: undefined, paused_ended: undefined };
+		rows = [
+			PAUSED,
+			{ ...PAUSED, ...live, id: 'p2', title: 'Monatsabschluss', created_by: 'mandate:ida@treuhand-mueller-partner.ch' },
+			{ ...PAUSED, ...live, id: 'p3', title: 'Eigener Plan', created_by: 'owner', edited_by: 'owner', mandate_editor: undefined },
+		];
 		await render();
 		const titleBox = (title: string): Element | null | undefined => [...target.querySelectorAll('p.font-medium')].find((e) => e.textContent?.trim() === title)?.querySelector('bdi[data-foreign-value]');
 		expect(titleBox('Wochenreport')?.textContent).toBe('Wochenreport');
-		expect(titleBox('Monatsabschluss')).toBeNull();
+		expect(titleBox('Monatsabschluss')?.textContent).toBe('Monatsabschluss');
+		expect(titleBox('Eigener Plan')).toBeNull();
 	});
 
 	it('sets every paused title apart, and keeps the engine\'s prefix outside only on the owner\'s own plan', async () => {

@@ -323,6 +323,15 @@ export interface PlanAuthorship {
 }
 
 /**
+ * Whether a person with access set the plan up or changed it, now or before the owner's last
+ * change (`mandate_editor`): its title may then be that person's words, and the view sets it apart
+ * ({@link pausedTitleLine}) wherever it lists the plan, not only where a takeover is offered.
+ */
+export function writtenByMember(plan: Omit<PlanAuthorship, 'title'>): boolean {
+	return [plan.created_by, plan.edited_by, plan.mandate_editor].some((tag) => (tag ?? '').startsWith('mandate:'));
+}
+
+/**
  * The title of a plan with a takeover to give, as a line with the value set apart. The title is
  * someone else's value on every such plan: even one the owner set up runs a workflow a person with
  * access made or changed, and its title may be that workflow's name, put there by lynox's agent or
