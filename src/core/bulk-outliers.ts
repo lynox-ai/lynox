@@ -130,11 +130,12 @@ export function markersOf(text: string): Map<MarkerKind, Set<string>> {
   for (const word of dottedWords(plain)) {
     if (seen.has(word)) continue;
     seen.add(word);
-    // An address: the domain after each @ that has something before it.
     const addressed = new Set<string>();
     const sides = word.split('@');
     for (let k = 1; k < sides.length; k++) {
-      if (trimEnds(sides[k - 1]!) === '') continue;
+      // A local part may be a single sign (`_@x.ch`) or stand before a doubled @ (`a@@x.ch`); only
+      // nothing at all before the @ is no address.
+      if (sides.slice(0, k).every((side) => side === '')) continue;
       const domain = trimEnds(sides[k]!.split(/[^\p{L}\p{N}.-]/u)[0]!);
       const host = domain.includes('.') ? asciiHost(domain) : undefined;
       if (host === undefined) continue;
