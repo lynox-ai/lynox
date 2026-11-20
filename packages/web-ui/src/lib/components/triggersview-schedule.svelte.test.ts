@@ -124,7 +124,7 @@ describe('a schedule near midnight names the local day', () => {
 	});
 
 	it('a zone that changes for a few weeks between January and July still keeps the weekday in UTC', async () => {
-		// Morocco 2026: +60 all year except about four weeks around March, when it is 0.
+		// Morocco 2026: +60 all year except about five weeks from mid-February into March, when it is 0.
 		// 23:30 UTC is Tuesday 00:30 at +60 and Monday 23:30 at 0.
 		vi.spyOn(Date.prototype, 'getTimezoneOffset').mockImplementation(function (this: Date) { return this.getMonth() === 2 ? 0 : -60; });
 		vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'], now: new Date('2026-07-15T12:00:00Z') });
