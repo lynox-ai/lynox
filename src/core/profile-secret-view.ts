@@ -22,7 +22,7 @@ import type { ApiAuth, ApiProfile, ApiStore, OAuthGrantRecord } from './api-stor
 import type { MandateEnds } from './mandate-ends.js';
 import { createHash } from 'node:crypto';
 import { currentPlanOf, currentPlanOwnerStarted, currentPlanStamp } from './plan-run-context.js';
-import { builtInPresetOf, derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, type OAuthPreset } from './oauth-presets.js';
+import { builtInPresetOf, derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, retiredPresetIdOf, type OAuthPreset } from './oauth-presets.js';
 import { MANDATE_TAG_PREFIX, principalTag, unhandledPrincipal, type RequestPrincipal } from './request-principal.js';
 import { singleLine } from './prompt-value.js';
 import { collapseToSingleLine } from './sanitize.js';
@@ -111,7 +111,10 @@ function credentialUrls(profile: ApiProfile): [URL | undefined, URL | undefined]
   if (preset) {
     const derived = derivePresetEndpoints(preset.id, oauth?.preset_params);
     if (!('kind' in derived)) tokenUrl = derived.tokenUrl;
-  } else if (oauth?.token_url) {
+  } else if (oauth?.token_url && retiredPresetIdOf(profile) === undefined) {
+    // Not for a provider this engine once shipped: its profile's `token_url` was display only
+    // while the provider existed, and no exchange runs for it now (fetch_token refuses it), so
+    // no slot of it may reach that address either.
     tokenUrl = oauth.token_url;
   }
   const parse = (u: string | undefined): URL | undefined => {
