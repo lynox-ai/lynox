@@ -14254,6 +14254,7 @@ export class LynoxHTTPApi {
       // database or the embedding model failed to open at boot), or a read cap was reached.
       const kg = engine.getKnowledgeLayer();
       if (kg) {
+        const fallbacksBefore = kg.readFallbackCount;
         try {
           // Page through ALL entities. A single { limit: 200 } call silently
           // dropped every entity past the first 200 from a user's GDPR export
@@ -14300,7 +14301,10 @@ export class LynoxHTTPApi {
               + 'The relation is no longer shown or used, and is removed at the next cleanup.',
             stats,
           };
-          exportData['knowledge_graph_may_be_incomplete'] = truncated || relationCapHit;
+          // A subject-graph read that fell back to the legacy store answered from another
+          // store; what it returned may be partial.
+          const fellBack = kg.readFallbackCount !== fallbacksBefore;
+          exportData['knowledge_graph_may_be_incomplete'] = truncated || relationCapHit || fellBack;
         } catch {
           exportData['knowledge_graph'] = { entities: [], relationships: [] };
           exportData['knowledge_graph_may_be_incomplete'] = true;
@@ -14465,13 +14469,21 @@ export class LynoxHTTPApi {
       }
 
       // Secret names, never values: a downloaded file holding credentials would be the leak
-      // itself. `secrets_note` says so to whoever reads the export. The store is null only when
-      // it failed to open at boot (there is no switch for it), so an empty list is then marked.
+      // itself. `secrets_note` says so to whoever reads the export. The names are the store's and
+      // the vault file's: code that holds the vault writes rows past the store's map after boot.
+      // There is no switch for the store or its vault, so either missing failed at boot (a vault
+      // key that does not open the file, for one), and the list is then marked.
       const secretStore = engine.getSecretStore();
       exportData['secrets_note'] = 'Names of the stored secrets only. Their values are not exported.';
       if (secretStore) {
-        exportData['secrets'] = secretStore.listNames();
-        exportData['secrets_may_be_incomplete'] = false;
+        let vaultNames: string[] = [];
+        let vaultRead = secretStore.hasVault;
+        try { vaultNames = secretStore.listVaultNames(); } catch { vaultRead = false; }
+        exportData['secrets'] = [...new Set([...secretStore.listNames(), ...vaultNames])].sort();
+        exportData['secrets_may_be_incomplete'] = !vaultRead;
+        if (!vaultRead) {
+          process.stderr.write('⚠ /api/export: secret vault unavailable — secret names marked incomplete\n');
+        }
       } else {
         exportData['secrets'] = [];
         exportData['secrets_may_be_incomplete'] = true;

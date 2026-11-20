@@ -7,6 +7,7 @@ import type { Server } from 'node:http';
 import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import { EXPORT_RELATIONS_PER_ENTITY } from '../core/knowledge-layer.js';
+import { SecretStore } from '../core/secret-store.js';
 
 /**
  * The engine opens its stores at boot and goes on without each one whose open fails. The
@@ -36,6 +37,7 @@ type EngineView = {
   _crm: unknown;
   knowledgeLayer: unknown;
   secretStore: unknown;
+  secretVault: { set: (name: string, value: string) => void; delete: (name: string) => boolean } | null;
 };
 
 const ENV = [
@@ -93,7 +95,7 @@ function harness(prepare: (dir: string) => void, durableMemory: boolean) {
     return await res.json() as ExportBody;
   };
 
-  return { engine, exportBody };
+  return { engine, exportBody, baseUrl: () => state.baseUrl!, secret };
 }
 
 describe('export with the stores down at boot (real engine)', () => {
@@ -205,6 +207,75 @@ describe('export with every store open, durable memory off, then the CRM gone (r
       const at = await h.exportBody();
       expect(at.knowledge_graph.relationships).toHaveLength(EXPORT_RELATIONS_PER_ENTITY);
       expect(at.knowledge_graph_may_be_incomplete, 'at the cap, the entity may hold more').toBe(true);
+    } finally {
+      h.engine().knowledgeLayer = saved;
+    }
+  }, 60_000);
+
+  it('lists a secret written to the vault after boot by name, not by value', async () => {
+    const vault = h.engine().secretVault;
+    expect(vault, 'fixture: the vault opened').not.toBeNull();
+    // Written past the store's map, as mail credentials and OAuth tokens are.
+    const value = `v-${randomBytes(12).toString('hex')}`;
+    vault!.set('LATE_VAULT_ROW', value);
+    try {
+      const res = await fetch(`${h.baseUrl()}/api/export`, { headers: { Authorization: `Bearer ${h.secret}` } });
+      const text = await res.text();
+      const body = JSON.parse(text) as ExportBody;
+      expect(body.secrets).toContain('LATE_VAULT_ROW');
+      expect(text.includes(value), 'the value is not exported').toBe(false);
+      expect(body.secrets_may_be_incomplete).toBe(false);
+    } finally {
+      vault!.delete('LATE_VAULT_ROW');
+    }
+  }, 60_000);
+
+  it('marks the secret names incomplete when the store has no vault', async () => {
+    const saved = h.engine().secretStore;
+    // What a vault that does not open at boot leaves behind: the store, built without it.
+    h.engine().secretStore = new SecretStore(h.engine().getUserConfig() as never);
+    try {
+      const body = await h.exportBody();
+      expect(body.secrets_may_be_incomplete, 'the vault file was not read').toBe(true);
+    } finally {
+      h.engine().secretStore = saved;
+    }
+  }, 60_000);
+
+  it('marks the secret names incomplete when reading the vault file throws', async () => {
+    const store = h.engine().secretStore as { listVaultNames: () => string[] };
+    const original = store.listVaultNames;
+    store.listVaultNames = () => { throw new Error('read failed'); };
+    try {
+      const body = await h.exportBody();
+      expect(body.secrets_may_be_incomplete, 'the vault file was not read').toBe(true);
+    } finally {
+      store.listVaultNames = original;
+    }
+  }, 60_000);
+
+  it('marks the knowledge graph incomplete when a read falls back to the legacy store', async () => {
+    const saved = h.engine().knowledgeLayer;
+    let fallbacks = 0;
+    h.engine().knowledgeLayer = {
+      get readFallbackCount() { return fallbacks; },
+      // The subject graph threw and the legacy store answered instead.
+      listEntities: () => { fallbacks += 1; return Promise.resolve([]); },
+      stats: () => Promise.resolve({}),
+      getEntityRelationsForExport: () => Promise.resolve([]),
+    };
+    try {
+      const body = await h.exportBody();
+      expect(body.knowledge_graph_may_be_incomplete, 'a fallback read may be partial').toBe(true);
+      fallbacks = 0;
+      h.engine().knowledgeLayer = {
+        get readFallbackCount() { return 3; },
+        listEntities: () => Promise.resolve([]),
+        stats: () => Promise.resolve({}),
+        getEntityRelationsForExport: () => Promise.resolve([]),
+      };
+      const steady = await h.exportBody();
+      expect(steady.knowledge_graph_may_be_incomplete, 'fallbacks before the export do not count').toBe(false);
     } finally {
       h.engine().knowledgeLayer = saved;
     }

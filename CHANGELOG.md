@@ -37,10 +37,13 @@
   flags only as "a cap was reached" also sees them on such an instance.
 - `GET /api/export` has three new fields. `knowledge_graph_may_be_incomplete`
   is `true` when the knowledge graph could not be read: reading it failed, it
-  did not open at boot although it is switched on, or an entity reached the
-  per-entity relation limit. It is `false` while the graph is switched off.
-  `secrets_may_be_incomplete` is `true` when the secret store did not open.
-  `secrets_note` says that only secret names are exported, never values.
+  did not open at boot although it is switched on, a read fell back to the
+  older store, or an entity reached the per-entity relation limit. It is
+  `false` while the graph is switched off. `secrets` now also lists names
+  written to the vault after boot (mail and OAuth credentials, for example).
+  `secrets_may_be_incomplete` is `true` when the secret store or its vault did
+  not open. `secrets_note` says that only secret names are exported, never
+  values.
 
 ## 2.18.0 — 2026-11-17
 

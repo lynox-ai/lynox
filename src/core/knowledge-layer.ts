@@ -1636,7 +1636,19 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * degrades to "not found" (subject ids don't resolve legacy rows) rather than
    * returning wrong data.
    */
+  /**
+   * How many subject-graph reads fell back to the legacy store since boot. A reader that needs
+   * the whole set (the data export) compares it before and after: a fallback read answers from
+   * another store, by-id reads degrade to "not found", so the result may be partial.
+   */
+  get readFallbackCount(): number {
+    return this._readFallbacks;
+  }
+
+  private _readFallbacks = 0;
+
   private _logReadFallback(method: string, err: unknown): void {
+    this._readFallbacks += 1;
     process.stderr.write(
       `[lynox:subject-graph] read ${method} fell back to legacy: ${err instanceof Error ? err.message : String(err)}\n`,
     );
