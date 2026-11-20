@@ -524,7 +524,7 @@ it('sees a name declared with a raw form, also inside a call, and a logger hande
     "function g() { const msg = 'x'; process.stderr.write(`ok ${msg}\\n`); }",
     'this.log(`f ${(msg)}`);',
     'process.stderr.write(`g ${mask(msg)}\\n`);',
-    'try { run(); } catch (msg) { process.stderr.write(`ok ${msg.code}\\n`); }',
+    'try { run(); } catch (msg) { process.stderr.write(`ok ${msg}\\n`); }',
     'for (const msg of list) process.stderr.write(`ok ${msg}\\n`);',
     'process.stderr.write(`ok ${obj.msg}\\n`);',
     'process.stderr.write(msg);',
