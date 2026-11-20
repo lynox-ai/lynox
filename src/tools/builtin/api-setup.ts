@@ -2091,6 +2091,9 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
         // all"... is not valid JSON"), which is remote-authored text: say only that it is
         // not JSON. The fetch's own failures go through `fetchFailureForModel`.
         const msg = err instanceof SyntaxError ? 'the body is not valid JSON' : fetchFailureForModel(err);
+        // A hop the origin check held is not a spec to look for elsewhere: its text says what to
+        // tell the user, and the frame below would send the model looking for another address.
+        if (msg.startsWith(CROSS_HOST_REFUSAL)) return `Error: ${msg}`;
         return `Error: could not parse OpenAPI spec from ${input.openapi_url} — ${msg}. If the docs site serves HTML, find the raw .json spec URL (often at /openapi.json or /swagger.json).`;
       }
 
