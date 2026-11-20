@@ -24,17 +24,22 @@ describe('scheduleInLog', () => {
 });
 
 describe('the worker\'s log lines (source guard)', () => {
-  const source = readFileSync(join(import.meta.dirname, 'worker-loop.ts'), 'utf8');
-  // A worker log line is any template that carries the `[lynox:worker]` prefix.
-  const logLines = source.split('\n').filter((l) => l.includes('[lynox:worker]'));
+  // Every file that writes with the worker's prefix, and every line of it that carries the prefix.
+  const files = ['worker-loop.ts', 'workflow-questions.ts'];
+  const logLines = files.flatMap((f) => readFileSync(join(import.meta.dirname, f), 'utf8').split('\n')
+    .filter((l) => l.includes('[lynox:worker]')).map((l) => ({ file: f, line: l })));
+  // Run text a log line must not print of its own: a schedule's title, description, instruction,
+  // goal or summary, a name or label held in a variable, a step's task.
+  const RUN_TEXT = /\$\{[^}]*(\b(title|description|instruction|goal|summary|name|label)\b|\.task\b)/;
 
-  it('names a schedule in a log line only through scheduleInLog, never by a title of its own', () => {
-    const titled = logLines.filter((l) => /\$\{[^}]*\btitle\b/.test(l.replaceAll(/scheduleInLog\([^)]*\)/g, '')));
-    expect(titled).toEqual([]);
+  it('names a schedule in a log line only through scheduleInLog, and prints no other run text of its own', () => {
+    const offending = logLines.filter(({ line }) => RUN_TEXT.test(line.replaceAll(/scheduleInLog\([^)]*\)/g, '')));
+    expect(offending).toEqual([]);
   });
 
-  it('finds the lines it guards: every schedule the worker names in its log goes through the helper', () => {
-    // The positive control: the guard reads the file it means to, and its 13 lines are there.
-    expect(logLines.filter((l) => l.includes('scheduleInLog(')).length).toBe(13);
+  it('reads the lines it guards: the worker\'s 13 calls of the helper are among them', () => {
+    // The positive control: the guard reads the files it means to, not an empty list.
+    expect(logLines.filter(({ line }) => line.includes('scheduleInLog(')).length).toBe(13);
+    expect(logLines.some(({ file }) => file === 'workflow-questions.ts')).toBe(true);
   });
 });
