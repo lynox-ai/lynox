@@ -93,6 +93,7 @@ describe('an HTML value past the reading bounds', () => {
     expect(hiddenAddsOf('<p>Wasserfilter</p>', large('<p>Wasser\u00adfilter</p>'), true)).toBeNull();
     // A before-image past the bounds is not read either.
     expect(hiddenAddsOf(deep('<p>Wasserfilter</p>'), '<p>Wasser\u00adfilter</p>', true)).toBeNull();
+    expect(hiddenAddsOf(large('<p>Wasserfilter</p>'), '<p>Wasser\u00adfilter</p>', true)).toBeNull();
     // CONTROL: the same character within the bounds is found.
     expect(hiddenAddsOf('<p>Wasserfilter</p>', '<p>Wasser\u00adfilter</p>', true)).toEqual([SHY]);
   });
