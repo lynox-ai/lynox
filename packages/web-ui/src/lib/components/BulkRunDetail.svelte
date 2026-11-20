@@ -194,7 +194,10 @@
 				// preview, at a probe too, so each has to be on the page.
 				|| (r.body.hiddenAddsTargets ?? 0) > 0
 				// So does one with a field that could not be checked for them: its sentence stands under it.
-				|| (r.body.hiddenUncheckedTargets ?? 0) > 0;
+				|| (r.body.hiddenUncheckedTargets ?? 0) > 0
+				// So does one halted on its failures: the step to check the targets with an error
+				// stands only where one is marked, and a marked one may lie past the first page.
+				|| r.body.haltKey === 'failureRate' || r.body.haltKey === 'consecutiveFailures';
 			// Every page is asked for the run this load opened, never for one the page has moved to since.
 			const shown = whole ? await loadFrom(id, 0, r.body.total) : await loadTargets(id, 0, FIRST_PAGE);
 			// A short page ends the loading early: fewer targets than the run's count are not the whole.

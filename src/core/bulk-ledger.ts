@@ -241,6 +241,10 @@ export interface BulkRunStatus {
   /** Targets this pass recorded as failed whose send is unclear now ({@link heads} `unclear`):
    *  a timeout counts toward the failure-rate halt, and the halt names it apart. */
   passUnclear: number;
+  /** This pass's failures that are not {@link passUnclear}: what the failure-rate halt counted,
+   *  less the sends without a clear answer. Not {@link failed}, which keeps a `secret` target of
+   *  an earlier pass. */
+  passFailed: number;
   /** How many targets may fail in one pass without the failure-rate halt; the next failure
    *  halts it ({@link bulkFailureLimit}). */
   failureLimit: number;
@@ -1805,10 +1809,11 @@ export class BulkLedger {
     const pass = db.prepare(
       // Failed once, apart from a target whose send is unclear now: the timeout that left it so
       // was recorded as a failure, and the page names it as unclear, not as failed. In this pass
-      // and unclear: unclear, with a failure this pass recorded (a resume clears the error), so
-      // the halt can say how many of the pass's failures were sends without a clear answer.
+      // and unclear: unclear, with a failure this pass recorded, so the halt can say how many of
+      // the pass's failures were sends without a clear answer. A resume clears every error but
+      // `secret`, which may stand from an earlier pass and is left out.
       `SELECT COUNT(*) AS writing, SUM(failed_once IS NULL) AS unknown, SUM(failed_once = 1 AND NOT ${RUN_UNCLEAR_SQL}) AS failedOnce,
-         SUM(${RUN_UNCLEAR_SQL} AND ${WRITE_FAILED_SQL}) AS passUnclear,
+         SUM(${RUN_UNCLEAR_SQL} AND ${WRITE_FAILED_SQL} AND error != 'secret') AS passUnclear,
          SUM(${RESUMABLE_SQL}) AS open, SUM(${RESUMABLE_SQL} AND write_sent = 1) AS openSent,
          SUM(${RESUMABLE_SQL} AND unknown_sends > 0) AS openUnclear
        FROM bulk_targets WHERE run_id = ? AND ${WRITING_SQL}`,
@@ -1835,6 +1840,9 @@ export class BulkLedger {
       maxTargets: row.max_targets,
       failedOnce: (pass.unknown ?? 0) > 0 ? null : pass.failedOnce ?? 0,
       passUnclear: pass.passUnclear ?? 0,
+      // The pass's failures as its halt counted them (`targets_failed`, set back by a resume),
+      // less the unclear ones: not a `secret` target still failed from an earlier pass.
+      passFailed: Math.max(0, row.targets_failed - (pass.passUnclear ?? 0)),
       failureLimit: bulkFailureLimit(pass.writing), resumeOpen: open, resumeTries, resumeSends,
       kind: row.kind, atomic: row.atomic === 1, sourceRunId: row.source_run_id,
       writeMethod: externalHostOf(row.target_system) === null ? null : parseContractMethods(row.contract_json),

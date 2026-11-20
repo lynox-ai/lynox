@@ -93,6 +93,8 @@ export interface BulkRun {
 	/** Of the targets this pass recorded as failed, those whose send is unclear now. Absent on an
 	 *  older engine. */
 	passUnclear?: number | undefined;
+	/** This pass's failures that are not `passUnclear`. Absent on an older engine. */
+	passFailed?: number | undefined;
 	/** How many targets may fail in one pass without the failure-rate halt. */
 	failureLimit: number;
 	/** The targets a resume tries again; every failure of the next pass is one of them. */
@@ -308,7 +310,7 @@ export function bulkResumeKind(
  *  what the owner can do first, and for a halt on failures how many failed so far and what the
  *  next pass may still fail. Every count comes from the engine: the page computes none of them. */
 export function bulkResumeText(
-	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'applied' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries' | 'sentUnknown' | 'resumeSends' | 'conflicts' | 'heads' | 'passUnclear'>,
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'applied' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries' | 'sentUnknown' | 'resumeSends' | 'conflicts' | 'passUnclear' | 'passFailed'>,
 	managed: boolean | null,
 	i18n: BulkI18n,
 	/** Whether the preview marks a target with a failure ({@link bulkShowsFailure}): only then
@@ -365,12 +367,13 @@ export function bulkResumeText(
 	return { cause, before, check: null, kept, soFar, allows: bulkResumeAllows(limit, open, i18n) };
 }
 
-/** Why a write run halted on its failure rate, with this pass's numbers: the targets that failed
- *  now (`heads.failed`) and those whose send is unclear (`passUnclear`). A timeout counts toward
- *  the halt, but it is not a target that could not be written. An older engine without these
- *  counts gets the sentence on the limit. */
-function bulkFailureRateCause(run: Pick<BulkRunDetailData, 'heads' | 'passUnclear'>, limit: number, i18n: BulkI18n): string {
-	const f = run.heads?.failed;
+/** Why a write run halted on its failure rate, with this pass's numbers: the targets that could
+ *  not be written (`passFailed`) and those whose send is unclear (`passUnclear`). A timeout
+ *  counts toward the halt, but it is not a target that could not be written. Not `heads.failed`:
+ *  a target that failed on what it would send stays failed from an earlier pass. An older engine
+ *  without these counts gets the sentence on the limit. */
+function bulkFailureRateCause(run: Pick<BulkRunDetailData, 'passFailed' | 'passUnclear'>, limit: number, i18n: BulkI18n): string {
+	const f = run.passFailed;
 	const u = run.passUnclear;
 	if (f === undefined || u === undefined || u === 0) {
 		return limit === 0 ? i18n.t('bulk.halt.failureRate_write0') : i18n.tf('bulk.halt.failureRate_write', { limit: String(limit) });

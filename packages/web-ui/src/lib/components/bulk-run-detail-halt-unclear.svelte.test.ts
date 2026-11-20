@@ -131,10 +131,12 @@ const unread = (seq: number, error: string): BulkTarget => ({ ...field(seq, erro
 
 /** A write run halted on its failure rate, with `f` targets failed now and `u` sends unclear in this pass. */
 function halted(f: number, u: number, o: Partial<BulkRunDetailData> = {}): BulkRunDetailData {
-	const total = f + u + 2;
+	const total = o.total ?? f + u + 2;
+	// A run halted on its failures is loaded whole: the engine serves every target.
+	allTargets = Array.from({ length: total }, (_, i) => field(i));
 	return makeRun({
 		phase: 'writing', total, changes: UPDATES(total), haltKey: 'failureRate', haltReason: 'more than 5 % of the targets failed',
-		probeConfirmed: true, maxTargets: total, failed: f + u, failedOnce: f, passUnclear: u, sentUnknown: u, failureLimit: 0,
+		probeConfirmed: true, maxTargets: total, failed: f + u, failedOnce: f, passUnclear: u, passFailed: f, sentUnknown: u, failureLimit: 0,
 		resumeOpen: 2 + f, resumeTries: 2 + f, resumeSends: 2 + f, heads: { ...NONE, failed: f, unclear: u, open: 2 }, ...o,
 	});
 }
@@ -185,6 +187,15 @@ describe('the halt on a target whose send is unclear', () => {
 		expect(shown()).toContain('In this pass, 2 targets could not be written, and for 3 it stayed unclear whether the change arrived.');
 	});
 
+	it('counts only this pass\'s failures, not a target still failed on its secret from an earlier pass', async () => {
+		// The head counts that target as failed; the halt of this pass did not.
+		run = halted(0, 1, { heads: { ...NONE, failed: 1, unclear: 1, open: 2 }, failed: 2 });
+		await render();
+		expect(shown()).toContain('In diesem Durchgang blieb bei einem Ziel offen, ob die Änderung angekommen ist.');
+		expect(shown()).not.toContain('liess sich 1 Ziel nicht schreiben');
+		expect(shown()).not.toContain(t('bulk.halt.failureRate_write0'));
+	});
+
 	it('keeps the sentence on a target that could not be written where no send is unclear, or the engine does not say', async () => {
 		run = halted(1, 0);
 		await render();
@@ -213,6 +224,14 @@ describe('the step to check the targets with an error', () => {
 		allTargets = [unread(0, 'conflict'), unread(1, 'sent_unknown'), field(2)];
 		await render();
 		expect(shown()).not.toContain(step);
+	});
+
+	it('loads every target of a run halted on its failures, so a marked one past the first page counts', async () => {
+		run = halted(1, 0, { total: 12, changes: UPDATES(12), heads: { ...NONE, failed: 1, open: 11 } });
+		allTargets = [...Array.from({ length: 10 }, (_, i) => field(i)), unread(10, 'write_failed'), field(11)];
+		await render();
+		expect(shown()).toContain(t('bulk.halt.failures_before_write'));
+		expect(target.textContent).toContain('/products/11');
 	});
 });
 

@@ -195,3 +195,28 @@ describe('the failures a halt names', () => {
     expect(s.passUnclear).toBe(1);
   });
 });
+
+describe('the failures of this pass', () => {
+  it('are what the halt counted less the unclear sends, never a target still failed on its secret from an earlier pass', () => {
+    // Pass 1 failed A on what it would send; the resume left it failed and set the count back.
+    // Pass 2 timed out on B and refused C: the halt counted two.
+    const id = run(EXTERNAL, [
+      { error: 'secret', failedOnce: true },
+      { sent: true, unknownSends: 1, error: 'write_failed', failedOnce: true },
+      { sent: true, error: 'write_failed', failedOnce: true },
+    ]);
+    engineDb.getDb().prepare('UPDATE bulk_runs SET targets_failed = 2 WHERE id = ?').run(id);
+    const s = ledger.getStatus(id)!;
+    expect(s.heads.failed).toBe(2);
+    expect(s.passUnclear).toBe(1);
+    expect(s.passFailed).toBe(1);
+  });
+
+  it('leave out an unclear target still failed on its secret: that error may stand from an earlier pass', () => {
+    const id = run(EXTERNAL, [{ sent: true, unknownSends: 1, error: 'secret', failedOnce: true }]);
+    const s = ledger.getStatus(id)!;
+    expect(s.heads.unclear).toBe(1);
+    expect(s.passUnclear).toBe(0);
+    expect(s.passFailed).toBe(0);
+  });
+});
