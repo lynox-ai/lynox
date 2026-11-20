@@ -112,6 +112,12 @@ function saidWorkflowId(id: string): string {
 /** A mandate's address an escalation title may name, and whether it set the plan up or changed it. */
 export interface ShownMandate { readonly address: string; readonly changed: boolean }
 
+/** A moment as a notice says it ({@link resetAt}): today, tomorrow or on a date, at a time with its zone. */
+export type ResetAt =
+  | { readonly day: 'today'; readonly time: string }
+  | { readonly day: 'tomorrow'; readonly time: string }
+  | { readonly day: 'on'; readonly date: string; readonly time: string };
+
 export interface WorkerNotices {
   /** The summary of more than a few triggers waiting for confirmation. */
   consentManyTitle(count: number): string;
@@ -230,23 +236,30 @@ export interface WorkerNotices {
   watchChanged(url: string, analysis: string): string;
   /**
    * A run that never started ({@link notRunReason}): the title of its notice, with the task's
-   * title as it came, and the sentences of its body. The cap's sentences are the chat's for a
-   * message the cap blocked, so the two say the same thing.
+   * title as it came, and the sentences of its body.
    */
   notRunTitle(title: string): string;
-  /** The cap reached, its limit, the spend against it and when it opens again ({@link resetWhen}). */
-  capReached(cap: 'daily' | 'monthly', limit: string, spent: string, when: string): string;
+  /** The budget reached, its amount and the spend against it. */
+  capReached(cap: 'daily' | 'monthly', limit: string, spent: string): string;
+  /** When the budget's period starts anew ({@link resetAt}): a new day, or a new month. */
+  periodStarts(cap: 'daily' | 'monthly', at: ResetAt): string;
   readonly capUnverifiable: string;
-  /** Who can change the cap: the owner on the limits page, or support for a managed plan. */
+  /**
+   * Where the owner changes the budget: only on a self-hosted instance. On one the control plane
+   * runs, its budget comes from the instance's environment, which wins over the limits page.
+   */
   readonly capNextSelf: string;
-  readonly capNextPlan: string;
   /** The step when spend cannot be checked: on a self-hosted instance, and on a hosted one. */
   readonly capRestart: string;
   readonly capSupportIfStays: string;
   /** A check before the run (a run hook) refused it; its own reason goes to the log, not here. */
   hookBlocked(managed: boolean): string;
-  /** What becomes of the trigger: it stays due, its next time runs, or a watch's next check. */
+  /**
+   * What becomes of the trigger: it stays due (until the budget allows, or a start is possible
+   * after a check before the run or the content check), its next time runs, or a watch's next check.
+   */
   readonly notRunWaits: string;
+  readonly notRunWaitsCheck: string;
   readonly notRunSkipped: string;
   readonly notRunWatchNext: string;
   /** A watch's first check, which has no last one to compare against. */
@@ -259,7 +272,7 @@ export interface WorkerNotices {
    * Recorded spend leaves less under a cap than a run of this kind is given: `need` is what it
    * reserves (`atLeast` false: "up to") or the least a run is started with (`atLeast` true).
    */
-  capTooSmall(cap: 'daily' | 'monthly', limit: string, left: string, need: string, atLeast: boolean, when: string): string;
+  capTooSmall(cap: 'daily' | 'monthly', limit: string, left: string, need: string, atLeast: boolean): string;
   /** Only other runs in flight hold the rest of the cap, and have since `since`. */
   waitingForOthers(since: string): string;
   /** The close of a wait for other runs: no advice, as nothing tells a hung run from a long one. */
@@ -268,7 +281,7 @@ export interface WorkerNotices {
   readonly contentRefused: string;
   readonly contentNextTask: string;
   readonly contentNextWatch: string;
-  /** When the cap opens again: today, tomorrow or on a date, each at a time with its zone. */
+  /** A time after a preposition ("Next try …", "seit …"): today, tomorrow or on a date, each with its zone. */
   resetToday(time: string): string;
   resetTomorrow(time: string): string;
   resetOn(date: string, time: string): string;
@@ -355,31 +368,33 @@ const EN: WorkerNotices = Object.freeze({
     : `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, the instance log names the cause.`,
   watchChanged: (url: string, analysis: string) => `${url} changed.\n\n${analysis}`,
   notRunTitle: (title: string) => `${title} did not run`,
-  capReached: (cap: 'daily' | 'monthly', limit: string, spent: string, when: string) => cap === 'daily'
-    ? `The daily limit of ${limit} is reached (today ${spent}). It resets ${when}.`
-    : `The monthly limit of ${limit} is reached (this month ${spent}). It resets ${when}.`,
+  capReached: (cap: 'daily' | 'monthly', limit: string, spent: string) => cap === 'daily'
+    ? `The daily budget of ${limit} is reached (today ${spent}).`
+    : `The monthly budget of ${limit} is reached (this month ${spent}).`,
+  periodStarts: (cap: 'daily' | 'monthly', at: ResetAt) => `A new ${cap === 'daily' ? 'day' : 'month'} starts ${
+    at.day === 'today' ? `today at ${at.time}` : at.day === 'tomorrow' ? `tomorrow at ${at.time}` : `on ${at.date} at ${at.time}`}.`,
   capUnverifiable: 'lynox can\'t check spending right now, so it starts no run.',
   capNextSelf: 'You can change the limit under Settings → Limits.',
-  capNextPlan: 'The limit comes with your plan. To change it, write to support@lynox.ai.',
   capRestart: 'Restart lynox.',
   capSupportIfStays: 'If it stays, write to support@lynox.ai.',
   hookBlocked: (managed: boolean) => managed
     ? 'A check before the start did not let the run begin. If it stays, write to support@lynox.ai.'
     : 'A check before the start did not let the run begin. The instance log names the reason.',
-  notRunWaits: 'Stays due and runs as soon as a start is possible.',
+  notRunWaits: 'The run stays due and starts as soon as the budget allows.',
+  notRunWaitsCheck: 'The run stays due and starts as soon as a start is possible.',
   notRunSkipped: 'This time is skipped; the next one runs as scheduled.',
   notRunWatchNext: 'The next check runs as scheduled and reports what changed since the last one.',
   notRunWatchFirst: 'The first check runs at the next time as scheduled.',
   notRunRetryAt: (when: string) => `Next try ${when}.`,
   notRunByHand: 'The schedule stays as it was. Start again by hand as soon as a start is possible.',
-  capTooSmall: (cap: 'daily' | 'monthly', limit: string, left: string, need: string, atLeast: boolean, when: string) => cap === 'daily'
-    ? `Only ${left} of the daily limit of ${limit} is left today, too little for a run of this kind (${atLeast ? 'at least' : 'up to'} ${need}). It resets ${when}.`
-    : `Only ${left} of the monthly limit of ${limit} is left this month, too little for a run of this kind (${atLeast ? 'at least' : 'up to'} ${need}). It resets ${when}.`,
-  waitingForOthers: (since: string) => `Waiting since ${since} for other runs, which hold the rest of the limit.`,
+  capTooSmall: (cap: 'daily' | 'monthly', limit: string, left: string, need: string, atLeast: boolean) => cap === 'daily'
+    ? `Only ${left} of the daily budget of ${limit} is left today, too little for a run of this kind (${atLeast ? 'at least' : 'up to'} ${need}).`
+    : `Only ${left} of the monthly budget of ${limit} is left this month, too little for a run of this kind (${atLeast ? 'at least' : 'up to'} ${need}).`,
+  waitingForOthers: (since: string) => `Waiting since ${since} for other runs, which hold the rest of the budget.`,
   waitingNext: 'Runs once the other runs end.',
-  contentRefused: 'The content check did not pass the task to the model.',
-  contentNextTask: 'Check the task\'s text under Automation › Triggers; the instance log names the reason.',
-  contentNextWatch: 'The content of the watched page was refused; the instance log names the reason.',
+  contentRefused: 'The content check did not pass the task on to the model.',
+  contentNextTask: 'Check the task\'s text under Automation → Triggers.',
+  contentNextWatch: 'The content of the watched page was refused.',
   resetToday: (time: string) => `today at ${time}`,
   resetTomorrow: (time: string) => `tomorrow at ${time}`,
   resetOn: (date: string, time: string) => `on ${date} at ${time}`,
@@ -502,33 +517,36 @@ const DE: WorkerNotices = Object.freeze({
     : `${DE_RESUMED_RUN_NOT_CONTAINED} Wiederholt es sich, nennt das Instanz-Protokoll den Grund.`,
   watchChanged: (url: string, analysis: string) => `${url} hat sich geändert.\n\n${analysis}`,
   notRunTitle: (title: string) => `${title} ist nicht gelaufen`,
-  capReached: (cap: 'daily' | 'monthly', limit: string, spent: string, when: string) => cap === 'daily'
-    ? `Das Tageslimit von ${limit} ist erreicht (heute ${spent}). Es gilt wieder ab ${when}.`
-    : `Das Monatslimit von ${limit} ist erreicht (diesen Monat ${spent}). Es gilt wieder ab ${when}.`,
+  capReached: (cap: 'daily' | 'monthly', limit: string, spent: string) => cap === 'daily'
+    ? `Das Tagesbudget von ${limit} ist erreicht (heute ${spent}).`
+    : `Das Monatsbudget von ${limit} ist erreicht (diesen Monat ${spent}).`,
+  // The time leads: "Morgen um 01:00 MEZ beginnt ein neuer Tag."
+  periodStarts: (cap: 'daily' | 'monthly', at: ResetAt) => `${
+    at.day === 'today' ? `Heute um ${at.time}` : at.day === 'tomorrow' ? `Morgen um ${at.time}` : `Am ${at.date} um ${at.time}`} beginnt ein neuer ${cap === 'daily' ? 'Tag' : 'Monat'}.`,
   capUnverifiable: 'lynox kann die Ausgaben gerade nicht prüfen und startet deshalb keinen Lauf.',
   capNextSelf: 'Du kannst das Limit unter Einstellungen → Limits ändern.',
-  capNextPlan: 'Das Limit gehört zu deinem Plan. Ändern lässt es sich über support@lynox.ai.',
   capRestart: 'Starte lynox neu.',
   capSupportIfStays: 'Bleibt das, schreib an support@lynox.ai.',
   hookBlocked: (managed: boolean) => managed
     ? 'Eine Prüfung vor dem Start hat den Lauf nicht zugelassen. Bleibt das, schreib an support@lynox.ai.'
     : 'Eine Prüfung vor dem Start hat den Lauf nicht zugelassen. Den Grund nennt das Instanz-Protokoll.',
-  // No pronoun: a task, a watch („Beobachtung“) and a trigger take different genders.
-  notRunWaits: 'Bleibt fällig und läuft, sobald ein Start möglich ist.',
+  // "Der Lauf" as the subject: a task, a watch („Beobachtung“) and a trigger take different genders.
+  notRunWaits: 'Der Lauf bleibt fällig und startet, sobald das Budget es zulässt.',
+  notRunWaitsCheck: 'Der Lauf bleibt fällig und startet, sobald ein Start möglich ist.',
   notRunSkipped: 'Dieser Termin entfällt; der nächste läuft wie geplant.',
   notRunWatchNext: 'Die nächste Prüfung läuft wie geplant und meldet, was sich seit der letzten geändert hat.',
   notRunWatchFirst: 'Die erste Prüfung läuft wie geplant zum nächsten Termin.',
   // "Neuer Versuch ab dem 1. Juli": the slot follows "ab", as in `capReached`.
   notRunRetryAt: (when: string) => `Neuer Versuch ab ${when}.`,
   notRunByHand: 'Der Zeitplan bleibt, wie er war. Von Hand neu starten, sobald ein Start möglich ist.',
-  capTooSmall: (cap: 'daily' | 'monthly', limit: string, left: string, need: string, atLeast: boolean, when: string) => cap === 'daily'
-    ? `Vom Tageslimit von ${limit} ist heute nur noch ${left} übrig, zu wenig für einen Lauf dieser Art (${atLeast ? 'mindestens' : 'bis zu'} ${need}). Es gilt wieder ab ${when}.`
-    : `Vom Monatslimit von ${limit} ist diesen Monat nur noch ${left} übrig, zu wenig für einen Lauf dieser Art (${atLeast ? 'mindestens' : 'bis zu'} ${need}). Es gilt wieder ab ${when}.`,
-  waitingForOthers: (since: string) => `Wartet seit ${since} auf andere Läufe, die den Rest des Limits belegen.`,
+  capTooSmall: (cap: 'daily' | 'monthly', limit: string, left: string, need: string, atLeast: boolean) => cap === 'daily'
+    ? `Vom Tagesbudget von ${limit} ist heute nur noch ${left} übrig, zu wenig für einen Lauf dieser Art (${atLeast ? 'mindestens' : 'bis zu'} ${need}).`
+    : `Vom Monatsbudget von ${limit} ist diesen Monat nur noch ${left} übrig, zu wenig für einen Lauf dieser Art (${atLeast ? 'mindestens' : 'bis zu'} ${need}).`,
+  waitingForOthers: (since: string) => `Wartet seit ${since} auf andere Läufe, die den Rest des Budgets belegen.`,
   waitingNext: 'Läuft, sobald die anderen Läufe enden.',
-  contentRefused: 'Die Inhaltsprüfung hat den Auftrag nicht an das Modell gegeben.',
-  contentNextTask: 'Prüf den Text des Auftrags unter Automation → Trigger; den Grund nennt das Instanz-Protokoll.',
-  contentNextWatch: 'Abgelehnt wurde der Inhalt der beobachteten Seite; den Grund nennt das Instanz-Protokoll.',
+  contentRefused: 'Die Inhaltsprüfung hat den Auftrag nicht ans Modell weitergegeben.',
+  contentNextTask: 'Prüf den Text des Auftrags unter Automation → Trigger.',
+  contentNextWatch: 'Abgelehnt wurde der Inhalt der beobachteten Seite.',
   resetToday: (time: string) => `heute um ${time}`,
   resetTomorrow: (time: string) => `morgen um ${time}`,
   // "ab dem 1. Dezember", not "ab am": the slot follows "ab".
@@ -537,9 +555,9 @@ const DE: WorkerNotices = Object.freeze({
 
 export const WORKER_NOTICES: Readonly<Record<NoticeLanguage, WorkerNotices>> = Object.freeze({ en: EN, de: DE });
 
-/** A cap as the chat names it: `$5` for a whole amount, `$7.50` otherwise. */
-function capUSD(usd: number): string {
-  return Number.isInteger(usd) ? `$${String(usd)}` : `$${usd.toFixed(2)}`;
+/** An amount in the notice: always two decimals, so `$1.00` stands next to `$1.20`. */
+function usd(amount: number): string {
+  return `$${amount.toFixed(2)}`;
 }
 
 /**
@@ -553,12 +571,11 @@ export function capResetAt(cap: 'daily' | 'monthly', now: Date): Date {
 }
 
 /**
- * The reset as the notice says it after "It resets" / "Es gilt wieder ab": today, tomorrow or a
- * date, at a time that names its zone. The engine does not know the reader's zone, so the time
- * carries the instance's own (`timeZone` for tests) and says which one it is.
+ * A moment as the notice says it: today, tomorrow or a date, at a time that names its zone. The
+ * engine does not know the reader's zone, so the time carries the instance's own (`timeZone` for
+ * tests) and says which one it is.
  */
-export function resetWhen(at: Date, now: Date, lang: NoticeLanguage, timeZone?: string): string {
-  const n = WORKER_NOTICES[lang];
+export function resetAt(at: Date, now: Date, lang: NoticeLanguage, timeZone?: string): ResetAt {
   const zone = timeZone === undefined ? {} : { timeZone };
   const time = at.toLocaleTimeString(lang === 'de' ? 'de-DE' : 'en-US', { hour: '2-digit', minute: '2-digit', timeZoneName: 'short', ...zone });
   const day = (d: Date): string => d.toLocaleDateString('en-CA', zone);
@@ -567,17 +584,24 @@ export function resetWhen(at: Date, now: Date, lang: NoticeLanguage, timeZone?: 
   // change is 23 or 25 hours long.
   const [y, m, d] = today.split('-').map(Number) as [number, number, number];
   const tomorrow = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
-  if (day(at) === today) return n.resetToday(time);
-  if (day(at) === tomorrow) return n.resetTomorrow(time);
-  const date = at.toLocaleDateString(lang === 'de' ? 'de-DE' : 'en-GB', { day: 'numeric', month: 'long', ...zone });
-  return n.resetOn(date, time);
+  if (day(at) === today) return { day: 'today', time };
+  if (day(at) === tomorrow) return { day: 'tomorrow', time };
+  const date = at.toLocaleDateString(lang === 'de' ? 'de-DE' : 'en-US', { day: 'numeric', month: 'long', ...zone });
+  return { day: 'on', date, time };
+}
+
+/** {@link resetAt} after a preposition: "Next try tomorrow at …", "seit heute um …". */
+export function resetWhen(at: Date, now: Date, lang: NoticeLanguage, timeZone?: string): string {
+  const n = WORKER_NOTICES[lang];
+  const r = resetAt(at, now, lang, timeZone);
+  return r.day === 'today' ? n.resetToday(r.time) : r.day === 'tomorrow' ? n.resetTomorrow(r.time) : n.resetOn(r.date, r.time);
 }
 
 /** What the notice of a run that never started needs to know about the instance. */
 export interface NotRunContext {
-  /** The control plane supplies the model key: the cap comes with the plan, support changes it. */
+  /** The control plane supplies the model key: support is the way for a check before the run. */
   readonly managed: boolean;
-  /** No control plane at all: a step can say "restart lynox". */
+  /** No control plane at all: a step can say "restart lynox", and the owner sets the budget. */
   readonly selfHosted: boolean;
   readonly now: Date;
   /** For tests; the worker passes none and gets the instance's zone. */
@@ -604,28 +628,29 @@ export type NotRunCause =
   | { readonly kind: 'content' };
 
 /**
- * Why a background run did not start, and what the owner can do: the cap with its limit, the
- * spend and when it opens again, and who can change it — or lynox's own sentence for a check
- * before the run or the content check, without their text, which may be a third party's.
+ * Why a background run did not start, and what the owner can do: the budget with its amount, the
+ * spend, when its period starts anew and, on a self-hosted instance, where to change it — or
+ * lynox's own sentence for a check before the run or the content check, without their text,
+ * which may be a third party's.
  */
 export function notRunReason(lang: NoticeLanguage, cause: NotRunCause, ctx: NotRunContext): string {
   const n = WORKER_NOTICES[lang];
-  const step = ctx.managed ? n.capNextPlan : n.capNextSelf;
+  const step = ctx.selfHosted ? ` ${n.capNextSelf}` : '';
   const ifStays = ctx.selfHosted ? n.capRestart : n.capSupportIfStays;
   switch (cause.kind) {
     case 'hook': return n.hookBlocked(ctx.managed);
     case 'content': return `${n.contentRefused} ${ctx.watch === true ? n.contentNextWatch : n.contentNextTask}`;
     case 'waiting': return `${n.waitingForOthers(resetWhen(cause.since, ctx.now, lang, ctx.timeZone))} ${n.waitingNext}`;
     case 'too_small': {
-      const when = resetWhen(capResetAt(cause.cap, ctx.now), ctx.now, lang, ctx.timeZone);
-      const left = `$${Math.max(0, cause.limitUSD - cause.spentUSD).toFixed(2)}`;
-      return `${n.capTooSmall(cause.cap, capUSD(cause.limitUSD), left, `$${cause.needUSD.toFixed(2)}`, cause.atLeast, when)} ${step}`;
+      const starts = n.periodStarts(cause.cap, resetAt(capResetAt(cause.cap, ctx.now), ctx.now, lang, ctx.timeZone));
+      const left = usd(Math.max(0, cause.limitUSD - cause.spentUSD));
+      return `${n.capTooSmall(cause.cap, usd(cause.limitUSD), left, usd(cause.needUSD), cause.atLeast)} ${starts}${step}`;
     }
     case 'cap': {
       const ref = cause.ref;
       if (ref.cap === 'unknown' || ref.limitUSD === undefined || ref.spentUSD === undefined) return `${n.capUnverifiable} ${ifStays}`;
-      const when = resetWhen(capResetAt(ref.cap, ctx.now), ctx.now, lang, ctx.timeZone);
-      return `${n.capReached(ref.cap, capUSD(ref.limitUSD), `$${ref.spentUSD.toFixed(2)}`, when)} ${step}`;
+      const starts = n.periodStarts(ref.cap, resetAt(capResetAt(ref.cap, ctx.now), ctx.now, lang, ctx.timeZone));
+      return `${n.capReached(ref.cap, usd(ref.limitUSD), usd(ref.spentUSD))} ${starts}${step}`;
     }
   }
 }

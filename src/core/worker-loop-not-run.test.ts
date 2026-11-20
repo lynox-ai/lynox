@@ -151,7 +151,7 @@ describe('a run the admission refused', () => {
     expect(calls, 'recorded when told, not at every tick').toHaveLength(1);
     expect(calls[0]![2]).toBe('not_run');
     expect(calls[0]![3], 'the trigger stays due').toEqual({ keepSchedule: true });
-    expect(calls[0]![1]).toContain('The daily limit of $100 is reached (today $100.00). It resets tomorrow at');
+    expect(calls[0]![1]).toContain('The daily budget of $100.00 is reached (today $100.00). A new day starts tomorrow at');
     expect(calls[0]![1]).toContain(EN.capNextSelf);
     expect(calls[0]![1]).toContain(EN.notRunWaits);
     expect(router.sent, 'one notice over two ticks').toHaveLength(1);
@@ -169,7 +169,7 @@ describe('a run the admission refused', () => {
     const { lines } = await ticks(tm, router, 2);
     expect(notRunCalls(tm), 'recorded once over two ticks').toHaveLength(1);
     expect(router.sent).toHaveLength(1);
-    expect(router.sent[0]!.body).toContain('Only $0.02 of the daily limit of $100 is left today, too little for a run of this kind (at least $0.05). It resets tomorrow at');
+    expect(router.sent[0]!.body).toContain('Only $0.02 of the daily budget of $100.00 is left today, too little for a run of this kind (at least $0.05). A new day starts tomorrow at');
     expect(router.sent[0]!.body).toContain(EN.capNextSelf);
     expect(router.sent[0]!.body).not.toContain('is reached');
     expect(lines.join('')).toContain('Not started');
@@ -184,7 +184,7 @@ describe('a run the admission refused', () => {
     expect(notRunCalls(tm)).toHaveLength(1);
     expect(vi.mocked(tm.recordTaskRun).mock.calls[0]![3]).toEqual({ keepSchedule: true });
     expect(router.sent).toHaveLength(1);
-    expect(router.sent[0]!.body).toContain('Only $1.00 of the daily limit of $100 is left today, too little for a run of this kind (up to $50.00). It resets tomorrow at');
+    expect(router.sent[0]!.body).toContain('Only $1.00 of the daily budget of $100.00 is left today, too little for a run of this kind (up to $50.00). A new day starts tomorrow at');
   });
 
   /** One tick a minute for `minutes` minutes, as the loop ticks at its 60 s interval. */
@@ -223,7 +223,7 @@ describe('a run the admission refused', () => {
     expect(notRunCalls(tm)).toHaveLength(1);
     expect(router.sent).toHaveLength(1);
     const body = router.sent[0]!.body;
-    expect(body).toMatch(/^Waiting since today at .+ for other runs, which hold the rest of the limit\. Runs once the other runs end\.$/);
+    expect(body).toMatch(/^Waiting since today at .+ for other runs, which hold the rest of the budget\. Runs once the other runs end\.$/);
     expect(body).not.toContain(EN.capRestart);
     expect(body).not.toContain(EN.capSupportIfStays);
     expect(body).not.toContain('support@');
@@ -309,7 +309,7 @@ describe('a run the admission refused', () => {
     }
     expect(notRunCalls(tm), 'told the cap, not the wait').toHaveLength(1);
     expect(router.sent).toHaveLength(1);
-    expect(router.sent[0]!.body).toContain('The daily limit of $100 is reached');
+    expect(router.sent[0]!.body).toContain('The daily budget of $100.00 is reached');
   });
 
   it('too little left under a cap between two waits starts the wait again', async () => {
@@ -335,7 +335,7 @@ describe('a run the admission refused', () => {
     }
     expect(notRunCalls(tm), 'told too little, not the wait').toHaveLength(1);
     expect(router.sent).toHaveLength(1);
-    expect(router.sent[0]!.body).toContain('Only $40.00 of the daily limit of $100 is left today');
+    expect(router.sent[0]!.body).toContain('Only $40.00 of the daily budget of $100.00 is left today');
   });
 
   it('a reservation refused on a cap its recorded spend reached: told with that cap', async () => {
@@ -344,7 +344,7 @@ describe('a run the admission refused', () => {
     const router = makeRouter();
     await ticks(tm, router, 1);
     expect(router.sent).toHaveLength(1);
-    expect(router.sent[0]!.body).toContain('The daily limit of $100 is reached (today $100.00).');
+    expect(router.sent[0]!.body).toContain('The daily budget of $100.00 is reached (today $100.00).');
     expect(vi.mocked(tm.recordTaskRun).mock.calls[0]![3]).toEqual({ keepSchedule: true });
   });
 
@@ -400,7 +400,7 @@ describe('a run the admission refused', () => {
       restore();
     }
     expect(router.sent).toHaveLength(1);
-    expect(router.sent[0]!.body).toContain('The monthly limit of $50 is reached (this month $50.00). It resets on 1 July at');
+    expect(router.sent[0]!.body).toContain('The monthly budget of $50.00 is reached (this month $50.00). A new month starts on July 1 at');
   });
 
   it('in German, on an instance that says so', async () => {
@@ -408,7 +408,7 @@ describe('a run the admission refused', () => {
     const router = makeRouter();
     await ticks(makeTaskManager([makeTask()]), router, 1, 'de');
     expect(router.sent[0]!.title).toBe('⚠ Daily Report ist nicht gelaufen');
-    expect(router.sent[0]!.body).toContain('Das Tageslimit von $100 ist erreicht (heute $100.00). Es gilt wieder ab morgen um');
+    expect(router.sent[0]!.body).toContain('Das Tagesbudget von $100.00 ist erreicht (heute $100.00). Morgen um');
     expect(router.sent[0]!.body).toContain(WORKER_NOTICES.de.capNextSelf);
   });
 });
@@ -434,7 +434,7 @@ describe('a run the cap or a hook stopped inside the session', () => {
     expect(call, 'recorded as not run').toBeDefined();
     expect(vi.mocked(tm.recordTaskRun).mock.calls.some((c) => c[2] === 'success'), 'never as a success').toBe(false);
     expect(call![3], 'a cron moves on as after any run').toBeUndefined();
-    expect(call![1]).toContain('The daily limit of $5 is reached (today $5.12). It resets tomorrow at');
+    expect(call![1]).toContain('The daily budget of $5.00 is reached (today $5.12). A new day starts tomorrow at');
     expect(call![1]).toContain(EN.capNextSelf);
     expect(call![1], 'a cron is told its time was skipped').toContain(EN.notRunSkipped);
     expect(router.sent).toHaveLength(1);
@@ -443,11 +443,15 @@ describe('a run the cap or a hook stopped inside the session', () => {
     expect(router.sent[0]!.followUps).toBeUndefined();
   });
 
-  it('a managed plan names support as the step', async () => {
-    vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
-    const { router } = await runBlocked(blockedSession('Daily spending cap ($5) reached.', { cap: 'daily', limitUSD: 5, spentUSD: 5 }));
-    expect(router.sent[0]!.body).toContain(EN.capNextPlan);
-    expect(router.sent[0]!.body).not.toContain(EN.capNextSelf);
+  it('names the limits page only where the owner sets the budget: self-hosted, not hosted or managed', async () => {
+    for (const [tier, named] of [['', true], ['hosted', false], ['managed', false]] as const) {
+      vi.stubEnv('LYNOX_BILLING_TIER', tier);
+      const { router } = await runBlocked(blockedSession('Daily spending cap ($5) reached.', { cap: 'daily', limitUSD: 5, spentUSD: 5 }));
+      const body = router.sent[0]!.body;
+      expect(body.includes(EN.capNextSelf), `tier '${tier}'`).toBe(named);
+      expect(body, `tier '${tier}'`).not.toContain('support@');
+      expect(body).toContain('The daily budget of $5.00 is reached (today $5.00). A new day starts tomorrow at');
+    }
   });
 
   it('a hook block: lynox\'s own sentence, the hook\'s text only in the log', async () => {
@@ -702,7 +706,7 @@ describe('the edges', () => {
     }
     const call = notRunCalls(tm)[0]!;
     expect(call[3]).toBeUndefined();
-    expect(call[1]).toContain(EN.notRunWaits);
+    expect(call[1], 'a check, not the budget, held it back').toBe(`${EN.hookBlocked(false)} ${EN.notRunWaitsCheck}`);
   });
 
   it('an update of a trigger already told does not clear what the others were told', async () => {
@@ -762,6 +766,35 @@ describe('the sentences', () => {
     expect(resetWhen(new Date('2026-06-16T00:00:00Z'), now, 'en', 'UTC')).toBe('tomorrow at 12:00 AM UTC');
     expect(resetWhen(new Date('2026-06-16T00:00:00Z'), now, 'de', 'Europe/Zurich')).toBe('morgen um 02:00 MESZ');
     expect(resetWhen(new Date('2026-07-01T00:00:00Z'), now, 'de', 'UTC')).toBe('dem 1. Juli um 00:00 UTC');
+  });
+
+  it('say every cause in full, in both languages and for each kind of instance', () => {
+    const nov = new Date('2026-11-20T12:00:00Z');
+    const zone = 'Europe/Zurich';
+    const self = { managed: false, selfHosted: true, now: nov, timeZone: zone };
+    const hosted = { managed: false, selfHosted: false, now: nov, timeZone: zone };
+    const managed = { managed: true, selfHosted: false, now: nov, timeZone: zone };
+    const daily = { kind: 'cap', ref: { cap: 'daily', limitUSD: 1.2, spentUSD: 1 } } as const;
+    const monthly = { kind: 'cap', ref: { cap: 'monthly', limitUSD: 50, spentUSD: 50.1 } } as const;
+    const small = { kind: 'too_small', cap: 'daily', limitUSD: 100, spentUSD: 99.98, needUSD: 0.05, atLeast: true } as const;
+    const waiting = { kind: 'waiting', since: new Date('2026-11-20T10:30:00Z') } as const;
+
+    expect(notRunReason('de', daily, self)).toBe('Das Tagesbudget von $1.20 ist erreicht (heute $1.00). Morgen um 01:00 MEZ beginnt ein neuer Tag. Du kannst das Limit unter Einstellungen → Limits ändern.');
+    expect(notRunReason('en', daily, self)).toBe('The daily budget of $1.20 is reached (today $1.00). A new day starts tomorrow at 01:00 AM GMT+1. You can change the limit under Settings → Limits.');
+    expect(notRunReason('de', daily, managed)).toBe('Das Tagesbudget von $1.20 ist erreicht (heute $1.00). Morgen um 01:00 MEZ beginnt ein neuer Tag.');
+    expect(notRunReason('en', daily, hosted)).toBe('The daily budget of $1.20 is reached (today $1.00). A new day starts tomorrow at 01:00 AM GMT+1.');
+    expect(notRunReason('de', monthly, managed)).toBe('Das Monatsbudget von $50.00 ist erreicht (diesen Monat $50.10). Am 1. Dezember um 01:00 MEZ beginnt ein neuer Monat.');
+    expect(notRunReason('en', monthly, managed)).toBe('The monthly budget of $50.00 is reached (this month $50.10). A new month starts on December 1 at 01:00 AM GMT+1.');
+    expect(notRunReason('de', small, self)).toBe('Vom Tagesbudget von $100.00 ist heute nur noch $0.02 übrig, zu wenig für einen Lauf dieser Art (mindestens $0.05). Morgen um 01:00 MEZ beginnt ein neuer Tag. Du kannst das Limit unter Einstellungen → Limits ändern.');
+    expect(notRunReason('en', small, hosted)).toBe('Only $0.02 of the daily budget of $100.00 is left today, too little for a run of this kind (at least $0.05). A new day starts tomorrow at 01:00 AM GMT+1.');
+    expect(notRunReason('de', waiting, self)).toBe('Wartet seit heute um 11:30 MEZ auf andere Läufe, die den Rest des Budgets belegen. Läuft, sobald die anderen Läufe enden.');
+    expect(notRunReason('en', waiting, managed)).toBe('Waiting since today at 11:30 AM GMT+1 for other runs, which hold the rest of the budget. Runs once the other runs end.');
+    expect(notRunReason('de', { kind: 'content' }, self)).toBe('Die Inhaltsprüfung hat den Auftrag nicht ans Modell weitergegeben. Prüf den Text des Auftrags unter Automation → Trigger.');
+    expect(notRunReason('en', { kind: 'content' }, managed)).toBe('The content check did not pass the task on to the model. Check the task\'s text under Automation → Triggers.');
+    expect(notRunReason('de', { kind: 'content' }, { ...self, watch: true })).toBe('Die Inhaltsprüfung hat den Auftrag nicht ans Modell weitergegeben. Abgelehnt wurde der Inhalt der beobachteten Seite.');
+    expect(notRunReason('en', { kind: 'content' }, { ...managed, watch: true })).toBe('The content check did not pass the task on to the model. The content of the watched page was refused.');
+    expect(WORKER_NOTICES.de.notRunWaits).toBe('Der Lauf bleibt fällig und startet, sobald das Budget es zulässt.');
+    expect(EN.notRunWaits).toBe('The run stays due and starts as soon as the budget allows.');
   });
 
   it('name no amount for spend that cannot be checked, and the step by who runs the instance', () => {

@@ -998,13 +998,15 @@ export class WorkerLoop {
     // What becomes of the trigger, as `recordTaskRun` schedules it: a run by hand leaves the
     // schedule as it was; refused at admission it stays due; a one-shot is due again at
     // `retryAt`; a watch checks again at its next time; a cron's missed time is missed.
-    // A wait for other runs says in its reason what becomes of it.
+    // A wait for other runs says in its reason what becomes of it; one that stays due waits for
+    // the budget, or after a check before the run or the content check, for a start at all.
+    const waits = cause.kind === 'cap' || cause.kind === 'too_small' ? n.notRunWaits : n.notRunWaitsCheck;
     const then = byHand ? n.notRunByHand
       : cause.kind === 'waiting' ? undefined
-      : at === 'admission' ? n.notRunWaits
+      : at === 'admission' ? waits
       : retryAt !== undefined ? n.notRunRetryAt(resetWhen(retryAt, now, lang))
       : task.watch_config ? (firstCheck ? n.notRunWatchFirst : n.notRunWatchNext)
-      : task.schedule_cron ? n.notRunSkipped : n.notRunWaits;
+      : task.schedule_cron ? n.notRunSkipped : waits;
     const result = then === undefined ? reason : `${reason} ${then}`;
     if (at === 'run') {
       this.#recordRun(this.engine.getTaskManager(), task.id, result, 'not_run', undefined, retryAt === undefined ? undefined : { retryAt: retryAt.toISOString() });
