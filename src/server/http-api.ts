@@ -103,7 +103,7 @@ import { sweepStaleExports } from '../core/export-archive.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded , toMistralEuBase } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { checkKeylessOverCiphertext, type KeylessState, type KeylessStore } from '../core/vault-key-detect.js';
-import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, creatorCovered, editorCovered, isOwnerPrincipal, mandateIdOf, ownedBy, planAuthorshipOf, planAuthorshipOfWorkflow, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
+import { CP_ADMIN_PRINCIPAL, MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, creatorCovered, editorCovered, isOwnerPrincipal, mandateIdOf, ownedBy, planAuthorshipOf, planAuthorshipOfWorkflow, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
 import { WORKFLOW_ENDED_REFUSAL, libraryRunCheck, workflowRunsAs } from '../orchestrator/run-source.js';
 import { runAsPlanOf } from '../core/plan-run-context.js';
 import { MEMBER_CONNECTION_PREFIX } from '../core/member-connection-notes.js';
@@ -333,7 +333,7 @@ export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: 
   // devices as if they were its own, and could act on neither. An absent value leaves the JSON.
   const rest = isOwnerPrincipal(principal)
     ? { ...stored, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome }
-    : { ...stored, last_escalation_at: undefined, last_escalation_outcome: undefined };
+    : { ...withoutForeignMarks(stored, principal), last_escalation_at: undefined, last_escalation_outcome: undefined };
   if (!planPauseOn()) return rest;
   const paused = isPaused(trigger);
   if (!paused || !isOwnerPrincipal(principal)) return { ...rest, paused };
@@ -344,6 +344,39 @@ export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: 
     paused_who: entries.map((e) => e.email),
     paused_ended: entries.map((e) => ({ email: e.email, reason: e.reason, ends_at: new Date(e.endsAt * 1000).toISOString(), warned: e.warned === true })),
   };
+}
+
+/** The marks on a trigger that name who set it up or changed it, each with the grant id stored beside it. */
+const TRIGGER_MARKS = [
+  ['created_by', 'created_mandate_id'],
+  ['edited_by', null],
+  ['mandate_editor', 'mandate_editor_id'],
+  ['covered_created_by', 'covered_created_id'],
+  ['covered_edited_by', 'covered_edited_id'],
+] as const satisfies readonly (readonly [keyof TriggerRecord, keyof TriggerRecord | null])[];
+
+/**
+ * A trigger's columns as a mandate may read them. A mark that names another mandate says only
+ * that a mandate set it, never which one: the tag keeps its prefix, so the view still tells a
+ * helper's schedule from the owner's (`awaitsOwnerStamp`), and the grant id beside it leaves.
+ * A schedule another mandate set up or changed keeps its values to itself (`pipeline_params`):
+ * a mandate cannot schedule that workflow anyway (`foreignWorkflowScheduleRefusalKind`). The
+ * owner's marks and the mandate's own stay as stored.
+ */
+function withoutForeignMarks<T extends Partial<TriggerRecord>>(stored: T, principal: RequestPrincipal): T {
+  if (isOwnerPrincipal(principal)) return stored;
+  const own = principal.kind === 'mandate' ? principalTag(principal) : null;
+  const isForeign = (tag: unknown): boolean => typeof tag === 'string' && tag.startsWith(MANDATE_TAG_PREFIX) && tag !== own;
+  const out: Record<string, unknown> = { ...stored };
+  let foreignSchedule = false;
+  for (const [tagKey, idKey] of TRIGGER_MARKS) {
+    if (!isForeign(out[tagKey])) continue;
+    out[tagKey] = MANDATE_TAG_PREFIX;
+    if (idKey !== null) delete out[idKey];
+    if (tagKey === 'created_by' || tagKey === 'edited_by' || tagKey === 'mandate_editor') foreignSchedule = true;
+  }
+  if (foreignSchedule) delete out['pipeline_params'];
+  return out as T;
 }
 
 /** One ended access behind a paused plan, as the owner's view reads it. */
@@ -9154,6 +9187,12 @@ export class LynoxHTTPApi {
       const { getPipeline } = await import('../tools/builtin/pipeline.js');
       const planned = getPipeline(params['id']!, history);
       if (!planned || planned.template !== true) { errorResponse(res, 404, 'Workflow not found'); return; }
+      // The preview answers what a schedule would bind, so it is refused where the schedule is
+      // (`POST /api/tasks`): a mandate does not get another mandate's workflow bound for it.
+      const { foreignWorkflowScheduleRefusalKind, FOREIGN_WORKFLOW_SCHEDULE_REFUSAL, UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL } = await import('../core/plan-stamp.js');
+      const refusalKind = foreignWorkflowScheduleRefusalKind(this._principalOf(_req), planned.id, history);
+      if (refusalKind === 'foreign') { errorResponse(res, 403, FOREIGN_WORKFLOW_SCHEDULE_REFUSAL, 'foreign_workflow'); return; }
+      if (refusalKind === 'unreadable') { errorResponse(res, 403, UNREADABLE_WORKFLOW_SCHEDULE_REFUSAL, 'unreadable_workflow'); return; }
       if (!isSchedulableWorkflow(planned)) { errorResponse(res, 400, `Workflow "${planned.id}" asks for more than an answer from its owner and cannot be scheduled.`); return; }
       const prepared = prepareWorkflowGrant(planned, {
         method: b['method'], host: b['host'], paths: b['paths'], params: b['params'], cron: scheduleCron, afterUntrusted: b['afterUntrusted'],
