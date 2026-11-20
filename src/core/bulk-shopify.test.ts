@@ -1702,6 +1702,16 @@ describe('applying a Shopify run', () => {
         expect(out.pushSummary).toMatch(/^lynox writes nothing more; what it wrote stays\. When connecting, lynox did not ask Shopify for permission to change products\. What to do is under Bulk runs\. .*1 applied, of \d+ targets\.$/);
       });
 
+      it('does not say it wrote nothing when a send of the run has an unclear end', async () => {
+        const id = await titling();
+        // A loop marked the target sent and died before recording what came of it.
+        ledger.markSent(id, ledger.getPreview(id)[0]!.seq, null);
+        const out = await applyRaw(id, GRANTED_ONLY);
+        expect(out.status).toBe('refused');
+        expect(out.summary).toMatch(/^lynox writes nothing more in this run; what it already wrote stays\./);
+        expect(out.pushSummary).toMatch(/^lynox writes nothing more; what it wrote stays\./);
+      });
+
       it('lets an undo restore what a run wrote, under a connection that no longer asks', async () => {
         const id = await titling();
         const seoBefore = JSON.stringify(s.products.get(10)!['seo']);
