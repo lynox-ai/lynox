@@ -219,7 +219,7 @@ const JUDGED = [
  */
 const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string }[]> = {
   'core/config.ts': [
-    { marker: 'Invalid config in', count: 1, why: 'a schema issue about the local config file; the issue message names the expected type, a fixed refine text or an unknown key, never the value read' },
+    { marker: 'Invalid config in', count: 1, why: 'a schema issue about the local config file; the issue message names the expected type, a schema bound or option list, a fixed refine or format text, or an unknown key (a key name from the file, never a value); no message quotes a value read' },
   ],
   'core/workflow-questions.ts': [
     { marker: 'asking a workflow question failed', count: 1, why: 'lynox constants, a session id, or the SQLite insert; the question text is bound, never quoted' },
