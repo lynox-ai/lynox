@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { judgeOutliers, markersOf, OUTLIER_MIN_VERDICTS, type OutlierFieldKind, type OutlierInput } from './bulk-outliers.js';
+import { judgeOutliers, markersOf, OUTLIER_MIN_VERDICTS, targetMarkers, type OutlierFieldKind, type OutlierInput } from './bulk-outliers.js';
 
 const OWN = ['teehaus.example.ch'];
 const KINDS: Record<string, OutlierFieldKind> = { title: 'text', description: 'text', status: 'enum', weight_g: 'number', vegan: 'boolean', price: 'number', origin: 'text', note: 'text' };
@@ -189,6 +189,24 @@ describe('judgeOutliers on domains in other scripts, phone numbers and the own s
     for (const seq of [21, 22, 23]) expect(result.find((f) => f.seq === seq)?.reasons).toContain('new_phone');
   });
 
+  it('holds a phone number the before text writes as a run of digits with its country, but not one an EAN merely ends in', () => {
+    const added = (before: string, after: string): string[] => [...targetMarkers({ seq: 1, before: { description: before }, after: { description: after } }, OWN).added.get('phone')!];
+    expect(added('Tel 41441234567', 'Tel +41 44 123 45 67')).toEqual([]);
+    expect(added('EAN 7610441234567', 'Tel 044 123 45 67')).toEqual(['41441234567']);
+  });
+
+  it('does not flag a verdict that changes four fields where the run changes one or two, and flags one that changes all eight', () => {
+    const fields = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+    const inputs: OutlierInput[] = Array.from({ length: 40 }, (_, i) => {
+      const seq = i + 1;
+      const n = seq === 7 ? 4 : seq === 9 ? 8 : seq % 2 === 0 ? 1 : 2;
+      const before = Object.fromEntries(fields.map((f) => [f, `alt ${f}${String(seq)}`]));
+      const after = Object.fromEntries(fields.map((f, k) => [f, k < n ? `neu ${f}${String(seq)}` : `alt ${f}${String(seq)}`]));
+      return { seq, before, after };
+    });
+    expect(judgeOutliers(inputs, OWN).flagged).toEqual([{ seq: 9, reasons: ['changed_fields'] }]);
+  });
+
   it('holds a phone number the before text writes without grouping', () => {
     const inputs = run(200, (t) => (t.seq === 24
       ? { ...t, before: { ...(t.before as object), note: 'Tel 0441234567' }, after: { ...(t.after as object), note: 'Tel 044 123 45 67' } }
@@ -216,18 +234,40 @@ describe('markersOf', () => {
     expect([...markersOf('+49 44 123 45 67').get('phone')!]).toEqual(['49441234567']);
   });
 
-  it('ends a host at a backslash and reads only what follows the user, refuses one longer than a host may be, and reads an ideographic full stop as a dot', () => {
+  it('ends a host at a backslash and reads only what follows the user, refuses one longer than a host may be, and reads full stops of other scripts as dots', () => {
     expect([...markersOf('https://evil.icu\\@moebel-meier.ch/').get('link')!]).toEqual(['evil.icu']);
+    expect([...markersOf('https://moebel-meier.ch@evil.icu/').get('link')!]).toEqual(['evil.icu']);
+    expect([...markersOf(`Mehr auf ${'a'.repeat(63)}.com`).get('link')!]).toEqual([`${'a'.repeat(63)}.com`]);
     expect([...markersOf(`Mehr auf ${'a'.repeat(64)}.com`).get('link')!]).toEqual([]);
-    expect([...markersOf('Mehr auf evil\u3002com').get('link')!]).toEqual(['evil.com']);
+    // 125 labels and com: 253 characters, the longest a host may be; one label more is not one.
+    expect([...markersOf(`Mehr auf ${'a.'.repeat(125)}com`).get('link')!]).toHaveLength(1);
+    expect([...markersOf(`Mehr auf ${'a.'.repeat(126)}com`).get('link')!]).toEqual([]);
+    for (const dot of ['\u3002', '\uFF0E', '\uFF61']) expect([...markersOf(`Mehr auf evil${dot}com`).get('link')!], dot).toEqual(['evil.com']);
   });
 
-  it('reads a long run of letters before an @, of labels, or of obfuscated dots in time linear in its length', () => {
+  it('reads a host whatever sign stands at its ends or after an @ that starts no address, and a top-level domain with a long s', () => {
+    for (const text of ['evil.com_', '_evil.com_', '*evil.com*', 'evil.com%20', 'evil.com+', '+evil.com', 'evil.com@', 'evil.com@home', '.evil.com.', '-evil.com-', 'Besuch evil.com_ jetzt']) {
+      expect([...markersOf(text).get('link')!], text).toEqual(['evil.com']);
+    }
+    for (const text of ['evil.\u017Fhop', 'EVIL.\u017FHOP']) expect([...markersOf(text).get('link')!], text).toEqual(['evil.shop']);
+    expect([...markersOf('info@evil.com_').get('email')!]).toEqual(['evil.com']);
+  });
+
+  it('reads a host a text repeats a thousand times once, in time like any other text', () => {
+    const t0 = performance.now();
+    expect([...markersOf('a.com '.repeat(5000)).get('link')!]).toEqual(['a.com']);
+    expect(performance.now() - t0).toBeLessThan(200);
+  });
+
+  it('reads a long run of letters before an @, of labels, or of blanks and obfuscated dots in time linear in its length', () => {
     const time = (text: string): number => { const t0 = performance.now(); markersOf(text); return performance.now() - t0; };
-    for (const unit of ['a', 'a.', 'a [.] ', 'a dot ', ' ', '-a']) {
-      time(unit.repeat(1000));
-      const small = time(unit.repeat(4000));
-      const large = time(unit.repeat(32000));
+    // A unit repeated, and what stands before or after the run: a bracket makes the obfuscated dots read.
+    const shapes: [string, string, string][] = [['', 'a', '@x.ch'], ['', 'a.', ''], ['', 'a [.] ', ''], ['', 'a dot ', ''], ['[', ' ', ''], ['', ' ', '[.]'], ['', '-a', ''], ['', 'ä.', '']];
+    for (const [head, unit, tail] of shapes) {
+      const shaped = (n: number): string => head + unit.repeat(n) + tail;
+      time(shaped(1000));
+      const small = time(shaped(4000));
+      const large = time(shaped(32000));
       // Eight times the text: linear stays well under 64 times the time, quadratic does not.
       expect(large, unit).toBeLessThan(Math.max(small, 20) * 24);
     }

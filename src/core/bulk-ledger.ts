@@ -1071,18 +1071,11 @@ function* rulePairs(
   }
 }
 
-/** How much text, in characters, {@link BulkLedger.judgeOutliersOf} reads before it lets other work
- *  run: a few milliseconds of reading. */
+/** How much stored text, in characters, {@link BulkLedger.judgeOutliersOf} decrypts and reads before it
+ *  lets other work run: tens of milliseconds on shop texts. */
 export const OUTLIER_CHUNK = 256 * 1024;
-
-/** The characters of a verdict's or before-image's text fields together. */
-function textLength(value: unknown): number {
-  if (typeof value === 'string') return value.length;
-  if (value === null || typeof value !== 'object') return 0;
-  let n = 0;
-  for (const v of Object.values(value as Record<string, unknown>)) if (typeof v === 'string') n += v.length;
-  return n;
-}
+/** How many rows {@link BulkLedger.judgeOutliersOf} fetches at once. */
+const OUTLIER_PAGE = 200;
 
 export class BulkLedger {
   /** `mirror`: history.db's copy of the thread containment (`history-markers.ts`), read with engine.db's when a run is planned from a thread. */
@@ -1807,26 +1800,35 @@ export class BulkLedger {
     }
     const host = externalHostOf(run.target_system);
     const own = [...(host === null ? [] : [host]), ...(this.startDomainsOfRow(run) ?? [])];
-    const rows = this.engineDb.getDb().prepare(
+    // Read a page of rows at a time, by seq, and each target's markers as it is read: decrypting is part
+    // of the work that must not hold the process, so it is done in the same parts.
+    const page = this.engineDb.getDb().prepare(
       `SELECT seq, before, after_planned FROM bulk_targets
-       WHERE run_id = ? AND judged_at IS NOT NULL AND change IN ('update', 'create', 'unchanged')
-       ORDER BY seq`,
-    ).iterate(runId) as IterableIterator<{ seq: number; before: string | null; after_planned: string | null }>;
+       WHERE run_id = ? AND seq > ? AND judged_at IS NOT NULL AND change IN ('update', 'create', 'unchanged')
+       ORDER BY seq LIMIT ${String(OUTLIER_PAGE)}`,
+    );
     const inputs: OutlierInput[] = [];
-    for (const r of rows) {
-      if (r.after_planned === null) continue;
-      const before = r.before === null ? null : JSON.parse(this.engineDb.dec(r.before)) as BeforeImage;
-      inputs.push({ seq: r.seq, before: before !== null && !before.absent ? before.value : null, after: JSON.parse(this.engineDb.dec(r.after_planned)) });
-    }
     const markers: TargetMarkers[] = [];
     let read = 0;
-    for (const input of inputs) {
-      if (read >= OUTLIER_CHUNK) {
-        read = 0;
-        await new Promise<void>((resolve) => { setImmediate(resolve); });
+    let after = -1;
+    for (;;) {
+      const rows = page.all(runId, after) as { seq: number; before: string | null; after_planned: string | null }[];
+      for (const r of rows) {
+        after = r.seq;
+        if (r.after_planned === null) continue;
+        if (read >= OUTLIER_CHUNK) {
+          read = 0;
+          await new Promise<void>((resolve) => { setImmediate(resolve); });
+        }
+        const beforeText = r.before === null ? '' : this.engineDb.dec(r.before);
+        const afterText = this.engineDb.dec(r.after_planned);
+        const before = beforeText === '' ? null : JSON.parse(beforeText) as BeforeImage;
+        const input: OutlierInput = { seq: r.seq, before: before !== null && !before.absent ? before.value : null, after: JSON.parse(afterText) };
+        inputs.push(input);
+        markers.push(targetMarkers(input, own));
+        read += beforeText.length + afterText.length;
       }
-      markers.push(targetMarkers(input, own));
-      read += textLength(input.before) + textLength(input.after);
+      if (rows.length < OUTLIER_PAGE) break;
     }
     return judgeOutliers(inputs, own, kinds, markers);
   }

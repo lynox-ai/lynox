@@ -120,7 +120,12 @@ export function markersOf(text: string): Map<MarkerKind, Set<string>> {
   }
   // The obfuscated dots need a bracket, a parenthesis, the word "dot" or a full stop of another script.
   const plain = /[[(\u3002\uFF0E\uFF61]|dot/iu.test(text) ? text.replace(OBFUSCATED_DOT, '.') : text;
-  for (const word of dottedWords(plain)) {
+  // A text that names one host a thousand times reads it once.
+  const seen = new Set<string>();
+  for (const whole of dottedWords(plain)) {
+    if (seen.has(whole)) continue;
+    seen.add(whole);
+    let word = whole;
     const at = word.indexOf('@');
     if (at >= 0) {
       // An address: something before the @, a domain with a dot after it. Its domain is not also a link.
@@ -128,25 +133,16 @@ export function markersOf(text: string): Map<MarkerKind, Set<string>> {
       if (at > 0 && domain.includes('.')) {
         const host = asciiHost(domain);
         if (host !== undefined) out.get('email')!.add(host);
+        continue;
       }
-      continue;
+      // No address ("evil.com@home"): what stands before the @ is read as a host.
+      word = word.slice(0, at);
     }
-    // A host has no _, % or + in it; dots and hyphens at its ends belong to the sentence.
-    if (/[_%+]/u.test(word)) continue;
-    const token = trimEnds(word);
-    // Most words with a dot end a sentence or shorten one ("inkl.", "z.B."): a last label of ASCII
-    // letters that is no top-level domain ends the reading before the host is built.
-    const last = token.slice(token.lastIndexOf('.') + 1);
-    if (/^[a-z]+$/iu.test(last) && !TLDS.has(last.toLowerCase())) continue;
-    if (!token.includes('.') || !token.split('.').every((l) => HOST_LABEL.test(l))) continue;
-    const tld = token.slice(token.lastIndexOf('.') + 1);
-    // "Baumwolle.Es ist": a sentence whose space after the full stop is missing, not a host. Only where
-    // the TLD is also a word: "Evil.Com" is a host.
-    if (WORD_TLDS.has(tld.toLowerCase()) && /^\p{Lu}\p{Ll}/u.test(tld) && !/^www\./iu.test(token)) continue;
-    const host = asciiHost(token);
-    if (host === undefined) continue;
-    const asciiTld = host.slice(host.lastIndexOf('.') + 1);
-    if (TLDS.has(asciiTld) || asciiTld.startsWith('xn--')) out.get('link')!.add(host);
+    // A host has no _, % or + inside: the parts between them are read each ("evil.com%20", "evil.com_").
+    for (const part of word.split(/[_%+]/u)) {
+      const host = hostOfWord(trimEnds(part));
+      if (host !== undefined) out.get('link')!.add(host);
+    }
   }
   for (const [written] of text.matchAll(PHONE_RE)) {
     const digits = written.replace(/\(0\)/gu, '').replace(/\D/gu, '');
@@ -188,6 +184,24 @@ export function targetMarkers(input: OutlierInput, own: readonly string[]): Targ
     }
   }
   return { held, added };
+}
+
+/** The host a word names, ASCII, or undefined: labels joined by dots, a top-level domain from the list
+ *  or in Punycode, and no capitalised word-TLD after a full stop that lacks its space. */
+function hostOfWord(token: string): string | undefined {
+  // Most words with a dot end a sentence or shorten one ("inkl.", "z.B."): a last label of ASCII
+  // letters (A–Z only: a long s or a dotless i is read as a letter of the domain below) that is no
+  // top-level domain ends the reading before the host is built.
+  const tld = token.slice(token.lastIndexOf('.') + 1);
+  if (/^[A-Za-z]+$/.test(tld) && !TLDS.has(tld.toLowerCase())) return undefined;
+  if (!token.includes('.') || !token.split('.').every((l) => HOST_LABEL.test(l))) return undefined;
+  // "Baumwolle.Es ist": a sentence whose space after the full stop is missing, not a host. Only where
+  // the TLD is also a word: "Evil.Com" is a host.
+  if (WORD_TLDS.has(tld.toLowerCase()) && /^\p{Lu}\p{Ll}/u.test(tld) && !/^www\./iu.test(token)) return undefined;
+  const host = asciiHost(token);
+  if (host === undefined) return undefined;
+  const asciiTld = host.slice(host.lastIndexOf('.') + 1);
+  return TLDS.has(asciiTld) || asciiTld.startsWith('xn--') ? host : undefined;
 }
 
 /** The words of a text that hold a dot or an @: maximal runs of letters and digits of any script and

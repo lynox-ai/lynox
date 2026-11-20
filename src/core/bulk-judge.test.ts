@@ -340,11 +340,15 @@ describe('judgeOutliersOf — the verdicts a judged run lists first', () => {
     const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.001 }));
     expect((await runBulkJudge(id, h.deps)).status).toBe('done');
 
-    const order: string[] = [];
-    const reading = ledger.judgeOutliersOf(id).then((r) => { order.push('done'); return r; });
-    setImmediate(() => { order.push('other'); });
-    expect(await reading).toMatchObject({ decided: 60, measured: true });
-    expect(order).toEqual(['other', 'done']);
+    // Other work, run again whenever the process is free: it runs between the parts, more than once.
+    let done = false;
+    let turns = 0;
+    const other = (): void => { if (!done) { turns += 1; setImmediate(other); } };
+    setImmediate(other);
+    const result = await ledger.judgeOutliersOf(id);
+    done = true;
+    expect(result).toMatchObject({ decided: 60, measured: true });
+    expect(turns).toBeGreaterThanOrEqual(2);
   });
 
   it('is null for a run without a rule', async () => {
