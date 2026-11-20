@@ -7,6 +7,7 @@ import * as reranker from './search-reranker.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { runInCallSlot } from '../../core/call-connection.js';
 import type { IAgent, SessionCounters } from '../../types/index.js';
+import { SearchResultAddresses } from '../../core/search-result-addresses.js';
 
 function makeCounters(): SessionCounters {
   return {
@@ -632,5 +633,27 @@ describe('API-setup reminder in a locked turn', () => {
     expect(owner).toContain(OWNER_LINE);
     expect(locked).toContain(LOCKED_LINE);
     expect(locked).not.toContain('ask_secret');
+  });
+});
+
+describe('search results feed the shell only from a search sent untainted', () => {
+  async function searchWith(startedTainted: boolean | undefined): Promise<SearchResultAddresses> {
+    const searches = new SearchResultAddresses();
+    const tool = createWebSearchTool(mockProvider([{ title: 'A', url: 'https://news.example/a', snippet: 's' }]));
+    const agent = { principal: OWNER_PRINCIPAL, searchResultAddresses: searches, ...(startedTainted === undefined ? {} : { batchStartedTainted: () => startedTainted }) };
+    await tool.handler({ action: 'search', query: 'q' }, agent as never);
+    return searches;
+  }
+
+  it('a search sent before foreign content adds its result hosts', async () => {
+    expect((await searchWith(false)).cleanHosts()).toEqual(['news.example']);
+  });
+
+  it('a search sent after foreign content, or by an agent that cannot say, adds the addresses but no host', async () => {
+    for (const started of [true, undefined]) {
+      const s = await searchWith(started);
+      expect(s.has('https://news.example/a')).toBe(true);
+      expect(s.cleanHosts()).toEqual([]);
+    }
   });
 });

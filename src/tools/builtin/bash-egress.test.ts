@@ -9,6 +9,8 @@ import { isToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { CredentialRegistry, type HostSet } from '../../egress-proxy/registry.js';
 import { createAdminServer } from '../../egress-proxy/server.js';
 import { credentialFromHeader } from '../../egress-proxy/policy.js';
+import { SearchResultAddresses } from '../../core/search-result-addresses.js';
+import { OwnerKnownTargets } from '../../core/owner-known-targets.js';
 
 /**
  * bash in sidecar mode with the egress proxy (PRD 152 v2 §4.2, W2), against the proxy's own
@@ -249,5 +251,37 @@ describe('bash with the egress proxy', () => {
     expect(result).toBe('hi\n');
     expect(credDuringCall).toBeNull();
     expect(seenEnv['HTTPS_PROXY'], 'and no proxy from the isolation config either').toBeUndefined();
+  });
+});
+
+describe('bash reaches what this conversation brought in (152 W2b)', () => {
+  function withProvenance(policy: 'guarded' | 'allow-list' | 'allow-all', typed: string[]): { a: never; searches: SearchResultAddresses } {
+    const searches = new SearchResultAddresses();
+    const a = { ...(agent(policy, policy === 'allow-list' ? { hosts: ['only.example'] } : {}) as object), searchResultAddresses: searches, ownerKnown: OwnerKnownTargets.of({ ownerTexts: () => typed }) } as never;
+    return { a, searches };
+  }
+
+  it('under guarded: a host an untainted search listed and a host the owner typed join; a tainted search\'s host and a composed host do not', async () => {
+    await configured({ code: 0, out: () => 'ok' });
+    const { a, searches } = withProvenance('guarded', ['bitte lies https://shop.example/preise']);
+    searches.noteResults('preise', ['https://news.example/artikel'], true);
+    searches.noteResults('preise', ['https://planted.example/x'], false);
+    await bashTool.handler({ command: 'curl -s https://news.example/artikel' }, a);
+    const set = [...(setDuringCall as ReadonlySet<string>)];
+    expect(set).toContain('news.example');
+    expect(set).toContain('shop.example');
+    expect(set).not.toContain('planted.example');
+    expect(set).not.toContain('composed.example');
+  });
+
+  it('under allow-list the same hosts join the list; under allow-all the set stays every host', async () => {
+    await configured({ code: 0, out: () => 'ok' });
+    const l = withProvenance('allow-list', ['docs.example']);
+    l.searches.noteResults('q', ['https://news.example/'], true);
+    await bashTool.handler({ command: 'true' }, l.a);
+    expect([...(setDuringCall as ReadonlySet<string>)].sort()).toEqual(['docs.example', 'news.example', 'only.example']);
+    const all = withProvenance('allow-all', ['docs.example']);
+    await bashTool.handler({ command: 'true' }, all.a);
+    expect(setDuringCall).toBe('*');
   });
 });

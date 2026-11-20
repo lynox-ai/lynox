@@ -408,8 +408,12 @@ export interface IAgent {
   readonly ownerKnown?: import('../core/owner-known-targets.js').OwnerKnownReader | undefined;
   /** The page addresses searches in this agent's conversation listed as results, as the provider
    *  gave them (`web_research` search adds to it, nothing else does). The origin check reads it for
-   *  a read after foreign content (`ToolEntry.readAddress`). Absent: none. */
+   *  a read after foreign content (`ToolEntry.readAddress`), and the shell's egress set reads the
+   *  hosts of searches sent before foreign content. A sub-agent and a workflow step share their
+   *  conversation's, by reference. Absent: none. */
   readonly searchResultAddresses?: import('../core/search-result-addresses.js').SearchResultAddresses | undefined;
+  /** See `Agent.batchStartedTainted`. */
+  batchStartedTainted?(): boolean;
   /** Where a target the owner did not name comes from in this agent's run, as far as the run
    *  knows it (a trigger's, a workflow's, a sub-agent, a helper's thread). Absent: read from the
    *  agent's taint (`readContent`), else unknown. */

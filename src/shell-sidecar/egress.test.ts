@@ -180,3 +180,31 @@ describe('one call against the registration listener', () => {
     expect(calls).toEqual([]);
   });
 });
+
+describe('what the conversation brought in joins the set', () => {
+  it('joins under guarded and allow-list, and changes nothing under allow-all and deny-all', () => {
+    const provenanceHosts = ['news.example', 'shop.example'];
+    const g = computeShellSet(input({ networkPolicy: 'guarded', provenanceHosts }));
+    expect(g.kind === 'hosts' && g.hosts).toEqual(expect.arrayContaining(provenanceHosts));
+    const l = computeShellSet(input({ networkPolicy: 'allow-list', allowedHosts: new Set(['only.example']), provenanceHosts }));
+    expect(l.kind === 'hosts' && l.hosts).toEqual(['news.example', 'only.example', 'shop.example']);
+    expect(computeShellSet(input({ networkPolicy: 'allow-all', provenanceHosts }))).toEqual({ kind: 'all' });
+    expect(computeShellSet(input({ networkPolicy: 'deny-all', provenanceHosts })).kind).toBe('none');
+  });
+
+  it('fills only the room the policy leaves, newest first, and never turns the set into none', () => {
+    const policy = new Set(Array.from({ length: MAX_SHELL_SET - 1 }, (_, i) => `p${String(i)}.example`));
+    const s = computeShellSet(input({ networkPolicy: 'allow-list', allowedHosts: policy, provenanceHosts: ['old.example', 'new.example'] }));
+    expect(s.kind).toBe('hosts');
+    if (s.kind !== 'hosts') return;
+    expect(s.hosts).toHaveLength(MAX_SHELL_SET);
+    expect(s.hosts).toContain('new.example');
+    expect(s.hosts).not.toContain('old.example');
+    expect(s.hosts).toContain('p0.example');
+  });
+
+  it('skips what the proxy cannot take, without naming it as a policy entry', () => {
+    const s = computeShellSet(input({ networkPolicy: 'allow-list', allowedHosts: new Set(['only.example']), provenanceHosts: ['10.0.0.1', '*.wild.example', 'Upper.Example', 'ok.example'] }));
+    expect(s).toEqual({ kind: 'hosts', hosts: ['ok.example', 'only.example'], dropped: [] });
+  });
+});
