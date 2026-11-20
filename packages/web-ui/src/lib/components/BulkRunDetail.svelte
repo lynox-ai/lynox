@@ -932,8 +932,6 @@
 						{#if resumeKind !== 'check'}
 							<!-- The window sentence first: what the failures allow then hangs on it ("Dabei …"). -->
 							<p class="text-sm" data-testid="bulk-resume-window">{t('bulk.resume.window')}{#if resumeText.allows}{' '}{resumeText.allows}{/if}</p>
-						{:else if resumeText.allows}
-							<p class="text-sm">{resumeText.allows}</p>
 						{/if}
 						<div class="flex flex-wrap gap-2">
 							<button type="button" class={btnPrimary} disabled={busy || (resumeKind === 'max' && bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run)) === null)} onclick={resume}>{t(resumeKind === 'check' ? 'bulk.resume.check' : 'bulk.resume.write')}</button>

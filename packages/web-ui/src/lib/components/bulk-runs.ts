@@ -124,10 +124,11 @@ export interface BulkRunDetailData extends BulkRun {
 	probeOwn?: boolean;
 	/** Targets an undo would take back now, a failed external write that may have landed included. */
 	undoable: number;
-	/** `undoable` in its parts: written targets, and targets sent to without a confirmed write, of
-	 *  which it is open whether the change arrived. Absent from an engine before this field. */
+	/** Of `undoable`: the written targets, and those with a send of which it is open whether the
+	 *  change arrived. A target whose sends the host all refused is in neither. Absent from an
+	 *  engine before this field. */
 	undoableParts?: { written: number; open: number };
-	/** For an undo: how many of the targets it gives a value back take back such an open write. */
+	/** For an undo: how many of the targets it gives a value back take back a write never confirmed. */
 	undoOpen?: number;
 	/** A list still to be read: the address its first page is read at, and the checksum the start presents. */
 	listFirstPage: string | null;
@@ -1006,8 +1007,11 @@ export function bulkFollowDelay(prev: number, ok: boolean, retryAfterS: number |
  *  would take back, and is not at its probe (that has its own way back). An atomic run is taken
  *  back whole or not at all, so only once it finished: the engine refuses any other
  *  (`atomic_partial`), and one that aborted has already rolled back what it could. */
-export function bulkCanUndo(run: Pick<BulkRunDetailData, 'kind' | 'phase' | 'haltReason' | 'undoable' | 'probe' | 'atomic'>): boolean {
+export function bulkCanUndo(run: Pick<BulkRunDetailData, 'kind' | 'phase' | 'haltReason' | 'undoable' | 'probe' | 'atomic'> & Partial<Pick<BulkRunDetailData, 'undoableParts'>>): boolean {
 	if (run.kind !== 'apply' || run.undoable <= 0 || bulkAtProbe(run)) return false;
+	// Only what the head shows as written, or a send of which it is open whether it arrived: a run
+	// whose every other send the host refused changed nothing an undo could take back.
+	if (run.undoableParts !== undefined && run.undoableParts.written + run.undoableParts.open === 0) return false;
 	if (run.atomic) return run.phase === 'done';
 	return run.phase === 'done' || run.phase === 'aborted' || (run.phase === 'writing' && run.haltReason !== null);
 }

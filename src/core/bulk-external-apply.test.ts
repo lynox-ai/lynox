@@ -334,6 +334,40 @@ describe('applying an external run', () => {
     }
   });
 
+  it('does not name a send the host refused as open, though its undo still reads it', async () => {
+    const s = shop();
+    // The host refuses the second write: it changed nothing there, and the head counts it failed.
+    s.sequence = new Map([['PATCH /products/1', [422]]]);
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15.00' } }, { target: url(1), after: { price: '20.00' } }]);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter });
+      expect(s.items.get('/products/1')!['price']).toBe('12.00');
+      expect(ledger.getStatus(runId)!.heads).toMatchObject({ written: 1, failed: 1, unclear: 0 });
+      // The undo takes back both, as before; the page names only the written one.
+      expect(ledger.countUndoable(runId)).toBe(2);
+      expect(ledger.countUndoableParts(runId)).toEqual({ written: 1, open: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it('counts an applied target a stale loop sent to after another found it as written, as the head does', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15.00' } }, { target: url(1), after: { price: '20.00' } }]);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter });
+      // A loop found the first target as planned, and a loop that had lost its claim sent to it after.
+      engineDb.getDb().prepare('UPDATE bulk_targets SET found_unsent = 1, write_sent = 1 WHERE run_id = ? AND seq = 0').run(runId);
+      expect(ledger.getStatus(runId)!.heads?.written).toBe(2);
+      expect(ledger.countUndoable(runId)).toBe(2);
+      expect(ledger.countUndoableParts(runId)).toEqual({ written: 2, open: 0 });
+    } finally {
+      restore();
+    }
+  });
+
   it('counts no open target on a local run, where a write has a known outcome', () => {
     const run = ledger.recordDryRun({
       createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'w',

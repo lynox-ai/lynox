@@ -98,6 +98,22 @@ describe('the undo offer with targets of which it is open whether the change arr
 		expect(text('bulk-undo-explain')).toContain('For one more target it is unclear whether the change reached the provider.');
 	});
 
+	it('is not offered for a run whose only sends the host refused, though the engine counts them', async () => {
+		setLocale('de');
+		run = makeRun({ undoable: 2, undoableParts: { written: 0, open: 0 } });
+		await render();
+		expect(text('bulk-undo-explain')).toBeUndefined();
+		expect(buttons()).not.toContain(t('bulk.undo.prepare'));
+	});
+
+	it('from an engine without the parts, is offered as before', async () => {
+		setLocale('de');
+		run = makeRun({ undoable: 1 });
+		await render();
+		expect(text('bulk-undo-explain')).toBe(t('bulk.undo.explain'));
+		expect(buttons()).toContain(t('bulk.undo.prepare'));
+	});
+
 	it('with only written targets, keeps the sentence as it was', async () => {
 		setLocale('de');
 		run = makeRun({ phase: 'done', applied: 2, failed: 0, undoable: 2, undoableParts: { written: 2, open: 0 } });
@@ -113,14 +129,14 @@ describe('the undo approval with targets that take back a write never confirmed'
 		targets = [written(1, false), written(2, false), written(3, false)];
 		run = makeRun({ kind: 'undo', phase: 'previewed', sourceRunId: 'r0', changes: { update: 3, create: 0, delete: 0, unchanged: 0, invalid: 0 }, failed: 0, undoable: 0, undoOpen: 1 });
 		await render();
-		expect(text('bulk-undo-approve-explain')).toBe('2 geschriebene Ziele bekommen ihren Wert von vorher zurück. Bei einem weiteren Ziel sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus diesem Lauf steht. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.');
+		expect(text('bulk-undo-approve-explain')).toBe('2 geschriebene Ziele bekommen ihren Wert von vorher zurück. Bei einem weiteren Ziel sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus dem ursprünglichen Lauf steht. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.');
 	});
 
 	it('with only such targets, says it checks them first', async () => {
 		setLocale('de');
 		run = makeRun({ total: 2, kind: 'undo', phase: 'previewed', sourceRunId: 'r0', changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 0 }, failed: 0, undoable: 0, undoOpen: 2 });
 		await render();
-		expect(text('bulk-undo-approve-explain')).toBe('Bei 2 Zielen sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus diesem Lauf steht.');
+		expect(text('bulk-undo-approve-explain')).toBe('Bei 2 Zielen sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus dem ursprünglichen Lauf steht.');
 		expect(text('bulk-undo-approve-explain')).not.toContain('zurückbekommen');
 	});
 });

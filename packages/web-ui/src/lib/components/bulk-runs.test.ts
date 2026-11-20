@@ -854,11 +854,11 @@ describe('going on from a run that halted', () => {
 			bulkUndoApproveText({ changes: { update, create, delete: 0, unchanged: 0, invalid: 0 }, ...(undoOpen === undefined ? {} : { undoOpen }) }, i);
 		expect(ap(3, 0, undefined, DE)).toBe('3 Ziele bekommen ihren Wert von vorher zurück. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.');
 		expect(ap(3, 0, 0, EN)).toBe('3 targets get their previous value back. Targets someone has changed since stay as they are.');
-		expect(ap(2, 1, 1, DE)).toBe('2 geschriebene Ziele bekommen ihren Wert von vorher zurück. Bei einem weiteren Ziel sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus diesem Lauf steht. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.');
-		expect(ap(3, 0, 2, DE)).toBe('1 geschriebenes Ziel bekommt seinen Wert von vorher zurück. Bei 2 weiteren Zielen sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus diesem Lauf steht. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.');
-		expect(ap(4, 0, 1, EN)).toBe('3 written targets get their previous value back. For one more target, taking back checks first and only resets where the value from this run is in place. Targets someone has changed since stay as they are.');
-		expect(ap(2, 0, 2, DE)).toBe('Bei 2 Zielen sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus diesem Lauf steht.');
-		expect(ap(1, 0, 1, EN)).toBe('For one target, taking back checks first and only resets where the value from this run is in place.');
+		expect(ap(2, 1, 1, DE)).toBe('2 geschriebene Ziele bekommen ihren Wert von vorher zurück. Bei einem weiteren Ziel sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus dem ursprünglichen Lauf steht. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.');
+		expect(ap(3, 0, 2, DE)).toBe('1 geschriebenes Ziel bekommt seinen Wert von vorher zurück. Bei 2 weiteren Zielen sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus dem ursprünglichen Lauf steht. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.');
+		expect(ap(4, 0, 1, EN)).toBe('3 written targets get their previous value back. For one more target, taking back checks first and only resets where the value from the original run is in place. Targets someone has changed since stay as they are.');
+		expect(ap(2, 0, 2, DE)).toBe('Bei 2 Zielen sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus dem ursprünglichen Lauf steht.');
+		expect(ap(1, 0, 1, EN)).toBe('For one target, taking back checks first and only resets where the value from the original run is in place.');
 	});
 
 	it('says what writing on lets fail, by the limit against the open targets', () => {
