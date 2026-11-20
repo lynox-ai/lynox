@@ -389,9 +389,12 @@ async function applyRunEffect(
     // checks between targets (the owner's stop among them) apply as on any other.
     const lost = outcome.kind === 'lost' || held.lost;
     // `taken`: this loop found the target taken, at the write or at its fenced record.
+    // When the other loop already ended or halted the run, this loop reports that, not its own reason.
     const haltRun = (reason: BulkHaltReason, taken: boolean): BulkEffectOutcome => {
-      if (taken) ledger.haltIfWriting(runId, reason);
-      else ledger.halt(runId, reason);
+      if (taken && !ledger.haltIfWriting(runId, reason)) {
+        return { status: 'halted', summary: summarize(ledger, runId, say.otherLoop, say) };
+      }
+      if (!taken) ledger.halt(runId, reason);
       return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', reason), say) };
     };
     if (outcome.kind === 'lost') continue;
@@ -403,8 +406,9 @@ async function applyRunEffect(
     }
     if (outcome.kind === 'applied') {
       const recorded = ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual, via, outcome.hostAddedMarkup === true, outcome.hostRewrote === true, held.since);
-      // Written and recorded with its mark first, so a halt that another loop's reason
-      // overwrites still leaves the target marked: the mark is the truth, not `halt_reason`.
+      // Recorded with its mark first where this loop still holds the target, so a halt that
+      // another loop's reason overwrites still leaves it marked: the mark is the truth, not
+      // `halt_reason`. Where the other loop holds it, that loop records what it finds there.
       if (outcome.hostAddedMarkup === true) return haltRun(BULK_HALT_REASONS.markupAddedByShop, lost || !recorded);
       if (!recorded) continue;
       consecutive = 0;
