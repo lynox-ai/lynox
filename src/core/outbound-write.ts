@@ -968,6 +968,11 @@ const JSON_TEXT_BUDGET_CHARS = 2_000_000;
  * with (`pathHoldsSecret`).
  */
 function jsonTextHides(text: string, readings: Iterable<string>, mask: (text: string) => string, unread = true): boolean {
+  const ofText = [...readings];
+  const literalSeen = new Set<string>();
+  for (const read of [...ofText, ...formSides(text).flatMap((side) => [...serverReadings(side)])]) {
+    if (escapedLiteralHides(read, mask, literalSeen, 0)) return true;
+  }
   const seen = new Set<string>();
   let left = JSON_TEXT_BUDGET_CHARS;
   const hides = (t: string, ofT: Iterable<string>, depth: number): boolean => {
@@ -998,7 +1003,52 @@ function jsonTextHides(text: string, readings: Iterable<string>, mask: (text: st
     }
     return false;
   };
-  return hides(text, readings, 0);
+  return hides(text, ofText, 0);
+}
+
+/** How many times a string literal inside a string literal is read by {@link escapedLiteralHides}. */
+const LITERAL_READ_DEPTH = 3;
+
+/**
+ * Whether a JSON string literal written anywhere in `text` holds a secret `mask` knows once it is
+ * unescaped, as that string or in a server reading of it, and so on for literals inside it. Read
+ * from the literals, not from a parse: a server's parser may take text `JSON.parse` refuses
+ * (`NaN`, a comma at the end, text after the value), a JSON document over several lines inside a
+ * larger text, or a form whose name has a space. It only decides: it costs no depth and no budget
+ * of {@link jsonTextHides}, and text it cannot read (past its depth, a literal that does not parse)
+ * counts as holding nothing, so it never makes text unshowable that holds no secret. Only a literal
+ * with an escape is read: one without has its text as written, which the mask already saw.
+ */
+function escapedLiteralHides(text: string, mask: (text: string) => string, seen: Set<string>, depth: number): boolean {
+  if (depth >= LITERAL_READ_DEPTH || !text.includes('\\')) return false;
+  for (const piece of literalPieces(text)) {
+    for (const [literal] of piece.matchAll(/"(?:[^"\\\n]|\\.)*"/g)) {
+      if (!literal.includes('\\')) continue;
+      let value: string;
+      try { value = JSON.parse(literal) as string; } catch { continue; }
+      if (seen.has(value)) continue;
+      seen.add(value);
+      for (const read of serverReadings(value)) {
+        if (mask(read) !== read) return true;
+        if (escapedLiteralHides(read, mask, seen, depth + 1)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** Where the literals of `text` are read from, so a stray quote before one does not pair the
+ *  quotes wrongly: the text, each line and each `&` piece of it, and each of those after its
+ *  first `=` (a form value). Each character is in a handful of pieces, so the cost stays linear. */
+function literalPieces(text: string): string[] {
+  const out = [text];
+  if (!/[\n&=]/.test(text)) return out;
+  for (const segment of text.split(/[\n&]/)) {
+    if (segment.includes('\\')) out.push(segment);
+    const at = segment.indexOf('=');
+    if (at >= 0 && segment.includes('\\', at)) out.push(segment.slice(at + 1));
+  }
+  return out;
 }
 
 /** Both sides of every `name=value` pair of `text` read as a form, the way a server splits it
