@@ -497,7 +497,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           const template = judgeTemplate(judge);
           // A verdict replaces F on an existing row; a row that is not there has nothing to judge.
           targets = planDataStore(source, store, input.target_collection).map((t): PlannedTarget =>
-            'invalid' in t ? t : t.before.absent ? { key: t.key, invalid: 'not_found' } : { key: t.key, before: t.before, after: template });
+            'invalid' in t ? t : t.before.absent ? { key: t.key, invalid: 'not_found' } : { key: t.key, before: t.before, after: template, beforeGrants: t.beforeGrants });
         } else {
           targets = planDataStore(source, store, input.target_collection);
         }
@@ -539,6 +539,10 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         targetCollection: input.target_system === 'data_store' ? input.target_collection ?? null : null,
         atomic: input.atomic === true,
         judge,
+        // The worker that writes the run holds no conversation: its data-store writes are stamped
+        // with this one's grant set, or a row made from what it read would escape that
+        // connection's erasure as unknown.
+        plannerGrants: agent.conversationGrants?.members() ?? null,
       });
       return [
         'Dry run recorded — nothing was written to any target.',

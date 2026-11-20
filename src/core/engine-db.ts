@@ -1636,6 +1636,16 @@ const MIGRATIONS: string[] = [
   // this, a grant with no named row walks the whole trail.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (70);
    CREATE INDEX IF NOT EXISTS idx_audit_log_mandate ON audit_log(mandate_id, id);`,
+  // v71: where a bulk run's data-store writes came from (`_source_grants`, data-store.ts). The
+  // run runs in the worker, outside any conversation, so the grant set of the conversation that
+  // planned it is kept on the run (`planner_grants`) and its writes are stamped with it. Per
+  // target, `before_grants` is the stamp the row held before the run wrote it, and
+  // `write_grants` the stamp an undo writes back in place of the run's. Each a JSON array of
+  // grant ids, sorted and without duplicates; NULL is unknown (and, on `write_grants`, the run's).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (71);
+   ALTER TABLE bulk_runs ADD COLUMN planner_grants TEXT;
+   ALTER TABLE bulk_targets ADD COLUMN before_grants TEXT;
+   ALTER TABLE bulk_targets ADD COLUMN write_grants TEXT;`,
 ];
 
 export interface EngineDbOptions {

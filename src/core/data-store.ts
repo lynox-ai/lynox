@@ -987,6 +987,34 @@ export class DataStore {
   }
 
   /**
+   * The `_source_grants` each row whose `keyColumn` value is among `values` holds, keyed by that
+   * value as a string — the stamp a bulk run must write back on an undo. A row whose stamp is
+   * NULL, empty or does not parse maps to null: unknown, as {@link sourceOfRow} reads it. A value
+   * no row has is not in the map. The caller passes a single-column unique key, so each value
+   * names one row at most; the collection and column are checked as in {@link sourceOfRow}.
+   */
+  sourceGrantsByKey(collection: string, keyColumn: string, values: readonly unknown[]): Map<string, string[] | null> {
+    const out = new Map<string, string[] | null>();
+    if (values.length === 0) return out;
+    if (!COLLECTION_NAME_RE.test(collection) || RESERVED_NAMES.has(collection)) throw new Error(`Collection "${collection}" not found.`);
+    const info = this._getCollectionMeta(collection);
+    if (!info) throw new Error(`Collection "${collection}" not found.`);
+    const columns = JSON.parse(info.schema_json) as DataStoreColumnDef[];
+    if (!columns.some(c => c.name === keyColumn) || !VALID_COLUMN_NAME_RE.test(keyColumn)) throw new Error(`Unknown column "${keyColumn}".`);
+    this._assertSourceColumns(collection);
+    const rows = this.db.prepare(
+      `SELECT "${keyColumn}" AS k, "_source_grants" AS g FROM "ds_${collection}" WHERE "${keyColumn}" IN (${values.map(() => '?').join(', ')})`,
+    ).all(...values) as Array<{ k: unknown; g: string | null }>;
+    for (const row of rows) {
+      let parsed: unknown = null;
+      try { parsed = row.g === null ? null : JSON.parse(row.g); } catch { parsed = null; }
+      const grants = Array.isArray(parsed) && parsed.length > 0 && parsed.every((g) => typeof g === 'string') ? parsed as string[] : null;
+      out.set(String(row.k), grants);
+    }
+    return out;
+  }
+
+  /**
    * Record-on-spine — the EXISTS form of {@link getRecordsForSubject}: does any row, in
    * any collection, link `subjectId` through a `subject`-typed column? One indexed probe
    * per collection (the R2a per-subject index), short-circuits on the first hit, never

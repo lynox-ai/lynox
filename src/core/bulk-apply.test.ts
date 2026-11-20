@@ -1827,6 +1827,70 @@ describe('data-store runs', () => {
     expect(store.getCollectionInfo('products')!.recordCount).toBe(150);
   });
 
+  describe('the stamp of a run\'s writes (_source_grants)', () => {
+    const writerFor = (run: Parameters<typeof bulkWriterFor>[0]) => bulkWriterFor(run, store);
+    /** An agent whose conversation holds `grants`; null: one that holds no grant set. */
+    const agentWith = (grants: string[] | null): IAgent => ({
+      ...agent(), ...(grants === null ? {} : { conversationGrants: { members: () => [...grants] } }),
+    } as unknown as IAgent);
+    const planAndApply = async (rows: { target: string; price: number }[], planner: IAgent): Promise<string> => {
+      writeFileSync(join(ws, 'p.json'), JSON.stringify(rows));
+      const runId = runIdOf(await bulkPlanTool.handler(
+        { target_system: 'data_store', target_collection: 'products', source_file: 'p.json' }, planner));
+      approve(runId);
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor })).status).toBe('done');
+      return runId;
+    };
+    const undoOf = async (runId: string): Promise<string> => {
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      approve(undo.status.id);
+      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor })).status).toBe('done');
+      return undo.status.id;
+    };
+
+    it('a row a run creates holds the planning conversation\'s grants, not unknown', async () => {
+      seedStore();
+      await planAndApply([{ target: 'NEW1', price: 1 }], agentWith(['gA']));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows).toHaveLength(1);
+      expect(store.sourceOfRow('products', 'sku', 'NEW1')?.grants).toEqual(['gA']);
+    });
+
+    it('CONTROL: a row a run creates, planned with no grant set, holds unknown', async () => {
+      seedStore();
+      await planAndApply([{ target: 'NEW1', price: 1 }], agentWith(null));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows).toHaveLength(1);
+      expect(store.sourceOfRow('products', 'sku', 'NEW1')?.grants).toEqual(['unknown']);
+    });
+
+    it('a row an undo deletes comes back with the stamp it held, when that undo is undone', async () => {
+      seedStore();
+      // The row a run under gB creates; its undo deletes it, and the undo of that undo — planned
+      // by the owner with no conversation — restores it.
+      const runId = await planAndApply([{ target: 'NEW1', price: 1 }], agentWith(['gB']));
+      expect(store.sourceOfRow('products', 'sku', 'NEW1')?.grants).toEqual(['gB']);
+      const undoId = await undoOf(runId);
+      expect(store.sourceOfRow('products', 'sku', 'NEW1')).toBeNull();
+      await undoOf(undoId);
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows[0]).toMatchObject({ sku: 'NEW1', price: 1 });
+      expect(store.sourceOfRow('products', 'sku', 'NEW1')?.grants).toEqual(['gB']);
+    });
+
+    it('the undo of an update writes back the stamp the row held beside the run\'s, and records it per target', async () => {
+      seedStore();
+      store.putRowVerbatim('products', { sku: 'S1', price: 1, owner: 'subj-1' }, { grants: ['gB'], runId: null, writtenBy: null, untrusted: false });
+      expect(store.sourceOfRow('products', 'sku', 'S1')?.grants).toEqual(['gB', 'unknown']);
+      const runId = await planAndApply([{ target: 'S1', price: 99 }], agentWith(['gA']));
+      expect(store.sourceOfRow('products', 'sku', 'S1')?.grants).toEqual(['gA', 'gB', 'unknown']);
+      const undoId = await undoOf(runId);
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'S1' } }).rows[0]).toMatchObject({ price: 1 });
+      // The store's union keeps the run's grant beside the restored one (accepted over-attribution).
+      expect(store.sourceOfRow('products', 'sku', 'S1')?.grants).toEqual(['gA', 'gB', 'unknown']);
+      const cells = engineDb.getDb().prepare('SELECT before_grants AS b, write_grants AS w FROM bulk_targets WHERE run_id = ?').get(undoId);
+      expect(cells).toEqual({ b: '["gA"]', w: '["gB","unknown"]' });
+    });
+  });
+
   it('a data-store run whose collection is gone halts as unavailable', async () => {
     seedStore();
     writeFileSync(join(ws, 'p.json'), JSON.stringify([{ target: 'S1', price: 5 }]));
