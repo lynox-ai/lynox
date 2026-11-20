@@ -96,7 +96,7 @@ let invoked = null;
 try {
   invoked = process.argv[1] === undefined ? null : realpathSync(process.argv[1]);
 } catch {
-  process.stderr.write('symlink-guard: argv[1] does not resolve; not run as a script\n');
+  process.stderr.write(`entrypoint self-check: ${import.meta.url} could not resolve process.argv[1]\n`);
 }
 if (invoked !== null && realpathSync(fileURLToPath(import.meta.url)) === invoked) main();
 
