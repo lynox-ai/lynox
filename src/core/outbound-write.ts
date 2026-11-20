@@ -1022,10 +1022,8 @@ const LITERAL_READ_DEPTH = 3;
 function escapedLiteralHides(text: string, mask: (text: string) => string, seen: Set<string>, depth: number): boolean {
   if (depth >= LITERAL_READ_DEPTH || !text.includes('\\')) return false;
   for (const piece of literalPieces(text)) {
-    for (const [literal] of piece.matchAll(/"(?:[^"\\\n]|\\.)*"/g)) {
-      if (!literal.includes('\\')) continue;
-      let value: string;
-      try { value = JSON.parse(literal) as string; } catch { continue; }
+    for (const literal of escapedLiterals(piece)) {
+      const value = unescapedLiteral(literal);
       if (seen.has(value)) continue;
       seen.add(value);
       for (const read of serverReadings(value)) {
@@ -1035,6 +1033,59 @@ function escapedLiteralHides(text: string, mask: (text: string) => string, seen:
     }
   }
   return false;
+}
+
+/**
+ * The double-quoted literals of `text` that hold an escape, found in one pass from the left: a
+ * literal ends at the next quote no backslash escapes. One that a raw line break ends unclosed
+ * pairs nothing else on its line, so the search goes on after that line break; a pattern that
+ * tried again from each quote would read a line of escaped quotes once per quote.
+ */
+function escapedLiterals(text: string): string[] {
+  const out: string[] = [];
+  let from = 0;
+  for (;;) {
+    const start = text.indexOf('"', from);
+    if (start < 0) return out;
+    let at = start + 1;
+    let escaped = false;
+    while (at < text.length && text[at] !== '"' && text[at] !== '\n') {
+      if (text[at] === '\\') {
+        escaped = true;
+        // A backslash before CRLF continues the line like one before LF.
+        at += text[at + 1] === '\r' && text[at + 2] === '\n' ? 2 : 1;
+      }
+      at++;
+    }
+    if (at >= text.length) return out;
+    if (text[at] === '"' && escaped) out.push(text.slice(start, at + 1));
+    from = at + 1;
+  }
+}
+
+/**
+ * The text of a double-quoted literal as a parser reads it: as JSON when it is JSON, otherwise
+ * the way lenient parsers unescape (`\xHH`, `\UHHHHHHHH`, octal, `\'`, a line continuation,
+ * and an escape none of them knows read as the character after the backslash). A literal one
+ * unknown escape makes invalid JSON is still read, so a `\\u…` elsewhere in it is not lost.
+ */
+function unescapedLiteral(literal: string): string {
+  try { return JSON.parse(literal) as string; } catch { /* not JSON: read it the lenient way */ }
+  const SIMPLE: Record<string, string> = { b: '\b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '0': '\0' };
+  const code = (hex: string): string => {
+    const point = parseInt(hex, 16);
+    return Number.isFinite(point) && point <= 0x10ffff ? String.fromCodePoint(point) : '';
+  };
+  return literal.slice(1, -1).replace(
+    /\\(?:u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})|x([0-9a-fA-F]{2})|([0-7]{1,3})|(\r\n|[\s\S]))/g,
+    (_m, u?: string, bigU?: string, x?: string, octal?: string, other?: string) =>
+      u !== undefined ? code(u)
+        : bigU !== undefined ? code(bigU)
+        : x !== undefined ? code(x)
+        : octal !== undefined ? (octal === '0' ? '\0' : String.fromCharCode(parseInt(octal, 8)))
+        : other === '\n' || other === '\r\n' ? ''
+        : SIMPLE[other!] ?? other!,
+  );
 }
 
 /** Where the literals of `text` are read from, so a stray quote before one does not pair the

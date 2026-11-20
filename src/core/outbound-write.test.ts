@@ -1163,6 +1163,44 @@ describe('a secret inside JSON text inside a value', () => {
       expect(bodyForQuestion(`q=%22&v=${encodeURIComponent('{"a":"x&y","token":"\\u0061",}')}`, mask, FORM)).toMatchObject({ escapedSecret: false });
     });
 
+    it('a literal with an escape JSON does not know is still read, the way a lenient parser unescapes it', () => {
+      const rest = STORED.slice(1);
+      const forms = [
+        ['an escaped quote', `{"t":"\\u0068${rest}\\'"}`],
+        ['a \\x escape', `{"t":"\\x68${rest}"}`],
+        ['an octal escape', `{"t":"\\150${rest}"}`],
+        ['a \\U escape', `{"t":"\\U00000068${rest}"}`],
+        ['a line continuation', `{"t":"hunter\\\n2secret"}`],
+      ] as const;
+      for (const [, body] of forms) {
+        expect(bodyForQuestion(body, mask, 'application/json')).toEqual({ unshowable: 'escaped-secret' });
+        expect(bodyForQuestion(`v=${encodeURIComponent(body)}`, mask, FORM)).toEqual({ text: 'v = ***', escapedSecret: true });
+      }
+      // In a header too, which carries no line break.
+      for (const [, body] of forms.slice(0, 4)) {
+        expect(headersForQuestion({ 'X-Meta': body }, mask, () => 'show')).toEqual({ unshowable: { reason: 'escaped-secret', name: 'X-Meta' } });
+      }
+      // Control: the same escapes around no secret are shown.
+      expect('text' in bodyForQuestion(`{"t":"\\x61b\\150\\'"}`, mask, 'application/json')).toBe(true);
+      // A line continuation before CRLF, and an escaped quote ahead of the secret in a literal.
+      expect(bodyForQuestion(`{"t":"hunter\\\r\n2secret",}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      expect(bodyForQuestion(`{"t":"say \\"\\u0068${rest}",}`, mask, 'application/json')).toEqual({ unshowable: 'escaped-secret' });
+      expect('text' in bodyForQuestion(`{"t":"hunter\\\r\n2",}`, mask, 'text/plain')).toBe(true);
+    });
+
+    it('reads a line of escaped quotes that never closes in time linear in its length', () => {
+      // A quote, then escaped quotes to the end: each quote opens a literal no quote closes.
+      const run = (n: number) => `"${'\\"'.repeat(n)}`;
+      const tail = '%252580+%E9%u0041';
+      const time = (text: string) => { const t0 = performance.now(); bodyForQuestion(text, mask, 'text/plain'); return performance.now() - t0; };
+      time(`a=${run(1000)}${tail}`);
+      const small = time(`a=${run(4_000)}${tail}`);
+      const large = time(`a=${run(32_000)}${tail}`);
+      // Eight times the text: linear stays well under 64 times the time, quadratic does not.
+      expect(large).toBeLessThan(Math.max(small, 5) * 24);
+      expect(large).toBeLessThan(3_000);
+    });
+
     it('a form in a decoded value whose name has a space or starts with a bracket', () => {
       for (const name of ['my name', '[0]', 'a b[c]']) {
         expect(bodyForQuestion(`p=${encodeURIComponent(`${name}=${escaped}`)}`, mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
