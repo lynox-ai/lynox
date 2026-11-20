@@ -275,6 +275,10 @@ describe('a cancelled run', () => {
 		// Its last step reads as the list reads its phase, not as done.
 		const steps = [...target.querySelectorAll('li[aria-current="step"]')].map((l) => l.textContent);
 		expect(steps).toEqual(['abgebrochen']);
+		// Only the last one: every step before keeps its name.
+		const chips = [...(target.querySelector('li[aria-current="step"]')?.parentElement?.querySelectorAll('li') ?? [])].map((l) => l.textContent);
+		expect(chips.filter((c) => c === 'abgebrochen')).toHaveLength(1);
+		expect(chips).toContain(t('bulk.step.planned'));
 		expect(shown()).not.toContain(t('bulk.step.done'));
 		expect(bulkHaltSuffixKey({ phase: 'aborted', haltKey: 'mandateEnded' })).toBeNull();
 		expect(bulkHaltSuffixKey({ phase: 'aborted', haltKey: 'stoppedByOwner' })).toBeNull();
