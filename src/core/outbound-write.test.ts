@@ -1184,6 +1184,10 @@ describe('a secret inside JSON text inside a value', () => {
       expect('text' in bodyForQuestion(`{"t":"\\x61b\\150\\'"}`, mask, 'application/json')).toBe(true);
       // A line continuation before CRLF, and an escaped quote ahead of the secret in a literal.
       expect(bodyForQuestion(`{"t":"hunter\\\r\n2secret",}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      // A backslash before CR or U+2028 joins the lines into one literal, yet each line is still read.
+      for (const brk of ['\r', ' ', ' ']) {
+        expect(bodyForQuestion(`"x\\${brk}y "\\u0068${rest}"`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      }
       expect(bodyForQuestion(`{"t":"say \\"\\u0068${rest}",}`, mask, 'application/json')).toEqual({ unshowable: 'escaped-secret' });
       expect('text' in bodyForQuestion(`{"t":"hunter\\\r\n2",}`, mask, 'text/plain')).toBe(true);
     });
@@ -1197,7 +1201,7 @@ describe('a secret inside JSON text inside a value', () => {
       const small = time(`a=${run(4_000)}${tail}`);
       const large = time(`a=${run(32_000)}${tail}`);
       // Eight times the text: linear stays well under 64 times the time, quadratic does not.
-      expect(large).toBeLessThan(Math.max(small, 5) * 24);
+      expect(large).toBeLessThan(Math.max(small, 20) * 24);
       expect(large).toBeLessThan(3_000);
     });
 

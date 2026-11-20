@@ -1093,8 +1093,10 @@ function unescapedLiteral(literal: string): string {
  *  first `=` (a form value). Each character is in a handful of pieces, so the cost stays linear. */
 function literalPieces(text: string): string[] {
   const out = [text];
-  if (!/[\n&=]/.test(text)) return out;
-  for (const segment of text.split(/[\n&]/)) {
+  // Every line break a backslash in a literal may continue over: a line the tokenizer reads as
+  // one literal is still read line by line.
+  if (!/[\r\n\u2028\u2029&=]/.test(text)) return out;
+  for (const segment of text.split(/\r\n?|[\n\u2028\u2029&]/)) {
     if (segment.includes('\\')) out.push(segment);
     const at = segment.indexOf('=');
     if (at >= 0 && segment.includes('\\', at)) out.push(segment.slice(at + 1));
