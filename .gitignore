@@ -1,4 +1,6 @@
-node_modules/
+# No trailing slash: a worktree's `node_modules` can be a link to another checkout, and
+# `node_modules/` matches only a directory (scripts/symlink-guard.mjs is the backstop).
+node_modules
 dist/
 build/
 *.tsbuildinfo
