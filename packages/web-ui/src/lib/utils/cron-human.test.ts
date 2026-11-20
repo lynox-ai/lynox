@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { monthDay } from './cron-human.js';
+import { localSchedule, monthDay } from './cron-human.js';
 
 describe('a day of the month in a schedule line', () => {
 	it('is an English ordinal: st, nd, rd, and th for 11 to 13 and the rest', () => {
@@ -9,5 +9,41 @@ describe('a day of the month in a schedule line', () => {
 
 	it('is the bare number in German, where the sentence carries the period', () => {
 		expect([1, 11, 22].map((d) => monthDay(d, 'de'))).toEqual(['1', '11', '22']);
+	});
+});
+
+describe('a UTC schedule as the reader lives it', () => {
+	const ZURICH_WINTER = 60;
+	const LOS_ANGELES = -480;
+
+	it('moves the weekday with the hour across midnight, both ways', () => {
+		// Measured 2026-11-20: 0 23 * * 1 runs Tuesday 00:00 in Zurich, and was shown as Monday.
+		expect(localSchedule('0 23 * * 1', ZURICH_WINTER)).toEqual({ kind: 'weekly', weekday: 2, time: '00:00' });
+		expect(localSchedule('0 23 * * 6', ZURICH_WINTER)).toEqual({ kind: 'weekly', weekday: 0, time: '00:00' });
+		expect(localSchedule('0 2 * * 1', LOS_ANGELES)).toEqual({ kind: 'weekly', weekday: 0, time: '18:00' });
+		expect(localSchedule('0 2 * * 0', LOS_ANGELES)).toEqual({ kind: 'weekly', weekday: 6, time: '18:00' });
+		expect(localSchedule('0 9 * * 1', ZURICH_WINTER)).toEqual({ kind: 'weekly', weekday: 1, time: '10:00' });
+	});
+
+	it('moves a monthly day with the hour, and says the last day where day 1 moves back', () => {
+		expect(localSchedule('0 23 1 * *', ZURICH_WINTER)).toEqual({ kind: 'monthly', day: 2, time: '00:00' });
+		expect(localSchedule('0 23 27 * *', ZURICH_WINTER)).toEqual({ kind: 'monthly', day: 28, time: '00:00' });
+		expect(localSchedule('0 2 15 * *', LOS_ANGELES)).toEqual({ kind: 'monthly', day: 14, time: '18:00' });
+		expect(localSchedule('0 2 1 * *', LOS_ANGELES)).toEqual({ kind: 'monthly_last', time: '18:00' });
+		expect(localSchedule('0 10 1 * *', ZURICH_WINTER)).toEqual({ kind: 'monthly', day: 1, time: '11:00' });
+	});
+
+	it('keeps a day 28 to 31 that moves forward in UTC, since some months lack the day it would land on', () => {
+		for (const day of [28, 29, 30, 31]) {
+			expect(localSchedule(`0 23 ${day} * *`, ZURICH_WINTER)).toEqual({ kind: 'monthly_utc', day, time: '23:00' });
+		}
+	});
+
+	it('moves only the hour of a daily schedule, and leaves what it cannot read as it is', () => {
+		expect(localSchedule('30 23 * * *', ZURICH_WINTER)).toEqual({ kind: 'daily', time: '00:30' });
+		expect(localSchedule('0 * * * *', ZURICH_WINTER)).toEqual({ kind: 'hourly' });
+		for (const cron of ['*/5 * * * *', '0 9 * 1 *', '0 9 * * 7', '0 24 * * *', '60 9 * * *', '0 9 0 * *', '0 9 32 * *']) {
+			expect(localSchedule(cron, ZURICH_WINTER)).toEqual({ kind: 'raw', cron });
+		}
 	});
 });

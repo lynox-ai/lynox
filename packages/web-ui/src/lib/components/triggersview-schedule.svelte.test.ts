@@ -39,6 +39,7 @@ afterEach(() => {
 	setLocale(locale);
 	vi.useRealTimers();
 	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
 });
 
 async function render(): Promise<void> {
@@ -78,5 +79,35 @@ describe('a monthly schedule names its day as the language does', () => {
 		await render();
 		expect(scheduleOf('Erster')).toMatch(/^Monatlich am 1\. um \d\d:\d\d$/);
 		expect(scheduleOf('Zweiundzwanzigster')).toMatch(/^Monatlich am 22\. um \d\d:\d\d$/);
+	});
+});
+
+describe('a schedule near midnight names the local day', () => {
+	const rowsOf = (): Record<string, unknown>[] => [
+		{ ...BASE, id: 'w', title: 'Wochentag', schedule_cron: '0 23 * * 1' },
+		{ ...BASE, id: 'l', title: 'Erster', schedule_cron: '0 2 1 * *' },
+		{ ...BASE, id: 'u', title: 'Einunddreissigster', schedule_cron: '0 23 31 * *' },
+	];
+	// getTimezoneOffset is UTC minus local, in minutes.
+	const inZone = (offset: number) => vi.spyOn(Date.prototype, 'getTimezoneOffset').mockReturnValue(offset);
+
+	it('in Zurich: the next weekday, and a day 31 that moves forward stays in UTC', async () => {
+		inZone(-60);
+		setLocale('de');
+		rows = rowsOf();
+		await render();
+		expect(scheduleOf('Wochentag')).toBe('Dienstags 00:00');
+		expect(scheduleOf('Erster')).toBe('Monatlich am 1. um 03:00');
+		expect(scheduleOf('Einunddreissigster')).toBe('Monatlich am 31. um 23:00 UTC');
+	});
+
+	it('in Los Angeles: day 1 moves back to the last day, in English too', async () => {
+		inZone(480);
+		setLocale('en');
+		rows = rowsOf();
+		await render();
+		expect(scheduleOf('Wochentag')).toBe('Mondays 15:00');
+		expect(scheduleOf('Erster')).toBe('Monthly on the last day at 18:00');
+		expect(scheduleOf('Einunddreissigster')).toBe('Monthly on the 31st at 15:00');
 	});
 });
