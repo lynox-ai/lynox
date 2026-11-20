@@ -6,7 +6,7 @@
 // The view shows the schedule from the preview, never from the list it polls, and confirms with the
 // preview's `expect`: what the owner reads is what is stamped, or the engine answers 409 `changed`.
 
-import { t, tf } from '../i18n.svelte.js';
+import { t } from '../i18n.svelte.js';
 import { fillTemplate } from '../i18n-fill.js';
 import { markHidden, marksHidden, watchOf } from './trigger-consent.js';
 import { setApart } from './plan-takeover.js';
