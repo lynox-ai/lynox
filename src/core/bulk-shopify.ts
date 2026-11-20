@@ -58,6 +58,25 @@ export function shopifyMediaAccess(profile: Pick<ApiProfile, 'base_url' | 'auth'
 export const SHOPIFY_FIELDS_BEFORE_CONSENT_TEXT: readonly string[] = Object.freeze(['title', 'seo_title', 'seo_description']);
 
 /**
+ * Whether a Shopify connection's grant lets a bulk run change products. Asked is what the person
+ * confirmed (the grant's `asked_scope`, as the connect callback recorded it), never the profile's
+ * scope, as in {@link shopifyMediaAccess}: an app can grant `write_products` that lynox never asked
+ * for, and then nobody saw the consent page, which is shown only for a link that asks for a write
+ * scope. A grant from before `asked_scope` was recorded, or none, or a record that is no list,
+ * asked for nothing.
+ * - `writable`: asked for and granted.
+ * - `not_asked`: not asked for, whatever was granted. The way on is a connection that asks.
+ * - `not_granted`: asked for, but the store's app did not grant it.
+ */
+export type ShopifyProductWriteAccess = 'writable' | 'not_asked' | 'not_granted';
+
+export function shopifyProductWriteAccess(grant: unknown): ShopifyProductWriteAccess {
+  const list = (v: unknown): string[] => Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : [];
+  if (!isPlainObject(grant) || !list(grant['asked_scope']).includes('write_products')) return 'not_asked';
+  return list(grant['granted_scope']).includes('write_products') ? 'writable' : 'not_granted';
+}
+
+/**
  * The fields of an apply that its connection does not cover yet, sorted; empty when it covers them
  * all. A connection covers every field once it was confirmed under the current customer text
  * ({@link SHOPIFY_CONSENT_VERSION}, recorded by the connect callback as `consent_version`). Under
