@@ -209,21 +209,21 @@ describe('a run the engine works on', () => {
 	it('says lynox writes, with the written targets out of those it writes, approved and while writing, and the head moves too', async () => {
 		run = makeRun({ phase: 'approved', total: 4, changes: { ...UPDATES(3), unchanged: 1 } });
 		await render();
-		expect(line()).toBe('lynox schreibt … 0 von 3');
+		expect(line()).toBe('lynox schreibt … 0 von 3 erledigt');
 		run = { ...run, phase: 'writing', applied: 2 };
 		await pass(BULK_FOLLOW_MS);
-		expect(line()).toBe('lynox schreibt … 2 von 3');
+		expect(line()).toBe('lynox schreibt … 2 von 3 erledigt');
 		expect(counts()).toBe(tf('bulk.head.counts', { n: '4', a: '2', c: '0', f: '0' }));
 	});
 
 	it('says lynox takes back an undo with its numbers, so a running undo does not look finished, and the head counts what it took back', async () => {
 		run = makeRun({ kind: 'undo', sourceRunId: 'r0', phase: 'writing', total: 3, changes: UPDATES(3), applied: 1 });
 		await render();
-		expect(line()).toBe('lynox nimmt zurück … 1 von 3');
+		expect(line()).toBe('lynox nimmt zurück … 1 von 3 erledigt');
 		expect(counts()).toBe('3 · zurückgenommen 1 · Konflikte 0 · fehlgeschlagen 0');
 		run = { ...run, applied: 2 };
 		await pass(BULK_FOLLOW_MS);
-		expect(line()).toBe('lynox nimmt zurück … 2 von 3');
+		expect(line()).toBe('lynox nimmt zurück … 2 von 3 erledigt');
 		expect(counts()).toBe('3 · zurückgenommen 2 · Konflikte 0 · fehlgeschlagen 0');
 	});
 
@@ -255,7 +255,7 @@ describe('a run the engine works on', () => {
 		await render();
 		run = { ...run, phase: 'writing', changes: UPDATES(3), applied: 1, judge: { tier: 'standard', unjudged: 0, judged: 3 } };
 		await pass(BULK_FOLLOW_MS);
-		expect(line()).toBe('lynox schreibt … 1 von 3');
+		expect(line()).toBe('lynox schreibt … 1 von 3 erledigt');
 	});
 
 	it('drops an answer that arrives after the page is gone, and loads nothing for it', async () => {
@@ -297,7 +297,7 @@ describe('a run the engine works on', () => {
 		try {
 			run = makeRun({ kind: 'undo', sourceRunId: 'r0', phase: 'writing', total: 3, changes: UPDATES(3), applied: 1 });
 			await render();
-			expect(line()).toBe('lynox is undoing … 1 of 3');
+			expect(line()).toBe('lynox is undoing … 1 of 3 done');
 		} finally { setLocale('de'); }
 	});
 
@@ -308,7 +308,7 @@ describe('a run the engine works on', () => {
 		retryAfter = '4';
 		await pass(BULK_FOLLOW_MS);
 		await pass(10_000);
-		expect(line()).toBe('lynox schreibt … 0 von 3');
+		expect(line()).toBe('lynox schreibt … 0 von 3 erledigt');
 		expect(shown()).not.toContain(t('common.load_failed'));
 	});
 

@@ -466,10 +466,16 @@ function staleBefore(now: number): string {
   return new Date(now - BULK_CLAIM_STALE_MS).toISOString();
 }
 
+// A target the run found already holding its planned value and never sent to ({@link
+// BulkLedger.recordApplied}, `already`): it counts as applied, but the run changed nothing there.
+// A run from before `unsent_tracked` leaves such a target at `found_unsent = 0`, as written.
+const FOUND_SQL = '(found_unsent = 1 AND write_sent = 0)';
+
 /** The classes {@link BulkRunStatus.heads} splits a run's targets into, in rank order: a target
- *  counts in the first one it belongs to. Taken out, left out by the plan (`invalid`); unchanged;
- *  written (`applied_at`, one found already holding its value included, as in
- *  {@link BulkRunStatus.applied}), and of those the ones taken
+ *  counts in the first one it belongs to. Taken out, left out by the plan (`invalid`); unchanged
+ *  (by the plan, or found already holding its value and never sent to, {@link
+ *  BulkRunStatus.foundAsPlanned}); written (`applied_at`, as in {@link BulkRunStatus.applied}
+ *  less those found so), and of the applied ones the ones taken
  *  back since; taken back without being written (an atomic rollback settles a send it never
  *  recorded, an external undo takes back a send that failed), whatever error that send left; a
  *  conflict; a send without a clear answer (an external run only, as
@@ -483,6 +489,7 @@ const BULK_HEAD_SQL = `CASE
   WHEN change = 'invalid' THEN 'invalid'
   WHEN change = 'unchanged' THEN 'unchanged'
   WHEN applied_at IS NOT NULL AND undone_at IS NOT NULL THEN 'takenBack'
+  WHEN applied_at IS NOT NULL AND ${FOUND_SQL} THEN 'unchanged'
   WHEN applied_at IS NOT NULL THEN 'written'
   WHEN undone_at IS NOT NULL THEN 'settled'
   WHEN error = 'conflict' THEN 'conflict'
@@ -1798,7 +1805,7 @@ export class BulkLedger {
       `SELECT error, COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND change = 'invalid' GROUP BY error`,
     ).all(row.id) as { error: BulkInvalidReason; n: number }[]) invalidReasons[e.error] = e.n;
     const outcome = db.prepare(
-      `SELECT SUM(error = 'conflict') AS conflicts, SUM(${WRITE_FAILED_SQL}) AS failed, SUM(undone_at IS NOT NULL AND (applied_at IS NOT NULL OR ? = 0)) AS undone, SUM(found_unsent = 1 AND write_sent = 0) AS foundAsPlanned,
+      `SELECT SUM(error = 'conflict') AS conflicts, SUM(${WRITE_FAILED_SQL}) AS failed, SUM(undone_at IS NOT NULL AND (applied_at IS NOT NULL OR ? = 0)) AS undone, SUM(${FOUND_SQL}) AS foundAsPlanned,
          SUM(change != 'invalid' AND before IS NULL) AS unread, SUM(shop_added_markup) AS shopAddedMarkup, SUM(host_rewrote) AS hostRewrote,
          SUM(${UNCLEAR_SQL}) AS sentUnknown
        FROM bulk_targets WHERE run_id = ?`,

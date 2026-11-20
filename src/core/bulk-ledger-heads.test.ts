@@ -42,6 +42,8 @@ interface Row {
   sent?: boolean;
   /** Failed in at least one pass (`failed_once`). */
   failedOnce?: boolean;
+  /** Found already holding its planned value (`found_unsent`). */
+  found?: boolean;
 }
 
 /** A run of the given targets, its counters as the rows say. */
@@ -51,10 +53,10 @@ function run(targetSystem: string, rows: Row[]): string {
   db.prepare(`INSERT INTO bulk_runs (id, rule_hash, target_system, undo, phase, targets_total, targets_applied)
     VALUES (?, 'fixture', ?, 'restorable', 'aborted', ?, ?)`).run(id, targetSystem, rows.length, rows.filter((r) => r.applied).length);
   rows.forEach((r, seq) => {
-    db.prepare(`INSERT INTO bulk_targets (run_id, seq, target_key, change, deselected_at, applied_at, undone_at, error, unknown_sends, claimed_at, write_sent, failed_once)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    db.prepare(`INSERT INTO bulk_targets (run_id, seq, target_key, change, deselected_at, applied_at, undone_at, error, unknown_sends, claimed_at, write_sent, failed_once, found_unsent)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       id, seq, engineDb.enc(`k${String(seq)}`), r.change ?? 'update', r.deselected ? AT : null, r.applied ? AT : null,
-      r.undone ? AT : null, r.error ?? null, r.unknownSends ?? 0, r.claimed ? AT : null, r.sent ? 1 : 0, r.failedOnce ? 1 : 0,
+      r.undone ? AT : null, r.error ?? null, r.unknownSends ?? 0, r.claimed ? AT : null, r.sent ? 1 : 0, r.failedOnce ? 1 : 0, r.found ? 1 : 0,
     );
   });
   return id;
@@ -130,6 +132,18 @@ describe('the head counts of a run', () => {
   it('an unclear send counts so on an external run only; a local one with a failure is failed', () => {
     expect(classes(LOCAL, [{ error: 'write_failed', unknownSends: 1 }, { unknownSends: 1 }])).toEqual(['failed', 'open']);
     expect(classes(EXTERNAL, [{ error: 'write_failed', unknownSends: 1 }, { unknownSends: 1 }])).toEqual(['unclear', 'unclear']);
+  });
+
+  it('a target found already holding its value and never sent to is unchanged, not written', () => {
+    expect(classes(EXTERNAL, [
+      { applied: true, found: true },
+      // Sent to and then found so: a loop that died wrote it, so it was written.
+      { applied: true, found: true, sent: true },
+      { applied: true },
+      // Taken back ranks first, as before.
+      { applied: true, found: true, undone: true },
+    ])).toEqual(['unchanged', 'written', 'written', 'takenBack']);
+    expect(classes(LOCAL, [{ applied: true, found: true }])).toEqual(['unchanged']);
   });
 
   it('a target a live loop holds is not unclear: its answer may still come', () => {

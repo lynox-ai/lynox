@@ -411,6 +411,44 @@ describe('the effect can only come from the approval (§7 b, the derivation prop
   });
 });
 
+describe('a target found already holding its value', () => {
+  const rows = (runId: string) => engineDb.getDb()
+    .prepare('SELECT seq, found_unsent, write_sent, applied_at IS NOT NULL AS applied, undone_at IS NOT NULL AS undone FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(runId);
+
+  it('counts as unchanged in the head of the run and of its undo, a target the run changed as written', async () => {
+    const { runId, initial } = recordMemoryRun(3);
+    approve(runId);
+    const { writer, state } = memory(initial);
+    // Someone set the second target to its planned value before the run reached it.
+    state.set('k001', 'w1');
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('done');
+    const s = ledger.getStatus(runId)!;
+    // Applied counts all three (the working line reaches its end); the head says what changed.
+    expect([s.applied, s.foundAsPlanned]).toEqual([3, 1]);
+    expect(s.heads).toMatchObject({ written: 2, unchanged: 1, takenBack: 0 });
+
+    // The undo takes back the two the run wrote; someone already set the third target back.
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    expect(undo.status.total).toBe(2);
+    approve(undo.status.id);
+    state.set('k002', 'v2');
+    expect((await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('done');
+    expect([state.get('k000'), state.get('k001'), state.get('k002')]).toEqual(['v0', 'w1', 'v2']);
+    const u = ledger.getStatus(undo.status.id)!;
+    expect([u.applied, u.foundAsPlanned]).toEqual([2, 1]);
+    // In the undo's head: one taken back by it ("written" there), one it found already back.
+    expect(u.heads).toMatchObject({ written: 1, unchanged: 1, takenBack: 0 });
+    // Through the `unchanged` branch, not `takenBack`: an undo's own rows carry no `undone_at`
+    // (the source's rows do), and the one it found is marked found and never sent to.
+    // The undo plans newest first: its first row is the third target, the one found already back.
+    expect(rows(undo.status.id)).toEqual([
+      { seq: 0, found_unsent: 1, write_sent: 0, applied: 1, undone: 0 },
+      { seq: 1, found_unsent: 0, write_sent: 1, applied: 1, undone: 0 },
+    ]);
+  });
+});
+
 describe('approval checks (§7 g)', () => {
   it('approve refuses a checksum that is not the current one', async () => {
     const runId = await planFiles([{ target: 'a.txt', after: 'x' }]);
