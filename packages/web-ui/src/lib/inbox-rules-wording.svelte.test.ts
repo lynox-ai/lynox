@@ -35,6 +35,8 @@ const WORDING: ReadonlyArray<readonly [key: string, de: string, en: string]> = [
 	['inbox.rule_withheld_from_sender', 'Feste Regel aus dem Absender', 'Fixed rule from sender'],
 	['inbox.rule_withheld_from_subject', 'Feste Regel aus dem Betreff', 'Fixed rule from subject'],
 	['inbox.rules_then_escalate', 'Immer unter „Braucht dich“ behalten', 'Always keep under “Needs you”'],
+	['inbox.rules_then_archive', 'Als erledigt ablegen', 'File as handled'],
+	['inbox.rules_then_archive_effect', 'lynox legt die Mail unter „{zone}“ ab. In deinem Postfach bleibt sie unverändert.', 'lynox files the mail under “{zone}”. It stays unchanged in your mailbox.'],
 	['inbox.rule_withheld_classifier_unnamed', 'Regel zurückgehalten: Der Klassifikator ordnete diese Mail anders ein, darum zeigt lynox sie dir. Soll die Regel hier immer greifen, mach daraus eine feste Regel.', 'Rule held back: the classifier sorted this mail differently, so lynox shows it to you. If the rule should always apply here, turn it into a fixed rule.'],
 	['inbox.rule_withheld_unchecked_unnamed', 'Regel zurückgehalten: Die Prüfung konnte nicht laufen, etwa wegen fehlendem KI-Budget oder Guthaben, darum zeigt lynox dir die Mail. Soll die Regel ohne Prüfung greifen, mach daraus eine feste Regel.', 'Rule held back: the check could not run, for example because of no AI budget or credit, so lynox shows you the mail. If the rule should apply without a check, turn it into a fixed rule.'],
 	['inbox.rule_withheld_sensitive_unnamed', 'Regel zurückgehalten: Diese Mail wirkt sensibel. Eine Regel legt solche Mails nie als erledigt ab, darum zeigt lynox sie dir.', 'Rule held back: this mail looks sensitive. A rule never files such mail as handled, so lynox shows it to you.'],
@@ -70,6 +72,25 @@ describe('inbox rules wording', () => {
 		expect(t(key)).toBe(de);
 		setLocale('en');
 		expect(t(key)).toBe(en);
+	});
+
+	// The mail provider has no call that archives, moves or marks a mail read, so no "then" text
+	// may promise one. A provider that gains such a call is the moment to revisit this list.
+	it('names no effect in the mailbox in any "then" text', async () => {
+		const { default: src } = (await import('./i18n.svelte.ts?raw')) as { default: string };
+		const keys = [...new Set([...src.matchAll(/'(inbox\.rules_then_[a-z_]+)'/g)].map((m) => m[1]!))];
+		expect(keys.length).toBeGreaterThanOrEqual(5);
+		for (const locale of ['de', 'en'] as const) {
+			setLocale(locale);
+			for (const k of keys) expect(t(k), `${locale} ${k}`).not.toMatch(/archiv|gelesen|lesen markieren|als gelesen|verschieb|mark(?:ed)? (?:as )?read|\bread\b|\bmove/i);
+		}
+	});
+
+	it('names the zone a handled rule files into as the inbox does', () => {
+		setLocale('de');
+		expect(t('inbox.rules_then_archive_effect')).toContain('„{zone}“');
+		setLocale('en');
+		expect(t('inbox.rules_then_archive_effect')).toContain('“{zone}”');
 	});
 
 	it('names the bucket of a rule that escalates as the inbox does', () => {
