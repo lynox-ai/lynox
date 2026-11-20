@@ -207,6 +207,22 @@ describe('the pause is held to its takeover (real engine)', () => {
     expect((await ask('DELETE', `/api/tasks/${pausedPlan()}`, ownerCookie)).status).toBe(200);
   });
 
+  it('a stamp leaves what the plan\'s creator had taken in as it was: a helper\'s edit and the owner\'s confirm keep it', async () => {
+    const id = `tainted-${String(++n)}`;
+    engine.getRunHistory()!.insertTrigger({
+      id, title: 'Weekly', source: 'cron', effect: 'run_agent', scheduleCron: '0 9 * * 1', nextRunAt: '2026-01-05T09:00:00.000Z',
+      createdBy: 'mandate:ida@example.invalid', createdMandateId: 'TEST-MANDATE-PAUSE', createdUntrusted: 'external-tool',
+    });
+    const taint = (): unknown => (db().prepare('SELECT created_untrusted FROM triggers WHERE id = ?').get(id) as { created_untrusted: unknown }).created_untrusted;
+    expect((await ask('PATCH', `/api/tasks/${id}`, mandateCookie, { title: 'Weekly, again' })).status).toBe(200);
+    expect(taint()).toBe('external-tool');
+    const shown = await ask('GET', `/api/tasks/${id}/stamp-preview`, ownerCookie);
+    expect(shown.status).toBe(200);
+    const stamp = await ask('POST', `/api/tasks/${id}/confirm`, ownerCookie, { expect: shown.json['expect'] });
+    expect([stamp.status, typeof stamp.json['confirmed_at']]).toEqual([200, 'string']);
+    expect(taint()).toBe('external-tool');
+  });
+
   it('the list shows a plan as paused, and filters on it', async () => {
     const id = pausedPlan();
     const all = await ask('GET', '/api/triggers', ownerCookie);
@@ -364,7 +380,8 @@ describe('the pause is held to its takeover (real engine)', () => {
       // Every answer that sends the row back leaves the stored columns out, a helper's edit as well.
       const stored = ['paused_at', 'paused_due_at', 'paused_for'];
       const helperEdit = await ask('PATCH', `/api/tasks/${id}`, mandateCookie, { title: 'Again' });
-      const stamp = await ask('POST', `/api/tasks/${id}/confirm`, ownerCookie, {});
+      const shown = await ask('GET', `/api/tasks/${id}/stamp-preview`, ownerCookie);
+      const stamp = await ask('POST', `/api/tasks/${id}/confirm`, ownerCookie, { expect: shown.json['expect'] });
       const done = await ask('POST', `/api/tasks/${id}/complete`, mandateCookie);
       for (const [what, r] of [['owner edit', edit], ['helper edit', helperEdit], ['confirm', stamp], ['complete', done]] as const) {
         expect([what, r.status, r.json['id']]).toEqual([what, 200, id]);

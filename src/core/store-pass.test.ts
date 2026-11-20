@@ -12,7 +12,7 @@ vi.mock('node:dns/promises', () => ({
 
 import { fetchPinned, fetchWithPublicRedirects, setPinnedTransportForTests } from './network-guard.js';
 import { isStorePass, mintStoreExchangePass, mintStorePass, storePassRefusal, type StorePass } from './store-pass.js';
-import { SHOPIFY_UNAVAILABLE } from './shopify-host.js';
+import { SHOPIFY_HOST_HEADER, SHOPIFY_PAGES, SHOPIFY_REDIRECT } from './shopify-host.js';
 
 const ORIGIN = 'https://acme.myshopify.com';
 const TOKEN = 'shpat_test_value_0001';
@@ -40,8 +40,23 @@ const send = (url: string, headers: Record<string, string>, p: StorePass | undef
 describe('without a pass', () => {
   it('a store host is refused as before, and nothing is sent', async () => {
     await expect(send(`${ORIGIN}/admin/api/2025-01/shop.json`, { [H]: TOKEN }, undefined))
-      .rejects.toThrow(SHOPIFY_UNAVAILABLE);
+      .rejects.toThrow(SHOPIFY_PAGES);
     expect(sent).toHaveLength(0);
+  });
+
+  it('a Host header naming a store on another URL is refused as the header\'s fault', async () => {
+    await expect(send('https://other.example/x', { Host: 'acme.myshopify.com' }, undefined)).rejects.toThrow(SHOPIFY_HOST_HEADER);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('a redirect from another host into a store is not followed, and says so; one to another host is', async () => {
+    respond = (url) => (url.startsWith('https://other.example/') ? { status: 302, headers: { location: `${ORIGIN}/admin/api/2025-01/shop.json` } } : { status: 200 });
+    await expect(fetchWithPublicRedirects('https://other.example/start')).rejects.toThrow(SHOPIFY_REDIRECT);
+    expect(sent.map((r) => r.url)).toEqual(['https://other.example/start']);
+    sent = [];
+    respond = (url) => (url === 'https://other.example/start' ? { status: 302, headers: { location: 'https://third.example/end' } } : { status: 200 });
+    expect((await fetchWithPublicRedirects('https://other.example/start')).status).toBe(200);
+    expect(sent.map((r) => r.url)).toEqual(['https://other.example/start', 'https://third.example/end']);
   });
 });
 

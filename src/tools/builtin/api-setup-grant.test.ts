@@ -833,8 +833,8 @@ describe('fetch_token — a grant a user gave is never renewed as an app token',
   const PRESET_ONLY = 'connects through the "bexio" provider, which issues its tokens only through a user\'s authorization';
   const CONNECT = 'action "connect"';
   const OWNER = 'needs re-authorizing by the person who owns it';
-  const REMOVE_FIRST = 'Remove auth.oauth.refresh_token_key with api_setup update, then call api_setup with action "connect"';
-  const CONNECT_ONLY = 'Call api_setup with action "connect"';
+  const REMOVE_FIRST = 'Remove auth.oauth.refresh_token_key with api_setup update, then, to connect it, call api_setup with action "connect" and id "crm-api"; that call returns the sign-in link for the user, or says why there is none.';
+  const CONNECT_ONLY = 'To connect it, call api_setup with action "connect" and id "crm-api"; that call returns the sign-in link for the user, or says why there is none.';
   /** A refresh slot of the profile's own, not the derived name a connect writes to. */
   const ownSlot = (p: ApiProfile, key = 'CRM_OWN_REFRESH'): ApiProfile =>
     ({ ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, refresh_token_key: key } } });
@@ -5145,8 +5145,9 @@ describe('the way forward: fetch_token and the 401 reminder say the same', () =>
   const WAYS = {
     owner: 'This connection needs re-authorizing by the person who owns it: say so, and do not edit the profile to make the exchange pass.',
     shares: 'It shares the connection of another profile through this provider and renews through it: set auth.oauth.grant_type to "refresh_token" with api_setup update. Do not remove auth.oauth.refresh_token_key or connect it on its own, that would end the sharing.',
-    removeFirst: 'Remove auth.oauth.refresh_token_key with api_setup update, then call api_setup with action "connect" for this profile and show the user the link. While the profile names a refresh slot of its own, a connect stores the refresh token where this profile does not read it, and it ends here again.',
-    connect: 'Call api_setup with action "connect" for this profile and show the user the link.',
+    // The connect call as every text that sends the model there words it (`connectCallText`).
+    removeFirst: (id: string): string => `Remove auth.oauth.refresh_token_key with api_setup update, then, to connect it, call api_setup with action "connect" and id "${id}"; that call returns the sign-in link for the user, or says why there is none. While the profile names a refresh slot of its own, a connect stores the refresh token where this profile does not read it, and it ends here again.`,
+    connect: (id: string): string => `To connect it, call api_setup with action "connect" and id "${id}"; that call returns the sign-in link for the user, or says why there is none.`,
   };
   /** What the 401 reminder alone adds after a way that ends in connect. */
   const AFTER_CONNECT = ' If connect answers that this profile is already connected, that is the token this API just refused: show the user the link from that answer. Do not offer to renew the token instead; fetch_token refuses for this profile.';
@@ -5164,8 +5165,8 @@ describe('the way forward: fetch_token and the 401 reminder say the same', () =>
     const { refreshTokenKey } = await import('../../core/api-store.js');
     const preset = OAUTH_PRESETS.get('bexio')!;
     const none = { knownProfiles: () => [] };
-    expect(presetDelegatedReminder(bexio('books'), preset, none)).toContain(`${WAYS.connect}${AFTER_CONNECT} The engine`);
-    expect(presetDelegatedReminder(bexio('books', { refresh_token_key: 'BOOKS_OWN_REFRESH' }), preset, none)).toContain(`${WAYS.removeFirst}${AFTER_CONNECT} The engine`);
+    expect(presetDelegatedReminder(bexio('books'), preset, none)).toContain(`${WAYS.connect('books')}${AFTER_CONNECT} The engine`);
+    expect(presetDelegatedReminder(bexio('books', { refresh_token_key: 'BOOKS_OWN_REFRESH' }), preset, none)).toContain(`${WAYS.removeFirst('books')}${AFTER_CONNECT} The engine`);
     const owner = bexio('books');
     const member = bexio('books-2', { refresh_token_key: refreshTokenKey('books') });
     const shared = presetDelegatedReminder(member, preset, { knownProfiles: () => [owner, member] });
@@ -5180,13 +5181,13 @@ describe('the way forward: fetch_token and the 401 reminder say the same', () =>
     const preset = OAUTH_PRESETS.get('bexio')!;
     const none = { knownProfiles: () => [] };
     expect(delegatedRenewalWay(bexio('books'), undefined, none)).toBe(WAYS.owner);
-    expect(delegatedRenewalWay(bexio('books'), preset, none)).toBe(WAYS.connect);
-    expect(delegatedRenewalWay(bexio('books', { refresh_token_key: 'BOOKS_OWN_REFRESH' }), preset, none)).toBe(WAYS.removeFirst);
+    expect(delegatedRenewalWay(bexio('books'), preset, none)).toBe(WAYS.connect('books'));
+    expect(delegatedRenewalWay(bexio('books', { refresh_token_key: 'BOOKS_OWN_REFRESH' }), preset, none)).toBe(WAYS.removeFirst('books'));
     const owner = bexio('books');
     const member = bexio('books-2', { refresh_token_key: refreshTokenKey('books') });
     expect(delegatedRenewalWay(member, preset, { knownProfiles: () => [owner, member] })).toBe(WAYS.shares);
     // Without the store the sharing cannot be seen: the profile's own slot decides.
-    expect(delegatedRenewalWay(member, preset, undefined)).toBe(WAYS.removeFirst);
+    expect(delegatedRenewalWay(member, preset, undefined)).toBe(WAYS.removeFirst('books-2'));
   });
 
   // Two profiles that share a connection both sit on the provider's API host, so the host maps to
@@ -5217,8 +5218,8 @@ describe('the way forward: fetch_token and the 401 reminder say the same', () =>
   });
 
   it.each([
-    ['connected, nothing of its own', {}, WAYS.connect],
-    ['reading a refresh slot of its own', { refresh_token_key: 'BOOKS_OWN_REFRESH' }, WAYS.removeFirst],
+    ['connected, nothing of its own', {}, WAYS.connect('books')],
+    ['reading a refresh slot of its own', { refresh_token_key: 'BOOKS_OWN_REFRESH' }, WAYS.removeFirst('books')],
   ])('a built-in provider\'s profile %s: both name the same way, byte for byte', async (_label, oauth, way) => {
     const { accessTokenKey } = await import('../../core/api-store.js');
     const store = new ApiStore();

@@ -7,11 +7,12 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { escalationNotice } from '../utils/trigger-escalation.js';
-	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
+	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
 	import { endedNotices, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
 	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
 	import StampConfirm from './StampConfirm.svelte';
+	import RecipientConfirm from './RecipientConfirm.svelte';
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
@@ -61,6 +62,23 @@
 		paused_who?: string[];
 		// How and when each of those accesses ended, for the owner only: the notices above the list.
 		paused_ended?: PausedEnded[];
+		// A bulk run's trigger: the host its run works on, or null where it has none (`GET /api/triggers`).
+		bulk_host?: string | null;
+		// From before its creator was recorded, nobody else's hand in it: it sends to none of the
+		// recipients it names until the owner confirms them (`GET /api/triggers`, owner only).
+		recipients_unconfirmed?: boolean;
+	}
+
+	// A bulk run's trigger is titled with its run id, which the model reads; the list names it by
+	// its stage and host instead (U-324). Every other trigger by its title.
+	const BULK_STAGE_KEYS: Readonly<Record<string, string>> = {
+		bulk_preview: 'triggers.bulk.preview', bulk_judge: 'triggers.bulk.judge', bulk_apply: 'triggers.bulk.apply', bulk_undo: 'triggers.bulk.undo',
+	};
+	function shownTitle(trigger: Trigger): string {
+		const key = trigger.effect === undefined ? undefined : BULK_STAGE_KEYS[trigger.effect];
+		if (key === undefined) return trigger.title;
+		const host = trigger.bulk_host ?? null;
+		return host === null || host === '' ? t(key) : `${t(key)} · ${host}`;
 	}
 
 	// How often the list is reloaded while the tab is visible, so a run that started on its
@@ -104,8 +122,15 @@
 			const data = (await res.json()) as { triggers: Trigger[]; viewer?: 'owner' | 'mandate' | 'none' };
 			if (load < shownLoad) return;
 			shownLoad = load;
-			triggers = data.triggers;
 			viewer = data.viewer ?? 'none';
+			// A check left open closes once its row stops offering it (the access ended, the plan waits
+			// again, the row left the list): otherwise it would reopen by itself, without a click, when the
+			// row offers it again.
+			for (const id of Object.keys(checking)) {
+				const row = data.triggers.find((x) => x.id === id);
+				if (row === undefined || !offersCheck(row)) delete checking[id];
+			}
+			triggers = data.triggers;
 			error = '';
 			loading = false;
 		} catch {
@@ -173,6 +198,8 @@
 	// "Check connections": a confirmed schedule whose run can use a connection, opened on demand,
 	// so the preview is not asked for on every refresh (ux U-058, ii-c-min).
 	let checking = $state<Record<string, boolean>>({});
+	// "Confirm recipients" opened per row.
+	let confirmingRecipients = $state<Record<string, boolean>>({});
 	function offersCheck(trigger: Trigger): boolean {
 		// Not once a member's access ended: the gate refuses the run whatever is listed, so allowing a
 		// connection there changes nothing, and the ended note already names the way out.
@@ -571,7 +598,7 @@
 							<!-- Wrapping, so the badges move to their own line on a narrow card instead
 							     of squeezing the title: the badges are `shrink-0` and the title clamps. -->
 							<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-								<p class="text-sm font-medium line-clamp-2 break-words">{trigger.title}</p>
+								<p class="text-sm font-medium line-clamp-2 break-words" data-trigger-title>{shownTitle(trigger)}</p>
 								<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{typeLabel(trigger)}</span>
 								{#if trigger.enabled === 0}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning">{t('triggers.paused')}</span>
@@ -608,6 +635,14 @@
 									<span class={notice.warn ? 'text-warning' : ''} data-escalation-notice={trigger.last_escalation_outcome}>{t(notice.key)} · {fmtDate(notice.at)}</span>
 								{/if}
 							</div>
+							<!-- A confirmed watch names its page too: its escalation leaves the address out when
+							     someone the owner let in set it up, and points here (PRD B6). -->
+							{#if showsWatchAddress(trigger) && !held(trigger)}
+								<p class="mt-1 break-words text-xs text-text-muted" data-trigger-watch>
+									<span class="font-medium">{t('triggers.watch_url')}:</span>
+									<span class="font-medium text-text">{watchOf(trigger)?.host ?? ''}</span>{watchOf(trigger)?.rest ?? ''}
+								</p>
+							{/if}
 							{#if held(trigger)}
 								<!-- Confirming allows this to run without the owner present, so what the run
 								     would carry out is shown beside the button — a button next to nothing but an
@@ -654,6 +689,19 @@
 									</ul>
 									{#if note}
 										<p class="mt-0.5 text-warning" data-stamp-note>{note}</p>
+									{/if}
+								</div>
+							{/if}
+							{#if ownerActs && trigger.recipients_unconfirmed === true}
+								<!-- The engine does not count this trigger's instruction as the owner's, so its run
+								     sends to none of the recipients it names. The hint leads to the button; the
+								     button opens the instruction to confirm. -->
+								<div class="mt-2 text-xs" data-recipients-unconfirmed>
+									<p class="text-warning">{t('recipients.unconfirmed_hint')}</p>
+									{#if confirmingRecipients[trigger.id]}
+										<RecipientConfirm id={trigger.id} onconfirmed={() => { confirmingRecipients[trigger.id] = false; void loadTriggers(true); }} onclose={() => (confirmingRecipients[trigger.id] = false)} />
+									{:else}
+										<button onclick={() => (confirmingRecipients[trigger.id] = true)} class="mt-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1 text-xs text-text-muted hover:text-text" data-recipients-open>{t('recipients.button')}</button>
 									{/if}
 								</div>
 							{/if}

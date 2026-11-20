@@ -419,7 +419,7 @@ describe('T2 — the covered set is the connection\'s epoch, from the grant its 
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('a `new` grant minted in the middle of the connection\'s life does not start an epoch', () => {
+  it('a held-back profile\'s corrected save stays in the connection\'s epoch', () => {
     // G1 (`new`) and G2 (`consent`) on one connection row.
     const oauth = (clientSecretKey: string): ApiProfile => ({
       id: 'shop-api', name: 'shop-api', base_url: 'https://api.shop.example/v1', description: 'd',
@@ -445,10 +445,11 @@ describe('T2 — the covered set is the connection\'s epoch, from the grant its 
     expect(booted.get('shop-api')).toBeUndefined();
     expect(booted.knownProfiles().map((p) => p.id)).toEqual(['shop-api']);
 
-    // Its corrected save is a create to the store, so it mints `new` — on the same row.
+    // Its corrected save is a create to the store, but it reads the held-back grant: a change of
+    // credentials, not a `new` one (it minted `new` until a held-back profile counted as new).
     expect(booted.save(oauth('SHOP_API_CSECRET'))).toEqual({ ok: true, isNew: true });
     const g3 = booted.get('shop-api')!.oauth_grant!.grant_id!;
-    expect(ledger.get(g3)?.reason).toBe('new');
+    expect(ledger.get(g3)?.reason).toBe('credentials');
     expect(conn.get('shop-api')!.createdAt).toBe(row.createdAt);
 
     expect([...(coveredGrantSet(db.getDb(), 'shop-api') ?? [])].sort()).toEqual([g1, g2, g3].sort());
@@ -563,6 +564,10 @@ describe('T3 — the fallback blanks every content column it names and keeps the
     tasks: 'tasks the customer keeps and deletes (remainder)',
     tenants: 'tenant configuration',
     thread_messages: 'the chat itself: deleted with the chat, cut by cut 1b',
+    // A copy of the typed part of a thread_messages row, keyed by thread and seq like it: no run
+    // id to blank it by, deleted with the chat (ON DELETE CASCADE), and cut wherever its message is.
+    thread_typed_text: 'the typed words of a chat message: deleted with the chat, cut with its message',
+    thread_read_outside: 'a thread id and a time: whether the chat read outside content',
     threads: 'the chat itself: deleted with the chat',
     triggers: 'the legacy table, superseded by engine.db',
     workflow_run_claims: 'workflow, key and run ids',
