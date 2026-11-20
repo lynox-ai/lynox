@@ -516,6 +516,34 @@ describe('the refresh of an expiring store connection', () => {
     expect(hold.calls).toHaveLength(1);
   });
 
+  it('a refresh under deny-all reads no secret and asks for no clearance', async () => {
+    const c = ctx();
+    const read: string[] = [];
+    const secretStore = { resolve: (n: string) => { read.push(n); return vault.get(n) ?? null; }, set: (n: string, v: string) => { vault.set(n, v); } } as never;
+    expect(await refreshStoreToken(ID, 'due', { ...c, secretStore, toolContext: { ...c.toolContext, ...DENY_ALL } })).toBe('not-run');
+    expect(read).toEqual([]);
+    expect(clearanceAsked).toBe(0);
+    expect(hold.calls).toHaveLength(0);
+    // Control: the same caller with an open policy reads the client and the refresh token.
+    resetStoreRefreshForTests();
+    expect(await refreshStoreToken(ID, 'due', { ...c, secretStore })).toBe('renewed');
+    expect(read.length).toBeGreaterThan(0);
+  });
+
+  it('a mandate\'s refresh refused by deny-all leaves no attempt row without its end', async () => {
+    const c = ctx();
+    const rows: { phase: string }[] = [];
+    const auditLog = { record: (e: { phase: string }) => { rows.push(e); } } as never;
+    const mandate = { ...c, principal: { kind: 'mandate', email: 'helper@example.org' } as never, toolContext: { ...c.toolContext, ...DENY_ALL, auditLog } };
+    expect(await refreshStoreToken(ID, 'due', mandate)).toBe('not-run');
+    expect(rows.filter((r) => r.phase === 'attempt')).toHaveLength(rows.filter((r) => r.phase !== 'attempt').length);
+    expect(hold.calls).toHaveLength(0);
+    // Control: with an open policy the same mandate's refresh writes its attempt and its end.
+    resetStoreRefreshForTests();
+    expect(await refreshStoreToken(ID, 'due', { ...mandate, toolContext: { ...mandate.toolContext, ...OPEN_POLICY } })).toBe('renewed');
+    expect(rows.map((r) => r.phase)).toEqual(['attempt', 'returned']);
+  });
+
   it('a refresh whose context carries deny-all is not sent, whoever calls it', async () => {
     const c = ctx();
     expect(await refreshStoreToken(ID, 'due', { ...c, toolContext: { ...c.toolContext, ...DENY_ALL } })).toBe('not-run');

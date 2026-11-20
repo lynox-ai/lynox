@@ -337,6 +337,17 @@ function beginTrail(profileId: string, trigger: 'due' | 'unauthorized', ctx: Sto
   return entry;
 }
 
+const POLICY_REFUSED = 'the instance network policy does not let this request out; nothing was sent';
+
+function policyLetsOut(url: string, ctx: StoreRefreshContext): boolean {
+  try {
+    assertHostPolicy(url, { surface: 'full-control', ackHosts: resolveGuardedAckHosts(ctx.toolContext as ToolContext) }, ctx.toolContext);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function runRefresh(profileId: string, trigger: 'due' | 'unauthorized', ctx: StoreRefreshContext): Promise<StoreRefreshOutcome> {
   const apiStore = ctx.toolContext.apiStore;
   // A vault this caller cannot write to gets no refresh: the store would spend the refresh token
@@ -344,6 +355,15 @@ async function runRefresh(profileId: string, trigger: 'due' | 'unauthorized', ct
   const vault = ctx.secretStore;
   if (!apiStore || vault.set === undefined) {
     outcomeLine(profileId, 'not-run', trigger, 'not started: this caller cannot write the vault');
+    return 'not-run';
+  }
+  // The instance's network policy, before anything else is read: a refresh is a request out like
+  // any other, and a caller that dropped the policy must not send it unchecked. Checked against the
+  // store's own host, which the refresh pass pins the token endpoint's origin to, so a refused
+  // refresh reads no secret, asks for no clearance and opens no trail. The exchange checks again.
+  const storeHost = (() => { const p = apiStore.get(profileId); return p === undefined ? null : presetStoreHost(p); })();
+  if (storeHost !== null && !policyLetsOut(`https://${storeHost}/`, ctx)) {
+    outcomeLine(profileId, 'not-run', trigger, POLICY_REFUSED);
     return 'not-run';
   }
   const setSecret = (name: string, value: string): void => { vault.set!(name, value); };
@@ -365,14 +385,6 @@ async function runRefresh(profileId: string, trigger: 'due' | 'unauthorized', ct
   if (plan === undefined) {
     endTrail('failed');
     outcomeLine(profileId, 'not-run', trigger, 'the connection does not qualify for a refresh (binding, refresh token or clearance)');
-    return 'not-run';
-  }
-  // The instance's network policy, checked here as well as inside the exchange: a refresh is a
-  // request out like any other, and a caller that dropped the policy must not send it unchecked.
-  try {
-    assertHostPolicy(plan.endpoint.url, { surface: 'full-control', ackHosts: resolveGuardedAckHosts(ctx.toolContext as ToolContext) }, ctx.toolContext);
-  } catch {
-    outcomeLine(profileId, 'not-run', trigger, 'the instance network policy does not let this request out; nothing was sent');
     return 'not-run';
   }
   const exchanged = await exchangeToken({ endpoint: plan.endpoint, params: plan.params, bodyFormat: plan.bodyFormat }, ctx.toolContext as ToolContext, undefined, plan.pass);
