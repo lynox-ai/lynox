@@ -78,6 +78,7 @@ import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns, maskEngineEnvSecrets } from './secret-store.js';
 import { UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { OwnerKnownReader, OwnerKnownVerdict } from './owner-known-targets.js';
+import { SearchResultAddresses } from './search-result-addresses.js';
 import type { ConversationLatch } from './conversation-latch.js';
 import type { NoticeLanguage } from './notice-language.js';
 import { noticeLanguage } from './notice-language.js';
@@ -663,6 +664,8 @@ export class Agent implements IAgent {
   writeAuthor: string | null = null;
   /** See `IAgent.ownerKnown`. Set per run by the session (a trigger's run adds its instruction). */
   ownerKnown?: OwnerKnownReader | undefined;
+  /** See `IAgent.searchResultAddresses`. Its own per agent: a sub-agent starts empty. */
+  readonly searchResultAddresses = new SearchResultAddresses();
   /** See `IAgent.sendOrigin`. Set per run by the session. */
   sendOrigin?: SendOrigin | undefined;
   /** See `IAgent.noticeLanguage`. */
@@ -5156,13 +5159,24 @@ export class Agent implements IAgent {
     // this call's batch: a reading tool arms the latch for its own call before this check runs, so
     // the latch as it stands now would gate the first read of a clean conversation. The flags hold
     // where no latch object exists too (a headless run).
-    const declared = tool.sendTargets
-      ?? (tool.sendTargetsWhenLatched !== undefined && taintedBefore ? tool.sendTargetsWhenLatched : undefined);
-    if (declared === undefined) return {};
+    // It is read only when the call's own targets are none (`sendTargets` absent or `null`): a tool
+    // whose writes declare targets has reads that declare none.
+    const whenLatched = taintedBefore ? tool.sendTargetsWhenLatched : undefined;
+    if (tool.sendTargets === undefined && whenLatched === undefined) return {};
     let targets: readonly SendTarget[] | null;
     let targetsUnread = false;
+    // Checked as a read: the latch made the address a target. Its question and refusals say "read".
+    let asRead = false;
     try {
-      targets = declared(tc.input);
+      targets = tool.sendTargets !== undefined ? tool.sendTargets(tc.input) : null;
+      if (targets === null && whenLatched !== undefined) {
+        // An address a search in this conversation listed as a result was chosen by the provider,
+        // not written by the model, so it carries nothing from the conversation.
+        const address = tool.readAddress?.(tc.input) ?? null;
+        if (address !== null && this.searchResultAddresses.has(address)) return {};
+        asRead = true;
+        targets = whenLatched(tc.input);
+      }
     } catch {
       targets = [];
       targetsUnread = true;
@@ -5172,7 +5186,7 @@ export class Agent implements IAgent {
     // empty one, a recipient field that yields none) refuses the whole call, in every session and
     // without a question: a yes to a target nobody can see would hold for anything.
     if (targetsUnread) {
-      const unreadNoun: TargetNoun = tc.name === 'web_research' ? 'page' : tc.name === 'http_request' ? 'host' : 'mail';
+      const unreadNoun: TargetNoun = asRead || tc.name === 'web_research' ? 'page' : tc.name === 'http_request' ? 'host' : 'mail';
       try { this.onOriginRefused?.({ targets: { values: [], unreadable: true }, noun: unreadNoun, origin: this.originOfTargets() }); } catch { /* the refusal stands */ }
       if (guardRefuses) return {};
       const text = originUnreadable(unreadNoun);
@@ -5190,7 +5204,7 @@ export class Agent implements IAgent {
     const lookupFailed = foreign.some((v) => v.verdict === 'unreadable');
     const shownTargets = foreign.map((v) => v.target.value);
     const shown: OriginTargets = { values: shownTargets, unreadable: false };
-    const noun: TargetNoun = tc.name === 'web_research' ? 'page' : foreign[0]!.target.kind === 'host' ? 'host' : 'mail';
+    const noun: TargetNoun = asRead || tc.name === 'web_research' ? 'page' : foreign[0]!.target.kind === 'host' ? 'host' : 'mail';
     // A source that could not be read leaves where the target comes from unchecked: every report of
     // it (the run's result, the approval card, the question, the model texts) says it is not known,
     // never the origin it would have had.

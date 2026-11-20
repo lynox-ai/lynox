@@ -187,11 +187,20 @@ export interface ToolEntry<TInput = unknown> {
   /**
    * Like `sendTargets`, but read only while the conversation latch is set: once something from
    * outside the owner's own words is in the conversation. For a call that is a plain read on a
-   * clean conversation and can carry data out only after foreign content arrived (a GET whose
-   * query a read page could have filled). Same contract as `sendTargets`; a tool declares one of
-   * the two, and `sendTargets` wins if both are set.
+   * clean conversation and can carry data out only after foreign content arrived: its address
+   * can hold what the conversation holds, in the path, the host name or the query. Same contract
+   * as `sendTargets`. Read only when `sendTargets` is absent or returns `null` for the call (a
+   * tool whose writes declare targets and whose reads do not).
    */
   sendTargetsWhenLatched?: ((input: TInput) => readonly SendTarget[] | null) | undefined;
+  /**
+   * The address a read fetches, exactly as the input names it, when nothing else of the call can
+   * carry data (no body, no header the model set); otherwise `null`. While the latch is set, a
+   * call whose address a search in this conversation listed as a result
+   * (`IAgent.searchResultAddresses`) passes the origin check without a question: the provider
+   * chose that address, so it carries nothing the model added.
+   */
+  readAddress?: ((input: TInput) => string | null) | undefined;
   /**
    * When true, calling this tool ENDS the agent's turn: after the tool_result
    * is appended and checkpointed, the loop returns the turn's text instead of

