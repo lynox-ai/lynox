@@ -351,6 +351,23 @@ describe('judgeOutliersOf — the verdicts a judged run lists first', () => {
     expect(turns).toBeGreaterThanOrEqual(2);
   });
 
+  it('reads every page of a run of more than 200 verdicts, and flags a link added past the first', async () => {
+    const many = Array.from({ length: 210 }, (_, i) => `R${String(i + 1).padStart(3, '0')}`);
+    store.insertRecords({
+      collection: 'products',
+      records: many.map((sku) => ({ sku, title: `old ${sku.toLowerCase()}`, note: `${MARK}-${sku}` })),
+      stamp: TEST_STAMP,
+    });
+    const id = await plan(many);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({
+      data: change({ title: user.includes('old r205') ? `${title(user)} tea-deals.example.net` : title(user) }), costUsd: 0.001,
+    }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    const seq205 = ledger.getPreview(id).find((t) => (t.after as Record<string, unknown> | null)?.['sku'] === 'R205')!.seq;
+    expect(await ledger.judgeOutliersOf(id)).toMatchObject({ decided: 210, flagged: [{ seq: seq205, reasons: ['new_link', 'length_jump'] }] });
+  });
+
   it('is null for a run without a rule', async () => {
     expect(await ledger.judgeOutliersOf('no-such-run')).toBeNull();
   });

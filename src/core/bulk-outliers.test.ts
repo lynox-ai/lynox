@@ -245,6 +245,12 @@ describe('markersOf', () => {
     for (const dot of ['\u3002', '\uFF0E', '\uFF61']) expect([...markersOf(`Mehr auf evil${dot}com`).get('link')!], dot).toEqual(['evil.com']);
   });
 
+  it('reads no host cut out of a percent escape or a word with an underscore inside, and an address after the last @', () => {
+    expect([...markersOf('Mehr auf https://x.example/?ref=https%3A%2F%2Fmoebel-meier.ch').get('link')!].sort()).toEqual(['moebel-meier.ch', 'x.example']);
+    expect([...markersOf('moebel_meier.ch').get('link')!]).toEqual([]);
+    expect([...markersOf('x@y@evil.com').get('email')!]).toEqual(['evil.com']);
+  });
+
   it('reads a host whatever sign stands at its ends or after an @ that starts no address, and a top-level domain with a long s', () => {
     for (const text of ['evil.com_', '_evil.com_', '*evil.com*', 'evil.com%20', 'evil.com+', '+evil.com', 'evil.com@', 'evil.com@home', '.evil.com.', '-evil.com-', 'Besuch evil.com_ jetzt']) {
       expect([...markersOf(text).get('link')!], text).toEqual(['evil.com']);
@@ -253,10 +259,15 @@ describe('markersOf', () => {
     expect([...markersOf('info@evil.com_').get('email')!]).toEqual(['evil.com']);
   });
 
-  it('reads a host a text repeats a thousand times once, in time like any other text', () => {
-    const t0 = performance.now();
+  it('reads a host a text repeats thousands of times, as words or as parts of one word, in a fraction of the time as many hosts', () => {
+    const time = (text: string): number => { const t0 = performance.now(); markersOf(text); return performance.now() - t0; };
+    const many = Array.from({ length: 5000 }, (_, i) => `a${String(i)}.com`);
+    time(many.join(' '));
+    const distinct = Math.min(time(many.join(' ')), time(many.join('+')));
     expect([...markersOf('a.com '.repeat(5000)).get('link')!]).toEqual(['a.com']);
-    expect(performance.now() - t0).toBeLessThan(200);
+    expect([...markersOf('a.com+'.repeat(5000)).get('link')!]).toEqual(['a.com']);
+    expect(time('a.com '.repeat(5000))).toBeLessThan(distinct / 4);
+    expect(time('a.com+'.repeat(5000))).toBeLessThan(distinct / 4);
   });
 
   it('reads a long run of letters before an @, of labels, or of blanks and obfuscated dots in time linear in its length', () => {

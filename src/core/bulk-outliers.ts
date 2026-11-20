@@ -64,7 +64,7 @@ const MARKER_REASON: Record<MarkerKind, OutlierReason> = { link: 'new_link', ema
 
 /** Top-level domains a host written as plain text must end in to count as one: so "z.B.", "ca.5" or
  *  "Art.Nr" in a product text is not read as an address. A host with a scheme needs none. */
-const TLDS = new Set('com net org info biz io co ai app dev shop store online site xyz top club link click ch li de at fr it es nl be lu uk eu us ru cn me tv cc ws ly gl to gg su tk ml ga cf pw in br pl cz se no dk fi pt gr tr jp kr au ca'.split(' '));
+const TLDS = new Set('com net org info biz io co ai app dev shop store online site xyz top club link click icu ch li de at fr it es nl be lu uk eu us ru cn me tv cc ws ly gl to gg su tk ml ga cf pw in br pl cz se no dk fi pt gr tr jp kr au ca'.split(' '));
 /** A dot written obfuscated — `[.]`, `(.)`, `[dot]`, `(dot)`, ` dot ` — read as a dot. Anchored at the
  *  start of the blank before it, so a long run of blanks is read once, not once per blank. */
 const OBFUSCATED_DOT = /(?<!\s)\s*(?:\[\.\]|\(\.\)|\[dot\]|\(dot\))\s*|(?<!\s)\s+dot\s+(?=[\p{L}\p{N}])|[\u3002\uFF0E\uFF61]/giu;
@@ -119,28 +119,35 @@ export function markersOf(text: string): Map<MarkerKind, Set<string>> {
     }
   }
   // The obfuscated dots need a bracket, a parenthesis, the word "dot" or a full stop of another script.
-  const plain = /[[(\u3002\uFF0E\uFF61]|dot/iu.test(text) ? text.replace(OBFUSCATED_DOT, '.') : text;
-  // A text that names one host a thousand times reads it once.
+  const dotted = /[[(\u3002\uFF0E\uFF61]|dot/iu.test(text) ? text.replace(OBFUSCATED_DOT, '.') : text;
+  // A percent escape ("%2F" in a link's query) separates, as the character it stands for mostly does.
+  const plain = dotted.includes('%') ? dotted.replace(/%[0-9A-Fa-f]{2}/gu, ' ') : dotted;
+  // A text that names one host a thousand times reads it once, as a word and as a part of one.
   const seen = new Set<string>();
   for (const whole of dottedWords(plain)) {
     if (seen.has(whole)) continue;
     seen.add(whole);
     let word = whole;
-    const at = word.indexOf('@');
+    const at = word.lastIndexOf('@');
     if (at >= 0) {
-      // An address: something before the @, a domain with a dot after it. Its domain is not also a link.
+      // An address: something before its last @, a domain with a dot after it. Its domain is not also a link.
       const domain = trimEnds(word.slice(at + 1).split(/[^\p{L}\p{N}.-]/u)[0]!);
       if (at > 0 && domain.includes('.')) {
         const host = asciiHost(domain);
         if (host !== undefined) out.get('email')!.add(host);
         continue;
       }
-      // No address ("evil.com@home"): what stands before the @ is read as a host.
-      word = word.slice(0, at);
+      // No address ("evil.com@home"): what stands before the first @ is read as a host.
+      word = word.slice(0, word.indexOf('@'));
     }
-    // A host has no _, % or + inside: the parts between them are read each ("evil.com%20", "evil.com_").
-    for (const part of word.split(/[_%+]/u)) {
-      const host = hostOfWord(trimEnds(part));
+    // The parts between a % or + are read each ("evil.com+"); signs at a part's ends belong to the
+    // sentence ("evil.com_"). A part with an _ inside is no host, and not cut into one ("moebel_meier.ch").
+    for (const part of word.split(/[%+]/u)) {
+      const token = trimEnds(part);
+      if (seen.has(`\u0000${token}`)) continue;
+      seen.add(`\u0000${token}`);
+      if (token.includes('_')) continue;
+      const host = hostOfWord(token);
       if (host !== undefined) out.get('link')!.add(host);
     }
   }
