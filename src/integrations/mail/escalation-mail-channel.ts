@@ -52,6 +52,7 @@
 import type { ChannelOutcome, NotificationChannel, NotificationMessage } from '../../core/notification-router.js';
 import type { MailRegistry } from './tools/registry.js';
 import { accountLookupOnly, sendMail, parseAddressList, type MailAccountLookup } from './send-core.js';
+import { processErrorText } from '../../core/error-egress.js';
 
 export interface EscalationMailChannelOptions {
   registry: MailRegistry;
@@ -190,7 +191,8 @@ export class EscalationMailChannel implements NotificationChannel {
         body: formatEscalationBody(msg),
       }, {}, this.accounts);
       if (!result.ok) {
-        process.stderr.write(`[escalation-mail] send failed (${result.status}): ${result.message}\n`);
+        // The provider's failure text can quote the escalation it was sent (an SMTP reply line uncut).
+        process.stderr.write(`[escalation-mail] send failed (${result.status}): ${processErrorText(new Error(result.message))}\n`);
         return 'failed';
       }
       return 'delivered';
@@ -198,8 +200,7 @@ export class EscalationMailChannel implements NotificationChannel {
       // `resolveProvider` throws a MailError when no account is configured,
       // which is the normal state of an instance without mail set up. Without
       // this the documented boolean contract would be a lie on that path.
-      const detail = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`[escalation-mail] send threw: ${detail}\n`);
+      process.stderr.write(`[escalation-mail] send threw: ${processErrorText(err)}\n`);
       return 'failed';
     }
   }

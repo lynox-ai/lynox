@@ -14762,9 +14762,9 @@ export class LynoxHTTPApi {
           if (noted.has(key)) return;
           noted.add(key);
           list.push(key);
-          const detail = err instanceof Error ? err.message : String(err);
           const mask = (t: string): string => maskSecretPatterns(t, { includeGeneric: true });
-          process.stderr.write(`⚠ /api/data: ${mask(key)} failed: ${mask(detail)}\n`);
+          // A failed step can name workspace files or quote a store; reduced on an exact instance.
+          process.stderr.write(`⚠ /api/data: ${mask(key)} failed: ${mask(processErrorText(err))}\n`);
         };
         const attempt = (key: string, fn: () => void): void => {
           try {

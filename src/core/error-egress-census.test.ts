@@ -25,8 +25,8 @@ const BODYISH = /^(body|bodyText|errText|errBody|responseText|respText|responseB
 /**
  * Calls that write their arguments to the log without being `console` or `process.stderr.write`:
  * a logger handed in (`deps.log`, `this.log`, `inputs.log`, `notes.warn`), one kept on the object
- * (`this.warn`), one named `log`/`warn`/`logger.*`. They format their arguments as a console call
- * does, so they are read as one.
+ * (`this.warn`), one named `log`/`warn`/`error`, and `logger.*`. They format their arguments as a
+ * console call does, so they are read as one.
  */
 const LOGGER_CALLEE = /^((this\.)?(deps|inputs|notes|opts|options|logger)\.)?(log|warn|error)$|^this\.(log|warn)$|^(this\.)?logger\.(error|warn|info|debug|log)$/;
 
@@ -34,7 +34,7 @@ function sinkKind(call: ts.CallExpression): 'stderr' | 'console' | null {
   const callee = call.expression.getText();
   if (callee === 'process.stderr.write') return 'stderr';
   if (/^console\.(error|warn|log|info|debug)$/.test(callee)) return 'console';
-  if (LOGGER_CALLEE.test(callee) && call.arguments.length > 0) return 'console';
+  if (LOGGER_CALLEE.test(callee)) return 'console';
   return null;
 }
 
@@ -70,12 +70,15 @@ function errish(node: ts.Expression): boolean {
 /**
  * The value a printed name was declared with, as TypeScript resolves the name: the nearest
  * enclosing block, case clause or file that declares it with `const`/`let`/`var`. A parameter of
- * an enclosing function with that name hides any outer declaration and is no alias. Null when no
- * declaration in reach has an initializer.
+ * an enclosing function, a catch variable or a loop variable with that name hides any outer
+ * declaration and is no alias. Null when no declaration in reach has an initializer.
  */
 function declaredValue(id: ts.Identifier): ts.Expression | null {
   for (let p: ts.Node | undefined = id.parent; p !== undefined; p = p.parent) {
     if (ts.isFunctionLike(p) && p.parameters.some((q) => ts.isIdentifier(q.name) && q.name.text === id.text)) return null;
+    if (ts.isCatchClause(p) && p.variableDeclaration && ts.isIdentifier(p.variableDeclaration.name) && p.variableDeclaration.name.text === id.text) return null;
+    if ((ts.isForStatement(p) || ts.isForOfStatement(p) || ts.isForInStatement(p)) && p.initializer && ts.isVariableDeclarationList(p.initializer)
+      && p.initializer.declarations.some((d) => ts.isIdentifier(d.name) && d.name.text === id.text)) return null;
     if (ts.isBlock(p) || ts.isSourceFile(p) || ts.isModuleBlock(p) || ts.isCaseClause(p) || ts.isDefaultClause(p)) {
       for (const st of p.statements) {
         if (!ts.isVariableStatement(st)) continue;
@@ -103,6 +106,19 @@ function aliasHit(node: ts.Expression, kind: 'stderr' | 'console', follow: boole
   return hit === null ? null : `${n.text} = ${hit}`;
 }
 
+/** An identifier that names a property or the function called, not a value. */
+function isNameOnly(id: ts.Identifier): boolean {
+  const p = id.parent;
+  return (ts.isPropertyAccessExpression(p) && p.name === id) || (ts.isCallExpression(p) && p.expression === id)
+    || (ts.isPropertyAssignment(p) && p.name === id);
+}
+
+/** `res.status`: a field read off the name, which prints the field, not the name's text. `msg.slice(…)` is not one. */
+function isFieldRead(id: ts.Identifier): boolean {
+  const p = id.parent;
+  return ts.isPropertyAccessExpression(p) && p.expression === id && !(ts.isCallExpression(p.parent) && p.parent.expression === p);
+}
+
 /** The first raw-error form in `node`, or null. `errorText(...)` subtrees are the sanctioned form. */
 function rawText(node: ts.Node, kind: 'stderr' | 'console', topLevelArg: boolean, follow = false): string | null {
   if (ts.isCallExpression(node) && /^(errorText|reducedErrorText|processErrorText)$/.test(node.expression.getText())) {
@@ -121,11 +137,10 @@ function rawText(node: ts.Node, kind: 'stderr' | 'console', topLevelArg: boolean
   if (ts.isCallExpression(node) && node.expression.getText() === 'JSON.stringify' && node.arguments[0] && errish(node.arguments[0])) return node.getText();
   // `${err}`, and the same text kept in a property first: `${f.error}`, `${result.reason}`.
   if (ts.isTemplateSpan(node) && errish(node.expression)) return `\${${node.expression.getText()}}`;
-  if (ts.isTemplateSpan(node)) { const hit = aliasHit(node.expression, kind, follow); if (hit !== null) return hit; }
-  if (ts.isIdentifier(node) && BODYISH.test(node.text)) return node.text;
+  // `result.body` reads a body; the key of an object literal (`{ body: payload }`) does not.
+  if (ts.isIdentifier(node) && !(ts.isPropertyAssignment(node.parent) && node.parent.name === node) && BODYISH.test(node.text)) return node.text;
   // A console call formats a whole error object: message and stack, also inside an object literal.
   if (kind === 'console' && topLevelArg && ts.isExpression(node) && errish(node)) return node.getText();
-  if (kind === 'console' && topLevelArg && ts.isExpression(node)) { const hit = aliasHit(node, kind, follow); if (hit !== null) return hit; }
   const literal = kind === 'console' && topLevelArg && ts.isExpression(node) ? unwrap(node) : null;
   if (literal && ts.isObjectLiteralExpression(literal)) {
     for (const p of literal.properties) {
@@ -133,6 +148,9 @@ function rawText(node: ts.Node, kind: 'stderr' | 'console', topLevelArg: boolean
       if (ts.isPropertyAssignment(p) && errish(p.initializer)) return node.getText();
     }
   }
+  // A name in a value position anywhere in the argument, also inside a call (`${mask(detail)}`);
+  // not the name of a property or the callee.
+  if (ts.isIdentifier(node) && !isNameOnly(node) && !isFieldRead(node)) { const hit = aliasHit(node, kind, follow); if (hit !== null) return hit; }
   let hit: string | null = null;
   node.forEachChild((child) => { hit ??= rawText(child, kind, false, follow); });
   return hit;
@@ -178,18 +196,11 @@ function sourceFiles(dir: string): string[] {
  * - transcribe/mistral-voxtral.ts: the provider body of a transcription; its input is the
  *   user's audio, never a store read.
  * - core/llm-wire-rules.ts: the wire rule's own refusal text, built by lynox.
- * - integrations/mail/escalation-mail-channel.ts: the mail provider's failure text. Gmail quotes up
- *   to 200 characters of its error body (`oauth-gmail.ts`), SMTP the server's reply line uncut
- *   (`imap-smtp.ts`, `SMTP send failed: …`), Graph only a status and a checked code. That is the
- *   provider's answer to a send, not a store read; it carries the escalation's text only if the
- *   server echoes it back.
- * - core/config.ts: a schema issue about the local config file (the `Invalid config` line).
  * - core/mistral-health-check.ts: the answer to the boot-time GET of the model list, which
  *   sends no run data.
  */
 const JUDGED = [
-  'core/transcribe/mistral-voxtral.ts', 'core/llm-wire-rules.ts', 'integrations/mail/escalation-mail-channel.ts',
-  'core/config.ts', 'core/mistral-health-check.ts',
+  'core/transcribe/mistral-voxtral.ts', 'core/llm-wire-rules.ts', 'core/mistral-health-check.ts',
 ];
 
 /**
@@ -207,6 +218,9 @@ const JUDGED = [
  * routed through processErrorText.
  */
 const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string }[]> = {
+  'core/config.ts': [
+    { marker: 'Invalid config in', count: 1, why: 'a schema issue about the local config file; the issue message names the field and the expected type, not the value read' },
+  ],
   'core/workflow-questions.ts': [
     { marker: 'asking a workflow question failed', count: 1, why: 'lynox constants, a session id, or the SQLite insert; the question text is bound, never quoted' },
     { marker: 'withdrawing a workflow question failed', count: 1, why: 'a prompt expiry UPDATE by id' },
@@ -242,7 +256,7 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'profile seed failed', count: 1, why: 'the block read and the seed INSERT: SQLite' },
   ],
   'core/managed-hook.ts': [
-    { marker: 'Managed usage report error', count: 1, why: 'the fetch of the control plane usage endpoint: a network errno; the body sent is lynox counts' },
+    { marker: 'Managed usage report error', count: 1, why: 'the fetch of the control plane usage endpoint and the parse of its answer: a network errno, a timeout, or the parse error quoting what the control plane answered; the body sent is lynox counts' },
     { marker: 'Managed usage DROP', count: 1, why: 'reason is one of four lynox literals; the rest are counts' },
   ],
   'core/knowledge-store.ts': [
@@ -273,7 +287,7 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'Import transaction failed', count: 1, why: 'the atomic upsert of the parsed rows: SQLite, bound values never quoted' },
   ],
   'scripts/subject-sweep.ts': [
-    { marker: '[subject-sweep] thread-anchor read failed', count: 1, why: 'an operator CLI; a SQLite read of the thread anchors with bound values' },
+    { marker: '[subject-sweep] thread-anchor read failed', count: 1, why: 'an operator CLI; a fixed SELECT of the thread anchors, so SQLite text names no row value' },
     { marker: '[subject-sweep] ROLLBACK-MERGE refused', count: 1, why: 'an operator CLI; the reason is lynox text with ids, or the error of the local SQLite statements and ledger-file writes that reverse a subject merge (subject-merge-runner.ts), all with bound values; no provider call' },
     { marker: '[subject-sweep] MERGE refused', count: 1, why: 'the same, for the merge itself; it also runs JSON.parse over a table\'s stored schema, whose error quotes column names and types, not row data' },
   ],
@@ -312,7 +326,7 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'wire snapshot prune failed', count: 1, why: 'a DELETE by capture time' },
   ],
   'server/http-api.ts': [
-    { marker: 'push notifications unavailable', count: 1, why: 'the push channel constructor: fs on the data dir, the VAPID key read whose parse is guarded, the SQLite open' },
+    { marker: 'push notifications unavailable', count: 1, why: 'the push channel constructor: fs on the data dir, the VAPID key read whose parse is guarded, the library check of the key lengths and the subject, the SQLite open' },
     { marker: 'are stored, but what this engine learned about them could not be recorded', count: 1, why: 'saved.reason is a refusal api-store builds from profile ids, vault names, hosts and file names; no error text enters it' },
     { marker: 'mandate end not recorded', count: 1, why: 'an INSERT with bound values; the plan-pause listener reports through processErrorText' },
     { marker: 'withdrawing the questions of deleted thread', count: 1, why: 'an UPDATE by thread id' },
@@ -350,13 +364,10 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'Engine database corrupted', count: 1, why: 'the open and integrity check of engine.db: SQLite names the file state, pages or index entries, never a row value' },
   ],
   'core/escalation.ts': [
-    { marker: '[escalation] recording the delivery failed', count: 1, why: 'the notify never rejects; what throws is the delivery reporter, a SQLite UPDATE binding a fixed delivery summary' },
+    { marker: '[escalation] recording the delivery failed', count: 1, why: 'the notify never rejects, and the reporter the engine hands in catches its own and its hooks errors; nothing that reaches here carries run text' },
   ],
   'core/speak/mistral-voxtral-tts.ts': [
     { marker: '[voxtral-tts]', count: 1, why: 'the provider body is in the line only while the process holds no exact connection (isErrorTextReducedForProcess)' },
-  ],
-  'egress-proxy/server.ts': [
-    { marker: 'deny cred=', count: 1, why: 'reason is a DenialReason literal; the detail is the address picker\'s lynox text' },
   ],
   'integrations/inbox/bootstrap.ts': [
     { marker: 'RunHistory bridge failed', count: 2, why: 'the run insert and update of the classifier\'s usage: SQLite with bound values' },
@@ -416,7 +427,6 @@ const FROZEN: Record<string, number> = {
   'egress-proxy/server.ts': 1,
   'integrations/google/google-auth.ts': 1,
   'integrations/inbox/bootstrap.ts': 2,
-  'integrations/mail/escalation-mail-channel.ts': 2,
   'integrations/mail/send-core.ts': 1,
   'integrations/microsoft/microsoft-auth.ts': 1,
   'integrations/push/web-push-channel.ts': 1,
@@ -497,7 +507,7 @@ it('sees every raw form it claims to see, and lets errorText through', () => {
   expect(census('probe.ts', src).map((l) => l.split(':')[1]?.split(' ')[0])).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26']);
 });
 
-it('sees a name declared with a raw form, and a logger handed in', () => {
+it('sees a name declared with a raw form, also inside a call, and a logger handed in; a shadowing name is no alias', () => {
   const src = [
     'const msg = err.message;',
     'process.stderr.write(`a ${msg}\\n`);',
@@ -513,8 +523,17 @@ it('sees a name declared with a raw form, and a logger handed in', () => {
     'notes.warn(`e ${getErrorMessage(err)}`);',
     "function g() { const msg = 'x'; process.stderr.write(`ok ${msg}\\n`); }",
     'this.log(`f ${(msg)}`);',
+    'process.stderr.write(`g ${mask(msg)}\\n`);',
+    'try { run(); } catch (msg) { process.stderr.write(`ok ${msg.code}\\n`); }',
+    'for (const msg of list) process.stderr.write(`ok ${msg}\\n`);',
+    'process.stderr.write(`ok ${obj.msg}\\n`);',
+    'process.stderr.write(msg);',
+    "const res = await fetch(url, { body: payload }); process.stderr.write(`ok ${res.status}\\n`);",
+    'process.stderr.write(`h ${msg.slice(0, 80)}\\n`);',
+    'process.stderr.write(`i ${result.body}\\n`);',
+    'process.stderr.write(`ok ${JSON.stringify({ body: 1 })}\\n`);',
   ].join('\n');
-  expect(census('probe.ts', src).map((l) => l.split(':')[1]?.split(' ')[0])).toEqual(['2', '3', '4', '7', '12', '14']);
+  expect(census('probe.ts', src).map((l) => l.split(':')[1]?.split(' ')[0])).toEqual(['2', '3', '4', '7', '12', '14', '15', '19', '21', '22']);
 });
 
 // Parses every source file under src/ with the TypeScript compiler. Under coverage in CI this test
