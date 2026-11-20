@@ -1140,7 +1140,8 @@ export class Agent implements IAgent {
   private _taintBeforeBatch: boolean | undefined;
   /** Whether this conversation holds a search the provider ran itself (`web_search_20250305`):
    *  its results reach the model inside the response, past every tool dispatch. Set when such a
-   *  response arrives, re-derived from the history on a load. */
+   *  response arrives, re-derived from the history on a load, cleared on `reset`, and carried
+   *  across a rebuild of the agent (`restoreProviderSearch`). */
   private _providerSearchSeen = false;
   /** The current tool batch as an identity, a fresh object per batch (`approvalBatch`). */
   private _batch: object | undefined;
