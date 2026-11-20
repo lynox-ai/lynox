@@ -198,6 +198,8 @@ describe('a profile in the API store', () => {
 		await settle();
 	}
 	const P = { base_url: 'https://x.example', description: 'd' };
+	// The owner's own name, with what a replacement string would read as a pattern: it stays as written.
+	const OWN = "Eigenes $& $' Profil";
 
 	it('sets apart the address of whoever connected it and the account\'s label', async () => {
 		const grant = { connected_by: `mandate:${MARK.helper}`, connected_by_reader: false, account: { label: MARK.account, source: 'oidc' } };
@@ -207,19 +209,25 @@ describe('a profile in the API store', () => {
 		expect(boxesIn(line)).toEqual([MARK.helper, MARK.account]);
 	});
 
-	it('sets apart, for the owner, the name of a profile a person with access set up, and keeps it out of the delete dialog', async () => {
+	it('sets apart, for the owner, the name of a profile a person with access set up, and names it by its host in the delete dialog', async () => {
 		await store([
-			{ ...P, id: 'p0', name: MARK.workflow, created_by: `mandate:${MARK.helper}` },
-			{ ...P, id: 'p1', name: MARK.own, created_by: 'owner' },
+			{ ...P, id: 'p0', name: MARK.workflow, base_url: 'https://crm.kanzlei.example/v2?x="y"', created_by: `mandate:${MARK.helper}` },
+			{ ...P, id: 'p1', name: OWN, created_by: 'owner' },
+			{ ...P, id: 'p2', name: MARK.plan, base_url: 'not an address', created_by: `mandate:${MARK.helper}` },
 		]);
 		const names = [...target.querySelectorAll('[data-profile-name]')];
-		expect(names.map((n) => n.textContent)).toEqual([MARK.workflow, MARK.own]);
-		expect(names.map((n) => boxesIn(n))).toEqual([[MARK.workflow], []]);
+		expect(names.map((n) => n.textContent)).toEqual([MARK.workflow, OWN, MARK.plan]);
+		expect(names.map((n) => boxesIn(n))).toEqual([[MARK.workflow], [], [MARK.plan]]);
 		const asked: string[] = [];
 		vi.stubGlobal('confirm', (m: string) => { asked.push(m); return false; });
 		for (const b of target.querySelectorAll<HTMLElement>('button')) if (b.getAttribute('aria-label') === 'Löschen' || b.textContent?.trim() === 'Löschen') b.click();
 		await settle();
-		expect(asked).toEqual(['Dieses API-Profil wirklich löschen?', `API-Profil "${MARK.own}" wirklich löschen?`]);
+		// The host alone, never the path or query; an address that does not parse names nothing.
+		expect(asked).toEqual([
+			'Das API-Profil für crm.kanzlei.example wirklich löschen?',
+			`API-Profil "${OWN}" wirklich löschen?`,
+			'Dieses API-Profil wirklich löschen?',
+		]);
 	});
 
 	it('leaves the name unboxed in a member\'s view', async () => {

@@ -25,6 +25,15 @@
 		return isOwnerSession() && (profile.created_by ?? '').startsWith('mandate:');
 	}
 
+	// The hostname of a profile's address, or '' when it does not parse or has none.
+	function hostOf(url: string): string {
+		try {
+			return new URL(url).hostname;
+		} catch {
+			return '';
+		}
+	}
+
 	// Who connected the profile and with which provider account (`utils/oauth-connection.ts`). A
 	// person's address and an account's label are someone else's values, set apart (`MarkedLine`).
 	function connectionText(line: ConnectionLine): string {
@@ -97,7 +106,10 @@
 		// Native confirm keeps the surface small; matches the rest of the
 		// destructive-action UX in this app (HistoryView, ArtifactsView).
 		// A native dialog cannot set a value apart: a name a person with access gave stays out of it.
-		const msg = setUpByMember(profile) ? t('apis.delete_confirm_unnamed') : t('apis.delete_confirm').replace('{name}', profile.name);
+		// The host of its address names it instead (a parsed hostname holds no spaces or quotes).
+		const host = setUpByMember(profile) ? hostOf(profile.base_url) : '';
+		const msg = !setUpByMember(profile) ? tf('apis.delete_confirm', { name: profile.name })
+			: host !== '' ? tf('apis.delete_confirm_host', { host }) : t('apis.delete_confirm_unnamed');
 		if (!confirm(msg)) return;
 		deleting = profile.id;
 		error = '';

@@ -753,7 +753,7 @@ describe('the library\'s own sentences', () => {
 		const run = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Ausführen');
 		run!.click();
 		await settle();
-		expect(target.querySelector('[data-page-error]')?.textContent).toBe('Eine Person mit Zugang hat den Workflow „Undetermined“ angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Er läuft erst wieder, wenn du ihn übernimmst: hier mit „Workflow übernehmen“.');
+		expect(target.querySelector('[data-page-error]')?.textContent).toBe('Eine Person mit Zugang hat den Workflow Undetermined angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Er läuft erst wieder, wenn du ihn übernimmst: hier mit „Workflow übernehmen“.');
 		expect(target.querySelector('[data-library-note="ended"]')?.textContent).toBe('Eine Person mit Zugang hat diesen Workflow angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Er läuft erst wieder, wenn du ihn übernimmst.');
 		expect(target.querySelector('[data-testid="access-ended-badge"]')?.textContent?.trim()).toBe('Zugang beendet');
 		expect(target.textContent).not.toContain('extern@kanzlei.example');
