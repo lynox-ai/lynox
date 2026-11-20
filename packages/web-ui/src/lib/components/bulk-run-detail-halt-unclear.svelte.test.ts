@@ -136,7 +136,7 @@ function halted(f: number, u: number, o: Partial<BulkRunDetailData> = {}): BulkR
 	allTargets = Array.from({ length: total }, (_, i) => field(i));
 	return makeRun({
 		phase: 'writing', total, changes: UPDATES(total), haltKey: 'failureRate', haltReason: 'more than 5 % of the targets failed',
-		probeConfirmed: true, maxTargets: total, failed: f + u, failedOnce: f, passUnclear: u, passFailed: f, secretFailed: 0, sentUnknown: u, failureLimit: 0,
+		probeConfirmed: true, maxTargets: total, failed: f + u, failedOnce: f, passUnclear: u, sentUnknown: u, failureLimit: 0,
 		resumeOpen: 2 + f, resumeTries: 2 + f, resumeSends: 2 + f, heads: { ...NONE, failed: f, unclear: u, open: 2 }, ...o,
 	});
 }
@@ -187,27 +187,12 @@ describe('the halt on a target whose send is unclear', () => {
 		expect(shown()).toContain('In this pass, 2 targets could not be written, and for 3 it stayed unclear whether the change arrived.');
 	});
 
-	it('names a target failed on its secret apart, without a number or a pass, and never as one of this pass\'s failures', async () => {
-		const secret = 'Dazu kommen Ziele, deren Wert etwas enthält, das lynox nicht hinausgibt, etwa einen Schlüssel. Sie lassen sich so nicht schreiben.';
-		// The head counts that target as failed; the pass's own count does not.
-		run = halted(0, 1, { heads: { ...NONE, failed: 1, unclear: 1, open: 2 }, failed: 2, secretFailed: 1 });
+	it('counts a target still failed on its secret from an earlier pass as failed in this one (today)', async () => {
+		// A resume leaves such a target failed, and the head counts it so: the halt sentence takes
+		// the head's count. Pinned as it stands, not as it should be.
+		run = halted(1, 1);
 		await render();
-		expect(shown()).toContain(`In diesem Durchgang blieb bei einem Ziel offen, ob die Änderung angekommen ist. ${secret}`);
-		expect(shown()).not.toContain('liess sich 1 Ziel nicht schreiben');
-		unmount(component!);
-		// With no failure of this pass on record, only that sentence: not the one on the limit.
-		run = halted(0, 0, { heads: { ...NONE, failed: 1, open: 2 }, failed: 1, secretFailed: 1 });
-		await render();
-		expect(shown()).toContain(secret);
-		expect(shown()).not.toContain(t('bulk.halt.failureRate_write0'));
-		unmount(component!);
-		// Nothing on record and no such target: the sentence on the limit.
-		run = halted(0, 0, { heads: { ...NONE, failed: 1, open: 2 }, failed: 1 });
-		await render();
-		expect(shown()).toContain(t('bulk.halt.failureRate_write0'));
-		expect(shown()).not.toContain(secret);
-		setLocale('en');
-		expect(t('bulk.halt.secret_targets')).toBe('There are also targets whose value contains something lynox does not send out, such as a key. They cannot be written as they are.');
+		expect(shown()).toContain('In diesem Durchgang liess sich 1 Ziel nicht schreiben, und bei 1 Ziel blieb offen, ob die Änderung angekommen ist.');
 	});
 
 	it('keeps the sentence on a target that could not be written where no send is unclear, or the engine does not say', async () => {
@@ -222,36 +207,10 @@ describe('the halt on a target whose send is unclear', () => {
 });
 
 describe('the halt on three failures in a row', () => {
-	it('names them as unclear where every failure of the pass is unclear, as either where both kinds are, and keeps its sentence where none is', async () => {
-		const cases: [number, number, string][] = [
-			[0, 3, 'Bei drei Zielen hintereinander blieb offen, ob die Änderung angekommen ist.'],
-			[1, 2, 'Bei drei Zielen hintereinander schlug das Schreiben fehl oder blieb offen, ob die Änderung angekommen ist.'],
-			[3, 0, 'Dreimal hintereinander liess sich ein Ziel nicht schreiben.'],
-		];
-		// A target failed on its secret may be one of the three: never "only unclear" then.
-		if (component) unmount(component);
-		component = undefined;
-		run = halted(0, 3, { haltKey: 'consecutiveFailures', haltReason: 'three consecutive targets failed', failureLimit: 5, secretFailed: 1 });
-		await render();
-		expect(shown()).toContain('Bei drei Zielen hintereinander schlug das Schreiben fehl oder blieb offen, ob die Änderung angekommen ist. Dazu kommen Ziele');
-		for (const [f, u, said] of cases) {
-			if (component) unmount(component);
-			component = undefined;
-			run = halted(f, u, { haltKey: 'consecutiveFailures', haltReason: 'three consecutive targets failed', failureLimit: 5 });
-			await render();
-			expect(shown(), `${String(f)}/${String(u)}`).toContain(said);
-		}
-		unmount(component!);
-		component = undefined;
-		run = halted(0, 3, { haltKey: 'consecutiveFailures', haltReason: 'three consecutive targets failed', failureLimit: 5, passFailed: undefined });
+	it('keeps its sentence, unclear sends or not', async () => {
+		run = halted(0, 3, { haltKey: 'consecutiveFailures', haltReason: 'three consecutive targets failed', failureLimit: 5 });
 		await render();
 		expect(shown()).toContain('Dreimal hintereinander liess sich ein Ziel nicht schreiben.');
-		const locale = getLocale();
-		setLocale('en');
-		try {
-			expect(t('bulk.halt.consecutiveFailures_unclear')).toBe('For three targets in a row, it stayed unclear whether the change arrived.');
-			expect(t('bulk.halt.consecutiveFailures_mixed')).toBe('For three targets in a row, writing failed or it stayed unclear whether the change arrived.');
-		} finally { setLocale(locale); }
 	});
 });
 

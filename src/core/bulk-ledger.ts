@@ -241,13 +241,6 @@ export interface BulkRunStatus {
   /** Targets this pass recorded as failed whose send is unclear now ({@link heads} `unclear`):
    *  a timeout counts toward the failure-rate halt, and the halt names it apart. */
   passUnclear: number;
-  /** Targets this pass recorded as failed that are not {@link passUnclear}, one per target, read
-   *  off its error (a resume clears it), not off its head class. Not a `secret` target: that
-   *  error stands across a resume ({@link secretFailed}). */
-  passFailed: number;
-  /** Targets failed on what they would send (`secret`). That error stands across a resume, so
-   *  whether one failed in this pass is not known. */
-  secretFailed: number;
   /** How many targets may fail in one pass without the failure-rate halt; the next failure
    *  halts it ({@link bulkFailureLimit}). */
   failureLimit: number;
@@ -1812,19 +1805,14 @@ export class BulkLedger {
     const pass = db.prepare(
       // Failed once, apart from a target whose send is unclear now: the timeout that left it so
       // was recorded as a failure, and the page names it as unclear, not as failed. In this pass
-      // and unclear: unclear, with a failure this pass recorded, so the halt can say how many of
-      // the pass's failures were sends without a clear answer; in this pass and failed, the rest.
-      // A resume clears every error but `secret`: one of those may stand from an earlier pass,
-      // so it is counted on its own and named without a number. Each is read off the targets
-      // alone, one per target, whatever its head class now (a partial undo settles one).
+      // and unclear: unclear, with a failure this pass recorded (a resume clears the error), so
+      // the halt can say how many of the pass's failures were sends without a clear answer.
       `SELECT COUNT(*) AS writing, SUM(failed_once IS NULL) AS unknown, SUM(failed_once = 1 AND NOT ${RUN_UNCLEAR_SQL}) AS failedOnce,
-         SUM(${RUN_UNCLEAR_SQL} AND ${WRITE_FAILED_SQL} AND error != 'secret') AS passUnclear,
-         SUM(NOT ${RUN_UNCLEAR_SQL} AND ${WRITE_FAILED_SQL} AND error != 'secret') AS passFailed,
-         SUM(${WRITE_FAILED_SQL} AND error = 'secret') AS secretFailed,
+         SUM(${RUN_UNCLEAR_SQL} AND ${WRITE_FAILED_SQL}) AS passUnclear,
          SUM(${RESUMABLE_SQL}) AS open, SUM(${RESUMABLE_SQL} AND write_sent = 1) AS openSent,
          SUM(${RESUMABLE_SQL} AND unknown_sends > 0) AS openUnclear
        FROM bulk_targets WHERE run_id = ? AND ${WRITING_SQL}`,
-    ).get(external, external, external, row.id) as { writing: number; unknown: number | null; failedOnce: number | null; passUnclear: number | null; passFailed: number | null; secretFailed: number | null; open: number | null; openSent: number | null; openUnclear: number | null };
+    ).get(external, external, row.id) as { writing: number; unknown: number | null; failedOnce: number | null; passUnclear: number | null; open: number | null; openSent: number | null; openUnclear: number | null };
     const open = pass.open ?? 0;
     const openSent = pass.openSent ?? 0;
     const cap = bulkWriteCap(row.max_targets, this.probeHolds(row));
@@ -1847,8 +1835,6 @@ export class BulkLedger {
       maxTargets: row.max_targets,
       failedOnce: (pass.unknown ?? 0) > 0 ? null : pass.failedOnce ?? 0,
       passUnclear: pass.passUnclear ?? 0,
-      passFailed: pass.passFailed ?? 0,
-      secretFailed: pass.secretFailed ?? 0,
       failureLimit: bulkFailureLimit(pass.writing), resumeOpen: open, resumeTries, resumeSends,
       kind: row.kind, atomic: row.atomic === 1, sourceRunId: row.source_run_id,
       writeMethod: externalHostOf(row.target_system) === null ? null : parseContractMethods(row.contract_json),
