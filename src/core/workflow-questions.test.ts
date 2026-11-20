@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RunHistory } from './run-history.js';
-import { PromptStore } from './prompt-store.js';
+import { PromptStore, consentOfPayload, consentActionOfPayload } from './prompt-store.js';
 import { principalFromTag } from './request-principal.js';
 import { ThreadStore } from './thread-store.js';
 import type { NotificationMessage, NotifyReport, DeliverySummary } from './notification-router.js';
@@ -119,6 +119,17 @@ describe('a question of a scheduled workflow run', () => {
     await expect(answer).resolves.toBe('B');
     expect(h.pending).toEqual([id, undefined]);
     expect(h.q.unanswered).toBe(false);
+  });
+
+  it('keeps a tool confirmation\'s kind and action on the stored row, for the card it is answered on', async () => {
+    const h = makeHarness();
+    const answer = h.q.ask('Delete event e1', ['confirm', 'cancel'], { consent: 'google', consentAction: 'delete' });
+    const id = await openQuestion(h);
+    const payload = h.prompts.getById(id)!.payload_json;
+    expect(consentOfPayload(payload)).toBe('google');
+    expect(consentActionOfPayload(payload)).toBe('delete');
+    h.prompts.answerUser(id, 'cancel', OWNER_PRINCIPAL);
+    await expect(answer).resolves.toBe('cancel');
   });
 
   it('seeds the thread\'s turns without the characters that render as nothing in the schedule\'s title', async () => {

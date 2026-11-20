@@ -324,7 +324,21 @@ export const VALUE_SLOT = '\uE000';
  * and the link override already rejects a non-allowlisted target — but a future
  * frame that did would put escaped text somewhere escaping is not sufficient.
  */
-export function renderPromptSegments(segments: readonly RenderablePromptSegment[]): string {
+/**
+ * The box a value someone else wrote stands in, when the question asks for it (`box`): the same
+ * shape as `MarkedLine`'s, an isolated element with a 1 px edge, so the value cannot pass for
+ * lynox's words nor turn the direction of the text around it. A value inside a quote (a mail's
+ * text, a plan's lines) is set apart by the quote already and stays as it is.
+ */
+const VALUE_BOX_OPEN = '<bdi data-foreign-value class="rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 box-decoration-clone font-mono">';
+const VALUE_BOX_CLOSE = '</bdi>';
+
+/** Whether `html` ends inside a quote: more blockquotes opened than closed. */
+function insideQuote(html: string): boolean {
+	return (html.match(/<blockquote[\s>]/g)?.length ?? 0) > (html.match(/<\/blockquote>/g)?.length ?? 0);
+}
+
+export function renderPromptSegments(segments: readonly RenderablePromptSegment[], options: { box?: boolean } = {}): string {
 	if (segments.length === 0) return renderPromptMarkdown('');
 
 	const values: string[] = [];
@@ -354,8 +368,8 @@ export function renderPromptSegments(segments: readonly RenderablePromptSegment[
 	let index = 0;
 	return parts.reduce((acc, part, i) => {
 		if (i === 0) return part;
-		const value = values[index++] ?? '';
-		return acc + escapeValueText(value, lone) + part;
+		const value = escapeValueText(values[index++] ?? '', lone);
+		return acc + (options.box === true && !insideQuote(acc) ? VALUE_BOX_OPEN + value + VALUE_BOX_CLOSE : value) + part;
 	}, '');
 }
 

@@ -3604,6 +3604,10 @@ describe('LynoxHTTPApi', () => {
         expect(openBody.consent).toBe('guard');
         expect(openBody.options).toEqual(['allow', 'deny']);
         expect(openBody.mailConnect).toBeUndefined();
+        // A Google consent comes back with the action its button names.
+        store.insertQuestion({ blocked: false, attended: true }, 's-google', 'Delete event e1', ['confirm', 'cancel'], false, undefined, undefined, undefined, undefined, 'google', 'delete');
+        const google = await (await jsonFetch('/api/sessions/s-google/pending-prompt')).json() as { consent?: string; consentAction?: string };
+        expect(google).toMatchObject({ consent: 'google', consentAction: 'delete' });
         store.insertAskUser('s-before', '⚠ Command: x', ['Allow', 'Deny', '\x00']);
         const before = await jsonFetch('/api/sessions/s-before/pending-prompt');
         expect((await before.json() as { consent?: string }).consent).toBeUndefined();
@@ -9252,7 +9256,7 @@ describe('LynoxHTTPApi', () => {
     });
 
     it('the live prompt frame carries the engine\'s consent marker, and a question without it carries none', async () => {
-      for (const [meta, expected] of [[{ consent: 'guard' }, 'guard'], [{ consent: 'deep' }, 'deep'], [undefined, undefined]] as const) {
+      for (const [meta, expected, action] of [[{ consent: 'guard' }, 'guard', undefined], [{ consent: 'deep' }, 'deep', undefined], [{ consent: 'google', consentAction: 'delete' }, 'google', 'delete'], [undefined, undefined, undefined]] as const) {
         await withStores(async (ps) => {
           mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
           let parked: Promise<unknown> | undefined;
@@ -9266,6 +9270,8 @@ describe('LynoxHTTPApi', () => {
           const frame = text.split('\n').find((l) => l.startsWith('data:') && l.includes('"promptId"'));
           expect(frame, 'no prompt frame on the stream').toBeDefined();
           expect((JSON.parse(frame!.slice('data:'.length)) as Record<string, unknown>)['consent'], String(expected)).toBe(expected);
+          // The action a Google consent's button names rides along, words only.
+          expect((JSON.parse(frame!.slice('data:'.length)) as Record<string, unknown>)['consentAction'], String(expected)).toBe(action);
           const pending = ps.getPending('sse-consent');
           if (pending) ps.expirePrompt(pending.id, 'run_stopped');
           await parked;

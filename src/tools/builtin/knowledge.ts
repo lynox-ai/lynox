@@ -8,6 +8,8 @@ import type { UntrustedCause } from '../../core/untrusted-signals.js';
 import { deriveTurnUntrusted, describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { appendUntrustedCauseLog } from '../../core/untrusted-cause-log.js';
 import { pv } from '../../core/prompt-value.js';
+import { consentMeta, consentOptions, consentRefusal, decideConsent } from '../../core/consent-ask.js';
+import { MEMORY_DIALOG } from '../dialog-text.js';
 import { canSupersede } from '../../core/provenance.js';
 import { chatThreadOf, privateThreadRefusal } from './private-thread.js';
 import { containedRefusal } from '../../core/containment.js';
@@ -390,11 +392,14 @@ export const memoryBlockEditTool: ToolEntry<BlockEditInput> = {
           ? `${clip(input.old_text, 240)} → ${clip(input.new_text, 240)}`
           : clip(input.new_text, 500))
       : clip(input.old_text ?? '', 500);
-    const answer = await agent.promptUser(
-      pv`Edit the ${input.block} block (${input.mode}${preview ? pv`: "${preview}"` : ''})? This block loads into every future turn. This is reversible by editing it again.`,
-      ['Apply', 'Cancel'],
-    );
-    if (answer !== 'Apply') return `Cancelled — the ${input.block} block is unchanged.`;
+    const said = MEMORY_DIALOG[agent.dialogLanguage ?? 'en'];
+    // Only the `apply` key edits; the label in any language, or typed text, does not.
+    const consent = decideConsent('apply', await agent.promptUser(
+      MEMORY_DIALOG[agent.dialogLanguage ?? 'en'].editBlock(input.block, input.mode, preview ? said.blockPreview(preview) : pv``),
+      consentOptions('apply'),
+      consentMeta('apply'),
+    ));
+    if (consent !== 'apply') return consentRefusal(consent, `Cancelled — the ${input.block} block is unchanged.`);
     // Again after the dialog: it can stay open for a long time, and private mode may have been
     // switched on meanwhile.
     const privateAfterDialog = containedRefusal(agent) ?? privateThreadRefusal(agent);
@@ -475,12 +480,15 @@ export const memoryRetireTool: ToolEntry<RetireInput> = {
       return `Refused: this entry is recorded at a higher trust level (${entry.sourceType}) than I can retire. Retire it yourself in the memory view if it is genuinely wrong.`;
     }
 
-    const reason = input.reason ? ` Reason: ${clip(input.reason)}.` : '';
-    const answer = await agent.promptUser(
-      pv`Retire this memory entry? "${clip(entry.text)}"${reason} It stays on record as superseded and stops surfacing. This needs a new \`remember\` if a corrected fact should replace it.`,
-      ['Retire', 'Cancel'],
-    );
-    if (answer !== 'Retire') return 'Cancelled — the entry stays active.';
+    const said = MEMORY_DIALOG[agent.dialogLanguage ?? 'en'];
+    const reason = input.reason ? said.retireReason(clip(input.reason)) : pv``;
+    // Only the `retire` key retires; the label in any language, or typed text, does not.
+    const consent = decideConsent('retire', await agent.promptUser(
+      MEMORY_DIALOG[agent.dialogLanguage ?? 'en'].retire(clip(entry.text), reason),
+      consentOptions('retire'),
+      consentMeta('retire'),
+    ));
+    if (consent !== 'retire') return consentRefusal(consent, 'Cancelled — the entry stays active.');
 
     try {
       // The store re-checks the same gate — the pre-prompt check above is for the

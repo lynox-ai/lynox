@@ -19,6 +19,7 @@ import {
   type SendCoreOptions,
 } from '../send-core.js';
 import type { MailRegistry } from './registry.js';
+import { consentMeta, consentOptions, consentRefusal, decideConsent, type ConsentOutcome } from '../../../core/consent-ask.js';
 import type { MailAddress } from '../provider.js';
 import { reflowMailBody } from '../body-reflow.js';
 import { currentCallFiling } from '../../../core/call-connection.js';
@@ -104,6 +105,8 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
         return 'mail_send error: sending requires interactive user confirmation, which is not available in this mode.';
       }
       const promptUser = agent.promptUser;
+      // What the confirmation decided, so a refusal can say whether the answer was understood.
+      let consent: ConsentOutcome = 'dismissed';
 
       const to = parseAddressList(input.to);
       const cc = parseAddressList(input.cc);
@@ -136,9 +139,10 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
             return { queued: filed.message };
           }
           if (!promptUser) return false;
-          const preview = buildSendPreview(sendCtx);
-          const answer = await promptUser(preview, ['Yes', 'No']);
-          return isApproval(answer);
+          const preview = buildSendPreview(sendCtx, agent.dialogLanguage ?? 'en');
+          // Only the `send` key sends; a label, a typed "ja" or any other text does not.
+          consent = decideConsent('send', await promptUser(preview, consentOptions('send'), consentMeta('send')));
+          return consent === 'send';
         },
       };
       if (input.track_followup) opts.trackFollowup = input.track_followup;
@@ -172,7 +176,7 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
             // beforeSend returned false — user clicked No (or the answer
             // wasn't a positive token). Mass-send vs single-send is implicit
             // in the preview already.
-            return 'mail_send cancelled by user.';
+            return consentRefusal(consent, 'mail_send cancelled by user.');
           case 'provider_error':
             return `mail_send error (${result.message})`;
         }
@@ -185,10 +189,4 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
       return `Email sent.\nMessage-ID: ${result.result.messageId}\nAccepted: ${result.result.accepted.join(', ') || '(none)'}${result.result.rejected.length > 0 ? `\nRejected: ${result.result.rejected.join(', ')}` : ''}${followupNote}`;
     },
   };
-}
-
-/** Accept yes/ja/ok/1/y as approval — anything else is denial. */
-function isApproval(answer: string): boolean {
-  const a = answer.toLowerCase().trim();
-  return ['yes', 'ja', 'ok', 'y', 'j', '1', 'sure', 'send', 'senden'].includes(a);
 }

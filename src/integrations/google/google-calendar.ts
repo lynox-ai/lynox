@@ -7,6 +7,9 @@ import { refuseUnlessScoped } from './action-scopes.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { pv, joinPrompts } from '../../core/prompt-value.js';
+import { consentMeta, consentOptions, consentRefusal, decideConsent } from '../../core/consent-ask.js';
+import type { ConsentAction } from '../../contract/prompt.js';
+import { GOOGLE_DIALOG, type DialogLanguage } from '../../tools/dialog-text.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
 import { ADDRESS_PLACEHOLDER, namedTarget } from '../../core/audit-log.js';
@@ -280,16 +283,17 @@ export function createCalendarTool(getAuth: () => GoogleAuth | null): ToolEntry<
           // newline in a value used to be able to imitate. The renderer puts
           // values in text nodes, so a forged field line is no longer possible
           // rather than merely unlikely. See core/prompt-value.ts.
+          const language = agent.dialogLanguage ?? 'en';
           let confirmMsg: PromptText = pv``;
+          let action: ConsentAction = 'create';
           switch (input.action) {
-            case 'create_event': confirmMsg = describeEventCreate(input.calendar_id, newEvent); break;
-            case 'update_event': confirmMsg = describeEventUpdate(input.event_id, input.calendar_id, eventUpdates); break;
-            case 'delete_event': confirmMsg = pv`Delete event ${input.event_id ?? '(unknown)'}${calendarLine(input.calendar_id)}\nThis cannot be undone.`; break;
+            case 'create_event': confirmMsg = describeEventCreate(input.calendar_id, newEvent, language); action = 'create'; break;
+            case 'update_event': confirmMsg = describeEventUpdate(input.event_id, input.calendar_id, eventUpdates, language); action = 'update'; break;
+            case 'delete_event': confirmMsg = GOOGLE_DIALOG[language].deleteEvent(input.event_id ?? GOOGLE_DIALOG[language].unknown, calendarLine(input.calendar_id, language)); action = 'delete'; break;
           }
-          const answer = await agent.promptUser(confirmMsg, ['Yes', 'No']);
-          if (answer.toLowerCase() !== 'yes' && answer !== '1') {
-            return 'Action cancelled by user.';
-          }
+          // Only the `confirm` key goes ahead; its button names `action`, which decides nothing.
+          const consent = decideConsent('google', await agent.promptUser(confirmMsg, consentOptions('google'), consentMeta('google', undefined, action)));
+          if (consent !== 'confirm') return consentRefusal(consent, 'Action cancelled by user.');
         }
 
         switch (input.action) {
@@ -385,23 +389,24 @@ export function buildEventCreate(input: CalendarInput): { ok: true; event: Recor
 }
 
 /** Every field the new event carries, one line each; each guest and each rule is its own value. */
-export function describeEventCreate(calendarId: string | undefined, event: Record<string, unknown>): PromptText {
+export function describeEventCreate(calendarId: string | undefined, event: Record<string, unknown>, language: DialogLanguage = 'en'): PromptText {
+  const said = GOOGLE_DIALOG[language];
   const when = (v: unknown): string => {
     const t = v as { date?: string; dateTime?: string; timeZone?: string };
     return t.date ?? (t.timeZone ? `${t.dateTime ?? '?'} (${t.timeZone})` : (t.dateTime ?? '?'));
   };
   const lines: PromptText[] = [
-    pv`Create event "${String(event['summary'])}"${calendarLine(calendarId)}`,
-    pv`Time: ${when(event['start'])} – ${when(event['end'])}`,
+    said.createEvent(String(event['summary']), calendarLine(calendarId, language)),
+    said.time(when(event['start']), when(event['end'])),
   ];
-  if (typeof event['location'] === 'string') lines.push(pv`Location: ${event['location']}`);
+  if (typeof event['location'] === 'string') lines.push(said.location(event['location']));
   if (Array.isArray(event['recurrence'])) {
-    lines.push(pv`Repeats: ${joinPrompts((event['recurrence'] as unknown[]).map((r) => pv`${String(r)}`), '; ')}`);
+    lines.push(said.repeats(joinPrompts((event['recurrence'] as unknown[]).map((r) => pv`${String(r)}`), '; ')));
   }
-  if (typeof event['description'] === 'string') lines.push(pv`Description: ${event['description']}`);
+  if (typeof event['description'] === 'string') lines.push(said.description(event['description']));
   if (Array.isArray(event['attendees'])) {
-    lines.push(pv`Guests: ${joinPrompts((event['attendees'] as { email: string }[]).map((g) => pv`${g.email}`), ', ')}`);
-    lines.push(pv`Everyone listed under Guests can see this event.`);
+    lines.push(said.guests(joinPrompts((event['attendees'] as { email: string }[]).map((g) => pv`${g.email}`), ', ')));
+    lines.push(said.guestsSee);
   }
   return joinPrompts(lines, '\n');
 }
@@ -484,28 +489,27 @@ export function buildEventUpdates(input: CalendarInput): { ok: true; updates: Re
 }
 
 /** `Calendar: <id>` when the action targets a calendar other than the person's own. */
-function calendarLine(calendarId: string | undefined): PromptText {
-  return calendarId !== undefined && calendarId !== 'primary' ? pv`\nCalendar: ${calendarId}` : pv``;
+function calendarLine(calendarId: string | undefined, language: DialogLanguage): PromptText {
+  return calendarId !== undefined && calendarId !== 'primary' ? GOOGLE_DIALOG[language].calendar(calendarId) : pv``;
 }
 
 /** One line per field the update changes; each guest is its own value. */
-export function describeEventUpdate(eventId: string | undefined, calendarId: string | undefined, updates: Record<string, unknown>): PromptText {
-  const head = pv`Update event ${eventId ?? '(unknown)'}${calendarLine(calendarId)}`;
+export function describeEventUpdate(eventId: string | undefined, calendarId: string | undefined, updates: Record<string, unknown>, language: DialogLanguage = 'en'): PromptText {
+  const said = GOOGLE_DIALOG[language];
+  const head = said.updateEvent(eventId ?? said.unknown, calendarLine(calendarId, language));
   const keys = Object.keys(updates);
-  if (keys.length === 0) return pv`${head}\nNothing changes.`;
+  if (keys.length === 0) return said.nothingChanges(head);
   const lines = keys.map((key) => {
     const value = updates[key];
     if (key === 'attendees' && Array.isArray(value)) {
       const guests = (value as { email: string }[]).map((g) => pv`${g.email}`);
-      return guests.length === 0
-        ? pv`Guests: none — every current guest is removed`
-        : pv`Guests (replace the current list): ${joinPrompts(guests, ', ')}`;
+      return guests.length === 0 ? said.guestsNone : said.guestsReplace(joinPrompts(guests, ', '));
     }
-    return pv`${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`;
+    return said.field(key, typeof value === 'string' ? value : JSON.stringify(value));
   });
   const guestsChange = keys.includes('attendees');
   return joinPrompts(
-    [pv`${head}\nThese fields change:`, ...lines, ...(guestsChange ? [pv`Everyone listed under Guests can see this event.`] : [])],
+    [said.fieldsChange(head), ...lines, ...(guestsChange ? [said.guestsSee] : [])],
     '\n',
   );
 }

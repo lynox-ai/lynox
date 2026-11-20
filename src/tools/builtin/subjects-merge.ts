@@ -3,7 +3,8 @@ import { getLynoxDir } from '../../core/config.js';
 import { runMerge, LEDGER_RETENTION_DAYS } from '../../core/subject-merge-runner.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { ifOk, withInstanceWrite } from '../../core/instance-trail.js';
-import { pv } from '../../core/prompt-value.js';
+import { consentMeta, consentOptions, consentRefusal, decideConsent } from '../../core/consent-ask.js';
+import { MEMORY_DIALOG } from '../dialog-text.js';
 import { NAME_DEDUPED_SUBJECT_KINDS } from '../../core/subject-store.js';
 import type { SubjectKind } from '../../core/subject-store.js';
 
@@ -137,11 +138,13 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
     // it is the wrong place to be aspirational. It now says the one thing that decides
     // their answer — they cannot take this back themselves — and leaves the operator
     // path to the result message, which hands over the actual ledger file.
-    const answer = await agent.promptUser(
-      pv`Merge "${dupSafe}" into "${canonSafe}"? Every note, task and mention of "${dupSafe}" moves to "${canonSafe}", and "${dupSafe}" is archived. Undoing it needs a command-line rollback — not something you can do from chat.`,
-      ['Merge', 'Cancel'],
-    );
-    if (answer !== 'Merge') return `Cancelled — "${dup.name}" and "${canon.name}" were left as separate entries.`;
+    // Only the `merge` key merges; the label in any language, or typed text, does not.
+    const consent = decideConsent('merge', await agent.promptUser(
+      MEMORY_DIALOG[agent.dialogLanguage ?? 'en'].merge(dupSafe, canonSafe),
+      consentOptions('merge'),
+      consentMeta('merge'),
+    ));
+    if (consent !== 'merge') return consentRefusal(consent, `Cancelled — "${dup.name}" and "${canon.name}" were left as separate entries.`);
 
     try {
       const dupId = dup.id, canonId = canon.id;
