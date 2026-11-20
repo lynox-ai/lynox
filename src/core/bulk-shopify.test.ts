@@ -1658,6 +1658,10 @@ describe('applying a Shopify run', () => {
         expect(JSON.stringify(s.products.get(10))).toBe(product);
         expect(ledger.getStatus(id)).toMatchObject({ applied: 0, failed: 0, sentUnknown: 0 });
         expect(out.summary).toContain('lynox wrote nothing. When this Shopify connection was set up, lynox did not ask for permission to change products.');
+        // The short reason the run page and a push show, in both languages.
+        expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.productWriteNotAsked);
+        expect(BULK_NOTICES.en.halted('apply', BULK_HALT_REASONS.productWriteNotAsked)).toContain('This Shopify connection may not change products. Ask lynox in the chat how to get that permission, then have the run planned again.');
+        expect(BULK_NOTICES.de.halted('apply', BULK_HALT_REASONS.productWriteNotAsked)).toContain('Diese Shopify-Verbindung darf keine Produkte ändern. Frag lynox im Chat, wie du die Erlaubnis bekommst, und lass den Lauf dann neu planen.');
       });
 
       it('writes nothing under a grant that asked for write_products but was not granted it, and says where to allow it', async () => {
