@@ -1646,6 +1646,12 @@ const MIGRATIONS: string[] = [
    ALTER TABLE bulk_runs ADD COLUMN planner_grants TEXT;
    ALTER TABLE bulk_targets ADD COLUMN before_grants TEXT;
    ALTER TABLE bulk_targets ADD COLUMN write_grants TEXT;`,
+  // v72: whether a bulk run's data-store writes carry content from outside (`_written_untrusted`,
+  // data-store.ts). The worker that writes holds no turn, so the run keeps it: 1 when the turn
+  // that planned it had read outside content or a source row carries the mark (a file source
+  // always counts), 0 when neither. NULL, a run planned before this column, counts as 1.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (72);
+   ALTER TABLE bulk_runs ADD COLUMN planner_untrusted INTEGER;`,
 ];
 
 export interface EngineDbOptions {

@@ -17,6 +17,7 @@ import { JUDGE_MAX_HTML, contextFieldsOfListForm, judgeFields, judgeTemplate, ju
 import { SHOPIFY_ALT_MAX_CHARS, SHOPIFY_FILTER_VALUE_RULE, SHOPIFY_LIST_FILTER_MAX_VALUES, SHOPIFY_LIST_STATUS_VALUES, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS, isShopifyStoreHostName } from '../../core/shopify-graphql.js';
 import { chatThreadOf } from './private-thread.js';
 import { UNKNOWN_GRANT } from '../../core/conversation-grants.js';
+import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
 
 /**
  * The model-facing half of a bulk run's dry run (PRD bulk-changes-reversible §3.2,
@@ -173,6 +174,23 @@ function sourceGrantsOfRows(agent: IAgent, collection: string, rows: readonly Re
   }
   const grants = store.sourceGrantsOfIds(collection, ids, BULK_QUERY_PAGE);
   return unknown ? [...new Set([...grants, UNKNOWN_GRANT])].sort() : grants;
+}
+
+/**
+ * Whether any source row a run copies carries the outside-content mark
+ * ({@link DataStore.sourceUntrustedOfIds}). A row without a usable `_id` counts as marked, for
+ * the reason {@link sourceGrantsOfRows} counts it as unknown.
+ */
+function sourceUntrustedOfRows(agent: IAgent, collection: string, rows: readonly Record<string, unknown>[]): boolean {
+  const store = agent.toolContext.dataStore;
+  if (!store) throw new BulkSourceError('The data store is not available.');
+  const ids: number[] = [];
+  for (const r of rows) {
+    const id = r['_id'];
+    if (typeof id === 'number' && Number.isInteger(id)) ids.push(id);
+    else return true;
+  }
+  return store.sourceUntrustedOfIds(collection, ids, BULK_QUERY_PAGE);
 }
 
 /**
@@ -478,6 +496,9 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       // Where the source's values came from, beside the conversation: a file carries no stamp,
       // so it is unknown; a collection's rows carry their own (`_source_grants`).
       let sourceGrants: string[];
+      // And whether they came from outside: a file may hold anything, so it counts as outside
+      // content; a collection's rows carry their own mark (`_written_untrusted`).
+      let sourceUntrusted: boolean;
       if (input.source_file !== undefined) {
         const path = bulkFileKey(input.source_file);
         if (path === null) throw new BulkSourceError('The source file must be inside the workspace.');
@@ -493,9 +514,11 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         const format = input.source_format ?? (path.toLowerCase().endsWith('.csv') ? 'csv' : 'json');
         rows = parseSourceText(image.value, format);
         sourceGrants = [UNKNOWN_GRANT];
+        sourceUntrusted = true;
       } else {
         rows = queryAllRows(agent, input.source_collection!, input.source_filter);
         sourceGrants = sourceGrantsOfRows(agent, input.source_collection!, rows);
+        sourceUntrusted = sourceUntrustedOfRows(agent, input.source_collection!, rows);
       }
       // With a judge, a row names only its target: the model decides the values.
       const source = input.judge === undefined ? rowsToSource(rows) : rowsToSource(rows).map((r) => ({ target: r.target, after: {} }));
@@ -580,6 +603,9 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         // with this one's grant set and its source's, or a row made from what either read would
         // escape that connection's erasure.
         plannerGrants: plannerGrantsOf(agent.conversationGrants?.members() ?? null, sourceGrants),
+        // Likewise its outside-content mark: a copy of a marked row, or a row written on the word
+        // of a turn that read outside content, is marked as the store marks such a write itself.
+        plannerUntrusted: deriveTurnUntrusted(agent) || sourceUntrusted,
       });
       return [
         'Dry run recorded — nothing was written to any target.',
