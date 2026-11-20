@@ -343,6 +343,8 @@ describe('an address that carries another address, after foreign content', () =>
     ['behind a named host and userinfo', 'https://reader.example.ch/https://docs.example.ch&x@collect.evil.example/p'],
     ['behind a plus', 'https://reader.example.ch/fetch?url=+https://collect.evil.example/p'],
     ['behind an encoded tab', 'https://reader.example.ch/https://docs.example.ch%09@collect.evil.example/p'],
+    ['behind a broken escape', 'https://reader.example.ch/fetch?a=%ZZ&url=htt%70s%3A//collect.evil.example'],
+    ['behind a cut UTF-8 escape', 'https://reader.example.ch/fetch?a=%E0%A4%A&url=%68ttps%3A%2F%2Fcollect.evil.example'],
   ] as const) {
     it(`(${form}) is asked about even when the owner named the hosts, and says why`, async () => {
       const tool = webResearch();
@@ -376,13 +378,35 @@ describe('an address that carries another address, after foreign content', () =>
     expect(String(result.content)).toContain('this run has no reader');
   });
 
-  it('CONTROL: a yes reads it, for this call', async () => {
+  it('CONTROL: a yes reads it, for this call only', async () => {
     const tool = webResearch();
     const ask = asker('Allow');
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
     await read(agent, 'https://reader.example.ch/https://docs.example.ch/guide');
     expect(ask.asked).toHaveLength(1);
     expect(tool.reads).toEqual(['https://reader.example.ch/https://docs.example.ch/guide']);
+    await read(agent, 'https://reader.example.ch/https://docs.example.ch/guide');
+    expect(ask.asked).toHaveLength(2);
+  });
+
+  it('a carry check that throws refuses the read unasked, as an address that cannot be read', async () => {
+    const base = webResearch();
+    const tool = Object.assign(base, { readCarriesAddress: () => { throw new Error('boom'); } });
+    const ask = asker('Allow');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
+    const result = await read(agent, 'https://reader.example.ch/docs');
+    expect(ask.asked).toEqual([]);
+    expect(tool.reads).toEqual([]);
+    expect(String(result.content)).toContain('could not read');
+  });
+
+  it('an address encoded five times is not seen: the named limit', async () => {
+    const tool = webResearch();
+    const ask = asker('Deny');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
+    const enc5 = [1, 2, 3, 4, 5].reduce((v) => encodeURIComponent(v), 'https://collect.evil.example/d');
+    await read(agent, `https://reader.example.ch/fetch?u=${enc5}`);
+    expect(ask.asked).toEqual([]);
   });
 
   it('CONTROL: an address a search listed exactly is read without a question, carried address and all', async () => {
@@ -402,6 +426,7 @@ describe('an address that carries another address, after foreign content', () =>
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
     await read(agent, 'https://reader.example.ch/page#https://collect.evil.example/d');
     expect(ask.asked).toEqual([]);
+    expect(tool.reads).toEqual(['https://reader.example.ch/page#https://collect.evil.example/d']);
   });
 
   it('CONTROL: a named host without a carried address is read without a question', async () => {

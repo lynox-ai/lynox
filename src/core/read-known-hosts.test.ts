@@ -93,7 +93,7 @@ describe('api_setup stamps a save the owner made in a clean turn', () => {
     ["a trigger's run", { writeAuthor: 'trigger:t1' }],
     ["a workflow's run", { writeAuthor: 'workflow:w1' }],
     ['a run whose author is not known', {}],
-    ['a sub-agent of the owner\'s chat', { writeAuthor: 'owner', sendOrigin: { kind: 'subAgent' } }],
+    ['a sub-agent of the owner\'s chat', { writeAuthor: 'owner', sendOrigin: { kind: 'childAgent' } }],
   ] as const) {
     it(`a clean save in ${label} under the owner's principal does not stamp`, async () => {
       const store = new ApiStore();
