@@ -215,6 +215,46 @@ describe('judgeOutliers on domains in other scripts, phone numbers and the own s
   });
 });
 
+/** Every form of a link or an address in text that some earlier reading of this module flagged,
+ *  collected over four review rounds: a later change to the reading must still flag each. The own
+ *  shop's domain stands in some to show that it does not hide the foreign one. */
+const FORMS_ONCE_CAUGHT = [
+    'evil.com_', 'Besuch evil.com_ jetzt', '_evil.com_', '*evil.com*', '**evil.com**', 'evil.com%20', 'evil.com+',
+    '+evil.com', 'evil.com@', 'evil.com@home', 'evil.com@x.y', '.evil.com.', '-evil.com-', '...evil.com...',
+    'info@evil.com_', 'info@evil.com_x', 'info_x@evil.com', '%info@evil.com', 'a+b@evil.com', 'https://user:pw@evil.com/x',
+    'https://moebel-meier.ch@evil.icu', 'hxxps://evil.icu', 'https://evil.icu:8080', 'evil.\u017fhop', 'evil.\u017fite',
+    'evil.\u017ftore', 'evil.u\u017f', 'evil.lin\u212a', 'EVIL.\u017fHOP', 'evil.\u0282hop', '\ud835\udc1e\ud835\udc2f\ud835\udc22\ud835\udc25.com',
+    'evil.\ud835\udc1c\ud835\udc28\ud835\udc26', 'evil.\uff43\uff4f\uff4d', '\u0435vil.com', 'evil.\u0440\u0444',
+    'evil.\u4e2d\u56fd', 'evil.xn--p1ai', 'evil.XN--P1AI', '\u0448\u043e\u043f.\u0440\u0444', 'ev\u200dil.com',
+    'ev\u00adil.com', 'ev\u0301il.com', '\u00e9vil.com', 'evil.c\u00f3m', 'evil\u3002com', 'evil\uff0ecom',
+    'evil\uff61com', 'evil[.]com', 'evil(dot)com', 'evil dot com', 'Evil.Com', 'Evil.Io', 'Evil.Ly', 'Evil.Ai',
+    'www.Evil.De', 'EVIL.DE', 'Evil.DE', 'Evil.Xn--p1ai', 'info@Evil.De', 'info@evil.icu', 'http://1.2.3.4/',
+    'http://0x7f.1/', 'evil.com\\x', 'https://evil.com\\@moebel-meier.ch', 'Visit evil.com.', 'Visit evil.com, now',
+    'evil.com/path', '(evil.com)', '"evil.com"', '<evil.com>', 'evil.com?', 'evil.com#x', 'evil.com:80',
+    'evil.co.uk', 'a.b.c.evil.shop', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com',
+    'a_b.com', 'evil.com_x.net', '%evil.com', 'x@y@evil.com', 'info@evil.com@x', 'info@evil.com%', 'info@evil.com+',
+    'info@evil.com.', 'info@evil.icu-', 'a%2Fevil.com', 'evil.com%2F', 'x+evil.icu', 'moebel-meier.ch@evil.icu',
+    'a@b.c', 'z.B._evil.com', 'evil.co_uk', 'www.Evil.De_', 'evil.\u017fhop_', 'mail@evil.\u0131o', 'evil.\u0131o',
+    'evil.\u0131cu', 'x.\u017fhop+', 'evil.com@@x', '@@evil.com', 'evil.com@.', 'a.com a.com a.com a.com a.com ',
+    'evil.icu%', 'evil.com_evil.icu', '%%evil.icu%%', 'evil.icu@', 'user@evil.icu@', 'see@evil.icu', 'Kontakt@Evil.De',
+    'info@evil.com@', 'Schreib an info@evil.com@ heute', 'a@evil.com@b', 'info@evil.com@moebel-meier.ch',
+    'info@evil.icu_x@moebel-meier.ch', 'kontakt@evil.icu@x.ch', 'evil.com_shop', 'Besuche evil.com_jetzt',
+    'go_now.evil.com', 'a_b.evil.com', 'go_now.evil.com/x', '%65vil.com', 'ev%69l.com', '%41evil.com', 'e%41vil.com',
+    'info%40evil.com', 'https%3A%2F%2Fevil.com', 'evil.com%40x.y',
+];
+
+describe('markersOf against every form an earlier reading caught', () => {
+  it('flags a foreign link or address in each of them', () => {
+    const own = ['moebel-meier.ch'];
+    const foreign = (text: string): string[] => [...markersOf(text)]
+      .filter(([kind]) => kind === 'link' || kind === 'email')
+      .flatMap(([, keys]) => [...keys].filter((h) => !own.some((d) => h === d || h.endsWith(`.${d}`))));
+    const missed = FORMS_ONCE_CAUGHT.filter((text) => foreign(text).length === 0);
+    expect(missed).toEqual([]);
+    expect(FORMS_ONCE_CAUGHT.length).toBe(127);
+  });
+});
+
 describe('markersOf', () => {
   it('reads no link where a full stop lacks its space before a word, nor a part number or a GTIN as a phone number', () => {
     const m = markersOf('Aus Baumwolle.Es ist weich. Holz.Co und Stk.No. Bestellnummer 0815 123456, Teil 0711 2345678, EAN 0041234567890, Lot 00123456789.');
@@ -234,9 +274,12 @@ describe('markersOf', () => {
     expect([...markersOf('+49 44 123 45 67').get('phone')!]).toEqual(['49441234567']);
   });
 
-  it('ends a host at a backslash and reads only what follows the user, refuses one longer than a host may be, and reads full stops of other scripts as dots', () => {
-    expect([...markersOf('https://evil.icu\\@moebel-meier.ch/').get('link')!]).toEqual(['evil.icu']);
-    expect([...markersOf('https://moebel-meier.ch@evil.icu/').get('link')!]).toEqual(['evil.icu']);
+  it('ends a host at a backslash and takes the host after the user, refuses one longer than a host may be, and reads full stops of other scripts as dots', () => {
+    // The address ends at the backslash: evil.icu is the host; the own shop after the @ is read as a word too.
+    expect([...markersOf('https://evil.icu\\@moebel-meier.ch/').get('link')!].sort()).toEqual(['evil.icu', 'moebel-meier.ch']);
+    // The link goes to evil.icu, whatever the user part names; that part is read as a word too.
+    expect([...markersOf('https://moebel-meier.ch@evil.icu/').get('link')!].sort()).toEqual(['evil.icu', 'moebel-meier.ch']);
+    expect([...markersOf('https://shop@evil.icu/').get('link')!]).toEqual(['evil.icu']);
     expect([...markersOf(`Mehr auf ${'a'.repeat(63)}.com`).get('link')!]).toEqual([`${'a'.repeat(63)}.com`]);
     expect([...markersOf(`Mehr auf ${'a'.repeat(64)}.com`).get('link')!]).toEqual([]);
     // 125 labels and com: 253 characters, the longest a host may be; one label more is not one.
@@ -245,10 +288,15 @@ describe('markersOf', () => {
     for (const dot of ['\u3002', '\uFF0E', '\uFF61']) expect([...markersOf(`Mehr auf evil${dot}com`).get('link')!], dot).toEqual(['evil.com']);
   });
 
-  it('reads no host cut out of a percent escape or a word with an underscore inside, and an address after the last @', () => {
+  it('reads no host cut out of a percent escape, an address after every @, and a host on each side of an underscore', () => {
     expect([...markersOf('Mehr auf https://x.example/?ref=https%3A%2F%2Fmoebel-meier.ch').get('link')!].sort()).toEqual(['moebel-meier.ch', 'x.example']);
-    expect([...markersOf('moebel_meier.ch').get('link')!]).toEqual([]);
     expect([...markersOf('x@y@evil.com').get('email')!]).toEqual(['evil.com']);
+    expect([...markersOf('info@evil.com@').get('email')!]).toEqual(['evil.com']);
+    expect([...markersOf('kontakt@evil.icu@x.ch').get('email')!].sort()).toEqual(['evil.icu', 'x.ch']);
+    // An _ inside a word cuts it, and every side is read: a hidden host is worth more than the false
+    // one a shop name with an underscore yields ("moebel_meier.ch" reads meier.ch).
+    expect([...markersOf('go_now.evil.com').get('link')!]).toEqual(['now.evil.com']);
+    expect([...markersOf('moebel_meier.ch').get('link')!]).toEqual(['meier.ch']);
   });
 
   it('reads a host whatever sign stands at its ends or after an @ that starts no address, and a top-level domain with a long s', () => {
@@ -263,11 +311,13 @@ describe('markersOf', () => {
     const time = (text: string): number => { const t0 = performance.now(); markersOf(text); return performance.now() - t0; };
     const many = Array.from({ length: 5000 }, (_, i) => `a${String(i)}.com`);
     time(many.join(' '));
-    const distinct = Math.min(time(many.join(' ')), time(many.join('+')));
+    // The fastest of three runs each, so a pause of the process does not decide.
+    const best = (text: string): number => Math.min(time(text), time(text), time(text));
+    const distinct = Math.min(best(many.join(' ')), best(many.join('+')));
     expect([...markersOf('a.com '.repeat(5000)).get('link')!]).toEqual(['a.com']);
     expect([...markersOf('a.com+'.repeat(5000)).get('link')!]).toEqual(['a.com']);
-    expect(time('a.com '.repeat(5000))).toBeLessThan(distinct / 4);
-    expect(time('a.com+'.repeat(5000))).toBeLessThan(distinct / 4);
+    expect(best('a.com '.repeat(5000))).toBeLessThan(distinct / 4);
+    expect(best('a.com+'.repeat(5000))).toBeLessThan(distinct / 4);
   });
 
   it('reads a long run of letters before an @, of labels, or of blanks and obfuscated dots in time linear in its length', () => {

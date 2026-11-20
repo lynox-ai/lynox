@@ -122,33 +122,32 @@ export function markersOf(text: string): Map<MarkerKind, Set<string>> {
   const dotted = /[[(\u3002\uFF0E\uFF61]|dot/iu.test(text) ? text.replace(OBFUSCATED_DOT, '.') : text;
   // A percent escape ("%2F" in a link's query) separates, as the character it stands for mostly does.
   const plain = dotted.includes('%') ? dotted.replace(/%[0-9A-Fa-f]{2}/gu, ' ') : dotted;
-  // A text that names one host a thousand times reads it once, as a word and as a part of one.
+  // Every reading of a word adds, none takes away: a sign that only one reading cuts at (an extra @,
+  // an _ inside) must not hide what another reading finds. A text that names one host a thousand times
+  // reads it once, as a word and as a piece of one.
   const seen = new Set<string>();
-  for (const whole of dottedWords(plain)) {
-    if (seen.has(whole)) continue;
-    seen.add(whole);
-    let word = whole;
-    const at = word.lastIndexOf('@');
-    if (at >= 0) {
-      // An address: something before its last @, a domain with a dot after it. Its domain is not also a link.
-      const domain = trimEnds(word.slice(at + 1).split(/[^\p{L}\p{N}.-]/u)[0]!);
-      if (at > 0 && domain.includes('.')) {
-        const host = asciiHost(domain);
-        if (host !== undefined) out.get('email')!.add(host);
-        continue;
-      }
-      // No address ("evil.com@home"): what stands before the first @ is read as a host.
-      word = word.slice(0, word.indexOf('@'));
+  const hosts = new Map<string, string | undefined>();
+  for (const word of dottedWords(plain)) {
+    if (seen.has(word)) continue;
+    seen.add(word);
+    // An address: the domain after each @ that has something before it.
+    const addressed = new Set<string>();
+    const sides = word.split('@');
+    for (let k = 1; k < sides.length; k++) {
+      if (trimEnds(sides[k - 1]!) === '') continue;
+      const domain = trimEnds(sides[k]!.split(/[^\p{L}\p{N}.-]/u)[0]!);
+      const host = domain.includes('.') ? asciiHost(domain) : undefined;
+      if (host === undefined) continue;
+      out.get('email')!.add(host);
+      addressed.add(host);
     }
-    // The parts between a % or + are read each ("evil.com+"); signs at a part's ends belong to the
-    // sentence ("evil.com_"). A part with an _ inside is no host, and not cut into one ("moebel_meier.ch").
-    for (const part of word.split(/[%+]/u)) {
-      const token = trimEnds(part);
-      if (seen.has(`\u0000${token}`)) continue;
-      seen.add(`\u0000${token}`);
-      if (token.includes('_')) continue;
-      const host = hostOfWord(token);
-      if (host !== undefined) out.get('link')!.add(host);
+    // Every piece between _ % + @ is read as a host as well; one an address of this word names is
+    // already marked as that address.
+    for (const piece of word.split(/[_%+@]/u)) {
+      const token = trimEnds(piece);
+      if (!hosts.has(token)) hosts.set(token, hostOfWord(token));
+      const host = hosts.get(token);
+      if (host !== undefined && !addressed.has(host)) out.get('link')!.add(host);
     }
   }
   for (const [written] of text.matchAll(PHONE_RE)) {
