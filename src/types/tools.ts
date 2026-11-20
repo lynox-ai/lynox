@@ -202,6 +202,11 @@ export interface ToolEntry<TInput = unknown> {
    */
   readAddress?: ((input: TInput) => string | null) | undefined;
   /**
+   * Whether a read's address carries another address (`carriesAddress`). While the latch is set,
+   * such a read is asked about whatever its host, unless a search listed its exact address.
+   */
+  readCarriesAddress?: ((input: TInput) => boolean) | undefined;
+  /**
    * When true, calling this tool ENDS the agent's turn: after the tool_result
    * is appended and checkpointed, the loop returns the turn's text instead of
    * looping back to the model. Use for terminal tools whose whole job is a

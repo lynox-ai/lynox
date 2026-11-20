@@ -63,10 +63,11 @@ describe('api_setup stamps a save the owner made in a clean turn', () => {
   beforeEach(() => { lynoxDir = mkdtempSync(join(tmpdir(), 'lynox-read-known-')); });
   afterEach(() => { rmSync(lynoxDir, { recursive: true, force: true }); });
 
-  function agentFor(store: ApiStore, tainted: boolean) {
+  function agentFor(store: ApiStore, tainted: boolean, run: { writeAuthor?: string; sendOrigin?: unknown } = { writeAuthor: 'owner' }) {
     return {
       principal: OWNER_PRINCIPAL,
       conversationSawUntrusted: tainted,
+      ...run,
       sessionCounters: { httpRequests: 0 },
       promptUser: async () => 'Allow',
       secretStore: { resolve: (): string | null => null, listNames: (): string[] => [] },
@@ -87,6 +88,20 @@ describe('api_setup stamps a save the owner made in a clean turn', () => {
     // The host still counts, by the acceptance the owner answered at this save, not by the stamp.
     expect(store.get('crm')?.custom_endpoint_ack?.accepted).toBe(true);
   });
+
+  for (const [label, run] of [
+    ["a trigger's run", { writeAuthor: 'trigger:t1' }],
+    ["a workflow's run", { writeAuthor: 'workflow:w1' }],
+    ['a run whose author is not known', {}],
+    ['a sub-agent of the owner\'s chat', { writeAuthor: 'owner', sendOrigin: { kind: 'subAgent' } }],
+  ] as const) {
+    it(`a clean save in ${label} under the owner's principal does not stamp`, async () => {
+      const store = new ApiStore();
+      const out = await apiSetupTool.handler({ action: 'create', profile: profile('crm', 'https://api.crm.example/v1') }, agentFor(store, false, run)) as string;
+      expect(out).toContain('Created API profile');
+      expect(store.get('crm')?.owner_clean_host).toBeUndefined();
+    });
+  }
 });
 
 type Result = { content: unknown; is_error?: boolean };

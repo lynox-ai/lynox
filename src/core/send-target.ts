@@ -87,46 +87,35 @@ export function hostTargets(url: string): SendTarget[] {
 }
 
 /**
- * An absolute http(s) address inside another one, up to the end of its authority. With two, one or
- * no slashes after the scheme, and a backslash for a slash: the URL parser of a service reading it
- * takes all of these to the same host (`https:/x`, `https:x` and `https:\\x` all mean `x`). The
- * authority ends at a character no host name holds, so `?url=https://x.example&y=1` or
- * `(https://x.example)` reads `x.example`.
+ * Whether a read's address carries another address: `http:` or `https:`, in any case, in its path
+ * or query, as written or decoded up to {@link CARRY_DECODE_ROUNDS} times. A service that fetches
+ * an address it is given (`https://reader.example/https://x/…`, `?url=https%3A%2F%2Fx`) sends the
+ * read on, with what the address holds, to a host no parser here can name for sure: each service
+ * reads the carried address its own way. So no host is guessed; such a read is asked about (or
+ * refused where nobody can be asked), whatever its own host. The fragment is never sent and is
+ * not read. An address that does not parse carries nothing here; its own target is unreadable.
  */
-const EMBEDDED_URL = /(?<![a-z0-9+.-])https?:[\\/]{0,2}([^\s/\\?#"'<>&,;()%=|^{}*+!$`]+)/giu;
-
-/**
- * The hosts a read of `url` reaches: its own, and the host of every absolute address its path or
- * query carries, plain, percent-encoded or encoded twice over (decoded up to three times). A
- * service that fetches the address it is given in the path (`https://reader.example/https://x/…`)
- * sends the read on to that host, so that host is a target as well. The fragment is never sent and
- * is not read. An embedded authority that is no host name the check can compare is still a target,
- * as written: it is never owner-known, so the read is asked about or refused like any other read to
- * an unnamed host, never passed.
- */
-export function readTargets(url: string): SendTarget[] {
-  const out = hostTargets(url);
+export function carriesAddress(url: string): boolean {
   let parsed: URL;
   try {
     parsed = new URL(url.trim());
   } catch {
-    throw new UnknownSendTargetError('host');
+    return false;
   }
   let layer = parsed.pathname + parsed.search;
-  for (let round = 0; round < 4; round++) {
-    for (const m of layer.matchAll(EMBEDDED_URL)) {
-      const authority = m[1] ?? '';
-      const target = normalizeHostTarget(`https://${authority}`) ?? { kind: 'host' as const, value: authority.toLowerCase() };
-      if (!out.some((t) => t.value === target.value)) out.push(target);
-    }
+  for (let round = 0; round <= CARRY_DECODE_ROUNDS; round++) {
+    if (/https?:/i.test(layer)) return true;
     let next: string;
     try {
       next = decodeURIComponent(layer);
     } catch {
-      next = layer.replace(/%3a/gi, ':').replace(/%2f/gi, '/').replace(/%5c/gi, '\\').replace(/%25/g, '%');
+      next = layer.replace(/%3a/gi, ':').replace(/%25/g, '%');
     }
-    if (next === layer) break;
+    if (next === layer) return false;
     layer = next;
   }
-  return out;
+  return false;
 }
+
+/** How often {@link carriesAddress} decodes before it stops looking: five layers of encoding. */
+export const CARRY_DECODE_ROUNDS = 4;

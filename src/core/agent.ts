@@ -84,7 +84,7 @@ import type { NoticeLanguage } from './notice-language.js';
 import { noticeLanguage } from './notice-language.js';
 import { normalizeHostName, normalizeMailTarget, type SendTarget } from './send-target.js';
 import {
-  originAsk, originBashAfterForeign, originDenied, originLookupFailedHead, originLookupFailedMandate, originLookupFailedUnattended,
+  originAsk, originCarriedAsk, originCarriedDenied, originCarriedMandate, originCarriedUnattended, originBashAfterForeign, originDenied, originLookupFailedHead, originLookupFailedMandate, originLookupFailedUnattended,
   originRefusedMandate, originRefusedUnattended, originUnreadable, type OriginRefusal, type OriginTargets, type SendOrigin, type TargetNoun,
 } from './origin-notices.js';
 import type { CallTargetOrigin } from './call-connection.js';
@@ -5188,6 +5188,7 @@ export class Agent implements IAgent {
     let targetsUnread = false;
     // Checked as a read: the latch made the address a target. Its question and refusals say "read".
     let asRead = false;
+    let carried = false;
     try {
       targets = tool.sendTargets !== undefined ? tool.sendTargets(tc.input) : null;
       if (targets === null && whenLatched !== undefined) {
@@ -5196,6 +5197,9 @@ export class Agent implements IAgent {
         asRead = true;
         const address = tool.readAddress?.(tc.input) ?? null;
         if (address !== null && this.searchResultAddresses.has(address)) return {};
+        // An address that carries another one is asked about whatever its host: a service that
+        // fetches it sends the read on to an address nobody here can name for sure.
+        carried = tool.readCarriesAddress?.(tc.input) === true;
         targets = whenLatched(tc.input);
       }
     } catch {
@@ -5217,7 +5221,7 @@ export class Agent implements IAgent {
       return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(text), is_error: true } };
     }
     if (targets.length === 0) return { origin: { known: [], allKnown: false } };
-    const verdicts = targets.map((t) => ({ target: t, verdict: this._ownerKnownVerdict(t, asRead) }));
+    const verdicts = targets.map((t) => ({ target: t, verdict: carried ? 'foreign' as const : this._ownerKnownVerdict(t, asRead) }));
     const foreign = verdicts.filter((v) => v.verdict !== 'known');
     const known = verdicts.filter((v) => v.verdict === 'known').map((v) => v.target.value);
     if (foreign.length === 0) return { origin: { known, allKnown: true } };
@@ -5248,12 +5252,12 @@ export class Agent implements IAgent {
     };
     const refuseUnattended = (): Promise<{ refusal: BetaToolResultBlockParam }> => {
       try { this.onOriginRefused?.({ targets: shown, noun, origin }); } catch { /* the refusal stands */ }
-      return refuse(lookupFailed ? originLookupFailedUnattended(shown, noun) : originRefusedUnattended(shown, origin, noun));
+      return refuse(carried ? originCarriedUnattended(shown) : lookupFailed ? originLookupFailedUnattended(shown, noun) : originRefusedUnattended(shown, origin, noun));
     };
     // Someone the owner let in answers this session's questions themselves: asking them would
     // protect nothing. A target the owner named goes out as it would for the owner.
     if (this.principal.kind !== 'owner') {
-      return refuse(lookupFailed ? originLookupFailedMandate(shown, noun) : originRefusedMandate(shown, origin, noun));
+      return refuse(carried ? originCarriedMandate(shown) : lookupFailed ? originLookupFailedMandate(shown, noun) : originRefusedMandate(shown, origin, noun));
     }
     if (!this.promptUser) return refuseUnattended();
     const lang = this._noticeLanguage();
@@ -5262,10 +5266,11 @@ export class Agent implements IAgent {
     // A host a stored profile names but that does not count for reads: the question says how it would.
     const profileHosts = asRead ? this._profileHosts() : new Set<string>();
     const connected = shownTargets.filter((h) => profileHosts.has(h));
-    const answer = await this.promptUser(originAsk(tc.name, tc.input, noun, shown, origin, lang, connected), ['Allow', 'Deny', '\x00'], { blocked: true });
+    const question = carried ? originCarriedAsk(shown, origin, lang) : originAsk(tc.name, tc.input, noun, shown, origin, lang, connected);
+    const answer = await this.promptUser(question, ['Allow', 'Deny', '\x00'], { blocked: true });
     if (answer === UNATTENDED_BLOCK_ANSWER) return refuseUnattended();
     if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-      const denied = lookupFailed ? `${originLookupFailedHead(shown)} ${originDenied(shown, origin, noun)}` : originDenied(shown, origin, noun);
+      const denied = carried ? originCarriedDenied(shown) : lookupFailed ? `${originLookupFailedHead(shown)} ${originDenied(shown, origin, noun)}` : originDenied(shown, origin, noun);
       return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(denied), is_error: true } };
     }
     return { origin: passed };

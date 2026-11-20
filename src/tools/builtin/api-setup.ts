@@ -39,7 +39,7 @@ import { pv, singleLine } from '../../core/prompt-value.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
-import { isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
+import { OWNER_PRINCIPAL, isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
 import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
 import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
 import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
@@ -2273,11 +2273,15 @@ ${draftJson}
       const reserved = reservedAppNameRefusal(profile);
       if (reserved) return `Validation error: ${reserved}`;
       if (!isOwnerPrincipal(agent.principal)) profile.created_by = principalTag(agent.principal);
-      // The owner chose this host in a turn no foreign content had reached: a read from it after
-      // foreign content is then not asked about (`ApiStore.readKnownHosts`). The engine's to
-      // write, never the input's, and bound to the host it was saved with; any other save drops it.
+      // The owner chose this host in their own chat, in a turn no foreign content had reached: a
+      // read from it after foreign content is then not asked about (`ApiStore.readKnownHosts`).
+      // Only the owner's interactive run: a trigger's, a workflow's or a task's run carries a run
+      // tag as its author even under the owner's principal, and a sub-agent a run origin of its
+      // own; a workflow made in another conversation could otherwise name a host unattended. The
+      // engine's to write, never the input's, and bound to the host it was saved with.
       delete profile.owner_clean_host;
-      if (isOwnerPrincipal(agent.principal) && !deriveTurnUntrusted(agent)) {
+      const ownersOwnChat = isOwnerPrincipal(agent.principal) && agent.writeAuthor === principalTag(OWNER_PRINCIPAL) && agent.sendOrigin === undefined;
+      if (ownersOwnChat && !deriveTurnUntrusted(agent)) {
         const cleanHost = profileReadHost(profile);
         if (cleanHost !== null) profile.owner_clean_host = cleanHost;
       }
