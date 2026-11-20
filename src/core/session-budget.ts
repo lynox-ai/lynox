@@ -191,10 +191,12 @@ function unverifiableReason(): string {
 }
 
 /**
- * Which of the instance's own spending caps a refused check reached: `daily`, `monthly`, or
- * `unknown` when it refused without either cap being over its spend (spend cannot be checked).
+ * Which of the instance's own spending caps a refused check reached: the cap the check says it
+ * refused on, or else the one over its spend; `unknown` when it refused without either (spend
+ * cannot be checked).
  */
 export function reachedCap(check: PersistentBudgetCheck): 'daily' | 'monthly' | 'unknown' {
+  if (check.cap !== undefined) return check.cap;
   if (check.dailyLimitUSD !== null && check.todayCostUSD >= check.dailyLimitUSD) return 'daily';
   if (check.monthlyLimitUSD !== null && check.monthCostUSD >= check.monthlyLimitUSD) return 'monthly';
   return 'unknown';
@@ -215,7 +217,7 @@ export function checkPersistentBudget(): PersistentBudgetCheck {
       allowed: false, todayCostUSD: 0, monthCostUSD: 0,
       dailyLimitUSD: _dailyCapUSD < Infinity ? _dailyCapUSD : null,
       monthlyLimitUSD: _monthlyCapUSD < Infinity ? _monthlyCapUSD : null,
-      reason: unverifiableReason(),
+      reason: unverifiableReason(), cap: 'unknown',
     };
   }
   const spend = computeRecordedSpend();
@@ -228,7 +230,7 @@ export function checkPersistentBudget(): PersistentBudgetCheck {
     return {
       allowed: false, todayCostUSD: todayCost, monthCostUSD: monthCost,
       dailyLimitUSD: _dailyCapUSD, monthlyLimitUSD: _monthlyCapUSD < Infinity ? _monthlyCapUSD : null,
-      reason: `Daily spending cap ($${_dailyCapUSD}) reached. Today: $${todayCost.toFixed(2)}.`,
+      reason: `Daily spending cap ($${_dailyCapUSD}) reached. Today: $${todayCost.toFixed(2)}.`, cap: 'daily',
     };
   }
 
@@ -236,7 +238,7 @@ export function checkPersistentBudget(): PersistentBudgetCheck {
     return {
       allowed: false, todayCostUSD: todayCost, monthCostUSD: monthCost,
       dailyLimitUSD: _dailyCapUSD < Infinity ? _dailyCapUSD : null, monthlyLimitUSD: _monthlyCapUSD,
-      reason: `Monthly spending cap ($${_monthlyCapUSD}) reached. This month: $${monthCost.toFixed(2)}.`,
+      reason: `Monthly spending cap ($${_monthlyCapUSD}) reached. This month: $${monthCost.toFixed(2)}.`, cap: 'monthly',
     };
   }
 

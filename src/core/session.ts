@@ -2490,8 +2490,9 @@ export class Session {
 
   /**
    * A thread whose message was blocked before the model is named from the person's words, as any
-   * thread is — without the title model, which a blocked run does not call. Only a thread with no
-   * name yet: a name the person gave stays, and an accepted turn later keeps this one.
+   * thread is — without the title model: the run was blocked by a cap or a hook, and a title call
+   * would spend past it. Only a thread with no name yet: a name the person gave stays, and an
+   * accepted turn later keeps this one (it does not upgrade it either).
    */
   private _titleBlockedThread(threadStore: ReturnType<Engine['getThreadStore']>, taskText: string): void {
     if (!threadStore) return;

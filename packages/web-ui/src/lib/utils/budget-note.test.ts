@@ -29,6 +29,15 @@ describe('when a cap opens again', () => {
 		expect(formatResetWhen(budgetResetAt('daily', afternoon), afternoon, 'en', ny)).toBe('today at 07:00 PM');
 		expect(formatResetWhen(budgetResetAt('daily', afternoon), afternoon, 'de', ny)).toBe('heute um 19:00');
 	});
+
+	it('the night before a clock change, the next midnight is still "tomorrow"', () => {
+		// London, 28 March 2026, 23:30 GMT: the clocks go forward that night, so the next day is
+		// 23 hours long and now + 24 h would land on the day after.
+		const london = 'Europe/London';
+		const now = new Date('2026-03-28T23:30:00Z');
+		expect(formatResetWhen(budgetResetAt('daily', now), now, 'en', london)).toBe('tomorrow at 12:00 AM');
+		expect(formatResetWhen(budgetResetAt('daily', now), now, 'de', london)).toBe('morgen um 00:00');
+	});
 });
 
 describe('amounts as the engine names them', () => {

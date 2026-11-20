@@ -68,9 +68,13 @@ export function formatResetWhen(at: Date, now: Date, lang: 'de' | 'en', timeZone
 	const zone = timeZone === undefined ? {} : { timeZone };
 	const time = at.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit', ...zone });
 	const day = (d: Date): string => d.toLocaleDateString('en-CA', zone);
-	const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-	if (day(at) === day(now)) return lang === 'de' ? `heute um ${time}` : `today at ${time}`;
-	if (day(at) === day(tomorrow)) return lang === 'de' ? `morgen um ${time}` : `tomorrow at ${time}`;
+	const today = day(now);
+	// The next calendar day from today's date in the reader's zone, not now + 24 h: a day of a
+	// clock change is 23 or 25 hours long.
+	const [y, m, d] = today.split('-').map(Number) as [number, number, number];
+	const tomorrow = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+	if (day(at) === today) return lang === 'de' ? `heute um ${time}` : `today at ${time}`;
+	if (day(at) === tomorrow) return lang === 'de' ? `morgen um ${time}` : `tomorrow at ${time}`;
 	const date = lang === 'de'
 		? at.toLocaleDateString('de-DE', { day: 'numeric', month: 'long', ...zone })
 		: at.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', ...zone });

@@ -198,6 +198,46 @@ describe('a message the spending cap blocked says why, until when, and what to d
 		expect(text(noteEl())).toBe(`Vor dem Senden geprüft Diese Nachricht ging nicht an das KI-Modell. ${DAILY}`);
 	});
 
+	it('while the page does not know whose session it is, no step: a mandate is not sent to the limits page', async () => {
+		const stream = sseStream();
+		run = stream;
+		i18n.setLocale('de');
+		stubFetch(MANDATE, (url) => {
+			if (url.endsWith('/config')) return json({}, 503);
+			return url.endsWith('/sessions/t1/run') ? new Response(stream.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }) : undefined;
+		});
+		void store.sendMessage('summarise the quarter');
+		await settle();
+		const { default: ChatView } = await import('./ChatView.svelte');
+		component = svelte.mount(ChatView, { target });
+		svelte.flushSync();
+		stream.send('done', { result: DAILY, notice: 'run_blocked', budget: DAILY_REF });
+		await settle();
+		svelte.flushSync();
+		expect(reason()).toContain('$5.12');
+		expect(next()).toBeNull();
+	});
+
+	it('a tier probe that failed is no proof of self-host: no restart, no limits page', async () => {
+		i18n.setLocale('de');
+		const stream = sseStream();
+		run = stream;
+		stubFetch(MANAGED, (url) => {
+			if (url.endsWith('/secrets/status')) return json({}, 500);
+			return url.endsWith('/sessions/t1/run') ? new Response(stream.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }) : undefined;
+		});
+		void store.sendMessage('summarise the quarter');
+		await settle();
+		const { default: ChatView } = await import('./ChatView.svelte');
+		component = svelte.mount(ChatView, { target });
+		svelte.flushSync();
+		stream.send('done', { result: UNKNOWN, notice: 'run_blocked', budget: { cap: 'unknown' } });
+		await settle();
+		svelte.flushSync();
+		expect(reason()).toBe('lynox kann die Ausgaben gerade nicht prüfen und sendet deshalb nichts.');
+		expect(next()).toBeNull();
+	});
+
 	it('control: a hook\'s block carries no budget and shows no reason or step', async () => {
 		await live('de', SELF, { result: 'Run blocked: AI budget for this period reached.', notice: 'run_blocked' });
 		expect(target.querySelector('[data-budget-reason]')).toBeNull();

@@ -379,6 +379,22 @@ describe('a message the budget or a run hook blocked is kept for the person, not
     expect(shown(engine, session)[5]!.note).toEqual({ code: 'run_blocked', detail: HOOK });
   });
 
+  it('the note names the cap the check refused on, not one it works out again', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    // Both caps over: the check refuses on the daily one, and so does the note.
+    budget.refuse = CAP;
+    budget.override = { todayCostUSD: 6, monthCostUSD: 200, dailyLimitUSD: 5, monthlyLimitUSD: 150, cap: 'daily' };
+    await session.run('summarise the quarter');
+    expect(session.getLastRunBudget()).toEqual({ cap: 'daily', limitUSD: 5, spentUSD: 6 });
+    // Spend unknown with a cap of $0: zero spend is "over" a zero cap, but the check refused
+    // because it could not count, and the note names no amounts.
+    budget.refuse = 'Spending cap (daily $0) cannot be checked.';
+    budget.override = { todayCostUSD: 0, monthCostUSD: 0, dailyLimitUSD: 0, monthlyLimitUSD: null, cap: 'unknown' };
+    await session.run('summarise the year');
+    expect(session.getLastRunBudget()).toEqual({ cap: 'unknown' });
+  });
+
   it('a run after a blocked one carries no budget of the earlier run', async () => {
     const engine = await boot();
     const session = engine.createSession();

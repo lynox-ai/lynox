@@ -57,6 +57,8 @@ export interface PersistentBudgetCheck {
   dailyLimitUSD: number | null;
   monthlyLimitUSD: number | null;
   reason?: string | undefined;
+  /** On a refusal, the cap it refused on: `unknown` when spend could not be checked. */
+  cap?: 'daily' | 'monthly' | 'unknown' | undefined;
 }
 
 /**

@@ -1,4 +1,3 @@
-import type { BudgetNoteRef } from '../utils/budget-note.js';
 /**
  * Who did what: attributing a turn's tool activity to the main agent or to a
  * specific delegated sub-agent.
@@ -13,6 +12,8 @@ import type { BudgetNoteRef } from '../utils/budget-note.js';
  * Kept out of `chat.svelte.ts` because the interesting part is a reducer over
  * plain data, and a reducer is worth testing on its own.
  */
+
+import type { BudgetNoteRef } from '../utils/budget-note.js';
 
 import { normalizeTier, type ModelTier } from '../contract/vocab.js';
 import { containedReason, type ContainedRefusalReason } from './contained-way-out.js';

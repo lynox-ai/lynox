@@ -32,7 +32,7 @@ import { privateToggleFailure, privateToggleNoAnswer, privateToggleOutcomeUnknow
 import { containedPrefill } from './contained-way-out.js';
 import { closedCodeOf, closedDraftAllowed, closedSentenceKey, draftOfAnswer, isConsentCard, type ClosedCode } from './closed-question.js';
 import { CONSENT_UNRECOGNISED, isConsentKind, type ConsentKind } from '../contract/prompt.js';
-import { isMandateSession, loadSettingsViewer } from './settings-viewer.svelte.js';
+import { isMandateSession, isViewerKnown, loadSettingsViewer } from './settings-viewer.svelte.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
 import { selectReattachTarget, scheduledQuestionWaits, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
@@ -587,6 +587,9 @@ let compactionOffer = $state<number | null>(null);
 // (normalized) or null on self-host, mapped to '' below; cpSuppliesLLMKey decides who brings the key.
 let managedTier = $state<string | null>(null);
 let managedProbePromise: Promise<void> | null = null;
+/** The engine answered the tier probe: a failed probe also leaves `managedTier` at '', which is
+ *  not proof of self-host. */
+let managedTierAnswered = $state(false);
 
 function probeManagedTier(): Promise<void> {
 	if (managedProbePromise) return managedProbePromise;
@@ -596,6 +599,7 @@ function probeManagedTier(): Promise<void> {
 			if (res.ok) {
 				const data = (await res.json()) as { managed?: string | null };
 				managedTier = typeof data.managed === 'string' ? data.managed : '';
+				managedTierAnswered = true;
 			} else {
 				managedTier = '';
 			}
@@ -606,24 +610,22 @@ function probeManagedTier(): Promise<void> {
 	return managedProbePromise;
 }
 
-/** True iff the instance supplies the LLM credentials (managed tiers).
- *  Unknown / not-yet-probed also returns true so error copy defaults to
- *  the neutral branch (conservative: avoids showing BYOK hints to a
- *  managed user during the probe race — see feedback_managed_ui_race_default_null). */
 /**
  * Who can change the spending cap a blocked message reached, for the note's next step
  * (`budget-note.ts`): a mandate's session names the owner, a managed plan names support, and
  * anyone else the limits page. Null while the tier is not known yet.
  */
 export function getBudgetAudience(): BudgetAudience | null {
+	// Unknown is no one here: a step that sends a mandate to a page it cannot change, or a managed
+	// tenant to restart lynox, is worse than no step.
+	if (!isViewerKnown() || !managedTierAnswered || managedTier === null) return null;
 	if (isMandateSession()) return 'owner';
-	if (managedTier === null) return null;
 	return cpSuppliesLLMKey(managedTier) ? 'plan' : 'self';
 }
 
-/** Whether the instance is self-hosted (no billing tier); null while not known yet. */
+/** Whether the instance is self-hosted (no billing tier); null while the engine has not said. */
 export function isInstanceSelfHosted(): boolean | null {
-	return managedTier === null ? null : !isHostedInstance(managedTier);
+	return !managedTierAnswered || managedTier === null ? null : !isHostedInstance(managedTier);
 }
 
 /** Ask for what {@link getBudgetAudience} needs: both answers are cached after the first. */
@@ -632,6 +634,10 @@ function learnBudgetAudience(): void {
 	void loadSettingsViewer();
 }
 
+/** True iff the instance supplies the LLM credentials (managed tiers).
+ *  Unknown / not-yet-probed also returns true so error copy defaults to
+ *  the neutral branch (conservative: avoids showing BYOK hints to a
+ *  managed user during the probe race — see feedback_managed_ui_race_default_null). */
 function isInstanceSuppliedLlm(): boolean {
 	if (managedTier === null) return true;
 	return cpSuppliesLLMKey(managedTier);
