@@ -33,7 +33,8 @@
 // Exit 0 clean, 1 a link found, 2 a usage or git error.
 
 import { execFileSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 /** What each problem is called in the job's log. */
 export const PROBLEM_WORDS = {
@@ -88,8 +89,18 @@ export function check(base, head) {
   return { commits: commits.length, found };
 }
 
-const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
-if (isMain) {
+// Run as a script, not when imported (the tests import `linkProblem`). Both sides resolved: a bare
+// comparison of `argv[1]` with `import.meta.url` fails through a symlinked path, and the guard
+// would then exit 0 without reading anything.
+let invoked = null;
+try {
+  invoked = process.argv[1] === undefined ? null : realpathSync(process.argv[1]);
+} catch {
+  process.stderr.write('symlink-guard: argv[1] does not resolve; not run as a script\n');
+}
+if (invoked !== null && realpathSync(fileURLToPath(import.meta.url)) === invoked) main();
+
+function main() {
   const [mode, base, head] = process.argv.slice(2);
   if (mode !== 'check' || !base || !head) {
     console.error('usage: node scripts/symlink-guard.mjs check <base> <head>');

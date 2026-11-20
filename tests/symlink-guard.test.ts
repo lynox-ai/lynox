@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const SCRIPT = fileURLToPath(new URL('../scripts/symlink-guard.mjs', import.meta.url));
@@ -213,5 +213,20 @@ describe('symlink-guard', () => {
   it('fails with exit 2 on a range git cannot read', () => {
     commitAll('base');
     expect(guard('no-such-ref', 'HEAD').status).toBe(2);
+  });
+
+  it('still checks when run through a symlinked directory, instead of exiting 0 without a word', () => {
+    const base = commitAll('base');
+    symlinkSync('/abs/node_modules', join(dir, 'node_modules'));
+    const head = commitAll('add a link');
+    const linked = mkdtempSync(join(tmpdir(), 'symlink-guard-via-'));
+    try {
+      symlinkSync(dirname(SCRIPT), join(linked, 'scripts'));
+      const r = spawnSync('node', [join(linked, 'scripts', 'symlink-guard.mjs'), 'check', base, head], { cwd: dir, env: CLEAN_ENV, encoding: 'utf8' });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('"node_modules"');
+    } finally {
+      rmSync(linked, { recursive: true, force: true });
+    }
   });
 });
