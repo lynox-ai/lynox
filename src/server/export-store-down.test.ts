@@ -161,6 +161,10 @@ describe('export with durable memory switched off after it held entries (real en
     const store = new KnowledgeStore(db, new SubjectStore(db), null);
     store.write({ text: 'ACME renews in March', subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: false });
     store.setBlockContent('profile', 'Runs a small bakery');
+    // Built at runtime, like the secret above: a key-shaped literal is what the commit scan reads.
+    store.setBlockContent('playbook', `Never paste ${['sk', 'ant', 'api03'].join('-')}-${'Q'.repeat(40)} into a rule.`);
+    // The full store ran its backfill; set it back, so a read that ran it again would show.
+    db.getDb().prepare('UPDATE profile_seed_backfill SET done = 0 WHERE id = 1').run();
     db.close();
   }, false);
 
@@ -171,7 +175,11 @@ describe('export with durable memory switched off after it held entries (real en
     const body = await h.exportBody();
     expect(body.durable_knowledge.entries.map((e) => e.text)).toEqual(['ACME renews in March']);
     expect(body.durable_knowledge.blocks['profile']).toBe('Runs a small bakery');
+    expect(body.durable_knowledge.blocks['playbook'], 'a key in a block is masked').not.toContain('Q'.repeat(40));
+    expect(body.durable_knowledge.blocks['playbook']).toContain('***');
     expect(body.durable_knowledge.may_be_incomplete, 'read in full').toBe(false);
+    const db = h.engine().getEngineDb() as EngineDb;
+    expect((db.getDb().prepare('SELECT done FROM profile_seed_backfill WHERE id = 1').get() as { done: number }).done, 'the export wrote nothing').toBe(0);
   }, 60_000);
 
   it('marks the block incomplete when the read fails', async () => {

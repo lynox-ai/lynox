@@ -1054,6 +1054,13 @@ export class KnowledgeStore {
     return null;
   }
 
+  /** One block's content, decrypted and masked as {@link readSurfaceBlocks} masks it, for a
+   *  file that gets stored and forwarded (the data export); null when the block was never set. */
+  getBlockMasked(id: MemoryBlockId): string | null {
+    const block = this.getBlock(id);
+    return block === null ? null : this._maskText(block.content);
+  }
+
   /** The always-loaded blocks (profile + playbook) for the read-surface, decrypted AND
    *  masked for display (the same two-layer masking as {@link renderBlocks}). */
   readSurfaceBlocks(): { profile: string; playbook: string } {

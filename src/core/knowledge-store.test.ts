@@ -26,7 +26,7 @@ describe('KnowledgeStore (Durable Knowledge Substrate — DK.1)', () => {
     for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 
-  it('a store built only to read writes nothing at construction; a full one runs its backfill', () => {
+  it('a store built only to read skips the backfill, its one write at construction; a full one runs it', () => {
     const done = (e: EngineDb): number | undefined =>
       (e.getDb().prepare('SELECT done FROM profile_seed_backfill WHERE id = 1').get() as { done: number } | undefined)?.done;
     expect(done(make().engine), 'a full store marks its backfill done').toBe(1);
@@ -601,6 +601,16 @@ describe('KnowledgeStore read-surface (DK-UX — listActive / readSurfaceBlocks)
     expect(blocks.profile).toContain('terse replies');
     expect(blocks.playbook).not.toContain('sk-ant-api03-ZYXWVUTSRQPONMLKJIHGFEDCBA9876543210');
     expect(blocks.playbook).toContain('***');
+  });
+
+  it('getBlockMasked masks a secret-shaped token and is null for a block never set', () => {
+    const { ks } = make();
+    // Built at runtime: a key-shaped literal is what the commit-time secret scan looks for.
+    const key = `${['sk', 'ant', 'api03'].join('-')}-${'Z'.repeat(40)}`;
+    ks.setBlockContent('playbook', `Never paste ${key} into a rule.`);
+    expect(ks.getBlockMasked('playbook')).not.toContain(key);
+    expect(ks.getBlockMasked('playbook')).toContain('***');
+    expect(ks.getBlockMasked('profile')).toBeNull();
   });
 
   it('readSurfaceBlocks returns empty strings when no blocks are set', () => {

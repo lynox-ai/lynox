@@ -14326,8 +14326,10 @@ export class LynoxHTTPApi {
         // The wording each conversation used for an entry, masked like the rest: a source can
         // hold words the entry itself does not carry.
         const sources = store.listSourcesMasked(ENTRY_CAP);
+        // Masked as well: a block is edited without a write-side shape scan, so it can hold a
+        // pasted key the entries' own check would have refused.
         const blocks: Record<string, string | null> = {};
-        for (const id of ALL_MEMORY_BLOCK_IDS) blocks[id] = store.getBlock(id)?.content ?? null;
+        for (const id of ALL_MEMORY_BLOCK_IDS) blocks[id] = store.getBlockMasked(id);
         return {
           entries: active,
           pending_entries: pending,
