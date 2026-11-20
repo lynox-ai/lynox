@@ -14210,8 +14210,12 @@ export class LynoxHTTPApi {
         exportData['contained_unknown_threads'] = threadsWithMessages.filter((t) => t.contained_unknown !== undefined).length;
         exportData['threads'] = threadsWithMessages;
       } else {
+        // The engine opens the thread store at boot whenever it can (its history database
+        // first, then the store on it), so none here means one of those opens failed. The
+        // threads were not read, which is not the same as there being none.
         exportData['threads'] = [];
-        exportData['threads_may_be_incomplete'] = false;
+        exportData['threads_may_be_incomplete'] = true;
+        process.stderr.write('⚠ /api/export: thread store unavailable — threads exported empty and marked incomplete\n');
         exportData['contained_threads'] = 0;
         exportData['contained_unknown_threads'] = 0;
       }
@@ -14340,7 +14344,13 @@ export class LynoxHTTPApi {
         } catch {
           exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
         }
+      } else if (engine.getUserConfig().durable_memory_enabled === true) {
+        // Switched on, yet no store: the engine opens it at boot when the setting is on, so
+        // that open failed (or its database did). Not read, so not known to be empty.
+        exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
+        process.stderr.write('⚠ /api/export: durable knowledge store unavailable — exported empty and marked incomplete\n');
       } else {
+        // Switched off: there is no store to read, and the empty block is the whole of it.
         exportData['durable_knowledge'] = EMPTY_KNOWLEDGE;
       }
 
