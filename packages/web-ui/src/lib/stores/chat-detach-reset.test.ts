@@ -79,14 +79,14 @@ const NEW_CHAT_ONLY = ['sessionModel', 'sessionTier', 'pendingModel'] as const;
  *    earlier claim of "both paths" was wrong.
  *  - `completedTextBlockGen`, `secretPromptGeneration`, `mailConnectGeneration` —
  *    monotonic generation counters; consumers compare deltas, never absolute values.
- *  - `authError`, `isOffline`, `managedTier` — genuinely app-global.
+ *  - `authError`, `isOffline`, `managedTier`, `managedTierAnswered` — genuinely app-global.
  *  - `isCompacting` — in-flight latch for a single `compactNow()` call, cleared
  *    in its own `finally`.
  */
 const NOT_THREAD_SCOPED = [
 	'currentToolStartedAt', 'lastEventAt', 'chatErrorDetail', 'contextWindow',
 	'completedTextBlockGen', 'secretPromptGeneration', 'mailConnectGeneration',
-	'authError', 'isOffline', 'managedTier', 'isCompacting',
+	'authError', 'isOffline', 'managedTier', 'managedTierAnswered', 'isCompacting',
 ] as const;
 
 /** Every module-level `let x = $state(...)` in the store. */
