@@ -18,8 +18,20 @@ const VALUE_MARK = /[\uE000\uE001]/g;
  * it says, it cannot read as lynox's own words.
  */
 export function shownValue(text: string): string {
+	return shownUpTo(text, SHOWN_VALUE_MAX);
+}
+
+/**
+ * {@link shownValue} without the cut, for a sentence the owner binds themselves to: they read
+ * every character of it, and a host is read from its end, which a cut would take away.
+ */
+export function shownWholeValue(text: string): string {
+	return shownUpTo(text, Infinity);
+}
+
+function shownUpTo(text: string, max: number): string {
 	const chars = Array.from(text.replace(/\s+/g, ' ').trim());
-	const cut = chars.length > SHOWN_VALUE_MAX ? `${chars.slice(0, SHOWN_VALUE_MAX - 1).join('')}…` : chars.join('');
+	const cut = chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : chars.join('');
 	const shown = visible(cut).replace(VALUE_MARK, (c) => `<U+${c.codePointAt(0)!.toString(16).toUpperCase()}>`);
 	return `${VALUE_OPEN}${shown}${VALUE_CLOSE}`;
 }

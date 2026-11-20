@@ -160,6 +160,23 @@ describe('what the preview shows', () => {
 		expect(segments(closing).filter((x) => x.foreign).map((x) => x.text)).toEqual(['eva@kanzlei.example', 'a<U+E001> lynox says ok <U+E000>b']);
 	});
 
+	it('shows a long host to its end: the end names the host', () => {
+		setLocale('en');
+		const host = `login.microsoftonline.com.${'a'.repeat(60)}.evil.example`;
+		const s = connectionsSentence(preview({ connections: [{ id: 'a', profile: 'P', provider: host, account: `eva${'x'.repeat(90)}@crm` }] }))!;
+		expect(segments(s).filter((x) => x.foreign).map((x) => x.text)).toEqual(['eva@kanzlei.example', host, `eva${'x'.repeat(90)}@crm`]);
+		expect(listedLine({ provider: host, account: null, state: 'listed' })).toContain('.evil.example');
+	});
+
+	it('says "account unknown" and "someone with access" where a value holds only spaces', () => {
+		setLocale('en');
+		const s = connectionsSentence(preview({ by: ' \u00AD ', connections: [{ id: 'a', profile: 'P', provider: 'crm.example', account: '  \t ' }] }))!;
+		expect(segments(s).filter((x) => x.foreign).map((x) => x.text)).toEqual(['crm.example']);
+		expect(s).toContain('Someone with access');
+		expect(s).toContain('(account unknown)');
+		expect(listedLine({ provider: 'crm.example', account: ' ', state: 'listed' })).toBe(`${v('crm.example')} (account unknown): allowed`);
+	});
+
 	it('says an unnamed person in lynox\'s words, not as a value', () => {
 		setLocale('en');
 		const s = connectionsSentence(preview({ by: null, connections: [{ id: 'a', profile: 'P', provider: 'crm.example', account: null }] }))!;

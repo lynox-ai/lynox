@@ -8,7 +8,7 @@
 
 import { t, tf } from '../i18n.svelte.js';
 import { markHidden, marksHidden, watchOf } from './trigger-consent.js';
-import { shownValue } from './plan-takeover.js';
+import { shownWholeValue } from './plan-takeover.js';
 
 /** `GET /api/tasks/:id/stamp-preview` (owner only). */
 export interface StampPreview {
@@ -100,16 +100,22 @@ export function usesConnections(row: StampRow): boolean {
 /**
  * A value someone else wrote (a person's name, a provider read from a host, an account's label) as
  * the stamp's sentences show it: the characters {@link hiddenIn} looks for marked first, so "marked
- * above" still points at a mark, then set apart as a value (`shownValue`), so a label cannot read
- * as lynox's words. The view draws it with `MarkedLine`.
+ * above" still points at a mark, then set apart as a value (`shownWholeValue`), so a label cannot read
+ * as lynox's words. The view draws it with `MarkedLine`. Never cut: a host is read from its end,
+ * and the owner binds themselves to this sentence, so they read every character of it.
  */
 function foreignValue(text: string): string {
-	return shownValue(markHidden(text));
+	return shownWholeValue(markHidden(text));
+}
+
+/** Whether a value says anything once the display has folded its spaces and dropped soft hyphens. */
+function says(text: string | null): text is string {
+	return text !== null && text.replace(/\u00AD/g, '').trim() !== '';
 }
 
 /** A provider with the account, or "account unknown" (legal POS-069: the line never stays empty). */
 function connectionText(c: StampPreview['connections'][number]): string {
-	return `${foreignValue(c.provider)} (${c.account !== null && c.account !== '' ? foreignValue(c.account) : t('stamp.account_unknown')})`;
+	return `${foreignValue(c.provider)} (${says(c.account) ? foreignValue(c.account) : t('stamp.account_unknown')})`;
 }
 
 /**
@@ -120,7 +126,7 @@ function connectionText(c: StampPreview['connections'][number]): string {
 export function connectionsSentence(p: StampPreview): string | null {
 	if (p.connections.length === 0) return null;
 	return tf('stamp.connections', {
-		person: p.by !== null ? foreignValue(p.by) : t('takeover.connection_someone'),
+		person: says(p.by) ? foreignValue(p.by) : t('takeover.connection_someone'),
 		connections: p.connections.map(connectionText).join(', '),
 	});
 }
@@ -161,7 +167,7 @@ export interface StampListed {
 /** One entry of {@link StampListed} as the row says it: provider, account, and how it stands. */
 export function listedLine(e: StampListed['entries'][number]): string {
 	const provider = e.provider !== null ? foreignValue(e.provider) : t('stamp.state_removed');
-	const account = e.account !== null && e.account !== '' ? foreignValue(e.account) : t('stamp.account_unknown');
+	const account = says(e.account) ? foreignValue(e.account) : t('stamp.account_unknown');
 	return `${provider} (${account}): ${t(`stamp.state_${e.state}`)}`;
 }
 
