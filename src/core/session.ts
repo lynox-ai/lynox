@@ -201,7 +201,9 @@ export interface RunOptions {
    *  (`cron`/`watch`/`webhook`/`inbox_event`/`manual`) so a scheduled
    *  automation turn is distinguishable from a user chat turn (which leaves
    *  this undefined → `runs.trigger_origin` NULL). A SEPARATE dimension from
-   *  `run_type`; observability only, never gates money. */
+   *  `run_type`. Never gates money. It does decide one thing: a run the budget or a run hook
+   *  blocks is kept in the thread (message + note) only without it — a scheduled task or a watch
+   *  at the cap would otherwise add both on every tick. */
   triggerOrigin?: string | undefined;
   /** Who started this run (PRD customer-granted-operator-access D1, §3.13): a mandate's run
    *  gets the mandate's tool lock. ABSENT MEANS "THE SAME AS BEFORE", never "the owner": the
@@ -962,6 +964,11 @@ export class Session {
       // An internal (compaction) run must NOT return the block string — it would
       // be injected as the thread's authoritative summary. Throw instead.
       if (runOptions?.internal === true) throw new InternalRunBlockedError(reason);
+      // Kept for the person, not for the model, as the content check's refusals are: a reload
+      // shows the message and the note the live chat showed. Only for a turn a person sent: a
+      // scheduled task or a watch at the cap would otherwise leave a message and a note in its
+      // thread on every tick (`triggerOrigin` marks those runs).
+      if (runOptions?.triggerOrigin === undefined) persistRefusedTurn(threadStore, this.sessionId, task, reason, 'run_blocked');
       this._lastRunNotice = 'run_blocked';
       return reason;
     }
@@ -997,6 +1004,7 @@ export class Session {
           // inline render fallback. `warning` (not `error`) keeps the failed
           // user turn intact — the block is transient (credit re-syncs).
           await this.onStream?.({ type: 'warning', code: 'run_blocked', detail: reason, agent: this.agent?.name ?? 'lynox' });
+          if (runOptions?.triggerOrigin === undefined) persistRefusedTurn(threadStore, this.sessionId, task, reason, 'run_blocked');
           this._lastRunNotice = 'run_blocked';
           return `Run blocked: ${reason}`;
         }
