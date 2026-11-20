@@ -2835,7 +2835,8 @@
 									<button type="button" class="mt-1 inline-flex min-h-6 items-center rounded-[var(--radius-sm)] border border-border px-3 py-1 text-xs text-text-muted hover:text-text" onclick={() => rewriteApprovalInChat(rewriteId)} data-approval-rewrite>{t('chat.note.approval_rewrite')}</button>
 								</div>
 							{/if}
-							{#if msg.note.detail}
+							<!-- A hold_exhausted note's code carries the whole sentence; its detail is the engine's English copy of it. -->
+							{#if msg.note.detail && msg.note.code !== 'hold_exhausted'}
 								<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words">{msg.note.detail}</div>
 							{/if}
 						</div>

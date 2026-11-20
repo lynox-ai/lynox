@@ -4334,15 +4334,19 @@ describe('Engine + Session (Orchestrator)', () => {
     });
 
     it('a bound of 0 refuses the run as blocked, not as a failed run', async () => {
-      // Kills: dropping the `ceilingCents > 0` check (the run would start with nothing to spend).
+      // Kills: dropping the `ceilingCents > 0` check (the run would start with nothing to spend), and
+      // refusing it there with a plain Error instead of RunAdmissionRefusedError (the warning would
+      // lose its hold_exhausted reason and the client would show a raw error instead of the note).
       const { engine, session } = await createEngineAndSession();
       const release = vi.fn();
       engine.registerHooks({ onBeforeRun: () => ({ maxCostCents: 0, release }) });
-      const seen: Array<{ type: string; code?: string }> = [];
-      session.onStream = async (e) => { seen.push(e as { type: string; code?: string }); };
+      const seen: Array<{ type: string; code?: string; reason?: string; detail?: string }> = [];
+      session.onStream = async (e) => { seen.push(e as { type: string; code?: string; reason?: string; detail?: string }); };
       const result = await session.run('go');
-      expect(result).toMatch(/^Run blocked: /);
-      expect(seen.some(e => e.type === 'warning' && e.code === 'run_blocked')).toBe(true);
+      expect(result).toBe(`Run blocked: ${HOLD_SENTENCE}`);
+      const warning = seen.find(e => e.type === 'warning' && e.code === 'run_blocked');
+      expect(warning?.reason).toBe('hold_exhausted');
+      expect(warning?.detail).toBe(HOLD_SENTENCE);
       expect(mockSend).not.toHaveBeenCalled();
       expect(release).toHaveBeenCalledOnce();
       const failed = (engine.getRunHistory()!.updateRun as unknown as { mock: { calls: unknown[][] } }).mock.calls

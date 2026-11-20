@@ -408,7 +408,7 @@ export function formatResult(state: RunState, name: string, resultLimit?: number
 
 /** What `run_workflow` answers in a run admitted with a spending bound of its own. */
 export const WORKFLOW_UNDER_RUN_CEILING =
-  "Not run: in this conversation lynox may spend only what is left of the AI budget, and a workflow's steps cannot be kept within that. Tell the user the workflow was not run for this reason; they can run it after buying a credit pack or in the next billing period.";
+  "Not run: in this conversation lynox may spend only what is left of the AI budget, and a workflow's steps cannot be kept within that. Tell the user the workflow was not run for this reason; they can start it from the Workflows page if enough AI budget is left for a full run, or run it here in the next billing period.";
 
 /**
  * Debit the aggregated cost of an IN-SESSION `run_workflow` execution.

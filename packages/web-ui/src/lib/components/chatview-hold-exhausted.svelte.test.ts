@@ -2,8 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readable } from 'svelte/store';
 
 // A run refused because nothing of the AI budget is free for it (`run_blocked` with the reason
-// `hold_exhausted`) is shown as a note in the owner's language, with the engine's own sentence as
-// the note's small detail line, and is not rendered a second time as the reply.
+// `hold_exhausted`) is shown as a note in the owner's language only: the engine's own sentence is
+// kept on the note but not shown as a detail line, and it is not rendered as the reply either.
 
 // As in chatview-thinking-loop-model: the client entry of `svelte` stands in for its server entry.
 const CLIENT_ENTRY = vi.hoisted(() => {
@@ -99,19 +99,22 @@ describe('a run refused because nothing of the AI budget is free', () => {
 		expect(toasts).toEqual([]);
 	});
 
-	it('renders the German sentence, and the English one in English', async () => {
-		// Kills: a note code without its i18n line (the generic error text would show instead).
+	it('renders only the German sentence in German, and the English one once in English', async () => {
+		// Kills: a note code without its i18n line (the generic error text would show instead), and
+		// rendering the engine sentence as the detail line (German mode would mix in the English
+		// text; English mode would show the sentence twice).
 		await blockedTurn('hold_exhausted');
 		await mountChat();
 		expect(target.textContent).toContain(DE);
-		expect(target.textContent).toContain(ENGINE_SENTENCE);
+		expect(target.textContent).not.toContain(ENGINE_SENTENCE);
 		(await import('../i18n.svelte.js')).setLocale('en');
 		svelte.flushSync();
 		await settle();
 		svelte.flushSync();
 		expect(target.textContent).not.toContain(DE);
-		// The English body and the detail line carry the same sentence.
-		expect(target.textContent?.split(ENGINE_SENTENCE).length).toBeGreaterThan(2);
+		expect(target.textContent?.split(ENGINE_SENTENCE).length).toBe(2);
+		const details = [...target.querySelectorAll('.font-mono')].map((el) => el.textContent ?? '');
+		expect(details.some((t) => t.includes(ENGINE_SENTENCE))).toBe(false);
 	});
 
 	it('a run_blocked without that reason stays a toast and the inline reply, as before', async () => {
