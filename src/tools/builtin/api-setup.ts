@@ -24,7 +24,7 @@ import { SaveRefused, accessTokenKey, collectVaultKeys, grantTokenNames, tokenSl
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
-import { connectCallText, builtInPresetOf, derivePresetEndpoints, presetIds, presetParamsForModel, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
+import { connectCallText, builtInPresetOf, retiredPresetIdOf, derivePresetEndpoints, presetIds, presetParamsForModel, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { isCountrySecondLevel } from '../../core/public-suffix.js';
 import { delegatedRenewalWay, fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated, providerNotFollowed } from './http.js';
@@ -337,7 +337,9 @@ function validateProfile(profile: ApiProfile): string | null {
     // `client_secret_key`, the token is attached from a slot derived from the
     // profile id, and `collectVaultKeys` counts the OAuth keys on its own. A list
     // here changes nothing for such a profile, so demanding one only costs a round.
-    if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0) && !builtInPresetOf(profile)) {
+    // So is a provider this engine once shipped: its profiles have that shape, and a save that
+    // keeps the provider must not fail on a list they never had.
+    if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0) && !builtInPresetOf(profile) && retiredPresetIdOf(profile) === undefined) {
       return 'auth.vault_keys is required for auth.type="oauth2" (lists the vault key names the OAuth grant will resolve)';
     }
     // OAuth2 metadata: required when type='oauth2' AND the agent intends to
@@ -2274,6 +2276,13 @@ ${draftJson}
       if (priorPreset && builtInPresetOf(profile)?.id !== priorPreset.id) {
         return `Error: profile "${profile.id}" is set up through the built-in "${priorPreset.id}" provider, and a save cannot remove or change auth.oauth.preset_id or auth.type: the sign-in and the scopes it may ask for belong to the provider, not to the profile. Nothing was saved. Scopes this provider allows: ${[...priorPreset.requiredScopes, ...priorPreset.allowedScopes].join(' ')}. Connecting here cannot authorize a scope outside that list, so tell the user it is not available rather than offering it. Another way of signing in to the same API replaces this connection, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
       }
+      // The same holds for a provider this engine once shipped and no longer has: the profile
+      // was set up through it, and its grant is a user's. The id is named because it equals one
+      // of ours (`RETIRED_PRESET_IDS`), the rule the unknown-preset note below keeps.
+      const priorRetired = prior && !priorPreset ? retiredPresetIdOf(prior) : undefined;
+      if (priorRetired !== undefined && retiredPresetIdOf(profile) !== priorRetired) {
+        return `Error: profile "${profile.id}" is set up through the built-in "${priorRetired}" provider, which this engine no longer has, and a save cannot remove or change auth.oauth.preset_id or auth.type: the sign-in belongs to the provider, not to the profile. Nothing was saved. Another way of signing in to the same API replaces this connection, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
+      }
       const reserved = reservedAppNameRefusal(profile);
       if (reserved) return `Validation error: ${reserved}`;
       if (!isOwnerPrincipal(agent.principal)) profile.created_by = principalTag(agent.principal);
@@ -2340,7 +2349,7 @@ ${draftJson}
       // unrelated parameter happened to validate — with no trace in either
       // direction. Refusing the save instead was the other candidate and is
       // worse: a provider retired from the register would make every profile
-      // naming it unsaveable, including the update that would remove the field.
+      // naming it unsaveable, even a save that keeps the provider.
       let presetNote: string | undefined;
       const redirectUrls: string[] = [];
       // Set only where a human actually answered. An acceptance nobody gave is
@@ -2672,6 +2681,14 @@ ${draftJson}
       }
       if (profile.auth?.type !== 'oauth2') {
         return `Error: profile "${id}" has auth.type="${authTypeForModel(profile.auth?.type)}", not "oauth2". Connecting sends the user to a provider to authorize; a profile that carries a static credential does not need it.`;
+      }
+      // A provider this engine once shipped: there is nothing to connect it to, and the profile
+      // stays held to it, so neither an update to another provider nor fetch_token (both
+      // suggested further down for other profiles) works. Asked before anything else that could
+      // answer with one of those.
+      const retiredId = retiredPresetIdOf(profile);
+      if (retiredId !== undefined) {
+        return `Error: profile "${id}" was set up through the built-in "${retiredId}" provider, which this engine no longer has, so there is no authorization page to send the user to. Tell the user this connection can no longer be renewed here; another way of signing in to the same API replaces it, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
       }
       // The link is built from the server's own origin, never assembled by the
       // model: a link the model writes is a link the model chooses. Without an
@@ -3018,6 +3035,14 @@ ${draftJson}
         return `Error: profile "${input.id}" is oauth2, so its tokens would live in a vault slot that belongs to a credential of this instance. Nothing was sent. Choose a different id for this profile.`;
       }
       const oauth = profile.auth.oauth;
+      // A provider this engine once shipped and no longer has: the profile's grant is a user's,
+      // and no endpoint of that provider is left to exchange it at. The profile's own `token_url`
+      // was display only while the provider existed, and it does not become the endpoint now,
+      // or an edit to it would send the user's refresh token to a host the profile names.
+      const retiredId = retiredPresetIdOf(profile);
+      if (retiredId !== undefined) {
+        return `Error: profile "${input.id}" was set up through the built-in "${retiredId}" provider, which this engine no longer has, so no token is requested for it. Nothing was sent. Tell the user this connection can no longer be renewed here; another way of signing in to the same API replaces it, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
+      }
       // A profile that names a preset this engine knows exchanges tokens at the preset's own
       // endpoint — the one the callback used — and its `token_url` is display only. Otherwise a
       // profile the agent wrote could send the provider's refresh token, and the client secret,
