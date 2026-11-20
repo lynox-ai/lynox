@@ -572,6 +572,7 @@
 										name="rule-then-preset"
 										value={preset}
 										checked={formPreset === preset}
+										aria-describedby={preset === 'archive' && formPreset === 'archive' ? 'rules-then-effect' : undefined}
 										onchange={() => (formPreset = preset)}
 									/>
 									<span>{t(PRESET_MAP[preset].labelKey)}</span>
@@ -579,7 +580,7 @@
 							{/each}
 						</div>
 						{#if formPreset === 'archive'}
-							<p class="mt-2 text-[11px] text-text-muted" data-testid="rules-then-effect">{tf('inbox.rules_then_archive_effect', { zone: t('inbox.zone_handled') })}</p>
+							<p id="rules-then-effect" class="mt-2 text-[11px] text-text-muted" data-testid="rules-then-effect">{tf('inbox.rules_then_archive_effect', { zone: t('inbox.zone_handled') })}</p>
 						{/if}
 						{#if formPreset === null}
 							<p class="mt-2 text-[11px] text-text-muted" data-testid="rules-then-choose-hint">{t('inbox.rules_then_choose_hint')}</p>

@@ -300,14 +300,12 @@ describe('RulesView — the description kind', () => {
 		expect(target.textContent).toContain(t('inbox.rules_match_description'));
 	});
 
-	it.each([
-		['archive', 'Mit „Als erledigt ablegen“ greift eine Beschreibungsregel nur, wenn auch der Klassifikator die Mail so einordnet. Sonst hält lynox die Regel zurück und zeigt dir die Mail.'],
-	] as const)('names the chosen handled option "%s" in the hint', async (preset, sentence) => {
+	it('names the chosen handled option in the hint', async () => {
 		await render({ viewer: 'owner', rules: [] });
 		await openForm();
 		await choose('rule-match-kind', 'matches_description');
-		await choose('rule-then-preset', preset);
-		expect(byTestId('rules-handled-hint')?.textContent).toBe(sentence);
+		await choose('rule-then-preset', 'archive');
+		expect(byTestId('rules-handled-hint')?.textContent).toBe('Mit „Als erledigt ablegen“ greift eine Beschreibungsregel nur, wenn auch der Klassifikator die Mail so einordnet. Sonst hält lynox die Regel zurück und zeigt dir die Mail.');
 	});
 
 	it('shows no handled hint for "keep under Needs you", nor for a fixed rule', async () => {
@@ -442,6 +440,7 @@ describe('RulesView — a form a link opened', () => {
 		expect(thenRadios().filter((r) => r.checked)).toEqual([]);
 		expect(save().disabled).toBe(true);
 		expect(byTestId('rules-then-choose-hint')?.textContent).toBe(t('inbox.rules_then_choose_hint'));
+		expect(byTestId('rules-then-effect')).toBeNull();
 		// A submit without a choice sends nothing.
 		target.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
 		await settle();
@@ -666,6 +665,10 @@ describe('RulesView — what a "then" choice says it does', () => {
 		await render({ viewer: 'owner', rules: [] });
 		await openForm();
 		expect(byTestId('rules-then-effect')?.textContent).toBe('lynox legt die Mail unter „Erledigt heute“ ab. In deinem Postfach bleibt sie unverändert.');
+		// A screen reader reads the sentence with the choice it belongs to.
+		const effectId = byTestId('rules-then-effect')!.id;
+		expect(effectId).not.toBe('');
+		expect(target.querySelector('input[name="rule-then-preset"][value="archive"]')!.getAttribute('aria-describedby')).toBe(effectId);
 		await choose('rule-then-preset', 'escalate');
 		expect(byTestId('rules-then-effect')).toBeNull();
 		await choose('rule-then-preset', 'archive');

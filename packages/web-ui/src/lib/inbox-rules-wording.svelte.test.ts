@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { getLocale, setLocale, t } from './i18n.svelte.js';
+import { getLocale, setLocale, t, tf } from './i18n.svelte.js';
 
 // The inbox rules' texts as reviewed, byte for byte, in both languages: the rule view's
 // proposals, confirming, the count of waiting proposals, the name field, the description kind
@@ -63,6 +63,9 @@ const WORDING: ReadonlyArray<readonly [key: string, de: string, en: string]> = [
 	['inbox.rule_withheld_forwarded_mandate_unnamed', 'Regel zurückgehalten: Diese Mail hat eine Person weitergeleitet. Solche Mails legt eine Beschreibungsregel nicht als erledigt ab, darum zeigt lynox sie dir. Eine feste Regel daraus kann der Inhaber anlegen.', 'Rule held back: a person forwarded this mail. A description rule does not file such mail as handled, so lynox shows it to you. The owner can turn it into a fixed rule.'],
 ];
 
+// Words that name an effect in the mail provider's mailbox (archive, move, delete, flag, read state).
+const MAILBOX_EFFECT = /archiv|gelesen|lesen markieren|verschieb|lösch|papierkorb|spam|markier|ausblend|ordner|\bread\b|unread|\bseen\b|\bmove|delete|trash|\bflag|\bhide\b|folder/i;
+
 const localeBefore = getLocale();
 afterEach(() => setLocale(localeBefore));
 
@@ -82,15 +85,19 @@ describe('inbox rules wording', () => {
 		expect(keys.length).toBeGreaterThanOrEqual(5);
 		for (const locale of ['de', 'en'] as const) {
 			setLocale(locale);
-			for (const k of keys) expect(t(k), `${locale} ${k}`).not.toMatch(/archiv|gelesen|lesen markieren|als gelesen|verschieb|mark(?:ed)? (?:as )?read|\bread\b|\bmove/i);
+			for (const k of keys) expect(t(k), `${locale} ${k}`).not.toMatch(MAILBOX_EFFECT);
+		}
+		// The list catches what the retired texts said, so a broken pattern cannot pass on nothing.
+		for (const retired of ['Automatisch archivieren', 'Auto-archive', 'Lesen markieren & ausblenden', 'Mark read & hide']) {
+			expect(retired).toMatch(MAILBOX_EFFECT);
 		}
 	});
 
 	it('names the zone a handled rule files into as the inbox does', () => {
 		setLocale('de');
-		expect(t('inbox.rules_then_archive_effect')).toContain('„{zone}“');
+		expect(tf('inbox.rules_then_archive_effect', { zone: t('inbox.zone_handled') })).toContain(`„${t('inbox.zone_handled')}“`);
 		setLocale('en');
-		expect(t('inbox.rules_then_archive_effect')).toContain('“{zone}”');
+		expect(tf('inbox.rules_then_archive_effect', { zone: t('inbox.zone_handled') })).toContain(`“${t('inbox.zone_handled')}”`);
 	});
 
 	it('names the bucket of a rule that escalates as the inbox does', () => {
