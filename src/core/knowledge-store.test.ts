@@ -26,6 +26,20 @@ describe('KnowledgeStore (Durable Knowledge Substrate — DK.1)', () => {
     for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 
+  it('a store built only to read writes nothing at construction; a full one runs its backfill', () => {
+    const done = (e: EngineDb): number | undefined =>
+      (e.getDb().prepare('SELECT done FROM profile_seed_backfill WHERE id = 1').get() as { done: number } | undefined)?.done;
+    expect(done(make().engine), 'a full store marks its backfill done').toBe(1);
+    // A database no full store has opened.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-'));
+    tmpDirs.push(dir);
+    const ro = new EngineDb(join(dir, 'engine.db'), '');
+    const before = done(ro);
+    expect(before).not.toBe(1);
+    new KnowledgeStore(ro, new SubjectStore(ro), null, { readOnly: true });
+    expect(done(ro)).toBe(before);
+  });
+
   // ── Tier derivation + routing (D-3/D-6, acceptance §7) ──
 
   it('a trusted agent write lands active + agent_inferred, subject-linked (H1)', () => {
