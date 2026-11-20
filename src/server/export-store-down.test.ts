@@ -6,6 +6,9 @@ import { join } from 'node:path';
 import type { Server } from 'node:http';
 import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
+import { EngineDb } from '../core/engine-db.js';
+import { SubjectStore } from '../core/subject-store.js';
+import { KnowledgeStore } from '../core/knowledge-store.js';
 
 /**
  * The engine opens its stores at boot and goes on without each one whose open fails. The
@@ -19,7 +22,10 @@ type ExportBody = {
   deals: unknown[]; deals_may_be_incomplete: boolean;
   datastore: Record<string, unknown[]>; datastore_may_be_incomplete: boolean;
   threads: unknown[]; threads_may_be_incomplete: boolean;
-  durable_knowledge: { entries: unknown[]; may_be_incomplete: boolean };
+  durable_knowledge: {
+    entries: Array<{ text: string }>; pending_entries: unknown[]; sources: unknown[];
+    blocks: Record<string, string | null>; may_be_incomplete: boolean;
+  };
 };
 
 type EngineView = {
@@ -28,6 +34,7 @@ type EngineView = {
   getThreadStore: () => unknown;
   getKnowledgeStore: () => unknown;
   getUserConfig: () => { durable_memory_enabled?: boolean | undefined };
+  getEngineDb: () => unknown;
   _crm: unknown;
 };
 
@@ -143,5 +150,59 @@ describe('export with every store open, durable memory off, then the CRM gone (r
     expect(body.contacts_may_be_incomplete).toBe(true);
     expect(body.deals_may_be_incomplete).toBe(true);
     expect(body.datastore_may_be_incomplete, 'the store itself was read in full').toBe(false);
+  }, 60_000);
+});
+
+describe('export with durable memory switched off after it held entries (real engine)', () => {
+  // Written while it was on: an entry and a memory block in engine.db, by the store the engine
+  // builds when the setting is on. The engine then boots with it off and opens no store.
+  const h = harness((dir) => {
+    const db = new EngineDb(join(dir, 'engine.db'));
+    const store = new KnowledgeStore(db, new SubjectStore(db), null);
+    store.write({ text: 'ACME renews in March', subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: false });
+    store.setBlockContent('profile', 'Runs a small bakery');
+    // Built at runtime, like the secret above: a key-shaped literal is what the commit scan reads.
+    store.setBlockContent('playbook', `Never paste ${['sk', 'ant', 'api03'].join('-')}-${'Q'.repeat(40)} into a rule.`);
+    // The full store ran its backfill; set it back, so a read that ran it again would show.
+    db.getDb().prepare('UPDATE profile_seed_backfill SET done = 0 WHERE id = 1').run();
+    db.close();
+  }, false);
+
+  it('carries the entries and blocks it still holds, unmarked', async () => {
+    expect(h.engine().getUserConfig().durable_memory_enabled, 'fixture: durable memory off').toBe(false);
+    expect(h.engine().getKnowledgeStore(), 'fixture: no store while it is off').toBeNull();
+
+    const body = await h.exportBody();
+    expect(body.durable_knowledge.entries.map((e) => e.text)).toEqual(['ACME renews in March']);
+    expect(body.durable_knowledge.blocks['profile']).toBe('Runs a small bakery');
+    expect(body.durable_knowledge.blocks['playbook'], 'a key in a block is masked').not.toContain('Q'.repeat(40));
+    expect(body.durable_knowledge.blocks['playbook']).toContain('***');
+    expect(body.durable_knowledge.may_be_incomplete, 'read in full').toBe(false);
+    const db = h.engine().getEngineDb() as EngineDb;
+    expect((db.getDb().prepare('SELECT done FROM profile_seed_backfill WHERE id = 1').get() as { done: number }).done, 'the export wrote nothing').toBe(0);
+  }, 60_000);
+
+  it('marks the block incomplete when the read fails', async () => {
+    const view = h.engine();
+    const real = view.getEngineDb;
+    view.getEngineDb = () => ({ getDb: () => { throw new Error('closed'); } });
+    try {
+      const body = await h.exportBody();
+      expect(body.durable_knowledge.entries).toEqual([]);
+      expect(body.durable_knowledge.may_be_incomplete, 'not read').toBe(true);
+    } finally {
+      view.getEngineDb = real;
+    }
+  }, 60_000);
+});
+
+describe('export with durable memory off and engine.db unopenable (real engine)', () => {
+  const h = harness((dir) => { mkdirSync(join(dir, 'engine.db')); }, false);
+
+  it('marks durable knowledge incomplete: the tables were not read', async () => {
+    expect(h.engine().getEngineDb(), 'fixture: engine.db failed to open').toBeNull();
+    const body = await h.exportBody();
+    expect(body.durable_knowledge.entries).toEqual([]);
+    expect(body.durable_knowledge.may_be_incomplete).toBe(true);
   }, 60_000);
 });

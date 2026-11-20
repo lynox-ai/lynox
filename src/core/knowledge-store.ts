@@ -200,8 +200,12 @@ export class KnowledgeStore {
     private readonly engine: EngineDb,
     private readonly subjects: SubjectStore,
     private readonly secretStore: SecretStoreLike | null = null,
+    opts: { readOnly?: boolean } = {},
   ) {
     this.db = engine.getDb();
+    // A store built only to read (the data export while durable knowledge is switched off)
+    // writes nothing, the backfill included.
+    if (opts.readOnly === true) return;
     // Once per database, and never fatal: a store that cannot backfill still works, and the
     // marker stays at 0 so the next boot tries again.
     try {
@@ -1048,6 +1052,13 @@ export class KnowledgeStore {
       if (text.startsWith(prefix)) return { id: r.id, text, sourceType: r.source_type as ProvenanceKind };
     }
     return null;
+  }
+
+  /** One block's content, decrypted and masked as {@link readSurfaceBlocks} masks it, for a
+   *  file that gets stored and forwarded (the data export); null when the block was never set. */
+  getBlockMasked(id: MemoryBlockId): string | null {
+    const block = this.getBlock(id);
+    return block === null ? null : this._maskText(block.content);
   }
 
   /** The always-loaded blocks (profile + playbook) for the read-surface, decrypted AND
