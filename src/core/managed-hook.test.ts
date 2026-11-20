@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createManagedHook, SHUTDOWN_FLUSH_BUDGET_MS } from './managed-hook.js';
+import { createManagedHook, RESERVATION_MAX_AGE_MS, SHUTDOWN_FLUSH_BUDGET_MS } from './managed-hook.js';
+import { RunAdmissionRefusedError } from './run-admission.js';
 import type { RunContext } from './engine.js';
 
 const CTX = { modelTier: 'balanced' } as unknown as RunContext;
@@ -1333,5 +1334,153 @@ describe('managed-hook escalation notice', () => {
     hook.onEscalationReported?.('not_delivered');
     await flushMicrotasks();
     expect(noticeCalls(spy)).toHaveLength(2);
+  });
+});
+
+describe('managed-hook admission within the balance (`overrun_hold`)', () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+  let statusBody: Record<string, unknown>;
+  let flushBody: Record<string, unknown>;
+
+  beforeEach(() => {
+    process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.test';
+    process.env['LYNOX_MANAGED_INSTANCE_ID'] = 'inst-1';
+    process.env['LYNOX_HTTP_SECRET'] = 'secret';
+    delete process.env['LYNOX_MANAGED_FLUSH_INTERVAL_MS'];
+    statusBody = { allowed: true, balance_cents: 50, spend_gate: 'balance', overrun_hold: true };
+    flushBody = { accepted: 1, allowed: true, balance_cents: 0 };
+    fetchSpy = vi.fn().mockImplementation((url: string) => {
+      const body = String(url).endsWith('/status') ? statusBody : flushBody;
+      return Promise.resolve({ ok: true, json: async () => ({ ...body }) });
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    delete process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+    delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
+    delete process.env['LYNOX_HTTP_SECRET'];
+  });
+
+  type Admission = { maxCostCents?: number; release?: () => void };
+  const admit = async (hook: ReturnType<typeof createManagedHook>, ctx: RunContext = CTX): Promise<Admission | undefined> =>
+    (await hook.onBeforeRun!('run', ctx)) ?? undefined;
+
+  it('without a hold the hook admits with nothing, exactly as before', async () => {
+    // Kills: a mutant that reserves (returns an admission) whatever the hold says.
+    statusBody = { allowed: true, balance_cents: 50, spend_gate: 'balance', overrun_hold: false };
+    const hook = createManagedHook();
+    await hook.onInit?.();
+    await expect(hook.onBeforeRun!('r1', CTX)).resolves.toBeUndefined();
+    await expect(hook.onBeforeRun!('r2', CTX)).resolves.toBeUndefined();
+    await hook.onShutdown?.();
+  });
+
+  it('a hold stated by /status bounds the run to all that is free', async () => {
+    // Kills: dropping the /status read of `overrun_hold` (the run is admitted unbounded).
+    const hook = createManagedHook();
+    await hook.onInit?.();
+    const a = await admit(hook);
+    expect(a?.maxCostCents).toBe(50);
+    expect(typeof a?.release).toBe('function');
+    a?.release?.();
+    await hook.onShutdown?.();
+  });
+
+  it('a concurrent second run is refused while the first holds everything, and admitted after its release', async () => {
+    // Kills: a mutant that does not subtract live reservations from the mirror.
+    const hook = createManagedHook();
+    await hook.onInit?.();
+    const first = await admit(hook);
+    await expect(hook.onBeforeRun!('r2', CTX)).rejects.toThrow(/budget for this period reached/i);
+    await expect(hook.onBeforeRun!('r2', CTX)).rejects.toBeInstanceOf(RunAdmissionRefusedError);
+    first?.release?.();
+    // Kills: a release that does not give the reservation back.
+    expect((await admit(hook))?.maxCostCents).toBe(50);
+    await hook.onShutdown?.();
+  });
+
+  it('release is idempotent: a second call does not free another run\'s reservation', async () => {
+    // Kills: a release that subtracts its cents from a shared total each time it is called.
+    const hook = createManagedHook();
+    await hook.onInit?.();
+    const first = await admit(hook);
+    first?.release?.();
+    const second = await admit(hook);
+    expect(second?.maxCostCents).toBe(50);
+    first?.release?.();
+    await expect(hook.onBeforeRun!('r3', CTX)).rejects.toThrow(/budget for this period reached/i);
+    second?.release?.();
+    await hook.onShutdown?.();
+  });
+
+  it('a reservation never given back stops counting after RESERVATION_MAX_AGE_MS, read lazily', async () => {
+    // Kills: a mutant without the age bound (a lost release would refuse every run for good).
+    vi.useFakeTimers();
+    const hook = createManagedHook();
+    await hook.onInit?.();
+    await admit(hook); // never released
+    await vi.advanceTimersByTimeAsync(RESERVATION_MAX_AGE_MS - 1_000);
+    await expect(hook.onBeforeRun!('r2', CTX)).rejects.toThrow(/budget for this period reached/i);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect((await admit(hook))?.maxCostCents).toBe(50);
+    await hook.onShutdown?.();
+  });
+
+  it('a call with a stated worst case is admitted only when that much is free, and takes only that much', async () => {
+    // Kills: ignoring `maxCostCents` (the call would take all 50 and the next call be refused).
+    const hook = createManagedHook();
+    await hook.onInit?.();
+    const small = { ...CTX, maxCostCents: 10 } as RunContext;
+    const a = await admit(hook, small);
+    expect(a?.maxCostCents).toBe(10);
+    // 40 still free: a 40c call fits, a 41c one does not.
+    await expect(hook.onBeforeRun!('r2', { ...CTX, maxCostCents: 41 } as RunContext)).rejects.toBeInstanceOf(RunAdmissionRefusedError);
+    const b = await admit(hook, { ...CTX, maxCostCents: 40 } as RunContext);
+    expect(b?.maxCostCents).toBe(40);
+    a?.release?.();
+    b?.release?.();
+    // An unbounded call (a batch) is never covered.
+    await expect(hook.onBeforeRun!('r3', { ...CTX, maxCostCents: Number.POSITIVE_INFINITY } as RunContext)).rejects.toBeInstanceOf(RunAdmissionRefusedError);
+    await hook.onShutdown?.();
+  });
+
+  it('an unknown balance under a hold admits nothing', async () => {
+    // Kills: falling back to "no bound" when the mirror is unknown (fail open).
+    statusBody = { allowed: true, balance_cents: 50, spend_gate: 'none', overrun_hold: true };
+    const hook = createManagedHook();
+    await hook.onInit?.();
+    await expect(hook.onBeforeRun!('r1', CTX)).rejects.toBeInstanceOf(RunAdmissionRefusedError);
+    await hook.onShutdown?.();
+  });
+
+  it('a hold stated by a flush answer holds; a flush answer without the field keeps it; /status without it clears it', async () => {
+    // Kills: dropping the flush read of `overrun_hold`, and a flush that treats absent as "no hold".
+    vi.useFakeTimers();
+    statusBody = { allowed: true, balance_cents: 500, spend_gate: 'balance' };
+    const hook = createManagedHook();
+    await hook.onInit?.();
+    await expect(hook.onBeforeRun!('r0', CTX)).resolves.toBeUndefined();
+
+    flushBody = { accepted: 1, allowed: true, balance_cents: 0, overrun_hold: true };
+    hook.onAfterRun?.('cost-1', 0.05, CTX);
+    await vi.advanceTimersByTimeAsync(30_000); // the flush timer
+    const held = await admit(hook);
+    expect(held?.maxCostCents).toBe(495);
+    held?.release?.();
+
+    flushBody = { accepted: 1, allowed: true, balance_cents: 0 };
+    hook.onAfterRun?.('cost-2', 0.05, CTX);
+    await vi.advanceTimersByTimeAsync(30_000);
+    const stillHeld = await admit(hook);
+    expect(stillHeld?.maxCostCents).toBe(490);
+    stillHeld?.release?.();
+
+    // The heartbeat /status (150 s cadence) says nothing about the hold: no hold.
+    await vi.advanceTimersByTimeAsync(150_000);
+    await expect(hook.onBeforeRun!('r3', CTX)).resolves.toBeUndefined();
+    await hook.onShutdown?.();
   });
 });

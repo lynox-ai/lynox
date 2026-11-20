@@ -417,3 +417,44 @@ describe('CostGuard — aborted-call bounds count against the ceiling only', () 
     expect(g.remainingBudgetUSD()).toBeCloseTo(1, 10);
   });
 });
+
+describe('CostGuard run ceiling', () => {
+  // opus input: $5 per 1M tokens → 200k tokens = $1.
+  it('the smaller of the budget and the run ceiling is the limit in force', () => {
+    // Kills: isExceeded reading maxBudgetUSD instead of the effective limit.
+    const g = new CostGuard({ maxBudgetUSD: 10 }, 'claude-opus-4-6');
+    g.setRunCeilingUSD(1);
+    expect(g.recordTurn(usage(100_000, 0))).toBe(false); // $0.50
+    expect(g.recordTurn(usage(100_000, 0))).toBe(true); // $1.00
+    // Kills: remainingBudgetUSD / snapshot reading maxBudgetUSD.
+    expect(g.remainingBudgetUSD()).toBe(0);
+    expect(g.snapshot().budgetPercent).toBe(100);
+  });
+
+  it('a run ceiling above the budget does not lift it, and a malformed one stops the run', () => {
+    // Kills: replacing the budget with the ceiling instead of taking the minimum.
+    const g = new CostGuard({ maxBudgetUSD: 1 }, 'claude-opus-4-6');
+    g.setRunCeilingUSD(50);
+    expect(g.remainingBudgetUSD()).toBe(1);
+    // Kills: a NaN ceiling ignored (Math.min with NaN would make the limit NaN = no limit).
+    g.setRunCeilingUSD(Number.NaN);
+    expect(g.remainingBudgetUSD()).toBe(0);
+  });
+
+  it('bounds an unbudgeted guard too', () => {
+    // Kills: remainingBudgetUSD short-circuiting to null on an Infinity budget before the ceiling.
+    const g = new CostGuard({}, 'claude-opus-4-6');
+    g.setRunCeilingUSD(2);
+    expect(g.remainingBudgetUSD()).toBe(2);
+    expect(g.reserveExternalCost(3)).toBe(false);
+  });
+
+  it('reset() clears the run ceiling', () => {
+    // Kills: a reset that leaves the ceiling in place (it would bound the next run).
+    const g = new CostGuard({ maxBudgetUSD: 10 }, 'claude-opus-4-6');
+    g.setRunCeilingUSD(1);
+    g.reset();
+    expect(g.remainingBudgetUSD()).toBe(10);
+    expect(g.recordTurn(usage(400_000, 0))).toBe(false); // $2 — over the old ceiling, under the budget
+  });
+});

@@ -38,6 +38,7 @@ import type { SendStop } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
 import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
+import { fireAdmissionHooks, type CombinedAdmission } from './run-admission.js';
 import { openPendingRunGroup, RUN_GROUP_ID_FORMAT, settleRunGroup } from './run-group.js';
 import { channels } from './observability.js';
 import { containsUntrustedMarker, detectInjectionAttempt } from './data-boundary.js';
@@ -144,6 +145,11 @@ export interface CompactionResult {
 }
 
 const DEFAULT_COMPACTION_MODEL: ModelTier = 'fast';
+
+/** A run refused because the bound an admission hook set leaves nothing to spend. */
+const RUN_CEILING_NOTHING_FREE = 'Nothing is left to spend for this run within the current balance.';
+/** A run refused because its spending bound cannot be enforced: the agent has no cost guard. */
+const RUN_CEILING_WITHOUT_GUARD = 'This run has a spending bound, but nothing in this session can hold it to it.';
 
 /** Thrown by `run()` when an `internal: true` run (only compaction, today) is
  *  stopped by a pre-run GUARD (persistent budget, a tenant/budget `onBeforeRun`
@@ -914,7 +920,25 @@ export class Session {
     return openPendingRunGroup(() => this._run(task, runOptions));
   }
 
+  /**
+   * What the admission hooks set aside for a run is given back however the run ends — a
+   * result, an early return before the model is asked (a content-policy block, a denied
+   * flag), a refusal or a throw — and only after the run's own cost was reported.
+   */
   private async _run(task: string | unknown[], runOptions?: RunOptions): Promise<string> {
+    const admission: { current: CombinedAdmission | null } = { current: null };
+    try {
+      return await this._runAdmitted(task, runOptions, admission);
+    } finally {
+      admission.current?.release();
+    }
+  }
+
+  private async _runAdmitted(
+    task: string | unknown[],
+    runOptions: RunOptions | undefined,
+    admission: { current: CombinedAdmission | null },
+  ): Promise<string> {
     if (!this.agent) throw new Error('Session not initialized — agent missing');
     // Before anything that could rebuild the agent below, so every rebuild of this run is
     // built for this run's principal. Absent = keep the one before (see `RunOptions`).
@@ -1038,30 +1062,36 @@ export class Session {
       source: context?.source ?? 'cli',
       tenantId: this._tenantId ?? undefined,
     };
-    for (const hook of this.engine.getHooks()) {
-      if (hook.onBeforeRun) {
-        try {
-          await hook.onBeforeRun(preRunContext.runId, preRunContext);
-        } catch (err: unknown) {
-          const reason = err instanceof Error ? err.message : String(err);
-          // An internal (compaction) run blocked by a tenant/budget hook: do NOT
-          // emit a user-facing `run_blocked` warning (no user turn was blocked)
-          // and do NOT return the block string (compaction would inject it as an
-          // authoritative summary and wipe the thread). Throw so compact() keeps
-          // the history and simply retries next turn.
-          if (runOptions?.internal === true) throw new InternalRunBlockedError(`Run blocked: ${reason}`);
-          // Surface the block as a `warning` SSE event so the web-UI shows a
-          // distinct, localized banner/toast instead of letting the reason
-          // string slip through as a `done.result` that the chat used to
-          // render as total silence (2026-05-29, first-session
-          // fail-closed credit check). The returned string is still the
-          // single source for non-SSE callers (CLI) and the `done.result`
-          // inline render fallback. `warning` (not `error`) keeps the failed
-          // user turn intact — the block is transient (credit re-syncs).
-          await this.onStream?.({ type: 'warning', code: 'run_blocked', detail: reason, agent: this.agent?.name ?? 'lynox' });
-          return `Run blocked: ${reason}`;
-        }
+    // A hook may bound what this run may spend (the smallest bound wins); the bound is
+    // applied to this run's cost guard below. Without a cost guard nothing would hold the
+    // run to it, so the run is refused, like a refusal by the hook itself.
+    let runCostCeilingUSD: number | undefined;
+    try {
+      admission.current = await fireAdmissionHooks(this.engine.getHooks(), preRunContext.runId, preRunContext);
+      const ceilingCents = admission.current.maxCostCents;
+      if (ceilingCents !== undefined) {
+        if (!(ceilingCents > 0)) throw new Error(RUN_CEILING_NOTHING_FREE);
+        if (this.agent.hasCostGuard?.() !== true) throw new Error(RUN_CEILING_WITHOUT_GUARD);
+        runCostCeilingUSD = ceilingCents / 100;
       }
+    } catch (err: unknown) {
+      const reason = err instanceof Error ? err.message : String(err);
+      // An internal (compaction) run blocked by a tenant/budget hook: do NOT
+      // emit a user-facing `run_blocked` warning (no user turn was blocked)
+      // and do NOT return the block string (compaction would inject it as an
+      // authoritative summary and wipe the thread). Throw so compact() keeps
+      // the history and simply retries next turn.
+      if (runOptions?.internal === true) throw new InternalRunBlockedError(`Run blocked: ${reason}`);
+      // Surface the block as a `warning` SSE event so the web-UI shows a
+      // distinct, localized banner/toast instead of letting the reason
+      // string slip through as a `done.result` that the chat used to
+      // render as total silence (2026-05-29, first-session
+      // fail-closed credit check). The returned string is still the
+      // single source for non-SSE callers (CLI) and the `done.result`
+      // inline render fallback. `warning` (not `error`) keeps the failed
+      // user turn intact — the block is transient (credit re-syncs).
+      await this.onStream?.({ type: 'warning', code: 'run_blocked', detail: reason, agent: this.agent?.name ?? 'lynox' });
+      return `Run blocked: ${reason}`;
     }
 
     // Content policy: check user input for malware/exploit/phishing intent BEFORE sending to LLM
@@ -1449,6 +1479,7 @@ export class Session {
           // Tell the agent its first pushed user message is already on disk, so
           // the identity-based eager-persist delta won't write it a second time.
           userMessagePrePersisted: userTurnPrePersisted,
+          ...(runCostCeilingUSD !== undefined ? { runCostCeilingUSD } : {}),
         },
       );
       // Why and how THIS run ended, kept where the caller can still reach it. The

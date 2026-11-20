@@ -4,6 +4,7 @@ import type { Engine, LynoxHooks } from './engine.js';
 import type { SessionCounters } from '../types/index.js';
 import { fireBeforeRunGate, reportMeteredCost, debitInRunHelperCost } from './metered-request.js';
 import { openRunGroup } from './run-group.js';
+import { SINGLE_CALL_WORST_CASE_CENTS } from './run-admission.js';
 import { configurePersistentBudget, resetPersistentBudget } from './session-budget.js';
 
 function makeCounters(): SessionCounters {
@@ -58,6 +59,36 @@ describe('fireBeforeRunGate — pre-run credit gate', () => {
     const onBeforeRun = vi.fn().mockRejectedValue('plain string boom');
     const result = await fireBeforeRunGate(makeEngine([{ onBeforeRun }]), 'fast');
     expect(result.blockedReason).toBe('plain string boom');
+  });
+});
+
+describe('fireBeforeRunGate — a single call under a balance-bounded admission', () => {
+  it('states the call\'s worst case to the hooks: the caller\'s, or the conservative default', async () => {
+    // Kills: a gate that leaves `maxCostCents` unset (the hook would reserve the whole balance).
+    const onBeforeRun = vi.fn();
+    await fireBeforeRunGate(makeEngine([{ onBeforeRun }]), 'fast');
+    await fireBeforeRunGate(makeEngine([{ onBeforeRun }]), 'fast', { maxCostCents: 3 });
+    expect((onBeforeRun.mock.calls[0]![1] as { maxCostCents?: number }).maxCostCents).toBe(SINGLE_CALL_WORST_CASE_CENTS);
+    expect((onBeforeRun.mock.calls[1]![1] as { maxCostCents?: number }).maxCostCents).toBe(3);
+  });
+
+  it('gives back what a hook set aside right after the check', async () => {
+    // Kills: a gate that ignores the admission (the reservation would block every later run).
+    const release = vi.fn();
+    const result = await fireBeforeRunGate(makeEngine([{ onBeforeRun: () => ({ maxCostCents: 10, release }) }]), 'fast');
+    expect(result.blockedReason).toBeNull();
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('a later hook refusing gives back what an earlier one set aside', async () => {
+    // Kills: a refusal path that returns without releasing the hooks before it.
+    const release = vi.fn();
+    const result = await fireBeforeRunGate(makeEngine([
+      { onBeforeRun: () => ({ maxCostCents: 10, release }) },
+      { onBeforeRun: () => { throw new Error('refused'); } },
+    ]), 'fast');
+    expect(result.blockedReason).toBe('refused');
+    expect(release).toHaveBeenCalledOnce();
   });
 });
 

@@ -1495,6 +1495,11 @@ export class Agent implements IAgent {
     return this.costGuard?.remainingBudgetUSD() ?? null;
   }
 
+  /** Whether this agent has a cost guard, i.e. something a per-run spending bound can be held to. */
+  hasCostGuard(): boolean {
+    return this.costGuard !== null;
+  }
+
   /**
    * Hold `usd` against this run's ceiling for work about to start; `false` means it did
    * not fit and NOTHING was held.
@@ -2808,8 +2813,17 @@ export class Agent implements IAgent {
        * single-use agent may get one (a test pins spawn.ts as the only caller).
        */
       disposableDeadline?: AbortSignal | undefined;
+      /**
+       * A dollar bound for THIS run on top of the guard's own budget, applied right after
+       * the guard is reset for the run (`CostGuard.setRunCeilingUSD`). Without a guard there
+       * is nothing to apply it to, so the run is refused before it reaches the provider.
+       */
+      runCostCeilingUSD?: number | undefined;
     },
   ): Promise<string> {
+    if (opts?.runCostCeilingUSD !== undefined && this.costGuard === null) {
+      throw new Error('This run has a spending bound, but the agent has no cost guard to hold it to.');
+    }
     // Per RUN, not per session: `Session` reads it once after this returns.
     this._helperCostUsd = 0;
     this._stoppedCallSessionUsd = 0;
@@ -2886,6 +2900,7 @@ export class Agent implements IAgent {
     // later turn silently ends tool-less. Reset at entry (like _sawUntrustedData) so a
     // post-run costSnapshot() reader (spawn.ts) still observes this run's cost.
     this.costGuard?.reset();
+    if (opts?.runCostCeilingUSD !== undefined) this.costGuard?.setRunCeilingUSD(opts.runCostCeilingUSD);
     this._turnToolNames.clear();
     this._suppressTools = opts?.suppressTools === true;
     // Linked to THIS run's controller (created above): an abort that already happened

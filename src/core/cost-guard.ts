@@ -34,6 +34,12 @@ export class CostGuard {
   private capOnlyUSD = 0;
   private iterations = 0;
   private warned = false;
+  /**
+   * A tighter dollar bound for the current run only, set at admission
+   * ({@link setRunCeilingUSD}); `Infinity` when the run has none. Cleared by `reset()`, so
+   * it never outlives the run it was set for.
+   */
+  private runCeilingUSD = Infinity;
 
   constructor(config: CostGuardConfig, model: string) {
     this.maxBudgetUSD = config.maxBudgetUSD ?? Infinity;
@@ -64,12 +70,13 @@ export class CostGuard {
 
   isExceeded(): boolean {
     const cost = this.capCost();
+    const limit = this.limitUSD();
     // Fail closed on a non-finite cost (NaN from a malformed pricing override):
     // `NaN >= cap` is false and would silently disable the dollar ceiling. An
     // explicitly-disabled budget (Infinity) stays the user's opt-out.
     const costExceeded = Number.isFinite(cost)
-      ? cost >= this.maxBudgetUSD
-      : this.maxBudgetUSD !== Infinity;
+      ? cost >= limit
+      : limit !== Infinity;
     return costExceeded || this.iterations >= this.maxIterations;
   }
 
@@ -90,8 +97,24 @@ export class CostGuard {
       estimatedCostUSD: cost,
       ownCostUSD: cost - this.externalCostUSD,
       iterationsUsed: this.iterations,
-      budgetPercent: this.maxBudgetUSD === Infinity ? 0 : Math.round((cost / this.maxBudgetUSD) * 100),
+      budgetPercent: this.limitUSD() === Infinity ? 0 : Math.round((cost / this.limitUSD()) * 100),
     };
+  }
+
+  /**
+   * Bound THIS run's spend to `usd` on top of the configured budget: the limit in force is
+   * the smaller of the two until the next `reset()`. A NaN or negative amount counts as 0,
+   * so a malformed bound stops the run instead of lifting the limit; `Infinity` sets none.
+   * Several calls keep the smallest.
+   */
+  setRunCeilingUSD(usd: number): void {
+    const bound = Number.isNaN(usd) || usd < 0 ? 0 : usd;
+    this.runCeilingUSD = Math.min(this.runCeilingUSD, bound);
+  }
+
+  /** The dollar limit in force: the configured budget, or the run's ceiling when smaller. */
+  private limitUSD(): number {
+    return Math.min(this.maxBudgetUSD, this.runCeilingUSD);
   }
 
   reset(): void {
@@ -105,6 +128,7 @@ export class CostGuard {
     this.reservedUSD = 0;
     this.iterations = 0;
     this.warned = false;
+    this.runCeilingUSD = Infinity;
   }
 
   /**
@@ -123,17 +147,18 @@ export class CostGuard {
    * same room.
    */
   remainingBudgetUSD(): number | null {
-    if (this.maxBudgetUSD === Infinity) return null;
+    const limit = this.limitUSD();
+    if (limit === Infinity) return null;
     // ⛔ BOTH inputs, not one. The first version of this guard checked the spend and not
     // the ceiling — so a non-finite-but-not-`Infinity` ceiling produced `NaN`, every
     // comparison against it was false, and a fan-out was admitted unbounded. The
     // docblock above claimed coverage this line did not have. Not reachable today (every
     // caller clamps or validates), which is exactly why it has to fail closed: the
     // reachability is a property of the callers, and callers change.
-    if (!Number.isFinite(this.maxBudgetUSD)) return 0;
+    if (!Number.isFinite(limit)) return 0;
     const spent = this.capCost();
     if (!Number.isFinite(spent)) return 0;
-    return Math.max(0, this.maxBudgetUSD - spent - this.reservedUSD);
+    return Math.max(0, limit - spent - this.reservedUSD);
   }
 
   /**
