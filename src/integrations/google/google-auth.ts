@@ -993,7 +993,7 @@ export class GoogleAuth {
           await new Promise(r => setTimeout(r, pollInterval));
           continue;
         }
-        throw new Error(`Device auth failed: ${errorData.error}`);
+        throw new Error(`Device auth failed: ${tokenRes.status}${tokenErrorCode(JSON.stringify({ error: errorData.error }))}`);
       }
 
       throw new Error('Device auth timed out. Please try again.');

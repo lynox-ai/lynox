@@ -936,6 +936,31 @@ describe('GoogleAuth', () => {
       await run;
       expect(auth.grantPending).toBe(false);
     });
+
+    it('startDeviceFlow keeps the client error code and drops the rest of the body', async () => {
+      const frag = ['zq', 'Vx81Lm'].join('');
+      // The connect page reads `invalid_client` / `unauthorized_client` out of this message.
+      mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: 'invalid_client', error_description: `client ${frag}` }), { status: 401 }));
+      const failed = await auth.startDeviceFlow().then(() => null, (e: unknown) => e as Error);
+      expect(failed?.message).toBe('Device auth request failed: 401 (invalid_client)');
+      mockFetch.mockResolvedValueOnce(new Response(`${frag}abcdef`, { status: 200 }));
+      const malformed = await auth.startDeviceFlow().then(() => null, (e: unknown) => e as Error);
+      expect(malformed?.message).toBe('Device auth request failed: the answer is not valid JSON');
+    });
+
+    it('startDeviceFlow names a refused poll by its status and code, never by the error text', async () => {
+      const frag = ['zq', 'Vx81Lm'].join('');
+      mockFetch.mockResolvedValueOnce(new Response(
+        JSON.stringify({ device_code: 'dc', user_code: 'uc', verification_url: 'https://example.test/d', expires_in: 300, interval: 1 }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ));
+      const { waitForAuth } = await auth.startDeviceFlow();
+      mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: `denied ${frag}` }), { status: 400 }));
+      vi.useFakeTimers();
+      const run = waitForAuth().then(() => null, (e: unknown) => e as Error);
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect((await run)?.message).toBe('Device auth failed: 400');
+    });
   });
 
   describe('getAccountInfo', () => {
