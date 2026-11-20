@@ -560,13 +560,35 @@ describe('a line written untrusted stays marked whatever happens to its knowledg
   });
 
   it.each([
-    { old_content: 'Placeholder entry', new_content: CLEAN }, // exact: a second copy of the clean line
-    { old_content: 'nothing like this anywhere', new_content: CLEAN }, // fallback: appended copy
-  ])('memory_update on an untrusted turn that writes a copy of a held line ($old_content) records no lasting mark for it', async ({ old_content, new_content }) => {
+    { old_content: 'Placeholder entry', answer: 'Updated' }, // exact: a second copy of the clean line
+    { old_content: 'nothing like this anywhere', answer: 'SUPERSEDED' }, // fallback: appended copy
+  ])('memory_update on an untrusted turn that writes a copy of a held line ($old_content) records no lasting mark for it, and records the new line beside it', async ({ old_content, answer }) => {
     const layer = await open();
     const memory = fileMemory([CLEAN, 'Placeholder entry']);
-    await turn(layer, memory, [{ id: 'w1', name: 'memory_update', input: { namespace: 'knowledge', old_content, new_content, scope: 'user:alex' } }], true);
-    expect(layer.untrustedLineKeysIn('knowledge').has(untrustedLineKey(CLEAN)!)).toBe(false);
+    const agent = await turn(layer, memory, [{ id: 'w1', name: 'memory_update', input: { namespace: 'knowledge', old_content, new_content: `${CLEAN}\n${PAYLOAD}`, scope: 'user:alex' } }], true);
+    expect(resultOf(agent, 'w1')).toMatch(answer === 'Updated' ? /Updated/ : /new|appended|SUPERSEDED|Added|Stored/i);
+    const keys = layer.untrustedLineKeysIn('knowledge');
+    expect(keys.has(untrustedLineKey(CLEAN)!)).toBe(false);
+    expect(keys.has(untrustedLineKey(PAYLOAD)!)).toBe(true);
+  });
+
+  it('a copy of a line marked by its row alone gets a key of its own, so it stays marked when that row ends', async () => {
+    const layer = await open();
+    await seed(layer, TEXT, true); // a row, no key
+    const memory = fileMemory([LINE]);
+    await turn(layer, memory, [write(`${TEXT}\n${PAYLOAD}`)], true);
+    expect(layer.untrustedLineKeysIn('knowledge').has(untrustedLineKey(TEXT)!)).toBe(true);
+  });
+
+  it('a failure to record what an exact edit left, after it landed, does not turn the edit into an error', async () => {
+    const layer = await open();
+    const memory = fileMemory([LINE]);
+    const real = layer.markUntrustedLines.bind(layer);
+    vi.spyOn(layer, 'markUntrustedLines').mockImplementationOnce(real).mockImplementationOnce(() => { throw new Error('store unwritable'); });
+    const agent = await turn(layer, memory, [{ id: 'w1', name: 'memory_update', input: { namespace: 'knowledge', old_content: 'CTO', new_content: `CTO (${PAYLOAD})`, scope: 'user:alex' } }], true);
+    expect(resultOf(agent, 'w1')).toMatch(/Updated/);
+    expect(resultOf(agent, 'w1')).not.toContain('store unwritable');
+    expect(layer.untrustedLineKeysIn('knowledge').has(untrustedLineKey(`[2026-10-01] Alice Schmidt is CTO (${PAYLOAD}) at Acme GmbH.`)!)).toBe(true);
   });
 
   it('memory_promote of a clean line on an untrusted turn records no mark: the turn cannot change its text', async () => {
