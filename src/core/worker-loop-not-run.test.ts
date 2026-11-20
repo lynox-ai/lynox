@@ -303,6 +303,25 @@ describe('a run the cap or a hook stopped inside the session', () => {
     expect(lines.join(''), 'the reason is in the instance log').toContain('tenant credit exhausted');
   });
 
+  it('a cron a hook stops at two runs within the relog interval says so once in the log', async () => {
+    const tm = makeTaskManager([makeTask({ schedule_cron: '* * * * *' })]);
+    const session = blockedSession('Run blocked: tenant credit exhausted', undefined);
+    const loop = new WorkerLoop(makeEngine(tm, session), makeRouter(), 60_000);
+    const { lines, restore } = quietStderr();
+    try {
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      vi.setSystemTime(new Date(Date.now() + 60_000));
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      restore();
+    }
+    expect(session.run, 'both runs started').toHaveBeenCalledTimes(2);
+    expect(notRunCalls(tm), 'both recorded').toHaveLength(2);
+    expect(lines.filter((l) => l.includes('Did not run')), 'one log line').toHaveLength(1);
+  });
+
   it('a one-shot a cap stopped is due again when the cap opens, and says so', async () => {
     const { tm } = await runBlocked(blockedSession('cap', { cap: 'daily', limitUSD: 5, spentUSD: 5 }), makeTask({ schedule_cron: undefined, source: 'task' }));
     const call = notRunCalls(tm)[0]!;
