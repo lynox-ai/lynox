@@ -20,14 +20,15 @@ import { recipientSpread } from '../integrations/mail/send-core.js';
 export type ApprovalScope =
   | { readonly viewer: 'owner' }
   /** `tag` is the mandate's own tag (`principalTag`): a mark stamped with it is the reader's own,
-   *  whichever of its grants stamped it. Absent, only the grant id tells. */
-  | { readonly viewer: 'mandate'; readonly mandateId: string; readonly tag?: string };
+   *  whichever of its grants stamped it (see {@link markGrantIn}). */
+  | { readonly viewer: 'mandate'; readonly mandateId: string; readonly tag: string };
 
 /**
  * The scope a principal reads the list in, or null when it reads nothing: a mandate whose login
  * names no grant (its entries cannot be told from another grant's), and any principal that is
  * neither the owner nor a mandate. Entries are matched by grant id, never by the mandate's tag:
- * a later grant for the same address is another grant and does not see the earlier one's.
+ * a later grant for the same address is another grant and does not see the earlier one's
+ * entries. A mark on what it does see is named by tag (see {@link markGrantIn}).
  */
 export function approvalScopeOf(p: RequestPrincipal): ApprovalScope | null {
   switch (p.kind) {
@@ -212,6 +213,21 @@ function marksOf(m: SetupMarks | undefined): Mark[] {
 /** How a mandate is named: by its grant id and its tag, which `nameOf` turns into a name. */
 export type MandateNamer = (mandateId: string | null, tag: string | null) => string;
 
+/** The grant a mark counts as in a scope, from its stored grant id and tag. */
+export type MarkGrant = (mandateId: string | null, tag: string | null) => string | null;
+
+/**
+ * The grant a mark counts as for a reader. A mark stamped with a mandate's own tag is its own,
+ * whichever grant for that address stamped it, or none: it counts as the grant the mandate reads
+ * under. Exact equality of the tag, as a helper's trigger fields are masked by it; nothing is
+ * normalized. Every other mark, and every mark the owner reads, keeps the grant id it was
+ * stored with (the owner tells a person's grants apart).
+ */
+export function markGrantIn(scope: ApprovalScope): MarkGrant {
+  if (scope.viewer !== 'mandate') return (mandateId) => mandateId;
+  return (mandateId, tag) => (tag !== null && tag === scope.tag ? scope.mandateId : mandateId);
+}
+
 /**
  * Who set an entry up, from stored columns only. An entry filed for a mandate always names that
  * mandate: as the one who set it up or changed it last when its grant's mark is on the trigger
@@ -223,8 +239,11 @@ export function setupLines(
   trigger: SetupMarks | undefined,
   workflow: SetupMarks | undefined,
   nameOf: MandateNamer,
+  grantOf: MarkGrant = (mandateId) => mandateId,
 ): SetupLine[] {
-  const marks = [...marksOf(trigger), ...marksOf(workflow)];
+  // Each mark under the grant it counts as for the reader, so a person's two grants are one line
+  // to themselves and the entry's own mark is found under either.
+  const marks = [...marksOf(trigger), ...marksOf(workflow)].map((m) => ({ ...m, mandateId: grantOf(m.mandateId, m.tag) }));
   const lines: SetupLine[] = [];
   const seen = new Set<string>();
   const add = (kind: SetupLine['kind'], mandateId: string | null, tag: string | null, takenOver: boolean): void => {
@@ -259,8 +278,9 @@ export const UNNAMED_MANDATE = 'unnamed mandate';
 export const OTHER_MANDATE = 'other mandate';
 
 /**
- * How a mark without a grant id and with another tag is named to a mandate: an older row whose
- * grant cannot be told, so it says neither whose nor that it is another's.
+ * How a mark without a grant id and with another tag is named to a mandate: an older row from
+ * before grant ids were stored. It is not the mandate's own; like another grant's mark, it says
+ * not whose (the word differs only because no grant is known).
  */
 export const SOME_MANDATE = 'some mandate';
 
@@ -276,15 +296,13 @@ export type DisplayNameOf = (mandateId: string) => string | null;
  * {@link SOME_MANDATE}.
  */
 export function mandateNamer(scope: ApprovalScope, displayNameOf: DisplayNameOf): MandateNamer {
+  const grantOf = markGrantIn(scope);
   return (markId, tag) => {
-    let mandateId = markId;
-    if (scope.viewer === 'mandate' && mandateId !== scope.mandateId) {
-      // Stamped with the reader's own tag, an earlier or later grant's mark is the reader's own, as
-      // `withoutForeignMarks` reads it: named as the reader's own grant, never from the other one.
-      const ownTag = scope.tag !== undefined && tag === scope.tag;
-      if (!ownTag) return mandateId === null ? SOME_MANDATE : OTHER_MANDATE;
-      mandateId = scope.mandateId;
-    }
+    // A mark of the reader's own tag counts as its own grant and is named from that grant, never
+    // from the one that stamped it.
+    const mandateId = grantOf(markId, tag);
+    if (scope.viewer === 'mandate' && mandateId === null) return SOME_MANDATE;
+    if (scope.viewer === 'mandate' && mandateId !== scope.mandateId) return OTHER_MANDATE;
     const display = mandateId !== null ? displayNameOf(mandateId) : null;
     if (display !== null && display !== '') return display;
     return mandateAddressOf(tag) ?? UNNAMED_MANDATE;
@@ -434,7 +452,7 @@ export function approvalCard(entry: ApprovalEntry, src: ApprovalCardSources): Ap
       ...(o.eventId !== undefined ? { eventId: o.eventId } : {}),
     },
     outcome: approvalOutcome(entry),
-    setup: setupLines(entry, src.trigger, src.workflow, mandateNamer(src.scope, src.displayNameOf)),
+    setup: setupLines(entry, src.trigger, src.workflow, mandateNamer(src.scope, src.displayNameOf), markGrantIn(src.scope)),
     chatThreadId: src.scope.viewer === 'owner' ? approvalChatThread(entry, src.threadOf) : null,
   };
 }

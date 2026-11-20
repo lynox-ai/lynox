@@ -11487,7 +11487,7 @@ describe('LynoxHTTPApi', () => {
           expect(bea.byId['trg-anna']).toEqual([{ kind: 'set_up_by', name: 'other mandate', takenOver: false }]);
           expect(bea.byId['trg-taken']).toEqual([{ kind: 'set_up_by', name: 'other mandate', takenOver: true }]);
           expect(bea.byId['trg-bea']).toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }]);
-          // Without a grant id it cannot be told to be hers or another's: it says neither.
+          // Another address without a grant id: not hers, and not whose.
           expect(bea.byId['trg-legacy']).toEqual([{ kind: 'set_up_by', name: 'some mandate', takenOver: false }]);
           // Her own address under another grant or none: hers, named as her own grant.
           const readsAsBea = reads.length;

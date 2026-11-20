@@ -44,7 +44,7 @@ const displayNameOf: DisplayNameOf = (id) => NAMES.get(id) ?? null;
 /** The owner's namer: every grant by its trail name. */
 const nameOf: MandateNamer = mandateNamer({ viewer: 'owner' }, displayNameOf);
 const owner: ApprovalCardSources = { scope: { viewer: 'owner' }, displayNameOf, now: T0 + 90_000 };
-const asMandate: ApprovalCardSources = { scope: { viewer: 'mandate', mandateId: 'grant-a' }, displayNameOf, now: T0 + 90_000 };
+const asMandate: ApprovalCardSources = { scope: { viewer: 'mandate', mandateId: 'grant-a', tag: 'mandate:anna@example.com' }, displayNameOf, now: T0 + 90_000 };
 
 const addresses = (n: number, f = (i: number): string => `r${String(i)}@example.com`): StoredAddress[] =>
   Array.from({ length: n }, (_, i) => ({ address: f(i) }));
@@ -422,28 +422,39 @@ describe('who set an entry up', () => {
     const beaEntry = entry(B);
     const both = { trigger: marks({ createdBy: A.createdBy, createdMandateId: 'grant-a', mandateEditor: B.createdBy, mandateEditorId: 'grant-b' }) };
 
+    it('on her own entry, Bea\'s marks of an earlier grant or of none are hers: one line, never a test run, and the owner still tells the grants apart', () => {
+      const asBea = { ...owner, scope: { viewer: 'mandate', mandateId: 'grant-b', tag: B.createdBy } as const };
+      // The trigger set up under her earlier grant, its workflow under the current one.
+      const sources = { trigger: marks({ createdBy: B.createdBy, createdMandateId: 'grant-b-old' }), workflow: marks({ createdBy: B.createdBy, createdMandateId: 'grant-b' }) };
+      expect(approvalCard(beaEntry, { ...asBea, ...sources }).setup).toEqual([{ kind: 'set_up_by', name: 'Bea B.', takenOver: false }]);
+      // Only the earlier grant's mark, or one with no grant id: still hers, not a test run.
+      expect(approvalCard(beaEntry, { ...asBea, trigger: sources.trigger }).setup).toEqual([{ kind: 'set_up_by', name: 'Bea B.', takenOver: false }]);
+      expect(approvalCard(beaEntry, { ...asBea, trigger: marks({ createdBy: B.createdBy }) }).setup).toEqual([{ kind: 'set_up_by', name: 'Bea B.', takenOver: false }]);
+      // The owner reads the earlier grant as a grant of its own.
+      const ownerLines = approvalCard(beaEntry, { ...owner, ...sources }).setup;
+      expect(ownerLines.map((l) => l.kind)).toEqual(['set_up_by', 'set_up_by']);
+    });
+
     it('the owner sees both grants by their names', () => {
       expect(approvalCard(beaEntry, { ...owner, ...both }).setup)
         .toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: 'Anna A.', takenOver: false }]);
     });
 
     it('Bea sees her own grant by its name and Anna\'s as another mandate, neither by name nor by address, on the same entry', () => {
-      const card = approvalCard(beaEntry, { ...owner, ...both, scope: { viewer: 'mandate', mandateId: 'grant-b' } });
+      const card = approvalCard(beaEntry, { ...owner, ...both, scope: { viewer: 'mandate', mandateId: 'grant-b', tag: 'mandate:bea@example.com' } });
       expect(card.setup).toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: OTHER_MANDATE, takenOver: false }]);
       expect(JSON.stringify(card)).not.toContain('Anna A.');
       expect(JSON.stringify(card.setup)).not.toContain('anna@example.com');
     });
 
     it('names to a mandate another grant\'s mark as another mandate, and a tag without a grant id as some mandate, never by name or address', () => {
-      const asBea = mandateNamer({ viewer: 'mandate', mandateId: 'grant-b' }, (id) => ({ 'grant-a': 'Anna A.', 'grant-b': 'Bea B.' } as Record<string, string>)[id] ?? null);
+      const asBea = mandateNamer({ viewer: 'mandate', mandateId: 'grant-b', tag: 'mandate:bea@example.com' }, (id) => ({ 'grant-a': 'Anna A.', 'grant-b': 'Bea B.' } as Record<string, string>)[id] ?? null);
       expect(asBea('grant-a', 'mandate:anna@example.com')).toBe(OTHER_MANDATE);
-      // A scope without her tag: a mark with no grant id cannot be told to be hers, even with her address.
-      expect(asBea(null, 'mandate:bea@example.com')).toBe(SOME_MANDATE);
       expect(asBea(null, 'mandate:anna@example.com')).toBe(SOME_MANDATE);
       expect(asBea(null, null)).toBe(SOME_MANDATE);
       expect(asBea('grant-b', 'mandate:bea@example.com')).toBe('Bea B.');
       // Her own grant without a shown name: her address, as before.
-      expect(mandateNamer({ viewer: 'mandate', mandateId: 'grant-b' }, () => null)('grant-b', 'mandate:bea@example.com')).toBe('bea@example.com');
+      expect(mandateNamer({ viewer: 'mandate', mandateId: 'grant-b', tag: 'mandate:bea@example.com' }, () => null)('grant-b', 'mandate:bea@example.com')).toBe('bea@example.com');
       // The owner: unchanged, every name, else the address.
       const asOwner = mandateNamer({ viewer: 'owner' }, (id) => (id === 'grant-a' ? 'Anna A.' : null));
       expect(asOwner('grant-a', 'mandate:anna@example.com')).toBe('Anna A.');
@@ -483,7 +494,7 @@ describe('the scope a principal reads in', () => {
 
   it('reads the store as every entry for the owner and the grant\'s own for a mandate', () => {
     expect(listScopeOf({ viewer: 'owner' })).toEqual({ kind: 'all' });
-    expect(listScopeOf({ viewer: 'mandate', mandateId: 'grant-a' })).toEqual({ kind: 'grant', mandateId: 'grant-a' });
+    expect(listScopeOf({ viewer: 'mandate', mandateId: 'grant-a', tag: 'mandate:anna@example.com' })).toEqual({ kind: 'grant', mandateId: 'grant-a' });
   });
 });
 
