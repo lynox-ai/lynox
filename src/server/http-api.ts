@@ -28,7 +28,7 @@ import { shapeRequestForModel } from '../core/llm-wire-rules.js';
 import {
   exchangeToken, serializeTokenBody, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
-import { consentNoticeVersion, derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
+import { consentNoticeVersion, derivePresetEndpoints, isPresetClientSecretName, isRetiredPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
 import { bindShopifyCallback, shopifyCallbackRefusalLine, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import { connectNoteFor, noteButton, noteLang, noteText, noteTitle, type ConnectNote, type NoteLang } from './connect-note.js';
@@ -7571,7 +7571,9 @@ export class LynoxHTTPApi {
       // which is what the model was told it never needs. The client id is not refused: it is
       // not a secret, and removing either stays possible below.
       if (isPresetClientSecretName(name)) {
-        errorResponse(res, 403, `"${name}" is the client secret of a built-in provider. It is entered in the connection form of the profile under Settings → API Profiles, not here.`, 'preset_client_secret');
+        errorResponse(res, 403, isRetiredPresetClientSecretName(name)
+          ? `"${name}" is the client secret of a built-in provider this engine no longer has. It stays stored and is not entered here; a profile of your own uses another name.`
+          : `"${name}" is the client secret of a built-in provider. It is entered in the connection form of the profile under Settings → API Profiles, not here.`, 'preset_client_secret');
         return;
       }
       // Managed-tier user (cookie auth → user scope per L~1049): user-writable

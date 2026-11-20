@@ -39,6 +39,8 @@ vi.mock('../../core/oauth-presets.js', async (importOriginal) => {
       real.derivePresetEndpoints(id, params, register),
     presetIds: () => register.ids(),
     isPresetClientSecretName: (name: string) => real.isPresetClientSecretName(name, register, retired),
+    isRetiredPresetClientSecretName: (name: string) => real.isRetiredPresetClientSecretName(name, retired),
+    presetClientSecretGuidance: (name: string) => real.presetClientSecretGuidanceWith(name, retired),
     OAUTH_PRESETS: register,
     RETIRED_PRESET_IDS: retired,
   };
@@ -46,7 +48,7 @@ vi.mock('../../core/oauth-presets.js', async (importOriginal) => {
 
 const { apiSetupTool } = await import('./api-setup.js');
 const { declinedFacts, httpRequestTool, oauthGrantIsUserDelegated, renderDeclinedFact } = await import('./http.js');
-const { isPresetClientSecretName } = await import('../../core/oauth-presets.js');
+const { isPresetClientSecretName, presetClientSecretGuidance } = await import('../../core/oauth-presets.js');
 const { slotMayReach } = await import('../../core/profile-secret-view.js');
 const { refreshTokenKey } = await import('../../core/api-store.js');
 const { tokenFingerprint } = await import('../../core/oauth-refresh-failure.js');
@@ -148,11 +150,25 @@ describe('a profile of a provider this engine no longer has', () => {
     expect(renderDeclinedFact(control)).toBe('no consent flow is recorded behind it');
   });
 
-  it('keeps its client secret a built-in provider\'s, so it stays off the list and out of references', () => {
+  it('still counts its client secret as a built-in provider\'s, and names no connection form for it', () => {
     expect(isPresetClientSecretName('GONE_SHOP_CLIENT_SECRET')).toBe(true);
     expect(isPresetClientSecretName('EXAMPLE_SHOP_CLIENT_SECRET')).toBe(true);
     // A name nobody shipped is an operator's own.
     expect(isPresetClientSecretName('NEVER_SHIPPED_CLIENT_SECRET')).toBe(false);
+    const retiredText = presetClientSecretGuidance('GONE_SHOP_CLIENT_SECRET');
+    expect(retiredText).toContain('is the OAuth client secret of a built-in provider this engine no longer has');
+    expect(retiredText).not.toContain('connection form');
+    expect(presetClientSecretGuidance('EXAMPLE_SHOP_CLIENT_SECRET')).toContain('connection form');
+  });
+
+  it('refuses an exchange that would write its token over that client secret', async () => {
+    const store = new ApiStore();
+    store.register(appOnlyNaming('never-shipped'));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const reply = await apiSetupTool.handler({ action: 'fetch_token', id: 'shop-api', output_secret_name: 'GONE_SHOP_CLIENT_SECRET' }, agentWith(store)) as string;
+
+    expect(reply).toContain('output_secret_name "GONE_SHOP_CLIENT_SECRET" holds the app of a built-in provider');
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it('lets no refresh slot reach the token_url such a profile names, while an app-only profile\'s still does', () => {
@@ -195,8 +211,6 @@ describe('a profile of a provider this engine no longer has', () => {
     expect(result).not.toContain('consent again');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
-
-
 
   it.each([
     ['update', 'switches to a bearer token', { type: 'bearer', vault_keys: ['SHOP_CLIENT_ID'] }],

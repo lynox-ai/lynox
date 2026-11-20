@@ -821,6 +821,11 @@ export function isPresetClientSecretName(
   return [...register.ids(), ...retired].some((id) => presetClientKeys(id).secret === name);
 }
 
+/** Whether `name` is the client secret of a provider this engine once shipped ({@link RETIRED_PRESET_IDS}). */
+export function isRetiredPresetClientSecretName(name: string, retired: readonly string[] = RETIRED_PRESET_IDS): boolean {
+  return retired.some((id) => presetClientKeys(id).secret === name);
+}
+
 /**
  * What the model is told about a built-in provider's client secret wherever it would otherwise be
  * told to collect or reference a vault name: the owner enters it in the profile's connection form,
@@ -828,6 +833,20 @@ export function isPresetClientSecretName(
  * a profile that names it as its client secret.
  */
 export function presetClientSecretGuidance(name: string): string {
+  return presetClientSecretGuidanceWith(name, RETIRED_PRESET_IDS);
+}
+
+/**
+ * {@link presetClientSecretGuidance} against a given retired list. Its own function, not a second
+ * parameter: callers pass the guidance to `.map`, which would hand the index in as that list.
+ */
+export function presetClientSecretGuidanceWith(name: string, retired: readonly string[]): string {
+  // A provider this engine once shipped has no connection form any more, so the form is not
+  // named; the name stays protected (`isPresetClientSecretName`), and a profile of the user's
+  // own takes another one.
+  if (isRetiredPresetClientSecretName(name, retired)) {
+    return `"${name}" is the OAuth client secret of a built-in provider this engine no longer has. It stays stored and is not entered, used or referenced here — not in the chat and not through ask_secret. A profile of the user's own names its client secret differently.`;
+  }
   return `"${name}" is the OAuth client secret of a built-in provider. The owner of this lynox instance enters it in the connection form of the profile under Settings → API Profiles — not in the chat and not through ask_secret, and it is not referenced in a request. The engine sends it to the provider itself, for a profile that names "${name}" as its client secret and may read it.`;
 }
 
