@@ -21,7 +21,7 @@ import { turnIsLocked } from '../../core/mandate-tool-lock.js';
 import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
 import { currentCallSignal, currentCallTargetOrigin, joinCallSignal, noteOwnStopSentence } from '../../core/call-connection.js';
 import { CROSS_HOST_REFUSAL, crossHostRedirectGuard, readHopsGuarded } from '../../core/read-hops.js';
-import { carriesAddress, hostTargets } from '../../core/send-target.js';
+import { carriesAddress, hostTargets, UnknownSendTargetError } from '../../core/send-target.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret, ExchangeFacts } from '../../core/api-store.js';
 import { SaveRefused, profileReadHost, accessTokenKey, collectVaultKeys, grantTokenNames, tokenSlotNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
@@ -253,10 +253,14 @@ function validateProfile(profile: ApiProfile): string | null {
   if (!ID_PATTERN.test(profile.id)) {
     return `Invalid id "${profile.id}": must be lowercase alphanumeric with hyphens/underscores, 1-64 chars`;
   }
+  // A string, before it is parsed: `new URL` turns a list into text and parses that, so a list
+  // would be stored as the address and read back as one by every later `new URL`.
+  const baseUrl: unknown = profile.base_url;
+  if (typeof baseUrl !== 'string') return 'Invalid base_url: must be a URL as text, for example "https://api.example.com"';
   try {
-    new URL(profile.base_url);
+    new URL(baseUrl);
   } catch {
-    return `Invalid base_url: "${profile.base_url}" is not a valid URL`;
+    return `Invalid base_url: "${baseUrl}" is not a valid URL`;
   }
   // Checked before the auth fields: whatever they say, a profile on this host that does not
   // name the provider is the wrong one. A stored profile that fails here is refused at every
@@ -350,8 +354,12 @@ function validateProfile(profile: ApiProfile): string | null {
     if (profile.auth.type === 'oauth2' && profile.auth.oauth) {
       const o = profile.auth.oauth;
       if (o.token_url !== undefined) {
+        // Text only, as for base_url: a list here would pass the parse below and skip the origin
+        // check of the save, which reads only an address given as text (`savedTokenUrl`).
+        const rawTokenUrl: unknown = o.token_url;
+        if (typeof rawTokenUrl !== 'string') return 'Invalid auth.oauth.token_url: must be a URL as text, for example "https://auth.example.com/oauth/token"';
         let tokenUrl: URL;
-        try { tokenUrl = new URL(o.token_url); } catch {
+        try { tokenUrl = new URL(rawTokenUrl); } catch {
           return `Invalid auth.oauth.token_url: "${o.token_url}" is not a valid URL`;
         }
         // The client secret is posted here, and the token it mints is attached to
@@ -723,6 +731,37 @@ function bootstrapUrl(input: ApiSetupInput): string | null {
   if (input.action !== 'bootstrap') return null;
   const url = input.docs_url || input.openapi_url;
   return typeof url === 'string' && url !== '' ? url : null;
+}
+
+/**
+ * The token address a `create` or `update` saves: the profile's `auth.oauth.token_url`, to which
+ * `fetch_token` later posts the client ID and client secret from the vault, on every fetch and
+ * refresh. `update` replaces the profile whole, so it sets the address the same way `create` does.
+ * `null` where the save sets none that is used: not oauth2, no `token_url`, or a built-in provider
+ * this engine knows (its tokens go to the provider's own endpoint, and `token_url` is display only,
+ * as in the save's egress list). An address the save refuses anyway (not an https URL) is `null`
+ * too: `validateProfile` refuses it with its own reason, and nothing is saved.
+ * A `token_url` that is set but is no address as text throws, and the check refuses the call as an
+ * unreadable save. The check is on the call, not on `fetch_token`: the call's input is all the
+ * origin check sees.
+ */
+function savedTokenUrl(input: ApiSetupInput): string | null {
+  if (input.action !== 'create' && input.action !== 'update') return null;
+  const profile: unknown = input.profile;
+  if (typeof profile !== 'object' || profile === null) return null;
+  const auth = (profile as ApiProfile).auth;
+  if (typeof auth !== 'object' || auth === null || auth.type !== 'oauth2') return null;
+  const oauth: unknown = auth.oauth;
+  if (typeof oauth !== 'object' || oauth === null) return null;
+  const url: unknown = (oauth as { token_url?: unknown }).token_url;
+  if (url === undefined) return null;
+  if (builtInPresetOf(profile as ApiProfile) !== undefined) return null;
+  // Set, but not an address as text (a list, a number, an empty string): the call is refused as a
+  // save whose address cannot be read (`ToolEntry.credentialAddress`), whether or not the save
+  // would refuse it later. Never `null`: that would let the call past the check unasked.
+  if (typeof url !== 'string' || url === '') throw new UnknownSendTargetError('token address');
+  if (!URL.canParse(url) || new URL(url).protocol !== 'https:') return null;
+  return url;
 }
 
 function fetchFailureForModel(err: unknown): string {
@@ -1927,10 +1966,13 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
   // After content from outside, the page `bootstrap` reads goes through the origin check as a
   // read: its address can carry data the model put there. The model chose the address, so it is
   // checked like `http_request`'s GET. A page a search listed needs no question (`readAddress`).
+  // The token address a `create` or `update` saves goes through the same check, as the save it is
+  // (`credentialAddress`): every later token fetch and refresh posts the client's credentials there.
   sendTargetsWhenLatched: (input) => {
-    const url = bootstrapUrl(input);
+    const url = bootstrapUrl(input) ?? savedTokenUrl(input);
     return url === null ? null : hostTargets(url);
   },
+  credentialAddress: (input) => savedTokenUrl(input),
   readCarriesAddress: (input) => {
     const url = bootstrapUrl(input);
     return url !== null && carriesAddress(url);

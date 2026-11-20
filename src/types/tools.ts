@@ -208,6 +208,18 @@ export interface ToolEntry<TInput = unknown> {
    */
   readCarriesAddress?: ((input: TInput) => boolean) | undefined;
   /**
+   * The address a call SAVES for later credentialed sends, exactly as the input names it: the
+   * token endpoint a profile the call saves will post a client ID and client secret to (`api_setup`
+   * create/update). Otherwise `null`. Where it is not `null`, the target `sendTargetsWhenLatched`
+   * declares for the call is checked as that save, not as a read: no exception for an address a
+   * search listed or for the host of a connected API, an address that carries another address
+   * (`carriesAddress`) is asked about whatever its host, and the question and the refusals say
+   * "save". `sendTargetsWhenLatched` must declare this address's host for the same input.
+   * Throws for an address that is set but cannot be read (not text): the call is then refused as
+   * an unreadable save, never let through.
+   */
+  credentialAddress?: ((input: TInput) => string | null) | undefined;
+  /**
    * When true, calling this tool ENDS the agent's turn: after the tool_result
    * is appended and checkpointed, the loop returns the turn's text instead of
    * looping back to the model. Use for terminal tools whose whole job is a
