@@ -58,6 +58,28 @@ import { proseWarnings } from './disclosure-vocabulary-scan.mjs';
  */
 const MARK = ['gate', 'record'].join('-');
 
+/**
+ * The message of an `::error::` line, escaped the way GitHub's own toolkit does it: `%`, CR and LF
+ * become `%25`, `%0D`, `%0A`. A message can quote PR text, and the runner reads a command at the
+ * start of every line, where a lone CR counts as a line break too. Unescaped, a body line like
+ * `not a field<CR>::add-mask::…` would end the annotation and start a command of its own. The
+ * annotation still shows `%0A` as a line break. The older `##[cmd]` form is no concern here: the
+ * runner tries it only on a line that is not already a `::` command.
+ */
+export function commandText(text) {
+  return String(text).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+}
+
+/**
+ * Plain log text, one printed line per line of it, each behind the mark, so no line of a note that
+ * quotes PR text can begin with `::`. A plain line still meets the runner's older command form,
+ * `##[cmd]data`, which it finds ANYWHERE in a line: a file name like `a/##[add-mask]b.ts` in a note
+ * would hide text for the rest of the job. `##[` is printed as `# #[`.
+ */
+export function logLines(text) {
+  for (const line of String(text).split(/\r\n|\r|\n/)) console.log(`${MARK}: ${line.replace(/##\[/g, '# #[')}`);
+}
+
 /** Gate names the record may claim. An unknown name is a typo, not a new gate. */
 const KNOWN_GATES = new Set(['code-review', 'security', 'delta', 'prd', 'staging-walk', 'legal']);
 
@@ -1764,13 +1786,13 @@ function main() {
   };
   const verdict = evaluate({ body, title, commits, head: args.head ?? '', files, author: args.author ?? '', visibility, ux, delta });
 
-  for (const n of verdict.notes ?? []) console.log(`${MARK}: ${n}`);
+  for (const n of verdict.notes ?? []) logLines(n);
   for (const w of verdict.warnings ?? []) console.log(`::warning::${MARK}: ${w}`);
   if (verdict.ok) {
     console.log(`${MARK}: ok`);
     return;
   }
-  for (const e of verdict.errors) console.log(`::error::${MARK}: ${e}`);
+  for (const e of verdict.errors) console.log(`::error::${MARK}: ${commandText(e)}`);
   process.exitCode = 1;
 }
 
