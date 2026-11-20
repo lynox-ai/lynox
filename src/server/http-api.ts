@@ -14350,7 +14350,8 @@ export class LynoxHTTPApi {
         exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
         process.stderr.write('⚠ /api/export: durable knowledge store unavailable — exported empty and marked incomplete\n');
       } else {
-        // Switched off: there is no store to read, and the empty block is the whole of it.
+        // Switched off: no store was opened, so nothing is read and nothing failed. Entries
+        // written while it was on stay in engine.db and are not in this block.
         exportData['durable_knowledge'] = EMPTY_KNOWLEDGE;
       }
 

@@ -90,8 +90,9 @@ function harness(prepare: (dir: string) => void, durableMemory: boolean) {
 }
 
 describe('export with the stores down at boot (real engine)', () => {
-  // A directory where each store's file belongs: opening it fails, as a corrupt or
-  // unreadable file would. The engine boots without a DataStore (so without a CRM), without
+  // A directory where each store's file belongs: it cannot be opened at all. (A corrupt file
+  // is a different case: the engine sets it aside and opens an empty store.) The engine
+  // boots without a DataStore (so without a CRM), without
   // its history database (so without a thread store) and without engine.db (so without the
   // durable knowledge store, switched on here).
   const h = harness((dir) => {
