@@ -637,10 +637,10 @@ describe('API-setup reminder in a locked turn', () => {
 });
 
 describe('search results feed the shell only from a search sent untainted', () => {
-  async function searchWith(startedTainted: boolean | undefined): Promise<SearchResultAddresses> {
+  async function searchWith(startedTainted: boolean | undefined, principal: unknown = OWNER_PRINCIPAL): Promise<SearchResultAddresses> {
     const searches = new SearchResultAddresses();
     const tool = createWebSearchTool(mockProvider([{ title: 'A', url: 'https://news.example/a', snippet: 's' }]));
-    const agent = { principal: OWNER_PRINCIPAL, searchResultAddresses: searches, ...(startedTainted === undefined ? {} : { batchStartedTainted: () => startedTainted }) };
+    const agent = { principal, searchResultAddresses: searches, ...(startedTainted === undefined ? {} : { batchStartedTainted: () => startedTainted }) };
     await tool.handler({ action: 'search', query: 'q' }, agent as never);
     return searches;
   }
@@ -655,5 +655,11 @@ describe('search results feed the shell only from a search sent untainted', () =
       expect(s.has('https://news.example/a')).toBe(true);
       expect(s.cleanHosts()).toEqual([]);
     }
+  });
+
+  it('a mandate\'s search adds the addresses but no host, even sent untainted', async () => {
+    const s = await searchWith(false, { kind: 'mandate', email: 'helfer@firma.example', mandateId: 'm-1' });
+    expect(s.has('https://news.example/a')).toBe(true);
+    expect(s.cleanHosts()).toEqual([]);
   });
 });

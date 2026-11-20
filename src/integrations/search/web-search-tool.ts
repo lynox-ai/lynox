@@ -232,8 +232,13 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           if (isOwnerPrincipal(agent.principal)) results = await enrichResults(results, ctx);
           // The addresses this search lists, as the provider gave them: a later read of exactly one of
           // them passes the origin check without a question (`readAddress`). Their hosts join the
-          // shell's egress set only when the search was sent before any foreign content.
-          agent.searchResultAddresses?.noteResults(input.query, results.map((r) => r.url), agent.batchStartedTainted?.() === false);
+          // shell's egress set only for the owner's own search sent before any foreign content: a
+          // mandate's query is a third party's choice, and the owner's later shell would reach it.
+          agent.searchResultAddresses?.noteResults(
+            input.query,
+            results.map((r) => r.url),
+            isOwnerPrincipal(agent.principal) && agent.batchStartedTainted?.() === false,
+          );
           const formatted = formatSearchResults(results);
           if (results.length === 0) return formatted;
           const { wrapUntrustedData } = await import('../../core/data-boundary.js');

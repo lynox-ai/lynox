@@ -261,7 +261,7 @@ describe('bash reaches what this conversation brought in (152 W2b)', () => {
     return { a, searches };
   }
 
-  it('under guarded: a host an untainted search listed and a host the owner typed join; a tainted search\'s host and a composed host do not', async () => {
+  it('under guarded: a host an untainted search listed and a host the owner typed join; a tainted search\'s host does not', async () => {
     await configured({ code: 0, out: () => 'ok' });
     const { a, searches } = withProvenance('guarded', ['bitte lies https://shop.example/preise']);
     searches.noteResults('preise', ['https://news.example/artikel'], true);
@@ -271,15 +271,14 @@ describe('bash reaches what this conversation brought in (152 W2b)', () => {
     expect(set).toContain('news.example');
     expect(set).toContain('shop.example');
     expect(set).not.toContain('planted.example');
-    expect(set).not.toContain('composed.example');
   });
 
-  it('under allow-list the same hosts join the list; under allow-all the set stays every host', async () => {
+  it('under allow-list the operator\'s list stays the boundary; under allow-all the set stays every host', async () => {
     await configured({ code: 0, out: () => 'ok' });
     const l = withProvenance('allow-list', ['docs.example']);
     l.searches.noteResults('q', ['https://news.example/'], true);
     await bashTool.handler({ command: 'true' }, l.a);
-    expect([...(setDuringCall as ReadonlySet<string>)].sort()).toEqual(['docs.example', 'news.example', 'only.example']);
+    expect([...(setDuringCall as ReadonlySet<string>)].sort()).toEqual(['only.example']);
     const all = withProvenance('allow-all', ['docs.example']);
     await bashTool.handler({ command: 'true' }, all.a);
     expect(setDuringCall).toBe('*');

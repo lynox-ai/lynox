@@ -43,9 +43,10 @@ export interface ShellPolicyInput {
   readonly allowedWildcards: readonly string[] | undefined;
   readonly ackHosts: ReadonlySet<string> | undefined;
   /**
-   * Hosts this conversation brought in, oldest first: result hosts of searches sent before any
-   * foreign content, and hosts the owner typed. They join under `guarded` and `allow-list`, after
-   * the policy's hosts and only into the room the proxy has left, newest first.
+   * Hosts this conversation brought in, oldest first: result hosts of the owner's searches sent
+   * before any foreign content, and hosts the owner typed. They join under `guarded` only, after
+   * the policy's hosts and only into the room the proxy has left, newest first. Under `allow-list`
+   * the operator's list is the boundary, as it is for the engine's own requests.
    */
   readonly provenanceHosts?: readonly string[] | undefined;
 }
@@ -98,7 +99,7 @@ export function computeShellSet(input: ShellPolicyInput): ShellSet {
   if (hosts.size > MAX_SHELL_SET) {
     return { kind: 'none', why: `the network policy names more than ${String(MAX_SHELL_SET)} hosts, more than the egress proxy takes` };
   }
-  const provenance = input.provenanceHosts ?? [];
+  const provenance = policy === 'guarded' ? (input.provenanceHosts ?? []) : [];
   for (let i = provenance.length - 1; i >= 0 && hosts.size < MAX_SHELL_SET; i--) {
     const h = provenance[i];
     if (typeof h === 'string' && isExactHostname(h)) hosts.add(h);
