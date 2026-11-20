@@ -1831,7 +1831,7 @@ describe('httpRequestTool', () => {
         // the call counts the one request it was asked to send. That holds while the only provider
         // with a write context bears no rate of its own; a rate the owner sets on such a profile is
         // the way it can stop holding (`PRESET_WRITE_CONTEXT`).
-        it('counts the write alone on its call, not the readings before it, on a profile with a rate', async () => {
+        it('counts the write on its call, and nothing for the readings when the person refuses it, on a profile with a rate', async () => {
           const { ApiStore } = await import('../../core/api-store.js');
           const store = new ApiStore();
           store.register({
@@ -4099,6 +4099,29 @@ describe('httpRequestTool', () => {
       const third: CallSlot = {};
       await runInCallSlot(third, () => handler({ url: 'https://short.example.org/k' }, costAgent(store, [])).then(String, (e: unknown) => String(e)));
       expect(third.apiCost).toBeUndefined();
+    });
+
+    it('counts a request the priced API sent on to a host without a profile, after a host without one sent it there', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'cost' });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://api.dataforseo.com/v3/keywords' } }))
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.org/signed' } }))
+        .mockResolvedValueOnce(createMockResponse({ headers: { 'content-type': 'application/json' }, json: { cost: 0.09 } })));
+      const slot: CallSlot = {};
+      await runInCallSlot(slot, () => handler({ url: 'https://short.example.org/k' }, costAgent(store, [])));
+      // The rate, not the figure in another party's answer.
+      expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+
+      // Two priced APIs on the way: the one reached last counts.
+      store.register({ id: 'serp', name: 'Serp', base_url: 'https://serp.example.com', description: 'second priced API', cost: { model: 'per_call', rate_usd: 0.005 } as never });
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://serp.example.com/q' } }))
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.org/signed' } }))
+        .mockResolvedValueOnce(createMockResponse({ headers: { 'content-type': 'application/json' }, json: { ok: true } })));
+      const both: CallSlot = {};
+      await runInCallSlot(both, () => handler({ url: 'https://api.dataforseo.com/v3/keywords' }, costAgent(store, [])));
+      expect(both.apiCost).toEqual({ usd: 0.005, source: 'profile' });
     });
 
     it('records nothing for a host whose profile has no cost', async () => {

@@ -564,7 +564,8 @@ export async function fetchWithValidatedRedirects(
   // because the origin changed. The write was not sent there, and the response is that GET's —
   // unless a GET from there on carried an override (`sent.again.carried`), which a server may run.
   // `sent`: the write this call sent and a server answered, with a second sending on a redirect.
-): Promise<{ response: Response; finalUrl: string; writeFollowedAsRead?: string; sent?: SentWrite }> {
+  // `answered`: every hop a server answered, first to last, the final one included.
+): Promise<{ response: Response; finalUrl: string; answered: readonly string[]; writeFollowedAsRead?: string; sent?: SentWrite }> {
   let currentUrl = url;
   let method = (init.method ?? 'GET').toUpperCase();
   const originalMethod = method;
@@ -626,6 +627,7 @@ export async function fetchWithValidatedRedirects(
         return {
           response,
           finalUrl: currentUrl,
+          answered: [...answered],
           ...(writeFollowedAsRead === undefined ? {} : { writeFollowedAsRead }),
           ...(sent === undefined ? {} : { sent }),
         };
@@ -3016,6 +3018,17 @@ function withFrontNotes(result: string, writeNote: string | undefined, sizeNotes
 }
 
 /** The profile of `url`'s host when it has a cost; `undefined` for any other URL. */
+/** The priced profile of the last hop in `hops` that has one: the API a redirect ride reached
+ *  last, which the call counts when the final answer came from elsewhere. */
+function lastPricedHop(hops: readonly string[] | undefined, toolContext: ToolContext | undefined): ApiProfile | undefined {
+  const list = hops ?? [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const profile = apiProfileOfUrl(list[i]!, toolContext);
+    if (profile !== undefined) return profile;
+  }
+  return undefined;
+}
+
 function apiProfileOfUrl(url: string, toolContext: ToolContext | undefined): ApiProfile | undefined {
   try {
     const profile = toolContext?.apiStore?.getByHostname(new URL(url).hostname);
@@ -4088,7 +4101,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               return writeKey(next, hopHeaders, 'drop') === writeKey(askedUrl, headers, 'drop') ? true : 'consent';
             }
           : undefined;
-      const { response, finalUrl: finalRequestUrl, writeFollowedAsRead, sent } = await Promise.race([
+      const { response, finalUrl: finalRequestUrl, answered: answeredHopUrls, writeFollowedAsRead, sent } = await Promise.race([
         fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect')), auth.pass, (write) => { carriedWrite = write; }, (again) => { againWrite = again; }),
         wallTimeout,
         stopped,
@@ -4096,11 +4109,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const status = `${response.status} ${response.statusText}`;
       // After a write turned into a GET on another origin, the answer is that GET's, not the write's.
       answeredStatus = writeFollowedAsRead === undefined ? status : `${status} to the GET it was redirected to on ${urlForNote(finalRequestUrl)}`;
-      // Attributed to the final URL after redirects; when that host has no cost but the first one
+      // Attributed to the final URL after redirects; when that host has no cost but an earlier hop
       // has, the request still went to the priced API (a redirect to a CDN or a signed link). The
       // answer is then another party's, so its cost field is not read: only the profile rate counts.
       const answeringProfile = apiProfileOfUrl(finalRequestUrl, toolContext);
-      const costProfile = answeringProfile ?? apiProfileOfUrl(input.url, toolContext);
+      const costProfile = answeringProfile ?? lastPricedHop(answeredHopUrls, toolContext) ?? apiProfileOfUrl(input.url, toolContext);
       const costInAnswer = answeringProfile !== undefined;
       apiCost = costProfile === undefined ? undefined : apiCostOfAnswer(costProfile, undefined);
       // Strip sensitive response headers to prevent credential leakage to agent
@@ -4365,9 +4378,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // Counted at the last answered hop on a priced API: a write to a host without a profile that a
       // redirect sends on to one was answered there before the next hop was refused.
       if (err instanceof RedirectRefusedAfterWrite || err instanceof DelegatedHopRefused || err instanceof OverrideHopRefused) {
-        const hops = answeredHopsOf(err);
-        const sentTo = [...hops].reverse().map((u) => apiProfileOfUrl(u, toolContext)).find((p) => p !== undefined)
-          ?? apiProfileOfUrl(input.url, toolContext);
+        const sentTo = lastPricedHop(answeredHopsOf(err), toolContext) ?? apiProfileOfUrl(input.url, toolContext);
         if (sentTo !== undefined) noteApiCost(apiCostOfAnswer(sentTo, undefined));
       }
       // A soft failure leaves untouched. `ToolSoftFailure` extends Error with
