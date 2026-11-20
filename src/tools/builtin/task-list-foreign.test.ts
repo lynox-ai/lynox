@@ -78,9 +78,11 @@ describe('task_list shows a mandate another mandate\'s schedules without their v
     const completed = await taskUpdateTool.handler({ task_id: 't-ole', status: 'completed' }, agent(IDA));
     expect(completed).toContain('Task completed');
     expect(completed).not.toContain('ole-value');
-    // The positive control: the owner's report of the same change names the values.
-    const byOwner = await taskUpdateTool.handler({ task_id: 't-owner', title: 'Renamed by owner' }, agent(OWNER_PRINCIPAL));
-    expect(byOwner).toContain('owner-value');
+    // The positive control: the schedule still holds its values, and the owner's report of a
+    // change of the same schedule names them.
+    const byOwner = await taskUpdateTool.handler({ task_id: 't-ole', title: 'Renamed by owner' }, agent(OWNER_PRINCIPAL));
+    expect(byOwner).toContain('Task updated');
+    expect(byOwner).toContain('ole-value');
   });
 
   it('lists every value to the owner', async () => {

@@ -18,7 +18,8 @@ const TRIGGER_MARKS = [
  * (`pipeline_params`): they may be that mandate's choice. Its own schedule a mandate reads with
  * its values, whoever changed it since. The owner's marks and the mandate's own stay as stored.
  * A takeover's covered marks name a mandate the schedule no longer belongs to, so they hide
- * whose they were and leave the values. A to-do carries none of these columns and passes as it is.
+ * whose they were and leave the values. A to-do's own `created_by` is always the reader's own or
+ * the owner's (a mandate changes only its own to-do), so it passes as it is.
  */
 export function withoutForeignMarks<T extends object>(stored: T, principal: RequestPrincipal): T {
   if (isOwnerPrincipal(principal)) return stored;
