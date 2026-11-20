@@ -730,10 +730,11 @@ function fetchFailureForModel(err: unknown): string {
   // (`DelegatedHopRefused`) does not reach here: the same reading refuses the hop first.
   if (err instanceof DiscoveryOverrideRefused) return err.message;
   const message = err instanceof Error ? err.message : '';
+  // A hop to another host after an origin check: the first request was sent, and the text says
+  // what the model may tell the user (`crossHostRedirectGuard`). It names a host only when the
+  // name is plain, so it is passed on as it is.
+  if (message.startsWith(CROSS_HOST_REFUSAL)) return message;
   if (message.startsWith('Blocked:')) {
-    // A hop to another host after an origin check: the first request was sent, and the text says
-    // what the model may tell the user (`crossHostRedirectGuard`).
-    if (message.startsWith(CROSS_HOST_REFUSAL)) return message;
     for (const [pattern, said] of GUARD_REFUSALS) if (pattern.test(message)) return `blocked: ${said}`;
     // A hop the redirect handling refused (a GraphQL mutation in its address): the first request
     // went out and was answered with that redirect.
