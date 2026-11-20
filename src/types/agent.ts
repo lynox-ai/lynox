@@ -345,6 +345,11 @@ export interface IAgent {
    */
   getRemainingRunBudgetUSD(): number | null;
   /**
+   * Whether this run was admitted with a spending bound of its own (`RunAdmission`), on top
+   * of the configured budget. Optional: a partial agent double without it has none.
+   */
+  hasRunCostCeiling?(): boolean;
+  /**
    * Hold `usd` against this run's ceiling for work about to start. `false` means it did
    * not fit and nothing was held, so a refused caller has nothing to give back.
    */

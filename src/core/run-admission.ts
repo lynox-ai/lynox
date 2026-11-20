@@ -35,7 +35,7 @@ export class RunAdmissionRefusedError extends Error {
  * refused unless this much is free, and refusing a cheap call costs less than admitting
  * an expensive one.
  */
-export const SINGLE_CALL_WORST_CASE_CENTS = 10;
+export const SINGLE_CALL_WORST_CASE_CENTS = 15;
 
 /** Every admission the hooks of one run handed back, combined. */
 export interface CombinedAdmission {

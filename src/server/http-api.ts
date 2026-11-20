@@ -11404,7 +11404,9 @@ export class LynoxHTTPApi {
       // gate checks the instance's daily and monthly spending caps first, on
       // every instance. The matching debit fires after synthesis below, keyed on
       // this run id.
-      const gate = await fireBeforeRunGate(engine, 'fast');
+      // Admitted on this request's own worst case: every character of the text billed at the
+      // per-character rate (text-prep only removes characters), in cents, rounded up.
+      const gate = await fireBeforeRunGate(engine, 'fast', { maxCostCents: Math.ceil(text.length * SPEAK_USD_PER_CHAR * 100) });
       if (gate.blockedReason) {
         errorResponse(res, 402, gate.blockedReason);
         return;

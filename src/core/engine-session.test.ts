@@ -4134,6 +4134,17 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(a.held()).toBe(0);
     });
 
+    it('with no bound handed back, an agent without a cost guard runs normally', async () => {
+      // Kills: refusing whenever the cost guard is missing (every instance without a configured
+      // per-run ceiling would be refused); the refusal belongs only to a run with a bound.
+      mockHasCostGuard.mockReturnValue(false);
+      const { engine, session } = await createEngineAndSession();
+      engine.registerHooks({ onBeforeRun: vi.fn() });
+      await expect(session.run('go')).resolves.toBe('response');
+      expect(mockSend).toHaveBeenCalledOnce();
+      expect(sendOpts()).not.toHaveProperty('runCostCeilingUSD');
+    });
+
     it('a run with no bound handed back sends exactly as before', async () => {
       // Kills: a mutant that always sets a ceiling (e.g. 0 or NaN) on an unbounded run.
       const { engine, session } = await createEngineAndSession();
@@ -4269,6 +4280,54 @@ describe('Engine + Session (Orchestrator)', () => {
       await vi.waitFor(() => expect(fastGates).toBe(1));
       await settle();
       expect(fastGates).toBe(1);
+    });
+
+    it('a batch is refused under a balance-bounded admission, however much is free', async () => {
+      // Kills: Engine.batch admitted on a finite worst case (its spend is unbounded while it runs).
+      const { engine } = await createEngineAndSession();
+      engine.registerHooks(balanceHook(1_000_000).hook);
+      await expect(engine.batch([{ id: 'r1', task: 'hello' }])).rejects.toThrow(/budget for this period reached/i);
+      expect(mockBatchCreate).not.toHaveBeenCalled();
+    });
+
+    it('a bound of 0 refuses the run as blocked, not as a failed run', async () => {
+      // Kills: dropping the `ceilingCents > 0` check (the run would start with nothing to spend).
+      const { engine, session } = await createEngineAndSession();
+      const release = vi.fn();
+      engine.registerHooks({ onBeforeRun: () => ({ maxCostCents: 0, release }) });
+      const seen: Array<{ type: string; code?: string }> = [];
+      session.onStream = async (e) => { seen.push(e as { type: string; code?: string }); };
+      const result = await session.run('go');
+      expect(result).toMatch(/^Run blocked: /);
+      expect(seen.some(e => e.type === 'warning' && e.code === 'run_blocked')).toBe(true);
+      expect(mockSend).not.toHaveBeenCalled();
+      expect(release).toHaveBeenCalledOnce();
+      const failed = (engine.getRunHistory()!.updateRun as unknown as { mock: { calls: unknown[][] } }).mock.calls
+        .find(c => (c[1] as { status?: string })?.status === 'failed');
+      expect(failed).toBeUndefined();
+    });
+
+    it('a memory extraction deferred while the run holds the balance runs once, after the release', async () => {
+      // Kills: running the deferred extraction while the run still holds the balance (it would
+      // be refused again), and dropping it (the turn's memory would be lost).
+      const { engine, session } = await createEngineAndSession();
+      const a = balanceHook(120);
+      engine.registerHooks(a.hook);
+      const ranWhileHeld: number[] = [];
+      const retry = vi.fn(() => { ranWhileHeld.push(a.held()); });
+      mockSend.mockImplementationOnce(async () => {
+        const agent = (session as unknown as { agent: { deferUntilBalanceFree?: (r: () => void) => void } }).agent;
+        agent.deferUntilBalanceFree?.(retry);
+        expect(retry).not.toHaveBeenCalled();
+        return 'response';
+      });
+      await session.run('go');
+      expect(retry).toHaveBeenCalledOnce();
+      expect(ranWhileHeld).toEqual([0]);
+      // Deferred with nothing held: runs at once, once.
+      const later = vi.fn();
+      (session as unknown as { agent: { deferUntilBalanceFree?: (r: () => void) => void } }).agent.deferUntilBalanceFree?.(later);
+      expect(later).toHaveBeenCalledOnce();
     });
 
     it('a title refused for another reason (credit exhausted) is not retried', async () => {

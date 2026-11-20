@@ -112,6 +112,11 @@ export class CostGuard {
     this.runCeilingUSD = Math.min(this.runCeilingUSD, bound);
   }
 
+  /** Whether a run ceiling is set for the current run. */
+  hasRunCeiling(): boolean {
+    return this.runCeilingUSD !== Infinity;
+  }
+
   /** The dollar limit in force: the configured budget, or the run's ceiling when smaller. */
   private limitUSD(): number {
     return Math.min(this.maxBudgetUSD, this.runCeilingUSD);

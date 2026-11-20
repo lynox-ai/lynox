@@ -450,10 +450,14 @@ describe('CostGuard run ceiling', () => {
   });
 
   it('reset() clears the run ceiling', () => {
-    // Kills: a reset that leaves the ceiling in place (it would bound the next run).
+    // Kills: a reset that leaves the ceiling in place (it would bound the next run), and a
+    // hasRunCeiling() that does not follow it (run_workflow would stay refused).
     const g = new CostGuard({ maxBudgetUSD: 10 }, 'claude-opus-4-6');
+    expect(g.hasRunCeiling()).toBe(false);
     g.setRunCeilingUSD(1);
+    expect(g.hasRunCeiling()).toBe(true);
     g.reset();
+    expect(g.hasRunCeiling()).toBe(false);
     expect(g.remainingBudgetUSD()).toBe(10);
     expect(g.recordTurn(usage(400_000, 0))).toBe(false); // $2 — over the old ceiling, under the budget
   });

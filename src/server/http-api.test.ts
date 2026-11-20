@@ -18676,6 +18676,19 @@ describe('metered audio routes: managed credit gate + debit', () => {
       expect(costArg).toBeCloseTo(0.0013, 6);
     });
 
+    it('admits the request on its own worst case: every character at the per-character rate', async () => {
+      // Kills: the generic single-call default instead of the text's own worst case
+      // (10 000 characters are 13 cents, more than that default allows for).
+      repayRateWindow();
+      const onBeforeRun = vi.fn();
+      mockEngineHooks = [{ onBeforeRun }];
+      mockSpeakStream.mockResolvedValue({ characters: 10_000, model: 'voxtral-tts', voice: 'default', latencyMs: 10, ttfbMs: 5 });
+      const res = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'a'.repeat(10_000) }) });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      expect((onBeforeRun.mock.calls[0]![1] as { maxCostCents?: number }).maxCostCents).toBe(13);
+    });
+
     it('refuses a model other than the pinned one before the budget gate', async () => {
       repayRateWindow();
       const { VOXTRAL_TTS_MODEL } = await vi.importActual<typeof import('../core/speak.js')>('../core/speak.js');

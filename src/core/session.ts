@@ -544,10 +544,11 @@ export class Session {
   /** Runs of this session whose admission is held (set aside, not yet given back). */
   private _admissionsHeld = 0;
   /**
-   * An LLM title refused only because a run held the balance: tried once more when the
-   * last held admission is given back ({@link _retryRefusedTitle}). Null when none waits.
+   * Work refused only because a run of this session held the balance (an LLM title, a memory
+   * extraction): each runs once when the last held admission is given back. A retry that is
+   * refused again is not queued again.
    */
-  private _titleAfterRelease: { firstMessage: string; placeholder: string } | null = null;
+  private _afterRelease: Array<() => void> = [];
   /**
    * A stop that arrived while this turn had not yet reached the agent. `Agent.send` starts
    * each run on a fresh controller, so an `abort()` landing in the awaits before it (a
@@ -940,19 +941,24 @@ export class Session {
       if (admission.current !== null) {
         admission.current.release();
         this._admissionsHeld--;
-        if (this._admissionsHeld === 0) this._retryRefusedTitle();
+        if (this._admissionsHeld === 0) this._runAfterRelease();
       }
     }
   }
 
-  /** The one retry of a title refused while a run held the balance; see {@link _titleAfterRelease}. */
-  private _retryRefusedTitle(): void {
-    const waiting = this._titleAfterRelease;
-    if (waiting === null) return;
-    this._titleAfterRelease = null;
-    // Only while the thread still carries the placeholder: a rename or a later title wins.
-    if (this.engine.getThreadStore()?.getThread(this.sessionId)?.title !== waiting.placeholder) return;
-    void this._generateLLMTitle(waiting.firstMessage, waiting.placeholder, true);
+  /** Runs `retry` once no run of this session holds the balance: now, or at the release. */
+  private _whenBalanceFree(retry: () => void): void {
+    this._afterRelease.push(retry);
+    if (this._admissionsHeld === 0) this._runAfterRelease();
+  }
+
+  /** Runs what waited for the release, each once; see {@link _afterRelease}. */
+  private _runAfterRelease(): void {
+    for (const retry of this._afterRelease.splice(0)) {
+      try {
+        retry();
+      } catch { /* best-effort enrichment: a failed retry stays skipped */ }
+    }
   }
 
   private async _runAdmitted(
@@ -2670,8 +2676,11 @@ export class Session {
         // asked for the title holds all of it while it runs): wait for that run to give it
         // back and try ONCE more, through the same gate. Refused again, it stays silent.
         if (titleGate.refusedWithinBalance && !isRetry) {
-          this._titleAfterRelease = { firstMessage, placeholder };
-          if (this._admissionsHeld === 0) this._retryRefusedTitle();
+          this._whenBalanceFree(() => {
+            // Only while the thread still carries the placeholder: a rename or a later title wins.
+            if (this.engine.getThreadStore()?.getThread(this.sessionId)?.title !== placeholder) return;
+            void this._generateLLMTitle(firstMessage, placeholder, true);
+          });
         }
         return;
       }
@@ -3177,6 +3186,7 @@ export class Session {
       userTimezone: this._userTimezone ?? undefined,
     });
     this._agentChangeset = this._changesetManager;
+    this.agent.deferUntilBalanceFree = (retry) => { this._whenBalanceFree(retry); };
 
     // Respect memory_extraction config (default: true)
     if (userConfig.memory_extraction === false) {

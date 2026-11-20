@@ -839,6 +839,12 @@ export class Agent implements IAgent {
   readonly toolCallTracker: ToolCallTracker | undefined;
   /** Mutable so Session can update per-request without recreating the agent — sub-agent paths still inherit a snapshot. */
   userTimezone: string | undefined;
+  /**
+   * Set by the owning session: takes the one retry of a memory extraction that was refused only
+   * because a run held the balance, and runs it once the session's runs have given it back.
+   * Unset (sub-agents, pipeline steps): such an extraction is skipped, as before.
+   */
+  deferUntilBalanceFree: ((retry: () => void) => void) | undefined = undefined;
   private readonly changesetManager: ChangesetManagerLike | undefined;
   private readonly costGuard: CostGuard | null;
   private knowledgeContext: string | undefined;
@@ -1493,6 +1499,11 @@ export class Agent implements IAgent {
    */
   getRemainingRunBudgetUSD(): number | null {
     return this.costGuard?.remainingBudgetUSD() ?? null;
+  }
+
+  /** Whether this run was admitted with a spending bound of its own; see `IAgent`. */
+  hasRunCostCeiling(): boolean {
+    return this.costGuard?.hasRunCeiling() ?? false;
   }
 
   /** Whether this agent has a cost guard, i.e. something a per-run spending bound can be held to. */
@@ -2641,6 +2652,7 @@ export class Agent implements IAgent {
       // Read when the extraction returns, not now: see the same re-read on the durable path.
       () => this._captureStoodDown(),
       actor, this.toolContext?.auditLog ?? null,
+      { onRefused: this.deferUntilBalanceFree },
     ));
   }
 

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createManagedHook, RESERVATION_MAX_AGE_MS, SHUTDOWN_FLUSH_BUDGET_MS } from './managed-hook.js';
+import { createManagedHook, SHUTDOWN_FLUSH_BUDGET_MS } from './managed-hook.js';
 import { RunAdmissionRefusedError } from './run-admission.js';
 import type { RunContext } from './engine.js';
 
@@ -1378,6 +1378,20 @@ describe('managed-hook admission within the balance (`overrun_hold`)', () => {
     await hook.onShutdown?.();
   });
 
+  it('a hosted/BYOK instance (unfunded) is never held, even with a stray `overrun_hold: true`', async () => {
+    // Kills: holding on `overrun_hold` alone, without the balance gate (an unfunded instance has
+    // no mirror, so every one of its runs would be refused).
+    for (const hold of [undefined, true]) {
+      statusBody = { allowed: true, balance_cents: null, spend_gate: 'unfunded', tier: 'hosted' };
+      if (hold !== undefined) statusBody['overrun_hold'] = hold;
+      const hook = createManagedHook();
+      await hook.onInit?.();
+      await expect(hook.onBeforeRun!('r1', CTX)).resolves.toBeUndefined();
+      await expect(hook.onBeforeRun!('r2', CTX)).resolves.toBeUndefined();
+      await hook.onShutdown?.();
+    }
+  });
+
   it('a hold stated by /status bounds the run to all that is free', async () => {
     // Kills: dropping the /status read of `overrun_hold` (the run is admitted unbounded).
     const hook = createManagedHook();
@@ -1416,15 +1430,27 @@ describe('managed-hook admission within the balance (`overrun_hold`)', () => {
     await hook.onShutdown?.();
   });
 
-  it('a reservation never given back stops counting after RESERVATION_MAX_AGE_MS, read lazily', async () => {
-    // Kills: a mutant without the age bound (a lost release would refuse every run for good).
+  it('a reservation still counts after an hour: there is no expiry', async () => {
+    // Kills: an age-based expiry (a long held run, e.g. waiting on its owner, would let a second run in).
     vi.useFakeTimers();
     const hook = createManagedHook();
     await hook.onInit?.();
-    await admit(hook); // never released
-    await vi.advanceTimersByTimeAsync(RESERVATION_MAX_AGE_MS - 1_000);
-    await expect(hook.onBeforeRun!('r2', CTX)).rejects.toThrow(/budget for this period reached/i);
-    await vi.advanceTimersByTimeAsync(2_000);
+    const first = await admit(hook);
+    await vi.advanceTimersByTimeAsync(61 * 60_000);
+    await expect(hook.onBeforeRun!('r2', CTX)).rejects.toBeInstanceOf(RunAdmissionRefusedError);
+    first?.release?.();
+    expect((await admit(hook))?.maxCostCents).toBe(50);
+    await hook.onShutdown?.();
+  });
+
+  it('a stated worst case that is negative or not finite-and-positive is refused', async () => {
+    // Kills: admitting a negative/NaN worst case (it would reserve nothing or a negative amount).
+    const hook = createManagedHook();
+    await hook.onInit?.();
+    for (const bad of [-1, Number.NaN, Number.NEGATIVE_INFINITY]) {
+      await expect(hook.onBeforeRun!('r', { ...CTX, maxCostCents: bad } as RunContext)).rejects.toBeInstanceOf(RunAdmissionRefusedError);
+    }
+    // Nothing was set aside by the refusals: a run still gets all 50.
     expect((await admit(hook))?.maxCostCents).toBe(50);
     await hook.onShutdown?.();
   });
@@ -1448,8 +1474,9 @@ describe('managed-hook admission within the balance (`overrun_hold`)', () => {
   });
 
   it('an unknown balance under a hold admits nothing', async () => {
-    // Kills: falling back to "no bound" when the mirror is unknown (fail open).
-    statusBody = { allowed: true, balance_cents: 50, spend_gate: 'none', overrun_hold: true };
+    // Kills: falling back to "no bound" when the mirror is unknown (fail open). A balance-gated
+    // answer with no number leaves the mirror unknown.
+    statusBody = { allowed: true, balance_cents: null, spend_gate: 'balance', overrun_hold: true };
     const hook = createManagedHook();
     await hook.onInit?.();
     await expect(hook.onBeforeRun!('r1', CTX)).rejects.toBeInstanceOf(RunAdmissionRefusedError);

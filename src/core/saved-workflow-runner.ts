@@ -21,7 +21,6 @@ import type { WorkflowQuestionWait } from './workflow-questions.js';
  * run may spend, while the control plane asks the engine to admit runs only within the
  * balance — and what the owner can do about it.
  */
-// wording: pending review
 export const WORKFLOW_HOLD_REFUSAL =
   'This workflow was not started: the remaining balance does not cover the most one workflow run may spend. Raise the limit or wait until the balance allows it, then start it again.';
 

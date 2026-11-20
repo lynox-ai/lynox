@@ -86,11 +86,6 @@ const DEFAULT_RESYNC_INTERVAL_MS = 5 * 60_000;
 // enough that the first message after a credit-pack purchase is decided on the CP's
 // current answer, long enough that a looping agent cannot storm the CP.
 const REFUSE_RESYNC_COALESCE_MS = 30_000;
-// How long a reservation taken under a balance-bounded admission counts if its run never
-// gives it back. Every caller in this repo gives it back in a `finally`, so this only
-// bounds a caller that does not: such a reservation stops counting after this long. Long
-// enough to outlast an ordinary run, which keeps its reservation while it runs.
-export const RESERVATION_MAX_AGE_MS = 30 * 60_000;
 const CREDIT_REFUSAL =
   'AI budget for this period reached. Buy a credit pack to continue now, or wait for your next billing cycle.\n' +
   'Manage your account at https://lynox.ai/managed/account';
@@ -169,8 +164,15 @@ export function createManagedHook(opts: {
   // (`overrun_hold`). /status states it every time (absent = no); a flush answer that
   // leaves it out keeps what the last statement said.
   let overrunHold = false;
-  // What runs admitted while that holds have set aside, in cents, until they end.
-  const reservations = new Map<number, { cents: number; atMs: number }>();
+  // Whether the last /status said the balance gates this instance (`spend_gate: 'balance'`).
+  // The hold applies only then: an unfunded (hosted/BYOK) or ungated instance has no balance
+  // to admit runs within, so a stray `overrun_hold` there holds nothing.
+  let balanceGated = false;
+  // What runs admitted while that holds have set aside, in cents, until they end. Held
+  // in this process only and given back by each caller's `finally`; there is no expiry, so
+  // a run that holds its reservation for hours (a question waiting for its owner) still
+  // keeps a second run out. A reservation never given back refuses until a restart.
+  const reservations = new Map<number, number>();
   let nextReservationId = 0;
   // Sub-cent billing carry, in integer micro-cents (1 cent = 1000 micro-cents).
   // The CP debits whole cents, so each run's exact cost accumulates here and only
@@ -324,6 +326,7 @@ export function createManagedHook(opts: {
         allowed = data.allowed === true; // as in flush(): only the boolean `true` allows
         // /status states the hold on every answer: anything but `true` is no hold.
         overrunHold = readOverrunHold(raw) === true;
+        balanceGated = data.spend_gate === 'balance';
         lastSyncedAtMs = Date.now();
         // Whether the control plane FUNDS this instance's LLM spend (a pooled
         // key). Only a CP-funded instance's provider failure is the CP's account
@@ -373,13 +376,10 @@ export function createManagedHook(opts: {
     return mirror === undefined || mirror > 0;
   }
 
-  /** Σ live reservations, dropping those older than RESERVATION_MAX_AGE_MS as it reads. */
-  function reservedCents(now: number): number {
+  /** Σ live reservations. */
+  function reservedCents(): number {
     let sum = 0;
-    for (const [id, r] of reservations) {
-      if (now - r.atMs > RESERVATION_MAX_AGE_MS) reservations.delete(id);
-      else sum += r.cents;
-    }
+    for (const cents of reservations.values()) sum += cents;
     return sum;
   }
 
@@ -392,14 +392,17 @@ export function createManagedHook(opts: {
    */
   function admitWithinBalance(context: RunContext): RunAdmission {
     if (mirror === undefined) throw new RunAdmissionRefusedError(CREDIT_REFUSAL);
-    const now = Date.now();
-    const available = mirror - reservedCents(now);
+    const available = mirror - reservedCents();
     const requested = context.maxCostCents;
     if (!(available > 0)) throw new RunAdmissionRefusedError(CREDIT_REFUSAL);
+    // A stated worst case that is negative, NaN or not a number cannot be held to: refused.
+    if (requested !== undefined && !(typeof requested === 'number' && requested >= 0)) {
+      throw new RunAdmissionRefusedError(CREDIT_REFUSAL);
+    }
     const cents = requested === undefined ? available : requested;
     if (!(cents <= available)) throw new RunAdmissionRefusedError(CREDIT_REFUSAL);
     const id = nextReservationId++;
-    reservations.set(id, { cents, atMs: now });
+    reservations.set(id, cents);
     return { maxCostCents: cents, release: () => { reservations.delete(id); } };
   }
 
@@ -524,7 +527,7 @@ export function createManagedHook(opts: {
           'This usually clears within a minute; runs resume automatically once the control plane responds again.',
         );
       }
-      if (allowed && mirrorAdmits()) return overrunHold ? admitWithinBalance(context) : undefined;
+      if (allowed && mirrorAdmits()) return overrunHold && balanceGated ? admitWithinBalance(context) : undefined;
       // Refused on the cached state, which can be minutes old: a credit pack bought since
       // then shows up only at the next heartbeat. Force ONE coalesced authoritative resync —
       // flush pending THEN /status, so `/status` is the LAST writer of `allowed` (a bare
@@ -539,7 +542,7 @@ export function createManagedHook(opts: {
       if (now - lastForcedResyncAtMs >= REFUSE_RESYNC_COALESCE_MS) {
         lastForcedResyncAtMs = now;
         await flush();
-        if ((await syncStatus()) && mirrorAdmits()) return overrunHold ? admitWithinBalance(context) : undefined;
+        if ((await syncStatus()) && mirrorAdmits()) return overrunHold && balanceGated ? admitWithinBalance(context) : undefined;
       }
       throw new Error(CREDIT_REFUSAL);
     },

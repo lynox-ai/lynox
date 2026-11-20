@@ -46,6 +46,7 @@ vi.mock('../../core/metered-request.js', async (importActual) => {
 
 import {
   runWorkflowTool,
+  WORKFLOW_UNDER_RUN_CEILING,
   storePipeline,
   getPipeline,
   runSavedWorkflow,
@@ -198,6 +199,25 @@ describe('run_workflow — inline steps', () => {
     const handed = ctx['parentPrompt'] as Record<string, unknown> | undefined;
     expect(handed, 'positive control: the caller\'s prompt callbacks are passed on').toBeDefined();
     expect(handed).not.toHaveProperty('approvalFiling');
+  });
+
+  it('does not start a workflow in a run admitted with a spending bound of its own', async () => {
+    // Kills: dropping the check (the steps' spend would pass the run's bound unseen).
+    // The same handler serves the first run, the retry and the continuation, so one
+    // refusal at its entry covers all three; a workflow_id call is refused the same way.
+    const bounded = { ...makePipelineAgent(), hasRunCostCeiling: () => true } as unknown as IAgent;
+    for (const input of [
+      { name: 'test', steps: [makeStep('s1', 'do thing')] },
+      { workflow_id: 'wf-1' },
+    ]) {
+      expect(await runWorkflowTool.handler(input as never, bounded)).toBe(WORKFLOW_UNDER_RUN_CEILING);
+    }
+    expect(mockRunManifest).not.toHaveBeenCalled();
+    // Without a bound of its own the run starts as before (positive control).
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    const unbounded = { ...makePipelineAgent(), hasRunCostCeiling: () => false } as unknown as IAgent;
+    await runWorkflowTool.handler({ name: 'test', steps: [makeStep('s1', 'do thing')] }, unbounded);
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
   });
 
   it('returns error when config not initialized', async () => {
