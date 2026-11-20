@@ -347,9 +347,10 @@ function watchedUrl(input: TaskCreateInput): string | null {
 export const taskCreateTool: ToolEntry<TaskCreateInput> = {
   undo: 'compensatable',
   // After content from outside, the page a watch reads goes through the origin check as a read: the
-  // model chose its address, and the worker reads it later, unattended and again and again, so data
-  // in its path or host name would leave on every check. It is checked like `http_request`'s GET,
-  // once, when the watch is created; its question says that the yes holds for every check
+  // model chose its address, and once the owner confirms the watch under Automation → Triggers the
+  // worker reads it unattended and again and again, so data in its path or host name would leave on
+  // every check. It is checked like `http_request`'s GET, once, when the watch is created; its
+  // question says how often the page is read, and that the yes does not confirm the watch
   // (`watchEveryMinutes`). A page a search listed needs no question (`readAddress`).
   sendTargetsWhenLatched: (input) => {
     const url = watchedUrl(input);

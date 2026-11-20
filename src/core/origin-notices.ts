@@ -193,8 +193,8 @@ export function originAsk(tool: string, input: unknown, noun: TargetNoun, target
 
 /**
  * How often the watch a `task_create` call sets up checks its page, as the handler clamps it (at
- * least 5 minutes, 60 when not given); `null` for any other call. Its question says that a yes
- * creates reads that come later, unattended, and do not ask again.
+ * least 5 minutes, 60 when not given); `null` for any other call. Its question says that the watch
+ * reads its page again and again once confirmed, and that the yes does not confirm it.
  */
 export function watchEveryMinutes(tool: string, input: unknown): number | null {
   if (tool !== 'task_create' || typeof input !== 'object' || input === null) return null;
@@ -203,16 +203,29 @@ export function watchEveryMinutes(tool: string, input: unknown): number | null {
   return Math.max(5, typeof every === 'number' ? every : 60);
 }
 
-/** How a read question opens, and what its yes covers: one read, or the checks of a watch. */
-function readHead(list: string, lang: NoticeLanguage, every: number | null): { head: PromptText; gets: PromptText; yes: string } {
+/**
+ * How a read question opens, the sentence on what the host gets, and what its yes covers: one
+ * read, or the checks of a watch (U-384). A watch the model creates runs only once the owner confirms
+ * it under Automation → Triggers (`getDue` holds an unconfirmed `run_agent` row), so its question says
+ * that the yes creates it and does not confirm it.
+ */
+function readHead(list: string, lang: NoticeLanguage, every: number | null): { head: PromptText; whole: PromptText; yes: string } {
   if (every === null) {
     return lang === 'de'
-      ? { head: pv`Seite auf ${list} lesen?`, gets: pv`erhält dabei`, yes: originAskOnce(lang, 'page') }
-      : { head: pv`Read the page on ${list}?`, gets: pv`then gets`, yes: originAskOnce(lang, 'page') };
+      ? { head: pv`Seite auf ${list} lesen?`, whole: pv`${list} erhält dabei die ganze Adresse, auch den Pfad und alles nach dem „?“.`, yes: originAskOnce(lang, 'page') }
+      : { head: pv`Read the page on ${list}?`, whole: pv`${list} then gets the whole address, including the path and everything after the "?".`, yes: originAskOnce(lang, 'page') };
   }
   return lang === 'de'
-    ? { head: pv`Seite auf ${list} beobachten? lynox prüft sie dann alle ${String(every)} Minuten selbst, bis die Beobachtung gelöscht ist.`, gets: pv`erhält bei jeder Prüfung`, yes: 'Ein Ja legt diese Beobachtung an, und ihre Prüfungen fragen nicht noch einmal.' }
-    : { head: pv`Watch the page on ${list}? lynox then checks it every ${String(every)} minutes on its own, until the watch is deleted.`, gets: pv`gets, on every check,`, yes: 'A yes creates this watch, and its checks do not ask again.' };
+    ? {
+      head: pv`Seite auf ${list} beobachten? Wenn du die Beobachtung danach unter Automation → Trigger bestätigst, prüft lynox die Seite alle ${String(every)} Minuten selbst, bis du sie dort pausierst oder löschst.`,
+      whole: pv`${list} erhält bei jeder Prüfung die ganze Adresse, auch den Pfad und alles nach dem „?“.`,
+      yes: 'Ein Ja legt die Beobachtung an, bestätigt ist sie damit noch nicht.',
+    }
+    : {
+      head: pv`Watch the page on ${list}? Once you confirm the watch under Automation → Triggers, lynox checks the page every ${String(every)} minutes on its own, until you pause or delete it there.`,
+      whole: pv`On every check, ${list} gets the whole address, including the path and everything after the "?".`,
+      yes: 'A yes creates the watch; it does not confirm it.',
+    };
 }
 
 /**
@@ -224,13 +237,13 @@ function readHead(list: string, lang: NoticeLanguage, every: number | null): { h
 function originReadAsk(list: string, lang: NoticeLanguage, connected: boolean, unchecked: boolean, every: number | null = null): PromptText {
   // The condition lynox checks, not an origin it would have to know: the owner may have typed the
   // address themselves into a conversation with foreign content.
-  const { head, gets, yes } = readHead(list, lang, every);
+  const { head, whole, yes } = readHead(list, lang, every);
   if (lang === 'de') {
-    if (unchecked) return pv`${head} Im Gespräch steht Inhalt von ausserhalb, und ob du ${list} genannt hast, konnte lynox nicht prüfen. ${list} ${gets} die ganze Adresse, auch den Pfad und alles nach dem „?“. ${yes}`;
-    return pv`${head} Im Gespräch steht Inhalt von ausserhalb, und ${list} hast du nicht genannt. ${list} ${gets} die ganze Adresse, auch den Pfad und alles nach dem „?“. ${yes}\n\nSchreib ${list} hier in den Chat, dann fragt lynox in diesem Gespräch nicht mehr nach diesem Host.${connected ? pv`\n\n${list} gehört zu einer gespeicherten Verbindung. Bitte lynox in einem neuen Gespräch, diese Verbindung noch einmal zu speichern; danach fragt lynox beim Lesen von dort nicht mehr.` : ''}`;
+    if (unchecked) return pv`${head} Im Gespräch steht Inhalt von ausserhalb, und ob du ${list} genannt hast, konnte lynox nicht prüfen. ${whole} ${yes}`;
+    return pv`${head} Im Gespräch steht Inhalt von ausserhalb, und ${list} hast du nicht genannt. ${whole} ${yes}\n\nSchreib ${list} hier in den Chat, dann fragt lynox in diesem Gespräch nicht mehr nach diesem Host.${connected ? pv`\n\n${list} gehört zu einer gespeicherten Verbindung. Bitte lynox in einem neuen Gespräch, diese Verbindung noch einmal zu speichern; danach fragt lynox beim Lesen von dort nicht mehr.` : ''}`;
   }
-  if (unchecked) return pv`${head} This conversation contains content from outside, and lynox could not check whether you named ${list}. ${list} ${gets} the whole address, including the path and everything after the "?". ${yes}`;
-  return pv`${head} This conversation contains content from outside, and you haven't named ${list}. ${list} ${gets} the whole address, including the path and everything after the "?". ${yes}\n\nWrite ${list} here in the chat, and lynox won't ask about this host again in this conversation.${connected ? pv`\n\n${list} belongs to a saved connection. Ask lynox in a new conversation to save that connection again; after that, lynox won't ask when it reads from there.` : ''}`;
+  if (unchecked) return pv`${head} This conversation contains content from outside, and lynox could not check whether you named ${list}. ${whole} ${yes}`;
+  return pv`${head} This conversation contains content from outside, and you haven't named ${list}. ${whole} ${yes}\n\nWrite ${list} here in the chat, and lynox won't ask about this host again in this conversation.${connected ? pv`\n\n${list} belongs to a saved connection. Ask lynox in a new conversation to save that connection again; after that, lynox won't ask when it reads from there.` : ''}`;
 }
 
 /**

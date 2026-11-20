@@ -23,7 +23,7 @@ import { taskCreateTool } from './task.js';
 
 type Result = { content: unknown; is_error?: boolean };
 type Exec = { _executeOneInner(tc: unknown): Promise<Result> };
-type Input = { title: string; watch_url?: string; watch_interval_minutes?: number; schedule?: string; workflow_id?: string };
+type Input = { title: string; watch_url?: string; watch_interval_minutes?: number; schedule?: string; workflow_id?: string; run_at?: string };
 
 function taskCreate(): ToolEntry & { created: string[] } {
   const created: string[] = [];
@@ -69,33 +69,54 @@ describe('a watch task_create sets up after foreign content', () => {
     expect(String(result.content)).toMatch(/^Not read: /);
   });
 
-  it('the question says the page is read again and again, and that the yes holds for every check', async () => {
+  it('the question says how often the page is read once confirmed, and that the yes does not confirm it', async () => {
     const tool = taskCreate();
     const ask = asker('Deny');
     const agent = agentOf(tool, ask.fn);
     await call(agent, { title: 'Watch', watch_url: EVIL });
-    expect(ask.asked[0]).toMatch(/^Watch the page on "collect\.evil\.example"\? lynox then checks it every 60 minutes on its own, until the watch is deleted\. /);
-    expect(ask.asked[0]).toContain('"collect.evil.example" gets, on every check, the whole address');
-    expect(ask.asked[0]).toContain('A yes creates this watch, and its checks do not ask again.');
+    expect(ask.asked[0]).toMatch(/^Watch the page on "collect\.evil\.example"\? Once you confirm the watch under Automation → Triggers, lynox checks the page every 60 minutes on its own, until you pause or delete it there\. /);
+    expect(ask.asked[0]).toContain('On every check, "collect.evil.example" gets the whole address');
+    expect(ask.asked[0]).toContain('A yes creates the watch; it does not confirm it.');
     expect(ask.asked[0]).not.toContain('this one read only');
   });
 
-  it('the interval in the question is the one the handler uses: at least 5 minutes', async () => {
+  it('the interval the question names is clamped as the handler clamps it: at least 5 minutes, 60 when not given', async () => {
     const ask = asker('Deny');
     await call(agentOf(taskCreate(), ask.fn), { title: 'Watch', watch_url: EVIL, watch_interval_minutes: 2 });
+    await call(agentOf(taskCreate(), ask.fn), { title: 'Watch', watch_url: EVIL, watch_interval_minutes: 0 });
     await call(agentOf(taskCreate(), ask.fn), { title: 'Watch', watch_url: EVIL, watch_interval_minutes: 15 });
     expect(ask.asked[0]).toContain('every 5 minutes');
-    expect(ask.asked[1]).toContain('every 15 minutes');
+    expect(ask.asked[1]).toContain('every 5 minutes');
+    expect(ask.asked[2]).toContain('every 15 minutes');
   });
 
-  it('in German it asks to watch the page, not to read it once', async () => {
+  it('in German it asks to watch the page, and says the yes does not confirm it', async () => {
     const tool = taskCreate();
     const ask = asker('Deny');
     const agent = agentOf(tool, ask.fn, 'nothing named', true, { noticeLanguage: 'de' } as Extra);
     await call(agent, { title: 'Watch', watch_url: EVIL });
-    expect(ask.asked[0]).toMatch(/^Seite auf „collect\.evil\.example“ beobachten\? lynox prüft sie dann alle 60 Minuten selbst, bis die Beobachtung gelöscht ist\. /);
+    expect(ask.asked[0]).toMatch(/^Seite auf „collect\.evil\.example“ beobachten\? Wenn du die Beobachtung danach unter Automation → Trigger bestätigst, prüft lynox die Seite alle 60 Minuten selbst, bis du sie dort pausierst oder löschst\. /);
     expect(ask.asked[0]).toContain('erhält bei jeder Prüfung die ganze Adresse');
-    expect(ask.asked[0]).toContain('Ein Ja legt diese Beobachtung an, und ihre Prüfungen fragen nicht noch einmal.');
+    expect(ask.asked[0]).toContain('Ein Ja legt die Beobachtung an, bestätigt ist sie damit noch nicht.');
+  });
+
+  it('a watch with run_at is still a watch, and is asked about', async () => {
+    const tool = taskCreate();
+    const ask = asker('Deny');
+    const agent = agentOf(tool, ask.fn);
+    await call(agent, { title: 'Watch', watch_url: EVIL, run_at: '2026-12-01T09:00:00' } as Input);
+    expect(ask.asked).toHaveLength(1);
+    expect(tool.created).toEqual([]);
+  });
+
+  it('a watch_url that does not parse is refused without a question', async () => {
+    const tool = taskCreate();
+    const ask = asker('Allow');
+    const agent = agentOf(tool, ask.fn);
+    const result = await call(agent, { title: 'Watch', watch_url: 'not a url' });
+    expect(ask.asked).toEqual([]);
+    expect(tool.created).toEqual([]);
+    expect(result.is_error).toBe(true);
   });
 
   it('a yes creates the watch', async () => {
@@ -174,7 +195,7 @@ describe('a watch task_create sets up after foreign content', () => {
     expect(ask.asked).toHaveLength(1);
     expect(ask.asked[0]).toMatch(/^Watch the page on "shop\.example\.ch"\? /);
     expect(ask.asked[0]).toContain('carries another address');
-    expect(ask.asked[0]).toContain('A yes creates this watch, and its checks do not ask again.');
+    expect(ask.asked[0]).toContain('A yes creates the watch; it does not confirm it.');
     expect(tool.created).toEqual([]);
   });
 });
