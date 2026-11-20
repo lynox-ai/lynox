@@ -466,6 +466,11 @@ function staleBefore(now: number): string {
   return new Date(now - BULK_CLAIM_STALE_MS).toISOString();
 }
 
+/** The bound argument of a `claimed_at = ?` fence: none without a holder's time. */
+function claimArg(held: number | null): string[] {
+  return held === null ? [] : [new Date(held).toISOString()];
+}
+
 // A target the run found already holding its planned value and never sent to ({@link
 // BulkLedger.recordApplied}, `already`): it counts as applied, but the run changed nothing there.
 // A run from before `unsent_tracked` leaves such a target at `found_unsent = 0`, as written.
@@ -526,9 +531,19 @@ export interface ActualImage { value: unknown; estimated: boolean }
 
 /** Per target, the unit of a run's time budget and of its approval window. */
 export const BULK_TARGET_BUDGET_MS = 5_000;
-/** A claim older than this is taken to belong to a dead loop. Longer than one target's
- *  budget, so a slow write is not mistaken for a dead one. */
-export const BULK_CLAIM_STALE_MS = 30_000;
+/** One external request's own deadline (`bulk-external.ts`). Defined here, where the claim bound
+ *  is derived from it, and re-exported there. */
+export const BULK_REQUEST_TIMEOUT_MS = 30_000;
+/** A claim older than this is taken to belong to a loop that stopped: two request deadlines plus
+ *  slack. A live loop renews its claim on a heartbeat ({@link BULK_CLAIM_HEARTBEAT_MS}) however
+ *  long its requests and waits take, so it loses the claim only when it did not run, or its
+ *  renewals failed, for this long. One that lost it sends no write and records nothing more there
+ *  ({@link BulkLedger.renewClaim}); a write it had already sent, or a read under way, may still
+ *  go out. */
+export const BULK_CLAIM_STALE_MS = 2 * BULK_REQUEST_TIMEOUT_MS + 15_000;
+/** How often a loop renews the claim on the target it is writing: four beats to the bound, so
+ *  one missed beat does not lose it. */
+export const BULK_CLAIM_HEARTBEAT_MS = BULK_CLAIM_STALE_MS / 4;
 /** The approval window: N targets × the per-target budget, plus this, capped at a day. */
 export const BULK_APPROVAL_SLACK_MS = 15 * 60_000;
 export const BULK_APPROVAL_MAX_MS = 24 * 60 * 60_000;
@@ -3522,17 +3537,20 @@ export class BulkLedger {
     shopAddedMarkup = false,
     /** The host stored an HTML field otherwise than sent, within what the run may write: counted. */
     hostRewrote = false,
-  ): void {
+    /** The time the writing loop claimed or last renewed its claim at: recorded only while the
+     *  claim is still that loop's, false when another loop holds the target ({@link renewClaim}). */
+    held: number | null = null,
+  ): boolean {
     const db = this.engineDb.getDb();
     const at = new Date(now).toISOString();
-    db.transaction(() => {
+    return db.transaction((): boolean => {
       // `result` through enc() too: for an external target it is the host's own answer
       // class, and nothing about a target is stored in clear.
       const res = db.prepare(
         `UPDATE bulk_targets SET applied_at = ?, result = ?, after_actual = ?, claimed_at = NULL, shop_added_markup = ?, host_rewrote = ?
-           WHERE run_id = ? AND seq = ? AND applied_at IS NULL`,
-      ).run(at, this.engineDb.enc(result), actual === null ? null : this.engineDb.enc(JSON.stringify(actual)), shopAddedMarkup ? 1 : 0, hostRewrote ? 1 : 0, run.id, seq);
-      if (res.changes !== 1) return;
+           WHERE run_id = ? AND seq = ? AND applied_at IS NULL${held === null ? '' : ' AND claimed_at = ?'}`,
+      ).run(at, this.engineDb.enc(result), actual === null ? null : this.engineDb.enc(JSON.stringify(actual)), shopAddedMarkup ? 1 : 0, hostRewrote ? 1 : 0, run.id, seq, ...claimArg(held));
+      if (res.changes !== 1) return false;
       this.noteConnection(run.id, seq, 'write', via);
       // Found as planned and never sent to by this run: someone else set the value, so the run
       // changed nothing there ({@link sentCount}, {@link undoEligible}).
@@ -3549,6 +3567,7 @@ export class BulkLedger {
              AND seq = (SELECT source_seq FROM bulk_targets WHERE run_id = ? AND seq = ?)`,
         ).run(at, run.sourceRunId, run.id, seq);
       }
+      return true;
     })();
   }
 
@@ -3559,9 +3578,18 @@ export class BulkLedger {
    * recorded with the mark (`write_*`), so a loop that dies before the target is recorded still
    * leaves whose credential reached the host.
    */
-  markSent(runId: string, seq: number, via: AttachedConnection | null = null): void {
+  markSent(
+    runId: string, seq: number, via: AttachedConnection | null = null,
+    /** The claim this loop holds (the time it claimed or last renewed at), renewed to `now` in
+     *  the same step. When the claim is no longer this loop's, nothing is marked and this
+     *  returns false: the caller must not send. */
+    held: { since: number; now: number } | null = null,
+  ): boolean {
     const db = this.engineDb.getDb();
-    db.transaction(() => {
+    return db.transaction((): boolean => {
+      if (held !== null) {
+        if (!this.renewClaim(runId, seq, held.since, held.now)) return false;
+      }
       // Noted first: `noteConnection` reads a target already marked sent with no write recorded as
       // one sent before v43, and this mark is not that.
       this.noteConnection(runId, seq, 'write', via);
@@ -3569,6 +3597,7 @@ export class BulkLedger {
       // refusal takes it back ({@link markRefused}), so no later answer can make an earlier
       // unclear one known.
       db.prepare('UPDATE bulk_targets SET write_sent = 1, unknown_sends = unknown_sends + 1 WHERE run_id = ? AND seq = ?').run(runId, seq);
+      return true;
     })();
   }
 
@@ -3580,10 +3609,22 @@ export class BulkLedger {
       .run(runId, seq);
   }
 
-  /** Give a claimed target back unwritten, for a loop that stops before writing it. */
-  releaseClaim(runId: string, seq: number): void {
-    this.engineDb.getDb().prepare('UPDATE bulk_targets SET claimed_at = NULL WHERE run_id = ? AND seq = ? AND applied_at IS NULL')
-      .run(runId, seq);
+  /** Give a claimed target back unwritten, for a loop that stops before writing it. With `held`
+   *  (the time the loop claimed or last renewed at), only while the claim is still that loop's;
+   *  false when it is not. */
+  releaseClaim(runId: string, seq: number, held: number | null = null): boolean {
+    return this.engineDb.getDb().prepare(`UPDATE bulk_targets SET claimed_at = NULL WHERE run_id = ? AND seq = ? AND applied_at IS NULL${held === null ? '' : ' AND claimed_at = ?'}`)
+      .run(runId, seq, ...claimArg(held)).changes === 1;
+  }
+
+  /**
+   * Renew a loop's claim on the target it is writing: from `since` (the time it claimed or last
+   * renewed at) to `now`. False when the claim is no longer that loop's — another loop took it
+   * over, or it was given back — and the loop must then send and record nothing more there.
+   */
+  renewClaim(runId: string, seq: number, since: number, now: number): boolean {
+    return this.engineDb.getDb().prepare('UPDATE bulk_targets SET claimed_at = ? WHERE run_id = ? AND seq = ? AND claimed_at = ? AND applied_at IS NULL')
+      .run(new Date(now).toISOString(), runId, seq, new Date(since).toISOString()).changes === 1;
   }
 
   /** Record a target that was not written. A conflict is not counted as a failure: the
@@ -3593,21 +3634,23 @@ export class BulkLedger {
     runId: string, seq: number, error: BulkTargetError,
     /** The connection of what the target's write stage sent, if anything ({@link noteConnection}). */
     via: AttachedConnection | null = null,
-  ): void {
+    /** As {@link recordApplied}: only while the claim is still that loop's. */
+    held: number | null = null,
+  ): boolean {
     const db = this.engineDb.getDb();
     const counted = !(NOT_FAILURES as readonly BulkTargetError[]).includes(error);
-    db.transaction(() => {
+    return db.transaction((): boolean => {
       const res = db.prepare(
         // `failed_once` stays NULL on a run approved before it was recorded: one known failure
         // does not make its earlier passes known.
         `UPDATE bulk_targets SET error = ?, claimed_at = NULL,
            failed_once = CASE WHEN ? = 0 OR failed_once IS NULL THEN failed_once ELSE 1 END
-         WHERE run_id = ? AND seq = ? AND applied_at IS NULL`,
-      ).run(error, counted ? 1 : 0, runId, seq);
-      if (res.changes === 1) this.noteConnection(runId, seq, 'write', via);
-      if (res.changes === 1 && counted) {
-        db.prepare('UPDATE bulk_runs SET targets_failed = targets_failed + 1 WHERE id = ?').run(runId);
-      }
+         WHERE run_id = ? AND seq = ? AND applied_at IS NULL${held === null ? '' : ' AND claimed_at = ?'}`,
+      ).run(error, counted ? 1 : 0, runId, seq, ...claimArg(held));
+      if (res.changes !== 1) return false;
+      this.noteConnection(runId, seq, 'write', via);
+      if (counted) db.prepare('UPDATE bulk_runs SET targets_failed = targets_failed + 1 WHERE id = ?').run(runId);
+      return true;
     })();
   }
 
