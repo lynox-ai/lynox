@@ -395,7 +395,7 @@ export const memoryBlockEditTool: ToolEntry<BlockEditInput> = {
     const said = MEMORY_DIALOG[agent.dialogLanguage ?? 'en'];
     // Only the `apply` key edits; the label in any language, or typed text, does not.
     const consent = decideConsent('apply', await agent.promptUser(
-      said.editBlock(input.block, input.mode, preview ? said.blockPreview(preview) : pv``),
+      MEMORY_DIALOG[agent.dialogLanguage ?? 'en'].editBlock(input.block, input.mode, preview ? said.blockPreview(preview) : pv``),
       consentOptions('apply'),
       consentMeta('apply'),
     ));
@@ -484,7 +484,7 @@ export const memoryRetireTool: ToolEntry<RetireInput> = {
     const reason = input.reason ? said.retireReason(clip(input.reason)) : pv``;
     // Only the `retire` key retires; the label in any language, or typed text, does not.
     const consent = decideConsent('retire', await agent.promptUser(
-      said.retire(clip(entry.text), reason),
+      MEMORY_DIALOG[agent.dialogLanguage ?? 'en'].retire(clip(entry.text), reason),
       consentOptions('retire'),
       consentMeta('retire'),
     ));
