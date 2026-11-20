@@ -115,7 +115,7 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
     const SHIPPED = ['bexio', 'shopify'];
     // (a) every id ever shipped is still answered for.
     for (const id of SHIPPED) {
-      expect(OAUTH_PRESETS.get(id) !== undefined || RETIRED_PRESET_IDS.includes(id), `shipped id "${id}" is in neither the register nor RETIRED_PRESET_IDS`).toBe(true);
+      expect(OAUTH_PRESETS.get(id) !== undefined || RETIRED_PRESET_IDS.includes(id), `shipped id "${id}" is in neither the register nor RETIRED_PRESET_IDS. Adding it there: check isPresetClientSecretName for its app-secret names and the profile's editable token_url and base_url`).toBe(true);
     }
     // (b) every id in the register is pinned.
     for (const id of OAUTH_PRESETS.ids()) {

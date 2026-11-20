@@ -654,6 +654,10 @@ export function builtInPresetOf(
  * provider this engine does not have, and such a profile must stay editable and keep its
  * app-level exchange. Removing an entry from {@link REGISTER_ENTRIES} means adding its id
  * here; a test pins the ids ever shipped and fails when one is in neither place.
+ *
+ * When an id goes in here, check two things this list does not cover: `isPresetClientSecretName`
+ * no longer protects that provider's app-secret names, and the profile's `token_url` and
+ * `base_url` stay editable (fetch_token exchanges nothing for such a profile today).
  */
 export const RETIRED_PRESET_IDS: readonly string[] = Object.freeze<string[]>([]);
 
