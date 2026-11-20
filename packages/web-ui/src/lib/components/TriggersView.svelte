@@ -709,12 +709,11 @@
 								<StampConfirm id={trigger.id} mode="check" cronText={cronToHuman} onstamped={() => void stamped(trigger)} onclose={() => (checking[trigger.id] = false)} />
 							{/if}
 						</div>
-						<!-- The controls hide until hover where hovering exists, and stay visible
-						     where it does not — keyed on the POINTER: a touch screen wider than `sm`
-						     has no hover either, and there they only appeared when a tap happened to
-						     leave the card in `:hover`. Below `sm` they also stay visible with a mouse:
-						     the row then wraps under the text, and hidden it would only leave an empty
-						     line. -->
+						<!-- The controls hide until hover only from `sm` up and only where hovering
+						     exists. A touch screen wider than `sm` has no hover, and there they only
+						     appeared when a tap happened to leave the card in `:hover`. Below `sm` the
+						     row wraps under the text; hidden controls there left blank space in it, an
+						     empty line when nothing else in the row shows. -->
 						<div class="flex flex-wrap items-center gap-2 sm:shrink-0 sm:mt-0.5">
 							<!-- Stop: only where a stop can end the run. Not hidden until hover like the
 							     others — a run the owner wants to end should not need finding. -->

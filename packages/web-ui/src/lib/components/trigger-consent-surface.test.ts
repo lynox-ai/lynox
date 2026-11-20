@@ -197,29 +197,28 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		);
 	});
 
+	// The five controls that hide until hover, the check button only when its note does not ask for it.
+	const hiding = (): [string, string][] => [
+		...['runNow(trigger)', 'togglePause(trigger)', 'manageInChat(trigger)', 'deleteTrigger(trigger)'].map((c): [string, string] => [c, line(`<button onclick={() => ${c}}`)]),
+		['check', line('<button onclick={() => (checking[trigger.id] = !checking[trigger.id])}')],
+	];
+
 	it('below `sm` the controls stay visible with a mouse too, where their row wraps under the text', () => {
-		// Hidden there, the wrapped row only left an empty line under the card's text.
-		for (const control of ['runNow(trigger)', 'togglePause(trigger)', 'manageInChat(trigger)', 'deleteTrigger(trigger)']) {
-			const tag = line(`<button onclick={() => ${control}}`);
-			expect(tag, control).toMatch(/["'\s]sm:\[@media\(hover:hover\)\]:opacity-0\s/);
-			expect(tag.replaceAll('sm:[@media(hover:hover)]:opacity-0', ''), control).not.toContain('[@media(hover:hover)]:opacity-0');
+		// The one way a control turns transparent is from `sm` up on a device that hovers. Every
+		// other hide (plain, `max-sm:`, a width alone, a pointer alone) would hide it in the
+		// wrapped row below `sm`, under the text, with nothing beside it to make room for.
+		for (const [control, tag] of hiding()) {
+			expect(tag.match(/[^\s"']*opacity-0\b/g), control).toEqual(['sm:[@media(hover:hover)]:opacity-0']);
 		}
-		const check = line('<button onclick={() => (checking[trigger.id] = !checking[trigger.id])}');
-		expect(check).toMatch(/["'\s]sm:\[@media\(hover:hover\)\]:opacity-0\s/);
-		expect(check.replaceAll('sm:[@media(hover:hover)]:opacity-0', '')).not.toContain('[@media(hover:hover)]:opacity-0');
 	});
 
-	it('the controls hide on hover-capable pointers, not at a width', () => {
-		// A touch screen wider than `sm` has no hover either: keyed on the width, the
-		// controls were unreachable there with no rule left to bring them back.
-		for (const control of ['runNow(trigger)', 'togglePause(trigger)', 'manageInChat(trigger)', 'deleteTrigger(trigger)']) {
-			const tag = line(`<button onclick={() => ${control}}`);
-			expect(tag, control).toContain('[@media(hover:hover)]:opacity-0');
+	it('the controls hide only where hovering exists, and hover or focus brings them back', () => {
+		// A touch screen wider than `sm` has no hover: a hide keyed on the width alone left
+		// the controls unreachable there with no rule to bring them back. The hide above is
+		// the only one, and it needs hover; this test holds what brings a control back.
+		for (const [control, tag] of hiding()) {
 			expect(tag, control).toContain('group-hover:opacity-100');
-			// Any width-keyed hide, not just the one that was there: `md:opacity-0`
-			// beside the pointer rule passed, and reintroduces the same dead end on a
-			// touch screen wider than that breakpoint.
-			expect(tag, control).not.toMatch(/(sm|md|lg|xl|2xl):opacity-0/);
+			expect(tag, control).toContain('focus-visible:opacity-100');
 		}
 	});
 });
