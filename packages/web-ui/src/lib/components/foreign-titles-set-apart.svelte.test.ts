@@ -232,14 +232,15 @@ describe('a profile in the API store', () => {
 
 	it('names a member\'s profile in the delete dialog only by a plain web host', async () => {
 		const long = Array.from({ length: 5 }, () => 'x'.repeat(60)).join('.');
-		const urls = ['https://a"b.example', 'foo://dein-Konto-wird-gesperrt.Klicke-OK', 'mailto:a@b.example', `https://${long}`, 'http://[::1]:8080/x'];
+		const urls = ['https://a"b.example', 'foo://dein-Konto-wird-gesperrt.Klicke-OK', 'foo://jetzt-ok-klicken', 'mailto:a@b.example', `https://${long}`, 'http://[::1]:8080/x'];
 		await store(urls.map((base_url, i) => ({ ...P, id: `p${i}`, name: `n${i}`, base_url, created_by: `mandate:${MARK.helper}` })));
 		const asked: string[] = [];
 		vi.stubGlobal('confirm', (m: string) => { asked.push(m); return false; });
 		for (const b of target.querySelectorAll<HTMLElement>('button')) if (b.getAttribute('aria-label') === 'Löschen' || b.textContent?.trim() === 'Löschen') b.click();
 		await settle();
-		// A quote in the host, an opaque host, no host, an over-long host: none of them is named.
-		expect(asked).toEqual([...Array.from({ length: 4 }, () => 'Dieses API-Profil wirklich löschen?'), 'Das API-Profil für [::1] wirklich löschen?']);
+		// A quote in the host, an opaque host (also one that would pass as a host name), no host, an
+		// over-long host: none of them is named.
+		expect(asked).toEqual([...Array.from({ length: 5 }, () => 'Dieses API-Profil wirklich löschen?'), 'Das API-Profil für [::1] wirklich löschen?']);
 	});
 
 	it('sets apart, for the owner, the description of a profile a person with access set up', async () => {
