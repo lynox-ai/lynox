@@ -72,8 +72,6 @@ export interface PersistentBudgetReservation {
   /** Amount actually held (0 when blocked or when no enforcement is active). */
   reservedUSD: number;
   reason?: string | undefined;
-  /** On a refusal, the cap it refused on: `unknown` when spend could not be checked. */
-  cap?: 'daily' | 'monthly' | 'unknown' | undefined;
 }
 
 export interface CostSnapshot {

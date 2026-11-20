@@ -1101,8 +1101,9 @@ export class TaskManager {
    * the run, did not let it begin. Nothing went wrong in it and nothing of it happened, so it
    * is neither `failed` (no retry, a cron keeps its status) nor `success`. A cron or a watch
    * goes on to its next time as after any run: the time it missed is missed, and its notice
-   * says so. A ONE-SHOT keeps its schedule, as `keepSchedule` does: it stays due and runs
-   * once the cap lets it.
+   * says so. A ONE-SHOT keeps its schedule, as `keepSchedule` does, and is due again at
+   * `opts.retryAt` when the caller names one (when the cap opens): due at once, the same cause
+   * would stop it again at every tick.
    */
   /**
    * @param opts.noRetry No retry for this run, whatever the trigger's retries say: a run a
@@ -1114,12 +1115,14 @@ export class TaskManager {
    *   its due time for when it is taken over, and is not in `getDue` meanwhile. And for a
    *   one-shot whose workflow waits for the owner's stamp, switched off with its time kept
    *   (`worker-loop.ts`), so switching it on again makes it due.
+   * @param opts.retryAt For a one-shot recorded `not_run`: when it is due again. Ignored for any
+   *   other status, a schedule kept for another reason, a cron and a watch.
    * @returns Whether this scheduled a retry of the run. The caller reports a failure only
    *   when it did not, so this is the one place that decides — a second copy of the retry
    *   conditions drifted from it (a cron or watch with retries set was never retried here,
    *   and its failures were reported nowhere).
    */
-  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted' | 'not_run', opts?: { noRetry?: boolean | undefined; keepSchedule?: boolean | undefined }): boolean {
+  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted' | 'not_run', opts?: { noRetry?: boolean | undefined; keepSchedule?: boolean | undefined; retryAt?: string | undefined }): boolean {
     const task = this.history.getTrigger(id);
     // The schedule was deleted while this run was in flight: deleting removes the row and
     // leaves the run going, so there is nothing left to record the run against.
@@ -1152,12 +1155,13 @@ export class TaskManager {
     // provider sends, one ledger row each. It has no cron, so
     // the branches below would read it as a one-shot and set it `completed` or `failed` — and a
     // trigger in either state accepts no further delivery.
-    if (isHandRunOf(task.id) || task.source === 'webhook' || opts?.keepSchedule === true || oneShotNotRun) {
+    const scheduleKept = isHandRunOf(task.id) || task.source === 'webhook' || opts?.keepSchedule === true;
+    if (scheduleKept || oneShotNotRun) {
       this.history.updateTriggerRunResult(id, {
         lastRunAt: new Date().toISOString(),
         lastRunResult: result.length > MAX_RUN_RESULT_CHARS ? result.slice(0, MAX_RUN_RESULT_CHARS) : result,
         lastRunStatus: status,
-        nextRunAt: undefined,
+        nextRunAt: !scheduleKept && oneShotNotRun ? opts?.retryAt : undefined,
         retryCount: undefined,
       });
       return false;

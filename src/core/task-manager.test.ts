@@ -740,6 +740,19 @@ describe('TaskManager', () => {
       expect(after.last_run_result).toBe('The daily limit is reached.');
     });
 
+    it('a one-shot is due again at the time the caller names, unless its schedule is kept for another reason', () => {
+      const at = '2026-06-15T09:00:00.000Z';
+      const later = '2026-06-16T00:00:00.000Z';
+      const task = tm.create({ title: 'Report', assignee: 'lynox', nextRunAt: at }) as TriggerRecord;
+      tm.recordTaskRun(task.id, 'The daily limit is reached.', 'not_run', { retryAt: later });
+      expect(tm.getTrigger(task.id)!.next_run_at).toBe(later);
+      expect(tm.getTrigger(task.id)!.status).toBe('open');
+
+      const kept = tm.create({ title: 'Report', assignee: 'lynox', nextRunAt: at }) as TriggerRecord;
+      tm.recordTaskRun(kept.id, 'x', 'not_run', { keepSchedule: true, retryAt: later });
+      expect(tm.getTrigger(kept.id)!.next_run_at).toBe(at);
+    });
+
     it('a cron moves on to its next time and keeps its status', () => {
       const task = tm.create({ title: 'Nightly', assignee: 'lynox', scheduleCron: '0 3 * * *' }) as TriggerRecord;
       const before = tm.getTrigger(task.id)!;

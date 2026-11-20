@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 // The pinned fetch is driven per case, so a watch's change is the case's and not the network's.
 const mockFetchPinned = vi.fn();
@@ -11,6 +14,9 @@ vi.mock('./network-guard.js', async (importActual) => {
 import { WorkerLoop, extractWatchSignal } from './worker-loop.js';
 import { WORKER_NOTICES, notRunReason, resetWhen } from './worker-notices.js';
 import { configurePersistentBudget, resetPersistentBudget } from './session-budget.js';
+import { RunHistory } from './run-history.js';
+import { EngineDb } from './engine-db.js';
+import { TaskManager as RealTaskManager } from './task-manager.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter, NotificationMessage } from './notification-router.js';
 import type { Session } from './session.js';
@@ -58,6 +64,14 @@ function blockedSession(said: string, budget: BudgetNoteRef | undefined): Sessio
   } as unknown as Session;
 }
 
+/** A session whose run ran. */
+function ranSession(): Session {
+  return {
+    sessionId: 'thread-ran', run: vi.fn(async () => 'Done.'), _recreateAgent: vi.fn(), getAgent: () => null,
+    getLastRunStop: () => null, getLastRunNotice: () => undefined, getLastRunBudget: () => undefined, promptUser: undefined,
+  } as unknown as Session;
+}
+
 function makeEngine(tm: TaskManager, session: Session, language?: string): Engine {
   return {
     config: { language: language ?? 'en' },
@@ -84,9 +98,9 @@ function makeRouter(): NotificationRouter & { sent: NotificationMessage[] } {
   } as unknown as NotificationRouter & { sent: NotificationMessage[] };
 }
 
-/** Spend held at `cost` on whatever day the clock says, so a new day is the same spend again. */
-function spendToday(cost: number): { getCostByDay: () => Array<{ day: string; cost_usd: number; run_count: number }> } {
-  return { getCostByDay: () => [{ day: new Date().toISOString().slice(0, 10), cost_usd: cost, run_count: 1 }] };
+/** Spend held at `cost()` on whatever day the clock says, so a new day is the same spend again. */
+function spendToday(cost: number | (() => number)): { getCostByDay: () => Array<{ day: string; cost_usd: number; run_count: number }> } {
+  return { getCostByDay: () => [{ day: new Date().toISOString().slice(0, 10), cost_usd: typeof cost === 'number' ? cost : cost(), run_count: 1 }] };
 }
 
 function quietStderr(): { lines: string[]; restore: () => void } {
@@ -99,6 +113,7 @@ function quietStderr(): { lines: string[]; restore: () => void } {
 }
 
 const EN = WORKER_NOTICES.en;
+const notRunCalls = (tm: TaskManager): unknown[][] => vi.mocked(tm.recordTaskRun).mock.calls.filter((c) => c[2] === 'not_run');
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -114,57 +129,72 @@ afterEach(() => {
 });
 
 describe('a run the admission refused', () => {
-  it('too little headroom: recorded not_run with its schedule kept, told once, the log line kept', async () => {
-    configurePersistentBudget({ costProvider: spendToday(99.98), dailyCapUSD: 100 });
-    const tm = makeTaskManager([makeTask()]);
-    const session = blockedSession('unused', undefined);
-    const engine = makeEngine(tm, session);
-    const router = makeRouter();
+  async function ticks(tm: TaskManager, router: ReturnType<typeof makeRouter>, n: number, language?: string): Promise<{ engine: Engine; lines: string[] }> {
+    const engine = makeEngine(tm, blockedSession('unused', undefined), language);
     const loop = new WorkerLoop(engine, router, 60_000);
     const { lines, restore } = quietStderr();
     try {
-      await loop.tick();
-      await loop.tick();
+      for (let i = 0; i < n; i++) await loop.tick();
     } finally {
       restore();
     }
+    return { engine, lines };
+  }
+
+  it('a cap its recorded spend reached: not_run with its schedule kept, told once, the log line kept', async () => {
+    configurePersistentBudget({ costProvider: spendToday(100), dailyCapUSD: 100 });
+    const tm = makeTaskManager([makeTask()]);
+    const router = makeRouter();
+    const { engine, lines } = await ticks(tm, router, 2);
     expect(engine.createSession, 'nothing started').not.toHaveBeenCalled();
     const calls = vi.mocked(tm.recordTaskRun).mock.calls;
     expect(calls, 'recorded when told, not at every tick').toHaveLength(1);
     expect(calls[0]![2]).toBe('not_run');
     expect(calls[0]![3], 'the trigger stays due').toEqual({ keepSchedule: true });
-    expect(calls[0]![1]).toContain('The daily limit of $100 is reached (today $99.98). It resets tomorrow at');
+    expect(calls[0]![1]).toContain('The daily limit of $100 is reached (today $100.00). It resets tomorrow at');
     expect(calls[0]![1]).toContain(EN.capNextSelf);
     expect(calls[0]![1]).toContain(EN.notRunWaits);
     expect(router.sent, 'one notice over two ticks').toHaveLength(1);
     expect(router.sent[0]!.title).toBe('⚠ Daily Report did not run');
     expect(router.sent[0]!.body).toBe(calls[0]![1]);
-    expect(router.sent[0]!.title).not.toContain('✓');
     expect(router.sent[0]!.data, 'no thread to open').toBeUndefined();
     expect(router.sent[0]!.followUps).toBeUndefined();
     expect(lines.join(''), 'the log line stays').toContain('Not started');
   });
 
-  it('the reservation refused: told with the cap the refusal named', async () => {
+  it('too little headroom left under a cap not reached: only the log line, no record, no notice', async () => {
+    configurePersistentBudget({ costProvider: spendToday(99.98), dailyCapUSD: 100 });
+    const tm = makeTaskManager([makeTask()]);
+    const router = makeRouter();
+    const { lines } = await ticks(tm, router, 1);
+    expect(tm.recordTaskRun).not.toHaveBeenCalled();
+    expect(router.sent).toHaveLength(0);
+    expect(lines.join('')).toContain('Not started');
+  });
+
+  it('a reservation the projection alone refuses: only the log line, no record, no notice', async () => {
     // A workflow keeps the worst-case reservation, so $99 of $100 refuses at the reservation.
     configurePersistentBudget({ costProvider: spendToday(99), dailyCapUSD: 100, sessionCapUSD: 50 });
     const tm = makeTaskManager([makeTask({ effect: 'run_workflow' })]);
     const router = makeRouter();
-    const loop = new WorkerLoop(makeEngine(tm, blockedSession('unused', undefined)), router, 60_000);
-    const { restore } = quietStderr();
-    try {
-      await loop.tick();
-      await loop.tick();
-    } finally {
-      restore();
-    }
+    const { lines } = await ticks(tm, router, 1);
+    expect(tm.recordTaskRun).not.toHaveBeenCalled();
+    expect(router.sent).toHaveLength(0);
+    expect(lines.join('')).toContain('would be exceeded by in-flight tasks');
+  });
+
+  it('a reservation refused on a cap its recorded spend reached: told with that cap', async () => {
+    configurePersistentBudget({ costProvider: spendToday(100), dailyCapUSD: 100, sessionCapUSD: 50 });
+    const tm = makeTaskManager([makeTask({ effect: 'run_workflow' })]);
+    const router = makeRouter();
+    await ticks(tm, router, 1);
     expect(router.sent).toHaveLength(1);
-    expect(router.sent[0]!.body).toContain('The daily limit of $100 is reached (today $99.00).');
+    expect(router.sent[0]!.body).toContain('The daily limit of $100 is reached (today $100.00).');
     expect(vi.mocked(tm.recordTaskRun).mock.calls[0]![3]).toEqual({ keepSchedule: true });
   });
 
   it('a new period brings a new notice', async () => {
-    configurePersistentBudget({ costProvider: spendToday(99.98), dailyCapUSD: 100 });
+    configurePersistentBudget({ costProvider: spendToday(100), dailyCapUSD: 100 });
     const tm = makeTaskManager([makeTask()]);
     const router = makeRouter();
     const loop = new WorkerLoop(makeEngine(tm, blockedSession('unused', undefined)), router, 60_000);
@@ -178,6 +208,27 @@ describe('a run the admission refused', () => {
     }
     expect(router.sent).toHaveLength(2);
     expect(vi.mocked(tm.recordTaskRun)).toHaveBeenCalledTimes(2);
+  });
+
+  it('refused, then run, then refused again the same day: told again', async () => {
+    let cost = 100;
+    configurePersistentBudget({ costProvider: spendToday(() => cost), dailyCapUSD: 100 });
+    const tm = makeTaskManager([makeTask()]);
+    const router = makeRouter();
+    const loop = new WorkerLoop(makeEngine(tm, ranSession()), router, 60_000);
+    const { restore } = quietStderr();
+    try {
+      await loop.tick();
+      cost = 10; // the owner raised the cap, or spend was corrected
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      cost = 100;
+      await loop.tick();
+    } finally {
+      restore();
+    }
+    expect(vi.mocked(tm.recordTaskRun).mock.calls.map((c) => c[2])).toEqual(['not_run', 'success', 'not_run']);
+    expect(router.sent.filter((m) => m.title.includes('did not run')), 'the second refusal is told too').toHaveLength(2);
   });
 
   it('a monthly cap counts its month: a new day in it brings no second notice', async () => {
@@ -198,13 +249,11 @@ describe('a run the admission refused', () => {
   });
 
   it('in German, on an instance that says so', async () => {
-    configurePersistentBudget({ costProvider: spendToday(99.98), dailyCapUSD: 100 });
+    configurePersistentBudget({ costProvider: spendToday(100), dailyCapUSD: 100 });
     const router = makeRouter();
-    const loop = new WorkerLoop(makeEngine(makeTaskManager([makeTask()]), blockedSession('unused', undefined), 'de'), router, 60_000);
-    const { restore } = quietStderr();
-    try { await loop.tick(); } finally { restore(); }
+    await ticks(makeTaskManager([makeTask()]), router, 1, 'de');
     expect(router.sent[0]!.title).toBe('⚠ Daily Report ist nicht gelaufen');
-    expect(router.sent[0]!.body).toContain('Das Tageslimit von $100 ist erreicht (heute $99.98). Es gilt wieder ab morgen um');
+    expect(router.sent[0]!.body).toContain('Das Tageslimit von $100 ist erreicht (heute $100.00). Es gilt wieder ab morgen um');
     expect(router.sent[0]!.body).toContain(WORKER_NOTICES.de.capNextSelf);
   });
 });
@@ -213,8 +262,7 @@ describe('a run the cap or a hook stopped inside the session', () => {
   async function runBlocked(session: Session, task: TriggerRecord = makeTask()): Promise<{ tm: TaskManager; router: ReturnType<typeof makeRouter>; lines: string[] }> {
     const tm = makeTaskManager([task]);
     const router = makeRouter();
-    // English set explicitly: a provisioned instance without a language speaks German.
-    const loop = new WorkerLoop(makeEngine(tm, session, 'en'), router, 60_000);
+    const loop = new WorkerLoop(makeEngine(tm, session), router, 60_000);
     const { lines, restore } = quietStderr();
     try {
       await loop.tick();
@@ -227,10 +275,10 @@ describe('a run the cap or a hook stopped inside the session', () => {
 
   it('a budget block: not_run, "did not run", the reason and the step, no thread, no chips', async () => {
     const { tm, router } = await runBlocked(blockedSession('Daily spending cap ($5) reached. Today: $5.12.', { cap: 'daily', limitUSD: 5, spentUSD: 5.12 }));
-    const call = vi.mocked(tm.recordTaskRun).mock.calls.find((c) => c[2] === 'not_run');
+    const call = notRunCalls(tm)[0];
     expect(call, 'recorded as not run').toBeDefined();
     expect(vi.mocked(tm.recordTaskRun).mock.calls.some((c) => c[2] === 'success'), 'never as a success').toBe(false);
-    expect(call![3], 'the run happened, so its schedule moves on').toBeUndefined();
+    expect(call![3], 'a cron moves on as after any run').toBeUndefined();
     expect(call![1]).toContain('The daily limit of $5 is reached (today $5.12). It resets tomorrow at');
     expect(call![1]).toContain(EN.capNextSelf);
     expect(call![1], 'a cron is told its time was skipped').toContain(EN.notRunSkipped);
@@ -249,34 +297,96 @@ describe('a run the cap or a hook stopped inside the session', () => {
 
   it('a hook block: lynox\'s own sentence, the hook\'s text only in the log', async () => {
     const { tm, router, lines } = await runBlocked(blockedSession('Run blocked: tenant credit exhausted', undefined));
-    const call = vi.mocked(tm.recordTaskRun).mock.calls.find((c) => c[2] === 'not_run');
-    expect(call![1]).toBe(`${EN.hookBlocked(false)} ${EN.notRunSkipped}`);
+    expect(notRunCalls(tm)[0]![1]).toBe(`${EN.hookBlocked(false)} ${EN.notRunSkipped}`);
     expect(router.sent[0]!.title).toBe('⚠ Daily Report did not run');
     expect(router.sent[0]!.body).not.toContain('tenant credit');
     expect(lines.join(''), 'the reason is in the instance log').toContain('tenant credit exhausted');
   });
 
-  it('a one-shot is told it stays due', async () => {
-    const { tm } = await runBlocked(blockedSession('Run blocked: x', undefined), makeTask({ schedule_cron: undefined, source: 'task' }));
-    expect(vi.mocked(tm.recordTaskRun).mock.calls.find((c) => c[2] === 'not_run')![1]).toContain(EN.notRunWaits);
+  it('a one-shot a cap stopped is due again when the cap opens, and says so', async () => {
+    const { tm } = await runBlocked(blockedSession('cap', { cap: 'daily', limitUSD: 5, spentUSD: 5 }), makeTask({ schedule_cron: undefined, source: 'task' }));
+    const call = notRunCalls(tm)[0]!;
+    expect(call[3]).toEqual({ retryAt: '2026-06-16T00:00:00.000Z' });
+    expect(call[1]).toContain('It tries again tomorrow at');
   });
 
-  it('a one-shot a hook stops at every tick is told once', async () => {
-    const task = makeTask({ schedule_cron: undefined, source: 'task' });
-    const tm = makeTaskManager([task]);
-    const router = makeRouter();
-    const loop = new WorkerLoop(makeEngine(tm, blockedSession('Run blocked: x', undefined)), router, 60_000);
-    const { restore } = quietStderr();
+  it('a one-shot a hook stopped is due again in an hour', async () => {
+    const { tm } = await runBlocked(blockedSession('Run blocked: x', undefined), makeTask({ schedule_cron: undefined, source: 'task' }));
+    expect(notRunCalls(tm)[0]![3]).toEqual({ retryAt: '2026-06-15T13:00:00.000Z' });
+  });
+});
+
+describe('a one-shot a hook stops, on a real schedule', () => {
+  let dir: string;
+  let history: RunHistory;
+  let engineDb: EngineDb;
+  let tm: RealTaskManager;
+
+  beforeEach(() => {
+    vi.useRealTimers();
+    dir = mkdtempSync(join(tmpdir(), 'lynox-wl-notrun-'));
+    history = new RunHistory(join(dir, 'history.db'));
+    engineDb = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engineDb);
+    tm = new RealTaskManager(history);
+  });
+  afterEach(() => {
+    try { history.close(); } catch { /* closed */ }
+    try { engineDb.close(); } catch { /* closed */ }
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  async function until(check: () => boolean): Promise<void> {
+    for (let i = 0; i < 400 && !check(); i++) await new Promise((r) => setTimeout(r, 5));
+    if (!check()) throw new Error('until(): condition never held');
+  }
+
+  it('is not run again at the next tick: its next run is the backoff', async () => {
+    const t = tm.create({
+      title: 'Once', taskType: 'scheduled', nextRunAt: '2020-01-01T00:00:00.000Z',
+      createdBy: 'owner', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner',
+    }) as TriggerRecord;
+    const session = blockedSession('Run blocked: x', undefined);
+    const loop = new WorkerLoop(makeEngine(tm as unknown as TaskManager, session), makeRouter(), 60_000);
+    const { lines, restore } = quietStderr();
+    const before = Date.now();
     try {
       await loop.tick();
-      await vi.advanceTimersByTimeAsync(0);
+      await until(() => tm.getTrigger(t.id)?.last_run_status === 'not_run');
+      await until(() => !(loop as unknown as { activeTasks: Map<string, unknown> }).activeTasks.has(t.id));
       await loop.tick();
-      await vi.advanceTimersByTimeAsync(0);
+      await new Promise((r) => setTimeout(r, 20));
     } finally {
       restore();
+      loop.stop();
     }
-    expect(vi.mocked(tm.recordTaskRun).mock.calls.filter((c) => c[2] === 'not_run'), 'each run recorded').toHaveLength(2);
-    expect(router.sent, 'told once').toHaveLength(1);
+    expect(session.run, 'the second tick started no run').toHaveBeenCalledTimes(1);
+    const next = Date.parse(tm.getTrigger(t.id)!.next_run_at!);
+    expect(next).toBeGreaterThanOrEqual(before + 60 * 60_000 - 1000);
+    expect(next).toBeLessThanOrEqual(Date.now() + 60 * 60_000);
+    expect(tm.getTrigger(t.id)!.status).toBe('open');
+    expect(lines.filter((l) => l.includes('Did not run')), 'one log line').toHaveLength(1);
+  });
+
+  it('started by hand, keeps its schedule and is told to be started again by hand', async () => {
+    const at = '2030-01-01T00:00:00.000Z';
+    const t = tm.create({
+      title: 'Once', taskType: 'scheduled', nextRunAt: at,
+      createdBy: 'owner', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner',
+    }) as TriggerRecord;
+    const loop = new WorkerLoop(makeEngine(tm as unknown as TaskManager, blockedSession('Run blocked: x', undefined)), makeRouter(), 60_000);
+    const { restore } = quietStderr();
+    try {
+      expect(await loop.runTriggerNow(t.id)).toEqual({ ok: true });
+      await until(() => tm.getTrigger(t.id)?.last_run_status === 'not_run');
+    } finally {
+      restore();
+      loop.stop();
+    }
+    const after = tm.getTrigger(t.id)!;
+    expect(after.next_run_at).toBe(at);
+    expect(after.last_run_result).toContain(EN.notRunByHand);
+    expect(after.last_run_result).not.toContain(EN.notRunWaits);
   });
 });
 
@@ -284,21 +394,24 @@ describe('a watch whose analysis was blocked', () => {
   const URL = 'https://x.test/page';
   const hashOf = (html: string): string => createHash('sha256').update(extractWatchSignal(html)).digest('hex');
 
+  function watchSession(blocked: () => boolean, answer: string): Session {
+    return {
+      sessionId: 'thread-watch', _recreateAgent: vi.fn(), getAgent: () => null, getLastRunStop: () => null, promptUser: undefined,
+      run: vi.fn(async () => (blocked() ? 'Daily spending cap ($5) reached.' : answer)),
+      getLastRunNotice: () => (blocked() ? 'run_blocked' : undefined),
+      getLastRunBudget: () => (blocked() ? { cap: 'daily', limitUSD: 5, spentUSD: 5 } : undefined),
+    } as unknown as Session;
+  }
+
   it('keeps its baseline, and the next check that runs reports the change it missed', async () => {
     vi.useRealTimers();
     const config = { url: URL, interval_minutes: 60, last_hash: hashOf('<p>old price 10</p>'), last_summary: 'The price is 10.' };
     const task = makeTask({ id: 'w-1', title: 'Price', source: 'watch', schedule_cron: undefined, watch_config: JSON.stringify(config) });
     const tm = makeTaskManager([task]);
     let blocked = true;
-    const analysis = {
-      sessionId: 'thread-watch', _recreateAgent: vi.fn(), getAgent: () => null, getLastRunStop: () => null, promptUser: undefined,
-      run: vi.fn(async () => (blocked ? 'Daily spending cap ($5) reached.' : 'The price went from 10 to 12.')),
-      getLastRunNotice: () => (blocked ? 'run_blocked' : undefined),
-      getLastRunBudget: () => (blocked ? { cap: 'daily', limitUSD: 5, spentUSD: 5 } : undefined),
-    } as unknown as Session;
+    const analysis = watchSession(() => blocked, 'The price went from 10 to 12.');
     const engine = makeEngine(tm, analysis);
-    const router = makeRouter();
-    const loop = new WorkerLoop(engine, router, 60_000);
+    const loop = new WorkerLoop(engine, makeRouter(), 60_000);
     const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
     const { restore } = quietStderr();
     try {
@@ -323,6 +436,24 @@ describe('a watch whose analysis was blocked', () => {
     expect(vi.mocked(tm.recordTaskRun).mock.calls[1]![2]).toBe('success');
     expect(tm.updateWatchConfig).toHaveBeenCalledTimes(1);
     expect(engine.escalateToUser).toHaveBeenCalledWith(expect.objectContaining({ body: expect.stringContaining('The price went from 10 to 12.') as unknown }));
+  });
+
+  it('on its first check names no last one', async () => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'w-2', title: 'Price', source: 'watch', schedule_cron: undefined, watch_config: JSON.stringify({ url: URL, interval_minutes: 60 }) });
+    const tm = makeTaskManager([task]);
+    const loop = new WorkerLoop(makeEngine(tm, watchSession(() => true, 'unused')), makeRouter(), 60_000);
+    const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
+    const { restore } = quietStderr();
+    try {
+      mockFetchPinned.mockResolvedValueOnce(new Response('<p>price 12</p>', { status: 200 }));
+      await fire(task);
+    } finally {
+      restore();
+    }
+    const said = String(notRunCalls(tm)[0]![1]);
+    expect(said).toContain(EN.notRunWatchFirst);
+    expect(said).not.toContain(EN.notRunWatchNext);
   });
 });
 

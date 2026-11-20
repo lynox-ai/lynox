@@ -16,6 +16,7 @@ import { currentWorkerRunStart } from './worker-run-start.js';
 import { WORKFLOW_STOPPED_ERROR } from '../orchestrator/workflow-stop.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
 import { setPlanPauseForTests } from './plan-pause.js';
+import { configurePersistentBudget, resetPersistentBudget } from './session-budget.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 
@@ -447,22 +448,48 @@ describe('the webhook drain', () => {
     await settled(t, id, 'done');
   });
 
+  /** Recorded spend at the daily cap, so the refusal is a cap really reached. */
+  const capReached = (): void => {
+    configurePersistentBudget({ costProvider: { getCostByDay: () => [{ day: new Date().toISOString().slice(0, 10), cost_usd: 100, run_count: 1 }] }, dailyCapUSD: 100 });
+  };
+  const notRunPushes = (): number => notify.mock.calls.filter((c) => String((c[0] as { title: string }).title).includes('Tickets did not run')).length;
+
   it('leaves an event the budget refused received, and runs it once the budget admits it', async () => {
     budget.refuse = true;
+    capReached();
+    try {
+      const t = sharedTrigger();
+      const id = deliver(t);
+      await loop.tick();
+      await loop.tick();
+      expect(runner.run).not.toHaveBeenCalled();
+      expect(eventOf(t, id).state).toBe('received');
+      expect(lease(t)).toBeNull();
+      // The owner hears of it once, not at every tick, and the trigger records that it did not run.
+      expect(notRunPushes()).toBe(1);
+      expect(tm.getTrigger(t)!.last_run_status).toBe('not_run');
+      budget.refuse = false;
+      resetPersistentBudget();
+      await loop.tick();
+      await settled(t, id, 'done');
+    } finally {
+      resetPersistentBudget();
+    }
+  });
+
+  it('says nothing of a run that did not start when only a lost run\'s report waits', async () => {
     const t = sharedTrigger();
     const id = deliver(t);
-    await loop.tick();
-    await loop.tick();
-    expect(runner.run).not.toHaveBeenCalled();
-    expect(eventOf(t, id).state).toBe('received');
-    expect(lease(t)).toBeNull();
-    // The owner hears of it once, not at every tick, and the trigger records that it did not run.
-    const notRun = notify.mock.calls.filter((c) => String((c[0] as { title: string }).title).includes('Tickets did not run'));
-    expect(notRun).toHaveLength(1);
-    expect(tm.getTrigger(t)!.last_run_status).toBe('not_run');
-    budget.refuse = false;
-    await loop.tick();
-    await settled(t, id, 'done');
+    expect(ledger.begin(id, 'attempt-of-a-lost-process')).toBe(true);
+    budget.refuse = true;
+    capReached();
+    try {
+      await loop.tick();
+    } finally {
+      resetPersistentBudget();
+    }
+    expect(notRunPushes()).toBe(0);
+    expect(tm.getTrigger(t)!.last_run_status ?? null).not.toBe('not_run');
   });
 
   // The admission is checked before the lease. A refusal of the trigger's next event while its
@@ -479,7 +506,9 @@ describe('the webhook drain', () => {
       runner.run.mockImplementationOnce(async () => {
         second = deliver(t);
         budget.refuse = true;
+        capReached();
         await other.tick();
+        resetPersistentBudget();
         return new Promise((resolve) => { finish = resolve; });
       });
       await loop.tick();

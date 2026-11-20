@@ -249,6 +249,12 @@ export interface WorkerNotices {
   readonly notRunWaits: string;
   readonly notRunSkipped: string;
   readonly notRunWatchNext: string;
+  /** A watch's first check, which has no last one to compare against. */
+  readonly notRunWatchFirst: string;
+  /** A one-shot due again later; `when` as {@link resetWhen} says it. */
+  notRunRetryAt(when: string): string;
+  /** A run started by hand: its schedule stays as it was, and the owner starts it again. */
+  readonly notRunByHand: string;
   /** When the cap opens again: today, tomorrow or on a date, each at a time with its zone. */
   resetToday(time: string): string;
   resetTomorrow(time: string): string;
@@ -350,6 +356,9 @@ const EN: WorkerNotices = Object.freeze({
   notRunWaits: 'It stays due and runs once it can start.',
   notRunSkipped: 'This time is skipped; the next one runs as scheduled.',
   notRunWatchNext: 'The next check runs as scheduled and reports what changed since the last one.',
+  notRunWatchFirst: 'The first check runs at the next time as scheduled.',
+  notRunRetryAt: (when: string) => `It tries again ${when}.`,
+  notRunByHand: 'Its schedule stays as it was. Start it again by hand once it can start.',
   resetToday: (time: string) => `today at ${time}`,
   resetTomorrow: (time: string) => `tomorrow at ${time}`,
   resetOn: (date: string, time: string) => `on ${date} at ${time}`,
@@ -486,6 +495,10 @@ const DE: WorkerNotices = Object.freeze({
   notRunWaits: 'Er bleibt fällig und läuft, sobald er starten kann.',
   notRunSkipped: 'Dieser Termin entfällt; der nächste läuft wie geplant.',
   notRunWatchNext: 'Die nächste Prüfung läuft wie geplant und meldet, was sich seit der letzten geändert hat.',
+  notRunWatchFirst: 'Die erste Prüfung läuft wie geplant zum nächsten Termin.',
+  // "Neuer Versuch ab dem 1. Juli": the slot follows "ab", as in `capReached`.
+  notRunRetryAt: (when: string) => `Neuer Versuch ab ${when}.`,
+  notRunByHand: 'Sein Zeitplan bleibt, wie er war. Starte ihn von Hand neu, sobald er starten kann.',
   resetToday: (time: string) => `heute um ${time}`,
   resetTomorrow: (time: string) => `morgen um ${time}`,
   // "ab dem 1. Dezember", not "ab am": the slot follows "ab".
