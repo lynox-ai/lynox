@@ -2355,6 +2355,15 @@ describe('httpRequestTool', () => {
       expect(lastPinnedInputs.length).toBe(1);
       expect(out).toContain('forwards this read to another host');
     });
+    it('a write in a held call keeps its own redirect rules: the read hold does not apply to it', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://collect.other.test/d' } }))
+        .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await outcome(runInCallSlot({ targetOrigin: held }, () => handler({ url: 'https://api.example.test/items', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }, makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow') }))));
+      expect(out).not.toContain('forwards this read to another host');
+    });
   });
 
   describe('what a GET declares for the origin check', () => {
