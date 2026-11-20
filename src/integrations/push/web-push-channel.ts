@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import webPush from 'web-push';
 import Database from 'better-sqlite3';
 import { scrubFreedPages, zeroDeletedContent } from '../../core/sqlite-constants.js';
+import { processErrorText } from '../../core/error-egress.js';
 import type {
   ChannelOutcome,
   NotificationChannel,
@@ -385,9 +386,9 @@ export class WebPushNotificationChannel implements NotificationChannel {
             staleEndpoints.push(sub.endpoint);
           } else {
             failed++;
-            const detail = err instanceof Error ? err.message : String(err);
+            // The push service's answer can quote what it was sent.
             process.stderr.write(
-              `[web-push] failed for ${sub.endpoint.slice(0, 50)}…: ${detail}\n`,
+              `[web-push] failed for ${sub.endpoint.slice(0, 50)}…: ${processErrorText(err)}\n`,
             );
           }
         }

@@ -5,7 +5,9 @@
  * through `errorText` fails here, so none is added silently.
  *
  * The census is by FORM, not by data flow: it sees the shapes listed in `rawText` and nothing
- * else, and only in calls `sinkKind` names; a shape not listed there passes. And it counts per file: one raw sink removed and another added in the same file passes. The existing sites are frozen per file with their count, NOT judged safe one by one:
+ * else, and only in calls `sinkKind` names; a shape not listed there passes. A printed name counts
+ * when its declaration, as the name resolves, holds such a shape (`const msg = err.message`); a
+ * name declared from another name, or assigned later, is not followed. And it counts per file: one raw sink removed and another added in the same file passes. The existing sites are frozen per file with their count, NOT judged safe one by one:
  * most write internal state errors (SQLite, init, the file system) on paths that carry no
  * provider answer; the ones judged by hand are named in `JUDGED` (whole files) and
  * `JUDGED_SINKS` (single sinks). Neither exempts anything: the counts still hold, and a judgement
@@ -20,10 +22,19 @@ const SRC = join(import.meta.dirname, '..');
 const ERRISH = /^(err|e|error|reason|cause|ex|exc|[a-z]+(Err|Error))$/;
 const BODYISH = /^(body|bodyText|errText|errBody|responseText|respText|responseBody)$/;
 
+/**
+ * Calls that write their arguments to the log without being `console` or `process.stderr.write`:
+ * a logger handed in (`deps.log`, `this.log`, `inputs.log`, `notes.warn`), one kept on the object
+ * (`this.warn`), one named `log`/`warn`/`logger.*`. They format their arguments as a console call
+ * does, so they are read as one.
+ */
+const LOGGER_CALLEE = /^((this\.)?(deps|inputs|notes|opts|options|logger)\.)?(log|warn|error)$|^this\.(log|warn)$|^(this\.)?logger\.(error|warn|info|debug|log)$/;
+
 function sinkKind(call: ts.CallExpression): 'stderr' | 'console' | null {
   const callee = call.expression.getText();
   if (callee === 'process.stderr.write') return 'stderr';
   if (/^console\.(error|warn|log|info|debug)$/.test(callee)) return 'console';
+  if (LOGGER_CALLEE.test(callee) && call.arguments.length > 0) return 'console';
   return null;
 }
 
@@ -56,8 +67,44 @@ function errish(node: ts.Expression): boolean {
   return false;
 }
 
+/**
+ * The value a printed name was declared with, as TypeScript resolves the name: the nearest
+ * enclosing block, case clause or file that declares it with `const`/`let`/`var`. A parameter of
+ * an enclosing function with that name hides any outer declaration and is no alias. Null when no
+ * declaration in reach has an initializer.
+ */
+function declaredValue(id: ts.Identifier): ts.Expression | null {
+  for (let p: ts.Node | undefined = id.parent; p !== undefined; p = p.parent) {
+    if (ts.isFunctionLike(p) && p.parameters.some((q) => ts.isIdentifier(q.name) && q.name.text === id.text)) return null;
+    if (ts.isBlock(p) || ts.isSourceFile(p) || ts.isModuleBlock(p) || ts.isCaseClause(p) || ts.isDefaultClause(p)) {
+      for (const st of p.statements) {
+        if (!ts.isVariableStatement(st)) continue;
+        for (const d of st.declarationList.declarations) {
+          if (ts.isIdentifier(d.name) && d.name.text === id.text) return d.initializer ?? null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * A name the sink prints that is not error-like itself but was declared with a raw form: the
+ * alias form, one step deep (`const msg = err.message`, later `${msg}`). The value it was given
+ * is read with the same rules, without following a further alias. Only a declaration counts: a
+ * later assignment (`msg = err.message`) is not followed.
+ */
+function aliasHit(node: ts.Expression, kind: 'stderr' | 'console', follow: boolean): string | null {
+  const n = unwrap(node);
+  if (!follow || !ts.isIdentifier(n) || ERRISH.test(n.text)) return null;
+  const init = declaredValue(n);
+  if (init === null) return null;
+  const hit = rawText(init, kind, true, false);
+  return hit === null ? null : `${n.text} = ${hit}`;
+}
+
 /** The first raw-error form in `node`, or null. `errorText(...)` subtrees are the sanctioned form. */
-function rawText(node: ts.Node, kind: 'stderr' | 'console', topLevelArg: boolean): string | null {
+function rawText(node: ts.Node, kind: 'stderr' | 'console', topLevelArg: boolean, follow = false): string | null {
   if (ts.isCallExpression(node) && /^(errorText|reducedErrorText|processErrorText)$/.test(node.expression.getText())) {
     // `errorText(err, false)` is the full text under another name.
     if (node.expression.getText() === 'errorText' && node.arguments[1]?.kind === ts.SyntaxKind.FalseKeyword) return node.getText();
@@ -74,9 +121,11 @@ function rawText(node: ts.Node, kind: 'stderr' | 'console', topLevelArg: boolean
   if (ts.isCallExpression(node) && node.expression.getText() === 'JSON.stringify' && node.arguments[0] && errish(node.arguments[0])) return node.getText();
   // `${err}`, and the same text kept in a property first: `${f.error}`, `${result.reason}`.
   if (ts.isTemplateSpan(node) && errish(node.expression)) return `\${${node.expression.getText()}}`;
+  if (ts.isTemplateSpan(node)) { const hit = aliasHit(node.expression, kind, follow); if (hit !== null) return hit; }
   if (ts.isIdentifier(node) && BODYISH.test(node.text)) return node.text;
   // A console call formats a whole error object: message and stack, also inside an object literal.
   if (kind === 'console' && topLevelArg && ts.isExpression(node) && errish(node)) return node.getText();
+  if (kind === 'console' && topLevelArg && ts.isExpression(node)) { const hit = aliasHit(node, kind, follow); if (hit !== null) return hit; }
   const literal = kind === 'console' && topLevelArg && ts.isExpression(node) ? unwrap(node) : null;
   if (literal && ts.isObjectLiteralExpression(literal)) {
     for (const p of literal.properties) {
@@ -85,7 +134,7 @@ function rawText(node: ts.Node, kind: 'stderr' | 'console', topLevelArg: boolean
     }
   }
   let hit: string | null = null;
-  node.forEachChild((child) => { hit ??= rawText(child, kind, false); });
+  node.forEachChild((child) => { hit ??= rawText(child, kind, false, follow); });
   return hit;
 }
 
@@ -100,7 +149,7 @@ function rawSinks(fileName: string, text: string): RawSink[] {
       const kind = sinkKind(node);
       if (kind) {
         for (const arg of node.arguments) {
-          const hit = rawText(arg, kind, true);
+          const hit = rawText(arg, kind, true, true);
           if (hit) { out.push({ line: sf.getLineAndCharacterOfPosition(node.getStart()).line + 1, form: hit, call: node.getText() }); break; }
         }
       }
@@ -134,7 +183,7 @@ function sourceFiles(dir: string): string[] {
  *   (`imap-smtp.ts`, `SMTP send failed: …`), Graph only a status and a checked code. That is the
  *   provider's answer to a send, not a store read; it carries the escalation's text only if the
  *   server echoes it back.
- * - core/config.ts: a schema issue about the local config file.
+ * - core/config.ts: a schema issue about the local config file (the `Invalid config` line).
  * - core/mistral-health-check.ts: the answer to the boot-time GET of the model list, which
  *   sends no run data.
  */
@@ -182,6 +231,7 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'prune of ${dir} failed', count: 1, why: 'fs errno on the env-configured sink dir and lynox-named capture files' },
   ],
   'core/run-history.ts': [
+    { marker: 'History database corrupted', count: 1, why: 'the open and integrity check of history.db: SQLite names the file state, pages or index entries, never a row value' },
     { marker: 'verb-graph mirror write failed', count: 1, why: 'the task mirror upsert and the assignee subject it may create: SQLite, no values in the message' },
   ],
   'core/retrieval-engine.ts': [
@@ -192,6 +242,7 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'profile seed failed', count: 1, why: 'the block read and the seed INSERT: SQLite' },
   ],
   'core/managed-hook.ts': [
+    { marker: 'Managed usage report error', count: 1, why: 'the fetch of the control plane usage endpoint: a network errno; the body sent is lynox counts' },
     { marker: 'Managed usage DROP', count: 1, why: 'reason is one of four lynox literals; the rest are counts' },
   ],
   'core/knowledge-store.ts': [
@@ -222,10 +273,12 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'Import transaction failed', count: 1, why: 'the atomic upsert of the parsed rows: SQLite, bound values never quoted' },
   ],
   'scripts/subject-sweep.ts': [
+    { marker: '[subject-sweep] thread-anchor read failed', count: 1, why: 'an operator CLI; a SQLite read of the thread anchors with bound values' },
     { marker: '[subject-sweep] ROLLBACK-MERGE refused', count: 1, why: 'an operator CLI; the reason is lynox text with ids, or the error of the local SQLite statements and ledger-file writes that reverse a subject merge (subject-merge-runner.ts), all with bound values; no provider call' },
     { marker: '[subject-sweep] MERGE refused', count: 1, why: 'the same, for the merge itself; it also runs JSON.parse over a table\'s stored schema, whose error quotes column names and types, not row data' },
   ],
   'core/engine.ts': [
+    { marker: '[engine] LLM client init failed', count: 1, why: 'the SDK client constructors run offline; their errors are lynox or SDK text about the provider setup' },
     { marker: 'could not get its source columns and refuses writes until a restart migrates it', count: 1, why: 'the SQLite text of a failed table-info read or ALTER TABLE ADD COLUMN on the store: it names the table, column or constraint, never a row value; the table name in it is the one the same line already prints' },
     { marker: '[escalation] recording the delivery failed', count: 1, why: 'a SQLite UPDATE binding a fixed delivery summary' },
     { marker: '[escalation] a hook failed on the delivery', count: 1, why: 'the engine own hook posts a fixed body and swallows its fetch; an embedder hook is its own code' },
@@ -259,6 +312,7 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
     { marker: 'wire snapshot prune failed', count: 1, why: 'a DELETE by capture time' },
   ],
   'server/http-api.ts': [
+    { marker: 'push notifications unavailable', count: 1, why: 'the push channel constructor: fs on the data dir, the VAPID key read whose parse is guarded, the SQLite open' },
     { marker: 'are stored, but what this engine learned about them could not be recorded', count: 1, why: 'saved.reason is a refusal api-store builds from profile ids, vault names, hosts and file names; no error text enters it' },
     { marker: 'mandate end not recorded', count: 1, why: 'an INSERT with bound values; the plan-pause listener reports through processErrorText' },
     { marker: 'withdrawing the questions of deleted thread', count: 1, why: 'an UPDATE by thread id' },
@@ -288,6 +342,31 @@ const JUDGED_SINKS: Record<string, { marker: string; count: number; why: string 
   'integrations/microsoft/microsoft-auth.ts': [
     { marker: 'Microsoft token-change hook failed', count: 1, why: 'reason is a MicrosoftTokenChangeReason literal; the error itself goes through processErrorText' },
   ],
+  'core/cp-trail.ts': [
+    { marker: 'row not written and not kept (request', count: 1, why: 'the audit row INSERT into history.db: SQLite with bound values, or the lynox literal for a missing audit log' },
+    { marker: 'kept in memory until a later row can be', count: 1, why: 'the same INSERT, for a row that is kept' },
+  ],
+  'core/engine-db.ts': [
+    { marker: 'Engine database corrupted', count: 1, why: 'the open and integrity check of engine.db: SQLite names the file state, pages or index entries, never a row value' },
+  ],
+  'core/escalation.ts': [
+    { marker: '[escalation] recording the delivery failed', count: 1, why: 'the notify never rejects; what throws is the delivery reporter, a SQLite UPDATE binding a fixed delivery summary' },
+  ],
+  'core/speak/mistral-voxtral-tts.ts': [
+    { marker: '[voxtral-tts]', count: 1, why: 'the provider body is in the line only while the process holds no exact connection (isErrorTextReducedForProcess)' },
+  ],
+  'egress-proxy/server.ts': [
+    { marker: 'deny cred=', count: 1, why: 'reason is a DenialReason literal; the detail is the address picker\'s lynox text' },
+  ],
+  'integrations/inbox/bootstrap.ts': [
+    { marker: 'RunHistory bridge failed', count: 2, why: 'the run insert and update of the classifier\'s usage: SQLite with bound values' },
+  ],
+  'integrations/mail/send-core.ts': [
+    { marker: 'recordSentMail failed', count: 1, why: 'the sent-mail INSERT into the state db: SQLite with bound values' },
+  ],
+  'shell-sidecar/exec-daemon.ts': [
+    { marker: 'QUARANTINE ', count: 1, why: 'release.ts text in lynox literals (uid, counts, residue grouped by directory) or the errno of a readdir of the fixed calls and queue dirs; the as-uid run never rejects' },
+  ],
 };
 
 /** The judgements whose marker does not match exactly `count` raw sinks of their file. */
@@ -312,31 +391,38 @@ it('names a judgement whose sink moved away or multiplied', () => {
 /** Raw sinks per file as of this change. A rise fails (a new sink); a drop asks to lower it here. */
 const FROZEN: Record<string, number> = {
   'core/api-store.ts': 6,
-  'core/config.ts': 1,
+  'core/config.ts': 2,
+  'core/cp-trail.ts': 2,
   'core/crm.ts': 1,
+  'core/engine-db.ts': 1,
   'core/engine-init.ts': 1,
-  'core/engine.ts': 31,
+  'core/engine.ts': 32,
+  'core/escalation.ts': 1,
   'core/knowledge-layer.ts': 8,
   'core/knowledge-store.ts': 2,
   'core/llm-wire-rules.ts': 1,
-  'core/managed-hook.ts': 1,
+  'core/managed-hook.ts': 2,
   'core/memory-graph-store.ts': 1,
   'core/mistral-health-check.ts': 1,
   'core/onboarding-promotion.ts': 2,
   'core/retrieval-engine.ts': 1,
-  'core/run-history.ts': 1,
+  'core/run-history.ts': 2,
+  'core/speak/mistral-voxtral-tts.ts': 1,
   'core/transcribe/mistral-voxtral.ts': 2,
   'core/wire-capture.ts': 2,
   'core/worker-loop.ts': 11,
   'core/workflow-questions.ts': 4,
   'egress-proxy/main.ts': 1,
+  'egress-proxy/server.ts': 1,
   'integrations/google/google-auth.ts': 1,
+  'integrations/inbox/bootstrap.ts': 2,
+  'integrations/mail/escalation-mail-channel.ts': 2,
+  'integrations/mail/send-core.ts': 1,
   'integrations/microsoft/microsoft-auth.ts': 1,
-  'integrations/mail/escalation-mail-channel.ts': 1,
   'integrations/push/web-push-channel.ts': 1,
-  'server/http-api.ts': 7,
-  'scripts/subject-sweep.ts': 2,
-  'shell-sidecar/exec-daemon.ts': 1,
+  'scripts/subject-sweep.ts': 3,
+  'server/http-api.ts': 8,
+  'shell-sidecar/exec-daemon.ts': 2,
   'tools/builtin/http.ts': 1,
 };
 
@@ -409,6 +495,26 @@ it('sees every raw form it claims to see, and lets errorText through', () => {
     'process.stderr.write(`ok ${processErrorText(err)}\\n`);',
   ].join('\n');
   expect(census('probe.ts', src).map((l) => l.split(':')[1]?.split(' ')[0])).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26']);
+});
+
+it('sees a name declared with a raw form, and a logger handed in', () => {
+  const src = [
+    'const msg = err.message;',
+    'process.stderr.write(`a ${msg}\\n`);',
+    'deps.log(`b ${err.message}`);',
+    'this.warn(`c ${String(err)}`);',
+    'function f(msg: string) { process.stderr.write(`ok ${msg}\\n`); }',
+    "{ const note = 'fixed'; process.stderr.write(`ok ${note}\\n`); }",
+    "const detail = err instanceof Error ? err.message : String(err); console.warn('d', detail);",
+    'const again = msg; process.stderr.write(`ok ${again}\\n`);',
+    "const later = msg; console.warn('ok', later);",
+    'log.record(`ok ${err.message}`);',
+    'inputs.log(`ok ${errorText(err, true)}`);',
+    'notes.warn(`e ${getErrorMessage(err)}`);',
+    "function g() { const msg = 'x'; process.stderr.write(`ok ${msg}\\n`); }",
+    'this.log(`f ${(msg)}`);',
+  ].join('\n');
+  expect(census('probe.ts', src).map((l) => l.split(':')[1]?.split(' ')[0])).toEqual(['2', '3', '4', '7', '12', '14']);
 });
 
 // Parses every source file under src/ with the TypeScript compiler. Under coverage in CI this test
