@@ -1029,16 +1029,16 @@ describe('a way on is said once on the run page (U-374)', () => {
 
 	it('every halt it treats as naming the owner does so in each of its mandate sentences, before and after a first write, in both languages', () => {
 		for (const key of ['consentOutdated', 'productWriteNotAsked', 'shopifyWriteOff']) {
-			// The base sentence and its variant after a first write (`_more_mandate`), wherever one exists.
-			const keys = Object.keys(de).filter((k) => k === `bulk.halt.${key}_mandate` || k === `bulk.halt.${key}_more_mandate`);
-			expect(keys, key).toContain(`bulk.halt.${key}_mandate`);
+			// The base sentence, and its variant after a first write wherever the owner has one: a
+			// mandate is shown `_more_mandate` for it (`bulk-runs.ts`), so that variant must exist too.
+			const keys = [`bulk.halt.${key}_mandate`, ...(de[`bulk.halt.${key}_more`] === undefined ? [] : [`bulk.halt.${key}_more_mandate`])];
 			for (const k of keys) {
 				expect(de[k], k).toMatch(/Inhaber/);
 				expect(en[k], k).toMatch(/owner/);
 			}
 		}
-		// The variants after a first write a mandate reads too.
-		expect(Object.keys(de).filter((k) => /^bulk\.halt\.(consentOutdated|productWriteNotAsked|shopifyWriteOff)_more_mandate$/.test(k)).length).toBeGreaterThan(0);
+		// At least one of them has a variant after a first write, so the second sentence is pinned.
+		expect(['consentOutdated', 'productWriteNotAsked', 'shopifyWriteOff'].filter((key) => de[`bulk.halt.${key}_more`] !== undefined).length).toBeGreaterThan(0);
 	});
 
 	it('finds the hosts with a hyphen in a halt sentence, and leaves the rest of the sentence as text', () => {

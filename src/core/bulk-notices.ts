@@ -66,13 +66,15 @@ export interface BulkNotices {
    * A Shopify product run halted because its connection did not ask for, or was not granted,
    * `write_products` (`shopifyProductWriteAccess`), the way on included; the apply step's result.
    * The run history, which a mandate reads too, keeps only its fact (`bulkHaltForReaders`); the
-   * way stands on the run page. `nothingYet` as above.
+   * way stands on the run page. A run whose planning grant is not known keeps it whole
+   * (`recordAndNotify`). `nothingYet` as above.
    */
   productWriteNotAsked(access: 'not_asked' | 'not_granted', nothingYet: boolean): string;
   /**
    * The same halt as it is pushed: lead and cause without the way, which the run page shows, so
    * that with the counts it fits the web-push cut (`REMINDER_BODY_MAX`). It goes to the owner's
-   * devices; the mandate that planned the run reads the owner in place of the pointer.
+   * devices; the mandate that planned the run reads the owner in place of the pointer. A run whose
+   * planning grant is not known pushes it to every device, as before (`recordAndNotify`).
    */
   productWriteNotAskedPush(access: 'not_asked' | 'not_granted', nothingYet: boolean): string;
   /** A run another loop took over (B9). */
