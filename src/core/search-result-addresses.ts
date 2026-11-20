@@ -6,7 +6,8 @@
 // the model. That is not "nothing from the conversation": which results come back depends on the
 // query, so a search lets the model choose among every page a host has indexed, and a host that
 // indexed pages for that purpose learns which one was chosen. What such a read can carry out is that
-// choice among pages indexed before, not text the model writes into the address.
+// choice, and any part or transformation of the query the listed address happens to hold: the filter
+// below drops only an address that holds the whole query (as written, fetched or decoded).
 //
 // Only the result entries count, never text: a page or a result list can repeat what the model
 // sent (a search query, a read's own address), and an address that came back that way would be the

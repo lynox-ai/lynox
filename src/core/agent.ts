@@ -5193,7 +5193,7 @@ export class Agent implements IAgent {
       targets = tool.sendTargets !== undefined ? tool.sendTargets(tc.input) : null;
       if (targets === null && whenLatched !== undefined) {
         // An address a search in this conversation listed as a result was chosen by the provider,
-        // not written by the model, so it carries nothing from the conversation.
+        // not written by the model (what it can still carry: `SearchResultAddresses`).
         asRead = true;
         const address = tool.readAddress?.(tc.input) ?? null;
         if (address !== null && this.searchResultAddresses.has(address)) return {};
