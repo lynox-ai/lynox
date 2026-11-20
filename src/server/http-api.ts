@@ -158,6 +158,7 @@ import { mintBrokerStartToken } from '../integrations/google/broker-start-mint.j
 import { isBrokerMode, hasControlPlaneInstanceId } from '../integrations/google/broker-mode.js';
 import { hostPolicyOf } from '../core/tool-context.js';
 import { InputRequiredError, isInputRequired } from '../core/input-required.js';
+import { EXPORT_RELATIONS_PER_ENTITY } from '../core/knowledge-layer.js';
 import { parseAcknowledged, removeBackupsOutside, removeOwedEntries, sameUnknownSet, scanDataDir, type WorkspaceErasure, type WorkspaceWalk } from '../core/data-dir-erase.js';
 import type { WorkspaceAccess } from '../core/workspace-access.js';
 import type { StagedArchive, WorkspaceManifest } from '../core/workspace-export.js';
@@ -14248,16 +14249,19 @@ export class LynoxHTTPApi {
         exportData['memory_scopes_may_be_incomplete'] = all.mayBeIncomplete;
       }
 
-      // Knowledge graph (entities + relations)
+      // Knowledge graph (entities + relations). `knowledge_graph_may_be_incomplete` says the block
+      // was not read in full: the layer threw, it is missing although it was not switched off (its
+      // database or the embedding model failed to open at boot), or a read cap was reached.
       const kg = engine.getKnowledgeLayer();
       if (kg) {
+        const fallbacksBefore = kg.readFallbackCount;
         try {
           // Page through ALL entities. A single { limit: 200 } call silently
           // dropped every entity past the first 200 from a user's GDPR export
           // (an Art. 15/20 completeness gap, on the legacy KG today and the
           // subject-graph once the flag flips). The page cap bounds a runaway
-          // loop. (The per-entity relation cap below stays at 200 newest — a
-          // documented bounded loss; the global relation scan is S2-main.)
+          // loop. The per-entity relation read is capped too (newest first); an entity
+          // that returns the cap may hold more, and the block is then marked.
           const PAGE = 200;
           const MAX_PAGES = 1000;
           const entities: EntityRecord[] = [];
@@ -14277,8 +14281,10 @@ export class LynoxHTTPApi {
           // source memory was deleted are still stored, so they are exported too,
           // marked `sourceDeleted` and explained in `relationships_note`.
           const relationSet = new Map<string, unknown>();
+          let relationCapHit = false;
           for (const entity of entities) {
             const relations = await kg.getEntityRelationsForExport(entity.id);
+            if (relations.length >= EXPORT_RELATIONS_PER_ENTITY) relationCapHit = true;
             for (const rel of relations) {
               // The source is part of the key: the legacy store keeps one row per
               // assertion, and a deleted one must not stand in for a live one.
@@ -14295,11 +14301,25 @@ export class LynoxHTTPApi {
               + 'The relation is no longer shown or used, and is removed at the next cleanup.',
             stats,
           };
+          // A subject-graph read that fell back to the legacy store answered from another
+          // store; what it returned may be partial.
+          // The same holds when the subject graph is on but its store never opened.
+          const fellBack = kg.readFallbackCount !== fallbacksBefore || kg.subjectGraphUnavailable;
+          exportData['knowledge_graph_may_be_incomplete'] = truncated || relationCapHit || fellBack;
         } catch {
           exportData['knowledge_graph'] = { entities: [], relationships: [] };
+          exportData['knowledge_graph_may_be_incomplete'] = true;
+          process.stderr.write('⚠ /api/export: knowledge graph read failed — exported empty and marked incomplete\n');
         }
-      } else {
+      } else if (engine.getUserConfig().knowledge_graph_enabled !== false) {
         exportData['knowledge_graph'] = { entities: [], relationships: [] };
+        exportData['knowledge_graph_may_be_incomplete'] = true;
+        process.stderr.write('⚠ /api/export: knowledge graph unavailable — exported empty and marked incomplete\n');
+      } else {
+        // Switched off: no layer was opened, so nothing failed. What it held while it was on
+        // stays in its database and is not in this block.
+        exportData['knowledge_graph'] = { entities: [], relationships: [] };
+        exportData['knowledge_graph_may_be_incomplete'] = false;
       }
 
       // Durable knowledge store (entries + the always-loaded memory blocks).
@@ -14449,12 +14469,26 @@ export class LynoxHTTPApi {
         process.stderr.write('⚠ /api/export: DataStore unavailable — datastore exported empty and marked incomplete\n');
       }
 
-      // Secret names (never values — GDPR export must not leak secrets)
+      // Secret names, never values: a downloaded file holding credentials would be the leak
+      // itself. `secrets_note` says so to whoever reads the export. The names are the store's and
+      // the vault file's: code that holds the vault writes rows past the store's map after boot.
+      // There is no switch for the store or its vault, so either missing failed at boot (a vault
+      // key that does not open the file, for one), and the list is then marked.
       const secretStore = engine.getSecretStore();
+      exportData['secrets_note'] = 'Names of the stored secrets only. Their values are not exported.';
       if (secretStore) {
-        exportData['secrets'] = secretStore.listNames();
+        let vaultNames: string[] = [];
+        let vaultRead = secretStore.hasVault;
+        try { vaultNames = secretStore.listVaultNames(); } catch { vaultRead = false; }
+        exportData['secrets'] = [...new Set([...secretStore.listNames(), ...vaultNames])].sort();
+        exportData['secrets_may_be_incomplete'] = !vaultRead;
+        if (!vaultRead) {
+          process.stderr.write('⚠ /api/export: secret vault unavailable — secret names marked incomplete\n');
+        }
       } else {
         exportData['secrets'] = [];
+        exportData['secrets_may_be_incomplete'] = true;
+        process.stderr.write('⚠ /api/export: secret store unavailable — secret names exported empty and marked incomplete\n');
       }
 
       // Config (redacted)

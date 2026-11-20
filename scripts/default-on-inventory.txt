@@ -8,3 +8,4 @@ feature:api-setup-v2
 feature:flat-file-memory
 feature:plugins
 http_html_extract
+knowledge_graph_enabled
