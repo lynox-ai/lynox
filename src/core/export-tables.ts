@@ -165,7 +165,8 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       memories: { about: 'remembered facts in the knowledge graph' },
       cooccurrences: { about: 'which ones appear together' },
       supersedes: { about: 'which fact replaced an older one' },
-      // Fingerprints, not text: carried so a remembered line keeps its mark where it is imported.
+      // Fingerprints, not text: part of the person's memory data. A move carries this table with
+      // the whole file (the migration bundle), not through this list.
       untrusted_lines: { about: 'which remembered notes came from a source that was not checked (as fingerprints, without their text)' },
     },
     name: {
