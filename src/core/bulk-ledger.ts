@@ -231,10 +231,16 @@ export interface BulkRunStatus {
   failed: number;
   /** The most different targets the approval lets the write verb reach; null before an approval. */
   maxTargets: number | null;
-  /** Targets that failed in at least one pass, whether or not a later pass wrote them. Null for a
+  /** Targets that failed in at least one pass, whether or not a later pass wrote them, apart from
+   *  one whose send is unclear now ({@link heads} `unclear`), which the page names as unclear. A
+   *  target that failed for real in an earlier pass and stays unclear after a later one is left
+   *  out too: the state does not keep which of its sends were refused. Null for a
    *  run approved before this was recorded: its earlier passes are not known, so a page says
    *  "at least {@link failed}" instead. */
   failedOnce: number | null;
+  /** Targets this pass recorded as failed whose send is unclear now ({@link heads} `unclear`):
+   *  a timeout counts toward the failure-rate halt, and the halt names it apart. */
+  passUnclear: number;
   /** How many targets may fail in one pass without the failure-rate halt; the next failure
    *  halts it ({@link bulkFailureLimit}). */
   failureLimit: number;
@@ -451,6 +457,9 @@ const WRITE_FAILED_SQL = `(change != 'invalid' AND applied_at IS NULL AND error 
 // target (written, failed, halted, released) gives the claim back; only a loop that died keeps
 // it, and that target counts once a later pass has read it.
 const UNCLEAR_SQL = "(unknown_sends > 0 AND applied_at IS NULL AND undone_at IS NULL AND claimed_at IS NULL AND (error IS NULL OR error != 'conflict'))";
+// {@link UNCLEAR_SQL} on a run: one bound parameter, 1 for an external run. Every count that names
+// or leaves out a run's unclear targets reads this one, so they move together.
+const RUN_UNCLEAR_SQL = `(? = 1 AND ${UNCLEAR_SQL})`;
 
 /** The classes {@link BulkRunStatus.heads} splits a run's targets into, in rank order: a target
  *  counts in the first one it belongs to. Taken out, left out by the plan (`invalid`); unchanged;
@@ -472,7 +481,7 @@ const BULK_HEAD_SQL = `CASE
   WHEN applied_at IS NOT NULL THEN 'written'
   WHEN undone_at IS NOT NULL THEN 'settled'
   WHEN error = 'conflict' THEN 'conflict'
-  WHEN ? = 1 AND ${UNCLEAR_SQL} THEN 'unclear'
+  WHEN ${RUN_UNCLEAR_SQL} THEN 'unclear'
   WHEN ${WRITE_FAILED_SQL} THEN 'failed'
   ELSE 'open' END`;
 
@@ -1792,12 +1801,18 @@ export class BulkLedger {
     // (`recordUnrecordedSettled`); they were never counted as applied, so not as undone either.
     // An external undo takes such a target back for real, and it counts.
     ).get(row.atomic, row.id) as { conflicts: number | null; failed: number | null; undone: number | null; foundAsPlanned: number | null; unread: number | null; shopAddedMarkup: number | null; hostRewrote: number | null; sentUnknown: number | null };
+    const external = externalHostOf(row.target_system) === null ? 0 : 1;
     const pass = db.prepare(
-      `SELECT COUNT(*) AS writing, SUM(failed_once IS NULL) AS unknown, SUM(failed_once = 1) AS failedOnce,
+      // Failed once, apart from a target whose send is unclear now: the timeout that left it so
+      // was recorded as a failure, and the page names it as unclear, not as failed. In this pass
+      // and unclear: unclear, with a failure this pass recorded (a resume clears the error), so
+      // the halt can say how many of the pass's failures were sends without a clear answer.
+      `SELECT COUNT(*) AS writing, SUM(failed_once IS NULL) AS unknown, SUM(failed_once = 1 AND NOT ${RUN_UNCLEAR_SQL}) AS failedOnce,
+         SUM(${RUN_UNCLEAR_SQL} AND ${WRITE_FAILED_SQL}) AS passUnclear,
          SUM(${RESUMABLE_SQL}) AS open, SUM(${RESUMABLE_SQL} AND write_sent = 1) AS openSent,
          SUM(${RESUMABLE_SQL} AND unknown_sends > 0) AS openUnclear
        FROM bulk_targets WHERE run_id = ? AND ${WRITING_SQL}`,
-    ).get(row.id) as { writing: number; unknown: number | null; failedOnce: number | null; open: number | null; openSent: number | null; openUnclear: number | null };
+    ).get(external, external, row.id) as { writing: number; unknown: number | null; failedOnce: number | null; passUnclear: number | null; open: number | null; openSent: number | null; openUnclear: number | null };
     const open = pass.open ?? 0;
     const openSent = pass.openSent ?? 0;
     const cap = bulkWriteCap(row.max_targets, this.probeHolds(row));
@@ -1819,6 +1834,7 @@ export class BulkLedger {
       heads: this.headsOf(row),
       maxTargets: row.max_targets,
       failedOnce: (pass.unknown ?? 0) > 0 ? null : pass.failedOnce ?? 0,
+      passUnclear: pass.passUnclear ?? 0,
       failureLimit: bulkFailureLimit(pass.writing), resumeOpen: open, resumeTries, resumeSends,
       kind: row.kind, atomic: row.atomic === 1, sourceRunId: row.source_run_id,
       writeMethod: externalHostOf(row.target_system) === null ? null : parseContractMethods(row.contract_json),

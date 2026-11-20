@@ -528,24 +528,24 @@ describe('going on from a run that halted', () => {
 			expect(en[`bulk.restart.${key}`], key).toBeTruthy();
 		}
 		for (const key of [...AS_IS, 'costCap', ...NONE]) {
-			expect(bulkHaltText(at(key), true, DE)?.cause, key).not.toMatch(/^bulk\./);
-			expect(bulkHaltText(at(key), false, EN)?.cause, key).not.toMatch(/^bulk\./);
+			expect(bulkHaltText(at(key), true, DE, true)?.cause, key).not.toMatch(/^bulk\./);
+			expect(bulkHaltText(at(key), false, EN, true)?.cause, key).not.toMatch(/^bulk\./);
 		}
 	});
 
 	it('words the halt with the run\'s provider, host and amounts', () => {
 		// The way on: continue, and if it halts again right away the host is not reachable yet (ux U-105).
 		const tryLater = 'Du kannst fortsetzen. Hält der Lauf gleich wieder an, ist shop.example.invalid noch nicht erreichbar; versuch es später noch einmal.';
-		expect(bulkHaltText(at('unavailable'), true, DE)).toEqual({ cause: 'Der Lauf kam nicht weiter. shop.example.invalid hat nicht geantwortet, oder in lynox ist ein Fehler aufgetreten.', before: tryLater });
+		expect(bulkHaltText(at('unavailable'), true, DE, true)).toEqual({ cause: 'Der Lauf kam nicht weiter. shop.example.invalid hat nicht geantwortet, oder in lynox ist ein Fehler aufgetreten.', before: tryLater });
 		// A judged run may also have stopped on its model, and its way on names both (ux U-105 M1).
-		expect(bulkHaltText(at('unavailable', judged), true, DE)).toEqual({
+		expect(bulkHaltText(at('unavailable', judged), true, DE, true)).toEqual({
 			cause: 'Der Lauf kam nicht weiter. shop.example.invalid oder das KI-Modell hat nicht geantwortet, oder in lynox ist ein Fehler aufgetreten.',
 			before: 'Du kannst fortsetzen. Hält der Lauf gleich wieder an, antworten shop.example.invalid oder das KI-Modell noch nicht; versuch es später noch einmal.',
 		});
-		expect(bulkHaltText(at('unavailable', judged), true, EN)?.before)
+		expect(bulkHaltText(at('unavailable', judged), true, EN, true)?.before)
 			.toBe('You can continue. If the run halts again right away, shop.example.invalid or the AI model is not answering yet; try again later.');
-		expect(bulkHaltText(at('unrecorded'), true, EN)).toEqual({ cause: 'lynox could not record a read in this instance\'s log. So lynox stopped reading at that point.', before: null });
-		expect(bulkHaltText(at('costCap', { costUsd: 0.0034, costCapUsd: 2 }), true, DE)?.cause)
+		expect(bulkHaltText(at('unrecorded'), true, EN, true)).toEqual({ cause: 'lynox could not record a read in this instance\'s log. So lynox stopped reading at that point.', before: null });
+		expect(bulkHaltText(at('costCap', { costUsd: 0.0034, costCapUsd: 2 }), true, DE, true)?.cause)
 			.toBe('Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: 2.00 USD, angerechnet sind 0.0034 USD.');
 		// What counts toward the limit, not what was paid: a judge call without an answer counts at
 		// its worst case (ux U-174).
@@ -555,17 +555,17 @@ describe('going on from a run that halted', () => {
 			'Der Lauf hat die KI-Kostengrenze erreicht, die der Inhaber beim Start gesetzt hat: {cap} USD, angerechnet sind {spent} USD.',
 			'The run reached the AI cost limit the owner set at its start: {cap} USD, with {spent} USD counted toward it.',
 		]);
-		expect(bulkHaltText(at('blocked'), true, DE)).toEqual({
+		expect(bulkHaltText(at('blocked'), true, DE, true)).toEqual({
 			cause: 'Deine Instanz darf shop.example.invalid nicht erreichen.',
 			before: 'Soll lynox shop.example.invalid erreichen, schreib an support@lynox.ai. Danach kannst du fortsetzen.',
 		});
-		expect(bulkHaltText(at('consecutiveFailures', { targetSystem: 'data_store' }), true, DE)?.cause)
+		expect(bulkHaltText(at('consecutiveFailures', { targetSystem: 'data_store' }), true, DE, true)?.cause)
 			.toBe('Dreimal hintereinander liess sich ein Ziel oder eine Seite der Liste nicht lesen.');
 	});
 
 	it('keeps the engine\'s reason on a run past its plan, which halts on the same keys for writes', () => {
 		for (const phase of ['writing', 'aborted', 'approved'] as const) {
-			expect(bulkHaltText(at('consecutiveFailures', { phase }), true, DE), phase).toBeNull();
+			expect(bulkHaltText(at('consecutiveFailures', { phase }), true, DE, true), phase).toBeNull();
 		}
 	});
 
@@ -581,11 +581,11 @@ describe('going on from a run that halted', () => {
 	});
 
 	it('names the next step by where the instance runs, managed when unknown', () => {
-		expect(bulkHaltText(at('blocked'), false, DE)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du fortsetzen.');
-		expect(bulkHaltText(at('blocked'), null, DE)?.before).toBe(bulkHaltText(at('blocked'), true, DE)?.before);
-		expect(bulkHaltText(at('spendLimit'), true, DE)?.before).not.toMatch(/Limits/);
-		expect(bulkHaltText(at('spendLimit'), false, DE)?.before).toMatch(/oder wenn du es unter Einstellungen → Limits anhebst\.$/);
-		expect(bulkHaltText(at('spendLimit'), false, EN)?.before).toMatch(/or once you raise it under Settings → Limits\.$/);
+		expect(bulkHaltText(at('blocked'), false, DE, true)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du fortsetzen.');
+		expect(bulkHaltText(at('blocked'), null, DE, true)?.before).toBe(bulkHaltText(at('blocked'), true, DE, true)?.before);
+		expect(bulkHaltText(at('spendLimit'), true, DE, true)?.before).not.toMatch(/Limits/);
+		expect(bulkHaltText(at('spendLimit'), false, DE, true)?.before).toMatch(/oder wenn du es unter Einstellungen → Limits anhebst\.$/);
+		expect(bulkHaltText(at('spendLimit'), false, EN, true)?.before).toMatch(/or once you raise it under Settings → Limits\.$/);
 	});
 
 	it('promises going on only where the page offers to go on (ux U-105 L1)', () => {
@@ -598,24 +598,24 @@ describe('going on from a run that halted', () => {
 		];
 		for (const [key, managed, o] of cases) {
 			// With a button: the step stands.
-			expect([key, managed, bulkRestartKind(at(key, o)), bulkHaltText(at(key, o), managed, DE)?.before]).toEqual([key, managed, expect.stringMatching(/^(read|judge)$/), expect.any(String)]);
+			expect([key, managed, bulkRestartKind(at(key, o)), bulkHaltText(at(key, o), managed, DE, true)?.before]).toEqual([key, managed, expect.stringMatching(/^(read|judge)$/), expect.any(String)]);
 			// Without one: a judged run with no model, or one on its own key, gets no promise.
 			for (const without of [{ ...o, ...noModel }, { ...o, ...ownKey }]) {
-				expect([key, managed, without.judgeOwnKey === true, bulkHaltText(at(key, without), managed, DE)?.before]).toEqual([key, managed, without.judgeOwnKey === true, null]);
+				expect([key, managed, without.judgeOwnKey === true, bulkHaltText(at(key, without), managed, DE, true)?.before]).toEqual([key, managed, without.judgeOwnKey === true, null]);
 			}
 		}
 		// A step that does not promise going on still stands without a button.
-		expect(bulkHaltText(at('credential', noModel), true, DE)?.before).toContain('Einstellungen → APIs');
+		expect(bulkHaltText(at('credential', noModel), true, DE, true)?.before).toContain('Einstellungen → APIs');
 	});
 
 	it('gives a refused access the step to reconnect it, and a missing model the start\'s own sentence', () => {
 		const reconnect = 'Öffne Einstellungen → APIs und tippe beim Profil für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden.';
-		expect(bulkHaltText(at('credential'), true, DE)?.before).toBe(`${reconnect} Gibt es dort kein Profil, bitte lynox im Chat, den Zugang einzurichten.`);
+		expect(bulkHaltText(at('credential'), true, DE, true)?.before).toBe(`${reconnect} Gibt es dort kein Profil, bitte lynox im Chat, den Zugang einzurichten.`);
 		// A refused access has a stored one, so no "no profile" clause, and the run continues after (ux U-105).
-		expect(bulkHaltText(at('unauthorized'), true, DE)?.before).toBe(`${reconnect} Danach kannst du fortsetzen.`);
-		expect(bulkHaltText(at('judgeModel'), true, DE)).toEqual({ cause: de['bulk.start.no_judge_model'], before: null });
-		expect(bulkHaltText(at('expired'), true, DE)).toBeNull();
-		expect(bulkHaltText(at('awaitingStart'), true, DE)).toBeNull();
+		expect(bulkHaltText(at('unauthorized'), true, DE, true)?.before).toBe(`${reconnect} Danach kannst du fortsetzen.`);
+		expect(bulkHaltText(at('judgeModel'), true, DE, true)).toEqual({ cause: de['bulk.start.no_judge_model'], before: null });
+		expect(bulkHaltText(at('expired'), true, DE, true)).toBeNull();
+		expect(bulkHaltText(at('awaitingStart'), true, DE, true)).toBeNull();
 	});
 
 	it('shows a small spend, not nothing', () => {
@@ -664,7 +664,7 @@ describe('going on from a run that halted', () => {
 		// Nor does it write on under a maximum above one, or under none at all.
 		expect(bulkResumeKind(w('unavailable', { probeConfirmed: false, maxTargets: 2 }))).toBeNull();
 		expect(bulkResumeKind(w('unavailable', { probeConfirmed: false, maxTargets: null }))).toBeNull();
-		expect(bulkResumeText(w('failureRate', { probeConfirmed: false }), true, DE)).toBeNull();
+		expect(bulkResumeText(w('failureRate', { probeConfirmed: false }), true, DE, true)).toBeNull();
 		// Under a maximum of one it writes on; with a probe, at any maximum.
 		expect(bulkResumeKind(w('unavailable', { probeConfirmed: false, maxTargets: 1 }))).toBe('write');
 		expect(bulkResumeKind(w('unavailable', { probeConfirmed: false, maxTargets: null, changes: { update: 1, create: 0, delete: 0, unchanged: 4, invalid: 0 } }))).toBe('write');
@@ -678,20 +678,20 @@ describe('going on from a run that halted', () => {
 		const unclear = { probeConfirmed: false, maxTargets: 1, applied: 0, sentUnknown: 1, resumeOpen: 3, resumeTries: 1, resumeSends: 0 };
 		expect(bulkResumeKind(w('failureRate', unclear))).toBe('check');
 		const one = 'Nachprüfen liest bei shop.example.invalid nach, ob die Änderung da ist; geschickt wird dabei nichts.';
-		const text = bulkResumeText(w('failureRate', unclear), true, DE);
+		const text = bulkResumeText(w('failureRate', unclear), true, DE, true);
 		// Checking sends nothing: no "before you continue writing", nothing said to be tried.
 		expect([text?.check, text?.before, text?.kept, text?.soFar, text?.allows]).toEqual([one, null, null, null, null]);
 		// After a check that did not find it, the run is at its maximum and still only checks.
 		expect(bulkResumeKind(w('maxTargets', unclear))).toBe('check');
-		expect(bulkResumeText(w('maxTargets', unclear), true, DE)?.check).toBe(one);
-		expect(bulkResumeText(w('unavailable', { ...unclear, sentUnknown: 3 }), true, EN)?.check).toBe('Check again looks in shop.example.invalid whether the changes are there; nothing is sent.');
+		expect(bulkResumeText(w('maxTargets', unclear), true, DE, true)?.check).toBe(one);
+		expect(bulkResumeText(w('unavailable', { ...unclear, sentUnknown: 3 }), true, EN, true)?.check).toBe('Check again looks in shop.example.invalid whether the changes are there; nothing is sent.');
 		// A halt's own step still comes first.
 		const reconnect = 'Öffne Einstellungen → APIs und tippe beim Profil für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden. Gibt es dort kein Profil, bitte lynox im Chat, den Zugang einzurichten.';
-		expect(bulkResumeText(w('credential', unclear), true, DE)?.before).toBe(reconnect);
+		expect(bulkResumeText(w('credential', unclear), true, DE, true)?.before).toBe(reconnect);
 		// Anything left to send: writing on, as before.
 		expect(bulkResumeKind(w('failureRate', { ...unclear, resumeSends: 1 }))).toBe('write');
 		expect(bulkResumeKind(w('failureRate', { ...unclear, sentUnknown: 0 }))).toBe('write');
-		expect(bulkResumeText(w('failureRate', { ...unclear, resumeSends: 1 }), true, DE)?.check).toBeNull();
+		expect(bulkResumeText(w('failureRate', { ...unclear, resumeSends: 1 }), true, DE, true)?.check).toBeNull();
 		// With a probe, a run at its maximum is offered a higher one, which checks them too.
 		expect(bulkResumeKind(w('maxTargets', { ...unclear, probeConfirmed: true }))).toBe('max');
 		expect(bulkResumeKind(w('unavailable', { ...unclear, probeConfirmed: true, maxTargets: 10 }))).toBe('check');
@@ -719,10 +719,10 @@ describe('going on from a run that halted', () => {
 		// The check found a third value: a conflict, never sent again, and no longer unclear.
 		const changed = { probeConfirmed: false, maxTargets: 1, applied: 0, sentUnknown: 0, conflicts: 1, resumeOpen: 1, resumeTries: 1, resumeSends: 0 };
 		expect(bulkResumeKind(w('failureRate', changed))).toBe('nothing');
-		const text = bulkResumeText(w('blocked', changed), true, DE);
+		const text = bulkResumeText(w('blocked', changed), true, DE, true);
 		expect([text?.check, text?.before, text?.kept, text?.soFar, text?.allows]).toEqual([
 			'Dieser Lauf schickt nichts mehr. Für Ziele, die sich bei shop.example.invalid inzwischen geändert hatten, bitte lynox im Chat, einen neuen Lauf zu planen; er liest den aktuellen Stand.', null, null, null, null]);
-		expect(bulkResumeText(w('failureRate', changed), true, EN)?.check).toBe('This run sends nothing more. For targets that had changed in shop.example.invalid in the meantime, ask lynox in a chat to plan a new run; it reads the current state.');
+		expect(bulkResumeText(w('failureRate', changed), true, EN, true)?.check).toBe('This run sends nothing more. For targets that had changed in shop.example.invalid in the meantime, ask lynox in a chat to plan a new run; it reads the current state.');
 		// No support link without the halt's own sentence.
 		expect(bulkSupportMailto({ ...w('blocked', changed), id: 'run-7', listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false }, true, DE)).toBeNull();
 		// Each part of the rule holds it: something left to send, no conflict, nothing left at all,
@@ -755,60 +755,60 @@ describe('going on from a run that halted', () => {
 	it('has every sentence in both languages for every halt it writes on from or refuses', () => {
 		for (const k of [...WRITE_ON, 'maxTargets', 'checksum', 'contract']) {
 			for (const [lang, i] of [['de', DE], ['en', EN]] as const) {
-				const said = bulkResumeText(w(k), true, i)!;
+				const said = bulkResumeText(w(k), true, i, true)!;
 				for (const [part, text] of Object.entries(said)) if (text !== null) expect(text, `${lang} ${k} ${part}`).not.toMatch(/bulk\.|\{/);
 			}
 		}
 	});
 
 	it('words why a write run halted, and what to do first', () => {
-		expect(bulkResumeText(w('failureRate'), true, DE)).toMatchObject({
+		expect(bulkResumeText(w('failureRate'), true, DE, true)).toMatchObject({
 			cause: 'In diesem Durchgang liessen sich mehr als 50 Ziele nicht schreiben.',
 			before: 'Prüfe unten die Ziele mit Fehler, bevor du weiterschreibst.',
 		});
 		// Under twenty targets the halt comes at the first failure.
-		expect(bulkResumeText(w('failureRate', { failureLimit: 0 }), true, EN)?.cause).toBe('In this pass, a target could not be written.');
-		expect(bulkResumeText(w('consecutiveFailures'), true, DE)?.cause).toBe('Dreimal hintereinander liess sich ein Ziel nicht schreiben.');
-		expect(bulkResumeText(w('unrecorded'), true, DE)?.cause).toBe('lynox konnte einen Zugriff auf shop.example.invalid nicht im Protokoll dieser Instanz festhalten. Deshalb hat lynox an dieser Stelle nicht weitergeschrieben.');
-		expect(bulkResumeText(w('maxTargets', { maxTargets: 40 }), true, EN)?.cause).toBe('The run reached the approved maximum: 40 targets.');
-		expect(bulkResumeText(w('maxTargets', { maxTargets: 1 }), true, DE)?.cause).toBe('Der Lauf hat die freigegebene Höchstzahl erreicht: ein Ziel.');
-		expect(bulkResumeText(w('unauthorized'), true, EN)?.before).toBe('Open Settings → APIs and tap the chat icon next to the profile for shop.example.invalid to reconnect the access. Then you can continue.');
-		expect(bulkResumeText(w('credential'), true, EN)?.before).toBe('Open Settings → APIs and tap the chat icon next to the profile for shop.example.invalid to reconnect the access. If there is no profile, ask lynox in the chat to set up the access.');
-		expect(bulkResumeText(w('unavailable'), true, EN)?.before).toBe('You can continue. If the run halts again right away, shop.example.invalid is not reachable yet; try again later.');
-		expect(bulkResumeText(w('blocked'), false, DE)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du fortsetzen.');
-		expect(bulkResumeText(w('blocked'), null, DE)?.before).toBe(bulkHaltText(at('blocked'), true, DE)?.before);
-		expect(bulkResumeText(w('timeBudget'), true, DE)).toMatchObject({ before: null, soFar: null, allows: null });
+		expect(bulkResumeText(w('failureRate', { failureLimit: 0 }), true, EN, true)?.cause).toBe('In this pass, a target could not be written.');
+		expect(bulkResumeText(w('consecutiveFailures'), true, DE, true)?.cause).toBe('Dreimal hintereinander liess sich ein Ziel nicht schreiben.');
+		expect(bulkResumeText(w('unrecorded'), true, DE, true)?.cause).toBe('lynox konnte einen Zugriff auf shop.example.invalid nicht im Protokoll dieser Instanz festhalten. Deshalb hat lynox an dieser Stelle nicht weitergeschrieben.');
+		expect(bulkResumeText(w('maxTargets', { maxTargets: 40 }), true, EN, true)?.cause).toBe('The run reached the approved maximum: 40 targets.');
+		expect(bulkResumeText(w('maxTargets', { maxTargets: 1 }), true, DE, true)?.cause).toBe('Der Lauf hat die freigegebene Höchstzahl erreicht: ein Ziel.');
+		expect(bulkResumeText(w('unauthorized'), true, EN, true)?.before).toBe('Open Settings → APIs and tap the chat icon next to the profile for shop.example.invalid to reconnect the access. Then you can continue.');
+		expect(bulkResumeText(w('credential'), true, EN, true)?.before).toBe('Open Settings → APIs and tap the chat icon next to the profile for shop.example.invalid to reconnect the access. If there is no profile, ask lynox in the chat to set up the access.');
+		expect(bulkResumeText(w('unavailable'), true, EN, true)?.before).toBe('You can continue. If the run halts again right away, shop.example.invalid is not reachable yet; try again later.');
+		expect(bulkResumeText(w('blocked'), false, DE, true)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du fortsetzen.');
+		expect(bulkResumeText(w('blocked'), null, DE, true)?.before).toBe(bulkHaltText(at('blocked'), true, DE, true)?.before);
+		expect(bulkResumeText(w('timeBudget'), true, DE, true)).toMatchObject({ before: null, soFar: null, allows: null });
 		// Shopify's own switch: who turns it back on depends on who runs the instance.
-		expect(bulkResumeText(w('shopifyWriteOff'), true, DE)).toMatchObject({
+		expect(bulkResumeText(w('shopifyWriteOff'), true, DE, true)).toMatchObject({
 			cause: 'Bulk-Änderungen an Shopify-Shops sind auf dieser Instanz nicht freigeschaltet. Der Lauf ist angehalten. Sobald sie wieder freigeschaltet sind, kannst du ihn hier fortsetzen.',
 			before: 'Soll lynox in Shopify-Shops schreiben, schreib an support@lynox.ai. Danach kannst du fortsetzen.',
 		});
-		expect(bulkResumeText(w('shopifyWriteOff'), false, EN)?.before).toBe('You enable them in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`).');
+		expect(bulkResumeText(w('shopifyWriteOff'), false, EN, true)?.before).toBe('You enable them in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`).');
 		// No way on past a changed run: no promise of what writing on keeps.
-		expect(bulkResumeText(w('checksum'), true, DE)).toEqual({ cause: 'Der Lauf hat sich seit deiner Freigabe geändert.', before: null, check: null, kept: null, soFar: null, allows: null });
+		expect(bulkResumeText(w('checksum'), true, DE, true)).toEqual({ cause: 'Der Lauf hat sich seit deiner Freigabe geändert.', before: null, check: null, kept: null, soFar: null, allows: null });
 	});
 
 	it('says all the rest is tried only when the maximum does not stop the pass first', () => {
-		expect(bulkResumeText(w('timeBudget'), true, DE)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht alle übrigen Ziele noch einmal. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
-		expect(bulkResumeText(w('timeBudget', { resumeTries: 4 }), true, DE)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht die übrigen Ziele bis zur freigegebenen Höchstzahl. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
+		expect(bulkResumeText(w('timeBudget'), true, DE, true)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht alle übrigen Ziele noch einmal. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
+		expect(bulkResumeText(w('timeBudget', { resumeTries: 4 }), true, DE, true)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht die übrigen Ziele bis zur freigegebenen Höchstzahl. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
 		// At its maximum the run writes on under the new one the owner types.
-		expect(bulkResumeText(w('maxTargets'), true, EN)?.kept).toBe('What is already written stays. lynox tries the remaining targets up to the approved maximum. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
+		expect(bulkResumeText(w('maxTargets'), true, EN, true)?.kept).toBe('What is already written stays. lynox tries the remaining targets up to the approved maximum. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
 		// With no target confirmed as written, nothing is said to stay — also where targets failed.
-		expect(bulkResumeText(w('expired', { phase: 'approved', applied: 0, failed: 0, failedOnce: 0 }), true, DE)?.kept).toBe('Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt alle Ziele. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
-		expect(bulkResumeText(w('consecutiveFailures', { applied: 0, failed: 3, failedOnce: 3 }), true, EN)?.kept).toBe('No target is confirmed as written yet. lynox now tries all targets. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
-		expect(bulkResumeText(w('unavailable', { applied: 0, resumeTries: 4 }), true, DE)?.kept).toBe('Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt die Ziele bis zur freigegebenen Höchstzahl. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
-		expect(bulkResumeText(w('unavailable', { applied: 0, resumeTries: 4 }), true, EN)?.kept).toBe('No target is confirmed as written yet. lynox now tries the targets up to the approved maximum. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
+		expect(bulkResumeText(w('expired', { phase: 'approved', applied: 0, failed: 0, failedOnce: 0 }), true, DE, true)?.kept).toBe('Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt alle Ziele. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
+		expect(bulkResumeText(w('consecutiveFailures', { applied: 0, failed: 3, failedOnce: 3 }), true, EN, true)?.kept).toBe('No target is confirmed as written yet. lynox now tries all targets. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
+		expect(bulkResumeText(w('unavailable', { applied: 0, resumeTries: 4 }), true, DE, true)?.kept).toBe('Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt die Ziele bis zur freigegebenen Höchstzahl. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
+		expect(bulkResumeText(w('unavailable', { applied: 0, resumeTries: 4 }), true, EN, true)?.kept).toBe('No target is confirmed as written yet. lynox now tries the targets up to the approved maximum. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
 	});
 
 	it('counts the targets failed so far, as at least the ones failed now on a run from before the count', () => {
-		expect(bulkResumeText(w('failureRate'), true, DE)?.soFar).toBe('70 Ziele sind bisher mindestens einmal gescheitert.');
-		expect(bulkResumeText(w('consecutiveFailures', { failedOnce: 1 }), true, EN)?.soFar).toBe('1 target has failed at least once so far.');
-		expect(bulkResumeText(w('failureRate', { failedOnce: null }), true, DE)?.soFar).toBe('Bisher sind mindestens 51 Ziele ohne Bestätigung.');
-		expect(bulkResumeText(w('failureRate', { failedOnce: null, failed: 1 }), true, EN)?.soFar).toBe('So far, at least 1 target has no confirmation.');
+		expect(bulkResumeText(w('failureRate'), true, DE, true)?.soFar).toBe('70 Ziele sind bisher mindestens einmal gescheitert.');
+		expect(bulkResumeText(w('consecutiveFailures', { failedOnce: 1 }), true, EN, true)?.soFar).toBe('1 target has failed at least once so far.');
+		expect(bulkResumeText(w('failureRate', { failedOnce: null }), true, DE, true)?.soFar).toBe('Bisher sind mindestens 51 Ziele ohne Bestätigung.');
+		expect(bulkResumeText(w('failureRate', { failedOnce: null, failed: 1 }), true, EN, true)?.soFar).toBe('So far, at least 1 target has no confirmation.');
 	});
 
 	it('says what writing on lets fail, by the limit against the open targets', () => {
-		const allows = (o: Partial<BulkRunDetailData>, i: BulkI18n) => bulkResumeText(w('failureRate', o), true, i)?.allows;
+		const allows = (o: Partial<BulkRunDetailData>, i: BulkI18n) => bulkResumeText(w('failureRate', o), true, i, true)?.allows;
 		// The limit below the open targets.
 		expect(allows({}, DE)).toBe('Mit dem Weiterschreiben dürfen noch einmal bis zu 50 Ziele scheitern, oder drei in Folge, bevor der Lauf wieder anhält.');
 		expect(allows({}, EN)).toBe('If you continue, up to 50 more targets may fail, or three in a row, before the run stops again.');
@@ -827,7 +827,7 @@ describe('going on from a run that halted', () => {
 		expect(allows({ resumeTries: 1 }, DE)).toBe(allows({}, DE));
 		expect(allows({ resumeOpen: 0, resumeTries: 0 }, DE)).toBeNull();
 		// Only on a halt on failures.
-		expect(bulkResumeText(w('timeBudget'), true, DE)?.allows).toBeNull();
+		expect(bulkResumeText(w('timeBudget'), true, DE, true)?.allows).toBeNull();
 	});
 
 	it('takes a maximum above the current one and at most every target, as a whole number', () => {
@@ -918,11 +918,11 @@ describe('going on from a run that halted', () => {
 		expect(link).toBe(`mailto:support@lynox.ai?subject=${encodeURIComponent('lynox: Massenlauf run-7 auf shop.example.invalid angehalten')}`);
 		expect(bulkSupportMailto(any('shopifyWriteOff'), null, EN)).toBe(`mailto:support@lynox.ai?subject=${encodeURIComponent('lynox: bulk run run-7 on shop.example.invalid halted')}`);
 		// The sentence it stands next to names support, and keeps the address readable.
-		expect(bulkHaltText(planned, true, DE)?.before).toContain('support@lynox.ai');
-		expect(bulkResumeText(any('shopifyWriteOff'), true, DE)?.before).toContain('support@lynox.ai');
+		expect(bulkHaltText(planned, true, DE, true)?.before).toContain('support@lynox.ai');
+		expect(bulkResumeText(any('shopifyWriteOff'), true, DE, true)?.before).toContain('support@lynox.ai');
 		// Self-hosted: the sentence sends the owner to their configuration, not to support.
 		expect(bulkSupportMailto(planned, false, DE)).toBeNull();
-		expect(bulkHaltText(planned, false, DE)?.before).not.toContain('support@');
+		expect(bulkHaltText(planned, false, DE, true)?.before).not.toContain('support@');
 		// A halt whose sentence does not name support has no link.
 		for (const haltKey of ['unavailable', 'spendLimit', 'credential', 'probeRequired']) {
 			expect(bulkSupportMailto(any(haltKey, { phase: 'planned' }), true, DE), haltKey).toBeNull();
@@ -933,9 +933,9 @@ describe('going on from a run that halted', () => {
 		// A judged run that cannot be judged on gets no restart, so neither sentence nor link; with its model it gets both.
 		const judgedPlanned = any('blocked', { phase: 'planned', judge: judged.judge, judgeServedBy: judged.judgeServedBy });
 		expect(bulkSupportMailto(judgedPlanned, true, DE)).toBe(link);
-		expect(bulkHaltText(judgedPlanned, true, DE)?.before).toContain('support@lynox.ai');
+		expect(bulkHaltText(judgedPlanned, true, DE, true)?.before).toContain('support@lynox.ai');
 		for (const without of [{ ...judgedPlanned, judgeServedBy: null }, { ...judgedPlanned, judgeOwnKey: true }]) {
-			expect([without.judgeOwnKey, bulkSupportMailto(without, true, DE), bulkHaltText(without, true, DE)?.before]).toEqual([without.judgeOwnKey, null, null]);
+			expect([without.judgeOwnKey, bulkSupportMailto(without, true, DE), bulkHaltText(without, true, DE, true)?.before]).toEqual([without.judgeOwnKey, null, null]);
 		}
 		expect(bulkSupportMailto(any('blocked', { phase: 'aborted' }), true, DE)).toBeNull();
 	});
@@ -1056,18 +1056,18 @@ describe('an owner\'s stop is called a stop, not a halt', () => {
 	// „Angehalten: Der Lauf wurde von Hand gestoppt.“
 	const HERE = fileURLToPath(new URL('.', import.meta.url));
 	it('the owner\'s stop gets the stop words, every other halt keeps the halt words', () => {
-		expect(bulkHaltHeadKey({ haltKey: 'stoppedByOwner' })).toBe('bulk.head.stopped');
-		expect(bulkHaltSuffixKey({ haltKey: 'stoppedByOwner' })).toBe('bulk.stopped_suffix');
+		expect(bulkHaltHeadKey({ haltKey: 'stoppedByOwner', phase: 'writing' })).toBe('bulk.head.stopped');
+		expect(bulkHaltSuffixKey({ haltKey: 'stoppedByOwner', phase: 'writing' })).toBe('bulk.stopped_suffix');
 		for (const haltKey of ['maxTargets', 'costCap', 'consecutiveFailures', null]) {
-			expect(bulkHaltHeadKey({ haltKey })).toBe('bulk.head.halted');
-			expect(bulkHaltSuffixKey({ haltKey })).toBe('bulk.halted_suffix');
+			expect(bulkHaltHeadKey({ haltKey, phase: 'writing' })).toBe('bulk.head.halted');
+			expect(bulkHaltSuffixKey({ haltKey, phase: 'writing' })).toBe('bulk.halted_suffix');
 		}
 		// the key is the engine's own name for the owner's stop
 		expect(Object.keys(BULK_HALT_REASONS)).toContain('stoppedByOwner');
 	});
 	it('both views ask the helpers, not a fixed key', () => {
 		expect(readFileSync(`${HERE}BulkRunDetail.svelte`, 'utf8')).toContain("{t(bulkHaltHeadKey(run))}");
-		expect(readFileSync(`${HERE}BulkRunsView.svelte`, 'utf8')).toContain("t(bulkHaltSuffixKey(run))");
+		expect(readFileSync(`${HERE}BulkRunsView.svelte`, 'utf8')).toContain("t(bulkHaltSuffixKey(run)!)");
 		const i18n = readFileSync(`${HERE}../i18n.svelte.ts`, 'utf8');
 		expect(i18n).toContain("'bulk.head.stopped': { de: 'Gestoppt', en: 'Stopped' }");
 		expect(i18n).toContain("'bulk.stopped_suffix': { de: '· gestoppt', en: '· stopped' }");
