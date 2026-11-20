@@ -306,8 +306,8 @@ const DE_WORKFLOW_STATUS: Readonly<Record<string, string>> = Object.freeze({
 });
 
 /** The sentence a check before the run and the content check share for the instance's log. */
-const EN_LOG_NAMES_REASON = 'The instance log names the reason.';
-const DE_LOG_NAMES_REASON = 'Den Grund nennt das Instanz-Protokoll.';
+const EN_LOG_NAMES_REASON = 'The lynox server log names the reason.';
+const DE_LOG_NAMES_REASON = 'Den Grund nennt das lynox-Server-Log.';
 
 const EN: WorkerNotices = Object.freeze({
   consentManyTitle: (count: number) => `⏸ ${String(count)} scheduled actions are waiting for your confirmation`,
@@ -371,7 +371,7 @@ const EN: WorkerNotices = Object.freeze({
   unknownEffect: (effect: string) => `Unknown trigger effect '${effect}' — skipped`,
   resumedRunNotContained: (provisioned: boolean) => provisioned
     ? `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, write to support@lynox.ai.`
-    : `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, the instance log names the cause.`,
+    : `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, the lynox server log names the cause.`,
   watchChanged: (url: string, analysis: string) => `${url} changed.\n\n${analysis}`,
   notRunTitle: (title: string) => `${title} did not run`,
   capReached: (cap: 'daily' | 'monthly', limit: string, spent: string) => cap === 'daily'
@@ -521,7 +521,7 @@ const DE: WorkerNotices = Object.freeze({
   unknownEffect: (effect: string) => `Unbekannte Wirkung „${effect}“ im Auslöser; übersprungen.`,
   resumedRunNotContained: (provisioned: boolean) => provisioned
     ? `${DE_RESUMED_RUN_NOT_CONTAINED} Wiederholt es sich, schreib an support@lynox.ai.`
-    : `${DE_RESUMED_RUN_NOT_CONTAINED} Wiederholt es sich, nennt das Instanz-Protokoll den Grund.`,
+    : `${DE_RESUMED_RUN_NOT_CONTAINED} Wiederholt es sich, nennt das lynox-Server-Log den Grund.`,
   watchChanged: (url: string, analysis: string) => `${url} hat sich geändert.\n\n${analysis}`,
   notRunTitle: (title: string) => `${title} ist nicht gelaufen`,
   capReached: (cap: 'daily' | 'monthly', limit: string, spent: string) => cap === 'daily'

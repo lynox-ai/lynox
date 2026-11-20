@@ -94,7 +94,7 @@ const DE_WORKER: Readonly<Record<string, string>> = {
   planRunUnrecorded: 'Nicht ausgeführt: Dieser Plan handelt für jemanden, dem du Zugang gegeben hast, und sein Start lässt sich gerade nicht im Protokoll der Instanz festhalten.',
   unknownEffect: 'Unbekannte Wirkung „bulk_x“ im Auslöser; übersprungen.',
   resumedManaged: 'Der Chat dieses Laufs wurde vor deiner Antwort gelöscht; lynox konnte den neuen nicht gleich schützen. Deine Antwort blieb ungenutzt. Starte die Aufgabe neu. Wiederholt es sich, schreib an support@lynox.ai.',
-  resumedSelfHosted: 'Der Chat dieses Laufs wurde vor deiner Antwort gelöscht; lynox konnte den neuen nicht gleich schützen. Deine Antwort blieb ungenutzt. Starte die Aufgabe neu. Wiederholt es sich, nennt das Instanz-Protokoll den Grund.',
+  resumedSelfHosted: 'Der Chat dieses Laufs wurde vor deiner Antwort gelöscht; lynox konnte den neuen nicht gleich schützen. Deine Antwort blieb ungenutzt. Starte die Aufgabe neu. Wiederholt es sich, nennt das lynox-Server-Log den Grund.',
   watchChanged: 'https://a.example/p hat sich geändert.\n\nA',
 };
 /** The German of the rest of the halt reasons (ux Rest-P HR), compared whole. */
@@ -414,9 +414,9 @@ describe('the notice tables', () => {
       b.nothingToJudge, b.noExternalTargets, n.failed(b.writeError)]) {
       expect([body, body.length <= REMINDER_BODY_MAX]).toEqual([body, true]);
     }
-    // A resumed run that could not be contained, in its failure frame: managed, and self-hosted at exactly the cut.
+    // A resumed run that could not be contained, in its failure frame: managed, and self-hosted one under the cut.
     expect(n.failed(n.resumedRunNotContained(true)).length).toBe(230);
-    expect(n.failed(n.resumedRunNotContained(false)).length).toBe(REMINDER_BODY_MAX);
+    expect(n.failed(n.resumedRunNotContained(false)).length).toBe(REMINDER_BODY_MAX - 1);
   });
 });
 
