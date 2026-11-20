@@ -437,7 +437,7 @@ describe('who set an entry up', () => {
     it('names to a mandate another grant\'s mark as another mandate, and a tag without a grant id as some mandate, never by name or address', () => {
       const asBea = mandateNamer({ viewer: 'mandate', mandateId: 'grant-b' }, (id) => ({ 'grant-a': 'Anna A.', 'grant-b': 'Bea B.' } as Record<string, string>)[id] ?? null);
       expect(asBea('grant-a', 'mandate:anna@example.com')).toBe(OTHER_MANDATE);
-      // No grant id: it cannot be told to be hers or another's, even with her own address.
+      // A scope without her tag: a mark with no grant id cannot be told to be hers, even with her address.
       expect(asBea(null, 'mandate:bea@example.com')).toBe(SOME_MANDATE);
       expect(asBea(null, 'mandate:anna@example.com')).toBe(SOME_MANDATE);
       expect(asBea(null, null)).toBe(SOME_MANDATE);
@@ -449,13 +449,33 @@ describe('who set an entry up', () => {
       expect(asOwner('grant-a', 'mandate:anna@example.com')).toBe('Anna A.');
       expect(asOwner(null, 'mandate:anna@example.com')).toBe('anna@example.com');
     });
+
+    it('names to a mandate a mark stamped with its own tag as its own, by its own grant, whichever grant stamped it', () => {
+      const names = { 'grant-a': 'Anna A.', 'grant-b': 'Bea B.', 'grant-b-old': 'Beatrice (old grant)' } as Record<string, string>;
+      const read: string[] = [];
+      const asBea = mandateNamer({ viewer: 'mandate', mandateId: 'grant-b', tag: 'mandate:bea@example.com' }, (id) => { read.push(id); return names[id] ?? null; });
+      // An earlier grant for her address: hers, named as her own grant, never read under the other grant.
+      expect(asBea('grant-b-old', 'mandate:bea@example.com')).toBe('Bea B.');
+      // No grant id but her own tag: hers too.
+      expect(asBea(null, 'mandate:bea@example.com')).toBe('Bea B.');
+      expect(read).toEqual(['grant-b', 'grant-b']);
+      // Another address stays another's, with or without a grant id, never by name or address.
+      expect(asBea('grant-a', 'mandate:anna@example.com')).toBe(OTHER_MANDATE);
+      expect(asBea(null, 'mandate:anna@example.com')).toBe(SOME_MANDATE);
+      expect(asBea(null, null)).toBe(SOME_MANDATE);
+      // Exact tag only: another spelling of her address is not hers here (one rule with the trigger masking).
+      expect(asBea('grant-b-old', 'mandate:Bea@example.com')).toBe(OTHER_MANDATE);
+      expect(asBea('grant-b-old', 'mandate:bea@example.com ')).toBe(OTHER_MANDATE);
+      // Her own grant without a shown name: her address.
+      expect(mandateNamer({ viewer: 'mandate', mandateId: 'grant-b', tag: 'mandate:bea@example.com' }, () => null)('grant-b-old', 'mandate:bea@example.com')).toBe('bea@example.com');
+    });
   });
 });
 
 describe('the scope a principal reads in', () => {
   it('the owner reads everything; a mandate its grant; a mandate without a grant, and the control plane, nothing', () => {
     expect(approvalScopeOf(OWNER_PRINCIPAL)).toEqual({ viewer: 'owner' });
-    expect(approvalScopeOf({ kind: 'mandate', email: 'a@example.com', mandateId: 'grant-a' })).toEqual({ viewer: 'mandate', mandateId: 'grant-a' });
+    expect(approvalScopeOf({ kind: 'mandate', email: 'a@example.com', mandateId: 'grant-a' })).toEqual({ viewer: 'mandate', mandateId: 'grant-a', tag: 'mandate:a@example.com' });
     expect(approvalScopeOf({ kind: 'mandate', email: 'a@example.com' })).toBeNull();
     expect(approvalScopeOf({ kind: 'mandate', email: 'a@example.com', mandateId: '' })).toBeNull();
     expect(approvalScopeOf({ kind: 'cp-admin' })).toBeNull();

@@ -13,13 +13,15 @@
 
 import { originCardMail } from './origin-notices.js';
 import type { ApprovalEntry, ApprovalKind, ApprovalOrigin, ApprovalListScope, ApprovalSource, ApprovalStatus, StoredAddress } from './approval-store.js';
-import { isMandateTag, MANDATE_TAG_PREFIX, unhandledPrincipal, type RequestPrincipal } from './request-principal.js';
+import { isMandateTag, MANDATE_TAG_PREFIX, principalTag, unhandledPrincipal, type RequestPrincipal } from './request-principal.js';
 import { recipientSpread } from '../integrations/mail/send-core.js';
 
 /** Whose list is read: the owner sees every entry, a mandate only the ones filed under its own grant. */
 export type ApprovalScope =
   | { readonly viewer: 'owner' }
-  | { readonly viewer: 'mandate'; readonly mandateId: string };
+  /** `tag` is the mandate's own tag (`principalTag`): a mark stamped with it is the reader's own,
+   *  whichever of its grants stamped it. Absent, only the grant id tells. */
+  | { readonly viewer: 'mandate'; readonly mandateId: string; readonly tag?: string };
 
 /**
  * The scope a principal reads the list in, or null when it reads nothing: a mandate whose login
@@ -30,7 +32,7 @@ export type ApprovalScope =
 export function approvalScopeOf(p: RequestPrincipal): ApprovalScope | null {
   switch (p.kind) {
     case 'owner': return { viewer: 'owner' };
-    case 'mandate': return typeof p.mandateId === 'string' && p.mandateId !== '' ? { viewer: 'mandate', mandateId: p.mandateId } : null;
+    case 'mandate': return typeof p.mandateId === 'string' && p.mandateId !== '' ? { viewer: 'mandate', mandateId: p.mandateId, tag: principalTag(p) } : null;
     case 'cp-admin': return null;
     default: return unhandledPrincipal(p);
   }
@@ -257,8 +259,8 @@ export const UNNAMED_MANDATE = 'unnamed mandate';
 export const OTHER_MANDATE = 'other mandate';
 
 /**
- * How a mark without a grant id is named to a mandate: it cannot be told to be its own or
- * another's (an older row, or an earlier grant for the same address), so it says neither.
+ * How a mark without a grant id and with another tag is named to a mandate: an older row whose
+ * grant cannot be told, so it says neither whose nor that it is another's.
  */
 export const SOME_MANDATE = 'some mandate';
 
@@ -268,13 +270,21 @@ export type DisplayNameOf = (mandateId: string) => string | null;
 /**
  * How a scope names a mandate: by the name its grant was shown under, else by the address in
  * its tag, else {@link UNNAMED_MANDATE}, never by the raw grant id. The owner sees every grant's
- * name. A mandate sees its own grant so, another grant as {@link OTHER_MANDATE}, and a tag
- * without a grant id as {@link SOME_MANDATE}: it cannot be told to be its own or another's.
+ * name. A mandate sees its own so: a mark of its grant, or one stamped with its own tag by an
+ * earlier or later grant for the same address (named as its own grant). Another grant's mark it
+ * sees as {@link OTHER_MANDATE}, and a mark with another tag and no grant id as
+ * {@link SOME_MANDATE}.
  */
 export function mandateNamer(scope: ApprovalScope, displayNameOf: DisplayNameOf): MandateNamer {
-  return (mandateId, tag) => {
-    if (scope.viewer === 'mandate' && mandateId === null) return SOME_MANDATE;
-    if (scope.viewer === 'mandate' && mandateId !== scope.mandateId) return OTHER_MANDATE;
+  return (markId, tag) => {
+    let mandateId = markId;
+    if (scope.viewer === 'mandate' && mandateId !== scope.mandateId) {
+      // Stamped with the reader's own tag, an earlier or later grant's mark is the reader's own, as
+      // `withoutForeignMarks` reads it: named as the reader's own grant, never from the other one.
+      const ownTag = scope.tag !== undefined && tag === scope.tag;
+      if (!ownTag) return mandateId === null ? SOME_MANDATE : OTHER_MANDATE;
+      mandateId = scope.mandateId;
+    }
     const display = mandateId !== null ? displayNameOf(mandateId) : null;
     if (display !== null && display !== '') return display;
     return mandateAddressOf(tag) ?? UNNAMED_MANDATE;
