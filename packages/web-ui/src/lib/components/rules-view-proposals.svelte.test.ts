@@ -672,6 +672,13 @@ describe('RulesView — what a "then" choice says it does', () => {
 		expect(byTestId('rules-then-effect')).not.toBeNull();
 	});
 
+	it('says the same in English, with the zone named as the English inbox names it', async () => {
+		setLocale('en');
+		await render({ viewer: 'owner', rules: [] });
+		await openForm();
+		expect(byTestId('rules-then-effect')?.textContent).toBe('lynox files the mail under “Handled today”. It stays unchanged in your mailbox.');
+	});
+
 	it.each(['archive', 'mark_read'])('shows a stored handled rule with action "%s" as "file as handled"', async (action) => {
 		await render({ viewer: 'owner', rules: [{ ...confirmed, action }] });
 		expect(target.textContent).toContain('→ Als erledigt ablegen');
