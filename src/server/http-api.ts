@@ -14210,8 +14210,12 @@ export class LynoxHTTPApi {
         exportData['contained_unknown_threads'] = threadsWithMessages.filter((t) => t.contained_unknown !== undefined).length;
         exportData['threads'] = threadsWithMessages;
       } else {
+        // The engine opens the thread store at boot whenever it can (its history database
+        // first, then the store on it), so none here means one of those opens failed. The
+        // threads were not read, which is not the same as there being none.
         exportData['threads'] = [];
-        exportData['threads_may_be_incomplete'] = false;
+        exportData['threads_may_be_incomplete'] = true;
+        process.stderr.write('⚠ /api/export: thread store unavailable — threads exported empty and marked incomplete\n');
         exportData['contained_threads'] = 0;
         exportData['contained_unknown_threads'] = 0;
       }
@@ -14340,7 +14344,14 @@ export class LynoxHTTPApi {
         } catch {
           exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
         }
+      } else if (engine.getUserConfig().durable_memory_enabled === true) {
+        // Switched on, yet no store: the engine opens it at boot when the setting is on, so
+        // that open failed (or its database did). Not read, so not known to be empty.
+        exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
+        process.stderr.write('⚠ /api/export: durable knowledge store unavailable — exported empty and marked incomplete\n');
       } else {
+        // Switched off: no store was opened, so nothing is read and nothing failed. Entries
+        // written while it was on stay in engine.db and are not in this block.
         exportData['durable_knowledge'] = EMPTY_KNOWLEDGE;
       }
 
@@ -14396,10 +14407,14 @@ export class LynoxHTTPApi {
         crmWalked.set('contacts', contacts);
         crmWalked.set('deals', deals);
       } else {
+        // The engine always opens the CRM at boot, so no CRM here means that open
+        // failed. The lists are empty because they could not be read, not because the
+        // owner has no contacts or deals, and the copy says so.
         exportData['contacts'] = [];
-        exportData['contacts_may_be_incomplete'] = false;
+        exportData['contacts_may_be_incomplete'] = true;
         exportData['deals'] = [];
-        exportData['deals_may_be_incomplete'] = false;
+        exportData['deals_may_be_incomplete'] = true;
+        process.stderr.write('⚠ /api/export: CRM unavailable — contacts and deals exported empty and marked incomplete\n');
       }
 
       const ds = engine.getDataStore();
@@ -14427,8 +14442,11 @@ export class LynoxHTTPApi {
         exportData['datastore'] = datastoreExport;
         exportData['datastore_may_be_incomplete'] = incomplete.length > 0;
       } else {
+        // Same reason as the CRM above: the DataStore is opened at boot, and a null one
+        // failed to open. An empty block here is unread, not empty.
         exportData['datastore'] = {};
-        exportData['datastore_may_be_incomplete'] = false;
+        exportData['datastore_may_be_incomplete'] = true;
+        process.stderr.write('⚠ /api/export: DataStore unavailable — datastore exported empty and marked incomplete\n');
       }
 
       // Secret names (never values — GDPR export must not leak secrets)
