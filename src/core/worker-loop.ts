@@ -2730,7 +2730,7 @@ export class WorkerLoop {
         // The connection a request carried: the attached profile's id and the grant it held when
         // its credential was read. An empty or non-string grant (a file-loaded profile) is none.
         attach: async (url, headers, method, out) => {
-          const profile = await attachStoredCredential(url, headers, isWriteMethod(method), { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases, exactClearance: toolContext.exactClearance, storeBindingDigest: toolContext.storeBindingDigest, containment: toolContext.containment, vaultNameBindings: toolContext.vaultNameBindings }, { bulkRunId: run.id }, out);
+          const profile = await attachStoredCredential(url, headers, isWriteMethod(method), { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases, exactClearance: toolContext.exactClearance, storeBindingDigest: toolContext.storeBindingDigest, containment: toolContext.containment, vaultNameBindings: toolContext.vaultNameBindings, hostPolicy: toolContext }, { bulkRunId: run.id }, out);
           if (profile === null) return null;
           const grantId: unknown = profile.oauth_grant?.grant_id;
           return { id: profile.id, grantId: typeof grantId === 'string' && grantId !== '' ? grantId : null };

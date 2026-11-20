@@ -329,7 +329,7 @@ describe('no container, or no record, means no request', () => {
 describe('a bulk run\'s request (attachStoredCredential)', () => {
   const attach = async (runId: string, over: Partial<{ containment: Containment | null }> = {}): Promise<{ attached: Awaited<ReturnType<typeof attachStoredCredential>>; pass: unknown }> => {
     const out: { pass?: unknown } = {};
-    const attached = await attachStoredCredential(URL_OK, {}, false, {
+    const attached = await attachStoredCredential(URL_OK, {}, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
       apiStore: ctx.apiStore!,
       secretStore: { resolve: (n: string) => (n === accessTokenKey('shop-acme') ? TOKEN : null) } as never,
       principal: OWNER_PRINCIPAL, mandateEnds: null, secretReleases: null,

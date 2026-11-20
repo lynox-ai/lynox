@@ -36,6 +36,8 @@ import { isOwnerPrincipal, type RequestPrincipal } from './request-principal.js'
 import { newCorrelationId, type AuditEntry } from './audit-log.js';
 import { mintStoreRefreshPass, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from './store-pass.js';
 import type { ToolContext } from './tool-context.js';
+import { resolveGuardedAckHosts } from './tool-context.js';
+import { assertHostPolicy } from './network-guard.js';
 import type { IAgent } from '../types/index.js';
 import { shopifyExchangeSwitchOn } from '../tools/builtin/http.js';
 
@@ -44,7 +46,8 @@ export const STORE_REFRESH_WINDOW_MS = 60 * 1000;
 
 /** What the refresh needs of its caller: the stores the attach holds, and who is asking. */
 export interface StoreRefreshContext {
-  readonly toolContext: Pick<ToolContext, 'apiStore' | 'exactClearance' | 'storeBindingDigest' | 'shellIsolation'> & Partial<Pick<ToolContext, 'auditLog'>>;
+  /** With the instance's network policy: a refresh goes out only where the policy lets a request out. */
+  readonly toolContext: Pick<ToolContext, 'apiStore' | 'exactClearance' | 'storeBindingDigest' | 'shellIsolation' | 'networkPolicy' | 'allowedHosts' | 'allowedWildcards' | 'enforceHttps'> & Partial<Pick<ToolContext, 'auditLog'>>;
   readonly secretStore: NonNullable<IAgent['secretStore']>;
   readonly principal: RequestPrincipal | undefined;
   readonly runId?: string | undefined;
@@ -362,6 +365,14 @@ async function runRefresh(profileId: string, trigger: 'due' | 'unauthorized', ct
   if (plan === undefined) {
     endTrail('failed');
     outcomeLine(profileId, 'not-run', trigger, 'the connection does not qualify for a refresh (binding, refresh token or clearance)');
+    return 'not-run';
+  }
+  // The instance's network policy, checked here as well as inside the exchange: a refresh is a
+  // request out like any other, and a caller that dropped the policy must not send it unchecked.
+  try {
+    assertHostPolicy(plan.endpoint.url, { surface: 'full-control', ackHosts: resolveGuardedAckHosts(ctx.toolContext as ToolContext) }, ctx.toolContext);
+  } catch {
+    outcomeLine(profileId, 'not-run', trigger, 'the instance network policy does not let this request out; nothing was sent');
     return 'not-run';
   }
   const exchanged = await exchangeToken({ endpoint: plan.endpoint, params: plan.params, bodyFormat: plan.bodyFormat }, ctx.toolContext as ToolContext, undefined, plan.pass);

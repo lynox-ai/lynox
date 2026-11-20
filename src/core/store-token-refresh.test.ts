@@ -62,6 +62,13 @@ const answer = (body: Record<string, unknown>, status = 200): TokenExchangeResul
   ({ ok: true, status, responseOk: status >= 200 && status < 300, text: JSON.stringify(body) });
 const RENEWED = { access_token: 'at-new', refresh_token: 'rt-new', expires_in: 3600, refresh_token_expires_in: 7_776_000, scope: SCOPE };
 
+type HostPolicy = { networkPolicy: 'deny-all' | 'allow-list' | undefined; allowedHosts: ReadonlySet<string> | undefined; allowedWildcards: string[]; enforceHttps: boolean };
+const OPEN_POLICY: HostPolicy = { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false };
+const DENY_ALL: HostPolicy = { ...OPEN_POLICY, networkPolicy: 'deny-all' };
+/** An allow-list that does not name the store's host. */
+const LIST_WITHOUT_STORE: HostPolicy = { ...OPEN_POLICY, networkPolicy: 'allow-list', allowedHosts: new Set(['api.other.example']) };
+const LIST_WITH_STORE: HostPolicy = { ...OPEN_POLICY, networkPolicy: 'allow-list', allowedHosts: new Set(['acme.myshopify.com']) };
+
 describe('the refresh of an expiring store connection', () => {
   let db: EngineDb;
   let store: ApiStore;
@@ -76,6 +83,7 @@ describe('the refresh of an expiring store connection', () => {
       exactClearance: { ensure: async () => { clearanceAsked++; return { ok: true }; }, blockedNow: () => false, heldRefusal: () => null, reassert: async () => undefined } as never,
       storeBindingDigest: bind,
       shellIsolation: { kind: 'sidecar', socket: '/run/lynox/shell.sock', root: {} } as never,
+      ...OPEN_POLICY,
     },
     secretStore: { resolve: (n: string) => vault.get(n) ?? null, set: (n: string, v: string) => { vault.set(n, v); } } as never,
     principal: OWNER_PRINCIPAL,
@@ -209,7 +217,7 @@ describe('the refresh of an expiring store connection', () => {
     resetStoreRefreshForTests();
     const c = ctx();
     const misnamedOut: { reconnect?: 'ended' | 'client-misnamed' | undefined } = {};
-    expect(await attachStoredCredential(`${ORIGIN}/admin/api/2025-10/shop.json`, {}, false, {
+    expect(await attachStoredCredential(`${ORIGIN}/admin/api/2025-10/shop.json`, {}, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
       apiStore: store, secretStore: c.secretStore, principal: OWNER_PRINCIPAL, mandateEnds: null, secretReleases: null,
       exactClearance: c.toolContext.exactClearance, storeBindingDigest: bind,
       containment: { contain: () => undefined, holds: () => true, isContained: () => false } as never,
@@ -424,7 +432,7 @@ describe('the refresh of an expiring store connection', () => {
     const headers: Record<string, string> = {};
     const out: { pass?: StorePass | undefined } = {};
     const c = ctx();
-    const attached = await attachStoredCredential(`${ORIGIN}/admin/api/2025-10/shop.json`, headers, false, {
+    const attached = await attachStoredCredential(`${ORIGIN}/admin/api/2025-10/shop.json`, headers, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
       apiStore: store,
       secretStore: c.secretStore,
       principal: OWNER_PRINCIPAL, mandateEnds: null, secretReleases: null,
@@ -448,7 +456,7 @@ describe('the refresh of an expiring store connection', () => {
     const { bindingsAsMigrated } = await import('../../tests/helpers/vault-bindings.js');
     const headers: Record<string, string> = {};
     const c = ctx();
-    await attachStoredCredential(`${ORIGIN}/admin/api/2025-10/shop.json`, headers, false, {
+    await attachStoredCredential(`${ORIGIN}/admin/api/2025-10/shop.json`, headers, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
       apiStore: store, secretStore: c.secretStore, principal: OWNER_PRINCIPAL, mandateEnds: null, secretReleases: null,
       exactClearance: c.toolContext.exactClearance, storeBindingDigest: bind,
       containment: { contain: () => undefined, holds: () => true, isContained: () => false } as never,
@@ -458,13 +466,70 @@ describe('the refresh of an expiring store connection', () => {
     expect(Object.entries(headers).find(([k]) => k.toLowerCase() === 'x-shopify-access-token')?.[1]).toBe('at-old');
   });
 
+  /** The attach a bulk run makes under the instance network policy `policy`. */
+  const bulkAttachUnder = async (policy: HostPolicy, headers: Record<string, string> = {}): Promise<{ attached: unknown; out: { renew?: (() => Promise<'renewed' | 'not-run' | 'dead' | 'client-misnamed'>) | undefined } }> => {
+    const { attachStoredCredential } = await import('../tools/builtin/http.js');
+    const { bindingsAsMigrated } = await import('../../tests/helpers/vault-bindings.js');
+    const c = ctx();
+    const out: { renew?: (() => Promise<'renewed' | 'not-run' | 'dead' | 'client-misnamed'>) | undefined } = {};
+    const attached = await attachStoredCredential(`${ORIGIN}/admin/api/2025-10/shop.json`, headers, false, {
+      hostPolicy: policy,
+      apiStore: store, secretStore: c.secretStore, principal: OWNER_PRINCIPAL, mandateEnds: null, secretReleases: null,
+      exactClearance: c.toolContext.exactClearance, storeBindingDigest: bind,
+      containment: { contain: () => undefined, holds: () => true, isContained: () => false } as never,
+      vaultNameBindings: bindingsAsMigrated(store), shellIsolation: c.toolContext.shellIsolation,
+    }, { bulkRunId: 'run-1' }, out);
+    return { attached, out };
+  };
+
+  it('a bulk run under deny-all sends no refresh for a due token', async () => {
+    const headers: Record<string, string> = {};
+    await bulkAttachUnder(DENY_ALL, headers);
+    expect(hold.calls).toHaveLength(0);
+    expect(lines().some((l) => l.includes('the instance network policy does not let this request out'))).toBe(true);
+  });
+
+  it('a bulk run under an allow-list without the store\'s host sends no refresh for a due token', async () => {
+    await bulkAttachUnder(LIST_WITHOUT_STORE);
+    expect(hold.calls).toHaveLength(0);
+  });
+
+  it('a bulk run under an allow-list naming the store\'s host does send the refresh (control)', async () => {
+    await bulkAttachUnder(LIST_WITH_STORE);
+    expect(hold.calls).toHaveLength(1);
+  });
+
+  it('a bulk run under deny-all sends no renewal after a 401', async () => {
+    const p = profile();
+    expect(store.save({ ...p, auth: { ...p.auth, oauth: { ...p.auth!.oauth, token_expires_at: Date.now() + 3_600_000 } } } as ApiProfile).ok).toBe(true);
+    const { out } = await bulkAttachUnder(DENY_ALL);
+    expect(out.renew).toBeTypeOf('function');
+    expect(await out.renew!()).toBe('not-run');
+    expect(hold.calls).toHaveLength(0);
+  });
+
+  it('a bulk run with an open policy does send the renewal after a 401 (control)', async () => {
+    const p = profile();
+    expect(store.save({ ...p, auth: { ...p.auth, oauth: { ...p.auth!.oauth, token_expires_at: Date.now() + 3_600_000 } } } as ApiProfile).ok).toBe(true);
+    const { out } = await bulkAttachUnder(OPEN_POLICY);
+    expect(await out.renew!()).toBe('renewed');
+    expect(hold.calls).toHaveLength(1);
+  });
+
+  it('a refresh whose context carries deny-all is not sent, whoever calls it', async () => {
+    const c = ctx();
+    expect(await refreshStoreToken(ID, 'due', { ...c, toolContext: { ...c.toolContext, ...DENY_ALL } })).toBe('not-run');
+    expect(hold.calls).toHaveLength(0);
+    expect(vault.get(refreshTokenKey(ID))).toBe('rt-old');
+  });
+
   /** The attach a bulk run makes, with what it hands back. */
   const bulkAttach = async (): Promise<{ attached: unknown; out: { reconnect?: string | undefined } }> => {
     const { attachStoredCredential } = await import('../tools/builtin/http.js');
     const { bindingsAsMigrated } = await import('../../tests/helpers/vault-bindings.js');
     const c = ctx();
     const out: { reconnect?: 'ended' | 'client-misnamed' | undefined } = {};
-    const attached = await attachStoredCredential(`${ORIGIN}/admin/api/2025-10/shop.json`, {}, false, {
+    const attached = await attachStoredCredential(`${ORIGIN}/admin/api/2025-10/shop.json`, {}, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
       apiStore: store, secretStore: c.secretStore, principal: OWNER_PRINCIPAL, mandateEnds: null, secretReleases: null,
       exactClearance: c.toolContext.exactClearance, storeBindingDigest: bind,
       containment: { contain: () => undefined, holds: () => true, isContained: () => false } as never,
@@ -523,7 +588,7 @@ describe('the refresh of an expiring store connection', () => {
     const { bindingsAsMigrated } = await import('../../tests/helpers/vault-bindings.js');
     const c = ctx();
     const out: { pass?: StorePass | undefined; renew?: (() => Promise<string>) | undefined } = {};
-    await attachStoredCredential(`${ORIGIN}/admin/api/2025-10/shop.json`, {}, false, {
+    await attachStoredCredential(`${ORIGIN}/admin/api/2025-10/shop.json`, {}, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
       apiStore: store, secretStore: c.secretStore, principal: OWNER_PRINCIPAL, mandateEnds: null, secretReleases: null,
       exactClearance: c.toolContext.exactClearance, storeBindingDigest: bind,
       containment: { contain: () => undefined, holds: () => true, isContained: () => false } as never,

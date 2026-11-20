@@ -63,7 +63,7 @@ async function attach(url: string, profiles: ApiProfile[], opts: {
   const read: string[] = [];
   const vault = opts.vault ?? { [accessTokenKey(profiles[0]?.id ?? 'shop-acme')]: TOKEN };
   const out: { pass?: StorePass | undefined } = {};
-  const attached = await attachStoredCredential(url, headers, false, {
+  const attached = await attachStoredCredential(url, headers, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
     apiStore: store,
     secretStore: { resolve: (n: string) => { read.push(n); return vault[n] ?? null; } } as never,
     principal: OWNER_PRINCIPAL, mandateEnds: null, secretReleases: null,

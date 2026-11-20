@@ -4563,6 +4563,9 @@ export async function attachStoredCredential(
     /** The process's shell mode; a store gets a pass only in sidecar mode. Defaults to the
      *  process's own object (`shell-isolation.ts`), never to "local". */
     shellIsolation?: ToolContext['shellIsolation'] | undefined;
+    /** The instance's network policy. Required: a store refresh this attach starts goes out under
+     *  it, and an attach built by hand without it would send that refresh unchecked. */
+    hostPolicy: Pick<ToolContext, 'networkPolicy' | 'allowedHosts' | 'allowedWildcards' | 'enforceHttps'>;
   },
   /** The bulk run this request is for. The agent below is built by hand and has no thread, so
    *  the run is the container a request to a store is contained under (`core/containment.ts`). */
@@ -4579,9 +4582,11 @@ export async function attachStoredCredential(
       containment: stores.containment ?? null,
       vaultNameBindings: stores.vaultNameBindings,
       shellIsolation: stores.shellIsolation ?? shellIsolation(),
+      networkPolicy: stores.hostPolicy.networkPolicy, allowedHosts: stores.hostPolicy.allowedHosts,
+      allowedWildcards: stores.hostPolicy.allowedWildcards, enforceHttps: stores.hostPolicy.enforceHttps,
       // A bulk run is not a chat: nothing of a thread is written for it.
       threadStore: null,
-    } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases' | 'exactClearance' | 'storeBindingDigest' | 'containment' | 'threadStore' | 'vaultNameBindings' | 'shellIsolation'> as ToolContext,
+    } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases' | 'exactClearance' | 'storeBindingDigest' | 'containment' | 'threadStore' | 'vaultNameBindings' | 'shellIsolation' | 'networkPolicy' | 'allowedHosts' | 'allowedWildcards' | 'enforceHttps'> as ToolContext,
     { secretStore: stores.secretStore, principal: stores.principal } as Pick<import('../../types/index.js').IAgent, 'secretStore' | 'principal'> as import('../../types/index.js').IAgent,
     write,
     { bulkRunId: container.bulkRunId },
