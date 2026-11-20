@@ -9,7 +9,7 @@ import type {
   ToolEntry,
 } from '../types/index.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
-import { getErrorMessage } from './utils.js';
+import { processErrorText } from './error-egress.js';
 import { getLynoxDir } from './config.js';
 import { stripSecretsForPlugin } from './secret-fields.js';
 
@@ -91,7 +91,7 @@ export class PluginManager {
       try {
         await this._loadPlugin(name, ctx);
       } catch (err: unknown) {
-        this.log(`Plugin "${name}" failed to load: ${getErrorMessage(err)}`);
+        this.log(`Plugin "${name}" failed to load: ${processErrorText(err)}`);
       }
     }
   }
@@ -172,7 +172,7 @@ export class PluginManager {
         try {
           await plugin.hooks.onSessionStart();
         } catch (err: unknown) {
-          this.log(`Plugin "${plugin.name}" onSessionStart error: ${getErrorMessage(err)}`);
+          this.log(`Plugin "${plugin.name}" onSessionStart error: ${processErrorText(err)}`);
         }
       }
     }
@@ -184,7 +184,7 @@ export class PluginManager {
         try {
           await plugin.hooks.onRunComplete(result);
         } catch (err: unknown) {
-          this.log(`Plugin "${plugin.name}" onRunComplete error: ${getErrorMessage(err)}`);
+          this.log(`Plugin "${plugin.name}" onRunComplete error: ${processErrorText(err)}`);
         }
       }
     }
@@ -197,7 +197,7 @@ export class PluginManager {
           const result = await plugin.hooks.onToolGate(toolName, input);
           if (result === false) return false;
         } catch (err: unknown) {
-          this.log(`Plugin "${plugin.name}" onToolGate error: ${getErrorMessage(err)}`);
+          this.log(`Plugin "${plugin.name}" onToolGate error: ${processErrorText(err)}`);
         }
       }
     }

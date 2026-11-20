@@ -3,6 +3,8 @@
  * Zero external dependencies.
  */
 
+import { processErrorText } from './error-egress.js';
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -156,10 +158,9 @@ export class NotificationRouter {
           }
         } catch (err: unknown) {
           outcome = 'failed';
-          const detail =
-            err instanceof Error ? err.message : String(err);
+          // A channel's error can quote its provider's answer to the message it was sending.
           process.stderr.write(
-            `[notification-router] channel "${ch.name}" failed: ${detail}\n`,
+            `[notification-router] channel "${ch.name}" failed: ${processErrorText(err)}\n`,
           );
         }
         return { channel: ch.name, outcome };
@@ -186,10 +187,8 @@ export class NotificationRouter {
       const outcome = outcomeOf(await ch.send(msg));
       return outcome === 'delivered' || outcome === 'skipped' || outcome === 'reached_others';
     } catch (err: unknown) {
-      const detail =
-        err instanceof Error ? err.message : String(err);
       process.stderr.write(
-        `[notification-router] channel "${channelName}" failed: ${detail}\n`,
+        `[notification-router] channel "${channelName}" failed: ${processErrorText(err)}\n`,
       );
       return false;
     }
