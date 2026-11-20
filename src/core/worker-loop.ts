@@ -320,8 +320,8 @@ const DEFER_RELOG_MS = 10 * 60_000;
 const NOT_RUN_RETRY_MS = 60 * 60_000;
 /**
  * How long only other runs in flight may hold a trigger back at admission before the owner is
- * told — or the lease's lifetime, if shorter: past it, a run that holds a reservation is lost or
- * hung, and its reservation is not given back while it hangs.
+ * told. Not the lease's lifetime: the heartbeat renews the lease, so it does not bound a run, and
+ * healthy runs (a question to the owner, a workflow, a long turn) take longer than it.
  */
 const WAITING_FOR_OTHERS_MS = 60 * 60_000;
 /** The most triggers each per-trigger memory of a run that did not start holds before it is cleared. */
@@ -761,8 +761,12 @@ export class WorkerLoop {
   readonly #notRunTold = new Map<string, string>();
   /** Per trigger, when a run stopped before the model was last said in the log (`#runBlocked`). */
   readonly #blockedSaidAt = new Map<string, number>();
-  /** Per trigger, since when only other runs in flight have held it back at admission. */
-  readonly #waitingSince = new Map<string, number>();
+  /**
+   * Per trigger, since when only other runs in flight have held it back at admission, and when
+   * they last did. A wait that was not refused for longer than two ticks (the trigger was paused,
+   * deleted, or its event dropped) starts again rather than going on from its old start.
+   */
+  readonly #waitingSince = new Map<string, { since: number; last: number }>();
   /** Names this loop's runs in the lease column; another process's loop has its own. */
   private readonly leaseHolder = randomUUID();
 
@@ -928,34 +932,30 @@ export class WorkerLoop {
    * - recorded spend alone leaves too little for this run: told so, with what the run needs, since
    *   it is refused at every tick until the cap resets — silent, it would be refused unseen;
    * - only other runs in flight stand in the way: the log line alone, as it passes once they end.
-   *   A reservation is given back only when its run settles, and a run that hangs never does
-   *   (the deadline ends a wait, not a computing run), so after {@link #waitLimitMs} of that it is
-   *   told too.
+   *   After {@link WAITING_FOR_OTHERS_MS} of that it is told too, with no advice: a reservation
+   *   is a sum without its holders, so nothing here tells a hung run from a long healthy one,
+   *   and advice to restart would end the very run it waits for.
    * @param atLeast `estimateUSD` is the least a run is started with, not what it reserves.
    */
   #admissionRefused(task: TriggerRecord, estimateUSD: number, atLeast: boolean): void {
     const why = admissionShortfall(estimateUSD);
     if (why.kind === 'in_flight') {
       const now = Date.now();
-      const since = this.#waitingSince.get(task.id);
-      if (since === undefined) {
-        if (this.#waitingSince.size >= NOT_RUN_KEYS_MAX) this.#waitingSince.clear();
-        this.#waitingSince.set(task.id, now);
+      const wait = this.#waitingSince.get(task.id);
+      if (wait === undefined || now - wait.last > 2 * this.intervalMs) {
+        if (wait === undefined && this.#waitingSince.size >= NOT_RUN_KEYS_MAX) this.#waitingSince.clear();
+        this.#waitingSince.set(task.id, { since: now, last: now });
         return;
       }
-      if (now - since < this.#waitLimitMs()) return;
-      this.#recordNotRun(task, { kind: 'waiting', since: new Date(since) }, 'admission');
+      wait.last = now;
+      if (now - wait.since < WAITING_FOR_OTHERS_MS) return;
+      this.#recordNotRun(task, { kind: 'waiting', since: new Date(wait.since) }, 'admission');
       return;
     }
     this.#waitingSince.delete(task.id);
     this.#recordNotRun(task, why.kind === 'reached'
       ? { kind: 'cap', ref: budgetNoteRef(why.check) }
       : { kind: 'too_small', cap: why.cap, limitUSD: why.limitUSD, spentUSD: why.spentUSD, needUSD: estimateUSD, atLeast }, 'admission');
-  }
-
-  /** How long only other runs in flight may hold a trigger back before the owner is told. */
-  #waitLimitMs(): number {
-    return Math.min(WAITING_FOR_OTHERS_MS, this.lease.ttlMs);
   }
 
   /**
@@ -998,12 +998,14 @@ export class WorkerLoop {
     // What becomes of the trigger, as `recordTaskRun` schedules it: a run by hand leaves the
     // schedule as it was; refused at admission it stays due; a one-shot is due again at
     // `retryAt`; a watch checks again at its next time; a cron's missed time is missed.
+    // A wait for other runs says in its reason what becomes of it.
     const then = byHand ? n.notRunByHand
+      : cause.kind === 'waiting' ? undefined
       : at === 'admission' ? n.notRunWaits
       : retryAt !== undefined ? n.notRunRetryAt(resetWhen(retryAt, now, lang))
       : task.watch_config ? (firstCheck ? n.notRunWatchFirst : n.notRunWatchNext)
       : task.schedule_cron ? n.notRunSkipped : n.notRunWaits;
-    const result = `${reason} ${then}`;
+    const result = then === undefined ? reason : `${reason} ${then}`;
     if (at === 'run') {
       this.#recordRun(this.engine.getTaskManager(), task.id, result, 'not_run', undefined, retryAt === undefined ? undefined : { retryAt: retryAt.toISOString() });
     } else {

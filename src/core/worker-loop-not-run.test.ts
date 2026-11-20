@@ -13,7 +13,7 @@ vi.mock('./network-guard.js', async (importActual) => {
 
 import { WorkerLoop, extractWatchSignal, NOT_RUN_KEYS_MAX } from './worker-loop.js';
 import { WORKER_NOTICES, notRunReason, resetWhen } from './worker-notices.js';
-import { configurePersistentBudget, resetPersistentBudget, reservePersistentBudget } from './session-budget.js';
+import { admissionShortfall, configurePersistentBudget, releasePersistentBudget, resetPersistentBudget, reservePersistentBudget } from './session-budget.js';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { TaskManager as RealTaskManager } from './task-manager.js';
@@ -187,33 +187,155 @@ describe('a run the admission refused', () => {
     expect(router.sent[0]!.body).toContain('Only $1.00 of the daily limit of $100 is left today, too little for a run of this kind (up to $50.00). It resets tomorrow at');
   });
 
-  it('only other runs in flight in the way: the log line alone, until they have held it past the wait limit', async () => {
+  /** One tick a minute for `minutes` minutes, as the loop ticks at its 60 s interval. */
+  async function everyMinute(loop: WorkerLoop, minutes: number): Promise<void> {
+    for (let i = 0; i < minutes; i++) {
+      vi.setSystemTime(new Date(Date.now() + 60_000));
+      await loop.tick();
+    }
+  }
+
+  /** A loop over one workflow trigger while another run in flight holds $95 of the $100 cap. */
+  function heldByOthers(): { tm: TaskManager; router: ReturnType<typeof makeRouter>; loop: WorkerLoop } {
     configurePersistentBudget({ costProvider: spendToday(0), dailyCapUSD: 100, sessionCapUSD: 50 });
-    // Another run in flight holds $95 of the cap.
     expect(reservePersistentBudget(95).allowed).toBe(true);
     const tm = makeTaskManager([makeTask({ effect: 'run_workflow' })]);
     const router = makeRouter();
-    const loop = new WorkerLoop(makeEngine(tm, ranSession()), router, 60_000);
+    return { tm, router, loop: new WorkerLoop(makeEngine(tm, ranSession()), router, 60_000) };
+  }
+
+  it('only other runs in flight in the way: the log line alone for the hour, then told with no advice', async () => {
+    const { tm, router, loop } = heldByOthers();
     const { lines, restore } = quietStderr();
     try {
       await loop.tick();
-      vi.setSystemTime(new Date(Date.now() + 10 * 60_000));
-      await loop.tick();
-      expect(tm.recordTaskRun, 'silent while the others may still end').not.toHaveBeenCalled();
+      // Past the lease's lifetime of 15 minutes: the heartbeat renews it, so a healthy run may last that long.
+      await everyMinute(loop, 20);
+      expect(tm.recordTaskRun, 'silent past the lease lifetime').not.toHaveBeenCalled();
+      await everyMinute(loop, 39);
+      expect(tm.recordTaskRun, 'silent short of the hour').not.toHaveBeenCalled();
       expect(router.sent).toHaveLength(0);
       expect(lines.join('')).toContain('would be exceeded by in-flight tasks');
-      // Past the lease's lifetime (15 minutes, shorter than the hour): a run that held it is hung.
-      vi.setSystemTime(new Date(Date.now() + 5 * 60_000));
-      await loop.tick();
-      await loop.tick();
+      await everyMinute(loop, 2);
     } finally {
       restore();
     }
     expect(notRunCalls(tm)).toHaveLength(1);
     expect(router.sent).toHaveLength(1);
-    expect(router.sent[0]!.body).toContain('Waiting since today at');
-    expect(router.sent[0]!.body).toContain('for other runs, which hold the rest of the limit.');
-    expect(router.sent[0]!.body).toContain(EN.capRestart);
+    const body = router.sent[0]!.body;
+    expect(body).toMatch(/^Waiting since today at .+ for other runs, which hold the rest of the limit\. Runs once the other runs end\.$/);
+    expect(body).not.toContain(EN.capRestart);
+    expect(body).not.toContain(EN.capSupportIfStays);
+    expect(body).not.toContain('support@');
+    expect(body, 'one close, not two').not.toContain(EN.notRunWaits);
+  });
+
+  it('a wait for other runs is told with no advice on a managed plan either', () => {
+    const now = new Date(`${DAY}T12:00:00Z`);
+    const since = new Date(`${DAY}T11:00:00Z`);
+    for (const lang of ['en', 'de'] as const) {
+      const n = WORKER_NOTICES[lang];
+      for (const ctx of [{ managed: true, selfHosted: false, now }, { managed: false, selfHosted: false, now }, { managed: false, selfHosted: true, now }]) {
+        const said = notRunReason(lang, { kind: 'waiting', since }, ctx);
+        expect(said.endsWith(n.waitingNext)).toBe(true);
+        expect(said).not.toContain(n.capRestart);
+        expect(said).not.toContain(n.capSupportIfStays);
+      }
+    }
+    expect(WORKER_NOTICES.de.waitingNext).toBe('Läuft, sobald die anderen Läufe enden.');
+  });
+
+  it('a gap of more than two ticks without a refusal starts the wait again', async () => {
+    const { tm, router, loop } = heldByOthers();
+    const { restore } = quietStderr();
+    try {
+      await loop.tick();
+      await everyMinute(loop, 30);
+      // Paused, deleted, or its event dropped: ten minutes without a refusal.
+      vi.setSystemTime(new Date(Date.now() + 10 * 60_000));
+      await everyMinute(loop, 40);
+      expect(tm.recordTaskRun, 'the hour counts from the second wait, not the first').not.toHaveBeenCalled();
+      await everyMinute(loop, 21);
+    } finally {
+      restore();
+    }
+    expect(notRunCalls(tm)).toHaveLength(1);
+    expect(router.sent).toHaveLength(1);
+  });
+
+  it('a real run between two waits starts the wait again', async () => {
+    configurePersistentBudget({ costProvider: spendToday(0), dailyCapUSD: 100 });
+    // Others hold all but $0.03, less than a run is started with.
+    expect(reservePersistentBudget(99.97).allowed).toBe(true);
+    const tm = makeTaskManager([makeTask()]);
+    const router = makeRouter();
+    const engine = makeEngine(tm, ranSession());
+    const loop = new WorkerLoop(engine, router, 60_000);
+    const { restore } = quietStderr();
+    try {
+      await loop.tick();
+      await everyMinute(loop, 50);
+      expect(engine.createSession).not.toHaveBeenCalled();
+      releasePersistentBudget(99.97);
+      await everyMinute(loop, 1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(engine.createSession, 'it ran').toHaveBeenCalled();
+      expect(reservePersistentBudget(99.97).allowed).toBe(true);
+      await everyMinute(loop, 30);
+    } finally {
+      restore();
+    }
+    expect(notRunCalls(tm), 'the hour counts from after the run').toHaveLength(0);
+    expect(router.sent.map((m) => m.title), 'the run told, the wait not').toEqual(['✓ Daily Report']);
+  });
+
+  it('a cap reached between two waits starts the wait again', async () => {
+    let cost = 0;
+    configurePersistentBudget({ costProvider: spendToday(() => cost), dailyCapUSD: 100, sessionCapUSD: 50 });
+    expect(reservePersistentBudget(95).allowed).toBe(true);
+    const tm = makeTaskManager([makeTask({ effect: 'run_workflow' })]);
+    const router = makeRouter();
+    const loop = new WorkerLoop(makeEngine(tm, ranSession()), router, 60_000);
+    const { restore } = quietStderr();
+    try {
+      await loop.tick();
+      await everyMinute(loop, 30);
+      cost = 100;
+      await everyMinute(loop, 1);
+      cost = 0;
+      await everyMinute(loop, 40);
+    } finally {
+      restore();
+    }
+    expect(notRunCalls(tm), 'told the cap, not the wait').toHaveLength(1);
+    expect(router.sent).toHaveLength(1);
+    expect(router.sent[0]!.body).toContain('The daily limit of $100 is reached');
+  });
+
+  it('too little left under a cap between two waits starts the wait again', async () => {
+    let cost = 0;
+    configurePersistentBudget({ costProvider: spendToday(() => cost), dailyCapUSD: 100, sessionCapUSD: 50 });
+    expect(reservePersistentBudget(45).allowed).toBe(true);
+    const tm = makeTaskManager([makeTask({ effect: 'run_workflow' })]);
+    const router = makeRouter();
+    const loop = new WorkerLoop(makeEngine(tm, ranSession()), router, 60_000);
+    const { restore } = quietStderr();
+    try {
+      // $10 spent and $45 held by others: the $50 run waits for them.
+      cost = 10;
+      await loop.tick();
+      await everyMinute(loop, 30);
+      // $60 spent: recorded spend alone leaves too little.
+      cost = 60;
+      await everyMinute(loop, 1);
+      cost = 10;
+      await everyMinute(loop, 40);
+    } finally {
+      restore();
+    }
+    expect(notRunCalls(tm), 'told too little, not the wait').toHaveLength(1);
+    expect(router.sent).toHaveLength(1);
+    expect(router.sent[0]!.body).toContain('Only $40.00 of the daily limit of $100 is left today');
   });
 
   it('a reservation refused on a cap its recorded spend reached: told with that cap', async () => {
@@ -607,6 +729,30 @@ describe('the edges', () => {
     }
     expect(router.sent, 'not told again').toHaveLength(NOT_RUN_KEYS_MAX + 1);
   });
+
+  it('a wait started again on a full memory does not start the others again', async () => {
+    configurePersistentBudget({ costProvider: spendToday(0), dailyCapUSD: 100, sessionCapUSD: 50 });
+    expect(reservePersistentBudget(95).allowed).toBe(true);
+    const tasks = Array.from({ length: NOT_RUN_KEYS_MAX }, (_, i) => makeTask({ id: `t-${String(i)}`, title: `T${String(i)}`, effect: 'run_workflow' }));
+    const tm = makeTaskManager(tasks);
+    const router = makeRouter();
+    const loop = new WorkerLoop(makeEngine(tm, ranSession()), router, 60_000);
+    const { restore } = quietStderr();
+    const minutes = async (n: number): Promise<void> => {
+      for (let i = 0; i < n; i++) { vi.setSystemTime(new Date(Date.now() + 60_000)); await loop.tick(); }
+    };
+    try {
+      await loop.tick();
+      // The first trigger is not due for a while, so its wait starts again while the memory is full.
+      vi.mocked(tm.getDueTriggers).mockReturnValue(tasks.slice(1));
+      await minutes(5);
+      vi.mocked(tm.getDueTriggers).mockReturnValue(tasks);
+      await minutes(56);
+    } finally {
+      restore();
+    }
+    expect(router.sent, 'the others told at their hour, the first not yet').toHaveLength(NOT_RUN_KEYS_MAX - 1);
+  });
 });
 
 describe('the sentences', () => {
@@ -622,5 +768,19 @@ describe('the sentences', () => {
     expect(notRunReason('en', { kind: 'cap', ref: { cap: 'unknown' } }, { managed: false, selfHosted: true, now })).toBe(`${EN.capUnverifiable} ${EN.capRestart}`);
     expect(notRunReason('en', { kind: 'cap', ref: { cap: 'unknown' } }, { managed: false, selfHosted: false, now })).toBe(`${EN.capUnverifiable} ${EN.capSupportIfStays}`);
     expect(notRunReason('de', { kind: 'hook' }, { managed: true, selfHosted: false, now })).toBe(WORKER_NOTICES.de.hookBlocked(true));
+  });
+});
+
+describe('what holds a run back at admission', () => {
+  it('too little left under the monthly cap while the daily cap has room', () => {
+    configurePersistentBudget({ costProvider: spendToday(49.5), dailyCapUSD: 1000, monthlyCapUSD: 50 });
+    expect(admissionShortfall(1)).toEqual({ kind: 'too_small', cap: 'monthly', limitUSD: 50, spentUSD: 49.5 });
+  });
+
+  it('a run that fits the rest of the cap to the cent is not too small', () => {
+    configurePersistentBudget({ costProvider: spendToday(50), dailyCapUSD: 100, monthlyCapUSD: 200 });
+    expect(admissionShortfall(50)).toEqual({ kind: 'in_flight' });
+    configurePersistentBudget({ costProvider: spendToday(150), dailyCapUSD: 1000, monthlyCapUSD: 200 });
+    expect(admissionShortfall(50)).toEqual({ kind: 'in_flight' });
   });
 });

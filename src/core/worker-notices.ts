@@ -262,6 +262,8 @@ export interface WorkerNotices {
   capTooSmall(cap: 'daily' | 'monthly', limit: string, left: string, need: string, atLeast: boolean, when: string): string;
   /** Only other runs in flight hold the rest of the cap, and have since `since`. */
   waitingForOthers(since: string): string;
+  /** The close of a wait for other runs: no advice, as nothing tells a hung run from a long one. */
+  readonly waitingNext: string;
   /** The content check did not pass the run's task (or a watched page) to the model. */
   readonly contentRefused: string;
   readonly contentNextTask: string;
@@ -374,6 +376,7 @@ const EN: WorkerNotices = Object.freeze({
     ? `Only ${left} of the daily limit of ${limit} is left today, too little for a run of this kind (${atLeast ? 'at least' : 'up to'} ${need}). It resets ${when}.`
     : `Only ${left} of the monthly limit of ${limit} is left this month, too little for a run of this kind (${atLeast ? 'at least' : 'up to'} ${need}). It resets ${when}.`,
   waitingForOthers: (since: string) => `Waiting since ${since} for other runs, which hold the rest of the limit.`,
+  waitingNext: 'Runs once the other runs end.',
   contentRefused: 'The content check did not pass the task to the model.',
   contentNextTask: 'Check the task\'s text under Automation › Triggers; the instance log names the reason.',
   contentNextWatch: 'The content of the watched page was refused; the instance log names the reason.',
@@ -522,6 +525,7 @@ const DE: WorkerNotices = Object.freeze({
     ? `Vom Tageslimit von ${limit} ist heute nur noch ${left} übrig, zu wenig für einen Lauf dieser Art (${atLeast ? 'mindestens' : 'bis zu'} ${need}). Es gilt wieder ab ${when}.`
     : `Vom Monatslimit von ${limit} ist diesen Monat nur noch ${left} übrig, zu wenig für einen Lauf dieser Art (${atLeast ? 'mindestens' : 'bis zu'} ${need}). Es gilt wieder ab ${when}.`,
   waitingForOthers: (since: string) => `Wartet seit ${since} auf andere Läufe, die den Rest des Limits belegen.`,
+  waitingNext: 'Läuft, sobald die anderen Läufe enden.',
   contentRefused: 'Die Inhaltsprüfung hat den Auftrag nicht an das Modell gegeben.',
   contentNextTask: 'Prüf den Text des Auftrags unter Automation → Trigger; den Grund nennt das Instanz-Protokoll.',
   contentNextWatch: 'Abgelehnt wurde der Inhalt der beobachteten Seite; den Grund nennt das Instanz-Protokoll.',
@@ -611,7 +615,7 @@ export function notRunReason(lang: NoticeLanguage, cause: NotRunCause, ctx: NotR
   switch (cause.kind) {
     case 'hook': return n.hookBlocked(ctx.managed);
     case 'content': return `${n.contentRefused} ${ctx.watch === true ? n.contentNextWatch : n.contentNextTask}`;
-    case 'waiting': return `${n.waitingForOthers(resetWhen(cause.since, ctx.now, lang, ctx.timeZone))} ${ifStays}`;
+    case 'waiting': return `${n.waitingForOthers(resetWhen(cause.since, ctx.now, lang, ctx.timeZone))} ${n.waitingNext}`;
     case 'too_small': {
       const when = resetWhen(capResetAt(cause.cap, ctx.now), ctx.now, lang, ctx.timeZone);
       const left = `$${Math.max(0, cause.limitUSD - cause.spentUSD).toFixed(2)}`;
