@@ -1532,6 +1532,73 @@ describe('api_setup tool', () => {
     });
   });
 
+  // A bootstrap read the origin check held after foreign content follows no redirect to another
+  // host, owner-named hosts included, as a page read and an `http_request` GET do: the hop would
+  // carry the address on to a host nobody named. Same-host hops and unheld reads are unchanged.
+  describe('bootstrap — a read the origin check held, and its redirects', () => {
+    const held = { known: [], allKnown: false } as const;
+    const named = { known: ['api.fake.com'], allKnown: true } as const;
+    const spec = JSON.stringify({ openapi: '3.0.1', info: { title: 'Fake' }, servers: [{ url: 'https://api.fake.com/v1' }], paths: { '/a': { get: { summary: 'A' } } } });
+    const hopTo = (location: string): Response => new Response(null, { status: 302, headers: { location } });
+    const ok = (body: string, type = 'application/json'): Response => new Response(body, { status: 200, headers: { 'content-type': type } });
+    const ORIGINAL_FLAG = process.env.LYNOX_FEATURE_API_SETUP_V2;
+    afterEach(() => {
+      if (ORIGINAL_FLAG === undefined) delete process.env.LYNOX_FEATURE_API_SETUP_V2;
+      else process.env.LYNOX_FEATURE_API_SETUP_V2 = ORIGINAL_FLAG;
+    });
+
+    it('a held spec read does not follow a redirect to another host, and says so', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(hopTo('https://collect.other.test/d')).mockResolvedValueOnce(ok(spec));
+      try {
+        const result = await runInCallSlot({ targetOrigin: held }, () => apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://api.fake.com/openapi.json' }, createMockAgent(new ApiStore()) as never));
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        expect(result).toContain('forwards this read to another host (…other.test)');
+        // The first request went out: the text does not claim it was refused before it was sent.
+        expect(result).not.toContain('refused before it was sent');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('a held docs read of a host the owner named does not follow a redirect to another host either', async () => {
+      process.env.LYNOX_FEATURE_API_SETUP_V2 = '1';
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(hopTo('https://files.other.test/docs')).mockResolvedValueOnce(ok('<html></html>', 'text/html'));
+      try {
+        const result = await runInCallSlot({ targetOrigin: named }, () => apiSetupTool.handler(
+          { action: 'bootstrap', docs_url: 'https://api.fake.com/docs' }, createMockAgent(new ApiStore()) as never));
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        expect(result).toContain('forwards this read to another host (…other.test)');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('CONTROL: a held read follows a redirect on its own host', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(hopTo('https://api.fake.com/v2/openapi.json')).mockResolvedValueOnce(ok(spec));
+      try {
+        const result = await runInCallSlot({ targetOrigin: held }, () => apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://api.fake.com/openapi.json' }, createMockAgent(new ApiStore()) as never));
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+        expect(result).not.toContain('forwards this read');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('CONTROL: a read the origin check did not stop at follows a redirect to another host, as before', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(hopTo('https://files.other.test/openapi.json')).mockResolvedValueOnce(ok(spec));
+      try {
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://api.fake.com/openapi.json' }, createMockAgent(new ApiStore()) as never);
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+        expect(result).not.toContain('forwards this read');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+  });
+
   describe('create — v2 schema validation', () => {
     function withV2(overrides: Partial<ApiProfile>): ApiProfile {
       return { ...SAMPLE_PROFILE, ...overrides };

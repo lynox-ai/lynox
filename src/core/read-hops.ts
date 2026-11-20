@@ -1,7 +1,7 @@
 // === Read hops ===
 //
 // How a read that the origin check held treats its redirects, for every tool that reads a page or a
-// URL (`web_research` read, `http_request` GET and HEAD).
+// URL (`web_research` read, `http_request` GET and HEAD, `api_setup` bootstrap).
 
 import type { CallTargetOrigin } from './call-connection.js';
 
@@ -12,6 +12,9 @@ export function maskedHost(hostname: string): string {
   const labels = hostname.split('.');
   return labels.length <= 2 ? hostname : `…${labels.slice(-2).join('.')}`;
 }
+
+/** How the refusal of a cross-host hop begins, so a caller that rewrites refusals can pass it on. */
+export const CROSS_HOST_REFUSAL = 'Blocked: the page forwards this read to another host';
 
 /**
  * A read the origin check held (`readHopsGuarded`) follows no redirect to another host: the owner
@@ -26,7 +29,7 @@ export function crossHostRedirectGuard(checkedUrl: string, checked: boolean, inn
     const to = new URL(nextUrl).hostname;
     if (to !== from) {
       const host = maskedHost(to);
-      throw new Error(`Blocked: the page forwards this read to another host (${host}), and lynox did not follow. Nothing was sent to that host. After content from outside in this conversation, a read like this one does not follow a redirect to another host. lynox does not show you the full address, so do not guess it. Tell the user that the page forwards to ${host} and that lynox did not follow it; if they want that page, they can give you its address.`);
+      throw new Error(`${CROSS_HOST_REFUSAL} (${host}), and lynox did not follow. Nothing was sent to that host. After content from outside in this conversation, a read like this one does not follow a redirect to another host. lynox does not show you the full address, so do not guess it. Tell the user that the page forwards to ${host} and that lynox did not follow it; if they want that page, they can give you its address.`);
     }
     inner?.(nextUrl, method, headers);
   };
