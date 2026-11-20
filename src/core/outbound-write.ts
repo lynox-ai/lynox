@@ -1083,7 +1083,7 @@ function unescapedLiteral(literal: string): string {
         : bigU !== undefined ? code(bigU)
         : x !== undefined ? code(x)
         : octal !== undefined ? (octal === '0' ? '\0' : String.fromCharCode(parseInt(octal, 8)))
-        : other === '\n' || other === '\r\n' ? ''
+        : other === '\n' || other === '\r\n' || other === '\r' || other === '\u2028' || other === '\u2029' ? ''
         : SIMPLE[other!] ?? other!,
   );
 }
@@ -1096,7 +1096,8 @@ function literalPieces(text: string): string[] {
   // Every line break a backslash in a literal may continue over: a line the tokenizer reads as
   // one literal is still read line by line.
   if (!/[\r\n\u2028\u2029&=]/.test(text)) return out;
-  for (const segment of text.split(/\r\n?|[\n\u2028\u2029&]/)) {
+  // Both cuts: at LF alone (a CR, U+2028 or U+2029 may sit inside a literal) and at every break.
+  for (const segment of new Set([...text.split(/[\n&]/), ...text.split(/\r\n?|[\n\u2028\u2029&]/)])) {
     if (segment.includes('\\')) out.push(segment);
     const at = segment.indexOf('=');
     if (at >= 0 && segment.includes('\\', at)) out.push(segment.slice(at + 1));
