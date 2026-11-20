@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import type { BulkRunDetailData, BulkTarget, BulkHeads } from './bulk-runs.js';
-import { bulkHaltSuffixKey } from './bulk-runs.js';
+import { bulkHaltSuffixKey, bulkSteps } from './bulk-runs.js';
 import { t, tf, getLocale, setLocale } from '../i18n.svelte.js';
 
 // A halted run's sentences on a target whose send has no clear answer (U-364):
@@ -277,7 +277,7 @@ describe('a cancelled run', () => {
 		expect(steps).toEqual(['abgebrochen']);
 		// Only the last one: every step before keeps its name.
 		const chips = [...(target.querySelector('li[aria-current="step"]')?.parentElement?.querySelectorAll('li') ?? [])].map((l) => l.textContent);
-		expect(chips.filter((c) => c === 'abgebrochen')).toHaveLength(1);
+		expect(chips).toEqual([...bulkSteps(run)].map((step) => (step === 'done' ? 'abgebrochen' : t(`bulk.step.${step}`))));
 		expect(chips).toContain(t('bulk.step.planned'));
 		expect(shown()).not.toContain(t('bulk.step.done'));
 		expect(bulkHaltSuffixKey({ phase: 'aborted', haltKey: 'mandateEnded' })).toBeNull();
