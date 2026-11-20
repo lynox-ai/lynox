@@ -367,7 +367,7 @@ describe('a save that cannot derive the authorize host says so', () => {
   // disclosure depend on whether an unrelated parameter happened to validate,
   // with no trace in either direction. Refusing the save was the other
   // candidate and is worse: a provider retired from the register would make
-  // every profile naming it unsaveable, including the update removing the field.
+  // every profile naming it unsaveable, even a save that keeps the provider.
   const saveWith = async (oauth: Record<string, unknown>, over: Partial<ApiProfile> = {}, prompt?: (q: unknown) => Promise<string>): Promise<string> => {
     const agent = agentWith(new ApiStore());
     if (prompt) (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = prompt;

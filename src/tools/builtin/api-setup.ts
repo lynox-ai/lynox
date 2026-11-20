@@ -336,7 +336,9 @@ function validateProfile(profile: ApiProfile): string | null {
     // `client_secret_key`, the token is attached from a slot derived from the
     // profile id, and `collectVaultKeys` counts the OAuth keys on its own. A list
     // here changes nothing for such a profile, so demanding one only costs a round.
-    if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0) && !builtInPresetOf(profile)) {
+    // So is a provider this engine once shipped: its profiles have that shape, and a save that
+    // keeps the provider must not fail on a list they never had.
+    if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0) && !builtInPresetOf(profile) && retiredPresetIdOf(profile) === undefined) {
       return 'auth.vault_keys is required for auth.type="oauth2" (lists the vault key names the OAuth grant will resolve)';
     }
     // OAuth2 metadata: required when type='oauth2' AND the agent intends to
@@ -2251,7 +2253,7 @@ ${draftJson}
       // unrelated parameter happened to validate — with no trace in either
       // direction. Refusing the save instead was the other candidate and is
       // worse: a provider retired from the register would make every profile
-      // naming it unsaveable, including the update that would remove the field.
+      // naming it unsaveable, even a save that keeps the provider.
       let presetNote: string | undefined;
       const redirectUrls: string[] = [];
       // Set only where a human actually answered. An acceptance nobody gave is
@@ -2910,6 +2912,14 @@ ${draftJson}
         return `Error: profile "${input.id}" is oauth2, so its tokens would live in a vault slot that belongs to a credential of this instance. Nothing was sent. Choose a different id for this profile.`;
       }
       const oauth = profile.auth.oauth;
+      // A provider this engine once shipped and no longer has: the profile's grant is a user's,
+      // and no endpoint of that provider is left to exchange it at. The profile's own `token_url`
+      // was display only while the provider existed, and it does not become the endpoint now,
+      // or an edit to it would send the user's refresh token to a host the profile names.
+      const retiredId = retiredPresetIdOf(profile);
+      if (retiredId !== undefined) {
+        return `Error: profile "${input.id}" was set up through the built-in "${retiredId}" provider, which this engine no longer has, so no token is requested for it. Nothing was sent. Tell the user this connection can no longer be renewed here; another way of signing in to the same API replaces it, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
+      }
       // A profile that names a preset this engine knows exchanges tokens at the preset's own
       // endpoint — the one the callback used — and its `token_url` is display only. Otherwise a
       // profile the agent wrote could send the provider's refresh token, and the client secret,

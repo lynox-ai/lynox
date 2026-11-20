@@ -1196,7 +1196,8 @@ export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IA
  *
  * Two marks, either suffices: `oauth_grant.origin === 'callback'` (only the callback
  * writes it; an incoming value is discarded on create and update) and a BUILT-IN preset
- * (`builtInPresetOf`: an oauth2 profile whose `auth.oauth.preset_id` the register knows): the built-in presets are
+ * (`builtInPresetOf`: an oauth2 profile whose `auth.oauth.preset_id` the register knows, or `retiredPresetIdOf`:
+ * one this engine once shipped): the built-in presets are
  * authorization-code flows, and the preset also marks a profile that re-entered the store
  * without its grant record (a JSON in the apis directory). A preset whose provider issues
  * app tokens would be refused here too, so adding one means revisiting this.
@@ -1532,7 +1533,7 @@ export type DeclinedFact =
        *  user's authorization issues — the reason the gate refuses it (`oauthGrantIsUserDelegated`).
        *  `none`: neither. */
       readonly consent: 'callback' | 'preset' | 'none';
-      /** The built-in provider's id, set only with `preset`; it is one of the register's own ids. */
+      /** The built-in provider's id, set only with `preset`; it is one of the register's own ids or a retired one. */
       readonly preset: string | undefined;
     }
   | { readonly kind: 'grant'; readonly named: string | undefined; readonly runnable: boolean }
@@ -1556,12 +1557,13 @@ export function declinedFacts(
   const rawSlot: unknown = profile.auth?.oauth?.refresh_token_key;
   const slot = typeof rawSlot === 'string' ? rawSlot : derived;
   const state = profile.oauth_grant?.state;
-  const preset = builtInPresetOf(profile);
+  // A provider this engine once shipped refuses for the same reason as one it has.
+  const presetId = builtInPresetOf(profile)?.id ?? retiredPresetIdOf(profile);
   return [
     profile.oauth_grant?.origin === 'callback'
       ? { kind: 'consent', consent: 'callback', preset: undefined }
-      : preset !== undefined
-        ? { kind: 'consent', consent: 'preset', preset: preset.id }
+      : presetId !== undefined
+        ? { kind: 'consent', consent: 'preset', preset: presetId }
         : { kind: 'consent', consent: 'none', preset: undefined },
     { kind: 'grant', named, runnable: named === undefined || named === 'refresh_token' || named === 'client_credentials' },
     { kind: 'slot', slot, derived, diverges: slot !== derived },

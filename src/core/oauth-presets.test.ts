@@ -110,6 +110,8 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
     // RETIRED_PRESET_IDS fails (a), and its profiles would lose the lock that keeps a user's
     // grant from being replaced. A provider added without being pinned here fails (b), so
     // this list keeps up and a later removal is caught.
+    // APPEND-ONLY: an id leaves the register by moving to RETIRED_PRESET_IDS, never by being
+    // deleted here as well; a diff that removes a line below defeats this test.
     const SHIPPED = ['bexio', 'shopify'];
     // (a) every id ever shipped is still answered for.
     for (const id of SHIPPED) {
@@ -121,6 +123,8 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
     }
     // And no id is both: a retired id answers through retiredPresetIdOf only.
     expect(RETIRED_PRESET_IDS.filter((id) => OAUTH_PRESETS.get(id) !== undefined)).toEqual([]);
+    // And every retired id is one a profile could have named.
+    expect(RETIRED_PRESET_IDS.filter((id) => !PRESET_ID_PATTERN.test(id))).toEqual([]);
   });
 
   it('refuses an id added to the retired list at runtime', () => {
