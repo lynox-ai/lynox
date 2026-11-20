@@ -1196,11 +1196,12 @@ describe('a save cannot take a profile off its built-in provider', () => {
     expect(store.get('vetted-api')?.description).toBe('changed');
   });
 
-  it('lets a profile off a provider the engine no longer knows', async () => {
-    // A preset retired from the register cannot connect anyway; holding the profile to it
-    // would make even the save that repairs it impossible.
+  it('lets a profile off a provider id this engine never had', async () => {
+    // Such an id cannot connect; holding the profile to it would make even the save that
+    // repairs a mistyped id impossible. A provider this engine once shipped is different and
+    // stays held (`RETIRED_PRESET_IDS`, api-setup-retired-preset.test.ts).
     const store = new ApiStore();
-    store.register({ ...prior, auth: { ...prior.auth!, oauth: { ...prior.auth!.oauth!, preset_id: 'retired-shop' } } });
+    store.register({ ...prior, auth: { ...prior.auth!, oauth: { ...prior.auth!.oauth!, preset_id: 'never-shipped' } } });
     const agent = agentWith(store);
     (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async () => 'allow';
     const reply = await apiSetupTool.handler({ action: 'update', profile: {

@@ -11,7 +11,7 @@ import { accessTokenKey, hasRevokedGrant, readersRefreshSlot, recordedWrites, re
 import type { ApiProfile } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
-import { OAUTH_PRESETS, PRESET_ID_PATTERN, builtInPresetOf, isPresetClientSecretName, presetClientSecretGuidance, presetNotFollowed, presetParamsForModel, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
+import { OAUTH_PRESETS, PRESET_ID_PATTERN, builtInPresetOf, retiredPresetIdOf, isPresetClientSecretName, presetClientSecretGuidance, presetNotFollowed, presetParamsForModel, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
@@ -1201,10 +1201,11 @@ export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IA
  * without its grant record (a JSON in the apis directory). A preset whose provider issues
  * app tokens would be refused here too, so adding one means revisiting this.
  *
- * ⚠ Known presets only. A profile may be saved naming a provider this engine does not have
- * (the save only notes it), and `connect` refuses such a profile — so reading any
- * `preset_id` as a user's consent would refuse an app-only profile's exchange and send it
- * to a `connect` that cannot run.
+ * ⚠ Known presets only, and the ones this engine once shipped (`retiredPresetIdOf`): a
+ * provider removed from the register leaves profiles whose grant a user gave through it.
+ * A profile may be saved naming a provider this engine never had (the save only notes it),
+ * and `connect` refuses such a profile — so reading any `preset_id` as a user's consent
+ * would refuse an app-only profile's exchange and send it to a `connect` that cannot run.
  *
  * ⚠ NOT "has an `oauth_grant`": `fetch_token` writes one after every successful exchange,
  * app-only profiles included (`written`, `connected_by`), and the renewal on attach runs the
@@ -1263,7 +1264,7 @@ export function oauthGrantIsUserDelegated(profile: {
   oauth_grant?: { origin?: 'callback' | undefined } | undefined;
 }): boolean {
   if (profile.oauth_grant?.origin === 'callback') return true;
-  return builtInPresetOf(profile) !== undefined;
+  return builtInPresetOf(profile) !== undefined || retiredPresetIdOf(profile) !== undefined;
 }
 
 /**

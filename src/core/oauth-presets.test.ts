@@ -17,6 +17,8 @@ import {
   presetTokenHeaderName,
   type OAuthPreset,
   PRESET_ID_PATTERN,
+  RETIRED_PRESET_IDS,
+  retiredPresetIdOf,
 } from './oauth-presets.js';
 
 // Two presets that exercise both host rules. They live here, not in the
@@ -97,8 +99,43 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
       // And `consentFrameProblems`: it reads a preset's customer text and lists what is missing.
       // `normalizedPresetParams` returns a copy of a profile's values as its preset reads them;
       // `askedScopes`, `scopesOfAnswer` and `scopesBeyondAsked` read scopes and add no preset.
-      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'askedScopes', 'builtInPresetOf', 'consentFrameProblems', 'derivePresetEndpoints', 'isPresetClientSecretName', 'normalizedPresetParams', 'presetClientKeys', 'presetClientSecretGuidance', 'presetIds', 'presetNotFollowed', 'presetParamsForModel', 'presetStoreHost', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetTokenBodyFormat', 'presetTokenHeaderName', 'scopesBeyondAsked', 'scopesOfAnswer'].sort(),
+      // `RETIRED_PRESET_IDS` is a frozen list of ids no provider answers to, and `retiredPresetIdOf` reads it.
+      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'RETIRED_PRESET_IDS', 'askedScopes', 'builtInPresetOf', 'retiredPresetIdOf', 'consentFrameProblems', 'derivePresetEndpoints', 'isPresetClientSecretName', 'normalizedPresetParams', 'presetClientKeys', 'presetClientSecretGuidance', 'presetIds', 'presetNotFollowed', 'presetParamsForModel', 'presetStoreHost', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetTokenBodyFormat', 'presetTokenHeaderName', 'scopesBeyondAsked', 'scopesOfAnswer'].sort(),
     );
+  });
+
+  it('keeps every provider id it ever shipped, in the register or in the retired list', () => {
+    // Pinned by hand on purpose: a list read from the register would only check the register
+    // against itself. A provider removed from the register without its id going to
+    // RETIRED_PRESET_IDS fails (a), and its profiles would lose the lock that keeps a user's
+    // grant from being replaced. A provider added without being pinned here fails (b), so
+    // this list keeps up and a later removal is caught.
+    const SHIPPED = ['bexio', 'shopify'];
+    // (a) every id ever shipped is still answered for.
+    for (const id of SHIPPED) {
+      expect(OAUTH_PRESETS.get(id) !== undefined || RETIRED_PRESET_IDS.includes(id), `shipped id "${id}" is in neither the register nor RETIRED_PRESET_IDS`).toBe(true);
+    }
+    // (b) every id in the register is pinned.
+    for (const id of OAUTH_PRESETS.ids()) {
+      expect(SHIPPED, `register id "${id}" is not pinned in this test`).toContain(id);
+    }
+    // And no id is both: a retired id answers through retiredPresetIdOf only.
+    expect(RETIRED_PRESET_IDS.filter((id) => OAUTH_PRESETS.get(id) !== undefined)).toEqual([]);
+  });
+
+  it('refuses an id added to the retired list at runtime', () => {
+    expect(Object.isFrozen(RETIRED_PRESET_IDS)).toBe(true);
+    expect(() => { (RETIRED_PRESET_IDS as string[]).push('evil'); }).toThrow();
+  });
+
+  it('names a retired provider only for an oauth2 profile that names it', () => {
+    const oauth2 = (preset_id: string | undefined) => ({ auth: { type: 'oauth2', oauth: { preset_id } } });
+    expect(retiredPresetIdOf(oauth2('gone-shop'), ['gone-shop'])).toBe('gone-shop');
+    // An id that was never shipped binds nothing: such a profile stays editable.
+    expect(retiredPresetIdOf(oauth2('never-was'), ['gone-shop'])).toBeUndefined();
+    expect(retiredPresetIdOf(oauth2(undefined), ['gone-shop'])).toBeUndefined();
+    expect(retiredPresetIdOf({ auth: { type: 'bearer', oauth: { preset_id: 'gone-shop' } } }, ['gone-shop'])).toBeUndefined();
+    expect(retiredPresetIdOf(oauth2('gone-shop'))).toBeUndefined();
   });
 
   it('keeps a register a caller built to itself', () => {

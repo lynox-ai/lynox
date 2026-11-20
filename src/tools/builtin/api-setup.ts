@@ -23,7 +23,7 @@ import { SaveRefused, accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
-import { builtInPresetOf, derivePresetEndpoints, presetIds, presetParamsForModel, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
+import { builtInPresetOf, retiredPresetIdOf, derivePresetEndpoints, presetIds, presetParamsForModel, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { isCountrySecondLevel } from '../../core/public-suffix.js';
 import { delegatedRenewalWay, fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated, providerNotFollowed } from './http.js';
@@ -2192,6 +2192,13 @@ ${draftJson}
       const priorPreset = prior ? builtInPresetOf(prior) : undefined;
       if (priorPreset && builtInPresetOf(profile)?.id !== priorPreset.id) {
         return `Error: profile "${profile.id}" is set up through the built-in "${priorPreset.id}" provider, and a save cannot remove or change auth.oauth.preset_id or auth.type: the sign-in and the scopes it may ask for belong to the provider, not to the profile. Nothing was saved. Scopes this provider allows: ${[...priorPreset.requiredScopes, ...priorPreset.allowedScopes].join(' ')}. Connecting here cannot authorize a scope outside that list, so tell the user it is not available rather than offering it. Another way of signing in to the same API replaces this connection, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
+      }
+      // The same holds for a provider this engine once shipped and no longer has: the profile
+      // was set up through it, and its grant is a user's. The id is named because it equals one
+      // of ours (`RETIRED_PRESET_IDS`), the rule the unknown-preset note below keeps.
+      const priorRetired = prior && !priorPreset ? retiredPresetIdOf(prior) : undefined;
+      if (priorRetired !== undefined && retiredPresetIdOf(profile) !== priorRetired) {
+        return `Error: profile "${profile.id}" is set up through the built-in "${priorRetired}" provider, which this engine no longer has, and a save cannot remove or change auth.oauth.preset_id or auth.type: the sign-in belongs to the provider, not to the profile. Nothing was saved. Another way of signing in to the same API replaces this connection, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
       }
       const reserved = reservedAppNameRefusal(profile);
       if (reserved) return `Validation error: ${reserved}`;
