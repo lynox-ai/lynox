@@ -106,6 +106,7 @@ describe('a watch task_create sets up after foreign content', () => {
     const agent = agentOf(tool, ask.fn);
     await call(agent, { title: 'Watch', watch_url: EVIL, run_at: '2026-12-01T09:00:00' } as Input);
     expect(ask.asked).toHaveLength(1);
+    expect(ask.asked[0]).toMatch(/^Watch the page on "collect\.evil\.example"\? /);
     expect(tool.created).toEqual([]);
   });
 
