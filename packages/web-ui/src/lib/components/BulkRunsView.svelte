@@ -144,7 +144,7 @@
 									<td class="py-2 pr-3 hidden sm:table-cell">{bulkSystemName(run.targetSystem, i18n)}</td>
 									<td class="py-2 pr-3">
 										<span class="{chipClass} whitespace-nowrap {run.phase === 'done' ? 'bg-success/15 text-success' : run.haltReason && !bulkWaitsForStart(run) ? 'bg-warning/15 text-warning' : 'bg-bg-muted text-text-muted'}">
-											{t(`bulk.phase.${run.phase}`)}{run.haltReason && !bulkWaitsForStart(run) ? ` ${t(bulkHaltSuffixKey(run))}` : ''}
+											{t(`bulk.phase.${run.phase}`)}{run.haltReason && !bulkWaitsForStart(run) && bulkHaltSuffixKey(run) !== null ? ` ${t(bulkHaltSuffixKey(run)!)}` : ''}
 										</span>
 										{#if run.writeForm === 'unmeasured'}
 											<span class="{chipClass} whitespace-nowrap bg-warning/15 text-warning">{t('bulk.unmeasured_chip')}</span>

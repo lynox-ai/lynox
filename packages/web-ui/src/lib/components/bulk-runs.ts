@@ -89,6 +89,9 @@ export interface BulkRun {
 	maxTargets: number | null;
 	/** Targets that failed in any pass; null for a run approved before this was counted. */
 	failedOnce: number | null;
+	/** Of the targets this pass recorded as failed, those whose send is unclear now. Absent on an
+	 *  older engine. */
+	passUnclear?: number | undefined;
 	/** How many targets may fail in one pass without the failure-rate halt. */
 	failureLimit: number;
 	/** The targets a resume tries again; every failure of the next pass is one of them. */
@@ -152,14 +155,18 @@ export function bulkTakesStartDomains(run: Pick<BulkRunDetailData, 'judge' | 'li
 	return run.judge !== null && (run.list ?? null) !== null && bulkHostOf(run.targetSystem) !== null;
 }
 
-/** The word over a halted run's cause. An owner's stop is a stop, not a halt: „angehalten“ is
- *  the word of a run that ended where its approval, a failure or a limit told it to. */
-export function bulkHaltHeadKey(run: Pick<BulkRun, 'haltKey'>): 'bulk.head.stopped' | 'bulk.head.halted' {
+/** The word over a halted run's cause. A run that was cancelled is cancelled, whatever ended it:
+ *  it will not go on. An owner's stop is a stop, not a halt: „angehalten“ is the word of a run
+ *  that waits where its approval, a failure or a limit told it to. */
+export function bulkHaltHeadKey(run: Pick<BulkRun, 'haltKey' | 'phase'>): 'bulk.head.aborted' | 'bulk.head.stopped' | 'bulk.head.halted' {
+	if (run.phase === 'aborted') return 'bulk.head.aborted';
 	return run.haltKey === 'stoppedByOwner' ? 'bulk.head.stopped' : 'bulk.head.halted';
 }
 
-/** The same distinction for the suffix on a run's phase in the list. */
-export function bulkHaltSuffixKey(run: Pick<BulkRun, 'haltKey'>): 'bulk.stopped_suffix' | 'bulk.halted_suffix' {
+/** The same distinction for the suffix on a run's phase in the list; none on a cancelled run,
+ *  whose phase already says so. */
+export function bulkHaltSuffixKey(run: Pick<BulkRun, 'haltKey' | 'phase'>): 'bulk.stopped_suffix' | 'bulk.halted_suffix' | null {
+	if (run.phase === 'aborted') return null;
 	return run.haltKey === 'stoppedByOwner' ? 'bulk.stopped_suffix' : 'bulk.halted_suffix';
 }
 
@@ -224,6 +231,8 @@ export function bulkHaltText(
 	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'targetSystem' | 'costUsd' | 'costCapUsd' | 'judge' | 'listFirstPage' | 'judgeServedBy' | 'judgeOwnKey'>,
 	managed: boolean | null,
 	i18n: BulkI18n,
+	/** Whether the preview marks a target with a failure ({@link bulkShowsFailure}). */
+	failureMarked: boolean,
 ): { cause: string; before: string | null } | null {
 	const key = run.haltKey;
 	if (run.phase !== 'planned' || key === null || !(BULK_RESTART_AS_IS.has(key) || BULK_RESTART_NONE.has(key))) return null;
@@ -245,6 +254,8 @@ export function bulkHaltText(
 	// A step that promises going on stands only where the page offers to go on (ux U-105 L1): a
 	// run that cannot be moved on as it is gets the warning's way instead.
 	const offersRestart = !BULK_NO_RESTART_BUTTON.has(bulkRestartKind(run) ?? 'none');
+	// "Check the targets with an error below" only where the preview marks one.
+	if (key === 'consecutiveFailures' && !failureMarked) return { cause: i18n.tf(`bulk.halt.${key}`, vars), before: null };
 	const before = BULK_BEFORE_PROMISES_GOING_ON.has(beforeKey) && !offersRestart ? beforeKey : i18n.tf(beforeKey, vars);
 	const causeKey = judgedUnavailable ? 'bulk.halt.unavailable_judge' : `bulk.halt.${key}`;
 	return { cause: i18n.tf(causeKey, vars), before: before === beforeKey ? null : before };
@@ -296,9 +307,12 @@ export function bulkResumeKind(
  *  what the owner can do first, and for a halt on failures how many failed so far and what the
  *  next pass may still fail. Every count comes from the engine: the page computes none of them. */
 export function bulkResumeText(
-	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'applied' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries' | 'sentUnknown' | 'resumeSends' | 'conflicts'>,
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'applied' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries' | 'sentUnknown' | 'resumeSends' | 'conflicts' | 'heads' | 'passUnclear'>,
 	managed: boolean | null,
 	i18n: BulkI18n,
+	/** Whether the preview marks a target with a failure ({@link bulkShowsFailure}): only then
+	 *  does the page tell the owner to check the targets with an error below. */
+	failureMarked: boolean,
 ): { cause: string; before: string | null; check: string | null; kept: string | null; soFar: string | null; allows: string | null } | null {
 	const kind = bulkResumeKind(run);
 	if (kind === null) return null;
@@ -309,12 +323,12 @@ export function bulkResumeText(
 	const limit = run.failureLimit;
 	const open = run.resumeOpen;
 	const failures = key === 'failureRate' || key === 'consecutiveFailures';
-	const cause = key === 'failureRate' ? (limit === 0 ? i18n.t('bulk.halt.failureRate_write0') : i18n.tf('bulk.halt.failureRate_write', { limit: String(limit) }))
+	const cause = key === 'failureRate' ? bulkFailureRateCause(run, limit, i18n)
 		: key === 'consecutiveFailures' ? i18n.t('bulk.halt.consecutiveFailures_write')
 		: key === 'unrecorded' ? i18n.tf('bulk.halt.unrecorded_write', vars)
 		: key === 'maxTargets' && run.maxTargets === 1 ? i18n.t('bulk.halt.maxTargets_one')
 		: i18n.tf(`bulk.halt.${key}`, vars);
-	const beforeKey = failures ? 'bulk.halt.failures_before_write'
+	const beforeKey = failures ? (failureMarked ? 'bulk.halt.failures_before_write' : null)
 		: key === 'credential' ? 'bulk.halt.credential_before'
 		: key === 'unauthorized' || key === 'unavailable' ? `bulk.halt.${key}_before`
 		: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_${tier}`
@@ -345,6 +359,30 @@ export function bulkResumeText(
 		? (f === 1 ? i18n.t('bulk.resume.failed_so_far_at_least_one') : i18n.tf('bulk.resume.failed_so_far_at_least', { n: String(f) }))
 		: (run.failedOnce === 1 ? i18n.t('bulk.resume.failed_so_far_one') : i18n.tf('bulk.resume.failed_so_far', { n: String(run.failedOnce) }));
 	return { cause, before, check: null, kept, soFar, allows: bulkResumeAllows(limit, open, i18n) };
+}
+
+/** Why a write run halted on its failure rate, with this pass's numbers: the targets that failed
+ *  now (`heads.failed`) and those whose send is unclear (`passUnclear`). A timeout counts toward
+ *  the halt, but it is not a target that could not be written. An older engine without these
+ *  counts gets the sentence on the limit. */
+function bulkFailureRateCause(run: Pick<BulkRunDetailData, 'heads' | 'passUnclear'>, limit: number, i18n: BulkI18n): string {
+	const f = run.heads?.failed;
+	const u = run.passUnclear;
+	if (f === undefined || u === undefined || u === 0) {
+		return limit === 0 ? i18n.t('bulk.halt.failureRate_write0') : i18n.tf('bulk.halt.failureRate_write', { limit: String(limit) });
+	}
+	if (f === 0) return u === 1 ? i18n.t('bulk.halt.failureRate_unclear_one') : i18n.tf('bulk.halt.failureRate_unclear', { n: String(u) });
+	return i18n.tf(`bulk.halt.failureRate_mixed_${f === 1 ? 'f1' : 'fn'}_${u === 1 ? 'u1' : 'un'}`, { f: String(f), u: String(u) });
+}
+
+/** Whether the preview marks this target with a failure: a write or read failure the row shows
+ *  as such. A target with a diff shows the diff, not its error; a conflict and a send without a
+ *  clear answer are not failures. A target left out after its second failed read shows that
+ *  read's failure too. */
+export function bulkShowsFailure(target: Pick<BulkTarget, 'error' | 'change' | 'diff'>): boolean {
+	if (target.change === 'invalid') return target.error === 'read_failed';
+	return target.error !== null && target.diff.kind === 'none'
+		&& target.error !== 'conflict' && target.error !== 'sent_unknown';
 }
 
 /** What writing on lets fail before the run stops again. The next pass's failures are bounded
@@ -869,7 +907,7 @@ const BULK_BEFORE_WRITE: ReadonlySet<BulkPhase> = new Set(['planned', 'previewed
  *  classes gets the overlapping counts it has. */
 export function bulkHeadCounts(
 	step: BulkWorkingStep | null,
-	run: Pick<BulkRun, 'kind' | 'phase' | 'total' | 'applied' | 'conflicts' | 'failed' | 'heads'>,
+	run: Pick<BulkRunDetailData, 'kind' | 'phase' | 'total' | 'applied' | 'conflicts' | 'failed' | 'heads' | 'haltKey' | 'probe' | 'haltReason'>,
 	i18n: BulkI18n,
 ): string {
 	if (step === 'list') return i18n.t('bulk.head.counts_pending');
@@ -890,10 +928,13 @@ const BULK_ENDED: ReadonlySet<BulkPhase> = new Set(['done', 'aborted', 'undone']
  *  holds a target. A target taken back without having been written counts with the ones taken
  *  back: for the owner the old value is back either way. An undo run's writes are what it took
  *  back, and what it in turn took back is restored. The rest is open while the run may still
- *  write it. Once the run has ended lynox has no result for it: it may hold a send whose answer
- *  was never recorded, so it is not called not written. */
-export function bulkHeadParts(run: Pick<BulkRun, 'kind' | 'phase'>, heads: BulkHeads, i18n: BulkI18n): string[] {
+ *  write it. Once the run has ended, or halted with no way on (`bulkResumeKind` `none`), lynox
+ *  has no result for it: it may hold a send whose answer was never recorded, so it is not called
+ *  not written. */
+export function bulkHeadParts(run: Pick<BulkRunDetailData, 'kind' | 'phase' | 'haltKey' | 'probe' | 'haltReason'>, heads: BulkHeads, i18n: BulkI18n): string[] {
 	const undo = run.kind === 'undo';
+	const noWayOn = BULK_ENDED.has(run.phase) || ((run.phase === 'approved' || run.phase === 'writing')
+		&& run.haltKey !== null && BULK_RESUME_NONE.has(run.haltKey) && !bulkAtProbe(run));
 	const parts: [key: string, n: number, always: boolean][] = [
 		['bulk.heads.deselected', heads.deselected, false],
 		['bulk.heads.invalid', heads.invalid, false],
@@ -903,7 +944,7 @@ export function bulkHeadParts(run: Pick<BulkRun, 'kind' | 'phase'>, heads: BulkH
 		[bulkOne('bulk.heads.conflict', heads.conflict), heads.conflict, true],
 		[bulkOne('bulk.heads.unclear', heads.unclear), heads.unclear, false],
 		['bulk.heads.failed', heads.failed, true],
-		[BULK_ENDED.has(run.phase) ? 'bulk.heads.no_result' : 'bulk.heads.open', heads.open, false],
+		[noWayOn ? 'bulk.heads.no_result' : 'bulk.heads.open', heads.open, false],
 	];
 	return parts.filter(([, n, always]) => always || n > 0).map(([key, n]) => i18n.tf(key, { n: String(n) }));
 }
@@ -1010,7 +1051,7 @@ export function bulkHaltCause(
 	mandate = false,
 ): string {
 	if (bulkAtProbe(run) && run.haltKey === 'maxTargets') return i18n.t('bulk.halted_after_probe');
-	const own = bulkHaltText(run, managed, i18n)?.cause ?? bulkResumeText(run, managed, i18n)?.cause ?? bulkRollbackText(run, i18n)?.cause;
+	const own = bulkHaltText(run, managed, i18n, false)?.cause ?? bulkResumeText(run, managed, i18n, false)?.cause ?? bulkRollbackText(run, i18n)?.cause;
 	if (own !== undefined) return own;
 	if (mandate && bulkWaitsForStart(run)) return i18n.t('bulk.halt.wait_owner_only');
 	const state = bulkStateText(run, startButton, i18n);
@@ -1093,10 +1134,12 @@ export function bulkStep(run: BulkStepRun): BulkStepName {
 	return 'done';
 }
 
-/** The i18n key of a step's chip. An undone run's last step reads as the list reads its phase
- *  („zurückgenommen“), not „fertig“: its values are no longer live. */
+/** The i18n key of a step's chip. An undone or cancelled run's last step reads as the list reads
+ *  its phase („zurückgenommen“, „abgebrochen“), not „fertig“: an undone run's values are no
+ *  longer live, and a cancelled one did not finish. */
 export function bulkStepLabelKey(run: Pick<BulkRun, 'phase'>, step: BulkStepName): string {
-	return step === 'done' && run.phase === 'undone' ? 'bulk.phase.undone' : `bulk.step.${step}`;
+	if (step === 'done' && (run.phase === 'undone' || run.phase === 'aborted')) return `bulk.phase.${run.phase}`;
+	return `bulk.step.${step}`;
 }
 
 /** Whether a target's after-value is shown as not live: an undo or a rollback took it back, or, on

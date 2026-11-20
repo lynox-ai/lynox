@@ -364,7 +364,7 @@ describe('a run the engine works on', () => {
 		expect(counts()).toBe(tf('bulk.head.counts', { n: '3', a: '0', c: '0', f: '1' }));
 		// Each count on its own opens the counts: a conflict the read found, a target written.
 		const i18n = { t, tf };
-		const before = { kind: 'apply' as const, phase: 'planned' as const, total: 3, applied: 0, conflicts: 0, failed: 0 };
+		const before = { kind: 'apply' as const, phase: 'planned' as const, total: 3, applied: 0, conflicts: 0, failed: 0, haltKey: null, probe: null, haltReason: null };
 		expect(bulkHeadCounts(null, before, i18n)).toBe('3 Ziele');
 		expect(bulkHeadCounts(null, { ...before, conflicts: 1 }, i18n)).toBe(tf('bulk.head.counts', { n: '3', a: '0', c: '1', f: '0' }));
 		expect(bulkHeadCounts(null, { ...before, phase: 'approved', applied: 1 }, i18n)).toBe(tf('bulk.head.counts', { n: '3', a: '1', c: '0', f: '0' }));
@@ -375,7 +375,7 @@ describe('the head names every target once', () => {
 	const NONE: BulkHeads = { deselected: 0, invalid: 0, unchanged: 0, takenBack: 0, written: 0, conflict: 0, unclear: 0, failed: 0, settled: 0, open: 0 };
 	const i18n = { t, tf };
 	const done = (total: number, heads: Partial<BulkHeads>, kind: 'apply' | 'undo' = 'apply', phase: BulkRunDetailData['phase'] = 'done') =>
-		bulkHeadCounts(null, { kind, phase, total, applied: 0, conflicts: 0, failed: 0, heads: { ...NONE, ...heads } }, i18n);
+		bulkHeadCounts(null, { kind, phase, total, applied: 0, conflicts: 0, failed: 0, haltKey: null, probe: null, haltReason: null, heads: { ...NONE, ...heads } }, i18n);
 	const label = (): string | null => target.querySelector('[data-testid="bulk-counts"]')?.previousElementSibling?.textContent ?? null;
 
 	it('names the status of a halted run in classes that add up to its targets, in DE and EN', async () => {
@@ -415,7 +415,7 @@ describe('the head names every target once', () => {
 			expect(done(3, { written: 1, open: 2 }, 'apply', phase), phase).toBe('3 Ziele: 1 geschrieben · 0 Konflikte · 0 fehlgeschlagen · 2 ohne Ergebnis');
 		}
 		// A run that ended before it wrote anything: the three zeros and the rest, with no result.
-		expect(bulkHeadCounts(null, { kind: 'apply', phase: 'aborted', total: 4, applied: 0, conflicts: 0, failed: 0, heads: { ...NONE, open: 4 } }, i18n))
+		expect(bulkHeadCounts(null, { kind: 'apply', phase: 'aborted', total: 4, applied: 0, conflicts: 0, failed: 0, haltKey: null, probe: null, haltReason: null, heads: { ...NONE, open: 4 } }, i18n))
 			.toBe('4 Ziele: 0 geschrieben · 0 Konflikte · 0 fehlgeschlagen · 4 ohne Ergebnis');
 	});
 
@@ -450,11 +450,11 @@ describe('the head names every target once', () => {
 
 	it('says one target in the singular', () => {
 		expect(done(1, { written: 1 })).toBe('1 Ziel: 1 geschrieben · 0 Konflikte · 0 fehlgeschlagen');
-		expect(bulkHeadCounts(null, { kind: 'apply', phase: 'previewed', total: 1, applied: 0, conflicts: 0, failed: 0, heads: { ...NONE, open: 1 } }, i18n)).toBe('1 Ziel');
+		expect(bulkHeadCounts(null, { kind: 'apply', phase: 'previewed', total: 1, applied: 0, conflicts: 0, failed: 0, haltKey: null, probe: null, haltReason: null, heads: { ...NONE, open: 1 } }, i18n)).toBe('1 Ziel');
 	});
 
 	it('names only the targets before the run writes, the classes notwithstanding', () => {
-		expect(bulkHeadCounts(null, { kind: 'apply', phase: 'previewed', total: 3, applied: 0, conflicts: 0, failed: 0, heads: { ...NONE, deselected: 1, open: 2 } }, i18n)).toBe('3 Ziele');
+		expect(bulkHeadCounts(null, { kind: 'apply', phase: 'previewed', total: 3, applied: 0, conflicts: 0, failed: 0, haltKey: null, probe: null, haltReason: null, heads: { ...NONE, deselected: 1, open: 2 } }, i18n)).toBe('3 Ziele');
 	});
 
 	it('moves the classes with each ask while the run writes', async () => {
