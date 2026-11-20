@@ -12723,7 +12723,7 @@ export class LynoxHTTPApi {
           verifier: signed.verifier,
         }),
         ...codeExchangeExtraParams(preset, {
-          hasAccessToken: secretStore.resolve(accessTokenKey(profile.id)) !== null,
+          hasAccessToken: secretStore.holds(accessTokenKey(profile.id)),
           tokenExpiresAt: profile.auth?.oauth?.token_expires_at,
         }),
       };

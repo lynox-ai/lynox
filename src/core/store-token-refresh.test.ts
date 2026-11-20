@@ -188,7 +188,7 @@ describe('the refresh of an expiring store connection', () => {
     expect(vault.get(refreshTokenKey(ID))).toBe('rt-old');
   });
 
-  it('mints no pass for a client the preset does not name, refuses with that reason, and stays refused inside the window', async () => {
+  it('mints no pass for a client the preset does not name, refuses with that reason, and stays refused inside the window until the names are the preset\'s', async () => {
     const p = profile();
     expect(store.save({ ...p, auth: { ...p.auth, oauth: { ...p.auth!.oauth, client_secret_key: 'OTHER_SECRET' } } } as ApiProfile).ok).toBe(true);
     vault.set('OTHER_SECRET', 'another-providers-key');
@@ -199,6 +199,10 @@ describe('the refresh of an expiring store connection', () => {
     // A second attempt inside the window is refused the same way, not let through with the stale token.
     expect(await refreshStoreToken(ID, 'due', ctx())).toBe('client-misnamed');
     expect(hold.calls).toHaveLength(0);
+    // Once the names are the preset's again, the window no longer answers for the client.
+    expect(store.save(p as ApiProfile).ok).toBe(true);
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('not-run');
+    expect(store.save({ ...p, auth: { ...p.auth, oauth: { ...p.auth!.oauth, client_secret_key: 'OTHER_SECRET' } } } as ApiProfile).ok).toBe(true);
     // The request that found the token due is refused with that reason.
     const { attachStoredCredential } = await import('../tools/builtin/http.js');
     const { bindingsAsMigrated } = await import('../../tests/helpers/vault-bindings.js');
@@ -212,6 +216,23 @@ describe('the refresh of an expiring store connection', () => {
       vaultNameBindings: bindingsAsMigrated(store), shellIsolation: c.toolContext.shellIsolation,
     }, { bulkRunId: 'run-1' }, misnamedOut)).toBeNull();
     expect(misnamedOut.reconnect).toBe('client-misnamed');
+  });
+
+  it('a refresh that went through after a misnamed one forgets it: inside the next window it is throttled, not refused for the client', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const p = profile();
+      const misnamed = { ...p, auth: { ...p.auth, oauth: { ...p.auth!.oauth, client_secret_key: 'OTHER_SECRET' } } } as ApiProfile;
+      expect(store.save(misnamed).ok).toBe(true);
+      expect(await refreshStoreToken(ID, 'due', ctx())).toBe('client-misnamed');
+      vi.setSystemTime(Date.now() + 61_000);
+      expect(store.save(p as ApiProfile).ok).toBe(true);
+      expect(await refreshStoreToken(ID, 'due', ctx())).toBe('renewed');
+      expect(store.save({ ...misnamed, oauth_grant: profile().oauth_grant } as ApiProfile).ok).toBe(true);
+      expect(await refreshStoreToken(ID, 'due', ctx())).toBe('not-run');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('a profile removed while the refresh was out stores nothing and still ends in an outcome line', async () => {
@@ -482,7 +503,7 @@ describe('the refresh of an expiring store connection', () => {
 
     it('in English with the date written out', () => {
       expiring(NOW + 3 * DAY);
-      expect(claimStoreReconnectHints(store, hold.dir, 'en', NOW)[0]?.body).toBe('lynox\'s access to the store acme.myshopify.com runs out on January 13, 2027. Connect the store again under Settings → APIs before then, so runs and requests keep going.');
+      expect(claimStoreReconnectHints(store, hold.dir, 'en', NOW)[0]?.body).toBe('lynox\'s access to the store acme.myshopify.com runs out on 13 January 2027. Connect the store again under Settings → APIs before then, so runs and requests keep going.');
     });
 
     it('says nothing while the end is further away than 14 days', () => {

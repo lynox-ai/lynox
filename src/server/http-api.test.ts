@@ -318,6 +318,8 @@ vi.mock('../core/engine.js', () => ({
       scrubFreedPages: vi.fn(),
       hasVault: true,
       resolve: mockSecretResolve,
+      // Existence without a value (`SecretStore.holds`), over the same slots `resolve` answers.
+      holds: (name: string): boolean => mockSecretResolve(name) != null,
       isEnvironmentSecret: mockSecretIsEnvironment,
       containsSecret: mockSecretContains,
       maskSecrets: mockSecretMask,

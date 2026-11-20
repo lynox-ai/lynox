@@ -160,7 +160,7 @@ function storeReconnectHint(host: string, until: number, now: number, lang: 'de'
       ? { title: 'Shop neu verbinden', body: `Der Zugang von lynox zum Shop ${host} ist abgelaufen. Verbinde den Shop unter Einstellungen → APIs neu, damit Läufe und Abfragen wieder laufen.`, priority: 'normal' }
       : { title: 'Shop bald neu verbinden', body: `Der Zugang von lynox zum Shop ${host} läuft am ${date} ab. Verbinde den Shop vorher unter Einstellungen → APIs neu, damit Läufe und Abfragen weiterlaufen.`, priority: 'normal' };
   }
-  const date = `${MONTHS_EN[d.getUTCMonth()] ?? ''} ${day}, ${year}`;
+  const date = `${day} ${MONTHS_EN[d.getUTCMonth()] ?? ''} ${year}`;
   return until <= now
     ? { title: 'Connect the store again', body: `lynox's access to the store ${host} has run out. Connect the store again under Settings → APIs so runs and requests work again.`, priority: 'normal' }
     : { title: 'Connect the store again soon', body: `lynox's access to the store ${host} runs out on ${date}. Connect the store again under Settings → APIs before then, so runs and requests keep going.`, priority: 'normal' };
@@ -270,8 +270,8 @@ export function refreshStoreToken(profileId: string, trigger: 'due' | 'unauthori
   }
   const last = lastAttempt.get(profileId);
   if (last !== undefined && Date.now() - last < STORE_REFRESH_WINDOW_MS) {
-    if (lastMisnamed.has(profileId)) {
-      logLine(profileId, 'not started: the last refresh found the client under other names, and nothing has changed since');
+    if (lastMisnamed.has(profileId) && clientStillMisnamed(profileId, ctx)) {
+      logLine(profileId, 'not started: the client is still under other names than the preset\'s');
       return Promise.resolve('client-misnamed');
     }
     logLine(profileId, `not started: one refresh per ${String(STORE_REFRESH_WINDOW_MS / 1000)} s, the last at ${new Date(last).toISOString()}`);
@@ -291,6 +291,15 @@ export function refreshStoreToken(profileId: string, trigger: 'due' | 'unauthori
     .finally(() => { refreshesInFlight.delete(profileId); });
   refreshesInFlight.set(profileId, run);
   return run;
+}
+
+/** Whether the profile still keeps its client under other names than its preset's (no vault read). */
+function clientStillMisnamed(profileId: string, ctx: StoreRefreshContext): boolean {
+  const oauth = ctx.toolContext.apiStore?.get(profileId)?.auth?.oauth;
+  const presetId = oauth?.preset_id;
+  if (oauth === undefined || presetId === undefined || OAUTH_PRESETS.get(presetId) === undefined) return false;
+  const client = presetClientKeys(presetId);
+  return oauth.client_id_key !== client.id || oauth.client_secret_key !== client.secret;
 }
 
 function logLine(profileId: string, what: string): void {

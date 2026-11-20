@@ -67,8 +67,8 @@ const PINNED: Readonly<Record<string, string>> = {
   'core/store-token-refresh.ts||| ctx.secretStore.resolve(refreshKey) !== plan.presented.refresh': 'view; compare-and-swap before a refresh is stored, not sent',
   'core/store-token-refresh.ts|for (const profile of apiStore.getAll()) {': 'reconnect hint: reads a grant\'s refresh expiry and the derived store host, no vault',
   // Raw on purpose: whether the slot holds a token at all decides whether the code exchange keeps a
-  // lasting connection's exchange; the value is not sent or shown.
-  'server/http-api.ts|hasAccessToken: secretStore.resolve(accessTokenKey(profile.id)) !== null,': 'existence decides whether the exchange asks for an expiring token, not sent',
+  // lasting connection's exchange; `holds` gives no value and writes no access record.
+  'server/http-api.ts|hasAccessToken: secretStore.holds(accessTokenKey(profile.id)),': 'existence decides whether the exchange asks for an expiring token; no value read',
   // Fixed names that are no API profile's token slot.
   "core/engine.ts|?? this.secretStore?.resolve('GCP_PROJECT_ID')": 'fixed engine name',
   "core/engine.ts|if (this.secretStore?.holds('GCP_PROJECT_ID') === true) this._recreateClient();": 'fixed engine name; existence only, decides a client rebuild',
