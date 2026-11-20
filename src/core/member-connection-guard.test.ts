@@ -57,6 +57,18 @@ const PINNED: Readonly<Record<string, string>> = {
   'core/api-store.ts|return secretStore?.resolve(k) ?? null;': 'delete purge: fingerprint compare',
   'core/api-store.ts|value = secretStore?.resolve(w.name) ?? null;': 'delete refusal: fingerprint compare',
   'core/engine.ts|read: (name, hash) => fingerprintStore.fingerprint(name, hash),': 'boot grant backfill: a digest into the grant record',
+  // The store refresh (`store-token-refresh.ts`): `secretStore` is the view the attach read the
+  // token through (`secretsForProfile`), handed on in the refresh context.
+  'core/store-token-refresh.ts|const access = secretStore.resolve(accessTokenKey(profile.id));': 'view; the binding check before a refresh pass, not sent',
+  'core/store-token-refresh.ts|const refresh = secretStore.resolve(refreshSlot);': 'view; the refresh body, sent only to the bound store under its pass',
+  'core/store-token-refresh.ts|const clientId = secretStore.resolve(client.id);': 'view; the refresh body, sent only to the bound store under its pass',
+  'core/store-token-refresh.ts|const clientSecret = secretStore.resolve(client.secret);': 'view; the refresh body, sent only to the bound store under its pass',
+  'core/store-token-refresh.ts|if (ctx.secretStore.resolve(accessKey) !== plan.presented.access': 'view; compare-and-swap before a refresh is stored, not sent',
+  'core/store-token-refresh.ts||| ctx.secretStore.resolve(refreshKey) !== plan.presented.refresh': 'view; compare-and-swap before a refresh is stored, not sent',
+  'core/store-token-refresh.ts|for (const profile of apiStore.getAll()) {': 'reconnect hint: reads a grant\'s refresh expiry and the derived store host, no vault',
+  // Raw on purpose: whether the slot holds a token at all decides whether the code exchange keeps a
+  // lasting connection's exchange; the value is not sent or shown.
+  'server/http-api.ts|hasAccessToken: secretStore.resolve(accessTokenKey(profile.id)) !== null,': 'existence decides whether the exchange asks for an expiring token, not sent',
   // Fixed names that are no API profile's token slot.
   "core/engine.ts|?? this.secretStore?.resolve('GCP_PROJECT_ID')": 'fixed engine name',
   "core/engine.ts|if (this.secretStore?.holds('GCP_PROJECT_ID') === true) this._recreateClient();": 'fixed engine name; existence only, decides a client rebuild',
@@ -179,6 +191,9 @@ const PROFILE_SAVES: Readonly<Record<string, string>> = {
   'tools/builtin/api-setup.ts|const saved = w.run(\'save\', () => apiStore.save(profile, apisDir, { trailId: freshTrailId }), ifOk);': 'create/update: author removed behind the owner-save check',
   'tools/builtin/api-setup.ts|const saved = apiStore.save(next, apisDir);': 'adopt_connection: author removed once the connection waits',
   'server/http-api.ts|const saved = apiStore.save(': 'connect callback: spreads the stored profile, author kept',
+  'core/store-token-refresh.ts|saved = apiStore.save(': 'store refresh: spreads the stored profile, author kept',
+  "core/store-token-refresh.ts|apiStore.save({ ...now, oauth_grant: grant } as ApiProfile, join(getLynoxDir(), 'apis'), { actor: ctx.principal });": 'store refresh ended: spreads the stored profile, author kept',
+  'core/store-token-refresh.ts|claimed = apiStore.save({ ...profile, oauth_grant: { ...grant, reconnect_hint_for: until } }, apisDir).ok;': 'reconnect hint claim: spreads the stored profile, author kept',
 };
 /** Each removal of the author, with what must stand in the lines before it. */
 const AUTHOR_REMOVALS: ReadonlyArray<{ file: string; line: string; check: RegExp }> = [

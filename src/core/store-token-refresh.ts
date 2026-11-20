@@ -68,6 +68,8 @@ export function storeClientMisnamedText(profileId: string): string {
 const refreshesInFlight = new Map<string, Promise<StoreRefreshOutcome>>();
 const connectsInFlight = new Map<string, number>();
 const lastAttempt = new Map<string, number>();
+/** Profiles whose last refresh found the client under other names: inside the window they stay refused, not sent with a stale token. */
+const lastMisnamed = new Set<string>();
 
 /**
  * A connect of `profileId` is about to mint its exchange pass. `false` when a refresh of the same
@@ -92,6 +94,7 @@ export function resetStoreRefreshForTests(): void {
   refreshesInFlight.clear();
   connectsInFlight.clear();
   lastAttempt.clear();
+  lastMisnamed.clear();
 }
 
 /** Hold `profileId` as if a refresh of it ran, until the returned function is called. For tests. */
@@ -144,19 +147,23 @@ export function claimStoreReconnectHints(
   return out;
 }
 
+const MONTHS_DE = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
+const MONTHS_EN = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
 function storeReconnectHint(host: string, until: number, now: number, lang: 'de' | 'en'): { title: string; body: string; priority: 'normal' } {
   const d = new Date(until);
-  const pad = (n: number): string => String(n).padStart(2, '0');
+  const day = String(d.getUTCDate());
+  const year = String(d.getUTCFullYear());
   if (lang === 'de') {
-    const date = `${pad(d.getUTCDate())}.${pad(d.getUTCMonth() + 1)}.${String(d.getUTCFullYear())}`;
+    const date = `${day}. ${MONTHS_DE[d.getUTCMonth()] ?? ''} ${year}`;
     return until <= now
-      ? { title: 'Shop neu verbinden', body: `Der Zugang von lynox zum Shop ${host} ist abgelaufen. Verbinde den Shop unter Einstellungen → APIs neu, damit Läufe und Abfragen wieder gehen.`, priority: 'normal' }
-      : { title: 'Shop bald neu verbinden', body: `Der Zugang von lynox zum Shop ${host} läuft am ${date} ab. Verbinde den Shop vorher unter Einstellungen → APIs neu, damit Läufe und Abfragen nicht anhalten.`, priority: 'normal' };
+      ? { title: 'Shop neu verbinden', body: `Der Zugang von lynox zum Shop ${host} ist abgelaufen. Verbinde den Shop unter Einstellungen → APIs neu, damit Läufe und Abfragen wieder laufen.`, priority: 'normal' }
+      : { title: 'Shop bald neu verbinden', body: `Der Zugang von lynox zum Shop ${host} läuft am ${date} ab. Verbinde den Shop vorher unter Einstellungen → APIs neu, damit Läufe und Abfragen weiterlaufen.`, priority: 'normal' };
   }
-  const date = `${String(d.getUTCFullYear())}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+  const date = `${MONTHS_EN[d.getUTCMonth()] ?? ''} ${day}, ${year}`;
   return until <= now
     ? { title: 'Connect the store again', body: `lynox's access to the store ${host} has run out. Connect the store again under Settings → APIs so runs and requests work again.`, priority: 'normal' }
-    : { title: 'Connect the store again soon', body: `lynox's access to the store ${host} runs out on ${date}. Connect the store again under Settings → APIs before then, so runs and requests do not stop.`, priority: 'normal' };
+    : { title: 'Connect the store again soon', body: `lynox's access to the store ${host} runs out on ${date}. Connect the store again under Settings → APIs before then, so runs and requests keep going.`, priority: 'normal' };
 }
 
 /** Whether a profile is of a store preset whose tokens may expire, so that a refresh applies. */
@@ -263,14 +270,23 @@ export function refreshStoreToken(profileId: string, trigger: 'due' | 'unauthori
   }
   const last = lastAttempt.get(profileId);
   if (last !== undefined && Date.now() - last < STORE_REFRESH_WINDOW_MS) {
+    if (lastMisnamed.has(profileId)) {
+      logLine(profileId, 'not started: the last refresh found the client under other names, and nothing has changed since');
+      return Promise.resolve('client-misnamed');
+    }
     logLine(profileId, `not started: one refresh per ${String(STORE_REFRESH_WINDOW_MS / 1000)} s, the last at ${new Date(last).toISOString()}`);
     return Promise.resolve('not-run');
   }
   lastAttempt.set(profileId, Date.now());
   const run = runRefresh(profileId, trigger, ctx)
     .catch(() => {
-      logLine(profileId, 'failed: an unexpected error; the stored token is unchanged');
+      outcomeLine(profileId, 'not-run', trigger, 'an unexpected error; the stored token is unchanged');
       return 'not-run' as const;
+    })
+    .then((outcome) => {
+      if (outcome === 'client-misnamed') lastMisnamed.add(profileId);
+      else lastMisnamed.delete(profileId);
+      return outcome;
     })
     .finally(() => { refreshesInFlight.delete(profileId); });
   refreshesInFlight.set(profileId, run);
@@ -368,7 +384,10 @@ async function runRefresh(profileId: string, trigger: 'due' | 'unauthorized', ct
 
   // From here to the save nothing yields: what the compare reads is what the writes replace.
   const profile = apiStore.get(profileId);
-  if (profile === undefined) return 'not-run';
+  if (profile === undefined) {
+    outcomeLine(profileId, 'not-run', trigger, 'the profile was removed while the refresh was out; nothing was stored');
+    return 'not-run';
+  }
   // An answer that names a scope must name the one granted; one that names none leaves the
   // granted scope as it was (a refresh cannot widen what the app was granted).
   const granted = profile.oauth_grant?.granted_scope;

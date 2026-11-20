@@ -77,7 +77,7 @@ describe('the worker tick and the store reconnect hint', () => {
   it('tells the owner once, through the router, when a store\'s access runs out within 14 days', async () => {
     const p = boot(true);
     await tick(p.loop);
-    expect(hints(p.notify)).toEqual([expect.objectContaining({ title: 'Shop bald neu verbinden', body: expect.stringContaining('acme.myshopify.com läuft am 15.01.2027 ab') as string })]);
+    expect(hints(p.notify)).toEqual([expect.objectContaining({ title: 'Shop bald neu verbinden', body: expect.stringContaining('acme.myshopify.com läuft am 15. Januar 2027 ab') as string })]);
     await tick(p.loop);
     expect(hints(p.notify)).toHaveLength(1);
   });

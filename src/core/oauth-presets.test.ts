@@ -98,7 +98,8 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
       // `askedScopes`, `scopesOfAnswer` and `scopesBeyondAsked` read scopes and add no preset.
       // `connectCallText` only phrases the connect call around a profile id, like `presetClientSecretGuidance`.
       // `consentNoticeVersion` derives a digest from what a preset's page shows; `SHOPIFY_CONSENT_VERSION` is that digest for Shopify, frozen.
-      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'SHOPIFY_CONSENT_VERSION', 'askedScopes', 'builtInPresetOf', 'connectCallText', 'consentFrameProblems', 'consentNoticeVersion', 'derivePresetEndpoints', 'isPresetClientSecretName', 'normalizedPresetParams', 'presetClientKeys', 'presetClientSecretGuidance', 'presetIds', 'presetNotFollowed', 'presetParamsForModel', 'presetStoreHost', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetTokenBodyFormat', 'presetTokenHeaderName', 'scopesBeyondAsked', 'scopesOfAnswer'].sort(),
+      // `codeExchangeExtraParams` reads a preset's ask for an expiring token and what a profile holds; it adds no preset.
+      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'SHOPIFY_CONSENT_VERSION', 'askedScopes', 'builtInPresetOf', 'codeExchangeExtraParams', 'connectCallText', 'consentFrameProblems', 'consentNoticeVersion', 'derivePresetEndpoints', 'isPresetClientSecretName', 'normalizedPresetParams', 'presetClientKeys', 'presetClientSecretGuidance', 'presetIds', 'presetNotFollowed', 'presetParamsForModel', 'presetStoreHost', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetTokenBodyFormat', 'presetTokenHeaderName', 'scopesBeyondAsked', 'scopesOfAnswer'].sort(),
     );
   });
 
