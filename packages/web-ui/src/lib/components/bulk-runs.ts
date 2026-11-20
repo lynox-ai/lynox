@@ -327,7 +327,7 @@ export function bulkResumeText(
 	const open = run.resumeOpen;
 	const failures = key === 'failureRate' || key === 'consecutiveFailures';
 	const cause = key === 'failureRate' ? bulkFailureRateCause(run, limit, i18n)
-		: key === 'consecutiveFailures' ? i18n.t('bulk.halt.consecutiveFailures_write')
+		: key === 'consecutiveFailures' ? bulkConsecutiveCause(run, i18n)
 		: key === 'unrecorded' ? i18n.tf('bulk.halt.unrecorded_write', vars)
 		: key === 'maxTargets' && run.maxTargets === 1 ? i18n.t('bulk.halt.maxTargets_one')
 		: i18n.tf(`bulk.halt.${key}`, vars);
@@ -380,6 +380,15 @@ function bulkFailureRateCause(run: Pick<BulkRunDetailData, 'passFailed' | 'passU
 	}
 	if (f === 0) return u === 1 ? i18n.t('bulk.halt.failureRate_unclear_one') : i18n.tf('bulk.halt.failureRate_unclear', { n: String(u) });
 	return i18n.tf(`bulk.halt.failureRate_mixed_${f === 1 ? 'f1' : 'fn'}_${u === 1 ? 'u1' : 'un'}`, { f: String(f), u: String(u) });
+}
+
+/** Why a write run halted on three failures in a row. Which of the pass's failures were the three
+ *  is not recorded, so a pass with both kinds says either: only one whose failures are all
+ *  unclear names them as unclear. */
+function bulkConsecutiveCause(run: Pick<BulkRunDetailData, 'passFailed' | 'passUnclear'>, i18n: BulkI18n): string {
+	const u = run.passUnclear;
+	if (run.passFailed === undefined || u === undefined || u === 0) return i18n.t('bulk.halt.consecutiveFailures_write');
+	return i18n.t(run.passFailed === 0 ? 'bulk.halt.consecutiveFailures_unclear' : 'bulk.halt.consecutiveFailures_mixed');
 }
 
 /** Whether the preview marks this target with a failure: a write or read failure the row shows

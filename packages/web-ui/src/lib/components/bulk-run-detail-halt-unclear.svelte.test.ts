@@ -207,6 +207,34 @@ describe('the halt on a target whose send is unclear', () => {
 	});
 });
 
+describe('the halt on three failures in a row', () => {
+	it('names them as unclear where every failure of the pass is unclear, as either where both kinds are, and keeps its sentence where none is', async () => {
+		const cases: [number, number, string][] = [
+			[0, 3, 'Bei drei Zielen hintereinander blieb offen, ob die Änderung angekommen ist.'],
+			[1, 2, 'Bei drei Zielen hintereinander schlug das Schreiben fehl oder blieb offen, ob die Änderung angekommen ist.'],
+			[3, 0, 'Dreimal hintereinander liess sich ein Ziel nicht schreiben.'],
+		];
+		for (const [f, u, said] of cases) {
+			if (component) unmount(component);
+			component = undefined;
+			run = halted(f, u, { haltKey: 'consecutiveFailures', haltReason: 'three consecutive targets failed', failureLimit: 5 });
+			await render();
+			expect(shown(), `${String(f)}/${String(u)}`).toContain(said);
+		}
+		unmount(component!);
+		component = undefined;
+		run = halted(0, 3, { haltKey: 'consecutiveFailures', haltReason: 'three consecutive targets failed', failureLimit: 5, passFailed: undefined });
+		await render();
+		expect(shown()).toContain('Dreimal hintereinander liess sich ein Ziel nicht schreiben.');
+		const locale = getLocale();
+		setLocale('en');
+		try {
+			expect(t('bulk.halt.consecutiveFailures_unclear')).toBe('For three targets in a row, it stayed unclear whether the change arrived.');
+			expect(t('bulk.halt.consecutiveFailures_mixed')).toBe('For three targets in a row, writing failed or it stayed unclear whether the change arrived.');
+		} finally { setLocale(locale); }
+	});
+});
+
 describe('the step to check the targets with an error', () => {
 	it('stands only where the preview marks a target with a failure', async () => {
 		const step = t('bulk.halt.failures_before_write');

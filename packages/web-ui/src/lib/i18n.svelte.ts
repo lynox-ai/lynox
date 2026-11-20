@@ -712,6 +712,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.halt.failureRate_mixed_fn_u1': { de: 'In diesem Durchgang liessen sich {f} Ziele nicht schreiben, und bei 1 Ziel blieb offen, ob die Änderung angekommen ist.', en: 'In this pass, {f} targets could not be written, and for 1 target it stayed unclear whether the change arrived.' },
 	'bulk.halt.failureRate_mixed_f1_u1': { de: 'In diesem Durchgang liess sich 1 Ziel nicht schreiben, und bei 1 Ziel blieb offen, ob die Änderung angekommen ist.', en: 'In this pass, 1 target could not be written, and for 1 target it stayed unclear whether the change arrived.' },
 	'bulk.halt.consecutiveFailures_write': { de: 'Dreimal hintereinander liess sich ein Ziel nicht schreiben.', en: 'Three times in a row a target could not be written.' },
+	'bulk.halt.consecutiveFailures_unclear': { de: 'Bei drei Zielen hintereinander blieb offen, ob die Änderung angekommen ist.', en: 'For three targets in a row, it stayed unclear whether the change arrived.' },
+	'bulk.halt.consecutiveFailures_mixed': { de: 'Bei drei Zielen hintereinander schlug das Schreiben fehl oder blieb offen, ob die Änderung angekommen ist.', en: 'For three targets in a row, writing failed or it stayed unclear whether the change arrived.' },
 	'bulk.halt.failures_before_write': { de: 'Prüfe unten die Ziele mit Fehler, bevor du weiterschreibst.', en: 'Check the targets with an error below before you continue writing.' },
 	'bulk.resume.write': { de: 'Weiterschreiben', en: 'Continue writing' },
 	'bulk.resume.check': { de: 'Nachprüfen', en: 'Check again' },

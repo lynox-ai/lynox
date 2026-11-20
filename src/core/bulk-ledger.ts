@@ -242,8 +242,8 @@ export interface BulkRunStatus {
    *  a timeout counts toward the failure-rate halt, and the halt names it apart. */
   passUnclear: number;
   /** This pass's failures that are not {@link passUnclear}: what the failure-rate halt counted,
-   *  less the sends without a clear answer. Not {@link failed}, which keeps a `secret` target of
-   *  an earlier pass. */
+   *  less the sends without a clear answer, and at most the targets failed now ({@link heads}
+   *  `failed`). Not {@link failed}, which keeps a `secret` target of an earlier pass. */
   passFailed: number;
   /** How many targets may fail in one pass without the failure-rate halt; the next failure
    *  halts it ({@link bulkFailureLimit}). */
@@ -1806,6 +1806,7 @@ export class BulkLedger {
     // An external undo takes such a target back for real, and it counts.
     ).get(row.atomic, row.id) as { conflicts: number | null; failed: number | null; undone: number | null; foundAsPlanned: number | null; unread: number | null; shopAddedMarkup: number | null; hostRewrote: number | null; sentUnknown: number | null };
     const external = externalHostOf(row.target_system) === null ? 0 : 1;
+    const heads = this.headsOf(row);
     const pass = db.prepare(
       // Failed once, apart from a target whose send is unclear now: the timeout that left it so
       // was recorded as a failure, and the page names it as unclear, not as failed. In this pass
@@ -1836,13 +1837,15 @@ export class BulkLedger {
       applied: row.targets_applied, foundAsPlanned: outcome.foundAsPlanned ?? 0, shopAddedMarkup: outcome.shopAddedMarkup ?? 0, hostRewrote: outcome.hostRewrote ?? 0, failed: outcome.failed ?? 0,
       conflicts: outcome.conflicts ?? 0, undone: outcome.undone ?? 0,
       sentUnknown: externalHostOf(row.target_system) === null ? 0 : outcome.sentUnknown ?? 0,
-      heads: this.headsOf(row),
+      heads,
       maxTargets: row.max_targets,
       failedOnce: (pass.unknown ?? 0) > 0 ? null : pass.failedOnce ?? 0,
       passUnclear: pass.passUnclear ?? 0,
       // The pass's failures as its halt counted them (`targets_failed`, set back by a resume),
-      // less the unclear ones: not a `secret` target still failed from an earlier pass.
-      passFailed: Math.max(0, row.targets_failed - (pass.passUnclear ?? 0)),
+      // less the unclear ones: not a `secret` target still failed from an earlier pass. At most
+      // the targets failed now: the count is of records, and two loops that both hold a target
+      // whose claim went stale each record its failure.
+      passFailed: Math.min(heads.failed, Math.max(0, row.targets_failed - (pass.passUnclear ?? 0))),
       failureLimit: bulkFailureLimit(pass.writing), resumeOpen: open, resumeTries, resumeSends,
       kind: row.kind, atomic: row.atomic === 1, sourceRunId: row.source_run_id,
       writeMethod: externalHostOf(row.target_system) === null ? null : parseContractMethods(row.contract_json),

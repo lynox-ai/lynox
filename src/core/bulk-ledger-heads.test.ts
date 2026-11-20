@@ -197,6 +197,21 @@ describe('the failures a halt names', () => {
 });
 
 describe('the failures of this pass', () => {
+  it('count a target once that two loops each recorded as failed, its claim gone stale under the first', () => {
+    // One target refused to both loops, each recording its failure: two records, one target.
+    // Beside it a send that timed out.
+    const id = run(EXTERNAL, [{ sent: true }, { sent: true, unknownSends: 1 }]);
+    ledger.recordFailed(id, 0, 'write_failed');
+    ledger.recordFailed(id, 0, 'write_failed');
+    ledger.recordFailed(id, 1, 'write_failed');
+    const db = engineDb.getDb();
+    expect((db.prepare('SELECT targets_failed AS n FROM bulk_runs WHERE id = ?').get(id) as { n: number }).n).toBe(3);
+    const s = ledger.getStatus(id)!;
+    expect(s.passUnclear).toBe(1);
+    expect(s.heads.failed).toBe(1);
+    expect(s.passFailed).toBe(1);
+  });
+
   it('are what the halt counted less the unclear sends, never a target still failed on its secret from an earlier pass', () => {
     // Pass 1 failed A on what it would send; the resume left it failed and set the count back.
     // Pass 2 timed out on B and refused C: the halt counted two.
