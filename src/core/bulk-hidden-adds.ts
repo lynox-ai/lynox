@@ -51,20 +51,22 @@ function counts(text: string, html: boolean): Map<number, number> | null {
 }
 
 /** The code points of {@link IN_PLACE_CHARS} that `after` holds more often than `before`, in
- *  ascending order; in an HTML field (`html`), its character references counted with them. */
-export function hiddenAddsOf(before: string | null, after: string, html = false): number[] {
-  return hiddenAddsRead(before, after, html) ?? [];
+ *  ascending order; in an HTML field (`html`), its character references counted with them.
+ *  `null` when either side is an HTML value past the reading bounds and was not read: what it
+ *  adds is then not known, in neither direction, and a caller must not take it for "none". */
+export function hiddenAddsOf(before: string | null, after: string, html = false): number[] | null {
+  return hiddenAddsRead(before, after, html);
 }
 
 /** {@link hiddenAddsOf} for a value the owner copies into the shop by hand, where no sentence can
  *  say "not checked": a before-image past the reading bounds counts as empty, so every such
- *  character the value holds is marked. `after` itself past the bounds marks nothing. */
-export function hiddenAddsToCopy(before: string | null, after: string): number[] {
-  return hiddenAddsRead(before, after, true) ?? hiddenAddsRead(null, after, true) ?? [];
+ *  character the value holds is marked. `null` when `after` itself is past the bounds: it was not
+ *  read, and nothing is known about what it holds. */
+export function hiddenAddsToCopy(before: string | null, after: string): number[] | null {
+  return hiddenAddsRead(before, after, true) ?? hiddenAddsRead(null, after, true);
 }
 
-/** {@link hiddenAddsOf}, or `null` when either side is an HTML value past the reading bounds and
- *  was not read: what it adds is then not known, in neither direction. */
+/** {@link hiddenAddsOf} for every kind of field, without the default for `html`. */
 function hiddenAddsRead(before: string | null, after: string, html: boolean): number[] | null {
   const added = counts(after, html);
   if (added === null) return null;

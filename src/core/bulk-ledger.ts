@@ -1686,6 +1686,9 @@ export class BulkLedger {
           // The owner pastes this value into the shop by hand: a hidden character it adds is marked
           // there as in the list, and against an empty before where the before-image was not read.
           const codePoints = hiddenAddsToCopy(typeof was === 'string' ? was : null, value);
+          // A value past the reading bounds is not refused for its shortcode (`refusesShortcode`),
+          // so it does not reach here. Were it to, it is not offered to copy unmarked.
+          if (codePoints === null) return [];
           return [{ field: f, value, ...(codePoints.length > 0 ? { codePoints } : {}) }];
         })
         : [];
