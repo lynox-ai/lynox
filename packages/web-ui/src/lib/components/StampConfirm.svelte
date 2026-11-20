@@ -9,6 +9,7 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { instructionOf, markHidden, watchOf } from '../utils/trigger-consent.js';
 	import MarkedLine from './MarkedLine.svelte';
+	import { setApart } from '../utils/plan-takeover.js';
 	import { confirmable, connectionsParts, hiddenIn, hiddenNote, hidesText, paramsOf, readPreview, shownAs, type StampPreview } from '../utils/stamp-confirm.js';
 
 	interface Props {
@@ -127,7 +128,8 @@
 		{@const as = shownAs(preview)}
 		{#if as === 'workflow'}
 			<div data-stamp-workflow>
-				<span class="font-medium">{t('stamp.workflow')}:</span> {markHidden(preview.workflow?.name ?? s.pipeline_id ?? '')}
+				<!-- The workflow's name is someone else's value: set apart, marked as `hiddenIn` checks it. -->
+				<span class="font-medium">{t('stamp.workflow')}:</span> <MarkedLine text={setApart(markHidden(preview.workflow?.name ?? s.pipeline_id ?? ''))} />
 				{#if paramsOf(s.pipeline_params).length > 0}
 					<p class="mt-0.5"><span class="font-medium">{t('stamp.params')}:</span> {paramsOf(s.pipeline_params).join(' · ')}</p>
 				{/if}

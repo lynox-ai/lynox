@@ -34,6 +34,14 @@ export function setApart(text: string): string {
 	return `${VALUE_OPEN}${flat}${VALUE_CLOSE}`;
 }
 
+/**
+ * {@link shownValue} without the cut: for a heading where the owner confirms which item they act on,
+ * so a long name is read to its end and two names that share a beginning stay apart.
+ */
+export function shownWhole(text: string): string {
+	return setApart(visible(text));
+}
+
 /** One piece of a sentence: lynox's words, or a value someone else wrote (`foreign`). */
 export interface Segment { text: string; foreign: boolean }
 
@@ -320,6 +328,15 @@ export interface PlanAuthorship {
 	created_by?: string | undefined;
 	edited_by?: string | undefined;
 	mandate_editor?: string | undefined;
+}
+
+/**
+ * Whether a person with access set the plan up or changed it, now or before the owner's last
+ * change (`mandate_editor`): its title may then be that person's words, and the owner's plan list
+ * sets it apart ({@link pausedTitleLine}) on the plan's card, not only where a takeover is offered.
+ */
+export function writtenByMember(plan: Omit<PlanAuthorship, 'title'>): boolean {
+	return [plan.created_by, plan.edited_by, plan.mandate_editor].some((tag) => (tag ?? '').startsWith('mandate:'));
 }
 
 /**
