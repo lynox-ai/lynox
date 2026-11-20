@@ -81,7 +81,7 @@ const SCHEME_RE = /\b(?:h[tx]{2}ps?|ftp):\/\/([^\s/?#"'<>]+)/giu;
  *  starts with 00 is not one), with an optional `(0)`; or a Swiss national number, 0 and nine digits,
  *  separated between its groups or not (`044 123 45 67`, `044 1234567`, `0441234567`). A part number
  *  grouped otherwise (`0815 123456`) is not read; German numbers, grouped every way, are not either. */
-const PHONE_RE = /(?<![\d+])(?:\+[1-9](?:[\s./-]?\(0\)|[\s./-]?\d){7,16}|00[1-9]\d{0,2}[\s./-](?:[\s./-]?\(0\)|[\s./-]?\d){6,13}|0[1-9]\d[\s./-]?\d{3}[\s./-]?\d{2}[\s./-]?\d{2}|0[1-9]\d[\s./-]\d{7})(?![\d])/gu;
+const PHONE_RE = /(?<![\d+])(?:\+[1-9](?:[\s./-]?\(0\)|[\s./-]?\d){7,16}|00[1-9]\d{0,2}[\s./-](?:[\s./-]?\(0\)|[\s./-]?\d){6,13}|0[1-9]\d[\s./-]?\d{3}[\s./-]?\d{2}[\s./-]?\d{2})(?![\d])/gu;
 const SCRIPT_RE = /\b(?:javascript|vbscript)\s*:|\bdata\s*:\s*text\/html/giu;
 
 /** A host as a browser reads it: ASCII, lower case, Punycode for other scripts, no `www.`, no port,
