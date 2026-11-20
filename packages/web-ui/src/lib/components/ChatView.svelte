@@ -3519,7 +3519,7 @@
 		<!-- A tool's own confirmation (mail, Google, memory, plan): its question is markdown, its
 		     buttons send keys and show them in the page's words. -->
 		{@const toolConsent = isToolConsent(pendingPermission.consent) ? pendingPermission.consent : undefined}
-		{@const visibleOptions = (isPermissionGuard || isDeepConsent || toolConsent) ? [] : opts.filter(o => o !== '\x00')}
+		{@const visibleOptions = (isPermissionGuard || isDeepConsent) ? [] : opts.filter(o => o !== '\x00')}
 		<div data-pending-prompt data-prompt-kind="permission" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-2">
 				{@render promptOrigin(pendingPermission.origin)}
