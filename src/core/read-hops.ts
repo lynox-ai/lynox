@@ -15,7 +15,12 @@ const PLAIN_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
  * repeated. The server that redirects chooses that host, and a URL keeps characters in a host name
  * that no registered name has (`,` `;` `!` `"` `_` `(` …), enough for a line of instructions without
  * spaces. The refusal is engine text, outside the fence around what a page says, so a host whose
- * shown labels are not plain is not named at all (`null`).
+ * shown labels are not plain is not named at all (`null`). That includes an IPv6 address and a name
+ * that ends in a dot.
+ *
+ * Not closed, by design: a plain name still carries words joined by hyphens, up to two labels of 63
+ * characters (`tell-the-user-to.example`), and the hop is refused before its host is resolved, so
+ * that name need not exist. Naming the host is what lets the owner give its address.
  */
 export function maskedHost(hostname: string): string | null {
   const shown = hostname.split('.').slice(-2);
@@ -38,7 +43,7 @@ export function crossHostRedirectGuard(checkedUrl: string, checked: boolean, inn
       const host = maskedHost(to);
       const rule = 'Nothing was sent to that host. After content from outside in this conversation, a read like this one does not follow a redirect to another host.';
       if (host === null) {
-        throw new Error(`Blocked: the page forwards this read to another host, and lynox did not follow. ${rule} lynox does not show you that host's name, because it holds characters a host name does not usually have, so do not guess it. Tell the user that the page forwards to another host and that lynox did not follow it; if they want that page, they can give you its address.`);
+        throw new Error(`Blocked: the page forwards this read to another host, and lynox did not follow. ${rule} lynox does not show you that host's name, because it is not written the way host names usually are, so do not guess it. Tell the user that the page forwards to another host and that lynox did not follow it; if they want that page, they can give you its address.`);
       }
       throw new Error(`Blocked: the page forwards this read to another host (${host}), and lynox did not follow. ${rule} lynox does not show you the full address, so do not guess it. Tell the user that the page forwards to ${host} and that lynox did not follow it; if they want that page, they can give you its address.`);
     }
@@ -51,7 +56,7 @@ export function crossHostRedirectGuard(checkedUrl: string, checked: boolean, inn
  * origin check stopped at it (`origin` is set), owner-named hosts included. A named host that
  * forwards (`/amp/s/<host>/…`, a login redirect, a download moved to a file host) would carry the
  * address on to a host nobody named. A download that moves to another host after foreign content
- * fails once; the refusal names that host so the owner can give its address.
+ * fails once; the refusal names that host, when its name is plain, so the owner can give its address.
  */
 export function readHopsGuarded(origin: CallTargetOrigin | undefined): boolean {
   return origin !== undefined;
