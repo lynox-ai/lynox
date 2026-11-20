@@ -151,12 +151,17 @@ function toolWord(tool: string, input: unknown, lang: NoticeLanguage): string {
  * The question to the owner: the targets were not named by them, where they come from, and
  * whether to send anyway, followed by the line that a yes holds for this one send.
  */
-export function originAsk(tool: string, input: unknown, noun: TargetNoun, targets: OriginTargets, origin: SendOrigin, lang: NoticeLanguage): PromptText {
+/**
+ * `connected`: the asked hosts a stored API profile names, for a page read only. Such a host counts
+ * once the owner saves the profile again in a conversation without foreign content, and the
+ * question says so.
+ */
+export function originAsk(tool: string, input: unknown, noun: TargetNoun, targets: OriginTargets, origin: SendOrigin, lang: NoticeLanguage, connected: readonly string[] = []): PromptText {
   const word = toolWord(tool, input, lang);
   const from = originFrom(origin, lang);
   const list = targetList(targets, lang);
   const many = countOf(targets) > 1;
-  if (noun === 'page') return originReadAsk(list, from, lang);
+  if (noun === 'page') return originReadAsk(list, from, lang, connected.length > 0);
   if (lang === 'de') {
     const head = noun === 'mail'
       ? (many ? pv`${word}: Die Empfänger ${list} hast nicht du genannt. ` : pv`${word}: Den Empfänger ${list} hast nicht du genannt. `)
@@ -181,17 +186,17 @@ export function originAsk(tool: string, input: unknown, noun: TargetNoun, target
  * way out that is not a click. A host the owner writes in the chat counts as named by them for the
  * rest of the conversation (`owner-known-targets.ts`), so lynox does not ask about it again.
  */
-function originReadAsk(list: string, from: PromptText | null, lang: NoticeLanguage): PromptText {
+function originReadAsk(list: string, from: PromptText | null, lang: NoticeLanguage, connected: boolean): PromptText {
   if (lang === 'de') {
     const where = from === null
       ? pv`Die Adresse kommt nicht von dir; woher sie stammt, kann lynox nicht feststellen.`
       : pv`Die Adresse kommt aus ${from}, nicht von dir.`;
-    return pv`Seite auf ${list} lesen? ${where} ${list} erhält dabei die ganze Adresse, auch den Pfad und alles nach dem „?“. ${originAskOnce(lang, 'page')}\n\nSchreib ${list} hier in den Chat, dann fragt lynox in diesem Gespräch nicht mehr nach diesem Host.`;
+    return pv`Seite auf ${list} lesen? ${where} ${list} erhält dabei die ganze Adresse, auch den Pfad und alles nach dem „?“. ${originAskOnce(lang, 'page')}\n\nSchreib ${list} hier in den Chat, dann fragt lynox in diesem Gespräch nicht mehr nach diesem Host.${connected ? pv`\n\n${list} gehört zu einer gespeicherten Verbindung. Speichere sie in einem neuen Gespräch noch einmal, dann fragt lynox beim Lesen von dort nicht mehr nach.` : ''}`;
   }
   const where = from === null
     ? pv`The address does not come from you; lynox cannot tell where it comes from.`
     : pv`The address comes from ${from}, not from you.`;
-  return pv`Read the page on ${list}? ${where} ${list} then gets the whole address, including the path and everything after the "?". ${originAskOnce(lang, 'page')}\n\nWrite ${list} here in the chat, and lynox won't ask about this host again in this conversation.`;
+  return pv`Read the page on ${list}? ${where} ${list} then gets the whole address, including the path and everything after the "?". ${originAskOnce(lang, 'page')}\n\nWrite ${list} here in the chat, and lynox won't ask about this host again in this conversation.${connected ? pv`\n\n${list} belongs to a saved connection. Save it again in a new conversation, and lynox won't ask when it reads from there.` : ''}`;
 }
 
 /** The question for a reply that goes only to the sender of the mail it answers. */

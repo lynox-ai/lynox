@@ -5118,7 +5118,10 @@ export class Agent implements IAgent {
 
   /** Whether the owner named this target, from the conversation's sources and, for a host, the
    *  reviewed contract that governs this call (a reviewed workflow's own run). */
-  private _ownerKnownVerdict(target: SendTarget): OwnerKnownVerdict {
+  private _ownerKnownVerdict(target: SendTarget, asRead = false): OwnerKnownVerdict {
+    // A read only: the host of a connected API the owner chose (`ApiStore.readKnownHosts`). A send
+    // never asks this, so a profile cannot make a send's target known.
+    if (asRead && target.kind === 'host' && this._readKnownHosts().has(target.value)) return 'known';
     if (target.kind === 'host') {
       // Only a reviewed contract: a person was shown the hosts and accepted them. Only while it
       // governs this call (not withheld after outside content), and only a host written out in
@@ -5127,6 +5130,24 @@ export class Agent implements IAgent {
       if (contract?.origin === 'reviewed' && contract.hostPatterns.some((p) => normalizeHostName(p) === target.value)) return 'known';
     }
     return this.ownerKnown?.known(target) ?? 'foreign';
+  }
+
+  /** {@link ApiStore.readKnownHosts}, or none when no store can answer: the read is then asked about. */
+  private _readKnownHosts(): ReadonlySet<string> {
+    try {
+      return this.toolContext?.apiStore?.readKnownHosts() ?? new Set();
+    } catch {
+      return new Set();
+    }
+  }
+
+  /** {@link ApiStore.profileHosts}, or none when no store can answer. */
+  private _profileHosts(): ReadonlySet<string> {
+    try {
+      return this.toolContext?.apiStore?.profileHosts() ?? new Set();
+    } catch {
+      return new Set();
+    }
   }
 
   /** Where a target the owner did not name comes from in this run, as far as the run knows. */
@@ -5196,7 +5217,7 @@ export class Agent implements IAgent {
       return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(text), is_error: true } };
     }
     if (targets.length === 0) return { origin: { known: [], allKnown: false } };
-    const verdicts = targets.map((t) => ({ target: t, verdict: this._ownerKnownVerdict(t) }));
+    const verdicts = targets.map((t) => ({ target: t, verdict: this._ownerKnownVerdict(t, asRead) }));
     const foreign = verdicts.filter((v) => v.verdict !== 'known');
     const known = verdicts.filter((v) => v.verdict === 'known').map((v) => v.target.value);
     if (foreign.length === 0) return { origin: { known, allKnown: true } };
@@ -5238,7 +5259,10 @@ export class Agent implements IAgent {
     const lang = this._noticeLanguage();
     // Blocked: a reader who does not watch this run refuses it before anything is stored or parked
     // (`PromptStore.insertQuestion`), and the call is refused here.
-    const answer = await this.promptUser(originAsk(tc.name, tc.input, noun, shown, origin, lang), ['Allow', 'Deny', '\x00'], { blocked: true });
+    // A host a stored profile names but that does not count for reads: the question says how it would.
+    const profileHosts = asRead ? this._profileHosts() : new Set<string>();
+    const connected = shownTargets.filter((h) => profileHosts.has(h));
+    const answer = await this.promptUser(originAsk(tc.name, tc.input, noun, shown, origin, lang, connected), ['Allow', 'Deny', '\x00'], { blocked: true });
     if (answer === UNATTENDED_BLOCK_ANSWER) return refuseUnattended();
     if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
       const denied = lookupFailed ? `${originLookupFailedHead(shown)} ${originDenied(shown, origin, noun)}` : originDenied(shown, origin, noun);

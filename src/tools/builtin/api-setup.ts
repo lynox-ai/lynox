@@ -18,9 +18,10 @@ import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import { turnIsLocked } from '../../core/mandate-tool-lock.js';
+import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
 import { currentCallSignal, joinCallSignal, noteOwnStopSentence } from '../../core/call-connection.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret, ExchangeFacts } from '../../core/api-store.js';
-import { SaveRefused, accessTokenKey, collectVaultKeys, grantTokenNames, tokenSlotNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
+import { SaveRefused, profileReadHost, accessTokenKey, collectVaultKeys, grantTokenNames, tokenSlotNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
@@ -2272,6 +2273,14 @@ ${draftJson}
       const reserved = reservedAppNameRefusal(profile);
       if (reserved) return `Validation error: ${reserved}`;
       if (!isOwnerPrincipal(agent.principal)) profile.created_by = principalTag(agent.principal);
+      // The owner chose this host in a turn no foreign content had reached: a read from it after
+      // foreign content is then not asked about (`ApiStore.readKnownHosts`). The engine's to
+      // write, never the input's, and bound to the host it was saved with; any other save drops it.
+      delete profile.owner_clean_host;
+      if (isOwnerPrincipal(agent.principal) && !deriveTurnUntrusted(agent)) {
+        const cleanHost = profileReadHost(profile);
+        if (cleanHost !== null) profile.owner_clean_host = cleanHost;
+      }
       // A mandate's oauth2 profile writes its tokens to the pair its id derives. Where that pair
       // already holds a value, the first exchange would write over it, so the id is refused
       // here. Only when the profile becomes oauth2 under this id: a later save of the same
