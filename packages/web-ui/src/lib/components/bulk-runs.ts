@@ -1010,7 +1010,9 @@ export function bulkFollowDelay(prev: number, ok: boolean, retryAfterS: number |
 export function bulkCanUndo(run: Pick<BulkRunDetailData, 'kind' | 'phase' | 'haltReason' | 'undoable' | 'probe' | 'atomic'> & Partial<Pick<BulkRunDetailData, 'undoableParts'>>): boolean {
 	if (run.kind !== 'apply' || run.undoable <= 0 || bulkAtProbe(run)) return false;
 	// Only what the head shows as written, or a send of which it is open whether it arrived: a run
-	// whose every other send the host refused changed nothing an undo could take back.
+	// whose every other send the host refused changed nothing an undo could take back. This trusts
+	// the engine's reading of a refusal: a send counts as refused only on an answer that says the
+	// host did not act; a timeout or an unreadable answer stays open.
 	if (run.undoableParts !== undefined && run.undoableParts.written + run.undoableParts.open === 0) return false;
 	if (run.atomic) return run.phase === 'done';
 	return run.phase === 'done' || run.phase === 'aborted' || (run.phase === 'writing' && run.haltReason !== null);

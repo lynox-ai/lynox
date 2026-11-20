@@ -10064,7 +10064,8 @@ export class LynoxHTTPApi {
         // which may have landed although its answer never came back.
         undoable: ledger.countUndoable(status.id),
         // The same, in the two parts the page names apart: the written targets, and those sent to
-        // without a confirmed write, of which it is open whether the change arrived.
+        // without a confirmed write, of which it is open whether the change arrived. A target whose
+        // every send the host refused is in neither.
         undoableParts: ledger.countUndoableParts(status.id),
         // For an undo: how many of the targets it gives a value back take back a source write
         // that was never confirmed, so the page does not count them as getting a value back.
