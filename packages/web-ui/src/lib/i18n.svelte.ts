@@ -3352,6 +3352,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'approvals.setup.last_changed_by': { de: 'Geändert von {name}', en: 'Changed by {name}' },
 	'approvals.setup.test_run_by': { de: 'Aus einem Testlauf von {name}', en: 'From a test run by {name}' },
 	'approvals.unnamed_mandate': { de: '(ohne Namen)', en: '(no name)' },
+	'approvals.other_mandate': { de: 'einer anderen Person mit Zugang', en: 'another person with delegated access' },
+	'approvals.some_mandate': { de: 'einer Person mit Zugang', en: 'someone with delegated access' },
 	'approvals.send': { de: 'Senden', en: 'Send' },
 	'approvals.confirm_question': { de: 'Prüfe die Empfänger oben. Jetzt senden?', en: 'Check the recipients above. Send now?' },
 	'approvals.send_confirm': { de: 'Ja, senden', en: 'Yes, send' },
