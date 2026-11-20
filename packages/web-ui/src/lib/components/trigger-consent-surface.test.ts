@@ -204,9 +204,10 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 	];
 
 	it('below `sm` the controls stay visible with a mouse too, where their row wraps under the text', () => {
-		// The one way a control turns transparent is from `sm` up on a device that hovers. Every
-		// other hide (plain, `max-sm:`, a width alone, a pointer alone) would hide it in the
-		// wrapped row below `sm`, under the text, with nothing beside it to make room for.
+		// The one way a control turns transparent is from `sm` up on a device that hovers. A plain
+		// or `max-sm:` hide would hide it in the wrapped row below `sm`, under the text; a hide
+		// keyed on a width alone would hide it on a touch screen wider than that width, where
+		// nothing brings it back.
 		for (const [control, tag] of hiding()) {
 			expect(tag.match(/[^\s"']*opacity-0\b/g), control).toEqual(['sm:[@media(hover:hover)]:opacity-0']);
 		}
