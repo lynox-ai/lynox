@@ -90,11 +90,11 @@ function harness(prepare: (dir: string) => void, durableMemory: boolean) {
 }
 
 describe('export with the stores down at boot (real engine)', () => {
-  // A directory where each store's file belongs: it cannot be opened at all. (A corrupt file
-  // is a different case: the engine sets it aside and opens an empty store.) The engine
-  // boots without a DataStore (so without a CRM), without
-  // its history database (so without a thread store) and without engine.db (so without the
-  // durable knowledge store, switched on here).
+  // A directory where each store's file belongs: it cannot be opened at all. A corrupt
+  // datastore.db fails the same way; a corrupt history.db or engine.db does not, as the boot
+  // sets it aside and opens an empty one. The engine boots without a DataStore (so without
+  // a CRM), without its history database (so without a thread store) and without engine.db
+  // (so without the durable knowledge store, switched on here).
   const h = harness((dir) => {
     for (const file of ['datastore.db', 'history.db', 'engine.db']) mkdirSync(join(dir, file));
   }, true);
@@ -123,14 +123,14 @@ describe('export with the stores down at boot (real engine)', () => {
 describe('export with every store open, durable memory off, then the CRM gone (real engine)', () => {
   const h = harness(() => {}, false);
 
-  it('marks durable knowledge and threads complete when nothing failed', async () => {
+  it('leaves durable knowledge and threads unmarked when nothing failed', async () => {
     expect(h.engine().getUserConfig().durable_memory_enabled, 'fixture: durable memory off').toBe(false);
     expect(h.engine().getKnowledgeStore(), 'fixture: no store while it is off').toBeNull();
     expect(h.engine().getThreadStore(), 'fixture: the thread store opened').not.toBeNull();
 
     const body = await h.exportBody();
     expect(body.durable_knowledge.entries).toEqual([]);
-    expect(body.durable_knowledge.may_be_incomplete, 'off: the empty block is the whole of it').toBe(false);
+    expect(body.durable_knowledge.may_be_incomplete, 'off: no store was opened, so nothing failed').toBe(false);
     expect(body.threads_may_be_incomplete, 'the thread store opened and was read').toBe(false);
   }, 60_000);
 
