@@ -968,6 +968,11 @@ const JSON_TEXT_BUDGET_CHARS = 2_000_000;
  * with (`pathHoldsSecret`).
  */
 function jsonTextHides(text: string, readings: Iterable<string>, mask: (text: string) => string, unread = true): boolean {
+  const ofText = [...readings];
+  const literalSeen = new Set<string>();
+  for (const read of [...ofText, ...formSides(text).flatMap((side) => [...serverReadings(side)])]) {
+    if (escapedLiteralHides(read, mask, literalSeen, 0)) return true;
+  }
   const seen = new Set<string>();
   let left = JSON_TEXT_BUDGET_CHARS;
   const hides = (t: string, ofT: Iterable<string>, depth: number): boolean => {
@@ -998,7 +1003,106 @@ function jsonTextHides(text: string, readings: Iterable<string>, mask: (text: st
     }
     return false;
   };
-  return hides(text, readings, 0);
+  return hides(text, ofText, 0);
+}
+
+/** How many times a string literal inside a string literal is read by {@link escapedLiteralHides}. */
+const LITERAL_READ_DEPTH = 3;
+
+/**
+ * Whether a JSON string literal written anywhere in `text` holds a secret `mask` knows once it is
+ * unescaped, as that string or in a server reading of it, and so on for literals inside it. Read
+ * from the literals, not from a parse: a server's parser may take text `JSON.parse` refuses
+ * (`NaN`, a comma at the end, text after the value), a JSON document over several lines inside a
+ * larger text, or a form whose name has a space. It only decides: it costs no depth and no budget
+ * of {@link jsonTextHides}, and text it cannot read (past its depth, a literal that does not parse)
+ * counts as holding nothing, so it never makes text unshowable that holds no secret. Only a literal
+ * with an escape is read: one without has its text as written, which the mask already saw.
+ */
+function escapedLiteralHides(text: string, mask: (text: string) => string, seen: Set<string>, depth: number): boolean {
+  if (depth >= LITERAL_READ_DEPTH || !text.includes('\\')) return false;
+  for (const piece of literalPieces(text)) {
+    for (const literal of escapedLiterals(piece)) {
+      const value = unescapedLiteral(literal);
+      if (seen.has(value)) continue;
+      seen.add(value);
+      for (const read of serverReadings(value)) {
+        if (mask(read) !== read) return true;
+        if (escapedLiteralHides(read, mask, seen, depth + 1)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * The double-quoted literals of `text` that hold an escape, found in one pass from the left: a
+ * literal ends at the next quote no backslash escapes. One that a raw line break ends unclosed
+ * pairs nothing else on its line, so the search goes on after that line break; a pattern that
+ * tried again from each quote would read a line of escaped quotes once per quote.
+ */
+function escapedLiterals(text: string): string[] {
+  const out: string[] = [];
+  let from = 0;
+  for (;;) {
+    const start = text.indexOf('"', from);
+    if (start < 0) return out;
+    let at = start + 1;
+    let escaped = false;
+    while (at < text.length && text[at] !== '"' && text[at] !== '\n') {
+      if (text[at] === '\\') {
+        escaped = true;
+        // A backslash before CRLF continues the line like one before LF.
+        at += text[at + 1] === '\r' && text[at + 2] === '\n' ? 2 : 1;
+      }
+      at++;
+    }
+    if (at >= text.length) return out;
+    if (text[at] === '"' && escaped) out.push(text.slice(start, at + 1));
+    from = at + 1;
+  }
+}
+
+/**
+ * The text of a double-quoted literal as a parser reads it: as JSON when it is JSON, otherwise
+ * the way lenient parsers unescape (`\xHH`, `\UHHHHHHHH`, octal, `\'`, a line continuation,
+ * and an escape none of them knows read as the character after the backslash). A literal one
+ * unknown escape makes invalid JSON is still read, so a `\\u…` elsewhere in it is not lost.
+ */
+function unescapedLiteral(literal: string): string {
+  try { return JSON.parse(literal) as string; } catch { /* not JSON: read it the lenient way */ }
+  const SIMPLE: Record<string, string> = { b: '\b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '0': '\0' };
+  const code = (hex: string): string => {
+    const point = parseInt(hex, 16);
+    return Number.isFinite(point) && point <= 0x10ffff ? String.fromCodePoint(point) : '';
+  };
+  return literal.slice(1, -1).replace(
+    /\\(?:u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})|x([0-9a-fA-F]{2})|([0-7]{1,3})|(\r\n|[\s\S]))/g,
+    (_m, u?: string, bigU?: string, x?: string, octal?: string, other?: string) =>
+      u !== undefined ? code(u)
+        : bigU !== undefined ? code(bigU)
+        : x !== undefined ? code(x)
+        : octal !== undefined ? (octal === '0' ? '\0' : String.fromCharCode(parseInt(octal, 8)))
+        : other === '\n' || other === '\r\n' || other === '\r' || other === '\u2028' || other === '\u2029' ? ''
+        : SIMPLE[other!] ?? other!,
+  );
+}
+
+/** Where the literals of `text` are read from, so a stray quote before one does not pair the
+ *  quotes wrongly: the text, each line and each `&` piece of it, and each of those after its
+ *  first `=` (a form value). Each character is in a handful of pieces, so the cost stays linear. */
+function literalPieces(text: string): string[] {
+  const out = [text];
+  // Every line break a backslash in a literal may continue over: a line the tokenizer reads as
+  // one literal is still read line by line.
+  if (!/[\r\n\u2028\u2029&=]/.test(text)) return out;
+  // Both cuts: at LF alone (a CR, U+2028 or U+2029 may sit inside a literal) and at every break.
+  for (const segment of new Set([...text.split(/[\n&]/), ...text.split(/\r\n?|[\n\u2028\u2029&]/)])) {
+    if (segment.includes('\\')) out.push(segment);
+    const at = segment.indexOf('=');
+    if (at >= 0 && segment.includes('\\', at)) out.push(segment.slice(at + 1));
+  }
+  return out;
 }
 
 /** Both sides of every `name=value` pair of `text` read as a form, the way a server splits it

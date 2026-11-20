@@ -1103,6 +1103,160 @@ describe('a secret inside JSON text inside a value', () => {
     expect(pathHoldsSecret(`https://h.example/a/${encodeURIComponent('{"a":"b"}')}`, mask)).toBe(false);
   });
 
+  // JSON text a server's parser reads and `JSON.parse` does not: the literals are read on their
+  // own. Each form, with the secret escaped, is not shown; written plainly it is masked.
+  describe('JSON text a lenient parser reads', () => {
+    const esc = `"\\u0068${STORED.slice(1)}"`;
+    const lenient = [
+      ['NaN', `{"a":NaN,"token":${esc}}`, `{"a":NaN,"token":"${STORED}"}`],
+      ['Infinity', `[-Infinity,${esc}]`, `[-Infinity,"${STORED}"]`],
+      ['a comma at the end', `{"token":${esc},}`, `{"token":"${STORED}",}`],
+      ['text after the value', `{"token":${esc}} x`, `{"token":"${STORED}"} x`],
+    ] as const;
+
+    it.each(lenient)('with %s, as a JSON body and inside a JSON value', (_f, hidden, plain) => {
+      expect(bodyForQuestion(hidden, mask, 'application/json')).toEqual({ unshowable: 'escaped-secret' });
+      expect(bodyForQuestion(JSON.stringify({ v: hidden }), mask)).toEqual({ unshowable: 'escaped-secret' });
+      const shown = bodyForQuestion(plain, mask, 'application/json');
+      expect('text' in shown && shown.text).toContain('***cret');
+      expect(JSON.stringify(shown)).not.toContain(STORED);
+    });
+
+    it.each(lenient)('with %s, in a form, a query, a header and a path', (_f, hidden, plain) => {
+      expect(bodyForQuestion(`v=${encodeURIComponent(hidden)}`, mask, FORM)).toEqual({ text: 'v = ***', escapedSecret: true });
+      expect(queryForQuestion(`?v=${encodeURIComponent(hidden)}`, mask)).toEqual({ text: 'v = ***', secret: true, escaped: true });
+      expect(headersForQuestion({ 'X-Meta': hidden }, mask, () => 'show')).toEqual({ unshowable: { reason: 'escaped-secret', name: 'X-Meta' } });
+      expect(pathHoldsSecret(`https://h.example/a/${encodeURIComponent(hidden)}`, mask)).toBe(true);
+      expect(pathForQuestion(`https://h.example/a/${encodeURIComponent(hidden)}`, mask)).toBe('/a/***');
+      // Control: written plainly it is masked where it is shown.
+      expect(bodyForQuestion(`v=${encodeURIComponent(plain)}`, mask, FORM)).toEqual({ text: `v = ${plain.replace(STORED, '***cret')}`, escapedSecret: false });
+      expect(headersForQuestion({ 'X-Meta': plain }, mask, () => 'show')).toMatchObject({ lines: [`X-Meta: ${plain.replace(STORED, '***cret')}`] });
+    });
+
+    it('JSON text over several lines, in a multipart part and in a text body', () => {
+      const pretty = (token: string) => JSON.stringify({ token }, null, 2);
+      const part = (inner: string, eol: string) => `--b${eol}Content-Type: application/json${eol}${eol}${inner.replaceAll('\n', eol)}${eol}--b--`;
+      for (const eol of ['\r\n', '\n']) {
+        expect(bodyForQuestion(part(pretty('\\u0068' + STORED.slice(1)).replaceAll('\\\\', '\\'), eol), mask, 'multipart/form-data; boundary=b')).toEqual({ unshowable: 'escaped-secret' });
+        const shown = bodyForQuestion(part(pretty(STORED), eol), mask, 'multipart/form-data; boundary=b');
+        expect('text' in shown && shown.text).toContain('***cret');
+      }
+      expect(bodyForQuestion(`note\n{\n  "token": ${esc}\n}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      // A stray quote on a line before does not pair the quotes wrongly: each line is read on its own.
+      expect(bodyForQuestion(`say "hi\n{"token":${esc}}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      expect(bodyForQuestion(`a=say "hi&b={"token":${esc}}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+    });
+
+    it('wherever its literals sit: after a stray quote, two literals deep, across an encoded &, or percent-encoded inside a literal', () => {
+      const comma = `{"token":${esc},}`;
+      // A stray quote earlier in the text: the piece after `&` and `=` is read on its own.
+      expect(bodyForQuestion(`a=x "y&b=z ${comma}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      // Lenient JSON text inside a string of JSON text: the literal inside the literal is read.
+      expect(headersForQuestion({ 'X-Meta': JSON.stringify({ v: comma }) }, mask, () => 'show')).toEqual({ unshowable: { reason: 'escaped-secret', name: 'X-Meta' } });
+      // An encoded `&` inside the JSON text, and a quote in another pair: each side is read before it is decoded.
+      expect(bodyForQuestion(`q=%22&v=${encodeURIComponent(`{"a":"x&y","token":${esc},}`)}`, mask, FORM)).toMatchObject({ escapedSecret: true });
+      // A literal whose escapes spell a percent-encoding of the secret: its server reading is read.
+      expect(headersForQuestion({ 'X-Meta': `{"t":"\\u0025\\u0036\\u0038${STORED.slice(1)}",}` }, mask, () => 'show')).toEqual({ unshowable: { reason: 'escaped-secret', name: 'X-Meta' } });
+      // Controls: the same shapes with no secret are shown.
+      expect('text' in bodyForQuestion(`a=x "y&b=z {"token":"\\u0061",}`, mask, 'text/plain')).toBe(true);
+      expect('lines' in headersForQuestion({ 'X-Meta': JSON.stringify({ v: '{"token":"\\u0061",}' }) }, mask, () => 'show')).toBe(true);
+      expect(bodyForQuestion(`q=%22&v=${encodeURIComponent('{"a":"x&y","token":"\\u0061",}')}`, mask, FORM)).toMatchObject({ escapedSecret: false });
+    });
+
+    it('a literal with an escape JSON does not know is still read, the way a lenient parser unescapes it', () => {
+      const rest = STORED.slice(1);
+      const forms = [
+        ['an escaped quote', `{"t":"\\u0068${rest}\\'"}`],
+        ['a \\x escape', `{"t":"\\x68${rest}"}`],
+        ['an octal escape', `{"t":"\\150${rest}"}`],
+        ['a \\U escape', `{"t":"\\U00000068${rest}"}`],
+        ['a line continuation', `{"t":"hunter\\\n2secret"}`],
+      ] as const;
+      for (const [, body] of forms) {
+        expect(bodyForQuestion(body, mask, 'application/json')).toEqual({ unshowable: 'escaped-secret' });
+        expect(bodyForQuestion(`v=${encodeURIComponent(body)}`, mask, FORM)).toEqual({ text: 'v = ***', escapedSecret: true });
+      }
+      // In a header too, which carries no line break.
+      for (const [, body] of forms.slice(0, 4)) {
+        expect(headersForQuestion({ 'X-Meta': body }, mask, () => 'show')).toEqual({ unshowable: { reason: 'escaped-secret', name: 'X-Meta' } });
+      }
+      // Control: the same escapes around no secret are shown.
+      expect('text' in bodyForQuestion(`{"t":"\\x61b\\150\\'"}`, mask, 'application/json')).toBe(true);
+      // A line continuation before CRLF, and an escaped quote ahead of the secret in a literal.
+      expect(bodyForQuestion(`{"t":"hunter\\\r\n2secret",}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      // A stray quote on one line, then a literal a backslash continues over the next line break.
+      expect(bodyForQuestion(`say "hi\n{"t":"hunter\\\n2secret",}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      expect('text' in bodyForQuestion(`say "hi\n{"t":"hunter\\\n2",}`, mask, 'text/plain')).toBe(true);
+      // A raw CR, U+2028 or U+2029 inside a literal behind a stray quote, and a backslash before one.
+      for (const brk of ['\r', ' ', ' ']) {
+        expect(bodyForQuestion(`k" v=w "\\u0068${rest}${brk}"`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+        expect(headersForQuestion({ 'X-Meta': `k" v=w "\\u0068${rest}${brk}"` }, mask, () => 'show')).toEqual({ unshowable: { reason: 'escaped-secret', name: 'X-Meta' } });
+        expect(bodyForQuestion(`{"t":"hunter\\${brk}2secret",}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+        expect('text' in bodyForQuestion(`k" v=w "\\u0061${brk}"`, mask, 'text/plain')).toBe(true);
+        expect('text' in bodyForQuestion(`{"t":"hunter\\${brk}2",}`, mask, 'text/plain')).toBe(true);
+      }
+      // A backslash before CR or U+2028 joins the lines into one literal, yet each line is still read.
+      for (const brk of ['\r', ' ', ' ']) {
+        expect(bodyForQuestion(`"x\\${brk}y "\\u0068${rest}"`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      }
+      expect(bodyForQuestion(`{"t":"say \\"\\u0068${rest}",}`, mask, 'application/json')).toEqual({ unshowable: 'escaped-secret' });
+      expect('text' in bodyForQuestion(`{"t":"hunter\\\r\n2",}`, mask, 'text/plain')).toBe(true);
+    });
+
+    it('reads a line of escaped quotes that never closes in time linear in its length', () => {
+      // A quote, then escaped quotes to the end: each quote opens a literal no quote closes.
+      const run = (n: number) => `"${'\\"'.repeat(n)}`;
+      const tail = '%252580+%E9%u0041';
+      const time = (text: string) => { const t0 = performance.now(); bodyForQuestion(text, mask, 'text/plain'); return performance.now() - t0; };
+      time(`a=${run(1000)}${tail}`);
+      const small = time(`a=${run(4_000)}${tail}`);
+      const large = time(`a=${run(32_000)}${tail}`);
+      // Eight times the text: linear stays well under 64 times the time, quadratic does not.
+      expect(large).toBeLessThan(Math.max(small, 20) * 24);
+      expect(large).toBeLessThan(3_000);
+    });
+
+    it('a form in a decoded value whose name has a space or starts with a bracket', () => {
+      for (const name of ['my name', '[0]', 'a b[c]']) {
+        expect(bodyForQuestion(`p=${encodeURIComponent(`${name}=${escaped}`)}`, mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
+        expect(queryForQuestion(`?p=${encodeURIComponent(`${name}=${escaped}`)}`, mask)).toEqual({ text: 'p = ***', secret: true, escaped: true });
+        // Control: written plainly it is masked.
+        expect(bodyForQuestion(`p=${encodeURIComponent(`${name}=${plainInner}`)}`, mask, FORM)).toEqual({ text: `p = ${name}={"token":"***cret"}`, escapedSecret: false });
+      }
+      expect(bodyForQuestion(`p=my%2520name%3D${encodeURIComponent(encodeURIComponent(escaped))}`, mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
+    });
+  });
+
+  // What the reading of the literals must not do: make text unshowable that holds no secret.
+  describe('JSON text with no secret stays shown', () => {
+    const urls = Array.from({ length: 40 }, (_, i) => `https://cdn.example.com/a%20b/${i}?q=a+b&r=%2F`);
+    const record = (i: number) => ({ id: i, name: `item ${i}`, links: urls, note: 'x'.repeat(200) });
+
+    it('canonical JSON three levels deep, about 53 KB, with + and % in its URLs', () => {
+      const three = JSON.stringify({ v: JSON.stringify({ v: JSON.stringify(Array.from({ length: 22 }, (_, i) => record(i))) }) });
+      expect(three.length).toBeGreaterThan(45_000);
+      expect(three.length).toBeLessThan(64_000);
+      expect('text' in bodyForQuestion(three, mask, 'application/json')).toBe(true);
+    });
+
+    it('two such lines of NDJSON, about 43 KB', () => {
+      const line = JSON.stringify({ v: JSON.stringify(Array.from({ length: 8 }, (_, i) => record(i))) });
+      const nd = `${line}\n${line}`;
+      expect(nd.length).toBeGreaterThan(35_000);
+      expect(nd.length).toBeLessThan(64_000);
+      expect('text' in bodyForQuestion(nd, mask, 'application/x-ndjson')).toBe(true);
+    });
+
+    it('JSON at full depth whose innermost string holds a written backslash, in a header, NDJSON and a body', () => {
+      for (const inner of ['C:\\temp\\x', 'caf\\u00e9', 'line\\nbreak']) {
+        const deep = JSON.stringify({ v: JSON.stringify({ v: JSON.stringify({ path: inner }) }) });
+        expect('lines' in headersForQuestion({ 'X-Meta': deep }, mask, () => 'show')).toBe(true);
+        expect('text' in bodyForQuestion(`${deep}\n${deep}`, mask, 'application/x-ndjson')).toBe(true);
+        expect('text' in bodyForQuestion(deep, mask, 'application/json')).toBe(true);
+      }
+    });
+  });
+
   it('JSON text in a path segment nested past what is read counts as holding a secret, as it is starred', () => {
     const deep = (inner: string) => `https://h.example/a/${encodeURIComponent(wrap(wrap(wrap(inner))))}`;
     expect(pathForQuestion(deep(escaped), mask)).toBe('/a/***');
