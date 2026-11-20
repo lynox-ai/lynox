@@ -11,6 +11,7 @@ import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 import { WATCH_OVERRIDE_REFUSAL } from '../../core/task-manager.js';
 import { readAddressWrites } from '../../core/outbound-write.js';
+import { carriesAddress, hostTargets } from '../../core/send-target.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
 
@@ -334,8 +335,32 @@ function createdNote(task: object, byOwner: boolean): string {
   return `. It is listed under Automation › ${'effect' in task ? 'Triggers' : 'Tasks'}.`;
 }
 
+/**
+ * The page a `task_create` call sets up a watch on, or `null`: the handler takes `workflow_id`
+ * first, then `schedule`, and only then `watch_url`, so a call with one of those creates no watch.
+ */
+function watchedUrl(input: TaskCreateInput): string | null {
+  if (input.workflow_id || input.schedule) return null;
+  return input.watch_url ? input.watch_url : null;
+}
+
 export const taskCreateTool: ToolEntry<TaskCreateInput> = {
   undo: 'compensatable',
+  // After content from outside, the page a watch reads goes through the origin check as a read: the
+  // model chose its address, and once the owner confirms the watch under Automation → Triggers the
+  // worker reads it unattended and again and again, so data in its path or host name would leave on
+  // every check. It is checked like `http_request`'s GET, once, when the watch is created; its
+  // question says how often the page is read, and that the yes does not confirm the watch
+  // (`watchEveryMinutes`). A page a search listed needs no question (`readAddress`).
+  sendTargetsWhenLatched: (input) => {
+    const url = watchedUrl(input);
+    return url === null ? null : hostTargets(url);
+  },
+  readCarriesAddress: (input) => {
+    const url = watchedUrl(input);
+    return url !== null && carriesAddress(url);
+  },
+  readAddress: (input) => watchedUrl(input),
   definition: {
     name: 'task_create',
     description: 'Create a task for a concrete deliverable with a deadline or assignee. Not for general notes (use memory_store with status namespace). Only create tasks when the user requests it or a clear action item emerges.',
