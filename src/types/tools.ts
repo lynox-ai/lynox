@@ -198,7 +198,8 @@ export interface ToolEntry<TInput = unknown> {
    * carry data (no body, no header the model set); otherwise `null`. While the latch is set, a
    * call whose address a search in this conversation listed as a result
    * (`IAgent.searchResultAddresses`) passes the origin check without a question: the provider
-   * chose that address, so it carries nothing the model added.
+   * wrote that address, not the model (which results come back still depends on the query; see
+   * `SearchResultAddresses`).
    */
   readAddress?: ((input: TInput) => string | null) | undefined;
   /**

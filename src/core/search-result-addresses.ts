@@ -2,8 +2,11 @@
 //
 // The page addresses that searches in this conversation listed as results, as the search provider
 // gave them. Once foreign content is in the conversation, a read of exactly such an address passes
-// the origin check without a question (`ToolEntry.readAddress`): the provider chose it, so it holds
-// nothing the model added.
+// the origin check without a question (`ToolEntry.readAddress`): the provider wrote the address, not
+// the model. That is not "nothing from the conversation": which results come back depends on the
+// query, so a search lets the model choose among every page a host has indexed, and a host that
+// indexed pages for that purpose learns which one was chosen. What such a read can carry out is that
+// choice among pages indexed before, not text the model writes into the address.
 //
 // Only the result entries count, never text: a page or a result list can repeat what the model
 // sent (a search query, a read's own address), and an address that came back that way would be the
