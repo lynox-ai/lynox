@@ -2199,3 +2199,50 @@ describe('a write told to a German owner', () => {
     expect(out.summary).toMatch(/^Massenlauf \(ganz oder gar nicht\) gestoppt und zurückgenommen\. /);
   });
 });
+
+describe('the head counts after a write', () => {
+  const none = { deselected: 0, invalid: 0, unchanged: 0, takenBack: 0, written: 0, conflict: 0, unclear: 0, failed: 0, settled: 0, open: 0 };
+  const sum = (h: Record<string, number>): number => Object.values(h).reduce((a, b) => a + b, 0);
+
+  it('an atomic rollback: the written targets and the failed one are taken back, the rest not written, and the halt keeps the cause', async () => {
+    const { runId, initial } = recordMemoryRun(10, { atomic: true });
+    approve(runId);
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(memory(initial, new Set(['k006'])).writer))).status).toBe('aborted');
+    const s = ledger.getStatus(runId)!;
+    expect(s.heads).toEqual({ ...none, takenBack: 6, settled: 1, open: 3 });
+    expect(sum(s.heads)).toBe(s.total);
+    // The target counts with the ones taken back; why the run stopped is the halt's to say.
+    expect(s.haltReason).toBe(BULK_HALT_REASONS.atomicRolledBack);
+  });
+
+  it('an atomic rollback settles a send a dead loop never recorded, apart from the written ones', async () => {
+    const { runId, initial } = recordMemoryRun(4, { atomic: true });
+    approve(runId);
+    ledger.markSent(runId, 3);
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(memory({ ...initial, k003: 'w3' }, new Set(['k002'])).writer))).status).toBe('aborted');
+    const s = ledger.getStatus(runId)!;
+    expect(s.heads).toEqual({ ...none, takenBack: 2, settled: 2 });
+    expect(s.undone).toBe(2);
+  });
+
+  it('a run with a target taken out, a conflict and a failure counts each once', async () => {
+    const { runId, initial } = recordMemoryRun(5);
+    expect(ledger.deselectTarget(runId, 0, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+    approve(runId);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(memory({ ...initial, k002: 'someone else' }, new Set(['k004'])).writer));
+    const s = ledger.getStatus(runId)!;
+    expect(s.heads).toEqual({ ...none, deselected: 1, written: 2, conflict: 1, failed: 1 });
+    expect(sum(s.heads)).toBe(s.total);
+  });
+
+  it('a target two loops raced on, written by one and found in conflict by the other, counts as written', async () => {
+    const { runId, initial } = recordMemoryRun(3);
+    approve(runId);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(memory(initial).writer));
+    // The losing loop's conflict lands after the write was recorded; the write is not undone by it.
+    engineDb.getDb().prepare(`UPDATE bulk_targets SET error = 'conflict' WHERE run_id = ? AND seq = 1`).run(runId);
+    const s = ledger.getStatus(runId)!;
+    expect([s.applied, s.conflicts]).toEqual([3, 1]);
+    expect(s.heads).toEqual({ ...none, written: 3 });
+  });
+});

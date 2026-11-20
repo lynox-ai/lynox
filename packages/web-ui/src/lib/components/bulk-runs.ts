@@ -44,6 +44,14 @@ export function bulkOne(key: string, n: number): string {
 export type BulkPhase = 'planned' | 'previewed' | 'approved' | 'writing' | 'done' | 'aborted' | 'undone';
 export type BulkChange = 'update' | 'create' | 'delete' | 'unchanged' | 'invalid';
 
+/** A run's targets by class, as the engine counts them: taken out, left out by the plan,
+ *  unchanged, written and taken back since, written, in conflict, sent without a clear answer,
+ *  failed, taken back without being written, and the rest. */
+export interface BulkHeads {
+	deselected: number; invalid: number; unchanged: number; takenBack: number; written: number;
+	conflict: number; unclear: number; failed: number; settled: number; open: number;
+}
+
 export interface BulkRun {
 	id: string;
 	createdAt: string;
@@ -62,6 +70,8 @@ export interface BulkRun {
 	/** Written targets whose store kept a description otherwise than sent, without outside markup: counted, not halted. */
 	hostRewrote?: number | undefined;
 	undone: number;
+	/** Every target in exactly one class; the classes sum to `total`. Absent on an older engine. */
+	heads?: BulkHeads | undefined;
 	kind: 'apply' | 'undo';
 	atomic: boolean;
 	sourceRunId: string | null;
@@ -772,9 +782,12 @@ export function bulkLabel(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>,
  *  send to them (so not "not written"), an undo expects what its source wrote (so not "since the
  *  preview"), a later resume reads them again (so of the last read only), and a local run has no
  *  provider to name. */
-export function bulkConflictsText(run: Pick<BulkRun, 'conflicts'>, i18n: BulkI18n): string | null {
-	if (run.conflicts <= 0) return null;
-	return run.conflicts === 1 ? i18n.t('bulk.conflicts_one') : i18n.tf('bulk.conflicts', { n: String(run.conflicts) });
+export function bulkConflictsText(run: Pick<BulkRun, 'conflicts' | 'heads'>, i18n: BulkI18n): string | null {
+	// The head's conflicts where the engine sends them: a target two loops raced on is written
+	// and still carries the losing loop's conflict, and lynox did not leave it as it was.
+	const n = run.heads?.conflict ?? run.conflicts;
+	if (n <= 0) return null;
+	return n === 1 ? i18n.t('bulk.conflicts_one') : i18n.tf('bulk.conflicts', { n: String(n) });
 }
 
 /** Targets the run writes — the most an approval can let it write. */
@@ -851,16 +864,48 @@ const BULK_BEFORE_WRITE: ReadonlySet<BulkPhase> = new Set(['planned', 'previewed
 /** The head's counts. While the list is read there is nothing to count yet. Until the run has
  *  begun to write (the probe or the run), only the number of targets stands: a „geschrieben 0 ·
  *  Konflikte 0 · fehlgeschlagen 0“ before any write reads as a finished run. Once a target is
- *  written, in conflict or failed, the counts stand whatever the phase. An undo counts what it
- *  took back. */
+ *  written, in conflict or failed, the counts stand whatever the phase: each target in one class
+ *  ({@link bulkHeadParts}), so they add up to the number of targets. An engine that sends no
+ *  classes gets the overlapping counts it has. */
 export function bulkHeadCounts(
 	step: BulkWorkingStep | null,
-	run: Pick<BulkRun, 'kind' | 'phase' | 'total' | 'applied' | 'conflicts' | 'failed'>,
+	run: Pick<BulkRun, 'kind' | 'phase' | 'total' | 'applied' | 'conflicts' | 'failed' | 'heads'>,
 	i18n: BulkI18n,
 ): string {
 	if (step === 'list') return i18n.t('bulk.head.counts_pending');
-	if (BULK_BEFORE_WRITE.has(run.phase) && run.applied === 0 && run.conflicts === 0 && run.failed === 0) return String(run.total);
-	return i18n.tf(run.kind === 'undo' ? 'bulk.head.counts_undo' : 'bulk.head.counts', { n: String(run.total), a: String(run.applied), c: String(run.conflicts), f: String(run.failed) });
+	const n = String(run.total);
+	if (BULK_BEFORE_WRITE.has(run.phase) && run.applied === 0 && run.conflicts === 0 && run.failed === 0) return i18n.tf(bulkOne('bulk.heads.total', run.total), { n });
+	if (run.heads === undefined) {
+		return i18n.tf(run.kind === 'undo' ? 'bulk.head.counts_undo' : 'bulk.head.counts', { n, a: String(run.applied), c: String(run.conflicts), f: String(run.failed) });
+	}
+	return i18n.tf(bulkOne('bulk.heads.line', run.total), { n, parts: bulkHeadParts(run, run.heads, i18n).join(' · ') });
+}
+
+/** Phases after which the run writes nothing more. */
+const BULK_ENDED: ReadonlySet<BulkPhase> = new Set(['done', 'aborted', 'undone']);
+
+/** The classes the head names, in the engine's rank order, except that the written targets
+ *  come before the ones taken back, and both kinds of taken back are named together. Written, conflicts and failed always
+ *  stand, at 0 too: they are what the owner looks for. Every other class stands only when it
+ *  holds a target. A target taken back without having been written counts with the ones taken
+ *  back: for the owner the old value is back either way. An undo run's writes are what it took
+ *  back, and what it in turn took back is restored. The rest is open while the run may still
+ *  write it. Once the run has ended lynox has no result for it: it may hold a send whose answer
+ *  was never recorded, so it is not called not written. */
+export function bulkHeadParts(run: Pick<BulkRun, 'kind' | 'phase'>, heads: BulkHeads, i18n: BulkI18n): string[] {
+	const undo = run.kind === 'undo';
+	const parts: [key: string, n: number, always: boolean][] = [
+		['bulk.heads.deselected', heads.deselected, false],
+		['bulk.heads.invalid', heads.invalid, false],
+		['bulk.heads.unchanged', heads.unchanged, false],
+		[undo ? 'bulk.heads.undone' : 'bulk.heads.written', heads.written, true],
+		[undo ? 'bulk.heads.restored' : 'bulk.heads.undone', heads.takenBack + heads.settled, false],
+		[bulkOne('bulk.heads.conflict', heads.conflict), heads.conflict, true],
+		[bulkOne('bulk.heads.unclear', heads.unclear), heads.unclear, false],
+		['bulk.heads.failed', heads.failed, true],
+		[BULK_ENDED.has(run.phase) ? 'bulk.heads.no_result' : 'bulk.heads.open', heads.open, false],
+	];
+	return parts.filter(([, n, always]) => always || n > 0).map(([key, n]) => i18n.tf(key, { n: String(n) }));
 }
 
 /** How the page follows a run the engine is moving on: it asks for the run every `BULK_FOLLOW_MS`

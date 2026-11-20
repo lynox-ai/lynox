@@ -140,10 +140,10 @@
 					if (!ok) retryAfter = lastRetryAfter;
 				} else {
 					// The same step: the page takes the run's progress from the ask, so the working line,
-					// the head's counts, the cost and a pause move with the run. Every other count stays
+					// the head's counts, the warning about unclear sends, the cost and a pause move with the run. Every other count stays
 					// as loaded, with the targets and their marks it speaks of; no input is offered then.
 					run = {
-						...current, applied: body.applied, conflicts: body.conflicts, failed: body.failed, judge: body.judge,
+						...current, applied: body.applied, conflicts: body.conflicts, failed: body.failed, heads: body.heads, sentUnknown: body.sentUnknown, judge: body.judge,
 						costUsd: body.costUsd, resumesAt: body.resumesAt,
 					};
 				}
@@ -625,7 +625,7 @@
 			<dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
 				<dt class="text-text-subtle">{t('bulk.head.target')}</dt>
 				<dd>{provider}{run.writeMethod ? ` · ${run.writeMethod}` : ''}</dd>
-				<dt class="text-text-subtle">{t('bulk.head.targets')}</dt>
+				<dt class="text-text-subtle">{t('bulk.head.status')}</dt>
 				<dd data-testid="bulk-counts">{bulkHeadCounts(workingStep, run, i18n)}</dd>
 				{#if run.costUsd > 0 || run.costCapUsd !== null}
 					<dt class="text-text-subtle">{t('bulk.head.cost')}</dt>
