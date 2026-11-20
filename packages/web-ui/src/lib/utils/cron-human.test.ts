@@ -67,6 +67,7 @@ describe('a schedule stays in UTC where one local day would not hold all year', 
 		// 23:00 UTC is the next day in both seasons; 10:00 UTC is the same day in both.
 		expect(localSchedule('0 23 * * 1', ZURICH.winter, [ZURICH.winter, ZURICH.summer])).toEqual({ kind: 'weekly', weekday: 2, time: '00:00' });
 		expect(localSchedule('0 10 * * 1', ZURICH.summer, [ZURICH.winter, ZURICH.summer])).toEqual({ kind: 'weekly', weekday: 1, time: '12:00' });
+		expect(localSchedule('0 23 15 * *', ZURICH.winter, [ZURICH.winter, ZURICH.summer])).toEqual({ kind: 'monthly', day: 16, time: '00:00' });
 		// Daily: only the hour moves, whatever the season.
 		expect(localSchedule('0 22 * * *', ZURICH.winter, [ZURICH.winter, ZURICH.summer])).toEqual({ kind: 'daily', time: '23:00' });
 	});

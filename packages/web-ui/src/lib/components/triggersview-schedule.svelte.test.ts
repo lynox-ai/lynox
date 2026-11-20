@@ -122,4 +122,15 @@ describe('a schedule near midnight names the local day', () => {
 		await render();
 		expect(scheduleOf('Umstellung')).toBe('Montags 22:00 UTC');
 	});
+
+	it('a zone that changes for a few weeks between January and July still keeps the weekday in UTC', async () => {
+		// Morocco 2026: +60 all year except about four weeks around March, when it is 0.
+		// 23:30 UTC is Tuesday 00:30 at +60 and Monday 23:30 at 0.
+		vi.spyOn(Date.prototype, 'getTimezoneOffset').mockImplementation(function (this: Date) { return this.getMonth() === 2 ? 0 : -60; });
+		vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'], now: new Date('2026-07-15T12:00:00Z') });
+		setLocale('de');
+		rows = [{ ...BASE, id: 'r', title: 'Ramadan', schedule_cron: '30 23 * * 1' }];
+		await render();
+		expect(scheduleOf('Ramadan')).toBe('Montags 23:30 UTC');
+	});
 });

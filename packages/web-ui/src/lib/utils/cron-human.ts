@@ -33,17 +33,25 @@ export type LocalSchedule =
 
 const pad = (n: number): string => n.toString().padStart(2, '0');
 
-/** This browser's offsets (local minus UTC, minutes) today and in January and July of this year. */
+/**
+ * This browser's offsets (local minus UTC, minutes) today and on the 1st and 15th of every month
+ * of this year. January and July alone miss a zone that changes for a few weeks in between
+ * (Morocco during Ramadan). The sample follows this year's rules only.
+ */
 function browserOffsets(): { now: number; year: number[] } {
 	const y = new Date().getFullYear();
-	return { now: -new Date().getTimezoneOffset(), year: [new Date(y, 0, 1).getTimezoneOffset(), new Date(y, 6, 1).getTimezoneOffset()].map((o) => -o) };
+	const year: number[] = [];
+	for (let month = 0; month < 12; month++) {
+		for (const day of [1, 15]) year.push(-new Date(y, month, day).getTimezoneOffset());
+	}
+	return { now: -new Date().getTimezoneOffset(), year };
 }
 
 /**
  * `offsetMinutes` is local time minus UTC in minutes (Zurich in winter +60, Los Angeles -480),
  * by default this browser's today; the time is shown with it. `yearOffsets` are the offsets the
- * zone takes over the year (by default January and July): a day or weekday is moved only when
- * every one of them moves it the same way.
+ * zone takes over the year (by default a sample of this year, see `browserOffsets`): a day or
+ * weekday is moved only when every one of them moves it the same way.
  */
 export function localSchedule(cron: string, offsetMinutes?: number, yearOffsets?: number[]): LocalSchedule {
 	if (cron === '0 * * * *') return { kind: 'hourly' };
