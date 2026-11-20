@@ -16,6 +16,7 @@
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { approvalSetupKind, approvalSetupName, type ApprovalSetupLine } from './approvals.js';
 	import { visibleText } from '../visible-text.js';
+	import { monthDay } from '../utils/cron-human.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
 	// table split out of `tasks` in v42. This is the editable *home* for them:
@@ -505,7 +506,8 @@
 		const day = m[3];
 		const weekday = m[4];
 		const weekdays: Record<string, string> = { '0': t('tasks.sunday'), '1': t('tasks.monday'), '2': t('tasks.tuesday'), '3': t('tasks.wednesday'), '4': t('tasks.thursday'), '5': t('tasks.friday'), '6': t('tasks.saturday') };
-		if (day !== '*') return `${t('tasks.monthly_on')} ${day}. ${t('tasks.at')} ${local}`;
+		// The day stays as written in the cron (UTC); only the time is shown in local time.
+		if (day !== '*') return tf('tasks.monthly_on_day', { day: monthDay(Number(day), getLocale()), time: local });
 		if (weekday !== '*') return `${weekdays[weekday] ?? weekday} ${local}`;
 		return `${t('tasks.daily_at')} ${local}`;
 	}
@@ -627,7 +629,7 @@
 							{/each}
 							<div class="flex flex-wrap gap-2 mt-1.5 text-xs text-text-subtle">
 								{#if trigger.schedule_cron}
-									<span class="flex items-center gap-1">
+									<span class="flex items-center gap-1" data-trigger-schedule>
 										<Icon name="clock" size="xs" />
 										{cronToHuman(trigger.schedule_cron)}
 									</span>
