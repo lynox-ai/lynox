@@ -1,0 +1,35 @@
+name: symlink-guard
+
+# A symlink is committed as a blob whose content is its target. A worktree whose `node_modules` is
+# a link to another checkout commits that link with `git add -A`, and the absolute target names the
+# machine's user and the worktree it points into. `.gitignore` now ignores `node_modules` as a file
+# too; this job is the backstop for a link under another name, or one committed with `--force`.
+#
+# It reads every commit the pull request adds, not only the net diff: a link added and removed
+# again is still in the branch's history, and the pull request shows that history. It never prints
+# a link's target, because this job's log is public.
+
+on:
+  pull_request:
+
+# No paths-ignore: a link can sit in any path.
+
+permissions:
+  contents: read
+
+jobs:
+  symlink-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Need full history to walk base..head.
+          fetch-depth: 0
+
+      - name: Check the commits this PR adds
+        # Via env, not interpolated into the command line.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/symlink-guard.mjs check "$BASE_SHA" "$HEAD_SHA"
