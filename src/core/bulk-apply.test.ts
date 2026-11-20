@@ -2048,6 +2048,34 @@ describe('the trail of one call of a run', () => {
   });
 });
 
+describe('a local send whose write threw', () => {
+  const sends = (runId: string) => engineDb.getDb()
+    .prepare('SELECT seq, write_sent, unknown_sends FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(runId);
+
+  it('is booked as answered: the outcome of a local writer is known', async () => {
+    const { runId, initial } = recordMemoryRun(3);
+    approve(runId);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(memory(initial, new Set(['k001'])).writer));
+    // The first written, the second threw and halts the pass (the limit of three targets is 0),
+    // the third never sent to. The one that threw has no send left without an answer.
+    expect(sends(runId)).toEqual([
+      { seq: 0, write_sent: 1, unknown_sends: 1 }, { seq: 1, write_sent: 1, unknown_sends: 0 }, { seq: 2, write_sent: 0, unknown_sends: 0 },
+    ]);
+    expect(ledger.getStatus(runId)!.heads.failed).toBe(1);
+  });
+
+  it('keeps a send a loop that died left before it, when this pass fails before sending', async () => {
+    const { runId, initial } = recordMemoryRun(1);
+    approve(runId);
+    // A loop that died after its send: marked sent, never recorded.
+    engineDb.getDb().prepare('UPDATE bulk_targets SET write_sent = 1, unknown_sends = 1 WHERE run_id = ?').run(runId);
+    const inner = memory(initial).writer;
+    const readFails: TargetWriter = { async read() { throw new Error(`read ${MARK}`); }, write: (k, a) => inner.write(k, a) };
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(readFails));
+    expect(sends(runId)).toEqual([{ seq: 0, write_sent: 1, unknown_sends: 1 }]);
+  });
+});
+
 describe('what a resume after a failure halt may still do', () => {
   /** A memory writer whose read fails for `readFail` (before anything is sent) and whose write
    *  fails for `fail`, or for `secret` on what it would send. */

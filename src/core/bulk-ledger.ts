@@ -450,13 +450,21 @@ const WRITE_FAILED_SQL = `(change != 'invalid' AND applied_at IS NULL AND error 
 // count the check in the write loop reads, not off `sent_unknown`: right after the halt that
 // left it unclear it still carries that send's own failure. Only an external run's targets: a
 // local writer's outcome is always known, and its sends are counted all the same. Not a target a
-// loop holds: it is being sent to now, and its answer may still come. Every way a pass leaves a
-// target (written, failed, halted, released) gives the claim back; only a loop that died keeps
-// it, and that target counts once a later pass has read it.
-const UNCLEAR_SQL = "(unknown_sends > 0 AND applied_at IS NULL AND undone_at IS NULL AND claimed_at IS NULL AND (error IS NULL OR error != 'conflict'))";
-// {@link UNCLEAR_SQL} on a run: one bound parameter, 1 for an external run. Every count that names
-// or leaves out a run's unclear targets reads this one, so they move together.
+// live loop holds: it is being sent to now, and its answer may still come. Every way a pass leaves
+// a target (written, failed, halted, released) gives the claim back; a claim older than
+// {@link BULK_CLAIM_STALE_MS} belongs to a loop that died, as {@link BulkLedger.claimTarget} reads
+// it, and its target is unclear as it stands. One bound parameter: the time before which a claim
+// is stale ({@link staleBefore}).
+const UNCLEAR_SQL = "(unknown_sends > 0 AND applied_at IS NULL AND undone_at IS NULL AND (claimed_at IS NULL OR claimed_at < ?) AND (error IS NULL OR error != 'conflict'))";
+// {@link UNCLEAR_SQL} on a run: two bound parameters, 1 for an external run, then the stale time.
+// Every count that names or leaves out a run's unclear targets reads this one, so they move together.
 const RUN_UNCLEAR_SQL = `(? = 1 AND ${UNCLEAR_SQL})`;
+
+/** The time before which a target's claim belongs to a loop that died: the one bound for it,
+ *  shared by {@link BulkLedger.claimTarget} and {@link UNCLEAR_SQL}. */
+function staleBefore(now: number): string {
+  return new Date(now - BULK_CLAIM_STALE_MS).toISOString();
+}
 
 /** The classes {@link BulkRunStatus.heads} splits a run's targets into, in rank order: a target
  *  counts in the first one it belongs to. Taken out, left out by the plan (`invalid`); unchanged;
@@ -469,7 +477,7 @@ const RUN_UNCLEAR_SQL = `(? = 1 AND ${UNCLEAR_SQL})`;
  *  follows the target's state, not the way it got there. */
 export const BULK_HEADS = ['deselected', 'invalid', 'unchanged', 'takenBack', 'written', 'settled', 'conflict', 'unclear', 'failed', 'open'] as const;
 export type BulkHead = (typeof BULK_HEADS)[number];
-// One bound parameter: 1 for an external run.
+// Two bound parameters, as {@link RUN_UNCLEAR_SQL}.
 const BULK_HEAD_SQL = `CASE
   WHEN deselected_at IS NOT NULL THEN 'deselected'
   WHEN change = 'invalid' THEN 'invalid'
@@ -1579,10 +1587,10 @@ export class BulkLedger {
   }
 
   /** Counters and phase of one run. No target key, value or diff. */
-  getStatus(runId: string): BulkRunStatus | null {
+  getStatus(runId: string, now: number = Date.now()): BulkRunStatus | null {
     this.freeDeadReads(runId);
     const row = this.engineDb.getDb().prepare('SELECT * FROM bulk_runs WHERE id = ?').get(runId) as RunRow | undefined;
-    return row ? this.toStatus(row) : null;
+    return row ? this.toStatus(row, now) : null;
   }
 
   /**
@@ -1630,12 +1638,12 @@ export class BulkLedger {
   }
 
   /** The most recent runs, newest first, as counters. */
-  listRuns(limit = 10): BulkRunStatus[] {
+  listRuns(limit = 10, now: number = Date.now()): BulkRunStatus[] {
     this.freeDeadReads();
     const rows = this.engineDb.getDb()
       .prepare('SELECT * FROM bulk_runs ORDER BY created_at DESC, rowid DESC LIMIT ?')
       .all(Math.max(1, Math.min(limit, 50))) as RunRow[];
-    return rows.map((r) => this.toStatus(r));
+    return rows.map((r) => this.toStatus(r, now));
   }
 
   /**
@@ -1770,15 +1778,15 @@ export class BulkLedger {
 
   /** Each target in the first class of {@link BULK_HEADS} it belongs to, in one grouped read, so
    *  the counts sum to the run's targets by construction. */
-  private headsOf(row: RunRow): Record<BulkHead, number> {
+  private headsOf(row: RunRow, now: number): Record<BulkHead, number> {
     const heads = Object.fromEntries(BULK_HEADS.map((h) => [h, 0])) as Record<BulkHead, number>;
     for (const r of this.engineDb.getDb().prepare(
       `SELECT ${BULK_HEAD_SQL} AS head, COUNT(*) AS n FROM bulk_targets WHERE run_id = ? GROUP BY head`,
-    ).all(externalHostOf(row.target_system) === null ? 0 : 1, row.id) as { head: BulkHead; n: number }[]) heads[r.head] = r.n;
+    ).all(externalHostOf(row.target_system) === null ? 0 : 1, staleBefore(now), row.id) as { head: BulkHead; n: number }[]) heads[r.head] = r.n;
     return heads;
   }
 
-  private toStatus(row: RunRow): BulkRunStatus {
+  private toStatus(row: RunRow, now: number): BulkRunStatus {
     const db = this.engineDb.getDb();
     const changes: Record<BulkChange, number> = { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 };
     for (const c of db.prepare('SELECT change, COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND deselected_at IS NULL GROUP BY change')
@@ -1797,7 +1805,7 @@ export class BulkLedger {
     // An atomic run's rollback also settles targets it sent to and never recorded
     // (`recordUnrecordedSettled`); they were never counted as applied, so not as undone either.
     // An external undo takes such a target back for real, and it counts.
-    ).get(row.atomic, row.id) as { conflicts: number | null; failed: number | null; undone: number | null; foundAsPlanned: number | null; unread: number | null; shopAddedMarkup: number | null; hostRewrote: number | null; sentUnknown: number | null };
+    ).get(row.atomic, staleBefore(now), row.id) as { conflicts: number | null; failed: number | null; undone: number | null; foundAsPlanned: number | null; unread: number | null; shopAddedMarkup: number | null; hostRewrote: number | null; sentUnknown: number | null };
     const external = externalHostOf(row.target_system) === null ? 0 : 1;
     const pass = db.prepare(
       // In this pass and unclear: unclear, with a failure this pass recorded (a resume clears the
@@ -1807,7 +1815,7 @@ export class BulkLedger {
          SUM(${RESUMABLE_SQL}) AS open, SUM(${RESUMABLE_SQL} AND write_sent = 1) AS openSent,
          SUM(${RESUMABLE_SQL} AND unknown_sends > 0) AS openUnclear
        FROM bulk_targets WHERE run_id = ? AND ${WRITING_SQL}`,
-    ).get(external, row.id) as { writing: number; unknown: number | null; failedOnce: number | null; passUnclear: number | null; open: number | null; openSent: number | null; openUnclear: number | null };
+    ).get(external, staleBefore(now), row.id) as { writing: number; unknown: number | null; failedOnce: number | null; passUnclear: number | null; open: number | null; openSent: number | null; openUnclear: number | null };
     const open = pass.open ?? 0;
     const openSent = pass.openSent ?? 0;
     const cap = bulkWriteCap(row.max_targets, this.probeHolds(row));
@@ -1815,8 +1823,8 @@ export class BulkLedger {
     const resumeTries = cap === null ? open : openSent + Math.min(open - openSent, Math.max(0, cap - this.sentCount(row.id)));
     // A target with a send still unclear was sent to by this run (`write_sent`), so it is in
     // `resumeTries`; the next pass only reads it at the host and never sends it again. Counted
-    // by `unknown_sends`, not {@link UNCLEAR_SQL}: one in conflict or held by a loop that died
-    // is not sent again either, though the owner is not shown it as unclear.
+    // by `unknown_sends`, not {@link UNCLEAR_SQL}: one in conflict, or one a loop holds within the
+    // claim bound, is not sent again either, though the owner is not shown it as unclear.
     const resumeSends = externalHostOf(row.target_system) === null ? resumeTries : Math.max(0, resumeTries - (pass.openUnclear ?? 0));
     return {
       id: row.id, createdAt: row.created_at, targetSystem: row.target_system, phase: row.phase, undo: row.undo,
@@ -1826,7 +1834,7 @@ export class BulkLedger {
       applied: row.targets_applied, foundAsPlanned: outcome.foundAsPlanned ?? 0, shopAddedMarkup: outcome.shopAddedMarkup ?? 0, hostRewrote: outcome.hostRewrote ?? 0, failed: outcome.failed ?? 0,
       conflicts: outcome.conflicts ?? 0, undone: outcome.undone ?? 0,
       sentUnknown: externalHostOf(row.target_system) === null ? 0 : outcome.sentUnknown ?? 0,
-      heads: this.headsOf(row),
+      heads: this.headsOf(row, now),
       maxTargets: row.max_targets,
       failedOnce: (pass.unknown ?? 0) > 0 ? null : pass.failedOnce ?? 0,
       passUnclear: pass.passUnclear ?? 0,
@@ -3474,7 +3482,7 @@ export class BulkLedger {
       `UPDATE bulk_targets SET claimed_at = ?
        WHERE run_id = ? AND seq = ? AND applied_at IS NULL AND error IS NULL AND undone_at IS NULL
          AND deselected_at IS NULL AND (claimed_at IS NULL OR claimed_at < ?)`,
-    ).run(new Date(now).toISOString(), runId, seq, new Date(now - BULK_CLAIM_STALE_MS).toISOString()).changes === 1;
+    ).run(new Date(now).toISOString(), runId, seq, staleBefore(now)).changes === 1;
   }
 
   loadTarget(runId: string, seq: number): ApplyTarget | null {

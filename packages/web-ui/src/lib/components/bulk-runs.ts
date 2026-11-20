@@ -292,7 +292,7 @@ export function bulkResumeKind(
 	// which writing on under a higher maximum would send), none of them sent to again, none still
 	// unclear, and every one a conflict (`conflicts === resumeTries`, and some are left): each was
 	// sent to without a clear answer and has a third value at the provider now. Not a target a
-	// loop that died still holds, which is neither unclear on this page nor a conflict.
+	// loop still holds within the claim bound, which is neither unclear on this page nor a conflict.
 	if (BULK_RESUME_WRITE.has(run.haltKey) && run.resumeOpen === run.resumeTries && run.resumeSends === 0
 		&& run.sentUnknown === 0 && run.conflicts > 0 && run.conflicts === run.resumeTries) return 'nothing';
 	const narrow = (run.maxTargets ?? bulkWriting(run)) <= 1;
