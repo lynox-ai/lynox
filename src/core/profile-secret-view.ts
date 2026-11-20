@@ -664,7 +664,8 @@ export function describeConnectionTokens(holdersOfEach: readonly (readonly { id?
  * - `nested` — an object whose own fields are placed in the next table.
  * - `inert` — it changes neither. A field the engine rewrites by itself belongs here, or every
  *   renewal would lapse the owner's release: `grant_type`, `token_expires_at`, `oauth_grant`,
- *   `custom_endpoint_ack` and `owner_clean_host`, which every save stamps anew.
+ *   `custom_endpoint_ack`, which every save stamps anew, and `owner_clean_host`, which every
+ *   create or update writes or removes.
  */
 type FieldBearing = 'host' | 'role' | 'bound' | 'nested' | 'inert';
 type OAuthBlock = NonNullable<ApiAuth['oauth']>;

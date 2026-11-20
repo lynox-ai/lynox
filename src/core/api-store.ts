@@ -260,7 +260,8 @@ export interface ApiProfile {
   /**
    * The host of `base_url` when the owner saved this profile in a turn that had taken in no
    * foreign content (`api_setup`). Written by the engine only, like `created_by`: a value in the
-   * input is dropped, and a save in any other turn removes it. Read by `readKnownHosts`: the owner
+   * input is dropped, and an `api_setup` create or update in any other turn removes it. Saves that
+   * keep the stored profile's `base_url` (refine, a token save, the OAuth callback) keep it. Read by `readKnownHosts`: the owner
    * chose this host, so a read from it after foreign content is not asked about.
    */
   owner_clean_host?: string | undefined;

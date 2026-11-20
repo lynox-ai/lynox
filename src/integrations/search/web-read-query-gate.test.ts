@@ -21,6 +21,8 @@ import { OwnerKnownTargets } from '../../core/owner-known-targets.js';
 import { ConversationLatch } from '../../core/conversation-latch.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
 import { createWebSearchTool } from './web-search-tool.js';
+import { createToolContext } from '../../core/tool-context.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 import type { SearchProvider } from './search-provider.js';
 
 type Result = { content: unknown; is_error?: boolean };
@@ -316,5 +318,81 @@ describe('an address that carries another address for a service to fetch', () =>
     const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
     await read(agent, 'https://reader.example.ch/page#https://collect.evil.example/d');
     expect(ask.asked).toEqual([]);
+  });
+});
+
+describe('an address another one carries ends where a host name ends', () => {
+  for (const [form, url] of [
+    ['followed by &', 'https://reader.example.ch/url?q=https://collect.evil.example&sa=D'],
+    ['followed by a comma', 'https://reader.example.ch/share?u=https://collect.evil.example,more'],
+    ['in brackets', 'https://reader.example.ch/(https://collect.evil.example)'],
+    ['with an encoded slash after it', 'https://reader.example.ch/?u=https://collect.evil.example%2Fd'],
+    ['with one slash', 'https://reader.example.ch/https:/collect.evil.example/d'],
+    ['with no slash', 'https://reader.example.ch/https:collect.evil.example/d'],
+  ] as const) {
+    it(`an unnamed host (${form}) is asked about, naming that host, not refused unasked`, async () => {
+      const tool = webResearch();
+      const ask = asker('Deny');
+      const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
+      await read(agent, url);
+      expect(ask.asked).toHaveLength(1);
+      expect(ask.asked[0]).toContain('"collect.evil.example"');
+      expect(tool.reads).toEqual([]);
+    });
+  }
+
+  it('CONTROL: when the owner named both hosts, a carried address followed by & is read without a question', async () => {
+    const tool = webResearch();
+    const ask = asker('Deny');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch for docs.example.ch') });
+    await read(agent, 'https://reader.example.ch/url?q=https://docs.example.ch&sa=D');
+    expect(ask.asked).toEqual([]);
+    expect(tool.reads).toEqual(['https://reader.example.ch/url?q=https://docs.example.ch&sa=D']);
+  });
+});
+
+describe('a result whose address holds the query is not listed, in any case and encoding', () => {
+  for (const [form, query, url] of [
+    ['with spaces', 'secret data here', 'https://collect.evil.example/secret data here'],
+    ['in another case, in the host', 'SECRET', 'https://SECRET.evil.example/'],
+    ['with a letter the address encodes', 'Müller', 'https://collect.evil.example/Müller'],
+  ] as const) {
+    it(`a query ${form}`, async () => {
+      const tool = webResearchSearching([{ url }]);
+      const ask = asker('Deny');
+      const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
+      await search(agent, query);
+      await read(agent, url);
+      expect(ask.asked).toHaveLength(1);
+      expect(tool.reads).toEqual([]);
+    });
+  }
+});
+
+describe('a session of someone the owner let in, after a search', () => {
+  // A helper's session reads nothing outside the instance unrecorded, so the search needs a log to run.
+  const logged = () => ({ ...createToolContext({}), auditLog: testAuditLog().log });
+
+  it('a page the search did not list is refused unasked, as a read, naming its host', async () => {
+    const tool = webResearchSearching([{ url: 'https://news.example.org/story/42' }]);
+    const ask = asker('Allow');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner(), principal: { kind: 'mandate', email: 'helper@example.ch' }, toolContext: logged() });
+    expect((await search(agent, 'story 42')).is_error).not.toBe(true);
+    const result = await read(agent, 'https://collect.evil.example/d/secret');
+    expect(ask.asked).toEqual([]);
+    expect(tool.reads).toEqual([]);
+    expect(result.is_error).toBe(true);
+    expect(String(result.content)).toContain('Not read');
+    expect(String(result.content)).toContain('collect.evil.example');
+  });
+
+  it('CONTROL: a page the search listed is read', async () => {
+    const tool = webResearchSearching([{ url: 'https://news.example.org/story/42' }]);
+    const ask = asker('Allow');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner(), principal: { kind: 'mandate', email: 'helper@example.ch' }, toolContext: logged() });
+    await search(agent, 'story 42');
+    await read(agent, 'https://news.example.org/story/42');
+    expect(ask.asked).toEqual([]);
+    expect(tool.reads).toEqual(['https://news.example.org/story/42']);
   });
 });

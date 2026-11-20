@@ -25,16 +25,32 @@ export function fetchedForm(address: string): string | null {
   }
 }
 
+/**
+ * The forms an address is compared with the query in, lower case: as the provider wrote it, as it
+ * is fetched, and that form decoded (`%20` back to a space, `%C3%BC` back to `ü`). The fetched form
+ * alone encodes spaces and other characters and lowers the host, so a query `secret data` would not
+ * be found in `https://x.example/secret%20data`.
+ */
+function formsOf(raw: string, fetched: string): string[] {
+  const forms = [raw.trim().toLowerCase(), fetched.toLowerCase()];
+  try {
+    forms.push(decodeURI(fetched).toLowerCase());
+  } catch {
+    // An encoding decodeURI refuses: the other two forms stand.
+  }
+  return forms;
+}
+
 export class SearchResultAddresses {
   private readonly _seen = new Set<string>();
 
   /** Notes the result addresses of one search for `query`. */
   noteResults(query: string, addresses: readonly string[]): void {
-    const q = query.trim();
+    const q = query.trim().toLowerCase();
     for (const raw of addresses) {
       const address = fetchedForm(raw);
       if (address === null) continue;
-      if (q !== '' && (address.includes(q) || q.includes(address) || q.includes(raw.trim()))) continue;
+      if (q !== '' && formsOf(raw, address).some((f) => f.includes(q) || q.includes(f))) continue;
       this._seen.add(address);
     }
   }

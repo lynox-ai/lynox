@@ -86,17 +86,23 @@ export function hostTargets(url: string): SendTarget[] {
   return [target];
 }
 
-/** An absolute http(s) address inside another one, up to the end of its host part. A backslash
- *  counts as a slash, as the URL parser of the service reading it would take it. */
-const EMBEDDED_URL = /https?:[\\/]{2}[^\s/\\?#"'<>]+/giu;
+/**
+ * An absolute http(s) address inside another one, up to the end of its authority. With two, one or
+ * no slashes after the scheme, and a backslash for a slash: the URL parser of a service reading it
+ * takes all of these to the same host (`https:/x`, `https:x` and `https:\\x` all mean `x`). The
+ * authority ends at a character no host name holds, so `?url=https://x.example&y=1` or
+ * `(https://x.example)` reads `x.example`.
+ */
+const EMBEDDED_URL = /(?<![a-z0-9+.-])https?:[\\/]{0,2}([^\s/\\?#"'<>&,;()%=|^{}*+!$`]+)/giu;
 
 /**
  * The hosts a read of `url` reaches: its own, and the host of every absolute address its path or
  * query carries, plain, percent-encoded or encoded twice over (decoded up to three times). A
  * service that fetches the address it is given in the path (`https://reader.example/https://x/…`)
  * sends the read on to that host, so that host is a target as well. The fragment is never sent and
- * is not read. An embedded address whose host cannot be read makes the whole call's targets
- * unknown, like an unreadable host of its own.
+ * is not read. An embedded authority that is no host name the check can compare is still a target,
+ * as written: it is never owner-known, so the read is asked about or refused like any other read to
+ * an unnamed host, never passed.
  */
 export function readTargets(url: string): SendTarget[] {
   const out = hostTargets(url);
@@ -109,8 +115,8 @@ export function readTargets(url: string): SendTarget[] {
   let layer = parsed.pathname + parsed.search;
   for (let round = 0; round < 4; round++) {
     for (const m of layer.matchAll(EMBEDDED_URL)) {
-      const target = normalizeHostTarget(m[0].replace(/\\/g, '/'));
-      if (target === null) throw new UnknownSendTargetError('host');
+      const authority = m[1] ?? '';
+      const target = normalizeHostTarget(`https://${authority}`) ?? { kind: 'host' as const, value: authority.toLowerCase() };
       if (!out.some((t) => t.value === target.value)) out.push(target);
     }
     let next: string;
