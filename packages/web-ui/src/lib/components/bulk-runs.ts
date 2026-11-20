@@ -352,6 +352,8 @@ export function bulkResumeText(
 		: key === 'unauthorized' || key === 'unavailable' ? `bulk.halt.${key}_before`
 		: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_${tier}`
 		: key === 'markupAddedByShop' ? 'bulk.halt.markupAddedByShop_before'
+		// Writing on meets the same refusal until the store is connected again or its profile fixed.
+		: key === 'storeAccessEnded' || key === 'storeClientMisnamed' ? `bulk.halt.${key}_before`
 		: null;
 	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
 	if (kind === 'none') return { cause, before, check: null, kept: null, soFar: null, allows: null };

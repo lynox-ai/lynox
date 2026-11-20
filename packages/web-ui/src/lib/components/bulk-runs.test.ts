@@ -661,6 +661,15 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeKind(w('unavailable', { haltKey: null }))).toBeNull();
 	});
 
+	it('names the step before writing on for a store whose access lynox could not renew', () => {
+		// Writing on alone would meet the same refusal: the page names the step first, in both languages.
+		expect(bulkResumeKind(w('storeAccessEnded'))).toBe('write');
+		expect(bulkResumeText(w('storeAccessEnded'), true, DE)?.before).toBe('Bitte lynox im Chat, den Shop neu zu verbinden. Danach kannst du den Lauf hier fortsetzen.');
+		expect(bulkResumeText(w('storeAccessEnded'), true, EN)?.before).toBe('Ask lynox in the chat to connect the store again. Then you can continue the run here.');
+		expect(bulkResumeText(w('storeClientMisnamed'), true, DE)?.before).toBe('Bitte lynox im Chat, das Profil für shop.example.invalid anzupassen. Danach kannst du den Lauf hier fortsetzen.');
+		expect(bulkResumeText(w('storeClientMisnamed'), true, EN)?.before).toBe('Ask lynox in the chat to fix the profile for shop.example.invalid. Then you can continue the run here.');
+	});
+
 	it('offers no way on that the engine refuses for want of a probe', () => {
 		// Without a probe a run writes on only under a maximum of one: a higher one is refused.
 		expect(bulkResumeKind(w('maxTargets', { probeConfirmed: false, maxTargets: 1 }))).toBeNull();
