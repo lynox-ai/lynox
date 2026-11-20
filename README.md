@@ -138,7 +138,7 @@ Open [localhost:3000](http://localhost:3000) on your phone and use your browser'
 
 ## Who builds this
 
-Built solo by Rafael Burlet in Rapperswil SG, Switzerland. lynox runs in production for three SMBs (one is mine). The project sustains through the [Managed hosting tier](https://lynox.ai/managed) for users who'd rather not run their own Docker host — self-hosted is and stays free.
+Built solo by Rafael Burlet in Rapperswil SG, Switzerland. I run lynox in production myself. The project sustains through the [Managed hosting tier](https://lynox.ai/managed) for users who'd rather not run their own Docker host — self-hosted is free.
 
 If something breaks, an [issue](https://github.com/lynox-ai/lynox/issues) lands on my desk directly; I usually reply within a few working days.
 
