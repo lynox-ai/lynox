@@ -90,6 +90,12 @@ function addCreated(into: KnowledgeCreatedCounts, made: Partial<KnowledgeCreated
  * Integrates: AgentMemoryDb (SQLite) + EntityResolver + RetrievalEngine +
  * ContradictionDetector + KpiEngine + RunHistory (for insights).
  */
+/**
+ * How many relations of one entity the data export reads, newest first. An entity that returns
+ * this many may hold more, so the export marks its graph block as possibly incomplete.
+ */
+export const EXPORT_RELATIONS_PER_ENTITY = 50;
+
 export class KnowledgeLayer implements IKnowledgeLayer {
   private readonly db: AgentMemoryDb;
   private readonly embeddingProvider: EmbeddingProvider;
@@ -1602,7 +1608,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * stored belongs in the export until the reap removes it. Same store choice and cap.
    */
   async getEntityRelationsForExport(entityId: string): Promise<Array<RelationRecord & { sourceDeleted: boolean }>> {
-    const limit = 50;
+    const limit = EXPORT_RELATIONS_PER_ENTITY;
     if (this.subjectGraphEnabled && this.relationshipStore) {
       try {
         return this.relationshipStore.getRelationshipsForSubjectForExport(entityId, limit)

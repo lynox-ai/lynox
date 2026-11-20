@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
 import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
+import { EXPORT_RELATIONS_PER_ENTITY } from '../core/knowledge-layer.js';
 
 /**
  * The engine opens its stores at boot and goes on without each one whose open fails. The
@@ -20,6 +21,8 @@ type ExportBody = {
   datastore: Record<string, unknown[]>; datastore_may_be_incomplete: boolean;
   threads: unknown[]; threads_may_be_incomplete: boolean;
   durable_knowledge: { entries: unknown[]; may_be_incomplete: boolean };
+  knowledge_graph: { entities: unknown[]; relationships: unknown[] }; knowledge_graph_may_be_incomplete: boolean;
+  secrets: string[]; secrets_may_be_incomplete: boolean; secrets_note: string;
 };
 
 type EngineView = {
@@ -27,8 +30,12 @@ type EngineView = {
   getDataStore: () => unknown;
   getThreadStore: () => unknown;
   getKnowledgeStore: () => unknown;
-  getUserConfig: () => { durable_memory_enabled?: boolean | undefined };
+  getKnowledgeLayer: () => unknown;
+  getSecretStore: () => unknown;
+  getUserConfig: () => { durable_memory_enabled?: boolean | undefined; knowledge_graph_enabled?: boolean | undefined };
   _crm: unknown;
+  knowledgeLayer: unknown;
+  secretStore: unknown;
 };
 
 const ENV = [
@@ -117,6 +124,15 @@ describe('export with the stores down at boot (real engine)', () => {
     expect(body.threads_may_be_incomplete, 'threads were not read, not absent').toBe(true);
     expect(body.durable_knowledge.may_be_incomplete, 'switched on but not read').toBe(true);
   }, 60_000);
+
+  it('marks the knowledge graph incomplete when it is missing without being switched off', async () => {
+    expect(h.engine().getUserConfig().knowledge_graph_enabled, 'fixture: not switched off').not.toBe(false);
+    expect(h.engine().getKnowledgeLayer(), 'fixture: no layer without the history database').toBeNull();
+
+    const body = await h.exportBody();
+    expect(body.knowledge_graph).toEqual({ entities: [], relationships: [] });
+    expect(body.knowledge_graph_may_be_incomplete, 'the graph was not read, not empty').toBe(true);
+  }, 60_000);
 });
 
 describe('export with every store open, durable memory off, then the CRM gone (real engine)', () => {
@@ -143,5 +159,83 @@ describe('export with every store open, durable memory off, then the CRM gone (r
     expect(body.contacts_may_be_incomplete).toBe(true);
     expect(body.deals_may_be_incomplete).toBe(true);
     expect(body.datastore_may_be_incomplete, 'the store itself was read in full').toBe(false);
+  }, 60_000);
+
+  it('leaves the knowledge graph and the secret names unmarked when both were read, and says values are not exported', async () => {
+    expect(h.engine().getSecretStore(), 'fixture: the secret store opened').not.toBeNull();
+    expect(h.engine().getKnowledgeLayer(), 'fixture: the knowledge graph opened').not.toBeNull();
+    const body = await h.exportBody();
+    expect(body.secrets_may_be_incomplete, 'the secret store was read').toBe(false);
+    expect(body.secrets_note).toBe('Names of the stored secrets only. Their values are not exported.');
+    expect(body.knowledge_graph_may_be_incomplete, 'the graph was read in full').toBe(false);
+  }, 60_000);
+
+  it('marks the knowledge graph incomplete when reading it throws', async () => {
+    const saved = h.engine().knowledgeLayer;
+    // A layer whose first read throws, as a corrupt or locked database does.
+    h.engine().knowledgeLayer = {
+      listEntities: () => Promise.reject(new Error('read failed')),
+      stats: () => Promise.reject(new Error('read failed')),
+      getEntityRelationsForExport: () => Promise.reject(new Error('read failed')),
+    };
+    try {
+      const body = await h.exportBody();
+      expect(body.knowledge_graph).toEqual({ entities: [], relationships: [] });
+      expect(body.knowledge_graph_may_be_incomplete, 'the graph threw, it was not read').toBe(true);
+    } finally {
+      h.engine().knowledgeLayer = saved;
+    }
+  }, 60_000);
+
+  it('marks the knowledge graph incomplete when an entity returns the per-entity relation cap', async () => {
+    const saved = h.engine().knowledgeLayer;
+    const rel = (i: number) => ({ fromEntityId: 'a', toEntityId: `b${String(i)}`, relationType: 'knows', sourceMemoryId: `m${String(i)}`, sourceDeleted: false });
+    const stub = (count: number) => ({
+      listEntities: ({ offset }: { offset: number }) => Promise.resolve(offset === 0 ? [{ id: 'a' }] : []),
+      stats: () => Promise.resolve({}),
+      getEntityRelationsForExport: () => Promise.resolve(Array.from({ length: count }, (_, i) => rel(i))),
+    });
+    try {
+      h.engine().knowledgeLayer = stub(EXPORT_RELATIONS_PER_ENTITY - 1);
+      const under = await h.exportBody();
+      expect(under.knowledge_graph.relationships).toHaveLength(EXPORT_RELATIONS_PER_ENTITY - 1);
+      expect(under.knowledge_graph_may_be_incomplete, 'below the cap, every relation was read').toBe(false);
+
+      h.engine().knowledgeLayer = stub(EXPORT_RELATIONS_PER_ENTITY);
+      const at = await h.exportBody();
+      expect(at.knowledge_graph.relationships).toHaveLength(EXPORT_RELATIONS_PER_ENTITY);
+      expect(at.knowledge_graph_may_be_incomplete, 'at the cap, the entity may hold more').toBe(true);
+    } finally {
+      h.engine().knowledgeLayer = saved;
+    }
+  }, 60_000);
+
+  it('marks the secret names incomplete when the secret store is unavailable', async () => {
+    const saved = h.engine().secretStore;
+    // What a failed open at boot leaves behind: there is no switch that turns the store off.
+    h.engine().secretStore = null;
+    try {
+      const body = await h.exportBody();
+      expect(body.secrets).toEqual([]);
+      expect(body.secrets_may_be_incomplete, 'the store was not read, not empty').toBe(true);
+    } finally {
+      h.engine().secretStore = saved;
+    }
+  }, 60_000);
+});
+
+describe('export with the knowledge graph switched off (real engine)', () => {
+  // Switched off the way a user does it, in config.json, so the engine boots without the layer.
+  const h = harness((dir) => {
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ knowledge_graph_enabled: false }));
+  }, false);
+
+  it('leaves the empty knowledge graph unmarked, since nothing was opened and nothing failed', async () => {
+    expect(h.engine().getUserConfig().knowledge_graph_enabled, 'fixture: switched off').toBe(false);
+    expect(h.engine().getKnowledgeLayer(), 'fixture: no layer while it is off').toBeNull();
+
+    const body = await h.exportBody();
+    expect(body.knowledge_graph).toEqual({ entities: [], relationships: [] });
+    expect(body.knowledge_graph_may_be_incomplete, 'off: no layer was opened, so nothing failed').toBe(false);
   }, 60_000);
 });
