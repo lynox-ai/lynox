@@ -429,6 +429,17 @@ describe('the notice tables', () => {
       const leads = [b.notApproved('approved'), b.haltedResume, b.otherLoop, b.otherLoopHolds, b.notReadyToJudge('approved', true),
         b.notReadyToRead('approved', true), ...(['stopped', 'time', 'failed'] as const).flatMap((cause) => [b.atomicEnded(cause, true), b.atomicEnded(cause, false)])];
       for (const lead of leads) expect([lang, lead, `${lead} ${warning}`.length <= REMINDER_BODY_MAX]).toEqual([lang, lead, true]);
+      // A product run its connection may not write: every version, before and after a first write, keeps
+      // the lead at most 180, the warning after it whole, and with four-digit counts fits the cut whole.
+      const fourDigits = b.applyCounts({ applied: 9_999, foundAsPlanned: 0, failed: 0, conflicts: 0, undone: 0, total: 9_999, sentUnknown: 0 });
+      for (const access of ['not_asked', 'not_granted'] as const) {
+        for (const nothingYet of [true, false]) {
+          const lead = b.productWriteNotAsked(access, nothingYet);
+          expect([lang, access, nothingYet, lead.length <= 180]).toEqual([lang, access, nothingYet, true]);
+          expect([lang, access, nothingYet, `${lead} ${warning}`.length <= REMINDER_BODY_MAX]).toEqual([lang, access, nothingYet, true]);
+          expect([lang, access, nothingYet, `${lead} ${fourDigits}`.length <= REMINDER_BODY_MAX]).toEqual([lang, access, nothingYet, true]);
+        }
+      }
       const counts = b.applyCounts(c);
       expect(counts.indexOf(lang === 'de' ? 'unklar' : 'unclear')).toBeLessThan(counts.indexOf(lang === 'de' ? 'geschrieben' : 'applied'));
       // A count of 0 is left out, but what was written and the total always stand.

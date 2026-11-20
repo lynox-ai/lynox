@@ -185,10 +185,11 @@ const EN: BulkNotices = Object.freeze({
   haltedResume: 'Bulk run is halted — resume it to continue.',
   consentOutdated: (fields: readonly string[], nothingYet: boolean) =>
     `${nothingYet ? 'lynox wrote nothing.' : 'lynox writes nothing more in this run; what it already wrote stays.'} This Shopify connection does not yet let lynox change ${shopifyFieldsNamed(fields, 'en')}. Reconnect Shopify (Settings → APIs), then ask lynox in the chat to plan the run again.`,
+  // Short, so that with the counts it fits a web push; the run page keeps the full sentence with the way.
   productWriteNotAsked: (access: 'not_asked' | 'not_granted', nothingYet: boolean) =>
-    `${nothingYet ? 'lynox wrote nothing.' : 'lynox writes nothing more in this run; what it already wrote stays.'} ${access === 'not_asked'
-      ? 'When this Shopify connection was set up, lynox did not ask for permission to change products. Ask lynox in the chat to connect Shopify again with permission to change products, then to plan the run again.'
-      : 'Shopify did not give this connection permission to change products. Allow it in the app settings in Shopify, then ask lynox in the chat to connect Shopify again and plan the run again.'}`,
+    `${nothingYet ? 'lynox wrote nothing.' : 'lynox writes nothing more; what it wrote stays.'} ${access === 'not_asked'
+      ? 'When connecting, lynox did not ask Shopify for permission to change products.'
+      : 'Shopify does not let this connection change products.'} What to do is under Bulk runs.`,
   otherLoop: 'Bulk run stopped by another loop.',
   otherLoopHolds: 'Bulk run waiting for targets another loop holds.',
   noJudgedRun: 'No judged bulk run with this id.',
@@ -390,9 +391,9 @@ const DE: BulkNotices = Object.freeze({
   consentOutdated: (fields: readonly string[], nothingYet: boolean) =>
     `${nothingYet ? 'lynox hat nichts geschrieben.' : 'lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt.'} Diese Shopify-Verbindung erlaubt lynox noch nicht, ${shopifyFieldsNamed(fields, 'de')} zu ändern. Verbinde Shopify neu (Einstellungen → APIs); dann bitte lynox im Chat, den Lauf neu zu planen.`,
   productWriteNotAsked: (access: 'not_asked' | 'not_granted', nothingYet: boolean) =>
-    `${nothingYet ? 'lynox hat nichts geschrieben.' : 'lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt.'} ${access === 'not_asked'
-      ? 'Beim Einrichten dieser Shopify-Verbindung hat lynox nicht um die Erlaubnis gebeten, Produkte zu ändern. Bitte lynox im Chat, Shopify mit dieser Erlaubnis neu zu verbinden und den Lauf dann neu zu planen.'
-      : 'Shopify hat dieser Verbindung nicht erlaubt, Produkte zu ändern. Erlaube es in den App-Einstellungen in Shopify und bitte lynox dann im Chat, Shopify neu zu verbinden und den Lauf neu zu planen.'}`,
+    `${nothingYet ? 'lynox hat nichts geschrieben.' : 'lynox schreibt nichts mehr; Geschriebenes bleibt.'} ${access === 'not_asked'
+      ? 'Beim Verbinden hat lynox Shopify nicht um das Recht gebeten, Produkte zu ändern.'
+      : 'Shopify erlaubt dieser Verbindung nicht, Produkte zu ändern.'} Was zu tun ist, steht unter Massenläufe.`,
   otherLoop: 'Massenlauf beendet: Ein anderer Durchgang bearbeitet ihn.',
   otherLoopHolds: 'Massenlauf wartet auf Ziele, die ein anderer Durchgang hält.',
   noJudgedRun: 'Diesen Massenlauf mit Beurteilung gibt es nicht.',
