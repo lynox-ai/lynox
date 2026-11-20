@@ -2507,7 +2507,9 @@ export class WorkerLoop {
     }
     // A halt at the approved maximum is the run doing what it was told: recorded as such,
     // not as the failure every other halt is.
-    this.recordAndNotify(task, outcome.summary, outcome.status === 'done' ? true : outcome.planned === true ? 'halted' : false);
+    // A halt whose summary is too long for a push is pushed in its short version; the run result
+    // keeps the summary with the way.
+    this.recordAndNotify(task, outcome.summary, outcome.status === 'done' ? true : outcome.planned === true ? 'halted' : false, outcome.pushSummary);
   }
 
   /**
