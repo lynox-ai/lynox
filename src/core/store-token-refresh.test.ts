@@ -316,7 +316,9 @@ describe('the refresh of an expiring store connection', () => {
     const p = profile();
     expect(store.save({ ...p, oauth_grant: { ...p.oauth_grant!, state: 'revoked', revoked_fp: 'fp-before', revoked_at: new Date().toISOString() } } as ApiProfile).ok).toBe(true);
     hold.answer = async () => answer({ error: 'invalid_grant' }, 400);
-    await refreshStoreToken(ID, 'due', ctx());
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
+    expect(hold.calls).toHaveLength(1);
+    expect(profile().oauth_grant?.store_binding).toBeUndefined();
     expect(profile().oauth_grant?.state).toBe('revoked');
     expect(profile().oauth_grant?.revoked_fp).toBe('fp-before');
   });

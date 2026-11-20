@@ -62,7 +62,7 @@ export type StoreRefreshOutcome = 'renewed' | 'not-run' | 'dead' | 'client-misna
  * token cannot be renewed, and nothing is sent. Fixed text, for the model and the log.
  */
 export function storeClientMisnamedText(profileId: string, sent: boolean): string {
-  return `the Shopify store connection of api_profile "${profileId}" does not keep its app's client ID and secret under the names this provider uses (SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET), so its expiring token cannot be renewed${sent ? '' : ' and nothing was sent to the store'}. Update the profile with api_setup action "update" so auth.oauth.client_id_key and client_secret_key name those two vault entries, then send the request again. If the app's client ID and secret are not stored under those names yet, the owner enters them in the profile's connection form under Settings → APIs; do not ask for them in the chat.`;
+  return `the Shopify store connection of api_profile "${profileId}" does not keep its app's client ID and secret under the names this provider uses (SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET), so its expiring token cannot be renewed${sent ? '' : ' and nothing was sent to the store'}. Update the profile with api_setup action "update" so auth.oauth.client_id_key and client_secret_key name those two vault entries, then send the request again. If the app's client ID and secret are not stored under those names yet, the owner enters them in the profile's connection form under Settings → API Profiles; do not ask for them in the chat.`;
 }
 
 const refreshesInFlight = new Map<string, Promise<StoreRefreshOutcome>>();

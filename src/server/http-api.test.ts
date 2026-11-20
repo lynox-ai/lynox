@@ -20606,11 +20606,11 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
       expect(sentParams()['expiring']).toBe('1');
     });
 
-    it('a connect after the refresh ended (refresh-dead) leaves the grant connected again', async () => {
+    it('a connect after the refresh ended (refresh-dead) records the new connection\'s own state', async () => {
       repayRateWindow(); // this file shares one per-IP rate window
       const { cookie, store } = await arrangeHeld({ token: false, grant: { origin: 'callback', state: 'refresh-dead' } });
       expect((await call(signed(good()), cookie)).status).toBe(200);
-      expect(store.get(PROFILE)?.oauth_grant?.state).not.toBe('refresh-dead');
+      expect(store.get(PROFILE)?.oauth_grant?.state).toBe('no-refresh');
     });
 
     it('decides by what the engine keeps, not by token_expires_at, which a profile update can write', async () => {
