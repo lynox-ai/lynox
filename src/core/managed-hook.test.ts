@@ -1416,6 +1416,23 @@ describe('managed-hook admission within the balance (`overrun_hold`)', () => {
     await hook.onShutdown?.();
   });
 
+  it('a release gives the whole reservation back: the next run is admitted on all that is free', async () => {
+    // Kills: a release that keeps the reservation (the next admission would be refused, in the
+    // test body rather than in a hook outside it).
+    const hook = createManagedHook();
+    await hook.onInit?.();
+    const first = await admit(hook);
+    expect(first?.maxCostCents).toBe(50);
+    first?.release?.();
+    let second: Admission | undefined;
+    let refused: unknown;
+    try { second = await admit(hook); } catch (err: unknown) { refused = err; }
+    expect(refused).toBeUndefined();
+    expect(second?.maxCostCents).toBe(50);
+    second?.release?.();
+    await hook.onShutdown?.();
+  });
+
   it('release is idempotent: a second call does not free another run\'s reservation', async () => {
     // Kills: a release that subtracts its cents from a shared total each time it is called.
     const hook = createManagedHook();

@@ -38,7 +38,7 @@ import type { SendStop } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
 import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
-import { fireAdmissionHooks, type CombinedAdmission } from './run-admission.js';
+import { fireAdmissionHooks, RunAdmissionRefusedError, type CombinedAdmission } from './run-admission.js';
 import { openPendingRunGroup, RUN_GROUP_ID_FORMAT, settleRunGroup } from './run-group.js';
 import { channels } from './observability.js';
 import { containsUntrustedMarker, detectInjectionAttempt } from './data-boundary.js';
@@ -147,7 +147,9 @@ export interface CompactionResult {
 const DEFAULT_COMPACTION_MODEL: ModelTier = 'fast';
 
 /** A run refused because the bound an admission hook set leaves nothing to spend. */
-const RUN_CEILING_NOTHING_FREE = 'Nothing is left to spend for this run within the current balance.';
+const RUN_CEILING_NOTHING_FREE = 'Nothing is left of the AI budget for this run right now. If another task is running, you can continue once it has finished; otherwise buy a credit pack or wait for your next billing period.';
+/** The `reason` a `run_blocked` warning carries when the run was refused within the balance. */
+export const RUN_BLOCKED_HOLD_EXHAUSTED = 'hold_exhausted';
 /** A run refused because its spending bound cannot be enforced: the agent has no cost guard. */
 const RUN_CEILING_WITHOUT_GUARD = 'This run has a spending bound, but nothing in this session can hold it to it.';
 
@@ -1098,12 +1100,15 @@ export class Session {
       this._admissionsHeld++;
       const ceilingCents = admission.current.maxCostCents;
       if (ceilingCents !== undefined) {
-        if (!(ceilingCents > 0)) throw new Error(RUN_CEILING_NOTHING_FREE);
+        if (!(ceilingCents > 0)) throw new RunAdmissionRefusedError(RUN_CEILING_NOTHING_FREE);
         if (this.agent.hasCostGuard?.() !== true) throw new Error(RUN_CEILING_WITHOUT_GUARD);
         runCostCeilingUSD = ceilingCents / 100;
       }
     } catch (err: unknown) {
-      const reason = err instanceof Error ? err.message : String(err);
+      // Refused within the balance (a hook's refusal, or a bound with nothing in it): one sentence,
+      // the same for both, and a reason code the chat shows in the owner's language.
+      const holdExhausted = err instanceof RunAdmissionRefusedError;
+      const reason = holdExhausted ? RUN_CEILING_NOTHING_FREE : err instanceof Error ? err.message : String(err);
       // An internal (compaction) run blocked by a tenant/budget hook: do NOT
       // emit a user-facing `run_blocked` warning (no user turn was blocked)
       // and do NOT return the block string (compaction would inject it as an
@@ -1118,7 +1123,10 @@ export class Session {
       // single source for non-SSE callers (CLI) and the `done.result`
       // inline render fallback. `warning` (not `error`) keeps the failed
       // user turn intact — the block is transient (credit re-syncs).
-      await this.onStream?.({ type: 'warning', code: 'run_blocked', detail: reason, agent: this.agent?.name ?? 'lynox' });
+      await this.onStream?.({
+        type: 'warning', code: 'run_blocked', detail: reason, agent: this.agent?.name ?? 'lynox',
+        ...(holdExhausted ? { reason: RUN_BLOCKED_HOLD_EXHAUSTED } : {}),
+      });
       return `Run blocked: ${reason}`;
     }
 

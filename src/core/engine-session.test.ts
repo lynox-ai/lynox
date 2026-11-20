@@ -4207,6 +4207,7 @@ describe('Engine + Session (Orchestrator)', () => {
     });
 
     const settle = async (): Promise<void> => { for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)); };
+    const HOLD_SENTENCE = 'Nothing is left of the AI budget for this run right now. If another task is running, you can continue once it has finished; otherwise buy a credit pack or wait for your next billing period.';
     /**
      * The mocked run history leaves no thread row behind, so the store has no title to read.
      * Once the run writes its placeholder title, the thread reads back with `title` (or with
@@ -4310,6 +4311,28 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(mockBatchCreate).not.toHaveBeenCalled();
     });
 
+    it('a run refused within the balance carries the hold_exhausted reason and its own sentence; a plain refusal does not', async () => {
+      // Kills: a run_blocked warning without the reason code (the chat could not show it in the
+      // owner's language), and the code on every refusal.
+      const { engine, session } = await createEngineAndSession();
+      const a = balanceHook(120);
+      engine.registerHooks(a.hook);
+      const held = a.hook.onBeforeRun!('first', { modelTier: 'balanced' } as never) as { release?: () => void };
+      const seen: Array<{ type: string; code?: string; reason?: string; detail?: string }> = [];
+      session.onStream = async (e) => { seen.push(e as never); };
+      const result = await session.run('go');
+      held.release?.();
+      expect(result).toBe(`Run blocked: ${HOLD_SENTENCE}`);
+      expect(seen.find(e => e.code === 'run_blocked')).toMatchObject({ reason: 'hold_exhausted', detail: HOLD_SENTENCE });
+
+      const { engine: e2, session: s2 } = await createEngineAndSession();
+      e2.registerHooks({ onBeforeRun: () => { throw new Error('AI budget for this period reached.'); } });
+      const seen2: Array<{ code?: string; reason?: string }> = [];
+      s2.onStream = async (e) => { seen2.push(e as never); };
+      await s2.run('go');
+      expect(seen2.find(e => e.code === 'run_blocked')).not.toHaveProperty('reason');
+    });
+
     it('a bound of 0 refuses the run as blocked, not as a failed run', async () => {
       // Kills: dropping the `ceilingCents > 0` check (the run would start with nothing to spend).
       const { engine, session } = await createEngineAndSession();
@@ -4325,6 +4348,28 @@ describe('Engine + Session (Orchestrator)', () => {
       const failed = (engine.getRunHistory()!.updateRun as unknown as { mock: { calls: unknown[][] } }).mock.calls
         .find(c => (c[1] as { status?: string })?.status === 'failed');
       expect(failed).toBeUndefined();
+    });
+
+    it('a retry queued while the run holds its admission runs at the release, and only then', async () => {
+      // Kills: dropping the release-time flush in Session._run's finally (the queued retry would
+      // wait for some later, unrelated deferral, or never run). Nothing else in this run defers:
+      // single calls (the title) are admitted, so only the release can run the queue.
+      const { engine, session } = await createEngineAndSession();
+      const order: string[] = [];
+      engine.registerHooks({
+        onBeforeRun: (_id, ctx) => ctx.maxCostCents === undefined
+          ? { maxCostCents: 120, release: () => { order.push('release'); } }
+          : undefined,
+      });
+      const stream = vi.fn().mockReturnValue({ finalMessage: () => Promise.resolve({ content: [{ type: 'text', text: 'T' }], usage: { input_tokens: 1, output_tokens: 1 } }) });
+      (engine.client.beta.messages as unknown as { stream: unknown }).stream = stream;
+      mockSend.mockImplementationOnce(async () => {
+        const agent = (session as unknown as { agent: { deferUntilBalanceFree?: (r: () => void) => void } }).agent;
+        agent.deferUntilBalanceFree?.(() => { order.push('retry'); });
+        return 'response';
+      });
+      await session.run('go');
+      expect(order).toEqual(['release', 'retry']);
     });
 
     it('a memory extraction deferred while the run holds the balance runs once, after the release', async () => {

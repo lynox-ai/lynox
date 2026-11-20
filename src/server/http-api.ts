@@ -556,6 +556,10 @@ function resolveRunWallClockMs(): number {
 }
 /** Hard per-request input cap for POST /api/speak to bound Mistral cost + latency. */
 const SPEAK_MAX_TEXT_CHARS = 10_000;
+/** The 402 a voice request (speech or transcription) gets when it is refused only because what is
+ *  free of the balance cannot cover it, while runs are admitted only within the balance. */
+const VOICE_HOLD_REFUSAL =
+  'Not enough AI budget is free for voice right now. If another task is running, try again once it has finished; otherwise buy a credit pack or wait for your next billing cycle.';
 /**
  * Mistral's list price for Voxtral TTS 3 (`voxtral-mini-tts-3-0`): $13 per million characters,
  * docs.mistral.ai/inference/pricing, read 2026-11-08. No usage headers exposed — billed client-side.
@@ -11413,7 +11417,7 @@ export class LynoxHTTPApi {
         maxCostCents: Math.ceil(preparedChars * SPEAK_USD_PER_CHAR * 100),
       });
       if (gate.blockedReason) {
-        errorResponse(res, 402, gate.blockedReason);
+        errorResponse(res, 402, gate.refusedWithinBalance ? VOICE_HOLD_REFUSAL : gate.blockedReason);
         return;
       }
 
@@ -11530,7 +11534,7 @@ export class LynoxHTTPApi {
         ? await fireBeforeRunGate(engine, 'fast')
         : { runId: randomUUID(), blockedReason: null, capReached: null, refusedWithinBalance: false };
       if (sttGate.blockedReason) {
-        errorResponse(res, 402, sttGate.blockedReason);
+        errorResponse(res, 402, sttGate.refusedWithinBalance ? VOICE_HOLD_REFUSAL : sttGate.blockedReason);
         return;
       }
 

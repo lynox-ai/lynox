@@ -22,7 +22,7 @@ import type { WorkflowQuestionWait } from './workflow-questions.js';
  * balance — and what the owner can do about it.
  */
 export const WORKFLOW_HOLD_REFUSAL =
-  'This workflow was not started: the remaining balance does not cover the most one workflow run may spend. Raise the limit or wait until the balance allows it, then start it again.';
+  'This workflow was not started: what is left of your AI budget does not cover a full run of it. Start it again after buying a credit pack or in your next billing period, or once a running task has finished.';
 
 /** `decideRunGrant` bound to this engine's schedules and keyed hash. */
 function grantDecider(engine: Engine, origin: GrantRunOrigin): (planned: PlannedPipeline) => GrantDecision {
