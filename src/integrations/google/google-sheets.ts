@@ -7,6 +7,9 @@ import { refuseUnlessScoped } from './action-scopes.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { pv } from '../../core/prompt-value.js';
+import { consentMeta, consentOptions, consentRefusal, decideConsent } from '../../core/consent-ask.js';
+import type { ConsentAction } from '../../contract/prompt.js';
+import { GOOGLE_DIALOG } from '../../tools/dialog-text.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
 import { namedTarget, withoutAddresses } from '../../core/audit-log.js';
@@ -213,13 +216,17 @@ export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<Sh
           // the range in text nodes — see core/prompt-value.ts. They are no
           // longer collapsed on the way in, which means the prompt now shows
           // the value that is actually about to be used.
-          const confirmMsg: PromptText = input.action === 'format'
-            ? pv`Apply batch changes to spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? Formatting requests can delete or overwrite cells and sheets.`
-            : pv`Overwrite range "${input.range ?? '(unspecified)'}" in spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? This will replace existing data.`;
-          const answer = await agent.promptUser(confirmMsg, ['Yes', 'No']);
-          if (answer.toLowerCase() !== 'yes' && answer !== '1') {
-            return 'Action cancelled by user.';
-          }
+          const said = GOOGLE_DIALOG[agent.dialogLanguage ?? 'en'];
+          const sheet = input.spreadsheet_id ?? said.unknown;
+          const range = input.range ?? said.unspecified;
+          // An append adds rows and keeps what is there, so it is not asked as an overwrite.
+          const action: ConsentAction = input.action === 'format' ? 'format' : input.action === 'append' ? 'append' : 'overwrite';
+          const confirmMsg: PromptText = action === 'format' ? said.format(sheet)
+            : action === 'append' ? said.append(range, sheet)
+            : said.overwrite(range, sheet);
+          // Only the `confirm` key goes ahead; its button names `action`, which decides nothing.
+          const consent = decideConsent('google', await agent.promptUser(confirmMsg, consentOptions('google'), consentMeta('google', undefined, action)));
+          if (consent !== 'confirm') return consentRefusal(consent, 'Action cancelled by user.');
         }
 
         switch (input.action) {

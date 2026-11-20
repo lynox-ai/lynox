@@ -19,6 +19,8 @@ import type { MailContext } from '../context.js';
 import { buildBodyBlock, checkSendAccount, previewAddressList, previewSendingAccount, quotedPreviewValue, resolveSendingAddress } from '../send-core.js';
 import { reflowMailBody } from '../body-reflow.js';
 import { pv, singleLine } from '../../../core/prompt-value.js';
+import { consentMeta, consentOptions, consentRefusal, decideConsent } from '../../../core/consent-ask.js';
+import { MAIL_DIALOG, type DialogLanguage } from '../../../tools/dialog-text.js';
 import { resolveThreadKey } from '../thread-key.js';
 import { resolveProvider, type MailRegistry, accountForRow } from './registry.js';
 import {
@@ -91,7 +93,7 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
           return 'mail_reply error: sending requires interactive user confirmation, which is not available in this mode.';
         }
 
-        const prepared = await prepareReply(registry, ctx, input);
+        const prepared = await prepareReply(registry, ctx, input, agent.dialogLanguage ?? 'en');
         if (!prepared.ok) return prepared.message;
 
         if (filing) {
@@ -102,10 +104,9 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
           return 'mail_reply error: sending requires interactive user confirmation, which is not available in this mode.';
         }
 
-        const answer = await agent.promptUser(prepared.preview, ['Yes', 'No']);
-        if (!isApproval(answer)) {
-          return 'mail_reply cancelled by user.';
-        }
+        // Only the `send` key sends; a label, a typed "ja" or any other text does not.
+        const consent = decideConsent('send', await agent.promptUser(prepared.preview, consentOptions('send'), consentMeta('send')));
+        if (consent !== 'send') return consentRefusal(consent, 'mail_reply cancelled by user.');
 
         return await commitReply(prepared.sendProvider, prepared.commit, ctx);
       } catch (err: unknown) {
@@ -149,7 +150,9 @@ export async function prepareReply(
   registry: MailRegistry,
   ctx: MailContext | undefined,
   input: MailReplyToolInput,
+  language: DialogLanguage = 'en',
 ): Promise<PreparedReply> {
+  const said = MAIL_DIALOG[language];
   // Cross-session rate-limit check (see mail-send for rationale).
   const rateBlock = checkMailRateLimit('mail_reply');
   if (rateBlock) return { ok: false, message: rateBlock };
@@ -269,7 +272,7 @@ export async function prepareReply(
 
   const subject = original.envelope.subject.startsWith('Re:')
     ? original.envelope.subject
-    : `Re: ${original.envelope.subject || '(no subject)'}`;
+    : `Re: ${original.envelope.subject || said.noSubject}`;
 
   // Per-recipient dedup window — block before showing the confirm
   // prompt so a retry storm can't pile up approval requests.
@@ -280,10 +283,10 @@ export async function prepareReply(
   // what voice will be used. Phase 1 will inject this as a compose-time
   // system prompt; Phase 0.1 is just the advisory render.
   const smartNote = sendProvider.accountId !== readProvider.accountId
-    ? ` _(smart reply-from, read via ${quotedPreviewValue(readProvider.accountId)})_` : '';
+    ? said.smartReplyFrom(quotedPreviewValue(readProvider.accountId)) : pv``;
   const sendAccountConfig = sendVerdict.accountConfig;
   const personaNote = sendAccountConfig
-    ? ` · _${singleLine(truncate(personaFor(sendAccountConfig), 80))}_` : '';
+    ? said.replyPersona(singleLine(truncate(personaFor(sendAccountConfig), 80))) : pv``;
   // Shared with mail_send's preview: an oversized body must state its
   // real size instead of ending in a bare "…". Reply is the likelier
   // injection path of the two — the untrusted inbound mail is already in
@@ -291,16 +294,18 @@ export async function prepareReply(
   // `singleLine` for the same reason: here the value is the REMOTE
   // sender's subject, and a newline in it can swallow the rest of this
   // prompt (see singleLine's doc).
-  const bodyPreview = buildBodyBlock(input.body);
+  const bodyPreview = buildBodyBlock(input.body, language);
 
-  const preview = pv`**Reply to "${singleLine(original.envelope.subject || '(no subject)')}"?**
-
-**To:** ${previewAddressList(toAddrs)}${ccAddrs.length > 0 ? pv`
-**Cc:** ${previewAddressList(ccAddrs)}` : ''}
-**Subject:** ${singleLine(subject)}
-**From:** ${previewSendingAccount(sendProvider, sendingAddress)}${smartNote}${personaNote}
-
-${bodyPreview}`;
+  const preview = said.reply(
+    singleLine(original.envelope.subject || said.noSubject),
+    previewAddressList(toAddrs),
+    ccAddrs.length > 0 ? said.cc(previewAddressList(ccAddrs)) : pv``,
+    singleLine(subject),
+    previewSendingAccount(sendProvider, sendingAddress),
+    smartNote,
+    personaNote,
+    bodyPreview,
+  );
 
   const stored = (list: ReadonlyArray<MailAddress>): StoredAddress[] =>
     list.map(a => (a.name !== undefined ? { name: a.name, address: a.address } : { address: a.address }));
@@ -414,12 +419,6 @@ function parseAddress(raw: string): MailAddress | null {
   }
   if (raw.includes('@')) return { address: raw };
   return null;
-}
-
-/** Accept yes/ja/ok/1/y as approval — anything else is denial. */
-function isApproval(answer: string): boolean {
-  const a = answer.toLowerCase().trim();
-  return ['yes', 'ja', 'ok', 'y', 'j', '1', 'sure', 'send', 'senden'].includes(a);
 }
 
 function truncate(s: string, max: number): string {

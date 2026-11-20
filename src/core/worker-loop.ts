@@ -8,8 +8,8 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
-import { CONSENT_KEYS, type ConsentKind } from '../contract/prompt.js';
-import { CONSENT_LABELS } from '../tools/dialog-text.js';
+import { CONSENT_KEYS, type ConsentAction, type ConsentKind } from '../contract/prompt.js';
+import { CONSENT_ACTION_LABELS, CONSENT_LABELS } from '../tools/dialog-text.js';
 import { errorText, errorTextReduced, FixedTextError, processErrorText } from './error-egress.js';
 import { containThreadFrom, threadIsContained } from './containment.js';
 import { isProvisionedInstance } from './wire-capture.js';
@@ -714,8 +714,8 @@ export function handRunCovers(grant: HandRunGrant | null, t: { created_by?: stri
 }
 
 /** An engine consent's options as a notification lists them: the keys in the owner's words. */
-function consentInquiryOptions(kind: ConsentKind, language: 'de' | 'en'): string[] {
-  return CONSENT_KEYS[kind].map((key) => CONSENT_LABELS[language][key]);
+function consentInquiryOptions(kind: ConsentKind, language: 'de' | 'en', action?: ConsentAction): string[] {
+  return CONSENT_KEYS[kind].map((key) => (key === 'confirm' && action !== undefined ? CONSENT_ACTION_LABELS[language][action] : CONSENT_LABELS[language][key]));
 }
 
 export class WorkerLoop {
@@ -3054,7 +3054,7 @@ export class WorkerLoop {
         // The options leave the box too (the mail channel lists them), so they are masked like the body.
         inquiry: questionReduced
           ? { question: notices.containedQuestionInquiry }
-          : { question: offBoxQuestion, options: meta?.consent !== undefined ? consentInquiryOptions(meta.consent, noticeLanguage(this.engine.config?.language)) : inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
+          : { question: offBoxQuestion, options: meta?.consent !== undefined ? consentInquiryOptions(meta.consent, noticeLanguage(this.engine.config?.language), meta.consentAction) : inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
       }).then((report) => { recordDelivery(summarizeDelivery(report)); }).catch((err: unknown) => {
         process.stderr.write(`[lynox:worker] recording a task question's delivery failed: ${processErrorText(err)}\n`);
       });

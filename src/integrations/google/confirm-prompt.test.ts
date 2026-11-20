@@ -47,7 +47,7 @@ function capturingAgent(): { agent: IAgent; prompt: () => string | PromptText } 
     onStream: null,
     promptUser: vi.fn().mockImplementation((question: string | PromptText) => {
       seen.push(question);
-      return Promise.resolve('no');
+      return Promise.resolve('cancel');
     }),
   } as unknown as IAgent;
   return {

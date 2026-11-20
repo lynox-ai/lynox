@@ -85,7 +85,7 @@ afterEach(() => {
 });
 
 /** Starts a turn, has the engine ask with `options` (and `consent`), renders ChatView, returns the prompt bar. */
-async function renderPrompt(options: string[], consent?: 'guard' | 'deep', before?: () => void): Promise<HTMLElement> {
+async function renderPrompt(options: string[], consent?: string, before?: () => void, extra: Record<string, unknown> = {}): Promise<HTMLElement> {
 	run = sseStream();
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
 		const url = String(input);
@@ -105,7 +105,7 @@ async function renderPrompt(options: string[], consent?: 'guard' | 'deep', befor
 	await settle();
 	before?.();
 	await settle();
-	run.send('prompt', { question: '⚠ Command: x', options, promptId: 'p1', agent: 'lynox', ...(consent ? { consent } : {}) });
+	run.send('prompt', { question: '⚠ Command: x', options, promptId: 'p1', agent: 'lynox', ...(consent ? { consent } : {}), ...extra });
 	await settle();
 	const { default: ChatView } = await import('./ChatView.svelte');
 	component = svelte.mount(ChatView, { target });
@@ -167,6 +167,83 @@ describe('the engine\'s own confirmation', () => {
 		await store.replyPermission('Erlauben');
 		await settle();
 		expect(replies.map((r) => r.answer)).toEqual(['Erlauben']);
+		expect(store.getChatError()).toBe(i18n.t('chat.consent_unrecognised'));
+	});
+});
+
+describe('a tool\'s own confirmation', () => {
+	const KINDS = [
+		{ kind: 'send', keys: ['send', 'cancel'], labels: ['chat.consent.send', 'chat.consent_cancel'] },
+		{ kind: 'merge', keys: ['merge', 'cancel'], labels: ['chat.consent.merge', 'chat.consent_cancel'] },
+		{ kind: 'apply', keys: ['apply', 'cancel'], labels: ['chat.consent.apply', 'chat.consent_cancel'] },
+		{ kind: 'retire', keys: ['retire', 'cancel'], labels: ['chat.consent.retire', 'chat.consent_cancel'] },
+		{ kind: 'plan', keys: ['proceed', 'adjust', 'cancel'], labels: ['chat.consent.proceed', 'chat.consent.adjust', 'chat.consent_cancel'] },
+	] as const;
+	for (const locale of ['de', 'en'] as const) {
+		for (const k of KINDS) {
+			it(`${k.kind}, ${locale}: the keys in the chat's words, no skip, and the first sends its key`, async () => {
+				i18n.setLocale(locale);
+				const bar = await renderPrompt([...k.keys], k.kind);
+				expect(buttons(bar)).toEqual(k.labels.map((l) => i18n.t(l)));
+				for (const key of k.keys) expect(buttons(bar)).not.toContain(key);
+				expect(bar.querySelector(`[aria-label="${i18n.t('chat.dismiss')}"]`)).toBeNull();
+				await click(bar, i18n.t(k.labels[0]));
+				expect(replies.map((r) => r.answer)).toEqual([k.keys[0]]);
+			});
+		}
+
+		it(`google, ${locale}: the confirming button names the action; a delete is red`, async () => {
+			i18n.setLocale(locale);
+			const bar = await renderPrompt(['confirm', 'cancel'], 'google', undefined, { consentAction: 'delete' });
+			expect(buttons(bar)).toEqual([i18n.t('chat.consent.action.delete'), i18n.t('chat.consent_cancel')]);
+			const del = bar.querySelector<HTMLElement>('[data-consent-key="confirm"]')!;
+			expect(del.className).toContain('text-danger');
+			await click(bar, i18n.t('chat.consent.action.delete'));
+			expect(replies.map((r) => r.answer)).toEqual(['confirm']);
+		});
+	}
+
+	it('google: a share is the primary action, not red; an unknown action falls back to a plain confirm', async () => {
+		i18n.setLocale('de');
+		let bar = await renderPrompt(['confirm', 'cancel'], 'google', undefined, { consentAction: 'share' });
+		expect(buttons(bar)[0]).toBe('Freigeben');
+		expect(bar.querySelector<HTMLElement>('[data-consent-key="confirm"]')!.className).not.toContain('text-danger');
+		run.close();
+		if (component) svelte.unmount(component);
+		component = undefined;
+		target.innerHTML = '';
+		store.newChat();
+		bar = await renderPrompt(['confirm', 'cancel'], 'google', undefined, { consentAction: 'erase' });
+		expect(buttons(bar)[0]).toBe('Bestätigen');
+	});
+
+	it('a plan says that writing is a way to answer; the others do not', async () => {
+		i18n.setLocale('de');
+		let bar = await renderPrompt(['proceed', 'adjust', 'cancel'], 'plan');
+		expect(bar.querySelector('[data-consent-hint]')?.textContent).toBe('Oder schreib, was du ändern willst.');
+		run.close();
+		if (component) svelte.unmount(component);
+		component = undefined;
+		target.innerHTML = '';
+		store.newChat();
+		bar = await renderPrompt(['send', 'cancel'], 'send');
+		expect(bar.querySelector('[data-consent-hint]')).toBeNull();
+	});
+
+	it('the question keeps its markdown: a tool\'s card is no <pre>', async () => {
+		i18n.setLocale('en');
+		const bar = await renderPrompt(['send', 'cancel'], 'send', undefined, { question: '**Send email?**', segments: [{ kind: 'frame', text: '**Send email?**' }] });
+		expect(bar.querySelector('pre')).toBeNull();
+		expect(bar.querySelector('strong')?.textContent).toBe('Send email?');
+	});
+
+	it('typed text to a send is refused visibly, as for the guard', async () => {
+		i18n.setLocale('de');
+		await renderPrompt(['send', 'cancel'], 'send');
+		refuse = true;
+		await store.replyPermission('ja');
+		await settle();
+		expect(replies.map((r) => r.answer)).toEqual(['ja']);
 		expect(store.getChatError()).toBe(i18n.t('chat.consent_unrecognised'));
 	});
 });

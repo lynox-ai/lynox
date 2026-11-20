@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { consentAnswer } from '../contract/prompt.js';
+	import { consentButtons, isToolConsent } from '../utils/consent-buttons.js';
 	import {
 		sendMessage,
 		retryFailedTurn,
@@ -1306,7 +1307,7 @@
 		// A click on one of the engine's confirmations, by its key; typed text is no key.
 		const decided = pendingPermission.consent !== undefined ? consentAnswer(pendingPermission.consent, answer) : undefined;
 		if (decided !== undefined) {
-			approvalInflight = { question: pendingPermission.question, answer: decided === 'deny' || decided === 'cancel' ? 'n' : 'y' };
+			approvalInflight = { question: pendingPermission.question, answer: decided === 'deny' || decided === 'cancel' || decided === 'adjust' ? 'n' : 'y' };
 			if (approvalInflightTimer) clearTimeout(approvalInflightTimer);
 			approvalInflightTimer = setTimeout(() => { approvalInflight = null; approvalInflightTimer = null; }, 6000);
 		}
@@ -3502,7 +3503,10 @@
 		     a question the model writes may offer "Allow" and "Deny" and stays an ordinary one. -->
 		{@const isPermissionGuard = pendingPermission.consent === 'guard'}
 		{@const isDeepConsent = pendingPermission.consent === 'deep'}
-		{@const visibleOptions = (isPermissionGuard || isDeepConsent) ? [] : opts.filter(o => o !== '\x00')}
+		<!-- A tool's own confirmation (mail, Google, memory, plan): its question is markdown, its
+		     buttons send keys and show them in the page's words. -->
+		{@const toolConsent = isToolConsent(pendingPermission.consent) ? pendingPermission.consent : undefined}
+		{@const visibleOptions = (isPermissionGuard || isDeepConsent || toolConsent) ? [] : opts.filter(o => o !== '\x00')}
 		<div data-pending-prompt data-prompt-kind="permission" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-2">
 				{@render promptOrigin(pendingPermission.origin)}
@@ -3530,7 +3534,7 @@
 						{#if promptSecondsLeft !== null && promptSecondsLeft !== undefined}
 							<span class="text-[11px] font-mono tabular-nums {promptSecondsLeft < 60 ? 'text-warning' : 'text-text-subtle'}" title={t('chat.prompt_timeout_left')}>{formatCountdown(promptSecondsLeft)}</span>
 						{/if}
-						{#if !isPermissionGuard && !isDeepConsent}
+						{#if !isPermissionGuard && !isDeepConsent && !toolConsent}
 							<button onclick={() => answerPrompt('__dismissed__')} class="p-1.5 rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors" aria-label={t('chat.dismiss')}>
 								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
 							</button>
@@ -3549,6 +3553,19 @@
 						<button onclick={() => answerPrompt('allow', t('chat.allow'))} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.allow')}</button>
 						<button onclick={() => answerPrompt('deny', t('chat.deny'))} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.deny')}</button>
 					</div>
+				{:else if toolConsent}
+					<div class="flex flex-wrap gap-2" data-consent-buttons={toolConsent}>
+						{#each consentButtons(toolConsent, pendingPermission.consentAction) as button (button.key)}
+							<button
+								data-consent-key={button.key}
+								onclick={() => answerPrompt(button.key, t(button.label))}
+								class="rounded-[var(--radius-sm)] border px-3 py-1.5 text-sm transition-opacity {button.tone === 'danger' ? 'bg-danger/15 border-danger/30 text-danger hover:bg-danger/25' : button.tone === 'primary' ? 'bg-accent/15 border-accent/30 text-accent-text hover:bg-accent/25' : 'border-border bg-bg text-text-muted hover:text-text'}"
+							>{t(button.label)}</button>
+						{/each}
+					</div>
+					{#if toolConsent === 'plan'}
+						<p class="text-xs text-text-subtle" data-consent-hint>{t('chat.consent.plan_hint')}</p>
+					{/if}
 				{:else if pendingPermission.multiSelect && visibleOptions.length > 0}
 					<!-- Multi-select: toggle several, then Send. -->
 					<div class="flex flex-wrap gap-2">

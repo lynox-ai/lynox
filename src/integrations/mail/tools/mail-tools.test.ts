@@ -96,8 +96,8 @@ function makeMessage(env: MailEnvelope, body: string, html: string | undefined =
 }
 
 const noPromptAgent: IAgent = {} as IAgent;
-const yesAgent: IAgent = { promptUser: async () => 'Yes' } as unknown as IAgent;
-const noAgent: IAgent = { promptUser: async () => 'No' } as unknown as IAgent;
+const yesAgent: IAgent = { promptUser: async () => 'send' } as unknown as IAgent;
+const noAgent: IAgent = { promptUser: async () => 'cancel' } as unknown as IAgent;
 
 let provider: FakeProvider;
 let registry: InMemoryMailRegistry;
@@ -153,7 +153,7 @@ describe('the account parameter takes an id or an address', () => {
     registry.add(lookalike);
     lookalike.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
     let prompt = '';
-    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'No'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'cancel'; } } as unknown as IAgent;
     await createMailSendTool(registry).handler({ account: 'office@example.ch', to: 'a@x.com', subject: 's', body: 'b' }, agent);
     expect(prompt, 'the user sees the real sending address before approving').toContain('**From:** someone-else@example.org (account "office@example.ch")');
     expect(lookalike.send, 'declined, so nothing went out').not.toHaveBeenCalled();
@@ -519,7 +519,7 @@ describe('mail_send tool', () => {
 
   it('refuses in a scheduled step that can only ask a question, and asks nothing over that channel', async () => {
     // `askUserPrompt` lets a step ask its owner; it is no way to approve a send.
-    const askUserPrompt = vi.fn(async () => 'Yes');
+    const askUserPrompt = vi.fn(async () => 'send');
     const tool = createMailSendTool(registry);
     const out = await tool.handler({ to: 'a@x.com', subject: 's', body: 'b' }, { askUserPrompt } as unknown as IAgent);
     expect(out).toContain('mail_send error');
@@ -626,7 +626,7 @@ describe('mail_reply tool', () => {
     provider.send.mockResolvedValue({ messageId: '<r@x>', accepted: ['alice@example.com'], rejected: [] });
     const tool = createMailReplyTool(registry);
     let prompt = '';
-    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'send'; } } as unknown as IAgent;
     const body = `Sure, sending it over now.\n\n${'RECORD;'.repeat(2000)}`;
     await tool.handler({ uid: 77, body }, agent);
     const flatLen = body.replace(/\s+/g, ' ').trim().length;
@@ -642,7 +642,7 @@ describe('mail_reply tool', () => {
     provider.fetch.mockResolvedValue(makeMessage(envelope(78, { messageId: '<o78@x>', from: 'alice@example.com', subject: 'Hi' }), 'Original.'));
     provider.send.mockResolvedValue({ messageId: '<r@x>', accepted: ['alice@example.com'], rejected: [] });
     let prompt = '';
-    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'send'; } } as unknown as IAgent;
     await createMailReplyTool(registry).handler({ uid: 78, body: 'Thanks.' }, agent);
     expect(prompt).toContain('**From:** rafael-gmail@example.com (account "rafael-gmail")');
   });
@@ -650,7 +650,7 @@ describe('mail_reply tool', () => {
   it('the reply confirmation shows the provider\'s live From address, and a failed lookup sends nothing', async () => {
     provider.fetch.mockResolvedValue(makeMessage(envelope(79, { messageId: '<o79@x>', from: 'alice@example.com', subject: 'Hi' }), 'Original.'));
     let prompt = '';
-    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'No'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'cancel'; } } as unknown as IAgent;
     Object.assign(provider, { fromAddress: vi.fn(async () => 'relinked@example.com') });
     await createMailReplyTool(registry).handler({ uid: 79, body: 'Thanks.' }, agent);
     expect(prompt).toContain('**From:** relinked@example.com (account "rafael-gmail")\n');
@@ -675,7 +675,7 @@ describe('mail_reply tool', () => {
     provider.send.mockResolvedValue({ messageId: '<r@x>', accepted: ['attacker@example.com'], rejected: [] });
     const tool = createMailReplyTool(registry);
     let prompt = '';
-    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'send'; } } as unknown as IAgent;
     await tool.handler({ uid: 78, body: 'q'.repeat(5000) }, agent);
     expect(prompt).toContain('Body is 5000 chars');
     expect(prompt.split('\n').some((l) => l.trimStart().startsWith('<!--'))).toBe(false);
@@ -765,7 +765,7 @@ describe('mail_reply tool', () => {
       getAccountConfig: () => null,
       notifyOutboundSent: vi.fn(async () => {}),
     } as unknown as MailContext;
-    const prompt = vi.fn(async () => 'Yes');
+    const prompt = vi.fn(async () => 'send');
     const tool = createMailReplyTool(registry, unconfigured);
     const out = await tool.handler({ uid: 9, body: 'answer' }, { promptUser: prompt } as unknown as IAgent);
     expect(out).toContain('mail_reply blocked');
@@ -868,7 +868,7 @@ describe('mail_reply tool', () => {
     });
     provider.send.mockResolvedValue({ messageId: 'x', accepted: [], rejected: [] });
     let preview = '';
-    const agent: IAgent = { promptUser: async (q: string | PromptText) => { preview = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { preview = flattenPrompt(q); return 'send'; } } as unknown as IAgent;
 
     await createMailReplyTool(registry).handler({ uid: 10, body: 'reply', reply_all: true, cc: 'manager@example.com' }, agent);
 
@@ -1363,7 +1363,7 @@ function receiveOnlyAccount(id: string, address: string, type: 'info' | 'abuse' 
 describe('mail_send — mass-send guard', () => {
   it('blocks a send from an account the context has no configuration for, and says how to fix it', async () => {
     const tool = createMailSendTool(registry, makeStubContext([]));
-    const prompt = vi.fn(async () => 'Yes');
+    const prompt = vi.fn(async () => 'send');
     const out = await tool.handler({ to: 'a@x.com', subject: 'unconfigured send', body: 'b' }, { promptUser: prompt } as unknown as IAgent);
     expect(out).toContain('mail_send blocked');
     expect(out).toContain('not set up for sending');
@@ -1380,7 +1380,7 @@ describe('mail_send — mass-send guard', () => {
 
     const tool = createMailSendTool(registry, ctx);
     let receivedPrompt = '';
-    const agent: IAgent = { promptUser: async (q: string | PromptText) => { receivedPrompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { receivedPrompt = flattenPrompt(q); return 'send'; } } as unknown as IAgent;
     await tool.handler({
       to: 'a@x.com, b@x.com, c@x.com',
       subject: 's',
@@ -1395,7 +1395,7 @@ describe('mail_send — mass-send guard', () => {
     provider.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
     const tool = createMailSendTool(registry);
     let receivedPrompt = '';
-    const agent: IAgent = { promptUser: async (q: string | PromptText) => { receivedPrompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { receivedPrompt = flattenPrompt(q); return 'send'; } } as unknown as IAgent;
     await tool.handler({
       to: 'a@x.com, b@x.com, c@x.com, d@x.com, e@x.com, f@x.com',
       subject: 's',
@@ -1411,7 +1411,7 @@ describe('mail_send — mass-send guard', () => {
     provider.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
     const tool = createMailSendTool(registry);
     let receivedPrompt = '';
-    const agent: IAgent = { promptUser: async (q: string | PromptText) => { receivedPrompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { receivedPrompt = flattenPrompt(q); return 'send'; } } as unknown as IAgent;
     await tool.handler({
       to: 'a@x.com, a@x.com, b@x.com',
       cc: 'a@x.com',
@@ -1429,7 +1429,7 @@ describe('mail_send + mail_reply — receive-only hard block', () => {
     const cfg = receiveOnlyAccount('rafael-gmail', 'info@example.com', 'info');
     const ctx = makeStubContext([cfg]);
     const tool = createMailSendTool(registry, ctx);
-    const promptSpy = vi.fn(async () => 'Yes');
+    const promptSpy = vi.fn(async () => 'send');
     const agent: IAgent = { promptUser: promptSpy } as unknown as IAgent;
     const out = await tool.handler({ to: 'a@x.com', subject: 's', body: 'b' }, agent);
     expect(out).toContain('blocked');
@@ -1442,7 +1442,7 @@ describe('mail_send + mail_reply — receive-only hard block', () => {
     const cfg = receiveOnlyAccount('rafael-gmail', 'abuse@example.com', 'abuse');
     const ctx = makeStubContext([cfg]);
     const tool = createMailSendTool(registry, ctx);
-    const agent: IAgent = { promptUser: async () => 'Yes' } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async () => 'send' } as unknown as IAgent;
     const out = await tool.handler({ to: 'a@x.com', subject: 's', body: 'b' }, agent);
     expect(out).toContain('abuse');
     expect(out).toContain('receive-only');
@@ -1465,7 +1465,7 @@ describe('mail_send + mail_reply — receive-only hard block', () => {
       references: undefined,
     });
     const tool = createMailReplyTool(registry, ctx);
-    const agent: IAgent = { promptUser: async () => 'Yes' } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async () => 'send' } as unknown as IAgent;
     const out = await tool.handler({ uid: 1, body: 'reply' }, agent);
     expect(out).toContain('blocked');
     expect(out).toContain('receive-only');
@@ -1526,7 +1526,7 @@ describe('mail_reply — smart reply-from', () => {
     });
     gmail.send.mockResolvedValue({ messageId: '<r44@x>', accepted: [], rejected: [] });
     let prompt = '';
-    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'send'; } } as unknown as IAgent;
 
     await createMailReplyTool(reg, ctx).handler({ account: 'gmail-old', uid: 44, body: 'Reply', reply_all: true }, agent);
 
@@ -1552,7 +1552,7 @@ describe('mail_reply — smart reply-from', () => {
     });
     business.send.mockResolvedValue({ messageId: '<r45@x>', accepted: [], rejected: [] });
     let prompt = '';
-    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'send'; } } as unknown as IAgent;
 
     await createMailReplyTool(reg, ctx).handler({ account: 'x) — sends as boss@corp.ch (y', uid: 45, body: 'Reply' }, agent);
 
@@ -1571,7 +1571,7 @@ describe('mail_reply — smart reply-from', () => {
     });
     business.send.mockResolvedValue({ messageId: '<r46@x>', accepted: [], rejected: [] });
     let prompt = '';
-    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'send'; } } as unknown as IAgent;
 
     await createMailReplyTool(reg, ctx).handler({ account: 'business', uid: 46, body: 'Reply' }, agent);
 
@@ -1609,7 +1609,7 @@ describe('mail_reply — smart reply-from', () => {
 
     const tool = createMailReplyTool(reg, ctx);
     let prompt = '';
-    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'send'; } } as unknown as IAgent;
     const out = await tool.handler({ account: 'personal', uid: 42, body: 'Reply content' }, agent);
     expect(prompt, 'the confirmation names the switched sender, not the account the mail was read from').toContain('**From:** user@example.com (account "business")');
 
@@ -1646,7 +1646,7 @@ describe('mail_reply — smart reply-from', () => {
     p.send.mockResolvedValue({ messageId: '<r@x>', accepted: [], rejected: [] });
 
     const tool = createMailReplyTool(reg, ctx);
-    const agent: IAgent = { promptUser: async () => 'Yes' } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async () => 'send' } as unknown as IAgent;
     await tool.handler({ uid: 1, body: 'reply' }, agent);
     expect(p.send).toHaveBeenCalled();
   });
@@ -1657,7 +1657,7 @@ describe('mail_send — mass-send cross-field counting', () => {
     provider.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
     const tool = createMailSendTool(registry);
     let receivedPrompt = '';
-    const agent: IAgent = { promptUser: async (q: string | PromptText) => { receivedPrompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { receivedPrompt = flattenPrompt(q); return 'send'; } } as unknown as IAgent;
     await tool.handler({
       to: 'a@x.com, b@x.com',
       cc: 'c@x.com, d@x.com',
@@ -1702,7 +1702,7 @@ describe('mail_send — persona hint in confirmation prompt', () => {
     provider.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
     const tool = createMailSendTool(registry, ctx);
     let prompt = '';
-    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'send'; } } as unknown as IAgent;
     await tool.handler({ to: 'bob@example.com', subject: 's', body: 'b' }, agent);
     expect(prompt).toContain('Professional');
   });
@@ -1716,7 +1716,7 @@ describe('mail_send — persona hint in confirmation prompt', () => {
     provider.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
     const tool = createMailSendTool(registry, ctx);
     let prompt = '';
-    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'send'; } } as unknown as IAgent;
     await tool.handler({ to: 'bob@example.com', subject: 's', body: 'b' }, agent);
     expect(prompt).toContain('Captain Marvel');
   });
@@ -2143,7 +2143,7 @@ describe('mail_triage leaves out the inbox\'s left-out accounts when nobody watc
 
   // A schedule's or trigger's run has a promptUser (the worker loop parks its questions) and
   // is autonomous. It is a run nobody watches all the same.
-  const workerRun = { promptUser: async () => 'Yes', autonomy: 'autonomous' } as unknown as IAgent;
+  const workerRun = { promptUser: async () => 'send', autonomy: 'autonomous' } as unknown as IAgent;
 
   it('does not list it in a worker run, which has a promptUser', async () => {
     const out = await createMailTriageTool(registry).handler({ account: 'secret-box' }, workerRun);
@@ -2166,5 +2166,92 @@ describe('mail_triage leaves out the inbox\'s left-out accounts when nobody watc
     expect(secret.search).toHaveBeenCalled();
     await createMailReadTool(registry).handler({ uid: 2, account: 'secret-box' }, yesAgent);
     expect(secret.fetch).toHaveBeenCalled();
+  });
+});
+
+// ── the send confirmation answers by key ───────────────────────────────────
+
+// Sending is an action outside lynox, so what approves it is one fixed key and nothing that
+// reads words: not a label in either language, not an older client's "Yes", not typed text.
+describe('mail_send and mail_reply send on the `send` key only', () => {
+  const NOT_KEYS = ['Yes', 'yes', 'ja', 'j', 'y', 'ok', '1', 'sure', 'Send', 'senden', 'Senden', ' send', 'SEND', 'send ', 'allow', 'confirm'];
+  const answering = (answer: string, seen?: { options?: string[]; meta?: unknown }): IAgent => ({
+    promptUser: async (_q: unknown, options?: string[], meta?: unknown) => {
+      if (seen) { seen.options = options; seen.meta = meta; }
+      return answer;
+    },
+  }) as unknown as IAgent;
+
+  it('offers the send keys and marks the question as the engine\'s own', async () => {
+    const seen: { options?: string[]; meta?: unknown } = {};
+    await createMailSendTool(registry).handler({ to: 'a@x.com', subject: 's', body: 'b' }, answering('cancel', seen));
+    expect(seen.options).toEqual(['send', 'cancel']);
+    expect(seen.meta).toMatchObject({ consent: 'send' });
+  });
+
+  it('mail_send: only `send` sends', async () => {
+    provider.send.mockResolvedValue({ messageId: '<k@x>', accepted: ['a@x.com'], rejected: [] });
+    const out = await createMailSendTool(registry).handler({ to: 'a@x.com', subject: 's', body: 'b' }, answering('send'));
+    expect(out).toContain('Email sent.');
+    expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
+  for (const answer of NOT_KEYS) {
+    it(`mail_send: ${JSON.stringify(answer)} sends nothing and says the answer was not understood`, async () => {
+      const out = await createMailSendTool(registry).handler({ to: 'a@x.com', subject: 's', body: 'b' }, answering(answer));
+      expect(provider.send).not.toHaveBeenCalled();
+      expect(out).toBe('mail_send cancelled by user. The answer was not one of the offered choices, so nothing was allowed. Tell the user to ask again and answer with the buttons; if no buttons were shown, their page is outdated and needs a reload first.');
+    });
+  }
+
+  it('mail_send: `cancel` is a plain no, and a closed question is no misunderstanding either', async () => {
+    for (const answer of ['cancel', '', '__dismissed__']) {
+      const out = await createMailSendTool(registry).handler({ to: 'a@x.com', subject: 's', body: 'b' }, answering(answer));
+      expect(out, JSON.stringify(answer)).toBe('mail_send cancelled by user.');
+    }
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
+  const original = (uid: number) => makeMessage(envelope(uid, { messageId: `<k${String(uid)}@x>`, from: 'alice@example.com', subject: 'Hi' }), 'Original.');
+
+  it('mail_reply: only `send` sends, with the same keys offered', async () => {
+    provider.fetch.mockResolvedValue(original(301));
+    provider.send.mockResolvedValue({ messageId: '<r@x>', accepted: ['alice@example.com'], rejected: [] });
+    const seen: { options?: string[]; meta?: unknown } = {};
+    await createMailReplyTool(registry).handler({ uid: 301, body: 'Thanks.' }, answering('send', seen));
+    expect(seen.options).toEqual(['send', 'cancel']);
+    expect(seen.meta).toMatchObject({ consent: 'send' });
+    expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
+  for (const answer of NOT_KEYS) {
+    it(`mail_reply: ${JSON.stringify(answer)} sends nothing and says the answer was not understood`, async () => {
+      provider.fetch.mockResolvedValue(original(302));
+      const out = await createMailReplyTool(registry).handler({ uid: 302, body: 'Thanks.' }, answering(answer));
+      expect(provider.send).not.toHaveBeenCalled();
+      expect(out).toMatch(/^mail_reply cancelled by user\. The answer was not one of the offered choices/);
+    });
+  }
+
+  it('mail_reply: `cancel` is a plain no', async () => {
+    provider.fetch.mockResolvedValue(original(303));
+    const out = await createMailReplyTool(registry).handler({ uid: 303, body: 'Thanks.' }, answering('cancel'));
+    expect(out).toBe('mail_reply cancelled by user.');
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
+  it('asks in German on a German instance, values as they are', async () => {
+    let prompt = '';
+    const agent = { dialogLanguage: 'de', promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'cancel'; } } as unknown as IAgent;
+    await createMailSendTool(registry).handler({ to: 'a@x.com', subject: 'Offerte Q3', body: 'Hallo' }, agent);
+    expect(prompt).toContain('**E-Mail senden?**');
+    expect(prompt).toContain('**An:** a@x.com');
+    expect(prompt).toContain('**Betreff:** Offerte Q3');
+    expect(prompt).not.toContain('Send email?');
+
+    provider.fetch.mockResolvedValue(original(304));
+    await createMailReplyTool(registry).handler({ uid: 304, body: 'Danke.' }, agent);
+    expect(prompt).toContain('**Auf „Hi“ antworten?**');
+    expect(prompt).toContain('**Von:**');
   });
 });
