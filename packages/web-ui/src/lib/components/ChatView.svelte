@@ -3931,7 +3931,9 @@
 			</div>
 		{/if}
 
-		{#if typedToConsent !== null && pendingPermission && (pendingPermission.promptId ?? pendingPermission.question) === typedToConsent}
+		<!-- Said as soon as there is text the open confirmation will not take: the arrow is off, and on a
+		     phone Enter is a new line, so waiting for a send attempt would say it to no one. -->
+		{#if pendingPermission && ((consentTakesNoText && inputText.trim() !== '') || (typedToConsent !== null && (pendingPermission.promptId ?? pendingPermission.question) === typedToConsent))}
 			<p class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto mb-2 text-[13px] md:text-xs text-text-muted" role="status" data-consent-typed>{t('chat.consent.typed_hint')}</p>
 		{/if}
 		<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex items-center gap-1.5 md:gap-2">

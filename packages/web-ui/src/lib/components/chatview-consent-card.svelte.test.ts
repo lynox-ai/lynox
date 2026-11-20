@@ -255,6 +255,28 @@ describe('a tool\'s own confirmation', () => {
 		expect(bar.querySelector('bdi[data-foreign-value]')).toBeNull();
 	});
 
+	it('the hint is there as soon as there is text, before any send: on a phone Enter is a new line', async () => {
+		i18n.setLocale('de');
+		await renderPrompt(['send', 'cancel'], 'send');
+		expect(target.querySelector('[data-consent-typed]')).toBeNull();
+		const field = target.querySelector<HTMLTextAreaElement>('textarea')!;
+		field.value = 'ja';
+		field.dispatchEvent(new Event('input', { bubbles: true }));
+		await settle();
+		expect(target.querySelector('[data-consent-typed]')?.textContent).toBe('Diese Frage beantwortest du mit ihren Knöpfen. Dein Text bleibt hier, bis du geantwortet hast.');
+		expect(replies).toEqual([]);
+	});
+
+	it('a plan says nothing of the kind while someone writes the change', async () => {
+		i18n.setLocale('de');
+		await renderPrompt(['proceed', 'adjust', 'cancel'], 'plan');
+		const field = target.querySelector<HTMLTextAreaElement>('textarea')!;
+		field.value = 'Ohne Schritt 3';
+		field.dispatchEvent(new Event('input', { bubbles: true }));
+		await settle();
+		expect(target.querySelector('[data-consent-typed]')).toBeNull();
+	});
+
 	for (const [kind, keys, active] of [['send', ['send', 'cancel'], false], ['guard', ['allow', 'deny'], false], ['plan', ['proceed', 'adjust', 'cancel'], true]] as const) {
 		it(`${kind}: the send arrow is ${active ? 'live, writing is an answer' : 'off, only the buttons answer'}`, async () => {
 			i18n.setLocale('de');
