@@ -197,6 +197,18 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		);
 	});
 
+	it('below `sm` the controls stay visible with a mouse too, where their row wraps under the text', () => {
+		// Hidden there, the wrapped row only left an empty line under the card's text.
+		for (const control of ['runNow(trigger)', 'togglePause(trigger)', 'manageInChat(trigger)', 'deleteTrigger(trigger)']) {
+			const tag = line(`<button onclick={() => ${control}}`);
+			expect(tag, control).toMatch(/["'\s]sm:\[@media\(hover:hover\)\]:opacity-0\s/);
+			expect(tag.replaceAll('sm:[@media(hover:hover)]:opacity-0', ''), control).not.toContain('[@media(hover:hover)]:opacity-0');
+		}
+		const check = line('<button onclick={() => (checking[trigger.id] = !checking[trigger.id])}');
+		expect(check).toMatch(/["'\s]sm:\[@media\(hover:hover\)\]:opacity-0\s/);
+		expect(check.replaceAll('sm:[@media(hover:hover)]:opacity-0', '')).not.toContain('[@media(hover:hover)]:opacity-0');
+	});
+
 	it('the controls hide on hover-capable pointers, not at a width', () => {
 		// A touch screen wider than `sm` has no hover either: keyed on the width, the
 		// controls were unreachable there with no rule left to bring them back.

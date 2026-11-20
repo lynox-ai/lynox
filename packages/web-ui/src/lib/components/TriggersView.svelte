@@ -710,9 +710,11 @@
 							{/if}
 						</div>
 						<!-- The controls hide until hover where hovering exists, and stay visible
-						     where it does not — keyed on the POINTER, not on a width: a touch screen
-						     wider than `sm` has no hover either, and there they only appeared when a
-						     tap happened to leave the card in `:hover`. -->
+						     where it does not — keyed on the POINTER: a touch screen wider than `sm`
+						     has no hover either, and there they only appeared when a tap happened to
+						     leave the card in `:hover`. Below `sm` they also stay visible with a mouse:
+						     the row then wraps under the text, and hidden it would only leave an empty
+						     line. -->
 						<div class="flex flex-wrap items-center gap-2 sm:shrink-0 sm:mt-0.5">
 							<!-- Stop: only where a stop can end the run. Not hidden until hover like the
 							     others — a run the owner wants to end should not need finding. -->
@@ -723,13 +725,13 @@
 							     has already been answered as started. Not at a completed paused plan
 							     either: it would be refused, and the refusal names no way out there. -->
 							{#if !held(trigger) && !pausedDone(trigger)}
-								<button onclick={() => runNow(trigger)} data-trigger-run-now disabled={busy[trigger.id]} aria-label={t('triggers.run_now')} title={t('triggers.run_now')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity disabled:opacity-40">▶ {t('triggers.run_now')}</button>
+								<button onclick={() => runNow(trigger)} data-trigger-run-now disabled={busy[trigger.id]} aria-label={t('triggers.run_now')} title={t('triggers.run_now')} class="sm:[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity disabled:opacity-40">▶ {t('triggers.run_now')}</button>
 							{/if}
-							<button onclick={() => togglePause(trigger)} disabled={busy[trigger.id]} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity disabled:opacity-40">{trigger.enabled === 0 ? t('triggers.resume') : t('triggers.pause')}</button>
-							<button onclick={() => manageInChat(trigger)} aria-label={t('triggers.manage_in_chat')} title={t('triggers.manage_in_chat')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity"><Icon name="chat" size="xs" /></button>
-							<button onclick={() => deleteTrigger(trigger)} disabled={busy[trigger.id]} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 transition-opacity disabled:opacity-40">{t('triggers.delete')}</button>
+							<button onclick={() => togglePause(trigger)} disabled={busy[trigger.id]} class="sm:[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity disabled:opacity-40">{trigger.enabled === 0 ? t('triggers.resume') : t('triggers.pause')}</button>
+							<button onclick={() => manageInChat(trigger)} aria-label={t('triggers.manage_in_chat')} title={t('triggers.manage_in_chat')} class="sm:[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity"><Icon name="chat" size="xs" /></button>
+							<button onclick={() => deleteTrigger(trigger)} disabled={busy[trigger.id]} class="sm:[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 transition-opacity disabled:opacity-40">{t('triggers.delete')}</button>
 							{#if offersCheck(trigger)}
-								<button onclick={() => (checking[trigger.id] = !checking[trigger.id])} aria-expanded={checking[trigger.id] === true} class="{checkAsked(trigger) ? '' : '[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100'} rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity" data-trigger-check>{t('stamp.check')}</button>
+								<button onclick={() => (checking[trigger.id] = !checking[trigger.id])} aria-expanded={checking[trigger.id] === true} class="{checkAsked(trigger) ? '' : 'sm:[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100'} rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity" data-trigger-check>{t('stamp.check')}</button>
 							{/if}
 							<!-- Take over: always visible, like Stop — a paused plan does nothing until it is.
 							     Last, so it ends the row where the hidden controls hold their place (ux). -->
