@@ -255,7 +255,7 @@ const EN_HALT_REASONS: Readonly<Record<keyof typeof BULK_HALT_REASONS, string>> 
   shopifyReadOff: 'Reading Shopify stores in a bulk run is switched off on this instance.',
   shopifyWriteOff: 'Writing to Shopify stores in a bulk run is switched off on this instance. Once it is on again, the run can be continued.',
   consentOutdated: 'This Shopify connection does not yet let lynox change these fields. Reconnect Shopify (Settings → APIs), then ask lynox in the chat to plan the run again.',
-  productWriteNotAsked: 'This Shopify connection may not change products. Ask lynox in the chat to connect Shopify again with that permission, then to plan the run again.',
+  productWriteNotAsked: 'This Shopify connection may not change products. Ask lynox in the chat how to get that permission, then have the run planned again.',
   superseded: 'Another run with judging was started in its place. This one wrote nothing.',
   discarded: 'You discarded this run. lynox wrote nothing.',
   judgeModel: 'The AI provider of this run has no model for judging, or the operator does not allow it.',
@@ -323,7 +323,7 @@ function deHaltReason(reason: string): string | undefined {
     [BULK_HALT_REASONS.shopifyWriteOff]: 'Schreiben in Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet. Ist es wieder an, lässt sich der Lauf fortsetzen.',
     // U-281, without the fields (the outcome's summary names them, `consentOutdated`).
     [BULK_HALT_REASONS.consentOutdated]: 'Diese Shopify-Verbindung erlaubt lynox noch nicht, diese Felder zu ändern. Verbinde Shopify neu (Einstellungen → APIs) und lass den Lauf im Chat neu planen.',
-    [BULK_HALT_REASONS.productWriteNotAsked]: 'Diese Shopify-Verbindung darf keine Produkte ändern. Bitte lynox im Chat, Shopify mit dieser Erlaubnis neu zu verbinden, und lass den Lauf neu planen.',
+    [BULK_HALT_REASONS.productWriteNotAsked]: 'Diese Shopify-Verbindung darf keine Produkte ändern. Frag lynox im Chat, wie du die Erlaubnis bekommst, und lass den Lauf dann neu planen.',
     [BULK_HALT_REASONS.superseded]: 'An seiner Stelle wurde ein anderer Lauf mit Beurteilung gestartet. Dieser hat nichts geschrieben.',
     // Said to the owner, on whose device a push lands (U-324).
     [BULK_HALT_REASONS.discarded]: 'Du hast diesen Lauf verworfen. lynox hat nichts geschrieben.',
