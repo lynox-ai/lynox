@@ -60,6 +60,8 @@ function scheduleOf(title: string): string {
 }
 
 describe('a monthly schedule names its day as the language does', () => {
+	// Zurich in winter, all year: the day must not depend on where the test runs.
+	beforeEach(() => { vi.spyOn(Date.prototype, 'getTimezoneOffset').mockReturnValue(-60); });
 	const monthly = (): Record<string, unknown>[] => [
 		{ ...BASE, id: 'm1', title: 'Erster', schedule_cron: '0 10 1 * *' },
 		{ ...BASE, id: 'm22', title: 'Zweiundzwanzigster', schedule_cron: '0 10 22 * *' },
@@ -109,5 +111,15 @@ describe('a schedule near midnight names the local day', () => {
 		expect(scheduleOf('Wochentag')).toBe('Mondays 15:00');
 		expect(scheduleOf('Erster')).toBe('Monthly on the last day at 18:00');
 		expect(scheduleOf('Einunddreissigster')).toBe('Monthly on the 31st at 15:00');
+	});
+
+	it('across a clock change: a weekday that summer would move stays in UTC', async () => {
+		// Winter today, summer in July: 22:00 UTC is Monday 23:00 now and Tuesday 00:00 then.
+		vi.spyOn(Date.prototype, 'getTimezoneOffset').mockImplementation(function (this: Date) { return this.getMonth() >= 3 && this.getMonth() <= 9 ? -120 : -60; });
+		vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'], now: new Date('2026-01-15T12:00:00Z') });
+		setLocale('de');
+		rows = [{ ...BASE, id: 'd', title: 'Umstellung', schedule_cron: '0 22 * * 1' }];
+		await render();
+		expect(scheduleOf('Umstellung')).toBe('Montags 22:00 UTC');
 	});
 });

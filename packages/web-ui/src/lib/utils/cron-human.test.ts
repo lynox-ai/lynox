@@ -47,3 +47,35 @@ describe('a UTC schedule as the reader lives it', () => {
 		}
 	});
 });
+
+describe('a schedule stays in UTC where one local day would not hold all year', () => {
+	const LOS_ANGELES = -480;
+	const ZURICH = { winter: 60, summer: 120 };
+
+	it('keeps a day 29 to 31 that moves back in UTC, and moves 28 back to the 27th', () => {
+		for (const day of [29, 30, 31]) {
+			expect(localSchedule(`0 2 ${day} * *`, LOS_ANGELES)).toEqual({ kind: 'monthly_utc', day, time: '02:00' });
+		}
+		expect(localSchedule('0 2 28 * *', LOS_ANGELES)).toEqual({ kind: 'monthly', day: 27, time: '18:00' });
+	});
+
+	it('keeps a day or weekday in UTC when the clock change would move it, and moves it when it does not', () => {
+		// 22:00 UTC is 23:00 in a Zurich winter and 00:00 the next day in summer.
+		expect(localSchedule('0 22 * * 1', ZURICH.winter, [ZURICH.winter, ZURICH.summer])).toEqual({ kind: 'weekly_utc', weekday: 1, time: '22:00' });
+		expect(localSchedule('0 22 15 * *', ZURICH.winter, [ZURICH.winter, ZURICH.summer])).toEqual({ kind: 'monthly_utc', day: 15, time: '22:00' });
+		expect(localSchedule('0 22 1 * *', ZURICH.summer, [ZURICH.winter, ZURICH.summer])).toEqual({ kind: 'monthly_utc', day: 1, time: '22:00' });
+		// 23:00 UTC is the next day in both seasons; 10:00 UTC is the same day in both.
+		expect(localSchedule('0 23 * * 1', ZURICH.winter, [ZURICH.winter, ZURICH.summer])).toEqual({ kind: 'weekly', weekday: 2, time: '00:00' });
+		expect(localSchedule('0 10 * * 1', ZURICH.summer, [ZURICH.winter, ZURICH.summer])).toEqual({ kind: 'weekly', weekday: 1, time: '12:00' });
+		// Daily: only the hour moves, whatever the season.
+		expect(localSchedule('0 22 * * *', ZURICH.winter, [ZURICH.winter, ZURICH.summer])).toEqual({ kind: 'daily', time: '23:00' });
+	});
+
+	it('moves by offsets that are not whole hours, and at the ends of the range', () => {
+		expect(localSchedule('45 23 * * 1', 15)).toEqual({ kind: 'weekly', weekday: 2, time: '00:00' });
+		expect(localSchedule('30 20 * * 5', 330)).toEqual({ kind: 'weekly', weekday: 6, time: '02:00' });
+		expect(localSchedule('15 2 * * 0', -210)).toEqual({ kind: 'weekly', weekday: 6, time: '22:45' });
+		expect(localSchedule('0 0 * * 0', -720)).toEqual({ kind: 'weekly', weekday: 6, time: '12:00' });
+		expect(localSchedule('59 23 * * 6', 840)).toEqual({ kind: 'weekly', weekday: 0, time: '13:59' });
+	});
+});

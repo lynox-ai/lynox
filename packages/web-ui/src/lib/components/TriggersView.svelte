@@ -494,6 +494,7 @@
 			case 'hourly': return t('tasks.every_hour');
 			case 'daily': return `${t('tasks.daily_at')} ${s.time}`;
 			case 'weekly': return `${t(WEEKDAY_KEYS[s.weekday]!)} ${s.time}`;
+			case 'weekly_utc': return `${t(WEEKDAY_KEYS[s.weekday]!)} ${s.time} UTC`;
 			case 'monthly': return tf('tasks.monthly_on_day', { day: monthDay(s.day, getLocale()), time: s.time });
 			case 'monthly_last': return tf('tasks.monthly_last_day', { time: s.time });
 			case 'monthly_utc': return tf('tasks.monthly_on_day_utc', { day: monthDay(s.day, getLocale()), time: s.time });
