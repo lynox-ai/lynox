@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { consentAnswer } from '../contract/prompt.js';
+	import { consentAnswer, consentTakesText } from '../contract/prompt.js';
 	import { consentButtons, isToolConsent } from '../utils/consent-buttons.js';
 	import {
 		sendMessage,
@@ -675,6 +675,8 @@
 	}
 
 	let inputText = $state('');
+	/** The confirmation that typed text was held back from (its id); the hint shows while it is open. */
+	let typedToConsent = $state<string | null>(null);
 	let messagesEl: HTMLDivElement;
 	let autoScroll = $state(true);
 	// DK-UX: inline edit state for the untrusted-knowledge review chip (edit_approve).
@@ -1897,6 +1899,14 @@
 			// In a mandate's chat no key is taken at all, not even by "store a secret": the helper
 			// reads the same sentence the server's refusal shows (the text stays in the field).
 			addToast(isMandateSession() ? t('chat.mandate_key_input_returned') : t('chat.secret_warning'), 'error', 6000);
+			return;
+		}
+
+		// An engine confirmation is answered with its buttons only: typed text is no key, even when
+		// it spells one ("send"). It stays in the field and the person is told how to answer. A plan
+		// is the exception: what is written there is the change asked for.
+		if (pendingPermission && task && pendingPermission.consent !== undefined && !consentTakesText(pendingPermission.consent)) {
+			typedToConsent = pendingPermission.promptId ?? pendingPermission.question;
 			return;
 		}
 
@@ -3917,6 +3927,9 @@
 			</div>
 		{/if}
 
+		{#if typedToConsent !== null && pendingPermission && (pendingPermission.promptId ?? pendingPermission.question) === typedToConsent}
+			<p class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto mb-2 text-[13px] md:text-xs text-text-muted" role="status" data-consent-typed>{t('chat.consent.typed_hint')}</p>
+		{/if}
 		<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex items-center gap-1.5 md:gap-2">
 			<!-- SVG is accepted: addFile() routes it through the image branch, which
 		     rasterizes it to JPEG via <img src=blob> + canvas before upload — the

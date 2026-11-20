@@ -61,6 +61,7 @@ let store: typeof import('../stores/chat.svelte.js');
 let run: ReturnType<typeof sseStream>;
 let replies: Array<{ answer?: unknown; promptId?: unknown }>;
 let refuse: boolean;
+let closed: boolean;
 let i18n: typeof import('../i18n.svelte.js');
 
 beforeEach(async () => {
@@ -71,6 +72,7 @@ beforeEach(async () => {
 	i18n = await import('../i18n.svelte.js');
 	replies = [];
 	refuse = false;
+	closed = false;
 	target = document.createElement('div');
 	document.body.appendChild(target);
 });
@@ -93,6 +95,7 @@ async function renderPrompt(options: string[], consent?: string, before?: () => 
 		if (url.endsWith('/sessions/t1/run')) return new Response(run.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 		if (url.endsWith('/sessions/t1/reply')) {
 			replies.push(JSON.parse(String(init?.body ?? '{}')) as { answer?: unknown });
+			if (closed) return new Response(JSON.stringify({ code: 'timed_out' }), { status: 410, headers: { 'Content-Type': 'application/json' } });
 			return json(refuse ? { ok: true, refused: 'unrecognised_answer' } : { ok: true });
 		}
 		if (url.endsWith('/threads/t1')) return json({ thread: null });
@@ -244,6 +247,39 @@ describe('a tool\'s own confirmation', () => {
 		const bar = await renderPrompt(['send', 'cancel'], 'send', undefined, { question: '**Send email?**', segments: [{ kind: 'frame', text: '**Send email?**' }] });
 		expect(bar.querySelector('pre')).toBeNull();
 		expect(bar.querySelector('strong')?.textContent).toBe('Send email?');
+	});
+
+	for (const [kind, keys, typed] of [['send', ['send', 'cancel'], 'send'], ['google', ['confirm', 'cancel'], 'confirm'], ['guard', ['allow', 'deny'], 'allow'], ['merge', ['merge', 'cancel'], 'ja']] as const) {
+		it(`${kind}: typed text — even its key — is no answer: it stays in the field with a hint`, async () => {
+			i18n.setLocale('de');
+			await renderPrompt([...keys], kind);
+			const field = target.querySelector<HTMLTextAreaElement>('textarea')!;
+			field.value = typed;
+			field.dispatchEvent(new Event('input', { bubbles: true }));
+			await settle();
+			field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+			await settle();
+			expect(replies, 'nothing was answered').toEqual([]);
+			expect(target.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe(typed);
+			expect(target.querySelector('[data-consent-typed]')?.textContent).toBe('Diese Frage beantwortest du mit ihren Knöpfen. Dein Text bleibt hier, bis du geantwortet hast.');
+			expect(target.querySelector('[data-prompt-kind="permission"]')).not.toBeNull();
+		});
+	}
+
+	it('plan: typed text is sent as the change asked for, and comes back to the field if the question closed', async () => {
+		i18n.setLocale('de');
+		await renderPrompt(['proceed', 'adjust', 'cancel'], 'plan');
+		closed = true;
+		const field = target.querySelector<HTMLTextAreaElement>('textarea')!;
+		field.value = 'Ohne Schritt 3';
+		field.dispatchEvent(new Event('input', { bubbles: true }));
+		await settle();
+		field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+		await settle();
+		await settle();
+		expect(replies.map((r) => r.answer)).toEqual(['Ohne Schritt 3']);
+		expect(target.querySelector('[data-consent-typed]')).toBeNull();
+		expect(target.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('Ohne Schritt 3');
 	});
 
 	it('typed text to a send is refused visibly, as for the guard', async () => {

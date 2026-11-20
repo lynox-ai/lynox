@@ -1525,6 +1525,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.consent.proceed': { de: 'Ausführen', en: 'Run' },
 	'chat.consent.adjust': { de: 'Anpassen', en: 'Adjust' },
 	'chat.consent.plan_hint': { de: 'Oder schreib, was du ändern willst.', en: 'Or write what to change.' },
+	'chat.consent.typed_hint': { de: 'Diese Frage beantwortest du mit ihren Knöpfen. Dein Text bleibt hier, bis du geantwortet hast.', en: 'Answer this question with its buttons. Your text stays here until you have answered.' },
 	'chat.consent.action.upload': { de: 'Hochladen', en: 'Upload' },
 	'chat.consent.action.create': { de: 'Anlegen', en: 'Create' },
 	'chat.consent.action.move': { de: 'Verschieben', en: 'Move' },
