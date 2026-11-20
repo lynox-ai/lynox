@@ -533,7 +533,7 @@ describe('a line written untrusted stays marked whatever happens to its knowledg
     const memory = fileMemory();
     vi.spyOn(layer, 'markUntrustedLines').mockImplementation(() => { throw new Error('store unwritable'); });
     const agent = await turn(layer, memory, [write(PAYLOAD)], true);
-    expect(resultOf(agent, 'w1')).toContain('Not written');
+    expect(resultOf(agent, 'w1')).toContain('Not saved');
     expect(resultOf(agent, 'w1')).not.toContain('store unwritable');
     expect(await memory.loadScoped('knowledge', from)).toBeNull();
   });
@@ -547,7 +547,7 @@ describe('a line written untrusted stays marked whatever happens to its knowledg
     const memory = fileMemory([LINE]);
     vi.spyOn(layer, 'untrustedLineKeysIn').mockImplementation(() => { throw new Error('graph unreadable'); });
     const agent = await turn(layer, memory, [{ id: 'w1', name, input }], false);
-    expect(resultOf(agent, 'w1')).toContain('Not written');
+    expect(resultOf(agent, 'w1')).toContain('Not saved');
     expect(await memory.loadScoped('knowledge', from)).toBe(LINE);
     expect(layer.getDb().untrustedLineKeys('knowledge').size).toBe(0);
   });

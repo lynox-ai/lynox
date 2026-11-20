@@ -124,7 +124,7 @@ function refusedUnmarked(record: () => void): string | null {
     record();
     return null;
   } catch {
-    return 'Not written: whether this text came in untrusted could not be recorded, and memory text is not written without that. Nothing was changed; try again.';
+    return 'Not saved: lynox could not record where this text came from, and memory is only saved together with its source. Nothing was changed. Try once more; if it fails again, tell the user the memory could not be saved right now and that nothing was changed.';
   }
 }
 
