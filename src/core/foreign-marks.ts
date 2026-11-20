@@ -18,13 +18,13 @@ const TRIGGER_MARKS = [
  * (`pipeline_params`): they may be that mandate's choice. Its own schedule a mandate reads with
  * its values, whoever changed it since. The owner's marks and the mandate's own stay as stored.
  * A takeover's covered marks name a mandate the schedule no longer belongs to, so they hide
- * whose they were and leave the values.
+ * whose they were and leave the values. A to-do carries none of these columns and passes as it is.
  */
-export function withoutForeignMarks<T extends Partial<TriggerRecord>>(stored: T, principal: RequestPrincipal): T {
+export function withoutForeignMarks<T extends object>(stored: T, principal: RequestPrincipal): T {
   if (isOwnerPrincipal(principal)) return stored;
   const own = principal.kind === 'mandate' ? principalTag(principal) : null;
   const isForeign = (tag: unknown): boolean => typeof tag === 'string' && tag.startsWith(MANDATE_TAG_PREFIX) && tag !== own;
-  const out: Record<string, unknown> = { ...stored };
+  const out: Record<string, unknown> = { ...(stored as Record<string, unknown>) };
   let foreignSchedule = false;
   for (const [tagKey, idKey] of TRIGGER_MARKS) {
     if (!isForeign(out[tagKey])) continue;
@@ -32,6 +32,6 @@ export function withoutForeignMarks<T extends Partial<TriggerRecord>>(stored: T,
     if (idKey !== null) delete out[idKey];
     if (tagKey === 'created_by' || tagKey === 'edited_by' || tagKey === 'mandate_editor') foreignSchedule = true;
   }
-  if (foreignSchedule && (own === null || stored.created_by !== own)) delete out['pipeline_params'];
+  if (foreignSchedule && (own === null || (stored as Partial<TriggerRecord>).created_by !== own)) delete out['pipeline_params'];
   return out as T;
 }

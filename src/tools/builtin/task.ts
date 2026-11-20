@@ -715,7 +715,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         if (input.status === 'completed') {
           const task = w.run('apply', () => managerRef.complete(input.task_id, scopeFilter, agent.principal), ifNonNull);
           if (!task) return `Task not found: ${input.task_id}`;
-          return `Task completed: ${formatTaskLine(task)}`;
+          return `Task completed: ${formatTaskLine(withoutForeignMarks(task, agent.principal))}`;
         }
 
         const task = w.run('apply', () => managerRef.update(input.task_id, {
@@ -750,7 +750,8 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         // An edit can re-open consent: changing what a trigger RUNS clears the stamp
         // (`trigger-store.ts`), so the row just edited may be held back again — and
         // this report is the only place that says so.
-        return `Task updated: ${formatTaskLine(task, `${scheduleNote}${pendingConsent(task, isOwnerPrincipal(agent.principal))}`)}`;
+        // A mandate may change another mandate's schedule; the report reads it as the trigger list does.
+        return `Task updated: ${formatTaskLine(withoutForeignMarks(task, agent.principal), `${scheduleNote}${pendingConsent(task, isOwnerPrincipal(agent.principal))}`)}`;
       });
     } catch (e: unknown) {
       logErrorChain('task_update', e);

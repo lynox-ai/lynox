@@ -5,9 +5,10 @@ import { tmpdir } from 'node:os';
 import { RunHistory } from '../../core/run-history.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { TaskManager } from '../../core/task-manager.js';
-import { taskListTool } from './task.js';
+import { taskListTool, taskUpdateTool } from './task.js';
 import type { IAgent } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
 
 /**
@@ -16,6 +17,7 @@ import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-princ
  */
 
 const IDA: RequestPrincipal = { kind: 'mandate', email: 'ida@example.invalid', mandateId: 'G-IDA' };
+const OLE: RequestPrincipal = { kind: 'mandate', email: 'ole@example.invalid', mandateId: 'G-OLE' };
 
 describe('task_list shows a mandate another mandate\'s schedules without their values', () => {
   let dir: string;
@@ -27,6 +29,7 @@ describe('task_list shows a mandate another mandate\'s schedules without their v
     const ctx = createToolContext({});
     ctx.taskManager = tm;
     ctx.runHistory = history;
+    ctx.auditLog = testAuditLog().log;
     return { name: 't', model: 'm', memory: null, tools: [], onStream: null, activeScopes: undefined, toolContext: ctx, principal } as IAgent;
   };
   const seed = (id: string, params: string, createdBy: string, createdMandateId?: string): void => {
@@ -58,6 +61,26 @@ describe('task_list shows a mandate another mandate\'s schedules without their v
     expect(out).toContain('ida-value');
     expect(out).toContain('owner-value');
     expect(out).not.toContain('ole-value');
+  });
+
+  it('lists a mandate its own schedule with its values after another mandate changed it', async () => {
+    tm.markEditedBy('t-ida', OLE, true);
+    const out = await taskListTool.handler({}, agent(IDA));
+    expect(out).toContain('ida-value');
+    expect(out).not.toContain('ole-value');
+  });
+
+  it('reports a mandate\'s change or completion of another mandate\'s schedule without its values', async () => {
+    const updated = await taskUpdateTool.handler({ task_id: 't-ole', title: 'Renamed by ida' }, agent(IDA));
+    expect(updated).toContain('Task updated');
+    expect(updated).toContain('Renamed by ida');
+    expect(updated).not.toContain('ole-value');
+    const completed = await taskUpdateTool.handler({ task_id: 't-ole', status: 'completed' }, agent(IDA));
+    expect(completed).toContain('Task completed');
+    expect(completed).not.toContain('ole-value');
+    // The positive control: the owner's report of the same change names the values.
+    const byOwner = await taskUpdateTool.handler({ task_id: 't-owner', title: 'Renamed by owner' }, agent(OWNER_PRINCIPAL));
+    expect(byOwner).toContain('owner-value');
   });
 
   it('lists every value to the owner', async () => {
