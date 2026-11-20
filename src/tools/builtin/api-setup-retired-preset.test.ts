@@ -185,16 +185,19 @@ describe('a profile of a provider this engine no longer has', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('sends connect to the way that exists, not to an update the save would refuse', async () => {
+  it.each([
+    ['with', 'https://tenant.lynox.example'],
+    ['without', ''],
+  ] as const)('sends connect %s a public address to the way that exists, not to an update or a fetch_token that is refused', async (_label, origin) => {
     const store = new ApiStore();
     store.register(profileNaming('gone-shop'));
-    // Connect needs this engine's public address before it reads the provider.
-    vi.stubEnv('ORIGIN', 'https://tenant.lynox.example');
+    vi.stubEnv('ORIGIN', origin);
     const reply = await apiSetupTool.handler({ action: 'connect', id: 'shop-api' }, agentWith(store)) as string;
 
     expect(reply).toContain('Error: profile "shop-api" was set up through the built-in "gone-shop" provider, which this engine no longer has, so there is no authorization page to send the user to.');
     expect(reply).toContain('ask the user first, then delete this profile and create the new one.');
     expect(reply).not.toContain('Set auth.oauth.preset_id');
+    expect(reply).not.toContain('fetch_token');
   });
 
   it.each([

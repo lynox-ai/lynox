@@ -2582,6 +2582,14 @@ ${draftJson}
       if (profile.auth?.type !== 'oauth2') {
         return `Error: profile "${id}" has auth.type="${authTypeForModel(profile.auth?.type)}", not "oauth2". Connecting sends the user to a provider to authorize; a profile that carries a static credential does not need it.`;
       }
+      // A provider this engine once shipped: there is nothing to connect it to, and the profile
+      // stays held to it, so neither an update to another provider nor fetch_token (both
+      // suggested further down for other profiles) works. Asked before anything else that could
+      // answer with one of those.
+      const retiredId = retiredPresetIdOf(profile);
+      if (retiredId !== undefined) {
+        return `Error: profile "${id}" was set up through the built-in "${retiredId}" provider, which this engine no longer has, so there is no authorization page to send the user to. Tell the user this connection can no longer be renewed here; another way of signing in to the same API replaces it, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
+      }
       // The link is built from the server's own origin, never assembled by the
       // model: a link the model writes is a link the model chooses. Without an
       // HTTP server there is nothing to send the user to.
@@ -2647,12 +2655,6 @@ ${draftJson}
       if ('kind' in endpoints) {
         const ids = presetIds();
         const known = ids.length > 0 ? `Known providers: ${ids.join(', ')}.` : 'No providers are built in yet, so nothing can be connected this way today.';
-        // A provider this engine once shipped: the profile stays held to it, so the update the
-        // message below suggests would be refused.
-        const retiredId = retiredPresetIdOf(profile);
-        if (endpoints.kind === 'unknown-preset' && retiredId !== undefined) {
-          return `Error: profile "${id}" was set up through the built-in "${retiredId}" provider, which this engine no longer has, so there is no authorization page to send the user to. Tell the user this connection can no longer be renewed here; another way of signing in to the same API replaces it, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
-        }
         if (endpoints.kind === 'unknown-preset') {
           return `Error: profile "${id}" names no built-in provider, so there is no authorization page to send the user to. ${known} Set auth.oauth.preset_id with api_setup update, or keep using a credential the user pastes with ask_secret.`;
         }
