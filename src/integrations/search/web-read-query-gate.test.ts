@@ -341,6 +341,16 @@ describe('an address another one carries ends where a host name ends', () => {
     });
   }
 
+  it('a carried authority that is no host name the check can compare is still asked about, never passed', async () => {
+    const tool = webResearch();
+    const ask = asker('Deny');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
+    await read(agent, 'https://reader.example.ch/https://col_lect.evil.example/d');
+    expect(ask.asked).toHaveLength(1);
+    expect(ask.asked[0]).toContain('col_lect.evil.example');
+    expect(tool.reads).toEqual([]);
+  });
+
   it('CONTROL: when the owner named both hosts, a carried address followed by & is read without a question', async () => {
     const tool = webResearch();
     const ask = asker('Deny');
