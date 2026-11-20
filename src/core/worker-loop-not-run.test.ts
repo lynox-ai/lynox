@@ -403,6 +403,20 @@ describe('a run the admission refused', () => {
     expect(router.sent[0]!.body).toContain('The monthly budget of $50.00 is reached (this month $50.00). A new month starts on July 1 at');
   });
 
+  it('spend that cannot be checked: told whole, closing without the budget, which is not what stands in the way', async () => {
+    // A cap set and no recorded spend to hold it against.
+    configurePersistentBudget({ dailyCapUSD: 100 });
+    for (const [lang, said] of [
+      ['en', 'lynox can\'t check spending right now, so it starts no run. Restart lynox. The run stays due and starts as soon as a start is possible.'],
+      ['de', 'lynox kann die Ausgaben gerade nicht prüfen und startet deshalb keinen Lauf. Starte lynox neu. Der Lauf bleibt fällig und startet, sobald ein Start möglich ist.'],
+    ] as const) {
+      const router = makeRouter();
+      await ticks(makeTaskManager([makeTask()]), router, 1, lang);
+      expect(router.sent).toHaveLength(1);
+      expect(router.sent[0]!.body).toBe(said);
+    }
+  });
+
   it('in German, on an instance that says so', async () => {
     configurePersistentBudget({ costProvider: spendToday(100), dailyCapUSD: 100 });
     const router = makeRouter();
@@ -682,7 +696,7 @@ describe('a task the content check refused', () => {
     }
     expect(vi.mocked(tm.recordTaskRun).mock.calls.some((c) => c[2] === 'success')).toBe(false);
     const call = notRunCalls(tm)[0]!;
-    expect(call[1]).toBe(`${EN.contentRefused} ${EN.contentNextTask} ${EN.notRunRetryAt(resetWhen(new Date('2026-06-15T13:00:00.000Z'), new Date(), 'en'))}`);
+    expect(call[1]).toBe(`${EN.contentRefused} ${EN.contentNextTask} ${EN.logNamesReason} ${EN.notRunRetryAt(resetWhen(new Date('2026-06-15T13:00:00.000Z'), new Date(), 'en'))}`);
     expect(call[3]).toEqual({ retryAt: '2026-06-15T13:00:00.000Z' });
     expect(router.sent).toHaveLength(1);
     expect(router.sent[0]!.title).toBe('⚠ Daily Report did not run');
@@ -789,10 +803,19 @@ describe('the sentences', () => {
     expect(notRunReason('en', small, hosted)).toBe('Only $0.02 of the daily budget of $100.00 is left today, too little for a run of this kind (at least $0.05). A new day starts tomorrow at 01:00 AM GMT+1.');
     expect(notRunReason('de', waiting, self)).toBe('Wartet seit heute um 11:30 MEZ auf andere Läufe, die den Rest des Budgets belegen. Läuft, sobald die anderen Läufe enden.');
     expect(notRunReason('en', waiting, managed)).toBe('Waiting since today at 11:30 AM GMT+1 for other runs, which hold the rest of the budget. Runs once the other runs end.');
-    expect(notRunReason('de', { kind: 'content' }, self)).toBe('Die Inhaltsprüfung hat den Auftrag nicht ans Modell weitergegeben. Prüf den Text des Auftrags unter Automation → Trigger.');
+    // The check's reason is in the instance's log: named only to a self-hosted owner, who reads it.
+    expect(notRunReason('de', { kind: 'content' }, self)).toBe('Die Inhaltsprüfung hat den Auftrag nicht ans Modell weitergegeben. Prüf den Text des Auftrags unter Automation → Trigger. Den Grund nennt das Instanz-Protokoll.');
+    expect(notRunReason('en', { kind: 'content' }, self)).toBe('The content check did not pass the task on to the model. Check the task\'s text under Automation → Triggers. The instance log names the reason.');
+    expect(notRunReason('de', { kind: 'content' }, hosted)).toBe('Die Inhaltsprüfung hat den Auftrag nicht ans Modell weitergegeben. Prüf den Text des Auftrags unter Automation → Trigger.');
     expect(notRunReason('en', { kind: 'content' }, managed)).toBe('The content check did not pass the task on to the model. Check the task\'s text under Automation → Triggers.');
-    expect(notRunReason('de', { kind: 'content' }, { ...self, watch: true })).toBe('Die Inhaltsprüfung hat den Auftrag nicht ans Modell weitergegeben. Abgelehnt wurde der Inhalt der beobachteten Seite.');
+    expect(notRunReason('de', { kind: 'content' }, { ...self, watch: true })).toBe('Die Inhaltsprüfung hat den Auftrag nicht ans Modell weitergegeben. Abgelehnt wurde der Inhalt der beobachteten Seite. Den Grund nennt das Instanz-Protokoll.');
+    expect(notRunReason('en', { kind: 'content' }, { ...self, watch: true })).toBe('The content check did not pass the task on to the model. The content of the watched page was refused. The instance log names the reason.');
+    expect(notRunReason('de', { kind: 'content' }, { ...hosted, watch: true })).toBe('Die Inhaltsprüfung hat den Auftrag nicht ans Modell weitergegeben. Abgelehnt wurde der Inhalt der beobachteten Seite.');
     expect(notRunReason('en', { kind: 'content' }, { ...managed, watch: true })).toBe('The content check did not pass the task on to the model. The content of the watched page was refused.');
+    expect(notRunReason('de', { kind: 'hook' }, self)).toBe('Eine Prüfung vor dem Start hat den Lauf nicht zugelassen. Den Grund nennt das Instanz-Protokoll.');
+    expect(notRunReason('en', { kind: 'hook' }, self)).toBe('A check before the start did not let the run begin. The instance log names the reason.');
+    expect(notRunReason('de', { kind: 'cap', ref: { cap: 'unknown' } }, self)).toBe('lynox kann die Ausgaben gerade nicht prüfen und startet deshalb keinen Lauf. Starte lynox neu.');
+    expect(notRunReason('en', { kind: 'cap', ref: { cap: 'unknown' } }, managed)).toBe('lynox can\'t check spending right now, so it starts no run. If it stays, write to support@lynox.ai.');
     expect(WORKER_NOTICES.de.notRunWaits).toBe('Der Lauf bleibt fällig und startet, sobald das Budget es zulässt.');
     expect(EN.notRunWaits).toBe('The run stays due and starts as soon as the budget allows.');
   });

@@ -999,8 +999,9 @@ export class WorkerLoop {
     // schedule as it was; refused at admission it stays due; a one-shot is due again at
     // `retryAt`; a watch checks again at its next time; a cron's missed time is missed.
     // A wait for other runs says in its reason what becomes of it; one that stays due waits for
-    // the budget, or after a check before the run or the content check, for a start at all.
-    const waits = cause.kind === 'cap' || cause.kind === 'too_small' ? n.notRunWaits : n.notRunWaitsCheck;
+    // the budget, or — after a check before the run, the content check, or spend that cannot be
+    // checked — for a start at all.
+    const waits = cap === 'daily' || cap === 'monthly' ? n.notRunWaits : n.notRunWaitsCheck;
     const then = byHand ? n.notRunByHand
       : cause.kind === 'waiting' ? undefined
       : at === 'admission' ? waits

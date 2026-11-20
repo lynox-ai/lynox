@@ -281,6 +281,8 @@ export interface WorkerNotices {
   readonly contentRefused: string;
   readonly contentNextTask: string;
   readonly contentNextWatch: string;
+  /** Where a self-hosted owner finds the reason a check gave: the instance's own log. */
+  readonly logNamesReason: string;
   /** A time after a preposition ("Next try …", "seit …"): today, tomorrow or on a date, each with its zone. */
   resetToday(time: string): string;
   resetTomorrow(time: string): string;
@@ -302,6 +304,10 @@ const DE_WORKFLOW_STATUS: Readonly<Record<string, string>> = Object.freeze({
   failed: 'fehlgeschlagen',
   rejected: 'abgelehnt',
 });
+
+/** The sentence a check before the run and the content check share for the instance's log. */
+const EN_LOG_NAMES_REASON = 'The instance log names the reason.';
+const DE_LOG_NAMES_REASON = 'Den Grund nennt das Instanz-Protokoll.';
 
 const EN: WorkerNotices = Object.freeze({
   consentManyTitle: (count: number) => `⏸ ${String(count)} scheduled actions are waiting for your confirmation`,
@@ -379,7 +385,7 @@ const EN: WorkerNotices = Object.freeze({
   capSupportIfStays: 'If it stays, write to support@lynox.ai.',
   hookBlocked: (managed: boolean) => managed
     ? 'A check before the start did not let the run begin. If it stays, write to support@lynox.ai.'
-    : 'A check before the start did not let the run begin. The instance log names the reason.',
+    : `A check before the start did not let the run begin. ${EN_LOG_NAMES_REASON}`,
   notRunWaits: 'The run stays due and starts as soon as the budget allows.',
   notRunWaitsCheck: 'The run stays due and starts as soon as a start is possible.',
   notRunSkipped: 'This time is skipped; the next one runs as scheduled.',
@@ -395,6 +401,7 @@ const EN: WorkerNotices = Object.freeze({
   contentRefused: 'The content check did not pass the task on to the model.',
   contentNextTask: 'Check the task\'s text under Automation → Triggers.',
   contentNextWatch: 'The content of the watched page was refused.',
+  logNamesReason: EN_LOG_NAMES_REASON,
   resetToday: (time: string) => `today at ${time}`,
   resetTomorrow: (time: string) => `tomorrow at ${time}`,
   resetOn: (date: string, time: string) => `on ${date} at ${time}`,
@@ -529,7 +536,7 @@ const DE: WorkerNotices = Object.freeze({
   capSupportIfStays: 'Bleibt das, schreib an support@lynox.ai.',
   hookBlocked: (managed: boolean) => managed
     ? 'Eine Prüfung vor dem Start hat den Lauf nicht zugelassen. Bleibt das, schreib an support@lynox.ai.'
-    : 'Eine Prüfung vor dem Start hat den Lauf nicht zugelassen. Den Grund nennt das Instanz-Protokoll.',
+    : `Eine Prüfung vor dem Start hat den Lauf nicht zugelassen. ${DE_LOG_NAMES_REASON}`,
   // "Der Lauf" as the subject: a task, a watch („Beobachtung“) and a trigger take different genders.
   notRunWaits: 'Der Lauf bleibt fällig und startet, sobald das Budget es zulässt.',
   notRunWaitsCheck: 'Der Lauf bleibt fällig und startet, sobald ein Start möglich ist.',
@@ -547,6 +554,7 @@ const DE: WorkerNotices = Object.freeze({
   contentRefused: 'Die Inhaltsprüfung hat den Auftrag nicht ans Modell weitergegeben.',
   contentNextTask: 'Prüf den Text des Auftrags unter Automation → Trigger.',
   contentNextWatch: 'Abgelehnt wurde der Inhalt der beobachteten Seite.',
+  logNamesReason: DE_LOG_NAMES_REASON,
   resetToday: (time: string) => `heute um ${time}`,
   resetTomorrow: (time: string) => `morgen um ${time}`,
   // "ab dem 1. Dezember", not "ab am": the slot follows "ab".
@@ -639,7 +647,8 @@ export function notRunReason(lang: NoticeLanguage, cause: NotRunCause, ctx: NotR
   const ifStays = ctx.selfHosted ? n.capRestart : n.capSupportIfStays;
   switch (cause.kind) {
     case 'hook': return n.hookBlocked(ctx.managed);
-    case 'content': return `${n.contentRefused} ${ctx.watch === true ? n.contentNextWatch : n.contentNextTask}`;
+    // The check's reason is in the instance's log, which only a self-hosted owner reads.
+    case 'content': return `${n.contentRefused} ${ctx.watch === true ? n.contentNextWatch : n.contentNextTask}${ctx.selfHosted ? ` ${n.logNamesReason}` : ''}`;
     case 'waiting': return `${n.waitingForOthers(resetWhen(cause.since, ctx.now, lang, ctx.timeZone))} ${n.waitingNext}`;
     case 'too_small': {
       const starts = n.periodStarts(cause.cap, resetAt(capResetAt(cause.cap, ctx.now), ctx.now, lang, ctx.timeZone));
