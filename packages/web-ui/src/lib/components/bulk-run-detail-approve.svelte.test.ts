@@ -1729,3 +1729,95 @@ describe('the start of a judged run, in words', () => {
 		expect(supersede.getAttribute('aria-describedby')).toBe('bulk-start-hint');
 	});
 });
+
+// U-387: a judged run's verdicts that differ from the rest of it come first, each with its reasons as
+// text that does not look clickable, under a line that says this is a reading order, not a check.
+describe('verdicts that differ from the rest of the run', () => {
+	const outlierCount = (): string | null | undefined => target.querySelector('[data-testid="bulk-outlier-count"]')?.textContent;
+	const spread = (): string[] => [...target.querySelectorAll('[data-testid="bulk-outlier-spread"]')].map((e) => e.textContent ?? '');
+	const rowNames = (): string[] => [...target.querySelectorAll('tbody tr')].map((r) => r.querySelector('td')?.textContent ?? '');
+	const pills = (row: number): string[] => [...target.querySelectorAll('tbody tr')[row]!.querySelectorAll('[data-testid="bulk-outlier"]')].map((e) => e.textContent ?? '');
+	const many = (n: number): BulkTarget[] => Array.from({ length: n }, (_, i) => ({
+		seq: i + 1, key: `gid://shopify/Product/${String(i + 1)}`, change: 'update' as const, diff: fieldsDiff(`Alt ${String(i + 1)}`, `Neu ${String(i + 1)}`), error: null, deselected: false,
+	}));
+	const changes = (n: number) => ({ update: n, create: 0, delete: 0, unchanged: 0, invalid: 0 });
+
+	it('lists the flagged verdicts first in their own order, with every reason, and says one that does not stand out can still be wrong', async () => {
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, spread: [],
+			flagged: [{ seq: 7, reasons: ['new_link', 'length_jump'] }, { seq: 19, reasons: ['rare_value'] }] } });
+		targets = many(25);
+		await render();
+		expect(outlierCount()).toBe(tf('bulk.outliers.count', { n: '2' }));
+		expect(rowNames().slice(0, 3).map((r) => /(\d+)/.exec(r)?.[1])).toEqual(['7', '19', '1']);
+		expect(pills(0)).toEqual([t('bulk.outlier.new_link'), t('bulk.outlier.length_jump')]);
+		expect(pills(1)).toEqual([t('bulk.outlier.rare_value')]);
+		expect(pills(2)).toEqual([]);
+		// Text, never a link.
+		expect(target.querySelector('[data-testid="bulk-outlier"] a, [data-testid="bulk-outlier-count"] a')).toBeNull();
+	});
+
+	it('says in the singular that one verdict differs', async () => {
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, spread: [], flagged: [{ seq: 3, reasons: ['changed_fields'] }] } });
+		targets = many(25);
+		await render();
+		expect(outlierCount()).toBe(t('bulk.outliers.count_one'));
+	});
+
+	it('says that no verdict differs, and that this is no check, when none is flagged among 20 or more', async () => {
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, spread: [], flagged: [] } });
+		targets = many(25);
+		await render();
+		expect(outlierCount()).toBe(t('bulk.outliers.none'));
+		expect(target.querySelector('[data-testid="bulk-outlier"]')).toBeNull();
+	});
+
+	it('tells the owner to read every verdict of a run under 20', async () => {
+		run = makeRun({ total: 5, changes: changes(5), judgeOutliers: { decided: 5, measured: false, spread: [], flagged: [] } });
+		targets = many(5);
+		await render();
+		expect(outlierCount()).toBe(t('bulk.outliers.small'));
+	});
+
+	it('lists the first 50 of more flagged verdicts first and names how many differ', async () => {
+		const flagged = Array.from({ length: 60 }, (_, i) => ({ seq: 100 - i, reasons: ['new_phone' as const] })).sort((a, b) => a.seq - b.seq);
+		run = makeRun({ total: 100, changes: changes(100), judgeOutliers: { decided: 100, measured: true, spread: [], flagged } });
+		targets = many(100);
+		await render();
+		expect(outlierCount()).toBe(tf('bulk.outliers.over', { n: '60', first: '50' }));
+		// The 50 first flagged (seq 41–90) on top, then the rest in plan order (1–40, then 91–100 flagged but not lifted).
+		expect(pills(0)).toEqual([t('bulk.outlier.new_phone')]);
+		expect(pills(49)).toEqual([t('bulk.outlier.new_phone')]);
+		expect(pills(50)).toEqual([]);
+	});
+
+	it('names a link many verdicts add on a line of its own, with up to five hosts as text and how many more', async () => {
+		const hosts = ['a.example', 'b.example', 'c.example', 'd.example', 'e.example', 'f.example', 'g.example'];
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 25, hosts }, { kind: 'phone', count: 1, hosts: [] }] } });
+		targets = many(25);
+		await render();
+		expect(spread()).toEqual([
+			tf('bulk.outliers.spread.link', { n: '25', hosts: tf('bulk.outliers.spread.link_hosts_more', { hosts: hosts.slice(0, 5).join(', '), k: '2' }) }),
+			tf('bulk.outliers.spread.phone_one', { n: '1', hosts: '' }),
+		]);
+		expect(target.querySelector('[data-testid="bulk-outlier-spread"] a')).toBeNull();
+	});
+
+	it('shows a hidden character in a host of that line instead of hiding it', async () => {
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 25, hosts: ['shop\u200b.example'] }] } });
+		targets = many(25);
+		await render();
+		expect(spread()).toHaveLength(1);
+		expect(spread()[0]).not.toContain('\u200b');
+		expect(spread()[0]).toContain('shop');
+	});
+
+	it('shows no line and no mark where the run is not one to approve', async () => {
+		run = makeRun({ phase: 'approved', total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, spread: [], flagged: [{ seq: 7, reasons: ['new_link'] }] } });
+		targets = many(25);
+		await render();
+		expect(outlierCount()).toBeUndefined();
+		expect(target.querySelector('[data-testid="bulk-outlier"]')).toBeNull();
+	});
+});

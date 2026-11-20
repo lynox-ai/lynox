@@ -260,6 +260,55 @@ describe('the start: rule hash, a limit in whole cents, supersedes', () => {
   });
 });
 
+describe('judgeOutliersOf — the verdicts a judged run lists first', () => {
+  const skus = Array.from({ length: 30 }, (_, i) => `P${String(i + 1).padStart(2, '0')}`);
+  const seed = (): void => {
+    store.insertRecords({
+      collection: 'products',
+      records: skus.map((sku, i) => ({ sku, title: `old ${sku.toLowerCase()} ${'tea '.repeat(i % 3)}`.trim(), note: `${MARK}-${sku}` })),
+      stamp: TEST_STAMP,
+    });
+  };
+
+  it('flags the one verdict among 30 that adds a link its row did not hold, by its seq, with the reason', async () => {
+    seed();
+    const id = await plan(skus);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({
+      data: change({ title: user.includes('old p17') ? `${title(user)} tea-deals.example.net` : title(user) }), costUsd: 0.001,
+    }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    const seq17 = ledger.getPreview(id).find((t) => (t.after as Record<string, unknown> | null)?.['sku'] === 'P17')!.seq;
+    expect(ledger.judgeOutliersOf(id)).toEqual({ decided: 30, measured: true, flagged: [{ seq: seq17, reasons: ['new_link', 'length_jump'] }], spread: [] });
+  });
+
+  it('flags no verdict of 30 that only reword their row, and counts them as measured', async () => {
+    seed();
+    const id = await plan(skus);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.001 }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    expect(ledger.judgeOutliersOf(id)).toEqual({ decided: 30, measured: true, flagged: [], spread: [] });
+  });
+
+  it('leaves a target the owner took out of the run out of the statistics', async () => {
+    seed();
+    const id = await plan(skus);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({
+      data: change({ title: user.includes('old p17') ? `${title(user)} tea-deals.example.net` : title(user) }), costUsd: 0.001,
+    }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    const seq17 = ledger.getPreview(id).find((t) => (t.after as Record<string, unknown> | null)?.['sku'] === 'P17')!.seq;
+    expect(ledger.deselectTarget(id, seq17, { checksum: ledger.computeChecksum(id)! }).ok).toBe(true);
+    expect(ledger.judgeOutliersOf(id)).toMatchObject({ decided: 29, flagged: [] });
+  });
+
+  it('is null for a run without a rule', () => {
+    expect(ledger.judgeOutliersOf('no-such-run')).toBeNull();
+  });
+});
+
 describe('runBulkJudge over data-store rows', () => {
   it('judges every target, merges the verdict into the row without nulling another column, books every call', async () => {
     const id = await plan(['A', 'B']);

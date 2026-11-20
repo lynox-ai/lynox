@@ -10212,6 +10212,9 @@ export class LynoxHTTPApi {
           const hidden = actionable ? ledger.hiddenCounts(params['id']!) : null;
           return { hiddenAddsTargets: hidden?.adds ?? null, hiddenUncheckedTargets: hidden?.unchecked ?? null };
         })(),
+        // A judged run's verdicts that differ from the rest of it, listed first in the approval view:
+        // a reading order, never a check (`bulk-outliers.ts`). Only where the run can be approved.
+        judgeOutliers: status.phase === 'previewed' ? ledger.judgeOutliersOf(params['id']!) : null,
         // A Shopify list has no page address: what is read is the store's GraphQL endpoint, with
         // the engine's own documents. It stands here so the owner sees where the read goes. A stored
         // source with no address to build (a form without a spec, a filter holding a list) shows its

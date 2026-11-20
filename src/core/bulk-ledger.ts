@@ -25,6 +25,7 @@ import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
 import { hiddenAddsToCopy, targetHiddenAdds, type FieldHiddenAdds } from './bulk-hidden-adds.js';
+import { judgeOutliers, type OutlierFieldKind, type OutlierInput, type OutlierResult } from './bulk-outliers.js';
 import { checkMarkup, sameHtmlField, shortcodeRefusalOf, htmlFieldsOfFormName, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
 import { canonicalHtml, htmlEqualIgnoringLayout, withinReadingBounds } from './html-tree.js';
@@ -1748,6 +1749,38 @@ export class BulkLedger {
       if (fields.some((f) => f.unread === true)) unchecked++;
     }
     return { adds, unchecked };
+  }
+
+  /**
+   * The verdicts of a judged run that differ from the rest of it (`bulk-outliers.ts`): the order the
+   * approval view lists them in, never a check. Over the targets the owner has not taken out whose
+   * verdict is decided; one pass, iterated like {@link hiddenCounts}. Null for a run without a rule.
+   * The store host and the start domains are what the run may link to, so they are not new.
+   */
+  judgeOutliersOf(runId: string): OutlierResult | null {
+    const run = this.runRow(runId);
+    if (run === undefined || run.judge_rule === null) return null;
+    const kinds: Record<string, OutlierFieldKind> = {};
+    for (const [field, property] of Object.entries(this.judgeRuleOf(run).schema.properties)) {
+      const type = (property as { type?: unknown }).type;
+      kinds[field] = type === 'number' || type === 'integer' ? 'number'
+        : type === 'boolean' ? 'boolean'
+        : Object.hasOwn(property as object, 'enum') ? 'enum' : 'text';
+    }
+    const host = externalHostOf(run.target_system);
+    const own = [...(host === null ? [] : [host]), ...(this.startDomainsOfRow(run) ?? [])];
+    const rows = this.engineDb.getDb().prepare(
+      `SELECT seq, before, after_planned FROM bulk_targets
+       WHERE run_id = ? AND deselected_at IS NULL AND judged_at IS NOT NULL AND change IN ('update', 'create', 'unchanged')
+       ORDER BY seq`,
+    ).iterate(runId) as IterableIterator<{ seq: number; before: string | null; after_planned: string | null }>;
+    const inputs: OutlierInput[] = [];
+    for (const r of rows) {
+      if (r.after_planned === null) continue;
+      const before = r.before === null ? null : JSON.parse(this.engineDb.dec(r.before)) as BeforeImage;
+      inputs.push({ seq: r.seq, before: before !== null && !before.absent ? before.value : null, after: JSON.parse(this.engineDb.dec(r.after_planned)) });
+    }
+    return judgeOutliers(inputs, own, kinds);
   }
 
   private toStatus(row: RunRow): BulkRunStatus {
