@@ -25,10 +25,16 @@
 		return isOwnerSession() && (profile.created_by ?? '').startsWith('mandate:');
 	}
 
-	// The hostname of a profile's address, or '' when it does not parse or has none.
+	// The hostname of a profile's web address, or '' when it is not one. Only http(s), and only the
+	// characters a host name or an IPv6 literal is made of: an opaque host (`foo://…`) keeps case and
+	// punctuation, and a special one still keeps quotes, so neither reaches the dialog. Length is
+	// bounded, so the question after it stays in view.
+	const HOST = /^(?:[a-z0-9-]{1,63}\.)*[a-z0-9-]{1,63}\.?$|^\[[0-9a-f:.]+\]$/;
 	function hostOf(url: string): string {
 		try {
-			return new URL(url).hostname;
+			const u = new URL(url);
+			if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+			return u.hostname.length <= 253 && HOST.test(u.hostname) ? u.hostname : '';
 		} catch {
 			return '';
 		}
@@ -106,7 +112,7 @@
 		// Native confirm keeps the surface small; matches the rest of the
 		// destructive-action UX in this app (HistoryView, ArtifactsView).
 		// A native dialog cannot set a value apart: a name a person with access gave stays out of it.
-		// The host of its address names it instead (a parsed hostname holds no spaces or quotes).
+		// The host of its address names it instead, when it is a plain host name (`hostOf`).
 		const host = setUpByMember(profile) ? hostOf(profile.base_url) : '';
 		const msg = !setUpByMember(profile) ? tf('apis.delete_confirm', { name: profile.name })
 			: host !== '' ? tf('apis.delete_confirm_host', { host }) : t('apis.delete_confirm_unnamed');
@@ -206,7 +212,7 @@
 							</div>
 							<p class="text-xs text-text-subtle mt-1 font-mono">{profile.base_url}</p>
 							{#if connectionLine(profile.oauth_grant)}<p class="text-xs text-text-muted mt-1" data-testid="api-connection"><MarkedLine text={connectionText(connectionLine(profile.oauth_grant)!)} /></p>{/if}
-							{#if profile.description}<p class="text-xs text-text-muted mt-1">{profile.description}</p>{/if}
+							{#if profile.description}<p class="text-xs text-text-muted mt-1" data-profile-description>{#if setUpByMember(profile)}<MarkedLine text={shownWhole(profile.description)} mono={false} />{:else}{profile.description}{/if}</p>{/if}
 						</button>
 						<button onclick={() => manageInChat(profile)}
 							aria-label={t('apis.manage_in_chat')}
