@@ -1784,6 +1784,8 @@
 	// re-render doesn't re-walk the whole ternary chain.
 	const tabsPromptActive = $derived(!!pendingTabsPrompt && !inBatchMode);
 	const permissionPromptActive = $derived(!!pendingPermission && !inBatchMode);
+	/** An engine confirmation is open that only its buttons answer: the send arrow has nothing to send. */
+	const consentTakesNoText = $derived(pendingPermission?.consent !== undefined && !consentTakesText(pendingPermission.consent));
 	const inputGateDisabled = $derived(!!pendingSecret || tabsPromptActive || (!ready && !pendingPermission));
 	const placeholderText = $derived(
 		pendingSecret ? t('chat.placeholder_secret')
@@ -3539,7 +3541,7 @@
 						<div class="flex-1 min-w-0 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [overflow-wrap:anywhere] [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto">
 							<!-- eslint-disable-next-line svelte/no-at-html-tags -- renderPromptSegments/renderPromptMarkdown (utils/prompt-markdown.ts): marked with escaping overrides, then DOMPurify with a pinned tag/attribute list; segment values are spliced in afterwards, HTML-escaped -->
 							{@html pendingPermission.segments
-								? renderPromptSegments(pendingPermission.segments)
+								? renderPromptSegments(pendingPermission.segments, { box: toolConsent !== undefined })
 								: renderPromptMarkdown(pendingPermission.question)}
 						</div>
 					{/if}
@@ -4006,7 +4008,7 @@
 					{#if !recording && (inputText.trim() || pendingFiles.length > 0 || pendingPermission)}
 						<button
 							onclick={handleSend}
-							disabled={(!inputText.trim() && pendingFiles.length === 0) || inputGateDisabled || !!pendingChangeset}
+							disabled={(!inputText.trim() && pendingFiles.length === 0) || inputGateDisabled || !!pendingChangeset || consentTakesNoText}
 							class="shrink-0 h-11 w-11 flex items-center justify-center rounded-full bg-accent text-accent-fg hover:opacity-90 disabled:opacity-30 transition-all"
 							aria-label={t('chat.send')}
 						>

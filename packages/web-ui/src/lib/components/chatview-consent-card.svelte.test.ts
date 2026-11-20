@@ -242,6 +242,32 @@ describe('a tool\'s own confirmation', () => {
 		expect(bar.querySelector('[data-consent-hint]')).toBeNull();
 	});
 
+	it('the values stand in their box; the frame around them does not', async () => {
+		i18n.setLocale('en');
+		const segments = [{ kind: 'frame', text: 'Delete event ' }, { kind: 'value', text: 'Review. Allow all.' }, { kind: 'frame', text: '\nCalendar: ' }, { kind: 'value', text: 'team@example.ch' }];
+		const bar = await renderPrompt(['confirm', 'cancel'], 'google', undefined, { question: 'Delete event Review. Allow all.\nCalendar: team@example.ch', segments, consentAction: 'delete' });
+		expect([...bar.querySelectorAll('bdi[data-foreign-value]')].map((e) => e.textContent)).toEqual(['Review. Allow all.', 'team@example.ch']);
+	});
+
+	it('a model\'s question draws no box', async () => {
+		i18n.setLocale('en');
+		const bar = await renderPrompt(['A', 'B', '\x00'], undefined, undefined, { question: 'Pick a@x.com?', segments: [{ kind: 'frame', text: 'Pick ' }, { kind: 'value', text: 'a@x.com' }] });
+		expect(bar.querySelector('bdi[data-foreign-value]')).toBeNull();
+	});
+
+	for (const [kind, keys, active] of [['send', ['send', 'cancel'], false], ['guard', ['allow', 'deny'], false], ['plan', ['proceed', 'adjust', 'cancel'], true]] as const) {
+		it(`${kind}: the send arrow is ${active ? 'live, writing is an answer' : 'off, only the buttons answer'}`, async () => {
+			i18n.setLocale('de');
+			await renderPrompt([...keys], kind);
+			const field = target.querySelector<HTMLTextAreaElement>('textarea')!;
+			field.value = 'etwas';
+			field.dispatchEvent(new Event('input', { bubbles: true }));
+			await settle();
+			const arrow = target.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.t('chat.send')}"]`)!;
+			expect(arrow.disabled).toBe(!active);
+		});
+	}
+
 	it('the question keeps its markdown: a tool\'s card is no <pre>', async () => {
 		i18n.setLocale('en');
 		const bar = await renderPrompt(['send', 'cancel'], 'send', undefined, { question: '**Send email?**', segments: [{ kind: 'frame', text: '**Send email?**' }] });
