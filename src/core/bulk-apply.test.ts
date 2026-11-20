@@ -2068,7 +2068,7 @@ describe('data-store runs', () => {
       expect(ledger.getRunForApply(await undoOf(clean))!.plannerUntrusted).toBe(false);
     });
 
-    it('a row a clean undo re-creates is marked when it was marked before its undo deleted it', async () => {
+    it('a row a clean undo re-creates is marked, so a mark it held before its undo deleted it is not lost', async () => {
       seedStore();
       stage([{ target: 'NEW1', price: 1 }], false);
       const runId = await planStaged(agentRead(false));
@@ -2083,6 +2083,15 @@ describe('data-store runs', () => {
       await undoOf(undo);
       expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows[0]).toMatchObject({ sku: 'NEW1', price: 1 });
       expect(markOf('NEW1')).toBe(true);
+
+      // The undo cannot tell which rows were marked when it deleted them (the before-image does
+      // not carry the mark), so it marks every row it re-creates — a clean one as well.
+      stage([{ target: 'NEW2', price: 2 }], false);
+      const clean = await planStaged(agentRead(false));
+      expect(markOf('NEW2')).toBe(false);
+      await undoOf(await undoOf(clean));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW2' } }).rows[0]).toMatchObject({ sku: 'NEW2', price: 2 });
+      expect(markOf('NEW2')).toBe(true);
     });
 
     it('CONTROL: a clean undo of an update leaves an unmarked row unmarked', async () => {
