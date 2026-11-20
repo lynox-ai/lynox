@@ -465,16 +465,34 @@ describe('the webhook drain', () => {
     await settled(t, id, 'done');
   });
 
-  it('puts an event whose run never started back to waiting, with its values', () => {
-    const t = sharedTrigger();
-    const id = deliver(t);
-    expect(ledger.begin(id, 'a1')).toBe(true);
-    expect(ledger.finish(id, 'a1', { state: 'received' })).toBe(true);
-    const back = eventOf(t, id);
-    expect(back.state).toBe('received');
-    expect(back.reason).toBeNull();
-    expect(back.valuesJson).not.toBeNull();
-    expect(ledger.oldestReceived(t)?.id).toBe(id);
+  // The admission is checked before the lease. A refusal of the trigger's next event while its
+  // last one runs records a run that never started; it must not end the run that is going.
+  // The second drain ticks from inside the first run, where the run's own context answers for
+  // the trigger, so a record that looked up the running slot would find it.
+  it('leaves a running event its own end when the next one is refused at the admission', async () => {
+    let finish: (v: { ok: boolean; status: string; runId: string }) => void = () => undefined;
+    const other = new WorkerLoop(engine, router, 60_000, undefined, { heartbeatMs: 20, ttlMs: 60_000 });
+    try {
+      const t = sharedTrigger();
+      const first = deliver(t);
+      let second = '';
+      runner.run.mockImplementationOnce(async () => {
+        second = deliver(t);
+        budget.refuse = true;
+        await other.tick();
+        return new Promise((resolve) => { finish = resolve; });
+      });
+      await loop.tick();
+      await vi.waitFor(() => expect(second).not.toBe(''), { timeout: 5_000 });
+      expect(tm.getTrigger(t)!.last_run_status, 'the refusal was recorded').toBe('not_run');
+      finish({ ok: true, status: 'completed', runId: 'run-1' });
+      await settled(t, first, 'done');
+      expect(runner.run).toHaveBeenCalledTimes(1);
+      expect(tm.getTrigger(t)!.last_run_status, 'the run is recorded as it ended').toBe('success');
+      expect(eventOf(t, second).state, 'the refused event still waits').toBe('received');
+    } finally {
+      other.stop();
+    }
   });
 
   // Two engine processes on one file, the first run's lease kept alive.

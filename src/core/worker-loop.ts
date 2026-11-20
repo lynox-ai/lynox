@@ -229,7 +229,7 @@ function eventValues(valuesJson: string | null): Record<string, string | number 
 export function outcomeOfRun(entry: Pick<ActiveTask, 'event'>): EventOutcome {
   const set = entry.event?.outcome;
   if (set === undefined) return { state: 'failed', reason: 'The run ended without a recorded outcome.' };
-  return set.state === 'done' || set.state === 'received' ? set : { ...set, reason: set.reason.slice(0, 500) };
+  return set.state === 'done' ? set : { ...set, reason: set.reason.slice(0, 500) };
 }
 
 /** A failed event's reasons that are lynox's own sentences, and so may be said (in the owner's language). */
@@ -866,7 +866,11 @@ export class WorkerLoop {
     // after `stop()` cleared the map); the lookup is that entry where the caller passed a slot
     // of its own.
     if (slot !== undefined) slot.ended = status;
-    const live = this.#runSlotOf(id);
+    // ⛔ A run refused before it started has no run, but the trigger may have one going: the
+    // admission is checked before the lease, so a webhook trigger's next event can be refused
+    // while its last one runs. That run's slot is not this record's to end — marked from here,
+    // its event took `not_run`'s end first and its real end could no longer set it.
+    const live = status === 'not_run' && run === null ? undefined : this.#runSlotOf(id);
     if (live !== undefined) live.ended = status;
     // A run stopped because its plan's access ended says so, not "on your instruction"; and when
     // its plan is paused, or a member's end is proven now, it keeps its schedule (`plan-pause.ts`).
@@ -879,9 +883,8 @@ export class WorkerLoop {
       }
     }
     // A webhook run's event takes the end where nothing more specific was set: lynox's own
-    // sentence, or the masked error of a run that threw. A run that never started leaves its
-    // event waiting, as an event the admission refused waits: it runs once the run can start.
-    endEvent(slot ?? live, status === 'success' ? { state: 'done' } : status === 'not_run' ? { state: 'received' } : { state: 'failed', reason: result });
+    // sentence, or the masked error of a run that threw.
+    endEvent(slot ?? live, status === 'success' ? { state: 'done' } : { state: 'failed', reason: result });
     // A run that did run ends the refusal it was told of: the next one is told again.
     if (status !== 'not_run') this.#notRunTold.delete(id);
     const record = { ...(startedByOther(slot) ? { noRetry: true } : {}), ...(opts?.keepSchedule === true ? { keepSchedule: true } : {}) };
