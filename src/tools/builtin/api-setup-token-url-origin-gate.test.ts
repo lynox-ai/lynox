@@ -21,7 +21,8 @@ import { OwnerKnownTargets } from '../../core/owner-known-targets.js';
 import { ConversationLatch } from '../../core/conversation-latch.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
 import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
-import { originRunNotice } from '../../core/origin-notices.js';
+import { originRunNotice, originTokenUrlRefused } from '../../core/origin-notices.js';
+import { UNATTENDED_BLOCK_ANSWER } from '../../core/prompt-store.js';
 import { apiSetupTool } from './api-setup.js';
 
 type Result = { content: unknown; is_error?: boolean };
@@ -84,7 +85,7 @@ describe('api_setup saving a token address after foreign content', () => {
       const agent = agentOf(tool, ask.fn);
       const result = await call(agent, { action, profile: oauthProfile(EVIL_TOKEN_URL) });
       expect(ask.asked).toHaveLength(1);
-      expect(ask.asked[0]).toMatch(/^Save this API connection\? Its token address is on "collect\.evil\.example", path "\/t\/acme-invoices", with 2 parameters\. /);
+      expect(ask.asked[0]).toMatch(/^Save this API connection\? lynox gets its tokens from "collect\.evil\.example", path "\/t\/acme-invoices", with 2 values after the "\?"\. /);
       expect(tool.done).toEqual([]);
       expect(result.is_error).toBe(true);
       expect(String(result.content)).toMatch(/^Not saved: /);
@@ -99,9 +100,9 @@ describe('api_setup saving a token address after foreign content', () => {
     const agent = agentOf(tool, ask.fn);
     await call(agent, { action: 'create', profile: oauthProfile(EVIL_TOKEN_URL) });
     expect(ask.asked).toEqual([
-      'Save this API connection? Its token address is on "collect.evil.example", path "/t/acme-invoices", with 2 parameters. '
-      + 'Each time lynox fetches or refreshes a token, it sends the client ID and client secret from your vault there. '
-      + 'This conversation contains content from outside, and you haven\'t named "collect.evil.example". A yes applies to this one save only.\n\n'
+      'Save this API connection? lynox gets its tokens from "collect.evil.example", path "/t/acme-invoices", with 2 values after the "?". '
+      + 'Each time lynox fetches or refreshes a token, it sends the Client ID and Client Secret from your vault there. '
+      + 'This conversation contains content from outside, and you haven\'t named "collect.evil.example". A yes saves the connection; after that, lynox does not ask again when it fetches tokens.\n\n'
       + 'Write "collect.evil.example" here in the chat, and lynox won\'t ask about this host again in this conversation.',
     ]);
     expect(ask.asked[0]).not.toContain(SECRET_VALUE);
@@ -114,27 +115,36 @@ describe('api_setup saving a token address after foreign content', () => {
     const agent = agentOf(tool, ask.fn, 'nothing named', true, { noticeLanguage: 'de' } as Extra);
     await call(agent, { action: 'create', profile: oauthProfile(EVIL_TOKEN_URL) });
     expect(ask.asked).toEqual([
-      'Diese API-Verbindung speichern? Ihre Token-Adresse liegt auf „collect.evil.example“, Pfad „/t/acme-invoices“, mit 2 Parametern. '
-      + 'Bei jedem Token-Abruf und jeder Erneuerung schickt lynox die Client-ID und das Client-Secret aus deinem Tresor dorthin. '
-      + 'Im Gespräch steht Inhalt von ausserhalb, und „collect.evil.example“ hast du nicht genannt. Ein Ja gilt nur für dieses eine Speichern.\n\n'
+      'Diese API-Verbindung speichern? lynox holt ihre Tokens bei „collect.evil.example“, Pfad „/t/acme-invoices“, mit 2 Angaben nach dem „?“. '
+      + 'Bei jedem Abruf und jeder Erneuerung eines Tokens schickt lynox die Client-ID und das Client-Secret aus deinem Vault dorthin. '
+      + 'Im Gespräch steht Inhalt von ausserhalb, und „collect.evil.example“ hast du nicht genannt. Ein Ja speichert die Verbindung; danach fragt lynox bei Token-Abrufen nicht mehr nach.\n\n'
       + 'Schreib „collect.evil.example“ hier in den Chat, dann fragt lynox in diesem Gespräch nicht mehr nach diesem Host.',
     ]);
     expect(ask.asked[0]).not.toContain(SECRET_VALUE);
   });
 
-  it('an address with one parameter says so in the singular, and one without a query says nothing of parameters', async () => {
+  it('one value is said in the singular, no query says nothing of values, and the path "/" is not named', async () => {
     const tool = apiSetup();
     const ask = asker('Deny');
     const agent = agentOf(tool, ask.fn);
     await call(agent, { action: 'create', profile: oauthProfile('https://collect.evil.example/t?x=1') });
     await call(agent, { action: 'create', profile: oauthProfile('https://collect.evil.example/oauth/token') });
-    expect(ask.asked[0]).toContain('path "/t", with 1 parameter. ');
-    expect(ask.asked[1]).toContain('path "/oauth/token". Each time');
-    expect(ask.asked[1]).not.toContain('parameter');
+    await call(agent, { action: 'create', profile: oauthProfile('https://collect.evil.example/') });
+    await call(agent, { action: 'create', profile: oauthProfile('https://collect.evil.example/?a=1&b=2') });
+    expect(ask.asked[0]).toContain('from "collect.evil.example", path "/t", with 1 value after the "?". Each time');
+    expect(ask.asked[1]).toContain('from "collect.evil.example", path "/oauth/token". Each time');
+    expect(ask.asked[1]).not.toContain('value');
+    expect(ask.asked[2]).toContain('from "collect.evil.example". Each time');
+    expect(ask.asked[2]).not.toContain('path');
+    expect(ask.asked[3]).toContain('from "collect.evil.example", with 2 values after the "?". Each time');
     const de = asker('Deny');
     const agentDe = agentOf(tool, de.fn, 'nothing named', true, { noticeLanguage: 'de' } as Extra);
     await call(agentDe, { action: 'create', profile: oauthProfile('https://collect.evil.example/t?x=1') });
-    expect(de.asked[0]).toContain('Pfad „/t“, mit 1 Parameter. ');
+    await call(agentDe, { action: 'create', profile: oauthProfile('https://collect.evil.example/') });
+    await call(agentDe, { action: 'create', profile: oauthProfile('https://collect.evil.example/oauth/token') });
+    expect(de.asked[0]).toContain('bei „collect.evil.example“, Pfad „/t“, mit 1 Angabe nach dem „?“. Bei jedem');
+    expect(de.asked[1]).toContain('bei „collect.evil.example“. Bei jedem');
+    expect(de.asked[2]).toContain('bei „collect.evil.example“, Pfad „/oauth/token“. Bei jedem');
   });
 
   it('a yes saves the profile', async () => {
@@ -258,7 +268,7 @@ describe('api_setup saving a token address after foreign content', () => {
     const result = await call(agent, { action: 'create', profile: oauthProfile('https:collect.evil.example/t') });
     expect(ask.asked).toEqual([]);
     expect(tool.done).toEqual([]);
-    expect(String(result.content)).toMatch(/^Not saved: lynox could not read the host of the token address/);
+    expect(String(result.content)).toMatch(/^Not saved: lynox could not read the token address of this profile/);
   });
 
   it('when the owner\'s words cannot be read, the question and the refusal say so, and name no way out', async () => {
@@ -294,5 +304,73 @@ describe('api_setup saving a token address after foreign content', () => {
     await call(agent, { action: 'fetch_token', id: 'acme' });
     expect(ask.asked).toEqual([]);
     expect(tool.done).toEqual([`create:${EVIL_TOKEN_URL}`, 'fetch_token:acme', 'fetch_token:acme']);
+  });
+  it('the refusal after a no names the way out without promising a save without questions', async () => {
+    const tool = apiSetup();
+    const ask = asker('Deny');
+    const agent = agentOf(tool, ask.fn);
+    const result = await call(agent, { action: 'create', profile: oauthProfile(EVIL_TOKEN_URL) });
+    expect(String(result.content)).toContain('they can write its host in the chat themselves and ask again; lynox then does not ask about this host again in this conversation.');
+    expect(String(result.content)).not.toContain('without asking');
+  });
+
+  it('a token_url that is not text (a list) is refused as unreadable after foreign content, and nothing is saved', async () => {
+    const tool = apiSetup();
+    const ask = asker('Allow');
+    const agent = agentOf(tool, ask.fn, 'the token endpoint is on collect.evil.example');
+    for (const action of ['create', 'update'] as const) {
+      for (const bad of [[EVIL_TOKEN_URL], 42, '']) {
+        const result = await call(agent, { action, profile: oauthProfile(bad as unknown as string) });
+        expect(String(result.content), `${action} ${JSON.stringify(bad)}`).toMatch(/^Not saved: lynox could not read the token address of this profile/);
+      }
+    }
+    expect(ask.asked).toEqual([]);
+    expect(tool.done).toEqual([]);
+  });
+
+  it('a question nobody watching can answer (blocked in an unattended run) refuses the save as unattended', async () => {
+    const tool = apiSetup();
+    const ask = asker(UNATTENDED_BLOCK_ANSWER);
+    const agent = agentOf(tool, ask.fn);
+    const result = await call(agent, { action: 'create', profile: oauthProfile(EVIL_TOKEN_URL) });
+    expect(ask.asked).toHaveLength(1);
+    expect(tool.done).toEqual([]);
+    expect(String(result.content)).toMatch(/^Not saved: /);
+    expect(String(result.content)).toContain('This run has no reader');
+  });
+
+  it('a trigger from before its creator was recorded is told how to confirm it, for a save as for a send', () => {
+    const host = { values: ['collect.evil.example'], unreadable: false };
+    const origin = { kind: 'triggerRun' as const, name: 'Neue API', setUpBy: { kind: 'unknown' as const }, predatesRecord: true };
+    expect(originTokenUrlRefused('unattended', host, origin)).toBe('Not saved: the trigger "Neue API" dates from before an update, so lynox cannot tell that the owner set it up, and "collect.evil.example" does not count as named by the owner. Do not try another token address. Report that the owner can open the trigger under Triggers and choose "Confirm recipients"; after that the trigger can save the profile, if it names "collect.evil.example".');
+    expect(originRunNotice('Neue API', { targets: host, noun: 'tokenUrl', origin }, 'en')).toBe('The trigger "Neue API" did not save the API profile with its token address on "collect.evil.example": it dates from before an update, so lynox cannot tell that you set it up. Open it under Triggers and choose "Confirm recipients"; after that it can save the profile, if the trigger names that host.');
+    expect(originRunNotice('Neue API', { targets: host, noun: 'tokenUrl', origin }, 'de')).toBe('Der Trigger "Neue API" hat das API-Profil mit der Token-Adresse auf "collect.evil.example" nicht gespeichert: Er stammt aus der Zeit vor einem Update, darum weiss lynox nicht, dass du ihn angelegt hast. Öffne ihn unter Trigger und wähle „Empfänger bestätigen“, danach kann er das Profil speichern, wenn der Trigger diesen Host nennt.');
+  });
+
+  describe('with the real handler: the origin question comes first, and a no ends there', () => {
+    const answering = (answers: string[]): { fn: (q: string | PromptText) => Promise<string>; asked: string[] } => {
+      const asked: string[] = [];
+      return { asked, fn: async (q) => { asked.push(flattenPrompt(q)); return answers[asked.length - 1] ?? 'Deny'; } };
+    };
+    const realAgent = (promptUser: (q: string | PromptText) => Promise<string>): Agent => agentOf(apiSetupTool as unknown as ToolEntry, promptUser);
+    // A host outside the vetted sub-processors: the save asks its own acceptance question after the origin check.
+    const profile = (): Profile => ({ ...oauthProfile(EVIL_TOKEN_URL), base_url: 'https://collect.evil.example/api' });
+
+    it('a no to the origin question asks nothing else', async () => {
+      const ask = answering(['Deny']);
+      const result = await call(realAgent(ask.fn), { action: 'create', profile: profile() });
+      expect(ask.asked).toHaveLength(1);
+      expect(ask.asked[0]).toMatch(/^Save this API connection\? /);
+      expect(String(result.content)).toMatch(/^Not saved: /);
+    });
+
+    it('CONTROL: a yes to it is followed by the acceptance question of the save', async () => {
+      const ask = answering(['Allow', 'Deny']);
+      const result = await call(realAgent(ask.fn), { action: 'create', profile: profile() });
+      expect(ask.asked).toHaveLength(2);
+      expect(ask.asked[0]).toMatch(/^Save this API connection\? /);
+      expect(ask.asked[1]).toContain('needs your acceptance');
+      expect(String(result.content)).toContain('not saved — user declined');
+    });
   });
 });

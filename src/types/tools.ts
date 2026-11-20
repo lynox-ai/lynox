@@ -215,6 +215,8 @@ export interface ToolEntry<TInput = unknown> {
    * search listed or for the host of a connected API, an address that carries another address
    * (`carriesAddress`) is asked about whatever its host, and the question and the refusals say
    * "save". `sendTargetsWhenLatched` must declare this address's host for the same input.
+   * Throws for an address that is set but cannot be read (not text): the call is then refused as
+   * an unreadable save, never let through.
    */
   credentialAddress?: ((input: TInput) => string | null) | undefined;
   /**

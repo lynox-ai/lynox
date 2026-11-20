@@ -5197,7 +5197,13 @@ export class Agent implements IAgent {
     try {
       targets = tool.sendTargets !== undefined ? tool.sendTargets(tc.input) : null;
       if (targets === null && whenLatched !== undefined) {
-        saveAddress = tool.credentialAddress?.(tc.input) ?? null;
+        // A declaration that throws names a save whose address cannot be read: refused as one.
+        try {
+          saveAddress = tool.credentialAddress?.(tc.input) ?? null;
+        } catch (err) {
+          saving = true;
+          throw err;
+        }
         saving = saveAddress !== null;
         if (saveAddress !== null) {
           // An address that carries another one is asked about whatever its host, as for a read.
