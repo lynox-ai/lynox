@@ -249,8 +249,8 @@ describe('a tool\'s own confirmation', () => {
 		expect(bar.querySelector('strong')?.textContent).toBe('Send email?');
 	});
 
-	for (const [kind, keys, typed] of [['send', ['send', 'cancel'], 'send'], ['google', ['confirm', 'cancel'], 'confirm'], ['guard', ['allow', 'deny'], 'allow'], ['merge', ['merge', 'cancel'], 'ja']] as const) {
-		it(`${kind}: typed text — even its key — is no answer: it stays in the field with a hint`, async () => {
+	for (const [kind, keys, typed] of [['send', ['send', 'cancel'], 'send'], ['send', ['send', 'cancel'], 'ja'], ['google', ['confirm', 'cancel'], 'confirm'], ['guard', ['allow', 'deny'], 'allow'], ['deep', ['deep', 'balanced', 'cancel'], 'deep'], ['merge', ['merge', 'cancel'], 'merge'], ['apply', ['apply', 'cancel'], 'apply'], ['retire', ['retire', 'cancel'], 'retire'], ['plan', ['proceed', 'adjust', 'cancel'], 'proceed'], ['plan', ['proceed', 'adjust', 'cancel'], 'cancel']] as const) {
+		it(`${kind}: typed ${JSON.stringify(typed)} is no answer: it stays in the field with a hint`, async () => {
 			i18n.setLocale('de');
 			await renderPrompt([...keys], kind);
 			const field = target.querySelector<HTMLTextAreaElement>('textarea')!;

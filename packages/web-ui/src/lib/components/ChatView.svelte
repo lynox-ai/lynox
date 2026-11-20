@@ -1904,8 +1904,10 @@
 
 		// An engine confirmation is answered with its buttons only: typed text is no key, even when
 		// it spells one ("send"). It stays in the field and the person is told how to answer. A plan
-		// is the exception: what is written there is the change asked for.
-		if (pendingPermission && task && pendingPermission.consent !== undefined && !consentTakesText(pendingPermission.consent)) {
+		// is the exception: what is written there is the change asked for — unless it spells one of
+		// the plan's keys ("proceed"), which only its button may send.
+		if (pendingPermission && task && pendingPermission.consent !== undefined
+			&& (!consentTakesText(pendingPermission.consent) || consentAnswer(pendingPermission.consent, task) !== undefined)) {
 			typedToConsent = pendingPermission.promptId ?? pendingPermission.question;
 			return;
 		}
