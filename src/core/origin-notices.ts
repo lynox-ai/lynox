@@ -211,12 +211,12 @@ export function originCarriedAsk(targets: OriginTargets, origin: SendOrigin, lan
     const where = from === null
       ? pv`Die Adresse kommt nicht von dir; woher sie stammt, kann lynox nicht feststellen.`
       : pv`Die Adresse kommt aus ${from}, nicht von dir.`;
-    return pv`Seite auf ${list} lesen? Die Adresse enthält eine weitere Adresse (ein „http:“ oder „https:“ im Pfad oder nach dem „?“). Ein Dienst, der so eine Adresse abruft, schickt die Anfrage mit allem, was die Adresse enthält, an diese weitere Adresse weiter. ${where} Bei solchen Adressen fragt lynox jedes Mal, auch bei einem Host, den du genannt hast. ${originAskOnce(lang, 'page')}`;
+    return pv`Seite auf ${list} lesen? Die Adresse enthält eine weitere Adresse (ein „http:“ oder „https:“ im Pfad oder nach dem „?“). Ein Dienst, der so eine Adresse abruft, kann die Anfrage mit allem, was die Adresse enthält, an diese weitere Adresse weiterschicken. ${where} Bei solchen Adressen fragt lynox jedes Mal, auch bei einem Host, den du genannt hast. ${originAskOnce(lang, 'page')}`;
   }
   const where = from === null
     ? pv`The address does not come from you; lynox cannot tell where it comes from.`
     : pv`The address comes from ${from}, not from you.`;
-  return pv`Read the page on ${list}? The address carries another address (an "http:" or "https:" in the path or after the "?"). A service that fetches such an address passes the request on, with everything the address holds, to that other address. ${where} lynox asks about such an address every time, even for a host you named. ${originAskOnce(lang, 'page')}`;
+  return pv`Read the page on ${list}? The address carries another address (an "http:" or "https:" in the path or after the "?"). A service that fetches such an address can pass the request on, with everything the address holds, to that other address. ${where} lynox asks about such an address every time, even for a host you named. ${originAskOnce(lang, 'page')}`;
 }
 
 /** The question for a reply that goes only to the sender of the mail it answers. */
@@ -300,7 +300,7 @@ export function originDenied(targets: OriginTargets, origin: SendOrigin, noun: T
     + `Tell the user that it was not sent, because they did not name ${list} themselves; ${r}. ${wayOut}${NOT_A_POLICY}`);
 }
 
-const CARRIED = 'carries another address (an "http:" or "https:" in its path or query), which a service that fetches it would pass the read on to';
+const CARRIED = 'carries another address (an "http:" or "https:" in its path or query), which a service that fetches it can pass the read on to';
 
 /** To the model, after the owner said no to a read whose address carries another address. */
 export function originCarriedDenied(targets: OriginTargets): string {

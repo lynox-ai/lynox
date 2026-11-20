@@ -3138,7 +3138,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
   // too, so only a read without them can pass as an address a search listed (`readAddress`).
   sendTargets: (input) => (httpOutwardWrite(input) === null ? null : hostTargets(input.url)),
   sendTargetsWhenLatched: (input) => (httpOutwardWrite(input) === null ? hostTargets(input.url) : null),
-  readCarriesAddress: (input) => httpOutwardWrite(input) === null && carriesAddress(input.url),
+  // Only a read reaches this (a write declares its own `sendTargets`), with or without headers.
+  readCarriesAddress: (input) => carriesAddress(input.url),
   readAddress: (input) => (httpOutwardWrite(input) === null && Object.keys(input.headers ?? {}).length === 0 && (input.body ?? '') === '' ? input.url : null),
   // The same method read the other way round: a GET or HEAD reads at the URL, host and path.
   outwardRead: (input) => {
