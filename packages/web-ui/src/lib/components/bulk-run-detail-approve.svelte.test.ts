@@ -1784,10 +1784,13 @@ describe('verdicts that differ from the rest of the run', () => {
 		targets = many(100);
 		await render();
 		expect(outlierCount()).toBe(tf('bulk.outliers.over', { n: '60', first: '50' }));
-		// The 50 first flagged (seq 41–90) on top, then the rest in plan order (1–40, then 91–100 flagged but not lifted).
-		expect(pills(0)).toEqual([t('bulk.outlier.new_phone')]);
-		expect(pills(49)).toEqual([t('bulk.outlier.new_phone')]);
-		expect(pills(50)).toEqual([]);
+		// The first 50 flagged (seq 41–90) on top in their own order, then the rest in plan order: 1–40,
+		// then 91–100, flagged but not lifted.
+		const seqs = rowNames().map((r) => Number(/(\d+)/.exec(r)?.[1]));
+		expect(seqs.slice(0, 50)).toEqual(Array.from({ length: 50 }, (_, i) => 41 + i));
+		expect(seqs.slice(50, 52)).toEqual([1, 2]);
+		expect(seqs.slice(-10)).toEqual(Array.from({ length: 10 }, (_, i) => 91 + i));
+		expect(pills(99)).toEqual([t('bulk.outlier.new_phone')]);
 	});
 
 	it('names a link many verdicts add on a line of its own, with up to five hosts as text and how many more', async () => {
@@ -1805,12 +1808,14 @@ describe('verdicts that differ from the rest of the run', () => {
 
 	it('shows a hidden character in a host of that line instead of hiding it', async () => {
 		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
-			spread: [{ kind: 'link', count: 25, hosts: ['shop\u200b.example'] }] } });
+			spread: [{ kind: 'link', count: 25, hosts: ['shop\u200b.example', 'sh\u200cop.example'] }] } });
 		targets = many(25);
 		await render();
 		expect(spread()).toHaveLength(1);
-		expect(spread()[0]).not.toContain('\u200b');
-		expect(spread()[0]).toContain('shop');
+		// A zero-width space, and a joiner that running text may carry between letters: in a host neither is.
+		expect(spread()[0]).not.toMatch(/[\u200b\u200c]/u);
+		expect(spread()[0]).toContain('⟨U+200B⟩');
+		expect(spread()[0]).toContain('⟨U+200C⟩');
 	});
 
 	it('shows no line and no mark where the run is not one to approve', async () => {

@@ -1753,13 +1753,34 @@ export class BulkLedger {
 
   /**
    * The verdicts of a judged run that differ from the rest of it (`bulk-outliers.ts`): the order the
-   * approval view lists them in, never a check. Over the targets the owner has not taken out whose
-   * verdict is decided; one pass, iterated like {@link hiddenCounts}. Null for a run without a rule.
-   * The store host and the start domains are what the run may link to, so they are not new.
+   * approval view lists them in, never a check. Over every target whose verdict is decided, a target the
+   * owner took out included: the rest of the run does not change when the owner takes one out, so the
+   * marks do not move under their hand and the result is computed once per set of verdicts (held in
+   * {@link outlierCache}, keyed by how many are decided). One pass, iterated like {@link hiddenCounts}.
+   * Null for a run without a rule. The store host and the start domains are what the run may link to,
+   * so they are not new.
    */
   judgeOutliersOf(runId: string): OutlierResult | null {
     const run = this.runRow(runId);
     if (run === undefined || run.judge_rule === null) return null;
+    const decided = (this.engineDb.getDb().prepare(
+      `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND judged_at IS NOT NULL`,
+    ).get(runId) as { n: number }).n;
+    const key = `${String(decided)}:${run.judge_rule_hash ?? ''}`;
+    const held = this.outlierCache.get(runId);
+    if (held !== undefined && held.key === key) return held.result;
+    const result = this.computeJudgeOutliers(runId, run);
+    this.outlierCache.delete(runId);
+    this.outlierCache.set(runId, { key, result });
+    // A few runs at most are approved at a time; the oldest goes first.
+    if (this.outlierCache.size > 8) this.outlierCache.delete(this.outlierCache.keys().next().value!);
+    return result;
+  }
+
+  /** The verdicts {@link judgeOutliersOf} last computed, per run, with the key they were computed for. */
+  private readonly outlierCache = new Map<string, { key: string; result: OutlierResult }>();
+
+  private computeJudgeOutliers(runId: string, run: RunRow): OutlierResult {
     const kinds: Record<string, OutlierFieldKind> = {};
     for (const [field, property] of Object.entries(this.judgeRuleOf(run).schema.properties)) {
       const type = (property as { type?: unknown }).type;
@@ -1771,7 +1792,7 @@ export class BulkLedger {
     const own = [...(host === null ? [] : [host]), ...(this.startDomainsOfRow(run) ?? [])];
     const rows = this.engineDb.getDb().prepare(
       `SELECT seq, before, after_planned FROM bulk_targets
-       WHERE run_id = ? AND deselected_at IS NULL AND judged_at IS NOT NULL AND change IN ('update', 'create', 'unchanged')
+       WHERE run_id = ? AND judged_at IS NOT NULL AND change IN ('update', 'create', 'unchanged')
        ORDER BY seq`,
     ).iterate(runId) as IterableIterator<{ seq: number; before: string | null; after_planned: string | null }>;
     const inputs: OutlierInput[] = [];

@@ -291,7 +291,7 @@ describe('judgeOutliersOf — the verdicts a judged run lists first', () => {
     expect(ledger.judgeOutliersOf(id)).toEqual({ decided: 30, measured: true, flagged: [], spread: [] });
   });
 
-  it('leaves a target the owner took out of the run out of the statistics', async () => {
+  it('keeps a target the owner took out in the statistics and flagged, so the marks do not move under the owner\'s hand', async () => {
     seed();
     const id = await plan(skus);
     expect(start(id).ok).toBe(true);
@@ -301,7 +301,28 @@ describe('judgeOutliersOf — the verdicts a judged run lists first', () => {
     expect((await runBulkJudge(id, h.deps)).status).toBe('done');
     const seq17 = ledger.getPreview(id).find((t) => (t.after as Record<string, unknown> | null)?.['sku'] === 'P17')!.seq;
     expect(ledger.deselectTarget(id, seq17, { checksum: ledger.computeChecksum(id)! }).ok).toBe(true);
-    expect(ledger.judgeOutliersOf(id)).toMatchObject({ decided: 29, flagged: [] });
+    expect(ledger.judgeOutliersOf(id)).toMatchObject({ decided: 30, flagged: [{ seq: seq17 }] });
+  });
+
+  it('counts a link to a start domain the owner gave as the run\'s own, not as new', async () => {
+    seed();
+    const id = await plan(skus);
+    engineDb.getDb().prepare('UPDATE bulk_runs SET start_domains = ? WHERE id = ?').run(engineDb.enc(JSON.stringify(['tea-deals.example.net'])), id);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({
+      data: change({ title: user.includes('old p17') ? `${title(user)} tea-deals.example.net` : title(user) }), costUsd: 0.001,
+    }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    expect(ledger.judgeOutliersOf(id)!.flagged.flatMap((f) => f.reasons)).not.toContain('new_link');
+  });
+
+  it('computes a run\'s marks once and gives the same result while its verdicts stand', async () => {
+    seed();
+    const id = await plan(skus);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.001 }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    expect(ledger.judgeOutliersOf(id)).toBe(ledger.judgeOutliersOf(id));
   });
 
   it('is null for a run without a rule', () => {

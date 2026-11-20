@@ -1374,8 +1374,6 @@ export function bulkHiddenHtml(target: Pick<BulkTarget, 'hiddenAdds'>, field: st
 	return target.hiddenAdds?.find((h) => h.field === field)?.html === true;
 }
 
-/** The line an approval and a probe's confirmation show when targets add hidden characters, or
- *  null for none (a mark among hundreds of targets is not left to be found). */
 /** Why a verdict is listed first (engine `bulk-outliers.ts`). */
 export type BulkOutlierReason = 'changed_fields' | 'length_jump' | 'new_link' | 'new_email' | 'new_phone' | 'new_script' | 'rare_value';
 export type BulkMarkerKind = 'link' | 'email' | 'phone' | 'script';
@@ -1398,9 +1396,9 @@ export function bulkOutlierOrder<T extends { seq: number }>(targets: readonly T[
 	return [...targets.filter((t) => first.has(t.seq)), ...targets.filter((t) => !first.has(t.seq))];
 }
 
-/** A target's reasons, or none. */
-export function bulkOutlierReasons(outliers: BulkJudgeOutliers | null | undefined, seq: number): BulkOutlierReason[] {
-	return outliers?.flagged.find((f) => f.seq === seq)?.reasons ?? [];
+/** Each flagged target's reasons by its seq, looked up once per row. */
+export function bulkOutlierReasonMap(outliers: BulkJudgeOutliers | null | undefined): Map<number, BulkOutlierReason[]> {
+	return new Map((outliers?.flagged ?? []).map((f) => [f.seq, f.reasons]));
 }
 
 /** The line over the list (U-387): how many verdicts differ, that they come first, and that one
@@ -1432,6 +1430,8 @@ export function bulkOutlierSpreadTexts(outliers: BulkJudgeOutliers | null | unde
 	});
 }
 
+/** The line an approval and a probe's confirmation show when targets add hidden characters, or
+ *  null for none (a mark among hundreds of targets is not left to be found). */
 export function bulkHiddenCountText(n: number | null | undefined, shopify: boolean, i18n: BulkI18n): string | null {
 	if (n === null || n === undefined || n <= 0) return null;
 	// Products on Shopify, targets elsewhere, as every count beside it (U-218).

@@ -63,50 +63,80 @@ const REASON_ORDER: OutlierReason[] = ['new_link', 'new_email', 'new_phone', 'ne
 const MARKER_REASON: Record<MarkerKind, OutlierReason> = { link: 'new_link', email: 'new_email', phone: 'new_phone', script: 'new_script' };
 
 /** Top-level domains a host written as plain text must end in to count as one: so "z.B.", "ca.5" or
- *  "Art.Nr" in a product text is not read as an address. */
-const TLDS = 'com|net|org|info|biz|io|co|ai|app|dev|shop|store|online|site|xyz|top|club|link|click|ch|li|de|at|fr|it|es|nl|be|lu|uk|eu|us|ru|cn|me|tv|cc|ws|ly|gl|to|gg|su|tk|ml|ga|cf|pw|in|br|pl|cz|se|no|dk|fi|pt|gr|tr|jp|kr|au|ca';
-const HOST_LABEL = '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?';
-/** A dot as written plainly or obfuscated: `.`, `[.]`, `(.)`, `(dot)`, `[dot]`, ` dot `. */
-const DOT = String.raw`(?:\s*(?:\[\.\]|\(\.\)|\(dot\)|\[dot\])\s*|\s+dot\s+|\.)`;
-const HOST_RE = new RegExp(String.raw`(?:^|[^a-z0-9@._-])((?:xn--)?${HOST_LABEL}(?:${DOT}(?:xn--)?${HOST_LABEL})*${DOT}(?:${TLDS}|xn--[a-z0-9-]+))(?![a-z0-9-])`, 'giu');
+ *  "Art.Nr" in a product text is not read as an address. A host with a scheme needs none. */
+const TLDS = new Set('com net org info biz io co ai app dev shop store online site xyz top club link click ch li de at fr it es nl be lu uk eu us ru cn me tv cc ws ly gl to gg su tk ml ga cf pw in br pl cz se no dk fi pt gr tr jp kr au ca'.split(' '));
+/** A dot written obfuscated — `[.]`, `(.)`, `[dot]`, `(dot)`, ` dot ` — read as a dot. Anchored at the
+ *  start of the blank before it, so a long run of blanks is read once, not once per blank. */
+const OBFUSCATED_DOT = /(?<!\s)\s*(?:\[\.\]|\(\.\)|\[dot\]|\(dot\))\s*|(?<!\s)\s+dot\s+(?=[\p{L}\p{N}])/giu;
+/** A run of labels joined by dots, letters of any script. It starts only where no letter, digit, dot or
+ *  hyphen stands before it, so every run is read once from its start. */
+const HOST_TOKEN = /(?<![\p{L}\p{N}._%+@-])(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?\.)+[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?(?![\p{L}\p{N}-])/gu;
 const SCHEME_RE = /\b(?:h[tx]{2}ps?|ftp):\/\/([^\s/?#"'<>]+)/giu;
-const EMAIL_RE = /[a-z0-9._%+-]+@([a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})/giu;
-/** `+` and 8–15 digits with separators, or a leading 0 with Swiss or German grouping. Article numbers,
- *  EANs, dimensions and prices have no `+` and no such grouping. */
-const PHONE_RE = /(?:^|[^\d+])(\+\d(?:[\s./()-]?\d){7,14}|0\d{2}[\s/-]\d{3}[\s-]\d{2}[\s-]\d{2}|0\d{2,4}[\s/-]\d{5,8})(?!\d)/gu;
+const EMAIL_RE = /(?<![\p{L}\p{N}._%+-])[\p{L}\p{N}._%+-]+@([\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)+)/gu;
+/** A phone number: `+` or `00` and a country code, with an optional `(0)`, 8–15 digits in all; or a
+ *  Swiss number in its grouping (`044 123 45 67`). A leading 0 with any other grouping is not read:
+ *  part numbers (`0815 123456`) look the same. */
+const PHONE_RE = /(?<![\d+])(?:(?:\+|00)[1-9](?:[\s./-]?\(0\)|[\s./-]?\d){7,16}|0\d{2}[\s./-]\d{3}[\s./-]\d{2}[\s./-]\d{2})(?![\d])/gu;
 const SCRIPT_RE = /\b(?:javascript|vbscript)\s*:|\bdata\s*:\s*text\/html/giu;
 
-/** The markers a text holds, per kind, each as a key: a host for links, a domain for addresses, the
- *  digits for phone numbers, the scheme for scripts. Lower case. */
-export function markersOf(text: string): Map<MarkerKind, Set<string>> {
-  const out = new Map<MarkerKind, Set<string>>([['link', new Set()], ['email', new Set()], ['phone', new Set()], ['script', new Set()]]);
-  const lower = text.toLowerCase();
-  const emailHosts = new Set<string>();
-  for (const m of lower.matchAll(EMAIL_RE)) {
-    out.get('email')!.add(m[1]!);
-    emailHosts.add(m[1]!);
+/** A host as a browser reads it: ASCII, lower case, Punycode for other scripts, no `www.`, no port,
+ *  no final dot. Undefined where it is no host. */
+function asciiHost(host: string): string | undefined {
+  try {
+    const name = new URL(`http://${host.replace(/^[^@/]*@/u, '')}`).hostname.replace(/\.$/u, '');
+    return name.replace(/^www\./u, '') || undefined;
+  } catch {
+    return undefined;
   }
-  const withoutEmails = lower.replace(EMAIL_RE, ' ');
-  for (const m of withoutEmails.matchAll(SCHEME_RE)) out.get('link')!.add(normalHost(m[1]!));
-  for (const m of withoutEmails.matchAll(HOST_RE)) out.get('link')!.add(normalHost(m[1]!));
-  for (const m of text.matchAll(PHONE_RE)) out.get('phone')!.add(m[1]!.replace(/\D/g, ''));
-  for (const m of lower.matchAll(SCRIPT_RE)) out.get('script')!.add(m[0].replace(/\s/g, ''));
-  return out;
 }
 
-function normalHost(host: string): string {
-  return host
-    .replace(/^[^@]*@/u, '')
-    .replace(/:\d+$/u, '')
-    .replace(new RegExp(DOT, 'giu'), '.')
-    .replace(/^www\./u, '')
-    .replace(/\.$/u, '');
+/** The key a phone number is compared by: its last nine digits, so `+41 44 …`, `0041 44 …` and
+ *  `044 …` are one number. */
+function phoneKey(written: string): string {
+  return written.replace(/\(0\)/gu, '').replace(/\D/gu, '').slice(-9);
+}
+
+/** The markers a text holds, per kind, each as a key: a host for links (ASCII, Punycode), a domain for
+ *  addresses, the last nine digits for phone numbers, the scheme for scripts. */
+export function markersOf(text: string): Map<MarkerKind, Set<string>> {
+  const out = new Map<MarkerKind, Set<string>>([['link', new Set()], ['email', new Set()], ['phone', new Set()], ['script', new Set()]]);
+  let rest = text;
+  if (text.includes('@')) {
+    for (const m of text.matchAll(EMAIL_RE)) {
+      const domain = asciiHost(m[1]!);
+      if (domain !== undefined) out.get('email')!.add(domain);
+    }
+    rest = text.replace(EMAIL_RE, ' ');
+  }
+  if (rest.includes('://')) {
+    for (const m of rest.matchAll(SCHEME_RE)) {
+      const host = asciiHost(m[1]!.replace(/:\d+$/u, ''));
+      if (host !== undefined) out.get('link')!.add(host);
+    }
+  }
+  const plain = rest.replace(OBFUSCATED_DOT, '.');
+  for (const [token] of plain.matchAll(HOST_TOKEN)) {
+    const tld = token.slice(token.lastIndexOf('.') + 1);
+    // "Baumwolle.Es ist": a sentence whose space after the full stop is missing, not a host. A host
+    // written all in capitals, or starting with www, still counts.
+    if (/^\p{Lu}\p{Ll}/u.test(tld) && !/^www\./iu.test(token) && token !== token.toUpperCase()) continue;
+    const host = asciiHost(token);
+    if (host === undefined) continue;
+    const asciiTld = host.slice(host.lastIndexOf('.') + 1);
+    if (TLDS.has(asciiTld) || asciiTld.startsWith('xn--')) out.get('link')!.add(host);
+  }
+  for (const [written] of text.matchAll(PHONE_RE)) {
+    const digits = written.replace(/\(0\)/gu, '').replace(/\D/gu, '');
+    if (digits.length >= 8 && digits.length <= 15) out.get('phone')!.add(phoneKey(written));
+  }
+  for (const m of text.toLowerCase().matchAll(SCRIPT_RE)) out.get('script')!.add(m[0].replace(/\s/gu, ''));
+  return out;
 }
 
 /** A host matches an own domain exactly or as a subdomain at a dot boundary. */
 function ownHost(host: string, own: readonly string[]): boolean {
   return own.some((d) => {
-    const domain = d.toLowerCase().replace(/^www\./u, '');
+    const domain = asciiHost(d) ?? '';
     return domain.length > 0 && (host === domain || host.endsWith(`.${domain}`));
   });
 }
@@ -159,7 +189,7 @@ export function judgeOutliers(
   const sortedChanged = [...changed].sort((a, b) => a - b);
   const q1 = quantile(sortedChanged, 0.25);
   const q3 = quantile(sortedChanged, 0.75);
-  const fence = Math.max(q3 + 1.5 * (q3 - q1), quantile(sortedChanged, 0.5) + 2);
+  const fence = Math.max(q3 + 3 * (q3 - q1), quantile(sortedChanged, 0.5) + 2);
   targets.forEach((t, i) => { if (changed[i]! > fence) flag(t.seq, 'changed_fields'); });
 
   // Length per text field: against the run's other targets of that field, a target whose before is
@@ -201,7 +231,8 @@ export function judgeOutliers(
       const b = t.before.get(f);
       if (same(a, b)) continue;
       const n = counts.get(JSON.stringify(a ?? null)) ?? 0;
-      if (n <= 2 && n < decided * 0.01 + 1) flag(t.seq, 'rare_value');
+      // A count says nothing for a number: prices are mostly each their own. A number counts by its change.
+      if (kind !== 'number' && n <= 2 && n < decided * 0.01 + 1) flag(t.seq, 'rare_value');
       if (kind === 'number' && typeof a === 'number' && typeof b === 'number') deltas.push({ seq: t.seq, d: a - b, base: Math.abs(b) });
     }
     if (deltas.length >= OUTLIER_MIN_VERDICTS) {
@@ -219,14 +250,16 @@ export function judgeOutliers(
     const beforeText = [...t.before.values()].filter((v): v is string => typeof v === 'string').join('\n');
     const held = markersOf(beforeText);
     for (const [kind, keys] of held) for (const k of keys) inBefores.get(kind)!.add(k);
-    const heldPhoneDigits = beforeText.replace(/\D/g, '');
+    // A phone number the before-image writes without grouping still counts as held: a digit run of a
+    // phone number's length (10–12) that ends in it. An EAN (13) or a run of all digits glued is not one.
+    const heldPhoneRuns = (beforeText.match(/\d+/gu) ?? []).filter((r) => r.length >= 10 && r.length <= 12);
     for (const [f, v] of t.after) {
       if (typeof v !== 'string' || same(v, t.before.get(f))) continue;
       for (const [kind, keys] of markersOf(v)) {
         for (const key of keys) {
           if (held.get(kind)!.has(key)) continue;
           if ((kind === 'link' || kind === 'email') && ownHost(key, own)) continue;
-          if (kind === 'phone' && heldPhoneDigits.includes(key)) continue;
+          if (kind === 'phone' && heldPhoneRuns.some((r) => r.endsWith(key))) continue;
           const perTarget = added.get(kind) ?? new Map<number, Set<string>>();
           const set = perTarget.get(t.seq) ?? new Set<string>();
           set.add(key);

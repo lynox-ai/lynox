@@ -2,12 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { judgeOutliers, markersOf, OUTLIER_MIN_VERDICTS, type OutlierFieldKind, type OutlierInput } from './bulk-outliers.js';
 
 const OWN = ['teehaus.example.ch'];
-const KINDS: Record<string, OutlierFieldKind> = { title: 'text', description: 'text', status: 'enum', weight_g: 'number', vegan: 'boolean' };
+const KINDS: Record<string, OutlierFieldKind> = { title: 'text', description: 'text', status: 'enum', weight_g: 'number', vegan: 'boolean', price: 'number', origin: 'text', note: 'text' };
 const SORTS = ['Grüntee', 'Schwarztee', 'Kräutertee', 'Rooibos', 'Mate', 'Chai', 'Oolong', 'Weisstee'];
 const ADJ = ['mild', 'kräftig', 'blumig', 'frisch', 'würzig', 'rund', 'fein', 'herb'];
 
-/** One plausible verdict of a run that rewrites tea descriptions: lengths vary by about ±30 %, one to
- *  three fields change, numbers that are no phone numbers (EAN, dimensions, prices) appear in text. */
+/** One plausible verdict of a run that rewrites tea descriptions and raises every price by 8 %: lengths
+ *  vary by about ±30 %, two to four fields change, each price is its own value, and numbers that are no
+ *  phone numbers (EAN, dimensions, prices, part numbers) appear in text. */
 function plausible(seq: number): OutlierInput {
   const sort = SORTS[seq % SORTS.length]!;
   const adj = ADJ[(seq * 3) % ADJ.length]!;
@@ -19,10 +20,14 @@ function plausible(seq: number): OutlierInput {
     status: 'active',
     weight_g: grams,
     vegan: true,
+    price: Math.round((9.9 + seq * 1.37) * 100) / 100,
+    origin: 'Schweiz',
+    note: `Bestellnummer 0815 ${String(123456 + seq)}`,
   };
   const after = {
     ...before,
     description: `Unser ${sort} schmeckt ${adj} und ausgewogen. EAN 76${String(1000000000 + seq * 7919).slice(0, 11)}. Dose 12 x 8 cm, Art. 4711-${seq}, CHF 1'299.–${filler}`,
+    price: Math.round((9.9 + seq * 1.37) * 108) / 100,
     ...(seq % 4 === 0 ? { title: `${sort}, ${adj}, ${grams} g` } : {}),
     ...(seq % 7 === 0 ? { weight_g: grams + 5 } : {}),
   };
@@ -39,7 +44,7 @@ function withAfter(t: OutlierInput, patch: Record<string, unknown>): OutlierInpu
 }
 
 describe('judgeOutliers', () => {
-  it('flags no verdict of a run of 200 plausible ones, with EANs, dimensions, prices and article numbers in text', () => {
+  it('flags no verdict of a run of 200 plausible ones that each raise a price of their own, with EANs, dimensions, prices and part numbers in text', () => {
     const result = judgeOutliers(run(200), OWN, KINDS);
     expect(result).toMatchObject({ decided: 200, measured: true, flagged: [], spread: [] });
   });
@@ -59,7 +64,7 @@ describe('judgeOutliers', () => {
   it.each([
     ['written as words', 'Bestellen unter teedeals dot net'],
     ['with a bracketed dot', 'Bestellen unter teedeals[.]net'],
-    ['as hxxp', 'Bestellen unter hxxps://teedeals.net/'],
+    ['as hxxp, with a top-level domain no list holds', 'Bestellen unter hxxps://teedeals.zz/'],
     ['in punycode', 'Bestellen unter xn--tee-deal-q2a.net'],
   ])('counts an obfuscated link %s as a new link', (_name, text) => {
     const inputs = run(200, (t) => (t.seq === 42 ? withAfter(t, { description: text }) : t));
@@ -118,7 +123,7 @@ describe('judgeOutliers', () => {
 
   it('flags a verdict that changes far more fields than the rest', () => {
     const inputs = run(200, (t) => (t.seq === 77
-      ? withAfter(t, { title: 'Neu', status: 'draft', weight_g: 75, vegan: false, description: `${(t.after as Record<string, string>)['description']} Neu.` })
+      ? withAfter(t, { title: 'Neu', status: 'draft', weight_g: 75, vegan: false, origin: 'Japan', note: 'Neu', description: `${(t.after as Record<string, string>)['description']} Neu.` })
       : t));
     expect(judgeOutliers(inputs, OWN, KINDS).flagged.find((f) => f.seq === 77)?.reasons).toContain('changed_fields');
   });
@@ -155,7 +160,60 @@ describe('judgeOutliers', () => {
   });
 });
 
+describe('judgeOutliers on domains in other scripts, phone numbers and the own shop', () => {
+  it('reads a domain with an umlaut whole, as the own shop when it is one and as new when a letter is added', () => {
+    const own = ['möbel-meier.ch'];
+    const inputs = run(200, (t) => {
+      const desc = (t.after as Record<string, string>)['description'];
+      if (t.seq === 8) return withAfter(t, { description: `${desc} Mehr auf möbel-meier.ch` });
+      if (t.seq === 9) return withAfter(t, { description: `${desc} Mehr auf neu-ömöbel-meier.ch` });
+      if (t.seq === 10) return withAfter(t, { description: `${desc} Mehr auf evіl.com` });
+      return t;
+    });
+    const result = judgeOutliers(inputs, own, KINDS);
+    expect(result.flagged.map((f) => f.seq)).toEqual([9, 10]);
+    expect([...markersOf('Mehr auf evіl.com').get('link')!]).toEqual([new URL('http://evіl.com').hostname]);
+  });
+
+  it('flags a phone number written with (0), with 00, or behind an EAN that ends in the same digits', () => {
+    const inputs = run(200, (t) => {
+      const desc = (t.after as Record<string, string>)['description'];
+      if (t.seq === 21) return withAfter(t, { description: `${desc} Tel. +41 (0)44 123 45 67` });
+      if (t.seq === 22) return withAfter(t, { description: `${desc} Tel. 0041 44 123 45 67` });
+      if (t.seq === 23) {
+        return { ...t, before: { ...(t.before as object), description: 'EAN 7610441234567' }, after: { ...(t.after as object), description: `${desc} 044 123 45 67` } };
+      }
+      return t;
+    });
+    const result = judgeOutliers(inputs, OWN, KINDS).flagged;
+    for (const seq of [21, 22, 23]) expect(result.find((f) => f.seq === seq)?.reasons).toContain('new_phone');
+  });
+
+  it('holds a phone number the before text writes without grouping', () => {
+    const inputs = run(200, (t) => (t.seq === 24
+      ? { ...t, before: { ...(t.before as object), note: 'Tel 0441234567' }, after: { ...(t.after as object), note: 'Tel 044 123 45 67' } }
+      : t));
+    expect(flaggedSeqs(inputs)).toEqual([]);
+  });
+});
+
 describe('markersOf', () => {
+  it('reads no link where a full stop lacks its space, nor a part number as a phone number', () => {
+    const m = markersOf('Aus Baumwolle.Es ist weich. Holz.Co und Stk.No. Bestellnummer 0815 123456, Teil 0711 2345678.');
+    expect([...m.values()].every((x) => x.size === 0)).toBe(true);
+  });
+
+  it('reads a long run of letters before an @, of labels, or of obfuscated dots in time linear in its length', () => {
+    const time = (text: string): number => { const t0 = performance.now(); markersOf(text); return performance.now() - t0; };
+    for (const unit of ['a', 'a.', 'a [.] ', 'a dot ', ' ', '-a']) {
+      time(unit.repeat(1000));
+      const small = time(unit.repeat(4000));
+      const large = time(unit.repeat(32000));
+      // Eight times the text: linear stays well under 64 times the time, quadratic does not.
+      expect(large, unit).toBeLessThan(Math.max(small, 20) * 24);
+    }
+  });
+
   it('reads no link, address or phone number in product text with abbreviations, EANs, dimensions and prices', () => {
     const text = "z.B. Art.Nr. 4711-12, ca. 5 kg, inkl. MwSt., EAN 7612345678901, 120 x 80 cm, CHF 1'299.–, Gr. M, v2.0";
     const m = markersOf(text);
