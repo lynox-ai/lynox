@@ -2647,6 +2647,12 @@ ${draftJson}
       if ('kind' in endpoints) {
         const ids = presetIds();
         const known = ids.length > 0 ? `Known providers: ${ids.join(', ')}.` : 'No providers are built in yet, so nothing can be connected this way today.';
+        // A provider this engine once shipped: the profile stays held to it, so the update the
+        // message below suggests would be refused.
+        const retiredId = retiredPresetIdOf(profile);
+        if (endpoints.kind === 'unknown-preset' && retiredId !== undefined) {
+          return `Error: profile "${id}" was set up through the built-in "${retiredId}" provider, which this engine no longer has, so there is no authorization page to send the user to. Tell the user this connection can no longer be renewed here; another way of signing in to the same API replaces it, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
+        }
         if (endpoints.kind === 'unknown-preset') {
           return `Error: profile "${id}" names no built-in provider, so there is no authorization page to send the user to. ${known} Set auth.oauth.preset_id with api_setup update, or keep using a credential the user pastes with ask_secret.`;
         }

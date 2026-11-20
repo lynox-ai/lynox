@@ -45,7 +45,7 @@ vi.mock('../../core/oauth-presets.js', async (importOriginal) => {
 });
 
 const { apiSetupTool } = await import('./api-setup.js');
-const { declinedFacts, oauthGrantIsUserDelegated } = await import('./http.js');
+const { declinedFacts, httpRequestTool, oauthGrantIsUserDelegated } = await import('./http.js');
 const { ApiStore } = await import('../../core/api-store.js');
 const { setPinnedTransportForTests } = await import('../../core/network-guard.js');
 const { bindingsAsMigrated } = await import('../../../tests/helpers/vault-bindings.js');
@@ -69,6 +69,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   restorePinnedTransport?.();
   restorePinnedTransport = undefined;
   for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -182,6 +183,43 @@ describe('a profile of a provider this engine no longer has', () => {
 
     expect(reply).toContain('Error: profile "shop-api" was set up through the built-in "gone-shop" provider, which this engine no longer has, so no token is requested for it. Nothing was sent.');
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('sends connect to the way that exists, not to an update the save would refuse', async () => {
+    const store = new ApiStore();
+    store.register(profileNaming('gone-shop'));
+    // Connect needs this engine's public address before it reads the provider.
+    vi.stubEnv('ORIGIN', 'https://tenant.lynox.example');
+    const reply = await apiSetupTool.handler({ action: 'connect', id: 'shop-api' }, agentWith(store)) as string;
+
+    expect(reply).toContain('Error: profile "shop-api" was set up through the built-in "gone-shop" provider, which this engine no longer has, so there is no authorization page to send the user to.');
+    expect(reply).toContain('ask the user first, then delete this profile and create the new one.');
+    expect(reply).not.toContain('Set auth.oauth.preset_id');
+  });
+
+  it.each([
+    ['without a grant type', {}],
+    ['with a refresh grant and a token_url', { grant_type: 'refresh_token', token_url: 'https://shop.example.com/oauth/token' }],
+  ] as const)('answers a 401 %s with the reminder that names no renewal', async (_label, over) => {
+    const store = new ApiStore();
+    const base = profileNaming('gone-shop');
+    store.register({
+      ...base, base_url: 'https://shop.example.com/api',
+      custom_endpoint_ack: { accepted: true, hosts: ['shop.example.com'], accepted_at: '2026-10-01T00:00:00.000Z' },
+      auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, ...over } },
+    });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } }));
+    const agent = {
+      principal: OWNER_PRINCIPAL,
+      toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store },
+      sessionCounters: { httpRequests: 0 },
+      secretStore: { resolve: (n: string) => (n === 'SHOP_API_ACCESS_TOKEN' ? 'at-stale' : null) },
+    } as never;
+    const result = String(await httpRequestTool.handler({ url: 'https://shop.example.com/api/x', method: 'GET' }, agent));
+
+    expect(result).toContain('**[Agent reminder: OAuth2 401, and this connection cannot be renewed here]**\nThis URL maps to api_profile "shop-api". It was set up through a built-in provider this engine no longer has, so no token is requested for it: do not call api_setup fetch_token or connect for it');
+    expect(result).not.toContain('Recover with');
+    expect(result).not.toContain('needs re-authorizing');
   });
 
   it('sends the exchange for a profile naming an id that was never shipped', async () => {

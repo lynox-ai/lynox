@@ -1260,6 +1260,15 @@ export function presetDelegatedReminder(profile: ApiProfile, preset: OAuthPreset
   return `\n\n**[Agent reminder: OAuth2 401, and fetch_token is the wrong move here]**\nThis URL maps to api_profile "${profile.id}". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do not call api_setup fetch_token for it as the profile stands, and change nothing on the profile beyond the step below. ${DELEGATED_RENEWAL_WAYS[kind]}${afterConnect} The engine has written the details to its log.`;
 }
 
+/**
+ * The 401 reminder of a profile set up through a provider this engine no longer has
+ * (`retiredPresetIdOf`): nothing renews its token here, and nothing on the profile changes that.
+ * Only the profile id is named; the store pins its shape.
+ */
+export function retiredProviderReminder(profileId: string): string {
+  return `\n\n**[Agent reminder: OAuth2 401, and this connection cannot be renewed here]**\nThis URL maps to api_profile "${profileId}". It was set up through a built-in provider this engine no longer has, so no token is requested for it: do not call api_setup fetch_token or connect for it, and do not edit the profile to make a renewal pass. Tell the user. Another way of signing in to the same API replaces this connection, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
+}
+
 export function oauthGrantIsUserDelegated(profile: {
   auth?: { type?: string | undefined; oauth?: { preset_id?: string | undefined } | undefined } | undefined;
   oauth_grant?: { origin?: 'callback' | undefined } | undefined;
@@ -4212,7 +4221,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           // A built-in provider's profile counts without a token_url: it derives its endpoint from
           // the provider and usually stores none, and it is exactly the profile the delegated
           // reminder below is for. The managed reminder stays with a configured token_url.
-          if (matchedProfile?.auth?.type === 'oauth2' && (matchedProfile.auth.oauth?.token_url || builtInPresetOf(matchedProfile) !== undefined)) {
+          if (matchedProfile?.auth?.type === 'oauth2' && (matchedProfile.auth.oauth?.token_url || builtInPresetOf(matchedProfile) !== undefined || retiredPresetIdOf(matchedProfile) !== undefined)) {
             // Which of two reminders, and the split is load-bearing. The text
             // below the `else` has been here since the 2026-05-18 Shopify
             // failure and is right for an app-only profile. For a profile a USER
@@ -4265,7 +4274,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // choice between constants, not an interpolation: no part of the
             // field's value reaches the text. Keep it that way.
             const swapPreset = builtInPresetOf(matchedProfile);
-            wrapped += oauthFetchTokenWouldSwapDelegatedAccess(matchedProfile, mpHeld)
+            // A provider this engine once shipped: fetch_token refuses every exchange for it, so
+            // neither reminder below would name a way that works.
+            wrapped += retiredPresetIdOf(matchedProfile) !== undefined
+              ? retiredProviderReminder(matchedProfile.id)
+              : oauthFetchTokenWouldSwapDelegatedAccess(matchedProfile, mpHeld)
               ? (swapPreset !== undefined
                 // A built-in provider's profile is told the way fetch_token would name, so the two
                 // never disagree; the profile may need the update that way names.
