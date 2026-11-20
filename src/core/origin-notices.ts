@@ -3,14 +3,18 @@
  * question to the owner, the answers to the model, the line on an approval card, a reply's own
  * question, and the run result a trigger's owner reads.
  *
- * Every sentence names where the target comes from as one fragment ({@link originFrom}), the part
- * after "aus" / "from", so the question, the card, the run result and the model texts say it the
- * same way. Where it comes from is not known, the sentence that says so replaces it. No sentence
- * offers another recipient or address; the model texts forbid trying one.
+ * Every sentence of a send names where the target comes from as one fragment ({@link originFrom}),
+ * the part after "aus" / "from", so the question, the card, the run result and the model texts say
+ * it the same way. Where it comes from is not known, the sentence that says so replaces it. The two
+ * questions about reading a page name the condition lynox checks instead (content from outside in
+ * the conversation, a host not named, an address inside the address), which holds even where the
+ * owner typed the address. No sentence offers another recipient or address; the model texts forbid
+ * trying one.
  *
- * Every value in a sentence (a target, a name, an address) is in ASCII quotes and has its own
- * quotes and line breaks replaced ({@link q}): a trigger's or a workflow's name is text anyone who
- * set it up chose, and it must not close its quotes and go on as the sentence.
+ * Every value in a sentence (a target, a name, an address) is in quotes, ASCII ones except for the
+ * host in a German page question („…“), and has its own quotes and line breaks replaced ({@link q}):
+ * a trigger's or a workflow's name is text anyone who set it up chose, and it must not close its
+ * quotes and go on as the sentence.
  */
 import type { NoticeLanguage } from './notice-language.js';
 import type { PromptText } from '../types/index.js';
@@ -153,16 +157,18 @@ function toolWord(tool: string, input: unknown, lang: NoticeLanguage): string {
  * whether to send anyway, followed by the line that a yes holds for this one send.
  */
 /**
+ * `unchecked`: for a page read, whether lynox could not check that the owner did not name the host
+ * (a source of named targets could not be read); the question then says so.
  * `connected`: the asked hosts a stored API profile names, for a page read only. Such a host counts
  * once the owner saves the profile again in a conversation without foreign content, and the
  * question says so.
  */
-export function originAsk(tool: string, input: unknown, noun: TargetNoun, targets: OriginTargets, origin: SendOrigin, lang: NoticeLanguage, connected: readonly string[] = []): PromptText {
+export function originAsk(tool: string, input: unknown, noun: TargetNoun, targets: OriginTargets, origin: SendOrigin, lang: NoticeLanguage, connected: readonly string[] = [], unchecked = false): PromptText {
   const word = toolWord(tool, input, lang);
   const from = originFrom(origin, lang);
   const list = targetList(targets, lang);
   const many = countOf(targets) > 1;
-  if (noun === 'page') return originReadAsk(targetList(targets, lang, true), lang, connected.length > 0);
+  if (noun === 'page') return originReadAsk(targetList(targets, lang, true), lang, connected.length > 0, unchecked);
   if (lang === 'de') {
     const head = noun === 'mail'
       ? (many ? pv`${word}: Die Empfänger ${list} hast nicht du genannt. ` : pv`${word}: Den Empfänger ${list} hast nicht du genannt. `)
@@ -187,12 +193,14 @@ export function originAsk(tool: string, input: unknown, noun: TargetNoun, target
  * way out that is not a click. A host the owner writes in the chat counts as named by them for the
  * rest of the conversation (`owner-known-targets.ts`), so lynox does not ask about it again.
  */
-function originReadAsk(list: string, lang: NoticeLanguage, connected: boolean): PromptText {
+function originReadAsk(list: string, lang: NoticeLanguage, connected: boolean, unchecked: boolean): PromptText {
   // The condition lynox checks, not an origin it would have to know: the owner may have typed the
   // address themselves into a conversation with foreign content.
   if (lang === 'de') {
+    if (unchecked) return pv`Seite auf ${list} lesen? Im Gespräch steht Inhalt von ausserhalb, und ob du ${list} genannt hast, konnte lynox nicht prüfen. ${list} erhält dabei die ganze Adresse, auch den Pfad und alles nach dem „?“. ${originAskOnce(lang, 'page')}`;
     return pv`Seite auf ${list} lesen? Im Gespräch steht Inhalt von ausserhalb, und ${list} hast du nicht genannt. ${list} erhält dabei die ganze Adresse, auch den Pfad und alles nach dem „?“. ${originAskOnce(lang, 'page')}\n\nSchreib ${list} hier in den Chat, dann fragt lynox in diesem Gespräch nicht mehr nach diesem Host.${connected ? pv`\n\n${list} gehört zu einer gespeicherten Verbindung. Bitte lynox in einem neuen Gespräch, diese Verbindung noch einmal zu speichern; danach fragt lynox beim Lesen von dort nicht mehr.` : ''}`;
   }
+  if (unchecked) return pv`Read the page on ${list}? This conversation contains content from outside, and lynox could not check whether you named ${list}. ${list} then gets the whole address, including the path and everything after the "?". ${originAskOnce(lang, 'page')}`;
   return pv`Read the page on ${list}? This conversation contains content from outside, and you haven't named ${list}. ${list} then gets the whole address, including the path and everything after the "?". ${originAskOnce(lang, 'page')}\n\nWrite ${list} here in the chat, and lynox won't ask about this host again in this conversation.${connected ? pv`\n\n${list} belongs to a saved connection. Ask lynox in a new conversation to save that connection again; after that, lynox won't ask when it reads from there.` : ''}`;
 }
 

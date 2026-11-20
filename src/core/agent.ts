@@ -5266,7 +5266,7 @@ export class Agent implements IAgent {
     // A host a stored profile names but that does not count for reads: the question says how it would.
     const profileHosts = asRead ? this._profileHosts() : new Set<string>();
     const connected = shownTargets.filter((h) => profileHosts.has(h));
-    const question = carried ? originCarriedAsk(shown, lang) : originAsk(tc.name, tc.input, noun, shown, origin, lang, connected);
+    const question = carried ? originCarriedAsk(shown, lang) : originAsk(tc.name, tc.input, noun, shown, origin, lang, connected, lookupFailed);
     const answer = await this.promptUser(question, ['Allow', 'Deny', '\x00'], { blocked: true });
     if (answer === UNATTENDED_BLOCK_ANSWER) return refuseUnattended();
     if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {

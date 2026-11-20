@@ -437,3 +437,16 @@ describe('an address that carries another address, after foreign content', () =>
     expect(ask.asked).toEqual([]);
   });
 });
+
+describe('a read where the sources of named targets could not be read', () => {
+  it('asks, and says lynox could not check whether the host was named', async () => {
+    const tool = webResearch();
+    const ask = asker('Deny');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: { known: () => 'unreadable' } });
+    await read(agent, 'https://docs.example.ch/guide');
+    expect(ask.asked).toHaveLength(1);
+    expect(ask.asked[0]).toContain('lynox could not check whether you named "docs.example.ch"');
+    expect(ask.asked[0]).not.toContain("you haven't named");
+    expect(tool.reads).toEqual([]);
+  });
+});
