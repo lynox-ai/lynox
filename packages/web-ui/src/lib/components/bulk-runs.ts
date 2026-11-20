@@ -25,6 +25,8 @@ export const BULK_MANDATE_KEYS: ReadonlySet<string> = new Set([
 	// Only the owner approves: a mandate reads that the owner can still approve the rest.
 	'bulk.invalid.html_too_long', 'bulk.invalid.html_too_long_woocommerce',
 	'bulk.halt.consentOutdated', 'bulk.halt.consentOutdated_more',
+	// Only the owner connects: a mandate reads that the owner has to (U-374).
+	'bulk.halt.productWriteNotAsked', 'bulk.halt.productWriteNotAsked_more',
 	'bulk.invalid.before_has_shop_markup', 'bulk.invalid.before_has_shop_markup_undated',
 ]);
 
@@ -273,7 +275,7 @@ const BULK_RESUME_WRITE = new Set([
 ]);
 /** Halts writing on would not get past: the run has changed since it was approved (the engine
  *  refuses), or a target lies outside what it may write (it would halt there again). */
-const BULK_RESUME_NONE = new Set(['checksum', 'contract', 'consentOutdated']);
+const BULK_RESUME_NONE = new Set(['checksum', 'contract', 'consentOutdated', 'productWriteNotAsked']);
 
 /** The fields a connection does not cover yet, by name with their article, joined with "und"/"and";
  *  "these fields" where one has no name on this page (U-281). */
@@ -343,6 +345,7 @@ export function bulkResumeText(
 		: key === 'consentOutdated' ? i18n.tf(run.applied === 0 && run.sentUnknown === 0 ? 'bulk.halt.consentOutdated' : 'bulk.halt.consentOutdated_more', {
 			field: bulkConsentFields(run.consentFields, i18n), path: `${i18n.t('nav.settings')} → ${i18n.t('settings.apis')}`,
 		})
+		: key === 'productWriteNotAsked' ? i18n.t(run.applied === 0 && run.sentUnknown === 0 ? 'bulk.halt.productWriteNotAsked' : 'bulk.halt.productWriteNotAsked_more')
 		: i18n.tf(`bulk.halt.${key}`, vars);
 	const beforeKey = failures ? 'bulk.halt.failures_before_write'
 		: key === 'credential' ? 'bulk.halt.credential_before'

@@ -508,7 +508,7 @@ describe('going on from a run that halted', () => {
 	it('places every halt the engine names', () => {
 		const STARTS = ['awaitingStart', 'listed'];
 		const ENDS_THE_RUN = ['superseded', 'mandateEnded', 'discarded'];
-		const WRITE_RUNS_ONLY = ['failureRate', 'expired', 'checksum', 'maxTargets', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete', 'runUnrecorded', 'shopifyWriteOff', 'markupAddedByShop', 'consentOutdated'];
+		const WRITE_RUNS_ONLY = ['failureRate', 'expired', 'checksum', 'maxTargets', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete', 'runUnrecorded', 'shopifyWriteOff', 'markupAddedByShop', 'consentOutdated', 'productWriteNotAsked'];
 		const left = [...STARTS, ...ENDS_THE_RUN, ...WRITE_RUNS_ONLY];
 		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {
 			const kind = bulkRestartKind({ ...base, haltKey });
@@ -756,12 +756,32 @@ describe('going on from a run that halted', () => {
 	});
 
 	it('has every sentence in both languages for every halt it writes on from or refuses', () => {
-		for (const k of [...WRITE_ON, 'maxTargets', 'checksum', 'contract', 'consentOutdated']) {
+		for (const k of [...WRITE_ON, 'maxTargets', 'checksum', 'contract', 'consentOutdated', 'productWriteNotAsked']) {
 			for (const [lang, i] of [['de', DE], ['en', EN]] as const) {
 				const said = bulkResumeText(w(k), true, i)!;
 				for (const [part, text] of Object.entries(said)) if (text !== null) expect(text, `${lang} ${k} ${part}`).not.toMatch(/bulk\.|\{/);
 			}
 		}
+	});
+
+	// U-374: the way on goes through the chat; a mandate reads that only the owner can connect.
+	it('words a halt for a connection that may not change products, for the owner and for a mandate', () => {
+		const none = { applied: 0, sentUnknown: 0 };
+		expect(bulkResumeKind(w('productWriteNotAsked'))).toBe('none');
+		expect(bulkResumeText(w('productWriteNotAsked', none), true, DE)).toEqual({
+			cause: 'lynox hat nichts geschrieben. Diese Shopify-Verbindung darf keine Produkte ändern. Bitte lynox im Chat, Shopify mit dieser Erlaubnis neu zu verbinden, und lass den Lauf neu planen.',
+			before: null, check: null, kept: null, soFar: null, allows: null,
+		});
+		expect(bulkResumeText(w('productWriteNotAsked', none), true, EN)?.cause)
+			.toBe('lynox wrote nothing. This Shopify connection may not change products. Ask lynox in the chat to connect Shopify again with that permission, then to plan the run again.');
+		for (const o of [{ applied: 1, sentUnknown: 0 }, { applied: 0, sentUnknown: 1 }]) {
+			expect(bulkResumeText(w('productWriteNotAsked', o), true, DE)!.cause.startsWith('lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt. Diese Shopify-Verbindung darf keine Produkte ändern.')).toBe(true);
+			expect(bulkResumeText(w('productWriteNotAsked', o), true, bulkMandateI18n(EN))!.cause.startsWith('lynox writes nothing more in this run; what it already wrote stays.')).toBe(true);
+		}
+		expect(bulkResumeText(w('productWriteNotAsked', none), true, bulkMandateI18n(DE))?.cause)
+			.toBe('lynox hat nichts geschrieben. Diese Shopify-Verbindung darf keine Produkte ändern. Das ändert sich nur, wenn der Inhaber dieser Instanz Shopify mit dieser Erlaubnis neu verbindet; bitte den Inhaber darum und lass den Lauf danach im Chat neu planen.');
+		expect(bulkResumeText(w('productWriteNotAsked', none), true, bulkMandateI18n(EN))?.cause)
+			.toBe('lynox wrote nothing. This Shopify connection may not change products. This only changes when the owner of this instance connects Shopify again with that permission; ask the owner to do so, then ask lynox in the chat to plan the run again.');
 	});
 
 	// U-281: the fields with their article, the way on, and "wrote nothing" only where it is true.

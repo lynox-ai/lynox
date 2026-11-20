@@ -1666,7 +1666,7 @@ describe('applying a Shopify run', () => {
         expect(out.status).toBe('refused');
         expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.productWriteNotAsked);
         expect(s.requests).toEqual([]);
-        expect(out.summary).toContain('Shopify did not give this connection permission to change products.');
+        expect(out.summary).toContain('lynox wrote nothing. Shopify did not give this connection permission to change products. Allow it in the app settings in Shopify, then ask lynox in the chat to connect Shopify again and plan the run again.');
       });
 
       it('writes once the connection asked for write_products and was granted it', async () => {
