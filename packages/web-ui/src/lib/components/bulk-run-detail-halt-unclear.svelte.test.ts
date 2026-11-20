@@ -272,6 +272,10 @@ describe('a cancelled run', () => {
 		const dt = [...target.querySelectorAll('dt')].map((d) => d.textContent);
 		expect(dt).toContain('Abgebrochen');
 		expect(dt).not.toContain('Angehalten');
+		// Its last step reads as the list reads its phase, not as done.
+		const steps = [...target.querySelectorAll('li[aria-current="step"]')].map((l) => l.textContent);
+		expect(steps).toEqual(['abgebrochen']);
+		expect(shown()).not.toContain(t('bulk.step.done'));
 		expect(bulkHaltSuffixKey({ phase: 'aborted', haltKey: 'mandateEnded' })).toBeNull();
 		expect(bulkHaltSuffixKey({ phase: 'aborted', haltKey: 'stoppedByOwner' })).toBeNull();
 		expect(bulkHaltSuffixKey({ phase: 'writing', haltKey: 'mandateEnded' })).toBe('bulk.halted_suffix');
