@@ -6,7 +6,7 @@ import {
 	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkPhaseKey, bulkPhaseHasSuffix, bulkStepLabelKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
-	bulkSentenceParts, bulkSecretInContextKey,
+	bulkSentenceParts, bulkSecretInContextKey, bulkOwnerNoticeShown, bulkWrapParts, bulkHostSegments,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -846,7 +846,7 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('timeBudget'), true, DE)).toMatchObject({ before: null, soFar: null, allows: null });
 		// Shopify's own switch: who turns it back on depends on who runs the instance.
 		expect(bulkResumeText(w('shopifyWriteOff'), true, DE)).toMatchObject({
-			cause: 'Bulk-Änderungen an Shopify-Shops sind auf dieser Instanz nicht freigeschaltet. Der Lauf ist angehalten. Sobald sie wieder freigeschaltet sind, kannst du ihn hier fortsetzen.',
+			cause: 'Änderungen per Massenlauf an Shopify-Shops sind auf dieser Instanz ausgeschaltet. Der Lauf ist angehalten. Sobald sie wieder eingeschaltet sind, kannst du ihn hier fortsetzen.',
 			before: 'Soll lynox in Shopify-Shops schreiben, schreib an support@lynox.ai. Danach kannst du fortsetzen.',
 		});
 		expect(bulkResumeText(w('shopifyWriteOff'), false, EN)?.before).toBe('You enable them in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`).');
@@ -1009,6 +1009,60 @@ describe('going on from a run that halted', () => {
 
 // Taking a merge back: the page says what came of it by the route's status and code, in the
 // owner's language, never the route's English sentence.
+describe('a way on is said once on the run page (U-374)', () => {
+	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
+	const ENTRY = /^\s*'([^']+)': \{ de: '((?:[^'\\]|\\.)*)', en: '((?:[^'\\]|\\.)*)' \},$/;
+	const de: Record<string, string> = {};
+	const en: Record<string, string> = {};
+	for (const l of source.split('\n')) {
+		const m = ENTRY.exec(l);
+		if (m) { de[m[1]!] = m[2]!; en[m[1]!] = m[3]!; }
+	}
+
+	it('drops the owner-only notice for a mandate where the halt sentence already sends it to the owner', () => {
+		expect(bulkOwnerNoticeShown('consentOutdated')).toBe(false);
+		expect(bulkOwnerNoticeShown('productWriteNotAsked')).toBe(false);
+		expect(bulkOwnerNoticeShown('shopifyWriteOff')).toBe(false);
+		// A sentence that does not name the owner keeps the notice.
+		expect(bulkOwnerNoticeShown('storeAccessEnded')).toBe(true);
+		expect(bulkOwnerNoticeShown('unavailable')).toBe(true);
+		expect(bulkOwnerNoticeShown(null)).toBe(true);
+	});
+
+	it('every halt it treats as naming the owner does so in its mandate sentence, in both languages', () => {
+		for (const key of ['consentOutdated', 'productWriteNotAsked', 'shopifyWriteOff']) {
+			expect(de[`bulk.halt.${key}_mandate`], key).toMatch(/Inhaber/);
+			expect(en[`bulk.halt.${key}_mandate`], key).toMatch(/owner/);
+		}
+	});
+
+	it('finds the hosts with a hyphen in a halt sentence, and leaves the rest of the sentence as text', () => {
+		expect(bulkHostSegments('lynox konnte den Zugang zu summer-shoes-test.myshopify.com nicht erneuern.')).toEqual([
+			{ text: 'lynox konnte den Zugang zu ', host: false },
+			{ text: 'summer-shoes-test.myshopify.com', host: true },
+			{ text: ' nicht erneuern.', host: false },
+		]);
+		// A word with a hyphen but no dot, and a host without a hyphen, stay text: neither can break at a hyphen inside a name.
+		expect(bulkHostSegments('Diese Shopify-Verbindung, shop.example.com.')).toEqual([{ text: 'Diese Shopify-Verbindung, shop.example.com.', host: false }]);
+		expect(bulkHostSegments('')).toEqual([]);
+	});
+
+	it('pins the switched-off sentence a mandate reads, word for word (U-383)', () => {
+		expect(de['bulk.halt.shopifyWriteOff_mandate']).toBe('Änderungen per Massenlauf an Shopify-Shops sind auf dieser Instanz ausgeschaltet. Der Lauf ist angehalten. Sobald sie wieder eingeschaltet sind, kann der Inhaber ihn hier fortsetzen.');
+	});
+
+	it('wraps a host after its dots and at spaces, never at a hyphen inside the name', () => {
+		const parts = bulkWrapParts('3 Ziele · summer-shoes-test.myshopify.com');
+		expect(parts.map((p) => p.text).join('')).toBe('3 Ziele · summer-shoes-test.myshopify.com');
+		expect(parts).toEqual([
+			{ text: '3 ', wrap: true }, { text: 'Ziele ', wrap: true }, { text: '· ', wrap: true },
+			{ text: 'summer-shoes-test.', wrap: true }, { text: 'myshopify.', wrap: true }, { text: 'com', wrap: false },
+		]);
+		// No part breaks a name at its hyphen: each hyphen sits inside one unbreakable part.
+		for (const p of parts) if (p.text.includes('-')) expect(p.text).toMatch(/^[^\s]*-[^\s]*\.?\s*$/);
+	});
+});
+
 describe('taking a merge of two contacts back', () => {
 	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
 	const ENTRY = /^\s*'([^']+)': \{ de: '((?:[^'\\]|\\.)*)', en: '((?:[^'\\]|\\.)*)' \},$/;

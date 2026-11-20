@@ -128,8 +128,8 @@ export function claimStoreReconnectHints(
   apisDir: string,
   lang: 'de' | 'en',
   now: number = Date.now(),
-): { title: string; body: string; priority: 'normal' }[] {
-  const out: { title: string; body: string; priority: 'normal' }[] = [];
+): StoreReconnectHint[] {
+  const out: StoreReconnectHint[] = [];
   for (const profile of apiStore.getAll()) {
     if (!storeRefreshApplies(profile)) continue;
     const grant = profile.oauth_grant;
@@ -153,20 +153,25 @@ export function claimStoreReconnectHints(
 const MONTHS_DE = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
 const MONTHS_EN = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
-function storeReconnectHint(host: string, until: number, now: number, lang: 'de' | 'en'): { title: string; body: string; priority: 'normal' } {
+/** The hint as the router takes it. Only the owner can connect a store again (a mandate's connect is
+ *  refused for a profile it did not set up), so it reaches the owner's devices only; a mandate learns
+ *  of the end when a run halts on it (U-383). */
+export interface StoreReconnectHint { title: string; body: string; priority: 'normal'; audience: 'owner' }
+
+function storeReconnectHint(host: string, until: number, now: number, lang: 'de' | 'en'): StoreReconnectHint {
   const d = new Date(until);
   const day = String(d.getUTCDate());
   const year = String(d.getUTCFullYear());
   if (lang === 'de') {
     const date = `${day}. ${MONTHS_DE[d.getUTCMonth()] ?? ''} ${year}`;
     return until <= now
-      ? { title: 'Shop neu verbinden', body: `Der Zugang von lynox zum Shop ${host} ist abgelaufen. Bitte lynox im Chat, den Shop neu zu verbinden, damit Läufe und Abfragen wieder laufen.`, priority: 'normal' }
-      : { title: 'Shop bald neu verbinden', body: `Der Zugang von lynox zum Shop ${host} läuft am ${date} ab. Bitte lynox vorher im Chat, den Shop neu zu verbinden, damit Läufe und Abfragen weiterlaufen.`, priority: 'normal' };
+      ? { title: 'Shop neu verbinden', body: `Der Zugang von lynox zum Shop ${host} ist abgelaufen. Bitte lynox im Chat, den Shop neu zu verbinden, damit Läufe und Abfragen wieder laufen.`, priority: 'normal', audience: 'owner' }
+      : { title: 'Shop bald neu verbinden', body: `Der Zugang von lynox zum Shop ${host} läuft am ${date} ab. Bitte lynox vorher im Chat, den Shop neu zu verbinden, damit Läufe und Abfragen weiterlaufen.`, priority: 'normal', audience: 'owner' };
   }
   const date = `${day} ${MONTHS_EN[d.getUTCMonth()] ?? ''} ${year}`;
   return until <= now
-    ? { title: 'Connect the store again', body: `lynox's access to the store ${host} has run out. Ask lynox in the chat to connect the store again, so runs and requests work again.`, priority: 'normal' }
-    : { title: 'Connect the store again soon', body: `lynox's access to the store ${host} runs out on ${date}. Ask lynox in the chat to connect the store again before then, so runs and requests keep going.`, priority: 'normal' };
+    ? { title: 'Connect the store again', body: `lynox's access to the store ${host} has run out. Ask lynox in the chat to connect the store again, so runs and requests work again.`, priority: 'normal', audience: 'owner' }
+    : { title: 'Connect the store again soon', body: `lynox's access to the store ${host} runs out on ${date}. Ask lynox in the chat to connect the store again before then, so runs and requests keep going.`, priority: 'normal', audience: 'owner' };
 }
 
 /** Whether a profile is of a store preset whose tokens may expire, so that a refresh applies. */

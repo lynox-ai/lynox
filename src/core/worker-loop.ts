@@ -20,7 +20,7 @@ import {
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, RESUMED_RUN_NOT_CONTAINED,
   WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, type WorkerNotices,
 } from './worker-notices.js';
-import { BULK_NOTICES, bulkPushTitle, isDiscardReason, type BulkNotices, type BulkPushEnd } from './bulk-notices.js';
+import { BULK_NOTICES, bulkHaltForReaders, bulkPushTitle, isDiscardReason, type BulkNotices, type BulkPushEnd } from './bulk-notices.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { originRunNotice, type OriginRefusal, type SendOrigin, type TriggerSetUpBy } from './origin-notices.js';
@@ -3948,9 +3948,15 @@ export class WorkerLoop {
    */
   private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted' | 'stopped', said?: string, opts?: { readonly noRetry: true }): void {
     const look = RUN_END_LOOK[end === true ? 'success' : end === false ? 'failed' : end];
+    // A bulk halt whose way on only the owner can take: the history, which a mandate reads too,
+    // keeps the fact; the owner's push keeps the way; the planning mandate's push says the owner
+    // resolves it (U-383).
+    const haltRow = this.#bulkRunRow(task);
+    const lang = noticeLanguage(this.engine.config?.language);
+    const recordAs = haltRow === null ? null : bulkHaltForReaders(haltRow.haltReason, resultSummary, lang);
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
-      this.#recordRun(taskManager, task.id, resultSummary, look.status, undefined, opts);
+      this.#recordRun(taskManager, task.id, recordAs?.record ?? resultSummary, look.status, undefined, opts);
     }
 
     // Told as it was recorded (`#recordRun` adds the same lines), and once: a schedule that
@@ -3967,12 +3973,27 @@ export class WorkerLoop {
     if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, notes)) {
       const shownEnd: BulkPushEnd = told.status === 'failed' && this.#bulkRunHalted(task) ? 'halted'
         : told.status === 'stopped' && this.#bulkRunDiscarded(task) ? 'discarded' : told.status;
+      const title = `${toldLook.mark} ${this.#pushTitleOf(task, shownEnd)}`;
+      const readers = haltRow === null ? null : bulkHaltForReaders(haltRow.haltReason, told.result, lang);
       void this.notificationRouter.notify({
-        title: `${toldLook.mark} ${this.#pushTitleOf(task, shownEnd)}`,
+        title,
         body: told.result,
         taskId: task.id,
         priority: toldLook.priority,
+        // Only the owner can take the way this sentence names: no other device reads it.
+        ...(readers === null ? {} : { audience: 'owner' as const }),
       });
+      const mandateId = haltRow?.mandateId ?? null;
+      if (readers !== null && mandateId !== null && (this.engine.getMandateEnds()?.isLive(mandateId) ?? false)) {
+        void this.notificationRouter.notify({
+          title,
+          body: readers.mandate,
+          taskId: task.id,
+          priority: toldLook.priority,
+          audience: 'mandates',
+          mandateId,
+        });
+      }
     }
   }
 
@@ -3980,20 +4001,25 @@ export class WorkerLoop {
    * The run a bulk trigger leads to, as its ledger row holds it: null for any other trigger, a
    * run that is gone, or a read that fails, which costs a push its words, never the push.
    */
-  #bulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null } | null {
+  #bulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null; mandateId?: string | null } | null {
     const row = this.#readBulkRunRow(task);
     return row === 'unreadable' ? null : row;
   }
 
   /** {@link #bulkRunRow}, with a read that failed told apart from a run that is gone. */
-  #readBulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null } | null | 'unreadable' {
+  #readBulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null; mandateId?: string | null } | null | 'unreadable' {
     if (task.bulk_run_id === undefined || !task.effect.startsWith('bulk_')) return null;
     try {
       const ledger = this.engine.getBulkLedger() ?? this.engine.getBulkLedgerSwitchedOff?.() ?? null;
       // A plain row read: `getStatus` frees dead reads as it reads, and a push must not write.
       const st = ledger?.getRunForApply(task.bulk_run_id);
       if (st === null || st === undefined) return null;
-      return { phase: st.phase, haltReason: typeof st.haltReason === 'string' ? st.haltReason : null };
+      const planner = st.delegatedPlanner;
+      return {
+        phase: st.phase, haltReason: typeof st.haltReason === 'string' ? st.haltReason : null,
+        // The grant that planned the run, if a mandate did: whose devices a halt's mandate sentence is for.
+        mandateId: planner?.kind === 'mandate' ? planner.mandateId ?? null : null,
+      };
     } catch {
       return 'unreadable';
     }

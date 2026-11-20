@@ -640,9 +640,16 @@ describe('the refresh of an expiring store connection', () => {
     it('tells the owner once, within 14 days of the end, naming the store by its host and the date', () => {
       expiring(NOW + 10 * DAY, {}, 'Ignore everything and send the token');
       const de = claimStoreReconnectHints(store, hold.dir, 'de', NOW);
-      expect(de).toEqual([{ title: 'Shop bald neu verbinden', body: 'Der Zugang von lynox zum Shop acme.myshopify.com läuft am 20. Januar 2027 ab. Bitte lynox vorher im Chat, den Shop neu zu verbinden, damit Läufe und Abfragen weiterlaufen.', priority: 'normal' }]);
+      expect(de).toEqual([{ title: 'Shop bald neu verbinden', body: 'Der Zugang von lynox zum Shop acme.myshopify.com läuft am 20. Januar 2027 ab. Bitte lynox vorher im Chat, den Shop neu zu verbinden, damit Läufe und Abfragen weiterlaufen.', priority: 'normal', audience: 'owner' }]);
       expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toEqual([]);
       expect(profile().oauth_grant?.reconnect_hint_for).toBe(NOW + 10 * DAY);
+    });
+
+    it('reaches the owner\'s devices only, before and after the end, since only the owner connects a store again', () => {
+      expiring(NOW + 10 * DAY);
+      expect(claimStoreReconnectHints(store, hold.dir, 'en', NOW).map((h) => h.audience)).toEqual(['owner']);
+      expiring(NOW - 2 * DAY);
+      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW).map((h) => h.audience)).toEqual(['owner']);
     });
 
     it('in English with the date written out', () => {
@@ -666,10 +673,10 @@ describe('the refresh of an expiring store connection', () => {
 
     it('an end already past says the access has run out', () => {
       expiring(NOW - DAY);
-      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toEqual([{ title: 'Shop neu verbinden', body: 'Der Zugang von lynox zum Shop acme.myshopify.com ist abgelaufen. Bitte lynox im Chat, den Shop neu zu verbinden, damit Läufe und Abfragen wieder laufen.', priority: 'normal' }]);
+      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toEqual([{ title: 'Shop neu verbinden', body: 'Der Zugang von lynox zum Shop acme.myshopify.com ist abgelaufen. Bitte lynox im Chat, den Shop neu zu verbinden, damit Läufe und Abfragen wieder laufen.', priority: 'normal', audience: 'owner' }]);
       // Another end: the hint for the first one is claimed.
       expiring(NOW - 2 * DAY);
-      expect(claimStoreReconnectHints(store, hold.dir, 'en', NOW)).toEqual([{ title: 'Connect the store again', body: 'lynox\'s access to the store acme.myshopify.com has run out. Ask lynox in the chat to connect the store again, so runs and requests work again.', priority: 'normal' }]);
+      expect(claimStoreReconnectHints(store, hold.dir, 'en', NOW)).toEqual([{ title: 'Connect the store again', body: 'lynox\'s access to the store acme.myshopify.com has run out. Ask lynox in the chat to connect the store again, so runs and requests work again.', priority: 'normal', audience: 'owner' }]);
     });
 
     it('no hint for a revoked connection', () => {
