@@ -1710,6 +1710,8 @@ describe('applying a Shopify run', () => {
         expect(out.status).toBe('refused');
         expect(out.summary).toMatch(/^lynox writes nothing more in this run; what it already wrote stays\./);
         expect(out.pushSummary).toMatch(/^lynox writes nothing more; what it wrote stays\./);
+        // The push names the unclear send first, then the counts.
+        expect(out.pushSummary).toMatch(/What to do is under Bulk runs\. 1 unclear: sent without a clear answer, not sent again\. 0 applied, of 1 targets\.$/);
       });
 
       it('lets an undo restore what a run wrote, under a connection that no longer asks', async () => {
