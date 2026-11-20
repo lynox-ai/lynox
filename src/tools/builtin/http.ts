@@ -487,6 +487,18 @@ function sameTarget(a: string, b: string): boolean {
   return x.origin === y.origin && x.pathname === y.pathname && x.search === y.search;
 }
 
+/**
+ * The hops that answered before a redirect ride ended in an error, first to last: every request a
+ * server received, the first included. A refusal after one of them ends the call, and the call
+ * still counts the request a priced API answered (the cost in the `http_request` handler).
+ */
+const answeredHops = new WeakMap<object, readonly string[]>();
+
+/** {@link answeredHops} for an error a redirect ride threw; empty for any other. */
+export function answeredHopsOf(err: unknown): readonly string[] {
+  return typeof err === 'object' && err !== null ? answeredHops.get(err) ?? [] : [];
+}
+
 export async function fetchWithValidatedRedirects(
   url: string,
   init: RequestInit,
@@ -582,6 +594,8 @@ export async function fetchWithValidatedRedirects(
   // yet and carries no write of its own: only a failure there is one where the write "was not
   // sent". A failure further on, or on a hop that kept an override, is worded without it.
   let unansweredDowngrade: string | undefined;
+  // Every hop a server answered, for the error that ends the ride (`answeredHopsOf`).
+  const answered: string[] = [];
 
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
     try {
@@ -601,6 +615,7 @@ export async function fetchWithValidatedRedirects(
       // A hop to a store, from a request that was not one, is a redirect the engine does not follow.
       if (redirects > 0 && pass === undefined) refuseRedirectToStore(currentUrl);
       const response = await fetchPinned(currentUrl, requestInit, pass);
+      answered.push(currentUrl);
       sent ??= ownWrite ?? overrideHop;
       if (pendingAgain !== undefined && sent !== undefined) sent = { ...sent, again: pendingAgain };
       if (pendingAgain !== undefined) onSendAgain?.({ ...pendingAgain, answered: true });
@@ -719,8 +734,11 @@ export async function fetchWithValidatedRedirects(
       // Anything else that ends the call after a write was answered (the next host's policy, the
       // network, a redirect without a target) ends it with the note as well: the generic error
       // alone reads as "nothing happened". An abort is the caller's own limit and keeps its form.
+      if (answered.length > 0 && typeof err === 'object' && err !== null) answeredHops.set(err, [...answered]);
       if (sent === undefined || err instanceof RedirectRefusedAfterWrite || init.signal?.aborted === true) throw err;
-      throw new RedirectRefusedAfterWrite(sent, sent.via === undefined ? unansweredDowngrade : undefined, 'failed', err);
+      const failed = new RedirectRefusedAfterWrite(sent, sent.via === undefined ? unansweredDowngrade : undefined, 'failed', err);
+      answeredHops.set(failed, [...answered]);
+      throw failed;
     }
   }
 
@@ -4344,8 +4362,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       if (answeredStatus !== undefined && apiCost !== undefined) noteApiCost(apiCost);
       // So does a write whose redirect hop was refused: it was sent and answered before the hop.
       // And a read whose override hop was refused: the read went out and was answered.
+      // Counted at the last answered hop on a priced API: a write to a host without a profile that a
+      // redirect sends on to one was answered there before the next hop was refused.
       if (err instanceof RedirectRefusedAfterWrite || err instanceof DelegatedHopRefused || err instanceof OverrideHopRefused) {
-        const sentTo = apiProfileOfUrl(input.url, toolContext);
+        const hops = answeredHopsOf(err);
+        const sentTo = [...hops].reverse().map((u) => apiProfileOfUrl(u, toolContext)).find((p) => p !== undefined)
+          ?? apiProfileOfUrl(input.url, toolContext);
         if (sentTo !== undefined) noteApiCost(apiCostOfAnswer(sentTo, undefined));
       }
       // A soft failure leaves untouched. `ToolSoftFailure` extends Error with
