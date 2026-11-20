@@ -9,7 +9,7 @@
  */
 
 import { recipientsConfirmable } from './recipient-confirm.js';
-import { errorText, errorTextReduced, FixedTextError, processErrorText } from './error-egress.js';
+import { errorText, errorTextReduced, FixedTextError, processErrorText, scheduleInLog } from './error-egress.js';
 import { containThreadFrom, threadIsContained } from './containment.js';
 import { isProvisionedInstance } from './wire-capture.js';
 import { noticeLanguage } from './notice-language.js';
@@ -996,7 +996,7 @@ export class WorkerLoop {
     try {
       if (pausePlanNow(db, task.id, (id) => ends.endRow(id), this.#closedPromptOf(task.id)) !== true) return false;
     } catch (err: unknown) {
-      process.stderr.write(`[lynox:worker] could not pause "${task.title}" (${task.id}), refused without it: ${processErrorText(err)}\n`);
+      process.stderr.write(`[lynox:worker] could not pause ${scheduleInLog(task.title, task.id)}, refused without it: ${processErrorText(err)}\n`);
       return false;
     }
     this.#recordRun(tm, task.id, PLAN_ENDED_RESULT, 'stopped', undefined, { keepSchedule: true });
@@ -1393,7 +1393,7 @@ export class WorkerLoop {
               this.engine.getRunHistory()?.updateTrigger(parked.id, { nextRunAt: new Date().toISOString() });
             }
             process.stderr.write(
-              `[lynox:worker] "${parked.title}" (${parked.id}) got its answer — due again\n`,
+              `[lynox:worker] ${scheduleInLog(parked.title, parked.id)} got its answer — due again\n`,
             );
           }
         }
@@ -1485,7 +1485,7 @@ export class WorkerLoop {
               );
             }
             process.stderr.write(
-              `[lynox:worker] "${parked.title}" (${parked.id}) waited past ${parked.waiting_until ?? '?'} without an answer — ended\n`,
+              `[lynox:worker] ${scheduleInLog(parked.title, parked.id)} waited past ${parked.waiting_until ?? '?'} without an answer — ended\n`,
             );
           }
         }
@@ -1569,7 +1569,7 @@ export class WorkerLoop {
           if (delayMs > 10 * 60_000) {
             const delayMin = Math.round(delayMs / 60_000);
             process.stderr.write(
-              `[lynox:worker] Missed run: "${task.title}" (${task.id}) was due ${String(delayMin)}min ago\n`,
+              `[lynox:worker] Missed run: ${scheduleInLog(task.title, task.id)} was due ${String(delayMin)}min ago\n`,
             );
           }
         }
@@ -1810,7 +1810,7 @@ export class WorkerLoop {
           releasePersistentBudget(reservation.reservedUSD);
           if (lease === 'interrupted') {
             // Fails closed: never read as `claimed`. The lease is ours now; give it back.
-            process.stderr.write(`[lynox:worker] "${trigger.title}" (${triggerId}) webhook trigger reported a lost run on its lease; no event run\n`);
+            process.stderr.write(`[lynox:worker] ${scheduleInLog(trigger.title, triggerId)} webhook trigger reported a lost run on its lease; no event run\n`);
             try { taskManager.releaseLease(triggerId, this.leaseHolder); } catch { /* it lapses on its own */ }
           }
           continue;
@@ -1875,7 +1875,7 @@ export class WorkerLoop {
 
   /** One report of an event to the owner, outside any run: lynox's own sentence, never an error's text. */
   #sayEvent(triggerId: string, title: string, sentence: string): void {
-    process.stderr.write(`[lynox:worker] "${title}" (${triggerId}) ${sentence}\n`);
+    process.stderr.write(`[lynox:worker] ${scheduleInLog(title, triggerId)} ${sentence}\n`);
     if (!this.notificationRouter.hasChannels()) return;
     void this.notificationRouter.notify({ title: `\u26a0 ${title}`, body: sentence, taskId: triggerId, priority: 'normal' });
   }
@@ -1900,7 +1900,7 @@ export class WorkerLoop {
     const again = saidAt === undefined ? '' : ' (still)';
     this.deferredSaidAt.set(task.id, now);
     process.stderr.write(
-      `[lynox:worker] Not started${again}: "${task.title}" (${task.id}) — ${reason}\n`,
+      `[lynox:worker] Not started${again}: ${scheduleInLog(task.title, task.id)} — ${reason}\n`,
     );
   }
 
@@ -1913,7 +1913,7 @@ export class WorkerLoop {
   private sayBudgetAdmitted(task: TriggerRecord): void {
     if (!this.deferredSaidAt.delete(task.id)) return;
     process.stderr.write(
-      `[lynox:worker] Budget freed: "${task.title}" (${task.id}) is admitted again\n`,
+      `[lynox:worker] Budget freed: ${scheduleInLog(task.title, task.id)} is admitted again\n`,
     );
   }
 
@@ -1951,7 +1951,7 @@ export class WorkerLoop {
     const starter = grant?.principal;
     if (!handRun || !grant) return this.#executeTask(task, capUSD, false, starter);
     // One line per hand start, naming who started it. A process log, not a record.
-    process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) test run by hand by ${principalTag(grant.principal)}\n`);
+    process.stderr.write(`[lynox:worker] ${scheduleInLog(task.title, task.id)} test run by hand by ${principalTag(grant.principal)}\n`);
     return runAsHandRun(task.id, () => this.#executeTask(task, capUSD, true, grant.principal));
   }
 
@@ -2055,9 +2055,9 @@ export class WorkerLoop {
         if (tm?.renewLease(task.id, this.leaseHolder, until) === false) {
           if (!tm.getTrigger(task.id)) {
             scheduleGone = true;
-            process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) was deleted while it ran; the run continues and its end is not recorded on the schedule\n`);
+            process.stderr.write(`[lynox:worker] ${scheduleInLog(task.title, task.id)} was deleted while it ran; the run continues and its end is not recorded on the schedule\n`);
           } else {
-            process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) lost its run lease to another engine process\n`);
+            process.stderr.write(`[lynox:worker] ${scheduleInLog(task.title, task.id)} lost its run lease to another engine process\n`);
           }
         }
       } catch { /* best-effort: a missed renewal only shortens the lease */ }
@@ -2416,7 +2416,7 @@ export class WorkerLoop {
           try {
             event.settle(entry);
           } catch (err: unknown) {
-            process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) could not record the outcome of event ${event.eventId}: ${processErrorText(err)}\n`);
+            process.stderr.write(`[lynox:worker] ${scheduleInLog(task.title, task.id)} could not record the outcome of event ${event.eventId}: ${processErrorText(err)}\n`);
           }
         }
       } finally {
@@ -2821,7 +2821,7 @@ export class WorkerLoop {
       }
       if (handStarter === undefined) {
         this.#recordRun(this.engine.getTaskManager(), task.id, MANDATE_ENDED_RESULT, 'failed', { starter: asker });
-        process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) was answered under an access that has since ended — not run\n`);
+        process.stderr.write(`[lynox:worker] ${scheduleInLog(task.title, task.id)} was answered under an access that has since ended — not run\n`);
         return;
       }
       answered = undefined;
