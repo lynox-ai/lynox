@@ -6,7 +6,6 @@ import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
 import { refuseUnlessScoped } from './action-scopes.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
-import { pv } from '../../core/prompt-value.js';
 import { consentMeta, consentOptions, consentRefusal, decideConsent } from '../../core/consent-ask.js';
 import type { ConsentAction } from '../../contract/prompt.js';
 import { GOOGLE_DIALOG } from '../../tools/dialog-text.js';
@@ -212,7 +211,7 @@ export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<Sh
           return `Error: "${input.action}" requires user confirmation but no interactive prompt is available (autonomous/background mode). Use assistant mode for this action.`;
         }
         if (CONFIRM_ACTIONS.has(input.action) && agent.promptUser) {
-          // `pv` splits frame from value, so the renderer can put the id and
+          // The dialog table builds the question with `pv`, which splits frame from value, so the renderer can put the id and
           // the range in text nodes — see core/prompt-value.ts. They are no
           // longer collapsed on the way in, which means the prompt now shows
           // the value that is actually about to be used.
