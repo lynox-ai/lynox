@@ -4444,6 +4444,23 @@ describe('WorkerLoop', () => {
       ]);
     });
 
+    it('names the schedule by its id only in the log once the instance holds an exact connection', async () => {
+      const { reduceErrorTextForProcess, _resetErrorEgress } = await import('./error-egress.js');
+      const { loop } = setup(proposal());
+      const lines: string[] = [];
+      const spy = vi.spyOn(process.stderr, 'write').mockImplementation((c: string | Uint8Array) => { lines.push(String(c)); return true; });
+      reduceErrorTextForProcess();
+      try {
+        const mint = loop.claimHandRunMinter();
+        expect(await loop.runTriggerNow('hr-prop', mint('hr-prop', EVA))).toEqual({ ok: true });
+        await vi.advanceTimersByTimeAsync(0);
+      } finally { spy.mockRestore(); _resetErrorEgress(); }
+      expect(lines.filter((l) => l.includes('test run by hand'))).toEqual([
+        '[lynox:worker] hr-prop test run by hand by mandate:eva@kanzlei.example\n',
+      ]);
+      expect(lines.join('')).not.toContain('Daily Report');
+    });
+
     it('refuses a look-alike marker: an in-process caller cannot mint one', async () => {
       const { loop, tm, session } = setup(proposal());
       loop.claimHandRunMinter();

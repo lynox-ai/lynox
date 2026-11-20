@@ -28,6 +28,17 @@ export function isErrorTextReducedForProcess(): boolean {
 }
 
 /**
+ * A schedule as the worker names it in the container log. Its title is run text: the model or a
+ * person wrote it, and on an instance with an exact connection it can name what the run reads
+ * from a store (a product, a customer). There the log names the schedule by its id only, as the
+ * error beside it is reduced; elsewhere it reads `"<title>" (<id>)`, which self-hosted debugging
+ * reads.
+ */
+export function scheduleInLog(title: string, id: string): string {
+  return exactHeld ? id : `"${title}" (${id})`;
+}
+
+/**
  * The status code of a provider's error: the SDK's `status`, or the OpenAI-compatible adapter's
  * message prefix. Null for anything else.
  */
