@@ -141,7 +141,7 @@ describe('a plan run: its head and the rows keyed to it', () => {
   });
 
   it('maps each end to its status, and an end that was not recorded to interrupted, not failed', () => {
-    const cases: Array<[string, string]> = [['success', 'done'], ['failed', 'failed'], ['timeout', 'failed'], ['stopped', 'ended'], ['halted', 'halted'], ['interrupted', 'interrupted'], ['unrecorded', 'interrupted']];
+    const cases: Array<[string, string]> = [['success', 'done'], ['failed', 'failed'], ['timeout', 'failed'], ['stopped', 'ended'], ['halted', 'halted'], ['interrupted', 'interrupted'], ['unrecorded', 'interrupted'], ['not_run', 'refused']];
     for (const [outcome, status] of cases) expect((buildTrail(run(outcome), quiet)[0] as TrailPlanRun).status, outcome).toBe(status);
   });
 
