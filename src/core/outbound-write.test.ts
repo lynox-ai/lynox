@@ -1184,6 +1184,9 @@ describe('a secret inside JSON text inside a value', () => {
       expect('text' in bodyForQuestion(`{"t":"\\x61b\\150\\'"}`, mask, 'application/json')).toBe(true);
       // A line continuation before CRLF, and an escaped quote ahead of the secret in a literal.
       expect(bodyForQuestion(`{"t":"hunter\\\r\n2secret",}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      // A stray quote on one line, then a literal a backslash continues over the next line break.
+      expect(bodyForQuestion(`say "hi\n{"t":"hunter\\\n2secret",}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      expect('text' in bodyForQuestion(`say "hi\n{"t":"hunter\\\n2",}`, mask, 'text/plain')).toBe(true);
       // A backslash before CR or U+2028 joins the lines into one literal, yet each line is still read.
       for (const brk of ['\r', ' ', ' ']) {
         expect(bodyForQuestion(`"x\\${brk}y "\\u0068${rest}"`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
