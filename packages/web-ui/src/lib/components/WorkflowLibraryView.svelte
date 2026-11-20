@@ -260,10 +260,12 @@
 					...(wf.parameters && wf.parameters.length > 0 ? { params: { ...paramValues } } : {}),
 				}),
 			});
-			const data = (await res.json().catch(() => null)) as (GrantPreview & { error?: string }) | null;
+			const data = (await res.json().catch(() => null)) as (GrantPreview & { error?: string; code?: string }) | null;
 			if (!res.ok || !data || !Array.isArray(data.tuples)) {
 				grantPreview = null;
-				scheduleError = data?.error ?? t('workflow_library.grant_preview_failed');
+				// The preview refuses a workflow the reader may not schedule with the schedule's own code.
+				const refused = typeof data?.code === 'string' ? SCHEDULE_REFUSALS[data.code] : undefined;
+				scheduleError = refused !== undefined ? t(refused) : (data?.error ?? t('workflow_library.grant_preview_failed'));
 				return;
 			}
 			grantPreview = data;

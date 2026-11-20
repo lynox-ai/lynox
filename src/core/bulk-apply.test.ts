@@ -1939,6 +1939,7 @@ describe('§7(i) before-images reach no model context', () => {
     const listAgent = {
       toolContext: { taskManager: { list: () => [], listTriggers: () => bulkTriggers } },
       activeScopes: [],
+      principal: OWNER_PRINCIPAL,
     } as unknown as IAgent;
     const listed = await taskListTool.handler({}, listAgent);
     expect(listed).toContain(`Bulk run ${runId2}`);
