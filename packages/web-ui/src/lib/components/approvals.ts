@@ -91,6 +91,9 @@ export const APPROVAL_LIST_LIMIT = 200;
 /** The engine's neutral name for a mandate it has neither a name nor an address for. */
 export const UNNAMED_MANDATE = 'unnamed mandate';
 
+/** The engine's neutral name for another mandate, as a mandate reads it: not its own, never whose. */
+export const OTHER_MANDATE = 'other mandate';
+
 /** The two i18n lookups the helpers need, `t` and `tf` from `i18n.svelte.ts`. */
 export interface ApprovalsI18n {
 	t: (key: string) => string;
@@ -329,9 +332,11 @@ export function approvalSetupKind(line: Pick<ApprovalSetupLine, 'kind' | 'takenO
 	return `${what}_taken_over_${viewer === 'owner' ? 'you' : 'owner'}`;
 }
 
-/** A setup line's name, with the engine's neutral label translated. */
+/** A setup line's name, with the engine's neutral labels translated. */
 export function approvalSetupName(name: string, i18n: Pick<ApprovalsI18n, 't'>): string {
-	return name === UNNAMED_MANDATE ? i18n.t('approvals.unnamed_mandate') : name;
+	if (name === UNNAMED_MANDATE) return i18n.t('approvals.unnamed_mandate');
+	if (name === OTHER_MANDATE) return i18n.t('approvals.other_mandate');
+	return name;
 }
 
 /** The line under a list the engine cut at its cap, or null when it is whole. The open tab says

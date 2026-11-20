@@ -85,11 +85,13 @@ describe('the schedules list says which helper set a trigger up', () => {
 		expect(linesByTitle()).toEqual({ 'Preise beobachten': ['Set up by Anna A.'], 'Eigener Bericht': [] });
 	});
 
-	it('says a change and a takeover as an approval card does, by whose session reads it', async () => {
+	it('says a change, a takeover and another helper as an approval card does, by whose session reads it', async () => {
 		setLocale('de');
 		rows = [
 			{ ...BASE, id: 'trg-both', title: 'Wochenbericht', setup: [{ kind: 'last_changed_by', name: 'bea@example.com', takenOver: false }, { kind: 'set_up_by', name: 'Anna A.', takenOver: true }] },
 			{ ...BASE, id: 'trg-unnamed', title: 'Ohne Namen', setup: [{ kind: 'set_up_by', name: 'unnamed mandate', takenOver: false }] },
+			// Another helper's mark, as a helper's list carries it: not whose.
+			{ ...BASE, id: 'trg-other', title: 'Fremd', setup: [{ kind: 'set_up_by', name: 'other mandate', takenOver: false }] },
 			// From before the list carried the lines: no line, and no error.
 			{ ...BASE, id: 'trg-old', title: 'Alt' },
 		];
@@ -97,6 +99,7 @@ describe('the schedules list says which helper set a trigger up', () => {
 		expect(linesByTitle()).toEqual({
 			Wochenbericht: ['Geändert von bea@example.com', 'Eingerichtet von Anna A., von dir übernommen'],
 			'Ohne Namen': ['Eingerichtet von (ohne Namen)'],
+			Fremd: ['Eingerichtet von einer anderen Person mit Zugang'],
 			Alt: [],
 		});
 		if (component) unmount(component);
@@ -104,5 +107,10 @@ describe('the schedules list says which helper set a trigger up', () => {
 		viewer = 'mandate';
 		await render();
 		expect(linesByTitle()['Wochenbericht']).toEqual(['Geändert von bea@example.com', 'Eingerichtet von Anna A., vom Inhaber übernommen']);
+		setLocale('en');
+		if (component) unmount(component);
+		component = undefined;
+		await render();
+		expect(linesByTitle()['Fremd']).toEqual(['Set up by another person with delegated access']);
 	});
 });

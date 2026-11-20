@@ -47,8 +47,8 @@
 		created_by?: string;
 		edited_by?: string;
 		// The same, as the lines shown under the title: a helper that set it up or changed it
-		// last, named as the session may read it — by name, or another grant by its address
-		// (`GET /api/triggers`). Only the marks on the trigger itself, not on the workflow it
+		// last, named as the session may read it — by name, or to a helper another helper's mark
+		// as "another person with delegated access" (`GET /api/triggers`). Only the marks on the trigger itself, not on the workflow it
 		// runs. Empty for the owner's own.
 		setup?: ApprovalSetupLine[];
 		// What the owner's stamp of a confirmed plan lists, entry by entry (owner only; B3).

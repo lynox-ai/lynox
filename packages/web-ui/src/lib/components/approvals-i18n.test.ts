@@ -154,6 +154,14 @@ describe('the approval queue speaks both languages', () => {
 		expect(entry('approvals.unnamed_mandate')).not.toBeNull();
 	});
 
+	it('the engine\'s label for another mandate has a translation, and the page knows the label', () => {
+		const engine = readFileSync(fileURLToPath(new URL('../../../../../src/core/approval-view.ts', import.meta.url)), 'utf8');
+		const label = /export const OTHER_MANDATE = '([^']+)';/.exec(engine)?.[1];
+		expect(label).toBeDefined();
+		expect(read('./approvals.ts')).toContain(`export const OTHER_MANDATE = '${label!}';`);
+		expect(entry('approvals.other_mandate')).toEqual({ de: 'einer anderen Person mit Zugang', en: 'another person with delegated access' });
+	});
+
 	it('the receive-only step names the settings path by the labels the navigation shows', () => {
 		const step = entry('approvals.next.receive_only');
 		const label = (key: string): { de: string; en: string } => entry(key) ?? { de: `missing ${key}`, en: `missing ${key}` };

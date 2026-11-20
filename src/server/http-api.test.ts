@@ -11437,7 +11437,7 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
-    it('GET /api/triggers names a helper that set a trigger up or changed it last, by the name a session may read, and the owner\'s own by none', async () => {
+    it('GET /api/triggers names a helper that set a trigger up or changed it last, by the name a session may read, another helper to a helper as another mandate, and the owner\'s own by none', async () => {
       const AT = '2026-11-10T00:00:00.000Z';
       const rows = [
         { id: 'trg-anna', title: 'Preise beobachten', created_by: 'mandate:anna@example.com', created_mandate_id: 'grant-a', created_at: AT },
@@ -11471,12 +11471,16 @@ describe('LynoxHTTPApi', () => {
           });
           // Two triggers of grant-a, one request: the trail is read once per grant.
           expect([...reads].sort()).toEqual(['grant-a', 'grant-b']);
-          // A helper reads its own grant's name, another grant by its address only.
+          // A helper reads its own grant's name, and another grant as another mandate: not its own,
+          // never whose. (Whether the row's own fields still carry the other address is the
+          // route's field question, not the setup lines'.)
           api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'bea@example.com', mandateId: 'grant-b' }) as RequestPrincipal);
           const bea = await setupOf();
-          expect(bea.byId['trg-anna']).toEqual([{ kind: 'set_up_by', name: 'anna@example.com', takenOver: false }]);
+          expect(bea.byId['trg-anna']).toEqual([{ kind: 'set_up_by', name: 'other mandate', takenOver: false }]);
+          expect(bea.byId['trg-taken']).toEqual([{ kind: 'set_up_by', name: 'other mandate', takenOver: true }]);
           expect(bea.byId['trg-bea']).toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }]);
           expect(bea.text).not.toContain('Anna A.');
+          expect(JSON.stringify(Object.values(bea.byId))).not.toContain('anna@example.com');
           // A session no scope names (a mandate without a grant): no lines at all, no read of the
           // trail, and no display name anywhere in the answer.
           api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'bea@example.com' }) as RequestPrincipal);
@@ -12511,7 +12515,7 @@ describe('LynoxHTTPApi', () => {
       expect(card!.setup).toEqual([{ kind: 'last_changed_by', name: 'bea@example.com', takenOver: false }, { kind: 'set_up_by', name: 'Anna A.', takenOver: false }]);
     });
 
-    it('names another grant to a mandate by its address only, and the owner sees both names, on the same entry', async () => {
+    it('names another grant to a mandate as another mandate, neither by name nor by address, and the owner sees both names, on the same entry', async () => {
       const log = new AuditLog(qDb.getDb());
       for (const [email, display, mandateId] of [['anna@example.com', 'Anna A.', 'grant-a'], ['bea@example.com', 'Bea B.', 'grant-b']] as const) {
         log.record({ principal: { kind: 'mandate', email, display, mandateId }, action: 'x', phase: 'read', correlationId: `c-${mandateId}` });
@@ -12523,8 +12527,9 @@ describe('LynoxHTTPApi', () => {
       const text = await res.text();
       const mine = (JSON.parse(text) as { entries: Card[] }).entries;
       expect(mine.map((e) => e.id)).toEqual([id]);
-      expect(mine[0]!.setup).toEqual([{ kind: 'test_run_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: 'anna@example.com', takenOver: false }]);
+      expect(mine[0]!.setup).toEqual([{ kind: 'test_run_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: 'other mandate', takenOver: false }]);
       expect(text).not.toContain('Anna A.');
+      expect(text).not.toContain('anna@example.com');
       // Counter-witness: the same entry, the same trail, read by the owner.
       as(OWNER_PRINCIPAL);
       const theirs = (await list('all')).entries.find((e) => e.id === id)!;
