@@ -210,6 +210,13 @@ describe('symlink-guard', () => {
     expect(r.out).toContain('1 commit(s) read');
   });
 
+  it('CONTROL: an empty range says it read no commit, rather than a bare clean', () => {
+    const head = commitAll('base');
+    const r = guard(head, head);
+    expect(r.status).toBe(0);
+    expect(r.out).toContain('clean — 0 commit(s) read');
+  });
+
   it('fails with exit 2 on a range git cannot read', () => {
     commitAll('base');
     expect(guard('no-such-ref', 'HEAD').status).toBe(2);
