@@ -157,7 +157,9 @@ function queryAllRows(agent: IAgent, collection: string, filter: Record<string, 
 /**
  * The stamps of the source rows a run copies, as their union ({@link DataStore.sourceGrantsOfIds}).
  * Read by `_id`, which every row {@link queryAllRows} returns, so the read is bounded as the
- * source read is. A row without a usable `_id` is unknown.
+ * source read is. A row without a usable `_id` counts as unknown: a guard, which no real read
+ * reaches today (`_id` is the table's integer primary key and every query selects it), kept so
+ * a later read that drops it errs toward unknown instead of toward no source.
  */
 function sourceGrantsOfRows(agent: IAgent, collection: string, rows: readonly Record<string, unknown>[]): string[] {
   const store = agent.toolContext.dataStore;

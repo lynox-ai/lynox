@@ -942,9 +942,10 @@ export interface BulkRunForApply {
   contractJson: string | null;
   /** As {@link BulkRunForPreview.delegatedPlanner}. */
   delegatedPlanner: RequestPrincipal | null;
-  /** The grant set of the conversation that planned the run, which its data-store writes are
-   *  stamped with (`_source_grants`): the worker that writes holds none. Null is unknown, and
-   *  so is every undo's — the owner plans it with no conversation; its targets carry their own. */
+  /** The grant set the run's data-store writes are stamped with (`_source_grants`), since the
+   *  worker that writes holds none: the planning conversation's set together with its source's —
+   *  the source rows' own stamps, or `unknown` for a file (`bulk_plan`). Null is unknown, and so
+   *  is every undo's — the owner plans it with no conversation; its targets carry their own. */
   plannerGrants: string[] | null;
 }
 
@@ -1147,8 +1148,9 @@ export class BulkLedger {
      *  `planned` and halted until the owner starts it, every target planned with
      *  {@link judgeTemplate} as its after-state until its verdict; a data-store run only. */
     judge?: JudgeRule | undefined;
-    /** The grant set of the planning conversation (`ConversationGrants.members()`), which the
-     *  run's data-store writes are stamped with. Null or absent: unknown. */
+    /** The grant set the run's data-store writes are stamped with: the planning conversation's
+     *  (`ConversationGrants.members()`) together with its source's — the source rows' own stamps,
+     *  or `unknown` for a file. The caller forms the union. Null or absent: unknown. */
     plannerGrants?: readonly string[] | null | undefined;
   }): BulkRunStatus {
     if (params.judge !== undefined && params.targetSystem !== 'data_store') {

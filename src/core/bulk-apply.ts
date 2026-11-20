@@ -777,9 +777,11 @@ export function dataStoreWriter(store: DataStore, collection: string): TargetWri
       const row = after.value;
       if (row === null || typeof row !== 'object' || Array.isArray(row)) throw new Error('not a row');
       // Bulk apply runs in the worker, outside any conversation, so the stamp comes with the
-      // write: the planning conversation's grant set (`BulkRunForApply.plannerGrants`), or for an
-      // undo the one the row held before its source wrote it. A created or restored row holds
-      // exactly that; an update keeps what the row already held beside it. Null reads as unknown.
+      // write: the run's (`BulkRunForApply.plannerGrants`, the planning conversation's set with
+      // its source's), or for an undo the one the row held before its source wrote it — with
+      // `unknown` beside it where a row is re-created (`recreatedGrants`). A created row holds
+      // exactly the stamp passed; an update keeps what the row already held beside it. Null
+      // reads as unknown.
       return store.putRowVerbatim(collection, row as Record<string, unknown>, { grants: grants ?? null, runId: null, writtenBy: null, untrusted: false });
     },
   };

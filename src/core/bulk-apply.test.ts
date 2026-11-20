@@ -1845,12 +1845,19 @@ describe('data-store runs', () => {
       return applyPlanned(await bulkPlanTool.handler(
         { target_system: 'data_store', target_collection: 'products', source_file: 'p.json' }, planner));
     };
+    /** Add rows to the collection `staged` (made on first use), stamped by a write with `stamp`. */
+    const stage = (rows: { target: string; price: number }[], stamp: string[]): void => {
+      if (!store.getCollectionInfo('staged')) {
+        store.createCollection({ name: 'staged', scope, columns: [{ name: 'target', type: 'string' }, { name: 'price', type: 'number' }] });
+      }
+      store.insertRecords({ collection: 'staged', records: rows, stamp: { grants: stamp, runId: null, writtenBy: null, untrusted: false } });
+    };
+    const planStaged = async (planner: IAgent, atomic = false): Promise<string> => applyPlanned(await bulkPlanTool.handler(
+      { target_system: 'data_store', target_collection: 'products', source_collection: 'staged', atomic }, planner));
     /** Plan from the collection `staged`, whose rows a write stamped with `stamp`. */
     const planFromCollection = async (rows: { target: string; price: number }[], stamp: string[], planner: IAgent, atomic = false): Promise<string> => {
-      store.createCollection({ name: 'staged', scope, columns: [{ name: 'target', type: 'string' }, { name: 'price', type: 'number' }] });
-      store.insertRecords({ collection: 'staged', records: rows, stamp: { grants: stamp, runId: null, writtenBy: null, untrusted: false } });
-      return applyPlanned(await bulkPlanTool.handler(
-        { target_system: 'data_store', target_collection: 'products', source_collection: 'staged', atomic }, planner));
+      stage(rows, stamp);
+      return planStaged(planner, atomic);
     };
     const undoOf = async (runId: string, w: typeof writerFor = writerFor): Promise<{ id: string; status: string }> => {
       const undo = ledger.planUndo(runId);
@@ -1865,6 +1872,26 @@ describe('data-store runs', () => {
       await planFromCollection([{ target: 'NEW1', price: 1 }], ['gX'], agentWith(['gA']));
       expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows).toHaveLength(1);
       expect(grantsOf('NEW1')).toEqual(['gA', 'gX']);
+    });
+
+    it('a source row without a stamp (NULL, as from before the columns) puts unknown beside the conversation\'s grants', async () => {
+      seedStore();
+      stage([{ target: 'NEW1', price: 1 }], ['gX']);
+      store['db'].prepare('UPDATE ds_staged SET _source_grants = NULL').run();
+      await planStaged(agentWith(['gA']));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows).toHaveLength(1);
+      expect(grantsOf('NEW1')).toEqual(['gA', 'unknown']);
+    });
+
+    it('the stamp of a source row past the first read chunk reaches the rows the run creates', async () => {
+      seedStore();
+      // 500 rows (one chunk of `BULK_QUERY_PAGE`) under gY, and the 501st alone under gZ.
+      stage(Array.from({ length: 500 }, (_, i) => ({ target: `N${String(i)}`, price: i })), ['gY']);
+      stage([{ target: 'N500', price: 500 }], ['gZ']);
+      await planStaged(agentWith(['gA']));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'N500' } }).rows).toHaveLength(1);
+      expect(grantsOf('N0')).toEqual(['gA', 'gY', 'gZ']);
+      expect(grantsOf('N500')).toEqual(['gA', 'gY', 'gZ']);
     });
 
     it('a row a run creates from a file holds unknown beside the planning conversation\'s grants', async () => {
