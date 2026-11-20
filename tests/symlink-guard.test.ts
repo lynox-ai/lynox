@@ -16,7 +16,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const SCRIPT = fileURLToPath(new URL('../scripts/symlink-guard.mjs', import.meta.url));
 // Imported as well as run: the rule itself is tested on its own, and a script that does not load
 // fails this whole file rather than one case.
-const { linkProblem } = await import(pathToFileURL(SCRIPT).href) as { linkProblem: (path: string, target: string, isLink?: (p: string) => boolean) => string | null };
+const { linkProblem } = await import(pathToFileURL(SCRIPT).href) as { linkProblem: (target: string) => string | null };
 
 /** Git exports `GIT_DIR` and friends inside hooks; left in place they point the fixture at this repository. */
 const CLEAN_ENV = { ...process.env, GIT_DIR: undefined, GIT_WORK_TREE: undefined, GIT_INDEX_FILE: undefined } as NodeJS.ProcessEnv;
@@ -50,35 +50,31 @@ afterEach(() => {
 
 describe('linkProblem', () => {
   it('refuses an absolute target', () => {
-    expect(linkProblem('node_modules', '/home/x/node_modules')).toBe('absolute');
+    expect(linkProblem('/home/x/node_modules')).toBe('absolute');
   });
 
   it('refuses a backslash, a colon or a control character: Windows paths, and text behind a NUL', () => {
-    expect(linkProblem('node_modules', 'C:\\Users\\x\\node_modules')).toBe('unusual');
-    expect(linkProblem('node_modules', 'C:/Users/x')).toBe('unusual');
-    expect(linkProblem('node_modules', 'C:foo')).toBe('unusual');
-    expect(linkProblem('node_modules', '\\\\server\\share')).toBe('unusual');
-    expect(linkProblem('node_modules', '..\\..\\home\\u')).toBe('unusual');
-    expect(linkProblem('node_modules', 'ok\u0000/home/u/secret')).toBe('unusual');
+    expect(linkProblem('C:\\Users\\x\\node_modules')).toBe('unusual');
+    expect(linkProblem('C:/Users/x')).toBe('unusual');
+    expect(linkProblem('C:foo')).toBe('unusual');
+    expect(linkProblem('\\\\server\\share')).toBe('unusual');
+    expect(linkProblem('..\\..\\home\\u')).toBe('unusual');
+    expect(linkProblem('ok\u0000/home/u/secret')).toBe('unusual');
   });
 
-  it('refuses a relative target that leads out of the tree, from the link\'s own directory', () => {
-    expect(linkProblem('node_modules', '../other/node_modules')).toBe('outside');
-    expect(linkProblem('a/node_modules', '../../x')).toBe('outside');
-    expect(linkProblem('a/b/c', 'd/../../../../x')).toBe('outside');
-    expect(linkProblem('x', './..')).toBe('outside');
+  it('refuses any target that climbs with "..", wherever the ".." stands', () => {
+    expect(linkProblem('../other/node_modules')).toBe('climbs');
+    expect(linkProblem('d/d/../outside')).toBe('climbs');
+    expect(linkProblem('./..')).toBe('climbs');
+    expect(linkProblem('a/..')).toBe('climbs');
   });
 
-  it('refuses a target that steps onto another link, which text normalisation would read as a directory', () => {
-    const isLink = (p: string): boolean => p === 'd';
-    expect(linkProblem('e', 'd/d/../outside', isLink)).toBe('throughLink');
-    expect(linkProblem('e', 'd', isLink)).toBe('throughLink');
-  });
-
-  it('CONTROL: lets a relative target inside the tree pass', () => {
-    expect(linkProblem('a/b/link', '../c')).toBeNull();
-    expect(linkProblem('a/link', 'd/../e')).toBeNull();
-    expect(linkProblem('link', 'docs/guide.md', (p) => p === 'other')).toBeNull();
+  it('CONTROL: lets a relative target without ".." pass, names that only start with dots included', () => {
+    expect(linkProblem('docs/guide.md')).toBeNull();
+    expect(linkProblem('./docs')).toBeNull();
+    expect(linkProblem('a//b')).toBeNull();
+    expect(linkProblem('...')).toBeNull();
+    expect(linkProblem('..hidden/x')).toBeNull();
   });
 });
 
@@ -97,7 +93,7 @@ describe('symlink-guard', () => {
     expect(r.err + r.out).not.toContain('checkout-of-another-worktree');
   });
 
-  it('turns red on a link whose relative target leads out of the tree', () => {
+  it('turns red on a link whose relative target climbs out of the tree', () => {
     const base = commitAll('base');
     mkdirSync(join(dir, 'pkg'));
     symlinkSync('../../elsewhere/node_modules', join(dir, 'pkg', 'node_modules'));
@@ -105,7 +101,7 @@ describe('symlink-guard', () => {
     const r = guard(base, head);
     expect(r.status).toBe(1);
     expect(r.err).toContain('"pkg/node_modules"');
-    expect(r.err).toContain('a target outside the tree');
+    expect(r.err).toContain('a target that climbs with ".."');
   });
 
   it('turns red on a link added and removed again on the branch: the history still holds it', () => {
@@ -126,7 +122,7 @@ describe('symlink-guard', () => {
     expect(guard(base, head).status).toBe(1);
   });
 
-  it('turns red on a link a merge commit brings in', () => {
+  it('turns red on a link a merged side brings in, once, in the side\'s commit', () => {
     const base = commitAll('base');
     git('checkout', '-q', '-b', 'side');
     symlinkSync('/abs/node_modules', join(dir, 'node_modules'));
@@ -160,7 +156,7 @@ describe('symlink-guard', () => {
     expect(r.err).toContain('"node_modules"');
   });
 
-  it('turns red on a link whose target changes to one outside the tree', () => {
+  it('turns red on a link whose target changes to an absolute one', () => {
     symlinkSync('docs', join(dir, 'link'));
     mkdirSync(join(dir, 'docs'));
     writeFileSync(join(dir, 'docs', 'a.md'), 'a\n');
@@ -172,22 +168,31 @@ describe('symlink-guard', () => {
     expect(guard(base, head).status).toBe(1);
   });
 
-  it('turns red on a link that leads out through another link', () => {
+  it('turns red on a link that would lead out through another link, in a later commit than that link', () => {
+    // `e` alone stays inside while `d` is a directory; once `d` is a link to `.`, it leads out.
+    // The rule needs neither commit to see the other: `e` climbs with "..".
+    mkdirSync(join(dir, 'd', 'd'), { recursive: true });
+    writeFileSync(join(dir, 'd', 'd', 'x'), 'x\n');
     const base = commitAll('base');
+    symlinkSync('d/d/../../outside', join(dir, 'e'));
+    commitAll('e');
+    rmSync(join(dir, 'd'), { recursive: true });
     symlinkSync('.', join(dir, 'd'));
-    symlinkSync('d/d/../outside', join(dir, 'e'));
-    const head = commitAll('two links');
+    const head = commitAll('d becomes a link');
     const r = guard(base, head);
     expect(r.status).toBe(1);
-    expect(r.err).toContain('"e" with a target that passes through another link');
+    expect(r.err).toContain('"e" with a target that climbs with ".."');
+    // `d -> .` itself climbs nowhere and is not reported.
+    expect(r.err).not.toContain('"d"');
   });
 
-  it('CONTROL: stays green on a link with a relative target inside the tree', () => {
+  it('CONTROL: stays green on links with relative targets without ".."', () => {
     mkdirSync(join(dir, 'docs'));
     writeFileSync(join(dir, 'docs', 'guide.md'), 'g\n');
     const base = commitAll('base');
-    mkdirSync(join(dir, 'a', 'b'), { recursive: true });
-    symlinkSync('../../docs/guide.md', join(dir, 'a', 'b', 'guide.md'));
+    mkdirSync(join(dir, 'a'), { recursive: true });
+    symlinkSync('docs/guide.md', join(dir, 'guide.md'));
+    symlinkSync('./b', join(dir, 'a', 'link'));
     const head = commitAll('a link inside');
     const r = guard(base, head);
     expect(r.status).toBe(0);
