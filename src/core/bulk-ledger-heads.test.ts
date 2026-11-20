@@ -156,42 +156,35 @@ describe('the head counts of a run', () => {
   });
 });
 
-describe('the failures a halt names', () => {
+describe('the unclear sends a halt names', () => {
   // A timeout is recorded as a failure (`write_failed`, `failed_once`) and leaves the send unclear.
   const timedOut: Row = { sent: true, unknownSends: 1, error: 'write_failed', failedOnce: true };
   const refused: Row = { sent: true, error: 'write_failed', failedOnce: true };
 
-  it('counts a target whose send is unclear now as unclear in this pass, not as failed once', () => {
+  it('counts a target whose send is unclear now and that this pass recorded as failed', () => {
     const s = ledger.getStatus(run(EXTERNAL, [timedOut, refused, { applied: true, failedOnce: true }]))!;
     expect(s.passUnclear).toBe(1);
-    expect(s.failedOnce).toBe(2);
     expect(s.heads.failed).toBe(1);
     expect(s.heads.unclear).toBe(1);
+    // Failed once counts every target that failed in a pass, an unclear one included.
+    expect(s.failedOnce).toBe(3);
   });
 
-  it('takes an unclear target no failure of this pass names out of the pass, and still out of failed once', () => {
+  it('leaves out an unclear target no failure of this pass names', () => {
     // Left unclear by an earlier pass: a resume cleared its error, or this pass only read it.
     const s = ledger.getStatus(run(EXTERNAL, [
       { sent: true, unknownSends: 1, failedOnce: true },
       { sent: true, unknownSends: 1, error: 'sent_unknown', failedOnce: true },
     ]))!;
     expect(s.passUnclear).toBe(0);
-    expect(s.failedOnce).toBe(0);
     expect(s.heads.unclear).toBe(2);
   });
 
-  it('reads unclear off the same predicate as the head: a local run has no unclear target, so it counts the same target failed', () => {
+  it('reads unclear off the same predicate as the head: a local run has no unclear target', () => {
     const s = ledger.getStatus(run(LOCAL, [timedOut, refused]))!;
     expect(s.heads.unclear).toBe(0);
     expect(s.passUnclear).toBe(0);
-    expect(s.failedOnce).toBe(2);
-  });
-
-  it('leaves out a target that failed for real once and is unclear after a later pass: the state keeps no refused send apart (today)', () => {
-    // Refused in pass 1 (its send taken back), timed out in pass 2: one row, the same as a target
-    // that only timed out. Pinned as it stands, not as it should be.
-    const s = ledger.getStatus(run(EXTERNAL, [timedOut]))!;
-    expect(s.failedOnce).toBe(0);
-    expect(s.passUnclear).toBe(1);
+    expect(s.heads.failed).toBe(2);
   });
 });
+

@@ -7,9 +7,8 @@ import { t, tf, getLocale, setLocale } from '../i18n.svelte.js';
 
 // A halted run's sentences on a target whose send has no clear answer (U-364):
 // the halt names unclear targets apart from the ones that could not be written, the step "check
-// the targets with an error below" stands only where the preview marks one, the count of failed
-// targets so far leaves the unclear ones out, a cancelled run is called cancelled, and the rest
-// of a run with no way on has no result rather than being open.
+// the targets with an error below" stands only where the preview marks one, a cancelled run is
+// called cancelled, and the rest of a run with no way on has no result rather than being open.
 
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
 type SvelteClient = {
@@ -233,26 +232,36 @@ describe('the step to check the targets with an error', () => {
 		expect(shown()).not.toContain(step);
 	});
 
+	it('counts a target left out after its second failed read, on a planned run halted on three failures in a row', async () => {
+		const step = t('bulk.halt.consecutiveFailures_before');
+		const planned = (o: Partial<BulkRunDetailData> = {}) => makeRun({
+			phase: 'planned', total: 3, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 3 },
+			haltKey: 'consecutiveFailures', haltReason: 'three consecutive targets failed', ...o,
+		});
+		const leftOut = (seq: number, error: string): BulkTarget => ({ ...unread(seq, error), change: 'invalid' });
+		run = planned();
+		allTargets = [leftOut(0, 'read_failed'), leftOut(1, 'read_failed'), leftOut(2, 'read_failed')];
+		await render();
+		expect(shown()).toContain(step);
+		unmount(component!);
+		// Left out when it was planned, for another reason: not a failure.
+		allTargets = [leftOut(0, 'redirect'), leftOut(1, 'redirect'), leftOut(2, 'redirect')];
+		await render();
+		expect(shown()).not.toContain(step);
+		unmount(component!);
+		// Loaded whole: the marked ones past the first page count too.
+		run = planned({ total: 9, changes: { update: 6, create: 0, delete: 0, unchanged: 0, invalid: 3 } });
+		allTargets = [...Array.from({ length: 6 }, (_, i) => field(i)), leftOut(6, 'read_failed'), leftOut(7, 'read_failed'), leftOut(8, 'read_failed')];
+		await render();
+		expect(shown()).toContain(step);
+	});
+
 	it('loads every target of a run halted on its failures, so a marked one past the first page counts', async () => {
 		run = halted(1, 0, { total: 12, changes: UPDATES(12), heads: { ...NONE, failed: 1, open: 11 } });
 		allTargets = [...Array.from({ length: 10 }, (_, i) => field(i)), unread(10, 'write_failed'), field(11)];
 		await render();
 		expect(shown()).toContain(t('bulk.halt.failures_before_write'));
 		expect(target.textContent).toContain('/products/11');
-	});
-});
-
-describe('the failed targets so far', () => {
-	it('counts only the targets that failed, never one whose send is unclear', async () => {
-		// The engine leaves the unclear one out of `failedOnce`; with none left the line is gone.
-		run = halted(0, 1, { resumeSends: 2 });
-		await render();
-		expect(shown()).not.toMatch(/gescheitert/);
-		unmount(component!);
-		run = halted(2, 1, { failedOnce: 2, resumeSends: 4 });
-		await render();
-		expect(shown()).toContain(tf('bulk.resume.failed_so_far', { n: '2' }));
-		expect(shown()).not.toContain(tf('bulk.resume.failed_so_far', { n: '3' }));
 	});
 });
 

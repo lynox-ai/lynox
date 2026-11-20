@@ -87,8 +87,7 @@ export interface BulkRun {
 	judge: { tier: string; unjudged: number; judged?: number | undefined } | null;
 	/** The most different targets the approval lets the write reach; null before an approval. */
 	maxTargets: number | null;
-	/** Targets that failed in any pass, apart from one whose send is unclear now; null for a run
-	 *  approved before this was counted. */
+	/** Targets that failed in any pass; null for a run approved before this was counted. */
 	failedOnce: number | null;
 	/** Of the targets this pass recorded as failed, those whose send is unclear now. Absent on an
 	 *  older engine. */
@@ -356,11 +355,8 @@ export function bulkResumeText(
 		: (capped ? 'bulk.resume.kept_write_capped' : 'bulk.resume.kept_write'));
 	if (!failures) return { cause, before, check: null, kept, soFar: null, allows: null };
 	const f = run.failed;
-	// A target whose send is unclear is not counted as failed (the engine leaves it out of
-	// `failedOnce`): the cause and the warning above name it. None failed: nothing to say.
 	const soFar = run.failedOnce === null
 		? (f === 1 ? i18n.t('bulk.resume.failed_so_far_at_least_one') : i18n.tf('bulk.resume.failed_so_far_at_least', { n: String(f) }))
-		: run.failedOnce === 0 ? null
 		: (run.failedOnce === 1 ? i18n.t('bulk.resume.failed_so_far_one') : i18n.tf('bulk.resume.failed_so_far', { n: String(run.failedOnce) }));
 	return { cause, before, check: null, kept, soFar, allows: bulkResumeAllows(limit, open, i18n) };
 }
@@ -381,9 +377,11 @@ function bulkFailureRateCause(run: Pick<BulkRunDetailData, 'heads' | 'passUnclea
 
 /** Whether the preview marks this target with a failure: a write or read failure the row shows
  *  as such. A target with a diff shows the diff, not its error; a conflict and a send without a
- *  clear answer are not failures. */
+ *  clear answer are not failures. A target left out after its second failed read shows that
+ *  read's failure too. */
 export function bulkShowsFailure(target: Pick<BulkTarget, 'error' | 'change' | 'diff'>): boolean {
-	return target.error !== null && target.change !== 'invalid' && target.diff.kind === 'none'
+	if (target.change === 'invalid') return target.error === 'read_failed';
+	return target.error !== null && target.diff.kind === 'none'
 		&& target.error !== 'conflict' && target.error !== 'sent_unknown';
 }
 
