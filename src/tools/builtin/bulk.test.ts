@@ -192,8 +192,10 @@ describe('bulk_plan over workspace files', () => {
     const raw = engineDb.getDb().prepare('SELECT target_key, before, after_planned FROM bulk_targets').all() as Record<string, string | null>[];
     expect(raw).toHaveLength(240);
     const dump = JSON.stringify(raw);
+    // Each marker holds a character base64 never yields ('-' in MARK, '.' in every key), so
+    // random ciphertext cannot contain it; a word like 'pages' alone it can.
     expect(dump).not.toContain(MARK);
-    expect(dump).not.toContain('pages');
+    expect(dump).not.toContain('.md');
   });
 
   it('marks a target outside the workspace invalid, by reason, without reading it', async () => {
