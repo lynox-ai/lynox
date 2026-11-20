@@ -664,8 +664,8 @@ export class Agent implements IAgent {
   writeAuthor: string | null = null;
   /** See `IAgent.ownerKnown`. Set per run by the session (a trigger's run adds its instruction). */
   ownerKnown?: OwnerKnownReader | undefined;
-  /** See `IAgent.searchResultAddresses`. Its own per agent: a sub-agent starts empty. */
-  readonly searchResultAddresses = new SearchResultAddresses();
+  /** See `IAgent.searchResultAddresses`. The conversation's: the session and a spawning parent pass theirs. */
+  readonly searchResultAddresses: SearchResultAddresses;
   /** See `IAgent.sendOrigin`. Set per run by the session. */
   sendOrigin?: SendOrigin | undefined;
   /** See `IAgent.noticeLanguage`. */
@@ -1158,6 +1158,15 @@ export class Agent implements IAgent {
    * consent gate inside `http_request` — run inside a batch and so see the same snapshot.
    * Outside a batch the fallback is the state right now, which can only refuse more.
    */
+  /**
+   * Whether the batch the running call belongs to started after the conversation had taken in
+   * foreign content. Every call runs inside a batch (`_executeOne` is reached only from there);
+   * read outside one it answers `true`, the side that grants less.
+   */
+  batchStartedTainted(): boolean {
+    return this._taintBeforeBatch ?? true;
+  }
+
   governingContract(): GoverningContract {
     const contract = this.capabilityContract;
     if (contract === undefined) return { contract: undefined, withheld: 'none' };
@@ -1749,6 +1758,7 @@ export class Agent implements IAgent {
       costUSD: 0,
     };
     this.toolResultBlobStore = config.toolResultBlobStore;
+    this.searchResultAddresses = config.searchResultAddresses ?? new SearchResultAddresses();
     this.toolCallTracker = config.toolCallTracker;
     this.userTimezone = config.userTimezone;
     this.changesetManager = config.changesetManager;
