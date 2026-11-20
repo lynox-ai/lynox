@@ -788,6 +788,22 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('checksum'), true, DE, true)).toEqual({ cause: 'Der Lauf hat sich seit deiner Freigabe geändert.', before: null, check: null, kept: null, soFar: null, allows: null });
 	});
 
+	it('counts as written only what the run wrote: a target found already holding its value is not', () => {
+		const heads = (written: number, takenBack: number, unchanged: number) => ({
+			deselected: 0, invalid: 0, unchanged, takenBack, written, settled: 0, conflict: 0, unclear: 0, failed: 0, open: 0,
+		});
+		const STAYS = 'Was schon geschrieben ist, bleibt.';
+		const NONE = 'Bisher ist kein Ziel als geschrieben bestätigt.';
+		// Only found ones: applied 2, none written by the run.
+		expect(bulkResumeText(w('timeBudget', { applied: 2, heads: heads(0, 0, 2) }), true, DE, true)?.kept).toMatch(new RegExp(`^${NONE}`));
+		// Found and written mixed: something the run wrote stays, as before.
+		expect(bulkResumeText(w('timeBudget', { applied: 3, heads: heads(1, 0, 2) }), true, DE, true)?.kept).toMatch(new RegExp(`^${STAYS}`));
+		// Written and taken back since counts as applied, as before.
+		expect(bulkResumeText(w('timeBudget', { applied: 1, heads: heads(0, 1, 0) }), true, DE, true)?.kept).toMatch(new RegExp(`^${STAYS}`));
+		// An engine without heads: applied, as before.
+		expect(bulkResumeText(w('timeBudget', { applied: 2 }), true, DE, true)?.kept).toMatch(new RegExp(`^${STAYS}`));
+	});
+
 	it('says all the rest is tried only when the maximum does not stop the pass first', () => {
 		expect(bulkResumeText(w('timeBudget'), true, DE, true)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht alle übrigen Ziele noch einmal. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
 		expect(bulkResumeText(w('timeBudget', { resumeTries: 4 }), true, DE, true)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht die übrigen Ziele bis zur freigegebenen Höchstzahl. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
