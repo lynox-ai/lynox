@@ -94,6 +94,11 @@ describe('a mandate reads another mandate\'s schedules without its address, gran
     schedule('t-covered', '{"region":"covered-value"}', { createdBy: 'owner' });
     db.prepare('UPDATE triggers SET covered_created_by = ?, covered_created_id = ?, covered_edited_by = ?, covered_edited_id = ? WHERE id = ?')
       .run(OLE, 'TEST-MANDATE-OLE', OLE, 'TEST-MANDATE-OLE', 't-covered');
+    // The mandate's own schedule, switched by another mandate since: its values stay its own.
+    schedule('t-ida-touched', '{"region":"ida-touched-value"}', { createdBy: IDA, createdMandateId: 'TEST-MANDATE-IDA' });
+    db.prepare('UPDATE triggers SET edited_by = ?, mandate_editor = ?, mandate_editor_id = ? WHERE id = ?').run(OLE, OLE, 'TEST-MANDATE-OLE', 't-ida-touched');
+    // Another mandate's schedule the mandate switches off itself.
+    schedule('t-ole-patch', '{"region":"ole-patch-value"}', { createdBy: OLE, createdMandateId: 'TEST-MANDATE-OLE' });
 
     const read = history.getWorkflowAuthorship.bind(history);
     history.getWorkflowAuthorship = (id: string) => {
@@ -167,9 +172,29 @@ describe('a mandate reads another mandate\'s schedules without its address, gran
     expect(covered).not.toHaveProperty('covered_edited_id');
   });
 
+  it('leaves a mandate the values of its own schedule after another mandate changed it, without saying which one', async () => {
+    const own = (await triggers(asMandate())).get('t-ida-touched')!;
+    expect(own).toMatchObject({ created_by: IDA, created_mandate_id: 'TEST-MANDATE-IDA', edited_by: 'mandate:', mandate_editor: 'mandate:', pipeline_params: '{"region":"ida-touched-value"}' });
+    expect(own).not.toHaveProperty('mandate_editor_id');
+  });
+
+  it('answers a mandate\'s change of another mandate\'s schedule with the row as its list shows it', async () => {
+    (api as unknown as Inner).rateCounts.clear();
+    const res = await fetch(`${base}/api/tasks/t-ole-patch`, {
+      method: 'PATCH', headers: { ...asMandate(), 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }),
+    });
+    expect(res.status).toBe(200);
+    const row = await res.json() as Row;
+    expect(row).toMatchObject({ id: 't-ole-patch', created_by: 'mandate:' });
+    expect(row).not.toHaveProperty('created_mandate_id');
+    expect(row).not.toHaveProperty('pipeline_params');
+    // Its own change is marked as its own, by name.
+    expect(row['edited_by']).toBe(IDA);
+  });
+
   it('puts no address, grant id or value of another mandate anywhere in a mandate\'s list', async () => {
     const text = await (await get('/api/triggers', asMandate())).text();
-    for (const stored of ['ole@example.invalid', 'TEST-MANDATE-OLE', 'ole-value', 'ole-edit-value', 'ole-lasting-value']) expect(text).not.toContain(stored);
+    for (const stored of ['ole@example.invalid', 'TEST-MANDATE-OLE', 'ole-value', 'ole-edit-value', 'ole-lasting-value', 'ole-patch-value']) expect(text).not.toContain(stored);
     // The positive control: the same list does carry the mandate's own.
     expect(text).toContain('ida-value');
   });
@@ -184,8 +209,21 @@ describe('a mandate reads another mandate\'s schedules without its address, gran
       const body = await res.json() as { code?: string };
       return { status: res.status, ...(body.code !== undefined ? { code: body.code } : {}) };
     };
-    expect(await preview('wf-ole', asMandate())).toEqual({ status: 403, code: 'foreign_workflow' });
-    expect(await preview('wf-unread', asMandate())).toEqual({ status: 403, code: 'unreadable_workflow' });
+    const schedule = async (id: string): Promise<{ status: number; code?: string }> => {
+      (api as unknown as Inner).rateCounts.clear();
+      const res = await fetch(`${base}/api/tasks`, {
+        method: 'POST', headers: { ...asMandate(), 'content-type': 'application/json' },
+        body: JSON.stringify({ title: 'probe', pipelineId: id, scheduleCron: '0 9 * * 1', params: { region: 'de' } }),
+      });
+      const body = await res.json() as { code?: string };
+      return { status: res.status, ...(body.code !== undefined ? { code: body.code } : {}) };
+    };
+    for (const [id, code] of [['wf-ole', 'foreign_workflow'], ['wf-unread', 'unreadable_workflow']] as const) {
+      const refused = await preview(id, asMandate());
+      expect(refused).toEqual({ status: 403, code });
+      // The same answer the schedule itself gives the same mandate.
+      expect(await schedule(id)).toEqual(refused);
+    }
     // Its own workflow, the owner's, and the owner on another mandate's pass the refusal (what
     // follows answers the grant itself, which these workflows do not need).
     for (const [id, headers] of [['wf-ida', asMandate()], ['wf-owner', asMandate()], ['wf-ole', { authorization: `Bearer ${SECRET}` }]] as const) {

@@ -7,6 +7,7 @@ import { describeTurnUntrusted, type UntrustedCause } from '../../core/untrusted
 import { logErrorChain } from '../../core/utils.js';
 import { OWNER_PRINCIPAL, UNKNOWN_RUN_TAG, isOwnerPrincipal, isRunTag, mandateIdOf, mandateNeedsOwnerStamp, principalTag } from '../../core/request-principal.js';
 import { PAUSED_MODEL_TEXT, isPaused } from '../../core/plan-pause.js';
+import { withoutForeignMarks } from '../../core/foreign-marks.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 import { WATCH_OVERRIDE_REFUSAL } from '../../core/task-manager.js';
@@ -842,7 +843,8 @@ export const taskListTool: ToolEntry<TaskListInput> = {
     // with ≥20 TODOs truncate every trigger off the default-20 slice below;
     // putting them first guarantees they're never starved by the limit. Any
     // overflowing TODOs are still accounted for by the "... and N more" line.
-    const tasks = [...triggers, ...todos];
+    // A mandate's chat reads another mandate's schedules as the trigger list does (`withoutForeignMarks`).
+    const tasks = [...triggers.map((t) => withoutForeignMarks(t, agent.principal)), ...todos];
 
     const limited = tasks.slice(0, input.limit ?? 20);
     if (limited.length === 0) return 'No tasks found.';

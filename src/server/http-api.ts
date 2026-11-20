@@ -91,6 +91,7 @@ import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { MANDATE_KEY_INPUT_REFUSAL, MandateKeyInputError, mandateCredentialInput, mandateDocumentCredential, maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptClosedReason, type PromptStore } from '../core/prompt-store.js';
 import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
+import { withoutForeignMarks } from '../core/foreign-marks.js';
 import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
 import type { ApprovalStore } from '../core/approval-store.js';
 import type { ThreadRecord } from '../core/thread-store.js';
@@ -103,7 +104,7 @@ import { sweepStaleExports } from '../core/export-archive.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded , toMistralEuBase } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { checkKeylessOverCiphertext, type KeylessState, type KeylessStore } from '../core/vault-key-detect.js';
-import { CP_ADMIN_PRINCIPAL, MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, creatorCovered, editorCovered, isOwnerPrincipal, mandateIdOf, ownedBy, planAuthorshipOf, planAuthorshipOfWorkflow, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
+import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, creatorCovered, editorCovered, isOwnerPrincipal, mandateIdOf, ownedBy, planAuthorshipOf, planAuthorshipOfWorkflow, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
 import { WORKFLOW_ENDED_REFUSAL, libraryRunCheck, workflowRunsAs } from '../orchestrator/run-source.js';
 import { runAsPlanOf } from '../core/plan-run-context.js';
 import { MEMBER_CONNECTION_PREFIX } from '../core/member-connection-notes.js';
@@ -344,39 +345,6 @@ export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: 
     paused_who: entries.map((e) => e.email),
     paused_ended: entries.map((e) => ({ email: e.email, reason: e.reason, ends_at: new Date(e.endsAt * 1000).toISOString(), warned: e.warned === true })),
   };
-}
-
-/** The marks on a trigger that name who set it up or changed it, each with the grant id stored beside it. */
-const TRIGGER_MARKS = [
-  ['created_by', 'created_mandate_id'],
-  ['edited_by', null],
-  ['mandate_editor', 'mandate_editor_id'],
-  ['covered_created_by', 'covered_created_id'],
-  ['covered_edited_by', 'covered_edited_id'],
-] as const satisfies readonly (readonly [keyof TriggerRecord, keyof TriggerRecord | null])[];
-
-/**
- * A trigger's columns as a mandate may read them. A mark that names another mandate says only
- * that a mandate set it, never which one: the tag keeps its prefix, so the view still tells a
- * helper's schedule from the owner's (`awaitsOwnerStamp`), and the grant id beside it leaves.
- * A schedule another mandate set up or changed keeps its values to itself (`pipeline_params`):
- * a mandate cannot schedule that workflow anyway (`foreignWorkflowScheduleRefusalKind`). The
- * owner's marks and the mandate's own stay as stored.
- */
-function withoutForeignMarks<T extends Partial<TriggerRecord>>(stored: T, principal: RequestPrincipal): T {
-  if (isOwnerPrincipal(principal)) return stored;
-  const own = principal.kind === 'mandate' ? principalTag(principal) : null;
-  const isForeign = (tag: unknown): boolean => typeof tag === 'string' && tag.startsWith(MANDATE_TAG_PREFIX) && tag !== own;
-  const out: Record<string, unknown> = { ...stored };
-  let foreignSchedule = false;
-  for (const [tagKey, idKey] of TRIGGER_MARKS) {
-    if (!isForeign(out[tagKey])) continue;
-    out[tagKey] = MANDATE_TAG_PREFIX;
-    if (idKey !== null) delete out[idKey];
-    if (tagKey === 'created_by' || tagKey === 'edited_by' || tagKey === 'mandate_editor') foreignSchedule = true;
-  }
-  if (foreignSchedule) delete out['pipeline_params'];
-  return out as T;
 }
 
 /** One ended access behind a paused plan, as the owner's view reads it. */
