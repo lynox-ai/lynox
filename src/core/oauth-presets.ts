@@ -845,7 +845,7 @@ export function presetClientSecretGuidanceWith(name: string, retired: readonly s
   // named; the name stays protected (`isPresetClientSecretName`), and a profile of the user's
   // own takes another one.
   if (isRetiredPresetClientSecretName(name, retired)) {
-    return `"${name}" is the OAuth client secret of a built-in provider this engine no longer has. It stays stored and is not entered, used or referenced here — not in the chat and not through ask_secret. A profile of the user's own names its client secret differently.`;
+    return `"${name}" is the OAuth client secret of a built-in provider this engine no longer has. It is not entered, used or referenced here — not in the chat and not through ask_secret. A profile of the user's own names its client secret differently.`;
   }
   return `"${name}" is the OAuth client secret of a built-in provider. The owner of this lynox instance enters it in the connection form of the profile under Settings → API Profiles — not in the chat and not through ask_secret, and it is not referenced in a request. The engine sends it to the provider itself, for a profile that names "${name}" as its client secret and may read it.`;
 }
