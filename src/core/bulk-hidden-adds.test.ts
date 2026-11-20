@@ -86,9 +86,14 @@ describe('an HTML value past the reading bounds', () => {
   const deep = (inner: string): string => `${'<div>'.repeat(600)}${inner}`;
   const large = (inner: string): string => `<p>${'a'.repeat(1024 * 1024)}</p>${inner}`;
 
-  it('is not read for what it adds, nested too deep or too large', () => {
-    expect(hiddenAddsOf('<p>Wasserfilter</p>', deep('<p>Wasser\u00adfilter</p>'), true)).toEqual([]);
-    expect(hiddenAddsOf('<p>Wasserfilter</p>', large('<p>Wasser\u00adfilter</p>'), true)).toEqual([]);
+  // Unread is said as such (`null`), never as "adds none" (`[]`): a caller that took the answer
+  // for a check would otherwise let a hidden character through in a value it could not read.
+  it('is not read for what it adds, nested too deep or too large, and says so instead of "none"', () => {
+    expect(hiddenAddsOf('<p>Wasserfilter</p>', deep('<p>Wasser\u00adfilter</p>'), true)).toBeNull();
+    expect(hiddenAddsOf('<p>Wasserfilter</p>', large('<p>Wasser\u00adfilter</p>'), true)).toBeNull();
+    // A before-image past the bounds is not read either.
+    expect(hiddenAddsOf(deep('<p>Wasserfilter</p>'), '<p>Wasser\u00adfilter</p>', true)).toBeNull();
+    expect(hiddenAddsOf(large('<p>Wasserfilter</p>'), '<p>Wasser\u00adfilter</p>', true)).toBeNull();
     // CONTROL: the same character within the bounds is found.
     expect(hiddenAddsOf('<p>Wasserfilter</p>', '<p>Wasser\u00adfilter</p>', true)).toEqual([SHY]);
   });
@@ -101,12 +106,13 @@ describe('an HTML value past the reading bounds', () => {
       .toEqual([{ field: 'description', codePoints: [SHY], html: true }]);
   });
 
-  it('counts a before-image past them as empty for a value the owner copies by hand, so its character is marked', () => {
+  it('counts a before-image past them as empty for a value the owner copies by hand, so its character is marked, and leaves a value past them unread', () => {
     expect(hiddenAddsToCopy(deep('<p>Wasser\u00adfilter</p>'), '<p>Wasser\u00adfilter</p>')).toEqual([SHY]);
     // CONTROL: a before-image within the bounds is read, and holds the character already.
     expect(hiddenAddsToCopy('<p>Wasser\u00adfilter</p>', '<p>Wasser\u00adfilter</p>')).toEqual([]);
-    // A value to copy past the bounds itself marks nothing.
-    expect(hiddenAddsToCopy(null, deep('<p>Wasser\u00adfilter</p>'))).toEqual([]);
+    // A value to copy past the bounds itself is not read, and says so instead of "none".
+    expect(hiddenAddsToCopy(null, deep('<p>Wasser\u00adfilter</p>'))).toBeNull();
+    expect(hiddenAddsToCopy('<p>Wasserfilter</p>', large('<p>Wasser\u00adfilter</p>'))).toBeNull();
   });
 
   it('is named as an unread field with nothing to mark, so it is never left out', () => {
