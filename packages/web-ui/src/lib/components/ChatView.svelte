@@ -72,6 +72,7 @@
 		type ToolCallInfo,
 		type ChatMessage,
 		getBudgetAudience,
+		learnBudgetAudience,
 		isInstanceSelfHosted,
 	} from '../stores/chat.svelte.js';
 	import type { PromptOrigin } from '../utils/prompt-origin.js';
@@ -1477,6 +1478,11 @@
 	$effect(() => { if (!isStreaming && !pendingPermission && answeredPrompts.length > 0) answeredPrompts = []; });
 
 	const messages = $derived(getMessages());
+	// A note for a capped message names a step by who can change the cap; whichever way the note
+	// arrived (live, from the server, from this browser's copy), ask for that once.
+	$effect(() => {
+		if (messages.some((m) => m.note?.budget !== undefined || (m.blocks?.some((b) => b.type === 'notice' && b.budget !== undefined) ?? false))) learnBudgetAudience();
+	});
 	const isStreaming = $derived(getIsStreaming());
 	const streamActivity = $derived(getStreamingActivity());
 	const streamToolName = $derived(getStreamingToolName());

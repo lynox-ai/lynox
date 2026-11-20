@@ -22,7 +22,7 @@ describe('when a cap opens again', () => {
 		// 00:30 in Zurich is still the day before in UTC: the reset is today at 01:00.
 		const night = new Date('2026-11-20T23:30:00Z');
 		expect(formatResetWhen(budgetResetAt('daily', night), night, 'de', zurich)).toBe('heute um 01:00');
-		expect(formatResetWhen(budgetResetAt('monthly', afternoon), afternoon, 'de', zurich)).toBe('am 1. Dezember um 01:00');
+		expect(formatResetWhen(budgetResetAt('monthly', afternoon), afternoon, 'de', zurich)).toBe('dem 1. Dezember um 01:00');
 		expect(formatResetWhen(budgetResetAt('monthly', afternoon), afternoon, 'en', zurich)).toBe('on 1 December at 01:00 AM');
 		// West of UTC the daily reset falls in the reader's evening of the same day.
 		const ny = 'America/New_York';

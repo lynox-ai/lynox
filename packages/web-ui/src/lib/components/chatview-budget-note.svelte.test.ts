@@ -74,6 +74,7 @@ afterEach(() => {
 	component = undefined;
 	target.remove();
 	store.newChat();
+	localStorage.removeItem('lynox-chat');
 	vi.unstubAllGlobals();
 });
 
@@ -178,6 +179,12 @@ describe('a message the spending cap blocked says why, until when, and what to d
 		});
 	}
 
+	it('de: the monthly reset reads "ab dem 1. …", never "ab am"', async () => {
+		await live('de', MANAGED, { result: MONTHLY, notice: 'run_blocked', budget: MONTHLY_REF });
+		expect(reason()).toMatch(/Es gilt wieder ab dem \d{1,2}\. \S+ um \d{2}:\d{2}\.$/);
+		expect(reason()).not.toContain('ab am');
+	});
+
 	it('de, spend cannot be checked, self-hosted: no amounts, restart', async () => {
 		await live('de', SELF, { result: UNKNOWN, notice: 'run_blocked', budget: { cap: 'unknown' } });
 		expect(reason()).toBe('lynox kann die Ausgaben gerade nicht prüfen und sendet deshalb nichts.');
@@ -236,6 +243,30 @@ describe('a message the spending cap blocked says why, until when, and what to d
 		svelte.flushSync();
 		expect(reason()).toBe('lynox kann die Ausgaben gerade nicht prüfen und sendet deshalb nichts.');
 		expect(next()).toBeNull();
+	});
+
+	it('a note from this browser\'s copy of the chat (the server has no thread) still names the step', async () => {
+		localStorage.setItem('lynox-chat', JSON.stringify({
+			sessionId: 't1',
+			threads: { t1: [
+				{ role: 'user', content: 'summarise the quarter' },
+				{ role: 'assistant', content: UNKNOWN, blocks: [{ type: 'notice', code: 'run_blocked', text: UNKNOWN, budget: { cap: 'unknown' } }] },
+			] },
+		}));
+		vi.resetModules();
+		svelte = (await import(/* @vite-ignore */ CLIENT_ENTRY)) as SvelteClient;
+		store = await import('../stores/chat.svelte.js');
+		i18n = await import('../i18n.svelte.js');
+		i18n.setLocale('de');
+		stubFetch(SELF, (url) => url.endsWith('/threads/t1/messages') ? json({ messages: [], threadMissing: true }) : undefined);
+		const { default: ChatView } = await import('./ChatView.svelte');
+		component = svelte.mount(ChatView, { target });
+		svelte.flushSync();
+		await settle();
+		svelte.flushSync();
+		expect(reason()).toBe('lynox kann die Ausgaben gerade nicht prüfen und sendet deshalb nichts.');
+		expect(text(next())).toBe('Starte lynox neu.');
+		localStorage.removeItem('lynox-chat');
 	});
 
 	it('control: a hook\'s block carries no budget and shows no reason or step', async () => {

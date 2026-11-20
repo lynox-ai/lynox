@@ -59,9 +59,10 @@ export function budgetResetAt(cap: 'daily' | 'monthly', now: Date): Date {
 }
 
 /**
- * The reset in the reader's own time, with its day: "heute um 19:00", "morgen um 01:00",
- * "am 1. Dezember um 01:00" / "today at 7:00 PM", "tomorrow at 1:00 AM", "on 1 December at 1:00 AM".
- * `timeZone` is for tests; the page passes none and gets the browser's.
+ * The reset in the reader's own time, with its day, as it follows "Es gilt wieder ab" / "It resets":
+ * "heute um 19:00", "morgen um 01:00", "dem 1. Dezember um 01:00" / "today at 07:00 PM",
+ * "tomorrow at 01:00 AM", "on 1 December at 01:00 AM". `timeZone` is for tests; the page passes
+ * none and gets the browser's.
  */
 export function formatResetWhen(at: Date, now: Date, lang: 'de' | 'en', timeZone?: string): string {
 	const locale = lang === 'de' ? 'de-DE' : 'en-US';
@@ -78,7 +79,8 @@ export function formatResetWhen(at: Date, now: Date, lang: 'de' | 'en', timeZone
 	const date = lang === 'de'
 		? at.toLocaleDateString('de-DE', { day: 'numeric', month: 'long', ...zone })
 		: at.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', ...zone });
-	return lang === 'de' ? `am ${date} um ${time}` : `on ${date} at ${time}`;
+	// "ab dem 1. Dezember", not "ab am": the slot follows "ab".
+	return lang === 'de' ? `dem ${date} um ${time}` : `on ${date} at ${time}`;
 }
 
 /** The note's lines: the reason with its amounts and reset, and the step with where it leads. */

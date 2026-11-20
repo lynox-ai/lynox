@@ -629,7 +629,7 @@ export function isInstanceSelfHosted(): boolean | null {
 }
 
 /** Ask for what {@link getBudgetAudience} needs: both answers are cached after the first. */
-function learnBudgetAudience(): void {
+export function learnBudgetAudience(): void {
 	void probeManagedTier();
 	void loadSettingsViewer();
 }
