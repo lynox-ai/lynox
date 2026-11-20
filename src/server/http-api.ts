@@ -7572,7 +7572,7 @@ export class LynoxHTTPApi {
       // not a secret, and removing either stays possible below.
       if (isPresetClientSecretName(name)) {
         errorResponse(res, 403, isRetiredPresetClientSecretName(name)
-          ? `"${name}" is the client secret of a built-in provider this engine no longer has. It is not entered here; a profile of your own uses another name.`
+          ? `"${name}" is reserved for a built-in provider this engine no longer has, so it can't be saved here. For a profile of your own, choose another name.`
           : `"${name}" is the client secret of a built-in provider. It is entered in the connection form of the profile under Settings → API Profiles, not here.`, 'preset_client_secret');
         return;
       }
