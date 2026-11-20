@@ -1,3 +1,4 @@
+import type { BudgetNoteRef } from '../utils/budget-note.js';
 /**
  * Who did what: attributing a turn's tool activity to the main agent or to a
  * specific delegated sub-agent.
@@ -94,7 +95,7 @@ export type ContentBlock =
 	| { type: 'answer'; text: string }
 	/** The run ended with a sentence of lynox's own instead of a model reply (`done.notice`):
 	 *  shown as a lynox note, without the AI mark. `code` is the note code it renders as. */
-	| { type: 'notice'; code: string; text: string };
+	| { type: 'notice'; code: string; text: string; budget?: BudgetNoteRef };
 
 /**
  * The slice of a chat message this module owns.

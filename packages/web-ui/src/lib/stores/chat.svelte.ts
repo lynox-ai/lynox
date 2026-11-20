@@ -1,6 +1,7 @@
 import { getApiBase } from '../config.svelte.js';
 import { maskText } from '../utils/mask-text.js';
-import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
+import { cpSuppliesLLMKey, isHostedInstance } from '../utils/billing-tier.js';
+import { parseBudgetNoteRef, type BudgetAudience, type BudgetNoteRef } from '../utils/budget-note.js';
 import { estimateCost } from '../format.js';
 import { t, tf } from '../i18n.svelte.js';
 import { mergeDoneUsage, type UsageInfo } from './chat-usage.js';
@@ -144,7 +145,7 @@ export interface ChatMessage {
 	 *  engine sends a structured code (not prose) so the UI renders a localized
 	 *  banner; `detail` is a sanitized provider-error snippet. Present only on
 	 *  rows the render projection flagged as notes (reload path). */
-	note?: { code: string; detail?: string; approval?: { id: string; outcome: string } };
+	note?: { code: string; detail?: string; approval?: { id: string; outcome: string }; budget?: BudgetNoteRef };
 	/** ISO timestamp the server persisted this message at (`created_at`), carried
 	 *  through the render projection so the UI can show a subtle per-message time.
 	 *  Optional/undefined-safe: older persisted rows + not-yet-reconciled live
@@ -609,6 +610,28 @@ function probeManagedTier(): Promise<void> {
  *  Unknown / not-yet-probed also returns true so error copy defaults to
  *  the neutral branch (conservative: avoids showing BYOK hints to a
  *  managed user during the probe race — see feedback_managed_ui_race_default_null). */
+/**
+ * Who can change the spending cap a blocked message reached, for the note's next step
+ * (`budget-note.ts`): a mandate's session names the owner, a managed plan names support, and
+ * anyone else the limits page. Null while the tier is not known yet.
+ */
+export function getBudgetAudience(): BudgetAudience | null {
+	if (isMandateSession()) return 'owner';
+	if (managedTier === null) return null;
+	return cpSuppliesLLMKey(managedTier) ? 'plan' : 'self';
+}
+
+/** Whether the instance is self-hosted (no billing tier); null while not known yet. */
+export function isInstanceSelfHosted(): boolean | null {
+	return managedTier === null ? null : !isHostedInstance(managedTier);
+}
+
+/** Ask for what {@link getBudgetAudience} needs: both answers are cached after the first. */
+function learnBudgetAudience(): void {
+	void probeManagedTier();
+	void loadSettingsViewer();
+}
+
 function isInstanceSuppliedLlm(): boolean {
 	if (managedTier === null) return true;
 	return cpSuppliesLLMKey(managedTier);
@@ -2601,7 +2624,8 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				// After any line already there (a typed answer to a confirmation), not over it.
 				msg.blocks = [...(msg.blocks ?? []), notice === undefined
 					? { type: 'text', text: result }
-					: { type: 'notice', code: notice, text: notice === 'run_blocked' && result.startsWith(RUN_BLOCKED_PREFIX) ? result.slice(RUN_BLOCKED_PREFIX.length) : result }];
+					: noticeBlock(notice, result, parseBudgetNoteRef(data['budget']))];
+				if (notice === 'run_blocked') learnBudgetAudience();
 			}
 			// Budget threshold check — usage dashboard Phase 4. Dynamic import
 			// keeps the alerts code out of the initial chat-store bundle for
@@ -3428,6 +3452,11 @@ const ENGINE_NOTICES = ['content_refused', 'run_blocked'] as const;
 const RUN_BLOCKED_PREFIX = 'Run blocked: ';
 function engineNotice(value: unknown): (typeof ENGINE_NOTICES)[number] | undefined {
 	return ENGINE_NOTICES.find((c) => c === value);
+}
+/** The note block for lynox's own sentence; a run the spending cap blocked carries which cap. */
+function noticeBlock(code: (typeof ENGINE_NOTICES)[number], result: string, budget: BudgetNoteRef | undefined): ContentBlock {
+	const text = code === 'run_blocked' && result.startsWith(RUN_BLOCKED_PREFIX) ? result.slice(RUN_BLOCKED_PREFIX.length) : result;
+	return code === 'run_blocked' && budget !== undefined ? { type: 'notice', code, text, budget } : { type: 'notice', code, text };
 }
 /** A reply that holds a typed answer is kept when it ends empty: the answer was given. */
 function holdsTypedAnswer(msg: ChatMessage): boolean {
@@ -4276,7 +4305,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 				blocks?: ContentBlock[];
 				toolCalls?: ToolCallInfo[];
 				usage?: UsageInfo;
-				note?: { code: string; detail?: string; approval?: { id: string; outcome: string } };
+				note?: { code: string; detail?: string; approval?: { id: string; outcome: string }; budget?: BudgetNoteRef };
 				created_at?: string;
 			}
 			const msgData = (await msgRes.json()) as {
@@ -4302,7 +4331,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 					if (m.blocks && m.blocks.length > 0) cm.blocks = m.blocks;
 					if (m.toolCalls && m.toolCalls.length > 0) cm.toolCalls = m.toolCalls;
 					if (m.usage) cm.usage = m.usage;
-					if (m.note) cm.note = m.note;
+					if (m.note) { cm.note = m.note; if (m.note.budget) learnBudgetAudience(); }
 					if (m.created_at) cm.createdAt = m.created_at;
 					return cm;
 				}),
@@ -4468,7 +4497,7 @@ export async function reconcileThread(): Promise<void> {
 			blocks?: ContentBlock[];
 			toolCalls?: ToolCallInfo[];
 			usage?: UsageInfo;
-			note?: { code: string; detail?: string; approval?: { id: string; outcome: string } };
+			note?: { code: string; detail?: string; approval?: { id: string; outcome: string }; budget?: BudgetNoteRef };
 			created_at?: string;
 		}
 		const data = (await res.json()) as {
@@ -4488,7 +4517,7 @@ export async function reconcileThread(): Promise<void> {
 				if (m.blocks && m.blocks.length > 0) cm.blocks = m.blocks;
 				if (m.toolCalls && m.toolCalls.length > 0) cm.toolCalls = m.toolCalls;
 				if (m.usage) cm.usage = m.usage;
-				if (m.note) cm.note = m.note;
+				if (m.note) { cm.note = m.note; if (m.note.budget) learnBudgetAudience(); }
 				if (m.created_at) cm.createdAt = m.created_at;
 				return cm;
 			}),

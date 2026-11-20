@@ -51,7 +51,7 @@ import {
   evictImagesFrom,
 } from './tool-result-blob-store.js';
 import { isWorkspaceActive } from './workspace.js';
-import { checkPersistentBudget } from './session-budget.js';
+import { budgetNoteRef, checkPersistentBudget } from './session-budget.js';
 import {
   SYSTEM_PROMPT,
   GOOGLE_PROMPT_SUFFIX,
@@ -76,7 +76,7 @@ import { noticeLanguage, type NoticeLanguage } from './notice-language.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { capSecretsListing, setupHistorySubscriptions } from './engine-init.js';
 import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker, persistRefusedTurn, capStopNote, CONTENT_REFUSED_NOTE, type EngineNoticeCode } from './eager-persist.js';
-import { buildDisplayNoteContent } from './render-projection.js';
+import { buildDisplayNoteContent, type BudgetNoteRef } from './render-projection.js';
 import { buildPostCompactionMessages } from './compaction-messages.js';
 import { buildCompactionSummaryPrompt } from './compaction-prompt.js';
 import type { ToolContext } from './tool-context.js';
@@ -569,6 +569,8 @@ export class Session {
   /** Set when the last run ended with a sentence of lynox's own instead of a model reply; see
    *  getLastRunNotice(). */
   private _lastRunNotice: EngineNoticeCode | undefined;
+  /** For a run the spending cap blocked: which cap, with its limit and spend, for the chat to word. */
+  private _lastRunBudget: BudgetNoteRef | undefined;
   private _systemPrompt: string | undefined;
 
   readonly usage: AccumulatedUsage = {
@@ -871,7 +873,7 @@ export class Session {
     if (runOptions?.internal !== true) this._stopBeforeSend = false;
     // Cleared for every run the person started, before any of its returns: only the returns
     // below that end the run with lynox's own sentence set it again.
-    if (runOptions?.internal !== true) this._lastRunNotice = undefined;
+    if (runOptions?.internal !== true) { this._lastRunNotice = undefined; this._lastRunBudget = undefined; }
     // Before anything that could rebuild the agent below, like the principal: every rebuild
     // of this run marks its agent by what this run's client said, never by an earlier run.
     if (runOptions?.internal !== true) this._runShowsReview = runOptions?.showsChangesetReview === true;
@@ -968,8 +970,12 @@ export class Session {
       // shows the message and the note the live chat showed. Only for a turn a person sent: a
       // scheduled task or a watch at the cap would otherwise leave a message and a note in its
       // thread on every tick (`triggerOrigin` marks those runs).
-      if (runOptions?.triggerOrigin === undefined) persistRefusedTurn(threadStore, this.sessionId, task, reason, 'run_blocked');
+      const budget = budgetNoteRef(budgetCheck);
+      if (runOptions?.triggerOrigin === undefined && persistRefusedTurn(threadStore, this.sessionId, task, reason, 'run_blocked', budget)) {
+        this._titleBlockedThread(threadStore, taskText);
+      }
       this._lastRunNotice = 'run_blocked';
+      this._lastRunBudget = budget;
       return reason;
     }
 
@@ -1004,7 +1010,9 @@ export class Session {
           // inline render fallback. `warning` (not `error`) keeps the failed
           // user turn intact — the block is transient (credit re-syncs).
           await this.onStream?.({ type: 'warning', code: 'run_blocked', detail: reason, agent: this.agent?.name ?? 'lynox' });
-          if (runOptions?.triggerOrigin === undefined) persistRefusedTurn(threadStore, this.sessionId, task, reason, 'run_blocked');
+          if (runOptions?.triggerOrigin === undefined && persistRefusedTurn(threadStore, this.sessionId, task, reason, 'run_blocked')) {
+            this._titleBlockedThread(threadStore, taskText);
+          }
           this._lastRunNotice = 'run_blocked';
           return `Run blocked: ${reason}`;
         }
@@ -2471,6 +2479,29 @@ export class Session {
    *  so the chat does not mark that sentence as written by the AI model. */
   getLastRunNotice(): EngineNoticeCode | undefined {
     return this._lastRunNotice;
+  }
+
+  /** For a last run the instance's own spending cap blocked: which cap, its limit and the spend
+   *  against it. The HTTP API sends it with the `done` event so the chat words the note as a
+   *  reload words it. */
+  getLastRunBudget(): BudgetNoteRef | undefined {
+    return this._lastRunBudget;
+  }
+
+  /**
+   * A thread whose message was blocked before the model is named from the person's words, as any
+   * thread is — without the title model, which a blocked run does not call. Only a thread with no
+   * name yet: a name the person gave stays, and an accepted turn later keeps this one.
+   */
+  private _titleBlockedThread(threadStore: ReturnType<Engine['getThreadStore']>, taskText: string): void {
+    if (!threadStore) return;
+    try {
+      if ((threadStore.getThread(this.sessionId)?.title ?? '') !== '') return;
+      const { title } = firstThreadTitle(taskText, {
+        language: noticeLanguage(this.engine.config.language), at: new Date(), timeZone: this._userTimezone,
+      });
+      threadStore.updateThread(this.sessionId, { title });
+    } catch { /* best-effort: the thread keeps no title, as before */ }
   }
 
   setEffort(level: EffortLevel): void {

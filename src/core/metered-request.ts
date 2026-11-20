@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
 import { currentRunGroup } from './run-group.js';
-import { checkPersistentBudget, recordSessionCost } from './session-budget.js';
+import { checkPersistentBudget, reachedCap, recordSessionCost } from './session-budget.js';
 import type { Engine, RunContext } from './engine.js';
-import type { ModelTier, PersistentBudgetCheck, SessionCounters } from '../types/index.js';
+import type { ModelTier, SessionCounters } from '../types/index.js';
 
 /**
  * Minimal engine surface these helpers need. Lets a non-`Session` caller that
@@ -58,12 +58,6 @@ export interface MeteredGateResult {
    * over its spend, so the caller does not name one.
    */
   capReached: 'daily' | 'monthly' | 'unknown' | null;
-}
-
-function reachedCap(check: PersistentBudgetCheck): 'daily' | 'monthly' | 'unknown' {
-  if (check.dailyLimitUSD !== null && check.todayCostUSD >= check.dailyLimitUSD) return 'daily';
-  if (check.monthlyLimitUSD !== null && check.monthCostUSD >= check.monthlyLimitUSD) return 'monthly';
-  return 'unknown';
 }
 
 function buildRunContext(host: HookHost, runId: string, modelTier: ModelTier): RunContext {

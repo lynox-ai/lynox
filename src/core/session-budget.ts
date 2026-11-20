@@ -7,6 +7,7 @@
  */
 
 import type { PersistentBudgetCheck, PersistentBudgetReservation, SessionCounters } from '../types/index.js';
+import type { BudgetNoteRef } from './render-projection.js';
 
 const DEFAULT_SESSION_COST_USD = 50;
 
@@ -187,6 +188,24 @@ function unverifiableReason(): string {
   return `${head}the history database (history.db) did not open when lynox started, ${tail}`
     + 'The log lynox writes at startup names the cause ("RunHistory init failed"); fix it, for example '
     + 'a full disk, missing file permissions or a damaged file, and restart lynox.';
+}
+
+/**
+ * Which of the instance's own spending caps a refused check reached: `daily`, `monthly`, or
+ * `unknown` when it refused without either cap being over its spend (spend cannot be checked).
+ */
+export function reachedCap(check: PersistentBudgetCheck): 'daily' | 'monthly' | 'unknown' {
+  if (check.dailyLimitUSD !== null && check.todayCostUSD >= check.dailyLimitUSD) return 'daily';
+  if (check.monthlyLimitUSD !== null && check.monthCostUSD >= check.monthlyLimitUSD) return 'monthly';
+  return 'unknown';
+}
+
+/** What a chat names about a refused check: the cap reached, its limit and the spend against it. */
+export function budgetNoteRef(check: PersistentBudgetCheck): BudgetNoteRef {
+  const cap = reachedCap(check);
+  if (cap === 'daily' && check.dailyLimitUSD !== null) return { cap, limitUSD: check.dailyLimitUSD, spentUSD: check.todayCostUSD };
+  if (cap === 'monthly' && check.monthlyLimitUSD !== null) return { cap, limitUSD: check.monthlyLimitUSD, spentUSD: check.monthCostUSD };
+  return { cap: 'unknown' };
 }
 
 /** Check if persistent daily/monthly budget allows another run. */
