@@ -266,6 +266,8 @@ describe('the refresh of an expiring store connection', () => {
     expect(vault.get(refreshTokenKey(ID))).toBe('rt-old');
     expect(profile().oauth_grant?.store_binding).toBeUndefined();
     expect(lines().some((l) => l.includes('another scope than the one granted'))).toBe(true);
+    // Only the store's own invalid_grant is named as one.
+    expect(lines().some((l) => l.includes('(invalid_grant)'))).toBe(false);
   });
 
   it('an answer that names no scope is stored, and the granted scope stays', async () => {
@@ -494,6 +496,14 @@ describe('the refresh of an expiring store connection', () => {
     const { attached, out } = await bulkAttach();
     expect(attached).toBeNull();
     expect(out.reconnect).toBe('client-misnamed');
+  });
+
+  it('a grant revoked before (the vault still holds the refused token) is refused with the same reason', async () => {
+    const p = profile();
+    expect(store.save({ ...p, oauth_grant: { ...p.oauth_grant!, state: 'revoked', revoked_fp: tokenFingerprint('rt-old'), revoked_at: new Date().toISOString() } } as ApiProfile).ok).toBe(true);
+    const { attached, out } = await bulkAttach();
+    expect(attached).toBeNull();
+    expect(out.reconnect).toBe('ended');
   });
 
   it('a store that never had an expiring connection gives no such reason', async () => {

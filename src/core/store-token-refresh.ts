@@ -372,8 +372,9 @@ async function runRefresh(profileId: string, trigger: 'due' | 'unauthorized', ct
   }
   if (!exchanged.responseOk) {
     // 400 and 401 are the store refusing the refresh token: expired, revoked or already spent. Only
-    // a new connect helps, and only an explicit `invalid_grant` records the grant as revoked. Any
-    // other status (429, 5xx, a proxy's 408) says nothing about the token: it stays as it was.
+    // a new connect helps; the connection ends as `refresh-dead`, never as a revocation, since the
+    // answer cannot tell those apart. Any other status (429, 5xx, a proxy's 408) says nothing about
+    // the token: it stays as it was.
     if (exchanged.status !== 400 && exchanged.status !== 401) {
       outcomeLine(profileId, 'not-run', trigger, `the store answered HTTP ${String(exchanged.status)}; the stored token is unchanged`);
       return 'not-run';
