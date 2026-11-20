@@ -343,6 +343,17 @@ const GATES: Readonly<Record<string, GateEntry>> = {
   // `clean ✓ (0 commits scanned)` on a range it could not read — on a check that
   // is REQUIRED in both repos. Fixed, and covered by tests/no-ai-attribution.test.ts
   // with both halves of an identical-substrate pair.
+  // Same shape as no-ai-attribution: its input is a commit range given as arguments, and it walks no
+  // tree, so there is nothing to starve. A call without both ends is refused with 2, and so is a
+  // range git cannot read (tests/symlink-guard.test.ts). An empty range answers 0 and says so:
+  // "0 commit(s) read", never a bare "clean".
+  'symlink-guard': {
+    kind: 'exempt',
+    reason:
+      'enumerates no tree: `check` takes a commit range as arguments, and a call without both ends is refused with 2 — which is what this probe exercises. A range git cannot read also exits 2, and an empty range reports how many commits it read (tests/symlink-guard.test.ts).',
+    expectStrippedExit: 2,
+    expectStrippedStderr: /usage: node scripts\/symlink-guard\.mjs check <base> <head>/,
+  },
   'no-ai-attribution': {
     kind: 'exempt',
     reason:
@@ -467,6 +478,7 @@ const EXEMPT_COMMAND: Readonly<Record<string, { cmd: string; args: string[] }>> 
     args: [join(repoRoot, 'scripts/public-repo-guard.sh'), 'check-commits', 'HEAD'],
   },
   'no-ai-attribution': { cmd: 'bash', args: [join(repoRoot, 'scripts/no-ai-attribution.sh')] },
+  'symlink-guard': { cmd: 'node', args: [join(repoRoot, 'scripts/symlink-guard.mjs')] },
   'corpus-structure-guard': { cmd: 'node', args: [join(repoRoot, 'scripts/corpus-structure-guard.mjs'), '--staged'] },
   'corpus-structure-guard-commits': { cmd: 'node', args: [join(repoRoot, 'scripts/corpus-structure-guard.mjs'), 'HEAD'] },
   'pattern-scan': { cmd: 'bash', args: [join(repoRoot, 'scripts/secret-pattern-scan.sh')] },
