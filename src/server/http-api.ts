@@ -9349,8 +9349,8 @@ export class LynoxHTTPApi {
         : taskManager.listTriggers(status ? { status } : undefined);
       const bulkLedgerForList = engine.getBulkLedger() ?? engine.getBulkLedgerSwitchedOff?.() ?? null;
       // Who set each trigger up or changed it last, when that was a mandate: lines as on an
-      // approval card, named by the same rule (in these lines a mandate sees another grant as
-      // another mandate, never whose; the row's stored tags are `triggerForRoute`'s question),
+      // approval card, named by the same rule (in these lines a mandate sees another address's
+      // grant as another mandate, never whose; the row's stored tags are `triggerForRoute`'s question),
       // from the marks on the trigger itself — the card also reads its workflow's. The owner's
       // own setup has no line. No session, no lines.
       const setupScope = approvalScopeOf(principal);
