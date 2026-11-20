@@ -18538,6 +18538,20 @@ describe('metered audio routes: managed credit gate + debit', () => {
       expect(mockSpeakStream).not.toHaveBeenCalled();
     });
 
+    it('a refusal within the balance gets the voice sentence; a plain refusal keeps its own text', async () => {
+      // Kills: the voice sentence on every refusal, and the hook's budget text on a refusal within the balance.
+      const { RunAdmissionRefusedError } = await import('../core/run-admission.js');
+      mockEngineHooks = [{ onBeforeRun: () => { throw new RunAdmissionRefusedError('AI budget for this period reached.'); } }];
+      const held = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello' }) });
+      expect(held.status).toBe(402);
+      expect(((await held.json()) as { error: string }).error).toBe('Not enough AI budget is free for voice right now. If another task is running, try again once it has finished; otherwise buy a credit pack or wait for your next billing cycle.');
+      repayRateWindow();
+      mockEngineHooks = [{ onBeforeRun: () => { throw new Error('AI budget for this period reached.'); } }];
+      const plain = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello' }) });
+      expect(((await plain.json()) as { error: string }).error).toBe('AI budget for this period reached.');
+      expect(mockSpeakStream).not.toHaveBeenCalled();
+    });
+
     it('blocks with 402 when the control plane is stale (fail-closed)', async () => {
       mockEngineHooks = [{ onBeforeRun: vi.fn(() => { throw new Error('Managed control plane temporarily unreachable'); }) }];
       const res = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello' }) });
@@ -18676,6 +18690,23 @@ describe('metered audio routes: managed credit gate + debit', () => {
       expect(costArg).toBeCloseTo(0.0013, 6);
     });
 
+    it('admits the request on the length text-prep turns it into, not on the raw length', async () => {
+      // Kills: admitting on the raw length, or on a fixed expansion factor (a table of arrows
+      // grows about eightfold in prep, and the call is billed on the prepared characters).
+      repayRateWindow();
+      const { prepareForSpeech } = await vi.importActual<typeof import('../core/speak.js')>('../core/speak.js');
+      const text = `| a | b |\n|---|---|\n| ${'↓'.repeat(9_900)} | x |`;
+      const prepared = prepareForSpeech(text, 'de').length;
+      expect(prepared, 'positive control: prep grows this text beyond a 1.5x factor').toBeGreaterThan(text.length * 1.5);
+      const onBeforeRun = vi.fn();
+      mockEngineHooks = [{ onBeforeRun }];
+      mockSpeakStream.mockResolvedValue({ characters: prepared, model: 'voxtral-tts', voice: 'default', latencyMs: 10, ttfbMs: 5 });
+      const res = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text, lang: 'de' }) });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      expect((onBeforeRun.mock.calls[0]![1] as { maxCostCents?: number }).maxCostCents).toBe(Math.ceil(prepared * 13 / 1_000_000 * 100));
+    });
+
     it('refuses a model other than the pinned one before the budget gate', async () => {
       repayRateWindow();
       const { VOXTRAL_TTS_MODEL } = await vi.importActual<typeof import('../core/speak.js')>('../core/speak.js');
@@ -18755,6 +18786,17 @@ describe('metered audio routes: managed credit gate + debit', () => {
       expect(body.error).toContain('AI budget');
       // Gate fired before any provider work — STT was never invoked.
       expect(mockExtractSessionContext).not.toHaveBeenCalled();
+      expect(mockTranscribeWithStream).not.toHaveBeenCalled();
+    });
+
+    it('a transcription refused within the balance gets the voice sentence', async () => {
+      // Kills: the STT route passing the hook's budget text through on a refusal within the balance.
+      const { RunAdmissionRefusedError } = await import('../core/run-admission.js');
+      mockEngineHooks = [{ onBeforeRun: () => { throw new RunAdmissionRefusedError('AI budget for this period reached.'); } }];
+      mockGetActiveTranscribeProvider.mockReturnValue({ name: 'mistral-voxtral' });
+      const res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
+      expect(res.status).toBe(402);
+      expect(((await res.json()) as { error: string }).error).toBe('Not enough AI budget is free for voice right now. If another task is running, try again once it has finished; otherwise buy a credit pack or wait for your next billing cycle.');
       expect(mockTranscribeWithStream).not.toHaveBeenCalled();
     });
 

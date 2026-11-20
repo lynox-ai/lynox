@@ -68,6 +68,9 @@ interface CaptureOptions {
    */
   meteredHost?: HookHost | null | undefined;
   sessionCounters?: SessionCounters | undefined;
+  /** Charges the annotation's spend to the calling run's cost ceiling (the agent's
+   *  `chargeExternalCost`), like the agent's own helper calls. Absent: no ceiling is charged. */
+  chargeRun?: ((usd: number) => void) | undefined;
   /** The calling tool's signal (`currentCallSignal`): a stop of the run, or the tool's time
    *  limit, aborts the annotation call. Absent outside a tool call; the call then runs as before. */
   signal?: AbortSignal | undefined;
@@ -465,6 +468,7 @@ export async function captureProcess(
       cache_creation_input_tokens: response.usage?.cache_creation_input_tokens ?? undefined,
       cache_read_input_tokens: response.usage?.cache_read_input_tokens ?? undefined,
     });
+    options.chargeRun?.(cost);
     debitInRunHelperCost(options.meteredHost ?? null, options.sessionCounters, cost, 'fast');
   }
 

@@ -368,8 +368,13 @@ describe('search edge cases', () => {
     });
     const onAfterRun = vi.fn();
     const { agent, counters } = meteredAgent(onAfterRun);
+    const charged = vi.fn();
+    (agent as unknown as { chargeExternalCost: (usd: number) => void }).chargeExternalCost = charged;
     await createWebSearchTool(mockProvider(raw)).handler({ action: 'search', query: 'x' }, agent);
 
+    // The run's cost ceiling is charged too. Kills: a rerank debit that skips the run's guard.
+    expect(charged).toHaveBeenCalledOnce();
+    expect(charged.mock.calls[0]![0] as number).toBeCloseTo(0.0006, 6);
     expect(counters.costUSD).toBeCloseTo(0.0006, 6);
     expect(onAfterRun).toHaveBeenCalledOnce();
     expect(onAfterRun.mock.calls[0]![1] as number).toBeCloseTo(0.0006, 6);
@@ -406,9 +411,16 @@ describe('search edge cases', () => {
     });
     const onAfterRun = vi.fn();
     const { agent, counters } = meteredAgent(onAfterRun);
+    const capOnly = vi.fn();
+    const charged = vi.fn();
+    Object.assign(agent, { chargeExternalCapOnlyCost: capOnly, chargeExternalCost: charged });
     await createWebSearchTool(mockProvider(raw)).handler({ action: 'search', query: 'x' }, agent);
 
     expect(rerankSpy).toHaveBeenCalledTimes(1);
+    // The run's ceiling counts the bound as cap-only, never as spend.
+    // Kills: an aborted bound that skips the run's guard, or one booked as billed spend.
+    expect(capOnly).toHaveBeenCalledWith(upperBoundUsd);
+    expect(charged).not.toHaveBeenCalled();
     // The BOUND, exactly — not the estimate.
     expect(counters.costUSD).toBe(upperBoundUsd);
     expect(onAfterRun, 'the aborted call must not reach the tenant debit').not.toHaveBeenCalled();

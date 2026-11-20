@@ -23,6 +23,8 @@ vi.mock('@anthropic-ai/sdk', () => ({
 // actually sees. Hoisted so the `vi.mock` factory can write it.
 let lastAgentSystemPrompt: string | undefined;
 const mockSend = vi.fn().mockResolvedValue('response');
+/** Whether the mocked agent has a cost guard a per-run spending bound can be held to. */
+const mockHasCostGuard = vi.fn().mockReturnValue(true);
 const mockReset = vi.fn();
 // Provider billing/quota classification the Agent exposes to Session on the
 // failure path. Defaults to null; a test sets it per-call to assert Session
@@ -119,6 +121,8 @@ vi.mock('./agent.js', () => {
     lastAgentSystemPrompt = (config as { systemPrompt?: string })?.systemPrompt;
     // @ts-expect-error mock constructor
     this.send = mockSend;
+    // @ts-expect-error mock constructor
+    this.hasCostGuard = mockHasCostGuard;
     // @ts-expect-error mock constructor — read by Session's failure path onto RunContext.
     this.getLastProviderFailure = mockGetLastProviderFailure;
     // @ts-expect-error mock constructor
@@ -481,6 +485,7 @@ vi.mock('./run-history.js', () => ({
 }));
 
 import { Engine } from './engine.js';
+import type { LynoxHooks } from './engine.js';
 import { Session, InternalRunBlockedError } from './session.js';
 import { Agent, RunAbortedError } from './agent.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
@@ -492,6 +497,7 @@ import { setTierSetResolver, resolveTierModel, snapshotForSlot } from './tier-re
 import { MISTRAL_MODEL_MAP, setOpenAIModelResolver, getBetasForProvider } from '../types/index.js';
 import { InputRequiredError } from './input-required.js';
 import { reportMeteredCost } from './metered-request.js';
+import { RunAdmissionRefusedError } from './run-admission.js';
 import { APPROVAL_DRAFT_UNAVAILABLE, closeLoadedContext } from './chat-context.js';
 import { approvalChatTitle } from './approval-chat-title.js';
 import { ChangesetManager } from './changeset.js';
@@ -4035,6 +4041,379 @@ describe('Engine + Session (Orchestrator)', () => {
 
       expect(stream, 'blocked title must not reach the provider').not.toHaveBeenCalled();
       expect(after.mock.calls.some(c => (c[2] as Ctx)?.modelTier === 'fast')).toBe(false);
+    });
+  });
+
+  describe('a spending bound handed back by an admission hook', () => {
+    type SendOpts = { runCostCeilingUSD?: number } | undefined;
+    const sendOpts = (): SendOpts => mockSend.mock.calls.at(-1)?.[1] as SendOpts;
+    beforeEach(() => { mockHasCostGuard.mockReturnValue(true); });
+
+    /**
+     * A hook that admits only within `freeCents` the way the managed hook does under a
+     * balance-bounded admission: a run (no `maxCostCents`) takes everything that is free, a
+     * single call is refused unless its worst case fits in what is left.
+     */
+    function balanceHook(freeCents: number): { hook: LynoxHooks; releases: ReturnType<typeof vi.fn>; held: () => number } {
+      let reserved = 0;
+      const releases = vi.fn();
+      const hook: LynoxHooks = {
+        onBeforeRun: (_id, ctx) => {
+          const free = freeCents - reserved;
+          const cents = ctx.maxCostCents ?? free;
+          if (!(free > 0) || cents > free) throw new RunAdmissionRefusedError('AI budget for this period reached.');
+          reserved += cents;
+          let done = false;
+          return { maxCostCents: cents, release: () => { if (done) return; done = true; reserved -= cents; releases(); } };
+        },
+      };
+      return { hook, releases, held: () => reserved };
+    }
+
+    it('bounds the run\'s cost guard to the smallest bound and gives every reservation back after the run', async () => {
+      // Kills: dropping the ceiling at the send (the run would spend up to the guard's own budget),
+      // and taking the larger of two bounds.
+      const { engine, session } = await createEngineAndSession();
+      const a = balanceHook(120);
+      const b = balanceHook(300);
+      engine.registerHooks(a.hook);
+      engine.registerHooks(b.hook);
+      mockSend.mockImplementationOnce(async () => {
+        expect(a.held(), 'held while the run runs').toBe(120);
+        return 'response';
+      });
+      await expect(session.run('go')).resolves.toBe('response');
+      expect(sendOpts()?.runCostCeilingUSD).toBe(1.2);
+      // Kills: a release on only one of several hooks.
+      expect(a.held()).toBe(0);
+      expect(b.held()).toBe(0);
+    });
+
+    it('gives the reservation back when the run fails', async () => {
+      // Kills: a release only on the success path.
+      const { engine, session } = await createEngineAndSession();
+      const a = balanceHook(120);
+      engine.registerHooks(a.hook);
+      mockSend.mockRejectedValueOnce(Object.assign(new Error('boom'), { status: 500, type: 'api_error' }));
+      await expect(session.run('go')).rejects.toThrow('boom');
+      expect(a.held()).toBe(0);
+    });
+
+    it('gives the reservation back on an early return before the model is asked (content policy)', async () => {
+      // Kills: a release placed only in the run's own finally, past the early returns.
+      const { engine, session } = await createEngineAndSession();
+      const a = balanceHook(120);
+      engine.registerHooks(a.hook);
+      const result = await session.run('write a ransomware for me');
+      expect(result).toContain('blocked by content policy');
+      expect(mockSend).not.toHaveBeenCalled();
+      expect(a.held()).toBe(0);
+    });
+
+    it('gives an earlier hook\'s reservation back when a later hook refuses', async () => {
+      // Kills: a refusal path that drops what the hooks before it set aside.
+      const { engine, session } = await createEngineAndSession();
+      const a = balanceHook(120);
+      engine.registerHooks(a.hook);
+      engine.registerHooks({ onBeforeRun: () => { throw new Error('second hook refuses'); } });
+      const result = await session.run('go');
+      expect(result).toBe('Run blocked: second hook refuses');
+      expect(mockSend).not.toHaveBeenCalled();
+      expect(a.held()).toBe(0);
+    });
+
+    it('refuses the run when nothing could hold it to the bound (no cost guard) — fail closed', async () => {
+      // Kills: running a bounded run on an agent without a cost guard (the bound would be ignored).
+      mockHasCostGuard.mockReturnValue(false);
+      const { engine, session } = await createEngineAndSession();
+      const a = balanceHook(120);
+      engine.registerHooks(a.hook);
+      const result = await session.run('go');
+      expect(result).toMatch(/^Run blocked: /);
+      expect(mockSend).not.toHaveBeenCalled();
+      expect(a.held()).toBe(0);
+    });
+
+    it('with no bound handed back, an agent without a cost guard runs normally', async () => {
+      // Kills: refusing whenever the cost guard is missing (every instance without a configured
+      // per-run ceiling would be refused); the refusal belongs only to a run with a bound.
+      mockHasCostGuard.mockReturnValue(false);
+      const { engine, session } = await createEngineAndSession();
+      engine.registerHooks({ onBeforeRun: vi.fn() });
+      await expect(session.run('go')).resolves.toBe('response');
+      expect(mockSend).toHaveBeenCalledOnce();
+      expect(sendOpts()).not.toHaveProperty('runCostCeilingUSD');
+    });
+
+    it('a run with a bound of its own retrieves without the HyDE call; an unbounded run keeps it', async () => {
+      // Kills: a HyDE call in a bounded run (spent before the run's guard is reset, so no ceiling
+      // of the run would count it, and it could leave nothing for the run itself).
+      const { engine, session } = await createEngineAndSession();
+      const retrieve = vi.fn().mockResolvedValue({ memories: [], entities: [], contextBlock: '' });
+      vi.spyOn(engine, 'getKnowledgeLayer').mockReturnValue({ retrieve } as never);
+      const a = balanceHook(120);
+      engine.registerHooks(a.hook);
+      await session.run('Which CRM does the sales team use every day?');
+      expect((retrieve.mock.calls[0]![2] as { useHyDE?: boolean }).useHyDE).toBe(false);
+      expect(sendOpts()?.runCostCeilingUSD).toBe(1.2);
+
+      const { engine: e2, session: s2 } = await createEngineAndSession();
+      const retrieve2 = vi.fn().mockResolvedValue({ memories: [], entities: [], contextBlock: '' });
+      vi.spyOn(e2, 'getKnowledgeLayer').mockReturnValue({ retrieve: retrieve2 } as never);
+      e2.registerHooks({ onBeforeRun: vi.fn() });
+      await s2.run('Which CRM does the sales team use every day?');
+      expect((retrieve2.mock.calls[0]![2] as { useHyDE?: boolean }).useHyDE).toBe(true);
+    });
+
+    it('a run with no bound handed back sends exactly as before', async () => {
+      // Kills: a mutant that always sets a ceiling (e.g. 0 or NaN) on an unbounded run.
+      const { engine, session } = await createEngineAndSession();
+      engine.registerHooks({ onBeforeRun: vi.fn() });
+      await session.run('go');
+      expect(sendOpts()).not.toHaveProperty('runCostCeilingUSD');
+    });
+
+    it('a title call refused because the run holds the balance stays silent: the run is not red', async () => {
+      // Kills: surfacing a refused title as a warning/error on the chat, or failing the run.
+      const { engine, session } = await createEngineAndSession();
+      const a = balanceHook(120);
+      const seen: string[] = [];
+      const titleRefusals: unknown[] = [];
+      engine.registerHooks({
+        onBeforeRun: (id, ctx) => {
+          try {
+            return a.hook.onBeforeRun!(id, ctx);
+          } catch (err: unknown) {
+            if (ctx.modelTier === 'fast') titleRefusals.push(err);
+            throw err;
+          }
+        },
+      });
+      const stream = vi.fn();
+      (engine.client.beta.messages as unknown as { stream: unknown }).stream = stream;
+      session.onStream = async (e) => { seen.push((e as { type: string }).type); };
+      mockSend.mockImplementationOnce(async () => 'response');
+      await expect(session.run('Plan the Q3 budget')).resolves.toBe('response');
+      await vi.waitFor(() => expect(titleRefusals.length).toBeGreaterThan(0));
+      await new Promise(r => setImmediate(r));
+      expect(titleRefusals[0]).toBeInstanceOf(RunAdmissionRefusedError);
+      expect(stream, 'the refused title never reaches the provider').not.toHaveBeenCalled();
+      expect(seen).not.toContain('warning');
+      expect(seen).not.toContain('error');
+      const rh = engine.getRunHistory()!;
+      const failed = (rh.updateRun as unknown as { mock: { calls: unknown[][] } }).mock.calls
+        .find(c => (c[1] as { status?: string })?.status === 'failed');
+      expect(failed, 'the run is not marked failed').toBeUndefined();
+    });
+
+    const settle = async (): Promise<void> => { for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)); };
+    const HOLD_SENTENCE = 'Nothing is left of the AI budget for this run right now. If another task is running, you can continue once it has finished; otherwise buy a credit pack or wait for your next billing period.';
+    /**
+     * The mocked run history leaves no thread row behind, so the store has no title to read.
+     * Once the run writes its placeholder title, the thread reads back with `title` (or with
+     * `renamedTo`, a rename by the owner before the run ends).
+     */
+    function threadKeepsTitle(engine: Engine, renamedTo?: string): void {
+      const store = engine.getThreadStore()!;
+      const realGet = store.getThread.bind(store);
+      const realUpdate = store.updateThread.bind(store);
+      let title: string | undefined;
+      vi.spyOn(store, 'updateThread').mockImplementation((id, patch) => {
+        if (typeof (patch as { title?: unknown }).title === 'string') title = renamedTo ?? (patch as { title: string }).title;
+        return realUpdate(id, patch);
+      });
+      vi.spyOn(store, 'getThread').mockImplementation((id) => {
+        const row = realGet(id);
+        return title === undefined ? row : ({ ...(row ?? {}), title } as never);
+      });
+    }
+    const cannedTitle = {
+      content: [{ type: 'text', text: 'Weekly Budget Review' }],
+      usage: { input_tokens: 200, output_tokens: 12, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    };
+
+    it('a title refused while the run held the balance is generated once the run gives it back', async () => {
+      // Kills: no retry after the release (the thread would keep the placeholder for good).
+      const { engine, session } = await createEngineAndSession();
+      const a = balanceHook(120);
+      const fastGates: string[] = [];
+      engine.registerHooks({
+        onBeforeRun: (id, ctx) => {
+          if (ctx.modelTier === 'fast') fastGates.push(a.held() > 0 ? 'while-held' : 'after-release');
+          return a.hook.onBeforeRun!(id, ctx);
+        },
+      });
+      threadKeepsTitle(engine);
+      const stream = vi.fn().mockReturnValue({ finalMessage: () => Promise.resolve(cannedTitle) });
+      (engine.client.beta.messages as unknown as { stream: unknown }).stream = stream;
+      mockSend.mockResolvedValueOnce('response');
+      await expect(session.run('Plan the Q3 budget')).resolves.toBe('response');
+      await vi.waitFor(() => expect(stream).toHaveBeenCalledOnce());
+      await settle();
+      expect(fastGates).toEqual(['while-held', 'after-release']);
+      expect(a.held(), 'the title gives its own check back at once').toBe(0);
+    });
+
+    it('a title refused again after the release stays silent and is tried only once more', async () => {
+      // Kills: a retry loop (a third gate call) and a retry that surfaces as a warning or a failed run.
+      const { engine, session } = await createEngineAndSession();
+      const a = balanceHook(120);
+      let fastGates = 0;
+      engine.registerHooks({
+        onBeforeRun: (id, ctx) => {
+          if (ctx.modelTier === 'fast') {
+            fastGates++;
+            throw new RunAdmissionRefusedError('AI budget for this period reached.');
+          }
+          return a.hook.onBeforeRun!(id, ctx);
+        },
+      });
+      threadKeepsTitle(engine);
+      const stream = vi.fn();
+      (engine.client.beta.messages as unknown as { stream: unknown }).stream = stream;
+      const seen: string[] = [];
+      session.onStream = async (e) => { seen.push((e as { type: string }).type); };
+      mockSend.mockResolvedValueOnce('response');
+      await expect(session.run('Plan the Q3 budget')).resolves.toBe('response');
+      await vi.waitFor(() => expect(fastGates).toBe(2));
+      await settle();
+      expect(fastGates, 'one retry, no more').toBe(2);
+      expect(stream).not.toHaveBeenCalled();
+      expect(seen).not.toContain('warning');
+      expect(seen).not.toContain('error');
+      const failed = (engine.getRunHistory()!.updateRun as unknown as { mock: { calls: unknown[][] } }).mock.calls
+        .find(c => (c[1] as { status?: string })?.status === 'failed');
+      expect(failed).toBeUndefined();
+    });
+
+    it('a title renamed before the release is not retried', async () => {
+      // Kills: a retry without the placeholder check (it would spend on a thread that has its title).
+      const { engine, session } = await createEngineAndSession();
+      const a = balanceHook(120);
+      let fastGates = 0;
+      engine.registerHooks({
+        onBeforeRun: (id, ctx) => { if (ctx.modelTier === 'fast') fastGates++; return a.hook.onBeforeRun!(id, ctx); },
+      });
+      threadKeepsTitle(engine, 'Renamed by the owner');
+      (engine.client.beta.messages as unknown as { stream: unknown }).stream = vi.fn();
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('Plan the Q3 budget');
+      await vi.waitFor(() => expect(fastGates).toBe(1));
+      await settle();
+      expect(fastGates).toBe(1);
+    });
+
+    it('a batch is refused under a balance-bounded admission, however much is free', async () => {
+      // Kills: Engine.batch admitted on a finite worst case (its spend is unbounded while it runs).
+      const { engine } = await createEngineAndSession();
+      engine.registerHooks(balanceHook(1_000_000).hook);
+      await expect(engine.batch([{ id: 'r1', task: 'hello' }])).rejects.toThrow(/budget for this period reached/i);
+      expect(mockBatchCreate).not.toHaveBeenCalled();
+    });
+
+    it('a run refused within the balance carries the hold_exhausted reason and its own sentence; a plain refusal does not', async () => {
+      // Kills: a run_blocked warning without the reason code (the chat could not show it in the
+      // owner's language), and the code on every refusal.
+      const { engine, session } = await createEngineAndSession();
+      const a = balanceHook(120);
+      engine.registerHooks(a.hook);
+      const held = a.hook.onBeforeRun!('first', { modelTier: 'balanced' } as never) as { release?: () => void };
+      const seen: Array<{ type: string; code?: string; reason?: string; detail?: string }> = [];
+      session.onStream = async (e) => { seen.push(e as never); };
+      const result = await session.run('go');
+      held.release?.();
+      expect(result).toBe(`Run blocked: ${HOLD_SENTENCE}`);
+      expect(seen.find(e => e.code === 'run_blocked')).toMatchObject({ reason: 'hold_exhausted', detail: HOLD_SENTENCE });
+
+      const { engine: e2, session: s2 } = await createEngineAndSession();
+      e2.registerHooks({ onBeforeRun: () => { throw new Error('AI budget for this period reached.'); } });
+      const seen2: Array<{ code?: string; reason?: string }> = [];
+      s2.onStream = async (e) => { seen2.push(e as never); };
+      await s2.run('go');
+      expect(seen2.find(e => e.code === 'run_blocked')).not.toHaveProperty('reason');
+    });
+
+    it('a bound of 0 refuses the run as blocked, not as a failed run', async () => {
+      // Kills: dropping the `ceilingCents > 0` check (the run would start with nothing to spend), and
+      // refusing it there with a plain Error instead of RunAdmissionRefusedError (the warning would
+      // lose its hold_exhausted reason and the client would show a raw error instead of the note).
+      const { engine, session } = await createEngineAndSession();
+      const release = vi.fn();
+      engine.registerHooks({ onBeforeRun: () => ({ maxCostCents: 0, release }) });
+      const seen: Array<{ type: string; code?: string; reason?: string; detail?: string }> = [];
+      session.onStream = async (e) => { seen.push(e as { type: string; code?: string; reason?: string; detail?: string }); };
+      const result = await session.run('go');
+      expect(result).toBe(`Run blocked: ${HOLD_SENTENCE}`);
+      const warning = seen.find(e => e.type === 'warning' && e.code === 'run_blocked');
+      expect(warning?.reason).toBe('hold_exhausted');
+      expect(warning?.detail).toBe(HOLD_SENTENCE);
+      expect(mockSend).not.toHaveBeenCalled();
+      expect(release).toHaveBeenCalledOnce();
+      const failed = (engine.getRunHistory()!.updateRun as unknown as { mock: { calls: unknown[][] } }).mock.calls
+        .find(c => (c[1] as { status?: string })?.status === 'failed');
+      expect(failed).toBeUndefined();
+    });
+
+    it('a retry queued while the run holds its admission runs at the release, and only then', async () => {
+      // Kills: dropping the release-time flush in Session._run's finally (the queued retry would
+      // wait for some later, unrelated deferral, or never run). Nothing else in this run defers:
+      // single calls (the title) are admitted, so only the release can run the queue.
+      const { engine, session } = await createEngineAndSession();
+      const order: string[] = [];
+      engine.registerHooks({
+        onBeforeRun: (_id, ctx) => ctx.maxCostCents === undefined
+          ? { maxCostCents: 120, release: () => { order.push('release'); } }
+          : undefined,
+      });
+      const stream = vi.fn().mockReturnValue({ finalMessage: () => Promise.resolve({ content: [{ type: 'text', text: 'T' }], usage: { input_tokens: 1, output_tokens: 1 } }) });
+      (engine.client.beta.messages as unknown as { stream: unknown }).stream = stream;
+      mockSend.mockImplementationOnce(async () => {
+        const agent = (session as unknown as { agent: { deferUntilBalanceFree?: (r: () => void) => void } }).agent;
+        agent.deferUntilBalanceFree?.(() => { order.push('retry'); });
+        return 'response';
+      });
+      await session.run('go');
+      expect(order).toEqual(['release', 'retry']);
+    });
+
+    it('a memory extraction deferred while the run holds the balance runs once, after the release', async () => {
+      // Kills: running the deferred extraction while the run still holds the balance (it would
+      // be refused again), and dropping it (the turn's memory would be lost).
+      const { engine, session } = await createEngineAndSession();
+      const a = balanceHook(120);
+      engine.registerHooks(a.hook);
+      const ranWhileHeld: number[] = [];
+      const retry = vi.fn(() => { ranWhileHeld.push(a.held()); });
+      mockSend.mockImplementationOnce(async () => {
+        const agent = (session as unknown as { agent: { deferUntilBalanceFree?: (r: () => void) => void } }).agent;
+        agent.deferUntilBalanceFree?.(retry);
+        expect(retry).not.toHaveBeenCalled();
+        return 'response';
+      });
+      await session.run('go');
+      expect(retry).toHaveBeenCalledOnce();
+      expect(ranWhileHeld).toEqual([0]);
+      // Deferred with nothing held: runs at once, once.
+      const later = vi.fn();
+      (session as unknown as { agent: { deferUntilBalanceFree?: (r: () => void) => void } }).agent.deferUntilBalanceFree?.(later);
+      expect(later).toHaveBeenCalledOnce();
+    });
+
+    it('a title refused for another reason (credit exhausted) is not retried', async () => {
+      // Kills: a retry on every refusal instead of only on a refusal within the balance.
+      const { engine, session } = await createEngineAndSession();
+      let fastGates = 0;
+      engine.registerHooks({
+        onBeforeRun: (_id, ctx) => {
+          if (ctx.modelTier === 'fast') { fastGates++; throw new Error('AI budget for this period reached.'); }
+        },
+      });
+      (engine.client.beta.messages as unknown as { stream: unknown }).stream = vi.fn();
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('Plan the Q3 budget');
+      await vi.waitFor(() => expect(fastGates).toBe(1));
+      await settle();
+      expect(fastGates).toBe(1);
     });
   });
 });

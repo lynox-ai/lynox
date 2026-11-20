@@ -23,7 +23,8 @@ vi.mock('./entity-extractor.js', async (importActual) => ({
   extractEntities: mockExtractV1,
 }));
 
-import { KnowledgeLayer } from './knowledge-layer.js';
+import { KnowledgeLayer, KG_EXTRACTION_REFUSED_METRIC } from './knowledge-layer.js';
+import { RunAdmissionRefusedError } from './run-admission.js';
 import { LocalProvider } from './embedding.js';
 import { configurePersistentBudget, resetPersistentBudget } from './session-budget.js';
 
@@ -90,6 +91,25 @@ describe('KnowledgeLayer — managed KG-extraction gate + debit', () => {
     expect(res.entities.length).toBe(0);
     // The memory itself is still stored — extraction is best-effort enrichment.
     expect(res.stored).toBe(true);
+  });
+
+  it('records an extraction refused within the balance per memory, with no text; a plain refusal records nothing', async () => {
+    // Kills: no record (a held balance would drop graph entities with no trace), and a record on
+    // every refusal (an exhausted tenant would fill the table).
+    layer.setMeteredHost({ getHooks: () => [{ onBeforeRun: () => { throw new RunAdmissionRefusedError('AI budget for this period reached.'); } }], getContext: () => undefined });
+    const res = await layer.store(text, 'knowledge', scope);
+    expect(res.stored).toBe(true);
+    const rows = layer.getDb().getMetrics(KG_EXTRACTION_REFUSED_METRIC);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ scope_type: 'memory', scope_id: res.memoryId, value: 1 });
+    expect(JSON.stringify(rows[0])).not.toContain(text.slice(0, 20));
+    // The same memory refused again counts up on its row.
+    layer.noteExtractionRefusedWithinBalance(res.memoryId);
+    expect(layer.getDb().getMetrics(KG_EXTRACTION_REFUSED_METRIC)[0]?.value).toBe(2);
+
+    layer.setMeteredHost({ getHooks: () => [{ onBeforeRun: () => { throw new Error('AI budget for this period reached.'); } }], getContext: () => undefined });
+    await layer.store(`${text} — a second, different note about the same topic`, 'knowledge', scope);
+    expect(layer.getDb().getMetrics(KG_EXTRACTION_REFUSED_METRIC)).toHaveLength(1);
   });
 
   it('runs extraction undebited when no metered host is set (self-host, under the caps)', async () => {
