@@ -296,6 +296,56 @@ describe('applying an external run', () => {
     }
   });
 
+  it('names a send without a confirmed write apart from the written targets, and its undo finds it unchanged where it never arrived', async () => {
+    const s = shop();
+    // The second send leaves and the connection drops before the host applies it: lynox sent to
+    // the target, has no answer, and the target still holds its value from before.
+    s.dropAfter = new Set(['PATCH /products/1']);
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15.00' } }, { target: url(1), after: { price: '20.00' } }]);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter });
+      expect(s.items.get('/products/1')!['price']).toBe('12.00');
+      // The undo still takes back both, but the page names them apart: one written, one open.
+      expect(ledger.countUndoable(runId)).toBe(2);
+      expect(ledger.countUndoableParts(runId)).toEqual({ written: 1, open: 1 });
+      // Where the head counts written targets, it counts the same one.
+      expect(ledger.getStatus(runId)!.heads?.written).toBe(1);
+
+      s.dropAfter.clear();
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted' WHERE id = ? AND phase = 'writing'`).run(runId);
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      expect(undo.status.total).toBe(2);
+      // Of the two targets it gives a value back, one takes back a write never confirmed.
+      expect(ledger.countUndoOpenTargets(undo.status.id)).toBe(1);
+      expect(ledger.countUndoOpenTargets(runId)).toBe(0);
+      expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
+      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: contractWriter })).status).toBe('done');
+      expect([s.items.get('/products/0')!['price'], s.items.get('/products/1')!['price']]).toEqual(['12.00', '12.00']);
+      // The open target never held the run's value: the undo finds it as it should be, unchanged,
+      // and does not show it as a target someone changed in between.
+      expect(ledger.getStatus(undo.status.id)).toMatchObject({ conflicts: 0 });
+      expect(ledger.getStatus(undo.status.id)!.heads).toMatchObject({ unchanged: 1, written: 1, conflict: 0 });
+      // Only the undo sent a PATCH to the first target; the open one got no second write.
+      expect(s.requests.filter((r) => r.method === 'PATCH' && r.path === '/products/1')).toHaveLength(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it('counts no open target on a local run, where a write has a known outcome', () => {
+    const run = ledger.recordDryRun({
+      createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'w',
+      targets: [{ key: '/a', before: { absent: false, value: 'old' }, after: 'new' }, { key: '/b', before: { absent: false, value: 'old' }, after: 'new' }],
+    });
+    // One written, one marked sent without a recorded write: locally that send is not open.
+    engineDb.getDb().prepare('UPDATE bulk_targets SET applied_at = 1 WHERE run_id = ? AND seq = 0').run(run.id);
+    engineDb.getDb().prepare('UPDATE bulk_targets SET write_sent = 1 WHERE run_id = ? AND seq = 1').run(run.id);
+    expect(ledger.countUndoableParts(run.id)).toEqual({ written: 1, open: 0 });
+    expect(ledger.countUndoable(run.id)).toBe(1);
+  });
+
   it('a failed write that landed stays in the undo after a resume turned its retry into a conflict', async () => {
     const s = shop();
     s.landThenFail = new Set(['/products/1']);

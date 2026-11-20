@@ -2346,6 +2346,36 @@ export class BulkLedger {
     ).get(runId) as { n: number }).n;
   }
 
+  /** {@link countUndoable} in its two parts, for the owner's page: the written targets (applied,
+   *  as the run's head counts them) and, for an external run, the targets sent to without a
+   *  confirmed write, of which it is open whether the change reached the host. The undo takes
+   *  back both; it reads the open ones first and resets only where the run's value is in place. */
+  countUndoableParts(runId: string): { written: number; open: number } {
+    const run = this.runRow(runId);
+    if (!run) return { written: 0, open: 0 };
+    const external = externalHostOf(run.target_system) !== null;
+    const row = this.engineDb.getDb().prepare(
+      `SELECT COALESCE(SUM(applied_at IS NOT NULL AND found_unsent = 0), 0) AS written,
+         COALESCE(SUM(applied_at IS NULL AND write_sent = 1), 0) AS open
+       FROM bulk_targets WHERE run_id = ? AND ${undoEligible(external)}`,
+    ).get(runId) as { written: number; open: number };
+    return { written: row.written, open: external ? row.open : 0 };
+  }
+
+  /** For an undo: how many of the targets it gives a value back (not those it removes) take back
+   *  a source target sent to without a confirmed write. Of those it is open whether the source's
+   *  change arrived; the undo reads them first and resets only where the source's value is in
+   *  place. 0 for any other run. */
+  countUndoOpenTargets(runId: string): number {
+    return (this.engineDb.getDb().prepare(
+      `SELECT COUNT(*) AS n FROM bulk_targets u
+         JOIN bulk_runs r ON r.id = u.run_id AND r.kind = 'undo'
+         JOIN bulk_targets s ON s.run_id = r.source_run_id AND s.seq = u.source_seq
+       WHERE u.run_id = ? AND u.change IN ('update','create') AND u.deselected_at IS NULL
+         AND s.applied_at IS NULL AND s.write_sent = 1`,
+    ).get(runId) as { n: number }).n;
+  }
+
   /** The undo that took an undone run back, for the owner's page: the last finished undo started
    *  from it, and when its last target was taken back. Null for a run that is not `undone`.
    *  Only an undo carries a `source_run_id` ({@link planUndo}), so the source link alone finds it.

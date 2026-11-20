@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
 	bulkHiddenSegments, bulkHiddenCountText, bulkRawText, bulkUncheckedCountText, bulkHiddenUnchecked,
-	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkUndoExplainText, bulkUndoApproveText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
 } from './bulk-runs.js';
@@ -827,22 +827,56 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('failureRate', { failedOnce: null, failed: 1 }), true, EN, true)?.soFar).toBe('So far, at least 1 target has no confirmation.');
 	});
 
+	it('names targets of which it is open whether the change arrived apart from the written ones, in the undo offer', () => {
+		const ex = (written: number, open: number | null, i: BulkI18n) => bulkUndoExplainText(open === null ? {} : { undoableParts: { written, open } }, i);
+		// Only written targets, or an engine without the parts: the sentence as before.
+		expect(ex(2, 0, DE)).toBe(DE.t('bulk.undo.explain'));
+		expect(ex(0, null, EN)).toBe(EN.t('bulk.undo.explain'));
+		// Written and open.
+		expect(ex(2, 3, DE)).toContain('Bei 3 weiteren Zielen ist offen, ob die Änderung beim Anbieter angekommen ist.');
+		expect(ex(2, 1, DE)).toContain('Bei einem weiteren Ziel ist offen, ob');
+		expect(ex(2, 1, EN)).toContain('For one more target it is unclear whether');
+		expect(ex(2, 3, DE)).toMatch(/^Die Rücknahme stellt bei jedem geschriebenen Ziel/);
+		// None written: it does not say "every written target".
+		expect(ex(0, 1, DE)).toMatch(/^Kein Ziel ist als geschrieben bestätigt\. Bei einem Ziel ist offen, ob/);
+		expect(ex(0, 2, EN)).toMatch(/^No target is confirmed as written\. For 2 targets it is unclear/);
+		expect(ex(0, 2, DE)).not.toContain('jedem geschriebenen Ziel');
+		// No number promised before writing that the undo cannot know.
+		for (const [w, o] of [[2, 3], [0, 1]] as const) {
+			expect(ex(w, o, DE)).toContain('Vor dem Schreiben sagt sie dir, wie viele Ziele sie sich vornimmt');
+			expect(ex(w, o, DE)).not.toContain('zurückbekommen');
+			expect(ex(w, o, EN)).toContain('Before writing, it tells you how many targets it will work on');
+		}
+	});
+
+	it('does not count a target whose write was never confirmed as getting its value back, in the undo approval', () => {
+		const ap = (update: number, create: number, undoOpen: number | undefined, i: BulkI18n) =>
+			bulkUndoApproveText({ changes: { update, create, delete: 0, unchanged: 0, invalid: 0 }, ...(undoOpen === undefined ? {} : { undoOpen }) }, i);
+		expect(ap(3, 0, undefined, DE)).toBe('3 Ziele bekommen ihren Wert von vorher zurück. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.');
+		expect(ap(3, 0, 0, EN)).toBe('3 targets get their previous value back. Targets someone has changed since stay as they are.');
+		expect(ap(2, 1, 1, DE)).toBe('2 geschriebene Ziele bekommen ihren Wert von vorher zurück. Bei einem weiteren Ziel sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus diesem Lauf steht. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.');
+		expect(ap(3, 0, 2, DE)).toBe('1 geschriebenes Ziel bekommt seinen Wert von vorher zurück. Bei 2 weiteren Zielen sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus diesem Lauf steht. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.');
+		expect(ap(4, 0, 1, EN)).toBe('3 written targets get their previous value back. For one more target, taking back checks first and only resets where the value from this run is in place. Targets someone has changed since stay as they are.');
+		expect(ap(2, 0, 2, DE)).toBe('Bei 2 Zielen sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus diesem Lauf steht.');
+		expect(ap(1, 0, 1, EN)).toBe('For one target, taking back checks first and only resets where the value from this run is in place.');
+	});
+
 	it('says what writing on lets fail, by the limit against the open targets', () => {
 		const allows = (o: Partial<BulkRunDetailData>, i: BulkI18n) => bulkResumeText(w('failureRate', o), true, i, true)?.allows;
 		// The limit below the open targets.
-		expect(allows({}, DE)).toBe('Mit dem Weiterschreiben dürfen noch einmal bis zu 50 Ziele scheitern, oder drei in Folge, bevor der Lauf wieder anhält.');
-		expect(allows({}, EN)).toBe('If you continue, up to 50 more targets may fail, or three in a row, before the run stops again.');
-		expect(allows({ failureLimit: 2 }, EN)).toBe('If you continue, up to 2 more targets may fail before the run stops again.');
-		expect(allows({ failureLimit: 1 }, DE)).toBe('Mit dem Weiterschreiben darf noch einmal ein Ziel scheitern, bevor der Lauf wieder anhält.');
-		expect(allows({ failureLimit: 1 }, EN)).toBe('If you continue, one more target may fail before the run stops again.');
-		expect(allows({ failureLimit: 0 }, EN)).toBe('If you continue, the run stops at the next target that cannot be written.');
+		expect(allows({}, DE)).toBe('Dabei dürfen noch einmal bis zu 50 Ziele scheitern, oder drei in Folge, bevor der Lauf wieder anhält.');
+		expect(allows({}, EN)).toBe('Up to 50 more targets may then fail, or three in a row, before the run stops again.');
+		expect(allows({ failureLimit: 2 }, EN)).toBe('Up to 2 more targets may then fail before the run stops again.');
+		expect(allows({ failureLimit: 1 }, DE)).toBe('Dabei darf noch einmal ein Ziel scheitern, bevor der Lauf wieder anhält.');
+		expect(allows({ failureLimit: 1 }, EN)).toBe('One more target may then fail before the run stops again.');
+		expect(allows({ failureLimit: 0 }, EN)).toBe('The run then stops at the next target that cannot be written.');
 		// The limit at or above the open targets: the share cannot be passed.
-		expect(allows({ resumeOpen: 38, resumeTries: 38 }, DE)).toBe('Mit dem Weiterschreiben hält der Lauf wegen Fehlschlägen nur noch an, wenn drei Ziele in Folge scheitern.');
-		expect(allows({ resumeOpen: 50, resumeTries: 50 }, EN)).toBe('If you continue, the run only stops for failures if three targets in a row fail.');
-		expect(allows({ resumeOpen: 3, resumeTries: 3, failureLimit: 3 }, DE)).toBe('Mit dem Weiterschreiben hält der Lauf wegen Fehlschlägen nur noch an, wenn drei Ziele in Folge scheitern.');
-		expect(allows({ resumeOpen: 2, resumeTries: 2 }, DE)).toBe('Mit dem Weiterschreiben hält der Lauf nicht mehr wegen Fehlschlägen an. Es sind nur noch 2 Ziele übrig.');
-		expect(allows({ resumeOpen: 1, resumeTries: 1 }, EN)).toBe('If you continue, the run no longer stops because of failures. Only one target is left.');
-		expect(allows({ resumeOpen: 1, resumeTries: 1 }, DE)).toBe('Mit dem Weiterschreiben hält der Lauf nicht mehr wegen Fehlschlägen an. Es ist nur noch ein Ziel übrig.');
+		expect(allows({ resumeOpen: 38, resumeTries: 38 }, DE)).toBe('Wegen Fehlschlägen hält der Lauf dann nur noch an, wenn drei Ziele in Folge scheitern.');
+		expect(allows({ resumeOpen: 50, resumeTries: 50 }, EN)).toBe('The run then only stops for failures if three targets in a row fail.');
+		expect(allows({ resumeOpen: 3, resumeTries: 3, failureLimit: 3 }, DE)).toBe('Wegen Fehlschlägen hält der Lauf dann nur noch an, wenn drei Ziele in Folge scheitern.');
+		expect(allows({ resumeOpen: 2, resumeTries: 2 }, DE)).toBe('Wegen Fehlschlägen hält der Lauf dann nicht mehr an. Es sind nur noch 2 Ziele übrig.');
+		expect(allows({ resumeOpen: 1, resumeTries: 1 }, EN)).toBe('The run then no longer stops because of failures. Only one target is left.');
+		expect(allows({ resumeOpen: 1, resumeTries: 1 }, DE)).toBe('Wegen Fehlschlägen hält der Lauf dann nicht mehr an. Es ist nur noch ein Ziel übrig.');
 		// Bounded by the open targets, never by the maximum: a target can fail before it is sent to.
 		expect(allows({ resumeTries: 1 }, DE)).toBe(allows({}, DE));
 		expect(allows({ resumeOpen: 0, resumeTries: 0 }, DE)).toBeNull();
