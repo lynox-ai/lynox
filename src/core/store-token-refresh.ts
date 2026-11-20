@@ -288,6 +288,8 @@ export function refreshStoreToken(profileId: string, trigger: 'due' | 'unauthori
       else lastMisnamed.delete(profileId);
       return outcome;
     })
+    // run-group-starter: reports no spend, and the request that started it awaits it; its one outward call,
+    // the token exchange, is bounded by that exchange's own timers (`TOKEN_EXCHANGE_TIMEOUT_MS`).
     .finally(() => { refreshesInFlight.delete(profileId); });
   refreshesInFlight.set(profileId, run);
   return run;
