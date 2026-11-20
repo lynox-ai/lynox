@@ -47,7 +47,9 @@
 		created_by?: string;
 		edited_by?: string;
 		// The same, as the lines shown under the title: a helper that set it up or changed it
-		// last, by name (`GET /api/triggers`). Empty for the owner's own.
+		// last, named as the session may read it — by name, or another grant by its address
+		// (`GET /api/triggers`). Only the marks on the trigger itself, not on the workflow it
+		// runs. Empty for the owner's own.
 		setup?: ApprovalSetupLine[];
 		// What the owner's stamp of a confirmed plan lists, entry by entry (owner only; B3).
 		stamp_listed?: StampListed | null;
@@ -618,7 +620,7 @@
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-paused>{t('triggers.paused_takeover')}</span>
 								{/if}
 							</div>
-							<!-- Who set it up or changed it last, when that was a helper: the lines of an
+							<!-- Who set it up or changed it last, when that was a helper, worded as on an
 							     approval card (U-202). The owner's own trigger has none. -->
 							{#each trigger.setup ?? [] as line, i (i)}
 								<p class="mt-0.5 text-xs text-text-muted break-words" data-trigger-setup={line.kind}>{tf(`approvals.setup.${approvalSetupKind(line, viewer)}`, { name: visibleText(approvalSetupName(line.name, { t })) })}</p>

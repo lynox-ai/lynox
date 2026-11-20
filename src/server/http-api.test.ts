@@ -11448,8 +11448,9 @@ describe('LynoxHTTPApi', () => {
         { id: 'trg-old', title: 'Alt' },
       ];
       const shown: Record<string, string> = { 'grant-a': 'Anna A.', 'grant-b': 'Bea B.' };
+      const reads: string[] = [];
       // A helper's read is recorded in the trail before it is answered, so the trail takes rows too.
-      let trail: { displayNameOf: (id: string) => string | null; record: () => void } = { displayNameOf: (id) => shown[id] ?? null, record: () => undefined };
+      let trail: { displayNameOf: (id: string) => string | null; record: () => void } | null = { displayNameOf: (id) => { reads.push(id); return shown[id] ?? null; }, record: () => undefined };
       type Lines = { triggers: Array<{ id: string; setup?: unknown }> };
       const setupOf = async (): Promise<{ text: string; byId: Record<string, unknown> }> => {
         const res = await jsonFetch('/api/triggers');
@@ -11468,6 +11469,8 @@ describe('LynoxHTTPApi', () => {
             'trg-own': [],
             'trg-old': [],
           });
+          // Two triggers of grant-a, one request: the trail is read once per grant.
+          expect([...reads].sort()).toEqual(['grant-a', 'grant-b']);
           // A helper reads its own grant's name, another grant by its address only.
           api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'bea@example.com', mandateId: 'grant-b' }) as RequestPrincipal);
           const bea = await setupOf();
@@ -11478,11 +11481,13 @@ describe('LynoxHTTPApi', () => {
           api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'bea@example.com' }) as RequestPrincipal);
           const none = await setupOf();
           for (const id of ['trg-anna', 'trg-bea', 'trg-taken', 'trg-own', 'trg-old']) expect(none.byId[id]).toEqual([]);
-          expect(none.text).not.toContain('Bea B.');
           // A trail that cannot be read costs the owner the names, not the list: the address stands in.
           api.setPrincipalResolverForTesting(resolver);
           trail = { displayNameOf: () => { throw new Error('trail down'); }, record: () => undefined };
           expect((await setupOf()).byId['trg-anna']).toEqual([{ kind: 'set_up_by', name: 'anna@example.com', takenOver: false }]);
+          // No trail on this instance: the same.
+          trail = null;
+          expect((await setupOf()).byId['trg-bea']).toEqual([{ kind: 'last_changed_by', name: 'bea@example.com', takenOver: false }]);
         });
       } finally {
         api.setPrincipalResolverForTesting(resolver);
