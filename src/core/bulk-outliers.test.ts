@@ -221,8 +221,8 @@ describe('markersOf', () => {
     expect([...m.values()].every((x) => x.size === 0)).toBe(true);
   });
 
-  it('reads a host however its top-level domain is capitalised, where that domain is no word', () => {
-    for (const text of ['Besuche Evil.Com', 'evil.Com', 'Evil.Shop heute', 'evil.Ch heute']) {
+  it('reads a host however its top-level domain is capitalised, where that domain is no word, and one under icu', () => {
+    for (const text of ['Besuche Evil.Com', 'evil.Com', 'Evil.Shop heute', 'evil.Ch heute', 'Besuche evil.icu']) {
       expect([...markersOf(text).get('link')!], text).toHaveLength(1);
     }
   });
