@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { setLocale, getLocale } from '../i18n.svelte.js';
-import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
+import { isMandateSession, resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
 // for the client, so it is mounted with the client entry, loaded by path.
@@ -224,6 +224,8 @@ describe('a profile in the API store', () => {
 
 	it('leaves the name unboxed in a member\'s view', async () => {
 		await store([{ ...P, id: 'p0', name: MARK.workflow, created_by: `mandate:${MARK.helper}` }], 'mandate');
+		// An answer that never arrived also leaves the name unboxed: the view must have read 'mandate'.
+		expect(isMandateSession(), 'the viewer resolved to a member').toBe(true);
 		const name = target.querySelector('[data-profile-name]');
 		expect(name, 'the profile name').not.toBeNull();
 		expect(boxesIn(name)).toEqual([]);
