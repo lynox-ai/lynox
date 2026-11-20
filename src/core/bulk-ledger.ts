@@ -950,7 +950,8 @@ export interface BulkRunForApply {
   /** Whether the run's data-store writes are marked as written from outside content
    *  (`_written_untrusted`), since the worker holds no turn: the planning turn had read outside
    *  content, or the source carries the mark (a file always does). A run that does not record it,
-   *  as one planned before the record existed, counts as marked. An undo keeps its source's. */
+   *  as one planned before the record existed, counts as marked. An undo keeps its source's, and
+   *  marks each row it re-creates. */
   plannerUntrusted: boolean;
 }
 
@@ -2743,8 +2744,8 @@ export class BulkLedger {
       ).run(id, params.createdBy ?? null, this.engineDb.keyedHash(hashParts()), src.target_system, runUndo,
         // Only the owner's route plans an undo (§3.13 E6), so the undo is the owner's.
         planned.length, src.atomic, sourceRunId, src.target_collection, src.contract_json, ...planner(OWNER_PRINCIPAL),
-        // It writes back what its source found and re-creates what its source deleted, values that
-        // came from where the source's did: it keeps the source's mark.
+        // It writes back what its source found, into rows that keep any mark they hold: it keeps
+        // the source's mark. A row it re-creates is marked by the writer (`dataStoreWriter`).
         src.planner_untrusted === 0 ? 0 : 1);
       planned.forEach((t, seq) => {
         if (t.tainted) {

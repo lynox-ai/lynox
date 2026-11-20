@@ -2068,6 +2068,33 @@ describe('data-store runs', () => {
       expect(ledger.getRunForApply(await undoOf(clean))!.plannerUntrusted).toBe(false);
     });
 
+    it('a row a clean undo re-creates is marked when it was marked before its undo deleted it', async () => {
+      seedStore();
+      stage([{ target: 'NEW1', price: 1 }], false);
+      const runId = await planStaged(agentRead(false));
+      expect(markOf('NEW1')).toBe(false);
+      // A turn that read outside content writes the row again with the same values: it is marked,
+      // and the undo still finds the values it expects.
+      store.putRowVerbatim('products', { sku: 'NEW1', price: 1, owner: null }, { grants: ['gO'], runId: null, writtenBy: null, untrusted: true });
+      expect(markOf('NEW1')).toBe(true);
+      const undo = await undoOf(runId);
+      expect(ledger.getRunForApply(undo)!.plannerUntrusted).toBe(false);
+      expect(store.sourceOfRow('products', 'sku', 'NEW1')).toBeNull();
+      await undoOf(undo);
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows[0]).toMatchObject({ sku: 'NEW1', price: 1 });
+      expect(markOf('NEW1')).toBe(true);
+    });
+
+    it('CONTROL: a clean undo of an update leaves an unmarked row unmarked', async () => {
+      seedStore();
+      store.putRowVerbatim('products', { sku: 'S1', price: 1, owner: 'subj-1' }, { grants: ['gB'], runId: null, writtenBy: null, untrusted: false });
+      stage([{ target: 'S1', price: 99 }], false);
+      const runId = await planStaged(agentRead(false));
+      await undoOf(runId);
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'S1' } }).rows[0]).toMatchObject({ price: 1 });
+      expect(markOf('S1')).toBe(false);
+    });
+
     it('a run that does not record the mark, as one planned before the record, counts as marked', async () => {
       seedStore();
       stage([{ target: 'NEW1', price: 1 }], false);

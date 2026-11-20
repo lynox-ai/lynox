@@ -748,9 +748,10 @@ export function anchoredWorkspaceWriter(): TargetWriter {
  * Rows of one data-store collection, addressed by its single-column unique key. Rows are
  * read raw (subject cells as stored ids, like the before-images) and written whole with
  * {@link DataStore.putRowVerbatim}, which does not re-resolve subject cells. `untrusted` marks
- * every write as written from outside content (`_written_untrusted`).
+ * every write as written from outside content (`_written_untrusted`); `markCreated` marks every
+ * write that creates a row.
  */
-export function dataStoreWriter(store: DataStore, collection: string, untrusted: boolean): TargetWriter | null {
+export function dataStoreWriter(store: DataStore, collection: string, untrusted: boolean, markCreated: boolean): TargetWriter | null {
   const info = store.getCollectionInfo(collection);
   if (!info || !info.uniqueKey || info.uniqueKey.length !== 1) return null;
   const keyCol = info.uniqueKey[0]!;
@@ -784,8 +785,11 @@ export function dataStoreWriter(store: DataStore, collection: string, untrusted:
       // exactly the stamp passed; an update keeps what the row already held beside it. Null
       // reads as unknown.
       // The outside-content mark is the run's as well (`BulkRunForApply.plannerUntrusted`); the
-      // store keeps a row marked once any write marked it.
-      return store.putRowVerbatim(collection, row as Record<string, unknown>, { grants: grants ?? null, runId: null, writtenBy: null, untrusted });
+      // store keeps a row marked once any write marked it. A row an undo re-creates comes back
+      // without the mark it held, which the before-image does not carry (a system column): it is
+      // marked, as its grants get `unknown` beside them.
+      const marked = untrusted || (markCreated && readRow(key).absent);
+      return store.putRowVerbatim(collection, row as Record<string, unknown>, { grants: grants ?? null, runId: null, writtenBy: null, untrusted: marked });
     },
   };
 }
@@ -799,7 +803,7 @@ export function bulkWriterFor(
   if (run.targetSystem === 'workspace') return workspaceWriter();
   if (run.targetSystem === 'data_store') {
     if (!store || run.targetCollection === null) return null;
-    return dataStoreWriter(store, run.targetCollection, run.plannerUntrusted);
+    return dataStoreWriter(store, run.targetCollection, run.plannerUntrusted, run.kind === 'undo');
   }
   return null;
 }
