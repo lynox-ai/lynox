@@ -82,7 +82,7 @@ describe('DataStore: who wrote a row', () => {
     it('a bulk apply writes as unknown', async () => {
       keyed();
       ds.insertRecords({ collection: 'leads', records: [{ email: 'a@x' }], stamp: stamp('owner') });
-      await dataStoreWriter(ds, 'leads')!.write('a@x', { absent: false, value: { email: 'a@x', source: 'x' } });
+      await dataStoreWriter(ds, 'leads', false)!.write('a@x', { absent: false, value: { email: 'a@x', source: 'x' } });
       expect(cells('leads')).toEqual([{ w: null, u: null }]);
     });
 
