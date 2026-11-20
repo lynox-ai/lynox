@@ -64,6 +64,7 @@ describe('jsonFault', () => {
     expect(jsonFault(quoted)).toBe('not valid JSON');
     expect(jsonFault(new SyntaxError('Unterminated string in JSON at position 62 (line 1 column 63)'))).toBe('not valid JSON at position 62 (line 1 column 63)');
     expect(jsonFault(new SyntaxError('Bad control character in string literal in JSON at position 22'))).toBe('not valid JSON at position 22');
+    expect(jsonFault(new SyntaxError('Unexpected non-whitespace character after JSON at position 7 (line 1 column 8)'))).toBe('not valid JSON at position 7 (line 1 column 8)');
     // The same words inside a quote are not a position.
     expect(jsonFault(new SyntaxError('Unexpected token \'a\', "x in JSON at position 7" is not valid JSON'))).toBe('not valid JSON');
   });
