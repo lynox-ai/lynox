@@ -14,6 +14,7 @@
  * before, or by an instance in the other language, is said in the owner's language too.
  */
 import type { NoticeLanguage } from './notice-language.js';
+import type { BudgetNoteRef } from './render-projection.js';
 import { ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT } from './plan-pause.js';
 import { isProvisionedInstance } from './wire-capture.js';
 import { MAX_WAITING_EVENTS, QUEUE_FULL_REASON, SHOP_MISMATCH_REASON } from '../server/webhook-receiver.js';
@@ -227,6 +228,31 @@ export interface WorkerNotices {
   resumedRunNotContained(provisioned: boolean): string;
   /** A watched page that changed, with the analysis (E15): the push only, the thread's seed stays English. */
   watchChanged(url: string, analysis: string): string;
+  /**
+   * A run that never started ({@link notRunReason}): the title of its notice, with the task's
+   * title as it came, and the sentences of its body. The cap's sentences are the chat's for a
+   * message the cap blocked, so the two say the same thing.
+   */
+  notRunTitle(title: string): string;
+  /** The cap reached, its limit, the spend against it and when it opens again ({@link resetWhen}). */
+  capReached(cap: 'daily' | 'monthly', limit: string, spent: string, when: string): string;
+  readonly capUnverifiable: string;
+  /** Who can change the cap: the owner on the limits page, or support for a managed plan. */
+  readonly capNextSelf: string;
+  readonly capNextPlan: string;
+  /** The step when spend cannot be checked: on a self-hosted instance, and on a hosted one. */
+  readonly capRestart: string;
+  readonly capSupportIfStays: string;
+  /** A check before the run (a run hook) refused it; its own reason goes to the log, not here. */
+  hookBlocked(managed: boolean): string;
+  /** What becomes of the trigger: it stays due, its next time runs, or a watch's next check. */
+  readonly notRunWaits: string;
+  readonly notRunSkipped: string;
+  readonly notRunWatchNext: string;
+  /** When the cap opens again: today, tomorrow or on a date, each at a time with its zone. */
+  resetToday(time: string): string;
+  resetTomorrow(time: string): string;
+  resetOn(date: string, time: string): string;
 }
 
 /**
@@ -309,6 +335,24 @@ const EN: WorkerNotices = Object.freeze({
     ? `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, write to support@lynox.ai.`
     : `${RESUMED_RUN_NOT_CONTAINED} If it stops the same way again, the instance log names the cause.`,
   watchChanged: (url: string, analysis: string) => `${url} changed.\n\n${analysis}`,
+  notRunTitle: (title: string) => `${title} did not run`,
+  capReached: (cap: 'daily' | 'monthly', limit: string, spent: string, when: string) => cap === 'daily'
+    ? `The daily limit of ${limit} is reached (today ${spent}). It resets ${when}.`
+    : `The monthly limit of ${limit} is reached (this month ${spent}). It resets ${when}.`,
+  capUnverifiable: 'lynox can\'t check spending right now, so it starts no run.',
+  capNextSelf: 'You can change the limit under Settings → Limits.',
+  capNextPlan: 'The limit comes with your plan. To change it, write to support@lynox.ai.',
+  capRestart: 'Restart lynox.',
+  capSupportIfStays: 'If it stays, write to support@lynox.ai.',
+  hookBlocked: (managed: boolean) => managed
+    ? 'A check before the start did not let the run begin. If it stays, write to support@lynox.ai.'
+    : 'A check before the start did not let the run begin. The instance log names the reason.',
+  notRunWaits: 'It stays due and runs once it can start.',
+  notRunSkipped: 'This time is skipped; the next one runs as scheduled.',
+  notRunWatchNext: 'The next check runs as scheduled and reports what changed since the last one.',
+  resetToday: (time: string) => `today at ${time}`,
+  resetTomorrow: (time: string) => `tomorrow at ${time}`,
+  resetOn: (date: string, time: string) => `on ${date} at ${time}`,
 });
 
 /** A resumed run whose new chat could not be contained, in English (ux U-089). */
@@ -427,6 +471,87 @@ const DE: WorkerNotices = Object.freeze({
     ? `${DE_RESUMED_RUN_NOT_CONTAINED} Wiederholt es sich, schreib an support@lynox.ai.`
     : `${DE_RESUMED_RUN_NOT_CONTAINED} Wiederholt es sich, nennt das Instanz-Protokoll den Grund.`,
   watchChanged: (url: string, analysis: string) => `${url} hat sich geändert.\n\n${analysis}`,
+  notRunTitle: (title: string) => `${title} ist nicht gelaufen`,
+  capReached: (cap: 'daily' | 'monthly', limit: string, spent: string, when: string) => cap === 'daily'
+    ? `Das Tageslimit von ${limit} ist erreicht (heute ${spent}). Es gilt wieder ab ${when}.`
+    : `Das Monatslimit von ${limit} ist erreicht (diesen Monat ${spent}). Es gilt wieder ab ${when}.`,
+  capUnverifiable: 'lynox kann die Ausgaben gerade nicht prüfen und startet deshalb keinen Lauf.',
+  capNextSelf: 'Du kannst das Limit unter Einstellungen → Limits ändern.',
+  capNextPlan: 'Das Limit gehört zu deinem Plan. Ändern lässt es sich über support@lynox.ai.',
+  capRestart: 'Starte lynox neu.',
+  capSupportIfStays: 'Bleibt das, schreib an support@lynox.ai.',
+  hookBlocked: (managed: boolean) => managed
+    ? 'Eine Prüfung vor dem Start hat den Lauf nicht zugelassen. Bleibt das, schreib an support@lynox.ai.'
+    : 'Eine Prüfung vor dem Start hat den Lauf nicht zugelassen. Den Grund nennt das Instanz-Protokoll.',
+  notRunWaits: 'Er bleibt fällig und läuft, sobald er starten kann.',
+  notRunSkipped: 'Dieser Termin entfällt; der nächste läuft wie geplant.',
+  notRunWatchNext: 'Die nächste Prüfung läuft wie geplant und meldet, was sich seit der letzten geändert hat.',
+  resetToday: (time: string) => `heute um ${time}`,
+  resetTomorrow: (time: string) => `morgen um ${time}`,
+  // "ab dem 1. Dezember", not "ab am": the slot follows "ab".
+  resetOn: (date: string, time: string) => `dem ${date} um ${time}`,
 });
 
 export const WORKER_NOTICES: Readonly<Record<NoticeLanguage, WorkerNotices>> = Object.freeze({ en: EN, de: DE });
+
+/** A cap as the chat names it: `$5` for a whole amount, `$7.50` otherwise. */
+function capUSD(usd: number): string {
+  return Number.isInteger(usd) ? `$${String(usd)}` : `$${usd.toFixed(2)}`;
+}
+
+/**
+ * When a cap opens again: the daily cap at the next midnight UTC, the monthly cap at midnight
+ * UTC on the first of the next month — the boundaries spend is summed by.
+ */
+export function capResetAt(cap: 'daily' | 'monthly', now: Date): Date {
+  return cap === 'daily'
+    ? new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1))
+    : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+}
+
+/**
+ * The reset as the notice says it after "It resets" / "Es gilt wieder ab": today, tomorrow or a
+ * date, at a time that names its zone. The engine does not know the reader's zone, so the time
+ * carries the instance's own (`timeZone` for tests) and says which one it is.
+ */
+export function resetWhen(at: Date, now: Date, lang: NoticeLanguage, timeZone?: string): string {
+  const n = WORKER_NOTICES[lang];
+  const zone = timeZone === undefined ? {} : { timeZone };
+  const time = at.toLocaleTimeString(lang === 'de' ? 'de-DE' : 'en-US', { hour: '2-digit', minute: '2-digit', timeZoneName: 'short', ...zone });
+  const day = (d: Date): string => d.toLocaleDateString('en-CA', zone);
+  const today = day(now);
+  // The next calendar day from today's date in that zone, not now + 24 h: a day of a clock
+  // change is 23 or 25 hours long.
+  const [y, m, d] = today.split('-').map(Number) as [number, number, number];
+  const tomorrow = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+  if (day(at) === today) return n.resetToday(time);
+  if (day(at) === tomorrow) return n.resetTomorrow(time);
+  const date = at.toLocaleDateString(lang === 'de' ? 'de-DE' : 'en-GB', { day: 'numeric', month: 'long', ...zone });
+  return n.resetOn(date, time);
+}
+
+/** What the notice of a run that never started needs to know about the instance. */
+export interface NotRunContext {
+  /** The control plane supplies the model key: the cap comes with the plan, support changes it. */
+  readonly managed: boolean;
+  /** No control plane at all: a step can say "restart lynox". */
+  readonly selfHosted: boolean;
+  readonly now: Date;
+  /** For tests; the worker passes none and gets the instance's zone. */
+  readonly timeZone?: string | undefined;
+}
+
+/**
+ * Why a background run did not start, and what the owner can do: the cap with its limit, the
+ * spend and when it opens again, and who can change it — or, for a check before the run (a run
+ * hook), lynox's own sentence without the hook's text, which may be a third party's.
+ */
+export function notRunReason(lang: NoticeLanguage, cause: BudgetNoteRef | 'hook', ctx: NotRunContext): string {
+  const n = WORKER_NOTICES[lang];
+  if (cause === 'hook') return n.hookBlocked(ctx.managed);
+  if (cause.cap === 'unknown' || cause.limitUSD === undefined || cause.spentUSD === undefined) {
+    return `${n.capUnverifiable} ${ctx.selfHosted ? n.capRestart : n.capSupportIfStays}`;
+  }
+  const when = resetWhen(capResetAt(cause.cap, ctx.now), ctx.now, lang, ctx.timeZone);
+  return `${n.capReached(cause.cap, capUSD(cause.limitUSD), `$${cause.spentUSD.toFixed(2)}`, when)} ${ctx.managed ? n.capNextPlan : n.capNextSelf}`;
+}

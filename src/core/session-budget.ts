@@ -210,6 +210,24 @@ export function budgetNoteRef(check: PersistentBudgetCheck): BudgetNoteRef {
   return { cap: 'unknown' };
 }
 
+/**
+ * What a background run's notice names about a cap the admission refused it on: the cap, its
+ * limit and the spend recorded against it now. `cap` is the one the refusal named; without one,
+ * the cap with the least headroom left, which is the one a run too small to start ran into.
+ * `unknown` when spend cannot be checked or no cap is enforced.
+ */
+export function admissionNoteRef(cap?: 'daily' | 'monthly' | 'unknown'): BudgetNoteRef {
+  if (cap === 'unknown' || spendUnverifiable()) return { cap: 'unknown' };
+  const spend = computeRecordedSpend();
+  if (!spend) return { cap: 'unknown' };
+  const dailyLeft = _dailyCapUSD < Infinity ? _dailyCapUSD - spend.todayCost : Infinity;
+  const monthlyLeft = _monthlyCapUSD < Infinity ? _monthlyCapUSD - spend.monthCost : Infinity;
+  const which = cap ?? (dailyLeft === Infinity && monthlyLeft === Infinity ? 'unknown' : dailyLeft <= monthlyLeft ? 'daily' : 'monthly');
+  if (which === 'daily' && _dailyCapUSD < Infinity) return { cap: 'daily', limitUSD: _dailyCapUSD, spentUSD: spend.todayCost };
+  if (which === 'monthly' && _monthlyCapUSD < Infinity) return { cap: 'monthly', limitUSD: _monthlyCapUSD, spentUSD: spend.monthCost };
+  return { cap: 'unknown' };
+}
+
 /** Check if persistent daily/monthly budget allows another run. */
 export function checkPersistentBudget(): PersistentBudgetCheck {
   if (spendUnverifiable()) {
@@ -266,7 +284,7 @@ export function checkPersistentBudget(): PersistentBudgetCheck {
  */
 export function reservePersistentBudget(estimatedCostUSD: number): PersistentBudgetReservation {
   // Before the zero-estimate shortcut: with spend unknown there is no headroom to admit into.
-  if (spendUnverifiable()) return { allowed: false, reservedUSD: 0, reason: unverifiableReason() };
+  if (spendUnverifiable()) return { allowed: false, reservedUSD: 0, reason: unverifiableReason(), cap: 'unknown' };
   const spend = computeRecordedSpend();
   if (!spend || estimatedCostUSD <= 0) {
     // No enforcement (no provider / caps disabled), or nothing to reserve.
@@ -277,13 +295,13 @@ export function reservePersistentBudget(estimatedCostUSD: number): PersistentBud
   if (_dailyCapUSD < Infinity && projectedToday > _dailyCapUSD) {
     return {
       allowed: false, reservedUSD: 0,
-      reason: `Daily spending cap ($${_dailyCapUSD}) would be exceeded by in-flight tasks.`,
+      reason: `Daily spending cap ($${_dailyCapUSD}) would be exceeded by in-flight tasks.`, cap: 'daily',
     };
   }
   if (_monthlyCapUSD < Infinity && projectedMonth > _monthlyCapUSD) {
     return {
       allowed: false, reservedUSD: 0,
-      reason: `Monthly spending cap ($${_monthlyCapUSD}) would be exceeded by in-flight tasks.`,
+      reason: `Monthly spending cap ($${_monthlyCapUSD}) would be exceeded by in-flight tasks.`, cap: 'monthly',
     };
   }
   _reservedInFlightUSD += estimatedCostUSD;

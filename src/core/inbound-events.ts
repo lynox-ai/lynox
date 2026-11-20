@@ -44,7 +44,9 @@ export interface InboundEventRecord {
 export type EventOutcome =
   | { state: 'done'; runId?: string | undefined }
   | { state: 'failed'; reason: string; runId?: string | undefined }
-  | { state: 'dropped'; reason: string };
+  | { state: 'dropped'; reason: string }
+  /** The run never started (the spending cap or a check before the run): the event waits again. */
+  | { state: 'received' };
 
 export interface RecordDelivery {
   triggerId: string;
@@ -151,14 +153,16 @@ export class InboundEventStore {
   /**
    * Write the outcome of the run of attempt `attemptId`; false when the row is not that
    * attempt's `running` any more, and then nothing changes. `done` and `dropped` clear the
-   * values, which nothing will read again; `failed` keeps them for the retention window.
+   * values, which nothing will read again; `failed` keeps them for the retention window, and
+   * `received` keeps them because the event runs with them later.
    */
   finish(id: string, attemptId: string, outcome: EventOutcome, now = new Date().toISOString()): boolean {
-    const clear = outcome.state !== 'failed';
+    const clear = outcome.state === 'done' || outcome.state === 'dropped';
+    const reason = outcome.state === 'failed' || outcome.state === 'dropped' ? outcome.reason : null;
     return this.db.prepare(
       `UPDATE inbound_events SET state = ?, reason = ?, run_id = COALESCE(?, run_id), updated_at = ?${clear ? ', values_json = NULL' : ''}
        WHERE id = ? AND state = 'running' AND attempt_id = ?`,
-    ).run(outcome.state, outcome.state === 'done' ? null : outcome.reason, 'runId' in outcome ? outcome.runId ?? null : null, now, id, attemptId).changes === 1;
+    ).run(outcome.state, reason, 'runId' in outcome ? outcome.runId ?? null : null, now, id, attemptId).changes === 1;
   }
 
   /** `received` → `dropped` with its reason, before any run; its values are cleared. */

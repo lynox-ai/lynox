@@ -452,12 +452,29 @@ describe('the webhook drain', () => {
     const t = sharedTrigger();
     const id = deliver(t);
     await loop.tick();
+    await loop.tick();
     expect(runner.run).not.toHaveBeenCalled();
     expect(eventOf(t, id).state).toBe('received');
     expect(lease(t)).toBeNull();
+    // The owner hears of it once, not at every tick, and the trigger records that it did not run.
+    const notRun = notify.mock.calls.filter((c) => String((c[0] as { title: string }).title).includes('Tickets did not run'));
+    expect(notRun).toHaveLength(1);
+    expect(tm.getTrigger(t)!.last_run_status).toBe('not_run');
     budget.refuse = false;
     await loop.tick();
     await settled(t, id, 'done');
+  });
+
+  it('puts an event whose run never started back to waiting, with its values', () => {
+    const t = sharedTrigger();
+    const id = deliver(t);
+    expect(ledger.begin(id, 'a1')).toBe(true);
+    expect(ledger.finish(id, 'a1', { state: 'received' })).toBe(true);
+    const back = eventOf(t, id);
+    expect(back.state).toBe('received');
+    expect(back.reason).toBeNull();
+    expect(back.valuesJson).not.toBeNull();
+    expect(ledger.oldestReceived(t)?.id).toBe(id);
   });
 
   // Two engine processes on one file, the first run's lease kept alive.
