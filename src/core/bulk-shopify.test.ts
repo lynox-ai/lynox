@@ -1686,6 +1686,22 @@ describe('applying a Shopify run', () => {
         expect(s.products.get(10)!['seo']).toEqual({ title: 'New title', description: 'D1' });
       });
 
+      it('says after a first write that what was written stays, and pushes that short with the counts', async () => {
+        fill(2);
+        const id = await previewed();
+        expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+        s.requests.length = 0;
+        await applyRaw(id, { ...GRANTED_ONLY, asked_scope: ['read_products', 'write_products'] });
+        expect(productWrites()).toHaveLength(1);
+        expect(ledger.confirmProbe(id)).toEqual({ ok: true });
+        expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 2 })).toMatchObject({ ok: true });
+        const out = await applyRaw(id, GRANTED_ONLY);
+        expect(out.status).toBe('refused');
+        expect(productWrites()).toHaveLength(1);
+        expect(out.summary).toMatch(/^lynox writes nothing more in this run; what it already wrote stays\. When this Shopify connection was set up/);
+        expect(out.pushSummary).toMatch(/^lynox writes nothing more; what it wrote stays\. When connecting, lynox did not ask Shopify for permission to change products\. What to do is under Bulk runs\. .*1 applied, of \d+ targets\.$/);
+      });
+
       it('lets an undo restore what a run wrote, under a connection that no longer asks', async () => {
         const id = await titling();
         const seoBefore = JSON.stringify(s.products.get(10)!['seo']);

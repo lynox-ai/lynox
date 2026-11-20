@@ -6,9 +6,10 @@ import type { NotificationRouter } from './notification-router.js';
 import type { TriggerRecord } from '../types/index.js';
 
 /**
- * A bulk write that ends with a summary too long for a push carries a short version: the run
- * result keeps the summary (the way included, for the history and the model), the push says
- * the short one. Without a short version, the push says the summary.
+ * A bulk write that gives a short version of its summary for the push: the run result keeps the
+ * summary (the way included, for the history and the model), the push says the short one.
+ * Without a short version, the push says the summary. (The lengths are checked in
+ * worker-notices.test.ts.)
  */
 
 const outcome = vi.hoisted(() => ({ value: { status: 'refused', summary: '' } as { status: 'refused'; summary: string; pushSummary?: string } }));
