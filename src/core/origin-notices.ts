@@ -135,6 +135,9 @@ const TOOL_WORDS: Readonly<Record<string, readonly [de: string, en: string]>> = 
   mail_reply: ['Antwort auf Mail', 'Reply to email'],
   http_request: ['API-Anfrage', 'API request'],
   web_research: ['Seite lesen', 'Read page'],
+  // `api_setup` declares targets only for the page bootstrap reads, which is asked about with the
+  // page question; these words stand for a question that does not start with them today.
+  api_setup: ['API einrichten: Seite lesen', 'API setup: read page'],
   google_drive: ['Google Drive: Datei freigeben', 'Google Drive: share file'],
   'google_calendar:create': ['Google Calendar: Termin anlegen', 'Google Calendar: create event'],
   'google_calendar:update': ['Google Calendar: Termin ändern', 'Google Calendar: change event'],
