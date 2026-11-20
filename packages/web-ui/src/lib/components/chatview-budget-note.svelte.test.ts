@@ -245,6 +245,26 @@ describe('a message the spending cap blocked says why, until when, and what to d
 		expect(next()).toBeNull();
 	});
 
+	it('a tier probe that failed sends no one to the limits page for a reached cap either', async () => {
+		i18n.setLocale('de');
+		const stream = sseStream();
+		run = stream;
+		stubFetch(MANAGED, (url) => {
+			if (url.endsWith('/secrets/status')) return json({}, 500);
+			return url.endsWith('/sessions/t1/run') ? new Response(stream.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }) : undefined;
+		});
+		void store.sendMessage('summarise the quarter');
+		await settle();
+		const { default: ChatView } = await import('./ChatView.svelte');
+		component = svelte.mount(ChatView, { target });
+		svelte.flushSync();
+		stream.send('done', { result: DAILY, notice: 'run_blocked', budget: DAILY_REF });
+		await settle();
+		svelte.flushSync();
+		expect(reason()).toContain('$5.12');
+		expect(next()).toBeNull();
+	});
+
 	it('a note from this browser\'s copy of the chat (the server has no thread) still names the step', async () => {
 		localStorage.setItem('lynox-chat', JSON.stringify({
 			sessionId: 't1',
