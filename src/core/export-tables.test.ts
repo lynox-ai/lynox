@@ -115,6 +115,7 @@ describe('the export decides every store and every table', () => {
  */
 const KEYED_CALLERS: Readonly<Record<string, string>> = {
   'src/core/approval-store.ts': 'stores: approval_entries.checksum, dedup_key, family_key',
+  'src/core/store-token-refresh.ts': 'stores: oauth_grant.store_binding over a refreshed token (already a registered grant path); computes only: the binding check before a refresh pass',
   'src/core/bulk-ledger.ts': 'stores: bulk_runs.rule_hash, judge_rule_hash, approval_checksum; computes only: the list-start and resume checksums',
   'src/core/workflow-grant.ts': 'stores: workflow_grants.checksum and the reviewedGrant stamp in workflows.definition_json',
   'src/core/workflow-stamp.ts': 'stores: the owner\'s stamp digest in workflows.definition_json ($.stamp), written by workflow-store.ts',
