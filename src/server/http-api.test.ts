@@ -11446,6 +11446,8 @@ describe('LynoxHTTPApi', () => {
           covered_created_by: 'mandate:anna@example.com', covered_created_id: 'grant-a', covered_created_at: AT },
         { id: 'trg-own', title: 'Eigener', created_by: 'owner' },
         { id: 'trg-old', title: 'Alt' },
+        // A helper's mark from before grant ids were stored: whose grant it was is not known.
+        { id: 'trg-legacy', title: 'Ohne Grant', created_by: 'mandate:anna@example.com' },
       ];
       const shown: Record<string, string> = { 'grant-a': 'Anna A.', 'grant-b': 'Bea B.' };
       const reads: string[] = [];
@@ -11468,6 +11470,7 @@ describe('LynoxHTTPApi', () => {
             'trg-taken': [{ kind: 'set_up_by', name: 'Anna A.', takenOver: true }],
             'trg-own': [],
             'trg-old': [],
+            'trg-legacy': [{ kind: 'set_up_by', name: 'anna@example.com', takenOver: false }],
           });
           // Two triggers of grant-a, one request: the trail is read once per grant.
           expect([...reads].sort()).toEqual(['grant-a', 'grant-b']);
@@ -11479,6 +11482,8 @@ describe('LynoxHTTPApi', () => {
           expect(bea.byId['trg-anna']).toEqual([{ kind: 'set_up_by', name: 'other mandate', takenOver: false }]);
           expect(bea.byId['trg-taken']).toEqual([{ kind: 'set_up_by', name: 'other mandate', takenOver: true }]);
           expect(bea.byId['trg-bea']).toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }]);
+          // Without a grant id it cannot be told to be hers or another's: it says neither.
+          expect(bea.byId['trg-legacy']).toEqual([{ kind: 'set_up_by', name: 'some mandate', takenOver: false }]);
           expect(bea.text).not.toContain('Anna A.');
           expect(JSON.stringify(Object.values(bea.byId))).not.toContain('anna@example.com');
           // A session no scope names (a mandate without a grant): no lines at all, no read of the
@@ -11486,7 +11491,7 @@ describe('LynoxHTTPApi', () => {
           api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'bea@example.com' }) as RequestPrincipal);
           const readsBefore = reads.length;
           const none = await setupOf();
-          for (const id of ['trg-anna', 'trg-bea', 'trg-taken', 'trg-own', 'trg-old']) expect(none.byId[id]).toEqual([]);
+          for (const id of ['trg-anna', 'trg-bea', 'trg-taken', 'trg-own', 'trg-old', 'trg-legacy']) expect(none.byId[id]).toEqual([]);
           expect(reads.length).toBe(readsBefore);
           for (const name of Object.values(shown)) expect(none.text).not.toContain(name);
           // A trail that cannot be read costs the owner the names, not the list: the address stands in.

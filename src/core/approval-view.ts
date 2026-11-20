@@ -256,18 +256,25 @@ export const UNNAMED_MANDATE = 'unnamed mandate';
  */
 export const OTHER_MANDATE = 'other mandate';
 
+/**
+ * How a mark without a grant id is named to a mandate: it cannot be told to be its own or
+ * another's (an older row, or an earlier grant for the same address), so it says neither.
+ */
+export const SOME_MANDATE = 'some mandate';
+
 /** The name a grant was last shown under in the actor trail, or null when it has none. */
 export type DisplayNameOf = (mandateId: string) => string | null;
 
 /**
  * How a scope names a mandate: by the name its grant was shown under, else by the address in
  * its tag, else {@link UNNAMED_MANDATE}, never by the raw grant id. The owner sees every grant's
- * name. A mandate sees its own grant so, and every other mark as {@link OTHER_MANDATE}: another
- * grant, and a tag without a grant id, which cannot be told to be its own.
+ * name. A mandate sees its own grant so, another grant as {@link OTHER_MANDATE}, and a tag
+ * without a grant id as {@link SOME_MANDATE}: it cannot be told to be its own or another's.
  */
 export function mandateNamer(scope: ApprovalScope, displayNameOf: DisplayNameOf): MandateNamer {
   return (mandateId, tag) => {
-    if (scope.viewer === 'mandate' && (mandateId === null || mandateId !== scope.mandateId)) return OTHER_MANDATE;
+    if (scope.viewer === 'mandate' && mandateId === null) return SOME_MANDATE;
+    if (scope.viewer === 'mandate' && mandateId !== scope.mandateId) return OTHER_MANDATE;
     const display = mandateId !== null ? displayNameOf(mandateId) : null;
     if (display !== null && display !== '') return display;
     return mandateAddressOf(tag) ?? UNNAMED_MANDATE;

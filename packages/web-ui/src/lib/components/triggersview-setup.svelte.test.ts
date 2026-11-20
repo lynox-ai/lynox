@@ -92,6 +92,8 @@ describe('the schedules list says which helper set a trigger up', () => {
 			{ ...BASE, id: 'trg-unnamed', title: 'Ohne Namen', setup: [{ kind: 'set_up_by', name: 'unnamed mandate', takenOver: false }] },
 			// Another helper's mark, as a helper's list carries it: not whose.
 			{ ...BASE, id: 'trg-other', title: 'Fremd', setup: [{ kind: 'set_up_by', name: 'other mandate', takenOver: false }] },
+			// A mark without a grant id: not known whose, so not "another".
+			{ ...BASE, id: 'trg-some', title: 'Ohne Grant', setup: [{ kind: 'set_up_by', name: 'some mandate', takenOver: false }] },
 			// From before the list carried the lines: no line, and no error.
 			{ ...BASE, id: 'trg-old', title: 'Alt' },
 		];
@@ -100,6 +102,7 @@ describe('the schedules list says which helper set a trigger up', () => {
 			Wochenbericht: ['Geändert von bea@example.com', 'Eingerichtet von Anna A., von dir übernommen'],
 			'Ohne Namen': ['Eingerichtet von (ohne Namen)'],
 			Fremd: ['Eingerichtet von einer anderen Person mit Zugang'],
+			'Ohne Grant': ['Eingerichtet von einer Person mit Zugang'],
 			Alt: [],
 		});
 		if (component) unmount(component);
@@ -112,5 +115,6 @@ describe('the schedules list says which helper set a trigger up', () => {
 		component = undefined;
 		await render();
 		expect(linesByTitle()['Fremd']).toEqual(['Set up by another person with delegated access']);
+		expect(linesByTitle()['Ohne Grant']).toEqual(['Set up by someone with delegated access']);
 	});
 });

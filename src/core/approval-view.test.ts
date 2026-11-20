@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  approvalCard, approvalChatThread, approvalOutcome, approvalScopeOf, listScopeOf, mandateNamer, OTHER_MANDATE, plainAddresses, replyRecipientDiffers, replyToElsewhere, setupLines, UNNAMED_MANDATE,
+  approvalCard, approvalChatThread, approvalOutcome, approvalScopeOf, listScopeOf, mandateNamer, OTHER_MANDATE, plainAddresses, SOME_MANDATE, replyRecipientDiffers, replyToElsewhere, setupLines, UNNAMED_MANDATE,
   type ApprovalCardSources, type DisplayNameOf, type MandateNamer, type SetupMarks,
 } from './approval-view.js';
 import type { ApprovalEntry, MailReplyPayload, MailSendPayload, StoredAddress } from './approval-store.js';
@@ -434,12 +434,13 @@ describe('who set an entry up', () => {
       expect(JSON.stringify(card.setup)).not.toContain('anna@example.com');
     });
 
-    it('names to a mandate every mark that is not its own grant\'s as another mandate: a tag without a grant id too', () => {
+    it('names to a mandate another grant\'s mark as another mandate, and a tag without a grant id as some mandate, never by name or address', () => {
       const asBea = mandateNamer({ viewer: 'mandate', mandateId: 'grant-b' }, (id) => ({ 'grant-a': 'Anna A.', 'grant-b': 'Bea B.' } as Record<string, string>)[id] ?? null);
       expect(asBea('grant-a', 'mandate:anna@example.com')).toBe(OTHER_MANDATE);
-      // Her own address, but no grant id: it cannot be told to be hers.
-      expect(asBea(null, 'mandate:bea@example.com')).toBe(OTHER_MANDATE);
-      expect(asBea(null, null)).toBe(OTHER_MANDATE);
+      // No grant id: it cannot be told to be hers or another's, even with her own address.
+      expect(asBea(null, 'mandate:bea@example.com')).toBe(SOME_MANDATE);
+      expect(asBea(null, 'mandate:anna@example.com')).toBe(SOME_MANDATE);
+      expect(asBea(null, null)).toBe(SOME_MANDATE);
       expect(asBea('grant-b', 'mandate:bea@example.com')).toBe('Bea B.');
       // Her own grant without a shown name: her address, as before.
       expect(mandateNamer({ viewer: 'mandate', mandateId: 'grant-b' }, () => null)('grant-b', 'mandate:bea@example.com')).toBe('bea@example.com');

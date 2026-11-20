@@ -94,6 +94,9 @@ export const UNNAMED_MANDATE = 'unnamed mandate';
 /** The engine's neutral name for another mandate, as a mandate reads it: not its own, never whose. */
 export const OTHER_MANDATE = 'other mandate';
 
+/** The engine's neutral name for a mark without a grant id, as a mandate reads it: its own or another's. */
+export const SOME_MANDATE = 'some mandate';
+
 /** The two i18n lookups the helpers need, `t` and `tf` from `i18n.svelte.ts`. */
 export interface ApprovalsI18n {
 	t: (key: string) => string;
@@ -336,6 +339,7 @@ export function approvalSetupKind(line: Pick<ApprovalSetupLine, 'kind' | 'takenO
 export function approvalSetupName(name: string, i18n: Pick<ApprovalsI18n, 't'>): string {
 	if (name === UNNAMED_MANDATE) return i18n.t('approvals.unnamed_mandate');
 	if (name === OTHER_MANDATE) return i18n.t('approvals.other_mandate');
+	if (name === SOME_MANDATE) return i18n.t('approvals.some_mandate');
 	return name;
 }
 

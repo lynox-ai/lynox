@@ -162,6 +162,14 @@ describe('the approval queue speaks both languages', () => {
 		expect(entry('approvals.other_mandate')).toEqual({ de: 'einer anderen Person mit Zugang', en: 'another person with delegated access' });
 	});
 
+	it('the engine\'s label for a mark without a grant id has a translation that does not say "another", and the page knows the label', () => {
+		const engine = readFileSync(fileURLToPath(new URL('../../../../../src/core/approval-view.ts', import.meta.url)), 'utf8');
+		const label = /export const SOME_MANDATE = '([^']+)';/.exec(engine)?.[1];
+		expect(label).toBeDefined();
+		expect(read('./approvals.ts')).toContain(`export const SOME_MANDATE = '${label!}';`);
+		expect(entry('approvals.some_mandate')).toEqual({ de: 'einer Person mit Zugang', en: 'someone with delegated access' });
+	});
+
 	it('the receive-only step names the settings path by the labels the navigation shows', () => {
 		const step = entry('approvals.next.receive_only');
 		const label = (key: string): { de: string; en: string } => entry(key) ?? { de: `missing ${key}`, en: `missing ${key}` };
