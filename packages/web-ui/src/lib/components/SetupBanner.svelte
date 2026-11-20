@@ -7,6 +7,7 @@
 	import { untrack } from 'svelte';
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { MISTRAL_API_BASE, isMistralPresetBase } from '../utils/mistral-endpoint.js';
+	import { keyCheckError, type KeyCheck } from '../utils/setup-key-check.js';
 
 	type Provider = 'anthropic' | 'mistral' | 'openai';
 
@@ -183,9 +184,9 @@
 						body: JSON.stringify(validateBody),
 					});
 					if (validateRes.ok) {
-						const v = (await validateRes.json()) as { state: 'valid' | 'invalid' | 'network-error'; error?: string };
+						const v = (await validateRes.json()) as KeyCheck;
 						validateState = v.state;
-						validateError = v.error ?? '';
+						validateError = keyCheckError(v);
 					}
 				} catch {
 					// Fetch failed (engine unreachable, CORS, etc.) — treat as

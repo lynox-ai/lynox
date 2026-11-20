@@ -14,8 +14,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, uxJsonKeyChanges, UX_SELF_PATH, UX_LINE_MARK, deltaRangeErrors, deltaPredates, DELTA_LINE_MARK, DELTA_RANGE, wrongRunErrors, OTHER_REPO_MARKER } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, uxJsonKeyChanges, uxConfirmBlocks, UX_SELF_PATH, UX_LINE_MARK, deltaRangeErrors, deltaPredates, DELTA_LINE_MARK, DELTA_RANGE, wrongRunErrors, OTHER_REPO_MARKER } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -2610,6 +2611,94 @@ describe('gate-record — the `ux:` line', () => {
       expect(owed([F], { [F]: entry('A') }, { [F]: entry('A2') }).why).toEqual([`${F} changes what a confirmation asks the user to agree to`]);
       // Control: a changed text in the NEXT entry, which is no confirmation, stays `self`.
       expect(owed([F], { [F]: entry('A') }, { [F]: entry('A').replace("de: 'T'", "de: 'T2'") }).review).toBe(false);
+    });
+
+    it('a confirmation is compared as a whole block by key: a reworded text that stands in an earlier entry owes a review', () => {
+      const file = (de: string) => `\t'a.title': {\n\t\tde: 'Alles löschen?',\n\t},\n\t'x.delete_confirm': {\n\t\tde: '${de}',\n\t},`;
+      expect(owed([F], { [F]: file('Nur diesen löschen?') }, { [F]: file('Alles löschen?') }).why).toEqual([`${F} changes what a confirmation asks the user to agree to`]);
+    });
+
+    it('two confirmations swapping their lines owe a review: no line count goes up', () => {
+      const file = (a: string, b: string) => `\t'x.delete_confirm': {\n\t\tde: '${a}',\n\t},\n\t'y.send_confirm': {\n\t\tde: '${b}',\n\t},`;
+      expect(owed([F], { [F]: file('Löschen?', 'Senden?') }, { [F]: file('Senden?', 'Löschen?') }).why).toEqual([`${F} changes what a confirmation asks the user to agree to`]);
+    });
+
+    it('a blank line or a new indent inside a confirmation counts: inside a template literal the user reads it', () => {
+      const base = `\t'x.delete_confirm': {\n\t\tde: 'Löschen?',\n\t\ten: 'Delete?',\n\t},\n\t'y.title': {\n\t\tde: 'T',\n\t},`;
+      expect(owed([F], { [F]: base }, { [F]: base.replace("\n\t\ten:", "\n\n\t\ten:") }).review).toBe(true);
+      expect(owed([F], { [F]: base }, { [F]: base.replace("\t\ten: 'Delete?'", "\t\t  en: 'Delete?'") }).review).toBe(true);
+      // In a template literal: a blank line, a new indent, a line that reads like a comment.
+      const tpl = (body: string) => `\t'x_confirm': {\n\t\tde: \`Löschen?\n${body}\n\`,\n\t},`;
+      for (const [a, b] of [['Alles.', '\nAlles.'], ['Alles.', '  Alles.'], ['Alles.', '* Alles.'], ['Alles.', '// Alles.']]) {
+        expect(owed([F], { [F]: tpl(a) }, { [F]: tpl(b) }).review, b).toBe(true);
+      }
+      // Control: a changed text in the next entry, which is no confirmation, stays `self`.
+      expect(owed([F], { [F]: base }, { [F]: base.replace("de: 'T'", "de: 'T2'") }).review).toBe(false);
+    });
+
+    it('a confirmation block keeps what follows a line ending in a brace: a nested value, a template literal, a message format', () => {
+      const cases: Array<[string, string]> = [
+        [`\t'x_confirm': {\n\t\tde: { short: 'A' },\n\t\ten: 'B',\n\t},`, "en: 'B2',"],
+        ["\t'x_confirm': {\n\t\tde: `Löschen ${n}\nund alles darunter?`,\n\t},", 'und alles darunter, auch Geteiltes?`,'],
+        [`\t'x_confirm': {\n\t\tde: '{count, plural, one {# Mail}\n\t\t\tother {# Mails}} löschen?',\n\t},`, "other {# Mails}} senden?',"],
+      ];
+      for (const [file, reworded] of cases) {
+        const last = file.split('\n').slice(-2, -1)[0].trim();
+        expect(owed([F], { [F]: file }, { [F]: file.replace(last, reworded) }).review, file).toBe(true);
+      }
+    });
+
+    it('a confirmation block holds its nested entries and a value that starts on the key line', () => {
+      const nested = (b: string) => `\t'x_confirm': {\n\t\t'body': { de: '${b}' },\n\t},`;
+      expect(owed([F], { [F]: nested('B') }, { [F]: nested('B2') }).review).toBe(true);
+      // A nested entry over several lines closes deeper than the confirmation; what follows is still it.
+      const deep = (e: string) => `\t'x_confirm': {\n\t\t'body': {\n\t\t\tde: 'B',\n\t\t},\n\t\ten: '${e}',\n\t},`;
+      expect(owed([F], { [F]: deep('C') }, { [F]: deep('C2') }).review).toBe(true);
+      const onKey = (e: string) => `\t'x_confirm': { de: 'A',\n\t\ten: '${e}' },\n\t'y.title': { de: 'T' },`;
+      expect(owed([F], { [F]: onKey('B') }, { [F]: onKey('B2') }).review).toBe(true);
+    });
+
+    it('a confirmation block ends at its own closing line or at the next entry at its indent', () => {
+      expect([...uxConfirmBlocks(`  'a_confirm': {\n    de: 'A',\n  },\n  'b.title': {\n    de: 'T',\n  },`)]).toEqual([['a_confirm', JSON.stringify(["  'a_confirm': {\n    de: 'A',\n  },"])]]);
+      expect([...uxConfirmBlocks(`  'a_confirm': { de: 'A' },\n  'b_confirm': { de: 'B' },\n};\nconst x = 1;`)]).toEqual([
+        ['a_confirm', JSON.stringify(["  'a_confirm': { de: 'A' },"])],
+        ['b_confirm', JSON.stringify(["  'b_confirm': { de: 'B' },\n};"])],
+      ]);
+      expect(uxConfirmBlocks(null).size).toBe(0);
+    });
+
+    it('a confirmation inside another keeps its own block, and the outer one holds a digest of it', () => {
+      const [outer, inner] = JSON.parse(uxConfirmBlocks(`'a_confirm': {\n\t'a_confirm': {\n\t\tde: 'X',\n\t},\n\tde: 'Y',\n},`).get('a_confirm') ?? '[]') as string[];
+      expect(inner).toBe(`\t'a_confirm': {\n\t\tde: 'X',\n\t},`);
+      expect(outer).toBe(`'a_confirm': {\n\0${createHash('sha256').update(inner ?? '').digest('hex')}\n\tde: 'Y',\n},`);
+      const two = (x: string, y: string) => `'a_confirm': {\n\t'b_confirm': {\n\t\tde: '${x}',\n\t},\n\tde: '${y}',\n},`;
+      expect(owed([F], { [F]: two('X', 'Y') }, { [F]: two('X2', 'Y') }).review).toBe(true);
+      expect(owed([F], { [F]: two('X', 'Y') }, { [F]: two('X', 'Y2') }).review).toBe(true);
+      expect(owed([F], { [F]: two('X', 'Y') }, { [F]: two('Y', 'X') }).review).toBe(true);
+      // The inner entry moved below the outer one's own line: neither block's lines change, its place does.
+      expect(owed([F], { [F]: two('X', 'Y') }, { [F]: `'a_confirm': {\n\tde: 'Y',\n\t'b_confirm': {\n\t\tde: 'X',\n\t},\n},` }).review).toBe(true);
+      // Two confirmations holding the same inner key swap places: every line stays, only what each one holds moves.
+      const pair = (a: string, b: string) => `export const t = {\n  '${a}': {\n    'confirm': {\n      de: 'Löschen',\n    },\n  },\n  '${b}': {\n    'confirm': {\n      de: 'Archivieren',\n    },\n  },\n};`;
+      expect(owed([F], { [F]: pair('delete_confirm', 'archive_confirm') }, { [F]: pair('archive_confirm', 'delete_confirm') }).review).toBe(true);
+      // A line of the file that reads like a digest is kept apart from one: it cannot stand in for the entry it names.
+      const x = `  'k_confirm': {\n    de: 'Alles löschen',\n  },`;
+      const d = `\0${createHash('sha256').update(x).digest('hex')}`;
+      const fake = (a: string, z: string) => `'a_confirm': {\n${a}\n  de: 'Y',\n},\n'z': {\n${z}\n},`;
+      expect(owed([F], { [F]: fake(d, x) }, { [F]: fake(x, d) }).review).toBe(true);
+    });
+
+    it('deeply nested confirmations cost the length of the file, not its length times their depth', () => {
+      const f = Array.from({ length: 300 }, (_, i) => `${' '.repeat(i)}'k${i}_confirm': {\n${' '.repeat(i + 1)}de: 'v${i}',`).join('\n');
+      let total = 0;
+      for (const v of uxConfirmBlocks(f).values()) total += v.length;
+      expect(total).toBeLessThan(3 * f.length);
+    });
+
+    it('a flat or mixed-indent file still owes a review where a child entry cuts the block: the line count is read too', () => {
+      const flat = (b: string) => `'x_confirm': {\n'title': { de: 'A' },\n'body': { de: '${b}' },\n},`;
+      expect(owed([F], { [F]: flat('B') }, { [F]: flat('B2') }).review).toBe(true);
+      const mixed = (b: string) => `    'x_confirm': {\n\t\t'title': { de: 'A' },\n\t\tde: '${b}',\n    },`;
+      expect(owed([F], { [F]: mixed('B') }, { [F]: mixed('B2') }).review).toBe(true);
     });
 
     it('a placeholder reason is refused through the reason path: a trailing period, dots, ellipses', () => {

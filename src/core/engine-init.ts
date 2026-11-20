@@ -35,7 +35,7 @@ import { ifReturned, ifStored, InstanceWriteUnrecorded, withInstanceWriteAs, typ
 import { ALL_NAMESPACES } from '../types/index.js';
 import { INSTANCE_WRITE_SITES } from './mandate-tool-lock.js';
 import type { KnowledgeStoreResult } from '../types/index.js';
-import { configurePersistentBudget } from './session-budget.js';
+import { configurePersistentBudget, isPersistentBudgetUnverifiable, describeSetCaps } from './session-budget.js';
 import { describeConnectionTokens } from './profile-secret-view.js';
 import { applyHttpRateLimits, applyEnforceHttps, applyNetworkPolicy } from './tool-context.js';
 import type { ToolContext } from './tool-context.js';
@@ -65,7 +65,9 @@ import type { Containment } from './containment.js';
  * Apply the cost, rate and egress settings to the ToolContext at boot.
  *
  * The HTTP/mail rate limits and the daily/monthly caps count against
- * RunHistory, so they need it. The session cap and the egress settings
+ * RunHistory. Without it the daily/monthly caps refuse every run (fail-closed, see
+ * `configurePersistentBudget`); the rate limits are still set, and the send paths
+ * refuse what they cannot count. The session cap and the egress settings
  * (`enforce_https`, `network_policy`, the operator host floor) do not, and are
  * applied whether or not RunHistory opened: an engine that boots without its
  * history must still enforce the limits it was configured with. Of these, only
@@ -83,7 +85,12 @@ export function configureBudgetAndRateLimits(
     dailyCapUSD: envFloat('LYNOX_MAX_DAILY_COST_USD') ?? userConfig.max_daily_cost_usd,
     monthlyCapUSD: envFloat('LYNOX_MAX_MONTHLY_COST_USD') ?? userConfig.max_monthly_cost_usd,
   });
-  if (runHistory) configureHistoryBackedLimits(runHistory, userConfig, toolContext);
+  // Said at boot, not only at the first refused run: whoever reads the startup log sees
+  // that nothing will run, next to the line that says why the history did not open.
+  if (isPersistentBudgetUnverifiable()) {
+    process.stderr.write(`[lynox] Spending caps (${describeSetCaps()}) cannot be checked without the history database: the agent does not run, not even for a chat, until lynox restarts with it open.\n`);
+  }
+  configureHistoryBackedLimits(runHistory, userConfig, toolContext);
   configureEgressPolicy(userConfig, toolContext);
 }
 
@@ -98,8 +105,13 @@ function envInt(key: string): number | undefined {
   return Number.isFinite(v) && v > 0 ? v : undefined;
 }
 
+/**
+ * The send-rate limits for HTTP and mail, counted from RunHistory's tool-call tally. Set
+ * whether or not RunHistory opened: without it a set limit cannot be counted, and the
+ * send paths refuse instead of sending uncounted.
+ */
 function configureHistoryBackedLimits(
-  runHistory: RunHistory,
+  runHistory: RunHistory | null,
   userConfig: LynoxUserConfig,
   toolContext: ToolContext,
 ): void {
@@ -115,6 +127,9 @@ function configureHistoryBackedLimits(
   const dedupSec = Number.isFinite(dedupEnvNum) && dedupEnvNum >= 0
     ? dedupEnvNum
     : userConfig.mail_dedup_window_sec;
+  if (runHistory === null) {
+    process.stderr.write('[lynox] The history database did not open, so send limits cannot be counted: no mail goes out, approved mails included, and no request through the http_request tool while an HTTP limit is set. This lasts until lynox restarts and can open the history database; approved mails go out then unless they expired, 72 hours after they were submitted.\n');
+  }
   configureMailRateLimits({
     provider: runHistory,
     hourlyLimit: envInt('LYNOX_MAX_MAIL_SENDS_PER_HOUR') ?? userConfig.max_mail_sends_per_hour,

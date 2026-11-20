@@ -62,6 +62,7 @@ describe('getPreview: markupChanges', () => {
       added: [{ kind: 'element', namespace: 'html', element: 'a', attributes: [['href', 'https://partner.example/p?q=1']], text: null, inTemplate: false }],
       removed: [{ kind: 'element', namespace: 'html', element: 'img', attributes: [['src', 'https://shop.example.com/a.jpg']], text: null, inTemplate: false }],
       addsOutsideAllowlist: false,
+      addsOnlyPassive: true,
     }]);
   });
 
@@ -72,7 +73,7 @@ describe('getPreview: markupChanges', () => {
     );
     const [t] = ledger.getPreview(id);
     expect(t!.markupChanges).toEqual([
-      { field: 'short_description', added: [{ kind: 'comment', namespace: '', element: '', attributes: [], text: ' c ', inTemplate: false }], removed: [], addsOutsideAllowlist: true },
+      { field: 'short_description', added: [{ kind: 'comment', namespace: '', element: '', attributes: [], text: ' c ', inTemplate: false }], removed: [], addsOutsideAllowlist: true, addsOnlyPassive: true },
     ]);
   });
 
@@ -81,5 +82,13 @@ describe('getPreview: markupChanges', () => {
     const [t] = ledger.getPreview(id);
     expect(t!.change).toBe('update');
     expect(t!.markupChanges).toBeUndefined();
+  });
+
+  it('names a field it cannot read for its depth instead of leaving it out', () => {
+    const deep = '<span>'.repeat(600) + 'x' + '</span>'.repeat(600);
+    const id = previewOne({ description: deep }, { description: '<p>Alt</p>' });
+    const [t] = ledger.getPreview(id);
+    expect(t!.change).toBe('update');
+    expect(t!.markupChanges).toEqual([{ field: 'description', added: [], removed: [], addsOutsideAllowlist: true, addsOnlyPassive: false, unread: true }]);
   });
 });

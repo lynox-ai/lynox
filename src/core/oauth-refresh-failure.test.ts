@@ -88,7 +88,8 @@ describe('revokedGrantMessage', () => {
     // refresh token to paste, so the paste instruction would be a dead end.
     const text = revokedGrantMessage('bexio-api', 'BEXIO_API_REFRESH_TOKEN', 'BEXIO_API_REFRESH_TOKEN', undefined, true);
     expect(text).toContain('api_profile "bexio-api"');
-    expect(text).toContain('action "connect"');
+    expect(text).toContain('The user has to consent again at the provider: call api_setup with action "connect" and id "bexio-api"; that call returns the sign-in link for the user, or says why there is none. Do not ask the user for a token.');
+    expect(text, 'connect may answer without a link').not.toContain('give the user the link it returns');
     expect(text).not.toContain('ask_secret');
     expect(text).toContain('fetch_token will not resend it');
   });

@@ -348,6 +348,17 @@ describe('exec daemon: start-up sweep', () => {
     await expect(startupSweep(h.deps)).rejects.toThrow(/not empty/);
   });
 
+  it('counts what is left in the calls dir and names none of it: a call chose those names, and the message reaches the log', async () => {
+    const h = (current = harness({ poolSize: 1 }));
+    const { mkdirSync } = await import('node:fs');
+    mkdirSync(h.deps.callsDir);
+    mkdirSync(join(h.deps.callsDir, 'name-a-call-chose'));
+    mkdirSync(join(h.deps.callsDir, 'another-one'));
+    const err = await startupSweep(h.deps).then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe('calls dir not empty after the start-up sweep: 2 entries left');
+  });
+
   it('refuses to start when no uid could be released', async () => {
     const h = (current = harness({ poolSize: 2, residue: ['msg 1'] }));
     const { mkdirSync } = await import('node:fs');

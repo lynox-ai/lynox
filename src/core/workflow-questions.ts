@@ -2,7 +2,7 @@ import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages
 import type { PromptMeta, PromptText, PromptUserFn } from '../types/index.js';
 import type { AbortScope } from '../types/config.js';
 import type { PromptStore } from './prompt-store.js';
-import { promptOriginOf } from './prompt-store.js';
+import { promptOriginOf, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import { principalTag, type RequestPrincipal } from './request-principal.js';
 import type { ThreadStore } from './thread-store.js';
 import type { NotificationMessage, NotifyReport, DeliverySummary } from './notification-router.js';
@@ -30,8 +30,14 @@ export interface WorkflowQuestionDeps {
   runId: string;
   /** The schedule that fired the run, named on the notification. */
   scheduleId: string;
-  /** The schedule's title: the thread's title and the notification's. */
+  /** The schedule's title: the thread's title and the notification's. Not a turn of its own:
+   *  someone else may have written it. */
   title: string;
+  /** The `user` turn that opens the thread: a fixed sentence of the engine's, which the model
+   *  reads as the owner's own words. */
+  opener: string;
+  /** The line that names the schedule above each question in the thread, the title quoted. */
+  titleLine: string;
   /** Who started the run, stamped on the prompt row (tag and, for a mandate, its grant) and the thread (tag). */
   principal: RequestPrincipal;
   handRun: boolean;
@@ -138,6 +144,15 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
         handRun: deps.handRun,
       });
     } catch (err: unknown) {
+      // A blocked question (where a send target comes from, a guard's hard block) is refused before
+      // it is stored. The run ends there, visibly, as a question it could not ask: a step that
+      // went on without the answer could end the run succeeded with the owner told nothing. The
+      // asker still gets the unattended answer, so a send check reports where its target came
+      // from (`onOriginRefused`), which the run's result then names.
+      if (err instanceof UnattendedBlockError) {
+        this.#endUnanswered('not_asked');
+        return UNATTENDED_BLOCK_ANSWER;
+      }
       // A database the engine already closed is the teardown, as after the wait.
       if (!store.isOpen()) return neverSettles();
       // Otherwise the question could not be put to the owner — e.g. a question of the owner's
@@ -241,10 +256,12 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
       // thread does (`escalation.ts`).
       const last = threads.getMessages(id, { apiOnly: true }).at(-1)?.role ?? null;
       // The turns the model reads when the owner answers, without the characters that render as
-      // nothing (`hidden-text.ts`): the schedule's title may have been written by someone else.
+      // nothing (`hidden-text.ts`). The schedule's title may have been written by someone else, so
+      // it is no `user` turn, which speaks with the owner's voice: that turn is the engine's
+      // opener, and the title is quoted above the question.
       const seeds: BetaMessageParam[] = [];
-      if (last === null || last === 'assistant') seeds.push({ role: 'user', content: [{ type: 'text', text: stripHidden(this.#deps.title) }] });
-      seeds.push({ role: 'assistant', content: [{ type: 'text', text: stripHidden(text) }] });
+      if (last === null || last === 'assistant') seeds.push({ role: 'user', content: [{ type: 'text', text: this.#deps.opener }] });
+      seeds.push({ role: 'assistant', content: [{ type: 'text', text: stripHidden(`${this.#deps.titleLine}\n\n${text}`) }] });
       const count = threads.getThread(id)?.message_count ?? 0;
       threads.appendMessages(id, seeds, threads.getNextSeq(id), { message_count: count + seeds.length });
       threads.updateThread(id, { is_unread: true });

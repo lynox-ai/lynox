@@ -30,7 +30,7 @@ import type {
 import { headlessRefusalNote } from './write-notes.js';
 import { grantIdOf, liftsAfterUntrusted, getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile, DEFAULT_MAX_TOOL_RESULT_CHARS, MISTRAL_EU_HOST, MISTRAL_GLOBAL_HOST } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
-import { createToolContext } from './tool-context.js';
+import { createToolContext, isPolicyUnread, markPolicyUnread } from './tool-context.js';
 import { StreamProcessor, type PartialReply } from './stream.js';
 import { StreamIncompleteError } from './stream-incomplete.js';
 import { ToolCallImitationDetector, imitationToolsFrom } from './tool-call-imitation.js';
@@ -43,7 +43,7 @@ import { channels, measureTool } from './observability.js';
 import { appendCaptureTelemetry } from './capture-telemetry.js';
 import type { CaptureSuppressedReason } from './capture-telemetry.js';
 import { chatIsContained, containedCallRefusal } from './containment.js';
-import { isDangerousDetailed, pathFieldsRead } from '../tools/permission-guard.js';
+import { isDangerousDetailed, pathFieldsRead, SENDS_OR_KEEPS_BASH } from '../tools/permission-guard.js';
 import { renderDiffHunks } from '../cli/diff.js';
 import { createLLMClient, getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveTierModel } from './tier-resolver.js';
@@ -77,6 +77,16 @@ import type { WireSnapshot } from './wire-capture.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns, maskEngineEnvSecrets } from './secret-store.js';
 import { UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
+import type { OwnerKnownReader, OwnerKnownVerdict } from './owner-known-targets.js';
+import type { ConversationLatch } from './conversation-latch.js';
+import type { NoticeLanguage } from './notice-language.js';
+import { noticeLanguage } from './notice-language.js';
+import { normalizeHostName, normalizeMailTarget, type SendTarget } from './send-target.js';
+import {
+  originAsk, originBashAfterForeign, originDenied, originLookupFailedHead, originLookupFailedMandate, originLookupFailedUnattended,
+  originRefusedMandate, originRefusedUnattended, originUnreadable, type OriginRefusal, type OriginTargets, type SendOrigin, type TargetNoun,
+} from './origin-notices.js';
+import type { CallTargetOrigin } from './call-connection.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
 import { applyRunStops, completedPrefixEnd, continuationLoopDetail, loopBreakDetail, withRunStop, type RunStop } from './run-stop.js';
 import { evictSavedArtifactBodies, restoreEvictedBodies } from './artifact-eviction.js';
@@ -108,14 +118,15 @@ import { buildPromptCacheKey, shouldSendPromptCacheKey } from './prompt-cache-ke
 import { computeComposition, type CompositionSnapshot } from './context-composition-probe.js';
 import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
-import { collectVaultKeys, grantTokenNames, isMandateConnection } from './api-store.js';
+import { collectVaultKeys, grantTokenNames, isMandateConnection, lockedTurnBriefing } from './api-store.js';
+import { lockedTurnPrompt } from './prompts.js';
 import { MEMBER_CONNECTION_PREFIX, noteMemberConnection } from './member-connection-notes.js';
-import { boundCtx, memberConnectionRefusal, slotMayReach, type BindingCtx } from './profile-secret-view.js';
+import { boundCtx, memberRefusalCase, memberRefusalOwnerNote, memberRefusalText, slotMayReach, type BindingCtx, type MemberRefusal, type OwnerNote } from './profile-secret-view.js';
 import { isPresetClientSecretName, presetClientSecretGuidance } from './oauth-presets.js';
 import { isContestedName } from './vault-name-bindings.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
-import { apiCostOf, callFiledOf, currentCallFiling, currentCallSignal, grantLiftOf, noteCallFiled, runInCallSlot, trackCallAnswer, type CallApiCost, type CallContract, type CallFiled, type GrantLift } from './call-connection.js';
+import { apiCostOf, callFiledOf, currentCallFiling, currentCallSignal, currentCallTargetOrigin, grantLiftOf, noteCallFiled, runInCallSlot, trackCallAnswer, type CallApiCost, type CallContract, type CallFiled, type GrantLift } from './call-connection.js';
 
 /** What a call's row carries beyond its outcome (PRD 3f-1b-α §2.1). */
 interface CallFacts { contract: CallContract; grant?: GrantLift; filed?: CallFiled; apiCost?: CallApiCost }
@@ -130,14 +141,15 @@ import type { AuditLog, AuditPhase } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { toolLockFor } from './mandate-tool-lock.js';
 import { ifNotDeduped, instanceTrailFor, InstanceWriteUnrecorded, withInstanceWriteAs, type InstanceActor } from './instance-trail.js';
-import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
+import { isShopifyAdminHost, SHOPIFY_CREDENTIAL_REFERENCE, storeInstanceRefusal } from './shopify-host.js';
 
 /** What the `secret:` destination check decides for a call (`Agent._secretVerdict`). */
 type SecretVerdict =
   | { kind: 'go' }
   /** `misplaced`: the names refused because they do not belong where this call sends them; none
    *  when the refusal is about the call itself or a missing approval, which leaves the name right. */
-  | { kind: 'refused'; content: string; misplaced: readonly string[]; memberNote?: true }
+  /** `memberNote`: the refusal is a member connection's, noted for the run with the owner's wording it gives. */
+  | { kind: 'refused'; content: string; misplaced: readonly string[]; memberNote?: (plan: string | undefined) => OwnerNote | null }
   | {
     kind: 'ask';
     /** The names still to approve, read again when it is this call's turn to ask. */
@@ -442,6 +454,27 @@ export function raceRunAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<
 /** The input field the review saves before a write_file/edit_file and records after it. */
 const REVIEWED_PATH_FIELD = 'path';
 
+/**
+ * Whether `network_policy` leaves web search open, so the provider-side `web_search` may be
+ * offered. That tool runs at the provider, past every egress check this instance makes, so it
+ * stands in for `web_research` only where `web_research` itself could search: no policy,
+ * `allow-all`, or `guarded` (which lets discovery through). `deny-all` refuses every search, and
+ * an `allow-list` cannot bound the hosts the provider reaches, so both withhold it. A policy this
+ * code does not know, or a context that does not carry the instance's policy (`isPolicyUnread`),
+ * withholds it too (fail-closed).
+ */
+export function providerSearchAdmitted(ctx: ToolContext | undefined): boolean {
+  if (ctx === undefined || isPolicyUnread(ctx)) return false;
+  const policy: string | undefined = ctx.networkPolicy;
+  return policy === undefined || policy === 'allow-all' || policy === 'guarded';
+}
+
+/** Whether a `bash` command matches a rule for sending data out (`SENDS_OR_KEEPS_BASH`). */
+function bashMaySend(input: unknown): boolean {
+  const command = (input as { command?: unknown } | null)?.command;
+  return typeof command === 'string' && SENDS_OR_KEEPS_BASH.some((rule) => rule.pattern.test(command));
+}
+
 export class Agent implements IAgent {
   readonly name: string;
   /** The agents this agent's chain may abort — see `AbortScope`. Inherited by children. */
@@ -552,6 +585,31 @@ export class Agent implements IAgent {
     return outcome;
   }
 
+  /**
+   * The recipients of a filed mail that are not owner-known, with where they come from, for the
+   * card. Read from the payload, the recipients that will be sent to: the dispatcher's check saw
+   * only the targets the input named, a reply's default recipients come from the mail it answers.
+   * Approving the card never makes them owner-known: an approved send is logged as not owner-named.
+   */
+  private _filingTargetOrigin(filing: ApprovalFiling): { targetOrigin?: { unnamed: string[]; origin: SendOrigin } } {
+    const checked = currentCallTargetOrigin();
+    const known = new Set(checked?.known ?? []);
+    const addresses = [...filing.payload.to, ...filing.payload.cc, ...(filing.kind === 'mail_send' ? filing.payload.bcc : [])].map((a) => a.address);
+    const unnamed: string[] = [];
+    for (const address of addresses) {
+      const target = normalizeMailTarget(address);
+      if (target === null) { unnamed.push(address); continue; }
+      if (known.has(target.value)) continue;
+      if (this._ownerKnownVerdict(target) !== 'known') unnamed.push(target.value);
+    }
+    if (unnamed.length === 0) return {};
+    // A reply's own recipients come from the mail it answers; anything else from the run.
+    const origin: SendOrigin = filing.kind === 'mail_reply' && checked?.unnamed === undefined
+      ? { kind: 'readMail', sender: filing.payload.original.from }
+      : checked?.unnamed?.origin ?? this.originOfTargets();
+    return { targetOrigin: { unnamed, origin } };
+  }
+
   private _fileApproval(filing: ApprovalFiling): FilingOutcome {
     const ctx = this.approvalFiling;
     if (!currentCallFiling() || ctx === undefined || this.autonomy !== 'autonomous' || !approvalQueueEnabled()) {
@@ -562,6 +620,8 @@ export class Agent implements IAgent {
     const runId = this.currentRunId ?? '';
     let result;
     try {
+      const runUntrusted = filing.kind === 'mail_reply' || this._sawUntrustedData || this._conversationSawUntrusted;
+      const instructionUntrusted = ctx.createdUntrusted === true;
       result = ctx.store.file({
         filing,
         origin: {
@@ -575,8 +635,12 @@ export class Agent implements IAgent {
           // taint is set only after the handler returns, so a reply counts as after foreign
           // content by its kind (PRD §4.5 fact 14). A trigger marked as set up after foreign
           // content passes that on to everything its run files.
-          afterUntrusted: filing.kind === 'mail_reply' || ctx.createdUntrusted === true
-            || this._sawUntrustedData || this._conversationSawUntrusted,
+          afterUntrusted: runUntrusted || instructionUntrusted,
+          // The card names which (U-209): the instruction, the run, or both.
+          ...(instructionUntrusted ? { instructionUntrusted: true } : {}),
+          ...(runUntrusted ? { runUntrusted: true } : {}),
+          // The recipients the owner did not name, and where they come from: the card says so.
+          ...this._filingTargetOrigin(filing),
         },
         createdBy: ctx.createdBy,
         mandateId: ctx.mandateId,
@@ -595,6 +659,18 @@ export class Agent implements IAgent {
   recordToolCall?: ToolCallRecorder | undefined;
   /** See `AgentConfig.conversationGrants`. Undefined: nothing records what this agent read. */
   conversationGrants?: ConversationGrants | undefined;
+  /** See `IAgent.writeAuthor`. Set per run by the session; null is unknown. */
+  writeAuthor: string | null = null;
+  /** See `IAgent.ownerKnown`. Set per run by the session (a trigger's run adds its instruction). */
+  ownerKnown?: OwnerKnownReader | undefined;
+  /** See `IAgent.sendOrigin`. Set per run by the session. */
+  sendOrigin?: SendOrigin | undefined;
+  /** See `IAgent.noticeLanguage`. */
+  noticeLanguage?: NoticeLanguage | undefined;
+  /** See `IAgent.conversationLatch`. */
+  conversationLatch?: ConversationLatch | undefined;
+  /** See `IAgent.onOriginRefused`. */
+  onOriginRefused?: ((refusal: OriginRefusal) => void) | undefined;
   /** See `AgentConfig.conversationRoot`. */
   readonly conversationRoot: boolean;
   /** See `AgentConfig.turnEndUsageCounted`. */
@@ -685,8 +761,9 @@ export class Agent implements IAgent {
    * disabled tools cannot be re-introduced by descending the agent tree.
    */
   getAvailableTools(): ToolEntry[] {
-    if (this._excludeSet.size === 0 && this._toolLock === null) return this.tools;
-    return this.tools.filter(t => !this._withheld(t.definition.name));
+    if (this._excludeSet.size === 0 && this._toolLock === null && this._stepFailTool === undefined) return this.tools;
+    // The step's own fail_step is never handed on: in a child it would end the PARENT's step.
+    return this.tools.filter(t => !this._isStepFailTool(t) && !this._withheld(t.definition.name));
   }
   /** Snapshot of the parent's excludeTools — propagated to spawned children. */
   getExcludedToolNames(): readonly string[] {
@@ -1117,6 +1194,21 @@ export class Agent implements IAgent {
     return { contract: this._contractOfCall(tc), ...(grant !== undefined ? { grant } : {}), ...(filed !== undefined ? { filed } : {}), ...(apiCost !== undefined ? { apiCost } : {}) };
   }
 
+  /** Deliver the result event of a call that has settled and is already in the ledger. A throw
+   *  from delivering it (a step's stream handler, a closed response) is not the call's outcome:
+   *  caught here, it cannot make the call's own `catch` record the call a second time, emit a
+   *  second result for it, tell the model a call that worked had failed, or keep a call that
+   *  needs input from ending the run. The caller builds the event from facts the ledger write
+   *  above it has already read. Only the error's kind is logged: its text is the stream's. */
+  private async _emitSettledResult(toolName: string, event: Parameters<EmittingStreamHandler>[0]): Promise<void> {
+    if (!this.onStream) return;
+    try {
+      await this.onStream(event);
+    } catch (emitErr: unknown) {
+      process.stderr.write(`[lynox:agent] a ${toolName} call was recorded, but its result event could not be delivered (${emitErr instanceof Error ? emitErr.name : 'unknown error'})\n`);
+    }
+  }
+
   /** The part of {@link _factsOfCall} the result event adds; `grant` already rides on it. The step
    *  recorder builds a workflow step's row from this event, so the API request rides on it too. */
   private _eventFactsOfCall(tc: BetaToolUseBlock, slot: CallSlot): { contract: CallContract; filed?: CallFiled; apiCost?: CallApiCost } {
@@ -1126,7 +1218,7 @@ export class Agent implements IAgent {
   }
   /** Wave 1.2: mark this run tainted (spawn propagates a shared-Memory child's taint here).
    *  Also arms the sticky conversation latch (DK.1 F5). */
-  noteUntrustedData(): void { this._sawUntrustedData = true; this._conversationSawUntrusted = true; }
+  noteUntrustedData(): void { this._sawUntrustedData = true; this._armConversationLatch(); }
   /**
    * Re-arm ONLY the sticky conversation latch, without touching the run-scoped
    * marker.
@@ -1145,7 +1237,17 @@ export class Agent implements IAgent {
    * run-scoped marker, claiming this turn saw untrusted content when it only
    * inherited the conversation's history.
    */
-  restoreConversationTaint(): void { this._conversationSawUntrusted = true; }
+  restoreConversationTaint(): void { this._armConversationLatch(); }
+
+  /**
+   * Set the sticky conversation latch and arm its record on the thread (`ConversationLatch`).
+   * Every place that sets the latch does so before the message that carries what was read is
+   * written, and the store writes the record in that message's transaction, or neither.
+   */
+  private _armConversationLatch(): void {
+    this._conversationSawUntrusted = true;
+    this.conversationLatch?.set();
+  }
   /**
    * DK.1 (H4): the set of tool NAMES executed on THIS run. The `_sawUntrustedData` content
    * marker is allowlist-by-omission — `bash`/`curl`/`read_file`/`media_process`/`api_setup`
@@ -1259,6 +1361,47 @@ export class Agent implements IAgent {
   /** Whether a tool is kept from this agent: disabled by the user, or outside the lock. */
   private _withheld(name: string): boolean {
     return this._excludeSet.has(name) || (this._toolLock !== null && !this._toolLock.has(name));
+  }
+
+  /**
+   * The step's own `fail_step` entry (`AgentConfig.stepFailTool`), or undefined. Every use below
+   * compares the ENTRY, never the name: a foreign tool called `fail_step` is an ordinary tool.
+   */
+  private _stepFailTool: ToolEntry | undefined;
+  /** Set once the handler of the step's own fail_step ACCEPTED its call (`markStepFailReported`); read by the loop and `_dispatchTools`. */
+  private _stepFailRan = false;
+
+  /** Whether `entry` is this step's own `fail_step` — by identity. */
+  private _isStepFailTool(entry: ToolEntry | undefined): boolean {
+    return entry !== undefined && this._stepFailTool !== undefined && entry === this._stepFailTool;
+  }
+
+  /**
+   * Called by the step's own `fail_step` handler when it accepts a call, before it aborts this
+   * agent: from here on the step has ended. Set by the handler, not at dispatch, because the
+   * handler can still refuse (a call from an agent it is not bound to), and a refused call ends
+   * nothing. Returns false, and changes nothing, for any entry but this agent's own.
+   */
+  markStepFailReported(entry: ToolEntry): boolean {
+    if (!this._isStepFailTool(entry)) return false;
+    this._stepFailRan = true;
+    return true;
+  }
+
+  /**
+   * `_withheld` for a tool ENTRY. The step's own `fail_step` passes the mandate lock: it ends its
+   * own step and does nothing else, and a mandate's unattended run is the run that most needs to
+   * say it failed. A user's disable still applies. Only this entry is exempt, so a tool of the
+   * same name from a plugin or an MCP server stays locked out.
+   */
+  private _withheldEntry(entry: ToolEntry): boolean {
+    if (this._isStepFailTool(entry)) return this._excludeSet.has(entry.definition.name);
+    return this._withheld(entry.definition.name);
+  }
+
+  /** The entry a call by `name` dispatches to: the first of that name, as `_executeOneInner` does. */
+  private _entryFor(name: string): ToolEntry | undefined {
+    return this.tools.find(t => t.definition.name === name);
   }
 
   /** Override effort for the next run without recreating the agent. */
@@ -1561,8 +1704,15 @@ export class Agent implements IAgent {
     this.nativeContextWindow = config.nativeContextWindow;
     this.currentRunId = config.currentRunId;
     if (config.principal !== undefined) this.principal = config.principal;
+    this._stepFailTool = config.stepFailTool;
     this.recordToolCall = config.recordToolCall;
     this.conversationGrants = config.conversationGrants;
+    this.writeAuthor = config.writeAuthor ?? null;
+    this.ownerKnown = config.ownerKnown;
+    this.sendOrigin = config.sendOrigin;
+    this.noticeLanguage = config.noticeLanguage;
+    this.conversationLatch = config.conversationLatch;
+    this.onOriginRefused = config.onOriginRefused;
     this.conversationRoot = config.conversationRoot === true;
     this.turnEndUsageCounted = config.turnEndUsageCounted === true;
     this.spawnDepth = config.spawnDepth ?? 0;
@@ -1588,7 +1738,8 @@ export class Agent implements IAgent {
     this.inheritedOpenaiModelId = config.openaiModelId;
     this.modelPinnedByProfile = config.modelPinnedByProfile === true;
     this.inheritedOpenaiAuth = config.openaiAuth;
-    this.toolContext = config.toolContext ?? createToolContext({});
+    // One built here carries no `network_policy`: marked, so the provider-side search stays withheld.
+    this.toolContext = config.toolContext ?? markPolicyUnread(createToolContext({}));
     this.sessionCounters = config.sessionCounters ?? {
       httpRequests: 0,
       writeBytes: 0,
@@ -1732,7 +1883,10 @@ export class Agent implements IAgent {
     this._lastRealAtMsgCount = 0;
     // DK.1 F5: re-derive the sticky conversation taint from the rehydrated history — a thread
     // whose context still carries a wrapped-untrusted marker keeps its durable-write gate armed.
-    this._conversationSawUntrusted = this._contextHoldsUntrustedMarker();
+    // And from the thread's record of it (`ConversationLatch`), which outlives a compaction that
+    // summarized the read away: either one is enough. A record that cannot be read counts as set.
+    if (this._contextHoldsUntrustedMarker() || this.conversationLatch?.isSet() === true) this._armConversationLatch();
+    else this._conversationSawUntrusted = false;
     // A user turn is written to the thread before `send()` sees its marker, so a crash between
     // the two leaves an upload's text in the thread and nothing in the set. The resume puts it
     // there. Only user turns' own text: a tool result's member entered the set before its
@@ -2720,7 +2874,7 @@ export class Agent implements IAgent {
     // the review queue. Placed after the reset above, or it would be cleared again.
     if (Agent._contentHoldsUntrustedMarker(content)) {
       this._sawUntrustedData = true;
-      this._conversationSawUntrusted = true;
+      this._armConversationLatch();
       // An upload is data from no connection: whatever is written from here on may hold it. A
       // conversation's own agent only: a step's or sub-agent's turn is built from what its root
       // already took in, and a workflow's parameters are decided where the run starts.
@@ -3153,10 +3307,15 @@ export class Agent implements IAgent {
         const guidanceBlocks: Array<{ type: 'text'; text: string }> = [];
         if (results.length > 0 && !endsTurn) {
           const threadKey = this.currentThreadId ?? '';
+          // A locked turn gets a tool's locked guidance where it has one, and the key says which
+          // was given: an owner who continues the thread after a mandate's turn still gets the
+          // owner's guidance once, and the mandate's turn never the owner's (U-185).
+          const locked = this._toolLock !== null;
           for (const b of toolUses) {
-            const guidance = this.tools.find(t => t.definition.name === b.name)?.detailedGuidance;
+            const entry = this.tools.find(t => t.definition.name === b.name);
+            const guidance = locked && entry?.lockedGuidance !== undefined ? entry.lockedGuidance : entry?.detailedGuidance;
             if (guidance === undefined || guidance === '') continue;
-            const key = `${threadKey}::${b.name}`;
+            const key = `${threadKey}::${b.name}::${locked ? 'locked' : 'open'}`;
             if (this._guidanceInjected.has(key)) continue;
             this._guidanceInjected.add(key);
             guidanceBlocks.push({ type: 'text', text: `${TOOL_GUIDANCE_MARKER} ${b.name}: ${guidance}` });
@@ -3184,6 +3343,10 @@ export class Agent implements IAgent {
         // silently downgrade the note to a generic run_interrupted.
         const breakKey = this._repeatGuard.breakLatched();
         if (breakKey !== null) throw new ToolLoopBreakError(breakKey);
+        // The step's own fail_step ran in this batch and aborted the run: end here, before another
+        // model call is paid for and before the model can call anything after it (send()'s abort
+        // branch turns this into RunAbortedError; the spawn reads the report from its closure).
+        if (this._stepFailRan && this.abortController?.signal.aborted === true) throw new RunAbortedError();
         if (endsTurn) {
           // Mirror the end_turn path exactly: return this turn's text and run the
           // same memory-extraction gate (skipped for untrusted/internal/durable).
@@ -3536,7 +3699,10 @@ export class Agent implements IAgent {
     // A provider-side tool runs at the provider, past the dispatch check that holds a contained
     // chat to its list (`containment.ts`), so such a chat is offered none.
     const contained = chatIsContained(this);
-    const builtinTools = !this.isNonDirectAnthropic && !hasWebResearch && !searchExcluded && !this._suppressTools && !contained
+    // The provider-side search runs at the provider, outside `network_policy`: it is offered only
+    // when the policy leaves search open, never because `web_research` happens to be missing.
+    const searchAdmitted = providerSearchAdmitted(this.toolContext);
+    const builtinTools = !this.isNonDirectAnthropic && !hasWebResearch && !searchExcluded && !this._suppressTools && !contained && searchAdmitted
       ? [{ type: 'web_search_20250305' as const, name: 'web_search' as const }]
       : [];
     // Lazy-tools: OPT-IN (dormant by default). Anthropic-direct only, never on the
@@ -3565,7 +3731,7 @@ export class Agent implements IAgent {
     // sub-agents byte-identical, so the flag only reshapes the prefix where it
     // pays — full-tool tenants carrying mail_*/google_*/api_setup/etc.
     const lazyToolsActive = lazyEnabled
-      && this.tools.some(t => !this._withheld(t.definition.name)
+      && this.tools.some(t => !this._withheldEntry(t)
         && LAZY_DEFERRED_TOOLS.has(t.definition.name));
     // Tenant tool definitions. Deterministically SORTED by name (code-point) — a
     // cheap cache-safety pin: order today is registration order, so a future
@@ -3584,10 +3750,13 @@ export class Agent implements IAgent {
     const mappedTenantTools: BetaTool[] = this._suppressTools
       ? []
       : this.tools
-          .filter(t => !this._withheld(t.definition.name))
-          .map(t => (lazyToolsActive && LAZY_DEFERRED_TOOLS.has(t.definition.name)
-            ? { ...t.definition, defer_loading: true }
-            : t.definition));
+          .filter(t => !this._withheldEntry(t))
+          // A locked turn sends a tool's locked definition where it has one: its owner text
+          // sends the model to collect a key there, where none is entered (U-185).
+          .map(t => (this._toolLock !== null && t.lockedDefinition !== undefined ? t.lockedDefinition : t.definition))
+          .map(d => (lazyToolsActive && LAZY_DEFERRED_TOOLS.has(d.name)
+            ? { ...d, defer_loading: true }
+            : d));
     const tenantTools: BetaTool[] = lazyToolsActive
       ? [...mappedTenantTools].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
       : mappedTenantTools;
@@ -3995,7 +4164,12 @@ export class Agent implements IAgent {
     const cc = this.isCustomProxy ? undefined
       : { type: 'ephemeral', ttl: AGENT_CACHE_TTL } as unknown as BetaCacheControlEphemeral;
 
-    const staticPrompt = this.systemPrompt ?? `You are ${this.name}, an autonomous AI agent. Think carefully, use tools when needed, and provide clear answers.`;
+    const ownerPrompt = this.systemPrompt ?? `You are ${this.name}, an autonomous AI agent. Think carefully, use tools when needed, and provide clear answers.`;
+    // A locked turn reads the same prompt with the parts that send the model to collect a key
+    // swapped (U-185). Chosen here, per request, like the tool list: the principal is per run,
+    // and an agent built for an owner's run is reused by a mandate's. The locked turn has a prefix
+    // of its own already, since its tool list differs.
+    const staticPrompt = this._toolLock !== null ? lockedTurnPrompt(ownerPrompt) : ownerPrompt;
 
     // The system prompt MUST stay byte-stable across every turn of a thread —
     // it is the head of the cached prefix (tools + system), shared across ALL
@@ -4085,7 +4259,9 @@ export class Agent implements IAgent {
     // mandate reaches no owner secret by name (a `secret:` reference is refused under its lock),
     // so the names and their last characters would only tell it what the owner stores.
     const secrets = this._toolLock === null ? this.secretsBriefing : undefined;
-    const briefing = this.briefing ? (secrets ? `${this.briefing}\n\n${secrets}` : this.briefing) : secrets;
+    // The catalog's step that sends the model to collect a key is swapped in a locked turn too.
+    const base = this.briefing !== undefined && this._toolLock !== null ? lockedTurnBriefing(this.briefing) : this.briefing;
+    const briefing = base ? (secrets ? `${base}\n\n${secrets}` : base) : secrets;
     if (briefing) {
       // The engine's own blocks (an API profile's description) end in a closer that reads as a
       // boundary escape; scanning past them would warn on every turn of every instance with a
@@ -4356,7 +4532,7 @@ export class Agent implements IAgent {
     if (verdict.kind === 'go') return null;
     if (verdict.kind === 'refused') {
       // Its line opens the result as it is, so a saved workflow's report picks it up (`collectWriteNotes`).
-      if (verdict.memberNote === true) noteMemberConnection(verdict.content);
+      if (verdict.memberNote !== undefined) noteMemberConnection(verdict.content, verdict.memberNote);
       return refuse(verdict.content);
     }
     // One prompt at a time per Session; each waiter re-reads the approvals once it is its turn.
@@ -4396,9 +4572,9 @@ export class Agent implements IAgent {
       const bindCtx = this._secretBindCtx();
       // A token of a connection someone else made with their own login is theirs, wherever the
       // request goes (`memberConnectionRefusal`; when that refusal is the answer, the gate notes it).
-      const theirs = (n: string): string | null => {
+      const theirs = (n: string): MemberRefusal | null => {
         const holder = apiStore?.knownProfiles().find((p) => isMandateConnection(p) && grantTokenNames(p).has(n));
-        return holder !== undefined ? memberConnectionRefusal(holder, this.principal, this.toolContext.mandateEnds ?? null) : null;
+        return holder !== undefined ? memberRefusalCase(holder, this.principal, this.toolContext.mandateEnds ?? null) : null;
       };
       // The names that do not belong where this request goes, whatever else is wrong with it: a
       // refusal of the call itself still says so for them, which is what the hint reads.
@@ -4430,16 +4606,20 @@ export class Agent implements IAgent {
         resolvedHost = new URL(String(resolved.url)).host;
       } catch { resolvedHost = undefined; }
       if (resolvedHost !== parsed.host) return notGoing('would reach a different host once its secrets are filled in');
-      // A Shopify store gets no secret for now (`shopify-host.ts`), approved or not: refused
-      // before any question, since the request tool would refuse the request itself anyway.
-      if (isShopifyAdminHost(parsed.hostname)) return refused(`Blocked: ${SHOPIFY_UNAVAILABLE}`, notHere());
+      // A Shopify store gets no secret, approved or not: the engine attaches the store connection
+      // itself (`shopify-host.ts`). Refused before any question, since the request tool would
+      // refuse the request anyway. Where no store pass is possible on this instance at all, the
+      // refusal names that cause instead: sending again without the reference would not help.
+      if (isShopifyAdminHost(parsed.hostname)) {
+        return refused(`Blocked: ${storeInstanceRefusal(this.toolContext) ?? SHOPIFY_CREDENTIAL_REFERENCE}`, notHere());
+      }
       // A token slot goes only to where its grant points, whoever approved what before: asked
       // before the profile's names and the session's approvals, and refused, never asked.
       // A member's token is refused with who and which, before the base check would let it
       // through to that connection's own base_url.
       for (const n of apiStore ? secretNames : []) {
-        const line = theirs(n);
-        if (line !== null) return { kind: 'refused', content: `${MEMBER_CONNECTION_PREFIX} ${line}`, misplaced: [n], memberNote: true };
+        const refusal = theirs(n);
+        if (refusal !== null) return { kind: 'refused', content: `${MEMBER_CONNECTION_PREFIX} ${memberRefusalText(refusal)}`, misplaced: [n], memberNote: (plan) => memberRefusalOwnerNote(refusal, plan) };
       }
       const offGrant = offGrantOf(secretNames);
       if (offGrant.length > 0) {
@@ -4572,10 +4752,20 @@ export class Agent implements IAgent {
     this._taintBeforeBatch = this._sawUntrustedData || this._conversationSawUntrusted;
     this._batch = {};
 
+    // A step's own fail_step has the last word in the response that calls it: it runs ALONE, and
+    // every other call of the same response is skipped, not run (fail-closed). Run beside it, a
+    // write would land in a step that is reported failed, and possibly be run again by a retry.
+    // Matched by the entry the call dispatches to (identity), so a foreign tool named fail_step
+    // gets nothing of this. Whether the step ended is known only once its handler accepted the call
+    // (a gate, the input check or the handler itself may refuse it): `_stepFailRan` is set there
+    // (`markStepFailReported`), not here.
+    const failCall = toolCalls.find(tc => this._isStepFailTool(this._entryFor(tc.name)));
+    const failSkipped = failCall === undefined ? [] : toolCalls.filter(tc => tc !== failCall);
+
     // Enforce fan-out limit: execute first N in parallel, truncate excess
     const limit = Agent.MAX_PARALLEL_TOOL_CALLS;
-    const toExecute = toolCalls.slice(0, limit);
-    const truncated = toolCalls.slice(limit);
+    const toExecute = failCall !== undefined ? [failCall] : toolCalls.slice(0, limit);
+    const truncated = failCall !== undefined ? [] : toolCalls.slice(limit);
     // How many calls of the batch are the same call: the same tool with the same input as the
     // model wrote it, before any secret is resolved. Counted before the first call starts, so the
     // number a write approval names does not depend on which call reaches its question first.
@@ -4638,6 +4828,19 @@ export class Agent implements IAgent {
         is_error: true,
       };
     });
+
+    // The calls beside the step's fail_step: answered, never run. What they are told depends on
+    // whether fail_step's handler ran: a refused fail_step ended nothing, and the step goes on.
+    for (const tc of failSkipped) {
+      results.push({
+        type: 'tool_result' as const,
+        tool_use_id: tc.id,
+        content: this._stepFailRan
+          ? annotateNonRetryable('Not run: fail_step in the same response ended this step.')
+          : 'Not run: it was called in the same response as fail_step, which did not run (see its result). Call it again if it is still needed.',
+        is_error: true,
+      });
+    }
 
     // Return error results for truncated tool calls
     for (const tc of truncated) {
@@ -4910,6 +5113,126 @@ export class Agent implements IAgent {
     );
   }
 
+  /** Whether the owner named this target, from the conversation's sources and, for a host, the
+   *  reviewed contract that governs this call (a reviewed workflow's own run). */
+  private _ownerKnownVerdict(target: SendTarget): OwnerKnownVerdict {
+    if (target.kind === 'host') {
+      // Only a reviewed contract: a person was shown the hosts and accepted them. Only while it
+      // governs this call (not withheld after outside content), and only a host written out in
+      // full, compared as a token: a pattern with a wildcard names no host.
+      const contract = this.governingContract().contract;
+      if (contract?.origin === 'reviewed' && contract.hostPatterns.some((p) => normalizeHostName(p) === target.value)) return 'known';
+    }
+    return this.ownerKnown?.known(target) ?? 'foreign';
+  }
+
+  /** Where a target the owner did not name comes from in this run, as far as the run knows. */
+  originOfTargets(): SendOrigin {
+    if (this.sendOrigin !== undefined) return this.sendOrigin;
+    return deriveTurnUntrusted(this) ? { kind: 'readContent' } : { kind: 'unknown' };
+  }
+
+  /** The language of this agent's own questions. */
+  private _noticeLanguage(): NoticeLanguage {
+    return this.noticeLanguage ?? noticeLanguage(undefined);
+  }
+
+  /**
+   * The check before a send: are the call's targets ones the owner named (`OwnerKnownReader`)?
+   *
+   * - A tool that declares no targets, or a call that names none it chose (`null`), passes.
+   * - An empty list passes on to the handler, which knows the targets the input does not name (a
+   *   reply's sender) and checks them itself; it is no assurance, so it is never `allKnown`.
+   * - Every target owner-known: passes, and the slot says so (`allKnown`), which is what lets a
+   *   mail be logged as sent to owner-named recipients.
+   * - A target that could not be read: the whole call is refused, in every session, unasked.
+   * - Otherwise (a target not owner-known, a source that could not be read): a call filed for approval passes and its card names the origin; a session of
+   *   someone other than the owner is refused; a run with no one to ask is refused; the owner is
+   *   asked with a blocked question, which a run nobody watches refuses before it is stored. A
+   *   yes holds for this call only: nothing is added, and the slot is not `allKnown`.
+   */
+  private async _checkSendOrigin(tc: BetaToolUseBlock, tool: ToolEntry, filingCall: boolean, guardRefuses: boolean, taintedBefore: boolean): Promise<{ refusal: BetaToolResultBlockParam } | { origin?: CallTargetOrigin | undefined }> {
+    // `sendTargetsWhenLatched` counts only when the conversation had taken in foreign content BEFORE
+    // this call's batch: a reading tool arms the latch for its own call before this check runs, so
+    // the latch as it stands now would gate the first read of a clean conversation. The flags hold
+    // where no latch object exists too (a headless run).
+    const declared = tool.sendTargets
+      ?? (tool.sendTargetsWhenLatched !== undefined && taintedBefore ? tool.sendTargetsWhenLatched : undefined);
+    if (declared === undefined) return {};
+    let targets: readonly SendTarget[] | null;
+    let targetsUnread = false;
+    try {
+      targets = declared(tc.input);
+    } catch {
+      targets = [];
+      targetsUnread = true;
+    }
+    if (targets === null) return {};
+    // A target that could not be read (the declaration threw: an address that does not parse, an
+    // empty one, a recipient field that yields none) refuses the whole call, in every session and
+    // without a question: a yes to a target nobody can see would hold for anything.
+    if (targetsUnread) {
+      const unreadNoun: TargetNoun = tc.name === 'web_research' ? 'page' : tc.name === 'http_request' ? 'host' : 'mail';
+      try { this.onOriginRefused?.({ targets: { values: [], unreadable: true }, noun: unreadNoun, origin: this.originOfTargets() }); } catch { /* the refusal stands */ }
+      if (guardRefuses) return {};
+      const text = originUnreadable(unreadNoun);
+      if (this.onStream) {
+        await this.onStream({ type: 'tool_result', name: tc.name, result: text, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
+      }
+      return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(text), is_error: true } };
+    }
+    if (targets.length === 0) return { origin: { known: [], allKnown: false } };
+    const verdicts = targets.map((t) => ({ target: t, verdict: this._ownerKnownVerdict(t) }));
+    const foreign = verdicts.filter((v) => v.verdict !== 'known');
+    const known = verdicts.filter((v) => v.verdict === 'known').map((v) => v.target.value);
+    if (foreign.length === 0) return { origin: { known, allKnown: true } };
+
+    const lookupFailed = foreign.some((v) => v.verdict === 'unreadable');
+    const shownTargets = foreign.map((v) => v.target.value);
+    const shown: OriginTargets = { values: shownTargets, unreadable: false };
+    const noun: TargetNoun = tc.name === 'web_research' ? 'page' : foreign[0]!.target.kind === 'host' ? 'host' : 'mail';
+    // A source that could not be read leaves where the target comes from unchecked: every report of
+    // it (the run's result, the approval card, the question, the model texts) says it is not known,
+    // never the origin it would have had.
+    const origin: SendOrigin = lookupFailed ? { kind: 'unknown' } : this.originOfTargets();
+    const passed: CallTargetOrigin = { known, allKnown: false, unnamed: { targets: shownTargets, origin } };
+    // The guard refuses this call without asking anyone, with its own text; the run's owner still
+    // learns that a target came from elsewhere.
+    if (guardRefuses) {
+      try { this.onOriginRefused?.({ targets: shown, noun, origin }); } catch { /* the refusal stands */ }
+      return {};
+    }
+    if (filingCall) return { origin: passed };
+
+    const refuse = async (text: string): Promise<{ refusal: BetaToolResultBlockParam }> => {
+      // Streamed like every other refusal: the owner of a run nobody watches learns of it only there.
+      if (this.onStream) {
+        await this.onStream({ type: 'tool_result', name: tc.name, result: text, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
+      }
+      return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(text), is_error: true } };
+    };
+    const refuseUnattended = (): Promise<{ refusal: BetaToolResultBlockParam }> => {
+      try { this.onOriginRefused?.({ targets: shown, noun, origin }); } catch { /* the refusal stands */ }
+      return refuse(lookupFailed ? originLookupFailedUnattended(shown, noun) : originRefusedUnattended(shown, origin, noun));
+    };
+    // Someone the owner let in answers this session's questions themselves: asking them would
+    // protect nothing. A target the owner named goes out as it would for the owner.
+    if (this.principal.kind !== 'owner') {
+      return refuse(lookupFailed ? originLookupFailedMandate(shown, noun) : originRefusedMandate(shown, origin, noun));
+    }
+    if (!this.promptUser) return refuseUnattended();
+    const lang = this._noticeLanguage();
+    // Blocked: a reader who does not watch this run refuses it before anything is stored or parked
+    // (`PromptStore.insertQuestion`), and the call is refused here.
+    const answer = await this.promptUser(originAsk(tc.name, tc.input, noun, shown, origin, lang), ['Allow', 'Deny', '\x00'], { blocked: true });
+    if (answer === UNATTENDED_BLOCK_ANSWER) return refuseUnattended();
+    if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
+      const denied = lookupFailed ? `${originLookupFailedHead(shown)} ${originDenied(shown, origin, noun)}` : originDenied(shown, origin, noun);
+      return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(denied), is_error: true } };
+    }
+    return { origin: passed };
+  }
+
   private async _executeOneInner(tc: BetaToolUseBlock): Promise<BetaToolResultBlockParam> {
     // Defense-in-depth: even if a prompt-injected tool_use block names an
     // excluded tool, refuse here. The LLM-facing tool list already strips
@@ -4923,7 +5246,9 @@ export class Agent implements IAgent {
         is_error: true,
       };
     }
-    if (this._withheld(tc.name)) {
+    // By the entry the call dispatches to, so only the step's own fail_step passes the lock.
+    const lockEntry = this._entryFor(tc.name);
+    if (lockEntry !== undefined ? this._withheldEntry(lockEntry) : this._withheld(tc.name)) {
       return {
         type: 'tool_result',
         tool_use_id: tc.id,
@@ -4937,7 +5262,9 @@ export class Agent implements IAgent {
     // user is never asked about a call that would not run. The tenant tools stay advertised;
     // only the provider-side web_search drops out of the list (`_callAPI`), so the cached prefix
     // changes once, on the first call after the chat becomes contained.
-    const containedRefusal = chatIsContained(this) ? containedCallRefusal(tc.name, tc.input) : null;
+    // The step's own fail_step (by identity) is exempt: it ends its own step and reaches nothing,
+    // and refusing it would let a contained step that cannot do its task end `completed`.
+    const containedRefusal = chatIsContained(this) && !this._isStepFailTool(lockEntry) ? containedCallRefusal(tc.name, tc.input) : null;
     if (containedRefusal !== null) {
       // Streamed with its reason, so the chat's view can offer the way out under it.
       if (this.onStream) {
@@ -4963,7 +5290,7 @@ export class Agent implements IAgent {
     // so a later marker scan cannot see them) — arm the sticky conversation latch so a
     // deferred `remember` on a later clean turn is still routed to pending_review.
     if (this.isExternalContentTool(tc.name)) {
-      this._conversationSawUntrusted = true;
+      this._armConversationLatch();
     }
 
     const tool = this.tools.find(t => t.definition.name === tc.name);
@@ -5045,6 +5372,15 @@ export class Agent implements IAgent {
       && this.autonomy === 'autonomous'
       && approvalQueueEnabled()
       && !(this.secretStore && tool?.secretRefs !== 'verbatim' && this.secretStore.extractSecretNames(tc.input).length > 0);
+    // Where the call's send targets come from, before the guard's own question: a target the owner
+    // did not name is asked about in a chat the owner watches, and refused everywhere else. A call
+    // filed for approval goes on, and its card says where the target comes from. Neither answer
+    // stands in for the other: the guard below still asks what it asks.
+    // A call the guard refuses below without asking anyone (a run with no prompt) keeps the guard's
+    // refusal, which names the write; it is refused either way.
+    const guardRefusesUnasked = effectiveSignal !== null && !filingCall && !this.promptUser;
+    const originCheck = await this._checkSendOrigin(tc, tool, filingCall, guardRefusesUnasked, taintedBeforeThisCall);
+    if ('refusal' in originCheck) return originCheck.refusal;
     if (effectiveSignal && !filingCall) {
       if (this.promptUser) {
         // A deep-tier consent gate may offer a cheaper alternative
@@ -5059,9 +5395,15 @@ export class Agent implements IAgent {
         // stores the question decides whether its reader watches this run, and refuses it for
         // one who does not (`PromptStore.insertQuestion`).
         const askMeta = effectiveSignal.hardBlock === true ? { blocked: true } : undefined;
+        // A shell command that may send data out cannot name its target, so the check before a
+        // send has nothing to compare. Once the conversation read outside content, the question
+        // says so; the decision stays the guard's.
+        const guardPrompt = tc.name === 'bash' && taintedBeforeThisCall && bashMaySend(tc.input)
+          ? pv`${effectiveSignal.prompt}\n\n${originBashAfterForeign(this._noticeLanguage())}`
+          : effectiveSignal.prompt;
         const answer = offersDowngrade
-          ? await this.promptUser(effectiveSignal.prompt, ['Allow deep', 'Run on balanced', 'Cancel', '\x00'], askMeta)
-          : await this.promptUser(effectiveSignal.prompt, ['Allow', 'Deny', '\x00'], askMeta);
+          ? await this.promptUser(guardPrompt, ['Allow deep', 'Run on balanced', 'Cancel', '\x00'], askMeta)
+          : await this.promptUser(guardPrompt, ['Allow', 'Deny', '\x00'], askMeta);
         if (answer === UNATTENDED_BLOCK_ANSWER) {
           const refusal = `Blocked: ${tc.name} — this action is blocked, and in a run nobody watches it is not queued for approval. A person has to do it by hand.`;
           // Streamed like the non-interactive refusal below: the owner of a run nobody watches
@@ -5302,7 +5644,10 @@ export class Agent implements IAgent {
     // This call's own slot for the connection the engine resolves (call-connection.ts).
     // Who makes this call's writes inside the instance is fixed here, with the slot, from the
     // same sources as the outward trail above (`instance-trail.ts`).
-    const callSlot: CallSlot = { abort: new AbortController(), twins: this._batchTwins?.get(tc) ?? 1, ...(filingCall ? { filing: true } : {}), instanceTrail: instanceTrailFor(this, tc.name) };
+    const callSlot: CallSlot = {
+      abort: new AbortController(), twins: this._batchTwins?.get(tc) ?? 1, ...(filingCall ? { filing: true } : {}),
+      ...(originCheck.origin !== undefined ? { targetOrigin: originCheck.origin } : {}), instanceTrail: instanceTrailFor(this, tc.name),
+    };
     // A stop of the run reaches the call: a handler that passes `currentCallSignal()` to its
     // I/O ends it now instead of at its own limit. The call is still awaited — a handler that
     // does not listen runs to its end, and its result is what it did.
@@ -5319,6 +5664,8 @@ export class Agent implements IAgent {
       // A non-spawn tool never offers downgrade (downgradeDecision undefined) and
       // never reads the field, so this is a no-op for it.
       this._pendingDowngradeTier = downgradeDecision;
+      // The step's own fail_step passed every gate; its handler marks the step ended if it accepts
+      // the call (`markStepFailReported`), before it aborts the run.
       // Resolved ONCE: the trail and the timeout race below read the same promise, so a
       // thenable's `then` runs once, not once per reader.
       const rawResult = Promise.resolve(runInCallSlot(callSlot, () => this.workerPool && this.workerPool.isWorkerSafe(tc.name)
@@ -5339,6 +5686,9 @@ export class Agent implements IAgent {
       // the tool used to return. Only `softFailureReason` diverges, and it
       // reaches nothing but `toolEnd`. See tool-soft-failure.ts.
       let softFailureReason: string | null = null;
+      // Only a thrown soft failure replaces the answer; one read by `failureOf` leaves it, and with
+      // it everything the model would have read, the stop note below included.
+      let thrownSoftFailure = false;
       let result: string;
       try {
         result = Agent.TOOL_TIMEOUT_EXEMPT.has(tc.name)
@@ -5361,6 +5711,18 @@ export class Agent implements IAgent {
         if (!isToolSoftFailure(err)) throw err;
         result = err.agentVisibleResult;
         softFailureReason = err.reason;
+        thrownSoftFailure = true;
+      }
+      // A tool that answers a call it did not carry out with a plain string says so through
+      // `failureOf`: the same soft failure as a thrown one, read from the answer it returned. The
+      // answer stays what the model reads. A reader that throws decides nothing: the call has
+      // already happened, and the worst it leaves is the ✓ it would have had without the reader.
+      if (softFailureReason === null && tool.failureOf !== undefined) {
+        try {
+          softFailureReason = tool.failureOf(result);
+        } catch {
+          softFailureReason = null;
+        }
       }
       // A write inside the instance was refused for want of its row: the handler may have turned
       // the throw into a result of its own, which must not read as if the entry were made.
@@ -5392,7 +5754,7 @@ export class Agent implements IAgent {
       // DK.1 F5: arm the sticky conversation latch too (this marker stays in context
       // across turns, so a later clean-latch `remember` could still be executing an
       // injected instruction that rode in with it).
-      if (containsUntrustedMarker(scanned)) this._conversationSawUntrusted = true;
+      if (containsUntrustedMarker(scanned)) this._armConversationLatch();
       // Before the result is appended: a member is recorded before the message that carries it.
       this._noteConversationGrant(tc.name, callSlot, containsUntrustedMarker(scanned));
 
@@ -5428,11 +5790,11 @@ export class Agent implements IAgent {
       // returns normally — and one that listens may return what it had when the stop came. A
       // call that reads from outside (`outwardRead`) and writes nothing outside says so. Only a
       // declared read counts: a tool that declares neither may write locally (a memory, a file),
-      // and a write's result is what it did. A soft failure is no result that may be partial, and
+      // and a write's result is what it did. A thrown soft failure is no result that may be partial, and
       // a result that already speaks of the stop (`ownStopSentence`) is left alone. After the
       // cap, so it is never cut off. The declarations are read only on a stopped run, and one
       // that throws on this input leaves the result as it is: the call already happened.
-      if (callSlot.stoppedByRun === true && softFailureReason === null && callSlot.ownStopSentence !== true && Agent._readsOutsideOnly(tool, tc.input)) {
+      if (callSlot.stoppedByRun === true && !thrownSoftFailure && callSlot.ownStopSentence !== true && Agent._readsOutsideOnly(tool, tc.input)) {
         sanitizedResult += `\n\n${TOOL_STOPPED_RESULT_NOTE}`;
       }
 
@@ -5483,7 +5845,9 @@ export class Agent implements IAgent {
         // (`GrantLift`, `CallConnection`).
         const grant = grantLiftOf(callSlot);
         const connection = callSlot.connection;
-        await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name, toolUseId: tc.id, ...(softMasked !== null ? { softFailure: true as const } : {}), ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}), ...this._eventFactsOfCall(tc, callSlot) });
+        // The call is in the ledger above; a throw from delivering its event must not reach the
+        // `catch` below and record it a second time as an error (`_emitSettledResult`).
+        await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name, toolUseId: tc.id, ...(softMasked !== null ? { softFailure: true as const } : {}), ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}), ...this._eventFactsOfCall(tc, callSlot) });
       }
       return {
         type: 'tool_result',
@@ -5549,11 +5913,14 @@ export class Agent implements IAgent {
         // A failed call keeps its connection stamp as well, as its ledger row above does.
         const grant = grantLiftOf(callSlot);
         const connection = callSlot.connection;
-        await this.onStream({ type: 'tool_result', name: tc.name, result: message, agent: this.name, toolUseId: tc.id, isError: true, ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}), ...this._eventFactsOfCall(tc, callSlot) });
+        // A throw from delivering it must not skip the end of the run below for a call that needs
+        // input, nor hand the stream's error text to the model in place of the call's.
+        await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: message, agent: this.name, toolUseId: tc.id, isError: true, ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}), ...this._eventFactsOfCall(tc, callSlot) });
       }
       // ⛔ …and then it ends the RUN, not the call: re-thrown, never returned as an error
       // result the model would read and work around (`input-required.ts`). AFTER the
-      // bookkeeping above, so the call is in the ledger and the UI's tool block closes.
+      // bookkeeping above, so the call is in the ledger and, when its event was delivered, the
+      // UI's tool block closes.
       if (askedNobody !== undefined) {
         this._needsInputStreamed.add(askedNobody); // the batch must not stream it a second time
         throw askedNobody;

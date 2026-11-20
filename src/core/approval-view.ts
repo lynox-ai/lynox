@@ -11,7 +11,8 @@
  * does not reach it.
  */
 
-import type { ApprovalEntry, ApprovalKind, ApprovalListScope, ApprovalSource, ApprovalStatus, StoredAddress } from './approval-store.js';
+import { originCardMail } from './origin-notices.js';
+import type { ApprovalEntry, ApprovalKind, ApprovalOrigin, ApprovalListScope, ApprovalSource, ApprovalStatus, StoredAddress } from './approval-store.js';
 import { isMandateTag, MANDATE_TAG_PREFIX, unhandledPrincipal, type RequestPrincipal } from './request-principal.js';
 import { recipientSpread } from '../integrations/mail/send-core.js';
 
@@ -305,6 +306,11 @@ export interface ApprovalCard {
   /** For a reply that goes to the original's Reply-To where that is not its sender; else null. */
   replyToElsewhere: ReplyToElsewhere | null;
   afterUntrusted: boolean;
+  /** Which sentence the card shows when `afterUntrusted` (U-209); null when it is not. */
+  afterUntrustedBy: 'run' | 'instruction' | 'both' | null;
+  /** Where the recipients the owner did not name come from, as the card's line in each language
+   *  (`originCardMail`); null when every recipient was owner-known, or on a record from before. */
+  targetOrigin: { de: string; en: string } | null;
   origin: { source: ApprovalSource; triggerId: string; runId: string; threadId?: string | undefined; eventId?: string | undefined } | null;
   outcome: ApprovalOutcome | null;
   setup: SetupLine[];
@@ -366,6 +372,14 @@ export function approvalChatThread(
   return o.threadId;
 }
 
+/** The side of `afterUntrusted` a stored origin records. A record filed before the sides were
+ *  stored carries none and reads as the run's own, the sentence it was shown with. */
+function untrustedBy(o: ApprovalOrigin | null | undefined): 'run' | 'instruction' | 'both' | null {
+  if (o?.afterUntrusted !== true) return null;
+  if (o.instructionUntrusted !== true) return 'run';
+  return o.runUntrusted === true ? 'both' : 'instruction';
+}
+
 /** The card for one entry, as the scope may see it. */
 export function approvalCard(entry: ApprovalEntry, src: ApprovalCardSources): ApprovalCard {
   const mail = cardMail(entry);
@@ -389,6 +403,8 @@ export function approvalCard(entry: ApprovalEntry, src: ApprovalCardSources): Ap
     recipientDiffers: replyRecipientDiffers(entry),
     replyToElsewhere: replyToElsewhere(entry),
     afterUntrusted: o?.afterUntrusted === true,
+    afterUntrustedBy: untrustedBy(o),
+    targetOrigin: o?.targetOrigin === undefined ? null : { de: originCardMail(o.targetOrigin.origin, 'de'), en: originCardMail(o.targetOrigin.origin, 'en') },
     origin: o === null ? null : {
       source: o.source, triggerId: o.triggerId, runId: o.runId,
       ...(o.threadId !== undefined ? { threadId: o.threadId } : {}),

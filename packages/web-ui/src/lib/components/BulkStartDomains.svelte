@@ -48,7 +48,7 @@
 		{#if read.badLines.length > 0 || read.tooMany}
 			<div class="text-danger" role="alert" id={errorsId}>
 				{#each read.badLines as i (i)}
-					<p><span class="font-mono">{tf('bulk.start_domains.bad_line', { line: String(i + 1), text: text.split('\n')[i] ?? '' })}</span>{#if read.sharedLines.includes(i)} {t('bulk.start_domains.shared')}{/if}</p>
+					<p><span class="font-mono">{tf('bulk.start_domains.bad_line', { line: String(i + 1), text: text.split('\n')[i] ?? '' })}</span></p>
 				{/each}
 				<p>{t('bulk.start_domains.invalid')}</p>
 			</div>

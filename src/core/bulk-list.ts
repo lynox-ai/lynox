@@ -17,6 +17,7 @@
  * - Nothing of an element reaches the model or a log. What a page is decides a fixed reason.
  */
 import { BULK_MAX_SOURCE_BYTES, BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BulkSourceError } from './bulk-plan.js';
+import { readWithinBounds, walkHtml } from './html-tree.js';
 import { externalTargetKey, isPlainObject, isScalar, BULK_WRITE_METHODS, type BulkWriteMethod, type ExternalImage } from './bulk-external.js';
 import { isMailProviderTarget } from './bulk-mail-targets.js';
 import { urlScanForms } from './url-scan-forms.js';
@@ -25,7 +26,7 @@ import type { CapabilityContract } from '../types/capability-contract.js';
 import { LIST_QUERY_MAX } from '../tools/permission-guard.js';
 import {
   SHOPIFY_ALT_MAX_CHARS, SHOPIFY_LIST_FILTER_KEYS, SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS,
-  isShopifyAltLength, isShopifyFilterValue, isShopifyFilterValues, isShopifyListFilters, isShopifyStoreHostName, shopifyFilterListRefusal, shopifyFilterRefusal,
+  isShopifyAltLength, isShopifyFilterValue, isShopifyFilterValues, isShopifyListFilters, isShopifyStatusValues, isShopifyStoreHostName, SHOPIFY_STATUS_REFUSAL, shopifyFilterListRefusal, shopifyFilterRefusal,
   type ShopifyListFilterValue, type ShopifyWriteForm,
 } from './shopify-graphql.js';
 
@@ -80,7 +81,7 @@ export type BulkListForm = keyof typeof BULK_LIST_FORMS;
  */
 export const SHOPIFY_LIST_FORM = 'shopify';
 /**
- * A Shopify list narrowed by `product_type`/`vendor` (PRD shopify-preset §22), as it is STORED.
+ * A Shopify list narrowed by `product_type`/`vendor`/`status` (PRD shopify-preset §22), as it is STORED.
  * The planner never names it: its input is `shopify` with `filters`. A form of its own so that an
  * engine from before the filter, which reads a `shopify` source as every product, refuses this
  * one (`isOfferedListSource`) instead of reading the whole store under a start given for a group.
@@ -99,6 +100,42 @@ export type BulkListSourceForm = BulkListForm | ShopifyListSourceForm;
 /** Whether `form` is one of a Shopify store's list forms as stored: its products, filtered or not, or their images. */
 export function isShopifyListForm(form: unknown): form is ShopifyListSourceForm {
   return form === SHOPIFY_LIST_FORM || form === SHOPIFY_FILTERED_LIST_FORM || form === SHOPIFY_MEDIA_LIST_FORM;
+}
+
+/** Elements that only hold text: a description built of these and nothing else shows only its text. */
+const TEXT_ONLY_ELEMENTS: ReadonlySet<string> = new Set([
+  'p', 'br', 'div', 'span', 'strong', 'em', 'b', 'i', 'u', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+]);
+/** Text that shows nothing: white space, the no-break space, and the code points no font draws. */
+const INVISIBLE_TEXT = /^[\s\u00a0\p{Default_Ignorable_Code_Point}]*$/u;
+const HTML_NS = 'http://www.w3.org/1999/xhtml';
+
+/**
+ * Whether the HTML `value` shows nothing on a product page: its tree holds no text but white space,
+ * and every element in it is a text element without attributes. Comments do not count. An image,
+ * an embed or any attribute makes it not blank, so a description of one image stays allowed.
+ * A value past the reading bounds ({@link readWithinBounds}) is not walked here and counts as not
+ * blank: the markup check refuses such a value before it is written (`not_canonical`).
+ */
+export function isBlankHtml(value: string): boolean {
+  const tree = readWithinBounds(value);
+  if (tree === null) return false;
+  return walkHtml(tree).every((node) =>
+    node.kind === 'comment'
+    || (node.kind === 'text' && INVISIBLE_TEXT.test(node.value))
+    || (node.kind === 'element' && node.namespace === HTML_NS && TEXT_ONLY_ELEMENTS.has(node.name) && node.attrs.length === 0));
+}
+
+/**
+ * Whether `value` is a product description no run may set: `null`, which Shopify ignores, or a text
+ * that shows nothing (`isBlankHtml`), `""` among them, which clears the page
+ * (PRD shopify-preset §16.8 M6b (iii)). Neither is a run's purpose, and an empty text from a model is
+ * far more often its failure. On a Shopify products list only; an undo, which writes back a
+ * before-image that was empty, does not ask.
+ */
+export function isEmptyShopifyDescription(form: BulkListSourceForm | null, field: string, value: unknown): boolean {
+  return (form === SHOPIFY_LIST_FORM || form === SHOPIFY_FILTERED_LIST_FORM) && field === 'descriptionHtml'
+    && (value === null || (typeof value === 'string' && isBlankHtml(value)));
 }
 
 /** The write form a Shopify list's targets are written with. */
@@ -150,9 +187,13 @@ export function isShopifyListSource(source: BulkListSource): boolean {
   return isShopifyListForm(source.form);
 }
 
-/** A filtered Shopify list's filters as the owner is shown them, or null for any other list. */
+/** A Shopify product list's filters as the owner is shown them ({} for none), or null for any other list. */
 export function shopifyListFiltersOf(list: { readonly source: BulkListSource } | null): Record<string, ShopifyListFilterValue> | null {
-  return list !== null && list.source.form === SHOPIFY_FILTERED_LIST_FORM ? { ...list.source.filters } : null;
+  if (list === null) return null;
+  if (list.source.form === SHOPIFY_FILTERED_LIST_FORM) return { ...list.source.filters };
+  // A store's products without a filter: none, but said, so the page can name what that reads —
+  // every product in every status. Null stays for every list that is not a store's products.
+  return list.source.form === SHOPIFY_LIST_FORM ? {} : null;
 }
 
 /** The cap on one page's body: the page cap, or what is left of the source's byte budget. */
@@ -252,11 +293,13 @@ export function parseListSource(host: string, input: unknown, method: BulkWriteM
 
 /**
  * A Shopify list source as the planner gave it: on a store host, the products — every one, or
- * those of one product type and/or vendor — and no path or id field. A filter value is taken
+ * those of one product type, vendor and/or status — and no path or id field. A filter value is taken
  * as written or refused, never rewritten ({@link isShopifyFilterValue}). The after-state may
- * only name the fields the write document sets ({@link SHOPIFY_WRITABLE_FIELDS}):
- * `descriptionHtml` is read into the before-image but not written yet. Checked like any list's
- * after-state otherwise.
+ * only name the fields the write document sets ({@link SHOPIFY_WRITABLE_FIELDS}). Checked like any
+ * list's after-state otherwise. A judge's template (every field `null`) and a stored source pass
+ * here too, so an empty description is refused where the planner writes one, in `bulk_plan`
+ * ({@link isEmptyShopifyDescription}), and where a verdict sets one, at the step that settles it
+ * (`emptiesDescription`, `bulk-judge.ts`).
  */
 function parseShopifyListSource(host: string, input: Record<string, unknown>, scan: (text: string) => string | null): BulkListSource {
   if (!isShopifyStoreHostName(host)) throw new BulkSourceError('source_list.form shopify reads a store: target_host must be <store>.myshopify.com.');
@@ -265,10 +308,6 @@ function parseShopifyListSource(host: string, input: Record<string, unknown>, sc
   }
   const filters = parseShopifyFilters(input['filters'], scan);
   const after = checkAfter(input['after'], 'id', scan);
-  // Read, but not written yet: the way on is named, not only the refusal.
-  if (Object.hasOwn(after, 'descriptionHtml')) {
-    throw new BulkSourceError(`source_list.after cannot set descriptionHtml yet: writing product descriptions comes with a later step of the Shopify form. Set only: ${SHOPIFY_WRITABLE_FIELDS.join(', ')}.`);
-  }
   if (!Object.keys(after).every((k) => SHOPIFY_WRITABLE_FIELDS.includes(k))) {
     throw new BulkSourceError(`source_list.after may only set: ${SHOPIFY_WRITABLE_FIELDS.join(', ')}.`);
   }
@@ -283,7 +322,7 @@ function parseShopifyListSource(host: string, input: Record<string, unknown>, sc
 
 /**
  * A Shopify list's filters as the planner gave them: absent for every product; otherwise an
- * object naming `product_type`, `vendor` or both, each value one the rule takes. An empty
+ * object naming `product_type`, `vendor`, `status` or several, each value one its rule takes. An empty
  * object or an empty value is refused, never read as "no filter": that would turn a run over
  * one group into a run over the whole store.
  */
@@ -291,11 +330,17 @@ function parseShopifyFilters(raw: unknown, scan: (text: string) => string | null
   if (raw === undefined) return {};
   const allowed = SHOPIFY_LIST_FILTER_KEYS.join(', ');
   if (!isPlainObject(raw) || Object.keys(raw).length === 0) {
-    throw new BulkSourceError(`source_list.filters for form shopify must name ${allowed} or both.`);
+    throw new BulkSourceError(`source_list.filters for form shopify must name one or more of ${allowed}.`);
   }
   const filters: Record<string, ShopifyListFilterValue> = {};
   for (const [key, value] of Object.entries(raw)) {
     if (!(SHOPIFY_LIST_FILTER_KEYS as readonly string[]).includes(key)) throw new BulkSourceError(`source_list.filters for form shopify may only use: ${allowed}.`);
+    // A status is one of three words, as the store's search spells them: no free text under this key.
+    if (key === 'status') {
+      if (!isShopifyStatusValues(value)) throw new BulkSourceError(SHOPIFY_STATUS_REFUSAL);
+      filters[key] = typeof value === 'string' ? value : [...(value as string[])];
+      continue;
+    }
     // One value, or a list of them taken as written, in the planner's order: never folded to one
     // value, never deduplicated, never trimmed — a list the rule refuses is refused whole.
     if (Array.isArray(value)) {

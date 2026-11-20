@@ -48,6 +48,11 @@ export interface ApprovalCardData {
 	/** Absent from an engine that predates the field. */
 	replyToElsewhere?: { replyTo: string[]; from: string[] } | null | undefined;
 	afterUntrusted: boolean;
+	/** Which sentence goes with `afterUntrusted` (U-209). Absent from an engine that predates it. */
+	afterUntrustedBy?: 'run' | 'instruction' | 'both' | null | undefined;
+	/** Where the recipients the owner did not name come from, as the engine words it in each
+	 *  language. Absent from an engine that predates it; null when every recipient was named. */
+	targetOrigin?: { de: string; en: string } | null | undefined;
 	origin: { source: 'workflow' | 'task'; triggerId: string; runId: string; threadId?: string | undefined; eventId?: string | undefined } | null;
 	outcome: string | null;
 	setup: ApprovalSetupLine[];

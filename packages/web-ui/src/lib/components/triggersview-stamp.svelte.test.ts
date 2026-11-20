@@ -291,6 +291,57 @@ describe('"Check connections" on a confirmed schedule', () => {
 		await render();
 		expect(check()).toBeNull();
 	});
+
+	it('an open check closes once the row stops offering it, and does not open again by itself', async () => {
+		// Only the list's own refresh interval is faked; settle() runs on real timeouts.
+		vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+		try {
+			rows = [CONFIRMED];
+			await render();
+			check()!.click();
+			await settle();
+			expect(check()!.getAttribute('aria-expanded')).toBe('true');
+			expect(confirmButton()).not.toBeNull();
+			// The member's access ends while the check is open: the row offers no check.
+			rows = [{ ...CONFIRMED, stamp_listed: { lapsed: false, ended: true, ended_on: 'plan', entries: [] } }];
+			vi.advanceTimersByTime(15_000);
+			await settle();
+			expect(check()).toBeNull();
+			expect(confirmButton()).toBeNull();
+			// The row offers it again: the check stays closed until the owner opens it.
+			rows = [CONFIRMED];
+			vi.advanceTimersByTime(15_000);
+			await settle();
+			expect(check()!.getAttribute('aria-expanded')).toBe('false');
+			expect(confirmButton()).toBeNull();
+			expect(previews).toBe(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('a row that leaves the list while its check is open does not come back with it open', async () => {
+		vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+		try {
+			rows = [CONFIRMED];
+			await render();
+			check()!.click();
+			await settle();
+			expect(check()!.getAttribute('aria-expanded')).toBe('true');
+			rows = [];
+			vi.advanceTimersByTime(15_000);
+			await settle();
+			expect(check()).toBeNull();
+			rows = [CONFIRMED];
+			vi.advanceTimersByTime(15_000);
+			await settle();
+			expect(check()!.getAttribute('aria-expanded')).toBe('false');
+			expect(confirmButton()).toBeNull();
+			expect(previews).toBe(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });
 
 describe('the list of a confirmed plan (B3)', () => {

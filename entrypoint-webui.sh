@@ -4,12 +4,24 @@ set -e
 # ── Pre-flight: verify volume mount ──────────────────────────
 # Without a volume mount, the vault key and all data are lost on restart.
 PREFLIGHT_FILE="$HOME/.lynox/.volume-check"
-if printf 'ok' > "$PREFLIGHT_FILE" 2>/dev/null && [ -f "$PREFLIGHT_FILE" ]; then
+if (printf 'ok' > "$PREFLIGHT_FILE") 2>/dev/null && [ -f "$PREFLIGHT_FILE" ]; then
   rm -f "$PREFLIGHT_FILE"
 else
   echo "" >&2
   echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" >&2
   echo "  WARNING: Volume mount not detected or not writable!" >&2
+  # The folder exists but cannot be written. The usual cause is another owner (data written
+  # under another uid); name it, so the warning does not only guess at a missing mount.
+  if [ -d "$HOME/.lynox" ]; then
+    DIR_OWNER=$(stat -c '%u' "$HOME/.lynox" 2>/dev/null || echo unknown)
+    if [ "$DIR_OWNER" != "$(id -u)" ]; then
+      echo "  $HOME/.lynox belongs to uid $DIR_OWNER; this container runs as uid $(id -u)," >&2
+      echo "  which cannot write it." >&2
+    else
+      echo "  $HOME/.lynox belongs to this container's uid but cannot be written" >&2
+      echo "  (a read-only mount, or a folder mode without write access?)." >&2
+    fi
+  fi
   echo "  Data will be LOST when this container restarts." >&2
   echo "" >&2
   echo "  Add to your docker run command:" >&2
@@ -48,10 +60,34 @@ fi
 
 # Auto-generate access token if not set
 TOKEN_FILE="$HOME/.lynox/.access-token"
+
+# The token file is there but this uid cannot use it: say whose it is and what to check, then
+# stop. Without this, `set -e` ends the script on the bare `Permission denied` of the read or
+# write, before the ownership warning further down that names this case.
+token_unusable() {
+  UNUSABLE_OWNER=$(stat -c '%u' "$2" 2>/dev/null || echo unknown)
+  echo "" >&2
+  echo "  ERROR: cannot $1 the access token file $TOKEN_FILE." >&2
+  if [ "$UNUSABLE_OWNER" != "$(id -u)" ]; then
+    echo "  $2 belongs to uid $UNUSABLE_OWNER; this container runs as uid $(id -u)." >&2
+    echo "  This happens when the data was written under another uid, e.g. by an older setup as" >&2
+    echo "  uid 1001 and the container now runs as your own uid (LYNOX_UID). Either leave LYNOX_UID" >&2
+    echo "  unset and run as the uid that owns the data, or change the owner of the data folder on" >&2
+    echo "  the host to the uid the container runs as. See https://docs.lynox.ai/setup/docker/" >&2
+  else
+    echo "  $2 belongs to this container's uid, so the owner is not the cause. Check that the" >&2
+    echo "  file's mode lets this uid read and write it, that the volume is not mounted read-only," >&2
+    echo "  that the disk is not full, and that $TOKEN_FILE is a regular file, not a folder or a" >&2
+    echo "  broken link." >&2
+  fi
+  echo "  lynox does not start, and the file was not changed." >&2
+  exit 1
+}
+
 if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
   # Reuse persisted token from previous run (survives container restarts)
   if [ -f "$TOKEN_FILE" ]; then
-    LYNOX_HTTP_SECRET=$(cat "$TOKEN_FILE")
+    LYNOX_HTTP_SECRET=$(cat "$TOKEN_FILE" 2>/dev/null) || token_unusable read "$TOKEN_FILE"
     export LYNOX_HTTP_SECRET
     echo "  Access token loaded from volume (not shown in logs)." >&2
     echo "  Retrieve: cat ~/.lynox/.access-token (on the host)" >&2
@@ -62,7 +98,10 @@ if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
     export LYNOX_HTTP_SECRET
     # Persist to volume so it survives container restarts
     mkdir -p "$HOME/.lynox"
-    printf '%s' "$LYNOX_HTTP_SECRET" > "$TOKEN_FILE"
+    # A folder this uid cannot enter hides an existing file from `[ -f ]` above, so a failed
+    # write can mean either; name the folder's owner. A folder or a broken link at the token
+    # path, a read-only mount or a full disk fail here too.
+    (printf '%s' "$LYNOX_HTTP_SECRET" > "$TOKEN_FILE") 2>/dev/null || token_unusable write "$HOME/.lynox"
     chmod 600 "$TOKEN_FILE"
     # POSIX-compatible 8-char preview — entrypoint runs under dash (`/bin/sh` of the
     # node:22-slim image), which does not support bash's ${VAR:0:8} substring

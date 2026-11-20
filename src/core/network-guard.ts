@@ -6,7 +6,7 @@ import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
 import type { NetworkPolicy } from '../types/index.js';
 import { isGuardedBaselineHost } from './llm/endpoint-allowlist.js';
 import { noteNetworkContact } from './call-connection.js';
-import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
+import { isShopifyAdminHost, isShopifyAdminUrl, SHOPIFY_HOST_HEADER, SHOPIFY_PAGES, SHOPIFY_REDIRECT } from './shopify-host.js';
 import { storePassBodyRefusal, storePassRefusal, storeRefusalNext, type StorePass } from './store-pass.js';
 
 /**
@@ -784,7 +784,10 @@ export async function fetchPinned(url: string, init: RequestInit = {}, pass?: St
       throw new Error('Blocked: request to a Shopify store refused: the token exchange sends its body as a string. Do not retry it with changed headers or a changed address.');
     }
   } else if (toStore) {
-    throw new Error(`Blocked: ${SHOPIFY_UNAVAILABLE}`);
+    // Without a pass: a Host header that names a store while the URL does not is the header's
+    // fault; a store URL is a page fetch (web search, watch, discovery, calendar, connector),
+    // since the request tool sends a store's data only with a pass and refuses before here.
+    throw new Error(`Blocked: ${isShopifyAdminHost(parsed.hostname) ? SHOPIFY_PAGES : SHOPIFY_HOST_HEADER}`);
   }
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
   const { address: pinnedIp, family } = await resolveAndValidate(hostname);
@@ -838,6 +841,14 @@ function appendIncomingHeaders(target: Headers, src: IncomingHttpHeaders): void 
 }
 
 /**
+ * Throws the redirect refusal when a hop without a store pass leads to a Shopify store: the
+ * request did not go to one, so the store would be reached by whatever the server answered.
+ */
+export function refuseRedirectToStore(hopUrl: string): void {
+  if (isShopifyAdminUrl(hopUrl)) throw new Error(`Blocked: ${SHOPIFY_REDIRECT}`);
+}
+
+/**
  * Fetch a URL after validating that every hop (initial + each redirect) targets
  * a public host. Returns the final non-redirect response. Re-throws the
  * `Blocked: ...` error on any private-IP hit, so callers don't need their own
@@ -877,6 +888,8 @@ export async function fetchWithPublicRedirects(
     } else {
       delete (hopInit as { body?: unknown }).body;
     }
+    // A hop to a store, from a request that was not one, is a redirect the engine does not follow.
+    if (i > 0 && opts.pass === undefined) refuseRedirectToStore(currentUrl);
     const response = await fetchPinned(currentUrl, hopInit, opts.pass);
 
     if (!REDIRECT_STATUSES.has(response.status)) {
