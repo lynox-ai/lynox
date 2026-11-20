@@ -2386,6 +2386,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'tasks.every_hour': { de: 'Stündlich', en: 'Every hour' },
 	'tasks.daily_at': { de: 'Täglich um', en: 'Daily at' },
 	'tasks.monthly_on_day': { de: 'Monatlich am {day}. um {time}', en: 'Monthly on the {day} at {time}' },
+	'tasks.monthly_last_day': { de: 'Monatlich am letzten Tag um {time}', en: 'Monthly on the last day at {time}' },
+	'tasks.monthly_on_day_utc': { de: 'Monatlich am {day}. um {time} UTC', en: 'Monthly on the {day} at {time} UTC' },
 	'tasks.monday': { de: 'Montags', en: 'Mondays' },
 	'tasks.tuesday': { de: 'Dienstags', en: 'Tuesdays' },
 	'tasks.wednesday': { de: 'Mittwochs', en: 'Wednesdays' },

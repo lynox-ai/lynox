@@ -16,7 +16,7 @@
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { approvalSetupKind, approvalSetupName, type ApprovalSetupLine } from './approvals.js';
 	import { visibleText } from '../visible-text.js';
-	import { monthDay } from '../utils/cron-human.js';
+	import { localSchedule, monthDay } from '../utils/cron-human.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
 	// table split out of `tasks` in v42. This is the editable *home* for them:
@@ -486,29 +486,20 @@
 		}
 	}
 
-	// Render a UTC cron in the user's local time so "0 7 * * *" (created locally
-	// as 09:00 in CEST) displays back as "Täglich um 09:00" instead of "07:00".
-	function utcHmToLocal(mmStr: string, hhStr: string): string {
-		const mm = parseInt(mmStr, 10);
-		const hh = parseInt(hhStr, 10);
-		if (Number.isNaN(mm) || Number.isNaN(hh)) return `${hhStr}:${mmStr.padStart(2, '0')}`;
-		const d = new Date();
-		d.setUTCHours(hh, mm, 0, 0);
-		const pad = (n: number) => n.toString().padStart(2, '0');
-		return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-	}
-
+	// A UTC cron as the reader lives it: hour, day and weekday in local time (`localSchedule`).
+	const WEEKDAY_KEYS = ['tasks.sunday', 'tasks.monday', 'tasks.tuesday', 'tasks.wednesday', 'tasks.thursday', 'tasks.friday', 'tasks.saturday'] as const;
 	function cronToHuman(cron: string): string {
-		if (cron === '0 * * * *') return t('tasks.every_hour');
-		const m = cron.match(/^(\d+)\s+(\d+)\s+(\*|\d+)\s+\*\s+(\*|\d+)$/);
-		if (!m) return cron;
-		const local = utcHmToLocal(m[1] ?? '0', m[2] ?? '0');
-		const day = m[3];
-		const weekday = m[4];
-		const weekdays: Record<string, string> = { '0': t('tasks.sunday'), '1': t('tasks.monday'), '2': t('tasks.tuesday'), '3': t('tasks.wednesday'), '4': t('tasks.thursday'), '5': t('tasks.friday'), '6': t('tasks.saturday') };
-		if (day !== '*') return tf('tasks.monthly_on_day', { day: monthDay(Number(day), getLocale()), time: local });
-		if (weekday !== '*') return `${weekdays[weekday] ?? weekday} ${local}`;
-		return `${t('tasks.daily_at')} ${local}`;
+		const s = localSchedule(cron);
+		switch (s.kind) {
+			case 'hourly': return t('tasks.every_hour');
+			case 'daily': return `${t('tasks.daily_at')} ${s.time}`;
+			case 'weekly': return `${t(WEEKDAY_KEYS[s.weekday]!)} ${s.time}`;
+			case 'weekly_utc': return `${t(WEEKDAY_KEYS[s.weekday]!)} ${s.time} UTC`;
+			case 'monthly': return tf('tasks.monthly_on_day', { day: monthDay(s.day, getLocale()), time: s.time });
+			case 'monthly_last': return tf('tasks.monthly_last_day', { time: s.time });
+			case 'monthly_utc': return tf('tasks.monthly_on_day_utc', { day: monthDay(s.day, getLocale()), time: s.time });
+			case 'raw': return s.cron;
+		}
 	}
 
 	function typeLabel(trigger: Trigger): string {

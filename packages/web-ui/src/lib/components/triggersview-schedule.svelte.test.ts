@@ -39,6 +39,7 @@ afterEach(() => {
 	setLocale(locale);
 	vi.useRealTimers();
 	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
 });
 
 async function render(): Promise<void> {
@@ -59,6 +60,8 @@ function scheduleOf(title: string): string {
 }
 
 describe('a monthly schedule names its day as the language does', () => {
+	// Zurich in winter, all year: the day must not depend on where the test runs.
+	beforeEach(() => { vi.spyOn(Date.prototype, 'getTimezoneOffset').mockReturnValue(-60); });
 	const monthly = (): Record<string, unknown>[] => [
 		{ ...BASE, id: 'm1', title: 'Erster', schedule_cron: '0 10 1 * *' },
 		{ ...BASE, id: 'm22', title: 'Zweiundzwanzigster', schedule_cron: '0 10 22 * *' },
@@ -78,5 +81,56 @@ describe('a monthly schedule names its day as the language does', () => {
 		await render();
 		expect(scheduleOf('Erster')).toMatch(/^Monatlich am 1\. um \d\d:\d\d$/);
 		expect(scheduleOf('Zweiundzwanzigster')).toMatch(/^Monatlich am 22\. um \d\d:\d\d$/);
+	});
+});
+
+describe('a schedule near midnight names the local day', () => {
+	const rowsOf = (): Record<string, unknown>[] => [
+		{ ...BASE, id: 'w', title: 'Wochentag', schedule_cron: '0 23 * * 1' },
+		{ ...BASE, id: 'l', title: 'Erster', schedule_cron: '0 2 1 * *' },
+		{ ...BASE, id: 'u', title: 'Einunddreissigster', schedule_cron: '0 23 31 * *' },
+	];
+	// getTimezoneOffset is UTC minus local, in minutes.
+	const inZone = (offset: number) => vi.spyOn(Date.prototype, 'getTimezoneOffset').mockReturnValue(offset);
+
+	it('in Zurich: the next weekday, and a day 31 that moves forward stays in UTC', async () => {
+		inZone(-60);
+		setLocale('de');
+		rows = rowsOf();
+		await render();
+		expect(scheduleOf('Wochentag')).toBe('Dienstags 00:00');
+		expect(scheduleOf('Erster')).toBe('Monatlich am 1. um 03:00');
+		expect(scheduleOf('Einunddreissigster')).toBe('Monatlich am 31. um 23:00 UTC');
+	});
+
+	it('in Los Angeles: day 1 moves back to the last day, in English too', async () => {
+		inZone(480);
+		setLocale('en');
+		rows = rowsOf();
+		await render();
+		expect(scheduleOf('Wochentag')).toBe('Mondays 15:00');
+		expect(scheduleOf('Erster')).toBe('Monthly on the last day at 18:00');
+		expect(scheduleOf('Einunddreissigster')).toBe('Monthly on the 31st at 15:00');
+	});
+
+	it('across a clock change: a weekday that summer would move stays in UTC', async () => {
+		// Winter today, summer in July: 22:00 UTC is Monday 23:00 now and Tuesday 00:00 then.
+		vi.spyOn(Date.prototype, 'getTimezoneOffset').mockImplementation(function (this: Date) { return this.getMonth() >= 3 && this.getMonth() <= 9 ? -120 : -60; });
+		vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'], now: new Date('2026-01-15T12:00:00Z') });
+		setLocale('de');
+		rows = [{ ...BASE, id: 'd', title: 'Umstellung', schedule_cron: '0 22 * * 1' }];
+		await render();
+		expect(scheduleOf('Umstellung')).toBe('Montags 22:00 UTC');
+	});
+
+	it('a zone that changes for a few weeks between January and July still keeps the weekday in UTC', async () => {
+		// Morocco 2026: +60 all year except about five weeks from mid-February into March, when it is 0.
+		// 23:30 UTC is Tuesday 00:30 at +60 and Monday 23:30 at 0.
+		vi.spyOn(Date.prototype, 'getTimezoneOffset').mockImplementation(function (this: Date) { return this.getMonth() === 2 ? 0 : -60; });
+		vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'], now: new Date('2026-07-15T12:00:00Z') });
+		setLocale('de');
+		rows = [{ ...BASE, id: 'r', title: 'Ramadan', schedule_cron: '30 23 * * 1' }];
+		await render();
+		expect(scheduleOf('Ramadan')).toBe('Montags 23:30 UTC');
 	});
 });
