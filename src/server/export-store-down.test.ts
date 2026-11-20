@@ -193,6 +193,8 @@ describe('export with every store open, durable memory off, then the CRM gone (r
     const saved = h.engine().knowledgeLayer;
     const rel = (i: number) => ({ fromEntityId: 'a', toEntityId: `b${String(i)}`, relationType: 'knows', sourceMemoryId: `m${String(i)}`, sourceDeleted: false });
     const stub = (count: number) => ({
+      readFallbackCount: 0,
+      subjectGraphUnavailable: false,
       listEntities: ({ offset }: { offset: number }) => Promise.resolve(offset === 0 ? [{ id: 'a' }] : []),
       stats: () => Promise.resolve({}),
       getEntityRelationsForExport: () => Promise.resolve(Array.from({ length: count }, (_, i) => rel(i))),
@@ -259,6 +261,7 @@ describe('export with every store open, durable memory off, then the CRM gone (r
     let fallbacks = 0;
     h.engine().knowledgeLayer = {
       get readFallbackCount() { return fallbacks; },
+      subjectGraphUnavailable: false,
       // The subject graph threw and the legacy store answered instead.
       listEntities: () => { fallbacks += 1; return Promise.resolve([]); },
       stats: () => Promise.resolve({}),
@@ -270,12 +273,30 @@ describe('export with every store open, durable memory off, then the CRM gone (r
       fallbacks = 0;
       h.engine().knowledgeLayer = {
         get readFallbackCount() { return 3; },
+        subjectGraphUnavailable: false,
         listEntities: () => Promise.resolve([]),
         stats: () => Promise.resolve({}),
         getEntityRelationsForExport: () => Promise.resolve([]),
       };
       const steady = await h.exportBody();
       expect(steady.knowledge_graph_may_be_incomplete, 'fallbacks before the export do not count').toBe(false);
+    } finally {
+      h.engine().knowledgeLayer = saved;
+    }
+  }, 60_000);
+
+  it('marks the knowledge graph incomplete when the subject graph is on without its store', async () => {
+    const saved = h.engine().knowledgeLayer;
+    h.engine().knowledgeLayer = {
+      readFallbackCount: 0,
+      subjectGraphUnavailable: true,
+      listEntities: () => Promise.resolve([]),
+      stats: () => Promise.resolve({}),
+      getEntityRelationsForExport: () => Promise.resolve([]),
+    };
+    try {
+      const body = await h.exportBody();
+      expect(body.knowledge_graph_may_be_incomplete, 'only the legacy store was read').toBe(true);
     } finally {
       h.engine().knowledgeLayer = saved;
     }

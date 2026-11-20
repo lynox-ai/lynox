@@ -1645,6 +1645,15 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     return this._readFallbacks;
   }
 
+  /**
+   * The subject graph is switched on but its store is missing (engine.db did not open at boot).
+   * Every read then answers from the legacy store alone, without a fallback being logged, and
+   * what only engine.db holds is not in it.
+   */
+  get subjectGraphUnavailable(): boolean {
+    return this.subjectGraphEnabled && this.subjectStore === null;
+  }
+
   private _readFallbacks = 0;
 
   private _logReadFallback(method: string, err: unknown): void {

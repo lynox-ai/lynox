@@ -14303,7 +14303,8 @@ export class LynoxHTTPApi {
           };
           // A subject-graph read that fell back to the legacy store answered from another
           // store; what it returned may be partial.
-          const fellBack = kg.readFallbackCount !== fallbacksBefore;
+          // The same holds when the subject graph is on but its store never opened.
+          const fellBack = kg.readFallbackCount !== fallbacksBefore || kg.subjectGraphUnavailable;
           exportData['knowledge_graph_may_be_incomplete'] = truncated || relationCapHit || fellBack;
         } catch {
           exportData['knowledge_graph'] = { entities: [], relationships: [] };
