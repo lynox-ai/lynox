@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, mkdirSync, chmodSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readUserConfig } from './config.js';
@@ -49,12 +49,11 @@ describe('a config file that does not parse', () => {
     expect(line).not.toContain('PARSEFAULTSECRET');
   });
 
-  it.skipIf(process.getuid?.() === 0)('names a read failure by its code', () => {
-    const file = join(dir, 'config.json');
-    writeFileSync(file, `{"api_key": "${KEY}"}`);
-    chmodSync(file, 0o000);
+  it('names a read failure by its code', () => {
+    // A directory in the file's place fails the read for any user, root included.
+    mkdirSync(join(dir, 'config.json'));
     expect(readUserConfig()).toEqual({});
-    expect(stderr.join('')).toMatch(/Failed to parse .*config\.json: EACCES\n/);
+    expect(stderr.join('')).toMatch(/Failed to parse .*config\.json: EISDIR\n/);
   });
 });
 
@@ -65,5 +64,7 @@ describe('jsonFault', () => {
     expect(jsonFault(quoted)).toBe('not valid JSON');
     expect(jsonFault(new SyntaxError('Unterminated string in JSON at position 62 (line 1 column 63)'))).toBe('not valid JSON at position 62 (line 1 column 63)');
     expect(jsonFault(new SyntaxError('Bad control character in string literal in JSON at position 22'))).toBe('not valid JSON at position 22');
+    // The same words inside a quote are not a position.
+    expect(jsonFault(new SyntaxError('Unexpected token \'a\', "x in JSON at position 7" is not valid JSON'))).toBe('not valid JSON');
   });
 });

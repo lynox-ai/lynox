@@ -5,6 +5,8 @@
  * a key or a token that quote is a piece of the secret, so a log line names the position only.
  */
 export function jsonFault(err: SyntaxError): string {
-  const at = /at position \d+(?: \(line \d+ column \d+\))?/.exec(err.message);
-  return at ? `not valid JSON ${at[0]}` : 'not valid JSON';
+  // Read from the end of the message only: a quote sits before it and could hold the same words.
+  const at = / in JSON at position (\d+)(?: \(line (\d+) column (\d+)\))?$/.exec(err.message);
+  if (!at) return 'not valid JSON';
+  return `not valid JSON at position ${at[1] ?? ''}${at[2] !== undefined && at[3] !== undefined ? ` (line ${at[2]} column ${at[3]})` : ''}`;
 }

@@ -207,10 +207,10 @@ function getProjectConfigDir(): string {
   return join(process.cwd(), LYNOX_DIR);
 }
 
-/** The errno code of a failed read (`EACCES`), or a fixed text: never the message. */
+/** The code of a failed read (`EACCES`, `ERR_FS_FILE_TOO_LARGE`), or a fixed text: never the message. */
 function errnoCode(err: unknown): string {
   const code = (err as { code?: unknown } | null)?.code;
-  return typeof code === 'string' && /^E[A-Z]+$/.test(code) ? code : 'read failed';
+  return typeof code === 'string' && /^(E[A-Z0-9]+|ERR_[A-Z_]+)$/.test(code) ? code : 'read failed';
 }
 
 function readConfigFile(filePath: string): LynoxUserConfig | null {
