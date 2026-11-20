@@ -11477,10 +11477,14 @@ describe('LynoxHTTPApi', () => {
           expect(bea.byId['trg-anna']).toEqual([{ kind: 'set_up_by', name: 'anna@example.com', takenOver: false }]);
           expect(bea.byId['trg-bea']).toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }]);
           expect(bea.text).not.toContain('Anna A.');
-          // A session no scope names (a mandate without a grant): no lines at all.
+          // A session no scope names (a mandate without a grant): no lines at all, no read of the
+          // trail, and no display name anywhere in the answer.
           api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'bea@example.com' }) as RequestPrincipal);
+          const readsBefore = reads.length;
           const none = await setupOf();
           for (const id of ['trg-anna', 'trg-bea', 'trg-taken', 'trg-own', 'trg-old']) expect(none.byId[id]).toEqual([]);
+          expect(reads.length).toBe(readsBefore);
+          for (const name of Object.values(shown)) expect(none.text).not.toContain(name);
           // A trail that cannot be read costs the owner the names, not the list: the address stands in.
           api.setPrincipalResolverForTesting(resolver);
           trail = { displayNameOf: () => { throw new Error('trail down'); }, record: () => undefined };
