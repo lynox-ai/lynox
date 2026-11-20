@@ -67,7 +67,8 @@ export function q(v: string): string {
   return singleLine(v).replace(QUOTE_LIKE, "'");
 }
 
-const quoted = (v: string): string => `"${q(v)}"`;
+/** A target in quotes, straight ones, or German ones („…“) where `german` asks for them. `q` keeps quote marks out of the value. */
+const quoted = (v: string, german = false): string => (german ? `„${q(v)}“` : `"${q(v)}"`);
 
 /** The element for a target that did not read as an address. Always last in a list; in German
  *  its relative clause closes with a comma, since the sentence always goes on after the list. */
@@ -77,8 +78,8 @@ const UNREADABLE: Record<NoticeLanguage, string> = {
 };
 
 /** The targets as a list: each in quotes, the last joined with "und" / "and". */
-export function targetList(targets: OriginTargets, lang: NoticeLanguage): string {
-  const items = [...targets.values.map(quoted), ...(targets.unreadable ? [UNREADABLE[lang]] : [])];
+export function targetList(targets: OriginTargets, lang: NoticeLanguage, germanQuotes = false): string {
+  const items = [...targets.values.map((v) => quoted(v, germanQuotes && lang === 'de')), ...(targets.unreadable ? [UNREADABLE[lang]] : [])];
   if (items.length <= 1) return items[0] ?? UNREADABLE[lang];
   return `${items.slice(0, -1).join(', ')} ${lang === 'de' ? 'und' : 'and'} ${items[items.length - 1]!}`;
 }
@@ -161,7 +162,7 @@ export function originAsk(tool: string, input: unknown, noun: TargetNoun, target
   const from = originFrom(origin, lang);
   const list = targetList(targets, lang);
   const many = countOf(targets) > 1;
-  if (noun === 'page') return originReadAsk(list, from, lang, connected.length > 0);
+  if (noun === 'page') return originReadAsk(targetList(targets, lang, true), lang, connected.length > 0);
   if (lang === 'de') {
     const head = noun === 'mail'
       ? (many ? pv`${word}: Die Empfänger ${list} hast nicht du genannt. ` : pv`${word}: Den Empfänger ${list} hast nicht du genannt. `)
@@ -186,17 +187,13 @@ export function originAsk(tool: string, input: unknown, noun: TargetNoun, target
  * way out that is not a click. A host the owner writes in the chat counts as named by them for the
  * rest of the conversation (`owner-known-targets.ts`), so lynox does not ask about it again.
  */
-function originReadAsk(list: string, from: PromptText | null, lang: NoticeLanguage, connected: boolean): PromptText {
+function originReadAsk(list: string, lang: NoticeLanguage, connected: boolean): PromptText {
+  // The condition lynox checks, not an origin it would have to know: the owner may have typed the
+  // address themselves into a conversation with foreign content.
   if (lang === 'de') {
-    const where = from === null
-      ? pv`Die Adresse kommt nicht von dir; woher sie stammt, kann lynox nicht feststellen.`
-      : pv`Die Adresse kommt aus ${from}, nicht von dir.`;
-    return pv`Seite auf ${list} lesen? ${where} ${list} erhält dabei die ganze Adresse, auch den Pfad und alles nach dem „?“. ${originAskOnce(lang, 'page')}\n\nSchreib ${list} hier in den Chat, dann fragt lynox in diesem Gespräch nicht mehr nach diesem Host.${connected ? pv`\n\n${list} gehört zu einer gespeicherten Verbindung. Speichere sie in einem neuen Gespräch noch einmal, dann fragt lynox beim Lesen von dort nicht mehr nach.` : ''}`;
+    return pv`Seite auf ${list} lesen? Im Gespräch steht Inhalt von ausserhalb, und ${list} hast du nicht genannt. ${list} erhält dabei die ganze Adresse, auch den Pfad und alles nach dem „?“. ${originAskOnce(lang, 'page')}\n\nSchreib ${list} hier in den Chat, dann fragt lynox in diesem Gespräch nicht mehr nach diesem Host.${connected ? pv`\n\n${list} gehört zu einer gespeicherten Verbindung. Bitte lynox in einem neuen Gespräch, diese Verbindung noch einmal zu speichern; danach fragt lynox beim Lesen von dort nicht mehr.` : ''}`;
   }
-  const where = from === null
-    ? pv`The address does not come from you; lynox cannot tell where it comes from.`
-    : pv`The address comes from ${from}, not from you.`;
-  return pv`Read the page on ${list}? ${where} ${list} then gets the whole address, including the path and everything after the "?". ${originAskOnce(lang, 'page')}\n\nWrite ${list} here in the chat, and lynox won't ask about this host again in this conversation.${connected ? pv`\n\n${list} belongs to a saved connection. Save it again in a new conversation, and lynox won't ask when it reads from there.` : ''}`;
+  return pv`Read the page on ${list}? This conversation contains content from outside, and you haven't named ${list}. ${list} then gets the whole address, including the path and everything after the "?". ${originAskOnce(lang, 'page')}\n\nWrite ${list} here in the chat, and lynox won't ask about this host again in this conversation.${connected ? pv`\n\n${list} belongs to a saved connection. Ask lynox in a new conversation to save that connection again; after that, lynox won't ask when it reads from there.` : ''}`;
 }
 
 /**
@@ -204,19 +201,12 @@ function originReadAsk(list: string, from: PromptText | null, lang: NoticeLangua
  * reason is said, and it has no way out: naming the host does not make it pass, because the
  * question is about where a service sends the read on, not about the host.
  */
-export function originCarriedAsk(targets: OriginTargets, origin: SendOrigin, lang: NoticeLanguage): PromptText {
-  const from = originFrom(origin, lang);
-  const list = targetList(targets, lang);
+export function originCarriedAsk(targets: OriginTargets, lang: NoticeLanguage): PromptText {
+  const list = targetList(targets, lang, true);
   if (lang === 'de') {
-    const where = from === null
-      ? pv`Die Adresse kommt nicht von dir; woher sie stammt, kann lynox nicht feststellen.`
-      : pv`Die Adresse kommt aus ${from}, nicht von dir.`;
-    return pv`Seite auf ${list} lesen? Die Adresse enthält eine weitere Adresse (ein „http:“ oder „https:“ im Pfad oder nach dem „?“). Ein Dienst, der so eine Adresse abruft, kann die Anfrage mit allem, was die Adresse enthält, an diese weitere Adresse weiterschicken. ${where} Bei solchen Adressen fragt lynox jedes Mal, auch bei einem Host, den du genannt hast. ${originAskOnce(lang, 'page')}`;
+    return pv`Seite auf ${list} lesen? In dieser Adresse steckt eine weitere Adresse (ein „http:“ oder „https:“ im Pfad oder nach dem „?“). Der Dienst kann die Anfrage mit allem, was die Adresse enthält, dorthin weiterschicken. Weil im Gespräch Inhalt von ausserhalb steht, fragt lynox bei solchen Adressen jedes Mal, auch bei einem Host, den du genannt hast. ${originAskOnce(lang, 'page')}`;
   }
-  const where = from === null
-    ? pv`The address does not come from you; lynox cannot tell where it comes from.`
-    : pv`The address comes from ${from}, not from you.`;
-  return pv`Read the page on ${list}? The address carries another address (an "http:" or "https:" in the path or after the "?"). A service that fetches such an address can pass the request on, with everything the address holds, to that other address. ${where} lynox asks about such an address every time, even for a host you named. ${originAskOnce(lang, 'page')}`;
+  return pv`Read the page on ${list}? This address carries another address (an "http:" or "https:" in the path or after the "?"). The service can pass the request on, with everything the address holds, to that other address. Because this conversation contains content from outside, lynox asks about such addresses every time, even for a host you named. ${originAskOnce(lang, 'page')}`;
 }
 
 /** The question for a reply that goes only to the sender of the mail it answers. */

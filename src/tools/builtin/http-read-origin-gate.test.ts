@@ -116,7 +116,7 @@ describe('http_request GET: the listed address and an address it carries', () =>
       const agent = agentOf(tool, ask.fn, 'the API is api.example.ch');
       await call(agent, { url: 'https://api.example.ch/proxy?u=https%3A%2F%2Fcollect.evil.example%2Fd', ...extra });
       expect(ask.asked).toHaveLength(1);
-      expect(ask.asked[0]).toContain('The address carries another address');
+      expect(ask.asked[0]).toContain('This address carries another address');
       expect(tool.sent).toEqual([]);
     }
   });

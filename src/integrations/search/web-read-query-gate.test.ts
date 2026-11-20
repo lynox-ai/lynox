@@ -352,7 +352,7 @@ describe('an address that carries another address, after foreign content', () =>
       const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch and docs.example.ch and collect.evil.example') });
       const result = await read(agent, url);
       expect(ask.asked).toHaveLength(1);
-      expect(ask.asked[0]).toMatch(/^Read the page on "reader\.example\.ch"\? The address carries another address/);
+      expect(ask.asked[0]).toMatch(/^Read the page on "reader\.example\.ch"\? This address carries another address/);
       expect(ask.asked[0]).toContain('even for a host you named');
       expect(ask.asked[0]).not.toContain('Write "reader.example.ch" here in the chat');
       expect(tool.reads).toEqual([]);

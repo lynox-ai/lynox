@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import {
+import { originCarriedAsk,
   originAsk, originAskOnce, originCardMail, originDenied, originLookupFailedMandate, originLookupFailedUnattended, originRefusedMandate, originRefusedUnattended, originReplyAsk, originReplyToAsk, originRunNotice, originUnreadable,
   targetList, TOOLS_WITH_WORDS, type OriginTargets, type SendOrigin,
 } from './origin-notices.js';
@@ -128,11 +128,17 @@ describe('the question to the owner', () => {
     // The same words for a page read and an http GET: both are reads (`noun` 'page').
     for (const [tool, input] of [['web_research', { action: 'read' }], ['http_request', {}]] as const) {
       const readDe = flattenPrompt(originAsk(tool, input, 'page', one('a.ch'), { kind: 'unknown' }, 'de'));
-      expect(readDe).toMatch(/^Seite auf "a\.ch" lesen\? /);
-      expect(readDe).toContain('"a.ch" erhält dabei die ganze Adresse, auch den Pfad und alles nach dem „?“.');
-      expect(readDe).toContain('Schreib "a.ch" hier in den Chat, dann fragt lynox in diesem Gespräch nicht mehr nach diesem Host.');
+      // The agreed words (U-368, its origin sentence replaced by the condition lynox checks; U-375).
+      expect(readDe).toBe('Seite auf „a.ch“ lesen? Im Gespräch steht Inhalt von ausserhalb, und „a.ch“ hast du nicht genannt. „a.ch“ erhält dabei die ganze Adresse, auch den Pfad und alles nach dem „?“. Ein Ja gilt nur für dieses eine Lesen.\n\nSchreib „a.ch“ hier in den Chat, dann fragt lynox in diesem Gespräch nicht mehr nach diesem Host.');
       expect(readDe).not.toContain('Trotzdem senden?');
     }
+    expect(flattenPrompt(originAsk('http_request', {}, 'page', one('a.ch'), { kind: 'unknown' }, 'en'))).toBe('Read the page on "a.ch"? This conversation contains content from outside, and you haven\'t named "a.ch". "a.ch" then gets the whole address, including the path and everything after the "?". A yes applies to this one read only.\n\nWrite "a.ch" here in the chat, and lynox won\'t ask about this host again in this conversation.');
+    // A host of a saved connection that does not count for reads: one sentence more.
+    expect(flattenPrompt(originAsk('http_request', {}, 'page', one('a.ch'), { kind: 'unknown' }, 'de', ['a.ch']))).toMatch(/\n\n„a\.ch“ gehört zu einer gespeicherten Verbindung\. Bitte lynox in einem neuen Gespräch, diese Verbindung noch einmal zu speichern; danach fragt lynox beim Lesen von dort nicht mehr\.$/);
+    expect(flattenPrompt(originAsk('http_request', {}, 'page', one('a.ch'), { kind: 'unknown' }, 'en', ['a.ch']))).toMatch(/\n\n"a\.ch" belongs to a saved connection\. Ask lynox in a new conversation to save that connection again; after that, lynox won't ask when it reads from there\.$/);
+    // An address that carries another address: its reason, no way out.
+    expect(flattenPrompt(originCarriedAsk(one('a.ch'), 'de'))).toBe('Seite auf „a.ch“ lesen? In dieser Adresse steckt eine weitere Adresse (ein „http:“ oder „https:“ im Pfad oder nach dem „?“). Der Dienst kann die Anfrage mit allem, was die Adresse enthält, dorthin weiterschicken. Weil im Gespräch Inhalt von ausserhalb steht, fragt lynox bei solchen Adressen jedes Mal, auch bei einem Host, den du genannt hast. Ein Ja gilt nur für dieses eine Lesen.');
+    expect(flattenPrompt(originCarriedAsk(one('a.ch'), 'en'))).toBe('Read the page on "a.ch"? This address carries another address (an "http:" or "https:" in the path or after the "?"). The service can pass the request on, with everything the address holds, to that other address. Because this conversation contains content from outside, lynox asks about such addresses every time, even for a host you named. A yes applies to this one read only.');
     expect(flattenPrompt(originAsk('http_request', {}, 'host', one('a.ch'), { kind: 'unknown' }, 'de'))).toContain('Trotzdem senden?');
     // A tool without words of its own is named as an external tool, its name in quotes.
     expect(flattenPrompt(originAsk('crm_push', {}, 'host', one('a.ch'), { kind: 'unknown' }, 'de'))).toMatch(/^Externes Werkzeug "crm_push": /);

@@ -162,7 +162,7 @@ describe('a GET to a connected API after foreign content', () => {
     const tool = http(); const asked: string[] = [];
     await call(agentWith(tool, store, asked), { url: 'https://api.old.example/v1/items' });
     expect(asked).toHaveLength(1);
-    expect(asked[0]).toContain('belongs to a saved connection. Save it again in a new conversation');
+    expect(asked[0]).toContain('belongs to a saved connection. Ask lynox in a new conversation to save that connection again');
     expect(tool.sent).toEqual([]);
   });
 
