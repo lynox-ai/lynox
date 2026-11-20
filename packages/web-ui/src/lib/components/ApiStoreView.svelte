@@ -189,9 +189,8 @@
 		<div class="space-y-2">
 			{#each profiles as profile}
 				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle overflow-hidden">
-					<div class="flex items-stretch">
-						<button onclick={() => expanded = expanded === profile.id ? null : profile.id}
-							class="flex-1 min-w-0 px-4 py-3 text-left hover:bg-bg-muted transition-colors">
+					<button onclick={() => expanded = expanded === profile.id ? null : profile.id}
+							class="block w-full min-w-0 px-4 py-3 text-left hover:bg-bg-muted transition-colors">
 							<div class="flex items-center gap-2">
 								<span class="text-sm font-medium">{profile.name}</span>
 								{#if profile.auth}<span class="text-xs rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{profile.auth.type}</span>{/if}
@@ -200,17 +199,20 @@
 							{#if connectionLine(profile.oauth_grant)}<p class="text-xs text-text-muted mt-1" data-testid="api-connection">{connectionText(connectionLine(profile.oauth_grant)!)}</p>{/if}
 							{#if profile.description}<p class="text-xs text-text-muted mt-1">{profile.description}</p>{/if}
 						</button>
-						<button onclick={() => manageInChat(profile)}
-							aria-label={t('apis.manage_in_chat')}
-							title={t('apis.manage_in_chat')}
-							class="shrink-0 px-3 text-sm text-text-subtle hover:text-text hover:bg-bg-muted transition-colors border-l border-border">
+					<!-- The actions in a row of their own, each with its name in view: a touch screen shows
+					     no tooltip, and texts that send the owner here name the button by its label. -->
+					<div class="flex flex-wrap items-center gap-2 border-t border-border px-4 py-2" data-testid="api-actions">
+						<button onclick={() => manageInChat(profile)} data-testid="api-manage-in-chat"
+							class="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] px-2 py-1 text-xs text-text-muted hover:text-text hover:bg-bg-muted transition-colors">
 							<Icon name="chat" size="xs" />
+							<span>{t('apis.manage_in_chat')}</span>
 						</button>
 						{#if isOwnerSession()}
 						<button onclick={() => deleteProfile(profile)}
 							disabled={deleting === profile.id}
 							aria-label={t('apis.delete')}
-							class="shrink-0 px-3 text-xs text-text-subtle hover:text-danger hover:bg-danger/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed border-l border-border">
+							data-testid="api-delete"
+							class="ml-auto rounded-[var(--radius-sm)] px-2 py-1 text-xs text-text-subtle hover:text-danger hover:bg-danger/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
 							{t('apis.delete')}
 						</button>
 						{/if}
