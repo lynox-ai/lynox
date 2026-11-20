@@ -345,6 +345,18 @@ describe('a message the budget or a run hook blocked is kept for the person, not
     expect(title.toLowerCase()).not.toContain('quarter');
   });
 
+  it('a scheduled or watch run the budget or a hook blocks keeps nothing: no thread fills up tick by tick', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    budget.refuse = CAP;
+    expect(await session.run('check the inbox', { triggerOrigin: 'cron' })).toBe(CAP);
+    budget.refuse = undefined;
+    session.registerHooks({ onBeforeRun: async () => { throw new Error(HOOK); } });
+    expect(await session.run('summarise the page', { triggerOrigin: 'watch' })).toBe(`Run blocked: ${HOOK}`);
+    expect(engine.getThreadStore()!.getMessages(session.sessionId)).toEqual([]);
+    expect(engine.getThreadStore()!.getThread(session.sessionId)?.message_count ?? 0).toBe(0);
+  });
+
   it('an internal run the budget or a hook blocks keeps nothing in the thread', async () => {
     const engine = await boot();
     const session = engine.createSession();
