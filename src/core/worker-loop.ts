@@ -8,6 +8,8 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
+import { join } from 'node:path';
+import { claimStoreReconnectHints } from './store-token-refresh.js';
 import { recipientsConfirmable } from './recipient-confirm.js';
 import { errorText, errorTextReduced, FixedTextError, processErrorText } from './error-egress.js';
 import { containThreadFrom, threadIsContained } from './containment.js';
@@ -18,7 +20,7 @@ import {
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, RESUMED_RUN_NOT_CONTAINED,
   WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, type WorkerNotices,
 } from './worker-notices.js';
-import { BULK_NOTICES, bulkPushTitle, isDiscardReason, type BulkNotices, type BulkPushEnd } from './bulk-notices.js';
+import { BULK_NOTICES, bulkHaltForReaders, bulkPushTitle, isDiscardReason, type BulkNotices, type BulkPushEnd } from './bulk-notices.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { originRunNotice, type OriginRefusal, type SendOrigin, type TriggerSetUpBy } from './origin-notices.js';
@@ -1519,6 +1521,20 @@ export class WorkerLoop {
         );
       }
 
+      // The owner's hint that a store's access runs out soon (`store-token-refresh.ts`): only with a
+      // channel, claimed on the grant before it is sent. No timer and no refresh of its own.
+      try {
+        const apiStore = this.engine.getApiStore();
+        if (apiStore && this.notificationRouter.hasChannels()) {
+          const { getLynoxDir } = await import('./config.js');
+          for (const message of claimStoreReconnectHints(apiStore, join(getLynoxDir(), 'apis'), noticeLanguage(this.engine.config?.language))) {
+            void this.notificationRouter.notify(message);
+          }
+        }
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:worker] store reconnect hint failed: ${processErrorText(err)}\n`);
+      }
+
       // The owner's notice of paused plans (`plan-pause.ts`), in the reminder's order: only with a
       // channel, claimed before it is sent, so two processes on one file send it once and none is
       // used up while no channel is registered. At boot the worker starts before the server
@@ -2716,7 +2732,7 @@ export class WorkerLoop {
         // The connection a request carried: the attached profile's id and the grant it held when
         // its credential was read. An empty or non-string grant (a file-loaded profile) is none.
         attach: async (url, headers, method, out) => {
-          const profile = await attachStoredCredential(url, headers, isWriteMethod(method), { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases, exactClearance: toolContext.exactClearance, storeBindingDigest: toolContext.storeBindingDigest, containment: toolContext.containment, vaultNameBindings: toolContext.vaultNameBindings }, { bulkRunId: run.id }, out);
+          const profile = await attachStoredCredential(url, headers, isWriteMethod(method), { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases, exactClearance: toolContext.exactClearance, storeBindingDigest: toolContext.storeBindingDigest, containment: toolContext.containment, vaultNameBindings: toolContext.vaultNameBindings, hostPolicy: toolContext }, { bulkRunId: run.id }, out);
           if (profile === null) return null;
           const grantId: unknown = profile.oauth_grant?.grant_id;
           return { id: profile.id, grantId: typeof grantId === 'string' && grantId !== '' ? grantId : null };
@@ -3932,9 +3948,18 @@ export class WorkerLoop {
    */
   private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted' | 'stopped', said?: string, opts?: { readonly noRetry: true }): void {
     const look = RUN_END_LOOK[end === true ? 'success' : end === false ? 'failed' : end];
+    // A bulk halt whose way on only the owner can take: the history, which a mandate reads too,
+    // keeps the fact; the owner's push keeps the way; the planning mandate's push says the owner
+    // resolves it (U-383).
+    const haltRow = this.#bulkRunRow(task);
+    const lang = noticeLanguage(this.engine.config?.language);
+    // A run a mandate planned before the ledger kept its grant cannot reach that grant's devices on
+    // its own: it stays one sentence for every reader and device, as before.
+    const byReader = haltRow !== null && haltRow.grantUnknown !== true;
+    const recordAs = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, resultSummary, lang);
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
-      this.#recordRun(taskManager, task.id, resultSummary, look.status, undefined, opts);
+      this.#recordRun(taskManager, task.id, recordAs?.record ?? resultSummary, look.status, undefined, opts);
     }
 
     // Told as it was recorded (`#recordRun` adds the same lines), and once: a schedule that
@@ -3951,12 +3976,27 @@ export class WorkerLoop {
     if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, notes)) {
       const shownEnd: BulkPushEnd = told.status === 'failed' && this.#bulkRunHalted(task) ? 'halted'
         : told.status === 'stopped' && this.#bulkRunDiscarded(task) ? 'discarded' : told.status;
+      const title = `${toldLook.mark} ${this.#pushTitleOf(task, shownEnd)}`;
+      const readers = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, told.result, lang);
       void this.notificationRouter.notify({
-        title: `${toldLook.mark} ${this.#pushTitleOf(task, shownEnd)}`,
+        title,
         body: told.result,
         taskId: task.id,
         priority: toldLook.priority,
+        // Only the owner can take the way this sentence names: no other device reads it.
+        ...(readers === null ? {} : { audience: 'owner' as const }),
       });
+      const mandateId = haltRow?.mandateId ?? null;
+      if (readers !== null && mandateId !== null && (this.engine.getMandateEnds()?.isLive(mandateId) ?? false)) {
+        void this.notificationRouter.notify({
+          title,
+          body: readers.mandate,
+          taskId: task.id,
+          priority: toldLook.priority,
+          audience: 'mandates',
+          mandateId,
+        });
+      }
     }
   }
 
@@ -3964,20 +4004,27 @@ export class WorkerLoop {
    * The run a bulk trigger leads to, as its ledger row holds it: null for any other trigger, a
    * run that is gone, or a read that fails, which costs a push its words, never the push.
    */
-  #bulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null } | null {
+  #bulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null; mandateId?: string | null; grantUnknown?: true } | null {
     const row = this.#readBulkRunRow(task);
     return row === 'unreadable' ? null : row;
   }
 
   /** {@link #bulkRunRow}, with a read that failed told apart from a run that is gone. */
-  #readBulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null } | null | 'unreadable' {
+  #readBulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null; mandateId?: string | null; grantUnknown?: true } | null | 'unreadable' {
     if (task.bulk_run_id === undefined || !task.effect.startsWith('bulk_')) return null;
     try {
       const ledger = this.engine.getBulkLedger() ?? this.engine.getBulkLedgerSwitchedOff?.() ?? null;
       // A plain row read: `getStatus` frees dead reads as it reads, and a push must not write.
       const st = ledger?.getRunForApply(task.bulk_run_id);
       if (st === null || st === undefined) return null;
-      return { phase: st.phase, haltReason: typeof st.haltReason === 'string' ? st.haltReason : null };
+      const planner = st.delegatedPlanner;
+      return {
+        phase: st.phase, haltReason: typeof st.haltReason === 'string' ? st.haltReason : null,
+        // The grant that planned the run, if a mandate did: whose devices a halt's mandate sentence is for.
+        mandateId: planner?.kind === 'mandate' ? planner.mandateId ?? null : null,
+        // A mandate planned it, but the row names no grant (a run from before the ledger kept it).
+        ...(planner?.kind === 'mandate' && (planner.mandateId ?? null) === null ? { grantUnknown: true as const } : {}),
+      };
     } catch {
       return 'unreadable';
     }

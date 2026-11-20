@@ -6,7 +6,7 @@ import {
 	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkPhaseKey, bulkPhaseHasSuffix, bulkStepLabelKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
-	bulkSentenceParts, bulkSecretInContextKey,
+	bulkSentenceParts, bulkSecretInContextKey, bulkOwnerNoticeShown, bulkWrapParts, bulkHostSegments,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -474,7 +474,7 @@ describe('going on from a run that halted', () => {
 		}
 	});
 
-	const AS_IS = ['unavailable', 'timeBudget', 'consecutiveFailures', 'stoppedByOwner', 'listUnreadable', 'credential', 'unauthorized', 'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'unrecorded', 'listReadFailed', 'shopInactive'];
+	const AS_IS = ['unavailable', 'timeBudget', 'consecutiveFailures', 'stoppedByOwner', 'listUnreadable', 'credential', 'unauthorized', 'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'unrecorded', 'listReadFailed', 'shopInactive', 'storeAccessEnded', 'storeClientMisnamed'];
 	const NONE = ['contract', 'listFormWithdrawn', 'listFilterWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff'];
 	const base = { phase: 'planned' as const, listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false };
 	const judged = { judge: { tier: 'fast', unjudged: 3 }, judgeServedBy: { provider: 'mistral', label: 'Mistral Medium' } } as unknown as Pick<BulkRunDetailData, 'judge' | 'judgeServedBy'>;
@@ -661,6 +661,15 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeKind(w('unavailable', { haltKey: null }))).toBeNull();
 	});
 
+	it('names the step before writing on for a store whose access lynox could not renew', () => {
+		// Writing on alone would meet the same refusal: the page names the step first, in both languages.
+		expect(bulkResumeKind(w('storeAccessEnded'))).toBe('write');
+		expect(bulkResumeText(w('storeAccessEnded'), true, DE)?.before).toBe('Bitte lynox im Chat, den Shop neu zu verbinden. Danach kannst du den Lauf hier fortsetzen.');
+		expect(bulkResumeText(w('storeAccessEnded'), true, EN)?.before).toBe('Ask lynox in the chat to connect the store again. Then you can continue the run here.');
+		expect(bulkResumeText(w('storeClientMisnamed'), true, DE)?.before).toBe('Bitte lynox im Chat, das Profil für shop.example.invalid anzupassen. Danach kannst du den Lauf hier fortsetzen.');
+		expect(bulkResumeText(w('storeClientMisnamed'), true, EN)?.before).toBe('Ask lynox in the chat to fix the profile for shop.example.invalid. Then you can continue the run here.');
+	});
+
 	it('offers no way on that the engine refuses for want of a probe', () => {
 		// Without a probe a run writes on only under a maximum of one: a higher one is refused.
 		expect(bulkResumeKind(w('maxTargets', { probeConfirmed: false, maxTargets: 1 }))).toBeNull();
@@ -837,7 +846,7 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('timeBudget'), true, DE)).toMatchObject({ before: null, soFar: null, allows: null });
 		// Shopify's own switch: who turns it back on depends on who runs the instance.
 		expect(bulkResumeText(w('shopifyWriteOff'), true, DE)).toMatchObject({
-			cause: 'Bulk-Änderungen an Shopify-Shops sind auf dieser Instanz nicht freigeschaltet. Der Lauf ist angehalten. Sobald sie wieder freigeschaltet sind, kannst du ihn hier fortsetzen.',
+			cause: 'Änderungen per Massenlauf an Shopify-Shops sind auf dieser Instanz ausgeschaltet. Der Lauf ist angehalten. Sobald sie wieder eingeschaltet sind, kannst du ihn hier fortsetzen.',
 			before: 'Soll lynox in Shopify-Shops schreiben, schreib an support@lynox.ai. Danach kannst du fortsetzen.',
 		});
 		expect(bulkResumeText(w('shopifyWriteOff'), false, EN)?.before).toBe('You enable them in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`).');
@@ -995,6 +1004,67 @@ describe('going on from a run that halted', () => {
 			expect([without.judgeOwnKey, bulkSupportMailto(without, true, DE), bulkHaltText(without, true, DE)?.before]).toEqual([without.judgeOwnKey, null, null]);
 		}
 		expect(bulkSupportMailto(any('blocked', { phase: 'aborted' }), true, DE)).toBeNull();
+	});
+});
+
+describe('a way on is said once on the run page (U-374)', () => {
+	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
+	const ENTRY = /^\s*'([^']+)': \{ de: '((?:[^'\\]|\\.)*)', en: '((?:[^'\\]|\\.)*)' \},$/;
+	const de: Record<string, string> = {};
+	const en: Record<string, string> = {};
+	for (const l of source.split('\n')) {
+		const m = ENTRY.exec(l);
+		if (m) { de[m[1]!] = m[2]!; en[m[1]!] = m[3]!; }
+	}
+
+	it('drops the owner-only notice for a mandate where the halt sentence already sends it to the owner', () => {
+		expect(bulkOwnerNoticeShown('consentOutdated')).toBe(false);
+		expect(bulkOwnerNoticeShown('productWriteNotAsked')).toBe(false);
+		expect(bulkOwnerNoticeShown('shopifyWriteOff')).toBe(false);
+		// A sentence that does not name the owner keeps the notice.
+		expect(bulkOwnerNoticeShown('storeAccessEnded')).toBe(true);
+		expect(bulkOwnerNoticeShown('unavailable')).toBe(true);
+		expect(bulkOwnerNoticeShown(null)).toBe(true);
+	});
+
+	it('every halt it treats as naming the owner does so in each of its mandate sentences, before and after a first write, in both languages', () => {
+		for (const key of ['consentOutdated', 'productWriteNotAsked', 'shopifyWriteOff']) {
+			// The base sentence, and its variant after a first write wherever the owner has one: a
+			// mandate is shown `_more_mandate` for it (`bulk-runs.ts`), so that variant must exist too.
+			const keys = [`bulk.halt.${key}_mandate`, ...(de[`bulk.halt.${key}_more`] === undefined ? [] : [`bulk.halt.${key}_more_mandate`])];
+			for (const k of keys) {
+				expect(de[k], k).toMatch(/Inhaber/);
+				expect(en[k], k).toMatch(/owner/);
+			}
+		}
+		// At least one of them has a variant after a first write, so the second sentence is pinned.
+		expect(['consentOutdated', 'productWriteNotAsked', 'shopifyWriteOff'].filter((key) => de[`bulk.halt.${key}_more`] !== undefined).length).toBeGreaterThan(0);
+	});
+
+	it('finds the hosts with a hyphen in a halt sentence, and leaves the rest of the sentence as text', () => {
+		expect(bulkHostSegments('lynox konnte den Zugang zu summer-shoes-test.myshopify.com nicht erneuern.')).toEqual([
+			{ text: 'lynox konnte den Zugang zu ', host: false },
+			{ text: 'summer-shoes-test.myshopify.com', host: true },
+			{ text: ' nicht erneuern.', host: false },
+		]);
+		// A word with a hyphen but no dot, and a host without a hyphen, stay text: neither can break at a hyphen inside a name.
+		expect(bulkHostSegments('Diese Shopify-Verbindung, shop.example.com.')).toEqual([{ text: 'Diese Shopify-Verbindung, shop.example.com.', host: false }]);
+		expect(bulkHostSegments('')).toEqual([]);
+	});
+
+	it('pins the switched-off sentence a mandate reads, word for word (U-383)', () => {
+		expect(de['bulk.halt.shopifyWriteOff_mandate']).toBe('Änderungen per Massenlauf an Shopify-Shops sind auf dieser Instanz ausgeschaltet. Der Lauf ist angehalten. Sobald sie wieder eingeschaltet sind, kann der Inhaber ihn hier fortsetzen.');
+	});
+
+	it('wraps a host after its dots and at spaces, never at a hyphen inside the name', () => {
+		const parts = bulkWrapParts('3 Ziele · summer-shoes-test.myshopify.com');
+		expect(parts.map((p) => p.text).join('')).toBe('3 Ziele · summer-shoes-test.myshopify.com');
+		expect(parts).toEqual([
+			{ text: '3 ', wrap: true }, { text: 'Ziele ', wrap: true }, { text: '· ', wrap: true },
+			{ text: 'summer-shoes-test.', wrap: true }, { text: 'myshopify.', wrap: true }, { text: 'com', wrap: false },
+		]);
+		// No part breaks a name at its hyphen: each hyphen sits inside one unbreakable part.
+		for (const p of parts) if (p.text.includes('-')) expect(p.text).toMatch(/^[^\s]*-[^\s]*\.?\s*$/);
 	});
 });
 

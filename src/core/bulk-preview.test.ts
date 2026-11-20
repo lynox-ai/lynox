@@ -1247,7 +1247,7 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
       await w.tick();
       // The handler's own sentence: the throw reached its catch, which halted the run. Read
       // past `getStatus`, which would also halt a run left with no trigger.
-      expect(w.recordTaskRun.mock.calls[0]![1]).toBe('Target system not reachable, or an error in lynox. The run can be continued; if it halts again right away, the target system is not reachable yet.');
+      expect(w.recordTaskRun.mock.calls[0]![1]).toBe('Target system not reachable, or an error in lynox.');
       expect(engineDb.getDb().prepare('SELECT halt_reason FROM bulk_runs WHERE id = ?').get(runId))
         .toEqual({ halt_reason: BULK_HALT_REASONS.unavailable });
     } finally {
@@ -1264,7 +1264,7 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
       const runId = planRun([{ target: url(0), after: { price: '1' } }]);
       const w = workerFor({ language: 'de' });
       await w.tick();
-      expect(w.recordTaskRun.mock.calls[0]![1]).toBe('Zielsystem nicht erreichbar oder Fehler in lynox. Der Lauf lässt sich fortsetzen; hält er gleich wieder an, ist das Zielsystem noch nicht erreichbar.');
+      expect(w.recordTaskRun.mock.calls[0]![1]).toBe('Zielsystem nicht erreichbar oder Fehler in lynox.');
       expect(engineDb.getDb().prepare('SELECT halt_reason FROM bulk_runs WHERE id = ?').get(runId))
         .toEqual({ halt_reason: BULK_HALT_REASONS.unavailable });
     } finally {

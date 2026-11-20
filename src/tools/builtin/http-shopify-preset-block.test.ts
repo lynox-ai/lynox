@@ -30,7 +30,7 @@ describe('a connected Shopify preset profile is still refused', () => {
     const store = new ApiStore();
     expect(store.register(profile)).toBe(true);
     const headers: Record<string, string> = {};
-    const attached = await attachStoredCredential(`${STORE}/admin/api/2025-10/shop.json`, headers, false, {
+    const attached = await attachStoredCredential(`${STORE}/admin/api/2025-10/shop.json`, headers, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
       apiStore: store,
       secretStore: { resolve: (n: string) => (n === accessTokenKey(profile.id) ? 'shpat-value' : null) } as never,
       principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store),

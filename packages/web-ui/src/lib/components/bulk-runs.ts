@@ -199,6 +199,7 @@ export function bulkStartKind(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' |
 const BULK_RESTART_AS_IS = new Set([
 	'unavailable', 'timeBudget', 'consecutiveFailures', 'stoppedByOwner', 'listUnreadable', 'credential', 'unauthorized',
 	'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'costCap', 'unrecorded', 'listReadFailed', 'shopInactive',
+	'storeAccessEnded', 'storeClientMisnamed',
 ]);
 /** Halts a restart would meet again on the same targets: the run has to be planned again. */
 const BULK_RESTART_NONE = new Set(['contract', 'listFormWithdrawn', 'listFilterWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff']);
@@ -229,6 +230,7 @@ const BULK_BEFORE_PROMISES_GOING_ON: ReadonlySet<string> = new Set([
 	'bulk.halt.unavailable_before', 'bulk.halt.unavailable_judge_before', 'bulk.halt.unauthorized_before',
 	'bulk.halt.blocked_before_managed', 'bulk.halt.blocked_before_selfhost', 'bulk.halt.creditRefused_before',
 	'bulk.halt.spendLimit_before_managed', 'bulk.halt.spendLimit_before_selfhost', 'bulk.halt.consecutiveFailures_before',
+	'bulk.halt.storeAccessEnded_before', 'bulk.halt.storeClientMisnamed_before',
 ]);
 
 /** The page's own sentences for a planned run's halt: why it halted, and what the owner can do
@@ -272,6 +274,7 @@ export function bulkHaltText(
 const BULK_RESUME_WRITE = new Set([
 	'runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked',
 	'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff', 'markupAddedByShop',
+	'storeAccessEnded', 'storeClientMisnamed',
 ]);
 /** Halts writing on would not get past: the run has changed since it was approved (the engine
  *  refuses), or a target lies outside what it may write (it would halt there again). */
@@ -320,6 +323,48 @@ export function bulkResumeKind(
 	return BULK_RESUME_WRITE.has(run.haltKey) ? 'write' : null;
 }
 
+/** Halts whose sentence, as a mandate reads it (`_mandate`), already sends the mandate to the
+ *  owner: the page adds no second "ask the owner" under it (U-374). */
+const BULK_HALT_MANDATE_NAMES_OWNER: ReadonlySet<string> = new Set(['consentOutdated', 'productWriteNotAsked', 'shopifyWriteOff']);
+
+/** Whether a mandate's page shows the notice that only the owner acts on bulk runs. */
+export function bulkOwnerNoticeShown(haltKey: string | null): boolean {
+	return haltKey === null || !BULK_HALT_MANDATE_NAMES_OWNER.has(haltKey);
+}
+
+/** A sentence cut into plain text and the hosts it names (`shop-name.myshopify.com`), so a page
+ *  can keep a host from breaking at a hyphen (with {@link bulkWrapParts}) while the rest of the
+ *  sentence wraps as text does; a long token that is no host still breaks where the browser breaks it. */
+export function bulkHostSegments(text: string): { text: string; host: boolean }[] {
+	const segments: { text: string; host: boolean }[] = [];
+	let at = 0;
+	for (const m of text.matchAll(/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+/gi)) {
+		if (!m[0].includes('-')) continue;
+		if (m.index > at) segments.push({ text: text.slice(at, m.index), host: false });
+		segments.push({ text: m[0], host: true });
+		at = m.index + m[0].length;
+	}
+	if (at < text.length) segments.push({ text: text.slice(at), host: false });
+	return segments;
+}
+
+/** A heading or line split where it may wrap: at spaces and after a dot, never at a hyphen, so a
+ *  host such as `summer-shoes-test.myshopify.com` wraps after its dot and not inside its name.
+ *  Each part keeps its trailing space or dot; `wrap` marks a break opportunity after it. */
+export function bulkWrapParts(text: string): { text: string; wrap: boolean }[] {
+	const parts: { text: string; wrap: boolean }[] = [];
+	for (const m of text.matchAll(/[^\s.]+\.?|\.|\s+/g)) {
+		const piece = m[0];
+		if (/^\s+$/.test(piece)) {
+			const last = parts[parts.length - 1];
+			if (last) { last.text += piece; last.wrap = true; } else parts.push({ text: piece, wrap: true });
+		} else {
+			parts.push({ text: piece, wrap: piece.endsWith('.') });
+		}
+	}
+	return parts;
+}
+
 /** The page's own sentences for a write run's halt (`bulkResumeKind` not null): why it halted,
  *  what the owner can do first, and for a halt on failures how many failed so far and what the
  *  next pass may still fail. Every count comes from the engine: the page computes none of them. */
@@ -352,6 +397,8 @@ export function bulkResumeText(
 		: key === 'unauthorized' || key === 'unavailable' ? `bulk.halt.${key}_before`
 		: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_${tier}`
 		: key === 'markupAddedByShop' ? 'bulk.halt.markupAddedByShop_before'
+		// Writing on meets the same refusal until the store is connected again or its profile fixed.
+		: key === 'storeAccessEnded' || key === 'storeClientMisnamed' ? `bulk.halt.${key}_before`
 		: null;
 	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
 	if (kind === 'none') return { cause, before, check: null, kept: null, soFar: null, allows: null };
