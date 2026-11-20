@@ -8,6 +8,7 @@
 
 import { recipientConfirmDigest, recipientsConfirmable } from '../core/recipient-confirm.js';
 import { errorText, errorTextReduced, processErrorText } from '../core/error-egress.js';
+import { jsonFault } from '../core/json-fault.js';
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
@@ -12208,7 +12209,8 @@ export class LynoxHTTPApi {
           await google.setTokens(tokens);
           jsonResponse(res, 200, { ok: true, scopes: tokens.scopes });
         } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
+          // The claim answer carries the tokens: a parse error names the position, never the text around it.
+          const msg = err instanceof SyntaxError ? `Claim answer ${jsonFault(err)}` : err instanceof Error ? err.message : String(err);
           errorResponse(res, 500, msg);
         }
       });
