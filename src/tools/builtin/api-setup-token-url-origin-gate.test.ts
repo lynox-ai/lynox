@@ -102,7 +102,7 @@ describe('api_setup saving a token address after foreign content', () => {
     expect(ask.asked).toEqual([
       'Save this API connection? lynox gets its tokens from "collect.evil.example", path "/t/acme-invoices", with 2 values after the "?". '
       + 'Each time lynox fetches or refreshes a token, it sends the Client ID and Client Secret from your vault there. '
-      + 'This conversation contains content from outside, and you haven\'t named "collect.evil.example". A yes saves the connection; after that, lynox does not ask again when it fetches tokens.\n\n'
+      + 'This conversation contains content from outside, and you haven\'t named "collect.evil.example". A yes allows this address; once the connection is saved, lynox does not ask again when it fetches tokens.\n\n'
       + 'Write "collect.evil.example" here in the chat, and lynox won\'t ask about this host again in this conversation.',
     ]);
     expect(ask.asked[0]).not.toContain(SECRET_VALUE);
@@ -117,7 +117,7 @@ describe('api_setup saving a token address after foreign content', () => {
     expect(ask.asked).toEqual([
       'Diese API-Verbindung speichern? lynox holt ihre Tokens bei „collect.evil.example“, Pfad „/t/acme-invoices“, mit 2 Angaben nach dem „?“. '
       + 'Bei jedem Abruf und jeder Erneuerung eines Tokens schickt lynox die Client-ID und das Client-Secret aus deinem Vault dorthin. '
-      + 'Im Gespräch steht Inhalt von ausserhalb, und „collect.evil.example“ hast du nicht genannt. Ein Ja speichert die Verbindung; danach fragt lynox bei Token-Abrufen nicht mehr nach.\n\n'
+      + 'Im Gespräch steht Inhalt von ausserhalb, und „collect.evil.example“ hast du nicht genannt. Ein Ja erlaubt diese Adresse; ist die Verbindung gespeichert, fragt lynox bei Token-Abrufen nicht mehr nach.\n\n'
       + 'Schreib „collect.evil.example“ hier in den Chat, dann fragt lynox in diesem Gespräch nicht mehr nach diesem Host.',
     ]);
     expect(ask.asked[0]).not.toContain(SECRET_VALUE);
@@ -241,9 +241,10 @@ describe('api_setup saving a token address after foreign content', () => {
 
   it('the run result of a trigger says the profile was not saved', () => {
     const refusal = { targets: { values: ['collect.evil.example'], unreadable: false }, noun: 'tokenUrl' as const, origin: { kind: 'readContent' as const } };
-    expect(originRunNotice('Neue API', refusal, 'en')).toBe('The trigger "Neue API" did not save the API profile with its token address on "collect.evil.example": you did not name this address; it comes from content lynox read. A run without you cannot ask. If the profile should be saved anyway, ask lynox in the chat, and lynox will ask you.');
-    expect(originRunNotice('Neue API', refusal, 'de')).toBe('Der Trigger "Neue API" hat das API-Profil mit der Token-Adresse auf "collect.evil.example" nicht gespeichert: Diese Adresse hast nicht du genannt, sie stammt aus Inhalten, die lynox gelesen hat. Ein Lauf ohne dich kann nicht nachfragen. Soll das Profil trotzdem gespeichert werden, bitte lynox im Chat darum, dann fragt lynox dich.');
-    expect(originRunNotice('Neue API', { ...refusal, targets: { values: [], unreadable: true } }, 'en')).toBe('The trigger "Neue API" did not save the API profile: lynox could not read the token address. Check the trigger with lynox in the chat.');
+    expect(originRunNotice('Neue API', refusal, 'en')).toBe('The trigger "Neue API" did not save the API profile that gets its tokens from "collect.evil.example": you did not name this address; it comes from content lynox read. A run without you cannot ask. If the profile should be saved anyway, ask lynox in the chat, and lynox will ask you.');
+    expect(originRunNotice('Neue API', refusal, 'de')).toBe('Der Trigger "Neue API" hat das API-Profil, das seine Tokens bei "collect.evil.example" holt, nicht gespeichert: Diese Adresse hast nicht du genannt, sie stammt aus Inhalten, die lynox gelesen hat. Ein Lauf ohne dich kann nicht nachfragen. Soll das Profil trotzdem gespeichert werden, bitte lynox im Chat darum, dann fragt lynox dich.');
+    expect(originRunNotice('Neue API', { ...refusal, targets: { values: [], unreadable: true } }, 'en')).toBe('The trigger "Neue API" did not save the API profile: lynox could not read the address the profile gets its tokens from. Check the trigger with lynox in the chat.');
+    expect(originRunNotice('Neue API', { ...refusal, targets: { values: [], unreadable: true } }, 'de')).toBe('Der Trigger "Neue API" hat das API-Profil nicht gespeichert: lynox konnte die Adresse nicht lesen, bei der das Profil seine Tokens holt. Prüfe den Trigger mit lynox im Chat.');
   });
 
   it('an address that carries another address is asked about, even on a host the owner named, with no way out', async () => {
@@ -339,12 +340,35 @@ describe('api_setup saving a token address after foreign content', () => {
     expect(String(result.content)).toContain('This run has no reader');
   });
 
-  it('a trigger from before its creator was recorded is told how to confirm it, for a save as for a send', () => {
+  it('a trigger from before its creator was recorded gets the way out through the chat, not "Confirm recipients"', () => {
     const host = { values: ['collect.evil.example'], unreadable: false };
     const origin = { kind: 'triggerRun' as const, name: 'Neue API', setUpBy: { kind: 'unknown' as const }, predatesRecord: true };
-    expect(originTokenUrlRefused('unattended', host, origin)).toBe('Not saved: the trigger "Neue API" dates from before an update, so lynox cannot tell that the owner set it up, and "collect.evil.example" does not count as named by the owner. Do not try another token address. Report that the owner can open the trigger under Triggers and choose "Confirm recipients"; after that the trigger can save the profile, if it names "collect.evil.example".');
-    expect(originRunNotice('Neue API', { targets: host, noun: 'tokenUrl', origin }, 'en')).toBe('The trigger "Neue API" did not save the API profile with its token address on "collect.evil.example": it dates from before an update, so lynox cannot tell that you set it up. Open it under Triggers and choose "Confirm recipients"; after that it can save the profile, if the trigger names that host.');
-    expect(originRunNotice('Neue API', { targets: host, noun: 'tokenUrl', origin }, 'de')).toBe('Der Trigger "Neue API" hat das API-Profil mit der Token-Adresse auf "collect.evil.example" nicht gespeichert: Er stammt aus der Zeit vor einem Update, darum weiss lynox nicht, dass du ihn angelegt hast. Öffne ihn unter Trigger und wähle „Empfänger bestätigen“, danach kann er das Profil speichern, wenn der Trigger diesen Host nennt.');
+    const model = originTokenUrlRefused('unattended', host, origin);
+    expect(model).toMatch(/^Not saved: the token address of this profile is on "collect\.evil\.example", which the owner did not name; it came from the trigger "Neue API"\. /);
+    expect(model).toContain('Add: if it should be saved, the owner can ask lynox in the chat, and lynox will ask them there.');
+    expect(model).not.toContain('Confirm recipients');
+    expect(originRunNotice('Neue API', { targets: host, noun: 'tokenUrl', origin }, 'en')).toBe('The trigger "Neue API" did not save the API profile that gets its tokens from "collect.evil.example": you did not name this address; it comes from the trigger "Neue API". A run without you cannot ask. If the profile should be saved anyway, ask lynox in the chat, and lynox will ask you.');
+    expect(originRunNotice('Neue API', { targets: host, noun: 'tokenUrl', origin }, 'de')).toBe('Der Trigger "Neue API" hat das API-Profil, das seine Tokens bei "collect.evil.example" holt, nicht gespeichert: Diese Adresse hast nicht du genannt, sie stammt aus dem Trigger "Neue API". Ein Lauf ohne dich kann nicht nachfragen. Soll das Profil trotzdem gespeichert werden, bitte lynox im Chat darum, dann fragt lynox dich.');
+    // CONTROL: a send from the same trigger keeps its own advice.
+    expect(originRunNotice('Neue API', { targets: host, noun: 'host', origin }, 'en')).toContain('choose "Confirm recipients"; after that it sends again.');
+  });
+
+  it('in the owner\'s chat, a yes to an address that carries another one saves it', async () => {
+    const tool = apiSetup();
+    const ask = asker('Allow');
+    const agent = agentOf(tool, ask.fn, 'the token endpoint is on auth.acme.example');
+    const url = 'https://auth.acme.example/token?u=https%3A%2F%2Fcollect.evil.example%2Fd';
+    await call(agent, { action: 'create', profile: oauthProfile(url) });
+    expect(ask.asked).toHaveLength(1);
+    expect(ask.asked[0]).toContain('This address carries another address');
+    expect(tool.done).toEqual([`create:${url}`]);
+  });
+
+  it('an address that carries another one keeps the way out through the chat in an unattended run, where lynox asks and a yes counts', () => {
+    const host = { values: ['auth.acme.example'], unreadable: false };
+    const model = originTokenUrlRefused('unattended', host, { kind: 'readContent' }, true);
+    expect(model).toMatch(/^Not saved: the token address of this profile, on "auth\.acme\.example", carries another address/);
+    expect(model).toContain('Add: if it should be saved, the owner can ask lynox in the chat, and lynox will ask them there.');
   });
 
   describe('with the real handler: the origin question comes first, and a no ends there', () => {

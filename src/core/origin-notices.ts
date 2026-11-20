@@ -332,8 +332,8 @@ export function originCarriedMandate(targets: OriginTargets): string {
  * The question before saving an API profile whose token address the owner did not name
  * (`tokenUrl`): the host and the path ("/" is not named), and of the query only how many values it
  * has, never a value. It says what goes there later (the Client ID and Client Secret, on every token
- * fetch and refresh), the condition lynox checks, as the read question does, and that a yes is not
- * for one call: once saved, token fetches are not asked about. `carried`: the address carries another
+ * fetch and refresh), the condition lynox checks, as the read question does, and that a yes allows
+ * the address: once the connection is saved, token fetches are not asked about. `carried`: the address carries another
  * address, so naming the host is no way out. `unchecked`: a source of named targets could not be
  * read, so lynox could not check whether the owner named the host; no way out either, as for a read.
  */
@@ -355,14 +355,14 @@ export function originTokenUrlAsk(targets: OriginTargets, url: string, lang: Not
       : (values === 1 ? pv`, with 1 value after the "?"` : pv`, with ${values} values after the "?"`);
   if (de) {
     const head = pv`Diese API-Verbindung speichern? lynox holt ihre Tokens bei ${list}${shownPath}${query}. Bei jedem Abruf und jeder Erneuerung eines Tokens schickt lynox die Client-ID und das Client-Secret aus deinem Vault dorthin.`;
-    if (carried) return pv`${head} In dieser Adresse steckt eine weitere Adresse (ein „http:“ oder „https:“ im Pfad oder nach dem „?“). Weil im Gespräch Inhalt von ausserhalb steht, fragt lynox bei solchen Adressen jedes Mal, auch bei einem Host, den du genannt hast. Ein Ja speichert die Verbindung; danach fragt lynox bei Token-Abrufen nicht mehr nach.`;
-    if (unchecked) return pv`${head} Im Gespräch steht Inhalt von ausserhalb, und ob du ${list} genannt hast, konnte lynox nicht prüfen. Ein Ja speichert die Verbindung; danach fragt lynox bei Token-Abrufen nicht mehr nach.`;
-    return pv`${head} Im Gespräch steht Inhalt von ausserhalb, und ${list} hast du nicht genannt. Ein Ja speichert die Verbindung; danach fragt lynox bei Token-Abrufen nicht mehr nach.\n\nSchreib ${list} hier in den Chat, dann fragt lynox in diesem Gespräch nicht mehr nach diesem Host.`;
+    if (carried) return pv`${head} In dieser Adresse steckt eine weitere Adresse (ein „http:“ oder „https:“ im Pfad oder nach dem „?“). Weil im Gespräch Inhalt von ausserhalb steht, fragt lynox bei solchen Adressen jedes Mal, auch bei einem Host, den du genannt hast. Ein Ja erlaubt diese Adresse; ist die Verbindung gespeichert, fragt lynox bei Token-Abrufen nicht mehr nach.`;
+    if (unchecked) return pv`${head} Im Gespräch steht Inhalt von ausserhalb, und ob du ${list} genannt hast, konnte lynox nicht prüfen. Ein Ja erlaubt diese Adresse; ist die Verbindung gespeichert, fragt lynox bei Token-Abrufen nicht mehr nach.`;
+    return pv`${head} Im Gespräch steht Inhalt von ausserhalb, und ${list} hast du nicht genannt. Ein Ja erlaubt diese Adresse; ist die Verbindung gespeichert, fragt lynox bei Token-Abrufen nicht mehr nach.\n\nSchreib ${list} hier in den Chat, dann fragt lynox in diesem Gespräch nicht mehr nach diesem Host.`;
   }
   const head = pv`Save this API connection? lynox gets its tokens from ${list}${shownPath}${query}. Each time lynox fetches or refreshes a token, it sends the Client ID and Client Secret from your vault there.`;
-  if (carried) return pv`${head} This address carries another address (an "http:" or "https:" in the path or after the "?"). Because this conversation contains content from outside, lynox asks about such addresses every time, even for a host you named. A yes saves the connection; after that, lynox does not ask again when it fetches tokens.`;
-  if (unchecked) return pv`${head} This conversation contains content from outside, and lynox could not check whether you named ${list}. A yes saves the connection; after that, lynox does not ask again when it fetches tokens.`;
-  return pv`${head} This conversation contains content from outside, and you haven't named ${list}. A yes saves the connection; after that, lynox does not ask again when it fetches tokens.\n\nWrite ${list} here in the chat, and lynox won't ask about this host again in this conversation.`;
+  if (carried) return pv`${head} This address carries another address (an "http:" or "https:" in the path or after the "?"). Because this conversation contains content from outside, lynox asks about such addresses every time, even for a host you named. A yes allows this address; once the connection is saved, lynox does not ask again when it fetches tokens.`;
+  if (unchecked) return pv`${head} This conversation contains content from outside, and lynox could not check whether you named ${list}. A yes allows this address; once the connection is saved, lynox does not ask again when it fetches tokens.`;
+  return pv`${head} This conversation contains content from outside, and you haven't named ${list}. A yes allows this address; once the connection is saved, lynox does not ask again when it fetches tokens.\n\nWrite ${list} here in the chat, and lynox won't ask about this host again in this conversation.`;
 }
 
 /** The situations a save of a token address is refused in, without the one where it cannot be read. */
@@ -393,11 +393,6 @@ export function originTokenUrlRefused(situation: TokenUrlRefusal, targets: Origi
     const wayOut = carried || lookupFailed ? '' : 'If this is the right token address, they can write its host in the chat themselves and ask again; lynox then does not ask about this host again in this conversation. ';
     return `Not saved: ${lead}. lynox asked the user whether to save the profile, and they said no, so the profile was not saved. ${again} `
       + `Tell the user that the profile was not saved because ${because}. ${wayOut}${NOT_A_POLICY}`;
-  }
-  if (situation === 'unattended' && !carried && !lookupFailed && origin.kind === 'triggerRun' && origin.predatesRecord === true) {
-    // As for a send: confirming makes the trigger's instruction the owner's, and a host it names
-    // then counts as named in its run (`ownerInstructionCounts`, `OwnerKnownTargets.withInstruction`).
-    return `Not saved: the trigger "${q(origin.name)}" dates from before an update, so lynox cannot tell that the owner set it up, and ${list} ${many ? 'do' : 'does'} not count as named by the owner. Do not try another token address. Report that the owner can open the trigger under Triggers and choose "Confirm recipients"; after that the trigger can save the profile, if it names ${list}.`;
   }
   if (situation === 'unattended') {
     return `Not saved: ${lead}. This run has no reader, so lynox cannot ask the owner and did not save the profile. ${again} `
@@ -495,8 +490,8 @@ export function originBashAfterForeign(lang: NoticeLanguage): string {
 
 /** The run result its owner reads when a trigger's run did not send. */
 export function originRunNotice(name: string, refusal: OriginRefusal, lang: NoticeLanguage): string {
+  if (refusal.noun === 'tokenUrl') return asSavedRunNotice(name, refusal, lang);
   const text = runNoticeText(name, refusal, lang);
-  if (refusal.noun === 'tokenUrl') return asSavedRunNotice(text, refusal, lang);
   if (refusal.noun !== 'page') return text;
   // A page read (U-349): the trigger did not read the page, and the way through the chat asks to read it.
   const list = refusal.targets.unreadable || refusal.targets.values.length === 0 ? '' : targetList(refusal.targets, lang);
@@ -512,20 +507,27 @@ export function originRunNotice(name: string, refusal: OriginRefusal, lang: Noti
   return out;
 }
 
-/** The run result for a save of a token address (`tokenUrl`): the trigger did not save the profile. */
-function asSavedRunNotice(text: string, refusal: OriginRefusal, lang: NoticeLanguage): string {
+/**
+ * The run result for a save of a token address (`tokenUrl`): the trigger did not save the profile.
+ * A trigger from before its creator was recorded gets the way out every other trigger gets, through
+ * the chat, not "Confirm recipients": confirming lifts only the origin question, and the save goes
+ * on to questions of its own that need someone there. The chat also holds where the address carries
+ * another one: there lynox asks, and a yes counts.
+ */
+function asSavedRunNotice(name: string, refusal: OriginRefusal, lang: NoticeLanguage): string {
+  const o = refusal.origin;
+  const origin: SendOrigin = o.kind === 'triggerRun' && o.predatesRecord === true ? { kind: 'triggerRun', name: o.name, setUpBy: o.setUpBy } : o;
+  const text = runNoticeText(name, { ...refusal, origin }, lang);
   const list = refusal.targets.unreadable || refusal.targets.values.length === 0 ? '' : targetList(refusal.targets, lang);
   const pairs: readonly (readonly [string, string])[] = lang === 'de'
-    ? [[`hat nicht an ${list} gesendet`, `hat das API-Profil mit der Token-Adresse auf ${list} nicht gespeichert`], ['hat nicht gesendet:', 'hat das API-Profil nicht gespeichert:'],
-      ['lynox konnte die Adresse nicht lesen.', 'lynox konnte die Token-Adresse nicht lesen.'],
-      ['Soll es trotzdem hinaus, bitte lynox im Chat darum, dann fragt lynox dich.', 'Soll das Profil trotzdem gespeichert werden, bitte lynox im Chat darum, dann fragt lynox dich.'],
-      ['danach sendet er wieder.', 'danach kann er das Profil speichern, wenn der Trigger diesen Host nennt.']]
-    : [[`did not send to ${list}`, `did not save the API profile with its token address on ${list}`], ['did not send:', 'did not save the API profile:'],
-      ['lynox could not read the address.', 'lynox could not read the token address.'],
-      ['If it should go out anyway, ask lynox in the chat, and lynox will ask you.', 'If the profile should be saved anyway, ask lynox in the chat, and lynox will ask you.'],
-      ['after that it sends again.', 'after that it can save the profile, if the trigger names that host.']];
+    ? [[`hat nicht an ${list} gesendet`, `hat das API-Profil, das seine Tokens bei ${list} holt, nicht gespeichert`], ['hat nicht gesendet:', 'hat das API-Profil nicht gespeichert:'],
+      ['lynox konnte die Adresse nicht lesen.', 'lynox konnte die Adresse nicht lesen, bei der das Profil seine Tokens holt.'],
+      ['Soll es trotzdem hinaus, bitte lynox im Chat darum, dann fragt lynox dich.', 'Soll das Profil trotzdem gespeichert werden, bitte lynox im Chat darum, dann fragt lynox dich.']]
+    : [[`did not send to ${list}`, `did not save the API profile that gets its tokens from ${list}`], ['did not send:', 'did not save the API profile:'],
+      ['lynox could not read the address.', 'lynox could not read the address the profile gets its tokens from.'],
+      ['If it should go out anyway, ask lynox in the chat, and lynox will ask you.', 'If the profile should be saved anyway, ask lynox in the chat, and lynox will ask you.']];
   let out = text;
-  for (const [send, read] of pairs) if (send.length > 0) out = out.split(send).join(read);
+  for (const [send, saved] of pairs) if (send.length > 0) out = out.split(send).join(saved);
   return out;
 }
 
