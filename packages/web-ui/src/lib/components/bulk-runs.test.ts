@@ -1007,8 +1007,6 @@ describe('going on from a run that halted', () => {
 	});
 });
 
-// Taking a merge back: the page says what came of it by the route's status and code, in the
-// owner's language, never the route's English sentence.
 describe('a way on is said once on the run page (U-374)', () => {
 	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
 	const ENTRY = /^\s*'([^']+)': \{ de: '((?:[^'\\]|\\.)*)', en: '((?:[^'\\]|\\.)*)' \},$/;
@@ -1029,11 +1027,18 @@ describe('a way on is said once on the run page (U-374)', () => {
 		expect(bulkOwnerNoticeShown(null)).toBe(true);
 	});
 
-	it('every halt it treats as naming the owner does so in its mandate sentence, in both languages', () => {
+	it('every halt it treats as naming the owner does so in each of its mandate sentences, before and after a first write, in both languages', () => {
 		for (const key of ['consentOutdated', 'productWriteNotAsked', 'shopifyWriteOff']) {
-			expect(de[`bulk.halt.${key}_mandate`], key).toMatch(/Inhaber/);
-			expect(en[`bulk.halt.${key}_mandate`], key).toMatch(/owner/);
+			// The base sentence and its variant after a first write (`_more_mandate`), wherever one exists.
+			const keys = Object.keys(de).filter((k) => k === `bulk.halt.${key}_mandate` || k === `bulk.halt.${key}_more_mandate`);
+			expect(keys, key).toContain(`bulk.halt.${key}_mandate`);
+			for (const k of keys) {
+				expect(de[k], k).toMatch(/Inhaber/);
+				expect(en[k], k).toMatch(/owner/);
+			}
 		}
+		// The variants after a first write a mandate reads too.
+		expect(Object.keys(de).filter((k) => /^bulk\.halt\.(consentOutdated|productWriteNotAsked|shopifyWriteOff)_more_mandate$/.test(k)).length).toBeGreaterThan(0);
 	});
 
 	it('finds the hosts with a hyphen in a halt sentence, and leaves the rest of the sentence as text', () => {
@@ -1063,6 +1068,8 @@ describe('a way on is said once on the run page (U-374)', () => {
 	});
 });
 
+// Taking a merge back: the page says what came of it by the route's status and code, in the
+// owner's language, never the route's English sentence.
 describe('taking a merge of two contacts back', () => {
 	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
 	const ENTRY = /^\s*'([^']+)': \{ de: '((?:[^'\\]|\\.)*)', en: '((?:[^'\\]|\\.)*)' \},$/;

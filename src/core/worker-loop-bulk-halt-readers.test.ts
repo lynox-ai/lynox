@@ -13,10 +13,12 @@ import type { TriggerRecord } from '../types/index.js';
 const R = BULK_HALT_REASONS;
 const CLOSING = 'Lösen kann das nur der Inhaber.';
 
-function harness(opts: { reason: string; plannedBy: 'owner' | 'mandate'; live?: boolean }) {
+function harness(opts: { reason: string; plannedBy: 'owner' | 'mandate' | 'mandate-without-grant'; live?: boolean }) {
   const recorded: string[] = [];
   const sent: NotificationMessage[] = [];
-  const planner = opts.plannedBy === 'mandate' ? { kind: 'mandate', mandateId: 'grant-1' } : null;
+  const planner = opts.plannedBy === 'mandate' ? { kind: 'mandate', mandateId: 'grant-1' }
+    // A run a mandate planned before the ledger kept its grant: the planner names no grant.
+    : opts.plannedBy === 'mandate-without-grant' ? { kind: 'mandate', email: 'member@example.invalid' } : null;
   const engine = {
     config: { language: 'de' },
     getTaskManager: vi.fn(() => ({ recordTaskRun: vi.fn((_id: string, result: string) => { recorded.push(result); return true; }) })),
@@ -74,6 +76,16 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
       expect(h.sent.map((m) => m.audience), JSON.stringify(setup)).toEqual(['owner']);
       expect(h.recorded, JSON.stringify(setup)).toEqual(['lynox findet keinen gespeicherten Zugang zum Zielsystem.']);
     }
+  });
+
+  it('keeps a halt of a run a mandate planned without a recorded grant one push to every device, recorded as it is', () => {
+    const h = harness({ reason: R.storeAccessEnded, plannedBy: 'mandate-without-grant' });
+    const summary = `${BULK_NOTICES.de.halted('apply', R.storeAccessEnded)}${COUNTS}`;
+    h.end(summary);
+    expect(h.recorded).toEqual([summary]);
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]!.body).toBe(summary);
+    expect(h.sent[0]!.audience).toBeUndefined();
   });
 
   it('keeps every other halt one push to every device, with its sentence recorded as it is', () => {

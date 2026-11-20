@@ -3953,7 +3953,10 @@ export class WorkerLoop {
     // resolves it (U-383).
     const haltRow = this.#bulkRunRow(task);
     const lang = noticeLanguage(this.engine.config?.language);
-    const recordAs = haltRow === null ? null : bulkHaltForReaders(haltRow.haltReason, resultSummary, lang);
+    // A run a mandate planned before the ledger kept its grant cannot reach that grant's devices on
+    // its own: it stays one sentence for every reader and device, as before.
+    const byReader = haltRow !== null && haltRow.grantUnknown !== true;
+    const recordAs = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, resultSummary, lang);
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
       this.#recordRun(taskManager, task.id, recordAs?.record ?? resultSummary, look.status, undefined, opts);
@@ -3974,7 +3977,7 @@ export class WorkerLoop {
       const shownEnd: BulkPushEnd = told.status === 'failed' && this.#bulkRunHalted(task) ? 'halted'
         : told.status === 'stopped' && this.#bulkRunDiscarded(task) ? 'discarded' : told.status;
       const title = `${toldLook.mark} ${this.#pushTitleOf(task, shownEnd)}`;
-      const readers = haltRow === null ? null : bulkHaltForReaders(haltRow.haltReason, told.result, lang);
+      const readers = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, told.result, lang);
       void this.notificationRouter.notify({
         title,
         body: told.result,
@@ -4001,13 +4004,13 @@ export class WorkerLoop {
    * The run a bulk trigger leads to, as its ledger row holds it: null for any other trigger, a
    * run that is gone, or a read that fails, which costs a push its words, never the push.
    */
-  #bulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null; mandateId?: string | null } | null {
+  #bulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null; mandateId?: string | null; grantUnknown?: true } | null {
     const row = this.#readBulkRunRow(task);
     return row === 'unreadable' ? null : row;
   }
 
   /** {@link #bulkRunRow}, with a read that failed told apart from a run that is gone. */
-  #readBulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null; mandateId?: string | null } | null | 'unreadable' {
+  #readBulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null; mandateId?: string | null; grantUnknown?: true } | null | 'unreadable' {
     if (task.bulk_run_id === undefined || !task.effect.startsWith('bulk_')) return null;
     try {
       const ledger = this.engine.getBulkLedger() ?? this.engine.getBulkLedgerSwitchedOff?.() ?? null;
@@ -4019,6 +4022,8 @@ export class WorkerLoop {
         phase: st.phase, haltReason: typeof st.haltReason === 'string' ? st.haltReason : null,
         // The grant that planned the run, if a mandate did: whose devices a halt's mandate sentence is for.
         mandateId: planner?.kind === 'mandate' ? planner.mandateId ?? null : null,
+        // A mandate planned it, but the row names no grant (a run from before the ledger kept it).
+        ...(planner?.kind === 'mandate' && (planner.mandateId ?? null) === null ? { grantUnknown: true as const } : {}),
       };
     } catch {
       return 'unreadable';

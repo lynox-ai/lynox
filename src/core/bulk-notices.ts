@@ -64,13 +64,15 @@ export interface BulkNotices {
   consentOutdated(fields: readonly string[], nothingYet: boolean): string;
   /**
    * A Shopify product run halted because its connection did not ask for, or was not granted,
-   * `write_products` (`shopifyProductWriteAccess`), the way on included; recorded as the run result. `nothingYet` as above.
+   * `write_products` (`shopifyProductWriteAccess`), the way on included; the apply step's result.
+   * The run history, which a mandate reads too, keeps only its fact (`bulkHaltForReaders`); the
+   * way stands on the run page. `nothingYet` as above.
    */
   productWriteNotAsked(access: 'not_asked' | 'not_granted', nothingYet: boolean): string;
   /**
    * The same halt as it is pushed: lead and cause without the way, which the run page shows, so
-   * that with the counts it fits the web-push cut (`REMINDER_BODY_MAX`). The run result keeps
-   * {@link BulkNotices.productWriteNotAsked}, the way included, for the owner's history and the model.
+   * that with the counts it fits the web-push cut (`REMINDER_BODY_MAX`). It goes to the owner's
+   * devices; the mandate that planned the run reads the owner in place of the pointer.
    */
   productWriteNotAskedPush(access: 'not_asked' | 'not_granted', nothingYet: boolean): string;
   /** A run another loop took over (B9). */
