@@ -67,59 +67,82 @@ const MARKER_REASON: Record<MarkerKind, OutlierReason> = { link: 'new_link', ema
 const TLDS = new Set('com net org info biz io co ai app dev shop store online site xyz top club link click ch li de at fr it es nl be lu uk eu us ru cn me tv cc ws ly gl to gg su tk ml ga cf pw in br pl cz se no dk fi pt gr tr jp kr au ca'.split(' '));
 /** A dot written obfuscated — `[.]`, `(.)`, `[dot]`, `(dot)`, ` dot ` — read as a dot. Anchored at the
  *  start of the blank before it, so a long run of blanks is read once, not once per blank. */
-const OBFUSCATED_DOT = /(?<!\s)\s*(?:\[\.\]|\(\.\)|\[dot\]|\(dot\))\s*|(?<!\s)\s+dot\s+(?=[\p{L}\p{N}])/giu;
-/** A run of labels joined by dots, letters of any script. It starts only where no letter, digit, dot or
- *  hyphen stands before it, so every run is read once from its start. */
-const HOST_TOKEN = /(?<![\p{L}\p{N}._%+@-])(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?\.)+[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?(?![\p{L}\p{N}-])/gu;
+const OBFUSCATED_DOT = /(?<!\s)\s*(?:\[\.\]|\(\.\)|\[dot\]|\(dot\))\s*|(?<!\s)\s+dot\s+(?=[\p{L}\p{N}])|[\u3002\uFF0E\uFF61]/giu;
+/** Top-level domains that are also words ("Baumwolle.Es ist", "Holz.Co"): written capitalised after a
+ *  full stop that lacks its space, they start a sentence, not a host. Every other TLD counts however it
+ *  is written ("Evil.Com"). */
+const WORD_TLDS = new Set(['es', 'it', 'in', 'at', 'to', 'no', 'de', 'be', 'me', 'co', 'so', 'am', 'an']);
+/** One label of a host: letters and digits of any script, inner hyphens. */
+const HOST_LABEL = /^[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?$/u;
+/** A letter or digit of any script, tested once per character outside ASCII. */
+const LETTER_OR_DIGIT = /^[\p{L}\p{N}]$/u;
 const SCHEME_RE = /\b(?:h[tx]{2}ps?|ftp):\/\/([^\s/?#"'<>]+)/giu;
-const EMAIL_RE = /(?<![\p{L}\p{N}._%+-])[\p{L}\p{N}._%+-]+@([\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)+)/gu;
-/** A phone number: `+` or `00` and a country code, with an optional `(0)`, 8–15 digits in all; or a
- *  Swiss number in its grouping (`044 123 45 67`). A leading 0 with any other grouping is not read:
- *  part numbers (`0815 123456`) look the same. */
-const PHONE_RE = /(?<![\d+])(?:(?:\+|00)[1-9](?:[\s./-]?\(0\)|[\s./-]?\d){7,16}|0\d{2}[\s./-]\d{3}[\s./-]\d{2}[\s./-]\d{2})(?![\d])/gu;
+/** A phone number: `+` and a country code, or `00`, a country code and a separator (so a GTIN that
+ *  starts with 00 is not one), with an optional `(0)`; or a Swiss national number, 0 and nine digits,
+ *  separated between its groups or not (`044 123 45 67`, `044 1234567`, `0441234567`). A part number
+ *  grouped otherwise (`0815 123456`) is not read; German numbers, grouped every way, are not either. */
+const PHONE_RE = /(?<![\d+])(?:\+[1-9](?:[\s./-]?\(0\)|[\s./-]?\d){7,16}|00[1-9]\d{0,2}[\s./-](?:[\s./-]?\(0\)|[\s./-]?\d){6,13}|0[1-9]\d[\s./-]?\d{3}[\s./-]?\d{2}[\s./-]?\d{2}|0[1-9]\d[\s./-]\d{7})(?![\d])/gu;
 const SCRIPT_RE = /\b(?:javascript|vbscript)\s*:|\bdata\s*:\s*text\/html/giu;
 
 /** A host as a browser reads it: ASCII, lower case, Punycode for other scripts, no `www.`, no port,
- *  no final dot. Undefined where it is no host. */
+ *  no final dot. It ends at the first `/` or `\` (a browser reads both as the path), and what stands
+ *  before an `@` within it is the user. Undefined where it is no host, or longer than a host may be
+ *  (a label of 63, a name of 253). */
 function asciiHost(host: string): string | undefined {
+  const authority = host.split(/[/\\]/u)[0]!;
   try {
-    const name = new URL(`http://${host.replace(/^[^@/]*@/u, '')}`).hostname.replace(/\.$/u, '');
+    const name = new URL(`http://${authority.slice(authority.lastIndexOf('@') + 1)}`).hostname.replace(/\.$/u, '');
+    if (name.length > 253 || name.split('.').some((l) => l.length > 63)) return undefined;
     return name.replace(/^www\./u, '') || undefined;
   } catch {
     return undefined;
   }
 }
 
-/** The key a phone number is compared by: its last nine digits, so `+41 44 …`, `0041 44 …` and
- *  `044 …` are one number. */
+/** The key a phone number is compared by: its country code and national digits, a national number
+ *  read as Swiss (41), so `+41 44 …`, `0041 44 …` and `044 …` are one number and `+49 44 …` another. */
 function phoneKey(written: string): string {
-  return written.replace(/\(0\)/gu, '').replace(/\D/gu, '').slice(-9);
+  const digits = written.replace(/\(0\)/gu, '').replace(/\D/gu, '');
+  if (written.startsWith('+')) return digits;
+  if (digits.startsWith('00')) return digits.slice(2);
+  return `41${digits.slice(1)}`;
 }
 
 /** The markers a text holds, per kind, each as a key: a host for links (ASCII, Punycode), a domain for
- *  addresses, the last nine digits for phone numbers, the scheme for scripts. */
+ *  addresses, country code and national digits for phone numbers, the scheme for scripts. */
 export function markersOf(text: string): Map<MarkerKind, Set<string>> {
   const out = new Map<MarkerKind, Set<string>>([['link', new Set()], ['email', new Set()], ['phone', new Set()], ['script', new Set()]]);
-  let rest = text;
-  if (text.includes('@')) {
-    for (const m of text.matchAll(EMAIL_RE)) {
-      const domain = asciiHost(m[1]!);
-      if (domain !== undefined) out.get('email')!.add(domain);
-    }
-    rest = text.replace(EMAIL_RE, ' ');
-  }
-  if (rest.includes('://')) {
-    for (const m of rest.matchAll(SCHEME_RE)) {
+  if (text.includes('://')) {
+    for (const m of text.matchAll(SCHEME_RE)) {
       const host = asciiHost(m[1]!.replace(/:\d+$/u, ''));
       if (host !== undefined) out.get('link')!.add(host);
     }
   }
-  const plain = rest.replace(OBFUSCATED_DOT, '.');
-  for (const [token] of plain.matchAll(HOST_TOKEN)) {
+  // The obfuscated dots need a bracket, a parenthesis, the word "dot" or a full stop of another script.
+  const plain = /[[(\u3002\uFF0E\uFF61]|dot/iu.test(text) ? text.replace(OBFUSCATED_DOT, '.') : text;
+  for (const word of dottedWords(plain)) {
+    const at = word.indexOf('@');
+    if (at >= 0) {
+      // An address: something before the @, a domain with a dot after it. Its domain is not also a link.
+      const domain = trimEnds(word.slice(at + 1).split(/[^\p{L}\p{N}.-]/u)[0]!);
+      if (at > 0 && domain.includes('.')) {
+        const host = asciiHost(domain);
+        if (host !== undefined) out.get('email')!.add(host);
+      }
+      continue;
+    }
+    // A host has no _, % or + in it; dots and hyphens at its ends belong to the sentence.
+    if (/[_%+]/u.test(word)) continue;
+    const token = trimEnds(word);
+    // Most words with a dot end a sentence or shorten one ("inkl.", "z.B."): a last label of ASCII
+    // letters that is no top-level domain ends the reading before the host is built.
+    const last = token.slice(token.lastIndexOf('.') + 1);
+    if (/^[a-z]+$/iu.test(last) && !TLDS.has(last.toLowerCase())) continue;
+    if (!token.includes('.') || !token.split('.').every((l) => HOST_LABEL.test(l))) continue;
     const tld = token.slice(token.lastIndexOf('.') + 1);
-    // "Baumwolle.Es ist": a sentence whose space after the full stop is missing, not a host. A host
-    // written all in capitals, or starting with www, still counts.
-    if (/^\p{Lu}\p{Ll}/u.test(tld) && !/^www\./iu.test(token) && token !== token.toUpperCase()) continue;
+    // "Baumwolle.Es ist": a sentence whose space after the full stop is missing, not a host. Only where
+    // the TLD is also a word: "Evil.Com" is a host.
+    if (WORD_TLDS.has(tld.toLowerCase()) && /^\p{Lu}\p{Ll}/u.test(tld) && !/^www\./iu.test(token)) continue;
     const host = asciiHost(token);
     if (host === undefined) continue;
     const asciiTld = host.slice(host.lastIndexOf('.') + 1);
@@ -129,8 +152,82 @@ export function markersOf(text: string): Map<MarkerKind, Set<string>> {
     const digits = written.replace(/\(0\)/gu, '').replace(/\D/gu, '');
     if (digits.length >= 8 && digits.length <= 15) out.get('phone')!.add(phoneKey(written));
   }
-  for (const m of text.toLowerCase().matchAll(SCRIPT_RE)) out.get('script')!.add(m[0].replace(/\s/gu, ''));
+  if (/script|data/iu.test(text)) {
+    for (const m of text.toLowerCase().matchAll(SCRIPT_RE)) out.get('script')!.add(m[0].replace(/\s/gu, ''));
+  }
   return out;
+}
+
+/** What one verdict's text holds: the markers of its before-image (over the fields the verdict sets),
+ *  and those its changed fields add over them, the own shop's links and addresses left out. */
+export interface TargetMarkers {
+  held: Map<MarkerKind, Set<string>>;
+  added: Map<MarkerKind, Set<string>>;
+}
+
+/** {@link TargetMarkers} of one verdict. The costly part of {@link judgeOutliers}: a caller with many
+ *  long texts reads them in parts and passes them in, so the reading does not hold the process. */
+export function targetMarkers(input: OutlierInput, own: readonly string[]): TargetMarkers {
+  const before = fieldsOf(input.before);
+  const after = fieldsOf(input.after);
+  const beforeText = [...after.keys()].map((f) => before.get(f)).filter((v): v is string => typeof v === 'string').join('\n');
+  const held = markersOf(beforeText);
+  // A phone number the before-image writes without grouping still counts as held: a digit run of a
+  // phone number's length (10–12) that ends in it. An EAN (13) or a run of all digits glued is not one.
+  const heldPhoneRuns = (beforeText.match(/\d+/gu) ?? []).filter((r) => r.length >= 10 && r.length <= 12);
+  const added = new Map<MarkerKind, Set<string>>([['link', new Set()], ['email', new Set()], ['phone', new Set()], ['script', new Set()]]);
+  for (const [f, v] of after) {
+    if (typeof v !== 'string' || same(v, before.get(f))) continue;
+    for (const [kind, keys] of markersOf(v)) {
+      for (const key of keys) {
+        if (held.get(kind)!.has(key)) continue;
+        if ((kind === 'link' || kind === 'email') && ownHost(key, own)) continue;
+        if (kind === 'phone' && heldPhoneRuns.some((r) => r.endsWith(key.slice(-9)))) continue;
+        added.get(kind)!.add(key);
+      }
+    }
+  }
+  return { held, added };
+}
+
+/** The words of a text that hold a dot or an @: maximal runs of letters and digits of any script and
+ *  of `. - _ % + @`. One pass over the characters, so a text of any shape is read in linear time; the
+ *  host and address rules then look at a few short words, not at every position of the text. */
+function dottedWords(text: string): string[] {
+  const words: string[] = [];
+  let start = -1;
+  let marked = false;
+  const end = (i: number): void => {
+    if (start >= 0 && marked) words.push(text.slice(start, i));
+    start = -1;
+    marked = false;
+  };
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    let inWord: boolean;
+    let width = 1;
+    if (c < 128) {
+      inWord = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 46 || c === 45 || c === 95 || c === 37 || c === 43 || c === 64;
+    } else {
+      const point = text.codePointAt(i)!;
+      if (point > 0xffff) width = 2;
+      inWord = LETTER_OR_DIGIT.test(String.fromCodePoint(point));
+    }
+    if (inWord) {
+      if (start < 0) start = i;
+      if (c === 46 || c === 64) marked = true;
+    } else {
+      end(i);
+    }
+    i += width - 1;
+  }
+  end(text.length);
+  return words;
+}
+
+/** A word without the dots, hyphens and other signs at its ends that belong to the sentence around it. */
+function trimEnds(word: string): string {
+  return word.replace(/^[._%+-]+|[._%+-]+$/gu, '');
 }
 
 /** A host matches an own domain exactly or as a subdomain at a dot boundary. */
@@ -147,6 +244,8 @@ function fieldsOf(value: unknown): Map<string, unknown> {
 }
 
 function same(a: unknown, b: unknown): boolean {
+  // A long text is compared directly, not copied into JSON first.
+  if (typeof a === 'string' || typeof b === 'string') return a === b;
   return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 }
 
@@ -173,6 +272,8 @@ function mad(values: number[], m: number): number {
  */
 export function judgeOutliers(
   inputs: readonly OutlierInput[], own: readonly string[], kinds: Readonly<Record<string, OutlierFieldKind>> = {},
+  /** {@link targetMarkers} of each input, in order, where the caller read them already. */
+  markers?: readonly TargetMarkers[],
 ): OutlierResult {
   const decided = inputs.length;
   if (decided < OUTLIER_MIN_VERDICTS) return { decided, measured: false, flagged: [], spread: [] };
@@ -246,29 +347,16 @@ export function judgeOutliers(
   // Markers a verdict's text adds over its own before-image.
   const added = new Map<MarkerKind, Map<number, Set<string>>>();
   const inBefores = new Map<MarkerKind, Set<string>>([['link', new Set()], ['email', new Set()], ['phone', new Set()], ['script', new Set()]]);
-  for (const t of targets) {
-    const beforeText = [...t.before.values()].filter((v): v is string => typeof v === 'string').join('\n');
-    const held = markersOf(beforeText);
-    for (const [kind, keys] of held) for (const k of keys) inBefores.get(kind)!.add(k);
-    // A phone number the before-image writes without grouping still counts as held: a digit run of a
-    // phone number's length (10–12) that ends in it. An EAN (13) or a run of all digits glued is not one.
-    const heldPhoneRuns = (beforeText.match(/\d+/gu) ?? []).filter((r) => r.length >= 10 && r.length <= 12);
-    for (const [f, v] of t.after) {
-      if (typeof v !== 'string' || same(v, t.before.get(f))) continue;
-      for (const [kind, keys] of markersOf(v)) {
-        for (const key of keys) {
-          if (held.get(kind)!.has(key)) continue;
-          if ((kind === 'link' || kind === 'email') && ownHost(key, own)) continue;
-          if (kind === 'phone' && heldPhoneRuns.some((r) => r.endsWith(key))) continue;
-          const perTarget = added.get(kind) ?? new Map<number, Set<string>>();
-          const set = perTarget.get(t.seq) ?? new Set<string>();
-          set.add(key);
-          perTarget.set(t.seq, set);
-          added.set(kind, perTarget);
-        }
-      }
+  inputs.forEach((input, i) => {
+    const m = markers?.[i] ?? targetMarkers(input, own);
+    for (const [kind, keys] of m.held) for (const k of keys) inBefores.get(kind)!.add(k);
+    for (const [kind, keys] of m.added) {
+      if (keys.size === 0) continue;
+      const perTarget = added.get(kind) ?? new Map<number, Set<string>>();
+      perTarget.set(input.seq, keys);
+      added.set(kind, perTarget);
     }
-  }
+  });
   const spread: SpreadMarker[] = [];
   for (const kind of ['link', 'email', 'phone', 'script'] as const) {
     const perTarget = added.get(kind);

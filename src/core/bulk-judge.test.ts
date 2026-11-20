@@ -6,7 +6,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { EngineDb } from './engine-db.js';
 import { DataStore } from './data-store.js';
-import { BulkLedger, BULK_HALT_REASONS, BULK_JUDGED_RETENTION_MS, BULK_MAX_PREVIEWED_RUNS } from './bulk-ledger.js';
+import { BulkLedger, BULK_HALT_REASONS, BULK_JUDGED_RETENTION_MS, BULK_MAX_PREVIEWED_RUNS, OUTLIER_CHUNK } from './bulk-ledger.js';
 import { BULK_NOTICES } from './bulk-notices.js';
 import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
 import { bulkPlanTool, bulkStatusTool } from '../tools/builtin/bulk.js';
@@ -279,7 +279,7 @@ describe('judgeOutliersOf — the verdicts a judged run lists first', () => {
     }));
     expect((await runBulkJudge(id, h.deps)).status).toBe('done');
     const seq17 = ledger.getPreview(id).find((t) => (t.after as Record<string, unknown> | null)?.['sku'] === 'P17')!.seq;
-    expect(ledger.judgeOutliersOf(id)).toEqual({ decided: 30, measured: true, flagged: [{ seq: seq17, reasons: ['new_link', 'length_jump'] }], spread: [] });
+    expect(await ledger.judgeOutliersOf(id)).toEqual({ decided: 30, measured: true, flagged: [{ seq: seq17, reasons: ['new_link', 'length_jump'] }], spread: [] });
   });
 
   it('flags no verdict of 30 that only reword their row, and counts them as measured', async () => {
@@ -288,7 +288,7 @@ describe('judgeOutliersOf — the verdicts a judged run lists first', () => {
     expect(start(id).ok).toBe(true);
     const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.001 }));
     expect((await runBulkJudge(id, h.deps)).status).toBe('done');
-    expect(ledger.judgeOutliersOf(id)).toEqual({ decided: 30, measured: true, flagged: [], spread: [] });
+    expect(await ledger.judgeOutliersOf(id)).toEqual({ decided: 30, measured: true, flagged: [], spread: [] });
   });
 
   it('keeps a target the owner took out in the statistics and flagged, so the marks do not move under the owner\'s hand', async () => {
@@ -301,7 +301,7 @@ describe('judgeOutliersOf — the verdicts a judged run lists first', () => {
     expect((await runBulkJudge(id, h.deps)).status).toBe('done');
     const seq17 = ledger.getPreview(id).find((t) => (t.after as Record<string, unknown> | null)?.['sku'] === 'P17')!.seq;
     expect(ledger.deselectTarget(id, seq17, { checksum: ledger.computeChecksum(id)! }).ok).toBe(true);
-    expect(ledger.judgeOutliersOf(id)).toMatchObject({ decided: 30, flagged: [{ seq: seq17 }] });
+    expect(await ledger.judgeOutliersOf(id)).toMatchObject({ decided: 30, flagged: [{ seq: seq17 }] });
   });
 
   it('counts a link to a start domain the owner gave as the run\'s own, not as new', async () => {
@@ -313,7 +313,7 @@ describe('judgeOutliersOf — the verdicts a judged run lists first', () => {
       data: change({ title: user.includes('old p17') ? `${title(user)} tea-deals.example.net` : title(user) }), costUsd: 0.001,
     }));
     expect((await runBulkJudge(id, h.deps)).status).toBe('done');
-    expect(ledger.judgeOutliersOf(id)!.flagged.flatMap((f) => f.reasons)).not.toContain('new_link');
+    expect((await ledger.judgeOutliersOf(id))!.flagged.flatMap((f) => f.reasons)).not.toContain('new_link');
   });
 
   it('computes a run\'s marks once and gives the same result while its verdicts stand', async () => {
@@ -323,10 +323,32 @@ describe('judgeOutliersOf — the verdicts a judged run lists first', () => {
     const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.001 }));
     expect((await runBulkJudge(id, h.deps)).status).toBe('done');
     expect(ledger.judgeOutliersOf(id)).toBe(ledger.judgeOutliersOf(id));
+    expect(await ledger.judgeOutliersOf(id)).toMatchObject({ decided: 30 });
   });
 
-  it('is null for a run without a rule', () => {
-    expect(ledger.judgeOutliersOf('no-such-run')).toBeNull();
+  it('reads a run whose texts exceed one part in parts, letting other work run before it is done', async () => {
+    const many = Array.from({ length: 60 }, (_, i) => `Q${String(i + 1).padStart(3, '0')}`);
+    // Long titles, so the run's text is more than one part.
+    const long = 'Grüntee aus Japan, mild und frisch. '.repeat(Math.ceil(2 * OUTLIER_CHUNK / many.length / 36));
+    store.insertRecords({
+      collection: 'products',
+      records: many.map((sku) => ({ sku, title: `old ${sku.toLowerCase()} ${long}`, note: `${MARK}-${sku}` })),
+      stamp: TEST_STAMP,
+    });
+    const id = await plan(many);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.001 }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+
+    const order: string[] = [];
+    const reading = ledger.judgeOutliersOf(id).then((r) => { order.push('done'); return r; });
+    setImmediate(() => { order.push('other'); });
+    expect(await reading).toMatchObject({ decided: 60, measured: true });
+    expect(order).toEqual(['other', 'done']);
+  });
+
+  it('is null for a run without a rule', async () => {
+    expect(await ledger.judgeOutliersOf('no-such-run')).toBeNull();
   });
 });
 

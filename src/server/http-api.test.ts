@@ -12896,7 +12896,7 @@ describe('LynoxHTTPApi', () => {
       it('names the verdicts that differ from the rest of the run only where the preview can be approved', async () => {
         const id = judgedRun();
         const outliers = { decided: 25, measured: true, flagged: [{ seq: 3, reasons: ['new_link' as const] }], spread: [] };
-        const spy = vi.spyOn(bulkLedger, 'judgeOutliersOf').mockReturnValue(outliers);
+        const spy = vi.spyOn(bulkLedger, 'judgeOutliersOf').mockResolvedValue(outliers);
         try {
           // Planned, no verdict yet: nothing is read.
           const planned = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;

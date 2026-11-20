@@ -198,9 +198,28 @@ describe('judgeOutliers on domains in other scripts, phone numbers and the own s
 });
 
 describe('markersOf', () => {
-  it('reads no link where a full stop lacks its space, nor a part number as a phone number', () => {
-    const m = markersOf('Aus Baumwolle.Es ist weich. Holz.Co und Stk.No. Bestellnummer 0815 123456, Teil 0711 2345678.');
+  it('reads no link where a full stop lacks its space before a word, nor a part number or a GTIN as a phone number', () => {
+    const m = markersOf('Aus Baumwolle.Es ist weich. Holz.Co und Stk.No. Bestellnummer 0815 123456, Teil 0711 2345678, EAN 0041234567890, Lot 00123456789.');
     expect([...m.values()].every((x) => x.size === 0)).toBe(true);
+  });
+
+  it('reads a host however its top-level domain is capitalised, where that domain is no word', () => {
+    for (const text of ['Besuche Evil.Com', 'evil.Com', 'Evil.Shop heute', 'evil.Ch heute']) {
+      expect([...markersOf(text).get('link')!], text).toHaveLength(1);
+    }
+  });
+
+  it('reads a Swiss number grouped, ungrouped or in parts, and keys it by its country', () => {
+    for (const text of ['044 123 45 67', '044 1234567', '0441234567', '044.123.45.67', '+41 44 123 45 67', '0041 44 123 45 67', '+41 (0)44 123 45 67']) {
+      expect([...markersOf(text).get('phone')!], text).toEqual(['41441234567']);
+    }
+    expect([...markersOf('+49 44 123 45 67').get('phone')!]).toEqual(['49441234567']);
+  });
+
+  it('ends a host at a backslash and reads only what follows the user, refuses one longer than a host may be, and reads an ideographic full stop as a dot', () => {
+    expect([...markersOf('https://evil.icu\\@moebel-meier.ch/').get('link')!]).toEqual(['evil.icu']);
+    expect([...markersOf(`Mehr auf ${'a'.repeat(64)}.com`).get('link')!]).toEqual([]);
+    expect([...markersOf('Mehr auf evil\u3002com').get('link')!]).toEqual(['evil.com']);
   });
 
   it('reads a long run of letters before an @, of labels, or of obfuscated dots in time linear in its length', () => {
