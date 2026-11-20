@@ -2708,7 +2708,7 @@ describe('a send without a clear answer is not sent again', () => {
     // among the targets the resume sends to.
     expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.failureRate, failed: 1, sentUnknown: 1 });
     // The halt names it as this pass's unclear send, and none as a target that failed.
-    expect(ledger.getStatus(runId)).toMatchObject({ passUnclear: 1, failedOnce: 0, heads: { failed: 0, unclear: 1 } });
+    expect(ledger.getStatus(runId)).toMatchObject({ passUnclear: 1, passFailed: 0, secretFailed: 0, failedOnce: 0, heads: { failed: 0, unclear: 1 } });
     s.special.delete('PATCH /products/0');
     resume(runId);
     return runId;

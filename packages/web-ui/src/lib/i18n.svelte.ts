@@ -705,6 +705,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.halt.checksum': { de: 'Der Lauf hat sich seit deiner Freigabe geändert.', en: 'The run has changed since you approved it.' },
 	'bulk.halt.failureRate_write': { de: 'In diesem Durchgang liessen sich mehr als {limit} Ziele nicht schreiben.', en: 'In this pass, more than {limit} targets could not be written.' },
 	'bulk.halt.failureRate_write0': { de: 'In diesem Durchgang liess sich ein Ziel nicht schreiben.', en: 'In this pass, a target could not be written.' },
+	'bulk.halt.secret_targets': { de: 'Dazu kommen Ziele, deren Wert etwas enthält, das lynox nicht hinausgibt, etwa einen Schlüssel. Sie lassen sich so nicht schreiben.', en: 'There are also targets whose value contains something lynox does not send out, such as a key. They cannot be written as they are.' },
 	'bulk.halt.failureRate_unclear_one': { de: 'In diesem Durchgang blieb bei einem Ziel offen, ob die Änderung angekommen ist.', en: 'In this pass, it stayed unclear whether one change arrived.' },
 	'bulk.halt.failureRate_unclear': { de: 'In diesem Durchgang blieb bei {n} Zielen offen, ob die Änderung angekommen ist.', en: 'In this pass, it stayed unclear for {n} targets whether the change arrived.' },
 	'bulk.halt.failureRate_mixed_fn_un': { de: 'In diesem Durchgang liessen sich {f} Ziele nicht schreiben, und bei {u} blieb offen, ob die Änderung angekommen ist.', en: 'In this pass, {f} targets could not be written, and for {u} it stayed unclear whether the change arrived.' },

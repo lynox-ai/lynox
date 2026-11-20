@@ -93,8 +93,10 @@ export interface BulkRun {
 	/** Of the targets this pass recorded as failed, those whose send is unclear now. Absent on an
 	 *  older engine. */
 	passUnclear?: number | undefined;
-	/** This pass's failures that are not `passUnclear`. Absent on an older engine. */
+	/** This pass's failures that are not `passUnclear`, one per target. Absent on an older engine. */
 	passFailed?: number | undefined;
+	/** Targets that fail on what they would send; that failure stands across a resume. Absent on an older engine. */
+	secretFailed?: number | undefined;
 	/** How many targets may fail in one pass without the failure-rate halt. */
 	failureLimit: number;
 	/** The targets a resume tries again; every failure of the next pass is one of them. */
@@ -310,7 +312,7 @@ export function bulkResumeKind(
  *  what the owner can do first, and for a halt on failures how many failed so far and what the
  *  next pass may still fail. Every count comes from the engine: the page computes none of them. */
 export function bulkResumeText(
-	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'applied' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries' | 'sentUnknown' | 'resumeSends' | 'conflicts' | 'passUnclear' | 'passFailed'>,
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'applied' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries' | 'sentUnknown' | 'resumeSends' | 'conflicts' | 'passUnclear' | 'passFailed' | 'secretFailed'>,
 	managed: boolean | null,
 	i18n: BulkI18n,
 	/** Whether the preview marks a target with a failure ({@link bulkShowsFailure}): only then
@@ -367,28 +369,50 @@ export function bulkResumeText(
 	return { cause, before, check: null, kept, soFar, allows: bulkResumeAllows(limit, open, i18n) };
 }
 
-/** Why a write run halted on its failure rate, with this pass's numbers: the targets that could
- *  not be written (`passFailed`) and those whose send is unclear (`passUnclear`). A timeout
- *  counts toward the halt, but it is not a target that could not be written. Not `heads.failed`:
- *  a target that failed on what it would send stays failed from an earlier pass. An older engine
- *  without these counts gets the sentence on the limit. */
-function bulkFailureRateCause(run: Pick<BulkRunDetailData, 'passFailed' | 'passUnclear'>, limit: number, i18n: BulkI18n): string {
-	const f = run.passFailed;
-	const u = run.passUnclear;
-	if (f === undefined || u === undefined || u === 0) {
-		return limit === 0 ? i18n.t('bulk.halt.failureRate_write0') : i18n.tf('bulk.halt.failureRate_write', { limit: String(limit) });
-	}
-	if (f === 0) return u === 1 ? i18n.t('bulk.halt.failureRate_unclear_one') : i18n.tf('bulk.halt.failureRate_unclear', { n: String(u) });
-	return i18n.tf(`bulk.halt.failureRate_mixed_${f === 1 ? 'f1' : 'fn'}_${u === 1 ? 'u1' : 'un'}`, { f: String(f), u: String(u) });
+/** This pass's numbers as the targets record them, or null on an older engine: the targets that
+ *  could not be written (`passFailed`), those whose send is unclear (`passUnclear`), and those
+ *  that fail on what they would send (`secretFailed`), which stay failed across a resume. */
+function bulkPassCounts(run: Pick<BulkRunDetailData, 'passFailed' | 'passUnclear' | 'secretFailed'>): { f: number; u: number; s: number } | null {
+	if (run.passFailed === undefined || run.passUnclear === undefined || run.secretFailed === undefined) return null;
+	return { f: run.passFailed, u: run.passUnclear, s: run.secretFailed };
+}
+
+/** The halt's sentence with the one on targets whose value lynox does not send out, where there are
+ *  any: without a claim on when they failed. With no failure of this pass on record, only that one. */
+function bulkWithSecret(base: string | null, s: number, i18n: BulkI18n): string | null {
+	if (s === 0) return base;
+	const secret = i18n.t('bulk.halt.secret_targets');
+	return base === null ? secret : `${base} ${secret}`;
+}
+
+/** Why a write run halted on its failure rate, with this pass's numbers ({@link bulkPassCounts}).
+ *  A timeout counts toward the halt, but it is not a target that could not be written. An older
+ *  engine, or a pass whose targets record no failure, gets the sentence on the limit. */
+function bulkFailureRateCause(run: Pick<BulkRunDetailData, 'passFailed' | 'passUnclear' | 'secretFailed'>, limit: number, i18n: BulkI18n): string {
+	const onLimit = limit === 0 ? i18n.t('bulk.halt.failureRate_write0') : i18n.tf('bulk.halt.failureRate_write', { limit: String(limit) });
+	const c = bulkPassCounts(run);
+	if (c === null) return onLimit;
+	const { f, u, s } = c;
+	if (f === 0 && u === 0) return bulkWithSecret(null, s, i18n) ?? onLimit;
+	const base = u === 0 ? onLimit
+		: f === 0 ? (u === 1 ? i18n.t('bulk.halt.failureRate_unclear_one') : i18n.tf('bulk.halt.failureRate_unclear', { n: String(u) }))
+		: i18n.tf(`bulk.halt.failureRate_mixed_${f === 1 ? 'f1' : 'fn'}_${u === 1 ? 'u1' : 'un'}`, { f: String(f), u: String(u) });
+	return bulkWithSecret(base, s, i18n)!;
 }
 
 /** Why a write run halted on three failures in a row. Which of the pass's failures were the three
- *  is not recorded, so a pass with both kinds says either: only one whose failures are all
- *  unclear names them as unclear. */
-function bulkConsecutiveCause(run: Pick<BulkRunDetailData, 'passFailed' | 'passUnclear'>, i18n: BulkI18n): string {
-	const u = run.passUnclear;
-	if (run.passFailed === undefined || u === undefined || u === 0) return i18n.t('bulk.halt.consecutiveFailures_write');
-	return i18n.t(run.passFailed === 0 ? 'bulk.halt.consecutiveFailures_unclear' : 'bulk.halt.consecutiveFailures_mixed');
+ *  is not recorded, so only a pass whose every failure is an unclear send names them as unclear;
+ *  one with a target that could not be written, or one that fails on what it would send, says
+ *  either. */
+function bulkConsecutiveCause(run: Pick<BulkRunDetailData, 'passFailed' | 'passUnclear' | 'secretFailed'>, i18n: BulkI18n): string {
+	const old = i18n.t('bulk.halt.consecutiveFailures_write');
+	const c = bulkPassCounts(run);
+	if (c === null) return old;
+	const { f, u, s } = c;
+	if (f === 0 && u === 0) return bulkWithSecret(null, s, i18n) ?? old;
+	const base = u === 0 ? old
+		: i18n.t(f === 0 && s === 0 ? 'bulk.halt.consecutiveFailures_unclear' : 'bulk.halt.consecutiveFailures_mixed');
+	return bulkWithSecret(base, s, i18n)!;
 }
 
 /** Whether the preview marks this target with a failure: a write or read failure the row shows

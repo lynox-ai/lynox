@@ -204,34 +204,45 @@ describe('the failures of this pass', () => {
     ledger.recordFailed(id, 0, 'write_failed');
     ledger.recordFailed(id, 0, 'write_failed');
     ledger.recordFailed(id, 1, 'write_failed');
-    const db = engineDb.getDb();
-    expect((db.prepare('SELECT targets_failed AS n FROM bulk_runs WHERE id = ?').get(id) as { n: number }).n).toBe(3);
+    expect((engineDb.getDb().prepare('SELECT targets_failed AS n FROM bulk_runs WHERE id = ?').get(id) as { n: number }).n).toBe(3);
     const s = ledger.getStatus(id)!;
     expect(s.passUnclear).toBe(1);
-    expect(s.heads.failed).toBe(1);
     expect(s.passFailed).toBe(1);
   });
 
-  it('are what the halt counted less the unclear sends, never a target still failed on its secret from an earlier pass', () => {
-    // Pass 1 failed A on what it would send; the resume left it failed and set the count back.
-    // Pass 2 timed out on B and refused C: the halt counted two.
-    const id = run(EXTERNAL, [
+  it('count a failed target a partial undo settled since: it still failed in this pass', () => {
+    // Refused, then found as before the run by an undo that halted before the unclear ones.
+    const s = ledger.getStatus(run(EXTERNAL, [
+      { sent: true, error: 'write_failed', undone: true, failedOnce: true },
+      { sent: true, unknownSends: 1, error: 'write_failed', failedOnce: true },
+      { sent: true, unknownSends: 1, error: 'write_failed', failedOnce: true },
+    ]))!;
+    expect(s.heads.settled).toBe(1);
+    expect(s.heads.failed).toBe(0);
+    expect(s.passFailed).toBe(1);
+    expect(s.passUnclear).toBe(2);
+  });
+
+  it('count a target failed on its secret apart, whichever pass it failed in, and neither as failed nor as unclear', () => {
+    // Failed on what it would send in pass 1; a resume left it so. Pass 2 timed out on B, refused C.
+    const s = ledger.getStatus(run(EXTERNAL, [
       { error: 'secret', failedOnce: true },
+      { sent: true, unknownSends: 1, error: 'secret', failedOnce: true },
       { sent: true, unknownSends: 1, error: 'write_failed', failedOnce: true },
       { sent: true, error: 'write_failed', failedOnce: true },
-    ]);
-    engineDb.getDb().prepare('UPDATE bulk_runs SET targets_failed = 2 WHERE id = ?').run(id);
-    const s = ledger.getStatus(id)!;
-    expect(s.heads.failed).toBe(2);
+    ]))!;
+    expect(s.secretFailed).toBe(2);
     expect(s.passUnclear).toBe(1);
     expect(s.passFailed).toBe(1);
   });
 
-  it('leave out an unclear target still failed on its secret: that error may stand from an earlier pass', () => {
-    const id = run(EXTERNAL, [{ sent: true, unknownSends: 1, error: 'secret', failedOnce: true }]);
-    const s = ledger.getStatus(id)!;
-    expect(s.heads.unclear).toBe(1);
+  it('on a local run, count every failure but a secret one as failed: none is unclear there', () => {
+    const s = ledger.getStatus(run(LOCAL, [
+      { sent: true, unknownSends: 1, error: 'write_failed', failedOnce: true },
+      { error: 'secret', failedOnce: true },
+    ]))!;
     expect(s.passUnclear).toBe(0);
-    expect(s.passFailed).toBe(0);
+    expect(s.passFailed).toBe(1);
+    expect(s.secretFailed).toBe(1);
   });
 });
