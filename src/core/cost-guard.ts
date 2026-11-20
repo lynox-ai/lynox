@@ -222,9 +222,11 @@ export class CostGuard {
    * NOT in `snapshot().ownCostUSD`, the figure a spawned child is debited and recorded with.
    * Everything booked here was debited already, on managed hosting to the tenant (an in-run
    * helper call, a delegated child), so the child's debit does not repeat it. A delegated child also has a
-   * run row of its own; an in-run helper call does not, so spawned children keep both helper
-   * fallbacks off, or that spend would be missing from the runs table (pinned in
-   * `spawn.test.ts`).
+   * run row of its own; an in-run helper call does not, so spawned children keep both of the
+   * agent's own helper fallbacks off, or that spend would be missing from the runs table (pinned
+   * in `spawn.test.ts`). A child's TOOLS still make helper calls (a rerank, a docs extraction, a
+   * plan): those charge the child's guard here and debit themselves, and are not in the child's
+   * run row, as they were not before they reached the guard.
    */
   recordExternalCost(usd: number): boolean {
     if (Number.isFinite(usd) && usd > 0) this.externalCostUSD += usd;

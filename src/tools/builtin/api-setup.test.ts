@@ -2035,7 +2035,8 @@ describe('api_setup tool', () => {
           throw new llmHelper.ExtractionStoppedError({ upperBoundUsd: 0.25, estimateUsd: 0.05, fromSnapshot: false });
         });
         try {
-          const agent = createMockAgent(new ApiStore());
+          const capOnly = vi.fn();
+          const agent = Object.assign(createMockAgent(new ApiStore()), { chargeExternalCapOnlyCost: capOnly });
           agent.sessionCounters.costUSD = 0.5;
           const onAfterRun = vi.fn();
           (agent.toolContext as { meteredHost?: unknown }).meteredHost = {
@@ -2046,6 +2047,8 @@ describe('api_setup tool', () => {
             agent,
           ))).rejects.toMatchObject({ name: 'AbortError' });
           expect(agent.sessionCounters.costUSD).toBeCloseTo(0.75, 10);
+          // The run's ceiling counts the bound as cap-only. Kills: an aborted bound that skips the run's guard.
+          expect(capOnly).toHaveBeenCalledWith(0.25);
           // The bound is for the session cap only: no tenant debit.
           expect(onAfterRun).not.toHaveBeenCalled();
         } finally {

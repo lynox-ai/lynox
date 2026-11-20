@@ -261,6 +261,8 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           // A rerank aborted at its timeout returned no reply to book. Its upper bound goes to
           // the session cap only — never to the tenant debit (aborted-call.ts).
           if (reranked.abortedCost) {
+            // And to this run's ceiling, as a bound it counts but does not bill.
+            agent.chargeExternalCapOnlyCost?.(reranked.abortedCost.upperBoundUsd);
             recordSessionCost(agent.sessionCounters, reranked.abortedCost.upperBoundUsd);
           }
           results = reranked.results;

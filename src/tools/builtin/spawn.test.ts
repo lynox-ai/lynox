@@ -231,6 +231,8 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
   ];
   return {
     principal: OWNER_PRINCIPAL,
+    // Required on `IAgent` and called directly by spawn: a parent without a bound of its own.
+    hasRunCostCeiling: () => false,
     name: 'parent',
     model: 'claude-sonnet-4-6',
     memory: null,

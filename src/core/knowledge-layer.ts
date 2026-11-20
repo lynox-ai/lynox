@@ -1863,8 +1863,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   noteExtractionRefusedWithinBalance(memoryId: string): void {
     if (!memoryId) return;
     try {
-      const prior = this.db.getMetrics(KG_EXTRACTION_REFUSED_METRIC)
-        .find(m => m.scope_type === 'memory' && m.scope_id === memoryId);
+      const prior = this.db.getMetric(KG_EXTRACTION_REFUSED_METRIC, 'memory', memoryId);
       const count = (prior?.value ?? 0) + 1;
       this.db.upsertMetric({ metricName: KG_EXTRACTION_REFUSED_METRIC, value: count, sampleCount: count, scopeType: 'memory', scopeId: memoryId });
     } catch { /* best-effort record */ }

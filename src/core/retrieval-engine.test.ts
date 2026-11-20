@@ -167,19 +167,6 @@ describe('RetrievalEngine — HyDE pool-key debit (managed)', () => {
     expect((ctx as { modelTier?: string }).modelTier).toBe('fast');
   });
 
-  it('tells the caller what the HyDE call spent, the same amount it debits', async () => {
-    // Kills: a HyDE call whose spend never reaches the caller (a bounded run could not count it).
-    engine.setAnthropicClient(hydeClient({ input_tokens: 300, output_tokens: 40 }));
-    const onAfterRun = vi.fn();
-    engine.setMeteredHost({ getHooks: () => [{ onAfterRun }], getContext: () => undefined });
-    const onHelperSpend = vi.fn();
-    await engine.retrieve('Which ticketing tool does the support team rely on?', [scope], {
-      topK: 5, threshold: 0.1, useHyDE: true, useGraphExpansion: false, onHelperSpend,
-    });
-    expect(onHelperSpend).toHaveBeenCalledOnce();
-    expect(onHelperSpend.mock.calls[0]![0]).toBe(onAfterRun.mock.calls[0]![1]);
-  });
-
   it('does not debit on a cache hit — the same query makes no second pool-key call', async () => {
     engine.setAnthropicClient(hydeClient({ input_tokens: 100, output_tokens: 10 }));
     const onAfterRun = vi.fn();

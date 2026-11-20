@@ -1341,7 +1341,11 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     // A stopped call has no reply to book: its bound goes to the session cap, never to the
     // tenant debit (`aborted-call.ts`), and the engine reports the stop.
     if (err instanceof ExtractionStoppedError) {
-      if (err.abortedCost !== undefined) recordSessionCost(agent.sessionCounters, err.abortedCost.upperBoundUsd);
+      if (err.abortedCost !== undefined) {
+        // And to this run's ceiling, as a bound it counts but does not bill.
+        agent.chargeExternalCapOnlyCost?.(err.abortedCost.upperBoundUsd);
+        recordSessionCost(agent.sessionCounters, err.abortedCost.upperBoundUsd);
+      }
       throw err;
     }
     // A refused extraction still paid for its reply: book it here, once, as the success

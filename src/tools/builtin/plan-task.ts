@@ -383,6 +383,8 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
         // A planning call aborted at its timeout or by the stop returned no reply to book. Its upper bound
         // goes to the session cap only — never to the tenant balance (aborted-call.ts).
         onAbortedSpend: (cost) => {
+          // And to this run's ceiling, as a bound it counts but does not bill.
+          agent.chargeExternalCapOnlyCost?.(cost.upperBoundUsd);
           recordSessionCost(agent.sessionCounters, cost.upperBoundUsd);
         },
         // A stop of the run ends the planning call (plan_task has no tool time limit: it is

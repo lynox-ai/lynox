@@ -4145,6 +4145,26 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(sendOpts()).not.toHaveProperty('runCostCeilingUSD');
     });
 
+    it('a run with a bound of its own retrieves without the HyDE call; an unbounded run keeps it', async () => {
+      // Kills: a HyDE call in a bounded run (spent before the run's guard is reset, so no ceiling
+      // of the run would count it, and it could leave nothing for the run itself).
+      const { engine, session } = await createEngineAndSession();
+      const retrieve = vi.fn().mockResolvedValue({ memories: [], entities: [], contextBlock: '' });
+      vi.spyOn(engine, 'getKnowledgeLayer').mockReturnValue({ retrieve } as never);
+      const a = balanceHook(120);
+      engine.registerHooks(a.hook);
+      await session.run('Which CRM does the sales team use every day?');
+      expect((retrieve.mock.calls[0]![2] as { useHyDE?: boolean }).useHyDE).toBe(false);
+      expect(sendOpts()?.runCostCeilingUSD).toBe(1.2);
+
+      const { engine: e2, session: s2 } = await createEngineAndSession();
+      const retrieve2 = vi.fn().mockResolvedValue({ memories: [], entities: [], contextBlock: '' });
+      vi.spyOn(e2, 'getKnowledgeLayer').mockReturnValue({ retrieve: retrieve2 } as never);
+      e2.registerHooks({ onBeforeRun: vi.fn() });
+      await s2.run('Which CRM does the sales team use every day?');
+      expect((retrieve2.mock.calls[0]![2] as { useHyDE?: boolean }).useHyDE).toBe(true);
+    });
+
     it('a run with no bound handed back sends exactly as before', async () => {
       // Kills: a mutant that always sets a ceiling (e.g. 0 or NaN) on an unbounded run.
       const { engine, session } = await createEngineAndSession();

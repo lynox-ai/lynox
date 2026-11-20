@@ -561,8 +561,6 @@ const SPEAK_MAX_TEXT_CHARS = 10_000;
  * docs.mistral.ai/inference/pricing, read 2026-11-08. No usage headers exposed — billed client-side.
  */
 const SPEAK_USD_PER_CHAR = 13 / 1_000_000;
-/** The most text-prep lengthens a text before it is billed per character (measured ~1.5×). */
-const SPEAK_PREP_EXPANSION_MAX = 1.5;
 /** Usage Dashboard summary cache: 30 s per (period, windowStart). Long enough to dedupe tab re-opens, short enough to feel live. */
 const USAGE_SUMMARY_TTL_MS = 30_000;
 /**
@@ -11334,7 +11332,7 @@ export class LynoxHTTPApi {
     // rationale (stream mode is mandatory to hit the 1.5 s TTFA target on
     // replies > ~200 chars).
     this.addStatic('user', 'POST /api/speak', async (_req, res, _params, body) => {
-      const { hasSpeakProvider, speakStream, isVoiceLanguageTag, VOXTRAL_TTS_MODEL } = await import('../core/speak.js');
+      const { hasSpeakProvider, speakStream, isVoiceLanguageTag, prepareForSpeech, VOXTRAL_TTS_MODEL } = await import('../core/speak.js');
       if (!hasSpeakProvider()) {
         errorResponse(res, 503, 'TTS not available (set MISTRAL_API_KEY)');
         return;
@@ -11406,11 +11404,13 @@ export class LynoxHTTPApi {
       // gate checks the instance's daily and monthly spending caps first, on
       // every instance. The matching debit fires after synthesis below, keyed on
       // this run id.
-      // Admitted on this request's own worst case, in cents, rounded up: the text at the
-      // per-character rate, times SPEAK_PREP_EXPANSION_MAX. Text-prep runs inside the call and
-      // can lengthen the text as well as shorten it (`a/b` → `a, b`, `—` → `, `).
+      // Admitted on this request's own cost, in cents, rounded up: the text as text-prep turns
+      // it into what is billed per character. Prep is deterministic and runs again inside the
+      // call with the same language, and it can lengthen a text several times over (a table of
+      // arrows becomes words), so the raw length is not a bound.
+      const preparedChars = prepareForSpeech(text, lang ?? 'auto').length;
       const gate = await fireBeforeRunGate(engine, 'fast', {
-        maxCostCents: Math.ceil(text.length * SPEAK_PREP_EXPANSION_MAX * SPEAK_USD_PER_CHAR * 100),
+        maxCostCents: Math.ceil(preparedChars * SPEAK_USD_PER_CHAR * 100),
       });
       if (gate.blockedReason) {
         errorResponse(res, 402, gate.blockedReason);

@@ -1093,9 +1093,6 @@ export class Session {
     // applied to this run's cost guard below. Without a cost guard nothing would hold the
     // run to it, so the run is refused, like a refusal by the hook itself.
     let runCostCeilingUSD: number | undefined;
-    // Helper calls this run makes before its agent starts (the retrieval's HyDE call) are spent
-    // before the guard is reset for the run, so they come off the run's bound instead.
-    let preSendHelperUsd = 0;
     try {
       admission.current = await fireAdmissionHooks(this.engine.getHooks(), preRunContext.runId, preRunContext);
       this._admissionsHeld++;
@@ -1397,8 +1394,10 @@ export class Session {
           const result = await knowledgeLayer.retrieve(task, this.engine.getActiveScopes(), {
             topK: 8,
             threshold: 0.55,
-            useHyDE: true,
-            onHelperSpend: (usd: number) => { if (Number.isFinite(usd) && usd > 0) preSendHelperUsd += usd; },
+            // Not for a run with a bound of its own: the HyDE call is spent before the run's guard
+            // is reset for the run, so no ceiling of the run could count it. Retrieval runs on the
+            // question alone then.
+            useHyDE: runCostCeilingUSD === undefined,
             useGraphExpansion: true,
             threadAnchorSubjectId,
             // Wave 0 shadow mode records this (plaintext) to correlate the admission
@@ -1511,7 +1510,7 @@ export class Session {
           // Tell the agent its first pushed user message is already on disk, so
           // the identity-based eager-persist delta won't write it a second time.
           userMessagePrePersisted: userTurnPrePersisted,
-          ...(runCostCeilingUSD !== undefined ? { runCostCeilingUSD: Math.max(0, runCostCeilingUSD - preSendHelperUsd) } : {}),
+          ...(runCostCeilingUSD !== undefined ? { runCostCeilingUSD } : {}),
         },
       );
       // Why and how THIS run ended, kept where the caller can still reach it. The

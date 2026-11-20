@@ -18676,17 +18676,21 @@ describe('metered audio routes: managed credit gate + debit', () => {
       expect(costArg).toBeCloseTo(0.0013, 6);
     });
 
-    it('admits the request on its own worst case: every character at the per-character rate', async () => {
-      // Kills: the generic single-call default instead of the text's own worst case, and a worst
-      // case without the text-prep expansion (10 000 characters × 1.5 = 19.5 cents → 20).
+    it('admits the request on the length text-prep turns it into, not on the raw length', async () => {
+      // Kills: admitting on the raw length, or on a fixed expansion factor (a table of arrows
+      // grows about eightfold in prep, and the call is billed on the prepared characters).
       repayRateWindow();
+      const { prepareForSpeech } = await vi.importActual<typeof import('../core/speak.js')>('../core/speak.js');
+      const text = `| a | b |\n|---|---|\n| ${'↓'.repeat(9_900)} | x |`;
+      const prepared = prepareForSpeech(text, 'de').length;
+      expect(prepared, 'positive control: prep grows this text beyond a 1.5x factor').toBeGreaterThan(text.length * 1.5);
       const onBeforeRun = vi.fn();
       mockEngineHooks = [{ onBeforeRun }];
-      mockSpeakStream.mockResolvedValue({ characters: 10_000, model: 'voxtral-tts', voice: 'default', latencyMs: 10, ttfbMs: 5 });
-      const res = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'a'.repeat(10_000) }) });
+      mockSpeakStream.mockResolvedValue({ characters: prepared, model: 'voxtral-tts', voice: 'default', latencyMs: 10, ttfbMs: 5 });
+      const res = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text, lang: 'de' }) });
       expect(res.status).toBe(200);
       await readSse(res);
-      expect((onBeforeRun.mock.calls[0]![1] as { maxCostCents?: number }).maxCostCents).toBe(20);
+      expect((onBeforeRun.mock.calls[0]![1] as { maxCostCents?: number }).maxCostCents).toBe(Math.ceil(prepared * 13 / 1_000_000 * 100));
     });
 
     it('refuses a model other than the pinned one before the budget gate', async () => {

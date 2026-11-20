@@ -819,11 +819,14 @@ describe('plan_task auto-planning fallback', () => {
     const counters = {
       httpRequests: 0, writeBytes: 0, costUSD: 0,
     };
-    const agent = makeAgent({ promptUser: undefined, sessionCounters: counters }, mockConfig);
+    const capOnly = vi.fn();
+    const agent = makeAgent({ promptUser: undefined, sessionCounters: counters, chargeExternalCapOnlyCost: capOnly }, mockConfig);
     agent.toolContext.meteredHost = { getHooks: () => [{ onAfterRun }], getContext: () => undefined };
 
     await planTaskTool.handler({ summary: 'Create a research report' }, agent);
     expect(mockPlanDAG).toHaveBeenCalledTimes(1);
+    // The run's ceiling counts the bound as cap-only. Kills: an aborted bound that skips the run's guard.
+    expect(capOnly).toHaveBeenCalledWith(upperBoundUsd);
     // The BOUND, exactly — not the estimate.
     expect(counters.costUSD).toBe(upperBoundUsd);
     expect(onAfterRun, 'the aborted call must not reach the tenant debit').not.toHaveBeenCalled();
