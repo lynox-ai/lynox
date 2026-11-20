@@ -679,7 +679,7 @@ describe('stop at ~80 % and resume (§7 c)', () => {
 describe('a target taken over by a second loop while the first still runs', () => {
   // Loop A reads its target, then stops running past the claim bound (its heartbeat does not beat
   // at the default interval within a test); loop B, on a later clock, takes the target over.
-  // A then sends and records nothing more there, and ends without touching the run.
+  // A then sends no further write to that target and records nothing on it.
   const T0 = Date.UTC(2026, 10, 20, 12);
   const PAST = T0 + BULK_CLAIM_STALE_MS + 1_000;
   /** A clock that reads `at` until moved. */
@@ -883,7 +883,7 @@ describe('a target taken over by a second loop while the first still runs', () =
     expect(row(runId)).toMatchObject({ error: 'sent_unknown', applied: 0 });
   });
 
-  it('a loop that lost its target past its deadline does not roll an atomic run back', async () => {
+  it('a loop that lost its target finds an atomic run the other loop finished, and leaves it written', async () => {
     const { runId, initial } = recordMemoryRun(3, { atomic: true });
     approve(runId, { now: T0 });
     const state = new Map(Object.entries(initial));
@@ -956,7 +956,7 @@ describe('a target taken over by a second loop while the first still runs', () =
       },
       async write() { throw new Error('A must not write'); },
     };
-    // The writer's halt still halts the run, as it does for any loop; the claim stays the other loop's.
+    // The writer's halt still halts the run (the run still writes, unhalted); the claim stays the other loop's.
     expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(aw, a.now))).status).toBe('halted');
     expect(row(runId).claimed_at).toBe(new Date(PAST).toISOString());
     bHolds.open();
@@ -1001,6 +1001,71 @@ describe('a target taken over by a second loop while the first still runs', () =
     // B recorded the target it held and wrote no further one.
     expect([state.get('k000'), state.get('k001'), state.get('k002')]).toEqual(['w0', 'v1', 'v2']);
     expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.stoppedByOwner });
+  });
+
+  // A halt loop A meets after B took its target over still halts the run, and B, holding that
+  // target, records it and writes no further one.
+  it.each([
+    ['markup the host added', BULK_HALT_REASONS.markupAddedByShop],
+    ['a writer halt (contract)', BULK_HALT_REASONS.contract],
+    ['a writer halt (credential)', BULK_HALT_REASONS.credential],
+  ] as const)('a loop that lost its target still halts the run on %s', async (_what, reason) => {
+    const { runId, initial } = recordMemoryRun(3);
+    approve(runId, { now: T0 });
+    const state = new Map(Object.entries(initial));
+    const a = clock(T0);
+    const bHolds = gate();
+    const bInRead = gate();
+    let bFirst = true;
+    let bWrites = 0;
+    const b: TargetWriter = {
+      async read(key) { if (bFirst) { bFirst = false; bInRead.open(); await bHolds.p; } return { absent: false, value: state.get(key)! }; },
+      async write(key, after) { bWrites++; state.set(key, after.absent ? '' : after.value as string); return 'ok'; },
+    };
+    let bRun!: Promise<{ status: string }>;
+    const takeOver = async () => {
+      a.at = PAST;
+      bRun = runBulkEffect(runId, 'bulk_apply', effectDeps(b, () => PAST));
+      await bInRead.p;
+    };
+    const markup = reason === BULK_HALT_REASONS.markupAddedByShop;
+    const aw: TargetWriter = {
+      async read(key) {
+        if (!markup) { await takeOver(); throw new BulkWriterHalt(reason); }
+        return { absent: false, value: state.get(key)! };
+      },
+      async write(key, after) {
+        state.set(key, `${String(after.absent ? '' : after.value)}<p></p>`);
+        await takeOver(); // the read-back stalls past the bound
+        return { result: 'written', actual: { value: state.get(key), estimated: false }, hostAddedMarkup: true };
+      },
+    };
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(aw, a.now))).status).toBe('halted');
+    expect(ledger.getStatus(runId)!.haltReason).toBe(reason);
+    bHolds.open();
+    expect((await bRun).status).toBe('halted');
+    expect([state.get('k001'), state.get('k002')]).toEqual(['v1', 'v2']);
+    expect(bWrites).toBeLessThanOrEqual(1);
+    expect(ledger.getStatus(runId)!.haltReason).toBe(reason);
+  });
+
+  it('a loop that lost its target does not overwrite the end the other loop gave the run', async () => {
+    const { runId, initial } = recordMemoryRun(1);
+    approve(runId, { now: T0 });
+    const state = new Map(Object.entries(initial));
+    const a = clock(T0);
+    const b = loopWriter(state);
+    const aw: TargetWriter = {
+      async read(key) { return { absent: false, value: state.get(key)! }; },
+      async write(key, after) {
+        state.set(key, after.absent ? '' : after.value as string);
+        a.at = PAST;
+        expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(b.writer, () => PAST))).status).toBe('done');
+        return { result: 'written', actual: null, hostAddedMarkup: true };
+      },
+    };
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(aw, a.now));
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', haltReason: null });
   });
 
   it('the first loop records nothing on a target the second holds and has not finished', async () => {
@@ -1064,6 +1129,30 @@ describe('the claim heartbeat while a target is written', () => {
     expect((await runBulkEffect(runId, 'bulk_apply', beatDeps(aw, () => at))).status).toBe('done');
     expect([aWrites, bWrites]).toEqual([1, 0]);
     expect(state.get('k000')).toBe('w0');
+  });
+
+  it('a loop whose target was taken while it read leaves the other loop\'s halt standing, and sends nothing', async () => {
+    const { runId } = recordMemoryRun(1);
+    approve(runId, { now: T0 });
+    const b: TargetWriter = {
+      async read() { throw new BulkWriterHalt(BULK_HALT_REASONS.unauthorized); },
+      async write() { throw new Error('B must not write'); },
+    };
+    let sends = 0;
+    const aw: TargetWriter = {
+      reportsSend: true,
+      async read(key) {
+        // A's own clock stays: its claim goes stale for B, which takes the target, halts the run
+        // on its own writer's halt and gives the target back; A's next beat finds it gone.
+        expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(b, () => T0 + BULK_CLAIM_STALE_MS + 1_000))).status).toBe('halted');
+        await sleep(40);
+        throw new BulkWriterHalt(BULK_HALT_REASONS.credential);
+      },
+      async write(_k, _a, onSend) { onSend?.(); sends++; return 'written'; },
+    };
+    expect((await runBulkEffect(runId, 'bulk_apply', beatDeps(aw, () => T0))).status).toBe('halted');
+    expect(sends).toBe(0);
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.unauthorized);
   });
 
   it('a beat that fails (the store busy) is caught and does not lose the target', async () => {

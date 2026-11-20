@@ -177,9 +177,9 @@ const BULK_EFFECTS: ReadonlySet<string> = new Set(Object.keys(BULK_EFFECT_KEYS))
  * except for an effect that resumes after loss ({@link RESUMES_AFTER_LOSS}), which another
  * process then runs beside the live one. A bulk run's per-target claim keeps the two apart:
  * a run stalled long enough to lose its lease has stale target claims too, and the other
- * process may take its targets over. Once the stalled run runs again it sends no write and
- * records nothing more on a target taken from it (`BulkLedger.renewClaim`); only a send it had
- * already started when it stalled can still land.
+ * process may take its targets over. Once the stalled run runs again it sends no further write
+ * to a target taken from it and records nothing on it (`BulkLedger.renewClaim`); a send it had
+ * already started when it stalled can still land, and between targets it goes on as before.
  */
 const LEASE_HEARTBEAT_MS = 30_000;
 const LEASE_TTL_MS = 15 * 60_000;

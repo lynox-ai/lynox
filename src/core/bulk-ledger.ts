@@ -537,9 +537,9 @@ export const BULK_REQUEST_TIMEOUT_MS = 30_000;
 /** A claim older than this is taken to belong to a loop that stopped: two request deadlines plus
  *  slack. A live loop renews its claim on a heartbeat ({@link BULK_CLAIM_HEARTBEAT_MS}) however
  *  long its requests and waits take, so it loses the claim only when it did not run, or its
- *  renewals failed, for this long. One that lost it sends no write and records nothing more there
- *  ({@link BulkLedger.renewClaim}); a write it had already sent, or a read under way, may still
- *  go out. */
+ *  renewals failed, for this long. One that lost it sends no further write to that target and
+ *  records nothing on it ({@link BulkLedger.renewClaim}); a write it had already sent, or a read
+ *  under way, may still go out, and between targets it goes on as any loop does. */
 export const BULK_CLAIM_STALE_MS = 2 * BULK_REQUEST_TIMEOUT_MS + 15_000;
 /** How often a loop renews the claim on the target it is writing: four beats to the bound, so
  *  one missed beat does not lose it. */
@@ -3721,6 +3721,13 @@ export class BulkLedger {
   /** Stop the run where it is: the phase stays, the reason is set. */
   halt(runId: string, reason: BulkHaltReason): void {
     this.engineDb.getDb().prepare('UPDATE bulk_runs SET halt_reason = ? WHERE id = ?').run(reason, runId);
+  }
+
+  /** Halt a run only while it still writes and nothing halted it yet: for a loop whose target
+   *  another loop took over, which must not overwrite the end that loop gave the run. */
+  haltIfWriting(runId: string, reason: BulkHaltReason): boolean {
+    return this.engineDb.getDb().prepare(`UPDATE bulk_runs SET halt_reason = ? WHERE id = ? AND phase = 'writing' AND halt_reason IS NULL`)
+      .run(reason, runId).changes === 1;
   }
 
   /**

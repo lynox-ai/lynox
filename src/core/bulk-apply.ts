@@ -382,29 +382,35 @@ async function applyRunEffect(
     } finally {
       clearInterval(beat);
     }
-    // Another loop holds the target now: it records what happens there, and this one goes on to
-    // the next target, where the checks between targets (the owner's stop among them) apply as on
-    // any other.
-    if (outcome.kind === 'lost' || held.lost) continue;
+    // Another loop may hold the target now (`lost`): it records what happens there, and this one
+    // records nothing on it. A halt this loop met still halts the run — a writer's halt holds for
+    // every target, and markup a host added is the run's to stop on — but never over an end the
+    // other loop already gave the run. Otherwise this loop goes on to the next target, where the
+    // checks between targets (the owner's stop among them) apply as on any other.
+    const lost = outcome.kind === 'lost' || held.lost;
+    // `taken`: this loop found the target taken, at the write or at its fenced record.
+    const haltRun = (reason: BulkHaltReason, taken: boolean): BulkEffectOutcome => {
+      if (taken) ledger.haltIfWriting(runId, reason);
+      else ledger.halt(runId, reason);
+      return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', reason), say) };
+    };
+    if (outcome.kind === 'lost') continue;
     const via = carried?.() ?? null;
     if (outcome.kind === 'halt') {
-      // The target is released unwritten; a resume takes it again.
-      ledger.releaseClaim(runId, seq, held.since);
-      ledger.halt(runId, outcome.reason);
-      return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', outcome.reason), say) };
+      // The target is released unwritten, while it is still this loop's; a resume takes it again.
+      const released = !lost && ledger.releaseClaim(runId, seq, held.since);
+      return haltRun(outcome.reason, !released);
     }
     if (outcome.kind === 'applied') {
-      if (!ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual, via, outcome.hostAddedMarkup === true, outcome.hostRewrote === true, held.since)) continue;
-      if (outcome.hostAddedMarkup === true) {
-        // Written and recorded with its mark first, so a halt that another loop's reason
-        // overwrites still leaves the target marked: the mark is the truth, not `halt_reason`.
-        ledger.halt(runId, BULK_HALT_REASONS.markupAddedByShop);
-        return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.markupAddedByShop), say) };
-      }
+      const recorded = ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual, via, outcome.hostAddedMarkup === true, outcome.hostRewrote === true, held.since);
+      // Written and recorded with its mark first, so a halt that another loop's reason
+      // overwrites still leaves the target marked: the mark is the truth, not `halt_reason`.
+      if (outcome.hostAddedMarkup === true) return haltRun(BULK_HALT_REASONS.markupAddedByShop, lost || !recorded);
+      if (!recorded) continue;
       consecutive = 0;
       continue;
     }
-    if (!ledger.recordFailed(runId, seq, outcome.kind, via, held.since)) continue;
+    if (lost || !ledger.recordFailed(runId, seq, outcome.kind, via, held.since)) continue;
     // No new attempt, so no failure: the send that left it unclear was counted, halted the
     // run, or belonged to a loop that died. Counting it on every pass would halt a small run
     // at the same target on every resume. It neither extends nor breaks a run of failures.
