@@ -165,7 +165,7 @@ describe('what the preview shows', () => {
 		const host = `login.microsoftonline.com.${'a'.repeat(60)}.evil.example`;
 		const s = connectionsSentence(preview({ connections: [{ id: 'a', profile: 'P', provider: host, account: `eva${'x'.repeat(90)}@crm` }] }))!;
 		expect(segments(s).filter((x) => x.foreign).map((x) => x.text)).toEqual(['eva@kanzlei.example', host, `eva${'x'.repeat(90)}@crm`]);
-		expect(listedLine({ provider: host, account: null, state: 'listed' })).toContain('.evil.example');
+		expect(listedLine({ provider: host, account: null, state: 'listed' })).toBe(`${v(host)} (account unknown): allowed`);
 	});
 
 	it('says "account unknown" and "someone with access" where a value holds only spaces', () => {
@@ -175,6 +175,19 @@ describe('what the preview shows', () => {
 		expect(s).toContain('Someone with access');
 		expect(s).toContain('(account unknown)');
 		expect(listedLine({ provider: 'crm.example', account: ' ', state: 'listed' })).toBe(`${v('crm.example')} (account unknown): allowed`);
+		expect(listedLine({ provider: 'crm.example', account: '\u00AD\u00AD', state: 'listed' })).toBe(`${v('crm.example')} (account unknown): allowed`);
+	});
+
+	it('shows a value made only of hidden characters as its marks, where "marked above" points', () => {
+		setLocale('en');
+		for (const hidden of ['\uFEFF', '\u2028', '\u2029 \u2028']) {
+			const p = preview({ by: hidden, connections: [{ id: 'a', profile: 'P', provider: 'crm.example', account: hidden }] });
+			const boxed = segments(connectionsSentence(p)!).filter((x) => x.foreign).map((x) => x.text);
+			expect(boxed, JSON.stringify(hidden)).toHaveLength(3);
+			for (const b of [boxed[0]!, boxed[2]!]) expect(b, JSON.stringify(hidden)).toMatch(/⟨U\+(FEFF|2028|2029)⟩/);
+			expect(hiddenIn(p)).toBe('plan');
+			expect(listedLine({ provider: 'crm.example', account: hidden, state: 'listed' })).toMatch(/⟨U\+(FEFF|2028|2029)⟩/);
+		}
 	});
 
 	it('says an unnamed person in lynox\'s words, not as a value', () => {

@@ -108,9 +108,13 @@ function foreignValue(text: string): string {
 	return shownWholeValue(markHidden(text));
 }
 
-/** Whether a value says anything once the display has folded its spaces and dropped soft hyphens. */
+/**
+ * Whether a value says anything as the sentence shows it: spaces alone say nothing, but a character
+ * `markHidden` prints is something (its mark is what "marked above" points at), so the test runs on
+ * the marked text. `trim()` alone would take U+FEFF and U+2028 for space.
+ */
 function says(text: string | null): text is string {
-	return text !== null && text.replace(/\u00AD/g, '').trim() !== '';
+	return text !== null && markHidden(text).trim() !== '';
 }
 
 /** A provider with the account, or "account unknown" (legal POS-069: the line never stays empty). */
