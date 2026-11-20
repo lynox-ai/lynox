@@ -1251,6 +1251,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'apis.erasure_connected_again_avert': { de: 'Wählst du innerhalb von 14 Tagen nach dem Widerruf „Erneut verbinden“ und meldest dich beim Anbieter neu an, löschen wir nicht.', en: 'If you choose “Reconnect” within 14 days of the revocation and sign in to the provider again, we don\'t delete anything.' },
 	'apis.delete': { de: 'Löschen', en: 'Delete' },
 	'apis.delete_confirm': { de: 'API-Profil "{name}" wirklich löschen?', en: 'Really delete API profile "{name}"?' },
+	'apis.delete_confirm_unnamed': { de: 'Dieses API-Profil wirklich löschen?', en: 'Really delete this API profile?' },
 	'apis.delete_failed': { de: 'Löschen fehlgeschlagen.', en: 'Delete failed.' },
 	'apis.delete_engine_less': { de: 'Nicht gelöscht: Die Engine ist ohne engine.db gestartet, und bis sie neu startet und wieder alle ihre Dateien öffnen kann, lässt sich keine API-Verbindung löschen.', en: 'Not removed: the engine started without engine.db, and until it restarts and can open all its files again, no API connection can be removed.' },
 	'memory.change_engine_less': { de: 'Nicht geändert: Die Engine ist ohne engine.db gestartet, und bis sie neu startet und wieder alle ihre Dateien öffnen kann, lässt sich das Gedächtnis nicht ändern.', en: 'Not changed: the engine started without engine.db, and until it restarts and can open all its files again, memory cannot be changed.' },

@@ -8,7 +8,7 @@
 	import Icon from '../primitives/Icon.svelte';
 	import PresetClientForm from './PresetClientForm.svelte';
 	import MarkedLine from './MarkedLine.svelte';
-	import { shownValue } from '../utils/plan-takeover.js';
+	import { shownValue, shownWhole } from '../utils/plan-takeover.js';
 	import { connectionLine, type ConnectionLine, type OAuthGrantView } from '../utils/oauth-connection.js';
 	import { localDay, noticesByProfile, revocationView, type ProviderNotice } from '../utils/provider-revocation.js';
 	import { connectHref } from '../oauth-connect-path.js';
@@ -16,9 +16,14 @@
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 
 	interface ApiEndpoint { method: string; path: string; description: string; }
-	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; oauth_grant?: OAuthGrantView & { state?: unknown; revoked_at?: unknown };
+	interface ApiProfile { id: string; name: string; base_url: string; description: string; /** Who set it up (`owner` or `mandate:<address>`). */ created_by?: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; oauth_grant?: OAuthGrantView & { state?: unknown; revoked_at?: unknown };
 		/** Whether this reader's connect start goes through: a mandate's only for a profile it set up. */
 		reader_may_connect?: boolean; }
+
+	// A profile a person with access set up, in the owner's view: its name is that person's words.
+	function setUpByMember(profile: ApiProfile): boolean {
+		return isOwnerSession() && (profile.created_by ?? '').startsWith('mandate:');
+	}
 
 	// Who connected the profile and with which provider account (`utils/oauth-connection.ts`). A
 	// person's address and an account's label are someone else's values, set apart (`MarkedLine`).
@@ -91,7 +96,8 @@
 	async function deleteProfile(profile: ApiProfile) {
 		// Native confirm keeps the surface small; matches the rest of the
 		// destructive-action UX in this app (HistoryView, ArtifactsView).
-		const msg = t('apis.delete_confirm').replace('{name}', profile.name);
+		// A native dialog cannot set a value apart: a name a person with access gave stays out of it.
+		const msg = setUpByMember(profile) ? t('apis.delete_confirm_unnamed') : t('apis.delete_confirm').replace('{name}', profile.name);
 		if (!confirm(msg)) return;
 		deleting = profile.id;
 		error = '';
@@ -183,7 +189,7 @@
 						<button onclick={() => expanded = expanded === profile.id ? null : profile.id}
 							class="flex-1 px-4 py-3 text-left hover:bg-bg-muted transition-colors">
 							<div class="flex items-center gap-2">
-								<span class="text-sm font-medium">{profile.name}</span>
+								<span class="text-sm font-medium break-words" data-profile-name>{#if setUpByMember(profile)}<MarkedLine text={shownWhole(profile.name)} mono={false} />{:else}{profile.name}{/if}</span>
 								{#if profile.auth}<span class="text-xs rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{profile.auth.type}</span>{/if}
 							</div>
 							<p class="text-xs text-text-subtle mt-1 font-mono">{profile.base_url}</p>

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { setLocale, getLocale } from '../i18n.svelte.js';
+import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
 // for the client, so it is mounted with the client entry, loaded by path.
@@ -115,7 +116,7 @@ describe('the plan list', () => {
 		await settle();
 		const line = target.querySelector('[data-stamp-workflow]');
 		expect(line, 'the stamp\'s workflow line').not.toBeNull();
-		expect(boxesIn(line)[0]).toBe(MARK.workflow);
+		expect(boxesIn(line)).toEqual([MARK.workflow]);
 	});
 });
 
@@ -147,35 +148,84 @@ describe('the workflow library', () => {
 		expect(boxesIn(target.querySelector('[data-testid="runs-as-badge"]'))).toEqual([MARK.person]);
 	});
 
-	it('leaves the owner\'s own workflow unboxed', async () => {
-		await library({ ...WF, name: MARK.own });
-		expect(boxesIn(target.querySelector('[data-workflow-title]'))).toEqual([]);
-	});
-
-	it('sets apart such a name in the run dialog and the schedule dialog', async () => {
-		await library({ ...WF, runs_as: { person: MARK.person, ended: false }, parameters: [{ name: 'to', required: false }] });
-		await press('Ausführen');
-		expect(boxesIn(target.querySelector('[data-params-title]'))).toEqual([MARK.workflow]);
-		component && unmount(component);
+	const again = async (wf: Record<string, unknown>): Promise<void> => {
+		if (component) unmount(component);
 		component = undefined;
 		target.replaceChildren();
-		await library({ ...WF, runs_as: { person: MARK.person, ended: false } });
+		await library(wf);
+	};
+
+	it('leaves the owner\'s own workflow unboxed, on the card and in the schedule dialog', async () => {
+		await library({ ...WF, name: MARK.own });
+		const title = target.querySelector('[data-workflow-title]');
+		expect(title, 'the card title').not.toBeNull();
+		expect(boxesIn(title)).toEqual([]);
 		await press('Planen');
 		const heading = target.querySelector('[data-schedule-title]');
-		expect(boxesIn(heading)).toEqual([MARK.workflow]);
-		expect(heading?.textContent).toBe(`Workflow planen: ${MARK.workflow}`);
+		expect(heading, 'the schedule heading').not.toBeNull();
+		expect(boxesIn(heading)).toEqual([]);
+	});
+
+	it('sets apart such a name, whole, in the run, schedule and step-review dialogs', async () => {
+		const long = `${MARK.workflow} ${'x'.repeat(90)} Ende`;
+		await library({ ...WF, name: long, runs_as: { person: MARK.person, ended: false }, parameters: [{ name: 'to', required: false }] });
+		await press('Ausführen');
+		expect(boxesIn(target.querySelector('[data-params-title]'))).toEqual([long]);
+		await again({ ...WF, name: long, runs_as: { person: MARK.person, ended: false } });
+		await press('Planen');
+		const heading = target.querySelector('[data-schedule-title]');
+		expect(boxesIn(heading)).toEqual([long]);
+		expect(heading?.textContent).toBe(`Workflow planen: ${long}`);
+		await again({ ...WF, name: long, runs_as: { person: MARK.person, ended: false }, awaitsStamp: true, confirmedAt: undefined });
+		target.querySelector<HTMLElement>('[data-testid="stamp-review"]')!.click();
+		await settle();
+		const review = target.querySelector('[data-stamp-review-title]');
+		expect(boxesIn(review)).toEqual([long]);
+		expect(review?.textContent).toBe(`Schritte prüfen: ${long}`);
 	});
 });
 
-describe('the connection line of a profile', () => {
-	it('sets apart the address of whoever connected it and the account\'s label', async () => {
-		const grant = { connected_by: `mandate:${MARK.helper}`, connected_by_reader: false, account: { label: MARK.account, source: 'oidc' } };
-		vi.stubGlobal('fetch', vi.fn(async () => json(200, { profiles: [{ id: 'p0', name: 'CRM', base_url: 'https://x.example', description: 'd', oauth_grant: grant }], importWaiting: [] })));
+describe('a profile in the API store', () => {
+	async function store(profiles: Record<string, unknown>[], viewer = 'owner'): Promise<void> {
+		resetSettingsViewer();
+		vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+			const path = new URL(String(input), 'http://localhost').pathname.replace(/^\/api/, '');
+			if (path === '/config') return json(200, { viewer, locks: {} });
+			return json(200, { profiles, importWaiting: [] });
+		}));
 		const { default: ApiStoreView } = await import('./ApiStoreView.svelte');
 		component = mount(ApiStoreView, { target });
 		await settle();
+	}
+	const P = { base_url: 'https://x.example', description: 'd' };
+
+	it('sets apart the address of whoever connected it and the account\'s label', async () => {
+		const grant = { connected_by: `mandate:${MARK.helper}`, connected_by_reader: false, account: { label: MARK.account, source: 'oidc' } };
+		await store([{ ...P, id: 'p0', name: 'CRM', oauth_grant: grant }]);
 		const line = target.querySelector('[data-testid="api-connection"]');
 		expect(line, 'the connection line').not.toBeNull();
 		expect(boxesIn(line)).toEqual([MARK.helper, MARK.account]);
+	});
+
+	it('sets apart, for the owner, the name of a profile a person with access set up, and keeps it out of the delete dialog', async () => {
+		await store([
+			{ ...P, id: 'p0', name: MARK.workflow, created_by: `mandate:${MARK.helper}` },
+			{ ...P, id: 'p1', name: MARK.own, created_by: 'owner' },
+		]);
+		const names = [...target.querySelectorAll('[data-profile-name]')];
+		expect(names.map((n) => n.textContent)).toEqual([MARK.workflow, MARK.own]);
+		expect(names.map((n) => boxesIn(n))).toEqual([[MARK.workflow], []]);
+		const asked: string[] = [];
+		vi.stubGlobal('confirm', (m: string) => { asked.push(m); return false; });
+		for (const b of target.querySelectorAll<HTMLElement>('button')) if (b.getAttribute('aria-label') === 'Löschen' || b.textContent?.trim() === 'Löschen') b.click();
+		await settle();
+		expect(asked).toEqual(['Dieses API-Profil wirklich löschen?', `API-Profil "${MARK.own}" wirklich löschen?`]);
+	});
+
+	it('leaves the name unboxed in a member\'s view', async () => {
+		await store([{ ...P, id: 'p0', name: MARK.workflow, created_by: `mandate:${MARK.helper}` }], 'mandate');
+		const name = target.querySelector('[data-profile-name]');
+		expect(name, 'the profile name').not.toBeNull();
+		expect(boxesIn(name)).toEqual([]);
 	});
 });
