@@ -1699,7 +1699,7 @@ describe('applying a Shopify run', () => {
         expect(out.status).toBe('refused');
         expect(productWrites()).toHaveLength(1);
         expect(out.summary).toMatch(/^lynox writes nothing more in this run; what it already wrote stays\. When this Shopify connection was set up/);
-        expect(out.pushSummary).toMatch(/^lynox writes nothing more; what it wrote stays\. When connecting, lynox did not ask Shopify for permission to change products\. What to do is under Bulk runs\. .*1 applied, of \d+ targets\.$/);
+        expect(out.pushSummary).toMatch(/^lynox writes nothing more; what it wrote stays\. When connecting, lynox did not ask Shopify for permission to change products\. What to do is under Bulk runs\. (?:.* )?1 applied, of 2 targets\.$/);
       });
 
       it('does not say it wrote nothing when a send of the run has an unclear end', async () => {
