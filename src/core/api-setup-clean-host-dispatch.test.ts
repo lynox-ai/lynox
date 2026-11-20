@@ -139,6 +139,18 @@ describe('api_setup through the dispatch records the host of a save the owner ma
     expect(store.get('crm')?.owner_clean_host).toBeUndefined();
   });
 
+  it('a reset starts a conversation that holds no provider search', async () => {
+    const store = new ApiStore();
+    const agent = ownersChat(store);
+    agent.loadMessages([
+      { role: 'user', content: 'find the CRM API' },
+      { role: 'assistant', content: [...searchBlocks(), { type: 'text', text: 'found it' }] as never },
+    ]);
+    expect(agent.heldProviderSearch()).toBe(true);
+    agent.reset();
+    expect(agent.heldProviderSearch()).toBe(false);
+  });
+
   it('CONTROL: a loaded conversation without such a search still records the host', async () => {
     const store = new ApiStore();
     const agent = ownersChat(store);

@@ -1180,8 +1180,9 @@ export class Agent implements IAgent {
 
   /**
    * Whether the batch the running call belongs to started after the conversation had taken in
-   * foreign content. Every call runs inside a batch (`_executeOne` is reached only from there);
-   * read outside one it answers `true`, the side that grants less.
+   * foreign content. Every dispatched call runs inside a batch (`_executeOne` is reached only
+   * from there); a handler called directly, or anything read outside a batch, gets `true`, the
+   * side that grants less.
    */
   batchStartedTainted(): boolean {
     return this._taintBeforeBatch ?? true;
@@ -1191,6 +1192,10 @@ export class Agent implements IAgent {
   heldProviderSearch(): boolean {
     return this._providerSearchSeen;
   }
+
+  /** Re-arms {@link heldProviderSearch} on an agent rebuilt for the same conversation, whose
+   *  history may no longer hold the search blocks (the context window drops old turns). */
+  restoreProviderSearch(): void { this._providerSearchSeen = true; }
 
   /**
    * Where a call stands toward the contract, for its row (`CallContract`). Taken once, when the
@@ -1802,6 +1807,7 @@ export class Agent implements IAgent {
     this._lastRealAtMsgCount = 0;
     // DK.1 F5: a fresh conversation has ingested nothing untrusted yet.
     this._conversationSawUntrusted = false;
+    this._providerSearchSeen = false;
     // Replaced, never cleared: a sub-agent still holding the old set keeps adding to it.
     this.conversationGrants = this.conversationGrants?.renewed();
   }
