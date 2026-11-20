@@ -9,10 +9,14 @@
 // `check <base> <head>` reads every commit in base..head and fails on each link a commit adds or
 // changes whose target is absolute, climbs with `..`, or holds a backslash, a colon or a control
 // character (paths that only Windows reads as absolute or outside, or text hidden behind a NUL).
-// Without `..` and without an absolute start, a target can leave the tree only through another link
-// that has one of them, and that link is refused where it is added. So the rule needs no file
-// system walk, and a tree that changes later cannot reopen it. A link inside the tree that needs
-// `..` is refused too; neither repository has one.
+// Without `..` and without an absolute start, a target can leave the tree only through another
+// committed link that has one of them, and that link is refused where it is added. So the rule
+// needs no file system walk, and a tree that changes later cannot reopen it. A link inside the
+// tree that needs `..` is refused too; neither repository has one.
+//
+// That reasoning assumes the base holds no such link, which is true of main (no link at all) and
+// stays true as long as every change reaches main through a pull request this job reads. A link
+// on a base that is not main, and that no pull request read, is not seen.
 //
 // Every commit, not the net diff: a link added and removed again on the branch is still in the
 // branch's history, and a pull request shows that history. A merge counts only for what differs
@@ -20,8 +24,9 @@
 // that commit is in the range.
 //
 // Not closed, by design: a target that stays inside the tree is a path of the tree's own names,
-// and those names can still carry text. A link to node_modules is caught whatever its target,
-// by `.gitignore` first.
+// and those names can still carry text. Paths git does not track (a CI checkout's installed
+// `node_modules`, with its own links) are not seen. A link named `node_modules` is ignored by
+// `.gitignore` first, whatever its target.
 //
 // The target itself is never printed: the job's log is as public as the repository.
 //
@@ -101,5 +106,5 @@ if (isMain) {
     console.error(`symlink-guard: ${f.commit.slice(0, 12)} adds the link ${JSON.stringify(f.path)} with ${PROBLEM_WORDS[f.problem]}. Remove it from the commit (git rm --cached ${JSON.stringify(f.path)}); a link to node_modules belongs in no commit.`);
   }
   if (result.found.length > 0) process.exit(1);
-  console.log(`symlink-guard: clean — ${result.commits} commit(s) read, no link whose target is absolute or climbs out.`);
+  console.log(`symlink-guard: clean — ${result.commits} commit(s) read, no link whose target is absolute, climbs or holds unusual characters.`);
 }
