@@ -7,10 +7,20 @@ import type { CallTargetOrigin } from './call-connection.js';
 
 type RedirectHook = (nextUrl: string, method: string, headers?: Record<string, string>) => void;
 
-/** A host for a refusal text: the last two labels, the rest elided, so data in a subdomain is not repeated. */
-export function maskedHost(hostname: string): string {
-  const labels = hostname.split('.');
-  return labels.length <= 2 ? hostname : `…${labels.slice(-2).join('.')}`;
+/** A label as a host name usually has it: letters, digits and inner hyphens (punycode included). */
+const PLAIN_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/**
+ * A host for a refusal text: the last two labels, the rest elided, so data in a subdomain is not
+ * repeated. The server that redirects chooses that host, and a URL keeps characters in a host name
+ * that no registered name has (`,` `;` `!` `"` `_` `(` …), enough for a line of instructions without
+ * spaces. The refusal is engine text, outside the fence around what a page says, so a host whose
+ * shown labels are not plain is not named at all (`null`).
+ */
+export function maskedHost(hostname: string): string | null {
+  const shown = hostname.split('.').slice(-2);
+  if (!shown.every((label) => PLAIN_LABEL.test(label))) return null;
+  return hostname.split('.').length <= 2 ? shown.join('.') : `…${shown.join('.')}`;
 }
 
 /**
@@ -26,7 +36,11 @@ export function crossHostRedirectGuard(checkedUrl: string, checked: boolean, inn
     const to = new URL(nextUrl).hostname;
     if (to !== from) {
       const host = maskedHost(to);
-      throw new Error(`Blocked: the page forwards this read to another host (${host}), and lynox did not follow. Nothing was sent to that host. After content from outside in this conversation, a read like this one does not follow a redirect to another host. lynox does not show you the full address, so do not guess it. Tell the user that the page forwards to ${host} and that lynox did not follow it; if they want that page, they can give you its address.`);
+      const rule = 'Nothing was sent to that host. After content from outside in this conversation, a read like this one does not follow a redirect to another host.';
+      if (host === null) {
+        throw new Error(`Blocked: the page forwards this read to another host, and lynox did not follow. ${rule} lynox does not show you that host's name, because it holds characters a host name does not usually have, so do not guess it. Tell the user that the page forwards to another host and that lynox did not follow it; if they want that page, they can give you its address.`);
+      }
+      throw new Error(`Blocked: the page forwards this read to another host (${host}), and lynox did not follow. ${rule} lynox does not show you the full address, so do not guess it. Tell the user that the page forwards to ${host} and that lynox did not follow it; if they want that page, they can give you its address.`);
     }
     inner?.(nextUrl, method, headers);
   };
