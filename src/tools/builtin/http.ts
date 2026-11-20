@@ -4,6 +4,7 @@ import { urlScanForms } from '../../core/url-scan-forms.js';
 import { shellIsolation } from '../../core/shell-isolation.js';
 import { applyShape } from '../../core/api-shape.js';
 import type { ResponseShape } from '../../core/api-store.js';
+import type { StoreRefreshOutcome } from '../../core/store-token-refresh.js';
 import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from '../../core/api-store.js';
 // Not from `types/index.js`: `ApiProfile` is one of the exported types that
 // does not live in the barrel, which `CLAUDE.md` says to look for rather than
@@ -1082,7 +1083,7 @@ interface AttachedAuth {
    * store answered 401 to it (`store-token-refresh.ts`), with the vault view this attach read it
    * through. True when a new token is stored. Absent for any other request.
    */
-  renew?: (() => Promise<boolean>) | undefined;
+  renew?: (() => Promise<StoreRefreshOutcome>) | undefined;
   /**
    * With a refusal of a store connection whose token expires: why only connecting the store again
    * helps. `ended`: the store refused the refresh, or the refresh ended the connection;
@@ -2451,7 +2452,7 @@ async function attachEngineManagedAuth(
         const outcome = await refreshStoreToken(profile.id, 'due', { toolContext: { ...toolContext, apiStore }, secretStore, principal: agent.principal, runId: agent.currentRunId });
         // Named, not silent: a token that cannot be renewed for this reason would fail on its own
         // within minutes, with nothing to say why.
-        if (outcome === 'client-misnamed') return { refusal: `Error: ${storeClientMisnamedText(profile.id)}`, reconnect: 'client-misnamed' };
+        if (outcome === 'client-misnamed') return { refusal: `Error: ${storeClientMisnamedText(profile.id, false)}`, reconnect: 'client-misnamed' };
       } else {
         process.stderr.write(`[lynox:http] oauth token renewal skipped for profile "${profile.id}": a store connection is renewed by connecting it again\n`);
       }
@@ -2549,9 +2550,9 @@ async function attachEngineManagedAuth(
       const minted = await mintStorePassFor(toolContext!, container, { kind: 'api', connectionId: profile.id }, origin, oauthSlot, oauthValue);
       if ('refusal' in minted) return { refusal: `Error: ${minted.refusal}` };
       const renew = attachPreset?.expiringParam !== undefined && toolContext !== undefined
-        ? async (): Promise<boolean> => {
+        ? async (): Promise<StoreRefreshOutcome> => {
           const { refreshStoreToken } = await import('../../core/store-token-refresh.js');
-          return (await refreshStoreToken(profile.id, 'unauthorized', { toolContext: { ...toolContext, apiStore }, secretStore, principal: agent.principal, runId: agent.currentRunId })) === 'renewed';
+          return refreshStoreToken(profile.id, 'unauthorized', { toolContext: { ...toolContext, apiStore }, secretStore, principal: agent.principal, runId: agent.currentRunId });
         }
         : undefined;
       return { ...put(oauthSlot, oauthValue), pass: minted.pass, renew };
@@ -4281,9 +4282,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // again by the engine; the model sends it once more, and a second 401 stays a 401.
       let storeRenewed = false;
       if (response.status === 401 && auth.renew !== undefined) {
-        storeRenewed = await auth.renew();
-        if (storeRenewed) {
+        const renewal = await auth.renew();
+        if (renewal === 'renewed') {
+          storeRenewed = true;
           wrapped += '\n\n**[Engine note — the store\'s access was renewed]**\nThe access token for this store had expired and the engine has renewed it. Send the same request once more; nothing was changed by the request above.';
+        } else if (renewal === 'client-misnamed') {
+          // Named, and in place of the reminder below: connecting again would not fix it.
+          storeRenewed = true;
+          const { storeClientMisnamedText } = await import('../../core/store-token-refresh.js');
+          wrapped += `\n\n**[Engine note — the store's access could not be renewed]**\nThe ${storeClientMisnamedText(auth.profile?.id ?? '', true)}`;
         }
       }
 
@@ -4561,7 +4568,7 @@ export async function attachStoredCredential(
    *  the run is the container a request to a store is contained under (`core/containment.ts`). */
   container: { bulkRunId: string },
   /** Receives the store pass minted for this request, which the caller hands to its send. */
-  out?: { pass?: StorePass | undefined; renew?: (() => Promise<boolean>) | undefined; reconnect?: 'ended' | 'client-misnamed' | undefined } | undefined,
+  out?: { pass?: StorePass | undefined; renew?: (() => Promise<StoreRefreshOutcome>) | undefined; reconnect?: 'ended' | 'client-misnamed' | undefined } | undefined,
 ): Promise<ApiProfile | null> {
   const auth = await attachEngineManagedAuth(
     url,

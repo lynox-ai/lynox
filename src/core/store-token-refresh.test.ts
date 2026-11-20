@@ -235,6 +235,18 @@ describe('the refresh of an expiring store connection', () => {
     }
   });
 
+  it('a refresh that cannot start still ends in one outcome line: a vault it cannot write, a trail it cannot record', async () => {
+    const noWrite = { ...ctx(), secretStore: { resolve: (n: string) => vault.get(n) ?? null } as never };
+    expect(await refreshStoreToken(ID, 'due', noWrite)).toBe('not-run');
+    expect(lines().filter((l) => l.includes('outcome=not-run (due): not started: this caller cannot write the vault'))).toHaveLength(1);
+    resetStoreRefreshForTests();
+    // A mandate's refresh needs its row in the instance log; without a log it does not start.
+    const mandate = { ...ctx(), principal: { kind: 'mandate', email: 'helper@example.org' } as never };
+    expect(await refreshStoreToken(ID, 'due', mandate)).toBe('not-run');
+    expect(lines().filter((l) => l.includes('outcome=not-run (due): not started: it could not be recorded in the instance log'))).toHaveLength(1);
+    expect(hold.calls).toHaveLength(0);
+  });
+
   it('a profile removed while the refresh was out stores nothing and still ends in an outcome line', async () => {
     hold.answer = async () => { store.forgetAll(); return answer(RENEWED); };
     expect(await refreshStoreToken(ID, 'due', ctx())).toBe('not-run');
@@ -293,22 +305,27 @@ describe('the refresh of an expiring store connection', () => {
     expect(vault.get(accessTokenKey(ID))).toBe('at-written-meanwhile');
   });
 
-  it('the store\'s invalid_grant ends the connection, records the grant as revoked, and leaves the vault as it was', async () => {
+  it('the store\'s invalid_grant ends the connection as refresh-dead, not as a revocation, and leaves the vault as it was', async () => {
     hold.answer = async () => answer({ error: 'invalid_grant', error_description: 'secret-looking provider text rt-old' }, 400);
     expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
     expect(vault.get(accessTokenKey(ID))).toBe('at-old');
     expect(profile().oauth_grant?.store_binding).toBeUndefined();
-    expect(hasRevokedGrant(profile())).toBe(true);
-    expect(profile().oauth_grant?.revoked_fp).toBe(tokenFingerprint('rt-old'));
+    // The store says the same for a refresh token that ran out or was spent: no revocation, no erasure.
+    expect(profile().oauth_grant?.state).toBe('refresh-dead');
+    expect(hasRevokedGrant(profile())).toBe(false);
+    expect(profile().oauth_grant?.revoked_fp).toBeUndefined();
+    expect(lines().some((l) => l.includes('outcome=dead (due)') && l.includes('(invalid_grant)'))).toBe(true);
     // The answer's body reaches no log line.
     expect(lines().some((l) => l.includes('secret-looking provider text') || l.includes('rt-old'))).toBe(false);
   });
 
-  it('another refusal (400 without invalid_grant) ends the connection but records no revocation', async () => {
+  it('another refusal (400 without invalid_grant) ends the connection the same way, without naming invalid_grant', async () => {
     hold.answer = async () => answer({ error: 'invalid_request' }, 400);
     expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
     expect(profile().oauth_grant?.store_binding).toBeUndefined();
+    expect(profile().oauth_grant?.state).toBe('refresh-dead');
     expect(hasRevokedGrant(profile())).toBe(false);
+    expect(lines().some((l) => l.includes('(invalid_grant)'))).toBe(false);
   });
 
   for (const status of [429, 500, 503, 408]) {
@@ -471,7 +488,7 @@ describe('the refresh of an expiring store connection', () => {
     const { attachStoredCredential } = await import('../tools/builtin/http.js');
     const { bindingsAsMigrated } = await import('../../tests/helpers/vault-bindings.js');
     const c = ctx();
-    const out: { pass?: StorePass | undefined; renew?: (() => Promise<boolean>) | undefined } = {};
+    const out: { pass?: StorePass | undefined; renew?: (() => Promise<string>) | undefined } = {};
     await attachStoredCredential(`${ORIGIN}/admin/api/2025-10/shop.json`, {}, false, {
       apiStore: store, secretStore: c.secretStore, principal: OWNER_PRINCIPAL, mandateEnds: null, secretReleases: null,
       exactClearance: c.toolContext.exactClearance, storeBindingDigest: bind,
@@ -480,7 +497,7 @@ describe('the refresh of an expiring store connection', () => {
     }, { bulkRunId: 'run-1' }, out);
     expect(hold.calls).toHaveLength(0);
     expect(out.renew).toBeDefined();
-    expect(await out.renew!()).toBe(true);
+    expect(await out.renew!()).toBe('renewed');
     expect(hold.calls).toHaveLength(1);
     expect(vault.get(accessTokenKey(ID))).toBe('at-new');
   });

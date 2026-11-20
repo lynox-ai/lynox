@@ -275,7 +275,7 @@ describe('no exchange renewal of a store preset (AC6)', () => {
       // not the preset's pair of names (`store-token-refresh.ts`, `storeRefreshPassFor`).
       const logged = log.mock.calls.map((c) => String(c[0]));
       expect(logged.some((l) => l.includes('oauth token renewal'))).toBe(false);
-      expect(logged.some((l) => l.includes('[lynox:store] token refresh for api_profile "shop-acme" not started'))).toBe(true);
+      expect(logged.some((l) => l.includes('[lynox:store] token refresh for api_profile "shop-acme" outcome=not-run (due): not started'))).toBe(true);
     } finally {
       log.mockRestore();
     }

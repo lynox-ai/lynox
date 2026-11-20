@@ -61,8 +61,8 @@ export type StoreRefreshOutcome = 'renewed' | 'not-run' | 'dead' | 'client-misna
  * The refusal for a store connection whose client is not under the preset's own vault names: its
  * token cannot be renewed, and nothing is sent. Fixed text, for the model and the log.
  */
-export function storeClientMisnamedText(profileId: string): string {
-  return `the Shopify store connection of api_profile "${profileId}" does not keep its app's client ID and secret under the names this provider uses (SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET), so its expiring token cannot be renewed and nothing was sent to the store. Connect it again with api_setup action "connect".`;
+export function storeClientMisnamedText(profileId: string, sent: boolean): string {
+  return `the Shopify store connection of api_profile "${profileId}" does not keep its app's client ID and secret under the names this provider uses (SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET), so its expiring token cannot be renewed${sent ? '' : ' and nothing was sent to the store'}. Update the profile with api_setup action "update" so auth.oauth.client_id_key and client_secret_key name those two vault entries (store the app's values under them first if they are not there yet), then send the request again.`;
 }
 
 const refreshesInFlight = new Map<string, Promise<StoreRefreshOutcome>>();
@@ -280,7 +280,7 @@ export function refreshStoreToken(profileId: string, trigger: 'due' | 'unauthori
   lastAttempt.set(profileId, Date.now());
   const run = runRefresh(profileId, trigger, ctx)
     .catch(() => {
-      outcomeLine(profileId, 'not-run', trigger, 'an unexpected error; the stored token is unchanged');
+      outcomeLine(profileId, 'not-run', trigger, 'an unexpected error; whether new tokens reached the vault is not known');
       return 'not-run' as const;
     })
     .then((outcome) => {
@@ -338,13 +338,13 @@ async function runRefresh(profileId: string, trigger: 'due' | 'unauthorized', ct
   // and the new one would be lost.
   const vault = ctx.secretStore;
   if (!apiStore || vault.set === undefined) {
-    logLine(profileId, 'not started: this caller cannot write the vault');
+    outcomeLine(profileId, 'not-run', trigger, 'not started: this caller cannot write the vault');
     return 'not-run';
   }
   const setSecret = (name: string, value: string): void => { vault.set!(name, value); };
   const trail = beginTrail(profileId, trigger, ctx);
   if (trail === 'refused') {
-    logLine(profileId, 'not started: it could not be recorded in the instance log');
+    outcomeLine(profileId, 'not-run', trigger, 'not started: it could not be recorded in the instance log');
     return 'not-run';
   }
   const endTrail = (phase: 'returned' | 'failed'): void => {
@@ -495,8 +495,12 @@ async function endConnection(
   outcome: 'dead' | 'scope-mismatch' | 'cas-lost',
   trigger: 'due' | 'unauthorized',
   why: string,
-  /** The store said `invalid_grant`: the grant is recorded as revoked, for the refusal that names it. */
-  revoked = false,
+  /**
+   * The store said `invalid_grant`: named in the line only. It is not recorded as a revocation: the
+   * store says the same for a refresh token that ran out and for one already spent, so the grant is
+   * marked `refresh-dead` like every other ended connection, and no erasure starts from it.
+   */
+  invalidGrantSaid = false,
 ): Promise<StoreRefreshOutcome> {
   const apiStore = ctx.toolContext.apiStore;
   if (apiStore) {
@@ -507,16 +511,14 @@ async function endConnection(
       const now = apiStore.get(profileId);
       if (now?.oauth_grant !== undefined && now.oauth_grant.store_binding === plan.presented.binding) {
         const { store_binding: _gone, ...rest } = now.oauth_grant;
-        const grant: OAuthGrantRecord = revoked
-          ? { ...rest, state: 'revoked', revoked_fp: tokenFingerprint(plan.presented.refresh), revoked_at: new Date().toISOString() }
-          : rest;
+        const grant: OAuthGrantRecord = { ...rest, state: 'refresh-dead' };
         apiStore.save({ ...now, oauth_grant: grant } as ApiProfile, join(getLynoxDir(), 'apis'), { actor: ctx.principal });
       }
     } catch {
       // The binding stays; the store refuses the spent token itself, and the next refresh ends here again.
     }
   }
-  outcomeLine(profileId, outcome, trigger, revoked ? `${why} (invalid_grant: recorded as revoked)` : why);
+  outcomeLine(profileId, outcome, trigger, invalidGrantSaid ? `${why} (invalid_grant)` : why);
   return 'dead';
 }
 

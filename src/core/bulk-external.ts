@@ -17,6 +17,7 @@
  * fields a write does not send is documented by none of them; that is what the one-target
  * probe before a wider approval is for (`BulkLedger.confirmProbe`).
  */
+import type { StoreRefreshOutcome } from './store-token-refresh.js';
 import { effectiveWriteMethod, gateReading, isGraphqlEndpoint, isOutboundEffectWrite, isReadMethod, normalizeWritePath, outboundEffectField } from './outbound-write.js';
 import { shopifyReadRequest, shopifyWriteRequest, type ShopifyRead, type ShopifyWrite } from './shopify-graphql.js';
 import { TARGET_MAX, httpTarget } from './audit-log.js';
@@ -319,7 +320,7 @@ export interface ExternalClientDeps {
   /** `out.pass` receives the store pass of a request to a Shopify store, which the send then carries. */
   /** `out.renew`, when the attach sets it, renews the attached connection's token after a 401 to
    *  it (a store whose token expires, `store-token-refresh.ts`): true when a new one is stored. */
-  attach: (url: string, headers: Record<string, string>, method: string, out?: { pass?: StorePass | undefined; renew?: (() => Promise<boolean>) | undefined; reconnect?: 'ended' | 'client-misnamed' | undefined }) => Promise<AttachedConnection | null>;
+  attach: (url: string, headers: Record<string, string>, method: string, out?: { pass?: StorePass | undefined; renew?: (() => Promise<StoreRefreshOutcome>) | undefined; reconnect?: 'ended' | 'client-misnamed' | undefined }) => Promise<AttachedConnection | null>;
   /** The profile's own rate limit: null when a request may go, else it may not. */
   rateLimit: (hostname: string) => string | null;
 
@@ -404,14 +405,21 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     onSend?: () => void, onRefused?: () => void, maxBytes: number = BULK_MAX_TARGET_BYTES,
     graphql?: { body: string; detail: string; writes?: true },
   ): Promise<ExternalRead> => {
-    const status: { http?: number; renew?: (() => Promise<boolean>) | undefined } = {};
+    const status: { http?: number; renew?: (() => Promise<StoreRefreshOutcome>) | undefined } = {};
     let answer = await sendOnce(method, url, body, signal, onSend, maxBytes, graphql, status);
     // A 401 to a token the attach can renew: renewed once, and the same request sent once more. A
     // 401 was not acted on, so a write sent again is not a second write; the first send is
     // reported as refused before it, so each send that was sent is answered once.
-    if (answer.kind === 'unauthorized' && status.http === 401 && status.renew !== undefined && await status.renew()) {
-      onRefused?.();
-      answer = await sendOnce(method, url, body, signal, onSend, maxBytes, graphql, {});
+    // A renewal that cannot help names why, and the run halts on that instead of a plain 401.
+    if (answer.kind === 'unauthorized' && status.http === 401 && status.renew !== undefined) {
+      const renewal = await status.renew();
+      if (renewal === 'renewed') {
+        onRefused?.();
+        answer = await sendOnce(method, url, body, signal, onSend, maxBytes, graphql, {});
+      } else if (renewal === 'client-misnamed' || renewal === 'dead') {
+        onRefused?.();
+        return { kind: 'reconnect', why: renewal === 'dead' ? 'ended' : 'client-misnamed' };
+      }
     }
     if (refusedAnswer(answer)) onRefused?.();
     return answer;
@@ -421,7 +429,7 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     onSend: (() => void) | undefined, maxBytes: number,
     graphql: { body: string; detail: string; writes?: true } | undefined,
     /** Receives the HTTP status the host answered with, when it answered, and the attach's renewal. */
-    status: { http?: number; renew?: (() => Promise<boolean>) | undefined },
+    status: { http?: number; renew?: (() => Promise<StoreRefreshOutcome>) | undefined },
   ): Promise<ExternalRead> => {
     // Whatever the plan or the approval decided: nothing is sent to a mail API, and a write
     // halts the run (`blocked`). Reads too — a run that may not write one has no use for them.
@@ -481,7 +489,7 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     const readBeforeAttach = gateReading(method, headers, url, payload);
     // The method a server acts on, as the contract was checked: a GET that names a write method
     // in its query is a write to the attach as well.
-    const attached: { pass?: StorePass | undefined; renew?: (() => Promise<boolean>) | undefined; reconnect?: 'ended' | 'client-misnamed' | undefined } = {};
+    const attached: { pass?: StorePass | undefined; renew?: (() => Promise<StoreRefreshOutcome>) | undefined; reconnect?: 'ended' | 'client-misnamed' | undefined } = {};
     // A GraphQL read is a read to the attach as well, whatever its verb: the body it sends is
     // one the contract admitted only because it cannot write.
     const connection = await deps.attach(url, headers, graphql !== undefined && graphql.writes !== true ? 'GET' : gated, attached);

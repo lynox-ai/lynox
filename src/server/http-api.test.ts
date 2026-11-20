@@ -20523,11 +20523,12 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
 
   describe('the ask for an expiring token in the code exchange', () => {
     /** Arranges the profile with or without a token in its vault slot, and the stamp it holds. */
-    async function arrangeHeld(held: { token: boolean; expiresAt?: number }): Promise<{ cookie: string }> {
-      const { accessTokenKey } = await vi.importActual<typeof import('../core/api-store.js')>('../core/api-store.js');
+    async function arrangeHeld(held: { token: boolean; refresh?: boolean; expiresAt?: number }): Promise<{ cookie: string }> {
+      const { accessTokenKey, refreshTokenKey } = await vi.importActual<typeof import('../core/api-store.js')>('../core/api-store.js');
       const out = await arrange(held.expiresAt === undefined ? {} : { oauthExtra: { token_expires_at: held.expiresAt } });
       mockSecretResolve.mockImplementation((n: string) => {
         if (n === accessTokenKey(PROFILE)) return held.token ? 'at-old' : null;
+        if (n === refreshTokenKey(PROFILE)) return held.refresh === true ? 'rt-old' : null;
         return n === 'SHOP_CLIENT_ID' ? 'id-1' : CLIENT_SECRET;
       });
       return out;
@@ -20590,11 +20591,18 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
       expect(store.get(PROFILE)?.oauth_grant?.refresh_expires_at).toBeGreaterThanOrEqual(before + 7_776_000_000 - 1000);
     });
 
-    it('asks a store whose token already expires again when it is connected again', async () => {
+    it('asks a store whose token already expires again when it is connected again, by the refresh token the engine keeps', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { cookie } = await arrangeHeld({ token: true, refresh: true });
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      expect(sentParams()['expiring']).toBe('1');
+    });
+
+    it('decides by what the engine keeps, not by token_expires_at, which a profile update can write', async () => {
       repayRateWindow(); // this file shares one per-IP rate window
       const { cookie } = await arrangeHeld({ token: true, expiresAt: Date.now() + 3_600_000 });
       expect((await call(signed(good()), cookie)).status).toBe(200);
-      expect(sentParams()['expiring']).toBe('1');
+      expect(sentParams()).not.toHaveProperty('expiring');
     });
   });
 

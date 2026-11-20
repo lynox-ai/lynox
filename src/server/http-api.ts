@@ -12724,7 +12724,9 @@ export class LynoxHTTPApi {
         }),
         ...codeExchangeExtraParams(preset, {
           hasAccessToken: secretStore.holds(accessTokenKey(profile.id)),
-          tokenExpiresAt: profile.auth?.oauth?.token_expires_at,
+          // From what the engine itself keeps, never from a field the profile carries (a model may
+          // write `token_expires_at`): a grant with a refresh end, or a refresh token in its slot.
+          expiringHeld: profile.oauth_grant?.refresh_expires_at !== undefined || secretStore.holds(refreshTokenKey(profile.id)),
         }),
       };
       const bodyFormat = preset ? presetTokenBodyFormat(preset, oauth.body_format) : oauth.body_format ?? 'form';

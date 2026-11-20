@@ -662,7 +662,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.halt.listOrder': { de: 'Eine Seite der Liste ging nicht in der Reihenfolge der IDs weiter.', en: 'A page of the list did not continue in ID order.' },
 	'bulk.halt.listReadFailed': { de: 'Der Shop hat eine Seite der Liste mit einem Fehler beantwortet.', en: 'The store answered a page of the list with an error.' },
 	'bulk.halt.shopInactive': { de: 'Der Shop ist geschlossen oder gesperrt.', en: 'The store is closed or frozen.' },
-	'bulk.halt.storeAccessEnded': { de: 'Der Zugang zu {provider} ist abgelaufen und liess sich nicht erneuern.', en: 'The access to {provider} ran out and could not be renewed.' },
+	'bulk.halt.storeAccessEnded': { de: 'lynox konnte den Zugang zu {provider} nicht erneuern.', en: 'lynox could not renew its access to {provider}.' },
 	'bulk.halt.storeAccessEnded_before': { de: 'Bitte lynox im Chat, den Shop neu zu verbinden. Danach kannst du den Lauf hier fortsetzen.', en: 'Ask lynox in the chat to connect the store again. Then you can continue the run here.' },
 	'bulk.halt.storeClientMisnamed': { de: 'Im Profil für {provider} stehen die Zugangsdaten der App unter anderen Namen, als lynox zum Erneuern erwartet.', en: 'In the profile for {provider}, the app credentials are stored under other names than lynox expects for renewing.' },
 	'bulk.halt.storeClientMisnamed_before': { de: 'Bitte lynox im Chat, das Profil für {provider} anzupassen. Danach kannst du den Lauf hier fortsetzen.', en: 'Ask lynox in the chat to fix the profile for {provider}. Then you can continue the run here.' },
@@ -1242,6 +1242,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	// After a provider revoked a profile's grant (ApiStoreView, utils/provider-revocation.ts). The notice is the
 	// text the owner is told while an erasure a revocation started is pending; dates without a time.
 	'apis.reconnect': { de: 'Erneut verbinden', en: 'Reconnect' },
+	'apis.access_ended': { de: 'lynox konnte den Zugang zu diesem Shop nicht erneuern.', en: 'lynox could not renew its access to this store.' },
 	'apis.revoked_on': { de: 'Vom Anbieter widerrufen am {date}', en: 'Revoked by the provider on {date}' },
 	// The long texts sit in a closed <details> below the dates and the way out.
 	'apis.erasure_details': { de: 'Was gelöscht wird und was bleibt', en: 'What is deleted and what stays' },

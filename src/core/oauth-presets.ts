@@ -314,11 +314,11 @@ export function presetTokenBodyFormat(preset: OAuthPreset, profileFormat: 'form'
  */
 export function codeExchangeExtraParams(
   preset: OAuthPreset | undefined,
-  held: { readonly hasAccessToken: boolean; readonly tokenExpiresAt: number | undefined },
+  held: { readonly hasAccessToken: boolean; readonly expiringHeld: boolean },
 ): Record<string, string> {
   const ask = preset?.expiringParam;
   if (ask === undefined) return {};
-  if (held.hasAccessToken && held.tokenExpiresAt === undefined) return {};
+  if (held.hasAccessToken && !held.expiringHeld) return {};
   return { [ask.name]: ask.value };
 }
 

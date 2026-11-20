@@ -120,7 +120,7 @@ function serve(s: Shop): () => void {
 
 const url = (i: number | string): string => `https://${HOST}/products/${String(i)}`;
 
-function client(opts: { attach?: boolean; methods?: string[]; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean; connection?: (url: string, method: string) => AttachedConnection | null; renew?: (url: string) => Promise<boolean>; reconnect?: 'ended' | 'client-misnamed' } = {}): ExternalClient {
+function client(opts: { attach?: boolean; methods?: string[]; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean; connection?: (url: string, method: string) => AttachedConnection | null; renew?: (url: string) => Promise<'renewed' | 'not-run' | 'dead' | 'client-misnamed'>; reconnect?: 'ended' | 'client-misnamed' } = {}): ExternalClient {
   return externalClient({
     contract: opts.contract ?? mintBulkContract(HOST, [0, 1, 2, 3, 'x'].map(url)),
     hostPolicy: createToolContext({}),
@@ -629,7 +629,7 @@ describe('applying an external run', () => {
       try {
         const renewed: string[] = [];
         const refused: number[] = [];
-        const c = client({ renew: async (u) => { renewed.push(u); return true; } });
+        const c = client({ renew: async (u) => { renewed.push(u); return 'renewed' as const; } });
         expect((await c.write(url(0), 'PATCH', { price: '13.00' }, undefined, undefined, () => { refused.push(1); })).kind).toBe('ok');
         expect(renewed).toEqual([url(0)]);
         expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(2);
@@ -648,7 +648,7 @@ describe('applying an external run', () => {
       const restore = serve(s);
       try {
         let renewals = 0;
-        const c = client({ renew: async () => { renewals++; return true; } });
+        const c = client({ renew: async () => { renewals++; return 'renewed' as const; } });
         const runId = await approvedRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '15' } })), c);
         const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
         expect(out.status).not.toBe('halted');
@@ -666,7 +666,7 @@ describe('applying an external run', () => {
       const restore = serve(s);
       try {
         let renewals = 0;
-        const c = client({ renew: async () => { renewals++; return true; } });
+        const c = client({ renew: async () => { renewals++; return 'renewed' as const; } });
         const runId = await approvedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), c);
         const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
         expect(out.status).toBe('halted');
@@ -685,7 +685,7 @@ describe('applying an external run', () => {
       s.special.set('PATCH /products/0', { status: 401 });
       const restore = serve(s);
       try {
-        const c = client({ renew: async () => false });
+        const c = client({ renew: async () => 'not-run' as const });
         const refused: number[] = [];
         expect((await c.write(url(0), 'PATCH', { price: '13.00' }, undefined, undefined, () => { refused.push(1); })).kind).toBe('unauthorized');
         // A refusal that stands is reported, once.
@@ -695,6 +695,23 @@ describe('applying an external run', () => {
         restore();
       }
     });
+
+    for (const [renewal, why] of [['dead', 'ended'], ['client-misnamed', 'client-misnamed']] as const) {
+      it(`a 401 whose renewal says ${renewal} answers reconnect (${why}), sent once and reported refused once`, async () => {
+        const s = shop();
+        s.special.set('PATCH /products/0', { status: 401 });
+        const restore = serve(s);
+        try {
+          const c = client({ renew: async () => renewal });
+          const refused: number[] = [];
+          expect(await c.write(url(0), 'PATCH', { price: '13.00' }, undefined, undefined, () => { refused.push(1); })).toEqual({ kind: 'reconnect', why });
+          expect(refused).toEqual([1]);
+          expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
+        } finally {
+          restore();
+        }
+      });
+    }
 
     for (const [why, reason] of [['ended', 'storeAccessEnded'], ['client-misnamed', 'storeClientMisnamed']] as const) {
       it(`a store connection that has to be connected again (${why}) halts the run with its own reason, nothing sent, resumable`, async () => {
@@ -721,7 +738,7 @@ describe('applying an external run', () => {
       const restore = serve(s);
       try {
         let renewals = 0;
-        const c = client({ renew: async () => { renewals++; return true; } });
+        const c = client({ renew: async () => { renewals++; return 'renewed' as const; } });
         expect((await c.write(url(0), 'PATCH', { price: '13.00' })).kind).toBe('unauthorized');
         expect(renewals).toBe(0);
         expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);

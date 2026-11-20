@@ -22,12 +22,12 @@ vi.mock('../../core/store-pass.js', async (importOriginal) => {
   };
 });
 
-const renewal = vi.hoisted(() => ({ result: false, urls: [] as string[] }));
+const renewal = vi.hoisted(() => ({ result: false as boolean | 'client-misnamed', urls: [] as string[] }));
 vi.mock('../../core/store-token-refresh.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../core/store-token-refresh.js')>();
   return {
     ...actual,
-    refreshStoreToken: async (id: string, trigger: string) => { renewal.urls.push(`${id}:${trigger}`); return renewal.result ? 'renewed' : 'not-run'; },
+    refreshStoreToken: async (id: string, trigger: string) => { renewal.urls.push(`${id}:${trigger}`); return renewal.result === 'client-misnamed' ? 'client-misnamed' : renewal.result ? 'renewed' : 'not-run'; },
   };
 });
 
@@ -189,6 +189,16 @@ describe('a 401 from the store', () => {
     expect(out).not.toContain(NOTE);
     // Without a renewal the existing reminder still speaks.
     expect(out).toMatch(REMINDER);
+  });
+
+  it('names a client under other names instead of the reminder, which would say to connect again', async () => {
+    renewal.result = 'client-misnamed';
+    storeAnswer = async () => new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } });
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(out).toContain('the store\'s access could not be renewed');
+    expect(out).toContain('api_setup action "update"');
+    expect(out).not.toContain('nothing was sent to the store');
+    expect(out.slice(out.indexOf('could not be renewed'))).not.toMatch(REMINDER);
   });
 
   it('asks for no renewal on an answer that is not a 401', async () => {

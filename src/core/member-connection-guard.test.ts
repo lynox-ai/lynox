@@ -69,6 +69,7 @@ const PINNED: Readonly<Record<string, string>> = {
   // Raw on purpose: whether the slot holds a token at all decides whether the code exchange keeps a
   // lasting connection's exchange; `holds` gives no value and writes no access record.
   'server/http-api.ts|hasAccessToken: secretStore.holds(accessTokenKey(profile.id)),': 'existence decides whether the exchange asks for an expiring token; no value read',
+  "server/http-api.ts|expiringHeld: profile.oauth_grant?.refresh_expires_at !== undefined || secretStore.holds(refreshTokenKey(profile.id)),": 'existence of the engine-kept refresh token decides the same; no value read',
   // Fixed names that are no API profile's token slot.
   "core/engine.ts|?? this.secretStore?.resolve('GCP_PROJECT_ID')": 'fixed engine name',
   "core/engine.ts|if (this.secretStore?.holds('GCP_PROJECT_ID') === true) this._recreateClient();": 'fixed engine name; existence only, decides a client rebuild',
