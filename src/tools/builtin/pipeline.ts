@@ -11,7 +11,8 @@ import { estimatePipelineCost } from '../../core/dag-planner.js';
 import type { Manifest, AgentOutput, RunState, RunHooks } from '../../types/orchestration.js';
 import { reportedErrorStep, reportedFailureForCaller } from '../../types/orchestration.js';
 import type { RunHistory } from '../../core/run-history.js';
-import { getErrorMessage } from '../../core/utils.js';
+import { formatUsdAmount, getErrorMessage } from '../../core/utils.js';
+import { getSessionCostCeiling } from '../../core/session-budget.js';
 import { asksOnlyViaAskUser, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { withWorkflowDefaults, workflowAwaitsStampResult, workflowStampState } from '../../core/workflow-stamp.js';
 import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
@@ -406,9 +407,13 @@ export function formatResult(state: RunState, name: string, resultLimit?: number
 
 // ===== Private execution helpers =====
 
-/** What `run_workflow` answers in a run admitted with a spending bound of its own. */
-export const WORKFLOW_UNDER_RUN_CEILING =
-  "Not run: in this conversation lynox may spend only what is left of the AI budget, and a workflow's steps cannot be kept within that. Tell the user the workflow was not run for this reason; they can start it from the Workflows page if enough AI budget is left for a full run, or run it here in the next billing period.";
+/**
+ * What `run_workflow` answers in a run admitted with a spending bound of its own. `capUsd` is
+ * the amount a saved workflow started from the Workflows page is admitted on.
+ */
+export function workflowUnderRunCeiling(capUsd: number): string {
+  return `Not run: in this conversation lynox may spend only what is left of the AI budget, and a workflow's steps cannot be kept within that. Tell the user the workflow was not run for this reason. If it is a saved workflow, they can start it from the Workflows page once at least ${formatUsdAmount(capUsd)} of AI budget is left; otherwise they can run it here in the next billing period.`;
+}
 
 /**
  * Debit the aggregated cost of an IN-SESSION `run_workflow` execution.
@@ -1632,7 +1637,7 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
     // sees. A run admitted with a spending bound of its own could pass it through them, so
     // such a run does not start one: not a first run, a retry or a continuation.
     // An agent that cannot say (no such method) is treated as bounded: refused, never waved through.
-    if (typeof agent.hasRunCostCeiling !== 'function' || agent.hasRunCostCeiling()) return WORKFLOW_UNDER_RUN_CEILING;
+    if (typeof agent.hasRunCostCeiling !== 'function' || agent.hasRunCostCeiling()) return workflowUnderRunCeiling(getSessionCostCeiling());
     const rawPipelineConfig = agent.toolContext.userConfig;
     // `getAvailableTools()`, not `toolContext.tools`: that context carries the ENGINE's
     // registry, which for a child agent is wider than the child's own grant — a workflow step

@@ -30,7 +30,11 @@ vi.mock('$app/navigation', () => ({
 vi.mock('./MarkdownRenderer.svelte', () => ({ default: () => {} }));
 
 const ENGINE_SENTENCE = 'Nothing is left of the AI budget for this run right now. If another task is running, you can continue once it has finished; otherwise buy a credit pack or wait for your next billing period.';
-const DE = 'Für diesen Lauf ist vom KI-Budget gerade nichts mehr frei. Läuft eine andere Aufgabe, kannst du weitermachen, sobald sie fertig ist; sonst kauf ein Credit-Pack oder warte auf die nächste Abrechnungsperiode.';
+const DE = 'Diese Nachricht ging nicht an das KI-Modell. Für diesen Lauf ist vom KI-Budget gerade nichts mehr frei. Läuft eine andere Aufgabe, kannst du weitermachen, sobald sie fertig ist; sonst kauf ein Credit-Pack oder warte auf die nächste Abrechnungsperiode.';
+
+const EN = `This message was not sent to the AI model. ${ENGINE_SENTENCE}`;
+const TITLE_DE = 'Vor dem Senden geprüft';
+const TITLE_EN = 'Checked before sending';
 
 const json = (body: unknown, status = 200): Response =>
 	new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -100,11 +104,12 @@ describe('a run refused because nothing of the AI budget is free', () => {
 	});
 
 	it('renders only the German sentence in German, and the English one once in English', async () => {
-		// Kills: a note code without its i18n line (the generic error text would show instead), and
-		// rendering the engine sentence as the detail line (German mode would mix in the English
-		// text; English mode would show the sentence twice).
+		// Kills: a note code without its i18n line or its own title (the generic error text or the
+		// generic note title would show instead), and rendering the engine sentence as the detail
+		// line (German mode would mix in the English text; English mode would show it twice).
 		await blockedTurn('hold_exhausted');
 		await mountChat();
+		expect(target.textContent).toContain(TITLE_DE);
 		expect(target.textContent).toContain(DE);
 		expect(target.textContent).not.toContain(ENGINE_SENTENCE);
 		(await import('../i18n.svelte.js')).setLocale('en');
@@ -112,6 +117,9 @@ describe('a run refused because nothing of the AI budget is free', () => {
 		await settle();
 		svelte.flushSync();
 		expect(target.textContent).not.toContain(DE);
+		expect(target.textContent).not.toContain(TITLE_DE);
+		expect(target.textContent).toContain(TITLE_EN);
+		expect(target.textContent).toContain(EN);
 		expect(target.textContent?.split(ENGINE_SENTENCE).length).toBe(2);
 		const details = [...target.querySelectorAll('.font-mono')].map((el) => el.textContent ?? '');
 		expect(details.some((t) => t.includes(ENGINE_SENTENCE))).toBe(false);

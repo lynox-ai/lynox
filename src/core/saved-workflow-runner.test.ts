@@ -14,7 +14,7 @@ const { mockCheckPersistentBudget, mockRunSavedWorkflow, mockGetSessionCostCeili
 vi.mock('./session-budget.js', () => ({ checkPersistentBudget: mockCheckPersistentBudget, getSessionCostCeiling: mockGetSessionCostCeiling }));
 vi.mock('../tools/builtin/pipeline.js', () => ({ runSavedWorkflow: mockRunSavedWorkflow }));
 
-const { runGuardedSavedWorkflow, assertSingleTenantContext, _resetTenantInvariantForTests, WORKFLOW_HOLD_REFUSAL } = await import('./saved-workflow-runner.js');
+const { runGuardedSavedWorkflow, assertSingleTenantContext, _resetTenantInvariantForTests, workflowHoldRefusal } = await import('./saved-workflow-runner.js');
 const { RunAdmissionRefusedError } = await import('./run-admission.js');
 
 function makeEngine(hooks: LynoxHooks[]): Engine {
@@ -314,9 +314,24 @@ describe('runGuardedSavedWorkflow — admission within the balance', () => {
     // Kills: passing the hook's generic text through instead of the workflow's own sentence.
     const release = vi.fn();
     const result = await runGuardedSavedWorkflow(makeEngine([balanceHook(499, release)]), 'wf-1', undefined, { principal: OWNER_PRINCIPAL });
-    expect(result).toEqual({ ok: false, error: `Run blocked: ${WORKFLOW_HOLD_REFUSAL}` });
+    expect(result).toEqual({ ok: false, error: `Run blocked: ${workflowHoldRefusal(5)}` });
+    expect(result).toEqual({ ok: false, error: 'Run blocked: This workflow was not started: what is left of your AI budget is less than the $5 a workflow run may spend at most. Start it again after buying a credit pack or in your next billing period, or once a running task has finished.' });
     expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
     expect(release).not.toHaveBeenCalled();
+  });
+
+  it('names in the refusal the same amount the run was admitted on, cents included', async () => {
+    // Kills: a sentence that reads the ceiling apart from the admission or not at all (a fixed
+    // amount), and a formatter that drops the cents.
+    mockGetSessionCostCeiling.mockReturnValueOnce(12.5);
+    const onBeforeRun = vi.fn((_id: string, ctx: { maxCostCents?: number }) => {
+      expect(ctx.maxCostCents).toBe(1250);
+      throw new RunAdmissionRefusedError('AI budget for this period reached.');
+    });
+    const result = await runGuardedSavedWorkflow(makeEngine([{ onBeforeRun }]), 'wf-1', undefined, { principal: OWNER_PRINCIPAL });
+    expect(onBeforeRun).toHaveBeenCalledOnce();
+    expect(result).toEqual({ ok: false, error: expect.stringContaining('is less than the $12.50 a workflow run may spend at most.') });
+    expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
   });
 
   it('holds the admission while the workflow runs and gives it back when it ends', async () => {

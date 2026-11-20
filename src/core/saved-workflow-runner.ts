@@ -5,6 +5,7 @@ import type { UntrustedCause } from './untrusted-signals.js';
 
 import type { Engine, RunContext } from './engine.js';
 import { checkPersistentBudget, getSessionCostCeiling } from './session-budget.js';
+import { formatUsdAmount } from './utils.js';
 import { fireAdmissionHooks, RunAdmissionRefusedError, type CombinedAdmission } from './run-admission.js';
 import { toolLockFor } from './mandate-tool-lock.js';
 import type { RequestPrincipal } from './request-principal.js';
@@ -19,10 +20,11 @@ import type { WorkflowQuestionWait } from './workflow-questions.js';
 /**
  * Why a saved workflow was not started when the balance cannot cover the most one workflow
  * run may spend, while the control plane asks the engine to admit runs only within the
- * balance — and what the owner can do about it.
+ * balance — and what the owner can do about it. `capUsd` is the amount the run is admitted on.
  */
-export const WORKFLOW_HOLD_REFUSAL =
-  'This workflow was not started: what is left of your AI budget does not cover a full run of it. Start it again after buying a credit pack or in your next billing period, or once a running task has finished.';
+export function workflowHoldRefusal(capUsd: number): string {
+  return `This workflow was not started: what is left of your AI budget is less than the ${formatUsdAmount(capUsd)} a workflow run may spend at most. Start it again after buying a credit pack or in your next billing period, or once a running task has finished.`;
+}
 
 /** `decideRunGrant` bound to this engine's schedules and keyed hash. */
 function grantDecider(engine: Engine, origin: GrantRunOrigin): (planned: PlannedPipeline) => GrantDecision {
@@ -159,13 +161,14 @@ export async function runGuardedSavedWorkflow(
   //    ceiling, so it is admitted on that ceiling: a hook that admits only within the
   //    balance refuses it unless that much is free, and holds it until the run ends.
   let admission: CombinedAdmission;
+  const capUsd = getSessionCostCeiling();
   try {
     admission = await fireAdmissionHooks(engine.getHooks(), runContext.runId, {
       ...runContext,
-      maxCostCents: getSessionCostCeiling() * 100,
+      maxCostCents: capUsd * 100,
     });
   } catch (err: unknown) {
-    if (err instanceof RunAdmissionRefusedError) return { ok: false, error: `Run blocked: ${WORKFLOW_HOLD_REFUSAL}` };
+    if (err instanceof RunAdmissionRefusedError) return { ok: false, error: `Run blocked: ${workflowHoldRefusal(capUsd)}` };
     const reason = err instanceof Error ? err.message : String(err);
     return { ok: false, error: `Run blocked: ${reason}` };
   }

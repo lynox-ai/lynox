@@ -46,7 +46,7 @@ vi.mock('../../core/metered-request.js', async (importActual) => {
 
 import {
   runWorkflowTool,
-  WORKFLOW_UNDER_RUN_CEILING,
+  workflowUnderRunCeiling,
   storePipeline,
   getPipeline,
   runSavedWorkflow,
@@ -212,18 +212,36 @@ describe('run_workflow — inline steps', () => {
       { name: 'test', steps: [makeStep('s1', 'do thing')] },
       { workflow_id: 'wf-1' },
     ]) {
-      expect(await runWorkflowTool.handler(input as never, bounded)).toBe(WORKFLOW_UNDER_RUN_CEILING);
+      expect(await runWorkflowTool.handler(input as never, bounded)).toBe(workflowUnderRunCeiling(50));
     }
     expect(mockRunManifest).not.toHaveBeenCalled();
     // An agent that cannot say whether it is bounded is treated as bounded.
     // Kills: an optional-call check (`?.() === true`) that waves an agent without the method through.
     const silent = { ...makePipelineAgent(), hasRunCostCeiling: undefined } as unknown as IAgent;
-    expect(await runWorkflowTool.handler({ name: 'test', steps: [makeStep('s1', 'do thing')] }, silent)).toBe(WORKFLOW_UNDER_RUN_CEILING);
+    expect(await runWorkflowTool.handler({ name: 'test', steps: [makeStep('s1', 'do thing')] }, silent)).toBe(workflowUnderRunCeiling(50));
     // Without a bound of its own the run starts as before (positive control).
     mockRunManifest.mockResolvedValueOnce(makeRunState());
     const unbounded = { ...makePipelineAgent(), hasRunCostCeiling: () => false } as unknown as IAgent;
     await runWorkflowTool.handler({ name: 'test', steps: [makeStep('s1', 'do thing')] }, unbounded);
     expect(mockRunManifest).toHaveBeenCalledTimes(1);
+  });
+
+  it('names the amount a saved workflow is admitted on, read from the session ceiling', async () => {
+    // Kills: a fixed amount in the sentence instead of getSessionCostCeiling() (the $12.50 case
+    // would still read $50), and a formatter that drops the cents or pads whole dollars.
+    const { configurePersistentBudget, resetPersistentBudget } = await import('../../core/session-budget.js');
+    const bounded = { ...makePipelineAgent(), hasRunCostCeiling: () => true } as unknown as IAgent;
+    const input = { name: 'test', steps: [makeStep('s1', 'do thing')] };
+    try {
+      expect(await runWorkflowTool.handler(input, bounded)).toContain('once at least $50 of AI budget is left;');
+      configurePersistentBudget({ costProvider: null, sessionCapUSD: 12.5 });
+      expect(await runWorkflowTool.handler(input, bounded)).toBe(
+        "Not run: in this conversation lynox may spend only what is left of the AI budget, and a workflow's steps cannot be kept within that. Tell the user the workflow was not run for this reason. If it is a saved workflow, they can start it from the Workflows page once at least $12.50 of AI budget is left; otherwise they can run it here in the next billing period.",
+      );
+    } finally {
+      resetPersistentBudget();
+    }
+    expect(mockRunManifest).not.toHaveBeenCalled();
   });
 
   it('returns error when config not initialized', async () => {
