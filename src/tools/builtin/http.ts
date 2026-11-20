@@ -51,7 +51,7 @@ import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_E
 import type { VerifiedStoreCallback } from '../../core/oauth-callback-hmac.js';
 import { chatIsContained, containedStoreWrite, containerOf, CONTAINED_WRITE_REFUSAL_AT_SEND, type ContainedConnection, type StoreContainer } from '../../core/containment.js';
 import { controlPlaneFromEnv } from '../../core/exact-clearance.js';
-import { hostTargets } from '../../core/send-target.js';
+import { hostTargets, readTargets } from '../../core/send-target.js';
 import { timingSafeEqual } from 'node:crypto';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
@@ -3137,7 +3137,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
   // through the same origin check (`sendTargetsWhenLatched`). Its headers and body can carry data
   // too, so only a read without them can pass as an address a search listed (`readAddress`).
   sendTargets: (input) => (httpOutwardWrite(input) === null ? null : hostTargets(input.url)),
-  sendTargetsWhenLatched: (input) => (httpOutwardWrite(input) === null ? hostTargets(input.url) : null),
+  sendTargetsWhenLatched: (input) => (httpOutwardWrite(input) === null ? readTargets(input.url) : null),
   readAddress: (input) => (httpOutwardWrite(input) === null && Object.keys(input.headers ?? {}).length === 0 && (input.body ?? '') === '' ? input.url : null),
   // The same method read the other way round: a GET or HEAD reads at the URL, host and path.
   outwardRead: (input) => {
@@ -4077,7 +4077,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             }
           : undefined;
       const { response, finalUrl: finalRequestUrl, writeFollowedAsRead, sent } = await Promise.race([
-        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, crossHostRedirectGuard(input.url, httpOutwardWrite(input) === null && readHopsGuarded(input.url, currentCallTargetOrigin()), delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect'))), auth.pass, (write) => { carriedWrite = write; }, (again) => { againWrite = again; }),
+        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, crossHostRedirectGuard(input.url, httpOutwardWrite(input) === null && readHopsGuarded(currentCallTargetOrigin()), delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect'))), auth.pass, (write) => { carriedWrite = write; }, (again) => { againWrite = again; }),
         wallTimeout,
         stopped,
       ]);

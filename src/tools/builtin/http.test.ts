@@ -2311,14 +2311,9 @@ describe('httpRequestTool', () => {
     });
   });
 
-  // fetchWithValidatedRedirects must NOT replay credential headers across a
-  // cross-origin redirect (mirror fetch()). Uses an opaque token that does NOT
-  // match SECRET_PATTERNS, so the pre-flight egress header scan lets it through
-  // to the redirect loop — exactly the case the per-hop scan misses.
-  // A GET the origin check held after foreign content (row: the read declares its host only once
-  // latched) follows no redirect to another host, like a page read: the hop would carry the address
-  // on to a host nobody was asked about. A GET of a host the owner named, without a query, follows
-  // as before (a download that moves to a file host).
+  // A GET the origin check held after foreign content (the read declares its host only once
+  // latched) follows no redirect to another host, like a page read, owner-named hosts included: the
+  // hop would carry the address on to a host nobody named.
   describe('a GET the origin check held, and its redirects', () => {
     const held = { known: [], allKnown: false } as const;
     const named = { known: ['api.example.test'], allKnown: true } as const;
@@ -2335,13 +2330,24 @@ describe('httpRequestTool', () => {
       expect(out).toContain('forwards this read to another host');
     });
 
-    it('CONTROL: a GET of a host the owner named, without a query, follows it as before', async () => {
+    it('a GET of a host the owner named, without a query, is held too', async () => {
       mockDnsPublic();
       const fetchMock = vi.fn()
         .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://files.other.test/1' } }))
         .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
       vi.stubGlobal('fetch', fetchMock);
-      await outcome(runInCallSlot({ targetOrigin: named }, () => handler({ url: 'https://api.example.test/download/1' }, makeAgent())));
+      const out = await outcome(runInCallSlot({ targetOrigin: named }, () => handler({ url: 'https://api.example.test/download/1' }, makeAgent())));
+      expect(lastPinnedInputs.length).toBe(1);
+      expect(out).toContain('forwards this read to another host');
+    });
+
+    it('CONTROL: a GET the origin check did not stop at follows a redirect to another host, as before', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://files.other.test/1' } }))
+        .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      await outcome(handler({ url: 'https://api.example.test/download/1' }, makeAgent()));
       expect(lastPinnedInputs.length).toBe(2);
     });
 
@@ -2362,6 +2368,8 @@ describe('httpRequestTool', () => {
         .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
       vi.stubGlobal('fetch', fetchMock);
       const out = await outcome(runInCallSlot({ targetOrigin: held }, () => handler({ url: 'https://api.example.test/items', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }, makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow') }))));
+      // The write went out: the read hold did not stop it before its first request.
+      expect(lastPinnedInputs[0]?.method).toBe('POST');
       expect(out).not.toContain('forwards this read to another host');
     });
   });
@@ -2385,6 +2393,10 @@ describe('httpRequestTool', () => {
     });
   });
 
+  // fetchWithValidatedRedirects must NOT replay credential headers across a
+  // cross-origin redirect (mirror fetch()). Uses an opaque token that does NOT
+  // match SECRET_PATTERNS, so the pre-flight egress header scan lets it through
+  // to the redirect loop — exactly the case the per-hop scan misses.
   describe('cross-origin redirect credential strip', () => {
     const lc = (h: Record<string, string>): Record<string, string> =>
       Object.fromEntries(Object.entries(h).map(([k, v]) => [k.toLowerCase(), v]));

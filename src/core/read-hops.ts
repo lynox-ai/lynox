@@ -33,24 +33,12 @@ export function crossHostRedirectGuard(checkedUrl: string, checked: boolean, inn
 }
 
 /**
- * Whether a read's redirects are held to its host (`crossHostRedirectGuard`): the origin check
- * stopped at it (`origin` is set) and it either went to a host the owner did not name, after a
- * question, or carries a query. A read of an owner-named host without a query follows its
- * redirects as before: a download link that moves to a file host keeps working.
+ * Whether a read's redirects are held to its host (`crossHostRedirectGuard`): exactly when the
+ * origin check stopped at it (`origin` is set), owner-named hosts included. A named host that
+ * forwards (`/amp/s/<host>/…`, a login redirect, a download moved to a file host) would carry the
+ * address on to a host nobody named. A download that moves to another host after foreign content
+ * fails once; the refusal names that host so the owner can give its address.
  */
-export function readHopsGuarded(url: string, origin: CallTargetOrigin | undefined): boolean {
-  return origin !== undefined && (!origin.allKnown || readUrlHasQuery(url));
-}
-
-/**
- * Whether a read URL carries a query, the part a server receives as data. The fragment never
- * leaves the browser side, so it is not checked. A URL that does not parse counts as carrying
- * one: the check then refuses it as unreadable instead of letting it through.
- */
-export function readUrlHasQuery(url: string): boolean {
-  try {
-    return new URL(url.trim()).search !== '';
-  } catch {
-    return true;
-  }
+export function readHopsGuarded(origin: CallTargetOrigin | undefined): boolean {
+  return origin !== undefined;
 }

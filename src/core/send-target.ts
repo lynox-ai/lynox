@@ -85,3 +85,42 @@ export function hostTargets(url: string): SendTarget[] {
   if (target === null) throw new UnknownSendTargetError('host');
   return [target];
 }
+
+/** An absolute http(s) address inside another one, up to the end of its host part. A backslash
+ *  counts as a slash, as the URL parser of the service reading it would take it. */
+const EMBEDDED_URL = /https?:[\\/]{2}[^\s/\\?#"'<>]+/giu;
+
+/**
+ * The hosts a read of `url` reaches: its own, and the host of every absolute address its path or
+ * query carries, plain, percent-encoded or encoded twice over (decoded up to three times). A
+ * service that fetches the address it is given in the path (`https://reader.example/https://x/…`)
+ * sends the read on to that host, so that host is a target as well. The fragment is never sent and
+ * is not read. An embedded address whose host cannot be read makes the whole call's targets
+ * unknown, like an unreadable host of its own.
+ */
+export function readTargets(url: string): SendTarget[] {
+  const out = hostTargets(url);
+  let parsed: URL;
+  try {
+    parsed = new URL(url.trim());
+  } catch {
+    throw new UnknownSendTargetError('host');
+  }
+  let layer = parsed.pathname + parsed.search;
+  for (let round = 0; round < 4; round++) {
+    for (const m of layer.matchAll(EMBEDDED_URL)) {
+      const target = normalizeHostTarget(m[0].replace(/\\/g, '/'));
+      if (target === null) throw new UnknownSendTargetError('host');
+      if (!out.some((t) => t.value === target.value)) out.push(target);
+    }
+    let next: string;
+    try {
+      next = decodeURIComponent(layer);
+    } catch {
+      next = layer.replace(/%3a/gi, ':').replace(/%2f/gi, '/').replace(/%5c/gi, '\\').replace(/%25/g, '%');
+    }
+    if (next === layer) break;
+    layer = next;
+  }
+  return out;
+}

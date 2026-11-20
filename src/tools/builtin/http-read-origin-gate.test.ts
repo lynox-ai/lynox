@@ -97,3 +97,25 @@ describe('http_request GET after foreign content', () => {
     expect(tool.sent).toEqual(['https://news.example.org/feed']);
   });
 });
+
+describe('http_request GET: the listed address and an address it carries', () => {
+  it('a listed address with Unicode spaces appended is asked about', async () => {
+    const tool = http();
+    const ask = asker('Deny');
+    const agent = agentOf(tool, ask.fn);
+    agent.searchResultAddresses.noteResults('items', ['https://news.example.org/feed']);
+    await call(agent, { url: 'https://news.example.org/feed\u3000\u2003' });
+    expect(ask.asked).toHaveLength(1);
+    expect(tool.sent).toEqual([]);
+  });
+
+  it('a GET of a named host that carries an unnamed host for it to fetch is asked about', async () => {
+    const tool = http();
+    const ask = asker('Deny');
+    const agent = agentOf(tool, ask.fn, 'the API is api.example.ch');
+    await call(agent, { url: 'https://api.example.ch/proxy?u=https%3A%2F%2Fcollect.evil.example%2Fd' });
+    expect(ask.asked).toHaveLength(1);
+    expect(ask.asked[0]).toContain('"collect.evil.example"');
+    expect(tool.sent).toEqual([]);
+  });
+});

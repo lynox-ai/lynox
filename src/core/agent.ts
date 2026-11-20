@@ -5172,9 +5172,9 @@ export class Agent implements IAgent {
       if (targets === null && whenLatched !== undefined) {
         // An address a search in this conversation listed as a result was chosen by the provider,
         // not written by the model, so it carries nothing from the conversation.
+        asRead = true;
         const address = tool.readAddress?.(tc.input) ?? null;
         if (address !== null && this.searchResultAddresses.has(address)) return {};
-        asRead = true;
         targets = whenLatched(tc.input);
       }
     } catch {

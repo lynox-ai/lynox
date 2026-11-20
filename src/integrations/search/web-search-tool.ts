@@ -11,9 +11,9 @@ import { currentCallSignal, currentCallTargetOrigin } from '../../core/call-conn
 import { delegatedRedirects, httpTarget, outwardReadRecorder } from '../../core/audit-log.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { turnIsLocked } from '../../core/mandate-tool-lock.js';
-import { hostTargets } from '../../core/send-target.js';
+import { readTargets } from '../../core/send-target.js';
 
-export { crossHostRedirectGuard, maskedHost, readHopsGuarded, readUrlHasQuery } from '../../core/read-hops.js';
+export { crossHostRedirectGuard, maskedHost, readHopsGuarded } from '../../core/read-hops.js';
 import { crossHostRedirectGuard, readHopsGuarded } from '../../core/read-hops.js';
 
 interface WebSearchInput {
@@ -124,11 +124,12 @@ export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSear
     outwardRead: (input) => (input.action === 'read' && typeof input.url === 'string' ? httpTarget('GET', input.url) : 'search'),
     // Once foreign content is in the conversation, a read address can carry data out: a page that
     // was read can ask for `https://<what the chat holds>.host/<more of it>?q=<and more>`. Such a
-    // read goes through the same origin check as a send, to the host of its address. Without a
+    // read goes through the same origin check as a send, to the host of its address and of any
+    // address it carries for a service to fetch (`readTargets`). Without a
     // question it passes when the owner named that host, or when a search in this conversation
     // listed exactly this address as a result (`readAddress`). A read the check stopped at follows
     // no redirect to another host (`crossHostRedirectGuard`).
-    sendTargetsWhenLatched: (input) => (input.action === 'read' && typeof input.url === 'string' ? hostTargets(input.url) : null),
+    sendTargetsWhenLatched: (input) => (input.action === 'read' && typeof input.url === 'string' ? readTargets(input.url) : null),
     readAddress: (input) => (input.action === 'read' && typeof input.url === 'string' ? input.url : null),
     definition: {
       name: 'web_research',
@@ -254,7 +255,7 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           // `currentCallTargetOrigin()` is set exactly when this call's address went through the origin
           // check (`sendTargetsWhenLatched` above declared it); `readHopsGuarded` says when that holds
           // its hops to the host.
-          const onRedirect = crossHostRedirectGuard(input.url, readHopsGuarded(input.url, currentCallTargetOrigin()), delegatedRedirects(outwardReadRecorder(agent, 'web_research:redirect')));
+          const onRedirect = crossHostRedirectGuard(input.url, readHopsGuarded(currentCallTargetOrigin()), delegatedRedirects(outwardReadRecorder(agent, 'web_research:redirect')));
           const result = await extractContent(input.url, undefined, ctx, onRedirect);
           const parts = [`# ${result.title}`, `Source: ${result.url}`, `Words: ${result.wordCount}`];
           if (result.truncated) parts.push('(Content truncated)');

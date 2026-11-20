@@ -82,18 +82,19 @@ describe('a checked read and its redirects', () => {
     expect(fetched).toEqual(['https://first.example/p?q=1', 'https://other.example/?d=x']);
   });
 
-  it('a read without a query to a host the owner did not name is asked about, and after the yes its hops are held too', async () => {
+  it('a read without a query to a host the owner did not name, once allowed, has its hops held too', async () => {
     const agent = agentWith(true, 'nothing named');
     const r = await readVia(agent, 'https://first.example/page/secret', 'https://other.example/landing');
     expect(fetched).toEqual(['https://first.example/page/secret']);
     expect(String(r.content)).toContain('forwards this read to another host');
   });
 
-  it('a read without a query of a host the owner named follows a redirect to another host, as before', async () => {
-    // A download link on a named host that moves to a file host keeps working.
+  it('a read of a host the owner named does not follow a redirect to another host either, without a query too', async () => {
+    // A named host that forwards (`/amp/s/<host>/…`) would carry the address on to a host nobody named.
     const agent = agentWith(true, 'see https://named.example for it');
-    await readVia(agent, 'https://named.example/download/1', 'https://files.other.example/1');
-    expect(fetched).toEqual(['https://named.example/download/1', 'https://files.other.example/1']);
+    const r = await readVia(agent, 'https://named.example/amp/s/collect.evil.example/d', 'https://collect.evil.example/d');
+    expect(fetched).toEqual(['https://named.example/amp/s/collect.evil.example/d']);
+    expect(String(r.content)).toContain('forwards this read to another host');
   });
 });
 

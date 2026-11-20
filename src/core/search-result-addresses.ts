@@ -11,6 +11,20 @@
 // holds, is left out. Nothing else adds to the set, and it lives as long as the agent: a reloaded
 // thread starts empty, which asks more, not less.
 
+/**
+ * An address as it is fetched: the WHATWG form `new URL()` gives, the one the request is built from.
+ * Not `trim()`: it removes Unicode spaces (U+3000 and others) that the URL parser instead encodes
+ * into the path, so a trimmed comparison would let an address with data appended match a listed
+ * one. `null` for an address that does not parse; it is never listed and never matches.
+ */
+export function fetchedForm(address: string): string | null {
+  try {
+    return new URL(address).href;
+  } catch {
+    return null;
+  }
+}
+
 export class SearchResultAddresses {
   private readonly _seen = new Set<string>();
 
@@ -18,15 +32,16 @@ export class SearchResultAddresses {
   noteResults(query: string, addresses: readonly string[]): void {
     const q = query.trim();
     for (const raw of addresses) {
-      const address = raw.trim();
-      if (address === '') continue;
-      if (q !== '' && (address.includes(q) || q.includes(address))) continue;
+      const address = fetchedForm(raw);
+      if (address === null) continue;
+      if (q !== '' && (address.includes(q) || q.includes(address) || q.includes(raw.trim()))) continue;
       this._seen.add(address);
     }
   }
 
-  /** Whether a search listed exactly this address. */
+  /** Whether a search listed this address, compared in the form it is fetched in. */
   has(address: string): boolean {
-    return this._seen.has(address.trim());
+    const fetched = fetchedForm(address);
+    return fetched !== null && this._seen.has(fetched);
   }
 }

