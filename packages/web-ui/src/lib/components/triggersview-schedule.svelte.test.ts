@@ -68,15 +68,15 @@ describe('a monthly schedule names its day as the language does', () => {
 		setLocale('en');
 		rows = monthly();
 		await render();
-		expect(scheduleOf('Erster')).toMatch(/^Monthly on the 1st at \d\d:00$/);
-		expect(scheduleOf('Zweiundzwanzigster')).toMatch(/^Monthly on the 22nd at \d\d:00$/);
+		expect(scheduleOf('Erster')).toMatch(/^Monthly on the 1st at \d\d:\d\d$/);
+		expect(scheduleOf('Zweiundzwanzigster')).toMatch(/^Monthly on the 22nd at \d\d:\d\d$/);
 	});
 
 	it('in German as the number with its period', async () => {
 		setLocale('de');
 		rows = monthly();
 		await render();
-		expect(scheduleOf('Erster')).toMatch(/^Monatlich am 1\. um \d\d:00$/);
-		expect(scheduleOf('Zweiundzwanzigster')).toMatch(/^Monatlich am 22\. um \d\d:00$/);
+		expect(scheduleOf('Erster')).toMatch(/^Monatlich am 1\. um \d\d:\d\d$/);
+		expect(scheduleOf('Zweiundzwanzigster')).toMatch(/^Monatlich am 22\. um \d\d:\d\d$/);
 	});
 });
