@@ -136,6 +136,8 @@ const noteEl = (): Element | null => target.querySelector('[role="status"]');
 const text = (el: Element | null | undefined): string => (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
 const reason = (): string => text(target.querySelector('[data-budget-reason]'));
 const next = (): Element | null => target.querySelector('[data-budget-next]');
+const link = (): string => text(next()?.querySelector('a'));
+const details = (): HTMLDetailsElement | null => target.querySelector('[data-budget-details]');
 const when = (cap: 'daily' | 'monthly', locale: 'de' | 'en'): string => {
 	const now = new Date();
 	return notes.formatResetWhen(notes.budgetResetAt(cap, now), now, locale);
@@ -152,8 +154,12 @@ describe('a message the spending cap blocked says why, until when, and what to d
 		expect(reason()).toBe(`Das Tageslimit von $5 ist erreicht (heute $5.12). Es gilt wieder ab ${when('daily', 'de')}.`);
 		expect(text(next())).toBe('Du kannst das Limit unter Einstellungen → Limits ändern.');
 		expect(next()?.querySelector('a')?.getAttribute('href')).toBe('/app/settings/workspace/limits');
-		// The engine's sentence stays, as a debug line in English under it.
-		expect(noteEl()?.querySelector('[lang="en"]')?.textContent).toBe(DAILY);
+		// Only the place it leads to is the link, not the whole step.
+		expect(link()).toBe('Einstellungen → Limits');
+		// The engine's sentence stays, in English, behind a Details that starts closed.
+		expect(details()?.open).toBe(false);
+		expect(text(details()?.querySelector('summary'))).toBe('Details');
+		expect(details()?.querySelector('[lang="en"]')?.textContent).toBe(DAILY);
 		expect(target.querySelector('.ai-badge')).toBeNull();
 	});
 
@@ -168,8 +174,9 @@ describe('a message the spending cap blocked says why, until when, and what to d
 		it(`${locale}, monthly cap on a managed plan: support changes it, by mail`, async () => {
 			await live(locale, MANAGED, { result: MONTHLY, notice: 'run_blocked', budget: MONTHLY_REF });
 			expect(reason()).toBe(i18n.tf('chat.note.budget.monthly', { limit: '$150', spent: '$150.40', when: when('monthly', locale) }));
-			expect(text(next())).toBe(i18n.t('chat.note.budget.next_plan'));
+			expect(text(next())).toBe(i18n.t('chat.note.budget.next_plan').replace('{link}', 'support@lynox.ai'));
 			expect(next()?.querySelector('a')?.getAttribute('href')).toBe('mailto:support@lynox.ai');
+			expect(link()).toBe('support@lynox.ai');
 		});
 
 		it(`${locale}, someone else's workspace: only the owner can change it, and no link`, async () => {
@@ -197,6 +204,7 @@ describe('a message the spending cap blocked says why, until when, and what to d
 		expect(reason()).toBe("lynox can't check spending right now, so it sends nothing.");
 		expect(text(next())).toBe('If it stays, write to support@lynox.ai.');
 		expect(next()?.querySelector('a')?.getAttribute('href')).toBe('mailto:support@lynox.ai');
+		expect(link()).toBe('support@lynox.ai');
 	});
 
 	it('a budget the engine sends in an unknown shape names no reason: the note stays as before', async () => {
@@ -293,6 +301,9 @@ describe('a message the spending cap blocked says why, until when, and what to d
 		await live('de', SELF, { result: 'Run blocked: AI budget for this period reached.', notice: 'run_blocked' });
 		expect(target.querySelector('[data-budget-reason]')).toBeNull();
 		expect(next()).toBeNull();
+		// A hook's reason is all the note has: it stays in view, not behind Details.
+		expect(details()).toBeNull();
+		expect(noteEl()?.querySelector('[lang="en"]')?.textContent).toBe('AI budget for this period reached.');
 	});
 
 	for (const locale of ['de', 'en'] as const) {

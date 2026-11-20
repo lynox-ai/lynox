@@ -119,7 +119,7 @@
 	import OnboardingBasics from './OnboardingBasics.svelte';
 	import { canChooseModel, isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
-	import { budgetNoteLines, type BudgetNoteRef } from '../utils/budget-note.js';
+	import { budgetNoteLines, splitAtLink, type BudgetNoteRef } from '../utils/budget-note.js';
 	import { speakHttpFailureText, transcribeFailureText } from './voice-failure.js';
 	import { currentQuote, currentGreeting, startWallClock } from '../stores/wall-clock.svelte.js';
 	import { createMicSession, MicSessionReleased } from '../utils/mic-session.js';
@@ -2405,7 +2405,9 @@
 			{#if budgetLines}
 				<div class="text-text-subtle" data-budget-reason>{tf(budgetLines.reasonKey, budgetLines.reasonVars)}</div>
 				{#if budgetLines.nextKey}
-					<div class="text-text-subtle" data-budget-next>{#if budgetLines.href}<a href={budgetLines.href} class="text-accent hover:underline">{t(budgetLines.nextKey)}</a>{:else}{t(budgetLines.nextKey)}{/if}</div>
+					<!-- Only the place the step leads to is a link; the rest of the step is plain text. -->
+					{@const stepParts = budgetLines.href && budgetLines.linkKey ? splitAtLink(t(budgetLines.nextKey)) : null}
+					<div class="text-text-subtle" data-budget-next>{#if stepParts && budgetLines.linkKey}{stepParts.before}<a href={budgetLines.href} class="text-accent hover:underline">{t(budgetLines.linkKey)}</a>{stepParts.after}{:else}{t(budgetLines.nextKey)}{/if}</div>
 				{/if}
 			{/if}
 			{#if (note.code === 'thinking_loop' || note.code === 'tool_call_imitation') && canChooseModel()}
@@ -2423,7 +2425,14 @@
 					<button type="button" class="mt-1 inline-flex min-h-6 items-center rounded-[var(--radius-sm)] border border-border px-3 py-1 text-xs text-text-muted hover:text-text" onclick={() => rewriteApprovalInChat(rewriteId)} data-approval-rewrite>{t('chat.note.approval_rewrite')}</button>
 				</div>
 			{/if}
-			{#if note.detail && refusedSentence === undefined}
+			{#if note.detail && refusedSentence === undefined && budgetLines}
+				<!-- A capped message's note says it in the reader's words; the engine's English
+				     sentence is for debugging and waits behind Details. -->
+				<details class="mt-1" data-budget-details>
+					<summary class="cursor-pointer text-[11px] text-text-subtle/80">{t('chat.note.budget.details')}</summary>
+					<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words" lang="en">{note.detail}</div>
+				</details>
+			{:else if note.detail && refusedSentence === undefined}
 				<!-- A blocked run's reason is the engine's English sentence. -->
 				<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words" lang={note.code === 'run_blocked' ? 'en' : undefined}>{note.detail}</div>
 			{/if}

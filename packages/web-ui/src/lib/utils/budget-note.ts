@@ -88,10 +88,18 @@ export interface BudgetNoteLines {
 	/** Text key of the reason, and the values for its slots. */
 	reasonKey: string;
 	reasonVars: Record<string, string>;
-	/** Text key of the next step, or none. */
+	/** Text key of the next step, or none. Its `{link}` slot, if any, holds the link. */
 	nextKey?: string;
-	/** Where the step leads: the limits page or a mail to support. None for the owner case. */
+	/** Where the step's link leads: the limits page or a mail to support. None for the owner case. */
 	href?: string;
+	/** Text key of the link's words in the step: only the place it leads is a link, not the step. */
+	linkKey?: string;
+}
+
+/** A step split around its `{link}` slot: the text before and after the link. */
+export function splitAtLink(step: string): { before: string; after: string } | null {
+	const at = step.indexOf('{link}');
+	return at < 0 ? null : { before: step.slice(0, at), after: step.slice(at + '{link}'.length) };
 }
 
 export const LIMITS_PAGE = '/app/settings/workspace/limits';
@@ -112,7 +120,7 @@ export function budgetNoteLines(
 	if (ref.cap === 'unknown' || ref.limitUSD === undefined || ref.spentUSD === undefined) {
 		const lines: BudgetNoteLines = { reasonKey: 'chat.note.budget.unverifiable', reasonVars: {} };
 		if (selfHosted === true) lines.nextKey = 'chat.note.budget.restart';
-		else if (selfHosted === false) { lines.nextKey = 'chat.note.budget.support_if_stays'; lines.href = SUPPORT_MAILTO; }
+		else if (selfHosted === false) { lines.nextKey = 'chat.note.budget.support_if_stays'; lines.href = SUPPORT_MAILTO; lines.linkKey = 'chat.note.budget.link_support'; }
 		return lines;
 	}
 	const lines: BudgetNoteLines = {
@@ -123,8 +131,8 @@ export function budgetNoteLines(
 			when: formatResetWhen(budgetResetAt(ref.cap, now), now, lang),
 		},
 	};
-	if (audience === 'self') { lines.nextKey = 'chat.note.budget.next_self'; lines.href = LIMITS_PAGE; }
-	else if (audience === 'plan') { lines.nextKey = 'chat.note.budget.next_plan'; lines.href = SUPPORT_MAILTO; }
+	if (audience === 'self') { lines.nextKey = 'chat.note.budget.next_self'; lines.href = LIMITS_PAGE; lines.linkKey = 'chat.note.budget.link_limits'; }
+	else if (audience === 'plan') { lines.nextKey = 'chat.note.budget.next_plan'; lines.href = SUPPORT_MAILTO; lines.linkKey = 'chat.note.budget.link_support'; }
 	else if (audience === 'owner') lines.nextKey = 'chat.note.budget.next_owner';
 	return lines;
 }

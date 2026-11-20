@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-	budgetNoteLines, budgetResetAt, formatCapUSD, formatResetWhen, formatSpentUSD, parseBudgetNoteRef,
+	splitAtLink, budgetNoteLines, budgetResetAt, formatCapUSD, formatResetWhen, formatSpentUSD, parseBudgetNoteRef,
 	LIMITS_PAGE, SUPPORT_MAILTO,
 } from './budget-note.js';
 
@@ -59,11 +59,12 @@ describe('the note\'s lines', () => {
 		expect(self.reasonVars['limit']).toBe('$5');
 		expect(self.reasonVars['spent']).toBe('$5.12');
 		expect(self.reasonVars['when']).toBe(formatResetWhen(budgetResetAt('daily', now), now, 'de'));
-		expect(self).toMatchObject({ nextKey: 'chat.note.budget.next_self', href: LIMITS_PAGE });
-		expect(budgetNoteLines(daily, 'plan', false, now, 'de')).toMatchObject({ nextKey: 'chat.note.budget.next_plan', href: SUPPORT_MAILTO });
+		expect(self).toMatchObject({ nextKey: 'chat.note.budget.next_self', href: LIMITS_PAGE, linkKey: 'chat.note.budget.link_limits' });
+		expect(budgetNoteLines(daily, 'plan', false, now, 'de')).toMatchObject({ nextKey: 'chat.note.budget.next_plan', href: SUPPORT_MAILTO, linkKey: 'chat.note.budget.link_support' });
 		const owner = budgetNoteLines(daily, 'owner', false, now, 'de');
 		expect(owner.nextKey).toBe('chat.note.budget.next_owner');
 		expect(owner.href).toBeUndefined();
+		expect(owner.linkKey).toBeUndefined();
 		expect(budgetNoteLines({ cap: 'monthly', limitUSD: 150, spentUSD: 150.4 }, 'self', true, now, 'en').reasonKey).toBe('chat.note.budget.monthly');
 	});
 
@@ -76,7 +77,7 @@ describe('the note\'s lines', () => {
 	it('spend that cannot be checked: no amounts; restart on self-host, support elsewhere', () => {
 		const unknown = { cap: 'unknown' } as const;
 		expect(budgetNoteLines(unknown, 'self', true, now, 'de')).toEqual({ reasonKey: 'chat.note.budget.unverifiable', reasonVars: {}, nextKey: 'chat.note.budget.restart' });
-		expect(budgetNoteLines(unknown, 'plan', false, now, 'de')).toEqual({ reasonKey: 'chat.note.budget.unverifiable', reasonVars: {}, nextKey: 'chat.note.budget.support_if_stays', href: SUPPORT_MAILTO });
+		expect(budgetNoteLines(unknown, 'plan', false, now, 'de')).toEqual({ reasonKey: 'chat.note.budget.unverifiable', reasonVars: {}, nextKey: 'chat.note.budget.support_if_stays', href: SUPPORT_MAILTO, linkKey: 'chat.note.budget.link_support' });
 		expect(budgetNoteLines(unknown, 'owner', null, now, 'de')).toEqual({ reasonKey: 'chat.note.budget.unverifiable', reasonVars: {} });
 		// A cap reached without its amounts says no numbers either.
 		expect(budgetNoteLines({ cap: 'daily', limitUSD: 5 }, 'self', true, now, 'de').reasonKey).toBe('chat.note.budget.unverifiable');
@@ -91,5 +92,13 @@ describe('reading a budget from the wire', () => {
 		expect(parseBudgetNoteRef(null)).toBeUndefined();
 		expect(parseBudgetNoteRef({ cap: 'daily', limitUSD: -1, spentUSD: Number.NaN })).toEqual({ cap: 'daily' });
 		expect(parseBudgetNoteRef({ cap: 'daily', limitUSD: '5', spentUSD: Infinity })).toEqual({ cap: 'daily' });
+	});
+});
+
+describe('a step with a link', () => {
+	it('splits around its link slot, and a step without one is not split', () => {
+		expect(splitAtLink('Du kannst das Limit unter {link} ändern.')).toEqual({ before: 'Du kannst das Limit unter ', after: ' ändern.' });
+		expect(splitAtLink('Bleibt das, schreib an {link}.')).toEqual({ before: 'Bleibt das, schreib an ', after: '.' });
+		expect(splitAtLink('Starte lynox neu.')).toBeNull();
 	});
 });
