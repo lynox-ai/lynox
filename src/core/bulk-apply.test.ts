@@ -1833,60 +1833,116 @@ describe('data-store runs', () => {
     const agentWith = (grants: string[] | null): IAgent => ({
       ...agent(), ...(grants === null ? {} : { conversationGrants: { members: () => [...grants] } }),
     } as unknown as IAgent);
-    const planAndApply = async (rows: { target: string; price: number }[], planner: IAgent): Promise<string> => {
-      writeFileSync(join(ws, 'p.json'), JSON.stringify(rows));
-      const runId = runIdOf(await bulkPlanTool.handler(
-        { target_system: 'data_store', target_collection: 'products', source_file: 'p.json' }, planner));
+    const applyPlanned = async (out: string, deps: { writerFor: typeof writerFor } = { writerFor }): Promise<string> => {
+      const runId = runIdOf(out);
       approve(runId);
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor })).status).toBe('done');
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, ...deps })).status).toBe('done');
       return runId;
     };
-    const undoOf = async (runId: string): Promise<string> => {
+    /** Plan from a workspace file: a file carries no stamp, so the run's stamp holds unknown. */
+    const planAndApply = async (rows: { target: string; price: number }[], planner: IAgent): Promise<string> => {
+      writeFileSync(join(ws, 'p.json'), JSON.stringify(rows));
+      return applyPlanned(await bulkPlanTool.handler(
+        { target_system: 'data_store', target_collection: 'products', source_file: 'p.json' }, planner));
+    };
+    /** Plan from the collection `staged`, whose rows a write stamped with `stamp`. */
+    const planFromCollection = async (rows: { target: string; price: number }[], stamp: string[], planner: IAgent, atomic = false): Promise<string> => {
+      store.createCollection({ name: 'staged', scope, columns: [{ name: 'target', type: 'string' }, { name: 'price', type: 'number' }] });
+      store.insertRecords({ collection: 'staged', records: rows, stamp: { grants: stamp, runId: null, writtenBy: null, untrusted: false } });
+      return applyPlanned(await bulkPlanTool.handler(
+        { target_system: 'data_store', target_collection: 'products', source_collection: 'staged', atomic }, planner));
+    };
+    const undoOf = async (runId: string, w: typeof writerFor = writerFor): Promise<{ id: string; status: string }> => {
       const undo = ledger.planUndo(runId);
       if (!undo.ok) throw new Error(undo.reason);
       approve(undo.status.id);
-      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor })).status).toBe('done');
-      return undo.status.id;
+      return { id: undo.status.id, status: (await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: w })).status };
     };
+    const grantsOf = (sku: string): readonly string[] | undefined => store.sourceOfRow('products', 'sku', sku)?.grants;
 
-    it('a row a run creates holds the planning conversation\'s grants, not unknown', async () => {
+    it('a row a run creates from a collection holds the planning conversation\'s grants and the source rows\', not unknown', async () => {
+      seedStore();
+      await planFromCollection([{ target: 'NEW1', price: 1 }], ['gX'], agentWith(['gA']));
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows).toHaveLength(1);
+      expect(grantsOf('NEW1')).toEqual(['gA', 'gX']);
+    });
+
+    it('a row a run creates from a file holds unknown beside the planning conversation\'s grants', async () => {
       seedStore();
       await planAndApply([{ target: 'NEW1', price: 1 }], agentWith(['gA']));
       expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows).toHaveLength(1);
-      expect(store.sourceOfRow('products', 'sku', 'NEW1')?.grants).toEqual(['gA']);
+      expect(grantsOf('NEW1')).toEqual(['gA', 'unknown']);
     });
 
-    it('CONTROL: a row a run creates, planned with no grant set, holds unknown', async () => {
+    it('CONTROL: a row a run creates, planned with no grant set, holds unknown — beside the source rows\' grants', async () => {
       seedStore();
       await planAndApply([{ target: 'NEW1', price: 1 }], agentWith(null));
-      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows).toHaveLength(1);
-      expect(store.sourceOfRow('products', 'sku', 'NEW1')?.grants).toEqual(['unknown']);
+      expect(grantsOf('NEW1')).toEqual(['unknown']);
+      store.dropCollection('products');
+      seedStore();
+      await planFromCollection([{ target: 'NEW2', price: 2 }], ['gX'], agentWith(null));
+      expect(grantsOf('NEW2')).toEqual(['gX', 'unknown']);
     });
 
-    it('a row an undo deletes comes back with the stamp it held, when that undo is undone', async () => {
+    it('a row an undo deletes comes back with the stamp it held and unknown beside it, when that undo is undone', async () => {
       seedStore();
       // The row a run under gB creates; its undo deletes it, and the undo of that undo — planned
-      // by the owner with no conversation — restores it.
-      const runId = await planAndApply([{ target: 'NEW1', price: 1 }], agentWith(['gB']));
-      expect(store.sourceOfRow('products', 'sku', 'NEW1')?.grants).toEqual(['gB']);
-      const undoId = await undoOf(runId);
+      // by the owner with no conversation — re-creates it.
+      const runId = await planFromCollection([{ target: 'NEW1', price: 1 }], ['gB'], agentWith(['gB']));
+      expect(grantsOf('NEW1')).toEqual(['gB']);
+      const undo = await undoOf(runId);
+      expect(undo.status).toBe('done');
       expect(store.sourceOfRow('products', 'sku', 'NEW1')).toBeNull();
-      await undoOf(undoId);
+      expect((await undoOf(undo.id)).status).toBe('done');
       expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows[0]).toMatchObject({ sku: 'NEW1', price: 1 });
-      expect(store.sourceOfRow('products', 'sku', 'NEW1')?.grants).toEqual(['gB']);
+      expect(grantsOf('NEW1')).toEqual(['gB', 'unknown']);
     });
 
-    it('the undo of an update writes back the stamp the row held beside the run\'s, and records it per target', async () => {
+    it('the atomic rollback re-creates a row its undo deleted with the stamp it held and unknown beside it', async () => {
+      seedStore();
+      const runId = await planFromCollection([{ target: 'NEW0', price: 0 }, { target: 'NEW1', price: 1 }], ['gB'], agentWith(['gB']), true);
+      expect([grantsOf('NEW0'), grantsOf('NEW1')]).toEqual([['gB'], ['gB']]);
+      // The undo deletes NEW1 first (reverse order), then fails on NEW0 and rolls back.
+      const failing = (run: Parameters<typeof bulkWriterFor>[0]): TargetWriter | null => {
+        const inner = bulkWriterFor(run, store);
+        if (!inner) return null;
+        return {
+          read: (k, f) => inner.read(k, f),
+          write: async (k, a, onSend, onRefused, grants) => {
+            if (k === 'NEW0' && a.absent) throw new Error('boom');
+            return inner.write(k, a, onSend, onRefused, grants);
+          },
+        };
+      };
+      expect((await undoOf(runId, failing)).status).toBe('aborted');
+      expect(store.queryRecords({ collection: 'products', filter: { sku: 'NEW1' } }).rows[0]).toMatchObject({ sku: 'NEW1', price: 1 });
+      expect(grantsOf('NEW1')).toEqual(['gB', 'unknown']);
+      expect(grantsOf('NEW0')).toEqual(['gB']);
+    });
+
+    it('a judged data-store plan records the stamp each existing row held', async () => {
       seedStore();
       store.putRowVerbatim('products', { sku: 'S1', price: 1, owner: 'subj-1' }, { grants: ['gB'], runId: null, writtenBy: null, untrusted: false });
-      expect(store.sourceOfRow('products', 'sku', 'S1')?.grants).toEqual(['gB', 'unknown']);
-      const runId = await planAndApply([{ target: 'S1', price: 99 }], agentWith(['gA']));
-      expect(store.sourceOfRow('products', 'sku', 'S1')?.grants).toEqual(['gA', 'gB', 'unknown']);
-      const undoId = await undoOf(runId);
+      writeFileSync(join(ws, 'j.csv'), 'target\nS1\nS2');
+      const out = await bulkPlanTool.handler(
+        { target_system: 'data_store', target_collection: 'products', source_file: 'j.csv', judge: { rule: 'Set a price.', schema: { price: { type: 'number' } } } }, agentWith(['gA']));
+      const cells = engineDb.getDb().prepare('SELECT seq, before_grants AS b FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(runIdOf(out));
+      // S1's stamp is gB with the seed's unknown; S2 holds the seed's empty set, read as unknown.
+      expect(cells).toEqual([{ seq: 0, b: '["gB","unknown"]' }, { seq: 1, b: null }]);
+    });
+
+    it('the undo of an update records the row\'s earlier stamp and the run\'s per target, and the store keeps their union', async () => {
+      seedStore();
+      store.putRowVerbatim('products', { sku: 'S1', price: 1, owner: 'subj-1' }, { grants: ['gB'], runId: null, writtenBy: null, untrusted: false });
+      expect(grantsOf('S1')).toEqual(['gB', 'unknown']);
+      const runId = await planFromCollection([{ target: 'S1', price: 99 }], ['gA'], agentWith(['gA']));
+      expect(grantsOf('S1')).toEqual(['gA', 'gB', 'unknown']);
+      const undo = await undoOf(runId);
+      expect(undo.status).toBe('done');
       expect(store.queryRecords({ collection: 'products', filter: { sku: 'S1' } }).rows[0]).toMatchObject({ price: 1 });
       // The store's union keeps the run's grant beside the restored one (accepted over-attribution).
-      expect(store.sourceOfRow('products', 'sku', 'S1')?.grants).toEqual(['gA', 'gB', 'unknown']);
-      const cells = engineDb.getDb().prepare('SELECT before_grants AS b, write_grants AS w FROM bulk_targets WHERE run_id = ?').get(undoId);
+      expect(grantsOf('S1')).toEqual(['gA', 'gB', 'unknown']);
+      const cells = engineDb.getDb().prepare('SELECT before_grants AS b, write_grants AS w FROM bulk_targets WHERE run_id = ?').get(undo.id);
       expect(cells).toEqual({ b: '["gA"]', w: '["gB","unknown"]' });
     });
   });

@@ -987,6 +987,34 @@ export class DataStore {
   }
 
   /**
+   * The union of the `_source_grants` of the rows with these `_id`s, sorted — what a bulk run
+   * that copies them carries forward. A row whose stamp is NULL, empty or does not parse adds
+   * `unknown`, as {@link sourceOfRow} reads it. Read in chunks of `chunk` ids, so the bound
+   * variables of one statement stay within SQLite's limit.
+   */
+  sourceGrantsOfIds(collection: string, ids: readonly number[], chunk = 500): string[] {
+    const grants = new Set<string>();
+    if (ids.length === 0) return [];
+    if (!COLLECTION_NAME_RE.test(collection) || RESERVED_NAMES.has(collection)) throw new Error(`Collection "${collection}" not found.`);
+    if (!this._getCollectionMeta(collection)) throw new Error(`Collection "${collection}" not found.`);
+    this._assertSourceColumns(collection);
+    const size = Math.max(1, chunk);
+    for (let i = 0; i < ids.length; i += size) {
+      const part = ids.slice(i, i + size);
+      const rows = this.db.prepare(
+        `SELECT "_source_grants" AS g FROM "ds_${collection}" WHERE "_id" IN (${part.map(() => '?').join(', ')})`,
+      ).all(...part) as Array<{ g: string | null }>;
+      for (const row of rows) {
+        let parsed: unknown = null;
+        try { parsed = row.g === null ? null : JSON.parse(row.g); } catch { parsed = null; }
+        if (!Array.isArray(parsed) || parsed.length === 0) { grants.add(UNKNOWN_GRANT); continue; }
+        for (const g of parsed) grants.add(typeof g === 'string' ? g : UNKNOWN_GRANT);
+      }
+    }
+    return [...grants].sort();
+  }
+
+  /**
    * The `_source_grants` each row whose `keyColumn` value is among `values` holds, keyed by that
    * value as a string — the stamp a bulk run must write back on an undo. A row whose stamp is
    * NULL, empty or does not parse maps to null: unknown, as {@link sourceOfRow} reads it. A value

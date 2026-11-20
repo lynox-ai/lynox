@@ -21,7 +21,7 @@ import type { BulkWriteEffect } from '../types/index.js';
 import type { AttachedConnection } from './bulk-connection.js';
 import { coercePlainColumnValue, SYSTEM_COLUMNS } from './data-store.js';
 import {
-  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, externalHostOf, sameValue,
+  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, externalHostOf, recreatedGrants, sameValue,
   type ActualImage, type ApplyTarget, type BeforeImage, type BulkHaltReason, type BulkLedger, type BulkRunForApply, type BulkTargetError,
 } from './bulk-ledger.js';
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
@@ -550,8 +550,10 @@ async function rollBack(
       }
       // Left as it is, and unmarked: the owner's view marks it as one to check by hand.
       if (cur === 'path_changed' || cur === 'foreign' || !sameImage(cur, t.after)) { complete = false; continue; }
-      // Taken back with the stamp the row held before the run wrote it.
-      await writer.write(t.key, t.expected, undefined, undefined, t.beforeGrants);
+      // Taken back with the stamp the row held before the run wrote it. A row the run deleted is
+      // re-created, and its recorded stamp may be older than the row it removed: `unknown` beside
+      // it (`recreatedGrants`).
+      await writer.write(t.key, t.expected, undefined, undefined, t.change === 'delete' ? recreatedGrants(t.beforeGrants) : t.beforeGrants);
       if (recorded) ledger.recordRolledBack(run, t.seq, now());
       else ledger.recordUnrecordedSettled(run.id, t.seq, now());
     } catch {

@@ -38,6 +38,7 @@ import type { ModelTier } from '../types/index.js';
 import { containRunFromRun, containRunFromThread } from './containment.js';
 import type { ContainmentMirror } from './history-markers.js';
 import { isSharedSuffix } from './public-suffix.js';
+import { UNKNOWN_GRANT } from './conversation-grants.js';
 
 /** A target's stored `read_*` or `write_*` pair (engine.db v43). */
 interface ConnectionColumns {
@@ -1007,6 +1008,17 @@ function undoEligible(external: boolean): string {
  *  overwriting needs the before-image. */
 function undoFor(before: BeforeImage): UndoKind {
   return before.absent ? 'compensatable' : 'restorable';
+}
+
+/**
+ * The stamp a bulk write gives a row it RE-CREATES after a bulk write removed it (an undo of a
+ * delete, the atomic rollback of one): the recorded set with `unknown` beside it. The recorded
+ * set was read at planning, not when the row was removed, and a write in between may have added
+ * a grant to the row that the record does not hold; `unknown` keeps every connection's erasure
+ * asking about the row. Null is unknown already.
+ */
+export function recreatedGrants(grants: readonly string[] | null): string[] | null {
+  return grants === null ? null : [...new Set([...grants, UNKNOWN_GRANT])].sort();
 }
 
 /** A grant set as a `planner_grants`, `before_grants` or `write_grants` cell: a JSON array of
@@ -2687,7 +2699,8 @@ export class BulkLedger {
       // The data-store stamps (`_source_grants`): the undo writes back the stamp the row held
       // before its source wrote it, and expects the one that write carried — so an undo of this
       // undo writes that one back in turn. The source's own target stamp is set only on an undo.
-      const writeGrants = t.beforeGrants;
+      // Where the source deleted the row, the undo re-creates it: {@link recreatedGrants}.
+      const writeGrants = r.change === 'delete' ? recreatedGrants(t.beforeGrants) : t.beforeGrants;
       const beforeGrants = t.writeGrants !== undefined ? t.writeGrants : grantsOfCell(src.planner_grants);
       return { key: t.key, sourceSeq: r.seq, expected, after, change, read, tainted, writeGrants, beforeGrants };
     });

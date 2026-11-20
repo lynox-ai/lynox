@@ -446,8 +446,10 @@ export function planDataStore(source: readonly SourceRow[], store: DataStore, co
 
   // Before-images in batches of the query's own maximum page size.
   const beforeByKey = new Map<string, Record<string, unknown>>();
-  // And the stamp each row holds (`_source_grants`), which no query returns: an undo of the run
-  // writes it back, or the row a bulk delete took would come back as unknown.
+  // And the stamp each row holds (`_source_grants`), which no query returns. A run only updates
+  // or creates a data-store row; an undo of an update, or an atomic rollback of one, writes this
+  // stamp back with the row's earlier values (beside the run's grants, which the store's union
+  // keeps).
   const grantsByKey = new Map<string, string[] | null>();
   const lookups = keyed.filter((k) => k.key !== null);
   for (let i = 0; i < lookups.length; i += BULK_QUERY_PAGE) {
