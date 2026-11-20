@@ -201,7 +201,9 @@ export interface RunOptions {
    *  (`cron`/`watch`/`webhook`/`inbox_event`/`manual`) so a scheduled
    *  automation turn is distinguishable from a user chat turn (which leaves
    *  this undefined → `runs.trigger_origin` NULL). A SEPARATE dimension from
-   *  `run_type`; observability only, never gates money. */
+   *  `run_type`. Never gates money. It does decide one thing: a run the budget or a run hook
+   *  blocks is kept in the thread (message + note) only without it — a scheduled task or a watch
+   *  at the cap would otherwise add both on every tick. */
   triggerOrigin?: string | undefined;
   /** Who started this run (PRD customer-granted-operator-access D1, §3.13): a mandate's run
    *  gets the mandate's tool lock. ABSENT MEANS "THE SAME AS BEFORE", never "the owner": the
