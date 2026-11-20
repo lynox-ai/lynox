@@ -91,7 +91,7 @@ import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { MANDATE_KEY_INPUT_REFUSAL, MandateKeyInputError, mandateCredentialInput, mandateDocumentCredential, maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptClosedReason, type PromptStore } from '../core/prompt-store.js';
 import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
-import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
+import { approvalCard, approvalScopeOf, listScopeOf, mandateNamer, setupLines, type DisplayNameOf, type SetupMarks } from '../core/approval-view.js';
 import type { ApprovalStore } from '../core/approval-store.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
@@ -345,6 +345,18 @@ export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: 
     paused_ended: entries.map((e) => ({ email: e.email, reason: e.reason, ends_at: new Date(e.endsAt * 1000).toISOString(), warned: e.warned === true })),
   };
 }
+
+/** A trigger's setup marks from its stored columns, as an approval card and the trigger list read them. */
+export function triggerSetupMarks(trigger: TriggerRecord): SetupMarks {
+  return {
+    createdBy: trigger.created_by ?? null, createdMandateId: trigger.created_mandate_id ?? null,
+    mandateEditor: trigger.mandate_editor ?? null, mandateEditorId: trigger.mandate_editor_id ?? null,
+    creatorCovered: creatorCovered(planAuthorshipOf(trigger)), editorCovered: editorCovered(planAuthorshipOf(trigger)),
+  };
+}
+
+/** No approval entry: the trigger list names only the marks on the trigger itself. */
+const NO_APPROVAL_ENTRY = { mandateId: null, createdBy: null } as const;
 
 /** One ended access behind a paused plan, as the owner's view reads it. */
 export interface PausedEnded {
@@ -2642,6 +2654,23 @@ export class LynoxHTTPApi {
       listed: { wf: plan.workflowConfirmedAt, entries: stampEntriesFor(plan.of, apiStore, engine.getMandateEnds() ?? null) },
       by: plan.of.email,
       workflow,
+    };
+  }
+
+  /**
+   * The name each grant was last shown under in the actor trail, read once per grant for one
+   * request. Null where the trail has none or cannot be read: the address stands in. Who may see
+   * which name is the caller's to decide (`mandateNamer`).
+   */
+  #displayNameReader(): DisplayNameOf {
+    const log = this.engine?.getAuditLog() ?? null;
+    const names = new Map<string, string | null>();
+    return (id) => {
+      if (names.has(id)) return names.get(id) ?? null;
+      let display: string | null = null;
+      if (log !== null) { try { display = log.displayNameOf(id); } catch { /* the address stands in */ } }
+      names.set(id, display);
+      return display;
     };
   }
 
@@ -9319,6 +9348,11 @@ export class LynoxHTTPApi {
         ? taskManager.listTriggers({ paused: true })
         : taskManager.listTriggers(status ? { status } : undefined);
       const bulkLedgerForList = engine.getBulkLedger() ?? engine.getBulkLedgerSwitchedOff?.() ?? null;
+      // Who set each trigger up or changed it last, when that was a mandate: the lines of an
+      // approval card, named by the same rule (a mandate sees another grant by its address only).
+      // The owner's own setup has no line. No session, no lines.
+      const setupScope = approvalScopeOf(principal);
+      const setupNameOf = setupScope === null ? null : mandateNamer(setupScope, this.#displayNameReader());
       const triggers = rows
         .map((trigger) => {
           const starter = loop?.runningStarterTag(trigger.id);
@@ -9348,6 +9382,7 @@ export class LynoxHTTPApi {
             recipients_unconfirmed: isOwnerPrincipal(principal) && recipientsConfirmable(trigger)
               && (trigger.effect === undefined || trigger.effect === null || trigger.effect === 'run_agent' || trigger.effect === 'run_workflow'),
             ...(isBulk ? { bulk_host: bulkSystem === undefined ? null : externalHostOf(bulkSystem) } : {}),
+            setup: setupNameOf === null ? [] : setupLines(NO_APPROVAL_ENTRY, triggerSetupMarks(trigger), undefined, setupNameOf),
           };
         });
       // What the owner's stamp of each confirmed plan lists, and how each entry stands (B3), for the
@@ -10370,16 +10405,8 @@ export class LynoxHTTPApi {
       const engineDb = this.engine?.getEngineDb() ?? null;
       const triggers = engineDb === null ? null : new TriggerStore(engineDb);
       const workflows = engineDb === null ? null : new WorkflowStore(engineDb);
-      const log = this.engine?.getAuditLog() ?? null;
-      // Read once per grant. Which grants a card may name this way is the card's to decide.
-      const names = new Map<string, string | null>();
-      const displayNameOf = (id: string): string | null => {
-        if (names.has(id)) return names.get(id) ?? null;
-        let display: string | null = null;
-        if (log !== null) { try { display = log.displayNameOf(id); } catch { /* the address stands in */ } }
-        names.set(id, display);
-        return display;
-      };
+      // Which grants a card may name this way is the card's to decide.
+      const displayNameOf = this.#displayNameReader();
       const threads = this.engine?.getThreadStore() ?? null;
       const containment = this.engine?.getToolContext().containment ?? null;
       const threadOf = (threadId: string): { createdBy: string | null; contained: boolean } | undefined => {
@@ -10394,11 +10421,7 @@ export class LynoxHTTPApi {
         const w = trigger?.pipeline_id === undefined ? undefined : workflows?.authorship(trigger.pipeline_id);
         return approvalCard(entry, {
           scope, now, displayNameOf, threadOf,
-          trigger: trigger === undefined ? undefined : {
-            createdBy: trigger.created_by ?? null, createdMandateId: trigger.created_mandate_id ?? null,
-            mandateEditor: trigger.mandate_editor ?? null, mandateEditorId: trigger.mandate_editor_id ?? null,
-            creatorCovered: creatorCovered(planAuthorshipOf(trigger)), editorCovered: editorCovered(planAuthorshipOf(trigger)),
-          },
+          trigger: trigger === undefined ? undefined : triggerSetupMarks(trigger),
           workflow: w === undefined ? undefined : {
             createdBy: w.createdBy, createdMandateId: w.createdMandateId, mandateEditor: w.mandateEditor, mandateEditorId: w.mandateEditorId,
             creatorCovered: creatorCovered(planAuthorshipOfWorkflow(w)), editorCovered: editorCovered(planAuthorshipOfWorkflow(w)),

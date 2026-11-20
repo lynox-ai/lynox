@@ -11437,6 +11437,58 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    it('GET /api/triggers names a helper that set a trigger up or changed it last, by the name a session may read, and the owner\'s own by none', async () => {
+      const AT = '2026-11-10T00:00:00.000Z';
+      const rows = [
+        { id: 'trg-anna', title: 'Preise beobachten', created_by: 'mandate:anna@example.com', created_mandate_id: 'grant-a', created_at: AT },
+        { id: 'trg-bea', title: 'Wochenbericht', created_by: 'owner', mandate_editor: 'mandate:bea@example.com', mandate_editor_id: 'grant-b', mandate_edited_at: AT },
+        { id: 'trg-taken', title: 'Übernommen', created_by: 'mandate:anna@example.com', created_mandate_id: 'grant-a', created_at: AT,
+          covered_created_by: 'mandate:anna@example.com', covered_created_id: 'grant-a', covered_created_at: AT },
+        { id: 'trg-own', title: 'Eigener', created_by: 'owner' },
+        { id: 'trg-old', title: 'Alt' },
+      ];
+      const shown: Record<string, string> = { 'grant-a': 'Anna A.', 'grant-b': 'Bea B.' };
+      // A helper's read is recorded in the trail before it is answered, so the trail takes rows too.
+      let trail: { displayNameOf: (id: string) => string | null; record: () => void } = { displayNameOf: (id) => shown[id] ?? null, record: () => undefined };
+      type Lines = { triggers: Array<{ id: string; setup?: unknown }> };
+      const setupOf = async (): Promise<{ text: string; byId: Record<string, unknown> }> => {
+        const res = await jsonFetch('/api/triggers');
+        expect(res.status).toBe(200);
+        const text = await res.text();
+        return { text, byId: Object.fromEntries((JSON.parse(text) as Lines).triggers.map((t) => [t.id, t.setup])) };
+      };
+      const resolver = (api as unknown as { _principalResolver: Parameters<typeof api.setPrincipalResolverForTesting>[0] })._principalResolver;
+      try {
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => rows }), getWorkerLoop: () => null, getAuditLog: () => trail }, async () => {
+          const owner = await setupOf();
+          expect(owner.byId).toEqual({
+            'trg-anna': [{ kind: 'set_up_by', name: 'Anna A.', takenOver: false }],
+            'trg-bea': [{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }],
+            'trg-taken': [{ kind: 'set_up_by', name: 'Anna A.', takenOver: true }],
+            'trg-own': [],
+            'trg-old': [],
+          });
+          // A helper reads its own grant's name, another grant by its address only.
+          api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'bea@example.com', mandateId: 'grant-b' }) as RequestPrincipal);
+          const bea = await setupOf();
+          expect(bea.byId['trg-anna']).toEqual([{ kind: 'set_up_by', name: 'anna@example.com', takenOver: false }]);
+          expect(bea.byId['trg-bea']).toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }]);
+          expect(bea.text).not.toContain('Anna A.');
+          // A session no scope names (a mandate without a grant): no lines at all.
+          api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'bea@example.com' }) as RequestPrincipal);
+          const none = await setupOf();
+          for (const id of ['trg-anna', 'trg-bea', 'trg-taken', 'trg-own', 'trg-old']) expect(none.byId[id]).toEqual([]);
+          expect(none.text).not.toContain('Bea B.');
+          // A trail that cannot be read costs the owner the names, not the list: the address stands in.
+          api.setPrincipalResolverForTesting(resolver);
+          trail = { displayNameOf: () => { throw new Error('trail down'); }, record: () => undefined };
+          expect((await setupOf()).byId['trg-anna']).toEqual([{ kind: 'set_up_by', name: 'anna@example.com', takenOver: false }]);
+        });
+      } finally {
+        api.setPrincipalResolverForTesting(resolver);
+      }
+    });
+
     it('GET /api/triggers gives a bulk run\'s trigger the host its run works on, null without one or when its run cannot be read, and no other trigger the field', async () => {
       const bulk = [
         { id: 'bulk-ext', title: 'Bulk run r-ext', effect: 'bulk_apply', bulk_run_id: 'r-ext' },
@@ -11611,13 +11663,14 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
-    it('GET /api/triggers adds the two flags, the pause\'s, and whether its workflow waits for a stamp, and nothing else to a row', async () => {
+    it('GET /api/triggers adds the two flags, the pause\'s, whether its workflow waits for a stamp, and its setup lines, and nothing else to a row', async () => {
       // Who started the run stays inside: any further field — a starter tag, an effect —
       // would be a new disclosure on a list a mandate reads. `paused` is the plan pause's
-      // (`triggerForRoute`), on by default since the takeover is in the view.
+      // (`triggerForRoute`), on by default since the takeover is in the view. `setup` names
+      // the helpers in the stored marks, by the approval card's rule (its own test above).
       await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => loopWith('owner') }, async () => {
         const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
-        for (const row of triggers) expect(Object.keys(row).sort()).toEqual(['id', 'paused', 'recipients_unconfirmed', 'running', 'stoppable', 'title', 'workflow_awaits_stamp']);
+        for (const row of triggers) expect(Object.keys(row).sort()).toEqual(['id', 'paused', 'recipients_unconfirmed', 'running', 'setup', 'stoppable', 'title', 'workflow_awaits_stamp']);
       });
     });
 

@@ -14,6 +14,8 @@
 	import StampConfirm from './StampConfirm.svelte';
 	import RecipientConfirm from './RecipientConfirm.svelte';
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { approvalSetupKind, approvalSetupName, type ApprovalSetupLine } from './approvals.js';
+	import { visibleText } from '../visible-text.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
 	// table split out of `tasks` in v42. This is the editable *home* for them:
@@ -44,6 +46,9 @@
 		// schedule a mandate set up or last changed waits for the owner's stamp (`awaitsOwnerStamp`).
 		created_by?: string;
 		edited_by?: string;
+		// The same, as the lines shown under the title: a helper that set it up or changed it
+		// last, by name (`GET /api/triggers`). Empty for the owner's own.
+		setup?: ApprovalSetupLine[];
 		// What the owner's stamp of a confirmed plan lists, entry by entry (owner only; B3).
 		stamp_listed?: StampListed | null;
 		// Whether the last escalation of this trigger (a failed scheduled run, a watch
@@ -613,6 +618,11 @@
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-paused>{t('triggers.paused_takeover')}</span>
 								{/if}
 							</div>
+							<!-- Who set it up or changed it last, when that was a helper: the lines of an
+							     approval card (U-202). The owner's own trigger has none. -->
+							{#each trigger.setup ?? [] as line, i (i)}
+								<p class="mt-0.5 text-xs text-text-muted break-words" data-trigger-setup={line.kind}>{tf(`approvals.setup.${approvalSetupKind(line, viewer)}`, { name: visibleText(approvalSetupName(line.name, { t })) })}</p>
+							{/each}
 							<div class="flex flex-wrap gap-2 mt-1.5 text-xs text-text-subtle">
 								{#if trigger.schedule_cron}
 									<span class="flex items-center gap-1">
