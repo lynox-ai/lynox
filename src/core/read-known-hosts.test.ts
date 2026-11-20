@@ -67,6 +67,7 @@ describe('api_setup stamps a save the owner made in a batch that began clean', (
     return {
       principal: OWNER_PRINCIPAL,
       batchStartedTainted: () => tainted,
+      heldProviderSearch: () => false,
       ...run,
       sessionCounters: { httpRequests: 0 },
       promptUser: async () => 'Allow',
@@ -89,13 +90,15 @@ describe('api_setup stamps a save the owner made in a batch that began clean', (
     expect(store.get('crm')?.custom_endpoint_ack?.accepted).toBe(true);
   });
 
-  it('an agent that cannot say how its batch began does not stamp', async () => {
-    const store = new ApiStore();
-    const agent = { ...(agentFor(store, false) as object), batchStartedTainted: undefined } as never;
-    const out = await apiSetupTool.handler({ action: 'create', profile: profile('crm', 'https://api.crm.example/v1') }, agent) as string;
-    expect(out).toContain('Created API profile');
-    expect(store.get('crm')?.owner_clean_host).toBeUndefined();
-  });
+  for (const missing of ['batchStartedTainted', 'heldProviderSearch'] as const) {
+    it(`an agent without ${missing} does not stamp`, async () => {
+      const store = new ApiStore();
+      const agent = { ...(agentFor(store, false) as object), [missing]: undefined } as never;
+      const out = await apiSetupTool.handler({ action: 'create', profile: profile('crm', 'https://api.crm.example/v1') }, agent) as string;
+      expect(out).toContain('Created API profile');
+      expect(store.get('crm')?.owner_clean_host).toBeUndefined();
+    });
+  }
 
   for (const [label, run] of [
     ["a trigger's run", { writeAuthor: 'trigger:t1' }],

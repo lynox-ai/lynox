@@ -49,6 +49,12 @@ const batch = (...calls: Array<[string, Record<string, unknown>]>) => ({
   usage: { input_tokens: 1, output_tokens: 1 },
 });
 
+// A search the provider runs itself comes back as two blocks inside the model's response.
+const searchBlocks = () => [
+  { type: 'server_tool_use', id: 'srv_1', name: 'web_search', input: { query: 'crm api' } },
+  { type: 'web_search_tool_result', tool_use_id: 'srv_1', content: [{ type: 'web_search_result', url: 'https://page.example/', title: 'a page', encrypted_content: 'x' }] },
+];
+
 function foreignRead(): ToolEntry {
   return {
     definition: { name: 'web_research', description: 'web_research', input_schema: { type: 'object' as const, properties: {} } },
@@ -103,6 +109,46 @@ describe('api_setup through the dispatch records the host of a save the owner ma
     await ownersChat(store).send('connect my CRM');
     expect(store.get('crm')).toBeDefined();
     expect(store.get('crm')?.owner_clean_host).toBeUndefined();
+  });
+
+  for (const [label, blocks] of [
+    ['its call and its results', () => searchBlocks()],
+    ['its call alone, the results still pending', () => searchBlocks().slice(0, 1)],
+  ] as const) {
+    it(`does not record the host when the provider ran a search in the same response: ${label}`, async () => {
+      const store = new ApiStore();
+      const withSearch = batch(save());
+      withSearch.content.unshift(...blocks() as never[]);
+      mockProcess.mockResolvedValueOnce(withSearch).mockResolvedValueOnce(endTurn);
+      await ownersChat(store).send('connect my CRM');
+      expect(store.get('crm')).toBeDefined();
+      expect(store.get('crm')?.owner_clean_host).toBeUndefined();
+    });
+  }
+
+  it('does not record the host in a conversation loaded with a search the provider ran', async () => {
+    const store = new ApiStore();
+    const agent = ownersChat(store);
+    agent.loadMessages([
+      { role: 'user', content: 'find the CRM API' },
+      { role: 'assistant', content: [...searchBlocks(), { type: 'text', text: 'found it' }] as never },
+    ]);
+    mockProcess.mockResolvedValueOnce(batch(save())).mockResolvedValueOnce(endTurn);
+    await agent.send('connect it');
+    expect(store.get('crm')).toBeDefined();
+    expect(store.get('crm')?.owner_clean_host).toBeUndefined();
+  });
+
+  it('CONTROL: a loaded conversation without such a search still records the host', async () => {
+    const store = new ApiStore();
+    const agent = ownersChat(store);
+    agent.loadMessages([
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: [{ type: 'text', text: 'hi' }] },
+    ]);
+    mockProcess.mockResolvedValueOnce(batch(save())).mockResolvedValueOnce(endTurn);
+    await agent.send('connect my CRM');
+    expect(store.get('crm')?.owner_clean_host).toBe('api.crm.example');
   });
 
   it('does not record the host for a call made outside a batch', async () => {

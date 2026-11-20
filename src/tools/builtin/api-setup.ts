@@ -2276,15 +2276,17 @@ ${draftJson}
       // foreign content: a read from it after foreign content is then not asked about
       // (`ApiStore.readKnownHosts`). The batch's snapshot, not the turn's: the dispatch counts
       // this tool's own call as foreign content before the handler runs, so the turn would never
-      // be clean here. Every `api_setup` call counts so, so only the conversation's first one
-      // records a host. Outside a batch nothing is recorded.
+      // be clean here. Only a save in a batch that began before the conversation's first foreign
+      // content records its host, and an earlier `api_setup` call counts as such content.
+      // Outside a batch nothing is recorded, nor in a conversation holding a search the provider
+      // ran itself: its results reach the model past every dispatch and arm nothing.
       // Only the owner's interactive run: a trigger's, a workflow's or a task's run carries a run
       // tag as its author even under the owner's principal, and a sub-agent a run origin of its
       // own; a workflow made in another conversation could otherwise name a host unattended. The
       // engine's to write, never the input's, and bound to the host it was saved with.
       delete profile.owner_clean_host;
       const ownersOwnChat = isOwnerPrincipal(agent.principal) && agent.writeAuthor === principalTag(OWNER_PRINCIPAL) && agent.sendOrigin === undefined;
-      if (ownersOwnChat && agent.batchStartedTainted?.() === false) {
+      if (ownersOwnChat && agent.batchStartedTainted?.() === false && agent.heldProviderSearch?.() === false) {
         const cleanHost = profileReadHost(profile);
         if (cleanHost !== null) profile.owner_clean_host = cleanHost;
       }
