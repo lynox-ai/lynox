@@ -747,11 +747,15 @@ describe('plan_task auto-planning fallback', () => {
     const counters = {
       httpRequests: 0, writeBytes: 0, costUSD: 0,
     };
-    const agent = makeAgent({ promptUser: undefined, sessionCounters: counters }, mockConfig);
+    const charged = vi.fn();
+    const agent = makeAgent({ promptUser: undefined, sessionCounters: counters, chargeExternalCost: charged } as never, mockConfig);
     agent.toolContext.meteredHost = { getHooks: () => [{ onAfterRun }], getContext: () => undefined };
 
     await planTaskTool.handler({ summary: 'Create a research report' }, agent);
 
+    // The run's cost ceiling sees it too. Kills: a debit that skips the run's guard.
+    expect(charged).toHaveBeenCalledOnce();
+    expect(charged.mock.calls[0]![0] as number).toBeCloseTo(0.003, 6);
     // Local session cap sees the planning spend...
     expect(counters.costUSD).toBeCloseTo(0.003, 6);
     // ...and it is debited to the tenant balance.

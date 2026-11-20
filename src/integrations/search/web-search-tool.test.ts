@@ -368,8 +368,13 @@ describe('search edge cases', () => {
     });
     const onAfterRun = vi.fn();
     const { agent, counters } = meteredAgent(onAfterRun);
+    const charged = vi.fn();
+    (agent as unknown as { chargeExternalCost: (usd: number) => void }).chargeExternalCost = charged;
     await createWebSearchTool(mockProvider(raw)).handler({ action: 'search', query: 'x' }, agent);
 
+    // The run's cost ceiling is charged too. Kills: a rerank debit that skips the run's guard.
+    expect(charged).toHaveBeenCalledOnce();
+    expect(charged.mock.calls[0]![0] as number).toBeCloseTo(0.0006, 6);
     expect(counters.costUSD).toBeCloseTo(0.0006, 6);
     expect(onAfterRun).toHaveBeenCalledOnce();
     expect(onAfterRun.mock.calls[0]![1] as number).toBeCloseTo(0.0006, 6);

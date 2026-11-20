@@ -308,6 +308,18 @@ describe('spawn_agent tool', () => {
     resetSessionSpawnCost(testCounters);
   });
 
+  it('a child of a run with a spending bound of its own runs under its share as a run ceiling', async () => {
+    // Kills: a child sent without `runCostCeilingUSD` under a bounded parent (the child would
+    // not count as bounded, and an in-session workflow would start there unseen by any guard).
+    const sendOpts = (): { runCostCeilingUSD?: number } | undefined =>
+      mockSend.mock.calls.at(-1)?.[1] as { runCostCeilingUSD?: number } | undefined;
+    await spawnAgentTool.handler({ agents: [{ name: 'a', task: 'A', max_budget_usd: 0.4 }] }, makeAgent({ hasRunCostCeiling: () => true }));
+    expect(sendOpts()?.runCostCeilingUSD).toBe(0.4);
+    // Not bounded: sent as before (positive control).
+    await spawnAgentTool.handler({ agents: [{ name: 'a', task: 'A', max_budget_usd: 0.4 }] }, makeAgent({ hasRunCostCeiling: () => false }));
+    expect(sendOpts()).not.toHaveProperty('runCostCeilingUSD');
+  });
+
   // Safety-net: the hybrid tests mutate process-global routing resolvers and
   // restore them in their own `finally`, but this guarantees a clean baseline
   // even if a future test forgets — routing/model leakage into a sibling test

@@ -2333,6 +2333,31 @@ describe('api_setup tool', () => {
       }
     });
 
+    it('charges the docs-extraction spend to the run\'s cost ceiling, accepted or refused', async () => {
+      // Kills: a debit that skips the run's guard (a run with a ceiling could spend past it
+      // through extraction calls the ceiling never sees).
+      const fetchSpy = mockFetchOk('<html>plain docs body, no links...</html>');
+      try {
+        stubExtraction({ description: 'Some API', auth: { type: 'bearer' } }, 0.0021);
+        const charged = vi.fn();
+        const agent = { ...createMockAgent(new ApiStore()), chargeExternalCost: charged };
+        await apiSetupTool.handler({ action: 'bootstrap', docs_url: 'https://docs.example.com/v1' }, agent as never);
+        expect(charged).toHaveBeenCalledOnce();
+        expect(charged.mock.calls[0]![0] as number).toBeCloseTo(0.0021, 6);
+
+        const refused = new llmHelper.ExtractShapeError('Model did not call the extract tool. Got content types: [text]');
+        llmHelper.attachExtractionSpend(refused, { costUsd: 0.0033, tier: 'balanced' });
+        mockedExtract.mockRejectedValue(refused);
+        const chargedRefused = vi.fn();
+        const agent2 = { ...createMockAgent(new ApiStore()), chargeExternalCost: chargedRefused };
+        await apiSetupTool.handler({ action: 'bootstrap', docs_url: 'https://docs.example.com/v1' }, agent2 as never);
+        expect(chargedRefused).toHaveBeenCalledOnce();
+        expect(chargedRefused.mock.calls[0]![0] as number).toBeCloseTo(0.0033, 6);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     it('debits a refused extraction once, from the spend its error carries', async () => {
       // The model answered but the extraction failed (no tool call, or a value the schema
       // refused). The reply was paid for, so it is booked like an accepted one.

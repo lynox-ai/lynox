@@ -1631,7 +1631,8 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
     // A workflow's steps run on agents of their own, whose spend this run's cost guard never
     // sees. A run admitted with a spending bound of its own could pass it through them, so
     // such a run does not start one: not a first run, a retry or a continuation.
-    if (agent.hasRunCostCeiling?.() === true) return WORKFLOW_UNDER_RUN_CEILING;
+    // An agent that cannot say (no such method) is treated as bounded: refused, never waved through.
+    if (typeof agent.hasRunCostCeiling !== 'function' || agent.hasRunCostCeiling()) return WORKFLOW_UNDER_RUN_CEILING;
     const rawPipelineConfig = agent.toolContext.userConfig;
     // `getAvailableTools()`, not `toolContext.tools`: that context carries the ENGINE's
     // registry, which for a child agent is wider than the child's own grant — a workflow step

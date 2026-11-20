@@ -117,6 +117,8 @@ function makePipelineAgent(opts?: {
     // child-agents as its consumers, and a stub without it cannot see which of the two lists
     // a route reads.
     getAvailableTools: () => opts?.granted ?? ctx.tools,
+    // Required on `IAgent`; a run_workflow on an agent without it is refused (fail closed).
+    hasRunCostCeiling: () => false,
   } as unknown as IAgent;
 }
 
@@ -213,6 +215,10 @@ describe('run_workflow — inline steps', () => {
       expect(await runWorkflowTool.handler(input as never, bounded)).toBe(WORKFLOW_UNDER_RUN_CEILING);
     }
     expect(mockRunManifest).not.toHaveBeenCalled();
+    // An agent that cannot say whether it is bounded is treated as bounded.
+    // Kills: an optional-call check (`?.() === true`) that waves an agent without the method through.
+    const silent = { ...makePipelineAgent(), hasRunCostCeiling: undefined } as unknown as IAgent;
+    expect(await runWorkflowTool.handler({ name: 'test', steps: [makeStep('s1', 'do thing')] }, silent)).toBe(WORKFLOW_UNDER_RUN_CEILING);
     // Without a bound of its own the run starts as before (positive control).
     mockRunManifest.mockResolvedValueOnce(makeRunState());
     const unbounded = { ...makePipelineAgent(), hasRunCostCeiling: () => false } as unknown as IAgent;
@@ -2284,7 +2290,7 @@ function makeAutonomyAgent(autonomy: AutonomyLevel | undefined): IAgent {
   // assert is the COMPLETENESS of the run context, and this stub was missing the accessor the
   // pool is read from — which is why they all threw rather than failed when it started being
   // read. Same list, because these tests are about autonomy and not about the grant.
-  return { toolContext: ctx, autonomy, principal: OWNER_PRINCIPAL, getAvailableTools: () => ctx.tools } as unknown as IAgent;
+  return { toolContext: ctx, autonomy, principal: OWNER_PRINCIPAL, getAvailableTools: () => ctx.tools, hasRunCostCeiling: () => false } as unknown as IAgent;
 }
 
 describe('A1: buildRunCtx — complete run-context shaping', () => {

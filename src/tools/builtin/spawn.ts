@@ -1937,7 +1937,14 @@ async function executeThinker(
     });
 
     // Same per-turn time anchor as top-level chat / pipeline steps.
-    const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone), { disposableDeadline: deadline?.signal });
+    // A parent run admitted with a spending bound of its own hands that kind of bound on: the
+    // child runs under its share as a run ceiling too, so whatever is refused under such a bound
+    // (an in-session workflow, whose steps no guard of this run sees) is refused in the child.
+    const parentBounded = parentAgent.hasRunCostCeiling?.() === true;
+    const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone), {
+      disposableDeadline: deadline?.signal,
+      ...(parentBounded ? { runCostCeilingUSD: budgetUSD } : {}),
+    });
     // Built HERE, not at the return: `runHistory.updateRun` below stores
     // `responseText`, and appending the note only on the way out left the run row
     // holding a version of the result the parent never saw — the one place

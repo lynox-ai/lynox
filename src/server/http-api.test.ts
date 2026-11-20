@@ -18677,8 +18677,8 @@ describe('metered audio routes: managed credit gate + debit', () => {
     });
 
     it('admits the request on its own worst case: every character at the per-character rate', async () => {
-      // Kills: the generic single-call default instead of the text's own worst case
-      // (10 000 characters are 13 cents, more than that default allows for).
+      // Kills: the generic single-call default instead of the text's own worst case, and a worst
+      // case without the text-prep expansion (10 000 characters × 1.5 = 19.5 cents → 20).
       repayRateWindow();
       const onBeforeRun = vi.fn();
       mockEngineHooks = [{ onBeforeRun }];
@@ -18686,7 +18686,7 @@ describe('metered audio routes: managed credit gate + debit', () => {
       const res = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'a'.repeat(10_000) }) });
       expect(res.status).toBe(200);
       await readSse(res);
-      expect((onBeforeRun.mock.calls[0]![1] as { maxCostCents?: number }).maxCostCents).toBe(13);
+      expect((onBeforeRun.mock.calls[0]![1] as { maxCostCents?: number }).maxCostCents).toBe(20);
     });
 
     it('refuses a model other than the pinned one before the budget gate', async () => {

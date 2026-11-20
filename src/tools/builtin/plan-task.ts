@@ -376,6 +376,8 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
         // the tenant balance. No-op on self-host / BYOK. Booked from the reply,
         // not the plan: a reply that yields no plan was paid for too.
         onSpend: (costUsd) => {
+          // Charged to this run's cost ceiling too, like the agent's own helper calls.
+          agent.chargeExternalCost?.(costUsd);
           debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, costUsd, 'fast');
         },
         // A planning call aborted at its timeout or by the stop returned no reply to book. Its upper bound

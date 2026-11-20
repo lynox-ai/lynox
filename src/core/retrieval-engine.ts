@@ -124,6 +124,8 @@ export interface RetrievalOptions {
   topK?: number | undefined;
   threshold?: number | undefined;
   useHyDE?: boolean | undefined;
+  /** Told what a HyDE call spent, so the caller can count it against its run's ceiling. */
+  onHelperSpend?: ((usd: number) => void) | undefined;
   useGraphExpansion?: boolean | undefined;
   namespace?: MemoryNamespace | undefined;
   /**
@@ -279,7 +281,7 @@ export class RetrievalEngine {
       if (cachedHyDE !== undefined) {
         queryForEmbedding = `${query} ${cachedHyDE}`;
       } else {
-        const hypothetical = await this._generateHyDE(query);
+        const hypothetical = await this._generateHyDE(query, options.onHelperSpend);
         if (hypothetical) {
           this._hydeCache.set(query, hypothetical);
           queryForEmbedding = `${query} ${hypothetical}`;
@@ -615,7 +617,7 @@ export class RetrievalEngine {
     }
   }
 
-  private async _generateHyDE(query: string): Promise<string | null> {
+  private async _generateHyDE(query: string, onSpend?: ((usd: number) => void) | undefined): Promise<string | null> {
     if (!this.anthropicClient) return null;
     try {
       const fast = resolveTierModel('fast', getActiveProvider());
@@ -636,18 +638,15 @@ export class RetrievalEngine {
       // id (the CP dedups on it). No local-cap recording — the RetrievalEngine
       // holds no session counters and a 256-token call is immaterial there.
       const u = response.usage;
-      if (this.meteredHost && u) {
-        reportMeteredCost(
-          this.meteredHost,
-          randomUUID(),
-          calculateCost(fast.modelId, {
-            input_tokens: u.input_tokens,
-            output_tokens: u.output_tokens,
-            cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,
-            cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
-          }),
-          'fast',
-        );
+      if (u) {
+        const usd = calculateCost(fast.modelId, {
+          input_tokens: u.input_tokens,
+          output_tokens: u.output_tokens,
+          cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,
+          cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
+        });
+        onSpend?.(usd);
+        if (this.meteredHost) reportMeteredCost(this.meteredHost, randomUUID(), usd, 'fast');
       }
       const textBlock = response.content.find(b => b.type === 'text');
       return textBlock?.type === 'text' ? textBlock.text.slice(0, 300) : null;
