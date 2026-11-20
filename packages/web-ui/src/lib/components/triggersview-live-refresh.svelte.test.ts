@@ -86,6 +86,29 @@ describe('a stopped run is named, not only coloured', () => {
 		expect(stopped).not.toContain('angehalten');
 	});
 
+	it('a run that never started says „nicht gelaufen“, in amber and never in the success colour', async () => {
+		rows = [{ ...ROW, id: 'n', title: 'Nicht gelaufen', last_run_at: '2026-10-19T08:00:00.000Z', last_run_status: 'not_run' }];
+		await render();
+		const line = target.querySelector('[data-run-status="not_run"]');
+		expect(line?.textContent).toContain('nicht gelaufen');
+		expect(line?.classList.contains('text-warning')).toBe(true);
+		expect(line?.classList.contains('text-success')).toBe(false);
+	});
+
+	it('and „did not run“ in English', async () => {
+		const { setLocale } = await import('../i18n.svelte.js');
+		setLocale('en');
+		try {
+			rows = [{ ...ROW, id: 'n', title: 'Weekly', last_run_at: '2026-10-19T08:00:00.000Z', last_run_status: 'not_run' }];
+			await render();
+			const line = target.querySelector('[data-run-status="not_run"]');
+			expect(line?.textContent).toContain('did not run');
+			expect(line?.classList.contains('text-success')).toBe(false);
+		} finally {
+			setLocale('de');
+		}
+	});
+
 	it('the Stop button says „Lauf stoppen“, not the word of the planned halt', async () => {
 		rows = [{ ...ROW, running: true, stoppable: true }];
 		await render();

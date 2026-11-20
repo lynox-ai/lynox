@@ -724,6 +724,57 @@ describe('TaskManager', () => {
     });
   });
 
+  describe('recordTaskRun — a run that never started is neither a success nor a failure', () => {
+    it('a one-shot keeps its time and stays due, with no retry counted', () => {
+      const at = '2026-06-15T09:00:00.000Z';
+      const task = tm.create({ title: 'Report', assignee: 'lynox', nextRunAt: at, maxRetries: 3 }) as TriggerRecord;
+
+      const retrying = tm.recordTaskRun(task.id, 'The daily limit is reached.', 'not_run');
+
+      const after = tm.getTrigger(task.id)!;
+      expect(retrying).toBe(false);
+      expect(after.status).toBe('open');
+      expect(after.next_run_at).toBe(at);
+      expect(after.retry_count ?? 0).toBe(0);
+      expect(after.last_run_status).toBe('not_run');
+      expect(after.last_run_result).toBe('The daily limit is reached.');
+    });
+
+    it('a cron moves on to its next time and keeps its status', () => {
+      const task = tm.create({ title: 'Nightly', assignee: 'lynox', scheduleCron: '0 3 * * *' }) as TriggerRecord;
+      const before = tm.getTrigger(task.id)!;
+
+      tm.recordTaskRun(task.id, 'The daily limit is reached.', 'not_run');
+
+      const after = tm.getTrigger(task.id)!;
+      expect(after.status).toBe('open');
+      expect(after.status).toBe(before.status);
+      expect(Date.parse(after.next_run_at ?? '')).toBeGreaterThan(Date.now());
+      expect(after.last_run_status).toBe('not_run');
+    });
+
+    it('a failing cron that did not run is not marked failed again, nor reopened as if it ran', () => {
+      const task = tm.create({ title: 'Nightly', assignee: 'lynox', scheduleCron: '0 3 * * *' }) as TriggerRecord;
+      tm.recordTaskRun(task.id, 'boom', 'failed');
+      expect(tm.getTrigger(task.id)!.status).toBe('failed');
+
+      tm.recordTaskRun(task.id, 'The daily limit is reached.', 'not_run');
+
+      expect(tm.getTrigger(task.id)!.status).toBe('failed');
+    });
+
+    it('a watch moves on to its next interval', () => {
+      const task = tm.createWatch({ title: 'Watch', watchUrl: 'https://example.test', watchIntervalMinutes: 60 });
+
+      tm.recordTaskRun(task.id, 'The daily limit is reached.', 'not_run');
+
+      const after = tm.getTrigger(task.id)!;
+      expect(after.next_run_at ?? '').not.toBe('');
+      expect(Date.parse(after.next_run_at!)).toBeGreaterThan(Date.now() + 59 * 60_000);
+      expect(after.last_run_status).toBe('not_run');
+    });
+  });
+
   // T1-2 regression — see PRD-HN-LAUNCH-HARDENING §3.
   describe('recordTaskRun — one-shot failure terminates the task', () => {
     it("marks a one-shot task 'failed' and clears next_run_at when it permanently fails with no retries", () => {

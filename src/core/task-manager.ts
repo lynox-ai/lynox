@@ -1096,6 +1096,13 @@ export class TaskManager {
    * `'interrupted'` is a run the engine lost mid-way and did not resume. It IS a run
    * that did not finish, so it is scheduled exactly like `failed` (the same retry, the same
    * `failed` status); the word only keeps it apart from a tool or provider failure.
+   *
+   * `'not_run'` is a run that never started: the instance's spending cap, or a check before
+   * the run, did not let it begin. Nothing went wrong in it and nothing of it happened, so it
+   * is neither `failed` (no retry, a cron keeps its status) nor `success`. A cron or a watch
+   * goes on to its next time as after any run: the time it missed is missed, and its notice
+   * says so. A ONE-SHOT keeps its schedule, as `keepSchedule` does: it stays due and runs
+   * once the cap lets it.
    */
   /**
    * @param opts.noRetry No retry for this run, whatever the trigger's retries say: a run a
@@ -1112,7 +1119,7 @@ export class TaskManager {
    *   conditions drifted from it (a cron or watch with retries set was never retried here,
    *   and its failures were reported nowhere).
    */
-  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted', opts?: { noRetry?: boolean | undefined; keepSchedule?: boolean | undefined }): boolean {
+  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted' | 'not_run', opts?: { noRetry?: boolean | undefined; keepSchedule?: boolean | undefined }): boolean {
     const task = this.history.getTrigger(id);
     // The schedule was deleted while this run was in flight: deleting removes the row and
     // leaves the run going, so there is nothing left to record the run against.
@@ -1131,7 +1138,10 @@ export class TaskManager {
     // that union breaks the build here rather than silently disarming the guard.
     // A stop withholds the status for the reason given above; a parked trigger
     // withholds it because its wait is still open. Two causes, one mechanism.
-    const mayWriteStatus = task.status !== 'waiting' && status !== 'stopped' && status !== 'halted';
+    // A run that never started says nothing about the schedule either (`'not_run'` above).
+    const mayWriteStatus = task.status !== 'waiting' && status !== 'stopped' && status !== 'halted' && status !== 'not_run';
+    // A one-shot that did not start keeps its time and stays due; a cron or a watch moves on below.
+    const oneShotNotRun = status === 'not_run' && !task.schedule_cron && !task.watch_config;
 
     // A test run by hand (hand-run-door.ts; decided at dispatch and carried by the run)
     // records what happened and leaves the schedule exactly as it was: no status, no next
@@ -1142,7 +1152,7 @@ export class TaskManager {
     // provider sends, one ledger row each. It has no cron, so
     // the branches below would read it as a one-shot and set it `completed` or `failed` — and a
     // trigger in either state accepts no further delivery.
-    if (isHandRunOf(task.id) || task.source === 'webhook' || opts?.keepSchedule === true) {
+    if (isHandRunOf(task.id) || task.source === 'webhook' || opts?.keepSchedule === true || oneShotNotRun) {
       this.history.updateTriggerRunResult(id, {
         lastRunAt: new Date().toISOString(),
         lastRunResult: result.length > MAX_RUN_RESULT_CHARS ? result.slice(0, MAX_RUN_RESULT_CHARS) : result,

@@ -2325,6 +2325,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'tasks.run_halted': { de: 'wie vorgesehen angehalten, wartet auf dich', en: 'halted as planned, waiting for you' },
 	'tasks.run_interrupted': { de: 'unterbrochen, nicht fortgesetzt', en: 'interrupted, not resumed' },
 	'tasks.run_stopped': { de: 'gestoppt, bevor er fertig war', en: 'stopped before it finished' },
+	'tasks.run_not_run': { de: 'nicht gelaufen', en: 'did not run' },
 	'tasks.every_hour': { de: 'Stündlich', en: 'Every hour' },
 	'tasks.daily_at': { de: 'Täglich um', en: 'Daily at' },
 	'tasks.monthly_on': { de: 'Monatlich am', en: 'Monthly on' },
