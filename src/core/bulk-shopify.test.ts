@@ -1681,6 +1681,7 @@ describe('applying a Shopify run', () => {
 
       it('lets an undo restore what a run wrote, under a connection that no longer asks', async () => {
         const id = await titling();
+        const seoBefore = JSON.stringify(s.products.get(10)!['seo']);
         await applyRaw(id, confirmedGrant());
         expect(s.products.get(10)!['seo']).toEqual({ title: 'New title', description: 'D1' });
         const undo = ledger.planUndo(id);
@@ -1689,7 +1690,16 @@ describe('applying a Shopify run', () => {
         expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
         await applyRaw(undo.status.id, GRANTED_ONLY, 'bulk_undo');
         expect(ledger.getStatus(undo.status.id)!.haltReason).toBeNull();
-        expect(s.products.get(10)!['seo']).not.toEqual({ title: 'New title', description: 'D1' });
+        expect(JSON.stringify(s.products.get(10)!['seo'])).toBe(seoBefore);
+      });
+
+      it('holds an undo of an undo under a connection that did not ask: it writes the new values again', async () => {
+        const redo = await redoOf();
+        const out = await applyRaw(redo, GRANTED_ONLY, 'bulk_undo');
+        expect(out.status).toBe('refused');
+        expect(ledger.getStatus(redo)!.haltReason).toBe(BULK_HALT_REASONS.productWriteNotAsked);
+        expect(s.requests).toEqual([]);
+        expect(s.products.get(10)!['descriptionHtml']).toBe('<p>1</p>');
       });
     });
   });
