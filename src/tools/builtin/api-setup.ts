@@ -725,6 +725,31 @@ function bootstrapUrl(input: ApiSetupInput): string | null {
   return typeof url === 'string' && url !== '' ? url : null;
 }
 
+/**
+ * The token address a `create` or `update` saves: the profile's `auth.oauth.token_url`, to which
+ * `fetch_token` later posts the client ID and client secret from the vault, on every fetch and
+ * refresh. `update` replaces the profile whole, so it sets the address the same way `create` does.
+ * `null` where the save sets none that is used: not oauth2, no `token_url`, or a built-in provider
+ * this engine knows (its tokens go to the provider's own endpoint, and `token_url` is display only,
+ * as in the save's egress list). An address the save refuses anyway (not an https URL) is `null`
+ * too: `validateProfile` refuses it with its own reason, and nothing is saved.
+ * The check is on the call, not on `fetch_token`: the call's input is all the origin check sees.
+ */
+function savedTokenUrl(input: ApiSetupInput): string | null {
+  if (input.action !== 'create' && input.action !== 'update') return null;
+  const profile: unknown = input.profile;
+  if (typeof profile !== 'object' || profile === null) return null;
+  const auth = (profile as ApiProfile).auth;
+  if (typeof auth !== 'object' || auth === null || auth.type !== 'oauth2') return null;
+  const oauth: unknown = auth.oauth;
+  if (typeof oauth !== 'object' || oauth === null) return null;
+  const url: unknown = (oauth as { token_url?: unknown }).token_url;
+  if (typeof url !== 'string' || url === '') return null;
+  if (builtInPresetOf(profile as ApiProfile) !== undefined) return null;
+  if (!URL.canParse(url) || new URL(url).protocol !== 'https:') return null;
+  return url;
+}
+
 function fetchFailureForModel(err: unknown): string {
   // Checked before `delegatedRedirects` on every hop, so a delegated session's write refusal
   // (`DelegatedHopRefused`) does not reach here: the same reading refuses the hop first.
@@ -1927,10 +1952,13 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
   // After content from outside, the page `bootstrap` reads goes through the origin check as a
   // read: its address can carry data the model put there. The model chose the address, so it is
   // checked like `http_request`'s GET. A page a search listed needs no question (`readAddress`).
+  // The token address a `create` or `update` saves goes through the same check, as the save it is
+  // (`credentialAddress`): every later token fetch and refresh posts the client's credentials there.
   sendTargetsWhenLatched: (input) => {
-    const url = bootstrapUrl(input);
+    const url = bootstrapUrl(input) ?? savedTokenUrl(input);
     return url === null ? null : hostTargets(url);
   },
+  credentialAddress: (input) => savedTokenUrl(input),
   readCarriesAddress: (input) => {
     const url = bootstrapUrl(input);
     return url !== null && carriesAddress(url);
