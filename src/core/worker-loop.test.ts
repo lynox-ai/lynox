@@ -1420,7 +1420,9 @@ describe('WorkerLoop', () => {
       }
 
       expect(engine.createSession, 'nothing dispatched').not.toHaveBeenCalled();
-      expect(tm.recordTaskRun, 'and the schedule left intact to retry').not.toHaveBeenCalled();
+      // Told as a run that did not start (too little left for one), with the schedule intact.
+      expect(vi.mocked(tm.recordTaskRun).mock.calls.map((c) => [c[2], c[3]]), 'and the schedule left intact to retry')
+        .toEqual([['not_run', { keepSchedule: true }]]);
       const said = lines.join('');
       expect(said, 'the task is named').toContain('task-1');
       expect(said, 'the figure it was refused against').toContain('0.05');
@@ -1858,8 +1860,9 @@ describe('WorkerLoop', () => {
       }
 
       // Admitted, it would reach executePipeline and record SOMETHING (a skip for the
-      // null target, or the mock engine's missing getRunHistory). Deferred, nothing.
-      expect(tm.recordTaskRun, 'deferred, so the pipeline path was never entered').not.toHaveBeenCalled();
+      // null target, or the mock engine's missing getRunHistory). Deferred, only the refusal.
+      expect(vi.mocked(tm.recordTaskRun).mock.calls.map((c) => c[2]), 'deferred, so the pipeline path was never entered')
+        .toEqual(['not_run']);
       expect(lines.join(''), 'and the refusal carries the cap it came from').toContain('Daily spending cap');
     });
   });

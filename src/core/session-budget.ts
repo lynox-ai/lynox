@@ -210,6 +210,34 @@ export function budgetNoteRef(check: PersistentBudgetCheck): BudgetNoteRef {
   return { cap: 'unknown' };
 }
 
+/**
+ * Why a background admission refused a run that would reserve `estimateUSD`, read apart:
+ * - `reached`: recorded spend is at a cap, or cannot be checked ({@link checkPersistentBudget});
+ * - `too_small`: recorded spend alone, without the runs in flight, leaves less than the run's
+ *   estimate under a cap — the run cannot be admitted before the cap resets, whatever else ends;
+ * - `in_flight`: only the reservations of runs in flight stand in the way; it passes once they end.
+ * Compared as {@link reservePersistentBudget} compares: a projection over the cap refuses.
+ */
+export type AdmissionShortfall =
+  | { kind: 'reached'; check: PersistentBudgetCheck }
+  | { kind: 'too_small'; cap: 'daily' | 'monthly'; limitUSD: number; spentUSD: number }
+  | { kind: 'in_flight' };
+
+export function admissionShortfall(estimateUSD: number): AdmissionShortfall {
+  const check = checkPersistentBudget();
+  if (!check.allowed) return { kind: 'reached', check };
+  const spend = computeRecordedSpend();
+  if (spend) {
+    if (_dailyCapUSD < Infinity && spend.todayCost + estimateUSD > _dailyCapUSD) {
+      return { kind: 'too_small', cap: 'daily', limitUSD: _dailyCapUSD, spentUSD: spend.todayCost };
+    }
+    if (_monthlyCapUSD < Infinity && spend.monthCost + estimateUSD > _monthlyCapUSD) {
+      return { kind: 'too_small', cap: 'monthly', limitUSD: _monthlyCapUSD, spentUSD: spend.monthCost };
+    }
+  }
+  return { kind: 'in_flight' };
+}
+
 /** Check if persistent daily/monthly budget allows another run. */
 export function checkPersistentBudget(): PersistentBudgetCheck {
   if (spendUnverifiable()) {

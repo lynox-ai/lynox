@@ -17,9 +17,9 @@ import { noticeLanguage } from './notice-language.js';
 import {
   EVENT_MAPPING_REFUSED, EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED_EN, EVENT_SHOP_MOVED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE,
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, RESUMED_RUN_NOT_CONTAINED,
-  WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, notRunReason, capResetAt, resetWhen, type WorkerNotices, type ShownMandate,
+  WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, notRunReason, capResetAt, resetWhen, type NotRunCause, type WorkerNotices, type ShownMandate,
 } from './worker-notices.js';
-import type { BudgetNoteRef } from './render-projection.js';
+import { CONTENT_REFUSED_NOTE } from './eager-persist.js';
 import { readEnvAlias } from './env.js';
 import { cpSuppliesLLMKey, isHostedInstance } from '../contract/vocab.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
@@ -57,7 +57,7 @@ import { readAddressWrites } from './outbound-write.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
-import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling, checkPersistentBudget, budgetNoteRef } from './session-budget.js';
+import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling, checkPersistentBudget, budgetNoteRef, admissionShortfall } from './session-budget.js';
 // Pure budget arithmetic, no I/O. It lives under src/server/ because the HTTP
 // handler was its first consumer; src/core/ is the better home now that there
 // are two. `src/core/config.ts` already imports across the same seam, so this
@@ -318,6 +318,14 @@ const DEFER_RELOG_MS = 10 * 60_000;
  * cap reset to wait for: a check before the run refused it, or spend could not be checked.
  */
 const NOT_RUN_RETRY_MS = 60 * 60_000;
+/**
+ * How long only other runs in flight may hold a trigger back at admission before the owner is
+ * told — or the lease's lifetime, if shorter: past it, a run that holds a reservation is lost or
+ * hung, and its reservation is not given back while it hangs.
+ */
+const WAITING_FOR_OTHERS_MS = 60 * 60_000;
+/** The most triggers each per-trigger memory of a run that did not start holds before it is cleared. */
+export const NOT_RUN_KEYS_MAX = 1024;
 // Hard ceiling on a watch target's response body. The 30s fetch timeout bounds
 // TIME, not BYTES — a hostile/misconfigured watch URL streaming multi-GB within
 // the window would buffer the whole body into memory and OOM the worker. 10 MB
@@ -753,6 +761,8 @@ export class WorkerLoop {
   readonly #notRunTold = new Map<string, string>();
   /** Per trigger, when a run stopped before the model was last said in the log (`#runBlocked`). */
   readonly #blockedSaidAt = new Map<string, number>();
+  /** Per trigger, since when only other runs in flight have held it back at admission. */
+  readonly #waitingSince = new Map<string, number>();
   /** Names this loop's runs in the lease column; another process's loop has its own. */
   private readonly leaseHolder = randomUUID();
 
@@ -893,7 +903,7 @@ export class WorkerLoop {
     // sentence, or the masked error of a run that threw.
     endEvent(slot ?? live, status === 'success' ? { state: 'done' } : { state: 'failed', reason: result });
     // A run that did run ends the refusal it was told of: the next one is told again.
-    if (status !== 'not_run') this.#notRunTold.delete(id);
+    if (status !== 'not_run') { this.#notRunTold.delete(id); this.#waitingSince.delete(id); }
     const record = {
       ...(startedByOther(slot) ? { noRetry: true } : {}),
       ...(opts?.keepSchedule === true ? { keepSchedule: true } : {}),
@@ -912,29 +922,56 @@ export class WorkerLoop {
   }
 
   /**
-   * An admission refusal told to the owner only when a cap is really reached — recorded spend at
-   * or over it, or spend that cannot be checked (`checkPersistentBudget`). A refusal that only
-   * the runs in flight or the worst-case projection cause passes on its own: the log line says
-   * it, and the owner is not told a limit is reached that is not.
+   * An admission refusal of a run that would reserve `estimateUSD`, told by its cause
+   * (`admissionShortfall`):
+   * - a cap recorded spend reached, or spend that cannot be checked: told as reached;
+   * - recorded spend alone leaves too little for this run: told so, with what the run needs, since
+   *   it is refused at every tick until the cap resets — silent, it would be refused unseen;
+   * - only other runs in flight stand in the way: the log line alone, as it passes once they end.
+   *   A reservation is given back only when its run settles, and a run that hangs never does
+   *   (the deadline ends a wait, not a computing run), so after {@link #waitLimitMs} of that it is
+   *   told too.
+   * @param atLeast `estimateUSD` is the least a run is started with, not what it reserves.
    */
-  #notRunIfCapReached(task: TriggerRecord): void {
-    const check = checkPersistentBudget();
-    if (!check.allowed) this.#recordNotRun(task, budgetNoteRef(check), 'admission');
+  #admissionRefused(task: TriggerRecord, estimateUSD: number, atLeast: boolean): void {
+    const why = admissionShortfall(estimateUSD);
+    if (why.kind === 'in_flight') {
+      const now = Date.now();
+      const since = this.#waitingSince.get(task.id);
+      if (since === undefined) {
+        if (this.#waitingSince.size >= NOT_RUN_KEYS_MAX) this.#waitingSince.clear();
+        this.#waitingSince.set(task.id, now);
+        return;
+      }
+      if (now - since < this.#waitLimitMs()) return;
+      this.#recordNotRun(task, { kind: 'waiting', since: new Date(since) }, 'admission');
+      return;
+    }
+    this.#waitingSince.delete(task.id);
+    this.#recordNotRun(task, why.kind === 'reached'
+      ? { kind: 'cap', ref: budgetNoteRef(why.check) }
+      : { kind: 'too_small', cap: why.cap, limitUSD: why.limitUSD, spentUSD: why.spentUSD, needUSD: estimateUSD, atLeast }, 'admission');
+  }
+
+  /** How long only other runs in flight may hold a trigger back before the owner is told. */
+  #waitLimitMs(): number {
+    return Math.min(WAITING_FOR_OTHERS_MS, this.lease.ttlMs);
   }
 
   /**
    * A run that never started, recorded `not_run` and told to the owner: the spending cap refused
    * it at admission (`at: 'admission'`), or the cap or a check before the run (`'hook'`) stopped
-   * it inside `Session.run` before the model was called (`at: 'run'`).
+   * it inside `Session.run` before the model was called, or the content check refused its task
+   * there (`at: 'run'`).
    *
-   * Told at most once per trigger, cause and period — the cap's day or month, a hook's day —
+   * Told at most once per trigger, cause and period — the cap's day or month, else the day —
    * because the admission refuses again at every tick. The admission's refusal is recorded only
    * when it is told, so its time stays the first refusal's; a refusal inside a run is recorded
    * each time, since the run was started and its schedule moves on (`recordTaskRun`).
    *
    * A one-shot stopped inside its run is not due again at the next tick, where the same cause
    * would stop it again: it is due again when the cap opens, or after {@link NOT_RUN_RETRY_MS}
-   * for a check before the run or a cap whose spend cannot be checked. A run started by hand
+   * for a check before the run, the content check or a cap whose spend cannot be checked. A run started by hand
    * keeps its schedule as it was.
    *
    * The notice names no thread (the run wrote none) and offers no follow-up: there is nothing to
@@ -942,20 +979,21 @@ export class WorkerLoop {
    *
    * @param firstCheck A watch without a baseline yet: there is no last check to compare against.
    */
-  #recordNotRun(task: TriggerRecord, cause: BudgetNoteRef | 'hook', at: 'admission' | 'run', firstCheck = false): void {
+  #recordNotRun(task: TriggerRecord, cause: NotRunCause, at: 'admission' | 'run', firstCheck = false): void {
     const now = new Date();
-    const period = now.toISOString().slice(0, cause !== 'hook' && cause.cap === 'monthly' ? 7 : 10);
-    const key = `${cause === 'hook' ? 'hook' : cause.cap}:${period}`;
+    const cap = cause.kind === 'cap' ? cause.ref.cap : cause.kind === 'too_small' ? cause.cap : undefined;
+    const period = now.toISOString().slice(0, cap === 'monthly' ? 7 : 10);
+    const key = `${cause.kind}:${cap ?? '-'}:${period}`;
     const told = this.#notRunTold.get(task.id) === key;
     if (at === 'admission' && told) return;
     const lang = noticeLanguage(this.engine.config?.language);
     const n = WORKER_NOTICES[lang];
     const tier = readEnvAlias('LYNOX_BILLING_TIER');
-    const reason = notRunReason(lang, cause, { managed: cpSuppliesLLMKey(tier), selfHosted: !isHostedInstance(tier), now });
+    const reason = notRunReason(lang, cause, { managed: cpSuppliesLLMKey(tier), selfHosted: !isHostedInstance(tier), now, watch: task.watch_config !== undefined && task.watch_config !== null });
     const byHand = at === 'run' && (isHandRunOf(task.id) || isStartedByHand(task.id));
     const oneShot = !task.schedule_cron && !task.watch_config && task.source !== 'webhook';
     const retryAt = at === 'run' && oneShot && !byHand
-      ? (cause !== 'hook' && cause.cap !== 'unknown' ? capResetAt(cause.cap, now) : new Date(now.getTime() + NOT_RUN_RETRY_MS))
+      ? (cap === 'daily' || cap === 'monthly' ? capResetAt(cap, now) : new Date(now.getTime() + NOT_RUN_RETRY_MS))
       : undefined;
     // What becomes of the trigger, as `recordTaskRun` schedules it: a run by hand leaves the
     // schedule as it was; refused at admission it stays due; a one-shot is due again at
@@ -979,7 +1017,7 @@ export class WorkerLoop {
     }
     if (told) return;
     // Bounded, and only a new trigger can grow it: a trigger told again replaces its own key.
-    if (!this.#notRunTold.has(task.id) && this.#notRunTold.size >= 1024) this.#notRunTold.clear();
+    if (!this.#notRunTold.has(task.id) && this.#notRunTold.size >= NOT_RUN_KEYS_MAX) this.#notRunTold.clear();
     this.#notRunTold.set(task.id, key);
     if (!this.notificationRouter.hasChannels()) return;
     void this.notificationRouter.notify({
@@ -991,23 +1029,35 @@ export class WorkerLoop {
   }
 
   /**
-   * A run `Session.run` ended before the model was called, with lynox's own sentence as its
-   * answer (`getLastRunNotice() === 'run_blocked'`): the cap it reached when the session names
-   * one, else a check before the run. The sentence goes to the log only: a hook's may be a third
-   * party's text, and the notice says it in the owner's language.
+   * Whether `Session.run` ended before the model was called, with lynox's own sentence as its
+   * answer: the spending cap or a check before the run blocked it (`run_blocked`), or the content
+   * check refused its task (`content_refused`). Either way nothing of the run happened.
    */
-  #runBlocked(task: TriggerRecord, session: Pick<Session, 'getLastRunBudget'>, said: string, firstCheck = false): void {
+  static #didNotRun(session: Pick<Session, 'getLastRunNotice'>): boolean {
+    const notice = session.getLastRunNotice?.();
+    return notice === 'run_blocked' || notice === CONTENT_REFUSED_NOTE;
+  }
+
+  /**
+   * A run {@link #didNotRun} says never reached the model: the cap it reached when the session
+   * names one, the content check, else a check before the run. The session's sentence goes to
+   * the log only: a hook's or the content check's may carry a third party's text, and the notice
+   * says it in the owner's language.
+   */
+  #runBlocked(task: TriggerRecord, session: Pick<Session, 'getLastRunBudget' | 'getLastRunNotice'>, said: string, firstCheck = false): void {
     const budget = session.getLastRunBudget?.();
+    const cause: NotRunCause = session.getLastRunNotice?.() === CONTENT_REFUSED_NOTE ? { kind: 'content' }
+      : budget !== undefined ? { kind: 'cap', ref: budget } : { kind: 'hook' };
     // Throttled like `sayBudgetDeferred`: a watch or a cron the same cause stops at every run
     // would otherwise write the same line each time.
     const now = Date.now();
     const saidAt = this.#blockedSaidAt.get(task.id);
     if (saidAt === undefined || now - saidAt >= DEFER_RELOG_MS) {
-      if (saidAt === undefined && this.#blockedSaidAt.size >= 1024) this.#blockedSaidAt.clear();
+      if (saidAt === undefined && this.#blockedSaidAt.size >= NOT_RUN_KEYS_MAX) this.#blockedSaidAt.clear();
       this.#blockedSaidAt.set(task.id, now);
       process.stderr.write(`[lynox:worker] Did not run: "${task.title}" (${task.id}) — ${said}\n`);
     }
-    this.#recordNotRun(task, budget ?? 'hook', 'run', firstCheck);
+    this.#recordNotRun(task, cause, 'run', firstCheck);
   }
 
   /**
@@ -1765,9 +1815,9 @@ export class WorkerLoop {
             `$${capUSD.toFixed(2)} of headroom left, under the $${MIN_VIABLE_RUN_USD.toFixed(2)} a run is given at minimum`
             + (hit === undefined ? '' : ` — ${hit}`),
           );
-          // And to the owner, when a cap is really reached: the log line alone reaches only
+          // And to the owner, by what refused it: the log line alone reaches only
           // someone who reads the engine's log.
-          this.#notRunIfCapReached(task);
+          this.#admissionRefused(task, MIN_VIABLE_RUN_USD, true);
           continue;
         }
         const reservation = reservePersistentBudget(grant);
@@ -1779,7 +1829,7 @@ export class WorkerLoop {
           // no longer does so SILENTLY, which is what made "never started" and "hung
           // scheduler" indistinguishable from outside.
           this.sayBudgetDeferred(task, reservation.reason ?? 'budget admission refused');
-          this.#notRunIfCapReached(task);
+          this.#admissionRefused(task, grant, false);
           continue;
         }
         // Taken after the reservation, so a deferred task never holds a lease it does not use.
@@ -1927,7 +1977,7 @@ export class WorkerLoop {
           this.sayBudgetDeferred(trigger, reservation.reason ?? 'budget admission refused');
           // The event stays waiting, untouched; the owner hears why it has not run yet. Only
           // when one waits: a pass for a lost run's report alone has no run that did not start.
-          if (event !== undefined) this.#notRunIfCapReached(trigger);
+          if (event !== undefined) this.#admissionRefused(trigger, grant, false);
           continue;
         }
         let lease: ReturnType<WorkerLoop['takeLease']>;
@@ -3429,7 +3479,7 @@ export class WorkerLoop {
     // ⛔ A run the spending cap or a check before the run stopped never reached the model: its
     // "result" is lynox's sentence of why. Recorded `success` with a ✓ and a link to its empty
     // thread, it read as a run that worked. It did not run, and is recorded and told so.
-    if (session.getLastRunNotice?.() === 'run_blocked') {
+    if (WorkerLoop.#didNotRun(session)) {
       this.#runBlocked(task, session, result);
       return;
     }
@@ -4209,7 +4259,7 @@ export class WorkerLoop {
     const analysis = await analysisSession.run(analysisPrompt, { noTools: true, triggerOrigin: 'watch', principal: runAs });
     // A blocked analysis compared nothing: the baseline stays where it was, so the next check
     // that does run still sees the change and reports it. Moved forward here, the change was lost.
-    if (analysisSession.getLastRunNotice?.() === 'run_blocked') {
+    if (WorkerLoop.#didNotRun(analysisSession)) {
       this.#runBlocked(task, analysisSession, analysis, isFirstRun);
       return;
     }

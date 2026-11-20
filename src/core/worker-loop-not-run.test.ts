@@ -11,9 +11,9 @@ vi.mock('./network-guard.js', async (importActual) => {
   return { ...actual, fetchPinned: (...args: unknown[]) => mockFetchPinned(...args) };
 });
 
-import { WorkerLoop, extractWatchSignal } from './worker-loop.js';
+import { WorkerLoop, extractWatchSignal, NOT_RUN_KEYS_MAX } from './worker-loop.js';
 import { WORKER_NOTICES, notRunReason, resetWhen } from './worker-notices.js';
-import { configurePersistentBudget, resetPersistentBudget } from './session-budget.js';
+import { configurePersistentBudget, resetPersistentBudget, reservePersistentBudget } from './session-budget.js';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { TaskManager as RealTaskManager } from './task-manager.js';
@@ -162,25 +162,58 @@ describe('a run the admission refused', () => {
     expect(lines.join(''), 'the log line stays').toContain('Not started');
   });
 
-  it('too little headroom left under a cap not reached: only the log line, no record, no notice', async () => {
+  it('less left under a cap not reached than a run is started with: told so, with the least it needs', async () => {
     configurePersistentBudget({ costProvider: spendToday(99.98), dailyCapUSD: 100 });
     const tm = makeTaskManager([makeTask()]);
     const router = makeRouter();
-    const { lines } = await ticks(tm, router, 1);
-    expect(tm.recordTaskRun).not.toHaveBeenCalled();
-    expect(router.sent).toHaveLength(0);
+    const { lines } = await ticks(tm, router, 2);
+    expect(notRunCalls(tm), 'recorded once over two ticks').toHaveLength(1);
+    expect(router.sent).toHaveLength(1);
+    expect(router.sent[0]!.body).toContain('Only $0.02 of the daily limit of $100 is left today, too little for a run of this kind (at least $0.05). It resets tomorrow at');
+    expect(router.sent[0]!.body).toContain(EN.capNextSelf);
+    expect(router.sent[0]!.body).not.toContain('is reached');
     expect(lines.join('')).toContain('Not started');
   });
 
-  it('a reservation the projection alone refuses: only the log line, no record, no notice', async () => {
-    // A workflow keeps the worst-case reservation, so $99 of $100 refuses at the reservation.
+  it('a workflow whose ceiling is more than the rest of the cap: told so, once over two ticks', async () => {
+    // A workflow reserves the session ceiling, so $99 of $100 refuses at every tick until the reset.
     configurePersistentBudget({ costProvider: spendToday(99), dailyCapUSD: 100, sessionCapUSD: 50 });
     const tm = makeTaskManager([makeTask({ effect: 'run_workflow' })]);
     const router = makeRouter();
-    const { lines } = await ticks(tm, router, 1);
-    expect(tm.recordTaskRun).not.toHaveBeenCalled();
-    expect(router.sent).toHaveLength(0);
-    expect(lines.join('')).toContain('would be exceeded by in-flight tasks');
+    await ticks(tm, router, 2);
+    expect(notRunCalls(tm)).toHaveLength(1);
+    expect(vi.mocked(tm.recordTaskRun).mock.calls[0]![3]).toEqual({ keepSchedule: true });
+    expect(router.sent).toHaveLength(1);
+    expect(router.sent[0]!.body).toContain('Only $1.00 of the daily limit of $100 is left today, too little for a run of this kind (up to $50.00). It resets tomorrow at');
+  });
+
+  it('only other runs in flight in the way: the log line alone, until they have held it past the wait limit', async () => {
+    configurePersistentBudget({ costProvider: spendToday(0), dailyCapUSD: 100, sessionCapUSD: 50 });
+    // Another run in flight holds $95 of the cap.
+    expect(reservePersistentBudget(95).allowed).toBe(true);
+    const tm = makeTaskManager([makeTask({ effect: 'run_workflow' })]);
+    const router = makeRouter();
+    const loop = new WorkerLoop(makeEngine(tm, ranSession()), router, 60_000);
+    const { lines, restore } = quietStderr();
+    try {
+      await loop.tick();
+      vi.setSystemTime(new Date(Date.now() + 10 * 60_000));
+      await loop.tick();
+      expect(tm.recordTaskRun, 'silent while the others may still end').not.toHaveBeenCalled();
+      expect(router.sent).toHaveLength(0);
+      expect(lines.join('')).toContain('would be exceeded by in-flight tasks');
+      // Past the lease's lifetime (15 minutes, shorter than the hour): a run that held it is hung.
+      vi.setSystemTime(new Date(Date.now() + 5 * 60_000));
+      await loop.tick();
+      await loop.tick();
+    } finally {
+      restore();
+    }
+    expect(notRunCalls(tm)).toHaveLength(1);
+    expect(router.sent).toHaveLength(1);
+    expect(router.sent[0]!.body).toContain('Waiting since today at');
+    expect(router.sent[0]!.body).toContain('for other runs, which hold the rest of the limit.');
+    expect(router.sent[0]!.body).toContain(EN.capRestart);
   });
 
   it('a reservation refused on a cap its recorded spend reached: told with that cap', async () => {
@@ -326,7 +359,7 @@ describe('a run the cap or a hook stopped inside the session', () => {
     const { tm } = await runBlocked(blockedSession('cap', { cap: 'daily', limitUSD: 5, spentUSD: 5 }), makeTask({ schedule_cron: undefined, source: 'task' }));
     const call = notRunCalls(tm)[0]!;
     expect(call[3]).toEqual({ retryAt: '2026-06-16T00:00:00.000Z' });
-    expect(call[1]).toContain('It tries again tomorrow at');
+    expect(call[1]).toContain('Next try tomorrow at');
   });
 
   it('a one-shot a hook stopped is due again in an hour', async () => {
@@ -474,6 +507,106 @@ describe('a watch whose analysis was blocked', () => {
     expect(said).toContain(EN.notRunWatchFirst);
     expect(said).not.toContain(EN.notRunWatchNext);
   });
+
+  it('the content check refused the page: the baseline stays, and the page is named as the cause', async () => {
+    vi.useRealTimers();
+    const config = { url: URL, interval_minutes: 60, last_hash: hashOf('<p>old</p>'), last_summary: 'Old.' };
+    const task = makeTask({ id: 'w-3', title: 'Page', source: 'watch', schedule_cron: undefined, watch_config: JSON.stringify(config) });
+    const tm = makeTaskManager([task]);
+    const analysis = contentRefusedSession('⚠ Request blocked by content policy: x. This request was not sent to the AI model.');
+    const engine = makeEngine(tm, analysis);
+    const loop = new WorkerLoop(engine, makeRouter(), 60_000);
+    const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
+    const { lines, restore } = quietStderr();
+    try {
+      mockFetchPinned.mockResolvedValueOnce(new Response('<p>new</p>', { status: 200 }));
+      await fire(task);
+    } finally {
+      restore();
+    }
+    expect(tm.updateWatchConfig, 'the baseline did not move').not.toHaveBeenCalled();
+    expect(engine.escalateToUser).not.toHaveBeenCalled();
+    const said = String(notRunCalls(tm)[0]![1]);
+    expect(said).toContain(EN.contentRefused);
+    expect(said).toContain(EN.contentNextWatch);
+    expect(said, 'the check\'s own text only in the log').not.toContain('content policy');
+    expect(lines.join('')).toContain('content policy');
+  });
+});
+
+/** A session whose task the content check refused before the model. */
+function contentRefusedSession(said: string): Session {
+  return {
+    sessionId: 'thread-refused', run: vi.fn(async () => said), _recreateAgent: vi.fn(), getAgent: () => null,
+    getLastRunStop: () => null, getLastRunNotice: () => 'content_refused', getLastRunBudget: () => undefined, promptUser: undefined,
+  } as unknown as Session;
+}
+
+describe('a task the content check refused', () => {
+  it('is recorded not_run with lynox\'s own sentence, never as a success, and a one-shot backs off', async () => {
+    const tm = makeTaskManager([makeTask({ schedule_cron: undefined, source: 'task' })]);
+    const router = makeRouter();
+    const loop = new WorkerLoop(makeEngine(tm, contentRefusedSession('⚠ Request blocked by content policy: x.')), router, 60_000);
+    const { restore } = quietStderr();
+    try {
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      restore();
+    }
+    expect(vi.mocked(tm.recordTaskRun).mock.calls.some((c) => c[2] === 'success')).toBe(false);
+    const call = notRunCalls(tm)[0]!;
+    expect(call[1]).toBe(`${EN.contentRefused} ${EN.contentNextTask} ${EN.notRunRetryAt(resetWhen(new Date('2026-06-15T13:00:00.000Z'), new Date(), 'en'))}`);
+    expect(call[3]).toEqual({ retryAt: '2026-06-15T13:00:00.000Z' });
+    expect(router.sent).toHaveLength(1);
+    expect(router.sent[0]!.title).toBe('⚠ Daily Report did not run');
+    expect(router.sent[0]!.title).not.toContain('✓');
+  });
+});
+
+describe('the edges', () => {
+  it('a webhook trigger stopped in its run is not given a one-shot\'s retry time', async () => {
+    // The due loop leaves webhook triggers to the drain, so the run is handed in directly: its
+    // work comes from the events it receives, not from a time of its own.
+    const task = makeTask({ schedule_cron: undefined, source: 'webhook' });
+    const tm = makeTaskManager([task]);
+    const loop = new WorkerLoop(makeEngine(tm, blockedSession('Run blocked: x', undefined)), makeRouter(), 60_000);
+    const run = (loop as unknown as { executeStandard: (t: TriggerRecord) => Promise<void> }).executeStandard.bind(loop);
+    const { restore } = quietStderr();
+    try {
+      await run(task);
+    } finally {
+      restore();
+    }
+    const call = notRunCalls(tm)[0]!;
+    expect(call[3]).toBeUndefined();
+    expect(call[1]).toContain(EN.notRunWaits);
+  });
+
+  it('an update of a trigger already told does not clear what the others were told', async () => {
+    configurePersistentBudget({ costProvider: spendToday(100), dailyCapUSD: 100 });
+    const tasks = Array.from({ length: NOT_RUN_KEYS_MAX }, (_, i) => makeTask({ id: `t-${String(i)}`, title: `T${String(i)}` }));
+    const tm = makeTaskManager(tasks);
+    const router = makeRouter();
+    const loop = new WorkerLoop(makeEngine(tm, ranSession()), router, 60_000);
+    const { restore } = quietStderr();
+    try {
+      await loop.tick();
+      expect(router.sent).toHaveLength(NOT_RUN_KEYS_MAX);
+      // A new day for the first trigger only: its own key is replaced, the map is full.
+      vi.setSystemTime(new Date('2026-06-16T12:00:00Z'));
+      vi.mocked(tm.getDueTriggers).mockReturnValue([tasks[0]!]);
+      await loop.tick();
+      expect(router.sent).toHaveLength(NOT_RUN_KEYS_MAX + 1);
+      // Back on the first day, the second trigger's refusal was already told.
+      vi.setSystemTime(new Date(`${DAY}T12:00:00Z`));
+      vi.mocked(tm.getDueTriggers).mockReturnValue([tasks[1]!]);
+      await loop.tick();
+    } finally {
+      restore();
+    }
+    expect(router.sent, 'not told again').toHaveLength(NOT_RUN_KEYS_MAX + 1);
+  });
 });
 
 describe('the sentences', () => {
@@ -486,8 +619,8 @@ describe('the sentences', () => {
   });
 
   it('name no amount for spend that cannot be checked, and the step by who runs the instance', () => {
-    expect(notRunReason('en', { cap: 'unknown' }, { managed: false, selfHosted: true, now })).toBe(`${EN.capUnverifiable} ${EN.capRestart}`);
-    expect(notRunReason('en', { cap: 'unknown' }, { managed: false, selfHosted: false, now })).toBe(`${EN.capUnverifiable} ${EN.capSupportIfStays}`);
-    expect(notRunReason('de', 'hook', { managed: true, selfHosted: false, now })).toBe(WORKER_NOTICES.de.hookBlocked(true));
+    expect(notRunReason('en', { kind: 'cap', ref: { cap: 'unknown' } }, { managed: false, selfHosted: true, now })).toBe(`${EN.capUnverifiable} ${EN.capRestart}`);
+    expect(notRunReason('en', { kind: 'cap', ref: { cap: 'unknown' } }, { managed: false, selfHosted: false, now })).toBe(`${EN.capUnverifiable} ${EN.capSupportIfStays}`);
+    expect(notRunReason('de', { kind: 'hook' }, { managed: true, selfHosted: false, now })).toBe(WORKER_NOTICES.de.hookBlocked(true));
   });
 });

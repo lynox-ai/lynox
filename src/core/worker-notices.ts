@@ -255,6 +255,17 @@ export interface WorkerNotices {
   notRunRetryAt(when: string): string;
   /** A run started by hand: its schedule stays as it was, and the owner starts it again. */
   readonly notRunByHand: string;
+  /**
+   * Recorded spend leaves less under a cap than a run of this kind is given: `need` is what it
+   * reserves (`atLeast` false: "up to") or the least a run is started with (`atLeast` true).
+   */
+  capTooSmall(cap: 'daily' | 'monthly', limit: string, left: string, need: string, atLeast: boolean, when: string): string;
+  /** Only other runs in flight hold the rest of the cap, and have since `since`. */
+  waitingForOthers(since: string): string;
+  /** The content check did not pass the run's task (or a watched page) to the model. */
+  readonly contentRefused: string;
+  readonly contentNextTask: string;
+  readonly contentNextWatch: string;
   /** When the cap opens again: today, tomorrow or on a date, each at a time with its zone. */
   resetToday(time: string): string;
   resetTomorrow(time: string): string;
@@ -353,12 +364,19 @@ const EN: WorkerNotices = Object.freeze({
   hookBlocked: (managed: boolean) => managed
     ? 'A check before the start did not let the run begin. If it stays, write to support@lynox.ai.'
     : 'A check before the start did not let the run begin. The instance log names the reason.',
-  notRunWaits: 'It stays due and runs once it can start.',
+  notRunWaits: 'Stays due and runs as soon as a start is possible.',
   notRunSkipped: 'This time is skipped; the next one runs as scheduled.',
   notRunWatchNext: 'The next check runs as scheduled and reports what changed since the last one.',
   notRunWatchFirst: 'The first check runs at the next time as scheduled.',
-  notRunRetryAt: (when: string) => `It tries again ${when}.`,
-  notRunByHand: 'Its schedule stays as it was. Start it again by hand once it can start.',
+  notRunRetryAt: (when: string) => `Next try ${when}.`,
+  notRunByHand: 'The schedule stays as it was. Start again by hand as soon as a start is possible.',
+  capTooSmall: (cap: 'daily' | 'monthly', limit: string, left: string, need: string, atLeast: boolean, when: string) => cap === 'daily'
+    ? `Only ${left} of the daily limit of ${limit} is left today, too little for a run of this kind (${atLeast ? 'at least' : 'up to'} ${need}). It resets ${when}.`
+    : `Only ${left} of the monthly limit of ${limit} is left this month, too little for a run of this kind (${atLeast ? 'at least' : 'up to'} ${need}). It resets ${when}.`,
+  waitingForOthers: (since: string) => `Waiting since ${since} for other runs, which hold the rest of the limit.`,
+  contentRefused: 'The content check did not pass the task to the model.',
+  contentNextTask: 'Check the task\'s text under Automation › Triggers; the instance log names the reason.',
+  contentNextWatch: 'The content of the watched page was refused; the instance log names the reason.',
   resetToday: (time: string) => `today at ${time}`,
   resetTomorrow: (time: string) => `tomorrow at ${time}`,
   resetOn: (date: string, time: string) => `on ${date} at ${time}`,
@@ -492,13 +510,21 @@ const DE: WorkerNotices = Object.freeze({
   hookBlocked: (managed: boolean) => managed
     ? 'Eine Prüfung vor dem Start hat den Lauf nicht zugelassen. Bleibt das, schreib an support@lynox.ai.'
     : 'Eine Prüfung vor dem Start hat den Lauf nicht zugelassen. Den Grund nennt das Instanz-Protokoll.',
-  notRunWaits: 'Er bleibt fällig und läuft, sobald er starten kann.',
+  // No pronoun: a task, a watch („Beobachtung“) and a trigger take different genders.
+  notRunWaits: 'Bleibt fällig und läuft, sobald ein Start möglich ist.',
   notRunSkipped: 'Dieser Termin entfällt; der nächste läuft wie geplant.',
   notRunWatchNext: 'Die nächste Prüfung läuft wie geplant und meldet, was sich seit der letzten geändert hat.',
   notRunWatchFirst: 'Die erste Prüfung läuft wie geplant zum nächsten Termin.',
   // "Neuer Versuch ab dem 1. Juli": the slot follows "ab", as in `capReached`.
   notRunRetryAt: (when: string) => `Neuer Versuch ab ${when}.`,
-  notRunByHand: 'Sein Zeitplan bleibt, wie er war. Starte ihn von Hand neu, sobald er starten kann.',
+  notRunByHand: 'Der Zeitplan bleibt, wie er war. Von Hand neu starten, sobald ein Start möglich ist.',
+  capTooSmall: (cap: 'daily' | 'monthly', limit: string, left: string, need: string, atLeast: boolean, when: string) => cap === 'daily'
+    ? `Vom Tageslimit von ${limit} ist heute nur noch ${left} übrig, zu wenig für einen Lauf dieser Art (${atLeast ? 'mindestens' : 'bis zu'} ${need}). Es gilt wieder ab ${when}.`
+    : `Vom Monatslimit von ${limit} ist diesen Monat nur noch ${left} übrig, zu wenig für einen Lauf dieser Art (${atLeast ? 'mindestens' : 'bis zu'} ${need}). Es gilt wieder ab ${when}.`,
+  waitingForOthers: (since: string) => `Wartet seit ${since} auf andere Läufe, die den Rest des Limits belegen.`,
+  contentRefused: 'Die Inhaltsprüfung hat den Auftrag nicht an das Modell gegeben.',
+  contentNextTask: 'Prüf den Text des Auftrags unter Automation → Trigger; den Grund nennt das Instanz-Protokoll.',
+  contentNextWatch: 'Abgelehnt wurde der Inhalt der beobachteten Seite; den Grund nennt das Instanz-Protokoll.',
   resetToday: (time: string) => `heute um ${time}`,
   resetTomorrow: (time: string) => `morgen um ${time}`,
   // "ab dem 1. Dezember", not "ab am": the slot follows "ab".
@@ -552,19 +578,50 @@ export interface NotRunContext {
   readonly now: Date;
   /** For tests; the worker passes none and gets the instance's zone. */
   readonly timeZone?: string | undefined;
+  /** The run is a watch's check: a refused content is the watched page's. */
+  readonly watch?: boolean | undefined;
 }
 
 /**
- * Why a background run did not start, and what the owner can do: the cap with its limit, the
- * spend and when it opens again, and who can change it — or, for a check before the run (a run
- * hook), lynox's own sentence without the hook's text, which may be a third party's.
+ * Why a background run did not start:
+ * - `cap`: a cap recorded spend reached, or spend that cannot be checked (the session's or the
+ *   admission's {@link BudgetNoteRef});
+ * - `too_small`: recorded spend leaves less under a cap than a run of this kind needs, `needUSD`
+ *   (up to, or `atLeast`);
+ * - `waiting`: only other runs in flight have held the rest of the cap, since `since`;
+ * - `hook`: a check before the run (a run hook) refused it;
+ * - `content`: the content check did not pass the task to the model.
  */
-export function notRunReason(lang: NoticeLanguage, cause: BudgetNoteRef | 'hook', ctx: NotRunContext): string {
+export type NotRunCause =
+  | { readonly kind: 'cap'; readonly ref: BudgetNoteRef }
+  | { readonly kind: 'too_small'; readonly cap: 'daily' | 'monthly'; readonly limitUSD: number; readonly spentUSD: number; readonly needUSD: number; readonly atLeast: boolean }
+  | { readonly kind: 'waiting'; readonly since: Date }
+  | { readonly kind: 'hook' }
+  | { readonly kind: 'content' };
+
+/**
+ * Why a background run did not start, and what the owner can do: the cap with its limit, the
+ * spend and when it opens again, and who can change it — or lynox's own sentence for a check
+ * before the run or the content check, without their text, which may be a third party's.
+ */
+export function notRunReason(lang: NoticeLanguage, cause: NotRunCause, ctx: NotRunContext): string {
   const n = WORKER_NOTICES[lang];
-  if (cause === 'hook') return n.hookBlocked(ctx.managed);
-  if (cause.cap === 'unknown' || cause.limitUSD === undefined || cause.spentUSD === undefined) {
-    return `${n.capUnverifiable} ${ctx.selfHosted ? n.capRestart : n.capSupportIfStays}`;
+  const step = ctx.managed ? n.capNextPlan : n.capNextSelf;
+  const ifStays = ctx.selfHosted ? n.capRestart : n.capSupportIfStays;
+  switch (cause.kind) {
+    case 'hook': return n.hookBlocked(ctx.managed);
+    case 'content': return `${n.contentRefused} ${ctx.watch === true ? n.contentNextWatch : n.contentNextTask}`;
+    case 'waiting': return `${n.waitingForOthers(resetWhen(cause.since, ctx.now, lang, ctx.timeZone))} ${ifStays}`;
+    case 'too_small': {
+      const when = resetWhen(capResetAt(cause.cap, ctx.now), ctx.now, lang, ctx.timeZone);
+      const left = `$${Math.max(0, cause.limitUSD - cause.spentUSD).toFixed(2)}`;
+      return `${n.capTooSmall(cause.cap, capUSD(cause.limitUSD), left, `$${cause.needUSD.toFixed(2)}`, cause.atLeast, when)} ${step}`;
+    }
+    case 'cap': {
+      const ref = cause.ref;
+      if (ref.cap === 'unknown' || ref.limitUSD === undefined || ref.spentUSD === undefined) return `${n.capUnverifiable} ${ifStays}`;
+      const when = resetWhen(capResetAt(ref.cap, ctx.now), ctx.now, lang, ctx.timeZone);
+      return `${n.capReached(ref.cap, capUSD(ref.limitUSD), `$${ref.spentUSD.toFixed(2)}`, when)} ${step}`;
+    }
   }
-  const when = resetWhen(capResetAt(cause.cap, ctx.now), ctx.now, lang, ctx.timeZone);
-  return `${n.capReached(cause.cap, capUSD(cause.limitUSD), `$${cause.spentUSD.toFixed(2)}`, when)} ${ctx.managed ? n.capNextPlan : n.capNextSelf}`;
 }
