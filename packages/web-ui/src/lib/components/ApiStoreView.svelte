@@ -33,6 +33,19 @@
 		return p.auth?.type === 'oauth2' && typeof p.auth.oauth?.preset_id === 'string' && p.auth.oauth.preset_id !== '';
 	}
 
+	// Whether the revocation view of this profile shows its own reconnect link (the markup below).
+	function viewLinks(view: ReturnType<typeof revocationView>): boolean {
+		return view !== null && (view.kind === 'revoked' || view.kind === 'connectedAgain' || (view.kind === 'reconnected' && view.avertable));
+	}
+
+	// Never connected: the first connect is still to make, unless a revocation view already offers
+	// its own reconnect link, so the two never show together. An erasure past its hold shows no
+	// link of its own, and the first connect is then the way back.
+	function notYetConnected(p: ApiProfile): boolean {
+		return onBuiltInProvider(p) && (p.oauth_grant === undefined || p.oauth_grant === null)
+			&& !viewLinks(revocationView(p.oauth_grant, notices.get(p.id), now));
+	}
+
 	// A file the import of the earlier profiles waits on (`ApiStore.importWaitsOn`).
 	interface ImportWait { file: string; reason: 'unread' | 'malformed' | 'not_a_profile' | 'invalid_id'; deleteId: string | null; }
 	const WAIT_REASON: Record<ImportWait['reason'], string> = {
@@ -178,26 +191,26 @@
 				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle overflow-hidden">
 					<div class="flex items-stretch">
 						<button onclick={() => expanded = expanded === profile.id ? null : profile.id}
-							class="flex-1 px-4 py-3 text-left hover:bg-bg-muted transition-colors">
+							class="flex-1 min-w-0 px-4 py-3 text-left hover:bg-bg-muted transition-colors">
 							<div class="flex items-center gap-2">
 								<span class="text-sm font-medium">{profile.name}</span>
 								{#if profile.auth}<span class="text-xs rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{profile.auth.type}</span>{/if}
 							</div>
-							<p class="text-xs text-text-subtle mt-1 font-mono">{profile.base_url}</p>
+							<p class="text-xs text-text-subtle mt-1 font-mono break-all">{profile.base_url}</p>
 							{#if connectionLine(profile.oauth_grant)}<p class="text-xs text-text-muted mt-1" data-testid="api-connection">{connectionText(connectionLine(profile.oauth_grant)!)}</p>{/if}
 							{#if profile.description}<p class="text-xs text-text-muted mt-1">{profile.description}</p>{/if}
 						</button>
 						<button onclick={() => manageInChat(profile)}
 							aria-label={t('apis.manage_in_chat')}
 							title={t('apis.manage_in_chat')}
-							class="px-3 text-sm text-text-subtle hover:text-text hover:bg-bg-muted transition-colors border-l border-border">
+							class="shrink-0 px-3 text-sm text-text-subtle hover:text-text hover:bg-bg-muted transition-colors border-l border-border">
 							<Icon name="chat" size="xs" />
 						</button>
 						{#if isOwnerSession()}
 						<button onclick={() => deleteProfile(profile)}
 							disabled={deleting === profile.id}
 							aria-label={t('apis.delete')}
-							class="px-3 text-xs text-text-subtle hover:text-danger hover:bg-danger/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed border-l border-border">
+							class="shrink-0 px-3 text-xs text-text-subtle hover:text-danger hover:bg-danger/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed border-l border-border">
 							{t('apis.delete')}
 						</button>
 						{/if}
@@ -220,7 +233,7 @@
 									<p data-testid="api-erasure-avert">{t('apis.erasure_connected_again_avert')}</p>
 								{/if}
 							{/if}
-							{#if view.kind === 'revoked' || view.kind === 'connectedAgain' || (view.kind === 'reconnected' && view.avertable)}
+							{#if viewLinks(view)}
 								{#if profile.reader_may_connect !== false}
 									<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
 									<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
@@ -248,7 +261,12 @@
 					{/if}
 					{#if onBuiltInProvider(profile) && isOwnerSession()}
 						<div class="border-t border-border px-4 py-3">
-							<PresetClientForm profileId={profile.id} />
+							<PresetClientForm profileId={profile.id} connectHref={notYetConnected(profile) ? connectHref(getApiBase(), profile.id) : null} />
+						</div>
+					{:else if notYetConnected(profile) && profile.reader_may_connect === false}
+						<!-- The server says `false` only to a mandate, which connects only a profile it set up. -->
+						<div class="border-t border-border px-4 py-3 text-xs text-text-muted">
+							<p data-testid="api-connect-first-not-yours">{t('apis.connect_first_not_yours')}</p>
 						</div>
 					{/if}
 					{#if expanded === profile.id && profile.endpoints && profile.endpoints.length > 0}

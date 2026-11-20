@@ -76,9 +76,9 @@ async function settle(): Promise<void> {
 	}
 }
 
-async function open(profileId = 'shop-admin'): Promise<void> {
+async function open(profileId = 'shop-admin', connectHref: string | null = null): Promise<void> {
 	const { default: PresetClientForm } = await import('./PresetClientForm.svelte');
-	component = mount(PresetClientForm, { target, props: { profileId } });
+	component = mount(PresetClientForm, { target, props: { profileId, connectHref } });
 	await settle();
 }
 
@@ -128,7 +128,7 @@ describe('PresetClientForm', () => {
 		expect([...target.querySelectorAll('input')].some((i) => i.value === SECRET)).toBe(false);
 		expect(target.innerHTML).not.toContain(SECRET);
 		expect(target.textContent).toContain('Client Secret is saved. Its value is not shown.');
-		expect(target.textContent).toContain('Saved. You can connect now.');
+		expect(target.textContent).toContain('Saved.');
 	});
 
 	it('says that only the owner may enter the app on a 403', async () => {
@@ -136,7 +136,7 @@ describe('PresetClientForm', () => {
 		await fillAndSave();
 
 		expect(target.textContent).toContain('Only the owner of this instance can enter the app credentials.');
-		expect(target.textContent).not.toContain('Saved. You can connect now.');
+		expect(target.textContent).not.toContain('Saved.');
 	});
 
 	it('asks before replacing the app the other profiles use, and replaces it only on the confirmation', async () => {
@@ -144,7 +144,7 @@ describe('PresetClientForm', () => {
 		await fillAndSave();
 
 		expect(target.textContent).toContain('This replaces the app that all Shopify connections on this instance use.');
-		expect(target.textContent).not.toContain('Saved. You can connect now.');
+		expect(target.textContent).not.toContain('Saved.');
 		const confirm = [...target.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Replace app');
 		expect(confirm, 'confirm button').toBeDefined();
 		confirm!.click();
@@ -155,7 +155,7 @@ describe('PresetClientForm', () => {
 			{ client_id: 'client-1', client_secret: SECRET },
 			{ client_id: 'client-1', client_secret: SECRET, replace_app: true },
 		]);
-		expect(target.textContent).toContain('Saved. You can connect now.');
+		expect(target.textContent).toContain('Saved.');
 		expect(target.querySelector('[data-testid="preset-client-replace"]')).toBeNull();
 	});
 
@@ -165,7 +165,7 @@ describe('PresetClientForm', () => {
 		component = mount(PresetClientForm, { target, props: { profileId: 'shop-admin' } });
 		await settle();
 
-		expect(target.textContent).toContain('This profile uses app credentials that lynox stored differently in the past.');
+		expect(target.textContent).toContain('This connection uses app credentials that lynox stored differently in the past.');
 		expect(target.querySelector('input')).toBeNull();
 	});
 
@@ -328,12 +328,12 @@ describe('PresetClientForm', () => {
 
 		expect(notice()?.textContent).toBe('Saving failed. Nothing was changed.');
 		expect(notice()?.className).toContain('text-danger');
-		expect(target.textContent).not.toContain('Saved. You can connect now.');
+		expect(target.textContent).not.toContain('Saved.');
 
 		putStatus = 200;
 		button('Save')!.click();
 		await settle();
-		expect(notice()?.textContent).toBe('Saved. You can connect now.');
+		expect(notice()?.textContent).toBe('Saved.');
 		expect(notice()?.className).toContain('text-success');
 		expect(notice()?.className).not.toContain('text-danger');
 	});
@@ -399,7 +399,61 @@ describe('PresetClientForm', () => {
 		putReplies = [{ status: 409, body: { error: 'x', code: 'reads_other_names' } }];
 		await fillAndSave();
 
-		expect(target.querySelector('[data-testid="preset-client-other-names"]')?.textContent).toContain('This profile uses app credentials that lynox stored differently in the past.');
+		expect(target.querySelector('[data-testid="preset-client-other-names"]')?.textContent).toContain('This connection uses app credentials that lynox stored differently in the past.');
 		expect(target.querySelector('input')).toBeNull();
+	});
+});
+
+describe('PresetClientForm, the first connect', () => {
+	const HREF = '/api/oauth/connect/shop-admin';
+	const link = (): HTMLAnchorElement | null => target.querySelector<HTMLAnchorElement>('[data-testid="api-connect-first-link"]');
+
+	it('offers the connect below the saved app credentials, as a full page load to the given route', async () => {
+		getExtra = { client_id: 'client-1', client_secret_set: true };
+		await open('shop-admin', HREF);
+		expect(target.querySelector('[data-testid="api-connect-first"]')?.textContent).toContain('The app credentials are saved. Connect your Shopify account so lynox can use it.');
+		expect(link()?.textContent).toBe('Connect account');
+		expect(link()?.getAttribute('href')).toBe(HREF);
+		expect(link()?.hasAttribute('data-sveltekit-reload')).toBe(true);
+	});
+
+	it('offers no connect while no secret is saved, and offers it once the save stored one', async () => {
+		await open('shop-admin', HREF);
+		expect(link()).toBeNull();
+		type(idInput(), 'client-1');
+		type(secretInput()!, SECRET);
+		button('Save')!.click();
+		await settle();
+		expect(notice()?.textContent).toBe('Saved. Connect your account with the button below.');
+		expect(link()?.getAttribute('href')).toBe(HREF);
+	});
+
+	it('offers no connect while another app is being entered', async () => {
+		getExtra = { client_id: 'client-1', client_secret_set: true };
+		await open('shop-admin', HREF);
+		expect(link()).not.toBeNull();
+		button('Replace Client Secret')!.click();
+		flushSync();
+		expect(link()).toBeNull();
+	});
+
+	it('offers no connect while the Client ID names another app', async () => {
+		getExtra = { client_id: 'client-1', client_secret_set: true };
+		await open('shop-admin', HREF);
+		expect(link()).not.toBeNull();
+		type(idInput(), 'client-2');
+		expect(link()).toBeNull();
+	});
+
+	it('offers no connect when the page gives no route, and says only saved', async () => {
+		getExtra = { client_id: 'client-1', client_secret_set: true };
+		await open('shop-admin', null);
+		expect(link()).toBeNull();
+		expect(target.querySelector('[data-testid="api-connect-first"]')).toBeNull();
+		type(idInput(), 'client-2');
+		type(secretInput()!, SECRET);
+		button('Save')!.click();
+		await settle();
+		expect(notice()?.textContent).toBe('Saved.');
 	});
 });
