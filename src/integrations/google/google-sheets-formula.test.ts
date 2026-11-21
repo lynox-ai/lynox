@@ -66,8 +66,10 @@ describe('a cell that starts like a formula', () => {
     ['Alice', false], ['', false], ['a=b', false],
     // Read as Google might normalise it: a full-width sign, an invisible character in front.
     ['＝IMPORTXML("https://x.example", "//a")', true], ['\u200b=A1', true], ['\ufeff=A1', true], ['＋A1', true],
-    // …and a number or a word stays what it is after that.
-    ['－５', false], ['\u200b12', false], ['\u200b-5', false], ['Ａlice', false], ['１,５', false],
+    // …and a signed number stays a number after that (it folds, then reads as plain)…
+    ['－５', false], ['\u200b-5', false], ['－１,５', false], ['\u200b+3.5', false],
+    // …while a value with no sign in front is no formula, folded or not.
+    ['\u200b12', false], ['Ａlice', false], ['１,５', false],
   ])('%j is counted as a formula: %s', (value, expected) => {
     expect(startsLikeFormula(value)).toBe(expected);
   });
@@ -193,11 +195,12 @@ describe('google_sheets after content from outside the chat', () => {
     expect(flattenPrompt(asked(a).prompt)).toContain('a file. 1 of these cells starts like a formula, and Google');
   });
 
-  it('shows five formulas, counts the rest, and then does not offer to write formulas the owner was not shown', async () => {
+  it('shows five formulas, counts the rest, and then does not offer to write formulas the owner was not shown, saying why', async () => {
     const a = agent('sawUntrustedData', 'Don’t write');
     await createSheetsTool(auth).handler({ ...write, range: 'A1', values: [['=1', '=2', '=3', '=4', '=5', '=6', '=7']] }, a);
     const lines = flattenPrompt(asked(a).prompt).split('\n');
-    expect(lines.slice(-6)).toEqual(['A1: =1', 'B1: =2', 'C1: =3', 'D1: =4', 'E1: =5', 'and 2 more']);
+    expect(lines.slice(-7)).toEqual(['A1: =1', 'B1: =2', 'C1: =3', 'D1: =4', 'E1: =5', 'and 2 more',
+      'Writing as formulas is offered only when every formula is shown here. To write them as formulas, ask in the chat to write at most 5 at a time.']);
     expect(lines[2]).toContain('7 of these cells start like a formula');
     expect(asked(a).options).toEqual(['Write as text', 'Don’t write']);
   });
@@ -213,6 +216,7 @@ describe('google_sheets after content from outside the chat', () => {
     await createSheetsTool(auth).handler({ ...write, range: 'A1', values: [['=1', '=2', '=3', '=4', '=5']] }, a);
     expect(asked(a).options).toEqual(['Write as text', 'Write as formulas', 'Don’t write']);
     expect(flattenPrompt(asked(a).prompt)).not.toContain('more');
+    expect(flattenPrompt(asked(a).prompt)).not.toContain('Writing as formulas is offered only');
   });
 
   it('keeps a formula whole but on one line, so it cannot draw another cell', async () => {
