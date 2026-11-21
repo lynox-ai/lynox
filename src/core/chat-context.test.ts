@@ -625,6 +625,77 @@ describe('#6 loaded-context boundary \u2014 compose \u2194 strip round-trip', ()
   });
 });
 
+// === The batch ("N im Chat") answers each item's follow-up, as "Reply in chat" does ===
+
+describe('resolveChatContext (kind: mail-batch) — the follow-up each item answers', () => {
+  const own = (id: string): ChatThreadMessage => ({
+    messageId: `<${id}-1@example.com>`, fromAddress: 'alice@example.com', fromName: 'Alice',
+    subject: 'Project update', snippet: 'Can you confirm Thursday?', direction: 'inbound',
+    mailDate: new Date('2026-06-24T09:00:00.000Z'),
+  });
+  const follow = (over: Partial<ChatThreadMessage> = {}): ChatThreadMessage => ({
+    messageId: '<a-2@example.com>', fromAddress: 'carol@example.com', fromName: 'Carol',
+    subject: 'Re: Project update', snippet: 'The parcel still has not arrived.', direction: 'inbound',
+    autoReply: false, mailDate: new Date('2026-06-25T09:00:00.000Z'), ...over,
+  });
+  const uids: Record<string, number> = { '<a-1@example.com>': 41, '<a-2@example.com>': 42, '<b-1@example.com>': 51 };
+  /** Item a has a follow-up in its thread, item b none. */
+  const reader = (followUp: ChatThreadMessage | null, opts: { uid?: boolean } = {}): ChatInboxReader => {
+    const items = new Map([
+      ['a', makeInboxItem({ id: 'a', threadKey: 't-a', messageId: '<a-1@example.com>', subject: 'Project update', snippet: 'Can you confirm Thursday?' })],
+      ['b', makeInboxItem({ id: 'b', threadKey: 't-b', messageId: '<b-1@example.com>', fromName: 'Bob', fromAddress: 'bob@example.com', subject: 'Invoice', snippet: 'Please find the invoice.' })],
+    ]);
+    return {
+      getItem: (id) => items.get(id) ?? null,
+      getItemBody: () => null,
+      getUidByMessageId: (_acc, m) => (opts.uid === false ? null : uids[m] !== undefined ? { uid: uids[m], folder: 'INBOX' } : null),
+      listThreadMessages: (_acc, threadKey) => (threadKey === 't-a' ? (followUp ? [followUp, own('a')] : [own('a')]) : [own('b')]),
+      listAuditForItem: () => [],
+    };
+  };
+
+  it('names a reopened item\'s follow-up text and uid, and leaves an item without one unchanged', () => {
+    const out = resolveChatContext(null, { kind: 'mail-batch', ids: ['a', 'b'] }, reader(follow()))!;
+    const [first, second] = out.split('\n2. ');
+    expect(first).toContain('1. account "acc-1", uid 42 — a follow-up to the mail the inbox took in\n');
+    expect(first).toContain('Snippet: The parcel still has not arrived.');
+    expect(first).toContain('From: Carol <carol@example.com>');
+    expect(first).toContain('Subject: Re: Project update');
+    expect(first).not.toContain('Can you confirm Thursday?');
+    expect(first).not.toContain('uid 41');
+    const unchanged = resolveChatContext(null, { kind: 'mail-batch', ids: ['a', 'b'] }, reader(null))!.split('\n2. ')[1];
+    expect(second).toBe(unchanged);
+    expect(second).toContain('account "acc-1", uid 51\n');
+    expect(second).not.toContain('follow-up');
+  });
+
+  it('withholds a sensitive follow-up\'s name, subject and snippet, says so on the locator line, and still points at it', () => {
+    const out = resolveChatContext(null, { kind: 'mail-batch', ids: ['a'] }, reader(follow({ fromName: 'Code 482917', subject: 'Ihr Code', snippet: 'Bestätigungscode: 482917 — gültig für 5 Minuten.' })))!;
+    expect(out).toContain('uid 42 — a follow-up to the mail the inbox took in — sender name, subject and snippet withheld: sensitive content (otp_or_2fa)\n');
+    expect(out).toContain('From: carol@example.com');
+    expect(out).not.toContain('482917');
+    expect(out).not.toContain('Ihr Code');
+  });
+
+  it('says the inbox stored no text of a follow-up it kept none of, instead of "no snippet"', () => {
+    const out = resolveChatContext(null, { kind: 'mail-batch', ids: ['a'] }, reader(follow({ snippet: undefined })))!;
+    expect(out).toContain('uid 42 — a follow-up to the mail the inbox took in — the inbox stored no text of it\n');
+    expect(out).not.toContain('no snippet');
+  });
+
+  it('takes a follow-up\'s text from its body when it has no snippet', () => {
+    const out = resolveChatContext(null, { kind: 'mail-batch', ids: ['a'] }, reader(follow({ snippet: undefined, bodyMd: 'Tracking says delivered.' })))!;
+    expect(out).toContain('Snippet: Tracking says delivered.');
+  });
+
+  it('without a uid, points mail_search at the follow-up\'s Message-ID', () => {
+    const out = resolveChatContext(null, { kind: 'mail-batch', ids: ['a'] }, reader(follow(), { uid: false }))!;
+    expect(out).toContain('locate via mail_search (by the Message-ID below) — a follow-up to the mail the inbox took in');
+    expect(out).toContain('Message-ID: <a-2@example.com>');
+    expect(out).not.toContain('<a-1@example.com>');
+  });
+});
+
 // === "Reply in chat" on an item with a follow-up (a customer writing again in the thread) ===
 
 describe('resolveChatContext (kind: mail) — the follow-up a reply answers', () => {
