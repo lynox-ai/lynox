@@ -2686,7 +2686,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow_library.stamp.mode_interactive': { de: 'Kann nachfragen', en: 'May ask questions' },
 	'workflow_library.stamp.mode_autonomous': { de: 'Selbstständig', en: 'On its own' },
 	'workflow_library.stamp.on_failure_stop': { de: 'Keine Folgeschritte starten', en: 'Start no follow-on steps' },
-	'workflow_library.stamp.on_failure_stop_note': { de: 'Schritte, die mit dem fehlgeschlagenen zusammen laufen, starten noch und laufen zu Ende.', en: 'Steps that run alongside the failed one still start and finish.' },
+	'workflow_library.stamp.on_failure_stop_note': { de: 'Schritte, die mit dem fehlgeschlagenen an der Reihe waren, starten noch und laufen zu Ende.', en: 'Steps that were due along with the failed one still start and finish.' },
 	'workflow_library.stamp.on_failure_continue': { de: 'Weitermachen', en: 'Continue' },
 	'workflow_library.stamp.step': { de: 'Schritt', en: 'Step' },
 	'workflow_library.stamp.changed_mark': { de: 'Geändert', en: 'Changed' },
