@@ -814,7 +814,7 @@ describe('a snooze set to wake on a reply wakes for the messages that may reopen
     expect(notifyNewItem).not.toHaveBeenCalled();
   });
 
-  it('a flagged message that wakes a snooze set after another message reopened the item raises it and pushes', async () => {
+  it('a flagged message that wakes a snooze set after another message reopened the item raises it to the top and pushes', async () => {
     const id = seedReplied();
     const g = gate();
     const hookG = graphHook(async (_a, env) => { if (env.messageId === '<otp@x>') await g.wait; return false; });
@@ -827,6 +827,8 @@ describe('a snooze set to wake on a reply wakes for the messages that may reopen
     await flagged;
     expect(woke(id)).toBe(true);
     expect(inbox.listAuditForItem(id).filter((a) => a.action === 'raised_on_sensitive_follow_up')).toHaveLength(1);
+    expect(inbox.getItem(id)!.classifierVersion).toBe('sensitive-follow-up');
+    expect(inbox.getItem(id)!.mailDate?.toISOString()).toBe('2026-11-04T09:00:00.000Z');
     expect(notifyNewItem).toHaveBeenCalledTimes(1);
   });
 

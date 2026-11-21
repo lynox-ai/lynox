@@ -212,12 +212,16 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       opts.state.insertThreadMessage(input);
       // Whether the item sleeps with wake-on-reply is read here, inside the write, not from the row
       // read before the auto-reply check above: the owner may have snoozed it again since, or another
-      // message woken it. Clearing the snooze and its audit commit with the message they are for.
+      // message woken it. The wake and its audit commit with the message they are for. One clock for
+      // the whole write, so the wake and the raise below judge the snooze at the same moment.
+      const now = Date.now();
       const asleep = mayWake ? opts.state.getItem(existing.id, existing.tenantId) : undefined;
       const wakes = asleep !== undefined && asleep !== null && asleep.unsnoozeOnReply
-        && asleep.snoozeUntil !== undefined && asleep.snoozeUntil.getTime() > Date.now();
+        && asleep.snoozeUntil !== undefined && asleep.snoozeUntil.getTime() > now;
       if (wakes) {
-        opts.state.setSnooze(existing.id, null, null, true, false, existing.tenantId);
+        // A message that raises the item below clears the snooze with the raise; cleared here first,
+        // an item already in "requires you" would look open to the raise and stay where it was.
+        if (!raises) opts.state.setSnooze(existing.id, null, null, true, false, existing.tenantId);
         opts.state.appendAudit({
           tenantId: existing.tenantId,
           itemId: existing.id,
@@ -227,17 +231,14 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
         });
       }
       // Decided on the row as it is now, inside the write, so two flagged messages arriving together
-      // raise it once. An item open in "requires you" stays as it is, unless this mail woke it from
-      // a snooze just above (`wakes`) and nothing has raised or reopened it since
-      // (both set `classified_at`): then it was out of view before, and this mail is what shows it.
+      // raise it once. An item open in "requires you" stays as it is. One this mail wakes is still
+      // snoozed here, so out of view, and this mail is what shows it.
       const current = raises ? opts.state.getItem(existing.id, existing.tenantId) : undefined;
       const openNow = current !== undefined && current !== null && current.bucket === 'requires_user'
         && current.userAction === undefined
-        && !(current.snoozeUntil !== undefined && current.snoozeUntil.getTime() > Date.now());
-      const wokeAndUntouched = wakes && current !== undefined && current !== null
-        && current.classifiedAt.getTime() === asleep?.classifiedAt.getTime();
-      if (raises && (!openNow || wokeAndUntouched)) {
-        opts.state.raiseToRequiresUser(existing.id, existing.tenantId, fields.mailDate ?? new Date());
+        && !(current.snoozeUntil !== undefined && current.snoozeUntil.getTime() > now);
+      if (raises && !openNow) {
+        opts.state.raiseToRequiresUser(existing.id, existing.tenantId, fields.mailDate ?? new Date(now), new Date(now));
         opts.state.appendAudit({
           tenantId: existing.tenantId,
           itemId: existing.id,
