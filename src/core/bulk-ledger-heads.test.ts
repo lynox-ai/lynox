@@ -42,8 +42,9 @@ interface Row {
   sent?: boolean;
   /** Failed in at least one pass (`failed_once`). */
   failedOnce?: boolean;
-  /** Found already holding its planned value (`found_unsent`). */
-  found?: boolean;
+  /** Found already holding its planned value (`found_unsent`): `refused` after a send the host
+   *  refused (`2`), otherwise before any send (`1`). */
+  found?: boolean | 'refused';
 }
 
 /** A run of the given targets, its counters as the rows say. */
@@ -56,7 +57,7 @@ function run(targetSystem: string, rows: Row[]): string {
     db.prepare(`INSERT INTO bulk_targets (run_id, seq, target_key, change, deselected_at, applied_at, undone_at, error, unknown_sends, claimed_at, write_sent, failed_once, found_unsent)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       id, seq, engineDb.enc(`k${String(seq)}`), r.change ?? 'update', r.deselected ? AT : null, r.applied ? AT : null,
-      r.undone ? AT : null, r.error ?? null, r.unknownSends ?? 0, r.claimed ? AT : null, r.sent ? 1 : 0, r.failedOnce ? 1 : 0, r.found ? 1 : 0,
+      r.undone ? AT : null, r.error ?? null, r.unknownSends ?? 0, r.claimed ? AT : null, r.sent ? 1 : 0, r.failedOnce ? 1 : 0, r.found === 'refused' ? 2 : r.found ? 1 : 0,
     );
   });
   return id;
@@ -137,15 +138,33 @@ describe('the head counts of a run', () => {
   it('a target found already holding its value, never sent to or every send refused, is unchanged, not written', () => {
     expect(classes(EXTERNAL, [
       { applied: true, found: true },
-      // Sent to and then found so: a loop that died wrote it, so it was written.
+      // Found so, then sent to by a loop that lost its claim: it may have written, so written —
+      // also with no unclear send, as a run from before unclear sends were counted leaves it.
       { applied: true, found: true, sent: true, unknownSends: 1 },
-      // Every send refused by the host, then found so: someone else set it, so it is unchanged.
       { applied: true, found: true, sent: true },
+      // Every send refused by the host, then found so: someone else set it, so it is unchanged.
+      { applied: true, found: 'refused', sent: true },
+      // A send after that find may have landed: written.
+      { applied: true, found: 'refused', sent: true, unknownSends: 1 },
       { applied: true },
       // Taken back ranks first, as before.
       { applied: true, found: true, undone: true },
-    ])).toEqual(['unchanged', 'written', 'unchanged', 'written', 'takenBack']);
+    ])).toEqual(['unchanged', 'written', 'written', 'unchanged', 'written', 'written', 'takenBack']);
     expect(classes(LOCAL, [{ applied: true, found: true }])).toEqual(['unchanged']);
+  });
+
+  it('records a target found as planned after a refused send as unchanged on an external run only', () => {
+    for (const [system, want] of [[EXTERNAL, 'unchanged'], [LOCAL, 'written']] as const) {
+      // Sent to, the send refused (no unclear send left), then found holding the planned value.
+      const id = run(system, [{ sent: true, failedOnce: true }]);
+      ledger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 0, 'already');
+      const heads = ledger.getStatus(id)!.heads;
+      expect(BULK_HEADS.filter((h) => heads[h] === 1), system).toEqual([want]);
+    }
+    // A send that may have landed is never found so.
+    const id = run(EXTERNAL, [{ sent: true, unknownSends: 1 }]);
+    ledger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 0, 'already');
+    expect(ledger.getStatus(id)!.heads.written).toBe(1);
   });
 
   it('a target a live loop holds is not unclear: its answer may still come', () => {
