@@ -125,7 +125,7 @@ export function markersOf(text: string): Map<MarkerKind, Set<string>> {
     readMarkers(shownText(text, true), out);
     // A style can show a block inline in more ways than a list could name: where one is styled, the
     // text is also read with no gap at a styled block.
-    if (/style/iu.test(text)) readMarkers(shownText(text, false), out);
+    if (/style|hidden/iu.test(text)) readMarkers(shownText(text, false), out);
   }
   return out;
 }
@@ -138,6 +138,15 @@ const BLOCK_TAGS = new Set([
   'thead', 'tbody', 'tfoot', 'caption', 'section', 'article', 'header', 'footer', 'aside', 'nav', 'blockquote', 'pre', 'hr',
   'figure', 'figcaption', 'address', 'main', 'details', 'summary', 'legend', 'fieldset', 'form', 'center', 'dialog', 'menu',
 ]);
+
+/** Whether a block tag's own attributes may show it inline or not at all, so that it breaks no line: a
+ *  style naming `display` or `all`, one this cannot read (a comment, an escape, a reference), or
+ *  `hidden`. Read wide, since it only adds a reading; a style that names neither (a margin, a colour)
+ *  keeps the break, or every paragraph a shop's editor styles would run into the next as a host. What
+ *  a style sheet shows inline, the text's own or the shop's, is not read. */
+function mayShowInline(tag: string): boolean {
+  return /\bhidden\b/iu.test(tag) || (/style/iu.test(tag) && /display|\ball\s*:|[\\&]|\/\*/iu.test(tag));
+}
 
 /** A text as a browser shows it, near enough: without its tags, its character references decoded. With
  *  `gapAtStyled` false a styled block tag leaves no gap, as one a style shows inline would not. */
@@ -159,9 +168,7 @@ function shownText(text: string, gapAtStyled: boolean): string {
     const named = /^\/?([a-z][a-z0-9]{0,15})/iu.exec(tag.slice(0, 18));
     const after = named === null ? undefined : tag[named[0].length];
     const name = named !== null && (after === undefined || /[\t\n\f\r /]/u.test(after)) ? named[1]!.toLowerCase() : undefined;
-    // A tag with "style" anywhere in it counts as styled: wider than an attribute, and it only adds. What a
-    // style sheet shows inline, the text's own or the shop's, is not read: it would join every paragraph.
-    if (name !== undefined && BLOCK_TAGS.has(name) && (gapAtStyled || !/style/iu.test(tag))) shown += ' ';
+    if (name !== undefined && BLOCK_TAGS.has(name) && (gapAtStyled || !mayShowInline(tag))) shown += ' ';
     i = close + 1;
   }
   return shown.replace(/&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|(amp|lt|gt|quot|apos|nbsp));/giu, (whole, dec?: string, hex?: string, name?: string) => {

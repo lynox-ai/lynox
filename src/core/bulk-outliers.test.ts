@@ -387,13 +387,19 @@ describe('markersOf', () => {
     // Not read, on purpose: a style sheet would join every paragraph of a run into hosts.
     expect([...markersOf('<style>p{display:inline}</style>evil<p>.com').get('link')!]).toEqual([]);
     expect([...markersOf('<style>p{margin:0}</style><p>Aus Eiche.</p><p>shop zeitlos</p>').get('link')!]).toEqual([]);
-    for (const style of ['display:inline-block', 'display:inline-flex', 'display:ruby', 'display:inline!important', 'DISPLAY:INLINE', 'display:/**/inline', 'display:&#105;nline', 'display:\\69nline', 'margin:0']) {
+    for (const style of ['display:inline-block', 'display:inline-flex', 'display:ruby', 'display:inline!important', 'DISPLAY:INLINE', 'display:/**/inline',
+      'display:&#105;nline', 'display:\\69nline', 'd\\69splay:inline', '&#100;isplay:inline', 'dis/**/play:inline', 'all:unset', 'ALL : initial', 'display:var(--x)']) {
       const text = `evil<p style="${style}">.com</p>`;
       expect([...markersOf(text).get('link')!], text).toEqual(['evil.com']);
     }
-    // The cost, accepted: a word after a full stop and a styled block is read as a host as well.
-    expect([...markersOf('Eiche.<br style="clear:both">shop').get('link')!]).toEqual(['eiche.shop']);
-    expect([...markersOf('Eiche.<br>shop').get('link')!]).toEqual([]);
+    expect([...markersOf('evil<br hidden>.com').get('link')!]).toEqual(['evil.com']);
+    // The cost, accepted: a word after a full stop and a block a style may show inline is a host as well.
+    expect([...markersOf('Eiche.<br style="display:block">shop').get('link')!]).toEqual(['eiche.shop']);
+    // A style naming no display, and a class, keep the break: a shop's editor puts them on every block.
+    for (const text of ['Eiche.<br style="clear:both">shop', 'Eiche.<br>shop', 'Eiche.<br class="br-style">shop', 'Eiche.<br data-mce-style="">shop',
+      '<p class="style-a">Aus Eiche.<p class="style-a">shop', '<ul><li class="li-style">Eiche.<li class="li-style">shop</ul>', '<p style="margin:0">Eiche.<p style="color:#333">shop']) {
+      expect([...markersOf(text).get('link')!], text).toEqual([]);
+    }
   });
 
   it('reads a host across a tag that only starts like a block, a tag that is none, and a block a style shows inline', () => {
