@@ -1,0 +1,144 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import { readable } from 'svelte/store';
+import { answerFrameReady } from '../utils/artifact-frame-host.js';
+
+// The gallery's preview frame: on the sandboxed frame endpoint, its document sent from memory to
+// its own window only, and a new frame for a new version (the frame takes one document).
+
+const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
+type SvelteClient = {
+	mount: (c: unknown, o: { target: Element }) => Record<string, unknown>;
+	unmount: (c: Record<string, unknown>) => void;
+	flushSync: () => void;
+	tick: () => Promise<void>;
+};
+const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLIENT_ENTRY)) as SvelteClient;
+
+vi.mock('$app/stores', () => ({ page: readable({ url: new URL('http://localhost/app/artifacts') }) }));
+vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
+vi.mock('./MarkdownRenderer.svelte', () => ({
+	default: (anchor: Comment) => { anchor.before(document.createElement('div')); },
+}));
+
+const META = {
+	id: 'cccccccc',
+	title: 'Deck',
+	description: '',
+	type: 'html',
+	createdAt: '2026-10-09T19:34:00.000Z',
+	updatedAt: '2026-10-09T19:34:00.000Z',
+	threadId: 't',
+};
+
+let version = 1;
+let target: HTMLElement;
+let component: Record<string, unknown> | undefined;
+
+beforeEach(() => {
+	version = 1;
+	vi.spyOn(HTMLIFrameElement.prototype, 'contentWindow', 'get').mockImplementation(function (this: HTMLIFrameElement) {
+		return windowOf(this);
+	});
+	target = document.createElement('div');
+	document.body.appendChild(target);
+	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+		const u = String(url);
+		const body = u.endsWith('/artifacts')
+			? { artifacts: [{ ...META, version }] }
+			: { ...META, version, content: `<p>version-${version}</p>` };
+		return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+	}));
+});
+
+afterEach(() => {
+	if (component) unmount(component);
+	component = undefined;
+	target.remove();
+	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
+});
+
+async function settle(): Promise<void> {
+	for (let i = 0; i < 10; i++) {
+		await new Promise((r) => setTimeout(r, 0));
+		await tick();
+		flushSync();
+	}
+}
+
+function previewFrame(): HTMLIFrameElement {
+	const f = document.querySelector<HTMLIFrameElement>('[role="dialog"] iframe');
+	if (!f) throw new Error('no preview frame');
+	return f;
+}
+
+// Each frame gets one stand-in window for its whole life, as a browser's WindowProxy stays the
+// same while the frame navigates (jsdom swaps the window when `src` loads). It records what it
+// is sent.
+const sentTo = new WeakMap<object, unknown[]>();
+const windows = new WeakMap<HTMLIFrameElement, Window>();
+function windowOf(f: HTMLIFrameElement): Window {
+	let w = windows.get(f);
+	if (!w) {
+		const sent: unknown[] = [];
+		w = { postMessage: (m: unknown) => { sent.push(m); } } as unknown as Window;
+		sentTo.set(w, sent);
+		windows.set(f, w);
+	}
+	return w;
+}
+
+/** What the frame's window is sent when `source` says ready from an opaque origin. */
+function documentSentTo(f: HTMLIFrameElement, source: Window = windowOf(f)): unknown[] {
+	answerFrameReady({ data: { type: 'lynox-frame-ready' }, origin: 'null', source });
+	return sentTo.get(windowOf(f)) ?? [];
+}
+
+async function openDeck(): Promise<void> {
+	const { default: ArtifactsView } = await import('./ArtifactsView.svelte');
+	component = mount(ArtifactsView, { target });
+	await settle();
+	const card = [...target.querySelectorAll('h3')].find((el) => el.textContent === 'Deck')?.closest('[role="button"]');
+	(card as HTMLElement).click();
+	await settle();
+}
+
+describe('the gallery preview frame', () => {
+	it('loads the endpoint with no srcdoc and is sent the artifact when its own window is ready', async () => {
+		await openDeck();
+		const f = previewFrame();
+		expect(f.getAttribute('src')).toBe('/_artifact-frame');
+		expect(f.hasAttribute('srcdoc')).toBe(false);
+		expect(f.getAttribute('sandbox')).toBe('allow-scripts');
+		const sent = documentSentTo(f) as { type: string; html: string }[];
+		expect(sent).toHaveLength(1);
+		expect(sent[0]!.type).toBe('lynox-frame-render');
+		expect(sent[0]!.html).toContain('<p>version-1</p>');
+	});
+
+	it('sends nothing for a ready that comes from another window', async () => {
+		await openDeck();
+		const f = previewFrame();
+		const stranger = document.createElement('iframe');
+		document.body.appendChild(stranger);
+		expect(documentSentTo(f, windowOf(stranger))).toEqual([]);
+		expect(sentTo.get(windowOf(stranger)) ?? []).toEqual([]);
+		stranger.remove();
+	});
+
+	it('builds a new frame for a new version, and the new frame gets the new version', async () => {
+		await openDeck();
+		const first = previewFrame();
+		version = 2;
+		const { loadArtifacts } = await import('../stores/artifacts.svelte.js');
+		await loadArtifacts();
+		await settle();
+		const second = previewFrame();
+		expect(second).not.toBe(first);
+		const sent = documentSentTo(second) as { html: string }[];
+		expect(sent).toHaveLength(1);
+		expect(sent[0]!.html).toContain('<p>version-2</p>');
+	});
+});

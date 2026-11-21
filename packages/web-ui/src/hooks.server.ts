@@ -4,6 +4,7 @@ import { sequence } from '@sveltejs/kit/hooks';
 import { env } from '$env/dynamic/private';
 import { verifySessionToken } from '$lib/server/auth.js';
 import { isPublic } from '$lib/server/public-paths.js';
+import { ARTIFACT_FRAME_PATH } from '$lib/utils/artifact-frame-protocol.js';
 
 const handleAuth: Handle = async ({ event, resolve }) => {
 	const secret = env.LYNOX_HTTP_SECRET;
@@ -65,6 +66,9 @@ const handleDemoHtmlLang: Handle = async ({ event, resolve }) => {
 
 const handleSecurityHeaders: Handle = async ({ event, resolve }) => {
 	const response = await resolve(event);
+	// The artifact frame endpoint sets its own policy (a sandbox) and its own caching (per
+	// build); both are what make it safe and fast, so neither is overwritten here.
+	const isFrameEndpoint = event.url.pathname === ARTIFACT_FRAME_PATH;
 	response.headers.set('X-Content-Type-Options', 'nosniff');
 	response.headers.set('X-Frame-Options', 'SAMEORIGIN');
 	response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
@@ -79,9 +83,10 @@ const handleSecurityHeaders: Handle = async ({ event, resolve }) => {
 	// no-store. Caught after a canary v1.3.10 incident —
 	// the iPhone PWA was stuck reloading to the same cached HTML.
 	const ct = response.headers.get('Content-Type') ?? '';
-	if (ct.startsWith('text/html')) {
+	if (ct.startsWith('text/html') && !isFrameEndpoint) {
 		response.headers.set('Cache-Control', 'no-store, must-revalidate');
 	}
+	if (isFrameEndpoint) return response;
 	response.headers.set(
 		'Content-Security-Policy',
 		[
@@ -92,7 +97,7 @@ const handleSecurityHeaders: Handle = async ({ event, resolve }) => {
 			"media-src 'self' blob:",
 			"font-src 'self' https://fonts.gstatic.com",
 			"connect-src 'self' https://cloudflareinsights.com",
-			"frame-src blob: data:",
+			"frame-src 'self'",
 			"frame-ancestors 'self'",
 			"base-uri 'self'",
 			"form-action 'self'",

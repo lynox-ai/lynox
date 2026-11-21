@@ -16,6 +16,7 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
 	import { injectArtifactPreview as injectArtifactFit } from '../utils/artifact-frame.js';
+	import { attachArtifactFrame } from '../utils/artifact-frame-host.js';
 	import { saveOrShareBlob } from '../utils/save-blob.js';
 
 	let selected = $state<Artifact | null>(null);
@@ -139,6 +140,12 @@
 	 *  contract / deck) is fully visible on mobile. Logic in artifact-frame.ts. */
 	function injectArtifactPreview(html: string): string {
 		return injectArtifactFit(html);
+	}
+
+	/** The preview frame runs on the sandboxed frame endpoint and gets its document from
+	 *  memory once it is ready (utils/artifact-frame-host.ts). */
+	function artifactFrame(node: HTMLIFrameElement, html: string): void {
+		attachArtifactFrame(node, html);
 	}
 
 	function typeIcon(type: string): string {
@@ -313,12 +320,15 @@
 					</div>
 				</div>
 			{:else if selected.type === 'html' || selected.type === 'svg'}
-				<iframe
-					srcdoc={injectArtifactPreview(selected.content)}
-					sandbox="allow-scripts"
-					class="w-full h-full border-none bg-bg-elevated"
-					title={selected.title}
-				></iframe>
+				<!-- A new version gets a new frame: the frame takes its document once. -->
+				{#key `${selected.id}:${selected.version ?? 1}`}
+					<iframe
+						use:artifactFrame={injectArtifactPreview(selected.content)}
+						sandbox="allow-scripts"
+						class="w-full h-full border-none bg-bg-elevated"
+						title={selected.title}
+					></iframe>
+				{/key}
 			{:else if selected.type === 'mermaid'}
 				<div class="p-6 overflow-auto h-full">
 					<MarkdownRenderer content={'```mermaid\n' + selected.content + '\n```'} />

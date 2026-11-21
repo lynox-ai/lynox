@@ -133,11 +133,19 @@ export const ARTIFACT_FIT_CODE =
 /** The frame's default viewport, for the branch that cannot query a document. */
 const VIEWPORT_META = '<meta name="viewport" content="width=device-width,initial-scale=1">';
 
-export const ARTIFACT_CSP =
-	'<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; ' +
+/**
+ * The artifact policy as directives. The frame endpoint (`/_artifact-frame`) sends it as its
+ * own response header, and the meta below carries the same text into the document, so the
+ * artifact is held to it twice: by the header, which the document cannot remove, and by the
+ * meta, which travels with a downloaded copy.
+ */
+export const ARTIFACT_POLICY =
+	'default-src \'none\'; ' +
 	'script-src \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com; ' +
 	'style-src \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; ' +
-	'font-src https://fonts.gstatic.com; img-src * data: blob:; connect-src \'none\'">';
+	'font-src https://fonts.gstatic.com; img-src * data: blob:; connect-src \'none\'';
+
+export const ARTIFACT_CSP = `<meta http-equiv="Content-Security-Policy" content="${ARTIFACT_POLICY}">`;
 
 /**
  * Is there a document tag here that we would have to insert INTO?
