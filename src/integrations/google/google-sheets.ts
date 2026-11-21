@@ -6,7 +6,9 @@ import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
 import { refuseUnlessScoped } from './action-scopes.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
-import { pv } from '../../core/prompt-value.js';
+import { pv, joinPrompts, singleLine } from '../../core/prompt-value.js';
+import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
+import { formulaCells, formulasAsText, formulasInRequests } from './sheets-formula.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
 import { namedTarget, withoutAddresses } from '../../core/audit-log.js';
@@ -120,6 +122,55 @@ function valuesToMarkdownTable(values: string[][]): string {
   return [headerLine, separatorLine, ...dataLines].join('\n');
 }
 
+// === Formulas after content from outside ===
+
+const WRITE_AS_TEXT = 'Write as text';
+const WRITE_AS_FORMULAS = 'Write as formulas';
+const WRITE = 'Write';
+const DONT_WRITE = 'Don’t write';
+/** For write and append: the first is the one preselected, and it writes no formula. */
+const CELL_FORMULA_OPTIONS = [WRITE_AS_TEXT, WRITE_AS_FORMULAS, DONT_WRITE];
+/** For format, whose raw requests have no text form: in the order of the plain question. */
+const FORMAT_FORMULA_OPTIONS = [WRITE, DONT_WRITE];
+/** Formula lines shown before the rest is counted. */
+const FORMULAS_SHOWN = 5;
+
+/** The cells (or, for format, the formulas) that may be read as a formula, in call order. */
+function formulasToShow(input: SheetsInput): Array<{ cell?: string; formula: string }> {
+  if (input.action === 'write') return formulaCells(input.values, input.range, 'write');
+  if (input.action === 'append') return formulaCells(input.values, input.range, 'append');
+  if (input.action === 'format') return formulasInRequests(input.format_requests).map((formula) => ({ formula }));
+  return [];
+}
+
+/** The option an answer names: by its label, or by its number in the list (1-based). */
+function chosenOption(answer: string, options: readonly string[]): string | undefined {
+  const byLabel = options.find((o) => o.toLowerCase() === answer.trim().toLowerCase());
+  if (byLabel !== undefined) return byLabel;
+  const index = /^\d+$/.test(answer.trim()) ? Number(answer.trim()) - 1 : -1;
+  return options[index];
+}
+
+/**
+ * What the question adds: why it asks, then each cell and its whole formula as a value. A
+ * formula is never shortened, since the address in it is what the owner decides on; a line
+ * break in it is not kept, so it cannot draw another cell's line.
+ */
+function formulaNote(formulas: ReadonlyArray<{ cell?: string; formula: string }>): PromptText {
+  const n = formulas.length;
+  const head = n === 1
+    ? pv`This chat has read content from outside lynox, such as a web page, an email or a file. 1 of these cells starts like a formula, and Google runs a formula when it is written. A formula can make Google fetch an address named in it, with data from the sheet in that address.`
+    : pv`This chat has read content from outside lynox, such as a web page, an email or a file. ${n} of these cells start like a formula, and Google runs a formula when it is written. A formula can make Google fetch an address named in it, with data from the sheet in that address.`;
+  const lines = formulas.slice(0, FORMULAS_SHOWN).map(({ cell, formula }) =>
+    cell === undefined ? pv`${singleLine(formula)}` : pv`${cell}: ${singleLine(formula)}`);
+  const more = n > FORMULAS_SHOWN ? [pv`and ${n - FORMULAS_SHOWN} more`] : [];
+  return joinPrompts([
+    head,
+    ...lines,
+    ...more,
+  ], '\n');
+}
+
 // === Tool Creation ===
 
 // Actions flagged destructive to the permission guard. `format` is included
@@ -194,6 +245,8 @@ export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<Sh
       // Registered from boot, connected or not — see google/index.ts.
       const auth = getAuth();
       if (!auth) return GOOGLE_NOT_CONNECTED;
+      // The call as it is carried out: the owner may choose to write formula cells as text.
+      let call = input;
       try {
         // `hasOwn`, not a truthiness check on the lookup: `input.action` is
         // typed but arrives from the model, so an unrecognised value is
@@ -216,19 +269,33 @@ export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<Sh
           const confirmMsg: PromptText = input.action === 'format'
             ? pv`Apply batch changes to spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? Formatting requests can delete or overwrite cells and sheets.`
             : pv`Overwrite range "${input.range ?? '(unspecified)'}" in spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? This will replace existing data.`;
-          const answer = await agent.promptUser(confirmMsg, ['Yes', 'No']);
-          if (answer.toLowerCase() !== 'yes' && answer !== '1') {
-            return 'Action cancelled by user.';
+          // After content from outside the chat, a cell that starts like a formula is shown with
+          // the question: Google runs it on its side, where no check on the engine's requests
+          // sees the address it may fetch. Before that, the question is the one it always was.
+          const formulas = deriveTurnUntrusted(agent) ? formulasToShow(input) : [];
+          if (formulas.length === 0) {
+            const answer = await agent.promptUser(confirmMsg, ['Yes', 'No']);
+            if (answer.toLowerCase() !== 'yes' && answer !== '1') {
+              return 'Action cancelled by user.';
+            }
+          } else {
+            const options = input.action === 'format' ? FORMAT_FORMULA_OPTIONS : CELL_FORMULA_OPTIONS;
+            const chosen = chosenOption(await agent.promptUser(joinPrompts([confirmMsg, formulaNote(formulas)], '\n\n'), options), options);
+            if (chosen === WRITE_AS_TEXT) {
+              call = { ...input, values: formulasAsText(input.values ?? []) };
+            } else if (chosen !== WRITE_AS_FORMULAS && chosen !== WRITE) {
+              return 'Action cancelled by user.';
+            }
           }
         }
 
-        switch (input.action) {
-          case 'read': return await handleRead(auth, input);
-          case 'write': return await handleWrite(auth, input);
-          case 'append': return await handleAppend(auth, input);
-          case 'create': return await handleCreate(auth, input);
+        switch (call.action) {
+          case 'read': return await handleRead(auth, call);
+          case 'write': return await handleWrite(auth, call);
+          case 'append': return await handleAppend(auth, call);
+          case 'create': return await handleCreate(auth, call);
           case 'list': return await handleList(auth);
-          case 'format': return await handleFormat(auth, input);
+          case 'format': return await handleFormat(auth, call);
           default: return `Error: Unknown action "${input.action}". Valid: read, write, append, create, list, format.`;
         }
       } catch (err: unknown) {
