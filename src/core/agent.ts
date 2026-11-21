@@ -99,7 +99,6 @@ import { toWorkspaceRel, workspaceBase } from './workspace-rel.js';
 import { resolveToolPath } from './workspace.js';
 import { FILE_TOOL_READ_CAP_BYTES, isReadLimit, openRead, readFdCapped } from './workspace-fd.js';
 import { oversizeWayOut, resolveWritablePath } from '../tools/builtin/fs.js';
-import { resolve } from 'node:path';
 import type {
   BetaMessageParam,
   BetaTool,
