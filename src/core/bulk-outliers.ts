@@ -140,8 +140,11 @@ const BLOCK_TAGS = new Set([
 ]);
 
 /** A text as a browser shows it, near enough: without its tags, its character references decoded. With
- *  `gapAtStyled` false a block tag with a style leaves no gap, as one a style shows inline would not. */
+ *  `gapAtStyled` false a styled block tag leaves no gap, as one a style shows inline would not. */
 function shownText(text: string, gapAtStyled: boolean): string {
+  // A style element of the text's own can show any block inline; a class styled from elsewhere is not
+  // seen. A tag with "style" anywhere in it counts as styled: wider than an attribute, and it only adds.
+  const sheet = !gapAtStyled && /<style[\t\n\f\r />]/iu.test(text);
   let shown = '';
   let i = 0;
   // Tags by index: an opening bracket without a closing one is text to the end, read once.
@@ -159,7 +162,7 @@ function shownText(text: string, gapAtStyled: boolean): string {
     const named = /^\/?([a-z][a-z0-9]{0,15})/iu.exec(tag.slice(0, 18));
     const after = named === null ? undefined : tag[named[0].length];
     const name = named !== null && (after === undefined || /[\t\n\f\r /]/u.test(after)) ? named[1]!.toLowerCase() : undefined;
-    if (name !== undefined && BLOCK_TAGS.has(name) && (gapAtStyled || !/\sstyle\s*=/iu.test(tag))) shown += ' ';
+    if (name !== undefined && BLOCK_TAGS.has(name) && (gapAtStyled || !(sheet || /style/iu.test(tag)))) shown += ' ';
     i = close + 1;
   }
   return shown.replace(/&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|(amp|lt|gt|quot|apos|nbsp));/giu, (whole, dec?: string, hex?: string, name?: string) => {
