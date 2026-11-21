@@ -5,6 +5,7 @@ import { BULK_NOTICES } from './bulk-notices.js';
 import type { Engine } from './engine.js';
 import type { NotificationMessage, NotificationRouter } from './notification-router.js';
 import type { TriggerRecord } from '../types/index.js';
+import { noteMemberConnection, runCollectingMemberNotes } from './member-connection-notes.js';
 
 // A halted bulk run's end goes to three readers: the run's history, which a mandate reads too;
 // the owner's devices; and the devices of the grant that planned the run. Where the halt's way on
@@ -53,6 +54,24 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
     expect(h.sent[1]).toMatchObject({ body: `lynox konnte den Zugang zum Shop nicht erneuern. ${CLOSING}${COUNTS}`, audience: 'mandates', mandateId: 'grant-1' });
     // Both name the run the same way.
     expect(h.sent[1]!.title).toBe(h.sent[0]!.title);
+  });
+
+  it('leaves the owner\'s member-connection lines out of the planning grant\'s push; the owner\'s push and the history keep them', async () => {
+    const h = harness({ reason: R.storeAccessEnded, plannedBy: 'mandate' });
+    const summary = `${BULK_NOTICES.de.halted('apply', R.storeAccessEnded)}${COUNTS}`;
+    // The owner's wording of a refused member connection: another member's provider and profile,
+    // and the owner's way to change it.
+    const NOTE = { en: 'Connection not used: CRM was connected by eva@kanzlei.example with her own login. Change it under Settings → APIs.', de: 'Verbindung nicht genutzt: CRM hat eva@kanzlei.example mit ihrem eigenen Login verbunden. Ändern unter Einstellungen → APIs.' };
+    await runCollectingMemberNotes(async () => {
+      noteMemberConnection('Connection not used: the model\'s line', () => NOTE);
+      h.end(summary);
+    }).done;
+    expect(h.sent).toHaveLength(2);
+    expect(h.sent[0]).toMatchObject({ audience: 'owner', body: `${summary}\n• ${NOTE.de}` });
+    expect(h.sent[1]).toMatchObject({ audience: 'mandates', mandateId: 'grant-1', body: `lynox konnte den Zugang zum Shop nicht erneuern. ${CLOSING}${COUNTS}` });
+    expect(h.sent[1]!.body).not.toContain('eva@kanzlei.example');
+    expect(h.recorded).toHaveLength(1);
+    expect(h.recorded[0]).toContain(NOTE.en);
   });
 
   it('pushes a product write\'s short form to the owner\'s devices as it is, records the fact, and tells the planning grant the owner resolves it', () => {

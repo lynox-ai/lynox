@@ -3987,10 +3987,14 @@ export class WorkerLoop {
         ...(readers === null ? {} : { audience: 'owner' as const }),
       });
       const mandateId = haltRow?.mandateId ?? null;
-      if (readers !== null && mandateId !== null && (this.engine.getMandateEnds()?.isLive(mandateId) ?? false)) {
+      // The planning grant reads the fact without the member-connection lines: they are the
+      // owner's, naming another member's provider and profile and the owner's way to change it.
+      // They stand in the history, which a mandate reads, as recorded.
+      const forMandate = !byReader || readers === null ? null : bulkHaltForReaders(haltRow.haltReason, said ?? resultSummary, lang);
+      if (forMandate !== null && mandateId !== null && (this.engine.getMandateEnds()?.isLive(mandateId) ?? false)) {
         void this.notificationRouter.notify({
           title,
-          body: readers.mandate,
+          body: forMandate.mandate,
           taskId: task.id,
           priority: toldLook.priority,
           audience: 'mandates',
