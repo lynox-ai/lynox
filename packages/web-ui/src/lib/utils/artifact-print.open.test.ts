@@ -3,7 +3,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 
 import { printHtmlDocument, printMarkdownDocument } from './artifact-print.js';
 import { answerFrameReady } from './artifact-frame-host.js';
-import { FRAME_READY, FRAME_RENDER } from './artifact-frame-protocol.js';
+import { FRAME_KEY_FIELD, FRAME_READY, FRAME_RENDER } from './artifact-frame-protocol.js';
 
 // What the two print actions actually open: the sandboxed print window on the frame endpoint, and
 // the document it is sent once it says ready. The policy that keeps an artifact's script from
@@ -17,8 +17,9 @@ function opened(print: () => boolean): string {
 		revokeObjectURL: () => {},
 	}));
 	expect(print()).toBe(true);
-	expect(open).toHaveBeenCalledWith('/_artifact-frame?print', '_blank');
-	expect(answerFrameReady({ data: { type: FRAME_READY }, origin: 'null', source: popup })).toBe(true);
+	expect(open).toHaveBeenCalledWith(expect.stringMatching(/^\/_artifact-frame\?print#[0-9a-f]{32}$/), '_blank');
+	const key = String(open.mock.calls[0]![0]).split('#')[1];
+	expect(answerFrameReady({ data: { type: FRAME_READY, [FRAME_KEY_FIELD]: key }, origin: 'null', source: popup })).toBe(true);
 	expect(sent).toHaveLength(1);
 	const msg = sent[0] as { type: string; html: string };
 	expect(msg.type).toBe(FRAME_RENDER);

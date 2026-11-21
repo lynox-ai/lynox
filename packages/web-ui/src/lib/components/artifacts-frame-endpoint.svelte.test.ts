@@ -90,9 +90,19 @@ function windowOf(f: HTMLIFrameElement): Window {
 	return w;
 }
 
-/** What the frame's window is sent when `source` says ready from an opaque origin. */
-function documentSentTo(f: HTMLIFrameElement, source: Window = windowOf(f)): unknown[] {
-	answerFrameReady({ data: { type: 'lynox-frame-ready' }, origin: 'null', source });
+/** The key the app put in the fragment of the frame's URL. */
+function keyOf(f: HTMLIFrameElement): string {
+	return (f.getAttribute('src') ?? '').split('#')[1] ?? '';
+}
+
+/**
+ * What the frame's window is sent when `source` says ready from an opaque origin, naming `key`
+ * (by default the frame's own, as the endpoint the app loaded there does; null sends no key).
+ */
+function documentSentTo(f: HTMLIFrameElement, source: Window = windowOf(f), key: string | null = keyOf(f)): unknown[] {
+	const data: Record<string, unknown> = { type: 'lynox-frame-ready' };
+	if (key !== null) data['key'] = key;
+	answerFrameReady({ data, origin: 'null', source });
 	return sentTo.get(windowOf(f)) ?? [];
 }
 
@@ -109,13 +119,22 @@ describe('the gallery preview frame', () => {
 	it('loads the endpoint with no srcdoc and is sent the artifact when its own window is ready', async () => {
 		await openDeck();
 		const f = previewFrame();
-		expect(f.getAttribute('src')).toBe('/_artifact-frame');
+		expect(f.getAttribute('src')).toMatch(/^\/_artifact-frame#[0-9a-f]{32}$/);
 		expect(f.hasAttribute('srcdoc')).toBe(false);
 		expect(f.getAttribute('sandbox')).toBe('allow-scripts');
 		const sent = documentSentTo(f) as { type: string; html: string }[];
 		expect(sent).toHaveLength(1);
 		expect(sent[0]!.type).toBe('lynox-frame-render');
 		expect(sent[0]!.html).toContain('<p>version-1</p>');
+	});
+
+	it('sends nothing for a ready from its own window that does not name its key', async () => {
+		await openDeck();
+		const f = previewFrame();
+		expect(documentSentTo(f, windowOf(f), null)).toEqual([]);
+		expect(documentSentTo(f, windowOf(f), '0'.repeat(32))).toEqual([]);
+		// Control: the same window with its key.
+		expect(documentSentTo(f)).toHaveLength(1);
 	});
 
 	it('sends nothing for a ready that comes from another window', async () => {

@@ -125,10 +125,15 @@ export const ARTIFACT_FIT_CODE =
  * are set explicitly. So unifying on `'none'` is de-duplication, not tightening
  * — which is why it is safe to do in the same change.
  *
- * `img-src *` is deliberate: artifacts legitimately show remote images — a logo,
- * a diagram, a map, a picture in a report — and narrowing it is a product
- * decision about what an artifact may display, not a change this module makes on
- * its own.
+ * `img-src` allows `data:` and `blob:` only, no remote host. That is the state
+ * artifacts had before they moved to the frame endpoint: as `srcdoc` frames they
+ * inherited the app's policy (`img-src 'self' data: blob:`), so remote images
+ * were already blocked whatever this policy said. The endpoint inherits nothing,
+ * so this policy has to hold that state itself; an image request to another
+ * host is a way to send data out without any script. Allowing remote images in
+ * artifacts would be a product decision, not a change this module makes on its
+ * own. `base-uri` and `form-action` are `'none'` for the same reason: they used
+ * to come from the inherited policy.
  */
 /** The frame's default viewport, for the branch that cannot query a document. */
 const VIEWPORT_META = '<meta name="viewport" content="width=device-width,initial-scale=1">';
@@ -143,7 +148,8 @@ export const ARTIFACT_POLICY =
 	'default-src \'none\'; ' +
 	'script-src \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com; ' +
 	'style-src \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; ' +
-	'font-src https://fonts.gstatic.com; img-src * data: blob:; connect-src \'none\'';
+	'font-src https://fonts.gstatic.com; img-src data: blob:; connect-src \'none\'; ' +
+	'base-uri \'none\'; form-action \'none\'';
 
 export const ARTIFACT_CSP = `<meta http-equiv="Content-Security-Policy" content="${ARTIFACT_POLICY}">`;
 

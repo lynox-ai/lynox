@@ -1,5 +1,5 @@
 import { ARTIFACT_POLICY } from '../utils/artifact-frame.js';
-import { FRAME_PRINT_PARAM, FRAME_READY, FRAME_RENDER, FRAME_VERSION_PARAM } from '../utils/artifact-frame-protocol.js';
+import { FRAME_KEY_FIELD, FRAME_PRINT_PARAM, FRAME_READY, FRAME_RENDER, FRAME_VERSION_PARAM } from '../utils/artifact-frame-protocol.js';
 
 /**
  * The response of `/_artifact-frame`: one fixed bootstrap document under a policy that
@@ -23,9 +23,11 @@ import { FRAME_PRINT_PARAM, FRAME_READY, FRAME_RENDER, FRAME_VERSION_PARAM } fro
  * The bootstrap, as code. It runs inside the sandbox and is written against `window`,
  * `location` and `document` only, so a test can run it against stand-ins for all three.
  *
+ * - First of all it reads the key from its URL fragment, before anything else runs.
  * - Top level without an opener (someone opened the URL directly): it does nothing.
  * - It says `ready` to its parent (a frame) or opener (the print window), addressed to the
- *   app's origin, so a foreign opener never hears it.
+ *   app's origin, so a foreign opener never hears it, and sends the key with it: the app
+ *   answers only the key it put in the URL it loaded in that window.
  * - It takes exactly one `render`, and only from that window AND from the app's origin.
  *   `location.origin` is the URL's origin even inside the sandbox, and the source check alone
  *   does not cover a foreign page that opened this URL: it IS the opener.
@@ -34,6 +36,7 @@ import { FRAME_PRINT_PARAM, FRAME_READY, FRAME_RENDER, FRAME_VERSION_PARAM } fro
  */
 export const ARTIFACT_FRAME_BOOTSTRAP =
 	'(function(){'
+	+ 'var k=String(location.hash||"").slice(1);'
 	+ 'var t=window.parent!==window?window.parent:window.opener;'
 	+ 'if(!t)return;'
 	+ 'var done=false;'
@@ -46,7 +49,8 @@ export const ARTIFACT_FRAME_BOOTSTRAP =
 	+ 'document.open();document.write(d.html);document.close();'
 	+ '}'
 	+ 'window.addEventListener("message",on);'
-	+ `t.postMessage({type:${JSON.stringify(FRAME_READY)}},location.origin);`
+	+ `var m={type:${JSON.stringify(FRAME_READY)}};m[${JSON.stringify(FRAME_KEY_FIELD)}]=k;`
+	+ 't.postMessage(m,location.origin);'
 	+ '})()';
 
 const BODY = '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>'

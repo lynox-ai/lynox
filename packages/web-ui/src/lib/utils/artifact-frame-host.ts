@@ -17,9 +17,21 @@
  * The endpoint's own policy sandboxes it, so its `ready` arrives with origin `'null'`. A
  * `ready` from any other origin means the window is not the sandboxed endpoint (an older
  * server, a proxy that stripped the policy) and gets nothing.
+ *
+ * ## Only to the document the app loaded
+ *
+ * The window and the opaque origin do not say WHICH document is in the window: the frames are
+ * sandboxed by their `sandbox` attribute too, so every document in them has origin `'null'`,
+ * including a page the frame was navigated to by a link. So every entry also holds a random key,
+ * and the URL the app loads carries it in its fragment. The endpoint's bootstrap reads it and
+ * sends it with `ready`; a document the frame navigated to has another URL and cannot name it.
+ * The artifact written into the endpoint document can read the key too, but it already holds
+ * the one document that key answers with. The fragment never goes to the server, so the
+ * endpoint's response and its cache key stay the same for every key.
  */
 import {
 	ARTIFACT_FRAME_PATH,
+	FRAME_KEY_FIELD,
 	FRAME_PRINT_PARAM,
 	FRAME_READY,
 	FRAME_RENDER,
@@ -28,6 +40,8 @@ import {
 
 interface FrameEntry {
 	readonly html: string;
+	/** The key in the fragment of the URL this window was pointed at. */
+	readonly key: string;
 	/** The frame element, or null for the print window. */
 	readonly iframe: HTMLIFrameElement | null;
 	/** The print window gets its document once; a frame gets it again if it reloads. */
@@ -35,7 +49,21 @@ interface FrameEntry {
 }
 
 const entries = new WeakMap<object, FrameEntry>();
+/**
+ * The key each frame element was last given, with the document it was given for. A frame that is
+ * moved gets a new window but reloads the same `src`, so its key has to outlive the window.
+ */
+const frameKeys = new WeakMap<HTMLIFrameElement, { readonly html: string; readonly key: string }>();
 let listening = false;
+
+/** A fresh key: 128 random bits as hex. */
+function newKey(): string {
+	const bytes = new Uint8Array(16);
+	globalThis.crypto.getRandomValues(bytes);
+	let hex = '';
+	for (const b of bytes) hex += b.toString(16).padStart(2, '0');
+	return hex;
+}
 
 /** The build this bundle belongs to: the endpoint is cacheable per build under it. */
 const BUILT_SHA: string = typeof __LYNOX_BUILD_SHA__ === 'string' ? __LYNOX_BUILD_SHA__ : '';
@@ -49,8 +77,8 @@ export function artifactFrameUrl(print = false, buildSha: string = BUILT_SHA): s
 }
 
 /**
- * Answer one `ready`: the registered document for its source, sent only to a sandboxed window.
- * Returns whether something was sent (for tests).
+ * Answer one `ready`: the registered document for its source, sent only to a sandboxed window
+ * that names the entry's key. Returns whether something was sent (for tests).
  */
 export function answerFrameReady(e: Pick<MessageEvent, 'data' | 'origin' | 'source'>): boolean {
 	const data: unknown = e.data;
@@ -60,8 +88,12 @@ export function answerFrameReady(e: Pick<MessageEvent, 'data' | 'origin' | 'sour
 	const entry = entries.get(source);
 	if (!entry) return false;
 	if (e.origin !== 'null') return false;
+	const key: unknown = (data as Record<string, unknown>)[FRAME_KEY_FIELD];
+	if (typeof key !== 'string' || key !== entry.key) return false;
 	if (entry.once) entries.delete(source);
-	// '*' because an opaque origin cannot be named as a target; the window was checked above.
+	// '*' because an opaque origin cannot be named as a target. What was checked above is the
+	// window (registered by the app) and the key, which only the endpoint document the app
+	// loaded in that window can know.
 	(source as Window).postMessage({ type: FRAME_RENDER, html: entry.html }, '*');
 	return true;
 }
@@ -79,11 +111,15 @@ function listen(): void {
 export function attachArtifactFrame(iframe: HTMLIFrameElement, html: string): void {
 	const win = iframe.contentWindow;
 	if (!win) return;
-	entries.set(win, { html, iframe, once: false });
+	// The same document in the same frame keeps its key, so its `src` stays the same.
+	const prior = frameKeys.get(iframe);
+	const key = prior && prior.html === html ? prior.key : newKey();
+	frameKeys.set(iframe, { html, key });
+	entries.set(win, { html, key, iframe, once: false });
 	listen();
 	// A frame moved into a new place already reloads its `src` on insertion; setting the same
 	// value again would load it twice.
-	const src = artifactFrameUrl();
+	const src = `${artifactFrameUrl()}#${key}`;
 	if (iframe.getAttribute('src') !== src) iframe.setAttribute('src', src);
 }
 
@@ -102,9 +138,10 @@ const PRINT_READY_MS = 60_000;
  * the window needs its opener to say `ready` to. False when the popup was blocked.
  */
 export function openArtifactPrintWindow(html: string): boolean {
-	const win = window.open(artifactFrameUrl(true), '_blank');
+	const key = newKey();
+	const win = window.open(`${artifactFrameUrl(true)}#${key}`, '_blank');
 	if (!win) return false;
-	entries.set(win, { html, iframe: null, once: true });
+	entries.set(win, { html, key, iframe: null, once: true });
 	listen();
 	// run-group-starter: a one-off cleanup in the browser, not engine code inside a run.
 	setTimeout(() => { entries.delete(win); }, PRINT_READY_MS);

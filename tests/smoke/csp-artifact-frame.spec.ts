@@ -10,6 +10,10 @@ import { mintOwnerSessionCookie } from './session-cookie.js';
 const SMOKE_SECRET = process.env['SMOKE_HTTP_SECRET'] ?? 'smoke-test-http-secret-ephemeral';
 const CDNS = ['cdn.jsdelivr.net', 'cdnjs.cloudflare.com', 'unpkg.com', 'cloudflareinsights.com'];
 const RENDER = 'lynox-frame-render';
+const READY = 'lynox-frame-ready';
+// A host no artifact may load images from. Served by a route, so the run needs no network.
+const IMG_URL = 'https://img.csp-smoke.test/x.png';
+const PNG_1PX = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
 
 // The policy the app had before: inline script allowed. Used only as the positive control that
 // the injection below is a real one.
@@ -244,6 +248,63 @@ test.describe('artifact frames', () => {
 			+ 'fetch("/api/health").then(function(){document.getElementById("m").textContent="fetched"},function(){document.getElementById("m").textContent="blocked"})</script>');
 		await expect.poll(() => f.evaluate(() => document.getElementById('m')?.textContent)).toBe('blocked');
 		expect(await f.evaluate(() => document.getElementById('v')?.textContent)).toBe('connect-src');
+	});
+
+	test('(k) the endpoint header alone blocks an image from another host, and no request leaves the frame', async ({ page }) => {
+		const hits: string[] = [];
+		await page.context().route('https://img.csp-smoke.test/**', (route) => {
+			hits.push(route.request().url());
+			return route.fulfill({ status: 200, contentType: 'image/png', body: PNG_1PX });
+		});
+		await page.goto('/login');
+		const f = await injectEndpointFrame(page, 'imager', true);
+		// No artifact meta in this document: only the response header can block it.
+		await renderFromParent(page, 'imager', '<p id="v"></p><p id="m">pending</p><script>'
+			+ 'document.addEventListener("securitypolicyviolation",function(e){document.getElementById("v").textContent=e.effectiveDirective+" "+e.blockedURI});'
+			+ '</script>'
+			+ `<img src="${IMG_URL}" onload="document.getElementById('m').textContent='loaded'" onerror="document.getElementById('m').textContent='blocked'">`);
+		await expect.poll(() => f.evaluate(() => document.getElementById('m')?.textContent)).toBe('blocked');
+		const v = await f.evaluate(() => document.getElementById('v')?.textContent ?? '');
+		expect(v.startsWith('img-src ')).toBe(true);
+		expect(v).toContain('img.csp-smoke.test');
+		await page.waitForTimeout(300);
+		expect(hits).toEqual([]);
+
+		// Control, same run: the route does see a request to that host when nothing blocks it.
+		const probe = await page.context().newPage();
+		await probe.goto(IMG_URL);
+		await probe.close();
+		expect(hits).toEqual([IMG_URL]);
+	});
+
+	test('(l) a document the frame is navigated to does not know its key and is sent nothing; the endpoint at its own key is (control)', async ({ page }) => {
+		await authenticate(page);
+		await openArtifact(page, ids['origin']!);
+		const [f] = await waitForFrames(page, 1);
+		expect(await marker(f!)).toBe('ran');
+		const src = (await (await f!.frameElement()).getAttribute('src')) ?? '';
+		const key = src.split('#')[1] ?? '';
+		expect(key).toMatch(/^[0-9a-f]{32}$/);
+
+		// The frame navigates itself, as a link in the artifact would. The page policy allows only
+		// same-origin documents in a frame, and only the endpoint may be framed, so the document it
+		// can reach is the endpoint at a URL without the key.
+		const navigate = async (url: string): Promise<void> => {
+			await f!.evaluate((u) => { setTimeout(() => { location.href = u; }, 0); }, url);
+			await expect.poll(() => f!.url(), { timeout: 10_000 }).toContain(url.split('#')[0]!);
+			await f!.waitForLoadState('load');
+		};
+
+		await navigate('/_artifact-frame?nav=1');
+		// Its own ready carried an empty key; one more without any key field at all.
+		await f!.evaluate((type) => { parent.postMessage({ type }, '*'); }, READY);
+		await page.waitForTimeout(500);
+		expect(await f!.evaluate(() => [...document.body.children].map((e) => e.tagName))).toEqual(['SCRIPT']);
+		expect(await f!.evaluate(() => document.getElementById('m'))).toBeNull();
+
+		// Control, same frame: the endpoint loaded with the frame's key gets the artifact again.
+		await navigate(`/_artifact-frame?nav=2#${key}`);
+		expect(await marker(f!)).toBe('ran');
 	});
 
 	test('(f) inline, CDN and onload-only scripts run in chat bubbles, which resize, and in the gallery', async ({ page }) => {
