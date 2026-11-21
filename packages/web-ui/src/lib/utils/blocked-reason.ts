@@ -23,11 +23,11 @@ export function blockedReasonParts(reason: BlockedReason, t: (key: BlockedReason
 }
 
 /**
- * A host as the pieces a line may break between: after each dot. Each piece is shown as one block,
- * so a label that fits on a line is not split (at a hyphen, say); only a label longer than the
- * line breaks inside. Empty labels (a trailing dot, `a..b`) are dropped.
+ * A host as the pieces a line may break between: after each run of dots. Each piece is shown as one
+ * block, so a label that fits on a line is not split (at a hyphen, say); only a label longer than
+ * the line breaks inside. Every dot is kept: the pieces join to the host exactly, since the
+ * allow-list compares it exactly (`shop.example.` is not `shop.example`, `a..b` is not `a.b`).
  */
 export function hostLabels(host: string): string[] {
-  const labels = host.split('.').filter((label) => label !== '');
-  return labels.map((label, i) => (i < labels.length - 1 ? `${label}.` : label));
+  return host.match(/[^.]*\.+|[^.]+/g) ?? [];
 }

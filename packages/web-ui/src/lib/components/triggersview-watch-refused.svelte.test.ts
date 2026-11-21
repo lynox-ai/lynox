@@ -102,7 +102,7 @@ describe('a watch the network policy keeps from its page', () => {
 		expect(boxes[0]!.textContent).toBe('shop.example');
 	});
 
-	it('keeps the host box one block, each label one block after its dot', async () => {
+	it('gives the host box and each label after its dot the block classes', async () => {
 		const line = await render('de', { kind: 'watch_allow_list', host: 'preise.lieferant-beispiel.ch' });
 		const box = line!.querySelector<HTMLElement>('bdi[data-foreign-value]')!;
 		expect(box.textContent).toBe('preise.lieferant-beispiel.ch');
@@ -114,11 +114,14 @@ describe('a watch the network policy keeps from its page', () => {
 		expect(box.querySelectorAll('wbr')).toHaveLength(3);
 	});
 
-	it('drops the empty label of a trailing dot', async () => {
-		const line = await render('de', { kind: 'watch_allow_list', host: 'shop.example.' });
-		const box = line!.querySelector<HTMLElement>('bdi[data-foreign-value]')!;
-		expect([...box.querySelectorAll('span')].map((s) => s.textContent)).toEqual(['shop.', 'example']);
-	});
+	for (const [host, pieces] of [['shop.example.', ['shop.', 'example.']], ['a..b', ['a..', 'b']], ['.x', ['.', 'x']]] as const) {
+		it(`shows the host exactly as the policy compares it, every dot kept: ${host}`, async () => {
+			const line = await render('de', { kind: 'watch_allow_list', host });
+			const box = line!.querySelector<HTMLElement>('bdi[data-foreign-value]')!;
+			expect(box.textContent).toBe(host);
+			expect([...box.querySelectorAll('span')].map((s) => s.textContent)).toEqual(pieces);
+		});
+	}
 
 	it('offers no run now on a watch the policy keeps from its page, and keeps the row\'s other buttons', async () => {
 		setLocale('de');
