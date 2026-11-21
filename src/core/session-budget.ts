@@ -228,8 +228,9 @@ function capReason(cap: 'daily' | 'monthly', limitUSD: number, spentUSD: number,
 }
 
 /**
- * A refused check's reason in `language`. The check's own `reason` is English, for logs, the
- * worker and every caller without a reader; a chat shows this one, in the instance's language.
+ * A refused check's reason in `language`, for every result a person reads: a chat's run and a
+ * saved workflow's run. The check's own `reason` stays English, for the server log and the
+ * callers that answer an API client.
  */
 export function budgetRefusal(check: PersistentBudgetCheck, language: NoticeLanguage): string {
   const cap = reachedCap(check);
