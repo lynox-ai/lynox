@@ -44,8 +44,8 @@ export interface ShellPolicyInput {
   readonly ackHosts: ReadonlySet<string> | undefined;
   /**
    * The hosts the owner typed in this thread, oldest first (`OwnerKnownTargets.typedHosts`). They
-   * join under `guarded` and, once the call's batch started tainted, under `allow-all`, after the
-   * policy's hosts and only into the room the proxy has left, newest first. Under `allow-list` the
+   * join under `guarded` and, once the call's batch started tainted, under `allow-all` and no
+   * policy, after the policy's hosts and only into the room the proxy has left, newest first. Under `allow-list` the
    * operator's list is the boundary, as it is for the engine's own requests.
    */
   readonly typedHosts?: readonly string[] | undefined;

@@ -239,7 +239,8 @@ export function isAllowlistedEndpoint(url: string): boolean {
  */
 /**
  * The host names `isGuardedBaselineHost` accepts, as a list: the shell's egress set under
- * `guarded` (src/shell-sidecar/egress.ts) is built from it, so both read the one Set.
+ * `guarded`, and under `allow-all` once the call's batch started after foreign content
+ * (src/shell-sidecar/egress.ts), is built from it, so both read the one Set.
  */
 export function guardedBaselineHostList(): string[] {
   return [...ALLOWLISTED_HOSTS];

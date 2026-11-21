@@ -131,14 +131,20 @@ describe('http_request GET: the listed address and an address it carries', () =>
   });
 });
 
+/** Gives the agent's context a policy it carries, as an engine boot does (no `isPolicyUnread` mark). */
+function readPolicy(agent: Agent, fields: Record<string, unknown>): Agent {
+  Object.assign(agent.toolContext, fields);
+  delete (agent.toolContext as unknown as Record<symbol, unknown>)[Symbol.for('lynox.toolContext.policyUnread')];
+  return agent;
+}
+
 describe('http_request after foreign content: the policy\'s own hosts count for a read only', () => {
-  function withPolicy(agent: Agent, networkPolicy: 'guarded' | 'allow-list' | 'allow-all' | 'deny-all'): Agent {
-    Object.assign(agent.toolContext, { networkPolicy, allowedHosts: new Set(['floor.example']), allowedWildcards: ['wild.example'] });
-    return agent;
+  function withPolicy(agent: Agent, networkPolicy: 'guarded' | 'allow-list' | 'allow-all' | 'deny-all' | undefined): Agent {
+    return readPolicy(agent, { networkPolicy, allowedHosts: new Set(['floor.example']), allowedWildcards: ['wild.example'] });
   }
 
   it('a GET of a floor host, exact or under a floor wildcard, and of a baseline host is not asked about', async () => {
-    for (const policy of ['guarded', 'allow-all'] as const) {
+    for (const policy of ['guarded', 'allow-all', undefined] as const) {
       const tool = http();
       const ask = asker('Deny');
       const agent = withPolicy(agentOf(tool, ask.fn), policy);
@@ -159,12 +165,25 @@ describe('http_request after foreign content: the policy\'s own hosts count for 
     expect(tool.sent).toEqual([]);
   });
 
-  it('the baseline\'s loopback name is not counted', async () => {
+  it('the baseline\'s loopback names are not counted', async () => {
     const tool = http();
     const ask = asker('Deny');
     const agent = withPolicy(agentOf(tool, ask.fn), 'guarded');
     await call(agent, { url: 'https://localhost/x' });
-    expect(ask.asked).toHaveLength(1);
+    await call(agent, { url: 'https://127.0.0.1/x' });
+    await call(agent, { url: 'https://0.0.0.0/x' });
+    expect(ask.asked).toHaveLength(3);
+  });
+
+  it('a context that does not carry the instance\'s policy names nothing', async () => {
+    const tool = http();
+    const ask = asker('Deny');
+    const agent = agentOf(tool, ask.fn);
+    Object.assign(agent.toolContext, { networkPolicy: 'guarded', allowedHosts: new Set(['floor.example']) });
+    await call(agent, { url: 'https://floor.example/a' });
+    await call(agent, { url: 'https://api.anthropic.com/v1/models' });
+    expect(ask.asked).toHaveLength(2);
+    expect(tool.sent).toEqual([]);
   });
 
   it('under allow-list only the list counts, under deny-all nothing', async () => {
@@ -207,7 +226,7 @@ describe('case 22: one host list, the engine\'s read and the tainted shell set',
     const tool = http();
     const ask = asker('Deny');
     const agent = agentOf(tool, ask.fn, 'please read typed.example');
-    Object.assign(agent.toolContext, {
+    readPolicy(agent, {
       networkPolicy: 'allow-all', allowedHosts: new Set(['floor.example']), allowedWildcards: ['wild.example'],
       apiStore: { readKnownHosts: () => new Set(['api.vendor.example']), getAcceptedEgressHosts: () => new Set(['api.vendor.example']) },
     });

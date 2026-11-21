@@ -289,8 +289,10 @@ export function assertHostPolicy(
       // Still outside it: the LLM provider call, push notifications, error
       // reporting, IMAP/SMTP mail, voice transcribe/TTS, and a shell command
       // outside sidecar mode (in sidecar mode with the egress proxy, a shell
-      // command reaches only the exact host names this policy lets http_request
-      // reach; src/shell-sidecar/egress.ts). This list is
+      // command reaches only what src/shell-sidecar/egress.ts registers: every
+      // host under allow-all until the conversation takes in foreign content,
+      // otherwise exact host names this policy names plus hosts the owner
+      // typed). This list is
       // stated identically in engine-init.ts and types/config.ts; a review found
       // all three carrying DIFFERENT lists in the very change that introduced
       // the sentence claiming they move together.

@@ -5146,10 +5146,11 @@ export class Agent implements IAgent {
     return this.ownerKnown?.known(target) ?? 'foreign';
   }
 
-  /** {@link policyNamesHost} for this agent's policy; no tool context names nothing. */
+  /** {@link policyNamesHost} for this agent's policy. A context that does not carry the
+   *  instance's policy (`isPolicyUnread`) names nothing (fail-closed, as `providerSearchAdmitted`). */
   private _policyNamesHost(host: string): boolean {
     const tc = this.toolContext;
-    return tc !== undefined && policyNamesHost(host, tc);
+    return tc !== undefined && !isPolicyUnread(tc) && policyNamesHost(host, tc);
   }
 
   /** {@link ApiStore.readKnownHosts}, or none when no store can answer: the read is then asked about. */
