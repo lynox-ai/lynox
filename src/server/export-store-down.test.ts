@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,6 +24,8 @@ type ExportBody = {
   durable_knowledge: { entries: unknown[]; may_be_incomplete: boolean };
   knowledge_graph: { entities: unknown[]; relationships: unknown[] }; knowledge_graph_may_be_incomplete: boolean;
   secrets: string[]; secrets_may_be_incomplete: boolean; secrets_note: string;
+  set_aside_databases?: Array<{ database: string; files: string[] }>;
+  set_aside_databases_unknown?: string;
 };
 
 type EngineView = {
@@ -95,7 +97,7 @@ function harness(prepare: (dir: string) => void, durableMemory: boolean) {
     return await res.json() as ExportBody;
   };
 
-  return { engine, exportBody, baseUrl: () => state.baseUrl!, secret };
+  return { engine, exportBody, baseUrl: () => state.baseUrl!, secret, dir: () => state.dir! };
 }
 
 describe('export with the stores down at boot (real engine)', () => {
@@ -149,6 +151,7 @@ describe('export with every store open, durable memory off, then the CRM gone (r
     expect(body.durable_knowledge.entries).toEqual([]);
     expect(body.durable_knowledge.may_be_incomplete, 'off: no store was opened, so nothing failed').toBe(false);
     expect(body.threads_may_be_incomplete, 'the thread store opened and was read').toBe(false);
+    expect(body.set_aside_databases, 'nothing was set aside').toBeUndefined();
   }, 60_000);
 
   it('marks contacts and deals incomplete and leaves the readable DataStore block complete', async () => {
@@ -329,5 +332,58 @@ describe('export with the knowledge graph switched off (real engine)', () => {
     const body = await h.exportBody();
     expect(body.knowledge_graph).toEqual({ entities: [], relationships: [] });
     expect(body.knowledge_graph_may_be_incomplete, 'off: no layer was opened, so nothing failed').toBe(false);
+  }, 60_000);
+});
+
+/** Bytes that are not an SQLite database: the boot's open finds them corrupt and sets the file aside. */
+function corrupt(dir: string, file: string): void {
+  writeFileSync(join(dir, file), Buffer.from('not a database '.repeat(512)));
+}
+
+describe('export after the boot set a corrupt history.db aside (real engine)', () => {
+  const h = harness((dir) => corrupt(dir, 'history.db'), true);
+
+  it('names the set-aside file and marks the threads and the knowledge graph incomplete, not durable knowledge', async () => {
+    const setAside = readdirSync(h.dir()).filter((f) => /^history\.db\.corrupt-\d+$/.test(f));
+    expect(setAside, 'fixture: the boot set history.db aside').toHaveLength(1);
+    expect(h.engine().getThreadStore(), 'fixture: an empty thread store opened in its place').not.toBeNull();
+
+    const body = await h.exportBody();
+    expect(body.set_aside_databases).toEqual([{ database: 'history.db', files: setAside }]);
+    expect(body.threads).toEqual([]);
+    expect(body.threads_may_be_incomplete, 'the old threads are in the set-aside file').toBe(true);
+    expect(body.knowledge_graph_may_be_incomplete, 'half of the graph lived in history.db').toBe(true);
+    expect(body.durable_knowledge.may_be_incomplete, 'engine.db was not set aside').toBe(false);
+  }, 60_000);
+});
+
+describe('export after the boot set a corrupt engine.db aside (real engine)', () => {
+  const h = harness((dir) => corrupt(dir, 'engine.db'), true);
+
+  it('names the set-aside file and marks durable knowledge and the knowledge graph incomplete, not the threads', async () => {
+    const setAside = readdirSync(h.dir()).filter((f) => /^engine\.db\.corrupt-\d+$/.test(f));
+    expect(setAside, 'fixture: the boot set engine.db aside').toHaveLength(1);
+    expect(h.engine().getKnowledgeStore(), 'fixture: an empty knowledge store opened in its place').not.toBeNull();
+
+    const body = await h.exportBody();
+    expect(body.set_aside_databases).toEqual([{ database: 'engine.db', files: setAside }]);
+    expect(body.durable_knowledge.may_be_incomplete, 'the old entries are in the set-aside file').toBe(true);
+    expect(body.knowledge_graph_may_be_incomplete, 'half of the graph lived in engine.db').toBe(true);
+    expect(body.threads_may_be_incomplete, 'history.db was not set aside').toBe(false);
+  }, 60_000);
+
+  it('marks every block from both databases when the data directory cannot be listed', async () => {
+    const dir = h.dir();
+    chmodSync(dir, 0o300);
+    try {
+      expect(() => readdirSync(dir), 'fixture: the directory cannot be listed').toThrow();
+      const body = await h.exportBody();
+      expect(body.set_aside_databases_unknown).toBeDefined();
+      expect(body.threads_may_be_incomplete).toBe(true);
+      expect(body.knowledge_graph_may_be_incomplete).toBe(true);
+      expect(body.durable_knowledge.may_be_incomplete).toBe(true);
+    } finally {
+      chmodSync(dir, 0o700);
+    }
   }, 60_000);
 });

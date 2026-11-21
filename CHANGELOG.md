@@ -44,6 +44,16 @@
   `secrets_may_be_incomplete` is `true` when the secret store or its vault did
   not open. `secrets_note` says that only secret names are exported, never
   values.
+- When the boot found `history.db` or `engine.db` corrupt and set it aside as
+  `<name>.corrupt-<ms>`, `GET /api/export` now names the set-aside files in
+  `set_aside_databases` (names only) and marks the blocks read from that
+  database incomplete: `threads_may_be_incomplete` and
+  `knowledge_graph_may_be_incomplete` for `history.db`,
+  `durable_knowledge.may_be_incomplete` and `knowledge_graph_may_be_incomplete`
+  for `engine.db`. Until now the empty database opened in its place exported as
+  complete, while the older data sat in the set-aside file. When the data
+  directory cannot be listed, `set_aside_databases_unknown` is set and all
+  three blocks are marked.
 
 ## 2.18.0 — 2026-11-17
 

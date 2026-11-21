@@ -14516,6 +14516,40 @@ export class LynoxHTTPApi {
       }
       if (!omitted) exportData['workspace_archive'] = '/api/export/workspace';
 
+      // A history.db or engine.db the boot found corrupt was set aside as `<name>.corrupt-<ms>`
+      // and an empty one opened in its place. The blocks read from the new store then look
+      // complete while the owner's older data sits in the set-aside file. Name the file (not its
+      // content) and mark every block read from that database incomplete: history.db holds the
+      // threads and half of the knowledge graph, engine.db the other half and the durable
+      // knowledge. A data directory that cannot be listed marks all of them.
+      {
+        let fromHistory = false;
+        let fromEngine = false;
+        try {
+          const { getLynoxDir } = await import('../core/config.js');
+          const { listSetAsideStores } = await import('../core/set-aside-stores.js');
+          const setAside = listSetAsideStores(getLynoxDir());
+          if (setAside.length > 0) exportData['set_aside_databases'] = setAside;
+          fromHistory = setAside.some((s) => s.database === 'history.db');
+          fromEngine = setAside.some((s) => s.database === 'engine.db');
+        } catch (err: unknown) {
+          exportData['set_aside_databases_unknown'] = err instanceof Error ? err.name : 'error';
+          fromHistory = true;
+          fromEngine = true;
+        }
+        if (fromHistory) exportData['threads_may_be_incomplete'] = true;
+        if (fromHistory || fromEngine) exportData['knowledge_graph_may_be_incomplete'] = true;
+        if (fromEngine) {
+          const durable = exportData['durable_knowledge'];
+          if (durable !== null && typeof durable === 'object') {
+            exportData['durable_knowledge'] = { ...(durable as Record<string, unknown>), may_be_incomplete: true };
+          }
+        }
+        if (fromHistory || fromEngine) {
+          process.stderr.write('⚠ /api/export: a database was set aside as corrupt — blocks read from it marked incomplete\n');
+        }
+      }
+
       // For the control plane, the act is the handover: its `done` row is written before the
       // body leaves, so a connection that drops while it streams does not erase it — and after
       // the body is made, so an export that cannot be serialised is not recorded as handed over.
