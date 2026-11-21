@@ -121,21 +121,27 @@ export function markersOf(text: string): Map<MarkerKind, Set<string>> {
   const out = new Map<MarkerKind, Set<string>>([['link', new Set()], ['email', new Set()], ['phone', new Set()], ['script', new Set()]]);
   readMarkers(text, out);
   // Markup can hide what a browser shows ("evil&#46;com", "evil<b></b>.com"): the text as shown is read too.
-  if (text.includes('<') || text.includes('&')) readMarkers(shownText(text), out);
+  if (text.includes('<') || text.includes('&')) {
+    readMarkers(shownText(text, true), out);
+    // A style can show a block inline in more ways than a list could name: where one is styled, the
+    // text is also read with no gap at a styled block.
+    if (/style/iu.test(text)) readMarkers(shownText(text, false), out);
+  }
   return out;
 }
 
 /** Elements a browser shows on a line of their own: removing one leaves a gap, so the end of one
  *  paragraph and the start of the next ("Eiche.</p><p>Design") are not read as one word. An inline
- *  tag leaves none ("evil<b></b>.com" shows "evil.com"), and neither does a block tag with a style. */
+ *  tag leaves none ("evil<b></b>.com" shows "evil.com"). */
 const BLOCK_TAGS = new Set([
   'p', 'div', 'br', 'li', 'ul', 'ol', 'dl', 'dt', 'dd', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'tr', 'td', 'th', 'table',
   'thead', 'tbody', 'tfoot', 'caption', 'section', 'article', 'header', 'footer', 'aside', 'nav', 'blockquote', 'pre', 'hr',
   'figure', 'figcaption', 'address', 'main', 'details', 'summary', 'legend', 'fieldset', 'form', 'center', 'dialog', 'menu',
 ]);
 
-/** A text as a browser shows it, near enough: without its tags, its character references decoded. */
-function shownText(text: string): string {
+/** A text as a browser shows it, near enough: without its tags, its character references decoded. With
+ *  `gapAtStyled` false a block tag with a style leaves no gap, as one a style shows inline would not. */
+function shownText(text: string, gapAtStyled: boolean): string {
   let shown = '';
   let i = 0;
   // Tags by index: an opening bracket without a closing one is text to the end, read once.
@@ -145,13 +151,15 @@ function shownText(text: string): string {
     const close = text.indexOf('>', open + 1);
     if (close < 0) { shown += text.slice(i); break; }
     shown += text.slice(i, open);
-    // The name ends at a blank, a slash or the tag's end: `<p-x>` and `<p:o>` are elements of their own,
-    // shown inline, and `</ p>` is no tag. A block tag with a style may be shown inline: no gap either.
+    // The name ends where HTML ends it — tab, line feed, form feed, carriage return, space, slash or the
+    // tag's end: `<p-x>`, `<p:o>` and `<p\u3000>` are elements of their own, shown inline, and `</ p>`
+    // is no tag. Whether a style shows a block inline is not read from the style: the caller reads the
+    // text once with a gap at every block and once with none at a styled one.
     const tag = text.slice(open + 1, close);
     const named = /^\/?([a-z][a-z0-9]{0,15})/iu.exec(tag.slice(0, 18));
     const after = named === null ? undefined : tag[named[0].length];
-    const name = named !== null && (after === undefined || /[\s/]/u.test(after)) ? named[1]!.toLowerCase() : undefined;
-    if (name !== undefined && BLOCK_TAGS.has(name) && !/\sstyle\s*=/iu.test(tag)) shown += ' ';
+    const name = named !== null && (after === undefined || /[\t\n\f\r /]/u.test(after)) ? named[1]!.toLowerCase() : undefined;
+    if (name !== undefined && BLOCK_TAGS.has(name) && (gapAtStyled || !/\sstyle\s*=/iu.test(tag))) shown += ' ';
     i = close + 1;
   }
   return shown.replace(/&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|(amp|lt|gt|quot|apos|nbsp));/giu, (whole, dec?: string, hex?: string, name?: string) => {

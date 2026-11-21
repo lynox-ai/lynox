@@ -376,9 +376,23 @@ describe('markersOf', () => {
     }
   });
 
+  it('reads a host before a styled block, and across one however its style shows it inline', () => {
+    for (const text of ['evil&#46;com<p style=x>jetzt', 'evil<b></b>.com<div style="margin:0">Angebot', 'evil<b></b>.com<br style=x>mehr', 'evil<b></b>.shop<td style=x>Preis']) {
+      expect([...markersOf(text).get('link')!].filter((h) => h.startsWith('evil.')), text).toHaveLength(1);
+    }
+    for (const style of ['display:inline-block', 'display:inline-flex', 'display:ruby', 'display:inline!important', 'DISPLAY:INLINE', 'display:/**/inline', 'display:&#105;nline', 'display:\\69nline', 'margin:0']) {
+      const text = `evil<p style="${style}">.com</p>`;
+      expect([...markersOf(text).get('link')!], text).toEqual(['evil.com']);
+    }
+    // The cost, accepted: a word after a full stop and a styled block is read as a host as well.
+    expect([...markersOf('Eiche.<br style="clear:both">shop').get('link')!]).toEqual(['eiche.shop']);
+    expect([...markersOf('Eiche.<br>shop').get('link')!]).toEqual([]);
+  });
+
   it('reads a host across a tag that only starts like a block, a tag that is none, and a block a style shows inline', () => {
     for (const text of ['evil<p-x></p-x>.com', 'evil<p:o></p:o>.com', 'evil<br-x>.com', 'evil<div_x></div_x>.com', 'evil<li.x>.com', 'evil<P-X>.com',
-      'evil</ p>.com', 'evil<p style="display:inline">.com</p>', 'evil<div style=display:contents>.com</div>', 'evil<blockquotes>.com']) {
+      'evil</ p>.com', 'evil<p style="display:inline">.com</p>', 'evil<div style=display:contents>.com</div>', 'evil<blockquotes>.com',
+      'evil<p\u3000>.com', 'evil<br\u000b>.com', 'evil<br style="display: none">.com']) {
       expect([...markersOf(text).get('link')!], text).toEqual(['evil.com']);
     }
   });
