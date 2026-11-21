@@ -345,6 +345,28 @@ describe('the dialog', () => {
 		expect(document.activeElement).toBe(d.querySelector('#workflow-takeover-title'));
 	});
 
+	it('the open dialog given another workflow shows that one without the marks of the last', async () => {
+		const moved = FULL();
+		moved['expect'] = 'digest-2';
+		(moved['steps'] as Array<Record<string, unknown>>)[1]!['inputTemplate'] = { url: 'https://evil.example.invalid/post' };
+		const other = FULL();
+		other['expect'] = 'digest-3';
+		other['workflow'] = { id: 'wf-f', name: 'Ended two' };
+		const TWO = { ...base('wf-f', 'Ended two'), runs_as: { person: EVA, ended: true, covered_by_takeover: 0 } };
+		const served = await open([ENDED, TWO], [FULL(), moved, other], { status: 409, body: { code: 'changed' } });
+		const d = await openDialog();
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		expect(d.querySelectorAll('[data-stamp-changed]')).toHaveLength(1);
+		// The same dialog stays mounted and loads the other workflow.
+		openButton(card('Ended two'))!.click();
+		await settle();
+		expect(served.previews).toBe(3);
+		expect(dialog()).toBe(d);
+		expect(d.querySelectorAll('[data-testid="stamp-step"]')).toHaveLength(3);
+		expect(d.querySelectorAll('[data-stamp-changed]')).toHaveLength(0);
+	});
+
 	it('a stamp the engine refused reloads like a change, and says so above the new state', async () => {
 		const moved = FULL();
 		moved['expect'] = 'digest-2';
