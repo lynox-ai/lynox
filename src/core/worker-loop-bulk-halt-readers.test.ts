@@ -74,6 +74,18 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
     expect(h.recorded[0]).toContain(NOTE.en);
   });
 
+  it('builds the planning grant\'s push from the sentence in the owner\'s language, as before the lines were left out', async () => {
+    const h = harness({ reason: R.storeAccessEnded, plannedBy: 'mandate' });
+    // The stored sentence in English, its version in the owner's German pushed in its place.
+    const stored = `${BULK_NOTICES.en.halted('apply', R.storeAccessEnded)} 2 of 5 targets written.`;
+    const said = `${BULK_NOTICES.de.halted('apply', R.storeAccessEnded)}${COUNTS}`;
+    await runCollectingMemberNotes(async () => {
+      noteMemberConnection('Connection not used: the model\'s line', () => ({ en: 'Connection not used: a note.', de: 'Verbindung nicht genutzt: eine Notiz.' }));
+      h.end(stored, said);
+    }).done;
+    expect(h.sent[1]).toMatchObject({ audience: 'mandates', body: `lynox konnte den Zugang zum Shop nicht erneuern. ${CLOSING}${COUNTS}` });
+  });
+
   it('pushes a product write\'s short form to the owner\'s devices as it is, records the fact, and tells the planning grant the owner resolves it', () => {
     const h = harness({ reason: R.productWriteNotAsked, plannedBy: 'mandate' });
     const summary = BULK_NOTICES.de.productWriteNotAsked('not_asked', true);
