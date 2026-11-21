@@ -84,10 +84,15 @@ import { PROMPT_TEXT_BRAND, type PromptSegment, type PromptText } from '../types
  *    value cannot pad itself onto what looks like a further line of the dialog:
  *    every default-ignorable code point (the Hangul fillers U+115F, U+1160,
  *    U+3164, U+FFA0, the combining grapheme joiner, the variation selectors,
- *    U+17B4, U+180B …) and U+2800, the braille blank, which is not
- *    default-ignorable. The price: an emoji loses its U+FE0F and may show in its
- *    text form, which a dialog value can bear. Korean in decomposed form keeps
- *    its vowels and final consonants, none of which is default-ignorable.
+ *    U+17B4, U+180B …). The price, accepted for a dialog value: an emoji loses
+ *    its U+FE0F and may show in its text form, a Japanese name loses its
+ *    ideographic variation selector, Mongolian its free variation selectors, a
+ *    run its grapheme joiner. Korean in decomposed form keeps its vowels and
+ *    final consonants, none of which is default-ignorable.
+ *    Two characters render as blank width without being any of these: U+2800,
+ *    the braille blank, and U+1D159, the musical null notehead. They are
+ *    collapsed like a space rather than removed, so braille words stay apart
+ *    and two names that differ only by one of them do not become equal.
  * 4. It keeps at most four non-spacing or enclosing marks (`\p{Mn}`, `\p{Me}`)
  *    on one base character; a longer run is cut, so stacked marks cannot paint
  *    over the text around a value. Vietnamese needs two, Indic scripts one or
@@ -98,13 +103,13 @@ import { PROMPT_TEXT_BRAND, type PromptSegment, type PromptText } from '../types
  * cannot shorten what the cut keeps.
  */
 export function singleLine(value: string): string {
-  // Format and blank-rendering characters removed outright, long mark runs cut,
-  // every break-ish character collapsed to one space. `\s` misses most of C0 and
-  // all of C1, so both are named.
+  // Format and default-ignorable characters removed outright, long mark runs cut,
+  // every break-ish or blank character collapsed to one space. `\s` misses most
+  // of C0 and all of C1, so both are named, as are the two blanks above.
   return value
-    .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, '')
+    .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, '')
     .replace(/([\p{Mn}\p{Me}]{4})[\p{Mn}\p{Me}]+/gu, '$1')
-    .replace(/[\s\u0000-\u001f\u0085]+/gu, ' ');
+    .replace(/[\s\u0000-\u001f\u0085\u2800\u{1D159}]+/gu, ' ');
 }
 
 // --- The structural boundary: frame vs. value, carried by the type ---

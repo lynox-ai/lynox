@@ -5,8 +5,8 @@ import { dialogToolWord } from '../tools/tool-words.js';
 
 // A value in a confirmation dialog must not pad itself with characters that render blank, nor
 // paint over its surroundings with stacked marks: either could push its text visually onto what
-// looks like a further line of the dialog. Every value reaches the dialog through `singleLine`,
-// and so does an external tool's name, before its cut.
+// looks like a further line of the dialog. A danger prompt's values reach it through
+// `singleLine`, and so does an external tool's name, before its cut.
 
 /** The value a read_file danger prompt shows for `path`. */
 function dialogValue(path: string): string {
@@ -18,7 +18,6 @@ function dialogValue(path: string): string {
 }
 
 const BLANK: ReadonlyArray<readonly [string, string]> = [
-  ['braille blank U+2800', '\u2800'],
   ['Hangul choseong filler U+115F', '\u115F'],
   ['Hangul jungseong filler U+1160', '\u1160'],
   ['Hangul filler U+3164', '\u3164'],
@@ -43,6 +42,24 @@ describe('singleLine removes what renders blank', () => {
       expect(dialogToolWord(`Merge${run}now`)).toBe('External tool "Mergenow"');
     });
   }
+
+  for (const [name, ch] of [['braille blank U+2800', '\u2800'], ['musical null notehead U+1D159', '\u{1D159}']] as const) {
+    const run = ch.repeat(40);
+    it(`${name}: collapsed to one space in a value`, () => {
+      expect(singleLine(`a${run}b`)).toBe('a b');
+    });
+    it(`${name}: collapsed to one space in a dialog value`, () => {
+      expect(dialogValue(`/etc/shadow${run}✓ reviewed`)).toBe('/etc/shadow ✓ reviewed');
+    });
+    it(`${name}: collapsed to one space in an external tool's name`, () => {
+      expect(dialogToolWord(`Merge${run}now`)).toBe('External tool "Merge now"');
+    });
+  }
+
+  it('braille words stay apart', () => {
+    const word = '\u281E\u2811\u2827';
+    expect(singleLine(`${word}\u2800${word}`)).toBe(`${word} ${word}`);
+  });
 
   it('a blank character between spaces leaves one space, not two', () => {
     expect(singleLine('a \u3164 b')).toBe('a b');
