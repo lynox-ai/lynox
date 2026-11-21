@@ -24,6 +24,8 @@ describe('watchRefusedNow', () => {
 
   it('says nothing for a trigger that is no watch, a config it cannot read, or a reason only the poll knows', () => {
     expect(watchRefusedNow({ source: 'cron', watch_config: undefined }, ctx('deny-all'))).toBeNull();
+    // Only a watch is read by its config: another trigger that carries one says nothing.
+    expect(watchRefusedNow({ source: 'cron', watch_config: JSON.stringify({ url: 'https://other.example/p' }) }, ctx('deny-all'))).toBeNull();
     expect(watchRefusedNow({ source: 'watch', watch_config: '{not json' }, ctx('deny-all'))).toBeNull();
     expect(watchRefusedNow(watch(''), ctx('deny-all'))).toBeNull();
     expect(watchRefusedNow(watch('ftp://other.example/p'), ctx('allow-list'))).toBeNull();
