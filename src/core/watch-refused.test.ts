@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { watchRefusedNow } from './task-manager.js';
+import { watchPolicyRefusal, watchRefusedNow } from './task-manager.js';
 
 // What the Triggers view is told about a watch the network policy keeps from its page (U-392): the
 // policy's own reason, computed from the policy as it is now, the same check the poll runs.
@@ -24,6 +24,23 @@ describe('watchRefusedNow', () => {
     expect(watchRefusedNow(watch('http://listed.example/p'), ctx('deny-all', true))).toEqual({ kind: 'watch_deny_all' });
     expect(watchRefusedNow(watch('http://other.example/p'), ctx('allow-list', true))).toEqual({ kind: 'watch_allow_list', host: 'other.example' });
     expect(watchRefusedNow(watch('http://listed.example/p'), ctx('allow-list', true))).toEqual({ kind: 'watch_https' });
+    expect(watchRefusedNow(watch('HTTP://user:pw@other.example/p'), ctx('allow-list', true))).toEqual({ kind: 'watch_allow_list', host: 'other.example' });
+  });
+
+  it('tells the model both steps when the https address would be refused too', () => {
+    expect(watchPolicyRefusal('http://other.example/p', ctx('allow-list', true))).toEqual({
+      why: "its host other.example is not in this instance's network allow-list.",
+      wayOut: 'The operator can add the host to the allow-list (network_policy). The watch also needs the https:// address, since this instance only reads HTTPS pages (enforce_https).',
+      shown: { kind: 'watch_allow_list', host: 'other.example' },
+    });
+    expect(watchPolicyRefusal('http://listed.example/p', ctx('deny-all', true))).toEqual({
+      why: "this instance's network_policy is deny-all, so lynox reads no web page.",
+      wayOut: 'Only the operator can change network_policy. The watch also needs the https:// address, since this instance only reads HTTPS pages (enforce_https).',
+      shown: { kind: 'watch_deny_all' },
+    });
+    expect(watchPolicyRefusal('http://listed.example/p', ctx('allow-list', true))).toEqual({
+      why: 'this instance only reads HTTPS pages (enforce_https).', wayOut: 'Watch the https:// address instead.', shown: { kind: 'watch_https' },
+    });
   });
 
   it('says nothing for a page that is read', () => {
