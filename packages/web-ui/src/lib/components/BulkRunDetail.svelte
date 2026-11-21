@@ -59,7 +59,7 @@
 		return { ok: res.ok, status: res.status, body };
 	}
 
-	type PostBody = { error?: string; id?: string; code?: string; supersedable?: { id: string; costUsd: number } };
+	type PostBody = { error?: string; id?: string; code?: string; checksum?: string; supersedable?: { id: string; costUsd: number } };
 	function post(path: string, body?: unknown): Promise<{ ok: boolean; status: number; body: PostBody }> {
 		return json(path, {
 			method: 'POST',
@@ -268,13 +268,17 @@
 	/** After a toggle the run is asked for again — its counts and the checksum the approval
 	 *  presents moved — but of its targets only the toggled one changed: it is marked here instead
 	 *  of every page being loaded again. False where the run is no longer the preview this page
-	 *  shows, could not be read, or moved by more than this toggle (another view took a target out
-	 *  or put one back meanwhile, so another row would be stale); the caller then loads it whole. */
-	async function afterToggle(id: string, seq: number, deselected: boolean): Promise<boolean> {
+	 *  shows, could not be read, or is not the run the toggle answered: its checksum differs from
+	 *  the one the toggle returned, so another view moved a target since (even a pair that cancels
+	 *  out, which the counts cannot tell) and another row would be stale. The caller then loads it
+	 *  whole. The toggle's compare-and-set proved the page showed the run before it, so a run with
+	 *  the toggle's checksum is exactly what the page shows plus this toggle. */
+	async function afterToggle(id: string, seq: number, deselected: boolean, checksum: string | undefined): Promise<boolean> {
 		const before = run;
 		const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(id)}`);
 		// A refused or failed ask carries no run, so no phase `previewed`.
 		if (id !== runId || run !== before || before === null || r.body.phase !== 'previewed' || r.body.total !== before.total) return false;
+		if (checksum === undefined || r.body.checksum !== checksum) return false;
 		if (r.body.deselected !== before.deselected + (deselected ? 1 : -1)) return false;
 		run = r.body;
 		targets = targets.map((x) => (x.seq === seq ? { ...x, deselected } : x));
@@ -305,7 +309,12 @@
 					const code = r.body.code;
 					if (!r.ok && code !== undefined && BULK_DESELECT_REFUSALS.includes(code)) actionError = t(`bulk.deselect.refused.${code}`);
 					else if (!r.ok) actionError = refusalOf(r) ?? t('common.load_failed');
-					else if (!(await afterToggle(id, target.seq, deselect)) && runId === id) await load();
+					else {
+						// A run that could not be read after the toggle is loaded whole: the page never
+						// keeps the checksum from before a toggle that went through.
+						const marked = await afterToggle(id, target.seq, deselect, r.body.checksum).catch(() => false);
+						if (!marked && runId === id) await load();
+					}
 				}
 			}
 		} catch {
