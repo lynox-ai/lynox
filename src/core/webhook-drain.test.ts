@@ -515,6 +515,7 @@ describe('the webhook drain', () => {
       await vi.waitFor(() => expect(second).not.toBe(''), { timeout: 5_000 });
       expect(tm.getTrigger(t)!.last_run_status, 'the refusal was recorded').toBe('not_run');
       finish({ ok: true, status: 'completed', runId: 'run-1' });
+      await vi.waitFor(() => expect(eventOf(t, first).state, 'the running event ends as its run did').toBe('done'), { timeout: 5_000 });
       await settled(t, first, 'done');
       expect(runner.run).toHaveBeenCalledTimes(1);
       expect(tm.getTrigger(t)!.last_run_status, 'the run is recorded as it ended').toBe('success');
