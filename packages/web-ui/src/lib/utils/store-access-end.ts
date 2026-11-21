@@ -6,7 +6,6 @@
  * without web push sees it in the app before the end.
  */
 
-import { localDay } from './provider-revocation.js';
 
 export interface StoreAccessEnd {
 	host: string;
@@ -38,7 +37,7 @@ export function storeAccessShown(profile: StoreAccessProfile, now: Date, locale:
 	const known = !Number.isNaN(at);
 	const ended = end.ended === true || profile.oauth_grant?.state === 'refresh-dead' || (known && at <= now.getTime());
 	if (!ended && !known) return null;
-	return { kind: ended ? 'ended' : 'soon', profileId: profile.id, host: end.host, date: known ? localDay(end.at!, locale) : '', mayConnect: profile.reader_may_connect !== false };
+	return { kind: ended ? 'ended' : 'soon', profileId: profile.id, host: end.host, date: known ? longDay(end.at!, locale) : '', mayConnect: profile.reader_may_connect !== false };
 }
 
 /** A sentence split at `{host}`, with its other placeholders filled: the host goes between the parts. */
@@ -53,4 +52,13 @@ export function hostParts(sentence: string): { before: string; after: string } {
  */
 export function hostSegments(host: string): string[] {
 	return host.split(/(?<=\.)/);
+}
+
+/**
+ * A deadline's day with the month's name, in the reader's time zone (U-391): `5. Dezember 2026`,
+ * `December 5, 2026`. Never in digits alone: `05/12/2026` reads as May 12 to an American reader.
+ */
+export function longDay(iso: string, locale: 'de' | 'en'): string {
+	// Held together by no-break spaces: a line never ends between the day and its month.
+	return new Date(iso).toLocaleDateString(locale === 'de' ? 'de-CH' : 'en-US', { day: 'numeric', month: 'long', year: 'numeric' }).replace(/ /g, '\u00a0');
 }

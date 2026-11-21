@@ -23,7 +23,7 @@ vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
 // Ends at noon UTC, so the day is the same in every time zone within 12 hours of UTC (the test runs
 // in UTC or Central Europe); the dates are written out, not derived the way the page derives them.
 const soonIso = '2099-01-20T12:00:00.000Z';
-const SOON = { de: '20.01.2099', en: '20/01/2099' };
+const SOON = { de: '20. Januar 2099', en: 'January 20, 2099' };
 const pastIso = '2020-03-04T12:00:00.000Z';
 
 /** A store as the engine sends it: `ended` from the engine, which the page also reads off the end. */
@@ -91,6 +91,8 @@ describe('the shell banner of a store whose access runs out', () => {
 			`${W('beta-shop.')}<wbr>${W('myshopify.')}<wbr>${W('com')}`,
 		]);
 		expect(all('store-access-host').every((h) => !h.className.includes('break-all'))).toBe(true);
+		// The box moves to the next line whole when the host fits on one (U-391).
+		expect(all('store-access-host').every((h) => h.classList.contains('inline-block') && h.classList.contains('max-w-full'))).toBe(true);
 		expect(all('store-access-reconnect').map((a) => (a.getAttribute('href') ?? '').replace(/^.*\/oauth\/connect\//, ''))).toEqual(['a', 'b']);
 		expect(all('store-access-reconnect').every((a) => (a.getAttribute('href') ?? '').includes('/oauth/connect/'))).toBe(true);
 		expect(all('store-access-reconnect').every((a) => a.hasAttribute('data-sveltekit-reload'))).toBe(true);

@@ -8,7 +8,8 @@
 
 	// The owner's line per store whose access runs out soon or has (U-391): without web push the
 	// owner learns of it here, before the end, and not only when a run halts. Hidden until the next
-	// load at most, never for good: the end would come unnoticed again. Shown once the server named
+	// load at most, never for good: the end would come unnoticed again. The host's box moves to the
+	// next line whole; only a host longer than a line breaks in it, after a dot. Shown once the server named
 	// the session the owner's, also when that answer comes late (a retry).
 	let profiles = $state<StoreAccessProfile[]>([]);
 	let dismissed = $state(false);
@@ -42,7 +43,7 @@
 			{#each lines as line (line.profileId)}
 				{@const parts = hostParts(tf(line.kind === 'soon' ? 'store_access.banner_soon' : 'store_access.banner_ended', { date: line.date, host: '{host}' }))}
 				<li class="flex items-center gap-3 flex-wrap text-[12px] text-warning" data-testid="store-access-line">
-					<span class="min-w-0 break-words">{parts.before}<span class="font-mono rounded-[var(--radius-sm)] bg-bg-muted px-1 py-0.5 text-text" data-testid="store-access-host">{#each hostSegments(line.host) as seg, i (i)}{#if i > 0}<wbr />{/if}<span class="whitespace-nowrap">{seg}</span>{/each}</span>{parts.after}</span>
+					<span class="min-w-0 break-words">{parts.before}<span class="inline-block max-w-full font-mono rounded-[var(--radius-sm)] bg-bg-muted px-1 py-0.5 text-text" data-testid="store-access-host">{#each hostSegments(line.host) as seg, i (i)}{#if i > 0}<wbr />{/if}<span class="whitespace-nowrap">{seg}</span>{/each}</span>{parts.after}</span>
 					<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
 					<a href={connectHref(getApiBase(), line.profileId)} data-sveltekit-reload data-testid="store-access-reconnect"
 						class="shrink-0 rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1 text-[12px] text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
