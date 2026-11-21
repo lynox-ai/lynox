@@ -4087,7 +4087,7 @@ export class WorkerLoop {
     const refusedBy = watchPolicyRefusal(config.url, this.engine.getToolContext());
     if (refusedBy !== null) {
       const taskManager = this.engine.getTaskManager();
-      if (taskManager) this.#recordRun(taskManager, task.id, `The watched page was not read: ${refusedBy}`, 'failed');
+      if (taskManager) this.#recordRun(taskManager, task.id, `The watched page was not read: ${refusedBy.why}${refusedBy.wayOut === '' ? '' : ` ${refusedBy.wayOut}`}`, 'failed');
       return;
     }
 

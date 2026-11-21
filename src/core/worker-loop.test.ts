@@ -574,11 +574,17 @@ describe('WorkerLoop', () => {
     await fire(makeTask({ id: 't-pol', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://other.test/p', interval_minutes: 60 }) }));
     expect(mockFetchPinned).not.toHaveBeenCalled();
     expect(engine.createSession).not.toHaveBeenCalled();
-    expect(JSON.stringify(vi.mocked(taskManager.recordTaskRun).mock.calls)).toContain("The watched page was not read: its host other.test is not in this instance's network allow-list (network_policy allow-list).");
+    const recorded = (): unknown[] => vi.mocked(taskManager.recordTaskRun).mock.calls.map((c) => c[1]);
+    expect(recorded()).toContain("The watched page was not read: its host other.test is not in this instance's network allow-list. The operator can add the host to the allow-list (network_policy).");
     policy = { ...policy, networkPolicy: 'deny-all' };
     await fire(makeTask({ id: 't-pol2', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://listed.test/p', interval_minutes: 60 }) }));
     expect(mockFetchPinned).not.toHaveBeenCalled();
-    expect(JSON.stringify(vi.mocked(taskManager.recordTaskRun).mock.calls)).toContain("The watched page was not read: this instance's network_policy is deny-all, which reads no page.");
+    expect(recorded()).toContain("The watched page was not read: this instance's network_policy is deny-all, so lynox reads no web page. Only the operator can change network_policy.");
+    policy = { ...policy, networkPolicy: 'guarded', enforceHttps: true };
+    await fire(makeTask({ id: 't-pol2b', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'http://listed.test/p', interval_minutes: 60 }) }));
+    expect(mockFetchPinned).not.toHaveBeenCalled();
+    expect(recorded()).toContain('The watched page was not read: this instance only reads HTTPS pages (enforce_https). Watch the https:// address instead.');
+    policy = { ...policy, enforceHttps: false };
     policy = { ...policy, networkPolicy: 'allow-list' };
     // Control: the list's own host is requested (the page answers 500, so the check ends there).
     mockFetchPinned.mockResolvedValueOnce(new Response('down', { status: 500 }));

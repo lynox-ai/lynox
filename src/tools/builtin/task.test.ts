@@ -339,13 +339,13 @@ describe('Task Tools', () => {
         return a;
       };
       expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'https://other.example/p' }, withPolicy('allow-list')))
-        .toBe("Error: watch_url not watched: its host other.example is not in this instance's network allow-list (network_policy allow-list). No watch was created.");
+        .toBe("Error: watch_url not watched: its host other.example is not in this instance's network allow-list. No watch was created. The operator can add the host to the allow-list (network_policy).");
       expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'https://listed.example/p' }, withPolicy('deny-all')))
-        .toBe("Error: watch_url not watched: this instance's network_policy is deny-all, which reads no page. No watch was created.");
+        .toBe("Error: watch_url not watched: this instance's network_policy is deny-all, so lynox reads no web page. No watch was created. Only the operator can change network_policy.");
       const https = makeAgent();
       Object.assign(https.toolContext, { networkPolicy: 'guarded', enforceHttps: true });
       expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'http://other.example/p' }, https))
-        .toBe("Error: watch_url not watched: this instance's network settings refuse it: HTTP not allowed — enforce_https is enabled. Use HTTPS. No watch was created.");
+        .toBe('Error: watch_url not watched: this instance only reads HTTPS pages (enforce_https). No watch was created. Watch the https:// address instead.');
       for (const watch_url of ['ftp://other.example/p', 'not a url']) {
         expect(await taskCreateTool.handler({ title: 'Watch', watch_url }, withPolicy('guarded')))
           .toBe('Error: watch_url not watched: it is not an http or https address. No watch was created.');

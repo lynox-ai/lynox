@@ -605,7 +605,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         if (readAddressWrites(input.watch_url)) return `Error: watch_url ${WATCH_OVERRIDE_REFUSAL} No watch was created. Pass the address of the page without the override or the mutation.`;
         // A watch the policy forbids is not created only to fail on every poll.
         const refusedBy = watchPolicyRefusal(input.watch_url, agent.toolContext);
-        if (refusedBy !== null) return `Error: watch_url not watched: ${refusedBy} No watch was created.`;
+        if (refusedBy !== null) return `Error: watch_url not watched: ${refusedBy.why} No watch was created.${refusedBy.wayOut === '' ? '' : ` ${refusedBy.wayOut}`}`;
         // Floor the interval at 5 min: the JSON-schema `minimum` is only advisory
         // for an LLM-supplied arg, so clamp defensively to bound fetch + LLM spend.
         const intervalMinutes = Math.max(5, input.watch_interval_minutes ?? 60);

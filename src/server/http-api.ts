@@ -150,7 +150,7 @@ import { requestLogUrl } from './request-log-url.js';
 import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
 import { EngineLessRefused } from '../core/engine-less-refusal.js';
-import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
+import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager, watchRefusedNow, type BlockedReason } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -9319,6 +9319,15 @@ export class LynoxHTTPApi {
         ? taskManager.listTriggers({ paused: true })
         : taskManager.listTriggers(status ? { status } : undefined);
       const bulkLedgerForList = engine.getBulkLedger() ?? engine.getBulkLedgerSwitchedOff?.() ?? null;
+      const policyContext = engine.getToolContext();
+      const refusedWatch = (trigger: TriggerRecord): { blocked_reason: BlockedReason } | null => {
+        try {
+          const refused = watchRefusedNow(trigger, policyContext);
+          return refused === null ? null : { blocked_reason: refused };
+        } catch {
+          return null;
+        }
+      };
       const triggers = rows
         .map((trigger) => {
           const starter = loop?.runningStarterTag(trigger.id);
@@ -9348,6 +9357,9 @@ export class LynoxHTTPApi {
             recipients_unconfirmed: isOwnerPrincipal(principal) && recipientsConfirmable(trigger)
               && (trigger.effect === undefined || trigger.effect === null || trigger.effect === 'run_agent' || trigger.effect === 'run_workflow'),
             ...(isBulk ? { bulk_host: bulkSystem === undefined ? null : externalHostOf(bulkSystem) } : {}),
+            // A watch the instance's network_policy keeps from its page, and why, as the poll would
+            // refuse it now: the view says so, with the way out (U-392).
+            ...(refusedWatch(trigger) ?? {}),
           };
         });
       // What the owner's stamp of each confirmed plan lists, and how each entry stands (B3), for the

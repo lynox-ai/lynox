@@ -10,6 +10,7 @@
 	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
 	import { endedNotices, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
+	import { blockedReasonParts, type BlockedReason } from '../utils/blocked-reason.js';
 	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
 	import StampConfirm from './StampConfirm.svelte';
 	import RecipientConfirm from './RecipientConfirm.svelte';
@@ -64,6 +65,9 @@
 		paused_ended?: PausedEnded[];
 		// A bulk run's trigger: the host its run works on, or null where it has none (`GET /api/triggers`).
 		bulk_host?: string | null;
+		// Why its run does not do its work, as a cause the view says in its own language
+		// (`GET /api/triggers`; a watch the instance's network_policy keeps from its page, U-392).
+		blocked_reason?: BlockedReason;
 		// From before its creator was recorded, nobody else's hand in it: it sends to none of the
 		// recipients it names until the owner confirms them (`GET /api/triggers`, owner only).
 		recipients_unconfirmed?: boolean;
@@ -635,6 +639,13 @@
 									<span class={notice.warn ? 'text-warning' : ''} data-escalation-notice={trigger.last_escalation_outcome}>{t(notice.key)} · {fmtDate(notice.at)}</span>
 								{/if}
 							</div>
+							<!-- Why its run does not do its work, with the way out (a watch the policy keeps from its
+							     page, U-392). The host is set apart as a value, as the plan views set apart what
+							     someone else wrote. -->
+							{#if trigger.blocked_reason}
+								{@const parts = blockedReasonParts(trigger.blocked_reason, t)}
+								<p class="mt-1 text-xs text-warning break-words" data-blocked-reason={trigger.blocked_reason.kind}>{parts.before}{#if parts.host !== null}<bdi data-foreign-value class="rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 box-decoration-clone font-mono">{parts.host}</bdi>{/if}{parts.after}</p>
+							{/if}
 							<!-- A confirmed watch names its page too: its escalation leaves the address out when
 							     someone the owner let in set it up, and points here (PRD B6). -->
 							{#if showsWatchAddress(trigger) && !held(trigger)}
