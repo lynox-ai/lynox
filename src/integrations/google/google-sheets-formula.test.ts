@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
-import { createSheetsTool } from './google-sheets.js';
+import { createSheetsTool, FORMULAS_SHOWN } from './google-sheets.js';
 import { startsLikeFormula, formulaCells, formulasAsText } from './sheets-formula.js';
 import type { IAgent, PromptText } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
@@ -219,7 +219,12 @@ describe('google_sheets after content from outside the chat', () => {
     expect(flattenPrompt(asked(a).prompt).split('\n').slice(-2)).toEqual(['and 1 more', HIDDEN]);
     expect(asked(a).options).toEqual(['Write as text', 'Don’t write']);
     // The sentence is the question's own words, not a value set apart.
-    expect(promptSegments(asked(a).prompt).filter((s) => s.kind === 'value').map((s) => s.text).join(' ')).not.toContain('at most');
+    expect(promptSegments(asked(a).prompt).filter((s) => s.kind === 'value').map((s) => s.text))
+      .toEqual(['A1', 'sid', '6', 'A1', '=1', 'B1', '=2', 'C1', '=3', 'D1', '=4', 'E1', '=5', '1']);
+  });
+
+  it('names in its sentence the number of formulas it shows', () => {
+    expect(HIDDEN).toContain(`write at most ${FORMULAS_SHOWN} at a time`);
   });
 
   it('offers to write formulas when exactly five are shown and none is hidden', async () => {

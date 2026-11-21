@@ -135,7 +135,7 @@ const FORMULA_OPTIONS = [WRITE_AS_TEXT, WRITE_AS_FORMULAS, DONT_WRITE];
  */
 const FORMULA_OPTIONS_SOME_HIDDEN = [WRITE_AS_TEXT, DONT_WRITE];
 /** Formula lines shown before the rest is counted. */
-const FORMULAS_SHOWN = 5;
+export const FORMULAS_SHOWN = 5;
 
 /** The cells of a write or an append that may be read as a formula, in call order. */
 function formulasToShow(input: SheetsInput): FormulaCell[] {
@@ -166,7 +166,7 @@ function formulaNote(formulas: readonly FormulaCell[]): PromptText {
   // With some only counted, the question offers no "Write as formulas" and says why, and how
   // to get it: each call is asked about on its own, so one of at most five shows every formula.
   // The 5 in the sentence is FORMULAS_SHOWN, written out so the sentence stays the question's own
-  // words; the tests hold the two together.
+  // words; a test reads the sentence's number against the constant.
   const more = n > FORMULAS_SHOWN
     ? [pv`and ${n - FORMULAS_SHOWN} more`, pv`Writing as formulas is offered only when every formula is shown here. To write them as formulas, ask in the chat to write at most 5 at a time.`]
     : [];
