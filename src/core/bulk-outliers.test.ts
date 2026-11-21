@@ -421,9 +421,14 @@ describe('markersOf', () => {
       'ev<span hidden style="d\\69splay:inline">il</span>.com', '<p style="display:inline">ev<span hidden="until-found">il</span></p>.com',
       '<span style="color:red display:none">ev<p style="display:inline">il</p></span>.com',
       'ev<math hidden><mtext><p style="display:inline">il</p></mtext></math>.com', '<math hidden><mtext>evil</div>.com</mtext></math>',
-      'ev<span style="display:none/**/;">zz</span>il.com', 'ev<span style="d\\69splay:none">zz</span>il.com']) {
+      'ev<span style="display:none/**/;">zz</span>il.com', 'ev<span style="d\\69splay:none">zz</span>il.com',
+      // Shown: its display wins over hidden. Its host stands before a script, whose text the tag reading keeps.
+      '<span hidden style="display:inline">ev<b>il.com</b><script>x</script><p style="color:red/**/">y</p></span>',
+      `ev<p STYLE="display:inline">il</p><span hidden STYLE="font-family:'A'">x</span>.com`]) {
       expect([...markersOf(text).get('link')!], text).toContain('evil.com');
     }
+    // An element hidden for sure is read in no reading, not even by one that keeps what it cannot decide.
+    expect([...markersOf('ev<span hidden><p style="display:inline">il</p></span>.com').get('link')!]).not.toContain('evil.com');
     for (const text of ['evil<p STYLE="display:inline">.com', 'evil<BR STYLE=display:none>.com', 'evil<p sTyLe=x;display:inline>.com', 'evil<dialog></dialog>.com', 'evil<BR HIDDEN>.com']) {
       expect([...markersOf(text).get('link')!], text).toEqual(['evil.com']);
     }
