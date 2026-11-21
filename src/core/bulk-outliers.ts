@@ -150,7 +150,7 @@ const BLOCK_TAGS = new Set([
 ]);
 
 /** Elements whose content a browser does not show as text. */
-const UNSHOWN = new Set(['script', 'style', 'template', 'noscript', 'noembed', 'noframes', 'rp', 'title', 'head']);
+const UNSHOWN = new Set(['script', 'style', 'template', 'noscript', 'noembed', 'noframes', 'title', 'head']);
 
 /** The tree a browser builds from a text, or null for one beyond what this reads (`withinReadingBounds`):
  *  such a text an HTML field refuses to write, and a plain-text field holds no new tag at all. */
@@ -169,15 +169,20 @@ function styleOf(el: Element): string | null {
   return style === undefined ? null : style.value.replace(/\s+/gu, ' ');
 }
 
-const hasHidden = (el: Element): boolean => defaultTreeAdapter.getAttrList(el).some((a) => a.name === 'hidden');
 
-/** Whether a browser shows nothing of an element: `hidden`, a dialog not open, or a style whose display
- *  is none. A later declaration or a style over `hidden` may show it after all: the reading without
- *  gaps therefore keeps such an element, and only the one with gaps leaves it out. */
+/** Whether a browser shows nothing of an element: `hidden` (not `until-found`), a ruby fallback, a dialog
+ *  not open, or a style whose display is none. A style that sets another display as well, or one this
+ *  cannot read (a quote, a function, an escape, a comment), may show it all the same: then it counts as
+ *  shown. Both readings leave a hidden element out. */
 function shownNot(el: Element): boolean {
   const style = styleOf(el);
-  return hasHidden(el) || (el.tagName === 'dialog' && !defaultTreeAdapter.getAttrList(el).some((a) => a.name === 'open'))
-    || (style !== null && /(?:^|[;\s])display ?: ?none ?(?:! ?important)? ?(?:;|$)/iu.test(style));
+  if (style !== null && (/["'(\\]|\/\*/u.test(style)
+    || [...style.matchAll(/(?:^|;) ?display ?:([^;]*)/giu)].some((m) => !/^ ?none ?(?:! ?important)? ?$/iu.test(m[1]!)))) return false;
+  const attrs = defaultTreeAdapter.getAttrList(el);
+  const hidden = attrs.find((a) => a.name === 'hidden');
+  return (hidden !== undefined && hidden.value.toLowerCase() !== 'until-found')
+    || el.tagName === 'rp' || (el.tagName === 'dialog' && !attrs.some((a) => a.name === 'open'))
+    || (style !== null && /(?:^|;) ?display ?: ?none\b/iu.test(style));
 }
 
 /** Whether a block's own style may show it inline, so that it breaks no line: a display no block has,
@@ -204,7 +209,7 @@ function treeText(tree: HtmlFragment, gapAtInline: boolean): string {
     if (node === ' ') { shown += ' '; continue; }
     if (defaultTreeAdapter.isTextNode(node)) { shown += node.value; continue; }
     if (!defaultTreeAdapter.isElementNode(node)) continue;
-    if (UNSHOWN.has(node.tagName) || (gapAtInline && shownNot(node))) continue;
+    if (UNSHOWN.has(node.tagName) || shownNot(node)) continue;
     const html = node.namespaceURI === p5.NS.HTML;
     const gap = html && BLOCK_TAGS.has(node.tagName) && (gapAtInline || !mayShowInline(node));
     if (gap) { shown += ' '; stack.push(' '); }

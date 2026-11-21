@@ -408,7 +408,11 @@ describe('markersOf', () => {
     expect([...markersOf('<p>Neu<p style="display:inline">evil</p>.com').get('link')!]).toContain('evil.com');
     for (const text of ['evil<script>x</script>.com', 'evil<style>x{}</style>.com', 'evil<div style="float\t:\tleft"></div>.com',
       'ev<p hidden style="display:inline">il</p>.com', 'ev<p style="display:none;display:inline">il</p>.com', '<p style="display:none;display:inline">evil</p>.com',
-      'evil<ruby><rp>(</rp></ruby>.com', 'evil<dialog>x</dialog>.com', 'evil<noembed>x</noembed>.com']) {
+      'evil<ruby><rp>(</rp></ruby>.com', 'evil<dialog>x</dialog>.com', 'evil<noembed>x</noembed>.com',
+      '<li style="display:inline">evil<li hidden></li>.com', 'evil<p hidden>zz</p><p style="display:inline">.com</p>',
+      'evil<p style="display:none">zz</p><p style="display:inline">.com</p>', 'evil<p hidden style="display:inline">.com</p>',
+      'evil<p style="--x: display:none; display:inline">.com</p>', 'evil<rp style="display:inline"><p style="display:inline">.com</p></rp>',
+      'evil<p hidden>zz</p>.com', 'ev<span hidden="until-found">il</span>.com']) {
       expect([...markersOf(text).get('link')!], text).toContain('evil.com');
     }
     for (const text of ['evil<p STYLE="display:inline">.com', 'evil<BR STYLE=display:none>.com', 'evil<p sTyLe=x;display:inline>.com', 'evil<dialog></dialog>.com', 'evil<BR HIDDEN>.com']) {
@@ -560,6 +564,8 @@ describe('markersOf', () => {
 describe('markersOf beyond the tree it reads', () => {
   it('leaves a text beyond the reading bounds to checkMarkup, which refuses to write it', () => {
     const after = '<p>x</p>'.repeat(MARKUP_MAX_TAGS) + 'evil<p hidden></p>.com';
+    // The tree is not read there, so the hidden element still leaves its gap: checkMarkup is what holds.
+    expect([...markersOf(after).get('link')!]).not.toContain('evil.com');
     expect(checkMarkup({ before: '<p>x</p>', after, storeHost: 'moebel-meier.myshopify.com', startDomains: [] }).ok).toBe(false);
   });
 
