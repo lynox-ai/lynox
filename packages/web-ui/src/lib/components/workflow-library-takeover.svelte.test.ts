@@ -218,7 +218,7 @@ describe('the dialog', () => {
 		// The stamp's own part: the fields beside the steps, and the steps.
 		const stamp = d.querySelector<HTMLElement>('[data-takeover-part="stamp"]')!;
 		// The failure strategy by its name, not its stored value.
-		expect(stamp.textContent).toContain('Weitermachen');
+		expect(stamp.querySelector('[data-testid="stamp-on-failure"]')?.textContent?.trim()).toBe('Weitermachen');
 		expect(stamp.textContent).not.toMatch(/\bcontinue\b/);
 		expect(stamp.textContent).toContain('recipient = someone@example.invalid');
 		expect(stamp.querySelectorAll('[data-testid="stamp-step"]').length).toBe(3);

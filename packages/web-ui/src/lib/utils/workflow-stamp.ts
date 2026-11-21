@@ -172,8 +172,10 @@ export function visible(text: string): string {
 }
 
 // The name of each mode and failure strategy the engine knows, as a setting is named, not a promise
-// of how a run goes (a stop, for one, lets the steps of the failed step's phase finish). A value
-// outside these is printed as it came (with hidden characters shown): no name is guessed for it.
+// of how a run goes (a stop, for one, lets the steps of the failed step's phase finish). `notify`
+// carries the name of `continue`: it runs the same and tells no one but a debug log, so a name
+// that promised a report would promise what no run does. A value outside these is printed as it
+// came (with hidden characters shown): no name is guessed for it.
 const MODE_KEYS: ReadonlyMap<string, string> = new Map([
   ['interactive', 'workflow_library.stamp.mode_interactive'],
   ['autonomous', 'workflow_library.stamp.mode_autonomous'],

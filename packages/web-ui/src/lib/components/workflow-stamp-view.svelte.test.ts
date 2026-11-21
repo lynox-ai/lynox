@@ -574,7 +574,7 @@ describe('renaming a workflow (ux U-077)', () => {
 	});
 });
 
-describe('the stamp part reads as sentences, not as stored values', () => {
+describe('the stamp part names settings, and shows no stored value', () => {
 	const twoSteps = (expect: string, postUrl = 'https://other.example/upload', over: Record<string, unknown> = {}): Record<string, unknown> => ({
 		...preview(expect),
 		...over,
@@ -591,7 +591,8 @@ describe('the stamp part reads as sentences, not as stored values', () => {
 	it('names the mode and the failure strategy, and prints neither stored value', async () => {
 		await openStamp(twoSteps('d1', undefined, { mode: 'autonomous', onFailure: 'notify' }));
 		expect(q('stamp-mode')?.textContent?.trim()).toBe('Selbstständig');
-		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Weitermachen und melden');
+		// notify runs as continue does and reports to no one: it is not named as if it reported.
+		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Weitermachen');
 		expect(q('stamp-mode')!.classList.contains('font-mono')).toBe(false);
 		const settings = q('stamp-settings')?.textContent ?? '';
 		expect(settings).not.toMatch(/\bautonomous\b|\bnotify\b/);
@@ -599,7 +600,7 @@ describe('the stamp part reads as sentences, not as stored values', () => {
 
 	it('the other values have their own names', async () => {
 		await openStamp(twoSteps('d1', undefined, { mode: 'interactive', onFailure: 'continue' }));
-		expect(q('stamp-mode')?.textContent?.trim()).toBe('Mit Rückfragen');
+		expect(q('stamp-mode')?.textContent?.trim()).toBe('Mit Fragen an dich');
 		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Weitermachen');
 	});
 
