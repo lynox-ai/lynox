@@ -571,8 +571,8 @@ export function resolveChatContext(
       if (!item) continue;
       // As in the single 'mail' kind: a follow-up in the thread is what a reply answers, so its
       // sender, subject, text and Message-ID take the place of the first mail's. It was not judged
-      // by the check the item's own mail passed, so it is checked here, on every text of it the
-      // row holds: the snippet shown and the body, which a writer may store masked differently.
+      // by the check the item's own mail passed, so it is checked here, on the snippet shown and on
+      // the body, which a writer may store masked differently.
       const followUp = followUpToAnswer(inboxState, item);
       const mail = followUp ?? item;
       const followUpBody = followUp?.bodyMd ?? '';
