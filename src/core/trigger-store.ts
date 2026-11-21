@@ -831,7 +831,11 @@ export class TriggerStore {
     /** What the turn that edits the instruction had taken in (`describeTurnUntrusted`), or
      *  null/absent for a clean one. Read only with a title/description edit; it only ever adds. */
     editedUntrusted?: string | null | undefined;
-  }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
+  }, opts?: {
+    scopeFilter?: Array<{ type: string; id: string }> | undefined;
+    /** Only while this holder holds the trigger's run lease, checked in the same statement. */
+    leaseHolder?: string | undefined;
+  }): boolean {
     const sets: string[] = [];
     const values: unknown[] = [];
     if (params.title !== undefined) { sets.push('title = ?'); values.push(params.title); }
@@ -904,6 +908,10 @@ export class TriggerStore {
     if (scopes && scopes.length > 0) {
       where.push(`(${scopes.map(() => '(scope_type = ? AND scope_id = ?)').join(' OR ')})`);
       for (const s of scopes) { values.push(s.type, s.id); }
+    }
+    if (opts?.leaseHolder !== undefined) {
+      where.push('lease_holder = ?');
+      values.push(opts.leaseHolder);
     }
     return this.db.prepare(`UPDATE triggers SET ${sets.join(', ')} WHERE ${where.join(' AND ')}`).run(...values).changes > 0;
   }
@@ -1237,6 +1245,18 @@ export class TriggerStore {
   renewLease(id: string, holder: string, until: string): boolean {
     return this.db.prepare('UPDATE triggers SET lease_until = ? WHERE id = ? AND lease_holder = ?')
       .run(until, id, holder).changes > 0;
+  }
+
+  /**
+   * Run `fn` only while `holder` holds the trigger's run lease, in one immediate transaction with
+   * the check, so no other process can take the lease over in between. For a run's booking at its
+   * end: a holder another process took the lease from books nothing.
+   */
+  underLease<T>(id: string, holder: string, fn: () => T): { held: true; value: T } | { held: false } {
+    return this.db.transaction((): { held: true; value: T } | { held: false } => {
+      const held = this.db.prepare('SELECT 1 FROM triggers WHERE id = ? AND lease_holder = ?').get(id, holder) !== undefined;
+      return held ? { held: true, value: fn() } : { held: false };
+    }).immediate();
   }
 
   /** Drop the lease once the run has recorded its result. A lease another holder took is left alone. */

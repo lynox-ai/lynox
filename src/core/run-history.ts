@@ -3701,8 +3701,13 @@ export class RunHistory {
     modelTier?: ModelTier | null | undefined;
     /** See `TriggerStore.updateFields`: the mark of the turn that edits the instruction. */
     editedUntrusted?: string | null | undefined;
-  }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
+  }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined; leaseHolder?: string | undefined }): boolean {
     return this._requireTriggerStore().updateFields(id, params, opts);
+  }
+
+  /** See {@link TriggerStore.underLease}. */
+  underTriggerLease<T>(id: string, holder: string, fn: () => T): { held: true; value: T } | { held: false } {
+    return this._requireTriggerStore().underLease(id, holder, fn);
   }
 
   /** Durable wait state (§0 A10): every parked trigger, deadline or not. */

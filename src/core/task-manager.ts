@@ -1112,7 +1112,22 @@ export class TaskManager {
    *   conditions drifted from it (a cron or watch with retries set was never retried here,
    *   and its failures were reported nowhere).
    */
-  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted', opts?: { noRetry?: boolean | undefined; keepSchedule?: boolean | undefined }): boolean {
+  recordTaskRun(
+    id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted',
+    opts?: { noRetry?: boolean | undefined; keepSchedule?: boolean | undefined; leaseHolder?: string | undefined },
+  ): boolean {
+    // @param opts.leaseHolder Book the run only while this holder holds the trigger's run lease,
+    //   in one transaction with the check: for a bulk run, whose loop another engine process may
+    //   have taken over. Nothing is booked, and no retry scheduled, when it does not.
+    const holder = opts?.leaseHolder;
+    if (holder !== undefined) {
+      const booked = this.history.underTriggerLease(id, holder, () => this.#recordTaskRun(id, result, status, opts));
+      return booked.held && booked.value;
+    }
+    return this.#recordTaskRun(id, result, status, opts);
+  }
+
+  #recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted', opts?: { noRetry?: boolean | undefined; keepSchedule?: boolean | undefined }): boolean {
     const task = this.history.getTrigger(id);
     // The schedule was deleted while this run was in flight: deleting removes the row and
     // leaves the run going, so there is nothing left to record the run against.

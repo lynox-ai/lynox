@@ -471,6 +471,35 @@ function claimArg(held: number | null): string[] {
   return held === null ? [] : [new Date(held).toISOString()];
 }
 
+/**
+ * The run lease a write loop works under (`TriggerStore.claimLease`): the trigger it EXECUTES and
+ * the holder id it took that lease as. Every record such a loop makes on its run and its targets
+ * holds this lease in the same statement, so a loop another engine process took the run over
+ * from records nothing further. No time clause: a takeover writes the new holder in the same step
+ * that finds the old lease lapsed, so until then the lapsed holder is still the only loop, and a
+ * process that stood still with nobody taking over writes on, as it always did.
+ */
+export interface BulkLease {
+  readonly triggerId: string;
+  readonly holder: string;
+}
+
+/**
+ * What a fenced record of a write loop reports: recorded (`true`), its own condition did not hold
+ * (`Miss`, the claim for a target's records), or the loop no longer holds its run lease (`lease`).
+ * The lease is asked first: a loop that lost both its claim and its lease has lost the run.
+ */
+export type BulkFenced<Miss extends string = never> = true | Miss | 'lease';
+
+/** The run lease as part of a write's WHERE clause; empty for a caller without one. */
+const LEASE_SQL = 'EXISTS (SELECT 1 FROM triggers WHERE id = ? AND lease_holder = ?)';
+function leaseWhere(lease: BulkLease | null): string {
+  return lease === null ? '' : ` AND ${LEASE_SQL}`;
+}
+function leaseArgs(lease: BulkLease | null): string[] {
+  return lease === null ? [] : [lease.triggerId, lease.holder];
+}
+
 // A target the run found already holding its planned value and never sent to ({@link
 // BulkLedger.recordApplied}, `already`): it counts as applied, but the run changed nothing there.
 // A run from before `unsent_tracked` leaves such a target at `found_unsent = 0`, as written.
@@ -2536,7 +2565,7 @@ export class BulkLedger {
       const blocked = this.writeBlocked(run);
       if (blocked !== null) return blocked;
       const res = db.prepare(
-        `UPDATE bulk_runs SET halt_reason = NULL, expires_at = ?, targets_failed = 0, max_targets = ?
+        `UPDATE bulk_runs SET halt_reason = NULL, stop_requested_at = NULL, expires_at = ?, targets_failed = 0, max_targets = ?
          WHERE id = ? AND phase IN ('approved','writing')`,
       ).run(this.approvalWindow(this.countWriting(runId), now), maxTargets, runId);
       if (res.changes !== 1) return false;
@@ -3499,12 +3528,72 @@ export class BulkLedger {
    * a loop that died. Two loops on one ledger (a restart, a retry, a second trigger)
    * therefore never both write a target.
    */
-  claimTarget(runId: string, seq: number, now: number = Date.now()): boolean {
-    return this.engineDb.getDb().prepare(
+  claimTarget(runId: string, seq: number, now?: number): boolean;
+  /** With the loop's run lease ({@link BulkLease}): `claim` when the target is not to be had. */
+  claimTarget(runId: string, seq: number, now: number, lease: BulkLease): BulkFenced<'claim'>;
+  claimTarget(runId: string, seq: number, now: number, lease: BulkLease | null): boolean | BulkFenced<'claim'>;
+  claimTarget(runId: string, seq: number, now: number = Date.now(), lease: BulkLease | null = null): boolean | BulkFenced<'claim'> {
+    const hit = this.engineDb.getDb().prepare(
       `UPDATE bulk_targets SET claimed_at = ?
        WHERE run_id = ? AND seq = ? AND applied_at IS NULL AND error IS NULL AND undone_at IS NULL
-         AND deselected_at IS NULL AND (claimed_at IS NULL OR claimed_at < ?)`,
-    ).run(new Date(now).toISOString(), runId, seq, staleBefore(now)).changes === 1;
+         AND deselected_at IS NULL AND (claimed_at IS NULL OR claimed_at < ?)${leaseWhere(lease)}`,
+    ).run(new Date(now).toISOString(), runId, seq, staleBefore(now), ...leaseArgs(lease)).changes === 1;
+    return this.fenced(hit, lease, 'claim');
+  }
+
+  /**
+   * Whether this loop still holds its run lease. Read on its own only where a loop reports
+   * what it READ (the run ended or halted by another loop): every write holds it in its own
+   * statement.
+   */
+  holdsLease(lease: BulkLease): boolean {
+    return this.engineDb.getDb().prepare(`SELECT 1 FROM triggers WHERE id = ? AND lease_holder = ?`)
+      .get(lease.triggerId, lease.holder) !== undefined;
+  }
+
+  /** The answer of a fenced write that did or did not land: without a lease the plain boolean,
+   *  with one the reason it missed, the lease asked first. */
+  private fenced<Miss extends string>(hit: boolean, lease: BulkLease | null, miss: Miss): boolean | BulkFenced<Miss> {
+    if (lease === null) return hit;
+    if (hit) return true;
+    return this.holdsLease(lease) ? miss : 'lease';
+  }
+
+  /** The answer of a fenced write whose own miss is no reason (main ignores it): only a lost lease. */
+  private leaseOnly(hit: boolean, lease: BulkLease | null): BulkFenced {
+    return hit || lease === null || this.holdsLease(lease) ? true : 'lease';
+  }
+
+  // ── The owner's stop, as a fact in the ledger ───────────────────────────────
+
+  /**
+   * Record the owner's stop of a run that may still write: approved or writing, not halted, not
+   * stopped already. One conditional UPDATE, written by the stop wherever it is given — a loop
+   * of this run in another process, or in none, reads it between two targets as the loop in this
+   * one does. `arm`: make the run's trigger due now in the same step, for a stop that found no
+   * loop of the run in this process, so a loop takes the stop up and ends the run by it. False
+   * when nothing was recorded.
+   */
+  requestStop(runId: string, opts: { now?: number | undefined; arm?: boolean | undefined } = {}): boolean {
+    const now = opts.now ?? Date.now();
+    const db = this.engineDb.getDb();
+    return db.transaction((): boolean => {
+      const hit = db.prepare(
+        `UPDATE bulk_runs SET stop_requested_at = ?
+           WHERE id = ? AND phase IN ('approved','writing') AND halt_reason IS NULL AND stop_requested_at IS NULL`,
+      ).run(new Date(now).toISOString(), runId).changes === 1;
+      if (hit && opts.arm === true) {
+        const run = this.runRow(runId);
+        if (run) this.armTrigger(run, now);
+      }
+      return hit;
+    })();
+  }
+
+  /** Whether the owner's stop of the run is recorded ({@link requestStop}); a resume clears it. */
+  isStopRequested(runId: string): boolean {
+    return this.engineDb.getDb().prepare('SELECT 1 FROM bulk_runs WHERE id = ? AND stop_requested_at IS NOT NULL')
+      .get(runId) !== undefined;
   }
 
   loadTarget(runId: string, seq: number): ApplyTarget | null {
@@ -3528,6 +3617,21 @@ export class BulkLedger {
    * counter — and, for an undo target, the source target it took back.
    */
   recordApplied(
+    run: Pick<BulkRunForApply, 'id' | 'kind' | 'sourceRunId'>, seq: number, result: string, now?: number,
+    actual?: ActualImage | null, via?: AttachedConnection | null, shopAddedMarkup?: boolean, hostRewrote?: boolean, held?: number | null,
+  ): boolean;
+  /** With the loop's run lease ({@link BulkLease}): `claim` when another loop holds the target. */
+  recordApplied(
+    run: Pick<BulkRunForApply, 'id' | 'kind' | 'sourceRunId'>, seq: number, result: string, now: number,
+    actual: ActualImage | null, via: AttachedConnection | null, shopAddedMarkup: boolean, hostRewrote: boolean, held: number | null,
+    lease: BulkLease,
+  ): BulkFenced<'claim'>;
+  recordApplied(
+    run: Pick<BulkRunForApply, 'id' | 'kind' | 'sourceRunId'>, seq: number, result: string, now: number,
+    actual: ActualImage | null, via: AttachedConnection | null, shopAddedMarkup: boolean, hostRewrote: boolean, held: number | null,
+    lease: BulkLease | null,
+  ): boolean | BulkFenced<'claim'>;
+  recordApplied(
     run: Pick<BulkRunForApply, 'id' | 'kind' | 'sourceRunId'>, seq: number, result: string, now: number = Date.now(),
     actual: ActualImage | null = null,
     /** The connection the target's write stage sent under ({@link noteConnection}, `write_*`). */
@@ -3540,17 +3644,18 @@ export class BulkLedger {
     /** The time the writing loop claimed or last renewed its claim at: recorded only while the
      *  claim is still that loop's, false when another loop holds the target ({@link renewClaim}). */
     held: number | null = null,
-  ): boolean {
+    lease: BulkLease | null = null,
+  ): boolean | BulkFenced<'claim'> {
     const db = this.engineDb.getDb();
     const at = new Date(now).toISOString();
-    return db.transaction((): boolean => {
+    return db.transaction((): boolean | BulkFenced<'claim'> => {
       // `result` through enc() too: for an external target it is the host's own answer
       // class, and nothing about a target is stored in clear.
       const res = db.prepare(
         `UPDATE bulk_targets SET applied_at = ?, result = ?, after_actual = ?, claimed_at = NULL, shop_added_markup = ?, host_rewrote = ?
-           WHERE run_id = ? AND seq = ? AND applied_at IS NULL${held === null ? '' : ' AND claimed_at = ?'}`,
-      ).run(at, this.engineDb.enc(result), actual === null ? null : this.engineDb.enc(JSON.stringify(actual)), shopAddedMarkup ? 1 : 0, hostRewrote ? 1 : 0, run.id, seq, ...claimArg(held));
-      if (res.changes !== 1) return false;
+           WHERE run_id = ? AND seq = ? AND applied_at IS NULL${held === null ? '' : ' AND claimed_at = ?'}${leaseWhere(lease)}`,
+      ).run(at, this.engineDb.enc(result), actual === null ? null : this.engineDb.enc(JSON.stringify(actual)), shopAddedMarkup ? 1 : 0, hostRewrote ? 1 : 0, run.id, seq, ...claimArg(held), ...leaseArgs(lease));
+      if (res.changes !== 1) return this.fenced(false, lease, 'claim');
       this.noteConnection(run.id, seq, 'write', via);
       // Found as planned and never sent to by this run: someone else set the value, so the run
       // changed nothing there ({@link sentCount}, {@link undoEligible}).
@@ -3578,17 +3683,25 @@ export class BulkLedger {
    * recorded with the mark (`write_*`), so a loop that dies before the target is recorded still
    * leaves whose credential reached the host.
    */
+  markSent(runId: string, seq: number, via?: AttachedConnection | null, held?: { since: number; now: number } | null): boolean;
+  /** With the loop's run lease ({@link BulkLease}): `claim` when another loop holds the target. */
+  markSent(runId: string, seq: number, via: AttachedConnection | null, held: { since: number; now: number } | null, lease: BulkLease): BulkFenced<'claim'>;
+  markSent(runId: string, seq: number, via: AttachedConnection | null, held: { since: number; now: number } | null, lease: BulkLease | null): boolean | BulkFenced<'claim'>;
   markSent(
     runId: string, seq: number, via: AttachedConnection | null = null,
     /** The claim this loop holds (the time it claimed or last renewed at), renewed to `now` in
      *  the same step. When the claim is no longer this loop's, nothing is marked and this
      *  returns false: the caller must not send. */
     held: { since: number; now: number } | null = null,
-  ): boolean {
+    lease: BulkLease | null = null,
+  ): boolean | BulkFenced<'claim'> {
     const db = this.engineDb.getDb();
-    return db.transaction((): boolean => {
+    return db.transaction((): boolean | BulkFenced<'claim'> => {
       if (held !== null) {
-        if (!this.renewClaim(runId, seq, held.since, held.now)) return false;
+        const renewed = lease === null ? this.renewClaim(runId, seq, held.since, held.now) : this.renewClaim(runId, seq, held.since, held.now, lease);
+        if (renewed !== true) return renewed;
+      } else if (lease !== null && !this.holdsLease(lease)) {
+        return 'lease';
       }
       // Noted first: `noteConnection` reads a target already marked sent with no write recorded as
       // one sent before v43, and this mark is not that.
@@ -3604,17 +3717,23 @@ export class BulkLedger {
   /** The send just marked was refused by the host (a 4xx other than a timeout, a 429
    *  included), or never left (a blocked address): it did not change the target. Not a
    *  redirect. Called at most once per send. */
-  markRefused(runId: string, seq: number): void {
-    this.engineDb.getDb().prepare('UPDATE bulk_targets SET unknown_sends = unknown_sends - 1 WHERE run_id = ? AND seq = ? AND unknown_sends > 0')
-      .run(runId, seq);
+  markRefused(runId: string, seq: number, lease: BulkLease | null = null): BulkFenced {
+    const hit = this.engineDb.getDb().prepare(`UPDATE bulk_targets SET unknown_sends = unknown_sends - 1 WHERE run_id = ? AND seq = ? AND unknown_sends > 0${leaseWhere(lease)}`)
+      .run(runId, seq, ...leaseArgs(lease)).changes === 1;
+    return this.leaseOnly(hit, lease);
   }
 
   /** Give a claimed target back unwritten, for a loop that stops before writing it. With `held`
    *  (the time the loop claimed or last renewed at), only while the claim is still that loop's;
    *  false when it is not. */
-  releaseClaim(runId: string, seq: number, held: number | null = null): boolean {
-    return this.engineDb.getDb().prepare(`UPDATE bulk_targets SET claimed_at = NULL WHERE run_id = ? AND seq = ? AND applied_at IS NULL${held === null ? '' : ' AND claimed_at = ?'}`)
-      .run(runId, seq, ...claimArg(held)).changes === 1;
+  releaseClaim(runId: string, seq: number, held?: number | null): boolean;
+  /** With the loop's run lease ({@link BulkLease}): `claim` when another loop holds the target. */
+  releaseClaim(runId: string, seq: number, held: number | null, lease: BulkLease): BulkFenced<'claim'>;
+  releaseClaim(runId: string, seq: number, held: number | null, lease: BulkLease | null): boolean | BulkFenced<'claim'>;
+  releaseClaim(runId: string, seq: number, held: number | null = null, lease: BulkLease | null = null): boolean | BulkFenced<'claim'> {
+    const hit = this.engineDb.getDb().prepare(`UPDATE bulk_targets SET claimed_at = NULL WHERE run_id = ? AND seq = ? AND applied_at IS NULL${held === null ? '' : ' AND claimed_at = ?'}${leaseWhere(lease)}`)
+      .run(runId, seq, ...claimArg(held), ...leaseArgs(lease)).changes === 1;
+    return this.fenced(hit, lease, 'claim');
   }
 
   /**
@@ -3622,32 +3741,42 @@ export class BulkLedger {
    * renewed at) to `now`. False when the claim is no longer that loop's — another loop took it
    * over, or it was given back — and the loop must then send and record nothing more there.
    */
-  renewClaim(runId: string, seq: number, since: number, now: number): boolean {
-    return this.engineDb.getDb().prepare('UPDATE bulk_targets SET claimed_at = ? WHERE run_id = ? AND seq = ? AND claimed_at = ? AND applied_at IS NULL')
-      .run(new Date(now).toISOString(), runId, seq, new Date(since).toISOString()).changes === 1;
+  renewClaim(runId: string, seq: number, since: number, now: number): boolean;
+  /** With the loop's run lease ({@link BulkLease}): `claim` when the claim is no longer this loop's. */
+  renewClaim(runId: string, seq: number, since: number, now: number, lease: BulkLease): BulkFenced<'claim'>;
+  renewClaim(runId: string, seq: number, since: number, now: number, lease: BulkLease | null): boolean | BulkFenced<'claim'>;
+  renewClaim(runId: string, seq: number, since: number, now: number, lease: BulkLease | null = null): boolean | BulkFenced<'claim'> {
+    const hit = this.engineDb.getDb().prepare(`UPDATE bulk_targets SET claimed_at = ? WHERE run_id = ? AND seq = ? AND claimed_at = ? AND applied_at IS NULL${leaseWhere(lease)}`)
+      .run(new Date(now).toISOString(), runId, seq, new Date(since).toISOString(), ...leaseArgs(lease)).changes === 1;
+    return this.fenced(hit, lease, 'claim');
   }
 
   /** Record a target that was not written. A conflict is not counted as a failure: the
    *  target is fine, it just no longer holds the state the run expected. Nor is
    *  `sent_unknown`, which records no new attempt (see {@link WRITE_FAILURES}). */
+  recordFailed(runId: string, seq: number, error: BulkTargetError, via?: AttachedConnection | null, held?: number | null): boolean;
+  /** With the loop's run lease ({@link BulkLease}): `claim` when another loop holds the target. */
+  recordFailed(runId: string, seq: number, error: BulkTargetError, via: AttachedConnection | null, held: number | null, lease: BulkLease): BulkFenced<'claim'>;
+  recordFailed(runId: string, seq: number, error: BulkTargetError, via: AttachedConnection | null, held: number | null, lease: BulkLease | null): boolean | BulkFenced<'claim'>;
   recordFailed(
     runId: string, seq: number, error: BulkTargetError,
     /** The connection of what the target's write stage sent, if anything ({@link noteConnection}). */
     via: AttachedConnection | null = null,
     /** As {@link recordApplied}: only while the claim is still that loop's. */
     held: number | null = null,
-  ): boolean {
+    lease: BulkLease | null = null,
+  ): boolean | BulkFenced<'claim'> {
     const db = this.engineDb.getDb();
     const counted = !(NOT_FAILURES as readonly BulkTargetError[]).includes(error);
-    return db.transaction((): boolean => {
+    return db.transaction((): boolean | BulkFenced<'claim'> => {
       const res = db.prepare(
         // `failed_once` stays NULL on a run approved before it was recorded: one known failure
         // does not make its earlier passes known.
         `UPDATE bulk_targets SET error = ?, claimed_at = NULL,
            failed_once = CASE WHEN ? = 0 OR failed_once IS NULL THEN failed_once ELSE 1 END
-         WHERE run_id = ? AND seq = ? AND applied_at IS NULL${held === null ? '' : ' AND claimed_at = ?'}`,
-      ).run(error, counted ? 1 : 0, runId, seq, ...claimArg(held));
-      if (res.changes !== 1) return false;
+         WHERE run_id = ? AND seq = ? AND applied_at IS NULL${held === null ? '' : ' AND claimed_at = ?'}${leaseWhere(lease)}`,
+      ).run(error, counted ? 1 : 0, runId, seq, ...claimArg(held), ...leaseArgs(lease));
+      if (res.changes !== 1) return this.fenced(false, lease, 'claim');
       this.noteConnection(runId, seq, 'write', via);
       if (counted) db.prepare('UPDATE bulk_runs SET targets_failed = targets_failed + 1 WHERE id = ?').run(runId);
       return true;
@@ -3660,9 +3789,10 @@ export class BulkLedger {
    * it. One left `undone_at` NULL is what the owner's view marks ({@link getPreview} `written`).
    * Not counted as undone: it was never counted as applied either.
    */
-  recordUnrecordedSettled(runId: string, seq: number, now: number = Date.now()): void {
-    this.engineDb.getDb().prepare('UPDATE bulk_targets SET undone_at = ? WHERE run_id = ? AND seq = ? AND applied_at IS NULL AND write_sent = 1')
-      .run(new Date(now).toISOString(), runId, seq);
+  recordUnrecordedSettled(runId: string, seq: number, now: number = Date.now(), lease: BulkLease | null = null): BulkFenced {
+    const hit = this.engineDb.getDb().prepare(`UPDATE bulk_targets SET undone_at = ? WHERE run_id = ? AND seq = ? AND applied_at IS NULL AND write_sent = 1${leaseWhere(lease)}`)
+      .run(new Date(now).toISOString(), runId, seq, ...leaseArgs(lease)).changes === 1;
+    return this.leaseOnly(hit, lease);
   }
 
   /**
@@ -3670,17 +3800,20 @@ export class BulkLedger {
    * undo run the rollback restores what the source wrote, so the source target stands
    * again: its `undone_at` is cleared in the same transaction.
    */
-  recordRolledBack(run: Pick<BulkRunForApply, 'id' | 'kind' | 'sourceRunId'>, seq: number, now: number = Date.now()): void {
+  recordRolledBack(run: Pick<BulkRunForApply, 'id' | 'kind' | 'sourceRunId'>, seq: number, now: number = Date.now(), lease: BulkLease | null = null): BulkFenced {
     const db = this.engineDb.getDb();
-    db.transaction(() => {
-      db.prepare('UPDATE bulk_targets SET undone_at = ? WHERE run_id = ? AND seq = ? AND applied_at IS NOT NULL')
-        .run(new Date(now).toISOString(), run.id, seq);
+    return db.transaction((): BulkFenced => {
+      const hit = db.prepare(`UPDATE bulk_targets SET undone_at = ? WHERE run_id = ? AND seq = ? AND applied_at IS NOT NULL${leaseWhere(lease)}`)
+        .run(new Date(now).toISOString(), run.id, seq, ...leaseArgs(lease)).changes === 1;
+      // A loop that lost its lease records nothing, the source's target included.
+      if (this.leaseOnly(hit, lease) === 'lease') return 'lease';
       if (run.kind === 'undo' && run.sourceRunId !== null) {
         db.prepare(
           `UPDATE bulk_targets SET undone_at = NULL WHERE run_id = ?
              AND seq = (SELECT source_seq FROM bulk_targets WHERE run_id = ? AND seq = ?)`,
         ).run(run.sourceRunId, run.id, seq);
       }
+      return true;
     })();
   }
 
@@ -3711,23 +3844,36 @@ export class BulkLedger {
   }
 
   /** Move the run's phase, only from one of `from`. */
-  setPhase(runId: string, from: readonly BulkPhase[], to: BulkPhase, haltReason: BulkHaltReason | null = null): boolean {
-    return this.engineDb.getDb().prepare(
+  setPhase(runId: string, from: readonly BulkPhase[], to: BulkPhase, haltReason?: BulkHaltReason | null): boolean;
+  /** With the loop's run lease ({@link BulkLease}): `phase` when the run is in none of `from`. */
+  setPhase(runId: string, from: readonly BulkPhase[], to: BulkPhase, haltReason: BulkHaltReason | null, lease: BulkLease): BulkFenced<'phase'>;
+  setPhase(runId: string, from: readonly BulkPhase[], to: BulkPhase, haltReason: BulkHaltReason | null, lease: BulkLease | null): boolean | BulkFenced<'phase'>;
+  setPhase(runId: string, from: readonly BulkPhase[], to: BulkPhase, haltReason: BulkHaltReason | null = null, lease: BulkLease | null = null): boolean | BulkFenced<'phase'> {
+    const hit = this.engineDb.getDb().prepare(
       `UPDATE bulk_runs SET phase = ?, halt_reason = COALESCE(?, halt_reason)
-       WHERE id = ? AND phase IN (${from.map(() => '?').join(',')})`,
-    ).run(to, haltReason, runId, ...from).changes === 1;
+       WHERE id = ? AND phase IN (${from.map(() => '?').join(',')})${leaseWhere(lease)}`,
+    ).run(to, haltReason, runId, ...from, ...leaseArgs(lease)).changes === 1;
+    return this.fenced(hit, lease, 'phase');
   }
 
-  /** Stop the run where it is: the phase stays, the reason is set. */
-  halt(runId: string, reason: BulkHaltReason): void {
-    this.engineDb.getDb().prepare('UPDATE bulk_runs SET halt_reason = ? WHERE id = ?').run(reason, runId);
+  /** Stop the run where it is: the phase stays, the reason is set. With the loop's run lease
+   *  ({@link BulkLease}), only while the loop holds it. */
+  halt(runId: string, reason: BulkHaltReason, lease: BulkLease | null = null): BulkFenced {
+    const hit = this.engineDb.getDb().prepare(`UPDATE bulk_runs SET halt_reason = ? WHERE id = ?${leaseWhere(lease)}`)
+      .run(reason, runId, ...leaseArgs(lease)).changes === 1;
+    return this.leaseOnly(hit, lease);
   }
 
   /** Halt a run only while it still writes and nothing halted it yet: for a loop whose target
    *  another loop took over, which must not overwrite the end that loop gave the run. */
-  haltIfWriting(runId: string, reason: BulkHaltReason): boolean {
-    return this.engineDb.getDb().prepare(`UPDATE bulk_runs SET halt_reason = ? WHERE id = ? AND phase = 'writing' AND halt_reason IS NULL`)
-      .run(reason, runId).changes === 1;
+  haltIfWriting(runId: string, reason: BulkHaltReason): boolean;
+  /** With the loop's run lease ({@link BulkLease}): `ended` when the run no longer writes or is halted. */
+  haltIfWriting(runId: string, reason: BulkHaltReason, lease: BulkLease): BulkFenced<'ended'>;
+  haltIfWriting(runId: string, reason: BulkHaltReason, lease: BulkLease | null): boolean | BulkFenced<'ended'>;
+  haltIfWriting(runId: string, reason: BulkHaltReason, lease: BulkLease | null = null): boolean | BulkFenced<'ended'> {
+    const hit = this.engineDb.getDb().prepare(`UPDATE bulk_runs SET halt_reason = ? WHERE id = ? AND phase = 'writing' AND halt_reason IS NULL${leaseWhere(lease)}`)
+      .run(reason, runId, ...leaseArgs(lease)).changes === 1;
+    return this.fenced(hit, lease, 'ended');
   }
 
   /**
@@ -3735,13 +3881,16 @@ export class BulkLedger {
    * source becomes `undone` once none of what an undo takes back ({@link undoEligible}) is
    * left standing.
    */
-  finish(run: Pick<BulkRunForApply, 'id' | 'kind' | 'sourceRunId'>): void {
+  finish(run: Pick<BulkRunForApply, 'id' | 'kind' | 'sourceRunId'>, lease: BulkLease | null = null): BulkFenced {
     const db = this.engineDb.getDb();
-    db.transaction(() => {
-      db.prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ? AND phase = 'writing'`).run(run.id);
-      if (run.kind !== 'undo' || run.sourceRunId === null) return;
+    return db.transaction((): BulkFenced => {
+      const hit = db.prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ? AND phase = 'writing'${leaseWhere(lease)}`)
+        .run(run.id, ...leaseArgs(lease)).changes === 1;
+      // A loop that lost its lease closes nothing, the source run included.
+      if (this.leaseOnly(hit, lease) === 'lease') return 'lease';
+      if (run.kind !== 'undo' || run.sourceRunId === null) return true;
       const src = this.runRow(run.sourceRunId);
-      if (!src) return;
+      if (!src) return true;
       // Standing is what an undo takes back and has not: for an external source that includes
       // a failed write the undo could not restore (a conflict, or a failed write of its own) —
       // it may hold what the source wrote, so the source is not reported undone.
@@ -3751,6 +3900,7 @@ export class BulkLedger {
       if (standing.n === 0) {
         db.prepare(`UPDATE bulk_runs SET phase = 'undone' WHERE id = ? AND phase IN ('done','aborted','writing')`).run(run.sourceRunId);
       }
+      return true;
     })();
   }
 }

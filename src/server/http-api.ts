@@ -9617,15 +9617,23 @@ export class LynoxHTTPApi {
         return [{ created_by: plan !== undefined && ownedBy({ created_by: plan }, this._principalOf(_req)) ? plan : starter }];
       })) return;
       const outcome = loop.stopTask(id);
+      let via: 'wait' | 'session' | 'signal';
       if (outcome.kind === 'not_running') {
         // Only here does the row matter — and a store that is DOWN cannot support "no
         // such task", which is the one answer a caller will not retry.
         if (!requireService(res, history, 'Run history')) return;
         if (!trigger) { errorResponse(res, 404, 'Task not found'); return; }
-        errorResponse(res, 409, 'That task is not running right now', 'not_running');
-        return;
-      }
-      if (outcome.kind === 'unstoppable') {
+        // A bulk write run whose loop is in no run of this process — waiting for targets another
+        // loop holds, or written by a loop of another engine process — still takes the stop: it is
+        // recorded in the run's ledger, where that loop reads it between two targets, and the
+        // trigger is made due so a loop takes it up. Nothing recorded (not a write run, or one no
+        // longer approved or writing, halted, or stopped already): not running, as before.
+        if (!loop.requestBulkStop(trigger.effect, trigger.bulk_run_id, true)) {
+          errorResponse(res, 409, 'That task is not running right now', 'not_running');
+          return;
+        }
+        via = 'signal';
+      } else if (outcome.kind === 'unstoppable') {
         // ⚠ "through this route", and the qualifier is load-bearing: the run can still end
         // other ways (its own end, the schedule paused), so the refusal says what THIS
         // route cannot do rather than promising the run will finish. The effect is named
@@ -9633,20 +9641,22 @@ export class LynoxHTTPApi {
         // re-capped here, because `errorResponse` already masks secrets and caps the body.
         errorResponse(res, 409, `That task is running, but nothing in its current phase can be interrupted through this route (effect '${outcome.effect}'). Pause the schedule with PATCH {enabled:false} so it does not start again.`, 'unstoppable');
         return;
+      } else {
+        via = outcome.via;
       }
       jsonResponse(res, 202, {
         id,
         requested: true,
-        via: outcome.via,
+        via,
         // One sentence per handle, because each reaches something different.
         //
         // ⚠ `session` says "requested", not "delivered": that handle reaches a model call
         // in flight, and between calls there is none, so the run can still finish on its
         // own. What does persist is the aborted controller, so if it asks a question
         // next, the question is dismissed and the run is recorded stopped.
-        note: outcome.via === 'wait'
+        note: via === 'wait'
           ? 'The run was parked on a question; the wait has been ended.'
-          : outcome.via === 'signal'
+          : via === 'signal'
             ? 'The stop was requested. A bulk write stops before its next target, after the one being written is recorded; a bulk preview stops its read. Either is halted for a resume, and an atomic write is rolled back instead. A scheduled workflow stops before its next step, and its step agents in flight are aborted. A run whose last target or step was already under way may still finish on its own.'
             : 'The stop was requested. A model call in flight is aborted, and so is a web request in flight; another tool handler already running may finish first, and a run between steps may still finish on its own unless it asks a question first.',
       });

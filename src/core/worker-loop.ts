@@ -179,7 +179,10 @@ const BULK_EFFECTS: ReadonlySet<string> = new Set(Object.keys(BULK_EFFECT_KEYS))
  * a run stalled long enough to lose its lease has stale target claims too, and the other
  * process may take its targets over. Once the stalled run runs again it sends no further write
  * to a target taken from it and records nothing on it (`BulkLedger.renewClaim`); a send it had
- * already started when it stalled can still land, and between targets it goes on as before.
+ * already started when it stalled can still land. A bulk write run records nothing at all once
+ * another process holds its lease: every record holds the lease in the same statement
+ * (`BulkLease`), and the loop ends without booking its trigger. A run whose lease lapsed with
+ * nobody taking it over still holds it, and writes on.
  */
 const LEASE_HEARTBEAT_MS = 30_000;
 const LEASE_TTL_MS = 15 * 60_000;
@@ -385,6 +388,8 @@ export interface RunStarterSlot {
   accessEnded?: boolean | undefined;
   /** Recorded as a paused plan's run: the schedule kept, and the tick tells the owner. */
   endedPaused?: boolean | undefined;
+  /** The run's effect. A bulk run's end is booked only under its run lease (`#recordRun`). */
+  effect?: string | undefined;
 }
 
 /** What a run's end is recorded as (`TaskManager.recordTaskRun`). */
@@ -432,6 +437,8 @@ function endEvent(slot: RunStarterSlot | undefined, outcome: EventOutcome): void
  *  store id of the prompt this task is currently parked on. */
 export interface ActiveTask {
   controller: AbortController;
+  /** The bulk run a bulk effect works on: where `stopTask` records the owner's stop of a write run. */
+  bulkRunId?: string | undefined;
   /** The event this run is for, when the webhook drain started it ({@link SlotEvent}). */
   event?: SlotEvent | undefined;
   /** The member-connection lines the run noted, set at its dispatch (`RunStarterSlot.memberNotes`). */
@@ -475,6 +482,12 @@ export interface ActiveTask {
    * other direction.
    */
   stopRequested?: boolean | undefined;
+  /**
+   * A stop of a bulk write run whose mark the ledger refused (`stopTask`): the loop of this run in
+   * this process stops on it as on the mark. Per run start, so a later run start never meets it; a
+   * resume given while this run start still writes is stopped by it, as the in-process stop always did.
+   */
+  stopMarkFailed?: boolean | undefined;
   /** See {@link RunStarterSlot.accessEnded}. */
   accessEnded?: boolean | undefined;
   /** See {@link RunStarterSlot.endedPaused}. */
@@ -862,7 +875,13 @@ export class WorkerLoop {
     // A webhook run's event takes the end where nothing more specific was set: lynox's own
     // sentence, or the masked error of a run that threw.
     endEvent(slot ?? live, status === 'success' ? { state: 'done' } : { state: 'failed', reason: result });
-    const record = { ...(startedByOther(slot) ? { noRetry: true } : {}), ...(opts?.keepSchedule === true ? { keepSchedule: true } : {}) };
+    // A bulk run's end is booked only while this loop holds the run's lease: a loop another engine
+    // process took the run over from neither ends nor re-arms the trigger that loop runs under.
+    const bulk = BULK_EFFECTS.has(slot?.effect ?? live?.effect ?? '');
+    const record = {
+      ...(startedByOther(slot) ? { noRetry: true } : {}), ...(opts?.keepSchedule === true ? { keepSchedule: true } : {}),
+      ...(bulk ? { leaseHolder: this.leaseHolder } : {}),
+    };
     return tm?.recordTaskRun(id, result, status, ...(Object.keys(record).length > 0 ? [record] : [])) ?? false;
   }
 
@@ -939,6 +958,17 @@ export class WorkerLoop {
     // failure with a cause of its own — as the owner's stop, in the ledger the owner
     // reads to decide whether to retry. An honest refusal is cheaper than a wrong word.
     if (via === undefined) return { kind: 'unstoppable', effect: active.effect };
+    // A bulk write run reads the owner's stop from its ledger, where a loop in another process
+    // reads it too: recorded before anything is aborted. A store that refuses the write must not
+    // cost the aborts below, nor the stops of the other tasks a sweep goes on to: it is reported,
+    // and the run's loop in this process stops on `stopMarkFailed` as it would on the mark.
+    try {
+      this.requestBulkStop(active.effect, active.bulkRunId);
+    } catch (err: unknown) {
+      active.stopMarkFailed = true;
+      const reduce = errorTextReduced(this.engine.getToolContext().containment, { bulkRunId: active.bulkRunId });
+      process.stderr.write(`[lynox:worker] recording the stop of "${taskId}" in its ledger threw: ${errorText(err, reduce)}\n`);
+    }
     active.stopRequested = true;
     active.ownerStop.abort();
     try {
@@ -2029,7 +2059,7 @@ export class WorkerLoop {
     // Registered before anything awaits, so a second tick sees the run. The schedule's mandate
     // is known from the row; the workflow's is read inside the run, before the access gate.
     const entry: ActiveTask = {
-      controller, ownerStop: new AbortController(), effect: task.effect, pauseDeadline, resumeDeadline, handRun, starter,
+      controller, ownerStop: new AbortController(), effect: task.effect, bulkRunId: task.bulk_run_id, pauseDeadline, resumeDeadline, handRun, starter,
       planMembers: planMembers(planMandate(planAuthorshipOf(task)), undefined).members, event,
     };
     this.activeTasks.set(task.id, entry);
@@ -2201,10 +2231,11 @@ export class WorkerLoop {
               // consent is the approval route that armed this trigger (PRD
               // bulk-changes-reversible §3.4); the handler refuses any run that is not
               // approved, inside its window and matching the approved checksum.
-              // `runBulkEffect` reads the signal between targets, so for this effect too the
-              // controller is the stop handle — set at the hand-over, as for `bulk_preview`.
+              // A stop reaches it between targets: `stopTask` records the owner's stop in the run's
+              // ledger (`BulkLedger.requestStop`), which `runBulkEffect` reads there. The flag is
+              // set at the hand-over, as for `bulk_preview`, so the route answers a stop here.
               entry.readsSignal = true;
-              await this.executeBulk(task, effect, controller.signal, () => entry.stopRequested === true);
+              await this.executeBulk(task, effect, () => entry.stopMarkFailed === true);
               break;
             case 'bulk_preview':
               // Deterministic: reads a planned external run's targets into its ledger and
@@ -2424,10 +2455,24 @@ export class WorkerLoop {
    * instead would leave a run that was waiting between ticks unhalted with its trigger spent,
    * and an atomic one half written. Null ledger only without engine.db.
    */
-  private bulkTick(signal: AbortSignal, ownerStopped: () => boolean): { ledger: ReturnType<Engine['getBulkLedger']>; signal: AbortSignal; ownerStopped: () => boolean } {
+  private bulkTick(signal: AbortSignal, ownerStopped: () => boolean): { ledger: ReturnType<Engine['getBulkLedger']>; signal: AbortSignal; ownerStopped: () => boolean; switchedOff: boolean } {
     const live = this.engine.getBulkLedger();
-    if (live) return { ledger: live, signal, ownerStopped };
-    return { ledger: this.engine.getBulkLedgerSwitchedOff?.() ?? null, signal: AbortSignal.abort(), ownerStopped: () => true };
+    if (live) return { ledger: live, signal, ownerStopped, switchedOff: false };
+    return { ledger: this.engine.getBulkLedgerSwitchedOff?.() ?? null, signal: AbortSignal.abort(), ownerStopped: () => true, switchedOff: true };
+  }
+
+  /**
+   * Record the owner's stop of a bulk WRITE run in its ledger (`BulkLedger.requestStop`), where its
+   * loop reads it, in this process or another. Only for `bulk_apply` and `bulk_undo` (the trigger
+   * `bulk-<id>`): the read phase under `bulk-preview-<id>` keeps its own stop. `arm`: the stop
+   * found no loop of the run in this process, so the run's trigger is made due now and a loop
+   * takes the stop up. False when nothing was recorded — not a write run, no ledger, or the run
+   * no longer stoppable (not approved or writing, halted, or stopped already).
+   */
+  requestBulkStop(effect: string, runId: string | undefined, arm = false): boolean {
+    if ((effect !== 'bulk_apply' && effect !== 'bulk_undo') || runId === undefined) return false;
+    const ledger = this.engine.getBulkLedger() ?? this.engine.getBulkLedgerSwitchedOff?.() ?? null;
+    return ledger?.requestStop(runId, { arm }) ?? false;
   }
 
   /**
@@ -2436,12 +2481,15 @@ export class WorkerLoop {
    * trigger — a halt waits for a human to resume it through the approval route, and so
    * does the owner's stop, which ends the run between two targets.
    */
-  private async executeBulk(task: TriggerRecord, effect: BulkWriteEffect, liveSignal: AbortSignal, liveStopped: () => boolean): Promise<void> {
-    const { ledger, signal, ownerStopped } = this.bulkTick(liveSignal, liveStopped);
+  private async executeBulk(task: TriggerRecord, effect: BulkWriteEffect, stopMarkFailed: () => boolean = () => false): Promise<void> {
+    // The live signal is not read here: the run reads the owner's stop from its ledger.
+    const { ledger, switchedOff } = this.bulkTick(AbortSignal.abort(), () => false);
     if (!ledger || task.bulk_run_id === undefined) {
       this.recordAndNotify(task, this.#bulkNotices().bulkOff, false);
       return;
     }
+    // Bulk runs are off: the tick ends the run as the owner's stop ends it, through the same mark.
+    if (switchedOff) ledger.requestStop(task.bulk_run_id);
     const { runBulkEffect, bulkWriterFor, BULK_RETRY_DELAY_MS } = await import('./bulk-apply.js');
     const { externalRunWriter } = await import('./bulk-external-writer.js');
     const dataStore = this.engine.getDataStore();
@@ -2460,8 +2508,9 @@ export class WorkerLoop {
       outcome = await runBulkEffect(task.bulk_run_id, effect, {
         ledger,
         writerFor: (run) => bulkWriterFor(run, dataStore, (r) => externalRunWriter(r, ledger, clientFor)),
-        signal,
-        ownerStopped,
+        // Every record of the run holds this trigger's lease, the one this loop runs under.
+        lease: { triggerId: task.id, holder: this.leaseHolder },
+        stopMarkFailed,
         trailFor: (run) => bulkRunTrail(run, auditLog, trailTools),
         notices: this.#bulkNotices(),
       });
@@ -2477,6 +2526,12 @@ export class WorkerLoop {
       if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) fixed.name = err.name;
       throw fixed;
     }
+    if (outcome.status === 'displaced') {
+      // A loop of another engine process holds the run's lease now and carries the run on: this
+      // one neither books the trigger nor tells the owner, since the run's end is that loop's.
+      process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) lost its run lease to another engine process; this loop stopped writing the run\n`);
+      return;
+    }
     if (outcome.status === 'stopped') {
       // Recorded as the owner's stop, not a failure: no retry, and no notification — the
       // owner is the one who asked. The summary names how many targets were written.
@@ -2488,7 +2543,7 @@ export class WorkerLoop {
       this.engine.getRunHistory()?.updateTrigger(task.id, {
         status: 'open',
         nextRunAt: new Date(Date.now() + BULK_RETRY_DELAY_MS).toISOString(),
-      });
+      }, { leaseHolder: this.leaseHolder });
       return;
     }
     // A halt at the approved maximum is the run doing what it was told: recorded as such,

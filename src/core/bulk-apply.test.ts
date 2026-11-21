@@ -235,7 +235,7 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
     await loop.tick();
     await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalled(), { timeout: 25_000 });
     const said = 'Massenlauf fertig. 3 geschrieben, von 3 Zielen.';
-    expect(recordTaskRun.mock.calls[0]!.slice(1)).toEqual([said, 'success']);
+    expect(recordTaskRun.mock.calls[0]!.slice(1, 3)).toEqual([said, 'success']);
     await vi.waitFor(() => expect(notify).toHaveBeenCalled());
     expect(notify.mock.calls[0]![0].body).toBe(said);
   });
@@ -302,7 +302,7 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as unknown as NotificationRouter, 60_000);
     await loop.tick();
-    await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalledWith('bulk-x', expect.stringContaining('not available'), 'failed'), { timeout: 10_000 });
+    await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalledWith('bulk-x', expect.stringContaining('not available'), 'failed', { leaseHolder: expect.any(String) }), { timeout: 10_000 });
   });
 });
 
@@ -969,7 +969,6 @@ describe('a target taken over by a second loop while the first still runs', () =
     approve(runId, { now: T0 });
     const state = new Map(Object.entries(initial));
     const a = clock(T0);
-    const stop = new AbortController();
     const bHolds = gate();
     const bInRead = gate();
     let bFirst = true;
@@ -986,13 +985,13 @@ describe('a target taken over by a second loop while the first still runs', () =
           a.at = PAST;
           bRun = runBulkEffect(runId, 'bulk_apply', effectDeps(b, () => PAST));
           await bInRead.p;
-          stop.abort(); // the owner stops the run while B holds the first target
+          ledger.requestStop(runId); // the owner stops the run while B holds the first target
         }
         return got;
       },
       async write(key, after) { aWrites++; state.set(key, after.absent ? '' : after.value as string); return 'ok'; },
     };
-    const out = await runBulkEffect(runId, 'bulk_apply', { ...effectDeps(aw, a.now), signal: stop.signal, ownerStopped: () => true });
+    const out = await runBulkEffect(runId, 'bulk_apply', effectDeps(aw, a.now));
     expect(out.status).toBe('stopped');
     expect(aWrites).toBe(0);
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.stoppedByOwner);
@@ -2808,10 +2807,9 @@ describe('a write told to a German owner', () => {
 
     const stopped = recordMemoryRun(4, { atomic: true });
     approve(stopped.runId);
-    const controller = new AbortController();
     const inner = memory(stopped.initial).writer;
-    const stopAfterOne: TargetWriter = { read: (k) => inner.read(k), write: async (k, a) => { const r = await inner.write(k, a); controller.abort(); return r; } };
-    const out = await runBulkEffect(stopped.runId, 'bulk_apply', { ...de(stopAfterOne), signal: controller.signal, ownerStopped: () => true });
+    const stopAfterOne: TargetWriter = { read: (k) => inner.read(k), write: async (k, a) => { const r = await inner.write(k, a); ledger.requestStop(stopped.runId); return r; } };
+    const out = await runBulkEffect(stopped.runId, 'bulk_apply', de(stopAfterOne));
     expect(out.summary).toMatch(/^Massenlauf \(ganz oder gar nicht\) gestoppt und zurückgenommen\. /);
   });
 });

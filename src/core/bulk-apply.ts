@@ -22,7 +22,8 @@ import type { AttachedConnection } from './bulk-connection.js';
 import { coercePlainColumnValue, SYSTEM_COLUMNS } from './data-store.js';
 import {
   BULK_CLAIM_HEARTBEAT_MS, BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, sameValue,
-  type ActualImage, type ApplyTarget, type BeforeImage, type BulkHaltReason, type BulkLedger, type BulkRunForApply, type BulkTargetError,
+  type ActualImage, type ApplyTarget, type BeforeImage, type BulkFenced, type BulkHaltReason, type BulkLease, type BulkLedger, type BulkRunForApply,
+  type BulkTargetError,
 } from './bulk-ledger.js';
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
 import { processUmask } from './workspace-rel.js';
@@ -119,8 +120,11 @@ export interface BulkEffectOutcome {
   /** `pending`: targets are left that another loop holds — try again shortly.
    *  `stopped`: the owner stopped the run between two targets. A non-atomic run is halted
    *  where it stood (a resume carries on, an undo takes back what was written); an atomic
-   *  one was rolled back, as on a failed target. */
-  status: 'done' | 'halted' | 'refused' | 'aborted' | 'pending' | 'stopped';
+   *  one was rolled back, as on a failed target.
+   *  `displaced`: this loop lost its run lease to a loop of another engine process, which
+   *  carries the run on. This one recorded nothing further, and its trigger is not booked:
+   *  the run's end is the other loop's to give. */
+  status: 'done' | 'halted' | 'refused' | 'aborted' | 'pending' | 'stopped' | 'displaced';
   /** Set on a `halted` run that stopped where its approval told it to — its approved maximum
    *  — with no failed write in this pass. The run did what was asked and waits for the owner,
    *  so the trigger records it as `halted`, not as a failure. Every other halt leaves it unset:
@@ -189,15 +193,14 @@ export interface BulkEffectDeps {
   /** How often a loop renews the claim on the target it writes ({@link BULK_CLAIM_HEARTBEAT_MS}).
    *  Set by tests only. */
   claimHeartbeatMs?: number;
-  /** The worker's task signal. Read between targets only, never inside a write. */
-  signal?: AbortSignal | undefined;
+  /** A stop given in this process whose mark the ledger refused: read beside the mark. */
+  stopMarkFailed?: () => boolean;
   /**
-   * Whether the abort on `signal` is the OWNER'S stop. Three things abort that controller —
-   * the owner's stop, the execution deadline and the worker's shutdown — and only the first
-   * is an instruction to end the run; the other two leave it writing as before. Without this
-   * the signal is not read at all.
+   * The run lease this loop works under: the trigger it executes and its holder id. Every record
+   * the loop makes holds it in the same statement, and a loop that lost it ends as `displaced`
+   * at once. Without one (a caller outside the worker), the records are not fenced.
    */
-  ownerStopped?: (() => boolean) | undefined;
+  lease?: BulkLease | undefined;
   /**
    * The actor trail of this call of the run, or null for a run that writes none (PRD
    * customer-granted-operator-access §3.9). Required, so no caller leaves it out by accident:
@@ -251,6 +254,11 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
   }
 }
 
+/** A record's answer with or without a run lease, as one: the unfenced `false` is the record's own miss. */
+function asFenced<Miss extends string>(answer: boolean | BulkFenced<Miss>, miss: Miss): BulkFenced<Miss> {
+  return answer === false ? miss : answer;
+}
+
 async function applyRunEffect(
   runId: string, effect: BulkEffect, deps: BulkEffectDeps, opened: (trail: BulkRunTrail, run: BulkRunForApply) => void,
 ): Promise<BulkEffectOutcome> {
@@ -258,6 +266,7 @@ async function applyRunEffect(
   const say = deps.notices ?? BULK_NOTICES.en;
   const now = deps.now ?? Date.now;
   const heartbeatMs = deps.claimHeartbeatMs ?? BULK_CLAIM_HEARTBEAT_MS;
+  const lease = deps.lease ?? null;
   const run = ledger.getRunForApply(runId);
   if (!run) return { status: 'refused', summary: say.noRun };
   if ((effect === 'bulk_undo') !== (run.kind === 'undo')) {
@@ -270,21 +279,21 @@ async function applyRunEffect(
     return { status: 'refused', summary: summarize(ledger, runId, say.haltedResume, say) };
   }
   if (run.expiresAt === null || now() > Date.parse(run.expiresAt)) {
-    ledger.halt(runId, BULK_HALT_REASONS.expired);
+    if (ledger.halt(runId, BULK_HALT_REASONS.expired, lease) === 'lease') return displaced();
     return { status: 'refused', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.expired), say) };
   }
   if (run.approvalChecksum === null || ledger.computeChecksum(runId) !== run.approvalChecksum) {
-    ledger.halt(runId, BULK_HALT_REASONS.checksum);
+    if (ledger.halt(runId, BULK_HALT_REASONS.checksum, lease) === 'lease') return displaced();
     return { status: 'refused', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.checksum), say) };
   }
   // Approved before the store's bulk runs were switched off: it writes no further.
   if (ledger.isWriteSwitchedOff(runId)) {
-    ledger.halt(runId, BULK_HALT_REASONS.shopifyWriteOff);
+    if (ledger.halt(runId, BULK_HALT_REASONS.shopifyWriteOff, lease) === 'lease') return displaced();
     return { status: 'refused', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.shopifyWriteOff), say) };
   }
   const writer = deps.writerFor(run);
   if (!writer) {
-    ledger.halt(runId, BULK_HALT_REASONS.unavailable);
+    if (ledger.halt(runId, BULK_HALT_REASONS.unavailable, lease) === 'lease') return displaced();
     return { status: 'refused', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.unavailable), say) };
   }
   // Before anything of this call is read or written: a run whose row cannot be written does
@@ -294,12 +303,12 @@ async function applyRunEffect(
     try {
       trail.begin();
     } catch {
-      ledger.halt(runId, BULK_HALT_REASONS.runUnrecorded);
+      if (ledger.halt(runId, BULK_HALT_REASONS.runUnrecorded, lease) === 'lease') return displaced();
       return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.runUnrecorded), say) };
     }
     opened(trail, run);
   }
-  ledger.setPhase(runId, ['approved'], 'writing');
+  if (ledger.setPhase(runId, ['approved'], 'writing', null, lease) === 'lease') return displaced();
 
   const writingTotal = ledger.countWriting(runId);
   // Compared under `htmlEqual` where a value is HTML: a store re-serialises a description.
@@ -325,16 +334,20 @@ async function applyRunEffect(
     // Let other work (and another loop on the same ledger) in between targets.
     await yieldToLoop();
     const current = ledger.getRunForApply(runId);
-    // Another loop on the same ledger closed the run: nothing is left for this one.
-    if (current?.phase === 'done') return { status: 'done', summary: summarize(ledger, runId, say.applyDone, say) };
+    // Another loop on the same ledger closed the run: nothing is left for this one. Read, not
+    // written, so the lease is asked here: a loop that lost it reports neither end, which is the
+    // other loop's to report.
+    if (current?.phase === 'done') return readEnd({ status: 'done', summary: summarize(ledger, runId, say.applyDone, say) });
     if (!current || current.phase !== 'writing' || current.haltReason !== null) {
-      return { status: 'halted', summary: summarize(ledger, runId, say.otherLoop, say) };
+      return readEnd({ status: 'halted', summary: summarize(ledger, runId, say.otherLoop, say) });
     }
     // The owner's stop lands HERE, between targets and never inside a write: a target whose
     // write is under way when the stop arrives is finished and recorded first, so the ledger
     // names every target the host received and an undo or a resume works from it. An atomic
-    // run must not stop half written, so it rolls back as it does on a failed target.
-    if (ownerStopped()) return endStopped();
+    // run must not stop half written, so it rolls back as it does on a failed target. The stop
+    // is the mark in the ledger, which every way of stopping writes ({@link BulkLedger.requestStop}),
+    // so a loop in another process reads it too, and a resumed run is not stopped again.
+    if (stopRequested()) return endStopped();
     // The approval bounds how many different targets receive the verb, not how many writes
     // landed: a failed write may have reached its target. A retry of a target that already
     // had the verb sends it to no new one, so it is not refused here — and a target never sent
@@ -349,12 +362,14 @@ async function applyRunEffect(
       // An atomic run must not stop half written: out of time, it rolls back instead. One that
       // has written nothing is not half written — a rollback would only end it for good, so it
       // halts like any run and can be resumed (as `endStopped` does for the owner's stop).
-      if (run.atomic && ledger.listAppliedDesc(runId).length > 0) return rollBack(ledger, writer, run, now, say, 'time');
-      ledger.halt(runId, BULK_HALT_REASONS.timeBudget);
+      if (run.atomic && ledger.listAppliedDesc(runId).length > 0) return rollBack(ledger, writer, run, now, say, 'time', lease);
+      if (ledger.halt(runId, BULK_HALT_REASONS.timeBudget, lease) === 'lease') return displaced();
       return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.timeBudget), say) };
     }
     const claimedAt = now();
-    if (!ledger.claimTarget(runId, seq, claimedAt)) continue;
+    const claimed = asFenced(ledger.claimTarget(runId, seq, claimedAt, lease), 'claim');
+    if (claimed === 'lease') return displaced();
+    if (claimed !== true) continue;
     const target = ledger.loadTarget(runId, seq);
     if (!target) continue;
 
@@ -363,15 +378,20 @@ async function applyRunEffect(
     const carried = writer.track?.() ?? null;
     // The claim this loop holds, renewed on a heartbeat while the target's requests and waits run,
     // and at each send: a live loop keeps it however long they take. `since` is the time of the
-    // last renewal, which every record of this target is fenced on.
-    const held = { since: claimedAt, lost: false };
+    // last renewal, which every record of this target is fenced on. `displaced`: the renewal or a
+    // send found the run lease gone, which ends the loop once the write returns.
+    const held = { since: claimedAt, lost: false, displaced: false };
     // run-group-starter: renews this one target's claim until its write returns (cleared in the
     // `finally` below, whichever way it ends); it writes only `claimed_at` and reports no spend.
     const beat = setInterval(() => {
       try {
         const at = now();
-        if (ledger.renewClaim(runId, seq, held.since, at)) held.since = at;
-        else held.lost = true;
+        const renewed = asFenced(ledger.renewClaim(runId, seq, held.since, at, lease), 'claim');
+        if (renewed === true) held.since = at;
+        else {
+          held.lost = true;
+          if (renewed === 'lease') held.displaced = true;
+        }
       } catch {
         // A missed beat (the store busy) is not a lost claim: the next one renews it.
       }
@@ -391,37 +411,47 @@ async function applyRunEffect(
     // `taken`: this loop found the target taken, at the write or at its fenced record.
     // When the other loop already ended or halted the run, this loop reports that, not its own reason.
     const haltRun = (reason: BulkHaltReason, taken: boolean): BulkEffectOutcome => {
-      if (taken && !ledger.haltIfWriting(runId, reason)) {
-        return { status: 'halted', summary: summarize(ledger, runId, say.otherLoop, say) };
+      if (taken) {
+        const halted = asFenced(ledger.haltIfWriting(runId, reason, lease), 'ended');
+        if (halted === 'lease') return displaced();
+        if (halted !== true) return { status: 'halted', summary: summarize(ledger, runId, say.otherLoop, say) };
       }
-      if (!taken) ledger.halt(runId, reason);
+      if (!taken && ledger.halt(runId, reason, lease) === 'lease') return displaced();
       return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', reason), say) };
     };
+    // The run lease went while the write ran: the loop that holds it now carries the run on, and
+    // this one records nothing more, on this target or any other.
+    if (held.displaced) return displaced();
     if (outcome.kind === 'lost') continue;
     const via = carried?.() ?? null;
     if (outcome.kind === 'halt') {
       // The target is released unwritten, while it is still this loop's; a resume takes it again.
-      const released = !lost && ledger.releaseClaim(runId, seq, held.since);
-      return haltRun(outcome.reason, !released);
+      const released = lost ? 'claim' : asFenced(ledger.releaseClaim(runId, seq, held.since, lease), 'claim');
+      if (released === 'lease') return displaced();
+      return haltRun(outcome.reason, released !== true);
     }
     if (outcome.kind === 'applied') {
-      const recorded = ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual, via, outcome.hostAddedMarkup === true, outcome.hostRewrote === true, held.since);
+      const recorded = asFenced(ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual, via, outcome.hostAddedMarkup === true, outcome.hostRewrote === true, held.since, lease), 'claim');
+      if (recorded === 'lease') return displaced();
       // Recorded with its mark first where this loop still holds the target, so a halt that
       // another loop's reason overwrites still leaves it marked: the mark is the truth, not
       // `halt_reason`. Where the other loop holds it, that loop records what it finds there, or
       // gives it back unrecorded on a halt of its own, and a resume reads it again.
-      if (outcome.hostAddedMarkup === true) return haltRun(BULK_HALT_REASONS.markupAddedByShop, lost || !recorded);
-      if (!recorded) continue;
+      if (outcome.hostAddedMarkup === true) return haltRun(BULK_HALT_REASONS.markupAddedByShop, lost || recorded !== true);
+      if (recorded !== true) continue;
       consecutive = 0;
       continue;
     }
-    if (lost || !ledger.recordFailed(runId, seq, outcome.kind, via, held.since)) continue;
+    if (lost) continue;
+    const failedRecorded = asFenced(ledger.recordFailed(runId, seq, outcome.kind, via, held.since, lease), 'claim');
+    if (failedRecorded === 'lease') return displaced();
+    if (failedRecorded !== true) continue;
     // No new attempt, so no failure: the send that left it unclear was counted, halted the
     // run, or belonged to a loop that died. Counting it on every pass would halt a small run
     // at the same target on every resume. It neither extends nor breaks a run of failures.
     // Only an external writer gives it, and an external run is never atomic.
     if (outcome.kind === 'sent_unknown') continue;
-    if (run.atomic) return rollBack(ledger, writer, run, now, say);
+    if (run.atomic) return rollBack(ledger, writer, run, now, say, 'failed', lease);
     if (outcome.kind === 'conflict') {
       // A conflict is not a failure, and it breaks a run of failures.
       consecutive = 0;
@@ -430,11 +460,11 @@ async function applyRunEffect(
     consecutive++;
     const failed = ledger.getRunForApply(runId)?.failed ?? 0;
     if (consecutive >= HALT_CONSECUTIVE) {
-      ledger.halt(runId, BULK_HALT_REASONS.consecutiveFailures);
+      if (ledger.halt(runId, BULK_HALT_REASONS.consecutiveFailures, lease) === 'lease') return displaced();
       return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.consecutiveFailures), say) };
     }
     if (failed > bulkFailureLimit(writingTotal)) {
-      ledger.halt(runId, BULK_HALT_REASONS.failureRate);
+      if (ledger.halt(runId, BULK_HALT_REASONS.failureRate, lease) === 'lease') return displaced();
       return { status: 'halted', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.failureRate), say) };
     }
   }
@@ -444,7 +474,7 @@ async function applyRunEffect(
     // run is finished, not stopped at its maximum.
     if (cappedOut) {
       const reason = cappedByProbe ? BULK_HALT_REASONS.probeRequired : BULK_HALT_REASONS.maxTargets;
-      ledger.halt(runId, reason);
+      if (ledger.halt(runId, reason, lease) === 'lease') return displaced();
       // Planned only when the bound is the approval's own and nothing in this pass failed (a
       // resume sets the count back; an earlier pass's failure was announced then). The
       // cap counts targets SENT, so a failed write uses up a slot: a run whose writes failed
@@ -463,14 +493,27 @@ async function applyRunEffect(
     // heartbeat) admits one live loop at a time, so the claim this loop passed over belongs to
     // a loop whose lease lapsed. A live loop writing the same atomic run would race the
     // rollback's read of what was applied — that takes two processes on one engine.db.
-    if (ownerStopped()) return endStopped();
+    if (stopRequested()) return endStopped();
     return { status: 'pending', summary: summarize(ledger, runId, say.otherLoopHolds, say) };
   }
-  ledger.finish(run);
+  if (ledger.finish(run, lease) === 'lease') return displaced();
   return { status: 'done', summary: summarize(ledger, runId, say.applyDone, say) };
 
-  function ownerStopped(): boolean {
-    return deps.signal?.aborted === true && deps.ownerStopped?.() === true;
+  /** The end of a loop that lost its run lease: it says nothing of the run, which the loop that
+   *  holds the lease now carries on. */
+  function displaced(): BulkEffectOutcome {
+    return { status: 'displaced', summary: say.otherLoop };
+  }
+
+  /** An end this loop READ off the run (another loop ended or halted it): reported only while
+   *  this loop still holds its run lease; a loop that lost it is displaced instead. */
+  function readEnd(end: BulkEffectOutcome): BulkEffectOutcome {
+    return lease === null || ledger.holdsLease(lease) ? end : displaced();
+  }
+
+  /** The owner's stop: the mark in the ledger, or a stop given here whose mark the ledger refused. */
+  function stopRequested(): boolean {
+    return ledger.isStopRequested(runId) || deps.stopMarkFailed?.() === true;
   }
 
   /** End the run on the owner's stop: an atomic run with a recorded write rolls back, any other
@@ -480,10 +523,11 @@ async function applyRunEffect(
    *  on that resume, as planned, and counted then. */
   async function endStopped(): Promise<BulkEffectOutcome> {
     if (run!.atomic && ledger.listAppliedDesc(runId).length > 0) {
-      const rolled = await rollBack(ledger, writer!, run!, now, say, 'stopped');
+      const rolled = await rollBack(ledger, writer!, run!, now, say, 'stopped', lease);
+      if (rolled.status === 'displaced') return rolled;
       return { ...rolled, status: 'stopped' };
     }
-    ledger.halt(runId, BULK_HALT_REASONS.stoppedByOwner);
+    if (ledger.halt(runId, BULK_HALT_REASONS.stoppedByOwner, lease) === 'lease') return displaced();
     return { status: 'stopped', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.stoppedByOwner), say) };
   }
 
@@ -491,7 +535,7 @@ async function applyRunEffect(
   async function writeOne(
     w: TargetWriter, t: ApplyTarget, carried: (() => AttachedConnection | null) | null,
     /** This loop's claim on the target: renewed at each send, and lost once another loop holds it. */
-    held: { since: number; lost: boolean },
+    held: { since: number; lost: boolean; displaced: boolean },
   ): Promise<{ kind: 'applied'; result: string; actual: ActualImage | null; hostAddedMarkup?: true; hostRewrote?: true } | { kind: BulkTargetError } | { kind: 'halt'; reason: BulkHaltReason } | { kind: 'lost' }> {
     let localSent = false;
     try {
@@ -524,13 +568,15 @@ async function applyRunEffect(
       // it to another sends nothing, whatever it read before.
       const sent = (): void => {
         const at = now();
-        if (held.lost || !ledger.markSent(runId, t.seq, carried?.() ?? null, { since: held.since, now: at })) {
+        const marked = held.lost ? 'claim' : asFenced(ledger.markSent(runId, t.seq, carried?.() ?? null, { since: held.since, now: at }, lease), 'claim');
+        if (marked !== true) {
           held.lost = true;
+          if (marked === 'lease') held.displaced = true;
           throw new BulkClaimLost();
         }
         held.since = at;
       };
-      const refused = (): void => { ledger.markRefused(runId, t.seq); };
+      const refused = (): void => { ledger.markRefused(runId, t.seq, lease); };
       if (w.reportsSend !== true) { sent(); localSent = true; }
       const out = await w.write(t.key, t.after, sent, refused);
       if (typeof out === 'string') return { kind: 'applied', result: out, actual: null };
@@ -543,7 +589,7 @@ async function applyRunEffect(
       // A local writer that throws has answered: its outcome is known, so its send is booked as
       // answered, as an external writer's refusal is (`onRefused`). Only the send of this pass,
       // never one a loop that died left before it.
-      if (localSent) ledger.markRefused(runId, t.seq);
+      if (localSent) ledger.markRefused(runId, t.seq, lease);
       if (err instanceof BulkClaimLost) return { kind: 'lost' };
       if (err instanceof BulkWriterHalt) return { kind: 'halt', reason: err.reason };
       if (err instanceof BulkRedirectError) return { kind: 'redirect' };
@@ -562,7 +608,10 @@ async function applyRunEffect(
 async function rollBack(
   ledger: BulkLedger, writer: TargetWriter, run: BulkRunForApply, now: () => number, say: BulkNotices,
   cause: 'failed' | 'stopped' | 'time' = 'failed',
+  /** The loop's run lease: a rollback record that finds it gone ends the rollback as `displaced`. */
+  lease: BulkLease | null = null,
 ): Promise<BulkEffectOutcome> {
+  const displaced: BulkEffectOutcome = { status: 'displaced', summary: say.otherLoop };
   let complete = true;
   // A target a dead loop sent to and never recorded is taken back too: its write may hold there,
   // and a rollback that skipped it would call itself complete over a target the run changed.
@@ -576,14 +625,16 @@ async function rollBack(
       const cur = await writer.read(t.key, null);
       // Still as before the run: the unrecorded send never landed, and there is nothing to take back.
       if (!recorded && cur !== 'path_changed' && cur !== 'foreign' && sameImage(cur, t.expected)) {
-        ledger.recordUnrecordedSettled(run.id, t.seq, now());
+        if (ledger.recordUnrecordedSettled(run.id, t.seq, now(), lease) === 'lease') return displaced;
         continue;
       }
       // Left as it is, and unmarked: the owner's view marks it as one to check by hand.
       if (cur === 'path_changed' || cur === 'foreign' || !sameImage(cur, t.after)) { complete = false; continue; }
+      // A loop that lost its lease restores nothing more: the holder may have written the target since.
+      if (lease !== null && !ledger.holdsLease(lease)) return displaced;
       await writer.write(t.key, t.expected);
-      if (recorded) ledger.recordRolledBack(run, t.seq, now());
-      else ledger.recordUnrecordedSettled(run.id, t.seq, now());
+      const booked = recorded ? ledger.recordRolledBack(run, t.seq, now(), lease) : ledger.recordUnrecordedSettled(run.id, t.seq, now(), lease);
+      if (booked === 'lease') return displaced;
     } catch {
       complete = false;
     }
@@ -595,7 +646,7 @@ async function rollBack(
     : cause === 'time'
       ? (complete ? BULK_HALT_REASONS.atomicTimeRolledBack : BULK_HALT_REASONS.atomicTimeRollbackIncomplete)
       : (complete ? BULK_HALT_REASONS.atomicRolledBack : BULK_HALT_REASONS.atomicRollbackIncomplete);
-  ledger.setPhase(run.id, ['writing'], 'aborted', reason);
+  if (ledger.setPhase(run.id, ['writing'], 'aborted', reason, lease) === 'lease') return displaced;
   return { status: 'aborted', summary: summarize(ledger, run.id, say.atomicEnded(cause, complete), say) };
 }
 
