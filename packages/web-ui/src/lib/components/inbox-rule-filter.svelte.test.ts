@@ -69,7 +69,10 @@ interface Answers {
 	counts?: { requires_user: number; draft_ready: number; auto_handled: number };
 	/** The counts answer waits for this, so a test can hold the first load back. */
 	countsHeld?: Promise<void>;
+	/** The answer to an items request filtered to a rule; one without a rule gets `unfilteredItems`. */
 	items?: unknown[];
+	/** The answer to an items request without a rule; the one filed mail when not given. */
+	unfilteredItems?: unknown[];
 	rules?: unknown[];
 }
 
@@ -80,7 +83,8 @@ async function render(a: Answers = {}): Promise<void> {
 		if (u.pathname.endsWith('/inbox/counts')) return Response.json({ counts: { ...(a.counts ?? { requires_user: 0, draft_ready: 0, auto_handled: 1 }) }, snoozed: 0, rulesPending: a.rulesPending ?? 0 });
 		if (u.pathname.endsWith('/inbox/items')) {
 			itemQueries.push(u.searchParams);
-			return Response.json({ items: u.searchParams.get('ruleId') === null || a.items === undefined ? [filed] : a.items });
+			const unfiltered = u.searchParams.get('ruleId') === null;
+			return Response.json({ items: unfiltered ? (a.unfilteredItems ?? [filed]) : (a.items ?? [filed]) });
 		}
 		if (u.pathname.endsWith('/inbox/rules')) return Response.json({ rules: a.rules ?? [] });
 		if (u.pathname.endsWith('/inbox/cold-start')) return Response.json({ active: [], recent: [] });
@@ -118,7 +122,8 @@ describe('InboxView — filtered to one rule', () => {
 
 	it('says no mail of the rule is in the inbox when its list is empty, and offers no cold start', async () => {
 		pageUrl.href = 'http://localhost/app/inbox?ruleId=rul_c1&accountId=info&zone=auto_handled';
-		await render({ rules: [rule], items: [] });
+		// Every zone empty: without the filter this is where the cold start is offered.
+		await render({ rules: [rule], items: [], counts: { requires_user: 0, draft_ready: 0, auto_handled: 0 } });
 		expect(target.textContent).toContain(t('inbox.rule_filter_empty'));
 		expect(target.textContent).not.toContain(t('inbox.empty_handled'));
 		expect(target.textContent).not.toContain(t('inbox.cold_start_trigger_button'));
@@ -173,6 +178,12 @@ describe('InboxView — filtered to one rule', () => {
 		expect(itemQueries.every((q) => q.get('ruleId') === null)).toBe(true);
 		// Without a filter the zone of the link does not apply either.
 		expect(itemQueries.at(-1)!.get('bucket')).toBe('requires_user');
+	});
+
+	it('offers the cold start when every zone is empty and no rule filters the list', async () => {
+		pageUrl.href = 'http://localhost/app/inbox?accountId=info&zone=auto_handled';
+		await render({ rules: [rule], unfilteredItems: [], counts: { requires_user: 0, draft_ready: 0, auto_handled: 0 } });
+		expect(target.textContent).toContain(t('inbox.cold_start_trigger_button'));
 	});
 
 	it('has no chip and no filter without a rule in the address', async () => {

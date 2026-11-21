@@ -82,6 +82,11 @@ describe('listInboxRules', () => {
 	it('returns [] when rules is not an array (malformed payload)', async () => {
 		installFetch(async () => jsonResponse({ rules: null }));
 		expect(await listInboxRules('/api', 'acct-1')).toEqual([]);
+		// A present value of another type is not passed through as the list either.
+		installFetch(async () => jsonResponse({ rules: { id: 'rul_x' } }));
+		expect(await listInboxRules('/api', 'acct-1')).toEqual([]);
+		installFetch(async () => jsonResponse({ rules: 'rul_x' }));
+		expect(await listInboxRules('/api', 'acct-1')).toEqual([]);
 	});
 
 	it('returns null when fetch throws', async () => {
