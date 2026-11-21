@@ -172,10 +172,10 @@ export function visible(text: string): string {
 }
 
 // The name of each mode and failure strategy the engine knows. A name says what a run does and
-// nothing it does not: a stop starts no further steps but lets the started steps of the failed
-// step's phase finish, and an interactive run asks questions without the name saying who answers
-// (a plan can run it too). `notify`
-// carries the name of `continue`: it runs the same and tells no one but a debug log, so a name
+// nothing it does not. Steps run in phases by what they wait on: a stop starts no step of a later
+// phase, while the steps of the failed step's own phase still start and finish (the view says so
+// under the name). An interactive workflow has a step that may ask; whether a run asks is up to
+// the model. `notify` carries the name of `continue`: it runs the same and tells no one but a debug log, so a name
 // that promised a report would promise what no run does. A value outside these is printed as it
 // came (with hidden characters shown): no name is guessed for it.
 const MODE_KEYS: ReadonlyMap<string, string> = new Map([

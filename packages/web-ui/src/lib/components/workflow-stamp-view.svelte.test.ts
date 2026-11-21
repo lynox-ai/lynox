@@ -600,7 +600,7 @@ describe('the stamp part names settings, and shows no stored value', () => {
 
 	it('the interactive mode and the continue strategy are named too', async () => {
 		await openStamp(twoSteps('d1', undefined, { mode: 'interactive', onFailure: 'continue' }));
-		expect(q('stamp-mode')?.textContent?.trim()).toBe('Mit Rückfragen');
+		expect(q('stamp-mode')?.textContent?.trim()).toBe('Kann nachfragen');
 		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Weitermachen');
 	});
 
@@ -611,9 +611,16 @@ describe('the stamp part names settings, and shows no stored value', () => {
 		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('halt');
 	});
 
-	it('the stop strategy has its own name', async () => {
+	it('the stop strategy has its own name, and a line under it that the steps alongside the failed one still run', async () => {
 		await openStamp(twoSteps('d1', undefined, { onFailure: 'stop' }));
-		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Keine weiteren Schritte starten');
+		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Keine Folgeschritte starten');
+		expect(q('stamp-on-failure-note')?.textContent?.trim()).toBe('Schritte, die mit dem fehlgeschlagenen zusammen laufen, starten noch und laufen zu Ende.');
+	});
+
+	it.each(['continue', 'notify', 'halt'])('the %s strategy carries no such line', async (onFailure) => {
+		await openStamp(twoSteps('d1', undefined, { onFailure }));
+		expect(q('stamp-on-failure')).not.toBeNull();
+		expect(q('stamp-on-failure-note')).toBeNull();
 	});
 
 	it('heads each step with its id and no number, and prints the task once', async () => {

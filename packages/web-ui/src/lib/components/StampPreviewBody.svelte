@@ -41,6 +41,10 @@
 		{#if p.onFailure}
 			{@const key = onFailureKey(p.onFailure)}
 			<dt class="text-text-subtle">{t('workflow_library.stamp.on_failure')}</dt><dd data-testid="stamp-on-failure" class={key === null ? `font-mono ${WRAP}` : WRAP}>{key === null ? visible(p.onFailure) : t(key)}</dd>
+			{#if p.onFailure === 'stop'}
+				<!-- What a reader would not expect: steps beside the failed one still start, and cost. -->
+				<dd data-testid="stamp-on-failure-note" class="col-start-2 text-text-subtle">{t('workflow_library.stamp.on_failure_stop_note')}</dd>
+			{/if}
 		{/if}
 		{#if p.limits !== null}<dt class="text-text-subtle">{t('workflow_library.stamp.limits')}</dt><dd class="font-mono whitespace-pre-wrap break-all">{templateText(p.limits)}</dd>{/if}
 	</dl>
