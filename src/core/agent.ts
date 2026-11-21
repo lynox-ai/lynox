@@ -3768,7 +3768,7 @@ export class Agent implements IAgent {
     // when the policy leaves search open, never because `web_research` happens to be missing.
     const searchAdmitted = providerSearchAdmitted(this.toolContext);
     const builtinTools = !this.isNonDirectAnthropic && !hasWebResearch && !searchExcluded && !this._suppressTools && !contained && searchAdmitted
-      ? [{ type: 'web_search_20250305' as const, name: PROVIDER_SEARCH_TOOL }]
+      ? [{ type: 'web_search_20250305' as const, name: 'web_search' as const }]
       : [];
     // Lazy-tools: OPT-IN (dormant by default). Anthropic-direct only, never on the
     // compaction (suppress) path. Heavy/long-tail tool schemas are deferred behind
