@@ -1205,7 +1205,7 @@ export class Agent implements IAgent {
   }
 
   /** Re-arms {@link heldProviderSearch} on an agent rebuilt for the same conversation, whose
-   *  history may no longer hold the search blocks (the context window drops old turns). */
+   *  history may no longer hold the server tool's blocks (the context window drops old turns). */
   restoreProviderSearch(): void { this._providerSearchSeen = true; }
 
   /**
@@ -1945,7 +1945,7 @@ export class Agent implements IAgent {
     if (this.conversationRoot && this.messages.some(m => m.role === 'user' && Agent._contentHoldsUntrustedMarker(m.content))) {
       this.conversationGrants?.add(UNKNOWN_GRANT);
     }
-    // Likewise a provider search in a thread written before such a search added to the set.
+    // Likewise a provider server tool in a thread written before such a tool added to the set.
     if (this.conversationRoot && this._providerSearchSeen) this.conversationGrants?.add(UNKNOWN_GRANT);
   }
 
@@ -3086,7 +3086,7 @@ export class Agent implements IAgent {
       // external-content tool of this turn under the web search's name, whichever server tool it
       // was. Counted before the
       // answer is written, so a checkpoint and every call this answer makes see it. Any agent
-      // that gets the tool: its rows, too, may hold what the search returned.
+      // that gets the tool: its rows, too, may hold what the tool returned.
       if (holdsProviderSearch(response.content)) {
         this._providerSearchSeen = true;
         this._turnToolNames.add(PROVIDER_SEARCH_TOOL);
