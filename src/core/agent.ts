@@ -1933,8 +1933,8 @@ export class Agent implements IAgent {
     // DK.1 F5: re-derive the sticky conversation taint from the rehydrated history — a thread
     // whose context still carries a wrapped-untrusted marker keeps its durable-write gate armed.
     // And from the thread's record of it (`ConversationLatch`), which outlives a compaction that
-    // summarized the read away, and from a web search the provider ran, whose blocks the history
-    // still holds: any one is enough. A record that cannot be read counts as set.
+    // summarized the read away, and from a server tool the provider ran (its web search), whose
+    // blocks the history still holds: any one is enough. A record that cannot be read counts as set.
     this._providerSearchSeen = this.messages.some((m) => holdsProviderSearch(m.content));
     if (this._contextHoldsUntrustedMarker() || this.conversationLatch?.isSet() === true || this._providerSearchSeen) this._armConversationLatch();
     else this._conversationSawUntrusted = false;
