@@ -814,6 +814,22 @@ describe('a snooze set to wake on a reply wakes for the messages that may reopen
     expect(notifyNewItem).not.toHaveBeenCalled();
   });
 
+  it('a flagged message that wakes a snooze set after another message reopened the item raises it and pushes', async () => {
+    const id = seedReplied();
+    const g = gate();
+    const hookG = graphHook(async (_a, env) => { if (env.messageId === '<otp@x>') await g.wait; return false; });
+    const flagged = hookG(ACCOUNT.id, envelope({ messageId: '<otp@x>', subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' }));
+    await hookG(ACCOUNT.id, envelope({ messageId: '<plain@x>' }));
+    expect(inbox.getItem(id)!.userAction).toBeUndefined();
+    notifyNewItem.mockClear();
+    inbox.setSnooze(id, later(), null, /* unsnoozeOnReply */ true);
+    g.release();
+    await flagged;
+    expect(woke(id)).toBe(true);
+    expect(inbox.listAuditForItem(id).filter((a) => a.action === 'raised_on_sensitive_follow_up')).toHaveLength(1);
+    expect(notifyNewItem).toHaveBeenCalledTimes(1);
+  });
+
   it('when the audit cannot be written, the snooze and the message stay as they were', async () => {
     const id = seedSnoozed();
     const until = inbox.getItem(id)!.snoozeUntil!.getTime();

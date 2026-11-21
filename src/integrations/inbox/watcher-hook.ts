@@ -235,7 +235,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
         && current.userAction === undefined
         && !(current.snoozeUntil !== undefined && current.snoozeUntil.getTime() > Date.now());
       const wokeAndUntouched = wakes && current !== undefined && current !== null
-        && current.classifiedAt.getTime() === existing.classifiedAt.getTime();
+        && current.classifiedAt.getTime() === asleep?.classifiedAt.getTime();
       if (raises && (!openNow || wokeAndUntouched)) {
         opts.state.raiseToRequiresUser(existing.id, existing.tenantId, fields.mailDate ?? new Date());
         opts.state.appendAudit({
