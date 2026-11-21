@@ -346,6 +346,10 @@ describe('Task Tools', () => {
       Object.assign(https.toolContext, { networkPolicy: 'guarded', enforceHttps: true });
       expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'http://other.example/p' }, https))
         .toBe('Error: watch_url not watched: this instance only reads HTTPS pages (enforce_https). No watch was created. Watch the https:// address instead.');
+      const privateHttps = makeAgent();
+      Object.assign(privateHttps.toolContext, { networkPolicy: 'guarded', enforceHttps: true });
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'http://10.0.0.1/p' }, privateHttps))
+        .toBe('Error: watch_url not watched: this instance\'s network settings refuse it: private IP address "10.0.0.1". No watch was created.');
       const both = withPolicy('allow-list');
       Object.assign(both.toolContext, { enforceHttps: true });
       expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'http://other.example/p' }, both))

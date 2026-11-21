@@ -102,6 +102,28 @@ describe('a watch the network policy keeps from its page', () => {
 		expect(boxes[0]!.textContent).toBe('shop.example');
 	});
 
+	it('keeps the host box whole: one block, broken only after a dot, never at a hyphen', async () => {
+		const line = await render('de', { kind: 'watch_allow_list', host: 'preise.lieferant-beispiel.ch' });
+		const box = line!.querySelector<HTMLElement>('bdi[data-foreign-value]')!;
+		expect(box.textContent).toBe('preise.lieferant-beispiel.ch');
+		expect(box.classList.contains('inline-block')).toBe(true);
+		expect(box.classList.contains('max-w-full')).toBe(true);
+		expect([...box.querySelectorAll('span')].map((s) => [s.textContent, s.classList.contains('whitespace-nowrap')]))
+			.toEqual([['preise.', true], ['lieferant-beispiel.', true], ['ch', true]]);
+		expect(box.querySelectorAll('wbr')).toHaveLength(3);
+	});
+
+	it('offers no run now on a watch the policy keeps from its page, but keeps pause', async () => {
+		await render('de', { kind: 'watch_deny_all' });
+		expect(target.querySelector('[data-trigger-run-now]')).toBeNull();
+		expect(target.textContent).toContain('Pausieren');
+	});
+
+	it('CONTROL: a watch whose page is read offers run now', async () => {
+		await render('de', undefined);
+		expect(target.querySelector('[data-trigger-run-now]')).not.toBeNull();
+	});
+
 	it('CONTROL: a watch whose page is read says nothing', async () => {
 		expect(await render('de', undefined)).toBeNull();
 	});

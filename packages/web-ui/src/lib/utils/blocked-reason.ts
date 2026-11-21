@@ -21,3 +21,12 @@ export function blockedReasonParts(reason: BlockedReason, t: (key: BlockedReason
   if (at < 0) return { before: text, host: null, after: '' };
   return { before: text.slice(0, at), host: reason.host, after: text.slice(at + '{host}'.length) };
 }
+
+/**
+ * A host as the pieces a line may break between: after each dot, never inside a label (a hyphen
+ * would split it). The box around it moves to the next line whole when the host fits on one.
+ */
+export function hostLabels(host: string): string[] {
+  const labels = host.split('.');
+  return labels.map((label, i) => (i < labels.length - 1 ? `${label}.` : label));
+}

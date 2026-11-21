@@ -47,6 +47,10 @@ describe('watchRefusedNow', () => {
     expect(watchPolicyRefusal('http://10.0.0.1/p', ctx('guarded', true))).toEqual({
       why: 'this instance\'s network settings refuse it: private IP address "10.0.0.1".', wayOut: '', shown: null,
     });
+    const unknown = { ...ctx('guarded', true), networkPolicy: 'no-such-policy' } as unknown as Parameters<typeof watchPolicyRefusal>[1];
+    expect(watchPolicyRefusal('http://listed.example/p', unknown)).toEqual({
+      why: 'this instance\'s network settings refuse it: network access denied (unrecognised egress policy).', wayOut: '', shown: null,
+    });
   });
 
   it('says nothing for a page that is read', () => {

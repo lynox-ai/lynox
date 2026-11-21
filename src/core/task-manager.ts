@@ -1298,7 +1298,8 @@ export function watchPolicyRefusal(url: string, ctx: HostPolicyContext | undefin
     if (message.startsWith(HTTPS_REFUSAL_START) && /^http:/i.test(url)) {
       const deeper = watchPolicyRefusal(`https:${url.slice('http:'.length)}`, ctx);
       if (deeper !== null && deeper.shown !== null) return { ...deeper, wayOut: `${deeper.wayOut} The address must also be https://, since this instance only reads HTTPS pages (enforce_https).` };
-      // Refused at https for a reason no setting names (a private address): that reason, told as is.
+      // Refused at https for a reason the view has no kind for (a private address, a policy this
+      // code does not know): that reason, told as is.
       if (deeper !== null) return deeper;
     }
     if (message === DENY_ALL_REFUSAL) {

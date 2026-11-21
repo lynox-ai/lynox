@@ -10,7 +10,7 @@
 	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
 	import { endedNotices, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
-	import { blockedReasonParts, type BlockedReason } from '../utils/blocked-reason.js';
+	import { blockedReasonParts, hostLabels, type BlockedReason } from '../utils/blocked-reason.js';
 	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
 	import StampConfirm from './StampConfirm.svelte';
 	import RecipientConfirm from './RecipientConfirm.svelte';
@@ -644,7 +644,7 @@
 							     someone else wrote. -->
 							{#if trigger.blocked_reason}
 								{@const parts = blockedReasonParts(trigger.blocked_reason, t)}
-								<p class="mt-1 text-xs text-warning break-words" data-blocked-reason={trigger.blocked_reason.kind}>{parts.before}{#if parts.host !== null}<bdi data-foreign-value class="rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 box-decoration-clone font-mono">{parts.host}</bdi>{/if}{parts.after}</p>
+								<p class="mt-1 text-xs text-warning break-words" data-blocked-reason={trigger.blocked_reason.kind}>{parts.before}{#if parts.host !== null}<bdi data-foreign-value class="inline-block max-w-full rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono">{#each hostLabels(parts.host) as label, i (i)}<span class="whitespace-nowrap">{label}</span><wbr />{/each}</bdi>{/if}{parts.after}</p>
 							{/if}
 							<!-- A confirmed watch names its page too: its escalation leaves the address out when
 							     someone the owner let in set it up, and points here (PRD B6). -->
@@ -733,7 +733,8 @@
 							<!-- Not offered while waiting: the engine refuses the run after the request
 							     has already been answered as started. Not at a completed paused plan
 							     either: it would be refused, and the refusal names no way out there. -->
-							{#if !held(trigger) && !pausedDone(trigger)}
+							<!-- Nor where the policy keeps a watch from its page: the run would read nothing. -->
+							{#if !held(trigger) && !pausedDone(trigger) && !trigger.blocked_reason}
 								<button onclick={() => runNow(trigger)} data-trigger-run-now disabled={busy[trigger.id]} aria-label={t('triggers.run_now')} title={t('triggers.run_now')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity disabled:opacity-40">▶ {t('triggers.run_now')}</button>
 							{/if}
 							<button onclick={() => togglePause(trigger)} disabled={busy[trigger.id]} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity disabled:opacity-40">{trigger.enabled === 0 ? t('triggers.resume') : t('triggers.pause')}</button>
