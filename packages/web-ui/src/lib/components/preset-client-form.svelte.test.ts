@@ -199,7 +199,7 @@ describe('PresetClientForm', () => {
 		expect(target.textContent).toContain('https://tenant.example/api/oauth/callback');
 	});
 
-	it('keeps the redirect address whole, each piece whole while it fits on a line, with break points only after a dot or a slash (U-391)', async () => {
+	it('puts the redirect address in one box of pieces, each its own inline-block, with `<wbr>` only after a dot or a slash (U-391)', async () => {
 		await open();
 		const box = target.querySelector<HTMLElement>('[data-testid="preset-redirect-uri"]')!;
 		expect(box.textContent).toBe('https://tenant.example/api/oauth/callback');

@@ -85,7 +85,7 @@ describe('the shell banner of a store whose access runs out', () => {
 		expect(all('store-access-host').map(text)).toEqual(['acme.myshopify.com', 'beta-shop.myshopify.com']);
 		// Break points only after a dot: `<wbr>` there and nowhere else, so not at the hyphen while a
 		// piece fits on a line. Each piece its own box, broken inside only when longer than a line.
-		// That a fitting piece stays whole is a rendering fact: measured in Chrome, not here.
+		// That a fitting piece stays whole is a rendering fact jsdom cannot check; this pins the markup.
 		const W = (x: string): string => `<span class="inline-block max-w-full break-all">${x}</span>`;
 		expect(all('store-access-host').map((h) => h.innerHTML.replace(/<!---->/g, ''))).toEqual([
 			`${W('acme.')}<wbr>${W('myshopify.')}<wbr>${W('com')}`,

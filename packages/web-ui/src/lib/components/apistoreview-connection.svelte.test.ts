@@ -91,7 +91,7 @@ describe('a profile\'s values stay whole on a narrow screen (U-391)', () => {
 	const W = (x: string): string => `<span class="inline-block max-w-full break-all">${x}</span>`;
 	const html = (id: string): string[] => [...target.querySelectorAll<HTMLElement>(`[data-testid="${id}"]`)].map((e) => e.innerHTML.replace(/<!---->/g, ''));
 
-	it('the base URL has break points only after a dot or a slash, the account only after a dot, none at a hyphen', async () => {
+	it('the base URL has `<wbr>` only after a dot or a slash, the account only after a dot, none at a hyphen', async () => {
 		serve({ profiles: [{ id: 'shop', name: 'Shop', base_url: 'https://acme-store.myshopify.com/admin/api/2025-10', description: '', oauth_grant: { connected_by: 'owner', account: { label: 'acme-store.myshopify.com' }, connected_by_reader: true } }], importWaiting: [] });
 		const { default: ApiStoreView } = await import('./ApiStoreView.svelte');
 		component = mount(ApiStoreView, { target });
