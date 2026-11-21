@@ -17,6 +17,7 @@
 import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
+import { turnIsLocked } from '../../core/mandate-tool-lock.js';
 import { currentCallSignal, joinCallSignal, noteOwnStopSentence } from '../../core/call-connection.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret, ExchangeFacts } from '../../core/api-store.js';
 import { SaveRefused, accessTokenKey, collectVaultKeys, grantTokenNames, tokenSlotNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
@@ -1406,10 +1407,12 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
   // BOOTSTRAP_DRAFT_PREAMBLE for why a fence). The engine's own lines (what was done, what was
   // dropped, the next steps) stay outside. The id here is a slug of the docs URL's host, the
   // model's own input.
+  // A locked turn (a mandate's) collects no key: its steps name the key and who stores it (U-185).
+  const locked = turnIsLocked(agent.principal);
   return compose([
     engineText(`Bootstrapped draft profile from ${docsUrl} (extraction cost $${costUsd.toFixed(4)}).${injectedNote}${truncatedNote}${limitNote}${apiHostCandidates.length > 0 ? `\n${String(apiHostCandidates.length)} other API host(s) seen on the docs page are listed in the block below; verify against an authoritative source before swapping base_url.` : ''}
 
-Review the draft, fill auth.vault_keys via ask_secret, then call action="create":`),
+${locked ? 'Review the draft, name the key(s) in auth.vault_keys, then call action="create":' : 'Review the draft, fill auth.vault_keys via ask_secret, then call action="create":'}`),
     renderFence('api_bootstrap_draft', `${summary}${linkedNote}${hostHintNote}
 
 \`\`\`json
@@ -1417,8 +1420,11 @@ ${draftJson}
 \`\`\``, { preamble: BOOTSTRAP_DRAFT_PREAMBLE, attrs: { from: 'docs page' } }),
     engineText(`Next steps:
 1. Inspect the draft. Add or remove guidelines / avoid / notes based on what you learn from a test call.
-2. Use \`ask_secret\` to collect credentials (a single secret name like ${draft.id.toUpperCase()}_API_KEY usually suffices; OAuth needs a refresh-token slot).
-3. Fire one test \`http_request\` against the most innocent endpoint to confirm the auth scheme.
+${locked
+    ? `2. Name the vault key in auth.vault_keys (a single name like ${draft.id.toUpperCase()}_API_KEY usually suffices; OAuth needs a refresh-token slot). It is not filled in this session: tell the user that the owner of this instance has to store it.
+3. A test \`http_request\` against the most innocent endpoint can only succeed after the owner has stored the key.`
+    : `2. Use \`ask_secret\` to collect credentials (a single secret name like ${draft.id.toUpperCase()}_API_KEY usually suffices; OAuth needs a refresh-token slot).
+3. Fire one test \`http_request\` against the most innocent endpoint to confirm the auth scheme.`}
 4. Call \`api_setup\` action="create" with the finished profile.`),
   ], '\n');
 }
@@ -1689,6 +1695,25 @@ export function providerBodySummary(text: string, sent: readonly string[]): stri
     engineText(`The body is a JSON object with ${String(keys.length)} top-level field(s)${unnamed > 0 ? `, ${String(unnamed)} of them not named here` : ''}; no values are shown. Its field names${code !== undefined ? ' and OAuth error code' : ''}, as the provider wrote them:`),
     renderFence('token_endpoint_answer', lines.join('\n')),
   ], '\n');
+}
+
+/**
+ * What connect tells the model to do about a value it lacks. No caller reaches these with a locked
+ * turn today (a check before them answers first), but they decide here, not at the call: a locked
+ * turn that does arrive gets the locked step, never the owner's way to `ask_secret` (U-185).
+ */
+export function unnamedValueStep(agent: Pick<IAgent, 'principal'>): string {
+  return turnIsLocked(agent.principal)
+    ? 'then tell the user that the owner of this instance has to store the value'
+    : 'then collect the value with ask_secret';
+}
+
+/** The askable names' step for connect, decided the same way as `unnamedValueStep`. */
+export function askableValueStep(agent: Pick<IAgent, 'principal'>, askable: readonly string[]): string {
+  if (askable.length === 0) return '';
+  return turnIsLocked(agent.principal)
+    ? ` The owner of this instance has to store ${askable.join(' and ')}; tell the user so.`
+    : ` Call ask_secret for ${askable.join(' and ')}.`;
 }
 
 /** Who reads through a profile's view in this agent's run, and what a release is checked against. */
@@ -2619,7 +2644,9 @@ ${draftJson}
             ? 'The acceptance for sending the user to the provider was REMOVED: this run could not ask anyone, and the record is rebuilt on every save. api_setup connect will refuse until the profile is saved again while a person is there to answer.'
             : 'Saved WITHOUT the acceptance for sending the user to the provider — nobody could be asked in this run. api_setup connect will refuse until the profile is saved again while a person is there to answer.');
         }
-        parts.push('Next steps: use ask_secret to securely collect API credentials if needed, then test with a simple http_request.');
+        parts.push(turnIsLocked(agent.principal)
+          ? 'Next steps: if the API needs a key, tell the user that the owner of this instance has to store it; a test http_request can only succeed after that.'
+          : 'Next steps: use ask_secret to securely collect API credentials if needed, then test with a simple http_request.');
         return parts.join('\n');
       });
     }
@@ -2658,7 +2685,9 @@ ${draftJson}
         if (originPreset !== undefined) {
           return `Error: profile "${id}" cannot be authorized now: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to after they authorize lynox at ${originPreset.label}. There is no other way to connect ${originPreset.label} here: this engine connects ${originPreset.label} only through its built-in provider, so a profile with a personal or API token, or with another kind of sign-in, is refused; do not offer one. fetch_token cannot do that authorization either; it only renews a profile that was authorized before and still holds its refresh token. Tell the user that this profile cannot be connected until whoever runs this engine sets its public address (ORIGIN).`;
         }
-        return 'Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Set it, or collect the credentials with ask_secret and use action=fetch_token.';
+        return turnIsLocked(agent.principal)
+          ? 'Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Only the owner of this instance can set it or store the credentials: tell the user so, and use action=fetch_token once the credentials are stored.'
+          : 'Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Set it, or collect the credentials with ask_secret and use action=fetch_token.';
       }
       // Parsed, not merely found. The provider host below is parsed, compared for
       // identity and checked for userinfo; the host the user is sent to FIRST had
@@ -2707,7 +2736,7 @@ ${draftJson}
         const ids = presetIds();
         const known = ids.length > 0 ? `Known providers: ${ids.join(', ')}.` : 'No providers are built in yet, so nothing can be connected this way today.';
         if (endpoints.kind === 'unknown-preset') {
-          return `Error: profile "${id}" names no built-in provider, so there is no authorization page to send the user to. ${known} Set auth.oauth.preset_id with api_setup update, or keep using a credential the user pastes with ask_secret.`;
+          return `Error: profile "${id}" names no built-in provider, so there is no authorization page to send the user to. ${known} Set auth.oauth.preset_id with api_setup update, ${turnIsLocked(agent.principal) ? 'or use a key instead and tell the user that the owner of this instance has to store it' : 'or keep using a credential the user pastes with ask_secret'}.`;
         }
         if (endpoints.kind === 'bad-preset') {
           // A defect in a compiled preset. Neither the model nor the user can
@@ -2763,7 +2792,7 @@ ${draftJson}
             const keys = presetClientKeys(appOfProvider.id);
             return `Error: profile "${id}" cannot authorize yet — it does not name ${unnamed.join(' or ')}. Save it again with api_setup update: on the built-in "${appOfProvider.id}" provider the names are set to "${keys.id}" and "${keys.secret}", and the owner enters the app in the profile's connection form under Settings → API Profiles.`;
           }
-          return `Error: profile "${id}" cannot authorize yet — it does not name ${unnamed.join(' or ')}. Set the vault key name(s) with api_setup update, then collect the value with ask_secret.`;
+          return `Error: profile "${id}" cannot authorize yet — it does not name ${unnamed.join(' or ')}. Set the vault key name(s) with api_setup update, ${unnamedValueStep(agent)}.`;
         }
         const withheld = agent.secretStore ? withheldFrom(agent.secretStore, profile, apiStore, unfilled, readCtxOf(agent)) : [];
         if (withheld.length > 0) return `Error: profile "${id}" cannot authorize yet. ${withheldText(withheld)}`;
@@ -2776,8 +2805,10 @@ ${draftJson}
         const askable = unfilled.filter((k) => !isPresetClientSecretName(k) && !isAppIdOf(appOfProvider, k));
         const settled = unfilled.filter((k) => isPresetClientSecretName(k)).map(presetClientSecretGuidance)
           .concat(unfilled.filter((k) => isAppIdOf(appOfProvider, k)).map(presetClientIdGuidance));
-        const ask = askable.length > 0 ? ` Call ask_secret for ${askable.join(' and ')}.` : '';
-        return `Error: profile "${id}" cannot authorize yet — the vault has no value for ${unfilled.join(' and ')}.${ask}${settled.map((g) => ` ${g}`).join('')} Then connect.`;
+        const ask = askableValueStep(agent, askable);
+        // In a locked turn the end is a condition: "Then" reads as now, and before the owner
+        // stores the values a connect only comes back here (U-185).
+        return `Error: profile "${id}" cannot authorize yet — the vault has no value for ${unfilled.join(' and ')}.${ask}${settled.map((g) => ` ${g}`).join('')} ${turnIsLocked(agent.principal) ? 'Once they are stored, connect.' : 'Then connect.'}`;
       }
       // The two refusals the route gives before anything is sent, asked here as well.
       if (clientIdKey && !mayServeAsClientId(apiStore, clientIdKey)) {
@@ -3154,8 +3185,11 @@ ${draftJson}
             ? `The tokens of a profile on the built-in "${appOfProvider.id}" provider come only from its sign-in, and this profile shares the connection of another profile through this provider: do not connect this one on its own; ${connectCallText(typeof holderId === 'string' ? holderId : undefined)} Do not ask the user for a token.`
             : `The tokens of a profile on the built-in "${appOfProvider.id}" provider come only from its sign-in: to connect it, ${connectCallText(input.id)} Do not ask the user for a token.`);
         }
-        const ask = askable.length > 0 ? ` Call \`ask_secret\` for ${askable.map((n) => `"${shownSlot(n)}"`).join(', ')} first.` : '';
-        const retry = slotFromSignIn ? '' : ' Then retry fetch_token.';
+        const slots = askable.map((n) => `"${shownSlot(n)}"`).join(', ');
+        const ask = askable.length === 0 ? ''
+          : turnIsLocked(agent.principal) ? ` The owner of this instance has to store ${slots}; tell the user so.`
+            : ` Call \`ask_secret\` for ${slots} first.`;
+        const retry = slotFromSignIn ? '' : turnIsLocked(agent.principal) ? ' Once they are stored, retry fetch_token.' : ' Then retry fetch_token.';
         return `Error: vault is missing the OAuth credentials for profile "${input.id}": ${missing.map((n) => `"${shownSlot(n)}"`).join(', ')}.${ask}${settled.map((g) => ` ${g}`).join('')}${retry}`;
       }
       // Past this point every slot name has resolved, and `resolveOne` resolves only a
@@ -3253,7 +3287,7 @@ ${draftJson}
         // On a built-in provider the refresh token comes from its sign-in, so no slot is filled by hand.
         : builtInPresetOf(profile) !== undefined
           ? `Remove auth.oauth.refresh_token_key with api_setup update, then, to connect it, ${connectCallText(input.id)}`
-          : `Point auth.oauth.refresh_token_key at a slot that holds only the refresh token — api_setup update — and store the token there with ask_secret.`}`;
+          : `Point auth.oauth.refresh_token_key at a slot that holds only the refresh token — api_setup update — and ${turnIsLocked(agent.principal) ? 'tell the user that the owner of this instance has to store the token there' : 'store the token there with ask_secret'}.`}`;
       if (outputName === refreshKey || outputName === refreshTokenKey(input.id)) {
         const clash = `Error: output_secret_name "${outputName}" is where this profile keeps its refresh token — the access token would be written over it.`;
         const derivedAccess = accessTokenKey(input.id);
@@ -3777,12 +3811,45 @@ ${draftJson}
  * mandate authorized is of no use to anyone once that mandate is no longer active, and this is
  * where the owner learns it is there. A mandate's turn is told nothing: the connections are not
  * its to keep.
+ *
+ * An answer that says the action was not done is read by `failureOf` as a failed call: the model
+ * reads the same text as before, and the call is recorded and shown as one that did not succeed
+ * instead of carrying the ✓ of a done action. A decline by the user and a stop of the run are the
+ * person's decision, not a failure of the call, and stay plain answers.
  */
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {
   ...apiSetupEntry,
   handler: async (input: ApiSetupInput, agent: IAgent): Promise<string> =>
     `${await apiSetupEntry.handler(input, agent)}${waitingConnectionsNote(agent)}${releaseRequestsNote(agent)}`,
+  failureOf: apiSetupFailure,
 };
+
+/** A refusal that is the user's decline, or a stop of the run before the question was asked. */
+const DECIDED_BY_THE_PERSON = /— user declined\.$|— the owner did not allow |the run was stopped before (?:the question was asked|the owner could be asked)/;
+
+/** How an answer that says the action was not done opens: a label, or one of the handler's own
+ *  openings for a refusal or a failed exchange. */
+const NOT_DONE_OPENING = /^(?:(Error|Refused|Blocked|Validation error)(?::| after )|Token exchange (?:failed|returned HTTP|completed, but)|API profile "[^"\n]*" not found\.|No API profiles registered\.$|Profile is incomplete|Unknown action\.)/;
+/** The sentence a refusal ends on when it opens without a label. */
+const NOTHING_DONE = /\bNothing was (?:changed|released|adopted|sent|saved|deleted)\b/;
+
+/**
+ * The ledger reason when an api_setup answer says the action was not done, else null. Only the
+ * first line is read: the notes added after it, and any fetched content, never stand there. It
+ * says "not done" when it opens with a label (`Error:`, `Refused:`, `Blocked:`, `Validation
+ * error`), with one of the handler's own refusal or exchange-failure openings, or when it says
+ * "Nothing was …" outside a quoted name. An empty `list` ("No API profiles registered. Use …")
+ * is a done list; only the bare sentence, where there is no store, is a refusal. A guard test renders every string return in this file and holds the ones
+ * read as done to a known list, so a new refusal that reads as done is not missed silently. A
+ * person's decline and a stop of the run are not failures of the call (`DECIDED_BY_THE_PERSON`).
+ */
+export function apiSetupFailure(answer: string): string | null {
+  const firstLine = answer.split('\n', 1)[0] ?? answer;
+  // A quoted name is the model's or the user's text, not the handler's: it never says what happened.
+  if (!NOT_DONE_OPENING.test(firstLine) && !NOTHING_DONE.test(firstLine.replace(/"[^"]*"/g, '""'))) return null;
+  if (firstLine.startsWith('Blocked:') && DECIDED_BY_THE_PERSON.test(firstLine)) return null;
+  return firstLine.length > 200 ? `${firstLine.slice(0, 200)}…` : firstLine;
+}
 
 /** Why a name cannot be released, as the owner and the mandate are told. Content-free: none
  *  of these depends on what the vault holds. */
@@ -3879,6 +3946,14 @@ export function waitingConnectionsNote(agent: IAgent): string {
   const one = ids.length === 1;
   return `\n\nWaiting for the owner: the connection of ${shown}${more} ${one ? 'was' : 'were'} authorized in a mandate's session that is no longer active, so ${one ? 'its tokens are' : 'their tokens are'} not used for anything. Tell the user. To keep one, call api_setup with action "adopt_connection" and its id (the user is asked first); otherwise it can be deleted.`;
 }
+
+/**
+ * The guidance a locked turn (a mandate's) gets: the owner's, with its last sentence, which sends
+ * the model to store the value with `ask_secret`, swapped (U-185).
+ */
+const API_SETUP_OWNER_STORE_SENTENCE = 'Store the value with ask_secret, then just call http_request.';
+const API_SETUP_LOCKED_STORE_SENTENCE = 'The value is stored by the owner of this instance, not in this session; once it is stored, just call http_request.';
+apiSetupTool.lockedGuidance = (apiSetupTool.detailedGuidance ?? '').split(API_SETUP_OWNER_STORE_SENTENCE).join(API_SETUP_LOCKED_STORE_SENTENCE);
 
 /**
  * What the person walks into after clicking the connect link, for the reply the model reads. A

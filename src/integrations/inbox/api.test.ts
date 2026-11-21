@@ -1028,6 +1028,18 @@ describe('handleUndoBulk', () => {
     expect(state.getItem(b)?.userAction).toBeUndefined();
   });
 
+  it('counts as reverted only the items it put back, and names the ones that changed since', () => {
+    const a = insertItem('a');
+    const b = insertItem('b');
+    const bulkId = (handleBulkAction(deps, { ids: [a, b], action: 'archived' }).body as { bulkId: string }).bulkId;
+    state.updateUserAction(b, 'replied');
+    const r = handleUndoBulk(deps, bulkId);
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ ok: true, reverted: 1, skipped: 1 });
+    expect(state.getItem(a)?.userAction).toBeUndefined();
+    expect(state.getItem(b)?.userAction).toBe('replied');
+  });
+
   it('returns 410 for an unknown bulkId or one outside the window', () => {
     const r = handleUndoBulk(deps, 'bulk_unknown');
     expect(r.status).toBe(410);

@@ -83,9 +83,29 @@ describe('reads on the routes the interface polls by itself', () => {
 		expect(t('access_trail.polls_one')).not.toBe('access_trail.polls_one');
 	});
 
-	it('shows the legend', async () => {
+	it('shows the legend where the list shows a group', async () => {
 		await render([poll(1)]);
 		expect(target.querySelector('[data-legend="interface-polls"]')?.textContent?.trim()).toBe(t('access_trail.polls_legend'));
+	});
+
+	it('shows no legend where the list shows no group', async () => {
+		await render([step(1), read(2)]);
+		expect(rows()).toEqual(['step', 'event']);
+		expect(target.querySelector('[data-legend="interface-polls"]')).toBeNull();
+	});
+
+	it('the legend follows the filter: gone when the chosen person has no group, back with one', async () => {
+		await render([poll(1), read(2, BEN)]);
+		const select = target.querySelector<HTMLSelectElement>('[data-filter="person"]')!;
+		select.value = 'M-2';
+		select.dispatchEvent(new Event('change'));
+		await settle();
+		expect(rows()).toEqual(['event']);
+		expect(target.querySelector('[data-legend="interface-polls"]')).toBeNull();
+		select.value = 'M-1';
+		select.dispatchEvent(new Event('change'));
+		await settle();
+		expect(target.querySelector('[data-legend="interface-polls"]')).not.toBeNull();
 	});
 
 	it('opens a group to every read in it', async () => {
