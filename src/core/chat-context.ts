@@ -570,14 +570,15 @@ export function resolveChatContext(
       const item = inboxState.getItem(id);
       if (!item) continue;
       // As in the single 'mail' kind: a follow-up in the thread is what a reply answers, so its
-      // sender, subject, text and Message-ID take the place of the first mail's, and it is checked
-      // for sensitive content here because the intake check never judged it.
+      // sender, subject, text and Message-ID take the place of the first mail's. It was not judged
+      // by the check the item's own mail passed, so it is checked here, on every text of it the
+      // row holds: the snippet shown and the body, which a writer may store masked differently.
       const followUp = followUpToAnswer(inboxState, item);
       const mail = followUp ?? item;
-      const followUpBody = followUp?.bodyMd && followUp.bodyMd.length > 0 ? followUp.bodyMd : '';
-      const text = followUp ? (followUp.snippet ?? followUpBody) : (item.snippet ?? '');
+      const followUpBody = followUp?.bodyMd ?? '';
+      const text = followUp ? (followUp.snippet || followUpBody) : (item.snippet ?? '');
       const withheld = followUp
-        ? detectSensitiveContent({ subject: '', body: [followUp.subject, followUp.fromName ?? '', followUpBody || text].join('\n') }).categories
+        ? detectSensitiveContent({ subject: '', body: [followUp.subject, followUp.fromName ?? '', followUpBody, text].join('\n') }).categories
         : [];
       const hidden = withheld.length > 0;
       const fromAddr = oneLine(mail.fromAddress, MAX_NAME_CHARS);

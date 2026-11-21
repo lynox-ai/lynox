@@ -9,6 +9,7 @@ import { WorkflowStore } from './workflow-store.js';
 import { CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline-schema-migration.js';
 import type { InboxItem, PlannedPipeline } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
+import { wrapChannelMessage } from './data-boundary.js';
 
 function makePlanned(overrides: Partial<PlannedPipeline> = {}): PlannedPipeline {
   return {
@@ -654,7 +655,7 @@ describe('resolveChatContext (kind: mail-batch) — the follow-up each item answ
     };
   };
 
-  it('names a reopened item\'s follow-up text and uid, and leaves an item without one unchanged', () => {
+  it('names an item\'s follow-up text and uid, and renders an item without one as before', () => {
     const out = resolveChatContext(null, { kind: 'mail-batch', ids: ['a', 'b'] }, reader(follow()))!;
     const [first, second] = out.split('\n2. ');
     expect(first).toContain('1. account "acc-1", uid 42 — a follow-up to the mail the inbox took in\n');
@@ -663,10 +664,39 @@ describe('resolveChatContext (kind: mail-batch) — the follow-up each item answ
     expect(first).toContain('Subject: Re: Project update');
     expect(first).not.toContain('Can you confirm Thursday?');
     expect(first).not.toContain('uid 41');
-    const unchanged = resolveChatContext(null, { kind: 'mail-batch', ids: ['a', 'b'] }, reader(null))!.split('\n2. ')[1];
-    expect(second).toBe(unchanged);
-    expect(second).toContain('account "acc-1", uid 51\n');
-    expect(second).not.toContain('follow-up');
+    // The rendering an item without a follow-up had before the batch looked for one, spelled out.
+    expect(second).toBe(
+      'account "acc-1", uid 51\n'
+      + wrapChannelMessage({
+        source: 'mail:acc-1:inbox:b',
+        fields: { From: 'Bob <bob@example.com>', Subject: 'Invoice', Snippet: 'Please find the invoice.' },
+      })
+      + '\n\nWork through these with the user one at a time: for each, draft a '
+      + 'reply (mail_reply with the listed account + uid) and confirm the send, '
+      + 'or note if it only needs acknowledging. Use mail_search for any without a uid.',
+    );
+  });
+
+  it('takes an unchecked follow-up when it is the one that reopened the item', () => {
+    const r = reader(follow({ autoReply: undefined }));
+    const audit = [{ action: 'reopened_on_reply', payloadJson: JSON.stringify({ trigger: 'inbound_mail', message_id: '<a-2@example.com>' }) }];
+    const out = resolveChatContext(null, { kind: 'mail-batch', ids: ['a'] }, { ...r, listAuditForItem: (id) => (id === 'a' ? audit : []) })!;
+    expect(out).toContain('uid 42 — a follow-up to the mail the inbox took in\n');
+    expect(out).toContain('Snippet: The parcel still has not arrived.');
+    expect(resolveChatContext(null, { kind: 'mail-batch', ids: ['a'] }, r)!).toContain('uid 41\n');
+  });
+
+  it('withholds a follow-up whose snippet is sensitive even when its body is not', () => {
+    const out = resolveChatContext(null, { kind: 'mail-batch', ids: ['a'] }, reader(follow({ snippet: 'Bestätigungscode: 482917 — gültig für 5 Minuten.', bodyMd: 'Hello, see attached.' })))!;
+    expect(out).toContain('withheld: sensitive content (otp_or_2fa)\n');
+    expect(out).not.toContain('482917');
+    expect(out).not.toContain('Hello, see attached.');
+  });
+
+  it('takes a follow-up\'s text from its body when its snippet is empty', () => {
+    const out = resolveChatContext(null, { kind: 'mail-batch', ids: ['a'] }, reader(follow({ snippet: '', bodyMd: 'Tracking says delivered.' })))!;
+    expect(out).toContain('Snippet: Tracking says delivered.');
+    expect(out).not.toContain('stored no text');
   });
 
   it('withholds a sensitive follow-up\'s name, subject and snippet, says so on the locator line, and still points at it', () => {
