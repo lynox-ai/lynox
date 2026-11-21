@@ -3455,14 +3455,16 @@ export function getMessages() {
 }
 /** The codes `done.notice` may carry: a run the engine ended with a sentence of its own. */
 const ENGINE_NOTICES = ['content_refused', 'run_blocked'] as const;
-/** How the engine opens a hook's block; the note's title says it, so the line keeps the reason. */
-const RUN_BLOCKED_PREFIX = 'Run blocked: ';
+/** How the engine opens a hook's block, in the instance's language; the note's title says it, so
+ *  the line keeps the reason. */
+const RUN_BLOCKED_PREFIXES = ['Run blocked: ', 'Lauf blockiert: '] as const;
 function engineNotice(value: unknown): (typeof ENGINE_NOTICES)[number] | undefined {
 	return ENGINE_NOTICES.find((c) => c === value);
 }
 /** The note block for lynox's own sentence; a run the spending cap blocked carries which cap. */
 function noticeBlock(code: (typeof ENGINE_NOTICES)[number], result: string, budget: BudgetNoteRef | undefined): ContentBlock {
-	const text = code === 'run_blocked' && result.startsWith(RUN_BLOCKED_PREFIX) ? result.slice(RUN_BLOCKED_PREFIX.length) : result;
+	const prefix = code === 'run_blocked' ? RUN_BLOCKED_PREFIXES.find((p) => result.startsWith(p)) : undefined;
+	const text = prefix !== undefined ? result.slice(prefix.length) : result;
 	return code === 'run_blocked' && budget !== undefined ? { type: 'notice', code, text, budget } : { type: 'notice', code, text };
 }
 /** A reply that holds a typed answer is kept when it ends empty: the answer was given. */

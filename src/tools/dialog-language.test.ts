@@ -211,4 +211,32 @@ describe('the refused flagged request', () => {
     expect(contentFlagRefusal('de', 'declined', 'some new reason')).toBe('Nicht an das KI-Modell geschickt: Du hast abgelehnt. lynox hatte in deiner Nachricht verdächtigen Inhalt gefunden.');
     expect(contentFlagRefusal('en', 'declined', undefined)).toBe('Not sent to the AI model: you declined. lynox had found suspicious content in your message.');
   });
+
+  it('says that there was nobody to ask, word for word, in both languages', async () => {
+    const { contentFlagRefusal } = await import('./dialog-text.js');
+    expect(contentFlagRefusal('de', 'nobody', 'credential attack')).toBe('Nicht an das KI-Modell geschickt: Es war niemand da, den lynox fragen konnte. lynox hatte in deiner Nachricht Hinweise auf einen Angriff auf Zugangsdaten gefunden. War sie so gemeint, schick sie im Chat noch einmal und erlaube sie.');
+    expect(contentFlagRefusal('en', 'nobody', 'credential attack')).toBe('Not sent to the AI model: there was nobody to ask. lynox had found signs of an attack on credentials in your message. If you meant it, send it again in the chat and allow it.');
+  });
+});
+
+describe('the request the content check always refuses', () => {
+  it('has words for every reason the check refuses without asking, in both languages', async () => {
+    const { BLOCKED_LABELS } = await import('../core/input-guard.js');
+    const { CONTENT_FLAG_TEXT } = await import('./dialog-text.js');
+    expect(BLOCKED_LABELS.length).toBeGreaterThan(0);
+    for (const language of ['en', 'de'] as const) {
+      for (const label of BLOCKED_LABELS) expect(CONTENT_FLAG_TEXT[language].blockedFound[label], `${language} ${label}`).toBeTruthy();
+      expect(Object.keys(CONTENT_FLAG_TEXT[language].blockedFound).sort()).toEqual([...BLOCKED_LABELS].sort());
+    }
+  });
+
+  it('says it word for word, in both languages; a flagged reason refused without asking keeps its phrase', async () => {
+    const { contentBlockRefusal } = await import('./dialog-text.js');
+    expect(contentBlockRefusal('de', 'malware creation request')).toBe('Nicht an das KI-Modell geschickt: lynox hat in deiner Nachricht eine Anfrage nach Schadsoftware gefunden und gibt solche Anfragen nicht weiter.');
+    expect(contentBlockRefusal('en', 'malware creation request')).toBe('Not sent to the AI model: lynox found a request for malware in your message and does not pass such requests on.');
+    expect(contentBlockRefusal('de', 'weaponization request')).toBe('Nicht an das KI-Modell geschickt: lynox hat in deiner Nachricht eine Anfrage nach einem einsatzfähigen Angriff gefunden und gibt solche Anfragen nicht weiter.');
+    expect(contentBlockRefusal('de', 'privacy violation')).toBe('Nicht an das KI-Modell geschickt: lynox hat in deiner Nachricht Hinweise auf eine Verletzung der Privatsphäre gefunden und gibt solche Anfragen nicht weiter.');
+    expect(contentBlockRefusal('de', 'some new reason')).toBe('Nicht an das KI-Modell geschickt: lynox hat in deiner Nachricht verdächtigen Inhalt gefunden und gibt solche Anfragen nicht weiter.');
+    expect(contentBlockRefusal('en', undefined)).toBe('Not sent to the AI model: lynox found suspicious content in your message and does not pass such requests on.');
+  });
 });

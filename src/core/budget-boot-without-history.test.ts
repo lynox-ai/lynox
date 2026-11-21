@@ -91,7 +91,7 @@ describe('Engine boot — the spending caps without run history', () => {
     expect((engine as unknown as { runHistory: unknown }).runHistory).toBeNull();
     const check = checkPersistentBudget();
     expect(check.allowed).toBe(false);
-    expect(check.reason).toContain('Spending cap (daily $15, monthly $150) cannot be checked');
+    expect(check.reason).toContain('lynox cannot check the daily budget of $15.00 and the monthly budget of $150.00');
   });
 
   it('says so in the startup log, next to the line that says why the history did not open', async () => {

@@ -58,6 +58,9 @@ const FLAGGED_PATTERNS: PatternEntry[] = [
   { pattern: /\b(doxx|doxing|track\b.*without\b.*consent|stalk|surveillance\b.*without\b.*consent)\b/i, label: 'privacy violation', category: 'illegal' },
 ];
 
+/** Every reason a request the check always refuses can carry: each needs its words for the person. */
+export const BLOCKED_LABELS: readonly string[] = [...new Set(BLOCKED_PATTERNS.map((p) => p.label))];
+
 /** Every reason a flagged request can carry: each needs its words for the person (`CONTENT_FLAG_TEXT`). */
 export const FLAGGED_LABELS: readonly string[] = [...new Set(FLAGGED_PATTERNS.map((p) => p.label))];
 

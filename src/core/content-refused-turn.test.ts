@@ -172,6 +172,21 @@ describe('a message the content check refused is kept for the person, not for th
     }
   });
 
+  it('a German instance says each refusal in German, word for word; an English one in English', async () => {
+    const said = async (language: string, task: string, wire: (s: Session) => void = () => { /* no question */ }): Promise<string> => {
+      const engine = await boot({ language } as Partial<LynoxConfig>);
+      const session = engine.createSession();
+      wire(session);
+      return session.run(task);
+    };
+    const nobody = (s: Session): void => { s.promptUser = vi.fn().mockRejectedValue(new InputRequiredError('Allow this request?')); };
+    expect(await said('de', BLOCKED)).toBe('Nicht an das KI-Modell geschickt: lynox hat in deiner Nachricht eine Anfrage nach Schadsoftware gefunden und gibt solche Anfragen nicht weiter.');
+    expect(await said('en', BLOCKED)).toBe('Not sent to the AI model: lynox found a request for malware in your message and does not pass such requests on.');
+    expect(await said('de', FLAGGED, nobody)).toBe('Nicht an das KI-Modell geschickt: Es war niemand da, den lynox fragen konnte. lynox hatte in deiner Nachricht Hinweise auf einen Angriff auf Zugangsdaten gefunden. War sie so gemeint, schick sie im Chat noch einmal und erlaube sie.');
+    expect(await said('en', FLAGGED, nobody)).toBe('Not sent to the AI model: there was nobody to ask. lynox had found signs of an attack on credentials in your message. If you meant it, send it again in the chat and allow it.');
+    expect(mockProcess).not.toHaveBeenCalled();
+  });
+
   it('allowed: nothing extra is kept — the turn is stored once, as an ordinary turn the model reads', async () => {
     const engine = await boot();
     const session = engine.createSession();
@@ -239,8 +254,8 @@ describe('a message the content check refused is kept for the person, not for th
     expect(session.getLastRunNotice()).toBeUndefined();
 
     // The daily or monthly budget refusing the run: lynox's sentence as well.
-    budget.refuse = 'Daily spending cap ($5) reached. Today: $5.00.';
-    expect(await session.run('and of Italy')).toBe('Daily spending cap ($5) reached. Today: $5.00.');
+    budget.refuse = 'Daily budget of $5.00 reached, today $5.12.';
+    expect(await session.run('and of Italy')).toBe('Daily budget of $5.00 reached, today $5.12.');
     expect(session.getLastRunNotice()).toBe('run_blocked');
     expect(mockProcess).toHaveBeenCalledTimes(2);
   });
@@ -257,13 +272,13 @@ describe('a message the content check refused is kept for the person, not for th
   it('an internal run the check refuses keeps nothing in the thread', async () => {
     const engine = await boot();
     const session = engine.createSession();
-    await expect(session.run(BLOCKED, { internal: true })).rejects.toThrow('Request blocked by content policy');
+    await expect(session.run(BLOCKED, { internal: true })).rejects.toThrow('Not sent to the AI model: lynox found');
     expect(engine.getThreadStore()!.getMessages(session.sessionId)).toEqual([]);
   });
 });
 
 describe('a message the budget or a run hook blocked is kept for the person, not for the model', { timeout: 60_000 }, () => {
-  const CAP = 'Daily spending cap ($5) reached. Today: $5.12.';
+  const CAP = 'Daily budget of $5.00 reached, today $5.12.';
   const HOOK = 'AI budget for this period reached.';
 
   it('budget: after a reload the message and the note are shown; the next turn and a resume carry neither', async () => {
@@ -304,6 +319,18 @@ describe('a message the budget or a run hook blocked is kept for the person, not
     expect(rows[1]!.note!.detail).toBe(HOOK);
     expect(engine.getThreadStore()!.getMessages(session.sessionId, { apiOnly: true })).toEqual([]);
     expect(mockProcess).not.toHaveBeenCalled();
+  });
+
+  it('a German instance opens a hook\'s block with "Lauf blockiert:" and words a reached budget in German', async () => {
+    const engine = await boot({ language: 'de' } as Partial<LynoxConfig>);
+    const session = engine.createSession();
+    budget.refuse = CAP;
+    expect(await session.run('fasse das Quartal zusammen')).toBe('Tagesbudget von $5.00 erreicht, heute $5.12.');
+    expect(shown(engine, session)[1]!.note!.detail).toBe('Tagesbudget von $5.00 erreicht, heute $5.12.');
+    budget.refuse = undefined;
+    session.registerHooks({ onBeforeRun: async () => { throw new Error('Grund des Hooks.'); } });
+    expect(await session.run('entwirf das Angebot')).toBe('Lauf blockiert: Grund des Hooks.');
+    expect(shown(engine, session)[3]!.note!.detail).toBe('Grund des Hooks.');
   });
 
   it('a hook\'s text is kept as the note\'s detail only, cut and without control characters', async () => {

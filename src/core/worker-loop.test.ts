@@ -1763,7 +1763,7 @@ describe('WorkerLoop', () => {
       }
       const said = lines.join('');
       expect(said, 'the remaining headroom').toContain('$0.00');
-      expect(said, 'AND which cap it ran into').toContain('Daily spending cap');
+      expect(said, 'AND which cap it ran into').toContain('Daily budget of $15.00 reached');
     });
 
     it('prints the headroom it measured, not a constant', async () => {

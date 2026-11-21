@@ -19,6 +19,9 @@ import { isProvisionedInstance } from './wire-capture.js';
 
 export type NoticeLanguage = 'de' | 'en';
 
+/** How a run a hook blocked opens its result, before the hook's reason; the chat cuts it off. */
+export const RUN_BLOCKED_PREFIX: Readonly<Record<NoticeLanguage, string>> = { en: 'Run blocked: ', de: 'Lauf blockiert: ' };
+
 export function noticeLanguage(
   configured: string | undefined,
   provisioned: boolean = isProvisionedInstance(),

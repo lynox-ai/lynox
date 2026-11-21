@@ -184,10 +184,12 @@ describe('a message the spending cap blocked says why, until when, and what to d
 		expect(next()?.querySelector('a')?.getAttribute('href')).toBe('/app/settings/workspace/limits');
 		// Only the place it leads to is the link, not the whole step.
 		expect(link()).toBe('Einstellungen → Limits');
-		// The engine's sentence stays, in English, behind a Details that starts closed.
+		// The engine's sentence stays behind a Details that starts closed, in the instance's
+		// language, so not marked as English.
 		expect(details()?.open).toBe(false);
 		expect(text(details()?.querySelector('summary'))).toBe('Details');
-		expect(details()?.querySelector('[lang="en"]')?.textContent).toBe(DAILY);
+		expect(details()?.querySelector('.font-mono')?.textContent).toBe(DAILY);
+		expect(details()?.querySelector('[lang]')).toBeNull();
 		expect(target.querySelector('.ai-badge')).toBeNull();
 	});
 
@@ -375,7 +377,16 @@ describe('a message the spending cap blocked says why, until when, and what to d
 		expect(next()).toBeNull();
 		// A hook's reason is all the note has: it stays in view, not behind Details.
 		expect(details()).toBeNull();
-		expect(noteEl()?.querySelector('[lang="en"]')?.textContent).toBe('AI budget for this period reached.');
+		expect(noteEl()?.querySelector('.font-mono')?.textContent).toBe('AI budget for this period reached.');
+		expect(noteEl()?.querySelector('[lang]')).toBeNull();
+	});
+
+	it('a German instance\'s hook block: the German prefix is cut, the German reason stays in view', async () => {
+		const reason = 'Das KI-Budget für diesen Zeitraum ist aufgebraucht.';
+		await live('de', SELF, { result: `Lauf blockiert: ${reason}`, notice: 'run_blocked' });
+		expect(noteEl()?.querySelector('.font-mono')?.textContent).toBe(reason);
+		expect(text(noteEl())).not.toContain('Lauf blockiert');
+		expect(noteEl()?.querySelector('[lang]')).toBeNull();
 	});
 
 	for (const locale of ['de', 'en'] as const) {

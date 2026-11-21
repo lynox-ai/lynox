@@ -10,13 +10,17 @@ const { mockCheckPersistentBudget, mockRunSavedWorkflow } = vi.hoisted(() => ({
   mockRunSavedWorkflow: vi.fn(),
 }));
 
-vi.mock('./session-budget.js', () => ({ checkPersistentBudget: mockCheckPersistentBudget }));
+vi.mock('./session-budget.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./session-budget.js')>()),
+  checkPersistentBudget: mockCheckPersistentBudget,
+}));
 vi.mock('../tools/builtin/pipeline.js', () => ({ runSavedWorkflow: mockRunSavedWorkflow }));
 
 const { runGuardedSavedWorkflow, assertSingleTenantContext, _resetTenantInvariantForTests } = await import('./saved-workflow-runner.js');
 
-function makeEngine(hooks: LynoxHooks[]): Engine {
+function makeEngine(hooks: LynoxHooks[], language = 'en'): Engine {
   return {
+    config: { language },
     getHooks: () => hooks,
     getContext: () => null,
     getUserConfig: () => ({ default_tier: 'balanced' }),
@@ -134,10 +138,20 @@ describe('runGuardedSavedWorkflow — budget + managed-credit lifecycle', () => 
     const onAfterRun = vi.fn();
     const result = await runGuardedSavedWorkflow(makeEngine([{ onBeforeRun, onAfterRun }]), 'wf-1', undefined, { principal: OWNER_PRINCIPAL });
     expect(result.ok).toBe(false);
-    expect(result.error).toContain('Run blocked');
-    expect(result.error).toContain('Managed AI budget exhausted');
+    expect(result.error).toBe('Run blocked: Managed AI budget exhausted');
     expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
     expect(onAfterRun).not.toHaveBeenCalled();
+  });
+
+  it('a German instance says the refusal in German: the reached budget and the hook block\'s prefix', async () => {
+    mockCheckPersistentBudget.mockReturnValue({ allowed: false, todayCostUSD: 5.12, monthCostUSD: 9, dailyLimitUSD: 5, monthlyLimitUSD: null, cap: 'daily', reason: 'x' });
+    expect(await runGuardedSavedWorkflow(makeEngine([], 'de'), 'wf-1', undefined, { principal: OWNER_PRINCIPAL }))
+      .toEqual({ ok: false, error: 'Tagesbudget von $5.00 erreicht, heute $5.12.' });
+    mockCheckPersistentBudget.mockReturnValue({ allowed: true });
+    const onBeforeRun = vi.fn().mockRejectedValue(new Error('Das KI-Budget für diesen Zeitraum ist aufgebraucht.'));
+    const result = await runGuardedSavedWorkflow(makeEngine([{ onBeforeRun }], 'de'), 'wf-1', undefined, { principal: OWNER_PRINCIPAL });
+    expect(result.error).toBe('Lauf blockiert: Das KI-Budget für diesen Zeitraum ist aufgebraucht.');
+    expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
   });
 
   it('runs and reports the cost via onAfterRun on the happy path', async () => {

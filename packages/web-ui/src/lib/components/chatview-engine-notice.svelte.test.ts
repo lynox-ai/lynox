@@ -113,12 +113,14 @@ describe('a run that ended with lynox\'s own sentence', () => {
 			expect(reply()?.querySelector('button')).toBeNull();
 		});
 
-		it(`${locale}: a run a hook blocked names the check, says it was not sent, and keeps the reason in English`, async () => {
+		it(`${locale}: a run a hook blocked names the check, says it was not sent, and keeps the reason as the engine said it`, async () => {
 			await endRun(locale, { result: `Run blocked: ${REASON}`, notice: 'run_blocked' });
 			const el = notice();
 			expect(text(el)).toBe(`${i18n.t('chat.note.run_blocked.title')} ${i18n.t('chat.note.run_blocked')} ${REASON}`);
-			const line = el?.querySelector('[lang="en"]');
+			const line = el?.querySelector('.font-mono');
 			expect(line?.textContent).toBe(REASON);
+			// The instance's language, not marked English.
+			expect(el?.querySelector('[lang]')).toBeNull();
 			expect(target.querySelector('.ai-badge')).toBeNull();
 			expect(el?.querySelector('[role="status"]')?.className).toContain('border-border');
 		});
