@@ -171,15 +171,15 @@ export function visible(text: string): string {
   return text.replace(HIDDEN, (c) => `<U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}>`);
 }
 
-// The name of each mode and failure strategy the engine knows. A name says what a run does and
-// nothing it does not. A parallel run starts its steps in phases by what they wait on: a stop
+// The name of each mode and failure strategy the engine knows. A name stands for the stored
+// setting, not for every run: whether a step can ask depends on the tools it declares and on
+// whether a chat is open to answer, whatever the mode. An interactive workflow can be saved
+// without a step that asks. A parallel run starts its steps in phases by what they wait on: a stop
 // starts no step of a later phase, while the steps of the failed step's own phase still start and
 // finish (the view says so under the name). A sequential run goes step by step, so a stop there
-// starts nothing after the failed step. An interactive workflow is marked as one whose steps may
-// ask; it can be saved so without a step that asks, and whether a run asks is up to the model.
-// `notify` carries the name of `continue`: it runs the same and tells no one but a debug log, so a
-// name that promised a report would promise what no run does. A value outside these is printed as it
-// came (with hidden characters shown): no name is guessed for it.
+// starts nothing after the failed step. `notify` carries the name of `continue`: it runs the same
+// and tells no one but a debug log, so a name that promised a report would promise what no run does.
+// A value outside these is printed as it came (with hidden characters shown): no name is guessed.
 const MODE_KEYS: ReadonlyMap<string, string> = new Map([
   ['interactive', 'workflow_library.stamp.mode_interactive'],
   ['autonomous', 'workflow_library.stamp.mode_autonomous'],
