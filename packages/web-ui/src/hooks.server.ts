@@ -4,7 +4,7 @@ import { sequence } from '@sveltejs/kit/hooks';
 import { env } from '$env/dynamic/private';
 import { verifySessionToken } from '$lib/server/auth.js';
 import { isPublic } from '$lib/server/public-paths.js';
-import { ARTIFACT_FRAME_PATH } from '$lib/utils/artifact-frame-protocol.js';
+import { applySecurityHeaders, refuseFraming } from '$lib/server/security-headers.js';
 
 const handleAuth: Handle = async ({ event, resolve }) => {
 	const secret = env.LYNOX_HTTP_SECRET;
@@ -64,46 +64,14 @@ const handleDemoHtmlLang: Handle = async ({ event, resolve }) => {
 	});
 };
 
+// First in the sequence, so a refused request never reaches a route (see refuseFraming).
+const handleFrameRefusal: Handle = async ({ event, resolve }) =>
+	refuseFraming(event.url.pathname, event.request.headers.get('sec-fetch-dest')) ?? resolve(event);
+
 const handleSecurityHeaders: Handle = async ({ event, resolve }) => {
 	const response = await resolve(event);
-	// The artifact frame endpoint sets its own policy (a sandbox) and its own caching (per
-	// build); both are what make it safe and fast, so neither is overwritten here.
-	const isFrameEndpoint = event.url.pathname === ARTIFACT_FRAME_PATH;
-	response.headers.set('X-Content-Type-Options', 'nosniff');
-	response.headers.set('X-Frame-Options', 'SAMEORIGIN');
-	response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
-	response.headers.set('Permissions-Policy', 'camera=(), microphone=(self), geolocation=()');
-	// HTML pages must NEVER be cached. Without this, iOS WKWebView (PWA + Safari)
-	// picks a heuristic max-age and keeps serving the stale `index.html` even
-	// after a `location.reload()` or `location.replace(?_v=…)` — the toast in
-	// PR #251 and the cold-start guard in PR #252 both bypass-fail because
-	// they trigger a network request that iOS satisfies from its own cache.
-	// Hashed `_app/immutable/*.{js,css}` assets are safe to cache forever
-	// (different filename per build); only the HTML driver document needs
-	// no-store. Caught after a canary v1.3.10 incident —
-	// the iPhone PWA was stuck reloading to the same cached HTML.
-	const ct = response.headers.get('Content-Type') ?? '';
-	if (ct.startsWith('text/html') && !isFrameEndpoint) {
-		response.headers.set('Cache-Control', 'no-store, must-revalidate');
-	}
-	if (isFrameEndpoint) return response;
-	response.headers.set(
-		'Content-Security-Policy',
-		[
-			"default-src 'self'",
-			"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com https://static.cloudflareinsights.com",
-			"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com",
-			"img-src 'self' data: blob:",
-			"media-src 'self' blob:",
-			"font-src 'self' https://fonts.gstatic.com",
-			"connect-src 'self' https://cloudflareinsights.com",
-			"frame-src 'self'",
-			"frame-ancestors 'self'",
-			"base-uri 'self'",
-			"form-action 'self'",
-		].join('; ')
-	);
+	applySecurityHeaders(event.url.pathname, response.headers);
 	return response;
 };
 
-export const handle = sequence(handleAuth, handleBuildShaInjection, handleDemoHtmlLang, handleSecurityHeaders);
+export const handle = sequence(handleFrameRefusal, handleAuth, handleBuildShaInjection, handleDemoHtmlLang, handleSecurityHeaders);
