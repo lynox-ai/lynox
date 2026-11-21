@@ -28,18 +28,21 @@ const META = {
 	id: 'cccccccc',
 	title: 'Deck',
 	description: '',
-	type: 'html',
 	createdAt: '2026-10-09T19:34:00.000Z',
 	updatedAt: '2026-10-09T19:34:00.000Z',
 	threadId: 't',
 };
 
 let version = 1;
+let artifactType = 'html';
+let artifactContent: string | null = null;
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 
 beforeEach(() => {
 	version = 1;
+	artifactType = 'html';
+	artifactContent = null;
 	vi.spyOn(HTMLIFrameElement.prototype, 'contentWindow', 'get').mockImplementation(function (this: HTMLIFrameElement) {
 		return windowOf(this);
 	});
@@ -48,8 +51,8 @@ beforeEach(() => {
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 		const u = String(url);
 		const body = u.endsWith('/artifacts')
-			? { artifacts: [{ ...META, version }] }
-			: { ...META, version, content: `<p>version-${version}</p>` };
+			? { artifacts: [{ ...META, type: artifactType, version }] }
+			: { ...META, type: artifactType, version, content: artifactContent ?? `<p>version-${version}</p>` };
 		return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 	}));
 });
@@ -128,6 +131,35 @@ describe('the gallery preview frame', () => {
 		expect(shared).toHaveLength(1);
 		const file = await shared[0]!.text();
 		expect(file).toContain('<p>version-1</p>');
+		expect(file).toMatch(/<meta http-equiv="Content-Security-Policy" content="[^"]*img-src data: blob:/);
+	});
+
+	it('exports an svg artifact as an svg file without its remote image and keeps the drawing', async () => {
+		shared.length = 0;
+		artifactType = 'svg';
+		artifactContent = '<svg xmlns="http://www.w3.org/2000/svg"><circle id="dot" r="4"/><image href="https://elsewhere.example/x.png" width="9" height="9"/></svg>';
+		await openDeck();
+		const share = [...target.querySelectorAll('button')].find((b) => /share|teilen/i.test(b.textContent ?? ''));
+		share!.click();
+		await settle();
+		expect(shared).toHaveLength(1);
+		expect(shared[0]!.type).toBe('image/svg+xml');
+		const file = await shared[0]!.text();
+		expect(file).toContain('<circle id="dot" r="4"/>');
+		expect(file).not.toContain('elsewhere.example');
+	});
+
+	it('exports an svg artifact that is not well-formed as html with the artifact policy', async () => {
+		shared.length = 0;
+		artifactType = 'svg';
+		artifactContent = '<svg xmlns="http://www.w3.org/2000/svg"><image href="https://elsewhere.example/x.png"/><g></svg>';
+		await openDeck();
+		const share = [...target.querySelectorAll('button')].find((b) => /share|teilen/i.test(b.textContent ?? ''));
+		share!.click();
+		await settle();
+		expect(shared).toHaveLength(1);
+		expect(shared[0]!.type).toBe('text/html');
+		const file = await shared[0]!.text();
 		expect(file).toMatch(/<meta http-equiv="Content-Security-Policy" content="[^"]*img-src data: blob:/);
 	});
 
