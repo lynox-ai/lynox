@@ -9,7 +9,7 @@ import { OWNER_PRINCIPAL, UNKNOWN_RUN_TAG, isOwnerPrincipal, isRunTag, mandateId
 import { PAUSED_MODEL_TEXT, isPaused } from '../../core/plan-pause.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
-import { WATCH_OVERRIDE_REFUSAL } from '../../core/task-manager.js';
+import { WATCH_OVERRIDE_REFUSAL, watchPolicyRefusal } from '../../core/task-manager.js';
 import { readAddressWrites } from '../../core/outbound-write.js';
 import { carriesAddress, hostTargets } from '../../core/send-target.js';
 
@@ -603,6 +603,9 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         // A watch only reads its page, unattended and again and again: an address a server may
         // run as a write (`?_method=DELETE`, a GraphQL mutation) would send that write on every check.
         if (readAddressWrites(input.watch_url)) return `Error: watch_url ${WATCH_OVERRIDE_REFUSAL} No watch was created. Pass the address of the page without the override or the mutation.`;
+        // A watch the policy forbids is not created only to fail on every poll.
+        const refusedBy = watchPolicyRefusal(input.watch_url, agent.toolContext);
+        if (refusedBy !== null) return `Error: watch_url not watched: ${refusedBy} No watch was created.`;
         // Floor the interval at 5 min: the JSON-schema `minimum` is only advisory
         // for an LLM-supplied arg, so clamp defensively to bound fetch + LLM spend.
         const intervalMinutes = Math.max(5, input.watch_interval_minutes ?? 60);

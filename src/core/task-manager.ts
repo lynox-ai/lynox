@@ -8,6 +8,7 @@ import { isValidCron, nextOccurrence } from './cron-parser.js';
 import { readEnvAlias } from './env.js';
 import { cpSuppliesLLMKey } from '../contract/vocab.js';
 import { compose, renderFence } from '../core/data-boundary.js';
+import { assertHostPolicy, type HostPolicyContext } from './network-guard.js';
 import { isHandRunOf } from './hand-run-door.js';
 import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, ownedBy, principalTag, type RequestPrincipal } from './request-principal.js';
 import { MAPPING_MAX_ENTRIES, mintRouteToken, parseWebhookSpec, type WebhookVerifierKind } from './webhook-verifiers.js';
@@ -1265,6 +1266,30 @@ export class TaskManager {
 }
 
 const MAX_RUN_RESULT_CHARS = 10_000;
+
+/**
+ * Why `network_policy` keeps a watch from reading `url`, or null when it may. A watch is a
+ * credential-free read, so it gets the `discovery` surface, as every other such read: under
+ * `allow-list` a host outside the list is refused, under `deny-all` every host, under `guarded`
+ * and `allow-all` it passes. Asked at creation and before every poll, so a watch the policy forbids
+ * is neither created nor read, and one created before the policy changed stops being read.
+ */
+export function watchPolicyRefusal(url: string, ctx: HostPolicyContext | undefined): string | null {
+  try {
+    assertHostPolicy(url, { surface: 'discovery' }, ctx);
+    return null;
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes('network_policy=deny-all')) return 'this instance\'s network_policy is deny-all, which reads no page.';
+    if (message.includes('not in network allow-list')) {
+      let host = url;
+      try { host = new URL(url).hostname; } catch { /* the address as given */ }
+      return `its host ${host} is not in this instance's network allow-list (network_policy allow-list).`;
+    }
+    const why = message.replace(/^Blocked:\s*/, '');
+    return `this instance's network settings refuse it: ${/[.!?]$/.test(why) ? why : `${why}.`}`;
+  }
+}
 
 /** After "its address" or "watch_url": why an address a server may run as a write is not watched (`readAddressWrites`). */
 export const WATCH_OVERRIDE_REFUSAL = 'carries a method override (such as `_method=DELETE`) or a GraphQL mutation, which a server may run as a write instead of showing a page.';
