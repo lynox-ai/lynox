@@ -28,6 +28,13 @@
   "confirm failed" until it is reloaded. An API client that confirms schedules
   reads the preview first.
 
+### Fixed
+
+- A scheduled agent task or scheduled workflow that was set up in a chat after
+  that chat had read outside content now records its writes as coming from an
+  unknown source. Until now such a run wrote its rows with no source at all, so
+  removing a connection's data did not find what the run derived from it.
+
 ## 2.18.0 — 2026-11-17
 
 ### Upgrade notes

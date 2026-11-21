@@ -7,6 +7,7 @@ import { RunHistory } from './run-history.js';
 import { ThreadStore } from './thread-store.js';
 import { reloadConfig } from './config.js';
 import { UNKNOWN_GRANT } from './conversation-grants.js';
+import { rowStampOf } from './data-store.js';
 import type { LynoxConfig } from '../types/index.js';
 import type { Agent } from './agent.js';
 
@@ -87,5 +88,22 @@ describe('Engine boot — the conversation grant set', () => {
     const engine = await boot();
     const session = engine.createSession({ sessionId: 'fresh-thread' });
     expect((session as unknown as { agent: Agent }).agent.conversationGrants?.members()).toEqual([]);
+  });
+
+  it('a run built from a task created after outside content writes under unknown, in its thread and after a rebuild', async () => {
+    const engine = await boot();
+    const session = engine.createSession({ sessionId: 'task-thread', seedUnknownGrant: true });
+    const agentOf = (): Agent => (session as unknown as { agent: Agent }).agent;
+    expect(agentOf().conversationGrants?.members()).toEqual([UNKNOWN_GRANT]);
+    // What a row the run writes is stamped with.
+    expect(rowStampOf(agentOf()).grants).toEqual([UNKNOWN_GRANT]);
+    // Recorded for the thread, so a later turn in it still holds it.
+    expect(engine.getRunHistory()!.getConversationGrants('task-thread')).toEqual([UNKNOWN_GRANT]);
+    // The worker rebuilds the agent before the run; the set stays.
+    session._recreateAgent();
+    expect(agentOf().conversationGrants?.members()).toEqual([UNKNOWN_GRANT]);
+    // Control: the same start without the flag holds nothing.
+    const clean = engine.createSession({ sessionId: 'clean-task-thread', seedUnknownGrant: false });
+    expect(rowStampOf((clean as unknown as { agent: Agent }).agent).grants).toEqual([]);
   });
 });
