@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
@@ -11,7 +12,7 @@
 	import { attemptKey, clearAttemptKey, clearAllAttemptKeys, attemptIsOver } from '../utils/run-attempt-key.js';
 	import { composeRunNotice, refusalBanner } from '../utils/run-notice.js';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
-	import { awaitsLineKey, awaitsStampRefusal, confirmOutcome, offersStamp, stillOffLine, parseStampPreview, visible, type StampPreview } from '../utils/workflow-stamp.js';
+	import { awaitsLineKey, awaitsStampRefusal, confirmOutcome, offersStamp, stillOffLine, parseStampPreview, stampChanges, visible, type StampChanges, type StampPreview } from '../utils/workflow-stamp.js';
 
 	// The card actions show on hover only where there is room beside the name AND a pointer that
 	// hovers. Below `md` they sit under the name and stay visible, and on a device without hover
@@ -438,6 +439,9 @@
 	// Why the view is open beyond the button: the steps changed under it, or a schedule was refused
 	// because the workflow waits for this stamp.
 	let stampLine = $state<'steps_changed' | 'awaits_at_schedule' | null>(null);
+	// After `steps_changed`: what differs from the version shown before, marked in the steps.
+	let stampChangesShown = $state<StampChanges | null>(null);
+	let stampDialog = $state<HTMLElement | null>(null);
 	// A schedule dialog the refusal interrupted, reopened as it was once the stamp holds.
 	let stampResumesSchedule = $state<SavedWorkflow | null>(null);
 	// Bumped by every load, so a late answer for an earlier opening writes nothing.
@@ -459,6 +463,7 @@
 		const generation = ++stampGeneration;
 		stampLoading = true;
 		stampPreview = null;
+		stampChangesShown = null;
 		try {
 			const res = await fetch(`${getApiBase()}/workflows/${encodeURIComponent(wf.id)}/stamp-preview`);
 			const body = res.ok ? await res.json().catch(() => null) : null;
@@ -515,7 +520,15 @@
 			if (outcome.kind === 'changed') {
 				// The line says the new version is shown below, so it goes up only once it is.
 				stampLine = null;
-				if (await loadStampPreview(wf) && opening === stampOpening) stampLine = 'steps_changed';
+				if (await loadStampPreview(wf) && opening === stampOpening && stampPreview !== null) {
+					stampLine = 'steps_changed';
+					stampChangesShown = stampChanges(shown, stampPreview);
+					// Brought into sight and focused: the changed part is what the owner has to read again.
+					await tick();
+					const mark = stampDialog?.querySelector<HTMLElement>('[data-stamp-changed]');
+					mark?.focus();
+					mark?.scrollIntoView?.({ block: 'nearest' });
+				}
 				return;
 			}
 			if (outcome.kind === 'failed') { error = t(outcome.key); return; }
@@ -1135,6 +1148,7 @@
 		aria-modal="true"
 		aria-label={t('workflow_library.stamp.review')}
 		data-testid="stamp-dialog"
+		bind:this={stampDialog}
 	>
 		<div class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
 			<!-- Where the owner approves the steps: a name a person with access gave is set apart, whole. -->
@@ -1160,7 +1174,7 @@
 			{#if stampLoading}
 				<p class="text-text-subtle text-sm">{t('common.loading')}</p>
 			{:else if stampPreview}
-				<StampPreviewBody preview={stampPreview} />
+				<StampPreviewBody preview={stampPreview} changes={stampChangesShown} />
 			{/if}
 
 			<div class="flex items-center justify-end gap-2 mt-5">

@@ -171,14 +171,52 @@ export function visible(text: string): string {
   return text.replace(HIDDEN, (c) => `<U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}>`);
 }
 
-/** How long the start of a step's task text runs in the step's heading (there is no step name). */
-export const STEP_TASK_HEAD = 80;
+// The sentence for each mode and failure strategy the engine knows. A value outside these is printed
+// as it came (with hidden characters shown): a sentence is never guessed for something unknown.
+const MODE_KEYS: ReadonlyMap<string, string> = new Map([
+  ['interactive', 'workflow_library.stamp.mode_interactive'],
+  ['autonomous', 'workflow_library.stamp.mode_autonomous'],
+]);
+const ON_FAILURE_KEYS: ReadonlyMap<string, string> = new Map([
+  ['stop', 'workflow_library.stamp.on_failure_stop'],
+  ['continue', 'workflow_library.stamp.on_failure_continue'],
+  ['notify', 'workflow_library.stamp.on_failure_notify'],
+]);
+/** The key of a mode's sentence, or null for a mode this view does not know. */
+export function modeKey(mode: string): string | null {
+  return MODE_KEYS.get(mode) ?? null;
+}
+/** The key of a failure strategy's sentence, or null for one this view does not know. */
+export function onFailureKey(onFailure: string): string | null {
+  return ON_FAILURE_KEYS.get(onFailure) ?? null;
+}
 
-/** The heading of a step: its id and the start of its task text, cut on a whole character. */
-export function stepHeading(step: { id: string; task: string }): { id: string; head: string } {
-  const flat = step.task.replace(/\s+/g, ' ').trim();
-  const chars = Array.from(flat);
-  return { id: visible(step.id), head: visible(chars.length > STEP_TASK_HEAD ? `${chars.slice(0, STEP_TASK_HEAD).join('')}…` : flat) };
+/** What moved between the preview that was shown and the one loaded after a refusal. */
+export interface StampChanges {
+  /** Mode, failure strategy, limits, parameters or contract. */
+  settings: boolean;
+  /** Positions in the new preview of steps that are new or differ from the step of that id before. */
+  steps: ReadonlySet<number>;
+  /** Ids of steps that were shown before and are gone now. */
+  removed: string[];
+}
+
+/**
+ * Compares two previews of the same workflow, step by step id. `stepKey` is what a step shows: by
+ * default the step itself; the takeover adds the note it prints at a step. A step that only moved
+ * is not marked.
+ */
+export function stampChanges<P extends StampPreview>(before: P, after: P, stepKey: (p: P, i: number) => string = (p, i) => JSON.stringify(p.steps[i])): StampChanges {
+  const settingsOf = (p: P): string => JSON.stringify([p.mode, p.onFailure, p.limits, p.parameters, p.contract]);
+  const was = new Map<string, string>();
+  before.steps.forEach((s, i) => { if (!was.has(s.id)) was.set(s.id, stepKey(before, i)); });
+  const steps = new Set<number>();
+  const now = new Set<string>();
+  after.steps.forEach((s, i) => {
+    now.add(s.id);
+    if (was.get(s.id) !== stepKey(after, i)) steps.add(i);
+  });
+  return { settings: settingsOf(before) !== settingsOf(after), steps, removed: [...was.keys()].filter((id) => !now.has(id)) };
 }
 
 /** A recorded step's input template as the view prints it: the literal call, nothing hidden. */
