@@ -268,7 +268,8 @@ describe('a message the spending cap blocked says why, until when, and what to d
 		const stream = sseStream();
 		run = stream;
 		i18n.setLocale('de');
-		stubFetch(MANDATE, (url) => {
+		// Self-hosted, where an owner would get the limits page: only the unknown reader holds it back.
+		stubFetch({ tier: '', viewer: 'mandate' }, (url) => {
 			if (url.endsWith('/config')) return json({}, 503);
 			return url.endsWith('/sessions/t1/run') ? new Response(stream.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }) : undefined;
 		});
@@ -309,6 +310,26 @@ describe('a message the spending cap blocked says why, until when, and what to d
 		const stream = sseStream();
 		run = stream;
 		stubFetch(MANAGED, (url) => {
+			if (url.endsWith('/secrets/status')) return json({}, 500);
+			return url.endsWith('/sessions/t1/run') ? new Response(stream.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }) : undefined;
+		});
+		void store.sendMessage('summarise the quarter');
+		await settle();
+		const { default: ChatView } = await import('./ChatView.svelte');
+		component = svelte.mount(ChatView, { target });
+		svelte.flushSync();
+		stream.send('done', { result: DAILY, notice: 'run_blocked', budget: DAILY_REF });
+		await settle();
+		svelte.flushSync();
+		expect(reason()).toContain('$5.12');
+		expect(next()).toBeNull();
+	});
+
+	it('a tier probe that failed names no step in someone else\'s workspace either', async () => {
+		i18n.setLocale('de');
+		const stream = sseStream();
+		run = stream;
+		stubFetch(MANDATE, (url) => {
 			if (url.endsWith('/secrets/status')) return json({}, 500);
 			return url.endsWith('/sessions/t1/run') ? new Response(stream.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }) : undefined;
 		});
