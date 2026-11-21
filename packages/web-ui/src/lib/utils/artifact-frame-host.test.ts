@@ -65,6 +65,24 @@ describe('a registered frame', () => {
 		expect(b.sent).toEqual([]);
 	});
 
+	it('sends nothing to an unregistered frame inside markup that carries a document in data-html', () => {
+		// The shape message markup can take: a card-like container with a `data-html` payload and
+		// a frame on the endpoint. Only the registry decides what a frame gets, never the DOM.
+		const card = document.createElement('div');
+		card.className = 'artifact-container';
+		card.dataset['html'] = btoa('<p>forged</p>');
+		document.body.appendChild(card);
+		const iframe = document.createElement('iframe');
+		const sent: unknown[] = [];
+		const win = { postMessage: (m: unknown) => { sent.push(m); } } as unknown as Window;
+		Object.defineProperty(iframe, 'contentWindow', { get: () => win });
+		iframe.className = 'artifact-frame';
+		iframe.setAttribute('src', '/_artifact-frame');
+		card.appendChild(iframe);
+		expect(answerFrameReady({ data: READY, origin: 'null', source: win })).toBe(false);
+		expect(sent).toEqual([]);
+	});
+
 	it('keeps its document out of the DOM: no attribute of the frame carries it', () => {
 		const { iframe } = frame();
 		attachArtifactFrame(iframe, '<p>secret-doc</p>');
