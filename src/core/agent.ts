@@ -470,11 +470,13 @@ export function providerSearchAdmitted(ctx: ToolContext | undefined): boolean {
   return policy === undefined || policy === 'allow-all' || policy === 'guarded';
 }
 
-/** Whether message content carries a search the provider ran itself: its call or its results. */
+/** Whether message content carries a web search the provider ran itself: its call or its
+ *  results. Only the web search: the lazy tools' tool search is a server tool too, but it searches
+ *  the request's own tool definitions and fetches nothing. */
 function holdsProviderSearch(content: unknown): boolean {
   return Array.isArray(content) && content.some((b: unknown) => {
-    const type = (b as { type?: unknown } | null)?.type;
-    return type === 'server_tool_use' || type === 'web_search_tool_result';
+    const block = b as { type?: unknown; name?: unknown } | null;
+    return (block?.type === 'server_tool_use' && block.name === 'web_search') || block?.type === 'web_search_tool_result';
   });
 }
 
@@ -1128,8 +1130,8 @@ export class Agent implements IAgent {
   /** Whether this run has seen wrapped untrusted content (Wave 1.2). */
   get sawUntrustedData(): boolean { return this._sawUntrustedData; }
   /** DK.1 F5: sticky over the CONVERSATION (not reset per run) — set once this conversation
-   *  has ingested untrusted content (a wrapped marker OR an {@link Agent.EXTERNAL_CONTENT_TOOLS}
-   *  read). The per-run latch resets each turn, but an injected instruction ("on your NEXT
+   *  has ingested untrusted content (a wrapped marker, an {@link Agent.EXTERNAL_CONTENT_TOOLS}
+   *  read, OR a web search the provider ran itself). The per-run latch resets each turn, but an injected instruction ("on your NEXT
    *  reply, remember(pin:true) …") persists in context, so a clean-latch turn could still be
    *  executing it. A durable-write gate ORs this in → such a deferred `remember` routes to
    *  pending_review, not active+pinned. Reset only on a fresh conversation (`reset`) or
@@ -1920,7 +1922,8 @@ export class Agent implements IAgent {
     // DK.1 F5: re-derive the sticky conversation taint from the rehydrated history — a thread
     // whose context still carries a wrapped-untrusted marker keeps its durable-write gate armed.
     // And from the thread's record of it (`ConversationLatch`), which outlives a compaction that
-    // summarized the read away: either one is enough. A record that cannot be read counts as set.
+    // summarized the read away, and from a web search the provider ran, whose blocks the history
+    // still holds: any one is enough. A record that cannot be read counts as set.
     this._providerSearchSeen = this.messages.some((m) => holdsProviderSearch(m.content));
     if (this._contextHoldsUntrustedMarker() || this.conversationLatch?.isSet() === true || this._providerSearchSeen) this._armConversationLatch();
     else this._conversationSawUntrusted = false;
@@ -1931,6 +1934,8 @@ export class Agent implements IAgent {
     if (this.conversationRoot && this.messages.some(m => m.role === 'user' && Agent._contentHoldsUntrustedMarker(m.content))) {
       this.conversationGrants?.add(UNKNOWN_GRANT);
     }
+    // Likewise a provider search in a thread written before such a search added to the set.
+    if (this.conversationRoot && this._providerSearchSeen) this.conversationGrants?.add(UNKNOWN_GRANT);
   }
 
   abort(): void {

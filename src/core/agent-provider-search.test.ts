@@ -38,9 +38,10 @@ const callingAnswer = (...blocks: unknown[]) => ({ content: blocks, stop_reason:
 
 type Seen = { latch: boolean; unknown: boolean };
 
-function agentFor(tools: ToolEntry[], asked: string[], grants: ConversationGrants, seen: Seen[]): Agent {
+function agentFor(tools: ToolEntry[], asked: string[], grants: ConversationGrants, seen: Seen[], root = false): Agent {
   let agent: Agent;
   agent = new Agent({
+    conversationRoot: root,
     name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', noticeLanguage: 'en',
     tools,
     promptUser: async (q: string | PromptText) => { asked.push(flattenPrompt(q)); return 'Deny'; },
@@ -77,8 +78,22 @@ describe('a search the provider ran counts as content from outside', () => {
       await agent.send('find the CRM API');
       expect(seen[0]).toEqual({ latch: true, unknown: true });
       expect(agent.conversationSawUntrusted).toBe(true);
+      expect(agent.sawUntrustedData).toBe(true);
     });
   }
+
+  it("CONTROL: the lazy tools' tool search, a server tool that fetches nothing, arms nothing", async () => {
+    const grants = ConversationGrants.detached(); const seen: Seen[] = [];
+    mockProcess.mockResolvedValueOnce(answer(
+      { type: 'server_tool_use', id: 'srv_2', name: 'tool_search_tool_regex', input: { pattern: 'mail' } },
+      { type: 'tool_search_tool_result', tool_use_id: 'srv_2', content: { type: 'tool_search_tool_search_result', tool_references: [] } },
+      { type: 'text', text: 'found the tool' },
+    ));
+    const agent = agentFor([], [], grants, seen);
+    await agent.send('find a mail tool');
+    expect(seen[0]).toEqual({ latch: false, unknown: false });
+    expect(agent.sawUntrustedData).toBe(false);
+  });
 
   it('CONTROL: an answer without such a search arms nothing', async () => {
     const grants = ConversationGrants.detached(); const seen: Seen[] = [];
@@ -96,6 +111,7 @@ describe('a search the provider ran counts as content from outside', () => {
       .mockResolvedValueOnce(endTurn);
     await agentFor([tool], asked, ConversationGrants.detached(), []).send('find the CRM API');
     expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain('This conversation contains content from outside, and you haven\'t named "collect.example"');
     expect(tool.sent).toEqual([]);
   });
 
@@ -109,21 +125,25 @@ describe('a search the provider ran counts as content from outside', () => {
     expect(tool.sent).toEqual(['https://collect.example/in']);
   });
 
-  it('a conversation loaded with such a search is armed', () => {
-    const agent = agentFor([], [], ConversationGrants.detached(), []);
+  it("a conversation loaded with such a search is armed, and its own agent's set holds unknown", () => {
+    const grants = ConversationGrants.detached();
+    const agent = agentFor([], [], grants, [], true);
     agent.loadMessages([
       { role: 'user', content: 'find the CRM API' },
       { role: 'assistant', content: [searchCall, searchResult, { type: 'text', text: 'found it' }] as never },
     ]);
     expect(agent.conversationSawUntrusted).toBe(true);
+    expect(grants.has(UNKNOWN_GRANT)).toBe(true);
   });
 
   it('CONTROL: a conversation loaded without one is not', () => {
-    const agent = agentFor([], [], ConversationGrants.detached(), []);
+    const grants = ConversationGrants.detached();
+    const agent = agentFor([], [], grants, [], true);
     agent.loadMessages([
       { role: 'user', content: 'hello' },
       { role: 'assistant', content: [{ type: 'text', text: 'hi' }] },
     ]);
     expect(agent.conversationSawUntrusted).toBe(false);
+    expect(grants.has(UNKNOWN_GRANT)).toBe(false);
   });
 });

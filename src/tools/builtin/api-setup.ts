@@ -2278,8 +2278,9 @@ ${draftJson}
       // this tool's own call as foreign content before the handler runs, so the turn would never
       // be clean here. Only a save in a batch that began before the conversation's first foreign
       // content records its host, and an earlier `api_setup` call counts as such content.
-      // Outside a batch nothing is recorded, nor in a conversation holding a search the provider
-      // ran itself: its results reach the model past every dispatch and arm nothing.
+      // Outside a batch nothing is recorded, nor in a conversation holding a web search the
+      // provider ran itself: its results reach the model past every dispatch. Such a search also
+      // arms the conversation latch; this check stays as a guard of its own.
       // Only the owner's interactive run: a trigger's, a workflow's or a task's run carries a run
       // tag as its author even under the owner's principal, and a sub-agent a run origin of its
       // own; a workflow made in another conversation could otherwise name a host unattended. The
