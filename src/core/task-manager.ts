@@ -1275,6 +1275,8 @@ const MAX_RUN_RESULT_CHARS = 10_000;
 export type BlockedReason = { kind: 'watch_allow_list'; host: string } | { kind: 'watch_deny_all' } | { kind: 'watch_https' };
 
 const DENY_ALL_REFUSAL = 'Blocked: network access denied for this tool (network_policy=deny-all)';
+const ALLOW_LIST_REFUSAL_START = 'Blocked: hostname "';
+const ALLOW_LIST_REFUSAL_END = '" not in network allow-list';
 const HTTPS_REFUSAL_START = 'Blocked: HTTP not allowed';
 
 /**
@@ -1305,9 +1307,10 @@ export function watchPolicyRefusal(url: string, ctx: HostPolicyContext | undefin
     if (message === DENY_ALL_REFUSAL) {
       return { why: 'this instance\'s network_policy is deny-all, so lynox reads no web page.', wayOut: 'Only the operator can change network_policy.', shown: { kind: 'watch_deny_all' } };
     }
-    if (message.startsWith('Blocked: hostname "') && message.endsWith('" not in network allow-list')) {
-      let host = url;
-      try { host = new URL(url).hostname; } catch { /* the address as given */ }
+    if (message.startsWith(ALLOW_LIST_REFUSAL_START) && message.endsWith(ALLOW_LIST_REFUSAL_END)) {
+      // The host as the allow-list compared it (an IPv6 literal without its brackets), so an
+      // operator who copies it adds the entry that matches.
+      const host = message.slice(ALLOW_LIST_REFUSAL_START.length, -ALLOW_LIST_REFUSAL_END.length);
       return { why: `its host ${host} is not in this instance's network allow-list.`, wayOut: 'The operator can add the host to the allow-list (network_policy).', shown: { kind: 'watch_allow_list', host } };
     }
     if (message.startsWith(HTTPS_REFUSAL_START)) return { why: 'this instance only reads HTTPS pages (enforce_https).', wayOut: 'Watch the https:// address instead.', shown: { kind: 'watch_https' } };

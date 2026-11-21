@@ -16,6 +16,10 @@ describe('watchRefusedNow', () => {
     expect(watchRefusedNow(watch('http://other.example/p'), ctx('guarded', true))).toEqual({ kind: 'watch_https' });
   });
 
+  it('names the host as the allow-list compares it: an IPv6 literal without its brackets', () => {
+    expect(watchRefusedNow(watch('https://[2001:db8::1]/p'), ctx('allow-list'))).toEqual({ kind: 'watch_allow_list', host: '2001:db8::1' });
+  });
+
   it('tells the reason by the whole refusal, not by a word a host name carries', () => {
     expect(watchRefusedNow(watch('https://network_policy=deny-all.x/p'), ctx('allow-list'))).toEqual({ kind: 'watch_allow_list', host: 'network_policy=deny-all.x' });
   });
