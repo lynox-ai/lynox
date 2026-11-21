@@ -88,11 +88,11 @@ describe('the API page says who connected a profile and with which account', () 
 });
 
 describe('a profile\'s values stay whole on a narrow screen (U-391)', () => {
-	const W = (x: string): string => `<span class="whitespace-nowrap">${x}</span>`;
+	const W = (x: string): string => `<span class="inline-block max-w-full break-all">${x}</span>`;
 	const html = (id: string): string[] => [...target.querySelectorAll<HTMLElement>(`[data-testid="${id}"]`)].map((e) => e.innerHTML.replace(/<!---->/g, ''));
 
 	it('the base URL breaks only after a dot or a slash, the account only after a dot, never at a hyphen', async () => {
-		serve({ profiles: [{ id: 'shop', name: 'Shop', base_url: 'https://acme-store.myshopify.com/admin/api/2025-10', description: '', oauth_grant: { connected_by: 'owner', account: { label: 'acme-store' }, connected_by_reader: true } }], importWaiting: [] });
+		serve({ profiles: [{ id: 'shop', name: 'Shop', base_url: 'https://acme-store.myshopify.com/admin/api/2025-10', description: '', oauth_grant: { connected_by: 'owner', account: { label: 'acme-store.myshopify.com' }, connected_by_reader: true } }], importWaiting: [] });
 		const { default: ApiStoreView } = await import('./ApiStoreView.svelte');
 		component = mount(ApiStoreView, { target });
 		for (let i = 0; i < 10; i++) {
@@ -101,11 +101,11 @@ describe('a profile\'s values stay whole on a narrow screen (U-391)', () => {
 			flushSync();
 		}
 		expect(html('api-base-url')).toEqual([['https://', 'acme-store.', 'myshopify.', 'com/', 'admin/', 'api/', '2025-10'].map(W).join('<wbr>')]);
-		expect(html('api-connection-account')).toEqual([W('acme-store')]);
+		expect(html('api-connection-account')).toEqual([['acme-store.', 'myshopify.', 'com'].map(W).join('<wbr>')]);
 		for (const id of ['api-base-url', 'api-connection-account']) {
 			const box = target.querySelector<HTMLElement>(`[data-testid="${id}"]`)!;
 			expect(box.classList.contains('inline-block') && box.classList.contains('max-w-full'), id).toBe(true);
 		}
-		expect(target.querySelector('[data-testid="api-connection"]')?.textContent?.trim()).toBe('Verbunden von dir · Konto: acme-store');
+		expect(target.querySelector('[data-testid="api-connection"]')?.textContent?.trim()).toBe('Verbunden von dir · Konto: acme-store.myshopify.com');
 	});
 });

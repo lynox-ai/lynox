@@ -203,7 +203,7 @@ describe('PresetClientForm', () => {
 		await open();
 		const box = target.querySelector<HTMLElement>('[data-testid="preset-redirect-uri"]')!;
 		expect(box.textContent).toBe('https://tenant.example/api/oauth/callback');
-		const W = (x: string): string => `<span class="whitespace-nowrap">${x}</span>`;
+		const W = (x: string): string => `<span class="inline-block max-w-full break-all">${x}</span>`;
 		expect(box.innerHTML.replace(/<!---->/g, '')).toBe(['https://', 'tenant.', 'example/', 'api/', 'oauth/', 'callback'].map(W).join('<wbr>'));
 		expect(box.classList.contains('inline-block') && box.classList.contains('max-w-full')).toBe(true);
 		// No break inside a word: `break-all` cut `…/oauth/callbac` / `k`.

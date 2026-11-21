@@ -2,7 +2,8 @@
  * Where a host or a URL may break across lines (U-391): never inside a name, at a hyphen or
  * mid-word. A value that fits on one line moves to the next line whole; only a longer one breaks,
  * a host after a dot, a URL after a dot or a slash (never inside the `//` of its scheme). The page
- * keeps each piece unbreakable, with a `<wbr>` between them (`WholeValue`).
+ * keeps each piece whole while it fits on a line, with a `<wbr>` between them (`WholeValue`); only a
+ * piece longer than a line breaks inside.
  */
 export type ValueKind = 'host' | 'url';
 

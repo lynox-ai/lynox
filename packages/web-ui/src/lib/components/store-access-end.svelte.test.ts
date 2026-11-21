@@ -84,8 +84,9 @@ describe('the shell banner of a store whose access runs out', () => {
 		]);
 		expect(all('store-access-host').map(text)).toEqual(['acme.myshopify.com', 'beta-shop.myshopify.com']);
 		// A break only after a dot: `<wbr>` there and nowhere else, never at the hyphen.
-		// Each piece unbreakable (a browser breaks after a hyphen otherwise), `<wbr>` between them.
-		const W = (x: string): string => `<span class="whitespace-nowrap">${x}</span>`;
+		// Each piece its own box, whole while it fits on a line (a browser breaks after a hyphen
+		// otherwise), and broken inside only when longer than a line; `<wbr>` between them.
+		const W = (x: string): string => `<span class="inline-block max-w-full break-all">${x}</span>`;
 		expect(all('store-access-host').map((h) => h.innerHTML.replace(/<!---->/g, ''))).toEqual([
 			`${W('acme.')}<wbr>${W('myshopify.')}<wbr>${W('com')}`,
 			`${W('beta-shop.')}<wbr>${W('myshopify.')}<wbr>${W('com')}`,
