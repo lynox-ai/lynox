@@ -87,7 +87,7 @@ describe('the API page says who connected a profile and with which account', () 
 	});
 });
 
-describe('a profile\'s values stay whole on a narrow screen (U-391)', () => {
+describe('a profile\'s values in boxes of pieces, for a narrow screen (U-391)', () => {
 	const W = (x: string): string => `<span class="inline-block max-w-full break-all">${x}</span>`;
 	const html = (id: string): string[] => [...target.querySelectorAll<HTMLElement>(`[data-testid="${id}"]`)].map((e) => e.innerHTML.replace(/<!---->/g, ''));
 

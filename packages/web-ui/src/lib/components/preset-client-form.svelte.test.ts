@@ -206,7 +206,7 @@ describe('PresetClientForm', () => {
 		const W = (x: string): string => `<span class="inline-block max-w-full break-all">${x}</span>`;
 		expect(box.innerHTML.replace(/<!---->/g, '')).toBe(['https://', 'tenant.', 'example/', 'api/', 'oauth/', 'callback'].map(W).join('<wbr>'));
 		expect(box.classList.contains('inline-block') && box.classList.contains('max-w-full')).toBe(true);
-		// Selecting it for a copy still takes the whole address; `<wbr>` adds no character.
+		// The text is the whole address, `<wbr>` adds no character, and the line keeps `select-all` for a copy.
 		expect(box.parentElement!.classList.contains('select-all')).toBe(true);
 	});
 

@@ -91,7 +91,7 @@ describe('the shell banner of a store whose access runs out', () => {
 			`${W('acme.')}<wbr>${W('myshopify.')}<wbr>${W('com')}`,
 			`${W('beta-shop.')}<wbr>${W('myshopify.')}<wbr>${W('com')}`,
 		]);
-		// The box moves to the next line whole when the host fits on one (U-391).
+		// The box is an inline-block up to the line's width, so the host can move to the next line whole (U-391).
 		expect(all('store-access-host').every((h) => h.classList.contains('inline-block') && h.classList.contains('max-w-full'))).toBe(true);
 		expect(all('store-access-reconnect').map((a) => (a.getAttribute('href') ?? '').replace(/^.*\/oauth\/connect\//, ''))).toEqual(['a', 'b']);
 		expect(all('store-access-reconnect').every((a) => (a.getAttribute('href') ?? '').includes('/oauth/connect/'))).toBe(true);
