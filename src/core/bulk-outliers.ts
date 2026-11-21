@@ -132,10 +132,12 @@ export function markersOf(text: string): Map<MarkerKind, Set<string>> {
     seen.add(word);
     const addressed = new Set<string>();
     const sides = word.split('@');
+    // A local part may be a single sign (`_@x.ch`) or stand before a doubled @ (`a@@x.ch`); only
+    // nothing at all before the @ is no address.
+    let localPart = false;
     for (let k = 1; k < sides.length; k++) {
-      // A local part may be a single sign (`_@x.ch`) or stand before a doubled @ (`a@@x.ch`); only
-      // nothing at all before the @ is no address.
-      if (sides.slice(0, k).every((side) => side === '')) continue;
+      localPart ||= sides[k - 1] !== '';
+      if (!localPart) continue;
       const domain = trimEnds(sides[k]!.split(/[^\p{L}\p{N}.-]/u)[0]!);
       const host = domain.includes('.') ? asciiHost(domain) : undefined;
       if (host === undefined) continue;

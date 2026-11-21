@@ -250,7 +250,8 @@ const FORMS_ONCE_CAUGHT = [
     'info%40evil.com', 'https%3A%2F%2Fevil.com', 'evil.com%40x.y',
 ];
 
-/** Each link or address, by kind and host, that some earlier reading found in those forms. Not here:
+/** Links and addresses, by kind and host, that some earlier reading found in those forms; each pair
+ *  here must still be read. Not here:
  *  the hosts an earlier reading cut wrongly out of a percent escape (`2fevil.com` for `%2Fevil.com`)
  *  or out of a user part (`user` for `https://user:pw@evil.com`), a hyphen it kept at a domain's end,
  *  and `@@evil.com`, which has no local part and is read as a link. */
@@ -365,6 +366,7 @@ describe('markersOf', () => {
     // A local part of one sign is a local part: the domain is an address, not a link.
     for (const text of ['_@lieferant.ch', '-@lieferant.ch', '+@lieferant.ch', '.@lieferant.ch', 'a@@lieferant.ch']) {
       expect([...markersOf(text).get('email')!], text).toEqual(['lieferant.ch']);
+      expect([...markersOf(text).get('link')!], text).toEqual([]);
     }
     // An _ inside a word cuts it, and every side is read: a hidden host is worth more than the false
     // one a shop name with an underscore yields ("moebel_meier.ch" reads meier.ch).
@@ -396,10 +398,10 @@ describe('markersOf', () => {
     expect(best('i@a.com '.repeat(5000))).toBeLessThan(best(addresses) / 4);
   });
 
-  it('reads a long run of letters before an @, of labels, or of blanks and obfuscated dots in time linear in its length', () => {
+  it('reads a long run of @, of letters before an @, of labels, or of blanks and obfuscated dots in time linear in its length', () => {
     const time = (text: string): number => { const t0 = performance.now(); markersOf(text); return performance.now() - t0; };
     // A unit repeated, and what stands before or after the run: a bracket makes the obfuscated dots read.
-    const shapes: [string, string, string][] = [['', 'a', '@x.ch'], ['', 'a.', ''], ['', 'a [.] ', ''], ['', 'a dot ', ''], ['[', ' ', ''], ['', ' ', '[.]'], ['', '-a', ''], ['', 'ä.', '']];
+    const shapes: [string, string, string][] = [['', '@', 'x.ch'], ['', 'a@', 'x.ch'], ['', 'a', '@x.ch'], ['', 'a.', ''], ['', 'a [.] ', ''], ['', 'a dot ', ''], ['[', ' ', ''], ['', ' ', '[.]'], ['', '-a', ''], ['', 'ä.', '']];
     for (const [head, unit, tail] of shapes) {
       const shaped = (n: number): string => head + unit.repeat(n) + tail;
       time(shaped(1000));
