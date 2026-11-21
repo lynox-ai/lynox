@@ -141,7 +141,6 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     env: MailEnvelope,
     mode: SensitiveMode,
     account: { address: string; authType?: MailAuthType | undefined },
-    wakeOnReply: boolean,
   ): Promise<void> => {
     const messageId = env.messageId;
     if (messageId === undefined || messageId.length === 0) return;
@@ -205,13 +204,18 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     // Otherwise only a `replied` item opens; `reopenReplied` checks that again in its UPDATE.
     // An unknown answer reopens (see `confirmAutoReply`): only a known automatic reply does not.
     const opens = existing.userAction === 'replied' && autoReply !== true && !own && !beforeUserAction;
-    // The snooze the owner set to wake on a reply wakes for a message that may reopen an item.
-    const wakes = wakeOnReply && autoReply !== true && !own && !beforeUserAction;
+    // A snooze the owner set to wake on a reply wakes for a message that may reopen an item.
+    const mayWake = autoReply !== true && !own && !beforeUserAction;
     // What the check found in the item's own mail, before this message.
     const itemCategories = opts.state.sensitiveCategoriesAtIngest(existing);
     const outcome = opts.state.runInTransaction((): 'raised' | 'reopened' | 'none' => {
       opts.state.insertThreadMessage(input);
-      // Clearing the snooze and its audit commit with the message they are for.
+      // Whether the item sleeps with wake-on-reply is read here, inside the write, not from the row
+      // read before the auto-reply check above: the owner may have snoozed it again since, or another
+      // message woken it. Clearing the snooze and its audit commit with the message they are for.
+      const asleep = mayWake ? opts.state.getItem(existing.id, existing.tenantId) : undefined;
+      const wakes = asleep !== undefined && asleep !== null && asleep.unsnoozeOnReply
+        && asleep.snoozeUntil !== undefined && asleep.snoozeUntil.getTime() > Date.now();
       if (wakes) {
         opts.state.setSnooze(existing.id, null, null, true, false, existing.tenantId);
         opts.state.appendAudit({
@@ -301,9 +305,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     //    that may reopen an item.
     const existing = opts.state.findItemByThread(accountId, threadKey);
     if (existing) {
-      const snoozeUntilMs = existing.snoozeUntil?.getTime();
-      const stillSnoozed = snoozeUntilMs !== undefined && snoozeUntilMs > Date.now();
-      await recordFollowUp(existing, env, sensitiveMode, account, stillSnoozed && existing.unsnoozeOnReply);
+      await recordFollowUp(existing, env, sensitiveMode, account);
       return 'duplicate';
     }
 
