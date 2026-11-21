@@ -406,7 +406,9 @@ describe('markersOf', () => {
       expect([...markersOf(text).get('link')!], text).toContain('evil.com');
     }
     expect([...markersOf('<p>Neu<p style="display:inline">evil</p>.com').get('link')!]).toContain('evil.com');
-    for (const text of ['evil<script>x</script>.com', 'evil<style>x{}</style>.com', 'evil<div style="float\t:\tleft"></div>.com']) {
+    for (const text of ['evil<script>x</script>.com', 'evil<style>x{}</style>.com', 'evil<div style="float\t:\tleft"></div>.com',
+      'ev<p hidden style="display:inline">il</p>.com', 'ev<p style="display:none;display:inline">il</p>.com', '<p style="display:none;display:inline">evil</p>.com',
+      'evil<ruby><rp>(</rp></ruby>.com', 'evil<dialog>x</dialog>.com', 'evil<noembed>x</noembed>.com']) {
       expect([...markersOf(text).get('link')!], text).toContain('evil.com');
     }
     for (const text of ['evil<p STYLE="display:inline">.com', 'evil<BR STYLE=display:none>.com', 'evil<p sTyLe=x;display:inline>.com', 'evil<dialog></dialog>.com', 'evil<BR HIDDEN>.com']) {

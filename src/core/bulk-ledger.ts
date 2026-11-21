@@ -1768,7 +1768,8 @@ export class BulkLedger {
    * {@link outlierCache}, keyed by how many are decided; a second caller while it is computed waits for
    * the same result). The texts are read in parts of about {@link OUTLIER_CHUNK} characters or
    * {@link OUTLIER_SLICE_MS} milliseconds, whichever comes first, the process
-   * free between them: 5000 long texts take seconds, and the route waits for them, not every other request.
+   * free between them: the route waits for them, not every other request. Reading markup costs the parser
+   * about half a millisecond per kilobyte, so 5000 targets of long HTML descriptions take minutes once.
    * Null for a run without a rule. The store host and the start domains are what the run may link to,
    * so they are not new.
    */

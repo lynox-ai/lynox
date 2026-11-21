@@ -150,7 +150,7 @@ const BLOCK_TAGS = new Set([
 ]);
 
 /** Elements whose content a browser does not show as text. */
-const UNSHOWN = new Set(['script', 'style', 'template', 'noscript', 'title', 'head']);
+const UNSHOWN = new Set(['script', 'style', 'template', 'noscript', 'noembed', 'noframes', 'rp', 'title', 'head']);
 
 /** The tree a browser builds from a text, or null for one beyond what this reads (`withinReadingBounds`):
  *  such a text an HTML field refuses to write, and a plain-text field holds no new tag at all. */
@@ -171,10 +171,13 @@ function styleOf(el: Element): string | null {
 
 const hasHidden = (el: Element): boolean => defaultTreeAdapter.getAttrList(el).some((a) => a.name === 'hidden');
 
-/** Whether a browser shows nothing of an element: `hidden`, or a style whose display is none. */
+/** Whether a browser shows nothing of an element: `hidden`, a dialog not open, or a style whose display
+ *  is none. A later declaration or a style over `hidden` may show it after all: the reading without
+ *  gaps therefore keeps such an element, and only the one with gaps leaves it out. */
 function shownNot(el: Element): boolean {
   const style = styleOf(el);
-  return hasHidden(el) || (style !== null && /(?:^|[;\s])display ?: ?none ?(?:! ?important)? ?(?:;|$)/iu.test(style));
+  return hasHidden(el) || (el.tagName === 'dialog' && !defaultTreeAdapter.getAttrList(el).some((a) => a.name === 'open'))
+    || (style !== null && /(?:^|[;\s])display ?: ?none ?(?:! ?important)? ?(?:;|$)/iu.test(style));
 }
 
 /** Whether a block's own style may show it inline, so that it breaks no line: a display no block has,
@@ -201,7 +204,7 @@ function treeText(tree: HtmlFragment, gapAtInline: boolean): string {
     if (node === ' ') { shown += ' '; continue; }
     if (defaultTreeAdapter.isTextNode(node)) { shown += node.value; continue; }
     if (!defaultTreeAdapter.isElementNode(node)) continue;
-    if (UNSHOWN.has(node.tagName) || shownNot(node)) continue;
+    if (UNSHOWN.has(node.tagName) || (gapAtInline && shownNot(node))) continue;
     const html = node.namespaceURI === p5.NS.HTML;
     const gap = html && BLOCK_TAGS.has(node.tagName) && (gapAtInline || !mayShowInline(node));
     if (gap) { shown += ' '; stack.push(' '); }
