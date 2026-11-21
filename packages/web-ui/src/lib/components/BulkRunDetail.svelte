@@ -271,8 +271,9 @@
 	 *  shows, could not be read, or is not the run the toggle answered: its checksum differs from
 	 *  the one the toggle returned, so another view moved a target since (even a pair that cancels
 	 *  out, which the counts cannot tell) and another row would be stale. The caller then loads it
-	 *  whole. The toggle's compare-and-set proved the page showed the run before it, so a run with
-	 *  the toggle's checksum is exactly what the page shows plus this toggle. */
+	 *  whole. The toggle's compare-and-set proved the run was the one whose checksum the page holds,
+	 *  so a run with the toggle's checksum is that run plus this toggle — as long as this one engine
+	 *  process writes the run, which the ledger's checksum after the commit assumes too. */
 	async function afterToggle(id: string, seq: number, deselected: boolean, checksum: string | undefined): Promise<boolean> {
 		const before = run;
 		const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(id)}`);
@@ -310,8 +311,8 @@
 					if (!r.ok && code !== undefined && BULK_DESELECT_REFUSALS.includes(code)) actionError = t(`bulk.deselect.refused.${code}`);
 					else if (!r.ok) actionError = refusalOf(r) ?? t('common.load_failed');
 					else {
-						// A run that could not be read after the toggle is loaded whole: the page never
-						// keeps the checksum from before a toggle that went through.
+						// A run that could not be read after the toggle is loaded whole, so the page
+						// shows no checksum from before a toggle that went through.
 						const marked = await afterToggle(id, target.seq, deselect, r.body.checksum).catch(() => false);
 						if (!marked && runId === id) await load();
 					}

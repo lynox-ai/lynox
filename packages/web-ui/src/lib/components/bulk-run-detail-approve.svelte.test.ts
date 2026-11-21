@@ -1325,6 +1325,20 @@ describe('the allowed link domains of a judged list run', () => {
 		expect(target.textContent).not.toContain(t('bulk.deselect.refused.not_writing'));
 	});
 
+	it('sends no take-out while another run loads, though the page still shows the one before', async () => {
+		run = makeRun();
+		const open = await renderSwitchable();
+		runsById['r2'] = makeRun({ id: 'r2' });
+		const release = held('r2');
+		await open('r2', false);
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		expect(posts).toEqual([]);
+		release();
+		await settle();
+		expect(posts).toEqual([]);
+	});
+
 	it('leaves a refusal shown on one run behind when another opens', async () => {
 		run = makeRun();
 		const open = await renderSwitchable();
