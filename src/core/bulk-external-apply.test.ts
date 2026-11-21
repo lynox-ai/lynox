@@ -357,6 +357,39 @@ describe('applying an external run', () => {
     }
   });
 
+  it('counts a target the host refused and someone else then set as planned as unchanged, and its undo leaves it alone', async () => {
+    const s = shop();
+    // The host refuses the second write: the run changed nothing there.
+    s.sequence = new Map([['PATCH /products/1', [422]]]);
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15.00' } }, { target: url(1), after: { price: '20.00' } }]);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter });
+      expect(ledger.getStatus(runId)!.heads).toMatchObject({ written: 1, failed: 1 });
+      // Someone else sets that target to the planned value; the resume finds it so.
+      s.items.get('/products/1')!['price'] = '20.00';
+      expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter });
+      const patches = (): number => s.requests.filter((r) => r.method === 'PATCH' && r.path === '/products/1').length;
+      expect(patches()).toBe(1);
+      expect(ledger.getStatus(runId)!.heads).toMatchObject({ written: 1, unchanged: 1, failed: 0 });
+      expect(ledger.getStatus(runId)!.foundAsPlanned).toBe(1);
+      expect(ledger.countUndoable(runId)).toBe(1);
+      expect(ledger.getPreview(runId).map((t) => t.written)).toEqual([true, false]);
+
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      expect(undo.status.total).toBe(1);
+      expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
+      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: contractWriter })).status).toBe('done');
+      // The first target gets its value back; the value someone else set stays, and no send reached it.
+      expect([s.items.get('/products/0')!['price'], s.items.get('/products/1')!['price']]).toEqual(['12.00', '20.00']);
+      expect(patches()).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
   it('counts an applied target a stale loop sent to after another found it as written, as the head does', async () => {
     const s = shop();
     const restore = serve(s);
@@ -1494,15 +1527,15 @@ describe('the write verb and the one-target probe', () => {
       expect(s.requests.filter((r) => r.method !== 'GET')).toEqual([]);
       expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', applied: 3 });
       expect([ledger.probeKey(runId), ledger.countUndoable(runId)]).toEqual([null, 0]);
-      // What the model reads: the applied count says these were sent nothing.
+      // What the model reads: the applied count says the run did not write these.
       const agent = { toolContext: { bulkLedger: ledger } } as unknown as IAgent;
       expect(await bulkStatusTool.handler({ run_id: runId }, agent))
-        .toContain('Applied 3 (3 already held the planned value and were sent nothing), failed 0');
+        .toContain('Applied 3 (3 already held the planned value and were not written by this run), failed 0');
       // A target found so and sent to after all (a loop that stalled before its send) counts again.
       expect(ledger.sentCount(runId)).toBe(0);
       ledger.markSent(runId, 0);
       expect(ledger.sentCount(runId)).toBe(1);
-      expect(await bulkStatusTool.handler({ run_id: runId }, agent)).toContain('Applied 3 (2 already held the planned value and were sent nothing)');
+      expect(await bulkStatusTool.handler({ run_id: runId }, agent)).toContain('Applied 3 (2 already held the planned value and were not written by this run)');
     } finally {
       restore();
     }
