@@ -78,6 +78,7 @@ import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns, maskEngineEnvSecrets } from './secret-store.js';
 import { UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { OwnerKnownReader, OwnerKnownVerdict } from './owner-known-targets.js';
+import { policyNamesHost } from './network-guard.js';
 import { SearchResultAddresses } from './search-result-addresses.js';
 import type { ConversationLatch } from './conversation-latch.js';
 import type { NoticeLanguage } from './notice-language.js';
@@ -5132,6 +5133,9 @@ export class Agent implements IAgent {
     // A read only: the host of a connected API the owner chose (`ApiStore.readKnownHosts`). A send
     // never asks this, so a profile cannot make a send's target known.
     if (asRead && target.kind === 'host' && this._readKnownHosts().has(target.value)) return 'known';
+    // A read only: a host the policy itself names, its baseline and the operator's floor. A send to
+    // one the owner did not name keeps asking.
+    if (asRead && target.kind === 'host' && this._policyNamesHost(target.value)) return 'known';
     if (target.kind === 'host') {
       // Only a reviewed contract: a person was shown the hosts and accepted them. Only while it
       // governs this call (not withheld after outside content), and only a host written out in
@@ -5140,6 +5144,12 @@ export class Agent implements IAgent {
       if (contract?.origin === 'reviewed' && contract.hostPatterns.some((p) => normalizeHostName(p) === target.value)) return 'known';
     }
     return this.ownerKnown?.known(target) ?? 'foreign';
+  }
+
+  /** {@link policyNamesHost} for this agent's policy; no tool context names nothing. */
+  private _policyNamesHost(host: string): boolean {
+    const tc = this.toolContext;
+    return tc !== undefined && policyNamesHost(host, tc);
   }
 
   /** {@link ApiStore.readKnownHosts}, or none when no store can answer: the read is then asked about. */

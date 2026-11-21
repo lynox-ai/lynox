@@ -206,12 +206,39 @@ export interface HostPolicyContext {
 }
 
 /** True iff `hostname` is in the operator floor (exact host or wildcard apex). */
-function hostInFloor(hostname: string, ctx: HostPolicyContext): boolean {
+function hostInFloor(hostname: string, ctx: Pick<HostPolicyContext, 'allowedHosts' | 'allowedWildcards'>): boolean {
   if (ctx.allowedHosts?.has(hostname)) return true;
   for (const domain of ctx.allowedWildcards) {
     if (hostname === domain || hostname.endsWith(`.${domain}`)) return true;
   }
   return false;
+}
+
+/** The baseline's loopback names: no read of the engine's reaches them by the baseline. */
+const BASELINE_LOOPBACK: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '0.0.0.0']);
+
+/**
+ * Whether the policy itself names this host for the engine's full-control surface: the guarded
+ * baseline (its loopback names left out) under `guarded` and `allow-all`, and the operator floor
+ * under every policy but `deny-all`. The origin check counts this for a READ only, once foreign
+ * content is in the conversation: a send to such a host the owner did not name keeps asking.
+ */
+export function policyNamesHost(hostname: string, ctx: Pick<HostPolicyContext, 'networkPolicy' | 'allowedHosts' | 'allowedWildcards'>): boolean {
+  switch (ctx.networkPolicy) {
+    case 'deny-all':
+      return false;
+    case 'allow-list':
+      return hostInFloor(hostname, ctx);
+    case undefined:
+    case 'allow-all':
+    case 'guarded':
+      return (!BASELINE_LOOPBACK.has(hostname) && isGuardedBaselineHost(`https://${hostname}/`)) || hostInFloor(hostname, ctx);
+    default: {
+      const _exhaustive: never = ctx.networkPolicy;
+      void _exhaustive;
+      return false;
+    }
+  }
 }
 
 /**

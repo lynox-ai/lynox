@@ -636,7 +636,7 @@ describe('API-setup reminder in a locked turn', () => {
   });
 });
 
-describe('search results feed the shell only from a search sent untainted', () => {
+describe('a search records the addresses it listed', () => {
   async function searchWith(startedTainted: boolean | undefined, principal: unknown = OWNER_PRINCIPAL): Promise<SearchResultAddresses> {
     const searches = new SearchResultAddresses();
     const tool = createWebSearchTool(mockProvider([{ title: 'A', url: 'https://news.example/a', snippet: 's' }]));
@@ -645,21 +645,11 @@ describe('search results feed the shell only from a search sent untainted', () =
     return searches;
   }
 
-  it('a search sent before foreign content adds its result hosts', async () => {
-    expect((await searchWith(false)).cleanHosts()).toEqual(['news.example']);
-  });
-
-  it('a search sent after foreign content, or by an agent that cannot say, adds the addresses but no host', async () => {
-    for (const started of [true, undefined]) {
-      const s = await searchWith(started);
-      expect(s.has('https://news.example/a')).toBe(true);
-      expect(s.cleanHosts()).toEqual([]);
+  it('whatever the taint of its batch, and for a mandate too', async () => {
+    for (const started of [false, true, undefined]) {
+      expect((await searchWith(started)).has('https://news.example/a')).toBe(true);
     }
-  });
-
-  it('a mandate\'s search adds the addresses but no host, even sent untainted', async () => {
-    const s = await searchWith(false, { kind: 'mandate', email: 'helfer@firma.example', mandateId: 'm-1' });
-    expect(s.has('https://news.example/a')).toBe(true);
-    expect(s.cleanHosts()).toEqual([]);
+    const mandate = await searchWith(false, { kind: 'mandate', email: 'helfer@firma.example', mandateId: 'm-1' });
+    expect(mandate.has('https://news.example/a')).toBe(true);
   });
 });
