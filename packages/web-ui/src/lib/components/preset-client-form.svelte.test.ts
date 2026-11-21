@@ -199,6 +199,19 @@ describe('PresetClientForm', () => {
 		expect(target.textContent).toContain('https://tenant.example/api/oauth/callback');
 	});
 
+	it('keeps the redirect address whole, breaking it only after a dot or a slash (U-391)', async () => {
+		await open();
+		const box = target.querySelector<HTMLElement>('[data-testid="preset-redirect-uri"]')!;
+		expect(box.textContent).toBe('https://tenant.example/api/oauth/callback');
+		const W = (x: string): string => `<span class="whitespace-nowrap">${x}</span>`;
+		expect(box.innerHTML.replace(/<!---->/g, '')).toBe(['https://', 'tenant.', 'example/', 'api/', 'oauth/', 'callback'].map(W).join('<wbr>'));
+		expect(box.classList.contains('inline-block') && box.classList.contains('max-w-full')).toBe(true);
+		// No break inside a word: `break-all` cut `…/oauth/callbac` / `k`.
+		expect(box.parentElement!.className).not.toContain('break-all');
+		// Selecting it for a copy still takes the whole address; `<wbr>` adds no character.
+		expect(box.parentElement!.classList.contains('select-all')).toBe(true);
+	});
+
 	it('says the load failed, and shows no form, when the engine answers with an error', async () => {
 		getStatus = 500;
 		await open();

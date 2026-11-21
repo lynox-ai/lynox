@@ -40,20 +40,6 @@ export function storeAccessShown(profile: StoreAccessProfile, now: Date, locale:
 	return { kind: ended ? 'ended' : 'soon', profileId: profile.id, host: end.host, date: known ? longDay(end.at!, locale) : '', mayConnect: profile.reader_may_connect !== false };
 }
 
-/** A sentence split at `{host}`, with its other placeholders filled: the host goes between the parts. */
-export function hostParts(sentence: string): { before: string; after: string } {
-	const i = sentence.indexOf('{host}');
-	return i < 0 ? { before: sentence, after: '' } : { before: sentence.slice(0, i), after: sentence.slice(i + '{host}'.length) };
-}
-
-/**
- * A host in pieces that end after each dot, for a line break only there: never inside a name, at a
- * hyphen or mid-word (`acme-store.` / `myshopify.com`). The page keeps each piece whole.
- */
-export function hostSegments(host: string): string[] {
-	return host.split(/(?<=\.)/);
-}
-
 /**
  * A deadline's day with the month's name, in the reader's time zone (U-391): `5. Dezember 2026`,
  * `December 5, 2026`. Never in digits alone: `05/12/2026` reads as May 12 to an American reader.

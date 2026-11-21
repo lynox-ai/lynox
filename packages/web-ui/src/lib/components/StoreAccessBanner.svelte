@@ -4,7 +4,9 @@
 	import { untrack } from 'svelte';
 	import { connectHref } from '../oauth-connect-path.js';
 	import { isOwnerSession, isViewerKnown, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
-	import { hostParts, hostSegments, storeAccessShown, type StoreAccessProfile } from '../utils/store-access-end.js';
+	import { storeAccessShown, type StoreAccessProfile } from '../utils/store-access-end.js';
+	import { placeholderParts } from '../utils/value-breaks.js';
+	import WholeValue from './WholeValue.svelte';
 
 	// The owner's line per store whose access runs out soon or has (U-391): without web push the
 	// owner learns of it here, before the end, and not only when a run halts. Hidden until the next
@@ -41,9 +43,9 @@
 	<div role="status" class="border-b border-warning/30 bg-warning-subtle px-4 py-2.5 flex items-start justify-between gap-3" data-testid="store-access-banner">
 		<ul class="space-y-2 min-w-0">
 			{#each lines as line (line.profileId)}
-				{@const parts = hostParts(tf(line.kind === 'soon' ? 'store_access.banner_soon' : 'store_access.banner_ended', { date: line.date, host: '{host}' }))}
+				{@const parts = placeholderParts(tf(line.kind === 'soon' ? 'store_access.banner_soon' : 'store_access.banner_ended', { date: line.date, host: '{host}' }), '{host}')}
 				<li class="flex items-center gap-3 flex-wrap text-[12px] text-warning" data-testid="store-access-line">
-					<span class="min-w-0 break-words">{parts.before}<span class="inline-block max-w-full font-mono rounded-[var(--radius-sm)] bg-bg-muted px-1 py-0.5 text-text" data-testid="store-access-host">{#each hostSegments(line.host) as seg, i (i)}{#if i > 0}<wbr />{/if}<span class="whitespace-nowrap">{seg}</span>{/each}</span>{parts.after}</span>
+					<span class="min-w-0 break-words">{parts.before}<WholeValue value={line.host} class="font-mono rounded-[var(--radius-sm)] bg-bg-muted px-1 py-0.5 text-text" testid="store-access-host" />{parts.after}</span>
 					<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
 					<a href={connectHref(getApiBase(), line.profileId)} data-sveltekit-reload data-testid="store-access-reconnect"
 						class="shrink-0 rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1 text-[12px] text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>

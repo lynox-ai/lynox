@@ -8,9 +8,11 @@
 	import Icon from '../primitives/Icon.svelte';
 	import PresetClientForm from './PresetClientForm.svelte';
 	import { connectionLine, type ConnectionLine, type OAuthGrantView } from '../utils/oauth-connection.js';
-	import { localDay, noticesByProfile, revocationView, type ProviderNotice } from '../utils/provider-revocation.js';
+	import { noticesByProfile, revocationView, type ProviderNotice } from '../utils/provider-revocation.js';
 	import { connectHref } from '../oauth-connect-path.js';
-	import { storeAccessShown, type StoreAccessEnd, type StoreAccessShown } from '../utils/store-access-end.js';
+	import { longDay, storeAccessShown, type StoreAccessEnd, type StoreAccessShown } from '../utils/store-access-end.js';
+	import { placeholderParts } from '../utils/value-breaks.js';
+	import WholeValue from './WholeValue.svelte';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 
@@ -22,13 +24,14 @@
 		store_access_ends?: StoreAccessEnd; }
 
 	// Who connected the profile and with which provider account (`utils/oauth-connection.ts`).
-	function connectionText(line: ConnectionLine): string {
+	// The account goes in its own box, kept whole (U-391): `acme-store` never breaks at its hyphen.
+	function connectionParts(line: ConnectionLine): { lead: string; account: string | null; after: string } {
 		const who = line.by.kind === 'you' ? t('apis.connected_by_you')
 			: line.by.kind === 'owner' ? t('apis.connected_by_owner')
 			: tf('apis.connected_by', { who: line.by.kind === 'helper' ? line.by.address : line.by.tag });
-		const account = line.withheld ? t('apis.account_withheld')
-			: line.account === null ? t('apis.account_unknown') : tf('apis.account', { account: line.account });
-		return `${who} · ${account}`;
+		if (line.withheld || line.account === null) return { lead: `${who} · ${t(line.withheld ? 'apis.account_withheld' : 'apis.account_unknown')}`, account: null, after: '' };
+		const parts = placeholderParts(tf('apis.account', { account: '{account}' }), '{account}');
+		return { lead: `${who} · ${parts.before}`, account: line.account, after: parts.after };
 	}
 
 	// A profile on a built-in provider gets its app credentials through its own form, not the chat.
@@ -200,8 +203,11 @@
 								<span class="text-sm font-medium">{profile.name}</span>
 								{#if profile.auth}<span class="text-xs rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{profile.auth.type}</span>{/if}
 							</div>
-							<p class="text-xs text-text-subtle mt-1 font-mono">{profile.base_url}</p>
-							{#if connectionLine(profile.oauth_grant)}<p class="text-xs text-text-muted mt-1" data-testid="api-connection">{connectionText(connectionLine(profile.oauth_grant)!)}</p>{/if}
+							<p class="text-xs text-text-subtle mt-1 font-mono"><WholeValue value={profile.base_url} kind="url" testid="api-base-url" /></p>
+							{#if connectionLine(profile.oauth_grant)}
+								{@const conn = connectionParts(connectionLine(profile.oauth_grant)!)}
+								<p class="text-xs text-text-muted mt-1" data-testid="api-connection">{conn.lead}{#if conn.account !== null}<WholeValue value={conn.account} testid="api-connection-account" />{/if}{conn.after}</p>
+							{/if}
 							{#if profile.description}<p class="text-xs text-text-muted mt-1">{profile.description}</p>{/if}
 						</button>
 						<button onclick={() => manageInChat(profile)}
@@ -224,13 +230,13 @@
 						<div class="border-t border-border px-4 py-3 space-y-2 text-xs text-text-muted" data-testid="api-revoked">
 							{#if view.kind === 'revoked' || view.kind === 'pending'}
 								{@const since = view.kind === 'revoked' ? view.revokedAt : view.notice.revokedAt}
-								{#if since}<p>{tf('apis.revoked_on', { date: localDay(since, getLocale()) })}</p>{/if}
+								{#if since}<p>{tf('apis.revoked_on', { date: longDay(since, getLocale()) })}</p>{/if}
 							{:else if view.kind === 'ended'}
 								<p data-testid="api-access-ended">{t('apis.access_ended')}</p>
 							{/if}
 							<!-- First the dates and the way out with its button; the long text below, closed. -->
 							{#if view.notice}
-								<p data-testid="api-erasure-window">{tf('apis.erasure_window', { earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) })}</p>
+								<p data-testid="api-erasure-window">{tf('apis.erasure_window', { earliest: longDay(view.notice.holdUntil, getLocale()), latest: longDay(view.notice.deadline, getLocale()) })}</p>
 								{#if view.kind === 'revoked' && view.avertable}
 									<p data-testid="api-erasure-avert">{t('apis.erasure_notice_avert')}</p>
 								{:else if view.kind === 'reconnected' && view.avertable}
@@ -251,7 +257,7 @@
 								{/if}
 							{/if}
 							{#if view.notice && view.kind !== 'pending'}
-								{@const dates = { revoked: localDay(view.notice.revokedAt, getLocale()), earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) }}
+								{@const dates = { revoked: longDay(view.notice.revokedAt, getLocale()), earliest: longDay(view.notice.holdUntil, getLocale()), latest: longDay(view.notice.deadline, getLocale()) }}
 								<details data-testid="api-erasure-details">
 									<summary class="cursor-pointer text-text-subtle hover:text-text">{t('apis.erasure_details')}</summary>
 									{#if view.kind === 'revoked'}
