@@ -87,7 +87,10 @@
 		const mine = ++generation;
 		loading = true;
 		preview = null;
+		// What a confirm found changed belongs to the version it was shown: a load starts without it,
+		// and the confirm that loads sets it again once the new version is shown.
 		changes = null;
+		changedLine = '';
 		error = '';
 		try {
 			const res = await fetch(`${getApiBase()}/workflows/${encodeURIComponent(workflow.id)}/takeover-preview`);

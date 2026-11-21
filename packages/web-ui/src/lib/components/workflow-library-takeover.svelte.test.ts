@@ -345,7 +345,8 @@ describe('the dialog', () => {
 		expect(document.activeElement).toBe(d.querySelector('#workflow-takeover-title'));
 	});
 
-	it('the open dialog given another workflow shows that one without the marks of the last', async () => {
+	// A contract of the dialog, not a user path: its overlay keeps the cards behind it out of reach.
+	it('the open dialog given another workflow loads that one, without the marks or the changed line of the last', async () => {
 		const moved = FULL();
 		moved['expect'] = 'digest-2';
 		(moved['steps'] as Array<Record<string, unknown>>)[1]!['inputTemplate'] = { url: 'https://evil.example.invalid/post' };
@@ -358,13 +359,18 @@ describe('the dialog', () => {
 		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
 		await settle();
 		expect(d.querySelectorAll('[data-stamp-changed]')).toHaveLength(1);
+		expect(d.querySelector('[data-testid="takeover-changed"]')).not.toBeNull();
 		// The same dialog stays mounted and loads the other workflow.
 		openButton(card('Ended two'))!.click();
 		await settle();
 		expect(served.previews).toBe(3);
+		const urls = vi.mocked(fetch).mock.calls.map(([u]) => String(u)).filter((u) => u.includes('/takeover-preview'));
+		expect(urls.at(-1)).toContain('/workflows/wf-f/takeover-preview');
 		expect(dialog()).toBe(d);
+		expect(d.querySelector('#workflow-takeover-title')?.textContent).toContain('Ended two');
 		expect(d.querySelectorAll('[data-testid="stamp-step"]')).toHaveLength(3);
 		expect(d.querySelectorAll('[data-stamp-changed]')).toHaveLength(0);
+		expect(d.querySelector('[data-testid="takeover-changed"]')).toBeNull();
 	});
 
 	it('a stamp the engine refused reloads like a change, and says so above the new state', async () => {
