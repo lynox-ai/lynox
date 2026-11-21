@@ -123,16 +123,20 @@ function makeLoop(opts: { ledger?: BulkLedger; switchedOff?: boolean; backup?: (
   return { loop, notify };
 }
 
-/** A writer whose writes wait until released; `both` resolves once `n` writes have started. */
-function bothWriting(initial: Record<string, string>, n = 2): { release: () => void; writer: { writer: TargetWriter; both: Promise<void> } } {
+/** A writer whose writes wait until released; `both` resolves once `n` writes have started.
+ *  `writes` lists the key of every write that landed, `state` the targets' values. */
+function bothWriting(initial: Record<string, string>, n = 2): { release: () => void; writes: string[]; state: Map<string, string>; writer: { writer: TargetWriter; both: Promise<void> } } {
   let release!: () => void;
   const held = new Promise<void>((r) => { release = r; });
   let started!: () => void;
   const both = new Promise<void>((r) => { started = r; });
   let entered = 0;
-  const m = memory(initial);
+  const writes: string[] = [];
+  const m = memory(initial, (k) => { writes.push(k); });
   return {
     release,
+    writes,
+    state: m.state,
     writer: {
       both,
       writer: { read: (k) => m.writer.read(k, null), async write(k, a) { if (++entered === n) started(); await held; return m.writer.write(k, a); } },
@@ -283,9 +287,9 @@ describe('the owner\'s stop reaches the run through its ledger', () => {
     await vi.waitFor(() => expect(trig(two.tid).last_run_status).toBe('stopped'), { timeout: 10_000 });
   });
 
-  it('stopTask on a bulk write whose ledger refuses the stop mark still aborts the task, answers requested, and says so on stderr', async () => {
+  it('stopTask on a bulk write whose ledger refuses the stop mark still aborts the task, answers requested, says so on stderr, and ends the run stopped without writing the targets after the stop', async () => {
     const { runId, tid, initial } = approvedRun(3);
-    const { release, writer } = bothWriting(initial, 1);
+    const { release, writes, state, writer } = bothWriting(initial, 1);
     await routeWriter(writer.writer);
     const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     restores.push(() => { err.mockRestore(); });
@@ -300,13 +304,44 @@ describe('the owner\'s stop reaches the run through its ledger', () => {
     expect(ledger.isStopRequested(runId)).toBe(false);
     expect(err.mock.calls.filter((c) => String(c[0]).includes(`recording the stop of "${tid}" in its ledger threw: store refused`))).toHaveLength(1);
     release();
-    await vi.waitFor(() => expect(trig(tid).last_run_status).not.toBeNull(), { timeout: 10_000 });
+    await vi.waitFor(() => expect(trig(tid).last_run_status).toBe('stopped'), { timeout: 10_000 });
+    // The write in flight at the stop lands; the two targets after it are never written.
+    expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.stoppedByOwner });
+    expect(writes).toEqual(['k000']);
+    expect(Object.fromEntries(state)).toEqual({ k000: 'w0', k001: 'v1', k002: 'v2' });
   });
 
-  it('stopBulkTasks: a first task whose stop mark throws does not cost the second its stop', async () => {
+  it('a run stopped on a refused stop mark, once resumed, writes its remaining targets to done: the refused mark is not carried into the next run start', async () => {
+    const { runId, tid, initial } = approvedRun(3);
+    const { release, writes, state, writer } = bothWriting(initial, 1);
+    await routeWriter(writer.writer);
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    restores.push(() => { err.mockRestore(); });
+    const { loop } = makeLoop({ ledger: refusingStop(() => true) });
+    await loop.tick();
+    await writer.both;
+    expect(loop.stopTask(tid)).toEqual({ kind: 'requested', via: 'signal' });
+    expect(ledger.isStopRequested(runId)).toBe(false);
+    release();
+    await vi.waitFor(() => expect(trig(tid).last_run_status).toBe('stopped'), { timeout: 10_000 });
+    expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.stoppedByOwner });
+    expect(writes).toEqual(['k000']);
+    // The first run start is over (its lease given back) before the next tick looks.
+    await vi.waitFor(() => expect(triggers.leaseOf(tid)!.holder).toBeNull());
+    const resumed = ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! });
+    if (!resumed.ok) throw new Error(resumed.reason);
+    await loop.tick();
+    await vi.waitFor(() => expect(trig(tid).last_run_status).toBe('success'), { timeout: 10_000 });
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', applied: 3, haltReason: null });
+    expect(writes).toEqual(['k000', 'k001', 'k002']);
+    expect(Object.fromEntries(state)).toEqual({ k000: 'w0', k001: 'w1', k002: 'w2' });
+  });
+
+  it('stopBulkTasks: a first task whose stop mark throws does not cost the second its stop, and both runs end stopped without writing the targets after the stop', async () => {
     const one = approvedRun(3);
     const two = approvedRun(3);
-    const { release, writer } = bothWriting(one.initial);
+    // Both runs plan the same keys, so they share one store here: each sends its first write.
+    const { release, writes, state, writer } = bothWriting(one.initial);
     await routeWriter(writer.writer);
     const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     restores.push(() => { err.mockRestore(); });
@@ -329,7 +364,13 @@ describe('the owner\'s stop reaches the run through its ledger', () => {
     expect(err.mock.calls.filter((c) => String(c[0]).includes('in its ledger threw'))).toHaveLength(1);
     release();
     await vi.waitFor(() => expect(trig(second!).last_run_status).toBe('stopped'), { timeout: 10_000 });
-    await vi.waitFor(() => expect(trig(first!).last_run_status).not.toBeNull(), { timeout: 10_000 });
+    await vi.waitFor(() => expect(trig(first!).last_run_status).toBe('stopped'), { timeout: 10_000 });
+    for (const tid of [first!, second!]) {
+      expect(ledger.getStatus(runOf(tid))).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.stoppedByOwner });
+    }
+    // One write each, the one in flight at the stop; the targets after it are never written.
+    expect(writes).toEqual(['k000', 'k000']);
+    expect(Object.fromEntries(state)).toEqual({ k000: 'w0', k001: 'v1', k002: 'v2' });
   });
 
   it('a tick while bulk runs are switched off records the stop and ends the run as the owner\'s stop, writing nothing', async () => {

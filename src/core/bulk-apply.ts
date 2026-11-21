@@ -193,6 +193,8 @@ export interface BulkEffectDeps {
   /** How often a loop renews the claim on the target it writes ({@link BULK_CLAIM_HEARTBEAT_MS}).
    *  Set by tests only. */
   claimHeartbeatMs?: number;
+  /** A stop given in this process whose mark the ledger refused: read beside the mark. */
+  stopMarkFailed?: () => boolean;
   /**
    * The run lease this loop works under: the trigger it executes and its holder id. Every record
    * the loop makes holds it in the same statement, and a loop that lost it ends as `displaced`
@@ -345,7 +347,7 @@ async function applyRunEffect(
     // run must not stop half written, so it rolls back as it does on a failed target. The stop
     // is the mark in the ledger, which every way of stopping writes ({@link BulkLedger.requestStop}),
     // so a loop in another process reads it too, and a resumed run is not stopped again.
-    if (ledger.isStopRequested(runId)) return endStopped();
+    if (stopRequested()) return endStopped();
     // The approval bounds how many different targets receive the verb, not how many writes
     // landed: a failed write may have reached its target. A retry of a target that already
     // had the verb sends it to no new one, so it is not refused here — and a target never sent
@@ -491,7 +493,7 @@ async function applyRunEffect(
     // heartbeat) admits one live loop at a time, so the claim this loop passed over belongs to
     // a loop whose lease lapsed. A live loop writing the same atomic run would race the
     // rollback's read of what was applied — that takes two processes on one engine.db.
-    if (ledger.isStopRequested(runId)) return endStopped();
+    if (stopRequested()) return endStopped();
     return { status: 'pending', summary: summarize(ledger, runId, say.otherLoopHolds, say) };
   }
   if (ledger.finish(run, lease) === 'lease') return displaced();
@@ -507,6 +509,11 @@ async function applyRunEffect(
    *  this loop still holds its run lease; a loop that lost it is displaced instead. */
   function readEnd(end: BulkEffectOutcome): BulkEffectOutcome {
     return lease === null || ledger.holdsLease(lease) ? end : displaced();
+  }
+
+  /** The owner's stop: the mark in the ledger, or a stop given here whose mark the ledger refused. */
+  function stopRequested(): boolean {
+    return ledger.isStopRequested(runId) || deps.stopMarkFailed?.() === true;
   }
 
   /** End the run on the owner's stop: an atomic run with a recorded write rolls back, any other

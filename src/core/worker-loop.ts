@@ -482,6 +482,11 @@ export interface ActiveTask {
    * other direction.
    */
   stopRequested?: boolean | undefined;
+  /**
+   * A stop of a bulk write run whose mark the ledger refused (`stopTask`): the loop of this run in
+   * this process stops on it as on the mark. Per run start, so a resumed run never meets it.
+   */
+  stopMarkFailed?: boolean | undefined;
   /** See {@link RunStarterSlot.accessEnded}. */
   accessEnded?: boolean | undefined;
   /** See {@link RunStarterSlot.endedPaused}. */
@@ -955,10 +960,11 @@ export class WorkerLoop {
     // A bulk write run reads the owner's stop from its ledger, where a loop in another process
     // reads it too: recorded before anything is aborted. A store that refuses the write must not
     // cost the aborts below, nor the stops of the other tasks a sweep goes on to: it is reported,
-    // and the run's own records meet the same store.
+    // and the run's loop in this process stops on `stopMarkFailed` as it would on the mark.
     try {
       this.requestBulkStop(active.effect, active.bulkRunId);
     } catch (err: unknown) {
+      active.stopMarkFailed = true;
       process.stderr.write(`[lynox:worker] recording the stop of "${taskId}" in its ledger threw: ${err instanceof Error ? err.message : String(err)}\n`);
     }
     active.stopRequested = true;
@@ -2227,7 +2233,7 @@ export class WorkerLoop {
               // ledger (`BulkLedger.requestStop`), which `runBulkEffect` reads there. The flag is
               // set at the hand-over, as for `bulk_preview`, so the route answers a stop here.
               entry.readsSignal = true;
-              await this.executeBulk(task, effect);
+              await this.executeBulk(task, effect, () => entry.stopMarkFailed === true);
               break;
             case 'bulk_preview':
               // Deterministic: reads a planned external run's targets into its ledger and
@@ -2473,7 +2479,7 @@ export class WorkerLoop {
    * trigger — a halt waits for a human to resume it through the approval route, and so
    * does the owner's stop, which ends the run between two targets.
    */
-  private async executeBulk(task: TriggerRecord, effect: BulkWriteEffect): Promise<void> {
+  private async executeBulk(task: TriggerRecord, effect: BulkWriteEffect, stopMarkFailed: () => boolean = () => false): Promise<void> {
     // The live signal is not read here: the run reads the owner's stop from its ledger.
     const { ledger, switchedOff } = this.bulkTick(AbortSignal.abort(), () => false);
     if (!ledger || task.bulk_run_id === undefined) {
@@ -2502,6 +2508,7 @@ export class WorkerLoop {
         writerFor: (run) => bulkWriterFor(run, dataStore, (r) => externalRunWriter(r, ledger, clientFor)),
         // Every record of the run holds this trigger's lease, the one this loop runs under.
         lease: { triggerId: task.id, holder: this.leaseHolder },
+        stopMarkFailed,
         trailFor: (run) => bulkRunTrail(run, auditLog, trailTools),
         notices: this.#bulkNotices(),
       });
