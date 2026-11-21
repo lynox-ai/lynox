@@ -34,6 +34,7 @@ describe('the security headers', () => {
 		expect(h.get('Content-Security-Policy')).toBe(APP_FALLBACK_CSP);
 		expect(directive(APP_FALLBACK_CSP, 'script-src')).toBe("'self'");
 		expect(directive(APP_FALLBACK_CSP, 'frame-ancestors')).toBe("'none'");
+		expect(directive(APP_FALLBACK_CSP, 'object-src')).toBe("'none'");
 	});
 
 	it('never replace a policy that is already there', () => {

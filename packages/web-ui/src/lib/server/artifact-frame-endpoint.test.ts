@@ -114,7 +114,9 @@ const render = (html: string): unknown => ({ type: FRAME_RENDER, html });
 
 describe('the frame bootstrap', () => {
 	it('does nothing when opened top-level without an opener', () => {
-		const h = runBootstrap('top');
+		let h: Harness | undefined;
+		expect(() => { h = runBootstrap('top'); }).not.toThrow();
+		if (h === undefined) throw new Error('the bootstrap did not run');
 		expect(h.posted).toEqual([]);
 		expect(h.listeners()).toBe(0);
 	});
