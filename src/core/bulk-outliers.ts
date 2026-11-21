@@ -9,6 +9,8 @@
 // What they cannot see is text: an address, a phone number or a link written as words.
 
 /** Why a verdict is listed first. */
+import { TOP_LEVEL_DOMAINS } from './top-level-domains.js';
+
 export type OutlierReason =
   | 'changed_fields'
   | 'length_jump'
@@ -62,16 +64,18 @@ export const SPREAD_SHARE = 0.05;
 const REASON_ORDER: OutlierReason[] = ['new_link', 'new_email', 'new_phone', 'new_script', 'rare_value', 'changed_fields', 'length_jump'];
 const MARKER_REASON: Record<MarkerKind, OutlierReason> = { link: 'new_link', email: 'new_email', phone: 'new_phone', script: 'new_script' };
 
-/** Top-level domains a host written as plain text must end in to count as one: so "z.B.", "ca.5" or
- *  "Art.Nr" in a product text is not read as an address. A host with a scheme needs none. */
-const TLDS = new Set('com net org info biz io co ai app dev shop store online site xyz top club link click icu ch li de at fr it es nl be lu uk eu us ru cn me tv cc ws ly gl to gg su tk ml ga cf pw in br pl cz se no dk fi pt gr tr jp kr au ca'.split(' '));
-/** A dot written obfuscated — `[.]`, `(.)`, `[dot]`, `(dot)`, ` dot ` — read as a dot. Anchored at the
+/** A dot written obfuscated — `[.]`, `(.)`, `{.}`, `[dot]`, `(dot)`, ` dot `, ` . ` — read as a dot. Anchored at the
  *  start of the blank before it, so a long run of blanks is read once, not once per blank. */
-const OBFUSCATED_DOT = /(?<!\s)\s*(?:\[\.\]|\(\.\)|\[dot\]|\(dot\))\s*|(?<!\s)\s+dot\s+(?=[\p{L}\p{N}])|[\u3002\uFF0E\uFF61]/giu;
-/** Top-level domains that are also words ("Baumwolle.Es ist", "Holz.Co"): written capitalised after a
- *  full stop that lacks its space, they start a sentence, not a host. Every other TLD counts however it
- *  is written ("Evil.Com"). */
-const WORD_TLDS = new Set(['es', 'it', 'in', 'at', 'to', 'no', 'de', 'be', 'me', 'co', 'so', 'am', 'an']);
+const OBFUSCATED_DOT = /(?<!\s)\s*(?:\[\.\]|\(\.\)|\{\.\}|\[dot\]|\(dot\))\s*|(?<!\s)\s+dot\s+(?=[\p{L}\p{N}])|(?<=[\p{L}\p{N}])[ \t]+\.[ \t]+(?=[\p{L}\p{N}])|[\u3002\uFF0E\uFF61]/giu;
+/** Top-level domains that are also words or abbreviations ("Baumwolle.Es ist", "Holz.Co", "Art.Nr"):
+ *  written capitalised after a full stop that lacks its space, they start a sentence, not a host. Every
+ *  other top-level domain (TOP_LEVEL_DOMAINS, all of them) counts however it is written ("Evil.Com",
+ *  "Evil.Cloud"). A host with a scheme needs none. */
+const WORD_TLDS = new Set([
+  'es', 'it', 'in', 'at', 'to', 'no', 'de', 'be', 'me', 'co', 'so', 'am', 'an', 'is', 'us', 'do', 'my', 'la', 'ma', 'id',
+  // Abbreviations a product text writes after a full stop: "Art.Nr", "Mo.Fr", "Str.St", "ca.Ca", "Tel".
+  'nr', 'fr', 'mo', 'sa', 'st', 'gr', 'ca', 'tel', 'ag',
+]);
 /** One label of a host: letters and digits of any script, inner hyphens. */
 const HOST_LABEL = /^[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?$/u;
 /** A letter or digit of any script, tested once per character outside ASCII. */
@@ -112,14 +116,42 @@ function phoneKey(written: string): string {
  *  addresses, country code and national digits for phone numbers, the scheme for scripts. */
 export function markersOf(text: string): Map<MarkerKind, Set<string>> {
   const out = new Map<MarkerKind, Set<string>>([['link', new Set()], ['email', new Set()], ['phone', new Set()], ['script', new Set()]]);
+  readMarkers(text, out);
+  // Markup can hide what a browser shows ("evil&#46;com", "evil<b></b>.com"): the text as shown is read too.
+  if (text.includes('<') || text.includes('&')) readMarkers(shownText(text), out);
+  return out;
+}
+
+/** A text as a browser shows it, near enough: without its tags, its character references decoded. */
+function shownText(text: string): string {
+  let shown = '';
+  let i = 0;
+  // Tags by index: an opening bracket without a closing one is text to the end, read once.
+  while (i < text.length) {
+    const open = text.indexOf('<', i);
+    if (open < 0) { shown += text.slice(i); break; }
+    const close = text.indexOf('>', open + 1);
+    if (close < 0) { shown += text.slice(i); break; }
+    shown += text.slice(i, open);
+    i = close + 1;
+  }
+  return shown.replace(/&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|(amp|lt|gt|quot|apos|nbsp));/giu, (whole, dec?: string, hex?: string, name?: string) => {
+    const point = dec !== undefined ? Number(dec) : hex !== undefined ? Number.parseInt(hex, 16) : undefined;
+    if (point !== undefined) return point > 0 && point <= 0x10ffff ? String.fromCodePoint(point) : whole;
+    return ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' } as Record<string, string>)[name!.toLowerCase()] ?? whole;
+  });
+}
+
+function readMarkers(text: string, out: Map<MarkerKind, Set<string>>): void {
   if (text.includes('://')) {
     for (const m of text.matchAll(SCHEME_RE)) {
       const host = asciiHost(m[1]!.replace(/:\d+$/u, ''));
       if (host !== undefined) out.get('link')!.add(host);
     }
   }
-  // The obfuscated dots need a bracket, a parenthesis, the word "dot" or a full stop of another script.
-  const dotted = /[[(\u3002\uFF0E\uFF61]|dot/iu.test(text) ? text.replace(OBFUSCATED_DOT, '.') : text;
+  // The obfuscated dots need a bracket, a parenthesis, a brace, the word "dot", a dot between blanks or
+  // a full stop of another script.
+  const dotted = /[[({\u3002\uFF0E\uFF61]|dot|\s\./iu.test(text) ? text.replace(OBFUSCATED_DOT, '.') : text;
   // A percent escape ("%2F" in a link's query) separates, as the character it stands for mostly does.
   const plain = dotted.includes('%') ? dotted.replace(/%[0-9A-Fa-f]{2}/gu, ' ') : dotted;
   // Every reading of a word adds, none takes away: a sign that only one reading cuts at (an extra @,
@@ -160,7 +192,6 @@ export function markersOf(text: string): Map<MarkerKind, Set<string>> {
   if (/script|data/iu.test(text)) {
     for (const m of text.toLowerCase().matchAll(SCRIPT_RE)) out.get('script')!.add(m[0].replace(/\s/gu, ''));
   }
-  return out;
 }
 
 /** What one verdict's text holds: the markers of its before-image (over the fields the verdict sets),
@@ -202,7 +233,7 @@ function hostOfWord(token: string): string | undefined {
   // letters (A–Z only: a long s or a dotless i is read as a letter of the domain below) that is no
   // top-level domain ends the reading before the host is built.
   const tld = token.slice(token.lastIndexOf('.') + 1);
-  if (/^[A-Za-z]+$/.test(tld) && !TLDS.has(tld.toLowerCase())) return undefined;
+  if (/^[A-Za-z]+$/.test(tld) && !TOP_LEVEL_DOMAINS.has(tld.toLowerCase())) return undefined;
   if (!token.includes('.') || !token.split('.').every((l) => HOST_LABEL.test(l))) return undefined;
   // "Baumwolle.Es ist": a sentence whose space after the full stop is missing, not a host. Only where
   // the TLD is also a word: "Evil.Com" is a host.
@@ -210,7 +241,9 @@ function hostOfWord(token: string): string | undefined {
   const host = asciiHost(token);
   if (host === undefined) return undefined;
   const asciiTld = host.slice(host.lastIndexOf('.') + 1);
-  return TLDS.has(asciiTld) || asciiTld.startsWith('xn--') ? host : undefined;
+  // A top-level domain written in letters of another script counts whether it exists or not: one that
+  // only looks like a known one ("cóm", "ıo") is read by a person as that one.
+  return TOP_LEVEL_DOMAINS.has(asciiTld) || asciiTld.startsWith('xn--') ? host : undefined;
 }
 
 /** The words of a text that hold a dot or an @: maximal runs of letters and digits of any script and
@@ -250,7 +283,13 @@ function dottedWords(text: string): string[] {
 
 /** A word without the dots, hyphens and other signs at its ends that belong to the sentence around it. */
 function trimEnds(word: string): string {
-  return word.replace(/^[._%+-]+|[._%+-]+$/gu, '');
+  // By index, not by a pattern: a pattern for the end is tried at every position of a long run of signs.
+  const sign = (c: string): boolean => c === '.' || c === '_' || c === '%' || c === '+' || c === '-';
+  let start = 0;
+  let end = word.length;
+  while (start < end && sign(word[start]!)) start++;
+  while (end > start && sign(word[end - 1]!)) end--;
+  return word.slice(start, end);
 }
 
 /** A host matches an own domain exactly or as a subdomain at a dot boundary. */
@@ -395,13 +434,17 @@ export function judgeOutliers(
       if (kind === 'link' || kind === 'email') {
         for (const keys of perTarget.values()) for (const k of keys) hostCounts.set(k, (hostCounts.get(k) ?? 0) + 1);
       }
-      const hosts = [...hostCounts].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([h]) => h);
+      // A host some before-image of the run holds marks no row: it is named first, then by count.
+      const unmarked = (h: string): number => (inBefores.get(kind)!.has(h) ? 0 : 1);
+      const hosts = [...hostCounts].sort((a, b) => unmarked(a[0]) - unmarked(b[0]) || b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([h]) => h);
       spread.push({ kind, count: perTarget.size, hosts });
     }
   }
 
+  // The most telling reason first, then plan order: the view lifts the first of these, and fifty cheap
+  // length jumps must not push a new link out of them.
   const flagged = [...reasons]
-    .sort((a, b) => a[0] - b[0])
-    .map(([seq, set]) => ({ seq, reasons: REASON_ORDER.filter((r) => set.has(r)) }));
+    .map(([seq, set]) => ({ seq, reasons: REASON_ORDER.filter((r) => set.has(r)) }))
+    .sort((a, b) => REASON_ORDER.indexOf(a.reasons[0]!) - REASON_ORDER.indexOf(b.reasons[0]!) || a.seq - b.seq);
   return { decided, measured: true, flagged, spread };
 }

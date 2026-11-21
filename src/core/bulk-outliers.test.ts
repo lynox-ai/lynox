@@ -202,6 +202,26 @@ describe('judgeOutliers on domains in other scripts, phone numbers and the own s
     }
   });
 
+  it('lists a verdict with a new link before many that only jump in length, and names a host that marks no row first', () => {
+    const inputs = run(200, (t) => {
+      const desc = (t.after as Record<string, string>)['description'];
+      if (t.seq <= 60) return withAfter(t, { description: desc.repeat(6) });
+      if (t.seq === 150) return withAfter(t, { description: `${desc} Mehr auf neu-tee.example.net` });
+      return t;
+    });
+    const flagged = judgeOutliers(inputs, OWN, KINDS).flagged;
+    expect(flagged[0]).toEqual({ seq: 150, reasons: ['new_link'] });
+    // A host most verdicts add: the one some before-image holds is named before one with more rows.
+    const spreadInputs = run(200, (t) => {
+      const desc = (t.after as Record<string, string>)['description'];
+      if (t.seq === 1) return { ...t, before: { ...(t.before as object), note: 'Partner gepflanzt-shop.net' } };
+      if (t.seq <= 20) return withAfter(t, { description: `${desc} gepflanzt-shop.net` });
+      if (t.seq <= 60) return withAfter(t, { description: `${desc} haeufig-shop.net` });
+      return t;
+    });
+    expect(judgeOutliers(spreadInputs, OWN, KINDS).spread.find((x) => x.kind === 'link')!.hosts).toEqual(['gepflanzt-shop.net', 'haeufig-shop.net']);
+  });
+
   it('does not flag a verdict that changes four fields where the run changes one or two, and flags one that changes all eight', () => {
     const fields = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
     const inputs: OutlierInput[] = Array.from({ length: 40 }, (_, i) => {
@@ -329,6 +349,22 @@ describe('markersOf', () => {
     expect([...m.values()].every((x) => x.size === 0)).toBe(true);
   });
 
+  it('reads a host under any top-level domain, however it is capitalised where that domain is no word or abbreviation', () => {
+    for (const text of ['Mehr auf evil.cloud', 'evil.swiss', 'evil.live', 'Evil.Cloud', 'EVIL.SWISS', 'evil.zip']) {
+      expect([...markersOf(text).get('link')!], text).toHaveLength(1);
+    }
+    for (const text of ['Art.Nr 4711', 'Mo.Fr offen', 'Str.St Gallen', 'Lager.Ca 5 kg', 'Tel.Tel', 'datei.pdf']) {
+      expect([...markersOf(text).get('link')!], text).toEqual([]);
+    }
+  });
+
+  it('reads a host whose dot markup or a character reference hides, or blanks or braces surround', () => {
+    for (const text of ['evil&#46;com', 'evil&#x2e;com', 'evil<b></b>.com', 'evil<span>.</span>com', '<p>Mehr auf evil.com</p>', 'evil . com', 'evil{.}com']) {
+      expect([...markersOf(text).get('link')!], text).toEqual(['evil.com']);
+    }
+    expect([...markersOf('info&#64;evil.com').get('link')!]).toEqual(['evil.com']);
+  });
+
   it('reads a host however its top-level domain is capitalised, where that domain is no word, and one under icu', () => {
     for (const text of ['Besuche Evil.Com', 'evil.Com', 'Evil.Shop heute', 'evil.Ch heute', 'Besuche evil.icu']) {
       expect([...markersOf(text).get('link')!], text).toHaveLength(1);
@@ -398,10 +434,10 @@ describe('markersOf', () => {
     expect(best('i@a.com '.repeat(5000))).toBeLessThan(best(addresses) / 4);
   });
 
-  it('reads a long run of @, of letters before an @, of labels, or of blanks and obfuscated dots in time linear in its length', () => {
+  it('reads a long run of signs inside a word, of @, of letters before an @, of labels, of brackets, or of blanks and obfuscated dots in time linear in its length', () => {
     const time = (text: string): number => { const t0 = performance.now(); markersOf(text); return performance.now() - t0; };
     // A unit repeated, and what stands before or after the run: a bracket makes the obfuscated dots read.
-    const shapes: [string, string, string][] = [['', '@', 'x.ch'], ['', 'a@', 'x.ch'], ['', 'a', '@x.ch'], ['', 'a.', ''], ['', 'a [.] ', ''], ['', 'a dot ', ''], ['[', ' ', ''], ['', ' ', '[.]'], ['', '-a', ''], ['', 'ä.', '']];
+    const shapes: [string, string, string][] = [['a', '-', 'a'], ['a', '.', 'a'], ['a', '_', 'a'], ['a', '%', 'a'], ['a', '+', 'a'], ['a', '<', 'a'], ['a', '&', 'a'], ['', '@', 'x.ch'], ['', 'a@', 'x.ch'], ['', 'a', '@x.ch'], ['', 'a.', ''], ['', 'a [.] ', ''], ['', 'a dot ', ''], ['[', ' ', ''], ['', ' ', '[.]'], ['', '-a', ''], ['', 'ä.', '']];
     for (const [head, unit, tail] of shapes) {
       const shaped = (n: number): string => head + unit.repeat(n) + tail;
       time(shaped(1000));
