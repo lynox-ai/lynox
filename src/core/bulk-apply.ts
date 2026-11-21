@@ -448,7 +448,7 @@ async function applyRunEffect(
       if (cur === 'path_changed') return { kind: 'path_changed' };
       if (cur !== 'foreign' && (sameImage(cur, t.after, htmlFields) || (savedForm && sameInSavedForm(cur, t.after, htmlFields)))) {
         // Found as planned: either a loop of this run wrote it and died before recording it
-        // (the target is marked sent), or someone else set the value, and the run sends
+        // (a send of it is still unclear), or someone else set the value, and the run sends
         // nothing to it (`found_unsent`, {@link BulkLedger.recordApplied}). What is there is
         // also what an undo must expect.
         // Found only under the HTML comparison is not counted as a rewrite: the comparison explains

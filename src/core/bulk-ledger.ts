@@ -466,10 +466,12 @@ function staleBefore(now: number): string {
   return new Date(now - BULK_CLAIM_STALE_MS).toISOString();
 }
 
-// A target the run found already holding its planned value and never sent to ({@link
-// BulkLedger.recordApplied}, `already`): it counts as applied, but the run changed nothing there.
-// A run from before `unsent_tracked` leaves such a target at `found_unsent = 0`, as written.
-const FOUND_SQL = '(found_unsent = 1 AND write_sent = 0)';
+// A target the run found already holding its planned value with no send of its own that may have
+// landed ({@link BulkLedger.recordApplied}, `already`): never sent to, or every send refused by the
+// host. It counts as applied, but the run changed nothing there. A send after that (a loop that
+// lost its claim) makes it written again. A run from before `unsent_tracked` leaves such a target
+// at `found_unsent = 0`, as written.
+const FOUND_SQL = '(found_unsent = 1 AND unknown_sends = 0)';
 
 /** The classes {@link BulkRunStatus.heads} splits a run's targets into, in rank order: a target
  *  counts in the first one it belongs to. Taken out, left out by the plan (`invalid`); unchanged
@@ -1020,9 +1022,10 @@ export function bulkFoundAsPlannedNote(found: number): string {
 function undoEligible(external: boolean): string {
   // `write_sent`, not `error = 'write_failed'`: a resume clears the error, and a retry that
   // then meets a conflict leaves no error of that kind, while the first write may stand.
-  // A target found already holding its value and never sent to (`found_unsent`) is not taken
-  // back: the run did not change it, and its undo would overwrite whoever did.
-  return `undone_at IS NULL AND ${WRITING_SQL} AND ((applied_at IS NOT NULL AND found_unsent = 0)${external ? ' OR write_sent = 1' : ''})`;
+  // A target found already holding its value with no send that may have landed ({@link
+  // FOUND_SQL}) is not taken back: the run did not change it, and its undo would overwrite
+  // whoever did — also where the host refused the run's send before.
+  return `undone_at IS NULL AND ${WRITING_SQL} AND ((applied_at IS NOT NULL AND found_unsent = 0)${external ? ` OR (write_sent = 1 AND NOT ${FOUND_SQL})` : ''})`;
 }
 
 /** Per-target undo class, derived from what is there: creating is compensatable,
@@ -2102,7 +2105,15 @@ export class BulkLedger {
     ).all(run.id) as { result: string | null }[];
     // Once anything was sent, whether writing on sends again depends on how that send ended:
     // claim `write_one` only before any send.
-    if (applied.length === 0) return this.sentCount(run.id) === 0 ? 'write_one' : null;
+    if (applied.length === 0) {
+      if (this.sentCount(run.id) === 0) return 'write_one';
+      // Its one applied target was found holding its value after a send the host refused: counted
+      // as unchanged ({@link FOUND_SQL}), and no probe either.
+      const found = this.engineDb.getDb().prepare(
+        'SELECT 1 FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL AND write_sent = 1 LIMIT 1',
+      ).get(run.id);
+      return found === undefined ? null : 'already_first';
+    }
     if (applied.length > 1) return 'too_many';
     const candidate = this.probeCandidate(run.id);
     if (candidate !== null && candidate !== 'not_found') return this.probeToConfirm(run.id) === null ? null : 'confirm';
@@ -3566,11 +3577,12 @@ export class BulkLedger {
       ).run(at, this.engineDb.enc(result), actual === null ? null : this.engineDb.enc(JSON.stringify(actual)), shopAddedMarkup ? 1 : 0, hostRewrote ? 1 : 0, run.id, seq);
       if (res.changes !== 1) return;
       this.noteConnection(run.id, seq, 'write', via);
-      // Found as planned and never sent to by this run: someone else set the value, so the run
-      // changed nothing there ({@link sentCount}, {@link undoEligible}).
+      // Found as planned with no send of this run that may have landed — never sent to, or every
+      // send refused ({@link markRefused}): someone else set the value, so the run changed nothing
+      // there ({@link FOUND_SQL}, {@link undoEligible}).
       if (result === 'already') {
         db.prepare(
-          `UPDATE bulk_targets SET found_unsent = 1 WHERE run_id = ? AND seq = ? AND write_sent = 0
+          `UPDATE bulk_targets SET found_unsent = 1 WHERE run_id = ? AND seq = ? AND unknown_sends = 0
              AND EXISTS (SELECT 1 FROM bulk_runs WHERE id = ? AND unsent_tracked = 1)`,
         ).run(run.id, seq, run.id);
       }
@@ -3674,8 +3686,8 @@ export class BulkLedger {
   }
 
   /** Targets this run applied and has not taken back, newest first — a rollback's order. Not a
-   *  target found already holding its value and never sent to (`found_unsent`): the run did not
-   *  change it, and rolling it back would overwrite whoever did. */
+   *  target found already holding its value with no send that may have landed (`found_unsent`):
+   *  the run did not change it, and rolling it back would overwrite whoever did. */
   listAppliedDesc(runId: string): ApplyTarget[] {
     const rows = this.engineDb.getDb().prepare(
       `SELECT seq, target_key, change, before, after_planned, source_seq FROM bulk_targets

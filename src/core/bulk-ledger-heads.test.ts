@@ -134,15 +134,17 @@ describe('the head counts of a run', () => {
     expect(classes(EXTERNAL, [{ error: 'write_failed', unknownSends: 1 }, { unknownSends: 1 }])).toEqual(['unclear', 'unclear']);
   });
 
-  it('a target found already holding its value and never sent to is unchanged, not written', () => {
+  it('a target found already holding its value, never sent to or every send refused, is unchanged, not written', () => {
     expect(classes(EXTERNAL, [
       { applied: true, found: true },
       // Sent to and then found so: a loop that died wrote it, so it was written.
+      { applied: true, found: true, sent: true, unknownSends: 1 },
+      // Every send refused by the host, then found so: someone else set it, so it is unchanged.
       { applied: true, found: true, sent: true },
       { applied: true },
       // Taken back ranks first, as before.
       { applied: true, found: true, undone: true },
-    ])).toEqual(['unchanged', 'written', 'written', 'takenBack']);
+    ])).toEqual(['unchanged', 'written', 'unchanged', 'written', 'takenBack']);
     expect(classes(LOCAL, [{ applied: true, found: true }])).toEqual(['unchanged']);
   });
 
