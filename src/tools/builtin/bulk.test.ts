@@ -448,6 +448,16 @@ describe('bulk_plan over data-store rows', () => {
 // not show. The result the model writes its reply from asks it not to name a place: in every plan
 // the user is to start or approve, and in none with nothing to approve.
 describe('where the user finds a planned run', () => {
+  // The model reads the HTML bound from the constant, and the cost of a larger bound only where it
+  // applies (a list run); the eval measured this wording, so a change to it is a change to measure.
+  it('tells the model the HTML fields\' shared bound from the constant, and the list run\'s cost of a larger one', async () => {
+    const { JUDGE_MAX_HTML } = await import('../../core/bulk-judge-rule.js');
+    const judge = (bulkPlanTool.definition.input_schema as { properties: { judge: { properties: { schema: { description: string } } } } }).properties.judge;
+    const text = judge.properties.schema.description;
+    expect(text).toContain(`Set each text field's maxLength near the longest text the run writes in it: the list form's HTML fields (shopify: descriptionHtml; woocommerce: description, short_description) may take up to ${String(JUDGE_MAX_HTML)} together, and in a list run a larger maxLength makes the run hold fewer targets.`);
+    expect(JUDGE_MAX_HTML).toBe(32_000);
+  });
+
   it('is not claimed to be nowhere: the description no longer says there is no screen for it', () => {
     expect(bulkPlanTool.definition.description).not.toMatch(/no screen or button/);
     expect(bulkPlanTool.definition.description).toContain('you cannot apply it.');
