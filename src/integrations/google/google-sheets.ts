@@ -165,8 +165,10 @@ function formulaNote(formulas: readonly FormulaCell[]): PromptText {
   const lines = formulas.slice(0, FORMULAS_SHOWN).map(({ cell, formula }) => pv`${cell}: ${singleLine(formula)}`);
   // With some only counted, the question offers no "Write as formulas" and says why, and how
   // to get it: each call is asked about on its own, so one of at most five shows every formula.
+  // The 5 in the sentence is FORMULAS_SHOWN, written out so the sentence stays the question's own
+  // words; the tests hold the two together.
   const more = n > FORMULAS_SHOWN
-    ? [pv`and ${n - FORMULAS_SHOWN} more`, pv`Writing as formulas is offered only when every formula is shown here. To write them as formulas, ask in the chat to write at most ${FORMULAS_SHOWN} at a time.`]
+    ? [pv`and ${n - FORMULAS_SHOWN} more`, pv`Writing as formulas is offered only when every formula is shown here. To write them as formulas, ask in the chat to write at most 5 at a time.`]
     : [];
   return joinPrompts([head, ...lines, ...more], '\n');
 }
