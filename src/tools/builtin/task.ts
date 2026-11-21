@@ -59,6 +59,8 @@ const ENDED_LABEL: ReadonlyMap<string, string> = new Map([
   ['stopped', 'STOPPED BY ITS OWNER'],
   ['halted', 'HALTED AS PLANNED, waiting for the owner to continue it'],
   ['interrupted', 'INTERRUPTED (the engine stopped mid-run; it was not resumed)'],
+  // Not a failure to repair: the spending cap or a check before the run kept it from starting.
+  ['not_run', 'DID NOT RUN (the spending cap or a check before the run did not let it start; nothing of it happened)'],
 ]);
 
 /** How much of the stored parameter set is rendered. Shorter than the reason:

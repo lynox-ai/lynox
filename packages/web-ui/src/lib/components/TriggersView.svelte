@@ -520,14 +520,18 @@
 		// The engine lost the run and did not start it again. It did not finish, which the
 		// owner should see, but it is not the run's own failure: amber, not red.
 		interrupted: 'text-warning',
+		// The spending cap or a check before the run kept it from starting. Nothing went
+		// wrong in it and nothing of it happened: amber, never the success colour.
+		not_run: 'text-warning',
 	};
 	// Colour alone does not tell these apart from the rest (and not at all to a reader
 	// who does not see colour), so they also carry a word. `stopped` and `halted` share
 	// the muted colour, which makes the word the only thing that separates them.
-	const runStatusWord: Record<string, 'tasks.run_halted' | 'tasks.run_interrupted' | 'tasks.run_stopped'> = {
+	const runStatusWord: Record<string, 'tasks.run_halted' | 'tasks.run_interrupted' | 'tasks.run_stopped' | 'tasks.run_not_run'> = {
 		halted: 'tasks.run_halted',
 		interrupted: 'tasks.run_interrupted',
 		stopped: 'tasks.run_stopped',
+		not_run: 'tasks.run_not_run',
 	};
 
 	$effect(() => { void loadTriggers(); void loadSettingsViewer(); /* both catch their errors */ });

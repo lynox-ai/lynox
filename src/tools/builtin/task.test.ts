@@ -1293,6 +1293,16 @@ describe('Task Tools', () => {
       expect(triggerDetailLine({ last_run_status: 'timeout', last_run_result: 'x' })).toContain('last run FAILED');
     });
 
+    it('a run that never started reads DID NOT RUN, not FAILED, and a one-shot that keeps its time draws no nudge', () => {
+      const line = triggerDetailLine({
+        effect: 'run_agent', status: 'open', next_run_at: '2026-06-15T09:00:00.000Z',
+        last_run_status: 'not_run', last_run_result: 'The daily limit of $5 is reached (today $5.00).',
+      });
+      expect(line).toContain('last run DID NOT RUN');
+      expect(line).not.toContain('FAILED');
+      expect(line).not.toContain('NO NEXT RUN');
+    });
+
     it('the target workflow is named whenever the schedule has one', () => {
       // The workflow id is what a repair has to PRESERVE — it is how its
       // definition is found. Shown on every schedule that has one, not only on

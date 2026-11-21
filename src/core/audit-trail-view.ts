@@ -239,6 +239,8 @@ function planEndStatus(outcome: string | undefined): TrailStatus {
     case 'failed': case 'timeout': return 'failed';
     case 'stopped': return 'ended';
     case 'halted': return 'halted';
+    // The spending cap or a check before the run kept it from starting: nothing of it ran.
+    case 'not_run': return 'refused';
     // `interrupted`, `unrecorded` (the end is known to have come, not how) and anything else.
     default: return 'interrupted';
   }
