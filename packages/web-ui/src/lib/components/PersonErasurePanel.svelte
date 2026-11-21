@@ -157,7 +157,7 @@
 	<ul class="mt-1 list-disc pl-4 text-xs text-text-muted">
 		{#each keys as key (key)}<li>{t(`erasure.nc.${key}`)}</li>{/each}
 		{#if setAside.length > 0}
-			<li data-testid="erasure-set-aside">{#each setAside as line, i (i)}{#if i > 0}{' '}{/if}{#each line as seg, j (j)}{#if 'mark' in seg}<code class="rounded-[var(--radius-sm)] bg-border px-1 py-0.5 font-mono text-[11px] break-all">{seg.mark}</code>{:else if 'mail' in seg}<a href="mailto:{seg.mail}" class="text-accent-text underline">{seg.mail}</a>{:else}{seg.text}{/if}{/each}{/each}</li>
+			<li data-testid="erasure-set-aside">{#each setAside as line, i (i)}{#if i > 0}{' '}{/if}{#each line as seg, j (j)}{#if 'mark' in seg}<code class="inline-block max-w-full rounded-[var(--radius-sm)] bg-border px-1 py-0.5 font-mono text-[11px] [overflow-wrap:anywhere]">{seg.mark}</code>{:else if 'mail' in seg}<a href="mailto:{seg.mail}" class="text-accent-text underline">{seg.mail}</a>{:else}{seg.text}{/if}{/each}{/each}</li>
 		{/if}
 	</ul>
 {/snippet}
