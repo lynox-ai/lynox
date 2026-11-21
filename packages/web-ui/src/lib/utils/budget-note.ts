@@ -13,9 +13,11 @@ export interface BudgetNoteRef {
 }
 
 /**
- * Who can change the cap, which decides the next step:
- * - `self`: the owner of a self-hosted or hosted (own key) instance — the limits page;
- * - `plan`: a managed plan — the cap comes with the plan, support changes it;
+ * Who the session belongs to, which decides the next step:
+ * - `self`: the owner of a self-hosted or hosted (own key) instance. Only a self-hosted owner
+ *   gets the limits page: on hosted the control plane sets the daily cap in the environment,
+ *   and that wins over the page, so the page cannot change the cap that applies;
+ * - `plan`: a managed plan — the cap comes with the plan, so the note names no step;
  * - `owner`: someone else's workspace (a mandate) — only the owner can.
  */
 export type BudgetAudience = 'self' | 'plan' | 'owner';
@@ -38,9 +40,9 @@ function amount(x: unknown): number | undefined {
 	return typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : undefined;
 }
 
-/** A cap as the engine names it: `$5` for a whole amount, `$7.50` otherwise. */
+/** A cap as the engine names it, with cents like the spend: `$5.00`, `$7.50`. */
 export function formatCapUSD(usd: number): string {
-	return Number.isInteger(usd) ? `$${usd}` : `$${usd.toFixed(2)}`;
+	return `$${usd.toFixed(2)}`;
 }
 
 /** Spend held against a cap, as the engine names it: `$5.12`. */
@@ -59,10 +61,11 @@ export function budgetResetAt(cap: 'daily' | 'monthly', now: Date): Date {
 }
 
 /**
- * The reset in the reader's own time, with its day, as it follows "Es gilt wieder ab" / "It resets":
- * "heute um 19:00", "morgen um 01:00", "dem 1. Dezember um 01:00" / "today at 07:00 PM",
- * "tomorrow at 01:00 AM", "on 1 December at 01:00 AM". `timeZone` is for tests; the page passes
- * none and gets the browser's.
+ * The reset in the reader's own time, with its day. In German it opens the sentence
+ * ("… beginnt ein neuer Tag"): "Heute um 19:00", "Morgen um 01:00", "Am 1. Dezember um 01:00".
+ * In English it follows "A new day starts": "today at 07:00 PM", "tomorrow at 01:00 AM",
+ * "on December 1 at 01:00 AM". `timeZone` is for tests; the page passes none and gets the
+ * browser's.
  */
 export function formatResetWhen(at: Date, now: Date, lang: 'de' | 'en', timeZone?: string): string {
 	const locale = lang === 'de' ? 'de-DE' : 'en-US';
@@ -74,13 +77,10 @@ export function formatResetWhen(at: Date, now: Date, lang: 'de' | 'en', timeZone
 	// clock change is 23 or 25 hours long.
 	const [y, m, d] = today.split('-').map(Number) as [number, number, number];
 	const tomorrow = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
-	if (day(at) === today) return lang === 'de' ? `heute um ${time}` : `today at ${time}`;
-	if (day(at) === tomorrow) return lang === 'de' ? `morgen um ${time}` : `tomorrow at ${time}`;
-	const date = lang === 'de'
-		? at.toLocaleDateString('de-DE', { day: 'numeric', month: 'long', ...zone })
-		: at.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', ...zone });
-	// "ab dem 1. Dezember", not "ab am": the slot follows "ab".
-	return lang === 'de' ? `dem ${date} um ${time}` : `on ${date} at ${time}`;
+	if (day(at) === today) return lang === 'de' ? `Heute um ${time}` : `today at ${time}`;
+	if (day(at) === tomorrow) return lang === 'de' ? `Morgen um ${time}` : `tomorrow at ${time}`;
+	const date = at.toLocaleDateString(locale, { day: 'numeric', month: 'long', ...zone });
+	return lang === 'de' ? `Am ${date} um ${time}` : `on ${date} at ${time}`;
 }
 
 /** The note's lines: the reason with its amounts and reset, and the step with where it leads. */
@@ -107,8 +107,10 @@ export const SUPPORT_MAILTO = 'mailto:support@lynox.ai';
 
 /**
  * The note's lines for a blocked run. `audience` and `selfHosted` are null while the page does not
- * know them yet; then the note names no step rather than a wrong one. A cap reached without its
- * amounts, or with spend that cannot be checked, says so without numbers.
+ * know them yet; then the note names no step rather than a wrong one. The limits page is the step
+ * only for the owner of a self-hosted instance; a hosted owner and a managed plan get the reason
+ * alone, a mandate the owner. A cap reached without its amounts, or with spend that cannot be
+ * checked, says so without numbers.
  */
 export function budgetNoteLines(
 	ref: BudgetNoteRef,
@@ -131,8 +133,7 @@ export function budgetNoteLines(
 			when: formatResetWhen(budgetResetAt(ref.cap, now), now, lang),
 		},
 	};
-	if (audience === 'self') { lines.nextKey = 'chat.note.budget.next_self'; lines.href = LIMITS_PAGE; lines.linkKey = 'chat.note.budget.link_limits'; }
-	else if (audience === 'plan') { lines.nextKey = 'chat.note.budget.next_plan'; lines.href = SUPPORT_MAILTO; lines.linkKey = 'chat.note.budget.link_support'; }
+	if (audience === 'self' && selfHosted === true) { lines.nextKey = 'chat.note.budget.next_self'; lines.href = LIMITS_PAGE; lines.linkKey = 'chat.note.budget.link_limits'; }
 	else if (audience === 'owner') lines.nextKey = 'chat.note.budget.next_owner';
 	return lines;
 }

@@ -611,9 +611,10 @@ function probeManagedTier(): Promise<void> {
 }
 
 /**
- * Who can change the spending cap a blocked message reached, for the note's next step
- * (`budget-note.ts`): a mandate's session names the owner, a managed plan names support, and
- * anyone else the limits page. Null while the tier is not known yet.
+ * Whose session it is, for the next step of a note on a message the spending cap blocked
+ * (`budget-note.ts`): a mandate's session names the owner, a managed plan names no step, and
+ * anyone else is `self`, who gets the limits page only on a self-hosted instance. Null while the
+ * tier is not known yet.
  */
 export function getBudgetAudience(): BudgetAudience | null {
 	// Unknown is no one here: a step that sends a mandate to a page it cannot change, or a managed

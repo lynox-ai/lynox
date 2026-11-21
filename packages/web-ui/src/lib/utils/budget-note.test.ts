@@ -17,17 +17,19 @@ describe('when a cap opens again', () => {
 		const zurich = 'Europe/Zurich';
 		// 20 Nov, 14:00 in Zurich: the daily reset (midnight UTC) is 01:00 there the next day.
 		const afternoon = new Date('2026-11-20T13:00:00Z');
-		expect(formatResetWhen(budgetResetAt('daily', afternoon), afternoon, 'de', zurich)).toBe('morgen um 01:00');
+		// German opens the sentence with it, so it starts with a capital; English follows "starts".
+		expect(formatResetWhen(budgetResetAt('daily', afternoon), afternoon, 'de', zurich)).toBe('Morgen um 01:00');
 		expect(formatResetWhen(budgetResetAt('daily', afternoon), afternoon, 'en', zurich)).toBe('tomorrow at 01:00 AM');
 		// 00:30 in Zurich is still the day before in UTC: the reset is today at 01:00.
 		const night = new Date('2026-11-20T23:30:00Z');
-		expect(formatResetWhen(budgetResetAt('daily', night), night, 'de', zurich)).toBe('heute um 01:00');
-		expect(formatResetWhen(budgetResetAt('monthly', afternoon), afternoon, 'de', zurich)).toBe('dem 1. Dezember um 01:00');
-		expect(formatResetWhen(budgetResetAt('monthly', afternoon), afternoon, 'en', zurich)).toBe('on 1 December at 01:00 AM');
+		expect(formatResetWhen(budgetResetAt('daily', night), night, 'de', zurich)).toBe('Heute um 01:00');
+		expect(formatResetWhen(budgetResetAt('monthly', afternoon), afternoon, 'de', zurich)).toBe('Am 1. Dezember um 01:00');
+		// US date order: month first.
+		expect(formatResetWhen(budgetResetAt('monthly', afternoon), afternoon, 'en', zurich)).toBe('on December 1 at 01:00 AM');
 		// West of UTC the daily reset falls in the reader's evening of the same day.
 		const ny = 'America/New_York';
 		expect(formatResetWhen(budgetResetAt('daily', afternoon), afternoon, 'en', ny)).toBe('today at 07:00 PM');
-		expect(formatResetWhen(budgetResetAt('daily', afternoon), afternoon, 'de', ny)).toBe('heute um 19:00');
+		expect(formatResetWhen(budgetResetAt('daily', afternoon), afternoon, 'de', ny)).toBe('Heute um 19:00');
 	});
 
 	it('the night before a clock change, the next midnight is still "tomorrow"', () => {
@@ -36,13 +38,15 @@ describe('when a cap opens again', () => {
 		const london = 'Europe/London';
 		const now = new Date('2026-03-28T23:30:00Z');
 		expect(formatResetWhen(budgetResetAt('daily', now), now, 'en', london)).toBe('tomorrow at 12:00 AM');
-		expect(formatResetWhen(budgetResetAt('daily', now), now, 'de', london)).toBe('morgen um 00:00');
+		expect(formatResetWhen(budgetResetAt('daily', now), now, 'de', london)).toBe('Morgen um 00:00');
 	});
 });
 
 describe('amounts as the engine names them', () => {
-	it('a whole cap without cents, spend always with cents', () => {
-		expect(formatCapUSD(5)).toBe('$5');
+	it('cap and spend both with cents', () => {
+		expect(formatCapUSD(5)).toBe('$5.00');
+		expect(formatCapUSD(1)).toBe('$1.00');
+		expect(formatCapUSD(150)).toBe('$150.00');
 		expect(formatCapUSD(7.5)).toBe('$7.50');
 		expect(formatSpentUSD(5.12)).toBe('$5.12');
 		expect(formatSpentUSD(150)).toBe('$150.00');
@@ -56,11 +60,16 @@ describe('the note\'s lines', () => {
 	it('the reason with its amounts, and the step by who can change the cap', () => {
 		const self = budgetNoteLines(daily, 'self', true, now, 'de');
 		expect(self.reasonKey).toBe('chat.note.budget.daily');
-		expect(self.reasonVars['limit']).toBe('$5');
+		expect(self.reasonVars['limit']).toBe('$5.00');
 		expect(self.reasonVars['spent']).toBe('$5.12');
 		expect(self.reasonVars['when']).toBe(formatResetWhen(budgetResetAt('daily', now), now, 'de'));
 		expect(self).toMatchObject({ nextKey: 'chat.note.budget.next_self', href: LIMITS_PAGE, linkKey: 'chat.note.budget.link_limits' });
-		expect(budgetNoteLines(daily, 'plan', false, now, 'de')).toMatchObject({ nextKey: 'chat.note.budget.next_plan', href: SUPPORT_MAILTO, linkKey: 'chat.note.budget.link_support' });
+		// A managed plan: the cap comes with the plan, the note gives the reason alone.
+		const plan = budgetNoteLines(daily, 'plan', false, now, 'de');
+		expect(plan.reasonKey).toBe('chat.note.budget.daily');
+		expect(plan.nextKey).toBeUndefined();
+		expect(plan.href).toBeUndefined();
+		expect(plan.linkKey).toBeUndefined();
 		const owner = budgetNoteLines(daily, 'owner', false, now, 'de');
 		expect(owner.nextKey).toBe('chat.note.budget.next_owner');
 		expect(owner.href).toBeUndefined();
@@ -68,11 +77,22 @@ describe('the note\'s lines', () => {
 		expect(budgetNoteLines({ cap: 'monthly', limitUSD: 150, spentUSD: 150.4 }, 'self', true, now, 'en').reasonKey).toBe('chat.note.budget.monthly');
 	});
 
+	it('a hosted owner gets no limits page: the control plane\'s cap wins over it', () => {
+		const hosted = budgetNoteLines(daily, 'self', false, now, 'de');
+		expect(hosted.reasonKey).toBe('chat.note.budget.daily');
+		expect(hosted.nextKey).toBeUndefined();
+		expect(hosted.href).toBeUndefined();
+		expect(hosted.linkKey).toBeUndefined();
+	});
+
 	it('while the page does not know who can change it, no step rather than a wrong one', () => {
 		const lines = budgetNoteLines(daily, null, null, now, 'de');
 		expect(lines.nextKey).toBeUndefined();
 		expect(lines.href).toBeUndefined();
+		// The owner, but whether the instance is self-hosted is not known yet: no limits page.
+		expect(budgetNoteLines(daily, 'self', null, now, 'de').nextKey).toBeUndefined();
 	});
+
 
 	it('spend that cannot be checked: no amounts; restart on self-host, support elsewhere', () => {
 		const unknown = { cap: 'unknown' } as const;
