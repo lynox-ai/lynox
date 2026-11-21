@@ -1921,9 +1921,9 @@ export class Agent implements IAgent {
     // whose context still carries a wrapped-untrusted marker keeps its durable-write gate armed.
     // And from the thread's record of it (`ConversationLatch`), which outlives a compaction that
     // summarized the read away: either one is enough. A record that cannot be read counts as set.
-    if (this._contextHoldsUntrustedMarker() || this.conversationLatch?.isSet() === true) this._armConversationLatch();
-    else this._conversationSawUntrusted = false;
     this._providerSearchSeen = this.messages.some((m) => holdsProviderSearch(m.content));
+    if (this._contextHoldsUntrustedMarker() || this.conversationLatch?.isSet() === true || this._providerSearchSeen) this._armConversationLatch();
+    else this._conversationSawUntrusted = false;
     // A user turn is written to the thread before `send()` sees its marker, so a crash between
     // the two leaves an upload's text in the thread and nothing in the set. The resume puts it
     // there. Only user turns' own text: a tool result's member entered the set before its
@@ -3069,7 +3069,15 @@ export class Agent implements IAgent {
       // thinking before max_tokens) strips to an empty array. Anthropic rejects
       // an assistant message with empty content and that would break the very
       // next request — substitute a minimal placeholder so history stays valid.
-      if (holdsProviderSearch(response.content)) this._providerSearchSeen = true;
+      // A search the provider ran itself reaches the model inside this answer, past every tool
+      // dispatch: content from outside, taken in now. Counted before the answer is written, so a
+      // checkpoint and every call this answer makes see it. Any agent that gets the tool: its
+      // rows, too, may hold what the search returned.
+      if (holdsProviderSearch(response.content)) {
+        this._providerSearchSeen = true;
+        this.noteUntrustedData();
+        this.conversationGrants?.add(UNKNOWN_GRANT);
+      }
       this.messages.push({
         role: 'assistant',
         content: contentForHistory.length > 0
