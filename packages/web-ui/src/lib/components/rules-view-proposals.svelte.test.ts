@@ -671,6 +671,7 @@ describe('RulesView — what a "then" choice says it does', () => {
 		expect(target.querySelector('input[name="rule-then-preset"][value="archive"]')!.getAttribute('aria-describedby')).toBe(effectId);
 		await choose('rule-then-preset', 'escalate');
 		expect(byTestId('rules-then-effect')).toBeNull();
+		expect(target.querySelector('input[name="rule-then-preset"][value="archive"]')!.getAttribute('aria-describedby')).toBeNull();
 		await choose('rule-then-preset', 'archive');
 		expect(byTestId('rules-then-effect')).not.toBeNull();
 	});

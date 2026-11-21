@@ -64,7 +64,7 @@ const WORDING: ReadonlyArray<readonly [key: string, de: string, en: string]> = [
 ];
 
 // Words that name an effect in the mail provider's mailbox (archive, move, delete, flag, read state).
-const MAILBOX_EFFECT = /archiv|gelesen|lesen markieren|verschieb|lösch|papierkorb|spam|markier|ausblend|ordner|\bread\b|unread|\bseen\b|\bmove|delete|trash|\bflag|\bhide\b|folder/i;
+const MAILBOX_EFFECT = /archiv|gelesen|lesen markieren|verschieb|lösch|papierkorb|spam|markier|ausblend|ordner|\bread\b|unread|\bseen\b|\bmove|delete|trash|\bflag|\bhid(?:e|es|den|ing)\b|folder/i;
 
 const localeBefore = getLocale();
 afterEach(() => setLocale(localeBefore));
@@ -87,10 +87,12 @@ describe('inbox rules wording', () => {
 			setLocale(locale);
 			for (const k of keys) expect(t(k), `${locale} ${k}`).not.toMatch(MAILBOX_EFFECT);
 		}
-		// The list catches what the retired texts said, so a broken pattern cannot pass on nothing.
-		for (const retired of ['Automatisch archivieren', 'Auto-archive', 'Lesen markieren & ausblenden', 'Mark read & hide']) {
-			expect(retired).toMatch(MAILBOX_EFFECT);
-		}
+		// The list catches what the retired texts said and one word per alternative, so a broken
+		// pattern cannot pass on nothing.
+		const probes = ['Automatisch archivieren', 'Auto-archive', 'Lesen markieren & ausblenden', 'Mark read & hide',
+			'als gelesen', 'verschieben', 'löschen', 'in den Papierkorb', 'als Spam', 'markiert', 'ausblenden', 'in einen Ordner',
+			'mark read', 'mark unread', 'mark as seen', 'move it', 'delete it', 'to the trash', 'flag it', 'hides it', 'hidden', 'to a folder'];
+		for (const probe of probes) expect(probe).toMatch(MAILBOX_EFFECT);
 	});
 
 	it('names the zone a handled rule files into as the inbox does', () => {
