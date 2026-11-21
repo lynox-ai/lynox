@@ -1631,6 +1631,12 @@ const MIGRATIONS: string[] = [
      done INTEGER NOT NULL DEFAULT 0
    );
    INSERT OR IGNORE INTO workflow_stamp_marker (id, done) VALUES (1, 0);`,
+  // v70: the owner's stop of a bulk run as a fact in the ledger (`BulkLedger.requestStop`), not
+  // only a signal in the memory of the process that runs it: a stop reaches a run whose loop is
+  // in another process, or in none. NULL on every existing run: none was stopped this way. The
+  // phase stays as it is; a resume clears the mark.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (70);
+   ALTER TABLE bulk_runs ADD COLUMN stop_requested_at TEXT;`,
 ];
 
 export interface EngineDbOptions {

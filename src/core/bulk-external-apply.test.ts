@@ -2926,11 +2926,14 @@ describe('a send without a clear answer is not sent again', () => {
       try {
         const c = client({ contract: mintBulkContract(HOST, SIXTY.map(url)) });
         const runId = await sixty(s, c);
-        const stop = new AbortController();
-        stop.abort();
         // The stop is read between targets: it takes effect once the first write went out.
         const out = await runBulkEffect(runId, 'bulk_apply', {
-          ledger, trailFor: () => null, writerFor: writerFor(c), signal: stop.signal, ownerStopped: () => patches(s).length > 0,
+          ledger, trailFor: () => null,
+          writerFor: (r) => {
+            const w = writerFor(c)(r)!;
+            // The owner stops the run once the first write went out, whatever came back.
+            return { ...w, read: w.read.bind(w), write: async (...args: Parameters<TargetWriter['write']>) => { try { return await w.write(...args); } finally { ledger.requestStop(runId); } } };
+          },
         });
         expect(out.status).not.toBe('done');
         expect(patches(s)).toEqual(['/products/0']);

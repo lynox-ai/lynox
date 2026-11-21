@@ -11127,7 +11127,7 @@ describe('LynoxHTTPApi', () => {
     });
 
     it('POST /api/tasks/:id/stop answers 409 — not 404 — when the task exists but is not running', async () => {
-      await withEngine({ getWorkerLoop: () => ({ stopTask: () => ({ kind: 'not_running' }) }) }, async () => {
+      await withEngine({ getWorkerLoop: () => ({ stopTask: () => ({ kind: 'not_running' }), requestBulkStop: () => false }) }, async () => {
         const res = await jsonFetch('/api/tasks/task-1/stop', { method: 'POST' });
         expect(res.status).toBe(409);
         const body = (await res.json()) as { error: string; code?: string };
@@ -23327,6 +23327,87 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       starter = M;
       expect((await jsonFetch('/api/tasks/trg-1/stop', { method: 'POST' })).status).toBe(202);
       expect(stopTask).toHaveBeenCalledWith('trg-1');
+    });
+
+    // The stop of a bulk write run whose loop runs in no run of this process: recorded in the
+    // run's ledger, where a loop of any process reads it. A real worker loop (never ticked) and a
+    // real ledger, so the answer and the mark are the route's and the ledger's own.
+    describe('POST /api/tasks/:id/stop on a bulk write run with no loop in this process', () => {
+      let bulkDir: string;
+      let bulkDb: EngineDb;
+      let bulkLedger: BulkLedger;
+      let bulkTriggers: TriggerStore;
+      let workerLoop: import('../core/worker-loop.js').WorkerLoop;
+      beforeEach(async () => {
+        bulkDir = mkdtempSync(join(tmpdir(), 'lynox-route-bulk-stop-'));
+        bulkDb = new EngineDb(join(bulkDir, 'engine.db'), 'test-vault-key');
+        bulkLedger = new BulkLedger(bulkDb, null);
+        bulkTriggers = new TriggerStore(bulkDb);
+        const { WorkerLoop } = await import('../core/worker-loop.js');
+        const loopEngine = { getBulkLedger: () => bulkLedger, getBulkLedgerSwitchedOff: () => null } as unknown as ConstructorParameters<typeof WorkerLoop>[0];
+        workerLoop = new WorkerLoop(loopEngine, { hasChannels: () => false, notify: vi.fn() } as unknown as ConstructorParameters<typeof WorkerLoop>[1], 60_000);
+        swap('getWorkerLoop', () => workerLoop);
+        swap('getRunHistory', () => ({ isAmbiguousTriggerId: () => false, getTrigger: (id: string) => bulkTriggers.getById(id) }));
+      });
+      afterEach(() => {
+        bulkDb.close();
+        rmSync(bulkDir, { recursive: true, force: true });
+      });
+      const writingRun = (): { runId: string; tid: string } => {
+        const s = bulkLedger.recordDryRun({ createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'mem', targets: [{ key: 'k', before: { absent: false, value: 'v' }, after: 'w' }] });
+        const out = bulkLedger.approve(s.id, { checksum: bulkLedger.computeChecksum(s.id)! });
+        if (!out.ok) throw new Error(out.reason);
+        bulkLedger.setPhase(s.id, ['approved'], 'writing');
+        // Waiting for its retry: no loop runs it now.
+        bulkDb.getDb().prepare(`UPDATE triggers SET next_run_at = ? WHERE id = ?`).run(new Date(Date.now() + 30_000).toISOString(), out.triggerId);
+        return { runId: s.id, tid: out.triggerId };
+      };
+
+      it('the owner\'s stop is accepted with 202, recorded in the ledger, and the trigger made due', async () => {
+        const { runId, tid } = writingRun();
+        expect(bulkTriggers.getDue().map((t) => t.id)).not.toContain(tid);
+        const res = await jsonFetch(`/api/tasks/${tid}/stop`, { method: 'POST' });
+        expect(res.status).toBe(202);
+        expect((await res.json() as { requested: boolean }).requested).toBe(true);
+        expect(bulkLedger.isStopRequested(runId)).toBe(true);
+        expect(bulkTriggers.getDue().map((t) => t.id)).toContain(tid);
+      });
+
+      it('a halted run is not running: 409, and nothing is recorded', async () => {
+        const { runId, tid } = writingRun();
+        bulkLedger.halt(runId, BULK_HALT_REASONS.timeBudget);
+        const res = await jsonFetch(`/api/tasks/${tid}/stop`, { method: 'POST' });
+        expect(res.status).toBe(409);
+        expect((await res.json() as { code?: string }).code).toBe('not_running');
+        expect(bulkLedger.isStopRequested(runId)).toBe(false);
+      });
+
+      it('a mandate is refused with 403 before anything is recorded', async () => {
+        const { runId, tid } = writingRun();
+        asMandate();
+        await refusal(await jsonFetch(`/api/tasks/${tid}/stop`, { method: 'POST' }));
+        expect(bulkLedger.isStopRequested(runId)).toBe(false);
+      });
+
+      it('the read phase\'s trigger records no stop on the write run', async () => {
+        const { runId } = writingRun();
+        const previewTid = bulkTriggers.armBulkEffect({ runId, effect: 'bulk_preview', title: 'x', nextRunAt: new Date().toISOString() });
+        expect(previewTid).toBe(bulkPreviewTriggerId(runId));
+        const res = await jsonFetch(`/api/tasks/${previewTid}/stop`, { method: 'POST' });
+        expect(res.status).toBe(409);
+        expect(bulkLedger.isStopRequested(runId)).toBe(false);
+      });
+
+      it('a run whose phase reads no stop (unstoppable): 409 as before, and no stop recorded', async () => {
+        const { runId, tid } = writingRun();
+        const requestBulkStop = vi.fn(() => true);
+        swap('getWorkerLoop', () => ({ runningStarterTag: () => undefined, runningPlanTag: () => undefined, stopTask: () => ({ kind: 'unstoppable', effect: 'bulk_apply' }), requestBulkStop }));
+        const res = await jsonFetch(`/api/tasks/${tid}/stop`, { method: 'POST' });
+        expect(res.status).toBe(409);
+        expect((await res.json() as { code?: string }).code).toBe('unstoppable');
+        expect(requestBulkStop).not.toHaveBeenCalled();
+        expect(bulkLedger.isStopRequested(runId)).toBe(false);
+      });
     });
   });
 

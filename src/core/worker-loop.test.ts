@@ -1092,7 +1092,7 @@ describe('WorkerLoop', () => {
       (engine as unknown as Record<string, unknown>)['getBulkLedger'] = () => null;
       await loop.tick();
       await vi.advanceTimersByTimeAsync(0);
-      expect(tm.recordTaskRun).toHaveBeenCalledWith('po-bulk', expect.stringContaining('not available'), 'failed');
+      expect(tm.recordTaskRun).toHaveBeenCalledWith('po-bulk', expect.stringContaining('not available'), 'failed', { leaseHolder: expect.any(String) });
       expect(planRows(rows)).toEqual([]);
     });
 
@@ -6125,7 +6125,10 @@ describe('a plan a mandate shaped runs only while its mandates are live', () => 
     const executor = vi.spyOn(loop as unknown as Spyable, EXECUTOR[effect]!).mockResolvedValue(undefined);
     await (loop as unknown as Exec).executeTask(task, null);
     expect(executor).not.toHaveBeenCalled();
-    expect(recorded(engine)).toEqual([['p-plan', expect.stringContaining('whose access has ended'), 'stopped']]);
+    expect(recorded(engine).map((c) => c.slice(0, 3))).toEqual([['p-plan', expect.stringContaining('whose access has ended'), 'stopped']]);
+    // A bulk run is booked only under this loop's run lease; any other effect as before.
+    const bulk = ['bulk_apply', 'bulk_undo', 'bulk_preview', 'bulk_judge'].includes(effect);
+    expect(recorded(engine)[0]![3]).toEqual(bulk ? { leaseHolder: expect.any(String) } : undefined);
   });
 
   it.each(Object.keys(EXECUTOR) as TriggerEffect[])('control: the same %s plan while the mandate is live reaches its executor', async (effect) => {
@@ -6384,7 +6387,7 @@ describe('a plan a mandate shaped runs only while its mandates are live', () => 
     const { loop, engine, bodies } = await germanLoopFor(task, () => true);
     await (loop as unknown as Exec).executeTask(task, null);
     const de = 'Massenläufe sind auf dieser Instanz nicht verfügbar; übersprungen.';
-    expect(recorded(engine)).toEqual([['p-bulk', de, 'failed']]);
+    expect(recorded(engine)).toEqual([['p-bulk', de, 'failed', { leaseHolder: expect.any(String) }]]);
     expect(bodies()).toEqual([de]);
   });
 });

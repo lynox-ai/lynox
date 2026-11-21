@@ -731,6 +731,8 @@ function makeClassHarness(opts: {
       judgeContextOf: () => [],
       getStatus: () => undefined,
       haltPreview: (_id: string, reason: string) => { halts.push(reason); },
+      // The owner's stop of a write run, recorded in the ledger (`BulkLedger.requestStop`).
+      requestStop: () => true,
     }
     : null);
   const engine = {
