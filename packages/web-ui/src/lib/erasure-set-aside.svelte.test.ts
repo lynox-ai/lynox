@@ -50,8 +50,10 @@ describe('setAsideCopiesNotice: what the person erasure says about set-aside cop
 		expect(text(withBoth, 'self').join(' ')).toBe('Eine als beschädigt beiseitegelegte Kopie der Datenbank engine.db.corrupt-1700000000000 kann noch Daten zu dieser Person enthalten. Diese Löschung erreicht sie nicht. Du kannst die Datei im Datenverzeichnis löschen, zusammen mit engine.db.corrupt-1700000000000-wal engine.db.corrupt-1700000000000-shm.');
 		setLocale('en');
 		expect(text(withBoth, 'self').join(' ')).toBe('A copy of the database that was set aside as damaged engine.db.corrupt-1700000000000 may still hold data about this person. This erasure does not reach it. You can delete the file in the data directory, together with engine.db.corrupt-1700000000000-wal engine.db.corrupt-1700000000000-shm.');
-		// On lynox Cloud support removes all of them: the sentence stays as it is.
+		// On lynox Cloud support removes all of them: the sentence stays as it is, DE and EN.
 		expect(text(withBoth, 'managed').join(' ')).toBe('A copy of the database that was set aside as damaged engine.db.corrupt-1700000000000 may still hold data about this person. This erasure does not reach it. We remove it if you write to support@lynox.ai.');
+		setLocale('de');
+		expect(text(withBoth, 'managed').join(' ')).toBe('Eine als beschädigt beiseitegelegte Kopie der Datenbank engine.db.corrupt-1700000000000 kann noch Daten zu dieser Person enthalten. Diese Löschung erreicht sie nicht. Wir entfernen sie, wenn du an support@lynox.ai schreibst.');
 	});
 
 	it('two copies, only one with companions, self-hosted: the plural, its companions in the order of the copies', () => {
@@ -67,9 +69,15 @@ describe('setAsideCopiesNotice: what the person erasure says about set-aside cop
 			'We remove them if you write to support@lynox.ai.',
 			'You can delete the files in the data directory, together with engine.db.corrupt-1700000000000-wal.',
 		]);
+		setLocale('de');
+		expect(text(mixed, 'loading')).toEqual([
+			'Als beschädigt beiseitegelegte Kopien der Datenbank agent-memory.db.corrupt-1700000000001 engine.db.corrupt-1700000000000 können noch Daten zu dieser Person enthalten. Diese Löschung erreicht sie nicht.',
+			'Wir entfernen sie, wenn du an support@lynox.ai schreibst.',
+			'Du kannst die Dateien im Datenverzeichnis löschen, zusammen mit engine.db.corrupt-1700000000000-wal.',
+		]);
 	});
 
-	it('names both ways while the way out is loading or could not be read', () => {
+	it('names both ways while the way out is loading or could not be read, DE and EN, one and two copies', () => {
 		for (const way of ['loading', 'failed'] as const) {
 			setLocale('de');
 			expect(text(one, way)).toEqual([
@@ -77,7 +85,17 @@ describe('setAsideCopiesNotice: what the person erasure says about set-aside cop
 				'Wir entfernen sie, wenn du an support@lynox.ai schreibst.',
 				'Du kannst die Datei im Datenverzeichnis löschen.',
 			]);
+			expect(text(two, way)).toEqual([
+				'Als beschädigt beiseitegelegte Kopien der Datenbank agent-memory.db.corrupt-1700000000001 engine.db.corrupt-1700000000000 können noch Daten zu dieser Person enthalten. Diese Löschung erreicht sie nicht.',
+				'Wir entfernen sie, wenn du an support@lynox.ai schreibst.',
+				'Du kannst die Dateien im Datenverzeichnis löschen.',
+			]);
 			setLocale('en');
+			expect(text(one, way)).toEqual([
+				'A copy of the database that was set aside as damaged engine.db.corrupt-1700000000000 may still hold data about this person. This erasure does not reach it.',
+				'We remove it if you write to support@lynox.ai.',
+				'You can delete the file in the data directory.',
+			]);
 			expect(text(two, way)).toEqual([
 				'Copies of the database that were set aside as damaged agent-memory.db.corrupt-1700000000001 engine.db.corrupt-1700000000000 may still hold data about this person. This erasure does not reach them.',
 				'We remove them if you write to support@lynox.ai.',

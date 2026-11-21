@@ -56,16 +56,16 @@
   complete, while the older data sat in the set-aside file. When the data
   directory cannot be listed, `set_aside_databases_unknown` is set and all
   of those blocks are marked.
-- The person erasure's preview and answer now name the set-aside copies of
-  the databases it deletes in (`engine.db`, its `migration-tmp` staging copy,
-  and `agent-memory.db`) in `setAsideCopies` (file names only, never content):
+- The person erasure's preview and answer now name the set-aside copies of the
+  databases it deletes in (`engine.db`, its `migration-tmp` staging copy, and
+  `agent-memory.db`) in `setAsideCopies` (file names only, never content):
   each copy with the `-wal` and `-shm` beside it in `companions`, and a `-wal`
   or `-shm` whose copy is gone as a copy itself. The web app lists them under
   "Not covered" with the way to them for the instance's hosting; self-hosted,
-  the companions are named with it. Such a copy may still hold data about the person, and
-  the erasure does not reach it; until now the answer did not say so. When
-  the data directory cannot be listed, `setAsideCopies` is `null` and the web
-  app says the copies could not be checked.
+  the companions are named with it. Such a copy may still hold data about the
+  person, and the erasure does not reach it; until now the answer did not say
+  so. When the data directory cannot be listed, `setAsideCopies` is `null` and
+  the web app says the copies could not be checked.
 
 ## 2.18.0 — 2026-11-17
 
