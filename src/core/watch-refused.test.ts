@@ -41,9 +41,11 @@ describe('watchRefusedNow', () => {
     expect(watchPolicyRefusal('http://listed.example/p', ctx('allow-list', true))).toEqual({
       why: 'this instance only reads HTTPS pages (enforce_https).', wayOut: 'Watch the https:// address instead.', shown: { kind: 'watch_https' },
     });
-    // A private address is refused at https too, but by no policy setting: the https reason stays.
+  });
+
+  it('tells a refusal of the https address that no setting names as it is, without a way out or a line in the view', () => {
     expect(watchPolicyRefusal('http://10.0.0.1/p', ctx('guarded', true))).toEqual({
-      why: 'this instance only reads HTTPS pages (enforce_https).', wayOut: 'Watch the https:// address instead.', shown: { kind: 'watch_https' },
+      why: 'this instance\'s network settings refuse it: private IP address "10.0.0.1".', wayOut: '', shown: null,
     });
   });
 
