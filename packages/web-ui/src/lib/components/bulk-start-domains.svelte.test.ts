@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { readStartDomainLines, START_DOMAINS_MAX } from './bulk-start-domains.js';
-import { tf } from '../i18n.svelte.js';
+import { t, tf } from '../i18n.svelte.js';
 
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
 // for the client, so it is mounted with the client entry, loaded by path.
@@ -59,7 +59,7 @@ function type(value: string): void {
 describe('readStartDomainLines', () => {
 	it('reads one domain per line or by comma, as the engine names hosts', () => {
 		expect(readStartDomainLines('Mein-Shop.CH\n  partner.example, \n\nbücher.ch\nmein-shop.ch')).toEqual({
-			domains: ['mein-shop.ch', 'partner.example', 'xn--bcher-kva.ch'], badLines: [], sharedLines: [], tooMany: false,
+			domains: ['mein-shop.ch', 'partner.example', 'xn--bcher-kva.ch'], badLines: [], tooMany: false,
 		});
 	});
 
@@ -70,13 +70,10 @@ describe('readStartDomainLines', () => {
 
 	it('marks a shared suffix on its own, and takes a name under one', () => {
 		expect(readStartDomainLines('myshopify.com\nco.uk\ngithub.io\nmeinshop.myshopify.com\nexample.co.uk')).toEqual({
-			domains: ['meinshop.myshopify.com', 'example.co.uk'], badLines: [0, 1, 2], sharedLines: [0, 1, 2], tooMany: false,
+			domains: ['meinshop.myshopify.com', 'example.co.uk'], badLines: [0, 1, 2], tooMany: false,
 		});
 	});
 
-	it('tells a shared suffix apart from a line that is no host at all', () => {
-		expect(readStartDomainLines('*.shop.ch\nmyshopify.com\nlocalhost, co.uk').sharedLines).toEqual([1, 2]);
-	});
 
 	it('marks a host that grows past 253 characters in Punycode', () => {
 		const label = `${'ü'.repeat(3)}${'a'.repeat(40)}`;
@@ -117,15 +114,17 @@ describe('BulkStartDomains', () => {
 		expect(target.querySelector('[role="alert"]')).toBeNull();
 	});
 
-	it('says on a line with a shared suffix why it is wrong, and only there', () => {
+	it('says why a shared suffix is wrong once, in the sentence under the lines', () => {
 		editable();
 		type('myshopify.com\n*.partner.example');
 		const lines = [...target.querySelectorAll('[role="alert"] p')].map((p) => p.textContent ?? '');
-		const shared = tf('bulk.start_domains.shared', {});
-		expect(lines[0]).toContain('myshopify.com');
-		expect(lines[0]).toContain(shared);
-		expect(lines[1]).toContain('*.partner.example');
-		expect(lines[1]).not.toContain(shared);
+		// Each marked line names itself only; the sentence the engine's refusal shows too says why.
+		expect(lines).toEqual([
+			tf('bulk.start_domains.bad_line', { line: '1', text: 'myshopify.com' }),
+			tf('bulk.start_domains.bad_line', { line: '2', text: '*.partner.example' }),
+			t('bulk.start_domains.invalid'),
+		]);
+		expect(t('bulk.start_domains.invalid')).toContain('myshopify.com');
 	});
 
 	it('turns invalid past the cap', () => {

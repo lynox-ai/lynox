@@ -1,5 +1,6 @@
 import type { ManifestStep, AgentOutput } from '../types/orchestration.js';
 import { getByPath } from './conditions.js';
+import { replacePlaceholders, solePlaceholder } from './placeholders.js';
 import { channels } from '../core/observability.js';
 import { detectInjectionAttempt, wrapUntrustedData } from '../core/data-boundary.js';
 
@@ -57,7 +58,7 @@ export function resolveTaskTemplate(
    *  knows. */
   fenceStepOutputs = false,
 ): string {
-  return task.replace(/\{\{([^}]+)\}\}/g, (_match: string, rawPath: string) => {
+  return replacePlaceholders(task, (_match: string, rawPath: string) => {
     const path = rawPath.trim();
     const value = getByPath(context, path);
     // A function is not a value: `getByPath` walks the prototype, so `{{params.toString}}`
@@ -76,8 +77,6 @@ export function resolveTaskTemplate(
       : str;
   });
 }
-
-const SOLE_PLACEHOLDER = /^\{\{\s*([^}]+)\s*\}\}$/;
 
 /**
  * Substitute `{{params.<name>}}` (and any `{{path}}`) placeholders inside a
@@ -120,12 +119,12 @@ function walk(value: unknown, context: Record<string, unknown>): unknown {
 }
 
 function substituteString(s: string, context: Record<string, unknown>): unknown {
-  const sole = SOLE_PLACEHOLDER.exec(s);
-  if (sole) {
-    const resolved = getByPath(context, sole[1]!.trim());
+  const sole = solePlaceholder(s);
+  if (sole !== null) {
+    const resolved = getByPath(context, sole.trim());
     return resolved === undefined ? s : resolved;
   }
-  return s.replace(/\{\{([^}]+)\}\}/g, (_match: string, rawPath: string) => {
+  return replacePlaceholders(s, (_match: string, rawPath: string) => {
     const path = rawPath.trim();
     const resolved = getByPath(context, path);
     if (resolved === undefined) return `{{${path}}}`;
