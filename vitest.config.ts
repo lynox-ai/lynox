@@ -57,6 +57,16 @@ export default defineConfig({
         // A component that imports SvelteKit's `$app/*` can be mounted here only if those resolve;
         // outside a SvelteKit build nothing provides them, so they point at inert stubs.
         resolve: {
+          // A component imports `svelte` by name, and the browser resolves that name to svelte's
+          // client build. vitest's own conditions here are `node` and `development|production`, so
+          // without `browser` the name resolved to the server build, where `mount` throws and
+          // `untrack` only calls its function, so a read inside it is still tracked.
+          // Vite merges this with vitest's list (it is not replaced); `node` stays in it, so a
+          // package whose exports name `node` before `browser` still gets its node build. Svelte's
+          // own `esm-env` import is resolved by Node, so its `BROWSER` flag stays false (no
+          // `requestAnimationFrame` ticks).
+          // `svelte-client-resolution.svelte.test.ts` checks the svelte part.
+          conditions: ['browser'],
           alias: {
             '$app/forms': fileURLToPath(new URL('./scripts/vitest-app-stubs/forms.ts', import.meta.url)),
             '$app/navigation': fileURLToPath(new URL('./scripts/vitest-app-stubs/navigation.ts', import.meta.url)),

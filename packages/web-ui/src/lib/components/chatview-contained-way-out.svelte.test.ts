@@ -60,7 +60,10 @@ function serve(events: Array<[string, Record<string, unknown>]>): void {
 		}
 		if (url.endsWith('/threads/t1')) return json({ thread: { skip_extraction: contained ? 1 : 0, contained } });
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
-		if (url.endsWith('/threads/t1/messages')) return json({ messages: [] });
+		// The turn above ran against this mock, so the server holds no copy of it. ChatView's mount
+		// reconciles against this answer, and an empty list from a settled thread would replace the
+		// turn; answered as a thread the server does not know, the store keeps it.
+		if (url.endsWith('/threads/t1/messages')) return json({ messages: [], threadMissing: true });
 		if (url.endsWith('/artifacts')) return json({ artifacts: [] });
 		if (url.endsWith('/config')) return json(config, configStatus);
 		return json({});

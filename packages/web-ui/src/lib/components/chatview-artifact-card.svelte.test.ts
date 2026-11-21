@@ -80,7 +80,10 @@ async function renderSave(result: Record<string, unknown> | null): Promise<strin
 		if (url.endsWith('/sessions/t1/run')) return new Response(run.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 		if (url.endsWith('/threads/t1')) return json({ thread: null });
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
-		if (url.endsWith('/threads/t1/messages')) return json({ messages: [] });
+		// The turn above ran against this mock, so the server holds no copy of it. ChatView's mount
+		// reconciles against this answer, and an empty list from a settled thread would replace the
+		// turn; answered as a thread the server does not know, the store keeps it.
+		if (url.endsWith('/threads/t1/messages')) return json({ messages: [], threadMissing: true });
 		if (url.endsWith('/artifacts')) return json({ artifacts: [] });
 		return json({});
 	}));
