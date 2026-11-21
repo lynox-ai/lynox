@@ -1243,6 +1243,12 @@ const translations: Record<string, Record<Locale, string>> = {
 	// text the owner is told while an erasure a revocation started is pending; dates without a time.
 	'apis.reconnect': { de: 'Erneut verbinden', en: 'Reconnect' },
 	'apis.access_ended': { de: 'lynox konnte den Zugang zu diesem Shop nicht erneuern.', en: 'lynox could not renew its access to this store.' },
+	// Before a store's access runs out (utils/store-access-end.ts, U-391): the owner reads both sentences, a mandate the first.
+	'apis.access_ends_on': { de: 'Der Zugang von lynox zu diesem Shop läuft am {date} ab.', en: "lynox's access to this store runs out on {date}." },
+	'apis.access_ends_way': { de: 'Verbinde ihn vorher neu, damit Läufe und Abfragen weiterlaufen.', en: 'Reconnect it before then so runs and requests keep going.' },
+	// The owner's banner in the shell, one line per store (StoreAccessBanner, U-391); {host} is shown in a box.
+	'store_access.banner_soon': { de: 'Der Zugang von lynox zum Shop {host} läuft am {date} ab. Verbinde den Shop vorher neu, damit Läufe und Abfragen weiterlaufen.', en: "lynox's access to the store {host} runs out on {date}. Reconnect the store before then so runs and requests keep going." },
+	'store_access.banner_ended': { de: 'lynox konnte den Zugang zum Shop {host} nicht erneuern. Läufe und Abfragen an den Shop gehen erst wieder, wenn du ihn neu verbindest.', en: 'lynox could not renew its access to the store {host}. Runs and requests to the store only work again once you reconnect it.' },
 	'apis.revoked_on': { de: 'Vom Anbieter widerrufen am {date}', en: 'Revoked by the provider on {date}' },
 	// The long texts sit in a closed <details> below the dates and the way out.
 	'apis.erasure_details': { de: 'Was gelöscht wird und was bleibt', en: 'What is deleted and what stays' },

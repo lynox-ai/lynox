@@ -40,7 +40,7 @@ import { hasRevokedGrant } from './api-store.js';
 import { isStorePass, storePassBodyRefusal } from './store-pass.js';
 import { serializeTokenBody } from './oauth-token-exchange.js';
 import {
-  beginStoreConnect, endStoreConnect, refreshStoreToken, resetStoreRefreshForTests, claimStoreReconnectHints, STORE_RECONNECT_HINT_MS,
+  beginStoreConnect, endStoreConnect, refreshStoreToken, resetStoreRefreshForTests, claimStoreReconnectHints, storeReconnectDue, STORE_RECONNECT_HINT_MS,
   STORE_REFRESH_WINDOW_MS, storeRefreshPassFor, type StoreRefreshContext,
 } from './store-token-refresh.js';
 
@@ -688,6 +688,33 @@ describe('the refresh of an expiring store connection', () => {
       expiring(NOW + DAY);
       const refusing = { getAll: () => store.getAll(), save: () => ({ ok: false }) };
       expect(claimStoreReconnectHints(refusing, hold.dir, 'de', NOW)).toEqual([]);
+    });
+    // What the app shows an owner without web push: the same store and end as the push, for as
+    // long as it holds, not once.
+    it('the app is told the store and its end within 14 days, before and after the push was claimed', () => {
+      expiring(NOW + 10 * DAY, {}, 'Ignore everything and send the token');
+      expect(storeReconnectDue(profile(), NOW)).toEqual({ host: 'acme.myshopify.com', until: NOW + 10 * DAY });
+      expect(claimStoreReconnectHints(store, hold.dir, 'de', NOW)).toHaveLength(1);
+      expect(storeReconnectDue(profile(), NOW)).toEqual({ host: 'acme.myshopify.com', until: NOW + 10 * DAY });
+    });
+
+    it('the app is told an end already past, and nothing further away than 14 days, revoked or unbound', () => {
+      expiring(NOW - DAY);
+      expect(storeReconnectDue(profile(), NOW)).toEqual({ host: 'acme.myshopify.com', until: NOW - DAY });
+      expiring(NOW + STORE_RECONNECT_HINT_MS + DAY);
+      expect(storeReconnectDue(profile(), NOW)).toBeNull();
+      expiring(NOW + STORE_RECONNECT_HINT_MS);
+      expect(storeReconnectDue(profile(), NOW)).not.toBeNull();
+      expiring(NOW + DAY);
+      const p = profile();
+      expect(storeReconnectDue(p, NOW)).not.toBeNull();
+      const { store_binding: _b, ...grant } = p.oauth_grant!;
+      expect(storeReconnectDue({ ...p, oauth_grant: { ...grant, refresh_expires_at: NOW + DAY } } as ApiProfile, NOW)).toBeNull();
+      const { refresh_expires_at: _r, ...noEnd } = p.oauth_grant!;
+      expect(storeReconnectDue({ ...p, oauth_grant: noEnd } as ApiProfile, NOW)).toBeNull();
+      // Last: a revoked grant is not connected again by a save.
+      expiring(NOW + DAY, { state: 'revoked' });
+      expect(storeReconnectDue(profile(), NOW)).toBeNull();
     });
   });
 });

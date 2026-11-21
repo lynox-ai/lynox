@@ -131,13 +131,10 @@ export function claimStoreReconnectHints(
 ): { title: string; body: string; priority: 'normal' }[] {
   const out: { title: string; body: string; priority: 'normal' }[] = [];
   for (const profile of apiStore.getAll()) {
-    if (!storeRefreshApplies(profile)) continue;
+    const due = storeReconnectDue(profile, now);
     const grant = profile.oauth_grant;
-    const until = grant?.refresh_expires_at;
-    const host = presetStoreHost(profile);
-    if (grant === undefined || typeof until !== 'number' || host === null) continue;
-    if (typeof grant.store_binding !== 'string' || grant.state === 'revoked') continue;
-    if (until - now > STORE_RECONNECT_HINT_MS || grant.reconnect_hint_for === until) continue;
+    if (due === null || grant === undefined || grant.reconnect_hint_for === due.until) continue;
+    const { host, until } = due;
     let claimed = false;
     try {
       claimed = apiStore.save({ ...profile, oauth_grant: { ...grant, reconnect_hint_for: until } }, apisDir).ok;
@@ -148,6 +145,24 @@ export function claimStoreReconnectHints(
     out.push(storeReconnectHint(host, until, now, lang));
   }
   return out;
+}
+
+/**
+ * The store whose refresh token runs out within {@link STORE_RECONNECT_HINT_MS} of `now`, or has,
+ * with its host and the end: the store the owner is told about, by push once
+ * ({@link claimStoreReconnectHints}) and in the app for as long as it holds. Null for any other
+ * profile: not a store whose tokens expire, no known end, no host the engine derives, no store
+ * binding, or a revoked grant.
+ */
+export function storeReconnectDue(profile: ApiProfile, now: number = Date.now()): { host: string; until: number } | null {
+  if (!storeRefreshApplies(profile)) return null;
+  const grant = profile.oauth_grant;
+  const until = grant?.refresh_expires_at;
+  const host = presetStoreHost(profile);
+  if (grant === undefined || typeof until !== 'number' || host === null) return null;
+  if (typeof grant.store_binding !== 'string' || grant.state === 'revoked') return null;
+  if (until - now > STORE_RECONNECT_HINT_MS) return null;
+  return { host, until };
 }
 
 const MONTHS_DE = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];

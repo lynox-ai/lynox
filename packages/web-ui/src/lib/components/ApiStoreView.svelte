@@ -10,13 +10,16 @@
 	import { connectionLine, type ConnectionLine, type OAuthGrantView } from '../utils/oauth-connection.js';
 	import { localDay, noticesByProfile, revocationView, type ProviderNotice } from '../utils/provider-revocation.js';
 	import { connectHref } from '../oauth-connect-path.js';
+	import { storeAccessShown, type StoreAccessEnd } from '../utils/store-access-end.js';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 
 	interface ApiEndpoint { method: string; path: string; description: string; }
 	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; oauth_grant?: OAuthGrantView & { state?: unknown; revoked_at?: unknown };
 		/** Whether this reader's connect start goes through: a mandate's only for a profile it set up. */
-		reader_may_connect?: boolean; }
+		reader_may_connect?: boolean;
+		/** A store whose access runs out soon or has (`storeReconnectDue` in the engine). */
+		store_access_ends?: StoreAccessEnd; }
 
 	// Who connected the profile and with which provider account (`utils/oauth-connection.ts`).
 	function connectionText(line: ConnectionLine): string {
@@ -245,6 +248,19 @@
 										<p class="mt-2" data-testid="api-erasure-connected-again">{tf('apis.erasure_connected_again_notice', dates)}</p>
 									{/if}
 								</details>
+							{/if}
+						</div>
+					{/if}
+					<!-- Before a store's access runs out (U-391); after the end, `ended` above says so. -->
+					{#if revocationView(profile.oauth_grant, notices.get(profile.id), now) === null && storeAccessShown(profile, now, getLocale())?.kind === 'soon'}
+						{@const soon = storeAccessShown(profile, now, getLocale())!}
+						<div class="border-t border-border px-4 py-3 space-y-2 text-xs text-text-muted" data-testid="api-access-ends">
+							<p data-testid="api-access-ends-text">{isOwnerSession() ? `${tf('apis.access_ends_on', { date: soon.date })} ${t('apis.access_ends_way')}` : tf('apis.access_ends_on', { date: soon.date })}</p>
+							{#if soon.mayConnect}
+								<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
+									class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
+							{:else}
+								<p data-testid="api-reconnect-not-yours">{t('apis.reconnect_not_yours')}</p>
 							{/if}
 						</div>
 					{/if}
