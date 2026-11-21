@@ -104,7 +104,7 @@ export interface InboxItem {
   /** The rule that filed this item (v20); cleared when the rule is deleted. */
   matchedRuleId?: string | undefined;
   /**
-   * The rule that named this item but was not applied (v21), or null when none was withheld.
+   * The rule that named this item but was not applied (v24), or null when none was withheld.
    * Always set on an item read from the store; optional so hand-built items compile.
    */
   ruleWithheld?: InboxRuleWithheld | null | undefined;

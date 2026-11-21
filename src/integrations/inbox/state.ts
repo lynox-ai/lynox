@@ -66,7 +66,7 @@ export interface InboxItemInput {
   inReplyTo?: string | undefined;
   /** The rule that filed the item (v20). */
   matchedRuleId?: string | undefined;
-  /** The rule that named the item but was not applied (v21). Never set with `matchedRuleId`. */
+  /** The rule that named the item but was not applied (v24). Never set with `matchedRuleId`. */
   ruleWithheld?: { id: string; name: string | undefined; reason: InboxRuleWithheldReason } | undefined;
 }
 
@@ -267,7 +267,7 @@ interface ItemRow {
   notified_at: number | null;
   // v20 — null on items no rule filed
   matched_rule_id: string | null;
-  // v21 — null on items no rule was withheld on (and the id null once that rule is deleted)
+  // v24 — null on items no rule was withheld on (and the id null once that rule is deleted)
   rule_withheld_id: string | null;
   rule_withheld_name: string | null;
   rule_withheld_reason: string | null;

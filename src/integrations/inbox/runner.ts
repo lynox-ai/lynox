@@ -291,7 +291,7 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
           reasonDe: result.reasonDe,
           classifiedAt: new Date(),
           classifierVersion: result.classifierVersion,
-          // A rule either filed the item or was withheld on it; the item says which (v21, v22).
+          // A rule either filed the item or was withheld on it; the item says which (v21, v24).
           ...(rule !== undefined && rule.withheld === false ? { matchedRuleId: rule.id } : {}),
           ...(rule !== undefined && rule.withheld !== false
             ? { ruleWithheld: { id: rule.id, name: rule.name, reason: rule.withheld } }
