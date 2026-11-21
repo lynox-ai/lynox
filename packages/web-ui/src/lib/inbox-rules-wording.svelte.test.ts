@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { getLocale, setLocale, t } from './i18n.svelte.js';
+import { getLocale, setLocale, t, tf } from './i18n.svelte.js';
 
 // The inbox rules' texts as reviewed, byte for byte, in both languages: the rule view's
 // proposals, confirming, the count of waiting proposals, the name field, the description kind
@@ -35,6 +35,8 @@ const WORDING: ReadonlyArray<readonly [key: string, de: string, en: string]> = [
 	['inbox.rule_withheld_from_sender', 'Feste Regel aus dem Absender', 'Fixed rule from sender'],
 	['inbox.rule_withheld_from_subject', 'Feste Regel aus dem Betreff', 'Fixed rule from subject'],
 	['inbox.rules_then_escalate', 'Immer unter „Braucht dich“ behalten', 'Always keep under “Needs you”'],
+	['inbox.rules_then_archive', 'Als erledigt ablegen', 'File as handled'],
+	['inbox.rules_then_archive_effect', 'lynox legt die Mail unter „{zone}“ ab. In deinem Postfach bleibt sie unverändert.', 'lynox files the mail under “{zone}”. It stays unchanged in your mailbox.'],
 	['inbox.rule_withheld_classifier_unnamed', 'Regel zurückgehalten: Der Klassifikator ordnete diese Mail anders ein, darum zeigt lynox sie dir. Soll die Regel hier immer greifen, mach daraus eine feste Regel.', 'Rule held back: the classifier sorted this mail differently, so lynox shows it to you. If the rule should always apply here, turn it into a fixed rule.'],
 	['inbox.rule_withheld_unchecked_unnamed', 'Regel zurückgehalten: Die Prüfung konnte nicht laufen, etwa wegen fehlendem KI-Budget oder Guthaben, darum zeigt lynox dir die Mail. Soll die Regel ohne Prüfung greifen, mach daraus eine feste Regel.', 'Rule held back: the check could not run, for example because of no AI budget or credit, so lynox shows you the mail. If the rule should apply without a check, turn it into a fixed rule.'],
 	['inbox.rule_withheld_sensitive_unnamed', 'Regel zurückgehalten: Diese Mail wirkt sensibel. Eine Regel legt solche Mails nie als erledigt ab, darum zeigt lynox sie dir.', 'Rule held back: this mail looks sensitive. A rule never files such mail as handled, so lynox shows it to you.'],
@@ -61,6 +63,9 @@ const WORDING: ReadonlyArray<readonly [key: string, de: string, en: string]> = [
 	['inbox.rule_withheld_forwarded_mandate_unnamed', 'Regel zurückgehalten: Diese Mail hat eine Person weitergeleitet. Solche Mails legt eine Beschreibungsregel nicht als erledigt ab, darum zeigt lynox sie dir. Eine feste Regel daraus kann der Inhaber anlegen.', 'Rule held back: a person forwarded this mail. A description rule does not file such mail as handled, so lynox shows it to you. The owner can turn it into a fixed rule.'],
 ];
 
+// Words that name an effect in the mail provider's mailbox (archive, move, delete, flag, read state).
+const MAILBOX_EFFECT = /archiv|gelesen|lesen markieren|verschieb|lösch|papierkorb|spam|markier|ausblend|ordner|\bread\b|unread|\bseen\b|\bmove|delete|trash|\bflag|\bhid(?:e|es|den|ing)\b|folder/i;
+
 const localeBefore = getLocale();
 afterEach(() => setLocale(localeBefore));
 
@@ -70,6 +75,31 @@ describe('inbox rules wording', () => {
 		expect(t(key)).toBe(de);
 		setLocale('en');
 		expect(t(key)).toBe(en);
+	});
+
+	// The mail provider has no call that archives, moves or marks a mail read, so no "then" text
+	// may promise one. A provider that gains such a call is the moment to revisit this list.
+	it('names no effect in the mailbox in any "then" text', async () => {
+		const { default: src } = (await import('./i18n.svelte.ts?raw')) as { default: string };
+		const keys = [...new Set([...src.matchAll(/'(inbox\.rules_then_[a-z_]+)'/g)].map((m) => m[1]!))];
+		expect(keys.length).toBeGreaterThanOrEqual(5);
+		for (const locale of ['de', 'en'] as const) {
+			setLocale(locale);
+			for (const k of keys) expect(t(k), `${locale} ${k}`).not.toMatch(MAILBOX_EFFECT);
+		}
+		// The list catches what the retired texts said and one word per alternative, so a broken
+		// pattern cannot pass on nothing.
+		const probes = ['Automatisch archivieren', 'Auto-archive', 'Lesen markieren & ausblenden', 'Mark read & hide',
+			'als gelesen', 'verschieben', 'löschen', 'in den Papierkorb', 'als Spam', 'markiert', 'ausblenden', 'in einen Ordner',
+			'mark read', 'mark unread', 'mark as seen', 'move it', 'delete it', 'to the trash', 'flag it', 'hides it', 'hidden', 'to a folder'];
+		for (const probe of probes) expect(probe).toMatch(MAILBOX_EFFECT);
+	});
+
+	it('names the zone a handled rule files into as the inbox does', () => {
+		setLocale('de');
+		expect(tf('inbox.rules_then_archive_effect', { zone: t('inbox.zone_handled') })).toContain(`„${t('inbox.zone_handled')}“`);
+		setLocale('en');
+		expect(tf('inbox.rules_then_archive_effect', { zone: t('inbox.zone_handled') })).toContain(`“${t('inbox.zone_handled')}”`);
 	});
 
 	it('names the bucket of a rule that escalates as the inbox does', () => {

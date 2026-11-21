@@ -42,24 +42,26 @@
 	import OwnerOnlyNotice from './settings-readonly/OwnerOnlyNotice.svelte';
 	import { getRulesPendingByAccount, isInboxAvailable, loadInboxCounts } from '../stores/inbox.svelte.js';
 
-	type FormPreset = 'archive' | 'escalate' | 'silent';
+	// No preset names an effect in the mailbox: the mail provider can neither archive nor mark a
+	// mail read, so a rule only files it in lynox. `mark_read` therefore offers nothing `archive`
+	// does not, and is not offered; a stored rule with it reads as "file as handled".
+	type FormPreset = 'archive' | 'escalate';
 
 	const PRESET_MAP: Record<FormPreset, { bucket: InboxRuleBucket; action: InboxRuleAction; labelKey: string }> = {
 		archive: { bucket: 'auto_handled', action: 'archive', labelKey: 'inbox.rules_then_archive' },
 		escalate: { bucket: 'requires_user', action: 'show', labelKey: 'inbox.rules_then_escalate' },
-		silent: { bucket: 'auto_handled', action: 'mark_read', labelKey: 'inbox.rules_then_silent' },
 	};
 
 	/**
 	 * Pure presentation: map a backend rule to its user-facing label. Falls
 	 * through to "other" for combinations the form doesn't expose (e.g.
 	 * `action: label`), so a rule created via the API surfaces honestly
-	 * instead of being silently mislabelled as "Mark read & hide".
+	 * instead of being silently mislabelled as "File as handled".
 	 */
 	function ruleDisplayLabelKey(rule: InboxRule): string {
 		if (rule.bucket === 'requires_user' && rule.action === 'show') return 'inbox.rules_then_escalate';
 		if (rule.bucket === 'auto_handled' && rule.action === 'archive') return 'inbox.rules_then_archive';
-		if (rule.bucket === 'auto_handled' && rule.action === 'mark_read') return 'inbox.rules_then_silent';
+		if (rule.bucket === 'auto_handled' && rule.action === 'mark_read') return 'inbox.rules_then_archive';
 		return 'inbox.rules_then_other';
 	}
 
@@ -563,19 +565,23 @@
 					<fieldset>
 						<legend class="text-[11px] text-text-subtle uppercase tracking-widest mb-2">{t('inbox.rules_then_label')}</legend>
 						<div class="space-y-1">
-							{#each ['archive', 'escalate', 'silent'] as const as preset (preset)}
+							{#each ['archive', 'escalate'] as const as preset (preset)}
 								<label class="flex items-center gap-2 text-sm text-text">
 									<input
 										type="radio"
 										name="rule-then-preset"
 										value={preset}
 										checked={formPreset === preset}
+										aria-describedby={preset === 'archive' && formPreset === 'archive' ? 'rules-then-effect' : undefined}
 										onchange={() => (formPreset = preset)}
 									/>
 									<span>{t(PRESET_MAP[preset].labelKey)}</span>
 								</label>
 							{/each}
 						</div>
+						{#if formPreset === 'archive'}
+							<p id="rules-then-effect" class="mt-2 text-[11px] text-text-muted" data-testid="rules-then-effect">{tf('inbox.rules_then_archive_effect', { zone: t('inbox.zone_handled') })}</p>
+						{/if}
 						{#if formPreset === null}
 							<p class="mt-2 text-[11px] text-text-muted" data-testid="rules-then-choose-hint">{t('inbox.rules_then_choose_hint')}</p>
 						{/if}
