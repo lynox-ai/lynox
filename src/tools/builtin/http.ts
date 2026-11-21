@@ -22,10 +22,10 @@ import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { repairStrayCloseTag } from './model-json-body.js';
-import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy } from '../../core/network-guard.js';
+import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy, refuseRedirectToStore } from '../../core/network-guard.js';
 import type { EgressCall, HostPolicyContext } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
-import { WRITE_POSSIBLY_LANDED_PREFIX, refusedReviewedHeaders, ungrantedWriteNote, urlForNote, writeFollowedAsReadNote, writeForNote, writeForShortNote } from '../../core/write-notes.js';
+import { WRITE_POSSIBLY_LANDED_PREFIX, hostShowsStoredValue, refusedReviewedHeaders, ungrantedWriteNote, urlForNote, writeFollowedAsReadNote, writeForNote, writeForShortNote } from '../../core/write-notes.js';
 import { isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
 import { isProtectedSecretWrite, SECRET_SHAPES } from '../../core/secret-store.js';
 import type { SecretShape, SecretShapeKind } from '../../core/secret-store.js';
@@ -43,13 +43,14 @@ import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../.
 import { currentCallSignal, currentCallTwins, joinCallSignal, noteApiCost, noteCallConnection, noteGrantLift, type CallApiCost } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
-import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, urlQueryStrings, jsonObjectNotGraphql, type BodyReadings } from '../../core/outbound-write.js';
+import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, urlQueryStrings, queryReadings, queryKeyName, jsonObjectNotGraphql, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
-import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
+import { clearanceRefusalText, isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_NOT_SET_UP, storeClearanceHeld, storeSetupRefusal } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
 import type { VerifiedStoreCallback } from '../../core/oauth-callback-hmac.js';
 import { chatIsContained, containedStoreWrite, containerOf, CONTAINED_WRITE_REFUSAL_AT_SEND, type ContainedConnection, type StoreContainer } from '../../core/containment.js';
 import { controlPlaneFromEnv } from '../../core/exact-clearance.js';
+import { hostTargets } from '../../core/send-target.js';
 import { timingSafeEqual } from 'node:crypto';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
@@ -403,6 +404,31 @@ function profilesOnHost(url: string, apiStore: NonNullable<ToolContext['apiStore
   return [...ids].map((id) => apiStore.get(id)).filter((p): p is ApiProfile => p !== undefined);
 }
 
+/** Query keys a GraphQL server reads a document, its variables, its operation or a stored document
+ *  from (Relay and Hot Chocolate name a persisted operation `id`; Apollo's by `persistedQuery`). */
+const GRAPHQL_QUERY_KEYS = new Set(['query', 'operationname', 'operation_name', 'variables', 'extensions', 'graphql', 'id', 'documentid', 'doc_id', 'queryid', 'persistedquery', 'hash', 'sha256hash']);
+
+/**
+ * Whether the query strings of a GraphQL write carry nothing but the credential an API profile
+ * on the host declares to go there (`auth.type: 'query'`, Contentful's `?access_token=`): one pair
+ * in the URL's own query string and none a decoded `?` in the path makes, under the name the
+ * profile declares (`key` when it names none), in every reading a server may make of it
+ * (`queryReadings`), and that name none a GraphQL server reads a document from. Anything else
+ * there may be run instead of the body, so it stays refused.
+ */
+function onlyProfileQueryCredential(url: string, toolContext: ToolContext | undefined): boolean {
+  if (!toolContext?.apiStore) return false;
+  const declared = profilesOnHost(url, toolContext.apiStore)
+    .filter((p) => p.auth?.type === 'query')
+    .map((p) => p.auth?.query_param ?? 'key');
+  const strings = urlQueryStrings(url);
+  if (strings.length !== 1) return false;
+  return queryReadings(strings[0]!).every((params) => {
+    const pairs = [...params];
+    return pairs.length === 1 && declared.includes(pairs[0]![0]) && !GRAPHQL_QUERY_KEYS.has(queryKeyName(pairs[0]![0]));
+  });
+}
+
 /** Write approvals denied in a tool batch, keyed by the batch's identity (`IAgent.approvalBatch`):
  *  a call of the same batch that waited on that question is refused without asking again. */
 const deniedInBatch = new WeakMap<object, Set<string>>();
@@ -572,6 +598,8 @@ export async function fetchWithValidatedRedirects(
       }
       // fetchPinned does the DNS-resolve + IP validation + connection-pinning in
       // one shot — no rebind window between validate and connect.
+      // A hop to a store, from a request that was not one, is a redirect the engine does not follow.
+      if (redirects > 0 && pass === undefined) refuseRedirectToStore(currentUrl);
       const response = await fetchPinned(currentUrl, requestInit, pass);
       sent ??= ownWrite ?? overrideHop;
       if (pendingAgain !== undefined && sent !== undefined) sent = { ...sent, again: pendingAgain };
@@ -2039,11 +2067,11 @@ const QUERY_CREDENTIAL = /token|key|secret|password|passwd|auth|signature|sessio
  *  6a. no refusal of the control plane that still holds.
  */
 function storePassPrecheck(url: string, headers: Record<string, string>, toolContext: ToolContext | undefined): string | null {
-  if (controlPlaneFromEnv() === null || !toolContext?.exactClearance || !toolContext.storeBindingDigest) return SHOPIFY_UNAVAILABLE;
-  if (toolContext.shellIsolation.kind !== 'sidecar') return SHOPIFY_UNAVAILABLE;
-  const apiStore = toolContext.apiStore;
+  const setupRefusal = storeSetupRefusal(toolContext);
+  if (setupRefusal !== null) return setupRefusal;
+  const apiStore = toolContext!.apiStore;
   let parsed: URL;
-  try { parsed = new URL(url); } catch { return SHOPIFY_UNAVAILABLE; }
+  try { parsed = new URL(url); } catch { return SHOPIFY_NOT_SET_UP; }
   const host = normalizeHostForMatch(parsed.hostname);
   const profile = apiStore?.getByHostname(parsed.hostname);
   const preset = profile?.auth?.type === 'oauth2' ? OAUTH_PRESETS.get(profile.auth.oauth?.preset_id ?? '') : undefined;
@@ -2056,9 +2084,9 @@ function storePassPrecheck(url: string, headers: Record<string, string>, toolCon
   for (const name of Object.keys(headers)) {
     if (STORE_CREDENTIAL_HEADERS.has(name.toLowerCase())) return `a request to a Shopify store may not carry a credential header of its own (${shapedForLog(name, DERIVED_NAME_SHAPE, 60)}). Remove it; the engine attaches the store connection itself.`;
   }
-  if (toolContext.exactClearance.blockedNow()) return SHOPIFY_UNAVAILABLE;
-  return null;
+  return storeClearanceHeld(toolContext!);
 }
+
 
 /**
  * The tail of the store pass (the clearance, step 6b, and the mint), the only place a request pass is
@@ -2103,7 +2131,7 @@ async function mintStorePassFor(
   const threads = target.kind === 'thread' ? toolContext.threadStore : null;
   if (target.kind === 'thread' && !threads) return { refusal: CONTAINMENT_UNWRITABLE };
   const clearance = await toolContext.exactClearance.ensure();
-  if (!clearance.ok) return { refusal: SHOPIFY_UNAVAILABLE };
+  if (!clearance.ok) return { refusal: clearanceRefusalText(clearance.reason, toolContext.exactClearance.heldRefusal()) };
   try {
     containment.contain(target, connection);
     // Read back in both records: `INSERT OR IGNORE` swallows a refused row as well.
@@ -2181,8 +2209,8 @@ async function attachEngineManagedAuth(
    *  (`store-pass-guards.test.ts`) lists each with its rule. */
   container: StoreContainer,
 ): Promise<AttachedAuth> {
-  // A Shopify store gets nothing from this engine for now (`core/shopify-host.ts`): refused here,
-  // before the profiles, the vault and the `!apiStore || !vault` exit below, so it holds whatever
+  // A request to a Shopify store goes out only under a store pass (`core/shopify-host.ts`): checked
+  // here, before the profiles, the vault and the `!apiStore || !vault` exit below, so it holds whatever
   // the request carries and whether or not a profile exists. `http_request`, the write-context
   // reads and a bulk run's requests all pass through here before they send.
   // Whether this request goes to a Shopify store. Such a request goes out only under a store
@@ -2217,6 +2245,9 @@ async function attachEngineManagedAuth(
   if (astray && write) {
     return { refusal: `Error: writes to ${astray.provider.label} go through this engine's built-in "${astray.provider.id}" provider, which shows the user what lynox may do there and asks each write with what it sends. api_profile "${astray.profile.id}" signs in another way, so this write was not sent; reading through it works as before. To write, change this profile with api_setup action "update" to auth.type "oauth2" with auth.oauth.preset_id "${astray.provider.id}" (one host holds one profile), then connect it with api_setup action "connect"; it reads again once it is connected.` };
   }
+  // A store request past the precheck needs the vault for its pass: without one this instance
+  // misses a part, and the request would otherwise go on without a pass and be refused as a page.
+  if (toStore && (!apiStore || !vault)) return { refusal: `Error: ${SHOPIFY_NOT_SET_UP}` };
   if (!apiStore || !vault) return {};
 
   let profile: ReturnType<NonNullable<ToolContext['apiStore']>['getByHostname']>;
@@ -3082,22 +3113,26 @@ interface HttpRequestInput {
   timeout_ms?: number | undefined;
 }
 
+// The effective method, overrides included; one that is not a method counts as a write. When
+// an override names other writes, every write the request names, as the approval keys them
+// (`PATCH+POST`): a server may run any of them.
+function httpOutwardWrite(input: HttpRequestInput): string | null {
+  const headers = input.headers ?? {};
+  const body = gateBodyReadings(input.body, headers);
+  const method = effectiveWriteMethod(input.method ?? 'GET', headers, input.url, body) ?? 'OVERRIDE';
+  if (isReadMethod(method)) return null;
+  const named = method === 'OVERRIDE' ? [] : writeMethodsNamed(input.method ?? 'GET', headers, input.url, body);
+  return named.length > 1 ? named.join('+') : method;
+}
+
 export const httpRequestTool: ToolEntry<HttpRequestInput> = {
   // The classification itself lives at `undoClassFor`, which the two gates in the handler
   // read as well — see its docblock for why PUT/PATCH are restorable and POST/DELETE are
   // not. Declaring it here a second time is what let the two drift.
   undo: (input) => undoClassFor(input.method ?? 'GET'),
-  // The effective method, overrides included; one that is not a method counts as a write. When
-  // an override names other writes, every write the request names, as the approval keys them
-  // (`PATCH+POST`): a server may run any of them.
-  outwardWrite: (input) => {
-    const headers = input.headers ?? {};
-    const body = gateBodyReadings(input.body, headers);
-    const method = effectiveWriteMethod(input.method ?? 'GET', headers, input.url, body) ?? 'OVERRIDE';
-    if (isReadMethod(method)) return null;
-    const named = method === 'OVERRIDE' ? [] : writeMethodsNamed(input.method ?? 'GET', headers, input.url, body);
-    return named.length > 1 ? named.join('+') : method;
-  },
+  outwardWrite: (input) => httpOutwardWrite(input),
+  // A write sends to the host of its URL. A read (GET, HEAD) declares no target here.
+  sendTargets: (input) => (httpOutwardWrite(input) === null ? null : hostTargets(input.url)),
   // The same method read the other way round: a GET or HEAD reads at the URL, host and path.
   outwardRead: (input) => {
     const method = effectiveWriteMethod(input.method ?? 'GET', input.headers ?? {}, input.url, gateBodyReadings(input.body, input.headers ?? {})) ?? 'OVERRIDE';
@@ -3225,7 +3260,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // malformed URL is refused by the host policy further down, with its own message.
     // Under a mandate a host that holds a stored secret is not named: the text reaches the
     // mandate's run report too. Read as parsed (lower-cased, percent-decoded) and as the request
-    // wrote it, where a secret keeps its case; and the parsed host as DNS and TLS read it.
+    // wrote it, where a secret keeps its case; and the parsed host as DNS and TLS read it. Also
+    // a value the host holds only in part, or in a form the parser undoes (`hostShowsStoredValue`).
     const hostHoldsSecret = (): boolean => {
       if (isOwnerPrincipal(agent.principal)) return false;
       const parsed = new URL(input.url);
@@ -3233,7 +3269,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const rawHost = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(input.url)?.[1] ?? '';
       const decodedHost = ((): string => { try { return decodeURIComponent(rawHost); } catch { return rawHost; } })();
       return [parsed.hostname, rawHost, decodedHost].some((h) => maskOf(h) !== h)
-        || (agent.secretStore?.containsSecretAsHost(parsed.hostname) ?? false);
+        || (agent.secretStore?.containsSecretAsHost(parsed.hostname) ?? false)
+        || hostShowsStoredValue(input.url, maskOf);
     };
     const service = (): string => (hostHoldsSecret() ? 'this service' : approvalOrigin(new URL(input.url)));
     const writeShown = writeForNote(method.trim().toUpperCase(), gatedMethod, writeMethodsNamed(method, headers, input.url, gateBodyReadings(input.body, headers)));
@@ -3255,8 +3292,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (graphqlEndpoint && isWriteMethod(gatedMethod)) {
       // Some servers read `query` from the URL before the body (express-graphql, graphene-django),
       // so a write there carries nothing in its URL: no list of parameter names a server might read.
-      // The query string a proxy may make of a `?` decoded in the path counts as well.
-      if (urlQueryStrings(input.url).some((search) => search !== '')) {
+      // The query string a proxy may make of a `?` decoded in the path counts as well. The one
+      // pair an API profile on the host declares for its credential is no document
+      // (`onlyProfileQueryCredential`): without it such a profile could write nothing there.
+      if (urlQueryStrings(input.url).some((search) => search !== '') && !onlyProfileQueryCredential(input.url, toolContext)) {
         blockedVerbatim(`Blocked: ${writeShown} to ${service()} is a GraphQL write with a query string, which a server may run instead of the body. Put the arguments in the JSON body and a credential in a header.`);
       }
       const reading = graphqlWrite(headers, input.body);
@@ -3672,7 +3711,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       contract !== undefined &&
       !outboundEffect &&
       !connectedAccount &&
-      named.every((m) => contractGrants('http_request', { ...input, method: m }, contract));
+      // The body as it is sent: the contract reads it (`bodyMayWriteGraphql`), and a repaired body
+      // can parse where the one the model wrote does not.
+      named.every((m) => contractGrants('http_request', { ...input, body: repairedBody?.body ?? input.body, method: m }, contract));
     // The one place where a grant lets an unattended write through, so the one place that
     // marks the call with it (`noteGrantLift`). A contract that names no accepted grant
     // (handed in through `AgentConfig` by an embedder or a test) leaves no mark: the write

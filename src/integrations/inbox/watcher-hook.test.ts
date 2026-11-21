@@ -555,3 +555,54 @@ describe('createInboxClassifierHook — queue overflow dead-letter', () => {
     expect(notifyNewItem.mock.calls[0]?.[0]).toMatchObject({ bucket: 'requires_user' });
   });
 });
+
+describe('createInboxClassifierHook — a flagged mail on the rule path and in the push', () => {
+  const OTP = { subject: 'Your code', snippet: 'OTP 482917' };
+  const PLAIN = { subject: 'Wochenbericht', snippet: 'Anbei der Bericht.' };
+  function showRule(): void {
+    inbox.insertRule({
+      accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'mustermann@example.com',
+      bucket: 'requires_user', action: 'show', source: 'on_demand',
+    });
+  }
+  const storedBody = (): string | null =>
+    inbox.listThreadMessages(ACCOUNT.id, 'imap:thread-1').find((m) => m.messageId === '<m1@x>')?.bodyMd ?? null;
+
+  it('a rule files a flagged mail under skip without its text, as the sensitive-skip branch does', async () => {
+    showRule();
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    expect(await hook(ACCOUNT.id, envelope(OTP))).toBe('rule_applied');
+    expect(storedBody()).toBeNull();
+  });
+
+  it('a rule still stores the text of a mail that is not flagged', async () => {
+    showRule();
+    expect(await createInboxClassifierHook({ state: inbox, rules, queue, accounts })(ACCOUNT.id, envelope(PLAIN))).toBe('rule_applied');
+    expect(storedBody()).toBe('Anbei der Bericht.');
+  });
+
+  it('a rule stores the text of a flagged mail under allow', async () => {
+    showRule();
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts, sensitiveMode: 'allow' });
+    expect(await hook(ACCOUNT.id, envelope(OTP))).toBe('rule_applied');
+    expect(storedBody()).toBe('OTP 482917');
+  });
+
+  it('tells the notifier a rule-filed flagged mail is flagged', async () => {
+    const notifyNewItem = vi.fn(async () => true);
+    showRule();
+    await createInboxClassifierHook({ state: inbox, rules, queue, accounts, notifier: { notifyNewItem } })(ACCOUNT.id, envelope(OTP));
+    expect(notifyNewItem.mock.calls[0]?.[1]).toEqual({ flagged: true });
+  });
+
+  it('tells the notifier a flagged mail is flagged on the sensitive-skip and dead-letter paths, and a plain one is not', async () => {
+    const notifyNewItem = vi.fn(async () => true);
+    const fullQueue: HookQueue = { enqueue: vi.fn(() => false) };
+    await createInboxClassifierHook({ state: inbox, rules, queue, accounts, notifier: { notifyNewItem } })(ACCOUNT.id, envelope(OTP));
+    await createInboxClassifierHook({ state: inbox, rules, queue: fullQueue, accounts, notifier: { notifyNewItem }, sensitiveMode: 'mask' })(
+      ACCOUNT.id, envelope({ ...OTP, messageId: '<m2@x>', threadKey: 'imap:thread-2' }));
+    await createInboxClassifierHook({ state: inbox, rules, queue: fullQueue, accounts, notifier: { notifyNewItem } })(
+      ACCOUNT.id, envelope({ ...PLAIN, messageId: '<m3@x>', threadKey: 'imap:thread-3' }));
+    expect(notifyNewItem.mock.calls.map((c) => (c as unknown[])[1])).toEqual([{ flagged: true }, { flagged: true }, { flagged: false }]);
+  });
+});

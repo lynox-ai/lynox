@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
-import { BackupManager } from './backup.js';
+import { BackupManager, backupFailureDetail } from './backup.js';
+import { _resetErrorEgress, reduceErrorTextForProcess } from './error-egress.js';
 import type { BackupManifest } from './backup.js';
 import { driveUploadOptedIn, isBackupDirName } from './backup-upload-gdrive.js';
 import { isEncryptedBackupFile } from './backup-crypto.js';
@@ -310,6 +311,58 @@ describe('createBackup — an unencrypted archive never leaves the machine', () 
     expect(result.success).toBe(true);   // an upload failure does not fail the backup
     expect(stderrText()).toContain('Google Drive upload failed');
     expect(stderrText()).toContain('Missing drive.file scope');
+  });
+
+  it('a failed upload leaves its reason out while the process reduces error text', async () => {
+    // The reason can quote a workspace file name and Google's answer. The failure itself is
+    // still reported; only the text after it goes.
+    const failing = {
+      upload: async (): Promise<UploadResult> => ({
+        success: false, folderId: '', filesUploaded: 0,
+        error: 'Upload failed for "workspace/Kundenliste.xlsx": 403 quota',
+      }),
+    } as unknown as GDriveBackupUploader;
+    const manager = new BackupManager(
+      lynoxDir, { backupDir, retentionDays: 30, encrypt: true, gdriveUploader: failing }, VAULT_KEY,
+    );
+    reduceErrorTextForProcess();
+    try {
+      await manager.createBackup();
+    } finally {
+      _resetErrorEgress();
+    }
+
+    expect(stderrText()).toContain('[lynox:backup] Google Drive upload failed — local backup is intact\n');
+    expect(stderrText()).not.toContain('Kundenliste');
+  });
+
+  it('a thrown upload error leaves only its class while the process reduces error text', async () => {
+    const throwing = {
+      upload: async (): Promise<UploadResult> => { throw new Error('socket hang up near workspace/Kundenliste.xlsx'); },
+    } as unknown as GDriveBackupUploader;
+    const manager = new BackupManager(
+      lynoxDir, { backupDir, retentionDays: 30, encrypt: true, gdriveUploader: throwing }, VAULT_KEY,
+    );
+    reduceErrorTextForProcess();
+    try {
+      await manager.createBackup();
+    } finally {
+      _resetErrorEgress();
+    }
+
+    expect(stderrText()).toContain('[lynox:backup] Google Drive upload failed — local backup is intact: Error\n');
+    expect(stderrText()).not.toContain('Kundenliste');
+  });
+
+  it('backupFailureDetail gives the reason, or the fallback, unless the process reduces error text', () => {
+    expect(backupFailureDetail('disk full', 'unknown')).toBe(': disk full');
+    expect(backupFailureDetail(undefined, 'unknown')).toBe(': unknown');
+    reduceErrorTextForProcess();
+    try {
+      expect(backupFailureDetail('Missing file: workspace/Kundenliste.xlsx', 'unknown')).toBe('');
+    } finally {
+      _resetErrorEgress();
+    }
   });
 
   it('verifyBackup accepts an ENCRYPTED archive — the sqlite relabel it used to omit', async () => {

@@ -860,3 +860,14 @@ describe('the note on a mail filed after outside content names which (U-209)', (
 		expect(notes).toEqual([t('approvals.after_untrusted')]);
 	});
 });
+
+describe('the card says where a recipient the owner did not name comes from', () => {
+	it('shows the engine\'s line in the page\'s language, and none on a card without it', async () => {
+		const { getLocale } = await import('../i18n.svelte.js');
+		const line = { de: 'Empfänger stammt aus dem Trigger "Bericht" von h@x.ch.', en: 'Recipient comes from the trigger "Bericht" set up by h@x.ch.' };
+		lists.open = { entries: [card({ targetOrigin: line }), card({ id: 'e-2' }), card({ id: 'e-3', targetOrigin: null })], pending: 3, viewer: 'owner' };
+		await render();
+		const notes = [...target.querySelectorAll('[data-note="target-origin"]')].map((n) => n.textContent?.trim());
+		expect(notes).toEqual([getLocale() === 'de' ? line.de : line.en]);
+	});
+});

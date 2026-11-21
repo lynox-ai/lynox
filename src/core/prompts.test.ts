@@ -15,6 +15,7 @@ import {
   shopifyPresetSuffix,
 } from './prompts.js';
 import type { TierModelInfo } from './prompts.js';
+import { connectCallText } from './oauth-presets.js';
 import { resolveTierModel, setTierSetResolver } from './tier-resolver.js';
 import { getModelId, type LLMProvider, type ModelTier } from '../types/index.js';
 
@@ -942,6 +943,12 @@ describe('SHOPIFY_PRESET_PROMPT_SUFFIX', () => {
   it('is empty without the switch and the suffix with it', () => {
     expect(shopifyPresetSuffix(false)).toBe('');
     expect(shopifyPresetSuffix(true)).toBe(SHOPIFY_PRESET_PROMPT_SUFFIX);
+  });
+
+  it('sends the model to connect with the shared text, which may answer without a link', () => {
+    // A model told to pass on "the link it returns" looks for one or writes one when connect gives none.
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain(`3. Once the client ID and secret are entered, ${connectCallText()}`);
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).not.toContain('give the user the link it returns');
   });
 
   it('names the preset, the connect action, research and the scope field', () => {
