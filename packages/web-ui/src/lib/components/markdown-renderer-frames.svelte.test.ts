@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { answerFrameReady } from '../utils/artifact-frame-host.js';
+import { setThemeMode } from '../stores/theme.svelte.js';
+import { buildArtifactBubbleFrame } from '../utils/artifact-frame.js';
 
 // The chat view's artifact frames across re-renders: a frame whose document did not change keeps
 // its element (matched by document, not by position), a rebuilt one starts at the last measured
@@ -98,6 +100,9 @@ afterEach(() => {
 	component = undefined;
 	target.remove();
 	vi.restoreAllMocks();
+	// The store is one module for the whole file; put the theme back to its start value.
+	setThemeMode('dark');
+	localStorage.removeItem('lyx-theme');
 });
 
 describe('the artifact frames of a message', () => {
@@ -161,6 +166,32 @@ describe('the artifact frames of a message', () => {
 		expect(documentOf(rebuilt!)).toContain('<p>alpha-edited</p>');
 		expect(rebuilt!.style.height).toBe('321px');
 		expect(rebuilt!.dataset['cw']).toBe('777');
+	});
+
+	it('are rebuilt with the new palette when the theme flips on a message with an HTML artifact and no diagram', async () => {
+		// A fragment, not a full document: a document with its own <html> brings its own styling
+		// and gets no palette, so a flip would leave it byte-equal.
+		const props = $state({ content: '```artifact\n<p id="m">gamma</p>\n```' });
+		await render(props);
+		const [dark] = frames();
+		expect(dark).toBeDefined();
+		// Each theme's default body style, as the frame module builds it.
+		const palette = (theme: 'light' | 'dark'): string =>
+			/<style>body\{[^}]*\}/.exec(buildArtifactBubbleFrame('<p></p>', theme, ''))?.[0] ?? '';
+		expect(palette('dark')).not.toBe('');
+		expect(palette('light')).not.toBe(palette('dark'));
+		const darkDoc = documentOf(dark!);
+		expect(darkDoc).toContain('<p id="m">gamma</p>');
+		expect(darkDoc).toContain(palette('dark'));
+		setThemeMode('light');
+		await settle(DEBOUNCE);
+		const [light] = frames();
+		expect(frames()).toHaveLength(1);
+		expect(light).not.toBe(dark);
+		const lightDoc = documentOf(light!);
+		expect(lightDoc).toContain('<p id="m">gamma</p>');
+		expect(lightDoc).toContain(palette('light'));
+		expect(lightDoc).not.toContain(palette('dark'));
 	});
 
 	it('are not replaced by a first render that resolves after the render that built them', async () => {
