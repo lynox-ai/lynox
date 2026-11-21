@@ -27,7 +27,7 @@
   from the release that carries #2207 on; a tab opened before the upgrade gets
   "confirm failed" until it is reloaded. An API client that confirms schedules
   reads the preview first.
-- In sidecar mode with the egress proxy, a `bash` call whose step started after
+- In sidecar mode with the egress proxy, a `bash` call whose tool round started after
   the conversation read outside content (a web page, a search, a mail, a
   previous `bash` call) no longer reaches every host under `allow-all` or no
   policy. Its proxy credential then names the built-in provider hosts, the

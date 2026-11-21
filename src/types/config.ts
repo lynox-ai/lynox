@@ -746,9 +746,10 @@ export interface LynoxUserConfig {
    * notifications, error reporting, IMAP/SMTP mail, voice transcribe/TTS, or
    * a shell command outside sidecar mode (in sidecar mode with the egress
    * proxy, a shell command reaches only what src/shell-sidecar/egress.ts
-   * registers: every host under allow-all until the conversation takes in
-   * foreign content, otherwise exact host names this policy names plus hosts
-   * the owner typed) — each is its own
+   * registers: under allow-all and no policy every host, until a tool round
+   * starts after the conversation took in foreign content; then, and under
+   * guarded, exact host names this policy names plus hosts the owner typed;
+   * under allow-list the list; under deny-all none) — each is its own
    * separately-configured egress surface. A cross-integration air-gap is a separate control.
    *
    * ⚠ What that costs you if you have already set 'deny-all': a connected

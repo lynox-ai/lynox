@@ -176,9 +176,10 @@ export function applyEgressSettings(userConfig: LynoxUserConfig, toolContext: To
   // notifications, error reporting, IMAP/SMTP mail, voice transcribe/TTS, and
   // a shell command outside sidecar mode (in sidecar mode with the egress
   // proxy, a shell command reaches only what src/shell-sidecar/egress.ts
-  // registers: every host under allow-all until the conversation takes in
-  // foreign content, otherwise exact host names this policy names plus hosts
-  // the owner typed). The same list is stated in
+  // registers: under allow-all and no policy every host, until a tool round
+  // starts after the conversation took in foreign content; then, and under
+  // guarded, exact host names this policy names plus hosts the owner typed;
+  // under allow-list the list; under deny-all none). The same list is stated in
   // network-guard.ts's deny-all case and in the `network_policy` doc comment.
   // The three move together: whoever edits one and not the others leaves two
   // statements behind that claim the opposite.
