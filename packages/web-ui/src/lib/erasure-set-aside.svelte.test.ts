@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { setAsideCopiesNotice, noticeText, type SetAsideCopy } from './erasure-set-aside.js';
+import { setAsideCopiesNotice, noticeRun, noticeText, type SetAsideCopy } from './erasure-set-aside.js';
 import { t, setLocale, getLocale } from './i18n.svelte.js';
 
 describe('setAsideCopiesNotice: what the person erasure says about set-aside copies (U-389)', () => {
@@ -114,6 +114,13 @@ describe('setAsideCopiesNotice: what the person erasure says about set-aside cop
 		const coreEn = 'lynox could not read the data directory, so it could not check for copies of the database that were set aside as damaged. If there are any, they may still hold data about this person, and this erasure does not reach them.';
 		expect(text(null, 'managed')).toEqual([coreEn, 'We check this and remove them if you write to support@lynox.ai.']);
 		expect(text(null, 'self')).toEqual([coreEn, 'Look in the data directory for such copies; their names follow *.corrupt-*. You can delete them.']);
+	});
+
+	it('runs the sentences together with one space between them, as the panel shows them', () => {
+		setLocale('en');
+		const lines = setAsideCopiesNotice(two, 'loading', t);
+		expect(noticeText([noticeRun(lines)])[0]).toBe(noticeText(lines).join(' '));
+		expect(noticeRun([])).toEqual([]);
 	});
 
 	it('puts each file name and the pattern in its own box and the address as a link', () => {

@@ -60,6 +60,11 @@ export function setAsideCopiesNotice(
 	return [`core_${form}`, ...ways].map(k => segments(t(`erasure.sa.${k}`), files, companions));
 }
 
+/** The sentences as one run of segments, a space between them, as the panel renders it. */
+export function noticeRun(lines: NoticeSegment[][]): NoticeSegment[] {
+	return lines.flatMap((l, i) => (i === 0 ? l : [{ text: ' ' }, ...l]));
+}
+
 /** The notice as plain text, one string per sentence (tests and screen readers read the same). */
 export function noticeText(lines: NoticeSegment[][]): string[] {
 	return lines.map(l => l.map(s => 'text' in s ? s.text : 'mark' in s ? s.mark : s.mail).join(''));
