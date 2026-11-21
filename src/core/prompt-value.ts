@@ -80,11 +80,30 @@ import { PROMPT_TEXT_BRAND, type PromptSegment, type PromptText } from '../types
  *    guard the same kind of prompt. A SHARED helper that is weaker than the two
  *    local ones it generalises is an invitation to a regression — the natural
  *    next refactor ("just use the central one") would quietly remove a guard.
+ * 3. It also removes what renders blank without being a format character, so a
+ *    value cannot pad itself onto what looks like a further line of the dialog:
+ *    every default-ignorable code point (the Hangul fillers U+115F, U+1160,
+ *    U+3164, U+FFA0, the combining grapheme joiner, the variation selectors,
+ *    U+17B4, U+180B …) and U+2800, the braille blank, which is not
+ *    default-ignorable. The price: an emoji loses its U+FE0F and may show in its
+ *    text form, which a dialog value can bear. Korean in decomposed form keeps
+ *    its vowels and final consonants, none of which is default-ignorable.
+ * 4. It keeps at most four non-spacing or enclosing marks (`\p{Mn}`, `\p{Me}`)
+ *    on one base character; a longer run is cut, so stacked marks cannot paint
+ *    over the text around a value. Vietnamese needs two, Indic scripts one or
+ *    two; Tibetan stacks of more than four are cut too, accepted. Spacing marks
+ *    (`\p{Mc}`) are visible and stay uncapped.
+ * All of this runs before any cut a caller makes, so characters past a cut
+ * cannot shorten what the cut keeps.
  */
 export function singleLine(value: string): string {
-  // Format characters removed outright; every break-ish character collapsed to
-  // one space. `\s` misses most of C0 and all of C1, so both are named.
-  return value.replace(/\p{Cf}/gu, '').replace(/[\s\u0000-\u001f\u0085]+/gu, ' ');
+  // Format and blank-rendering characters removed outright, long mark runs cut,
+  // every break-ish character collapsed to one space. `\s` misses most of C0 and
+  // all of C1, so both are named.
+  return value
+    .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, '')
+    .replace(/([\p{Mn}\p{Me}]{4})[\p{Mn}\p{Me}]+/gu, '$1')
+    .replace(/[\s\u0000-\u001f\u0085]+/gu, ' ');
 }
 
 // --- The structural boundary: frame vs. value, carried by the type ---
