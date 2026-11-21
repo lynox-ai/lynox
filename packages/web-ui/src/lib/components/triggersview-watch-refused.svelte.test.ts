@@ -102,21 +102,40 @@ describe('a watch the network policy keeps from its page', () => {
 		expect(boxes[0]!.textContent).toBe('shop.example');
 	});
 
-	it('keeps the host box whole: one block, broken only after a dot, never at a hyphen', async () => {
+	it('keeps the host box one block, each label one block after its dot', async () => {
 		const line = await render('de', { kind: 'watch_allow_list', host: 'preise.lieferant-beispiel.ch' });
 		const box = line!.querySelector<HTMLElement>('bdi[data-foreign-value]')!;
 		expect(box.textContent).toBe('preise.lieferant-beispiel.ch');
 		expect(box.classList.contains('inline-block')).toBe(true);
 		expect(box.classList.contains('max-w-full')).toBe(true);
-		expect([...box.querySelectorAll('span')].map((s) => [s.textContent, s.classList.contains('whitespace-nowrap')]))
+		const block = (s: Element): boolean => s.classList.contains('inline-block') && s.classList.contains('max-w-full') && s.classList.contains('[overflow-wrap:anywhere]');
+		expect([...box.querySelectorAll('span')].map((s) => [s.textContent, block(s)]))
 			.toEqual([['preise.', true], ['lieferant-beispiel.', true], ['ch', true]]);
 		expect(box.querySelectorAll('wbr')).toHaveLength(3);
 	});
 
-	it('offers no run now on a watch the policy keeps from its page, but keeps pause', async () => {
-		await render('de', { kind: 'watch_deny_all' });
-		expect(target.querySelector('[data-trigger-run-now]')).toBeNull();
-		expect(target.textContent).toContain('Pausieren');
+	it('drops the empty label of a trailing dot', async () => {
+		const line = await render('de', { kind: 'watch_allow_list', host: 'shop.example.' });
+		const box = line!.querySelector<HTMLElement>('bdi[data-foreign-value]')!;
+		expect([...box.querySelectorAll('span')].map((s) => s.textContent)).toEqual(['shop.', 'example']);
+	});
+
+	it('offers no run now on a watch the policy keeps from its page, and keeps the row\'s other buttons', async () => {
+		setLocale('de');
+		rows = [{ ...WATCH, id: 'w-blocked', title: 'Gesperrt', blocked_reason: { kind: 'watch_deny_all' } }, { ...WATCH, id: 'w-read', title: 'Gelesen' }];
+		const { default: TriggersView } = await import('./TriggersView.svelte');
+		component = mount(TriggersView, { target });
+		await settle();
+		const card = (title: string): HTMLElement => [...target.querySelectorAll<HTMLElement>('[data-trigger-title]')].find((e) => e.textContent === title)!.closest<HTMLElement>('.group')!;
+		const labels = (el: HTMLElement): string[] => [...el.querySelectorAll('button')].map((b) => b.getAttribute('aria-label') ?? b.textContent!.trim());
+		const blocked = card('Gesperrt');
+		const read = card('Gelesen');
+		expect(blocked.querySelector('[data-blocked-reason]')).not.toBeNull();
+		expect(blocked.querySelector('[data-trigger-run-now]')).toBeNull();
+		expect(read.querySelector('[data-trigger-run-now]')).not.toBeNull();
+		expect(labels(blocked)).toContain('Pausieren');
+		expect(labels(blocked)).toContain('Löschen');
+		expect(labels(blocked)).toEqual(labels(read).filter((l) => l !== read.querySelector('[data-trigger-run-now]')!.getAttribute('aria-label')));
 	});
 
 	it('CONTROL: a watch whose page is read offers run now', async () => {

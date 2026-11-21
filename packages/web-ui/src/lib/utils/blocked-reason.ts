@@ -23,10 +23,11 @@ export function blockedReasonParts(reason: BlockedReason, t: (key: BlockedReason
 }
 
 /**
- * A host as the pieces a line may break between: after each dot, never inside a label (a hyphen
- * would split it). The box around it moves to the next line whole when the host fits on one.
+ * A host as the pieces a line may break between: after each dot. Each piece is shown as one block,
+ * so a label that fits on a line is not split (at a hyphen, say); only a label longer than the
+ * line breaks inside. Empty labels (a trailing dot, `a..b`) are dropped.
  */
 export function hostLabels(host: string): string[] {
-  const labels = host.split('.');
+  const labels = host.split('.').filter((label) => label !== '');
   return labels.map((label, i) => (i < labels.length - 1 ? `${label}.` : label));
 }
