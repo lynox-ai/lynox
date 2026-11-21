@@ -41,7 +41,7 @@ Domain views: `KnowledgeGraphView`, `MemoryInsightsView`, `MemoryView`, `History
 
 UI: `CommandPalette`, `StatusBar`, `ContextPanel`, `MarkdownRenderer`, `ChangesetReview`, `ToastContainer`, `MobileAccess`, `ColdStartBanner`, `KeyboardShortcutsHelp`, `PromptAnchor`, `StreamingActivityBar`, `ToolToggles`.
 
-`MarkdownRenderer` and `ArtifactsView` (and every view that renders chat messages with them) show HTML artifacts in sandboxed frames on the route `/_artifact-frame`, and print through it. The host app has to serve that route itself with `artifactFrameResponse` (`src/lib/server/artifact-frame-endpoint.ts`), as `src/routes/_artifact-frame/+server.ts` in the lynox repo does; it is not part of the packaged library. Without it, artifacts stay blank.
+`MarkdownRenderer` and `ArtifactsView` (and every view that renders chat messages with them) show HTML artifacts in sandboxed frames on the route `/_artifact-frame`, and print through it. The host app has to serve that route itself with `artifactFrameResponse` (`src/lib/server/artifact-frame-endpoint.ts`), as `src/routes/_artifact-frame/+server.ts` in the lynox repo does. Neither the route nor `artifactFrameResponse` is part of the packaged library or exported from it: copy the endpoint module into the host app. Without it, artifacts stay blank.
 
 Primitives: `Checkbox`, `Icon` (+ `IconName` type).
 
