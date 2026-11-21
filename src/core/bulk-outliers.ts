@@ -134,7 +134,7 @@ export function markersOf(text: string): Map<MarkerKind, Set<string>> {
     if (tree !== null) {
       readMarkers(treeText(tree, true), out);
       // A style can show a block inline: where one may, the tree is also read with no gap at that block.
-      if (/style|hidden/iu.test(text)) readMarkers(treeText(tree, false), out);
+      if (/style/iu.test(text)) readMarkers(treeText(tree, false), out);
     }
   }
   return out;

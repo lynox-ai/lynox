@@ -562,6 +562,8 @@ describe('markersOf beyond the tree it reads', () => {
   });
 
   it('still reads a text beyond the reading bounds by its tags', () => {
-    expect([...markersOf('<p>x</p>'.repeat(MARKUP_MAX_TAGS) + 'evil<b></b>.com').get('link')!]).toEqual(['evil.com']);
+    for (const tail of ['evil<b></b>.com', 'evil<p-x></p-x>.com', 'evil<p\u3000>.com', 'evil&#46;com']) {
+      expect([...markersOf('<p>x</p>'.repeat(MARKUP_MAX_TAGS) + tail).get('link')!], tail).toEqual(['evil.com']);
+    }
   });
 });
