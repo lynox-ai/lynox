@@ -83,6 +83,29 @@ describe('bootstrapInbox — wiring', () => {
     await runtime.shutdown();
   });
 
+  it('a reminder for an item whose mail the sensitive check flagged names no subject', async () => {
+    const bodies: string[] = [];
+    const router = { notify: vi.fn(async (m: { body: string }) => { bodies.push(m.body); return []; }) };
+    const runtime = bootstrapInbox({
+      mailStateDb: mail, anthropicClient: makeClient({ content: [] }), reminderPollIntervalMs: 10, language: () => 'de',
+      notificationRouter: router as unknown as Parameters<typeof bootstrapInbox>[0]['notificationRouter'],
+    });
+    const insert = (threadKey: string, subject: string, sensitive: boolean): string => {
+      const id = runtime.state.insertItemWithAudit(
+        { accountId: 'acct-1', channel: 'email', threadKey, bucket: 'requires_user', confidence: 0, reasonDe: 'r',
+          classifiedAt: new Date('2026-05-01'), classifierVersion: 'v', subject },
+        { action: 'classified', actor: 'rule_engine', payloadJson: JSON.stringify(sensitive ? { sensitive_categories: ['otp'] } : {}) },
+      );
+      runtime.state.setSnooze(id, new Date(Date.now() - 5000), null, true, true);
+      return id;
+    };
+    insert('t-flagged', 'Ihr Code 482917', true);
+    insert('t-plain', 'Vertrag prüfen', false);
+    await vi.waitFor(() => expect(bodies).toHaveLength(2));
+    await runtime.shutdown();
+    expect([...bodies].sort()).toEqual(['Eine Mail mit vertraulichem Inhalt. Absender und Betreff siehst du in lynox.', 'Vertrag prüfen']);
+  });
+
   it('returns a runtime bundle with all parts populated', () => {
     const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
     const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
@@ -509,6 +532,25 @@ describe('bootstrapInbox — push notifier wire', () => {
     expect(send).toHaveBeenCalledTimes(1);
     const msg = send.mock.calls[0]?.[0] as { data?: { itemId?: string } };
     expect(msg.data?.itemId).toMatch(/^inb_/);
+  });
+
+  it('words the push of a flagged mail in the language it is handed', async () => {
+    const { NotificationRouter } = await import('../../core/notification-router.js');
+    const { FLAGGED_PUSH_TEXT } = await import('./notifier.js');
+    for (const language of ['de', 'en'] as const) {
+      mail.close();
+      mail = new MailStateDb({ path: ':memory:' });
+      mail.upsertAccount(ACCOUNT);
+      const router = new NotificationRouter();
+      const send = vi.fn(async () => 'delivered' as const);
+      router.register({ name: 'web-push', send });
+      const runtime = bootstrapInbox({
+        mailStateDb: mail, anthropicClient: makeClient({ content: [] }), notificationRouter: router, language: () => language,
+      });
+      await runtime.hook(ACCOUNT.id, envelope({ subject: 'Your code', snippet: 'Your one-time code is 123456.' }));
+      expect(send).toHaveBeenCalledTimes(1);
+      expect((send.mock.calls[0] as unknown as [{ body: string }])[0].body).toBe(FLAGGED_PUSH_TEXT[language]);
+    }
   });
 
   it('respects inbox_push_enabled=false: notifier silently skips even with router wired', async () => {

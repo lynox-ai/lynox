@@ -547,11 +547,12 @@ export function handleBulkAction(deps: InboxApiDeps, body: BulkActionBody): ApiR
  * the row's prior state is already snapshot in user_action_log).
  */
 export function handleUndoBulk(deps: InboxApiDeps, bulkId: string): ApiResponse {
-  const reverted = deps.state.undoBulkAction(bulkId);
-  if (reverted === 0) {
+  const { total, reverted, skipped } = deps.state.undoBulkActionCounted(bulkId);
+  if (total === 0) {
     return { status: 410, body: { error: 'undo window expired or bulk_id unknown', reason: 'undo_expired' } };
   }
-  return { status: 200, body: { ok: true, reverted } };
+  // `reverted`: items put back; `skipped`: items that changed since the bulk action and stay as they are.
+  return { status: 200, body: { ok: true, reverted, skipped } };
 }
 
 /** Last 5 undoable bulks within the UNDO window (PRD §"UNDO-Toast UX"). */

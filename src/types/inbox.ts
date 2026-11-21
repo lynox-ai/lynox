@@ -34,6 +34,7 @@ export type InboxAuditAction =
   | 'undo'
   | 'unsnoozed_on_reply'
   | 'reopened_on_reply'
+  | 'raised_on_sensitive_follow_up'
   | 'rule_applied'
   | 'generation_requested';
 

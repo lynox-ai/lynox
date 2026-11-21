@@ -83,7 +83,9 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       services: { about: 'your services' },
       artifacts: { about: 'documents and pages the assistant made for you' },
       tasks: { about: 'your tasks and to-dos' },
-      workflows: { about: 'your saved workflows', stripJson: { definition_json: ['$.reviewedGrant'] } },
+      // The owner's stamp digest is keyed like the grant's: it never leaves the instance, and an
+      // imported workflow waits for its owner's stamp there (`workflow-stamp.ts`).
+      workflows: { about: 'your saved workflows', stripJson: { definition_json: ['$.reviewedGrant', '$.stamp'] } },
       workflow_grants: { about: 'what each saved workflow is allowed to do', strip: ['checksum'] },
       triggers: { about: 'your schedules and automatic triggers' },
       pending_prompts: { about: 'questions the assistant asked you and is waiting on' },
@@ -112,6 +114,7 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       contained: MARKER,
       exact_marker: MARKER,
       verb_backfill_marker: MARKER,
+      workflow_stamp_marker: MARKER,
       vault_name_binding_migration: MARKER,
       profile_seed_backfill: MARKER,
       schema_version: MARKER,
@@ -138,6 +141,7 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       security_events: { about: 'security checks that stopped or flagged something' },
       threads: { about: 'older copy of your conversations, from before a software update' },
       thread_messages: { about: 'older copy of conversation messages, from before a software update' },
+      thread_typed_text: { about: 'the words you typed in each message, apart from what was loaded around them' },
       tasks: { about: 'older copy of your tasks' },
       triggers: { about: 'older copy of your schedules' },
       scopes: { about: 'older copy of memory areas' },
@@ -151,6 +155,7 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       // history.db's copies of engine.db's `contained` and `exact_marker`, labelled like them.
       contained_threads: MARKER,
       exact_marker_mirror: MARKER,
+      thread_read_outside: 'a note per conversation that it read content from outside, and when; it holds none of that content',
       schema_version: MARKER,
     },
   },
@@ -178,6 +183,7 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       mail_followups: { about: 'mails you wanted a reminder about' },
       mail_scheduled: { about: 'mails scheduled to be sent later' },
       mail_sent_log: { about: 'mails that were sent' },
+      mail_sent_owner_known: { about: 'the recipients of sent mails that went only to addresses you had named' },
       inbox_audit_log: { about: 'a log of what happened to each mail' },
       inbox_user_action_log: { about: 'what you did with each mail' },
       // No credentials: an account's passwords and tokens live in the vault.
@@ -212,5 +218,6 @@ export const KEYED_COLUMNS: ReadonlyArray<{ readonly store: ExportedStore; reado
   { store: 'engine.db', table: 'bulk_runs', column: 'approval_checksum' },
   { store: 'engine.db', table: 'workflow_grants', column: 'checksum' },
   { store: 'engine.db', table: 'workflows', column: 'definition_json', jsonPath: '$.reviewedGrant' },
+  { store: 'engine.db', table: 'workflows', column: 'definition_json', jsonPath: '$.stamp' },
   ...GRANT_RECORD_PATHS.map(jsonPath => ({ store: 'engine.db' as const, table: 'connections', column: 'config_json', jsonPath })),
 ];

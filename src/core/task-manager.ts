@@ -9,12 +9,13 @@ import { readEnvAlias } from './env.js';
 import { cpSuppliesLLMKey } from '../contract/vocab.js';
 import { compose, renderFence } from '../core/data-boundary.js';
 import { isHandRunOf } from './hand-run-door.js';
-import { isMandateTag, isOwnerPrincipal, ownedBy, type RequestPrincipal } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, ownedBy, principalTag, type RequestPrincipal } from './request-principal.js';
 import { MAPPING_MAX_ENTRIES, mintRouteToken, parseWebhookSpec, type WebhookVerifierKind } from './webhook-verifiers.js';
 import { encodeStamp } from './plan-stamp.js';
 import type { StampEntry } from './plan-run-context.js';
 import { PAUSED_MODEL_TEXT, isPaused } from './plan-pause.js';
 import { stripHidden } from './hidden-text.js';
+import { EngineLessRefused } from './engine-less-refusal.js';
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -262,6 +263,26 @@ export function createsTrigger(params: Pick<TaskCreateParams, 'assignee' | 'next
 export class TaskManager {
   constructor(private history: RunHistory) {}
 
+  /** Set by an engine that started without engine.db: see {@link refuseTaskChangesWithoutStore}. */
+  private changesRefused = false;
+
+  /**
+   * Called by an engine that started without engine.db. A to-do is then written to history.db
+   * only. With the subject graph on, the next boot with engine.db reads its to-dos from engine.db,
+   * and the copy that would put the change there runs once per engine.db; with it off, the change
+   * is read, but missing from engine.db once the graph is switched on. So a change from here on is
+   * refused with a plain reason (`EngineLessRefused`) instead, whichever the flag. Triggers
+   * refuse on their own: their store is engine.db. A manager never told this writes as before.
+   */
+  refuseTaskChangesWithoutStore(): void {
+    this.changesRefused = true;
+  }
+
+  /** Throws the refusal when this manager refuses to-do changes; before anything is written. */
+  private refuseIfEngineLess(): void {
+    if (this.changesRefused) throw new EngineLessRefused('task');
+  }
+
   /**
    * Look up a USER-TODO by id (or id-prefix, for UX convenience). The optional
    * `scopeFilter` folds the ownership check into the same SQL read used by
@@ -279,6 +300,7 @@ export class TaskManager {
   }
 
   create(params: TaskCreateParams): TaskRecord | TriggerRecord {
+    if (!createsTrigger(params)) this.refuseIfEngineLess();
     const id = randomUUID().slice(0, 8);
 
     if (params.parentTaskId) {
@@ -377,7 +399,7 @@ export class TaskManager {
       dueDate: params.dueDate ? params.dueDate.slice(0, 10) : undefined,
       tags: params.tags ? JSON.stringify(params.tags) : undefined,
       parentTaskId: params.parentTaskId,
-      ...(isMandateTag(params.createdBy) ? { createdBy: params.createdBy } : {}),
+      ...(isMandateTag(params.createdBy) || params.createdBy === principalTag(OWNER_PRINCIPAL) ? { createdBy: params.createdBy } : {}),
     });
 
     return this.history.getTask(id)!;
@@ -474,6 +496,7 @@ export class TaskManager {
 
     const task = this.history.getTask(id, scopeOpts);
     if (!task) return undefined;
+    this.refuseIfEngineLess();
     refuseForeignTodo(task, by, 'complete');
 
     const now = new Date().toISOString();
@@ -508,6 +531,7 @@ export class TaskManager {
    * legacy row is gone.
    */
   deleteTodo(id: string, by?: RequestPrincipal): boolean {
+    this.refuseIfEngineLess();
     if (by === undefined || isOwnerPrincipal(by)) return this.history.deleteTask(id);
     const { task, descendants } = this.history.getTaskDeleteSet(id);
     if (task === undefined) return false;
@@ -531,6 +555,7 @@ export class TaskManager {
 
     const task = this.history.getTask(id, scopeOpts);
     if (!task) return undefined;
+    this.refuseIfEngineLess();
 
     this.history.updateTask(task.id, { status: 'open', completedAt: '' }, scopeOpts);
     return this.history.getTask(task.id, scopeOpts);
@@ -633,6 +658,7 @@ export class TaskManager {
 
     const task = this.history.getTask(id, scopeOpts);
     if (!task) return undefined;
+    this.refuseIfEngineLess();
     refuseForeignTodo(task, by, 'change');
 
     const updateParams: {
@@ -922,6 +948,14 @@ export class TaskManager {
     return this.history.markTriggerEditedBy(trigger.id, editor, clearStamp);
   }
 
+  /** A run's change of a trigger under the owner's principal: see `TriggerStore.markEditedByRun`. */
+  markEditedByRun(id: string, runTag: string): boolean {
+    const trigger = this.history.getTrigger(id);
+    if (!trigger) return false;
+    refuseBulkTrigger(trigger);
+    return this.history.markTriggerEditedByRun(trigger.id, runTag);
+  }
+
   /** Create a watch/monitor AGENT-TRIGGER → source='watch', effect='run_agent', assignee='lynox', computes next_run_at from interval. */
   createWatch(params: TaskCreateParams & {
     watchUrl: string;
@@ -1077,8 +1111,10 @@ export class TaskManager {
    *   per request"). A retry carries no request, so it would run as the schedule's run, not
    *   the request's.
    * @param opts.keepSchedule Record the run and leave the schedule as it is: no status, no next
-   *   run, no retry. Only for a run the plan's pause ended (`plan-pause.ts`): a paused plan keeps
-   *   its due time for when it is taken over, and is not in `getDue` meanwhile.
+   *   run, no retry. For a run the plan's pause ended (`plan-pause.ts`): a paused plan keeps
+   *   its due time for when it is taken over, and is not in `getDue` meanwhile. And for a
+   *   one-shot whose workflow waits for the owner's stamp, switched off with its time kept
+   *   (`worker-loop.ts`), so switching it on again makes it due.
    * @returns Whether this scheduled a retry of the run. The caller reports a failure only
    *   when it did not, so this is the one place that decides — a second copy of the retry
    *   conditions drifted from it (a cron or watch with retries set was never retried here,
@@ -1229,3 +1265,6 @@ export class TaskManager {
 }
 
 const MAX_RUN_RESULT_CHARS = 10_000;
+
+/** After "its address" or "watch_url": why an address a server may run as a write is not watched (`readAddressWrites`). */
+export const WATCH_OVERRIDE_REFUSAL = 'carries a method override (such as `_method=DELETE`) or a GraphQL mutation, which a server may run as a write instead of showing a page.';

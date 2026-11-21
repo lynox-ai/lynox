@@ -1,13 +1,16 @@
 import type { ToolEntry, IAgent, TaskPriority, TaskStatus, TriggerStatus, MemoryScopeRef } from '../../types/index.js';
+import { workflowStampState } from '../../core/workflow-stamp.js';
 import { parseScopeString } from '../../core/scope-resolver.js';
 import { detectInjectionAttempt } from '../../core/data-boundary.js';
 import { findHiddenChar, hiddenCharRefusal, stripHidden } from '../../core/hidden-text.js';
-import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
+import { describeTurnUntrusted, type UntrustedCause } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
-import { isOwnerPrincipal, mandateIdOf, principalTag } from '../../core/request-principal.js';
+import { OWNER_PRINCIPAL, UNKNOWN_RUN_TAG, isOwnerPrincipal, isRunTag, mandateIdOf, mandateNeedsOwnerStamp, principalTag } from '../../core/request-principal.js';
 import { PAUSED_MODEL_TEXT, isPaused } from '../../core/plan-pause.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
+import { WATCH_OVERRIDE_REFUSAL } from '../../core/task-manager.js';
+import { readAddressWrites } from '../../core/outbound-write.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
 
@@ -266,6 +269,27 @@ function detectEmbeddedParams(field: string, value: string | undefined): string 
 }
 
 /**
+ * What a turn had taken in, recorded on a trigger instruction it creates or rewrites. The
+ * instruction is the model's text, and it can carry what the conversation took in: a turn in a
+ * thread someone the owner let in started, or one whose conversation read outside content
+ * earlier (the latch, also after a compaction summarized the read away), counts as taken in from
+ * the conversation, so it never counts as the owner's own instruction.
+ */
+function instructionTakenIn(agent: IAgent): UntrustedCause {
+  const turnCause = describeTurnUntrusted(agent);
+  return turnCause === 'none'
+    && (agent.sendOrigin?.kind === 'helperThread' || agent.conversationLatch?.isSet() === true)
+    ? 'conversation'
+    : turnCause;
+}
+
+/** The tag a write under the owner's principal records when the owner did not write the turn: the
+ *  run's own (`trigger:<id>`, `workflow:<id>`), or the unknown run's tag, never the owner's. */
+function runTagOf(agent: IAgent): string {
+  return isRunTag(agent.writeAuthor) ? agent.writeAuthor! : UNKNOWN_RUN_TAG;
+}
+
+/**
  * The sentence a reported row owes the reader when the scheduler will NOT run it
  * yet.
  *
@@ -280,14 +304,34 @@ function detectEmbeddedParams(field: string, value: string | undefined): string 
  * (its consent sits on the workflow), and an edit that changes what a trigger
  * runs clears the stamp, so the update path needs it too.
  */
-function pendingConsent(task: object): string {
+function pendingConsent(task: object, byOwner: boolean): string {
   // Takes the union both creators return (a TODO has neither field) and reads
   // the two fields the gate reads. Narrowed here rather than cast per call site:
   // a caller that has to shape its argument is a caller that can shape it wrong.
-  const row = task as { effect?: unknown; confirmed_at?: unknown };
-  return row.effect === 'run_agent' && !row.confirmed_at
-    ? ' — it runs once you confirm it in Triggers.'
-    : '';
+  const row = task as { effect?: unknown; confirmed_at?: string | undefined; created_by?: string | undefined; edited_by?: string | undefined };
+  // Held back: an agent run nobody confirmed (`getDue`), or any row a mandate created or last
+  // changed that the owner has not stamped, whatever its effect (`mandateNeedsOwnerStamp`, the
+  // test the worker applies).
+  const held = (row.effect === 'run_agent' && !row.confirmed_at) || ('effect' in row && mandateNeedsOwnerStamp(row));
+  if (!held) return '';
+  // Only the owner confirms (`POST /api/tasks/:id/confirm`): a mandate's session is told who does,
+  // so it does not ask the person it works for to confirm what they cannot.
+  return byOwner
+    ? ' — it runs once you confirm it under Automation › Triggers.'
+    : ' — it runs only after the owner of this lynox confirms it under Automation › Triggers. The person in this chat has delegated access and cannot confirm it: tell them the owner has to.';
+}
+
+/**
+ * What a created row's report ends with: the consent it waits for, which names where it stands,
+ * or else where the web UI lists it. The place is read off the row the store returned, not off
+ * the branch that made it: a to-do assigned to lynox becomes a trigger (`createsTrigger`), and
+ * only a trigger carries `effect`. The Automation hub lists triggers under Triggers
+ * (`GET /api/triggers`) and to-dos under Tasks (`GET /api/tasks`).
+ */
+function createdNote(task: object, byOwner: boolean): string {
+  const consent = pendingConsent(task, byOwner);
+  if (consent !== '') return consent;
+  return `. It is listed under Automation › ${'effect' in task ? 'Triggers' : 'Tasks'}.`;
 }
 
 export const taskCreateTool: ToolEntry<TaskCreateInput> = {
@@ -394,8 +438,9 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
       // What the turn had taken in, on every trigger it files, not only a workflow one: the
       // reminder to confirm it says so (worker-loop `consentOneBody`), and what its run files for
       // approval counts as after outside content (`executeStandard` → `afterUntrusted`). Only a
-      // workflow run is also seeded tainted (`executePipeline`); a run_agent run is not.
-      const createdUntrusted = describeTurnUntrusted(agent);
+      // workflow run is also seeded tainted (`executePipeline`); a run_agent run is not. Also what
+      // the conversation took in (`instructionTakenIn`).
+      const createdUntrusted = instructionTakenIn(agent);
       const baseParams = {
         title: input.title,
         description: input.description,
@@ -408,10 +453,17 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         parentTaskId: input.parent_task_id,
         // A mandate's turn writes under the mandate's name, so what it schedules waits for the
         // owner's stamp exactly as it does when created over HTTP (PRD customer-granted-operator-
-        // access §3.12, H2). The owner's turns leave it absent, as before.
-        ...(isOwnerPrincipal(agent.principal) ? {} : { createdBy: principalTag(agent.principal), createdMandateId: mandateIdOf(agent.principal) }),
+        // access §3.12, H2). A turn the owner typed records the owner; any other turn under the
+        // owner's principal (a trigger's or a workflow's run) records the run's tag, which never
+        // reads as the owner's and keeps the trigger apart from one from before creators were
+        // recorded, the only kind "Confirm recipients" takes (`recipientsConfirmable`).
+        ...(isOwnerPrincipal(agent.principal)
+          ? { createdBy: agent.writeAuthor === principalTag(OWNER_PRINCIPAL) ? principalTag(OWNER_PRINCIPAL) : runTagOf(agent) }
+          : { createdBy: principalTag(agent.principal), createdMandateId: mandateIdOf(agent.principal) }),
         ...(createdUntrusted !== 'none' ? { createdUntrusted } : {}),
       };
+      // Whose session reads the report: only the owner confirms a held-back row.
+      const byOwner = isOwnerPrincipal(agent.principal);
 
       if (input.workflow_id) {
         // The tool param is `workflow_id`; the TaskManager + DB column remain
@@ -471,6 +523,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           if (refusal !== null) return `Error: workflow ${planned?.id ?? input.workflow_id}: ${refusal}`;
         }
         if (planned) {
+          const stampState = agent.toolContext.runHistory?.workflowStampState(planned) ?? workflowStampState(null, planned, undefined);
           const unschedulable = !isSchedulableWorkflow(planned)
             ? `is '${planned.mode}' and may ask for something other than an answer from its owner; a schedule runs an 'autonomous' workflow, or one whose only question tool is ask_user. Remove its ask_secret / ask_human steps before scheduling it.`
             : planned.template !== true
@@ -480,7 +533,11 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
               // owner saw them (an old template carries one from its content migration).
               : planned.mode === 'interactive'
                 ? 'asks its owner while it runs. Ask the user to schedule it from the workflow library: its confirmation names the steps that ask, and it creates the task. Do not create it here.'
-              : !planned.confirmedAt
+              // The owner's stamp is bound to the steps (`workflow-stamp.ts`): one over other steps,
+              // or a workflow someone the owner let in shaped, waits for the owner to review it.
+              : stampState === 'awaits_owner_stamp'
+                ? 'waits for its owner to review its steps: they were set up or changed by someone the owner let in, or changed after the owner stamped them. Ask the user to review its steps under Automation → Workflows and stamp them; then schedule it there. Do not create the task here.'
+              : stampState === 'unconfirmed'
                 ? 'has not been confirmed for unattended runs, so a task for it would be disabled at its first run. Ask the user to schedule it from the workflow library: that confirms it and creates the task. Do not create it again here.'
                 : null;
           if (unschedulable !== null) return `Error: workflow ${planned.id} ${unschedulable}`;
@@ -500,7 +557,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           w.created('create', task.id);
           const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
           const scheduleInfo = input.schedule ? ` (schedule: ${input.schedule})` : '';
-          return `Workflow task created: ${formatTaskLine(task, `${nextRun}${scheduleInfo}${pendingConsent(task)}`)}`;
+          return `Workflow task created: ${formatTaskLine(task, `${nextRun}${scheduleInfo}${createdNote(task, byOwner)}`)}`;
         });
       }
 
@@ -513,11 +570,14 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           }), ifReturned);
           w.created('create', task.id);
           const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
-          return `Scheduled task created: ${formatTaskLine(task, `${nextRun}${pendingConsent(task)}`)}`;
+          return `Scheduled task created: ${formatTaskLine(task, `${nextRun}${createdNote(task, byOwner)}`)}`;
         });
       }
 
       if (input.watch_url) {
+        // A watch only reads its page, unattended and again and again: an address a server may
+        // run as a write (`?_method=DELETE`, a GraphQL mutation) would send that write on every check.
+        if (readAddressWrites(input.watch_url)) return `Error: watch_url ${WATCH_OVERRIDE_REFUSAL} No watch was created. Pass the address of the page without the override or the mutation.`;
         // Floor the interval at 5 min: the JSON-schema `minimum` is only advisory
         // for an LLM-supplied arg, so clamp defensively to bound fetch + LLM spend.
         const intervalMinutes = Math.max(5, input.watch_interval_minutes ?? 60);
@@ -529,7 +589,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
             watchIntervalMinutes: intervalMinutes,
           }), ifReturned);
           w.created('create', task.id);
-          return `Watch task created: ${formatTaskLine(task, ` — it checks ${input.watch_url} every ${String(intervalMinutes)}min${pendingConsent(task)}`)}`;
+          return `Watch task created: ${formatTaskLine(task, ` — it checks ${input.watch_url} every ${String(intervalMinutes)}min${createdNote(task, byOwner)}`)}`;
         });
       }
 
@@ -540,7 +600,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         return withInstanceWrite(agent, { site: 'task_create#one-shot', kind: 'create', store: 'tasks', target: () => [['type', 'one-shot']], main: ['create'] }, (w) => {
           const task = w.run('create', () => managerRef.create({ ...baseParams, nextRunAt: input.run_at }), ifReturned);
           w.created('create', task.id);
-          return `Task scheduled for ${input.run_at}: ${formatTaskLine(task, pendingConsent(task))}`;
+          return `Task scheduled for ${input.run_at}: ${formatTaskLine(task, createdNote(task, byOwner))}`;
         });
       }
 
@@ -549,7 +609,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
       return withInstanceWrite(agent, { site: 'task_create#todo', kind: 'create', store: 'tasks', target: () => [['type', 'todo']], main: ['create'] }, (w) => {
         const task = w.run('create', () => managerRef.create(baseParams), ifReturned);
         w.created('create', task.id);
-        return `Task created: ${formatTaskLine(task, pendingConsent(task))}`;
+        return `Created: ${formatTaskLine(task, createdNote(task, byOwner))}`;
       });
     } catch (e: unknown) {
       logErrorChain('task_create', e);
@@ -641,6 +701,15 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         if (!isOwnerPrincipal(agent.principal)) {
           const trigger = managerRef.getTrigger(input.task_id, scopeFilter);
           if (trigger) w.run('mark', () => managerRef.markEditedBy(trigger.id, agent.principal, true), ifTrue);
+        } else if (agent.writeAuthor !== principalTag(OWNER_PRINCIPAL)
+          && (input.title !== undefined || input.description !== undefined)) {
+          // Under the owner's principal but not the owner's own turn (a trigger's or a workflow's
+          // run) changing the instruction (its title or description): the change is the run's, so
+          // the instruction stops counting as the owner's. An unknown author is marked as such,
+          // never left as the owner. A change that leaves the instruction as it is (its status,
+          // its schedule) keeps it the owner's.
+          const trigger = managerRef.getTrigger(input.task_id, scopeFilter);
+          if (trigger) w.run('mark', () => managerRef.markEditedByRun(trigger.id, runTagOf(agent)), ifTrue);
         }
         if (input.status === 'completed') {
           const task = w.run('apply', () => managerRef.complete(input.task_id, scopeFilter, agent.principal), ifNonNull);
@@ -659,10 +728,14 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
           nextRunAt: input.run_at,
           scheduleCron: input.schedule,
           // A trigger's instruction rewritten here carries what this turn had taken in, as one
-          // created here does; the manager records it only with a title or description change.
-          untrusted: describeTurnUntrusted(agent),
+          // created here does (`instructionTakenIn`, the same rule); the manager records it only
+          // with a title or description change.
+          untrusted: instructionTakenIn(agent),
         }, scopeFilter, agent.principal), ifNonNull);
         if (!task) return `Task not found: ${input.task_id}`;
+        // A run's earlier rewrite keeps its tag after a later change in the owner's own turn: a
+        // change of the title or of part of the description leaves the run's words in place, and
+        // nothing here can tell which. Only a trigger the owner sets up anew counts as theirs.
         // Surface the new schedule when it changed so the agent can confirm
         // the reschedule landed (mirrors the create path's "scheduled for …"
         // string, which the LLM is already trained to read back).
@@ -676,7 +749,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         // An edit can re-open consent: changing what a trigger RUNS clears the stamp
         // (`trigger-store.ts`), so the row just edited may be held back again — and
         // this report is the only place that says so.
-        return `Task updated: ${formatTaskLine(task, `${scheduleNote}${pendingConsent(task)}`)}`;
+        return `Task updated: ${formatTaskLine(task, `${scheduleNote}${pendingConsent(task, isOwnerPrincipal(agent.principal))}`)}`;
       });
     } catch (e: unknown) {
       logErrorChain('task_update', e);

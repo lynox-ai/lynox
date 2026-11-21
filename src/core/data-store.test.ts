@@ -1154,15 +1154,19 @@ describe('DataStore', () => {
     it('pins the DDL createCollection emits for the CRM\'s shapes — a change here does not reach kept empty tables', () => {
       // A kept empty CRM collection keeps the DDL it was created with. If this snapshot
       // has to change, existing empty CRM tables will NOT get the new DDL from the boot
-      // drop any more (crm-schema.ts): ship a migration for them with the change.
+      // drop any more (crm-schema.ts): ship a migration for them with the change. The source
+      // columns are the exception: the boot adds any that are missing (`ensureSourceColumns`).
       for (const shape of CRM_COLLECTIONS) ds.createCollection(createParamsOf(shape));
       const ddl = (ds['db'] as Database.Database)
         .prepare("SELECT name, sql FROM sqlite_master WHERE tbl_name IN ('ds_contacts','ds_deals','ds_interactions') ORDER BY name")
         .all();
       expect(ddl).toEqual([
-        { name: 'ds_contacts', sql: 'CREATE TABLE "ds_contacts" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, _source_grants TEXT, _source_run_id TEXT, "name" TEXT, "email" TEXT, "phone" TEXT, "company" TEXT, "type" TEXT, "source" TEXT, "channel_id" TEXT, "language" TEXT, "notes" TEXT, "tags" TEXT)' },
-        { name: 'ds_deals', sql: 'CREATE TABLE "ds_deals" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, _source_grants TEXT, _source_run_id TEXT, "title" TEXT, "contact_name" TEXT, "value" REAL, "currency" TEXT, "stage" TEXT, "next_action" TEXT, "due_date" TEXT)' },
-        { name: 'ds_interactions', sql: 'CREATE TABLE "ds_interactions" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, _source_grants TEXT, _source_run_id TEXT, "contact_name" TEXT, "type" TEXT, "channel" TEXT, "summary" TEXT, "date" TEXT)' },
+        { name: 'ds_contacts', sql: 'CREATE TABLE "ds_contacts" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, _source_grants TEXT, _source_run_id TEXT, _written_by TEXT, _written_untrusted TEXT, _written_at TEXT, "name" TEXT, "email" TEXT, "phone" TEXT, "company" TEXT, "type" TEXT, "source" TEXT, "channel_id" TEXT, "language" TEXT, "notes" TEXT, "tags" TEXT)' },
+        { name: 'ds_contacts__writer_unknown', sql: 'CREATE TRIGGER "ds_contacts__writer_unknown" AFTER UPDATE ON "ds_contacts" FOR EACH ROW WHEN NEW."_written_at" IS OLD."_written_at" AND NEW."_written_at" IS NOT NULL BEGIN UPDATE "ds_contacts" SET "_written_at" = NULL WHERE "_id" = NEW."_id"; END' },
+        { name: 'ds_deals', sql: 'CREATE TABLE "ds_deals" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, _source_grants TEXT, _source_run_id TEXT, _written_by TEXT, _written_untrusted TEXT, _written_at TEXT, "title" TEXT, "contact_name" TEXT, "value" REAL, "currency" TEXT, "stage" TEXT, "next_action" TEXT, "due_date" TEXT)' },
+        { name: 'ds_deals__writer_unknown', sql: 'CREATE TRIGGER "ds_deals__writer_unknown" AFTER UPDATE ON "ds_deals" FOR EACH ROW WHEN NEW."_written_at" IS OLD."_written_at" AND NEW."_written_at" IS NOT NULL BEGIN UPDATE "ds_deals" SET "_written_at" = NULL WHERE "_id" = NEW."_id"; END' },
+        { name: 'ds_interactions', sql: 'CREATE TABLE "ds_interactions" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, _source_grants TEXT, _source_run_id TEXT, _written_by TEXT, _written_untrusted TEXT, _written_at TEXT, "contact_name" TEXT, "type" TEXT, "channel" TEXT, "summary" TEXT, "date" TEXT)' },
+        { name: 'ds_interactions__writer_unknown', sql: 'CREATE TRIGGER "ds_interactions__writer_unknown" AFTER UPDATE ON "ds_interactions" FOR EACH ROW WHEN NEW."_written_at" IS OLD."_written_at" AND NEW."_written_at" IS NOT NULL BEGIN UPDATE "ds_interactions" SET "_written_at" = NULL WHERE "_id" = NEW."_id"; END' },
         { name: 'idx_contacts_ukey', sql: 'CREATE UNIQUE INDEX "idx_contacts_ukey" ON "ds_contacts" ("email")' },
         { name: 'idx_deals_ukey', sql: 'CREATE UNIQUE INDEX "idx_deals_ukey" ON "ds_deals" ("title", "contact_name")' },
       ]);

@@ -266,6 +266,11 @@ export async function undoBulk(bulkId: string, currentZone: InboxBucket): Promis
 		addToast(t('inbox.error_bulk_undo'), 'error');
 		return false;
 	}
+	// Items that changed since the bulk action stay as they are; say so, with the real numbers.
+	const body = (await res.json().catch(() => ({}))) as { reverted?: unknown; skipped?: unknown };
+	if (typeof body.skipped === 'number' && body.skipped > 0 && typeof body.reverted === 'number') {
+		addToast(tf('inbox.bulk_undo_skipped', { restored: String(body.reverted), skipped: String(body.skipped) }), 'info');
+	}
 	void loadInboxCounts();
 	void loadInboxItems(currentZone);
 	return true;
