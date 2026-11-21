@@ -19,6 +19,11 @@ describe('the request refusal for frames', () => {
 		}
 	});
 
+	it('tells the reader what happened and how to open lynox instead', async () => {
+		const res = refuseFraming('/app', 'iframe');
+		expect(await res?.text()).toBe('lynox cannot be shown inside another page. Open it in its own browser tab.');
+	});
+
 	it('lets the frame endpoint be framed and every other destination through', () => {
 		expect(refuseFraming('/_artifact-frame', 'iframe')).toBeNull();
 		expect(refuseFraming('/app', 'document')).toBeNull();

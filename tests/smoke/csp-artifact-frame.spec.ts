@@ -461,6 +461,7 @@ test.describe('app page policy', () => {
 			for (const path of ['/app', '/login', '/auth/magic?token=x', '/']) {
 				const res = await request.get(path, { headers: { 'Sec-Fetch-Dest': dest }, maxRedirects: 0 });
 				expect(res.status(), `${dest} ${path}`).toBe(403);
+				expect(await res.text(), `${dest} ${path}`).toBe('lynox cannot be shown inside another page. Open it in its own browser tab.');
 			}
 			expect((await request.get('/_artifact-frame', { headers: { 'Sec-Fetch-Dest': dest } })).status()).toBe(200);
 		}

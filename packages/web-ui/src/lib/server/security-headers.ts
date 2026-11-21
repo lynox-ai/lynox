@@ -9,6 +9,9 @@ import { APP_FALLBACK_CSP } from './app-csp.js';
 /** `Sec-Fetch-Dest` values of a request that wants to be displayed inside a frame. */
 const FRAME_DESTINATIONS = new Set(['iframe', 'frame']);
 
+/** What a refused frame shows: what happened and the way out, in a sentence each. */
+export const FRAMING_REFUSAL_TEXT = 'lynox cannot be shown inside another page. Open it in its own browser tab.';
+
 /**
  * Refuse a request that asks to be framed, on every path but the frame endpoint.
  *
@@ -22,7 +25,7 @@ const FRAME_DESTINATIONS = new Set(['iframe', 'frame']);
 export function refuseFraming(pathname: string, secFetchDest: string | null): Response | null {
 	if (pathname === ARTIFACT_FRAME_PATH) return null;
 	if (secFetchDest === null || !FRAME_DESTINATIONS.has(secFetchDest.toLowerCase())) return null;
-	return new Response('This page cannot be shown in a frame.', {
+	return new Response(FRAMING_REFUSAL_TEXT, {
 		status: 403,
 		headers: {
 			'Content-Type': 'text/plain; charset=utf-8',
