@@ -655,3 +655,88 @@ describe('a flagged follow-up brings its item back to where the owner sees it', 
     expect(notifyNewItem).not.toHaveBeenCalled();
   });
 });
+
+describe('a snooze set to wake on a reply wakes for the messages that may reopen an item', () => {
+  const later = () => new Date(Date.now() + 86_400_000);
+  /** An open item, snoozed by the owner to wake on a reply. */
+  function seedSnoozed(tenantId?: string): string {
+    const id = inbox.insertItem({
+      ...(tenantId !== undefined ? { tenantId } : {}),
+      accountId: ACCOUNT.id, channel: 'email', threadKey: THREAD, bucket: 'requires_user', confidence: 0.9,
+      reasonDe: 'Kundin fragt nach der Lieferung', classifiedAt: new Date('2026-11-03T08:00:00Z'),
+      classifierVersion: 'v1', messageId: '<first@x>', subject: 'Bestellung 1043', fromAddress: 'kunde@example.com',
+    });
+    inbox.insertThreadMessage({
+      ...(tenantId !== undefined ? { tenantId } : {}),
+      accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<first@x>', fromAddress: 'kunde@example.com',
+      subject: 'Bestellung 1043', direction: 'inbound', inboxItemId: id,
+    });
+    inbox.setSnooze(id, later(), null, /* unsnoozeOnReply */ true, false, tenantId);
+    return id;
+  }
+  const woke = (id: string, tenantId?: string) => inbox.getItem(id, tenantId)!.snoozeUntil === undefined;
+  const wakeAudits = (id: string, tenantId?: string) =>
+    inbox.listAuditForItem(id, tenantId).filter((a) => a.action === 'unsnoozed_on_reply');
+
+  it('a new message from the customer wakes it, with one audit naming the message', async () => {
+    const id = seedSnoozed();
+    await hook()(ACCOUNT.id, envelope());
+    expect(woke(id)).toBe(true);
+    const audits = wakeAudits(id);
+    expect(audits).toHaveLength(1);
+    expect(JSON.parse(audits[0]!.payloadJson)).toEqual({ trigger: 'inbound_mail', message_id: '<follow@x>' });
+  });
+
+  it('an automatic reply does not wake it', async () => {
+    const id = seedSnoozed();
+    await hook()(ACCOUNT.id, envelope({ isAutoReply: true, messageId: '<ooo@x>', snippet: 'Ich bin bis Montag abwesend.' }));
+    expect(woke(id)).toBe(false);
+    expect(wakeAudits(id)).toHaveLength(0);
+    expect(messageIds()).toContain('<ooo@x>');
+  });
+
+  it('our own mail coming back into the thread does not wake it', async () => {
+    const id = seedSnoozed();
+    await hook()(ACCOUNT.id, envelope({ from: [{ address: ACCOUNT.address }], messageId: '<own@x>' }));
+    expect(woke(id)).toBe(false);
+    expect(wakeAudits(id)).toHaveLength(0);
+  });
+
+  it('a redelivered message does not wake it', async () => {
+    const id = seedSnoozed();
+    await hook()(ACCOUNT.id, envelope({ messageId: '<first@x>' }));
+    expect(woke(id)).toBe(false);
+    expect(wakeAudits(id)).toHaveLength(0);
+  });
+
+  it('a message without a Message-ID does not wake it', async () => {
+    const id = seedSnoozed();
+    await hook()(ACCOUNT.id, envelope({ messageId: undefined }));
+    expect(woke(id)).toBe(false);
+    expect(wakeAudits(id)).toHaveLength(0);
+  });
+
+  it('a message dated before the owner\'s reply does not wake it', async () => {
+    const id = seedSnoozed();
+    inbox.updateUserAction(id, 'replied', new Date('2026-11-03T09:00:00Z'));
+    await hook()(ACCOUNT.id, envelope({ date: new Date('2026-11-03T08:30:00Z') }));
+    expect(woke(id)).toBe(false);
+    expect(wakeAudits(id)).toHaveLength(0);
+  });
+
+  it('an item of another tenant wakes in its own tenant, and its audit is written there', async () => {
+    const id = seedSnoozed('tenant-b');
+    await hook()(ACCOUNT.id, envelope());
+    expect(woke(id, 'tenant-b')).toBe(true);
+    expect(wakeAudits(id, 'tenant-b')).toHaveLength(1);
+  });
+
+  it('a snooze set not to wake on a reply stays for a new message (control)', async () => {
+    const id = seedSnoozed();
+    const until = later();
+    inbox.setSnooze(id, until, null, /* unsnoozeOnReply */ false);
+    await hook()(ACCOUNT.id, envelope());
+    expect(inbox.getItem(id)!.snoozeUntil?.getTime()).toBe(until.getTime());
+    expect(wakeAudits(id)).toHaveLength(0);
+  });
+});
