@@ -381,9 +381,12 @@ describe('markersOf', () => {
       expect([...markersOf(text).get('link')!].filter((h) => h.startsWith('evil.')), text).toHaveLength(1);
     }
     for (const text of ['evil<p/style="display:inline">.com', 'evil<p x/style=display:inline>.com', 'evil<p class="a"style="display:inline">.com',
-      "evil<p class='a'style='display:inline'>.com", '<style>p{display:inline}</style>evil<p>.com', '<STYLE type="text/css">div{display:inline}</STYLE>evil<div>.com</div>']) {
+      "evil<p class='a'style='display:inline'>.com"]) {
       expect([...markersOf(text).get('link')!], text).toEqual(['evil.com']);
     }
+    // Not read, on purpose: a style sheet would join every paragraph of a run into hosts.
+    expect([...markersOf('<style>p{display:inline}</style>evil<p>.com').get('link')!]).toEqual([]);
+    expect([...markersOf('<style>p{margin:0}</style><p>Aus Eiche.</p><p>shop zeitlos</p>').get('link')!]).toEqual([]);
     for (const style of ['display:inline-block', 'display:inline-flex', 'display:ruby', 'display:inline!important', 'DISPLAY:INLINE', 'display:/**/inline', 'display:&#105;nline', 'display:\\69nline', 'margin:0']) {
       const text = `evil<p style="${style}">.com</p>`;
       expect([...markersOf(text).get('link')!], text).toEqual(['evil.com']);
