@@ -213,7 +213,9 @@ describe('the store row on Settings → APIs before the end', () => {
 		await render('apis');
 		expect(q('api-erasure-window')).not.toBeNull();
 		expect(text(q('api-access-ends-text'))).toBe(`Der Zugang von lynox zu diesem Shop läuft am ${SOON.de} ab. Verbinde ihn vorher neu, damit Läufe und Abfragen weiterlaufen.`);
+		// The one "Reconnect" is the erasure view's; the line adds none.
 		expect(all('api-reconnect')).toHaveLength(1);
+		expect(q('api-access-ends')!.querySelector('[data-testid="api-reconnect"]')).toBeNull();
 	});
 
 	it('a refresh that ended while an erasure past its hold stands: "ended" and its own "Reconnect" beside the dates', async () => {
@@ -222,7 +224,9 @@ describe('the store row on Settings → APIs before the end', () => {
 		await render('apis');
 		expect(q('api-erasure-window')).not.toBeNull();
 		expect(all('api-access-ended').map(text)).toEqual(['lynox konnte den Zugang zu diesem Shop nicht erneuern.']);
+		// The one "Reconnect" is the line's own: the erasure view past its hold offers none.
 		expect(all('api-reconnect')).toHaveLength(1);
+		expect(q('api-access-ends')!.querySelectorAll('[data-testid="api-reconnect"]')).toHaveLength(1);
 	});
 
 	it('a mandate that set the store up gets "Reconnect" under the first sentence', async () => {

@@ -174,7 +174,8 @@ export function storeReconnectDue(profile: ApiProfile, now: number = Date.now())
  */
 export function storeAccessEnd(profile: ApiProfile, now: number = Date.now()): { host: string; until: number | null; ended: boolean } | null {
   const grant = profile.oauth_grant;
-  if (grant?.state === 'refresh-dead' && storeRefreshApplies(profile)) {
+  // Only a store refresh ends a connection this way, and only a store has a host the engine derives.
+  if (grant?.state === 'refresh-dead') {
     const host = presetStoreHost(profile);
     if (host === null) return null;
     const until = grant.refresh_expires_at;
