@@ -96,7 +96,7 @@ import { OwnerKnownTargets } from './owner-known-targets.js';
 import { ConversationLatch } from './conversation-latch.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { turnIsLocked } from './mandate-tool-lock.js';
-import { ConversationGrants } from './conversation-grants.js';
+import { ConversationGrants, UNKNOWN_GRANT } from './conversation-grants.js';
 
 /** Context-usage % at which auto-compaction fires as a LAST-RESORT safety net.
  *  The primary path is user-triggered "prepare & compact" from COMPACT_PREPARE_PERCENT
@@ -335,6 +335,10 @@ export interface SessionOptions {
   costGuard?: import('../types/index.js').CostGuardConfig | undefined;
   /** Who the session's first agent is built for — see `RunOptions.principal`. Absent = owner. */
   principal?: RequestPrincipal | undefined;
+  /** The run is built from input written in another conversation that had read outside content
+   *  (a task created untrusted). Its grants are not carried over, so this conversation's set
+   *  starts with `unknown`: a row it writes is found by every erasure, never by none. */
+  seedUnknownGrant?: boolean | undefined;
 }
 
 /**
@@ -786,6 +790,8 @@ export class Session {
       // session opened before keeps the helper's turns in memory, and `_run` would find no row.
       if (threadHoldsForeignTurns(threadStore, this.sessionId)) this._foreignRunHere = true;
     }
+    // After the thread row exists, so the member is recorded for it. The agent holds this set.
+    if (opts?.seedUnknownGrant === true) this._grantSet().add(UNKNOWN_GRANT);
 
     if (opts?.messages) {
       this.loadMessages(opts.messages);

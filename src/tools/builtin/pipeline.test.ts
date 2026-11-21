@@ -2534,7 +2534,9 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     mockRunManifest.mockResolvedValueOnce(makeRunState());
     await runSavedWorkflow(id, { getPlannedPipeline: () => undefined } as never, mockConfig, undefined, { principal: OWNER_PRINCIPAL, tools: mockTools, seed: 'external-tool' });
     const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
-    expect(opts['runTaint']).toEqual({ seeded: 'external-tool', earned: 'none', onOriginRefused: expect.any(Function) });
+    expect(opts['runTaint']).toMatchObject({ seeded: 'external-tool', earned: 'none', onOriginRefused: expect.any(Function) });
+    // A seeded schedule writes under unknown: its creating session's grants are not stored.
+    expect((opts['runTaint'] as { grants?: { members(): string[] } }).grants?.members()).toEqual([UNKNOWN_GRANT]);
   });
 
   it('leaves secretStore undefined for a chat agent with no vault (backward-compat)', async () => {
@@ -2816,6 +2818,16 @@ describe('headlessRunTaint: the parameters of a run with no conversation', () =>
 
   it('keeps the seed', () => {
     expect(headlessRunTaint('external-tool', undefined, undefined)).toMatchObject({ seeded: 'external-tool', earned: 'none' });
+  });
+
+  it.each([['marker'], ['external-tool']] as const)('a schedule created after outside content (%s) starts with unknown, without parameters and from the library too', (seed) => {
+    expect(headlessRunTaint(seed, undefined, 'schedule:t1').grants?.members()).toEqual([UNKNOWN_GRANT]);
+    expect(headlessRunTaint(seed, {}, 'schedule:t1').grants?.members()).toEqual([UNKNOWN_GRANT]);
+    expect(headlessRunTaint(seed, params, 'library:cookie:owner').grants?.members()).toEqual([UNKNOWN_GRANT]);
+  });
+
+  it('the seed none adds nothing', () => {
+    expect(headlessRunTaint('none', undefined, 'schedule:t1').grants).toBeUndefined();
   });
 });
 

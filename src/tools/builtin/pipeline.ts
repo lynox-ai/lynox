@@ -813,11 +813,13 @@ function resolveInSessionLimits(stored: WorkflowLimits | undefined): WorkflowLim
  * a person who pressed Run in the library typed them; any other start — a schedule, "Run now" on
  * one (a script with a token can press it), an API token, a local start, an unknown origin — may
  * carry data from outside, and the run's set starts with `unknown` (PRD connection-attribution A5).
+ * A seed other than `none` starts it with `unknown` too: the schedule was created in a
+ * conversation that had read outside content, and that conversation's grants are not stored.
  */
 export function headlessRunTaint(seed: UntrustedCause | undefined, params: Record<string, unknown> | undefined, startedVia: string | undefined): RunTaint {
   const taint: RunTaint = { ...newRunTaint(), seeded: seed ?? 'none' };
   const typedByPerson = startedVia?.startsWith('library:cookie:') === true;
-  if (params !== undefined && Object.keys(params).length > 0 && !typedByPerson) {
+  if (taint.seeded !== 'none' || (params !== undefined && Object.keys(params).length > 0 && !typedByPerson)) {
     runGrantSet(taint)?.add(UNKNOWN_GRANT);
   }
   return taint;

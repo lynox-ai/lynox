@@ -2859,6 +2859,10 @@ export class WorkerLoop {
       principal: runAs,
       // The tier the user chose for this trigger, held to the ceiling by the session.
       ...(triggerTier ? { model: triggerTier } : {}),
+      // Its task text was written in the conversation that created it. That conversation's grants
+      // are not stored with the task, so a task created after outside content writes under
+      // `unknown`: the same signal that marks its approvals as created untrusted.
+      ...(storedUntrustedCause(task.created_untrusted) !== 'none' ? { seedUnknownGrant: true } : {}),
     });
     // The new thread takes the question and its answer as input, and the question may quote what
     // a connected store returned: when the deleted conversation was contained, the new thread is

@@ -2138,6 +2138,17 @@ describe('WorkerLoop', () => {
     expect(opts['sendOrigin']).toEqual({ kind: 'triggerRun', name: task.title, setUpBy: { kind: 'owner' } });
   });
 
+  it.each([['marker', true], ['conversation', true], ['a spelling it does not know', true], ['none', undefined]] as const)('a task created after outside content (%s) asks its session to seed unknown into the grant set', async (stored, expected) => {
+    const task = makeTask({ created_untrusted: stored });
+    const session = makeSession('ok');
+    const engine = makeEngine({ taskManager: makeTaskManager([task]), session });
+    await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(session.run, 'positive control: the run happened').toHaveBeenCalledTimes(1);
+    const opts = vi.mocked(engine.createSession).mock.calls[0]![0] as Record<string, unknown>;
+    expect(opts['seedUnknownGrant']).toBe(expected);
+  });
+
   it('a send the run refused is said in the recorded result, with the target, its origin and the way through the chat', async () => {
     const task = makeTask();
     const tm = makeTaskManager([task]);
