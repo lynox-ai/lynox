@@ -145,7 +145,7 @@ describe('injectIntoArtifactFrame — the policy is not a parameter', () => {
 });
 
 describe('artifactExportDocument', () => {
-	it('exports an html artifact under the artifact policy, so a copy opened from disk loads no remote image', () => {
+	it('puts the artifact policy (images only from data: and blob:) into an exported html artifact and keeps its content', () => {
 		for (const html of ['<html><head></head><body><img src="https://elsewhere.example/x.png"></body></html>', '<div><img src="https://elsewhere.example/x.png"></div>']) {
 			const doc = asDoc(artifactExportDocument(html));
 			const policy = doc.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute('content') ?? '';

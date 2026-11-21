@@ -118,7 +118,7 @@ async function openDeck(): Promise<void> {
 }
 
 describe('the gallery preview frame', () => {
-	it('exports an html artifact with the artifact policy in the file, as the chat download does', async () => {
+	it('exports an html artifact with the artifact policy in the file', async () => {
 		shared.length = 0;
 		await openDeck();
 		const share = [...target.querySelectorAll('button')].find((b) => /share|teilen/i.test(b.textContent ?? ''));
