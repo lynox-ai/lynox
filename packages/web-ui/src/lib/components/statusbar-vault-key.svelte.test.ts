@@ -13,13 +13,6 @@ type SvelteClient = {
 	tick: () => Promise<void>;
 };
 const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLIENT_ENTRY)) as SvelteClient;
-// StatusBar imports `onDestroy` from `svelte`, which would also resolve to the server entry; the
-// component gets the same client runtime it is mounted with.
-vi.mock('svelte', async () => {
-	const { createRequire: req } = await import('node:module');
-	const path = await import('node:path');
-	return import(/* @vite-ignore */ path.join(path.dirname(req(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js'));
-});
 
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;

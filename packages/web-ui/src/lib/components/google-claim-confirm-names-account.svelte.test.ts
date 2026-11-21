@@ -15,15 +15,6 @@ type SvelteClient = {
 };
 const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLIENT_ENTRY)) as SvelteClient;
 
-// GoogleSettings imports `onDestroy` from `svelte`, which under node is the server entry and
-// throws outside a server render. Point the bare import at the same client entry `mount` uses.
-vi.mock('svelte', async () => {
-	const { createRequire: req } = await import('node:module');
-	const path = await import('node:path');
-	const entry = path.join(path.dirname(req(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
-	return (await import(/* @vite-ignore */ entry)) as Record<string, unknown>;
-});
-
 /**
  * The confirmation for a parked Google claim names the account before anything
  * is claimed. Connect waits while the account is looked up, is offered for a named
