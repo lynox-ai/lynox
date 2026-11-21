@@ -4,13 +4,13 @@
  * which can run to many lines. With little height only the value scrolls: the head stays above
  * it, so a person always sees what kind of action they are deciding, however far they scrolled.
  *
- * The head is the run of frame segments before the first value. Without segments (an older
- * engine), or without a value after the frame (a question that is all system text), there is no
- * head to keep apart and the whole question scrolls as one. A short one-line value stays on the
- * head's line, as it always did: kept apart it would cost a line, and a short question cannot
- * scroll its head away.
+ * The head runs up to the first LONG value: one with a line break, or longer than a line. Short
+ * values before it stay in the head, so an external tool's name (a short value between frames)
+ * does not cut the head off before the action it names. Without segments (an older engine), or
+ * without a long value (a question that is short, or all system text), there is no head to keep
+ * apart: the question shows as one, as it always did.
  */
-const INLINE_VALUE_MAX = 160;
+const LONG_VALUE = 80;
 
 export interface PromptSplit {
 	/** The system-written opening that never scrolls; empty when there is none. */
@@ -25,11 +25,10 @@ interface Segment {
 }
 
 export function splitPromptHead(question: string, segments: readonly Segment[] | undefined): PromptSplit {
-	const firstValue = segments ? segments.findIndex((s) => s.kind === 'value') : -1;
-	if (!segments || firstValue <= 0) return { head: '', lines: question.split('\n') };
-	const head = segments.slice(0, firstValue).map((s) => s.text).join('');
-	const body = segments.slice(firstValue).map((s) => s.text).join('');
-	if (!body.includes('\n') && question.length <= INLINE_VALUE_MAX) return { head: '', lines: [question] };
+	const firstLong = segments ? segments.findIndex((s) => s.kind === 'value' && (s.text.includes('\n') || s.text.length > LONG_VALUE)) : -1;
+	if (!segments || firstLong <= 0) return { head: '', lines: question.split('\n') };
+	const head = segments.slice(0, firstLong).map((s) => s.text).join('');
+	const body = segments.slice(firstLong).map((s) => s.text).join('');
 	return { head, lines: body.split('\n') };
 }
 
@@ -48,8 +47,14 @@ export function linesBelow(lineBottoms: readonly number[], fieldBottom: number):
  * Whether the field has too little room to show about four lines once it shrinks with the window.
  * Then the card keeps its own height and the stack scrolls instead, buttons included: the question
  * wins over the buttons. `over` is how far the stack's content runs past its visible part.
+ * The room is measured one way in each state, and the two can differ by a rounded pixel or two, so
+ * the state changes only a margin past four lines: at one window height it never flips back and
+ * forth.
  */
-export function promptFieldTooLow(field: { clientHeight: number; scrollHeight: number }, over: number, lineHeight: number): boolean {
+const TOO_LOW_MARGIN = 4;
+export function promptFieldTooLow(field: { clientHeight: number; scrollHeight: number }, over: number, lineHeight: number, wasTooLow: boolean): boolean {
 	const room = field.clientHeight - Math.max(0, over);
-	return field.scrollHeight > room + 1 && room < 4 * lineHeight - 1;
+	if (field.scrollHeight <= room + 1) return false;
+	const four = 4 * lineHeight;
+	return wasTooLow ? room < four + TOO_LOW_MARGIN : room < four - TOO_LOW_MARGIN;
 }

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { t, tf } from '../i18n.svelte.js';
 	import { prefersReducedMotion, scrollBehaviorForMotion } from '../utils/pipeline-status.js';
 	import { linesBelow, promptFieldTooLow } from '../utils/prompt-head.js';
@@ -28,7 +29,7 @@
 		const stack = el.closest<HTMLElement>('[data-chat-stack]');
 		const over = stack ? stack.scrollHeight - stack.clientHeight : 0;
 		const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 22;
-		tooLow = promptFieldTooLow(el, over, lineHeight);
+		tooLow = promptFieldTooLow(el, over, lineHeight, tooLow);
 	}
 
 	let frame = 0;
@@ -43,7 +44,7 @@
 		void lines;
 		void head;
 		if (!el) return;
-		measure();
+		untrack(measure);
 		const stack = el.closest<HTMLElement>('[data-chat-stack]');
 		const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => schedule());
 		ro?.observe(el);
@@ -53,6 +54,7 @@
 			ro?.disconnect();
 			window.removeEventListener('resize', schedule);
 			if (typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(frame);
+			tooLow = false;
 		};
 	});
 
@@ -68,7 +70,7 @@
 		<div data-prompt-head class="shrink-0 whitespace-pre-wrap [overflow-wrap:anywhere]">{head}</div>
 	{/if}
 	<div class="relative flex min-h-0 flex-1 flex-col">
-		<pre data-prompt-field bind:this={field} onscroll={schedule} class="min-h-0 flex-1 max-h-64 overflow-y-auto scrollbar-thin whitespace-pre-wrap font-sans [overflow-wrap:anywhere]">{#each lines as line, i (i)}<span data-prompt-line class="block">{#if line === ''}&nbsp;{:else}{line}{/if}</span>{/each}</pre>
+		<pre data-prompt-field bind:this={field} onscroll={schedule} class="min-h-0 flex-1 max-h-64 overflow-y-auto scrollbar-thin whitespace-pre-wrap font-sans [overflow-wrap:anywhere]">{#each lines as line, i (i)}<span data-prompt-line class="block min-h-[1lh]">{line}</span>{/each}</pre>
 		{#if below > 0}
 			<div data-prompt-fade class="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-bg-subtle to-transparent"></div>
 			<button data-prompt-read-more type="button" onclick={readOn} aria-label={t('chat.prompt_read_more_aria')} class="absolute bottom-0 right-0 whitespace-nowrap rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-xs text-text-muted hover:text-text">{label}</button>
