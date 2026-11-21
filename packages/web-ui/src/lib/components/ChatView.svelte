@@ -104,6 +104,8 @@
 	import { shouldRenderArtifactCard, parseArtifactIdFromResult, artifactFenceHeader } from '../utils/artifact-inline.js';
 	import { isPipelineRunning } from '../utils/pipeline-status.js';
 	import { renderPromptMarkdown, renderPromptSegments } from '../utils/prompt-markdown.js';
+	import { splitPromptHead } from '../utils/prompt-head.js';
+	import PromptQuestionField from './PromptQuestionField.svelte';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
 	import PipelineProgress from './PipelineProgress.svelte';
@@ -688,6 +690,9 @@
 	let isDragging = $state(false);
 	let recording = $state(false);
 	let selectedOptions = $state<string[]>([]);
+	/** Set by the confirmation's question field when too little height is left for about four of its
+	 *  lines: the card then keeps its height and the stack scrolls, buttons included. */
+	let promptTooLow = $state(false);
 	// Clear the multi-select working set whenever the ACTIVE prompt changes, so a
 	// selection from a prompt that was replaced without a click (server timeout →
 	// next ask_user, or a thread switch) can't leak pre-checked into the next
@@ -3508,14 +3513,19 @@
 		{@const isPermissionGuard = pendingPermission.consent === 'guard'}
 		{@const isDeepConsent = pendingPermission.consent === 'deep'}
 		{@const visibleOptions = (isPermissionGuard || isDeepConsent) ? [] : opts.filter(o => o !== '\x00')}
-		<!-- With little height the card shrinks, not its buttons: only the question row gives way,
-		     and its block scrolls within. At 340 px height two lines of it stay in view. -->
-		<div data-pending-prompt data-prompt-kind="permission" tabindex="-1" class="flex min-h-0 flex-col border-t border-border bg-bg-subtle px-4 py-3">
-			<div class="flex min-h-0 w-full flex-col max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-2">
+		<!-- The engine's own confirmation: with little height the card shrinks, not its buttons. Only
+		     the question row gives way; its head stays and its value scrolls, with a count of the lines
+		     below. When not even about four lines would fit, the card keeps its height and the stack
+		     scrolls instead: the question wins over the buttons. A model's own question keeps its
+		     height as before. -->
+		{@const shrinks = (isPermissionGuard || isDeepConsent) && !promptTooLow}
+		<div data-pending-prompt data-prompt-kind="permission" tabindex="-1" class="flex {shrinks ? 'min-h-0' : ''} flex-col border-t border-border bg-bg-subtle px-4 py-3">
+			<div class="flex {shrinks ? 'min-h-0' : ''} w-full flex-col max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-2">
 				{@render promptOrigin(pendingPermission.origin)}
-				<div data-prompt-question-row class="flex min-h-0 items-stretch gap-2">
+				<div data-prompt-question-row class="flex {shrinks ? 'min-h-0' : ''} items-stretch gap-2">
 					{#if isPermissionGuard || isDeepConsent}
-						<pre data-prompt-question class="flex-1 text-sm text-text-muted whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto scrollbar-thin">{pendingPermission.question}</pre>
+						{@const split = splitPromptHead(pendingPermission.question, pendingPermission.segments)}
+						<PromptQuestionField head={split.head} lines={split.lines} bind:tooLow={promptTooLow} />
 					{:else}
 						<!-- renderPromptMarkdown, NOT MarkdownRenderer: the chat renderer
 						     keeps DOMPurify's defaults, which permit `div`, `style` and

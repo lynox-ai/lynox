@@ -41,24 +41,27 @@ describe('a long permission question at little height', () => {
 		for (const c of ['flex', 'flex-col', 'min-h-0', 'overflow-y-auto', 'max-h-[60%]']) expect(cls, c).toContain(c);
 	});
 
-	it('the permission card may shrink, and so may its inner column', () => {
+	it('the engine\'s confirmation card, its inner column and its question row may shrink, unless too low', () => {
+		expect(CHATVIEW).toContain("{@const shrinks = (isPermissionGuard || isDeepConsent) && !promptTooLow}");
 		const card = classesOf('data-prompt-kind="permission"');
-		for (const c of ['flex', 'flex-col', 'min-h-0']) expect(card, c).toContain(c);
 		const inner = /<div\b[^>]*>/.exec(permissionCard().slice(permissionCard().indexOf('>') + 1));
 		expect(inner).not.toBeNull();
 		const innerCls = /\bclass="([^"]*)"/.exec(inner![0])![1]!.split(/\s+/);
-		for (const c of ['flex', 'flex-col', 'min-h-0', 'w-full']) expect(innerCls, c).toContain(c);
-	});
-
-	it('only the question row gives way: it may shrink, and its question block fills it and scrolls', () => {
 		const row = classesOf('data-prompt-question-row');
-		expect(row).toContain('min-h-0');
+		for (const [name, cls] of [['card', card], ['inner', innerCls], ['row', row]] as const) {
+			expect(cls, name).toContain('flex');
+			expect(cls.join(' '), name).toContain("{shrinks ? 'min-h-0' : ''}");
+		}
+		expect(card).toContain('flex-col');
+		expect(innerCls).toContain('flex-col');
 		expect(row).toContain('items-stretch');
 		expect(row).not.toContain('items-start');
+	});
+
+	it('the engine\'s confirmation shows its question through the field with the head and the count', () => {
 		const card = permissionCard();
-		const questions = [...card.matchAll(/data-prompt-question class="([^"]*)"/g)].map((m) => m[1]!.split(/\s+/));
-		expect(questions).toHaveLength(2);
-		for (const q of questions) expect(q).toContain('overflow-y-auto');
+		expect(card).toContain('<PromptQuestionField head={split.head} lines={split.lines} bind:tooLow={promptTooLow} />');
+		expect(card).toContain('{@const split = splitPromptHead(pendingPermission.question, pendingPermission.segments)}');
 	});
 
 	it('the buttons are outside the question row, so they never scroll with it', () => {
