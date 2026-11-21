@@ -739,6 +739,8 @@ describe('the refresh of an expiring store connection', () => {
       expect(storeAccessEnd({ ...dead, oauth_grant: { ...dead.oauth_grant!, refresh_expires_at: -1e16 } } as ApiProfile, NOW)).toEqual({ host: 'acme.myshopify.com', until: null, ended: true });
       // A profile of no store whose tokens expire, ended or not, is told nothing.
       expect(storeAccessEnd({ ...dead, auth: { type: 'oauth2', vault_keys: [], oauth: { preset_id: 'bexio' } } } as ApiProfile, NOW)).toBeNull();
+      // Connected again: a new binding and a new end beyond the window, told nothing.
+      expect(storeAccessEnd({ ...dead, oauth_grant: { ...dead.oauth_grant!, state: 'connected', store_binding: 'b', refresh_expires_at: NOW + STORE_RECONNECT_HINT_MS + DAY } } as ApiProfile, NOW)).toBeNull();
       expiring(NOW + DAY, { state: 'revoked' });
       expect(storeAccessEnd(profile(), NOW)).toBeNull();
     });

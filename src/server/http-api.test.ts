@@ -5943,7 +5943,8 @@ describe('LynoxHTTPApi', () => {
     });
 
     // An owner without web push learns that a store's access runs out from the list: the store, by
-    // the host the engine derives, and its end, within the hint's 14 days (`storeReconnectDue`).
+    // the host the engine derives, and its end, within the hint's 14 days or once its refresh ended
+    // (`storeAccessEnd`).
     it('GET of the api profiles tells of a store whose access runs out within 14 days or whose refresh ended, and of no other', async () => {
       const until = Date.now() + 5 * 24 * 3600 * 1000;
       const store = (id: string, end: number): Record<string, unknown> => ({

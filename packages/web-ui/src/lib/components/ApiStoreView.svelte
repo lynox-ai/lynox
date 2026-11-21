@@ -18,7 +18,7 @@
 	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; oauth_grant?: OAuthGrantView & { state?: unknown; revoked_at?: unknown };
 		/** Whether this reader's connect start goes through: a mandate's only for a profile it set up. */
 		reader_may_connect?: boolean;
-		/** A store whose access runs out soon or has (`storeReconnectDue` in the engine). */
+		/** A store whose access runs out soon, has, or whose refresh ended (`storeAccessEnd` in the engine). */
 		store_access_ends?: StoreAccessEnd; }
 
 	// Who connected the profile and with which provider account (`utils/oauth-connection.ts`).
@@ -61,16 +61,17 @@
 	let now = $state(new Date());
 
 	/**
-	 * A store's access end on its row (U-391): before it, beside any revocation view but a revoked or
-	 * ended one, which say what to do; after it, only while no view says so yet (the grant still
-	 * reads connected, no refresh was tried).
+	 * A store's access end on its row (U-391), before and after it, unless the revocation view says
+	 * what to do instead (`revoked`, or `ended` for a refresh that ended). Beside any other view (an
+	 * erasure that stands) the line shows too; its own "Reconnect" only where that view shows none.
 	 */
-	function accessLine(profile: ApiProfile): StoreAccessShown | null {
+	function accessLine(profile: ApiProfile): { access: StoreAccessShown; button: boolean } | null {
 		const access = storeAccessShown(profile, now, getLocale());
 		if (access === null) return null;
 		const view = revocationView(profile.oauth_grant, notices.get(profile.id), now);
-		if (access.kind === 'soon') return view?.kind === 'revoked' || view?.kind === 'ended' ? null : access;
-		return view === null ? access : null;
+		if (view?.kind === 'revoked' || view?.kind === 'ended') return null;
+		const viewButton = view?.kind === 'connectedAgain' || (view?.kind === 'reconnected' && view.avertable);
+		return { access, button: !viewButton };
 	}
 	$effect(() => {
 		const timer = setInterval(() => { now = new Date(); }, 60_000);
@@ -266,14 +267,17 @@
 					{/if}
 					<!-- A store's access end (U-391), as `accessLine` has it. -->
 					{#if accessLine(profile)}
-						{@const access = accessLine(profile)!}
+						{@const line = accessLine(profile)!}
+						{@const access = line.access}
 						<div class="border-t border-border px-4 py-3 space-y-2 text-xs text-text-muted" data-testid="api-access-ends">
 							{#if access.kind === 'soon'}
 								<p data-testid="api-access-ends-text">{isOwnerSession() ? `${tf('apis.access_ends_on', { date: access.date })} ${t('apis.access_ends_way')}` : tf('apis.access_ends_on', { date: access.date })}</p>
 							{:else}
 								<p data-testid="api-access-ended">{t('apis.access_ended')}</p>
 							{/if}
-							{#if access.mayConnect}
+							{#if !line.button}
+								<!-- The revocation view above already offers the way. -->
+							{:else if access.mayConnect}
 								<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
 									class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
 							{:else}

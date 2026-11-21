@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
+import { noteSettingsViewer, resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
 import { setLocale } from '../i18n.svelte.js';
 
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
@@ -20,8 +20,8 @@ vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
 // line on the store's row. After the end the banner stays; the APIs row says "ended" as before.
 // A mandate gets no banner, and on the APIs only the first sentence.
 
-// Ends at noon UTC, so the day is the same in any time zone the test runs in; the dates are written
-// out, not derived the way the page derives them.
+// Ends at noon UTC, so the day is the same in every time zone within 12 hours of UTC (the test runs
+// in UTC or Central Europe); the dates are written out, not derived the way the page derives them.
 const soonIso = '2099-01-20T12:00:00.000Z';
 const SOON = { de: '20.01.2099', en: '20/01/2099' };
 const pastIso = '2020-03-04T12:00:00.000Z';
@@ -115,6 +115,13 @@ describe('the shell banner of a store whose access runs out', () => {
 		expect(all('store-access-line').map(text)).toEqual([ENDED('acme.myshopify.com'), ENDED('b.myshopify.com')]);
 	});
 
+	it('takes the engine\'s word that the access ended, though the end is still ahead on this browser\'s clock', async () => {
+		setLocale('en');
+		serve('owner', [shop('a', 'acme.myshopify.com', soonIso, { store_access_ends: { host: 'acme.myshopify.com', ended: true, at: soonIso } })]);
+		await render('banner');
+		expect(text(q('store-access-line'))).toBe('lynox could not renew its access to the store acme.myshopify.com. Runs and requests to the store only work again once you reconnect it. Reconnect');
+	});
+
 	it('hides until the next load, and comes back on it', async () => {
 		serve('owner', [shop('a', 'acme.myshopify.com', soonIso)]);
 		await render('banner');
@@ -127,7 +134,7 @@ describe('the shell banner of a store whose access runs out', () => {
 		expect(q('store-access-banner')).not.toBeNull();
 	});
 
-	it('shows a mandate nothing and does not ask for its profiles, shows nothing while no one named the session, and nothing where the engine told no end', async () => {
+	it('shows a mandate nothing and does not ask for its profiles, shows nothing until the server names the owner, and nothing where the engine told no end', async () => {
 		serve('mandate', [shop('a', 'acme.myshopify.com', soonIso)]);
 		await render('banner');
 		expect(q('store-access-banner')).toBeNull();
@@ -138,6 +145,13 @@ describe('the shell banner of a store whose access runs out', () => {
 		serve(null, [shop('a', 'acme.myshopify.com', soonIso)]);
 		await render('banner');
 		expect(asked.some((u) => u.endsWith('/api-profiles'))).toBe(true);
+		expect(q('store-access-banner')).toBeNull();
+		// The server names the owner late (a retry): the banner shows then, without a new load.
+		noteSettingsViewer({ viewer: 'owner' });
+		flushSync();
+		expect(all('store-access-line')).toHaveLength(1);
+		noteSettingsViewer({ viewer: 'mandate' });
+		flushSync();
 		expect(q('store-access-banner')).toBeNull();
 		unmount(component!);
 		component = undefined;
@@ -193,12 +207,22 @@ describe('the store row on Settings → APIs before the end', () => {
 		expect(q('api-access-ends-text')).toBeNull();
 	});
 
-	it('a store connected again while an erasure stands: the end beside the erasure dates', async () => {
+	it('a store connected again while an erasure stands: the end beside the erasure dates, with one "Reconnect"', async () => {
 		const notice = { recordId: 1, connectionId: 'a', revokedAt: '2099-01-01T12:00:00.000Z', holdUntil: '2099-01-15T12:00:00.000Z', deadline: '2099-01-31T12:00:00.000Z', reconnected: false };
 		serve('owner', [shop('a', 'acme.myshopify.com', soonIso)], [notice]);
 		await render('apis');
 		expect(q('api-erasure-window')).not.toBeNull();
 		expect(text(q('api-access-ends-text'))).toBe(`Der Zugang von lynox zu diesem Shop läuft am ${SOON.de} ab. Verbinde ihn vorher neu, damit Läufe und Abfragen weiterlaufen.`);
+		expect(all('api-reconnect')).toHaveLength(1);
+	});
+
+	it('a refresh that ended while an erasure past its hold stands: "ended" and its own "Reconnect" beside the dates', async () => {
+		const notice = { recordId: 1, connectionId: 'a', revokedAt: '2020-01-01T12:00:00.000Z', holdUntil: '2020-01-15T12:00:00.000Z', deadline: '2099-01-31T12:00:00.000Z', reconnected: false };
+		serve('owner', [shop('a', 'acme.myshopify.com', soonIso, { oauth_grant: { state: 'refresh-dead' }, store_access_ends: { host: 'acme.myshopify.com', ended: true, at: soonIso } })], [notice]);
+		await render('apis');
+		expect(q('api-erasure-window')).not.toBeNull();
+		expect(all('api-access-ended').map(text)).toEqual(['lynox konnte den Zugang zu diesem Shop nicht erneuern.']);
+		expect(all('api-reconnect')).toHaveLength(1);
 	});
 
 	it('a mandate that set the store up gets "Reconnect" under the first sentence', async () => {
