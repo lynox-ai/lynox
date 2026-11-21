@@ -273,7 +273,7 @@ export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<Sh
           const confirmMsg: PromptText = input.action === 'format'
             ? pv`Apply batch changes to spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? Formatting requests can delete or overwrite cells and sheets.`
             : input.action === 'append'
-              ? pv`Add rows to range "${input.range ?? '(unspecified)'}" in spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? Google inserts them below the table there; nothing is overwritten.`
+              ? pv`Add rows to range "${input.range ?? '(unspecified)'}" in spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? Google adds them after any rows already there; nothing is overwritten.`
               : pv`Overwrite range "${input.range ?? '(unspecified)'}" in spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? This will replace existing data.`;
           // After content from outside the chat, a cell that starts like a formula is shown with
           // the question: Google runs it on its side, where no check on the engine's requests
