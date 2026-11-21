@@ -184,6 +184,14 @@ test.beforeAll(async ({ baseURL }) => {
 });
 
 
+// The engine counts API requests per client address in a fixed 60-second window, and on the smoke
+// stack every spec comes from one address. This file loads many pages, so it ends by waiting out
+// the window it used; otherwise the next file starts with that window spent and is refused (429).
+test.afterAll(async () => {
+	test.setTimeout(90_000);
+	await new Promise((r) => setTimeout(r, 61_000));
+});
+
 test.describe('artifact frames', () => {
 	// Room for one wait on the request limiter (see openArtifact).
 	test.describe.configure({ timeout: 120_000 });
