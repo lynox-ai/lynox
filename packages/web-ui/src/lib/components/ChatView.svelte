@@ -2549,7 +2549,9 @@
 	     overscroll-locked this is belt-and-suspenders, not load-bearing —
 	     it stays so the transcript's overscroll semantics remain local even
 	     if an ancestor becomes scrollable again someday. -->
-	<div class="relative flex min-h-0 flex-1 flex-col">
+	<!-- `min-h-12`: with little height (a phone in landscape with the keyboard open) the
+	     transcript keeps a strip of its own instead of running under the prompt stack. -->
+	<div data-chat-transcript class="relative flex min-h-12 flex-1 flex-col">
 	<div class="flex-1 min-w-0 overflow-x-hidden overflow-y-auto overscroll-y-contain px-4 py-6 md:px-6" bind:this={messagesEl} onscroll={onMessagesScroll}>
 		{#if threadReadRefusal !== null && messages.length === 0}
 			<!-- Not this reader's chat to read: the reason, not an empty start page. -->
@@ -3332,7 +3334,10 @@
 		 worse than the bug. `max-h-[60%]` keeps the transcript from collapsing
 		 to 0px behind a tall block (flex-1 has basis 0, so in the shrink phase
 		 it loses everything without the cap). -->
-	<div data-chat-stack class="min-h-0 max-h-[60%] shrink overflow-y-auto scrollbar-thin">
+	<!-- A flex column, so a permission card can shrink inside it: its question block scrolls and
+	     its buttons stay in view. The other blocks keep their content height and scroll with the
+	     stack as before. -->
+	<div data-chat-stack class="flex min-h-0 max-h-[60%] shrink flex-col overflow-y-auto scrollbar-thin">
 	<!-- Pipeline progress: sticky above input during active execution only -->
 	{#if activePipeline && isStreaming && pipelineRunning}
 		<div class="border-t border-border bg-bg-subtle px-4 py-2">
@@ -3503,10 +3508,12 @@
 		{@const isPermissionGuard = pendingPermission.consent === 'guard'}
 		{@const isDeepConsent = pendingPermission.consent === 'deep'}
 		{@const visibleOptions = (isPermissionGuard || isDeepConsent) ? [] : opts.filter(o => o !== '\x00')}
-		<div data-pending-prompt data-prompt-kind="permission" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
-			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-2">
+		<!-- With little height the card shrinks, not its buttons: only the question row gives way,
+		     and its block scrolls within. At 340 px height two lines of it stay in view. -->
+		<div data-pending-prompt data-prompt-kind="permission" tabindex="-1" class="flex min-h-0 flex-col border-t border-border bg-bg-subtle px-4 py-3">
+			<div class="flex min-h-0 w-full flex-col max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-2">
 				{@render promptOrigin(pendingPermission.origin)}
-				<div class="flex items-start gap-2">
+				<div data-prompt-question-row class="flex min-h-0 items-stretch gap-2">
 					{#if isPermissionGuard || isDeepConsent}
 						<pre data-prompt-question class="flex-1 text-sm text-text-muted whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto scrollbar-thin">{pendingPermission.question}</pre>
 					{:else}
@@ -3526,7 +3533,7 @@
 								: renderPromptMarkdown(pendingPermission.question)}
 						</div>
 					{/if}
-					<div class="flex items-center gap-1.5 shrink-0">
+					<div class="flex items-center gap-1.5 shrink-0 self-start">
 						{#if promptSecondsLeft !== null && promptSecondsLeft !== undefined}
 							<span class="text-[11px] font-mono tabular-nums {promptSecondsLeft < 60 ? 'text-warning' : 'text-text-subtle'}" title={t('chat.prompt_timeout_left')}>{formatCountdown(promptSecondsLeft)}</span>
 						{/if}
