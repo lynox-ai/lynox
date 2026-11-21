@@ -9,6 +9,8 @@
 		type PersonErasureOutcome,
 		type PersonErasureResult,
 	} from '../api/person-erasure.js';
+	import { noticeRun, setAsideCopiesNotice, type SetAsideCopy } from '../erasure-set-aside.js';
+	import { managedWayOut, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 
 	// Erasing one person (owner only): preview with the text, the owner ticks the mentions
 	// that should go, then one confirm. What is tied to the person always goes and is not
@@ -78,6 +80,8 @@
 	}
 
 	$effect(() => { untrack(() => { void load(); }); });
+	// Never rejects; picks the way out the set-aside notice names (both until it is known).
+	$effect(() => { untrack(() => { void loadManagedStatus(); }); });
 </script>
 
 <div class="mt-3 rounded-[var(--radius-md)] border border-danger/30 bg-danger/10 p-3 text-sm" role="region" aria-label={t('erasure.title')}>
@@ -93,7 +97,7 @@
 		{/if}
 		{#if !result.scrubbed}<p class="mt-1 text-text-muted">{t('erasure.not_scrubbed')}</p>{/if}
 		{#if result.left.blocks.length > 0}<p class="mt-1 text-text-muted">{t('erasure.blocks')}</p>{/if}
-		{@render notCovered(result.notCovered)}
+		{@render notCovered(result.notCovered, result.setAsideCopies)}
 	{:else}
 		{#if notice === 'partial' && result}
 			<p class="mt-2 text-danger" role="alert">{tf('erasure.partial', { step: t(`erasure.step.${result.failed ?? 'subject'}`) })}</p>
@@ -135,7 +139,7 @@
 				<p class="mt-3 text-xs text-text-muted">{t('erasure.blocks')}</p>
 			{/if}
 
-			{@render notCovered(preview.notCovered)}
+			{@render notCovered(preview.notCovered, preview.setAsideCopies)}
 
 			<button onclick={confirm} disabled={busy}
 				class="mt-3 w-full rounded-[var(--radius-md)] bg-danger px-3 py-2 text-sm text-white hover:opacity-90 disabled:opacity-50 transition-opacity">
@@ -147,9 +151,13 @@
 	{/if}
 </div>
 
-{#snippet notCovered(keys: readonly string[])}
+{#snippet notCovered(keys: readonly string[], copies: readonly SetAsideCopy[] | null | undefined)}
+	{@const setAside = setAsideCopiesNotice(copies, managedWayOut(), t)}
 	<p class="mt-3 text-[10px] font-mono uppercase tracking-widest text-text-subtle">{t('erasure.not_covered')}</p>
 	<ul class="mt-1 list-disc pl-4 text-xs text-text-muted">
 		{#each keys as key (key)}<li>{t(`erasure.nc.${key}`)}</li>{/each}
+		{#if setAside.length > 0}
+			<li data-testid="erasure-set-aside">{#each noticeRun(setAside) as seg, j (j)}{#if 'mark' in seg}<code class="inline-block max-w-full rounded-[var(--radius-sm)] bg-border px-1 py-0.5 font-mono text-[11px] [overflow-wrap:anywhere]">{seg.mark}</code>{:else if 'mail' in seg}<a href="mailto:{seg.mail}" class="text-accent-text underline">{seg.mail}</a>{:else}{seg.text}{/if}{/each}</li>
+		{/if}
 	</ul>
 {/snippet}

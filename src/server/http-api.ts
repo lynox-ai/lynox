@@ -112,8 +112,8 @@ import { buildTrail, readTrailPage, trailSourceDeps, trailSources } from '../cor
 import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
 import { UndecryptableTextError } from '../core/engine-db.js';
 import {
-  PERSON_ERASURE_CONFIRM, erasePerson, previewPersonErasure,
-  type PersonErasureDeps, type PersonErasurePreview, type PersonErasureRefusal, type PersonErasureResult,
+  PERSON_ERASURE_CONFIRM, erasePerson, personErasureSetAsideCopies, previewPersonErasure,
+  type PersonErasureDeps, type PersonErasurePreview, type PersonErasureSetAsideCopy, type PersonErasureRefusal, type PersonErasureResult,
 } from '../core/person-erasure.js';
 import { durableMemoryState } from '../core/memory-tool-set.js';
 import { migrationCeiling } from '../core/migration-ceiling.js';
@@ -10846,6 +10846,16 @@ export class LynoxHTTPApi {
       noStoreJson(res, 403, { error: 'On a managed instance a person is erased from the web app, signed in as the owner', code: 'session_required' });
       return true;
     };
+    // The set-aside copies the answer names (file names only); null when the data directory
+    // could not be listed, so the answer says the copies could not be checked rather than nothing.
+    const setAsideCopies = (): PersonErasureSetAsideCopy[] | null => {
+      try {
+        return personErasureSetAsideCopies(getLynoxDir());
+      } catch (err: unknown) {
+        process.stderr.write(`[privacy] person erasure: set-aside copies not listed (${err instanceof Error ? err.name : 'unknown'})\n`);
+        return null;
+      }
+    };
     const readIds = (v: unknown): string[] | null =>
       v === undefined ? [] : Array.isArray(v) && v.length <= 10_000 && v.every(x => typeof x === 'string' && x.length <= 200) ? v as string[] : null;
 
@@ -10866,7 +10876,7 @@ export class LynoxHTTPApi {
         throw err;
       }
       if ('refused' in preview) { personErasureRefusal(res, preview); return; }
-      noStoreJson(res, 200, preview);
+      noStoreJson(res, 200, { ...preview, setAsideCopies: setAsideCopies() });
     }, ownerOnly('erase a person\'s data'));
 
     this.addStatic('user', 'POST /api/privacy/person-erasure', async (req, res, _params, body) => {
@@ -10957,7 +10967,8 @@ export class LynoxHTTPApi {
         try { log?.record(closing); } catch { /* the attempt row stands alone, which reads as "did not finish" */ }
       }
       process.stderr.write(`[privacy] person erasure: erased=${String(result.erased)} done=${result.done.join(',')} failed=${result.failed ?? '-'}\n`);
-      const { error, ...rest } = result;
+      const { error, ...erased } = result;
+      const rest = { ...erased, setAsideCopies: setAsideCopies() };
       if (!result.erased) {
         // 500 on any failed step: a client reading the status alone must not conclude the person
         // is gone. `done` and `failed` say how far it got; a new preview shows what is left, and
