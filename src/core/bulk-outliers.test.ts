@@ -400,7 +400,24 @@ describe('markersOf', () => {
       expect([...markersOf(`Eiche.${tag}shop`).get('link')!], tag).toEqual([]);
     }
     // The cost, accepted: a word after a full stop and a block a style may show inline is a host as well.
-    expect([...markersOf('Eiche.<br style="display:block">shop').get('link')!]).toEqual(['eiche.shop']);
+    expect([...markersOf('Eiche.<br style="display:inline">shop').get('link')!]).toEqual(['eiche.shop']);
+    // A block's end tag closes what its start showed inline; a float or an absolute position takes an
+    // empty block out of the line, and a break ignores both.
+    for (const text of ['evil<p hidden></p>.com', 'evil<div style="display:none"></div>.com', 'evil<div style="display:inline"></div>.com',
+      '<p style="display:inline">evil</p>.com', '<div style="display:contents">evil</div>.com', 'evil<div style="float:left"></div>.com',
+      '<div style="float:right">evil</div>.com', 'evil<p style="position:absolute"></p>.com', 'evil<div style="position: fixed"></div>.com',
+      'evil<div style="float:inline-start"></div>.com']) {
+      expect([...markersOf(text).get('link')!], text).toEqual(['evil.com']);
+    }
+    for (const text of ['Eiche.<br style="display:block">shop', 'Eiche.<p style="display:block !important">shop', 'Eiche.<div style="position:relative"></div>shop',
+      'Eiche.<div style="float:none"></div>shop', 'Eiche.<br style="float:left">shop', 'Eiche.<br style="position:absolute">shop',
+      'Eiche.<br aria-hidden="true">Shop', 'Eiche.<br class="hidden-xs">shop', 'Eiche.<br data-hidden>shop', 'Eiche.<p style="overflow:hidden">shop',
+      '<div style="display:flex"><p>Eiche.</p><p>shop</p></div>', '<p style="display:block">Eiche.</p><p>shop',
+      'Eiche.<p style="display :\t block\n !  important ;">shop', 'Eiche.<p style="margin: 0; display: block">shop', 'Eiche.<div style="float: none"></div>shop',
+      'Eiche.<p style="display: flex;">shop']) {
+      expect([...markersOf(text).get('link')!], text).toEqual([]);
+    }
+    expect([...markersOf('evil<p style="display:\n\n  inline">.com').get('link')!]).toEqual(['evil.com']);
     // A style naming no display, and a class, keep the break: a shop's editor puts them on every block.
     for (const text of ['Eiche.<br style="clear:both">shop', 'Eiche.<br>shop', 'Eiche.<br class="br-style">shop', 'Eiche.<br data-mce-style="">shop',
       '<p class="style-a">Aus Eiche.<p class="style-a">shop', '<ul><li class="li-style">Eiche.<li class="li-style">shop</ul>', '<p style="margin:0">Eiche.<p style="color:#333">shop']) {

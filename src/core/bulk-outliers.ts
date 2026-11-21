@@ -140,17 +140,25 @@ const BLOCK_TAGS = new Set([
 ]);
 
 /** Whether a block tag's own attributes may show it inline or not at all, so that it breaks no line: a
- *  style naming `display` or `all`, one this cannot read (a comment, an escape, a reference), or
- *  `hidden`. Read wide, since it only adds a reading; a style that names neither (a margin, a colour)
+ *  display no block has, a float or an absolute position, `all`, a style this cannot read (a comment,
+ *  an escape, a reference), or `hidden`. A style without them (a margin, a colour, `display:block`)
  *  keeps the break, or every paragraph a shop's editor styles would run into the next as a host. What
- *  a style sheet shows inline, the text's own or the shop's, is not read. */
-function mayShowInline(tag: string): boolean {
-  return /\bhidden\b/iu.test(tag) || (/style/iu.test(tag) && /display|\ball\s*:|[\\&]|\/\*/iu.test(tag));
+ *  a style sheet or a parent's layout shows inline, the text's own or the shop's, is not read. */
+function mayShowInline(raw: string, breaksLine: boolean): boolean {
+  // Every run of blanks as one, so that no pattern below backtracks over a long one.
+  const tag = raw.replace(/\s+/gu, ' ');
+  if (/[ /"']hidden(?![^ /=>])/iu.test(tag)) return true;
+  if (!/style/iu.test(tag)) return false;
+  // A display that is no block's, a float or an absolute position takes the block out of the line; a
+  // break ignores float and position. A style this cannot read counts as one that does.
+  return /display ?:(?! ?(?:block|flex|grid|table|list-item|flow-root) ?(?:! ?important)? ?(?:[;"']|$))|\ball ?:|[\\&]|\/\*/iu.test(tag)
+    || (!breaksLine && /\bfloat ?:(?! ?none\b)|\bposition ?: ?(?:absolute|fixed)/iu.test(tag));
 }
 
 /** A text as a browser shows it, near enough: without its tags, its character references decoded. With
  *  `gapAtStyled` false a styled block tag leaves no gap, as one a style shows inline would not. */
 function shownText(text: string, gapAtStyled: boolean): string {
+  const opened = new Map<string, boolean[]>();
   let shown = '';
   let i = 0;
   // Tags by index: an opening bracket without a closing one is text to the end, read once.
@@ -168,7 +176,24 @@ function shownText(text: string, gapAtStyled: boolean): string {
     const named = /^\/?([a-z][a-z0-9]{0,15})/iu.exec(tag.slice(0, 18));
     const after = named === null ? undefined : tag[named[0].length];
     const name = named !== null && (after === undefined || /[\t\n\f\r /]/u.test(after)) ? named[1]!.toLowerCase() : undefined;
-    if (name !== undefined && BLOCK_TAGS.has(name) && (gapAtStyled || !mayShowInline(tag))) shown += ' ';
+    if (name !== undefined && BLOCK_TAGS.has(name)) {
+      // Read without gaps, an end tag takes the reading of its start tag: `</p>` names no style, but
+      // closes a block its start showed inline. A break and a rule have no end tag.
+      let inline = false;
+      if (!gapAtStyled) {
+        const lone = name === 'br' || name === 'hr';
+        if (tag.startsWith('/') && !lone) inline = opened.get(name)?.pop() ?? false;
+        else {
+          inline = mayShowInline(tag, name === 'br');
+          if (!lone) {
+            const stack = opened.get(name) ?? [];
+            stack.push(inline);
+            opened.set(name, stack);
+          }
+        }
+      }
+      if (!inline) shown += ' ';
+    }
     i = close + 1;
   }
   return shown.replace(/&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|(amp|lt|gt|quot|apos|nbsp));/giu, (whole, dec?: string, hex?: string, name?: string) => {
