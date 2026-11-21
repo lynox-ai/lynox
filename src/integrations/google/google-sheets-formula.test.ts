@@ -250,7 +250,7 @@ describe('google_sheets after content from outside the chat', () => {
     const result = await createSheetsTool(auth).handler({ action: 'append', spreadsheet_id: 'sid', range: 'Sheet1!A:B', values: [['x', FETCHING]] }, a);
     expect(result).toContain('Data appended');
     expect(asked(a).options).toEqual(['Write as text', 'Write as formulas', 'Don’t write']);
-    expect(flattenPrompt(asked(a).prompt).split('\n')[0]).toBe('Add rows to range "Sheet1!A:B" in spreadsheet sid? Google adds them after any rows already there; nothing is overwritten.');
+    expect(flattenPrompt(asked(a).prompt).split('\n')[0]).toBe('Add rows to range "Sheet1!A:B" in spreadsheet sid? Nothing is overwritten.');
     expect(flattenPrompt(asked(a).prompt).split('\n').at(-1)).toBe(`1st new row, 2nd value: ${FETCHING}`);
     expect(sentValues()).toEqual([['x', `'${FETCHING}`]]);
   });
@@ -260,7 +260,7 @@ describe('google_sheets after content from outside the chat', () => {
     mockFetch.mockResolvedValueOnce(APPENDED);
     await createSheetsTool(auth).handler({ action: 'append', spreadsheet_id: 'sid', range: 'Sheet1!A:B', values: [['x', FETCHING]] }, a);
     expect(asked(a).options).toEqual(['Yes', 'No']);
-    expect(flattenPrompt(asked(a).prompt)).toBe('Add rows to range "Sheet1!A:B" in spreadsheet sid? Google adds them after any rows already there; nothing is overwritten.');
+    expect(flattenPrompt(asked(a).prompt)).toBe('Add rows to range "Sheet1!A:B" in spreadsheet sid? Nothing is overwritten.');
     expect(sentUrl()).toContain('insertDataOption=INSERT_ROWS');
   });
 
