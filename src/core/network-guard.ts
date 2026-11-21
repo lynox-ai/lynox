@@ -224,21 +224,15 @@ const BASELINE_LOOPBACK: ReadonlySet<string> = new Set(['localhost', '127.0.0.1'
  * content is in the conversation: a send to such a host the owner did not name keeps asking.
  */
 export function policyNamesHost(hostname: string, ctx: Pick<HostPolicyContext, 'networkPolicy' | 'allowedHosts' | 'allowedWildcards'>): boolean {
-  switch (ctx.networkPolicy) {
-    case 'deny-all':
-      return false;
-    case 'allow-list':
-      return hostInFloor(hostname, ctx);
-    case undefined:
-    case 'allow-all':
-    case 'guarded':
-      return (!BASELINE_LOOPBACK.has(hostname) && isGuardedBaselineHost(`https://${hostname}/`)) || hostInFloor(hostname, ctx);
-    default: {
-      const _exhaustive: never = ctx.networkPolicy;
-      void _exhaustive;
-      return false;
-    }
+  // Written as conditions, not a switch: tests/doc-drift.test.ts reads the guard's own deny-all case
+  // below by its first `case` label.
+  const policy = ctx.networkPolicy;
+  if (policy === 'allow-list') return hostInFloor(hostname, ctx);
+  if (policy === undefined || policy === 'allow-all' || policy === 'guarded') {
+    return (!BASELINE_LOOPBACK.has(hostname) && isGuardedBaselineHost(`https://${hostname}/`)) || hostInFloor(hostname, ctx);
   }
+  // `deny-all`, and a policy this code does not know: no host.
+  return false;
 }
 
 /**
