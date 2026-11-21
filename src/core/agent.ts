@@ -96,6 +96,7 @@ import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene
 import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS, DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES } from './tool-result-blob-store.js';
 import { openSync, closeSync, constants, fstatSync } from 'node:fs';
 import { toWorkspaceRel, workspaceBase } from './workspace-rel.js';
+import { resolveToolPath } from './workspace.js';
 import { FILE_TOOL_READ_CAP_BYTES, isReadLimit, openRead, readFdCapped } from './workspace-fd.js';
 import { oversizeWayOut, resolveWritablePath } from '../tools/builtin/fs.js';
 import { resolve } from 'node:path';
@@ -5605,7 +5606,7 @@ export class Agent implements IAgent {
     // a prompt the user may take a while to answer.
     if (mutatesFile && this.changesetManager?.active) {
       const reviewed = (tc.input as Record<string, unknown>)[REVIEWED_PATH_FIELD];
-      if (typeof reviewed === 'string' && reviewed && this.changesetManager.backupBeforeWrite(resolve(reviewed)) === false) {
+      if (typeof reviewed === 'string' && reviewed && this.changesetManager.backupBeforeWrite(resolveToolPath(reviewed)) === false) {
         // Nothing could be saved for the review: the write would be in neither the review nor
         // the rollback, and nothing would say so.
         const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
@@ -5730,7 +5731,7 @@ export class Agent implements IAgent {
       // Which file the write left at the path: a rollback deletes a new file only while it is still this one.
       if (mutatesFile && this.changesetManager?.active) {
         const written = (tc.input as Record<string, unknown>)[REVIEWED_PATH_FIELD];
-        if (typeof written === 'string' && written) this.changesetManager.recordWritten?.(resolve(written));
+        if (typeof written === 'string' && written) this.changesetManager.recordWritten?.(resolveToolPath(written));
       }
 
       // Without a store (a headless workflow step) the engine's own env secrets are still

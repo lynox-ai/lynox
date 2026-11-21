@@ -7,6 +7,7 @@ import { batchFilesTool } from './batch-files.js';
 import { setTenantWorkspace, clearTenantWorkspace, validatePath, resolveToolPath } from '../../core/workspace.js';
 import { closeWorkspaceBase, toWorkspaceRel } from '../../core/workspace-rel.js';
 import type { IAgent, SessionCounters } from '../../types/index.js';
+import { isDangerous } from '../permission-guard.js';
 
 function agent(): IAgent {
   const sessionCounters = { writeBytes: 0, httpRequests: 0 } as unknown as SessionCounters;
@@ -80,6 +81,21 @@ describe('with isolation, a relative path in the file tools is read from the wor
     expect(resolveWritablePath('d/f.txt')).toBe(join(ws, 'd', 'f.txt'));
     // An absolute path is unchanged.
     expect(resolveToolPath(join(cwd, 'f.txt'))).toBe(join(cwd, 'f.txt'));
+  });
+});
+
+describe('with isolation, the permission guard judges a relative path where the tool reads it', () => {
+  it('names the workspace file in the warning on a relative read of a sensitive name', () => {
+    const warning = isDangerous('read_file', { path: 'config/.env' });
+    expect(warning).toContain(join(ws, 'config', '.env'));
+    expect(warning).not.toContain(cwd);
+  });
+
+  it('lets an unattended move within the workspace by relative paths through, and blocks one out of it', () => {
+    mkdirSync(join(ws, 'in'));
+    expect(isDangerous('batch_files', { directory: 'in', pattern: '*.txt', operation: 'move', destination: 'out' }, 'autonomous')).toBeNull();
+    expect(isDangerous('batch_files', { directory: 'in', pattern: '*.txt', operation: 'move', destination: join(cwd, 'out') }, 'autonomous'))
+      .toContain('move destination outside project');
   });
 });
 

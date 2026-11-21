@@ -4,7 +4,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, dirname, resolve, basename } from 'node:path';
-import { isPathWithin, getWorkspaceCwd, resolveToolPath, writeRootsBesidesWorkspace } from './workspace.js';
+import { isPathWithin, getWorkspaceCwd, writeRootsBesidesWorkspace } from './workspace.js';
 import { processUmask, toWorkspaceRel, workspaceBase } from './workspace-rel.js';
 import { namesSidecarLabel } from './workspace-root.js';
 import { sidecarWriteModes } from './workspace-write-modes.js';
@@ -113,7 +113,7 @@ export class ChangesetManager {
    * the way can change between the backup and the rollback.
    */
   private _confine(filePath: string): string | null {
-    const abs = resolveToolPath(filePath);
+    const abs = resolve(filePath);
     // In shell sidecar mode a path below the label outside the context workspace is not tracked,
     // and not looked up by name to find out (D3).
     if (namesSidecarLabel(abs)) return null;

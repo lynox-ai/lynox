@@ -316,7 +316,7 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
     }
     // In shell sidecar mode a directory below the label outside the context workspace is not
     // reached by name (D3).
-    if (namesSidecarLabel(input.directory)) {
+    if (namesSidecarLabel(resolveToolPath(input.directory))) {
       throw new Error(`${input.directory} is in the workspace but not in this conversation's folder. Name a directory in ${base?.ws ?? 'the workspace'}.`);
     }
     // Resolve symlinks on the directory itself to prevent traversal via symlinked root

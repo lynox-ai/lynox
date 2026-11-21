@@ -6,7 +6,7 @@ import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
 import { resolve, dirname, basename, join } from 'node:path';
 import type { AutonomyLevel, ProviderConfigSnapshot, ToolEntry, WarningPayload } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
-import { isWorkspaceActive, getWorkspaceCwd, READ_ONLY_ROOTS, isPathWithin } from '../core/workspace.js';
+import { isWorkspaceActive, getWorkspaceCwd, READ_ONLY_ROOTS, isPathWithin, resolveToolPath } from '../core/workspace.js';
 import { proveBashCommand, BASH_OBSERVE_EVENT, type BashProof } from './bash-allowlist.js';
 import { shellIsolation } from '../core/shell-isolation.js';
 import { namesSidecarLabel } from '../core/workspace-root.js';
@@ -2002,7 +2002,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   }
 
   if (toolName === 'read_file' && input && typeof input === 'object' && 'path' in input) {
-    const rawPath = resolve(asPath('path', String((input as { path: unknown }).path)));
+    const rawPath = resolveToolPath(asPath('path', String((input as { path: unknown }).path)));
     const filePath = resolveRealPath(rawPath);
     // Check both raw (pre-symlink) and resolved path — /etc/ → /private/etc/ on macOS
     if (isSensitivePath(rawPath) || isSensitivePath(filePath)) {
@@ -2051,7 +2051,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
 
   if (toolName === 'batch_files' && input && typeof input === 'object') {
     const obj = input as { directory?: unknown; operation?: unknown; destination?: unknown };
-    const dirRaw = typeof obj.directory === 'string' ? resolve(asPath('directory', obj.directory)) : '';
+    const dirRaw = typeof obj.directory === 'string' ? resolveToolPath(asPath('directory', obj.directory)) : '';
     const dirPath = dirRaw ? resolveRealPath(dirRaw) : '';
 
     if (dirPath) {
@@ -2064,7 +2064,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     }
 
     if (obj.operation === 'move' && typeof obj.destination === 'string') {
-      const destRaw = resolve(asPath('destination', obj.destination));
+      const destRaw = resolveToolPath(asPath('destination', obj.destination));
       const destPath = resolveRealPath(destRaw);
       if (isSensitivePath(destRaw) || isSensitivePath(destPath) || LYNOX_DIR.test(destRaw) || LYNOX_DIR.test(destPath)) {
         if (autonomy === 'autonomous') {
@@ -2073,7 +2073,9 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
         return framed`⚠ ${system(toolName)}: move files into sensitive path — "${agentText(destPath)}"`;
       }
 
-      const cwd = resolveRealPath(process.cwd());
+      // The project is the context workspace under isolation (the tool moves within it only),
+      // the process cwd without.
+      const cwd = resolveRealPath(getWorkspaceCwd());
       if (!isPathWithin(destPath, cwd)) {
         if (autonomy === 'autonomous') {
           return hardBlock(framed`⚠ ${system(toolName)}: move destination outside project — "${agentText(destPath)}" [BLOCKED]`);
