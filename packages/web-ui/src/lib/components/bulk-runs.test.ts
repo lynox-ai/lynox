@@ -836,6 +836,9 @@ describe('going on from a run that halted', () => {
 		expect(ex(2, 3, DE)).toContain('Bei 3 weiteren Zielen ist offen, ob die Änderung beim Anbieter angekommen ist.');
 		expect(ex(2, 1, DE)).toContain('Bei einem weiteren Ziel ist offen, ob');
 		expect(ex(2, 1, EN)).toContain('For one more target it is unclear whether');
+		// The singular forms in full: one target, never "those".
+		expect(ex(2, 1, EN)).toBe('Taking back restores the previous value of every written target. For one more target it is unclear whether the change reached the provider. For that target, it checks first and only resets where the value from this run is in place. If someone has changed a target since, it leaves that target as it is and shows it to you. Before writing, it tells you how many targets it will work on, and needs a second approval.');
+		expect(ex(0, 1, EN)).toBe('No target is confirmed as written. For one target it is unclear whether the change reached the provider. Taking back checks that target and restores the previous value only where the value from this run is in place. Before writing, it tells you how many targets it will work on, and needs a second approval.');
 		expect(ex(2, 3, DE)).toMatch(/^Die Rücknahme stellt bei jedem geschriebenen Ziel/);
 		// None written: it does not say "every written target".
 		expect(ex(0, 1, DE)).toMatch(/^Kein Ziel ist als geschrieben bestätigt\. Bei einem Ziel ist offen, ob/);
