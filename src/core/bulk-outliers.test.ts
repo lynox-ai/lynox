@@ -418,7 +418,10 @@ describe('markersOf', () => {
       `evil<dialog style="font-family:'A'">zz</dialog>.com`, 'evil<span style="display:none;--y:{;display:inline}">zz</span>.com',
       'evil<span style="display:none!important;display:inline">zz</span>.com',
       `evil<span style="font-family:'A';display:none">zz</span><p style="display:inline">.com</p>`,
-      'ev<span hidden style="d\\69splay:inline">il</span>.com', '<p style="display:inline">ev<span hidden="until-found">il</span></p>.com']) {
+      'ev<span hidden style="d\\69splay:inline">il</span>.com', '<p style="display:inline">ev<span hidden="until-found">il</span></p>.com',
+      '<span style="color:red display:none">ev<p style="display:inline">il</p></span>.com',
+      'ev<math hidden><mtext><p style="display:inline">il</p></mtext></math>.com', '<math hidden><mtext>evil</div>.com</mtext></math>',
+      'ev<span style="display:none/**/;">zz</span>il.com', 'ev<span style="d\\69splay:none">zz</span>il.com']) {
       expect([...markersOf(text).get('link')!], text).toContain('evil.com');
     }
     for (const text of ['evil<p STYLE="display:inline">.com', 'evil<BR STYLE=display:none>.com', 'evil<p sTyLe=x;display:inline>.com', 'evil<dialog></dialog>.com', 'evil<BR HIDDEN>.com']) {

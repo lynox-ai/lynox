@@ -183,9 +183,10 @@ function shownNot(el: Element): 'yes' | 'maybe' | 'no' {
   const style = styleOf(el);
   const attrs = defaultTreeAdapter.getAttrList(el);
   const hidden = attrs.find((a) => a.name === 'hidden');
-  const signal = (hidden !== undefined && hidden.value.toLowerCase() !== 'until-found')
+  // `hidden` hides only an HTML element: a browser shows a MathML or SVG one with it.
+  const signal = (hidden !== undefined && el.namespaceURI === p5.NS.HTML && hidden.value.toLowerCase() !== 'until-found')
     || el.tagName === 'rp' || (el.tagName === 'dialog' && !attrs.some((a) => a.name === 'open'))
-    || (style !== null && /(?:^|[;\s])display ?: ?none ?(?:!|;|$)/iu.test(style));
+    || (style !== null && (/(?:^|;) ?display ?: ?none ?(?:!|;|$)/iu.test(style) || /\\|\/\*/u.test(style)));
   if (!signal) return 'no';
   if (style === null) return 'yes';
   if (/["'(\\{[]|\/\*|(?:^|[;\s])all ?:/iu.test(style)
