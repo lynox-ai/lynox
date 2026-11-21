@@ -250,8 +250,18 @@ describe('google_sheets after content from outside the chat', () => {
     const result = await createSheetsTool(auth).handler({ action: 'append', spreadsheet_id: 'sid', range: 'Sheet1!A:B', values: [['x', FETCHING]] }, a);
     expect(result).toContain('Data appended');
     expect(asked(a).options).toEqual(['Write as text', 'Write as formulas', 'Don’t write']);
+    expect(flattenPrompt(asked(a).prompt).split('\n')[0]).toBe('Add rows to range "Sheet1!A:B" in spreadsheet sid? Google inserts them below the table there; nothing is overwritten.');
     expect(flattenPrompt(asked(a).prompt).split('\n').at(-1)).toBe(`1st new row, 2nd value: ${FETCHING}`);
     expect(sentValues()).toEqual([['x', `'${FETCHING}`]]);
+  });
+
+  it('asks an append as adding rows, not as overwriting, before any content from outside', async () => {
+    const a = agent('none', 'Yes');
+    mockFetch.mockResolvedValueOnce(APPENDED);
+    await createSheetsTool(auth).handler({ action: 'append', spreadsheet_id: 'sid', range: 'Sheet1!A:B', values: [['x', FETCHING]] }, a);
+    expect(asked(a).options).toEqual(['Yes', 'No']);
+    expect(flattenPrompt(asked(a).prompt)).toBe('Add rows to range "Sheet1!A:B" in spreadsheet sid? Google inserts them below the table there; nothing is overwritten.');
+    expect(sentUrl()).toContain('insertDataOption=INSERT_ROWS');
   });
 
   it('leaves format as it was: its raw requests are not read for formulas', async () => {

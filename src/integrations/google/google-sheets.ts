@@ -268,12 +268,16 @@ export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<Sh
           // the range in text nodes — see core/prompt-value.ts. They are no
           // longer collapsed on the way in, which means the prompt now shows
           // the value that is actually about to be used.
+          // An append inserts its rows (`insertDataOption=INSERT_ROWS`), so it overwrites nothing
+          // and is not asked about as if it did.
           const confirmMsg: PromptText = input.action === 'format'
             ? pv`Apply batch changes to spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? Formatting requests can delete or overwrite cells and sheets.`
-            : pv`Overwrite range "${input.range ?? '(unspecified)'}" in spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? This will replace existing data.`;
+            : input.action === 'append'
+              ? pv`Add rows to range "${input.range ?? '(unspecified)'}" in spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? Google inserts them below the table there; nothing is overwritten.`
+              : pv`Overwrite range "${input.range ?? '(unspecified)'}" in spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? This will replace existing data.`;
           // After content from outside the chat, a cell that starts like a formula is shown with
           // the question: Google runs it on its side, where no check on the engine's requests
-          // sees the address it may fetch. Before that, the question is the one it always was.
+          // sees the address it may fetch. Before that, the question is the plain one above.
           const formulas = deriveTurnUntrusted(agent) ? formulasToShow(input) : [];
           if (formulas.length === 0) {
             const answer = await agent.promptUser(confirmMsg, ['Yes', 'No']);
