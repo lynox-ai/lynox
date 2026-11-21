@@ -484,7 +484,8 @@ export interface ActiveTask {
   stopRequested?: boolean | undefined;
   /**
    * A stop of a bulk write run whose mark the ledger refused (`stopTask`): the loop of this run in
-   * this process stops on it as on the mark. Per run start, so a resumed run never meets it.
+   * this process stops on it as on the mark. Per run start, so a later run start never meets it; a
+   * resume given while this run start still writes is stopped by it, as the in-process stop always did.
    */
   stopMarkFailed?: boolean | undefined;
   /** See {@link RunStarterSlot.accessEnded}. */
