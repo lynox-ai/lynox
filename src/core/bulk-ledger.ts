@@ -1074,6 +1074,9 @@ function* rulePairs(
 /** How much stored text, in characters, {@link BulkLedger.judgeOutliersOf} decrypts and reads before it
  *  lets other work run: tens of milliseconds on shop texts. */
 export const OUTLIER_CHUNK = 256 * 1024;
+/** How long, in milliseconds, it reads before it lets other work run whatever the length: a short text
+ *  of deeply nested markup costs the parser far more than its characters say. */
+export const OUTLIER_SLICE_MS = 20;
 /** How many rows {@link BulkLedger.judgeOutliersOf} fetches at once. */
 const OUTLIER_PAGE = 200;
 
@@ -1763,7 +1766,8 @@ export class BulkLedger {
    * owner took out included: the rest of the run does not change when the owner takes one out, so the
    * marks do not move under their hand and the result is computed once per set of verdicts (held in
    * {@link outlierCache}, keyed by how many are decided; a second caller while it is computed waits for
-   * the same result). The texts are read in parts of about {@link OUTLIER_CHUNK} characters, the process
+   * the same result). The texts are read in parts of about {@link OUTLIER_CHUNK} characters or
+   * {@link OUTLIER_SLICE_MS} milliseconds, whichever comes first, the process
    * free between them: 5000 long texts take seconds, and the route waits for them, not every other request.
    * Null for a run without a rule. The store host and the start domains are what the run may link to,
    * so they are not new.
@@ -1810,15 +1814,17 @@ export class BulkLedger {
     const inputs: OutlierInput[] = [];
     const markers: TargetMarkers[] = [];
     let read = 0;
+    let since = performance.now();
     let after = -1;
     for (;;) {
       const rows = page.all(runId, after) as { seq: number; before: string | null; after_planned: string | null }[];
       for (const r of rows) {
         after = r.seq;
         if (r.after_planned === null) continue;
-        if (read >= OUTLIER_CHUNK) {
+        if (read >= OUTLIER_CHUNK || performance.now() - since >= OUTLIER_SLICE_MS) {
           read = 0;
           await new Promise<void>((resolve) => { setImmediate(resolve); });
+          since = performance.now();
         }
         const beforeText = r.before === null ? '' : this.engineDb.dec(r.before);
         const afterText = this.engineDb.dec(r.after_planned);

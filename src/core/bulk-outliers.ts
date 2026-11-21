@@ -9,7 +9,13 @@
 // What they cannot see is text: an address, a phone number or a link written as words.
 
 /** Why a verdict is listed first. */
+import { defaultTreeAdapter, html as p5 } from 'parse5';
+import type { DefaultTreeAdapterTypes } from 'parse5';
+import { readWithinBounds, type HtmlFragment } from './html-tree.js';
 import { TOP_LEVEL_DOMAINS } from './top-level-domains.js';
+
+type Node = DefaultTreeAdapterTypes.ChildNode;
+type Element = DefaultTreeAdapterTypes.Element;
 
 export type OutlierReason =
   | 'changed_fields'
@@ -120,45 +126,94 @@ function phoneKey(written: string): string {
 export function markersOf(text: string): Map<MarkerKind, Set<string>> {
   const out = new Map<MarkerKind, Set<string>>([['link', new Set()], ['email', new Set()], ['phone', new Set()], ['script', new Set()]]);
   readMarkers(text, out);
-  // Markup can hide what a browser shows ("evil&#46;com", "evil<b></b>.com"): the text as shown is read too.
+  // Markup can hide what a browser shows ("evil&#46;com", "evil<b></b>.com"): the text as shown is read
+  // too, by its tags and by the tree a browser builds from it. Every reading adds; none takes away.
   if (text.includes('<') || text.includes('&')) {
-    readMarkers(shownText(text, true), out);
-    // A style can show a block inline in more ways than a list could name: where one is styled, the
-    // text is also read with no gap at a styled block.
-    if (/style|hidden/iu.test(text)) readMarkers(shownText(text, false), out);
+    readMarkers(taggedText(text), out);
+    const tree = treeOf(text);
+    if (tree !== null) {
+      readMarkers(treeText(tree, true), out);
+      // A style can show a block inline: where one may, the tree is also read with no gap at that block.
+      if (/style|hidden/iu.test(text)) readMarkers(treeText(tree, false), out);
+    }
   }
   return out;
 }
 
-/** Elements a browser shows on a line of their own: removing one leaves a gap, so the end of one
- *  paragraph and the start of the next ("Eiche.</p><p>Design") are not read as one word. An inline
- *  tag leaves none ("evil<b></b>.com" shows "evil.com"). */
+/** Elements a browser shows on a line of their own: around one a gap, so the end of one paragraph and
+ *  the start of the next ("Eiche.</p><p>Design") are not read as one word. An inline element leaves
+ *  none ("evil<b></b>.com" shows "evil.com"). */
 const BLOCK_TAGS = new Set([
   'p', 'div', 'br', 'li', 'ul', 'ol', 'dl', 'dt', 'dd', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'tr', 'td', 'th', 'table',
   'thead', 'tbody', 'tfoot', 'caption', 'section', 'article', 'header', 'footer', 'aside', 'nav', 'blockquote', 'pre', 'hr',
   'figure', 'figcaption', 'address', 'main', 'details', 'summary', 'legend', 'fieldset', 'form', 'center', 'menu',
 ]);
 
-/** Whether a block tag's own attributes may show it inline or not at all, so that it breaks no line: a
- *  display no block has, a float or an absolute position, `all`, a style this cannot read (a comment,
- *  an escape, a reference), or `hidden`. A style without them (a margin, a colour, `display:block`)
- *  keeps the break, or every paragraph a shop's editor styles would run into the next as a host. What
- *  a style sheet or a parent's layout shows inline, the text's own or the shop's, is not read. */
-function mayShowInline(raw: string, breaksLine: boolean): boolean {
-  // Every run of blanks as one, so that no pattern below backtracks over a long one.
-  const tag = raw.replace(/\s+/gu, ' ');
-  if (/[ /"']hidden(?![^ /=>])/iu.test(tag)) return true;
-  if (!/style/iu.test(tag)) return false;
-  // A display that is no block's, a float or an absolute position takes the block out of the line; a
-  // break ignores float and position. A style this cannot read counts as one that does.
-  return /display ?:(?! ?(?:block|flex|grid|table|list-item|flow-root) ?(?:! ?important)? ?(?:[;"']|$))|\ball ?:|[\\&]|\/\*/iu.test(tag)
-    || (!breaksLine && /\bfloat ?:(?! ?none\b)|\bposition ?: ?(?:absolute|fixed)/iu.test(tag));
+/** Elements whose content a browser does not show as text. */
+const UNSHOWN = new Set(['script', 'style', 'template', 'noscript', 'title', 'head']);
+
+/** The tree a browser builds from a text, or null for one beyond what this reads (`withinReadingBounds`):
+ *  such a text an HTML field refuses to write, and a plain-text field holds no new tag at all. */
+function treeOf(text: string): HtmlFragment | null {
+  try {
+    return readWithinBounds(text);
+  } catch {
+    return null;
+  }
 }
 
-/** A text as a browser shows it, near enough: without its tags, its character references decoded. With
- *  `gapAtStyled` false a styled block tag leaves no gap, as one a style shows inline would not. */
-function shownText(text: string, gapAtStyled: boolean): string {
-  const opened = new Map<string, boolean[]>();
+/** A style value as the parser decoded it, every run of blanks as one: no pattern below then
+ *  backtracks over a long run. */
+function styleOf(el: Element): string | null {
+  const style = defaultTreeAdapter.getAttrList(el).find((a) => a.name === 'style');
+  return style === undefined ? null : style.value.replace(/\s+/gu, ' ');
+}
+
+const hasHidden = (el: Element): boolean => defaultTreeAdapter.getAttrList(el).some((a) => a.name === 'hidden');
+
+/** Whether a browser shows nothing of an element: `hidden`, or a style whose display is none. */
+function shownNot(el: Element): boolean {
+  const style = styleOf(el);
+  return hasHidden(el) || (style !== null && /(?:^|[;\s])display ?: ?none ?(?:! ?important)? ?(?:;|$)/iu.test(style));
+}
+
+/** Whether a block's own style may show it inline, so that it breaks no line: a display no block has,
+ *  a float or an absolute position, `all`, or a style this cannot read (an escape, a comment). A style
+ *  without them (a margin, a colour, `display:block`) keeps the break, or every paragraph a shop's
+ *  editor styles would run into the next as a host. A break ignores float and position. What a style
+ *  sheet or a parent's layout shows inline, the text's own or the shop's, is not read. */
+function mayShowInline(el: Element): boolean {
+  const style = styleOf(el);
+  if (style === null) return false;
+  return /display ?:(?! ?(?:block|flex|grid|table|list-item|flow-root) ?(?:! ?important)? ?(?:;|$))|\ball ?:|\\|\/\*/iu.test(style)
+    || (el.tagName !== 'br' && /\bfloat ?:(?! ?none\b)|\bposition ?: ?(?:absolute|fixed)/iu.test(style));
+}
+
+/** The text a browser shows from a tree, near enough: its text nodes in order, nothing below an element
+ *  it hides or whose content it does not show, a gap around each block — with `gapAtInline` false, not
+ *  around a block whose style may show it inline. Implicitly closed elements, end tags without a start
+ *  and the content of hidden ones are the parser's: the tree is the one a browser builds. */
+function treeText(tree: HtmlFragment, gapAtInline: boolean): string {
+  let shown = '';
+  const stack: (Node | ' ')[] = [...defaultTreeAdapter.getChildNodes(tree)].reverse();
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (node === ' ') { shown += ' '; continue; }
+    if (defaultTreeAdapter.isTextNode(node)) { shown += node.value; continue; }
+    if (!defaultTreeAdapter.isElementNode(node)) continue;
+    if (UNSHOWN.has(node.tagName) || shownNot(node)) continue;
+    const html = node.namespaceURI === p5.NS.HTML;
+    const gap = html && BLOCK_TAGS.has(node.tagName) && (gapAtInline || !mayShowInline(node));
+    if (gap) { shown += ' '; stack.push(' '); }
+    const children = defaultTreeAdapter.getChildNodes(node);
+    for (let k = children.length - 1; k >= 0; k -= 1) stack.push(children[k]!);
+  }
+  return shown;
+}
+
+/** A text as its tags show it, near enough: without them, a gap at each block tag, its character
+ *  references decoded. A reading of its own beside the tree's: it reads what the bounds leave unread. */
+function taggedText(text: string): string {
   let shown = '';
   let i = 0;
   // Tags by index: an opening bracket without a closing one is text to the end, read once.
@@ -170,33 +225,20 @@ function shownText(text: string, gapAtStyled: boolean): string {
     shown += text.slice(i, open);
     // The name ends where HTML ends it — tab, line feed, form feed, carriage return, space, slash or the
     // tag's end: `<p-x>`, `<p:o>` and `<p\u3000>` are elements of their own, shown inline, and `</ p>`
-    // is no tag. Whether a style shows a block inline is not read from the style: the caller reads the
-    // text once with a gap at every block and once with none at a styled one.
+    // is no tag.
     const tag = text.slice(open + 1, close);
     const named = /^\/?([a-z][a-z0-9]{0,15})/iu.exec(tag.slice(0, 18));
     const after = named === null ? undefined : tag[named[0].length];
     const name = named !== null && (after === undefined || /[\t\n\f\r /]/u.test(after)) ? named[1]!.toLowerCase() : undefined;
-    if (name !== undefined && BLOCK_TAGS.has(name)) {
-      // Read without gaps, an end tag takes the reading of its start tag: `</p>` names no style, but
-      // closes a block its start showed inline. A break and a rule have no end tag.
-      let inline = false;
-      if (!gapAtStyled) {
-        const lone = name === 'br' || name === 'hr';
-        if (tag.startsWith('/') && !lone) inline = opened.get(name)?.pop() ?? false;
-        else {
-          inline = mayShowInline(tag, name === 'br');
-          if (!lone) {
-            const stack = opened.get(name) ?? [];
-            stack.push(inline);
-            opened.set(name, stack);
-          }
-        }
-      }
-      if (!inline) shown += ' ';
-    }
+    if (name !== undefined && BLOCK_TAGS.has(name)) shown += ' ';
     i = close + 1;
   }
-  return shown.replace(/&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|(amp|lt|gt|quot|apos|nbsp));/giu, (whole, dec?: string, hex?: string, name?: string) => {
+  return decodeReferences(shown);
+}
+
+/** Numeric references and the few named ones a shop's text carries, decoded; any other left as written. */
+function decodeReferences(text: string): string {
+  return text.replace(/&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|(amp|lt|gt|quot|apos|nbsp));/giu, (whole, dec?: string, hex?: string, name?: string) => {
     const point = dec !== undefined ? Number(dec) : hex !== undefined ? Number.parseInt(hex, 16) : undefined;
     if (point !== undefined) return point > 0 && point <= 0x10ffff ? String.fromCodePoint(point) : whole;
     return ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' } as Record<string, string>)[name!.toLowerCase()] ?? whole;

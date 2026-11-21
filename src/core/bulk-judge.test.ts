@@ -326,6 +326,31 @@ describe('judgeOutliersOf — the verdicts a judged run lists first', () => {
     expect(await ledger.judgeOutliersOf(id)).toMatchObject({ decided: 30 });
   });
 
+  it('reads a run whose markup costs more than its length in parts by time, letting other work run', async () => {
+    const many = Array.from({ length: 30 }, (_, i) => `N${String(i + 1).padStart(3, '0')}`);
+    // Short titles of deeply nested markup: far below one part in characters, slow for the parser.
+    const deep = '<div>'.repeat(1500);
+    store.insertRecords({
+      collection: 'products',
+      records: many.map((sku) => ({ sku, title: `old ${sku.toLowerCase()} ${deep}`, note: `${MARK}-${sku}` })),
+      stamp: TEST_STAMP,
+    });
+    const id = await plan(many);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.001 }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    expect(30 * (deep.length + 20)).toBeLessThan(OUTLIER_CHUNK);
+
+    let done = false;
+    let turns = 0;
+    const other = (): void => { if (!done) { turns += 1; setImmediate(other); } };
+    setImmediate(other);
+    const result = await ledger.judgeOutliersOf(id);
+    done = true;
+    expect(result).toMatchObject({ decided: 30 });
+    expect(turns).toBeGreaterThanOrEqual(2);
+  });
+
   it('reads a run whose texts exceed one part in parts, letting other work run before it is done', async () => {
     const many = Array.from({ length: 60 }, (_, i) => `Q${String(i + 1).padStart(3, '0')}`);
     // Long titles, so the run's text is more than one part.

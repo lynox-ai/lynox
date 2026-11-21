@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { judgeOutliers, markersOf, OUTLIER_MIN_VERDICTS, targetMarkers, type OutlierFieldKind, type OutlierInput } from './bulk-outliers.js';
 import { TOP_LEVEL_DOMAINS } from './top-level-domains.js';
+import { checkMarkup } from './bulk-html.js';
+import { MARKUP_MAX_TAGS } from './html-tree.js';
 
 const OWN = ['teehaus.example.ch'];
 const KINDS: Record<string, OutlierFieldKind> = { title: 'text', description: 'text', status: 'enum', weight_g: 'number', vegan: 'boolean', price: 'number', origin: 'text', note: 'text' };
@@ -369,8 +371,12 @@ describe('markersOf', () => {
 
   it('reads no host across the end of one block and the start of the next, whatever the case of word or tag', () => {
     for (const word of ['design', 'Design', 'DESIGN', 'black', 'Black', 'bio']) {
-      for (const tag of ['</p><p>', '</P><P>', '<br>', '<BR>', '<br/>', '</li><li>', '</div><div class="x">', '</td><td>', '<hr>', '</h1><h2>', '</blockquote><table>', '</figcaption>']) {
+      for (const tag of ['</p><p>', '</P><P>', '<br>', '<BR>', '<br/>', '</li><li>', '</div><div class="x">', '<hr>', '</h1><h2>']) {
         const text = `<p>Aus Eiche.${tag}${word} zeitlos</p>`;
+        expect([...markersOf(text).get('link')!], text).toEqual([]);
+      }
+      for (const text of [`<table><tr><td>Aus Eiche.</td><td>${word} zeitlos</td></tr></table>`, `<blockquote>Aus Eiche.</blockquote><table><tr><td>${word}</td></tr></table>`,
+        `<figure><figcaption>Aus Eiche.</figcaption>${word} zeitlos</figure>`]) {
         expect([...markersOf(text).get('link')!], text).toEqual([]);
       }
     }
@@ -393,6 +399,13 @@ describe('markersOf', () => {
       expect([...markersOf(text).get('link')!], text).toEqual(['evil.com']);
     }
     expect([...markersOf('evil<br hidden>.com').get('link')!]).toEqual(['evil.com']);
+    // The tree a browser builds: implicitly closed elements, end tags without a start, hidden content.
+    for (const text of ['<ul><li style="display:inline">x<ul><li>a</ul>evil</li>.com</ul>', 'evil<ol hidden><li>x</li></ol>.com',
+      'evil<template><p>x</p></template>.com', 'evil</li>.com', 'evil</h1>.com', 'evil</dd>.com', 'evil</ul>.com', 'evil</blockquote>.com',
+      'evil</section>.com', 'evil</hr>.com', 'evil<p hidden>!</p>.com', 'evil<div style="display: none">!</div>.com', 'evil<p style="display:flex inline">.com']) {
+      expect([...markersOf(text).get('link')!], text).toContain('evil.com');
+    }
+    expect([...markersOf('<p>Neu<p style="display:inline">evil</p>.com').get('link')!]).toContain('evil.com');
     for (const text of ['evil<p STYLE="display:inline">.com', 'evil<BR STYLE=display:none>.com', 'evil<p sTyLe=x;display:inline>.com', 'evil<dialog></dialog>.com', 'evil<BR HIDDEN>.com']) {
       expect([...markersOf(text).get('link')!], text).toEqual(['evil.com']);
     }
@@ -414,10 +427,14 @@ describe('markersOf', () => {
       'Eiche.<br aria-hidden="true">Shop', 'Eiche.<br class="hidden-xs">shop', 'Eiche.<br data-hidden>shop', 'Eiche.<p style="overflow:hidden">shop',
       '<div style="display:flex"><p>Eiche.</p><p>shop</p></div>', '<p style="display:block">Eiche.</p><p>shop',
       'Eiche.<p style="display :\t block\n !  important ;">shop', 'Eiche.<p style="margin: 0; display: block">shop', 'Eiche.<div style="float: none"></div>shop',
-      'Eiche.<p style="display: flex;">shop']) {
+      'Eiche.<p style="display: flex;">shop', '<p style="margin: 0px; font: 12px &quot;Helvetica Neue&quot;;">Eiche.</p><p style="margin: 0px; font: 12px &quot;Helvetica Neue&quot;;">shop</p>',
+      'Eiche.<p title="hidden gem">shop', "Eiche.<p title='versteckt hidden'>shop"]) {
       expect([...markersOf(text).get('link')!], text).toEqual([]);
     }
     expect([...markersOf('evil<p style="display:\n\n  inline">.com').get('link')!]).toEqual(['evil.com']);
+    for (const text of ['evil<p style="display&colon;inline">.com', 'evil<p style="display:&#105nline">.com', 'evil<p class="a"hidden></p>.com', 'evil<p title="&quot;" hidden title="&quot;"></p>.com', 'evil<p style="font: &quot;x&quot;; display: inline">.com']) {
+      expect([...markersOf(text).get('link')!], text).toEqual(['evil.com']);
+    }
     // A style naming no display, and a class, keep the break: a shop's editor puts them on every block.
     for (const text of ['Eiche.<br style="clear:both">shop', 'Eiche.<br>shop', 'Eiche.<br class="br-style">shop', 'Eiche.<br data-mce-style="">shop',
       '<p class="style-a">Aus Eiche.<p class="style-a">shop', '<ul><li class="li-style">Eiche.<li class="li-style">shop</ul>', '<p style="margin:0">Eiche.<p style="color:#333">shop']) {
@@ -532,5 +549,12 @@ describe('markersOf', () => {
 
   it('reads hosts lower case, without www, port or obfuscation', () => {
     expect([...markersOf('Siehe WWW.Example.COM:8080/x und example dot org').get('link')!]).toEqual(['example.com', 'example.org']);
+  });
+});
+
+describe('markersOf beyond the tree it reads', () => {
+  it('leaves a text beyond the reading bounds to checkMarkup, which refuses to write it', () => {
+    const after = '<p>x</p>'.repeat(MARKUP_MAX_TAGS) + 'evil<p hidden></p>.com';
+    expect(checkMarkup({ before: '<p>x</p>', after, storeHost: 'moebel-meier.myshopify.com', startDomains: [] }).ok).toBe(false);
   });
 });
