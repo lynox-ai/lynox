@@ -10,7 +10,8 @@
   to an earlier release on an instance that has run bulk runs is not supported:
   the earlier engine ignores the column, so a stop accepted but not yet carried
   out is lost and the run writes on, and a stop left over from before can stop
-  a run resumed after the next upgrade. `engine.db` has no downgrade path.
+  a run that was resumed on the earlier release, once the instance is upgraded
+  again. `engine.db` has no downgrade path.
 - `docker-compose.yml` and the compose file the installer writes no longer pin
   `platform: linux/amd64`. ARM and Apple Silicon hosts get the native arm64 image
   after `docker compose pull && docker compose up -d` instead of the amd64 image
