@@ -354,7 +354,7 @@ describe('markersOf', () => {
     for (const text of ['Mehr auf evil.cloud', 'evil.swiss', 'evil.live', 'EVIL.SWISS', 'evil.zip']) {
       expect([...markersOf(text).get('link')!], text).toHaveLength(1);
     }
-    for (const text of ['Art.Nr 4711', 'Str.St Gallen', 'Tel.Tel', 'datei.pdf']) {
+    for (const text of ['Art.Nr 4711', 'Str.St Gallen', 'Tel.Tel', 'datei.pdf', 'Mo.Fr offen', 'Lager.Ca 5 kg', 'Kl.Gr', 'Gr.Us']) {
       expect([...markersOf(text).get('link')!], text).toEqual([]);
     }
     expect(TOP_LEVEL_DOMAINS.size).toBe(1449);
@@ -367,12 +367,19 @@ describe('markersOf', () => {
     expect([...markersOf('info&#64;evil.com').get('link')!]).toEqual(['evil.com']);
   });
 
-  it('reads no host across the end of one paragraph and the start of the next, in any case', () => {
+  it('reads no host across the end of one block and the start of the next, whatever the case of word or tag', () => {
     for (const word of ['design', 'Design', 'DESIGN', 'black', 'Black', 'bio']) {
-      for (const tag of ['</p><p>', '<br>', '</li><li>', '</div>\n<div class="x">', '</td><td>']) {
+      for (const tag of ['</p><p>', '</P><P>', '<br>', '<BR>', '<br/>', '</li><li>', '</div><div class="x">', '</td><td>', '<hr>', '</h1><h2>', '</blockquote><table>', '</figcaption>']) {
         const text = `<p>Aus Eiche.${tag}${word} zeitlos</p>`;
         expect([...markersOf(text).get('link')!], text).toEqual([]);
       }
+    }
+  });
+
+  it('reads a host across a tag that only starts like a block, a tag that is none, and a block a style shows inline', () => {
+    for (const text of ['evil<p-x></p-x>.com', 'evil<p:o></p:o>.com', 'evil<br-x>.com', 'evil<div_x></div_x>.com', 'evil<li.x>.com', 'evil<P-X>.com',
+      'evil</ p>.com', 'evil<p style="display:inline">.com</p>', 'evil<div style=display:contents>.com</div>', 'evil<blockquotes>.com']) {
+      expect([...markersOf(text).get('link')!], text).toEqual(['evil.com']);
     }
   });
 

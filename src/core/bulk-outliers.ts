@@ -70,7 +70,11 @@ const OBFUSCATED_DOT = /(?<!\s)\s*(?:\[\.\]|\(\.\)|\{\.\}|\[dot\]|\(dot\))\s*|(?
 /** Top-level domains that are also words ("Baumwolle.Es ist", "Holz.Co"): written capitalised after a
  *  full stop that lacks its space, they start a sentence, not a host. A host with a scheme needs no
  *  top-level domain at all. */
-const WORD_TLDS = new Set(['es', 'it', 'in', 'at', 'to', 'no', 'de', 'be', 'me', 'co', 'so', 'am', 'an']);
+const WORD_TLDS = new Set([
+  'es', 'it', 'in', 'at', 'to', 'no', 'de', 'be', 'me', 'co', 'so', 'am', 'an',
+  // Abbreviations of a shop text: "Mo.Fr 9-18", "Kl.Gr", "Lager.Ca", "Gr.Us".
+  'fr', 'gr', 'ca', 'us',
+]);
 /** The top-level domains a host counts under when it is written capitalised ("Evil.Com"). Most of the
  *  others are words a sentence starts with ("Eiche.Design", "Navy.Black", "Holz.Art"), so a
  *  capitalised one of them is read as a sentence; written in lower case or all capitals they count. */
@@ -123,11 +127,11 @@ export function markersOf(text: string): Map<MarkerKind, Set<string>> {
 
 /** Elements a browser shows on a line of their own: removing one leaves a gap, so the end of one
  *  paragraph and the start of the next ("Eiche.</p><p>Design") are not read as one word. An inline
- *  tag leaves none ("evil<b></b>.com" shows "evil.com"). */
+ *  tag leaves none ("evil<b></b>.com" shows "evil.com"), and neither does a block tag with a style. */
 const BLOCK_TAGS = new Set([
   'p', 'div', 'br', 'li', 'ul', 'ol', 'dl', 'dt', 'dd', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'tr', 'td', 'th', 'table',
   'thead', 'tbody', 'tfoot', 'caption', 'section', 'article', 'header', 'footer', 'aside', 'nav', 'blockquote', 'pre', 'hr',
-  'figure', 'figcaption', 'address', 'main', 'details', 'summary',
+  'figure', 'figcaption', 'address', 'main', 'details', 'summary', 'legend', 'fieldset', 'form', 'center', 'dialog', 'menu',
 ]);
 
 /** A text as a browser shows it, near enough: without its tags, its character references decoded. */
@@ -141,8 +145,13 @@ function shownText(text: string): string {
     const close = text.indexOf('>', open + 1);
     if (close < 0) { shown += text.slice(i); break; }
     shown += text.slice(i, open);
-    const name = /^\/?\s*([a-z][a-z0-9]*)/iu.exec(text.slice(open + 1, Math.min(close, open + 16)))?.[1]?.toLowerCase();
-    if (name !== undefined && BLOCK_TAGS.has(name)) shown += ' ';
+    // The name ends at a blank, a slash or the tag's end: `<p-x>` and `<p:o>` are elements of their own,
+    // shown inline, and `</ p>` is no tag. A block tag with a style may be shown inline: no gap either.
+    const tag = text.slice(open + 1, close);
+    const named = /^\/?([a-z][a-z0-9]{0,15})/iu.exec(tag.slice(0, 18));
+    const after = named === null ? undefined : tag[named[0].length];
+    const name = named !== null && (after === undefined || /[\s/]/u.test(after)) ? named[1]!.toLowerCase() : undefined;
+    if (name !== undefined && BLOCK_TAGS.has(name) && !/\sstyle\s*=/iu.test(tag)) shown += ' ';
     i = close + 1;
   }
   return shown.replace(/&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|(amp|lt|gt|quot|apos|nbsp));/giu, (whole, dec?: string, hex?: string, name?: string) => {
