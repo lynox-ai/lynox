@@ -14,6 +14,7 @@
  * before, or by an instance in the other language, is said in the owner's language too.
  */
 import type { NoticeLanguage } from './notice-language.js';
+import type { ShownMandate } from './request-principal.js';
 import { ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT } from './plan-pause.js';
 import { isProvisionedInstance } from './wire-capture.js';
 import { MAX_WAITING_EVENTS, QUEUE_FULL_REASON, SHOP_MISMATCH_REASON } from '../server/webhook-receiver.js';
@@ -108,8 +109,7 @@ function saidWorkflowId(id: string): string {
   return `${kept}…`;
 }
 
-/** A mandate's address an escalation title may name, and whether it set the plan up or changed it. */
-export interface ShownMandate { readonly address: string; readonly changed: boolean }
+export type { ShownMandate };
 
 export interface WorkerNotices {
   /** The summary of more than a few triggers waiting for confirmation. */
@@ -120,6 +120,9 @@ export interface WorkerNotices {
   consentOneBody(title: string, setUpAfterOutsideContent: boolean): string;
   /** A run that failed or was stopped, with the error as it came. */
   failed(message: string): string;
+  /** A saved workflow that did not run because step `step` (1-based) refers to the output of a step
+   *  it does not read (`template-refs.ts`). The owner reads it, so no tool name and no stored text. */
+  workflowRefUnresolved(step: number): string;
   stoppedWith(message: string): string;
   /** The first line of a run the owner ended; the run's own text follows after a blank line. */
   readonly stopped: string;
@@ -163,8 +166,16 @@ export interface WorkerNotices {
   readonly questionOpener: string;
   /** The line above a scheduled workflow's question in its thread, the title quoted. */
   questionFrom(title: string): string;
+  /**
+   * A question from a plan someone the owner let in set up or changed (PRD B6): the thread's and
+   * the push's title, and the line above the question, in lynox's words. The plan's title stays
+   * out, as on the failure path: it is that person's text, and here it would be called the owner's.
+   */
+  helperQuestionTitle(by: ShownMandate | undefined): string;
+  readonly helperQuestionFrom: string;
   readonly errorLabel: string;
-  readonly failedStepsLabel: string;
+  /** The heading over the step lines; each line says what happened to its step (U-201). */
+  readonly affectedStepsLabel: string;
   readonly writesLabel: string;
   /**
    * A step that reported it could not complete its task (`fail_step`), in lynox's own words: its
@@ -176,6 +187,41 @@ export interface WorkerNotices {
   stepReported(stepId: string): string;
   stepReportedItem(stepId: string): string;
   readonly reportedReasonWhere: string;
+  /** What stands in for a step id outside the allowed shape (`step-id.ts`): an id stored before the
+   *  limit is not shown in the thread, where it would read as the assistant's own words (U-314). The
+   *  step is named by its position in the workflow, counted from 1 as `#2` is; `undefined` where no
+   *  position is known. */
+  unnamedStep(position: number | undefined): string;
+  /** `stepReported`, `stepFailed` and `stepDeclined` for a step named by `unnamedStep`, which is a
+   *  name and not quoted. */
+  stepReportedUnnamed(position: number | undefined): string;
+  stepFailedUnnamed(position: number | undefined): string;
+  stepDeclinedUnnamed(position: number | undefined): string;
+  /** `reportedReasonWhere` when more than one step reported. */
+  readonly reportedReasonsWhere: string;
+  /**
+   * A step that failed without reporting it: its error can carry a third party's text (a service's
+   * answer), so it stays out of the thread too and is named in lynox's own words (U-201).
+   * `stepFailed` is the run's error line when that step's error is the run's, `stepFailedItem` its
+   * line under the failed steps, `runFailed` a run error no step recorded and lynox did not write.
+   * After the steps, once: `errorWhere` (one error), `errorsWhere` (more), or
+   * `errorsAndReasonWhere` when steps also reported (then not `reportedReasonWhere`).
+   */
+  stepFailed(stepId: string): string;
+  stepFailedItem(stepId: string): string;
+  /** The run's error line for a step its approver declined with a reason: the reason, a person's text, stays out. */
+  stepDeclined(stepId: string): string;
+  /** A declined step's line under the affected steps, with or without a reason. */
+  stepDeclinedItem(stepId: string): string;
+  readonly runFailed: string;
+  readonly errorWhere: string;
+  readonly errorsWhere: string;
+  readonly errorsAndReasonWhere: string;
+  /** `errorsAndReasonWhere` when more than one step reported. */
+  readonly errorsAndReasonsWhere: string;
+  /** After a decline with a reason and no other error; `errorsAndDeclinedWhere` with other errors. */
+  readonly declinedWhere: string;
+  readonly errorsAndDeclinedWhere: string;
   /**
    * A run that stopped at its cost ceiling (`value` like `$0.50`) or turn limit (`value` the
    * count) with work still pending: the sentence the push leads with.
@@ -232,10 +278,12 @@ export interface WorkerNotices {
 /**
  * A title as it goes between quotes in a turn the model reads: without the characters that close
  * a quote or start a line, so a title cannot end its quote and go on as the turn's own words.
+ * A line is started by every character Unicode counts as a line break: CR, LF, VT, FF, NEL,
+ * U+2028 and U+2029.
  * A title is set by the model or a delegated session and may carry text someone else wrote.
  */
 export function inQuotes(title: string): string {
-  return title.replace(/["\u201C\u201D\u201E\u201F\u00AB\u00BB\u2033\uFF02]/g, "'").replace(/[\r\n\u2028\u2029]+/g, ' ');
+  return title.replace(/["\u201C\u201D\u201E\u201F\u00AB\u00BB\u2033\uFF02]/g, "'").replace(/[\r\n\v\f\u0085\u2028\u2029]+/g, ' ');
 }
 
 /** The workflow statuses a notice names; any other, `unknown` included, is left out rather than quoted raw. */
@@ -252,6 +300,7 @@ const EN: WorkerNotices = Object.freeze({
   consentOneBody: (title: string, outside: boolean) =>
     `It came due and has not run.${outside ? ' It was set up after reading content from outside.' : ''} Review “${title}” under Automation › Triggers before you confirm it.`,
   failed: (message: string) => `Task failed: ${message}`,
+  workflowRefUnresolved: (step: number) => `Step ${String(step)} of this workflow uses the result of a step it does not read, so the workflow did not run. Ask lynox in a chat to fix that step.`,
   stoppedWith: (message: string) => `Stopped on your instruction: ${message}`,
   stopped: 'Stopped on your instruction.',
   chipRunAgain: 'Run again',
@@ -276,15 +325,35 @@ const EN: WorkerNotices = Object.freeze({
   reportOpener: 'What happened with my automation?',
   questionOpener: 'My scheduled workflow has a question.',
   questionFrom: (title: string) => `From your scheduled workflow "${inQuotes(title)}":`,
+  helperQuestionTitle: (by: ShownMandate | undefined) => by === undefined
+    ? 'A plan someone you let in set up has a question'
+    : by.changed ? `A plan changed by ${by.address} has a question` : `A plan set up by ${by.address} has a question`,
+  helperQuestionFrom: 'From a scheduled workflow that someone you let in set up or changed. Its name is left out here, because it can contain text from that person:',
   budgetCut: (kind: 'cost' | 'turns', value: string) =>
     `Stopped at the ${kind === 'cost' ? `cost ceiling of ${value}` : `turn limit of ${value}`} with work still pending.`,
   budgetCutWayOut: 'Running it again can stop at the same point. Ask lynox in the chat to split the task into smaller plans.',
   errorLabel: 'Error:',
-  failedStepsLabel: 'Failed steps:',
+  affectedStepsLabel: 'Affected steps:',
   writesLabel: 'Writes:',
   stepReported: (stepId: string) => `Step "${stepId}" reported that it could not complete its task.`,
-  stepReportedItem: (stepId: string) => `• ${stepId}: reported that it could not complete its task.`,
+  stepReportedItem: (stepId: string) => `- ${stepId}: reported that it could not complete its task.`,
   reportedReasonWhere: 'You can ask here for the reason the step gave; it is kept in the run\'s record.',
+  unnamedStep: (position: number | undefined) => (position === undefined ? 'A step' : `Step ${String(position)}`),
+  stepReportedUnnamed: (position: number | undefined) => `${position === undefined ? 'A step' : `Step ${String(position)}`} reported that it could not complete its task.`,
+  stepFailedUnnamed: (position: number | undefined) => `${position === undefined ? 'A step' : `Step ${String(position)}`} failed.`,
+  stepDeclinedUnnamed: (position: number | undefined) => `${position === undefined ? 'A step' : `Step ${String(position)}`} was declined at its approval.`,
+  reportedReasonsWhere: 'You can ask here for the reasons the steps gave; they are kept in the run\'s record.',
+  stepFailed: (stepId: string) => `Step "${stepId}" failed.`,
+  stepFailedItem: (stepId: string) => `- ${stepId}: failed.`,
+  stepDeclined: (stepId: string) => `Step "${stepId}" was declined at its approval.`,
+  stepDeclinedItem: (stepId: string) => `- ${stepId}: was declined at its approval.`,
+  runFailed: 'The run failed.',
+  errorWhere: 'You can ask here for the error; it is kept in the run\'s record.',
+  errorsWhere: 'You can ask here for the errors; they are kept in the run\'s record.',
+  errorsAndReasonWhere: 'You can ask here for the errors and for the reason a step gave; both are kept in the run\'s record.',
+  errorsAndReasonsWhere: 'You can ask here for the errors and for the reasons the steps gave; both are kept in the run\'s record.',
+  declinedWhere: 'You can ask here for the reason it was declined; it is kept in the run\'s record.',
+  errorsAndDeclinedWhere: 'You can ask here for the errors and the reasons for declining; they are kept in the run\'s record.',
   workflowRef: (runId: string | undefined, workflowId: string | undefined) => runId
     ? `(run ${runId}${workflowId ? ` · workflow ${workflowId}` : ''})`
     : (workflowId ? `(workflow ${workflowId})` : ''),
@@ -366,6 +435,7 @@ const DE: WorkerNotices = Object.freeze({
   consentOneBody: (title: string, outside: boolean) =>
     `Fällig, aber nicht gelaufen.${outside ? ' Eingerichtet, nachdem ein Lauf Inhalte von aussen gelesen hatte.' : ''} Prüf „${title}“ unter Automation → Trigger, bevor du bestätigst.`,
   failed: (message: string) => `Aufgabe fehlgeschlagen: ${message}`,
+  workflowRefUnresolved: (step: number) => `Schritt ${String(step)} dieses Workflows nutzt das Ergebnis eines Schritts, den er nicht liest. Darum lief der Workflow nicht. Bitte lynox im Chat, diesen Schritt zu reparieren.`,
   stoppedWith: (message: string) => `Auf deine Anweisung gestoppt: ${message}`,
   stopped: 'Auf deine Anweisung gestoppt.',
   chipRunAgain: 'Erneut ausführen',
@@ -394,15 +464,35 @@ const DE: WorkerNotices = Object.freeze({
   reportOpener: 'Was ist mit meiner Automation passiert?',
   questionOpener: 'Mein geplanter Workflow hat eine Frage.',
   questionFrom: (title: string) => `Aus deinem geplanten Workflow „${inQuotes(title)}“:`,
+  helperQuestionTitle: (by: ShownMandate | undefined) => by === undefined
+    ? 'Ein Plan von jemandem, dem du Zugang gegeben hast, hat eine Frage'
+    : by.changed ? `Ein Plan, den ${by.address} geändert hat, hat eine Frage` : `Ein Plan von ${by.address} hat eine Frage`,
+  helperQuestionFrom: 'Aus einem geplanten Workflow, den jemand, dem du Zugang gegeben hast, eingerichtet oder geändert hat. Der Name des Workflows steht hier nicht, weil er Text dieser Person enthalten kann:',
   budgetCut: (kind: 'cost' | 'turns', value: string) =>
     `${kind === 'cost' ? `Gestoppt an der Kostengrenze (${value})` : `Gestoppt am Rundenlimit (${value})`}, obwohl noch Arbeit offen war.`,
   budgetCutWayOut: 'Ein Neustart kann wieder an derselben Stelle stoppen. Bitte lynox im Chat, die Aufgabe in kleinere Pläne aufzuteilen.',
   errorLabel: 'Fehler:',
-  failedStepsLabel: 'Fehlgeschlagene Schritte:',
+  affectedStepsLabel: 'Betroffene Schritte:',
   writesLabel: 'Schreibvorgänge:',
   stepReported: (stepId: string) => `Schritt „${stepId}“ hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
-  stepReportedItem: (stepId: string) => `• ${stepId}: hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
+  stepReportedItem: (stepId: string) => `- ${stepId}: hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
   reportedReasonWhere: 'Den Grund, den der Schritt angegeben hat, kannst du hier erfragen; er steht im Protokoll des Laufs.',
+  unnamedStep: (position: number | undefined) => (position === undefined ? 'Ein Schritt' : `Schritt ${String(position)}`),
+  stepReportedUnnamed: (position: number | undefined) => `${position === undefined ? 'Ein Schritt' : `Schritt ${String(position)}`} hat gemeldet, dass er seine Aufgabe nicht erfüllen konnte.`,
+  stepFailedUnnamed: (position: number | undefined) => `${position === undefined ? 'Ein Schritt' : `Schritt ${String(position)}`} ist fehlgeschlagen.`,
+  stepDeclinedUnnamed: (position: number | undefined) => `${position === undefined ? 'Ein Schritt' : `Schritt ${String(position)}`} wurde bei der Freigabe abgelehnt.`,
+  reportedReasonsWhere: 'Die Gründe, die die Schritte angegeben haben, kannst du hier erfragen; sie stehen im Protokoll des Laufs.',
+  stepFailed: (stepId: string) => `Schritt „${stepId}“ ist fehlgeschlagen.`,
+  stepFailedItem: (stepId: string) => `- ${stepId}: ist fehlgeschlagen.`,
+  stepDeclined: (stepId: string) => `Schritt „${stepId}“ wurde bei der Freigabe abgelehnt.`,
+  stepDeclinedItem: (stepId: string) => `- ${stepId}: wurde bei der Freigabe abgelehnt.`,
+  runFailed: 'Der Lauf ist fehlgeschlagen.',
+  errorWhere: 'Den Fehler kannst du hier erfragen; er steht im Protokoll des Laufs.',
+  errorsWhere: 'Die Fehler kannst du hier erfragen; sie stehen im Protokoll des Laufs.',
+  errorsAndReasonWhere: 'Die Fehler und den Grund, den ein Schritt angegeben hat, kannst du hier erfragen; beides steht im Protokoll des Laufs.',
+  errorsAndReasonsWhere: 'Die Fehler und die Gründe, die die Schritte angegeben haben, kannst du hier erfragen; beides steht im Protokoll des Laufs.',
+  declinedWhere: 'Den Grund der Ablehnung kannst du hier erfragen; er steht im Protokoll des Laufs.',
+  errorsAndDeclinedWhere: 'Fehler und Ablehnungsgründe kannst du hier erfragen; sie stehen im Protokoll des Laufs.',
   workflowRef: (runId: string | undefined, workflowId: string | undefined) => runId
     ? `(Lauf ${runId}${workflowId ? ` · Workflow ${workflowId}` : ''})`
     : (workflowId ? `(Workflow ${workflowId})` : ''),

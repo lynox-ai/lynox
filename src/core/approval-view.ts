@@ -11,6 +11,7 @@
  * does not reach it.
  */
 
+import { originCardMail } from './origin-notices.js';
 import type { ApprovalEntry, ApprovalKind, ApprovalOrigin, ApprovalListScope, ApprovalSource, ApprovalStatus, StoredAddress } from './approval-store.js';
 import { isMandateTag, MANDATE_TAG_PREFIX, unhandledPrincipal, type RequestPrincipal } from './request-principal.js';
 import { recipientSpread } from '../integrations/mail/send-core.js';
@@ -307,6 +308,9 @@ export interface ApprovalCard {
   afterUntrusted: boolean;
   /** Which sentence the card shows when `afterUntrusted` (U-209); null when it is not. */
   afterUntrustedBy: 'run' | 'instruction' | 'both' | null;
+  /** Where the recipients the owner did not name come from, as the card's line in each language
+   *  (`originCardMail`); null when every recipient was owner-known, or on a record from before. */
+  targetOrigin: { de: string; en: string } | null;
   origin: { source: ApprovalSource; triggerId: string; runId: string; threadId?: string | undefined; eventId?: string | undefined } | null;
   outcome: ApprovalOutcome | null;
   setup: SetupLine[];
@@ -400,6 +404,7 @@ export function approvalCard(entry: ApprovalEntry, src: ApprovalCardSources): Ap
     replyToElsewhere: replyToElsewhere(entry),
     afterUntrusted: o?.afterUntrusted === true,
     afterUntrustedBy: untrustedBy(o),
+    targetOrigin: o?.targetOrigin === undefined ? null : { de: originCardMail(o.targetOrigin.origin, 'de'), en: originCardMail(o.targetOrigin.origin, 'en') },
     origin: o === null ? null : {
       source: o.source, triggerId: o.triggerId, runId: o.runId,
       ...(o.threadId !== undefined ? { threadId: o.threadId } : {}),

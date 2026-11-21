@@ -3,9 +3,9 @@ import { workflowStampState } from '../../core/workflow-stamp.js';
 import { parseScopeString } from '../../core/scope-resolver.js';
 import { detectInjectionAttempt } from '../../core/data-boundary.js';
 import { findHiddenChar, hiddenCharRefusal, stripHidden } from '../../core/hidden-text.js';
-import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
+import { describeTurnUntrusted, type UntrustedCause } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
-import { isOwnerPrincipal, mandateIdOf, mandateNeedsOwnerStamp, principalTag } from '../../core/request-principal.js';
+import { OWNER_PRINCIPAL, UNKNOWN_RUN_TAG, isOwnerPrincipal, isRunTag, mandateIdOf, mandateNeedsOwnerStamp, principalTag } from '../../core/request-principal.js';
 import { PAUSED_MODEL_TEXT, isPaused } from '../../core/plan-pause.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
@@ -269,6 +269,27 @@ function detectEmbeddedParams(field: string, value: string | undefined): string 
 }
 
 /**
+ * What a turn had taken in, recorded on a trigger instruction it creates or rewrites. The
+ * instruction is the model's text, and it can carry what the conversation took in: a turn in a
+ * thread someone the owner let in started, or one whose conversation read outside content
+ * earlier (the latch, also after a compaction summarized the read away), counts as taken in from
+ * the conversation, so it never counts as the owner's own instruction.
+ */
+function instructionTakenIn(agent: IAgent): UntrustedCause {
+  const turnCause = describeTurnUntrusted(agent);
+  return turnCause === 'none'
+    && (agent.sendOrigin?.kind === 'helperThread' || agent.conversationLatch?.isSet() === true)
+    ? 'conversation'
+    : turnCause;
+}
+
+/** The tag a write under the owner's principal records when the owner did not write the turn: the
+ *  run's own (`trigger:<id>`, `workflow:<id>`), or the unknown run's tag, never the owner's. */
+function runTagOf(agent: IAgent): string {
+  return isRunTag(agent.writeAuthor) ? agent.writeAuthor! : UNKNOWN_RUN_TAG;
+}
+
+/**
  * The sentence a reported row owes the reader when the scheduler will NOT run it
  * yet.
  *
@@ -417,8 +438,9 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
       // What the turn had taken in, on every trigger it files, not only a workflow one: the
       // reminder to confirm it says so (worker-loop `consentOneBody`), and what its run files for
       // approval counts as after outside content (`executeStandard` → `afterUntrusted`). Only a
-      // workflow run is also seeded tainted (`executePipeline`); a run_agent run is not.
-      const createdUntrusted = describeTurnUntrusted(agent);
+      // workflow run is also seeded tainted (`executePipeline`); a run_agent run is not. Also what
+      // the conversation took in (`instructionTakenIn`).
+      const createdUntrusted = instructionTakenIn(agent);
       const baseParams = {
         title: input.title,
         description: input.description,
@@ -431,8 +453,13 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         parentTaskId: input.parent_task_id,
         // A mandate's turn writes under the mandate's name, so what it schedules waits for the
         // owner's stamp exactly as it does when created over HTTP (PRD customer-granted-operator-
-        // access §3.12, H2). The owner's turns leave it absent, as before.
-        ...(isOwnerPrincipal(agent.principal) ? {} : { createdBy: principalTag(agent.principal), createdMandateId: mandateIdOf(agent.principal) }),
+        // access §3.12, H2). A turn the owner typed records the owner; any other turn under the
+        // owner's principal (a trigger's or a workflow's run) records the run's tag, which never
+        // reads as the owner's and keeps the trigger apart from one from before creators were
+        // recorded, the only kind "Confirm recipients" takes (`recipientsConfirmable`).
+        ...(isOwnerPrincipal(agent.principal)
+          ? { createdBy: agent.writeAuthor === principalTag(OWNER_PRINCIPAL) ? principalTag(OWNER_PRINCIPAL) : runTagOf(agent) }
+          : { createdBy: principalTag(agent.principal), createdMandateId: mandateIdOf(agent.principal) }),
         ...(createdUntrusted !== 'none' ? { createdUntrusted } : {}),
       };
       // Whose session reads the report: only the owner confirms a held-back row.
@@ -672,9 +699,17 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         target: () => [['task', managerRef.getTrigger(input.task_id, scopeFilter)?.id]],
         main: ['apply'],
       }, (w) => {
-        const mark: BeforeTriggerWrite | undefined = isOwnerPrincipal(agent.principal)
-          ? undefined
-          : (trigger) => { w.run('mark', () => managerRef.markEditedBy(trigger.id, agent.principal, true), ifTrue); };
+        // A mandate's change marks the trigger with its principal; a change under the owner's
+        // principal but not the owner's own turn (a trigger's or a workflow's run) that rewrites the
+        // instruction (its title or description) marks it with the run's tag, an unknown author as
+        // such, never as the owner. A change that leaves the instruction as it is (its status, its
+        // schedule) keeps it the owner's. Either mark is set only once the write has passed its
+        // checks (`BeforeTriggerWrite`), so a refused change marks nothing.
+        const mark: BeforeTriggerWrite | undefined = !isOwnerPrincipal(agent.principal)
+          ? (trigger) => { w.run('mark', () => managerRef.markEditedBy(trigger.id, agent.principal, true), ifTrue); }
+          : agent.writeAuthor !== principalTag(OWNER_PRINCIPAL) && (input.title !== undefined || input.description !== undefined)
+            ? (trigger) => { w.run('mark', () => managerRef.markEditedByRun(trigger.id, runTagOf(agent)), ifTrue); }
+            : undefined;
         if (input.status === 'completed') {
           const task = w.run('apply', () => managerRef.complete(input.task_id, scopeFilter, agent.principal, mark), ifNonNull);
           if (!task) return `Task not found: ${input.task_id}`;
@@ -692,10 +727,14 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
           nextRunAt: input.run_at,
           scheduleCron: input.schedule,
           // A trigger's instruction rewritten here carries what this turn had taken in, as one
-          // created here does; the manager records it only with a title or description change.
-          untrusted: describeTurnUntrusted(agent),
+          // created here does (`instructionTakenIn`, the same rule); the manager records it only
+          // with a title or description change.
+          untrusted: instructionTakenIn(agent),
         }, scopeFilter, agent.principal, mark), ifNonNull);
         if (!task) return `Task not found: ${input.task_id}`;
+        // A run's earlier rewrite keeps its tag after a later change in the owner's own turn: a
+        // change of the title or of part of the description leaves the run's words in place, and
+        // nothing here can tell which. Only a trigger the owner sets up anew counts as theirs.
         // Surface the new schedule when it changed so the agent can confirm
         // the reschedule landed (mirrors the create path's "scheduled for …"
         // string, which the LLM is already trained to read back).

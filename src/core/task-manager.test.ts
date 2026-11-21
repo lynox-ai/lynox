@@ -1328,9 +1328,11 @@ describe.each([false, true])('a mandate\'s own to-dos (subject graph %s)', (grap
     expect(tm.getTask(a)!.created_by).toBe(TAG);
   });
 
-  it('the owner\'s creating request records no creator, as before', () => {
+  it('the owner\'s creating request records the owner; one that names nobody records nobody', () => {
     const id = tm.create({ title: 'by the owner', createdBy: 'owner' }).id;
-    expect(createdBy(id)).toEqual({ legacy: null, mirror: null });
+    expect(createdBy(id)).toEqual({ legacy: 'owner', mirror: 'owner' });
+    const none = tm.create({ title: 'by nobody named' }).id;
+    expect(createdBy(none)).toEqual({ legacy: null, mirror: null });
   });
 
   describe('update', () => {

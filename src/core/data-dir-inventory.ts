@@ -324,3 +324,12 @@ export const ERASE_BY_STEP = eraseBy('step');
 export const ERASE_BY_REMOVE = eraseBy('remove');
 /** Erasure: entries the route leaves alone, each with a reason. */
 export const ERASE_KEPT = eraseBy('keep');
+
+/**
+ * The file in a backup directory's root where the backup list keeps its answers across restarts
+ * (`backup.ts`). Not a backup: it holds each backup's folder name, a digest of its manifest and the
+ * provenance shown. The erasure removes it with the backups (`data-dir-erase.ts`).
+ */
+export const BACKUP_LIST_PROOF_FILE = '.list-provenance.json';
+/** The temporary file a write of `BACKUP_LIST_PROOF_FILE` leaves when the process dies before its rename: `<file>.<pid>.<12 hex>.tmp`. */
+export const BACKUP_LIST_PROOF_TMP = /^\.list-provenance\.json\.\d+\.[0-9a-f]{12}\.tmp$/;

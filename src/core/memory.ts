@@ -18,6 +18,7 @@ import { ensureDir } from './atomic-write.js';
 import { detectInjectionAttempt } from './data-boundary.js';
 import { fireBeforeRunGate, reportMeteredCost, type HookHost } from './metered-request.js';
 import { calculateCost } from './pricing.js';
+import { engineLessStoreText, type EngineLessReader } from './engine-less-refusal.js';
 
 const DEFAULT_DIR = 'memory';
 const CONTEXT_TTL_DAYS = 30;
@@ -256,6 +257,23 @@ export class Memory implements IMemory {
    */
   setMeteredHost(host: HookHost | null): void {
     this.meteredHost = host;
+  }
+
+  /** Set by an engine that started without engine.db: see {@link refuseChangesWithoutStore}. */
+  private _changesRefused = false;
+
+  /**
+   * Called by an engine that started without engine.db while durable memory is on. It then serves
+   * these files through the old memory tools, and the next boot with engine.db does not read them
+   * the same way (`engine-less-refusal.ts`), so a change from the model or a person is refused with
+   * a plain reason instead. A memory never told this writes as before.
+   */
+  refuseChangesWithoutStore(): void {
+    this._changesRefused = true;
+  }
+
+  engineLessRefusal(reader: EngineLessReader): string | null {
+    return this._changesRefused ? engineLessStoreText('memory', reader) : null;
   }
 
   /**

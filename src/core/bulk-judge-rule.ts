@@ -23,9 +23,15 @@ const FIELD_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 export const JUDGE_MAX_FIELDS = 20;
 /** The longest a judged text field may be, in characters. */
 export const JUDGE_MAX_STRING = 2_000;
+/** The longest a judged HTML field may be, in characters: a field the run's list form declares
+ *  HTML (`htmlFieldsOfListForm`). Above the longest measured shop description (20,822, PRD
+ *  shopify-preset §21.4 item 10), with room for an admin value longer than the storefront's and a
+ *  rewrite that grows. */
+export const JUDGE_MAX_HTML = 32_000;
 /** The longest rule text. */
 export const JUDGE_MAX_RULE_CHARS = 4_000;
-/** The most a verdict may take in bytes, as {@link judgeAfterBound} counts it. */
+/** The most a verdict's fields that are not HTML may take together in bytes, as {@link judgeAfterBound}
+ *  counts them. The HTML fields are bounded together by {@link JUDGE_MAX_HTML} characters instead. */
 export const JUDGE_MAX_AFTER_BYTES = 32 * 1024;
 /** Bytes a number in a verdict may take as JSON: the longest a double prints is 25
  *  (`-0.0000012345678901234567`); rounded up. */
@@ -114,7 +120,7 @@ function refuseHidden(text: string, what: string, opts: { inPlace?: boolean } = 
   );
 }
 
-function normalizeProperty(name: string, raw: unknown): ExtractSchemaProperty {
+function normalizeProperty(name: string, raw: unknown, maxString: number): ExtractSchemaProperty {
   if (!isPlainObject(raw)) throw new BulkSourceError(`judge.schema: field ${name} must be an object with a type.`);
   if (Object.hasOwn(raw, 'pattern')) {
     // A regex the planner writes runs over output the target's text steers, before any length
@@ -133,8 +139,8 @@ function normalizeProperty(name: string, raw: unknown): ExtractSchemaProperty {
         return { type: 'string', enum: [...new Set(enumValues as string[])] };
       }
       const max = raw['maxLength'];
-      if (typeof max !== 'number' || !Number.isInteger(max) || max < 1 || max > JUDGE_MAX_STRING) {
-        throw new BulkSourceError(`judge.schema: text field ${name} needs maxLength (1–${String(JUDGE_MAX_STRING)}) or enum.`);
+      if (typeof max !== 'number' || !Number.isInteger(max) || max < 1 || max > maxString) {
+        throw new BulkSourceError(`judge.schema: text field ${name} needs maxLength (1–${String(maxString)}) or enum.`);
       }
       const min = raw['minLength'];
       if (min !== undefined && (typeof min !== 'number' || !Number.isInteger(min) || min < 0 || min > max)) {
@@ -193,10 +199,13 @@ function normalizeContext(
  * Build the rule a run stores from what `bulk_plan` was given, or refuse it. `idField`: the
  * field a list identifies its elements by — a verdict never sets it, and the context never names
  * it. `contextFields`: the names a context may take where the source's form bounds them (a
- * Shopify list: {@link SHOPIFY_CONTEXT_FIELDS}); any name of F's rule without it.
+ * Shopify list: {@link SHOPIFY_CONTEXT_FIELDS}); any name of F's rule without it. `htmlFields`:
+ * the fields the run's list form declares HTML, which may ask for up to {@link JUDGE_MAX_HTML}
+ * characters; every other text field up to {@link JUDGE_MAX_STRING}.
  */
 export function normalizeJudgeRule(
-  input: unknown, opts: { idField?: string | undefined; contextFields?: readonly string[] | undefined } = {},
+  input: unknown,
+  opts: { idField?: string | undefined; contextFields?: readonly string[] | undefined; htmlFields?: readonly string[] | undefined } = {},
 ): JudgeRule {
   if (!isPlainObject(input)) throw new BulkSourceError('judge must be an object with rule and schema.');
   const rule = input['rule'];
@@ -226,10 +235,20 @@ export function normalizeJudgeRule(
     if (opts.idField !== undefined && name === opts.idField) {
       throw new BulkSourceError('judge.schema must not decide the id field: the run could not check it reads back the target it listed.');
     }
-    properties[name] = normalizeProperty(name, rawProps[name]);
+    properties[name] = normalizeProperty(name, rawProps[name], opts.htmlFields?.includes(name) === true ? JUDGE_MAX_HTML : JUDGE_MAX_STRING);
   }
   const schema: ExtractSchema = { type: 'object', properties, required: names, additionalProperties: false };
-  if (judgeAfterBound(schema) > JUDGE_MAX_AFTER_BYTES) {
+  // An HTML field is bounded by its own maxLength (JUDGE_MAX_HTML); the other fields together by
+  // the byte bound, as before.
+  const plain: ExtractSchema = { ...schema, properties: Object.fromEntries(Object.entries(properties).filter(([n]) => opts.htmlFields?.includes(n) !== true)) };
+  // Every HTML field together: one call's output cap (JUDGE_HTML_OUTPUT_CAP) is measured for one
+  // description of the longest length, not two (WooCommerce has two HTML fields).
+  const html = Object.entries(properties).filter(([n]) => opts.htmlFields?.includes(n) === true)
+    .reduce((sum, [, p]) => sum + (p.type !== 'string' ? 0 : p.enum ? Math.max(...p.enum.map((e) => [...e].length)) : p.maxLength ?? 0), 0);
+  if (html > JUDGE_MAX_HTML) {
+    throw new BulkSourceError(`judge.schema: the HTML fields together may ask for at most ${String(JUDGE_MAX_HTML)} characters; lower their maxLength values or shorten their choices.`);
+  }
+  if (judgeAfterBound(plain) > JUDGE_MAX_AFTER_BYTES) {
     throw new BulkSourceError('judge.schema allows a verdict larger than a bulk target may hold: lower the maxLength values.');
   }
   const tierRaw = input['tier'];
@@ -290,11 +309,24 @@ export function judgeAfterBound(schema: ExtractSchema): number {
 /**
  * Output tokens a verdict call may take: the verdict's byte bound plus room for the tool call
  * around it — a token is at least one byte, so this is never too few below the cap — and at most
- * 8000. A reply cut off anyway is refused (`refuseCutOff`), never recorded: the bound decides
+ * 8000, or {@link JUDGE_HTML_OUTPUT_CAP} for a schema with a text field longer than
+ * {@link JUDGE_MAX_STRING}, which only an HTML field may be. A reply cut off anyway is refused (`refuseCutOff`), never recorded: the bound decides
  * how useful a large schema is, not whether a verdict is whole. A judge model that thinks before
  * it answers gets room on top (`judgeOutputBudget`); the call and the run's worst-case cost check
  * count that budget.
  */
 export function judgeMaxOutputTokens(schema: ExtractSchema): number {
-  return Math.min(8_000, Math.max(256, judgeAfterBound(schema) + 128));
+  return Math.min(judgeOutputCap(schema), Math.max(256, judgeAfterBound(schema) + 128));
 }
+
+/** The output cap of a verdict call: {@link JUDGE_HTML_OUTPUT_CAP} for a schema with a text field
+ *  longer than {@link JUDGE_MAX_STRING} — only an HTML field may be (`normalizeJudgeRule`) — and
+ *  8,000 otherwise (PRD shopify-preset §21.4 item 10). */
+function judgeOutputCap(schema: ExtractSchema): number {
+  const long = Object.values(schema.properties).some((p) => p.type === 'string' && (p.maxLength ?? 0) > JUDGE_MAX_STRING
+    || p.type === 'object' && judgeOutputCap(p as unknown as ExtractSchema) === JUDGE_HTML_OUTPUT_CAP);
+  return long ? JUDGE_HTML_OUTPUT_CAP : 8_000;
+}
+
+/** Output tokens a verdict call with an HTML field may take. */
+export const JUDGE_HTML_OUTPUT_CAP = 16_000;

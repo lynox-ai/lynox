@@ -260,7 +260,7 @@ function handleSSEEvent(event: string, data: Record<string, unknown>): void {
 				step = 'done';
 				// A green "completed successfully" alone would be read and dismissed while the workspace
 				// files stayed behind (ux U-046).
-				const omitted = migrationWorkspaceNotice(result, false);
+				const omitted = migrationWorkspaceNotice(result);
 				if (omitted) addToast(t(omitted.toast), 'info', 8000);
 				// Files the export could not carry: not the green toast either (row 1033, ux U-056).
 				else if (doneSkipped.length === 1) addToast(t('migration.success_skipped_one'), 'info', 8000);
