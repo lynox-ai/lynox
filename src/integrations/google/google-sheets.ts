@@ -164,9 +164,9 @@ function formulaNote(formulas: readonly FormulaCell[]): PromptText {
     : pv`This chat has read content from outside lynox, such as a web page, an email or a file. ${n} of these cells start like a formula, and Google runs a formula when it is written. A formula can make Google fetch an address named in it, with data from the sheet in that address.`;
   const lines = formulas.slice(0, FORMULAS_SHOWN).map(({ cell, formula }) => pv`${cell}: ${singleLine(formula)}`);
   // With some only counted, the question offers no "Write as formulas" and says why, and how
-  // to get it: each call is asked about on its own, so one of at most five shows every formula.
-  // The 5 in the sentence is FORMULAS_SHOWN, written out so the sentence stays the question's own
-  // words; a test reads the sentence's number against the constant.
+  // to get it: each call is asked about on its own, so a call with at most FORMULAS_SHOWN shows
+  // every formula. The sentence writes that number out, so it stays the question's own words;
+  // tests hold the sentence to a copy of it and the copy's number to the constant.
   const more = n > FORMULAS_SHOWN
     ? [pv`and ${n - FORMULAS_SHOWN} more`, pv`Writing as formulas is offered only when every formula is shown here. To write them as formulas, ask in the chat to write at most 5 at a time.`]
     : [];
