@@ -184,14 +184,14 @@
 		const base = a.title.replace(/\s+/g, '-').toLowerCase();
 		// An html file keeps the artifact policy, as the chat's download does (artifactExportDocument).
 		// An svg file cannot carry the policy, so it goes out without anything that reaches another
-		// address (svgExportDocument); one that is not a well-formed svg goes out as the html the
-		// chat's download gives for it.
+		// address (svgExportDocument). Content with no svg in it goes out as plain text, which a
+		// browser opened on it only shows.
 		let type = a.type;
 		let body = a.content;
 		if (a.type === 'html') body = artifactExportDocument(a.content);
 		else if (a.type === 'svg') {
 			const svg = svgExportDocument(a.content);
-			if (svg === null) { type = 'html'; body = artifactExportDocument(a.content); }
+			if (svg === null) type = 'text';
 			else body = svg;
 		}
 		void saveOrShareBlob(new Blob([body], { type: mimeFor(type) }), `${base}.${extensionFor(type)}`);

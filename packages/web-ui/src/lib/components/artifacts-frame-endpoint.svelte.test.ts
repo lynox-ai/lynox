@@ -149,18 +149,33 @@ describe('the gallery preview frame', () => {
 		expect(file).not.toContain('elsewhere.example');
 	});
 
-	it('exports an svg artifact that is not well-formed as html with the artifact policy', async () => {
+	it('exports an svg artifact that is not well-formed as a well-formed svg file without its remote image', async () => {
 		shared.length = 0;
 		artifactType = 'svg';
-		artifactContent = '<svg xmlns="http://www.w3.org/2000/svg"><image href="https://elsewhere.example/x.png"/><g></svg>';
+		artifactContent = '<svg viewBox="0 0 9 9"><circle r="2"><image href="https://elsewhere.example/x.png"/><g></svg>';
 		await openDeck();
 		const share = [...target.querySelectorAll('button')].find((b) => /share|teilen/i.test(b.textContent ?? ''));
 		share!.click();
 		await settle();
 		expect(shared).toHaveLength(1);
-		expect(shared[0]!.type).toBe('text/html');
+		expect(shared[0]!.type).toBe('image/svg+xml');
 		const file = await shared[0]!.text();
-		expect(file).toMatch(/<meta http-equiv="Content-Security-Policy" content="[^"]*img-src data: blob:/);
+		const doc = new DOMParser().parseFromString(file, 'image/svg+xml');
+		expect(doc.getElementsByTagName('parsererror')).toHaveLength(0);
+		expect(doc.querySelector('circle')?.getAttribute('r')).toBe('2');
+		expect(file).not.toContain('elsewhere.example');
+	});
+
+	it('exports an svg artifact with no svg in it as plain text', async () => {
+		shared.length = 0;
+		artifactType = 'svg';
+		artifactContent = '<p>no drawing</p><img src="https://elsewhere.example/x.png">';
+		await openDeck();
+		const share = [...target.querySelectorAll('button')].find((b) => /share|teilen/i.test(b.textContent ?? ''));
+		share!.click();
+		await settle();
+		expect(shared).toHaveLength(1);
+		expect(shared[0]!.type).toBe('text/plain');
 	});
 
 	it('loads the endpoint with no srcdoc and is sent the artifact when its own window is ready', async () => {

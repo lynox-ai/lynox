@@ -2,9 +2,13 @@
 import { describe, it, expect } from 'vitest';
 import { svgExportDocument } from './svg-export.js';
 
-// jsdom parses the svg here. What a browser does with the exported file opened from disk is not
-// measurable in this environment; each form below was loaded from disk in Chromium and Firefox,
-// raw (it loads its address in at least one of them) and after the export (it loads nothing).
+// jsdom parses the svg here; what a browser does with the exported file opened from disk is not
+// measurable in this environment. Each form below was also loaded from disk in Chromium and
+// Firefox, raw and after the export: after it, none loads anything. Raw, most load their address
+// in at least one of the two; some load nothing there either (a use to another file, an animated
+// fill, an xml:base, an instruction inside the root, an animated ping, a data- attribute, an
+// svg with no namespace, which is no svg document as a file), and are kept as forms the export
+// has to hold against all the same.
 
 const NS = 'xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"';
 const HOST = 'elsewhere.example';
@@ -38,6 +42,14 @@ const REACHING_OUT: Record<string, string> = {
 	'an xml-stylesheet instruction before the root': `<?xml-stylesheet href="${AT}" type="text/css"?><svg ${NS}/>`,
 	'an xml-stylesheet instruction inside the root': `<svg ${NS}><?xml-stylesheet href="${AT}" type="text/css"?></svg>`,
 	'an anchor to another address': `<svg ${NS}><a href="${AT}"><text>t</text></a></svg>`,
+	'a ping on an anchor': `<svg ${NS}><a href="#r" ping="${AT}"><rect id="r" width="9" height="9"/></a></svg>`,
+	'an animation that sets a ping': `<svg ${NS}><a href="#r"><set attributeName="ping" to="${AT}"/><rect id="r" width="9" height="9"/></a></svg>`,
+	'an address in an attribute with no address meaning': `<svg ${NS}><rect width="9" height="9" data-x="${AT}"/></svg>`,
+	'an @import split by an element inside the style element': `<svg ${NS}><style>@im<g>x</g>port "${AT}";</style></svg>`,
+	'a url( split by a desc inside the style element': `<svg ${NS}><style>rect{cursor:u<desc>x</desc>rl(${AT}),auto}</style></svg>`,
+	'an @import split by a script inside the style element': `<svg ${NS}><style>@im<script>x</script>port "${AT}";</style></svg>`,
+	'an image in an svg that is not well-formed': `<svg ${NS}><image href="${AT}"/><g></svg>`,
+	'an @import split by an element in an svg with no namespace': `<svg><style>@im<g>x</g>port "${AT}";</style></svg>`,
 };
 
 describe('svgExportDocument', () => {
@@ -88,9 +100,18 @@ describe('svgExportDocument', () => {
 		expect(out).not.toContain(HOST);
 	});
 
-	it('refuses text that is not a well-formed svg document', () => {
-		expect(svgExportDocument(`<svg ${NS}><image href="${AT}"/><g></svg>`)).toBeNull();
+	it('refuses text with no svg in it', () => {
 		expect(svgExportDocument(`<html><body><img src="${AT}"></body></html>`)).toBeNull();
 		expect(svgExportDocument('')).toBeNull();
+	});
+
+	it('writes an svg that is not well-formed out well-formed, read as the app shows it', () => {
+		const out = svgExportDocument('<svg viewBox="0 0 9 9"><circle r="2"><rect width="1" height="1"></svg>');
+		expect(out).not.toBeNull();
+		const doc = new DOMParser().parseFromString(out!, 'image/svg+xml');
+		expect(doc.getElementsByTagName('parsererror')).toHaveLength(0);
+		expect(doc.documentElement.namespaceURI).toBe('http://www.w3.org/2000/svg');
+		expect(doc.querySelector('circle')?.getAttribute('r')).toBe('2');
+		expect(doc.querySelector('rect')?.getAttribute('width')).toBe('1');
 	});
 });

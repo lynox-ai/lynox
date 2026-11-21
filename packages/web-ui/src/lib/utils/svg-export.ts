@@ -16,32 +16,39 @@
  *    resolves against);
  *  - every `href` (in any namespace) that is not a fragment (`#id`); `image` and `feImage` may
  *    also keep a `data:` address, which a browser loads as an image without any further fetch;
+ *  - every other attribute whose value names an address (`//`, or a scheme such as `http:` at
+ *    its start): `ping` on a link posts to its list on a click, and the next such attribute
+ *    should not need its own line here;
  *  - every piece of CSS (a `style` element, a `style` attribute, a presentation attribute) that
  *    could name an address. CSS can reach an address only through a function or rule whose name
  *    is spelled out (`url`, `image-set`, `src`, `@import`) or through an escape (`\75 rl(` is
  *    `url(`), so the test is on those spellings, not on a parse: CSS with a backslash, or with
- *    any of those names other than a `url(#id)`, is dropped whole;
- *  - every animation element that could set one of the above (an `href`, an event attribute, or
- *    a value naming an address).
+ *    any of those names other than a `url(#id)`, is dropped whole. A `style` element with any
+ *    element inside it is dropped as well: the browser joins the text around a child into one
+ *    sheet (`@im<g/>port`), so the text the test sees is not the text it reads;
+ *  - every animation element that could set one of the above (an `href`, a `ping`, an event
+ *    attribute, or a value naming an address).
  * Processing instructions (`<?xml-stylesheet?>`) and the doctype stay behind because only the
  * root element is written out.
  *
- * Returns null when the text is not a well-formed svg document. A browser renders such a file
- * up to the first error, and what comes before it can still load, so the caller does not hand
- * the text out unchanged.
+ * Text that is not a well-formed svg document (the app shows it inside html, where `<svg>` needs
+ * no namespace and a stray tag is forgiven) is read the way the app reads it, by the html parser,
+ * and the svg it holds is cleaned and written out well-formed. The result is parsed back as an
+ * svg document before it is handed out: a browser renders a broken file up to its first error,
+ * so nothing that does not parse back is handed out. Returns null when there is no svg to write.
  */
 export function svgExportDocument(svg: string): string | null {
-	let doc = parseSvg(svg);
-	// In the app an svg artifact is shown inside html, where `<svg>` needs no namespace, and a
-	// model often leaves it out. Without it the file is not an svg document, so it is put in. Where
-	// it lands does not matter for what is taken out: that runs on whatever the second parse gives.
-	if (doc?.documentElement.namespaceURI === null && doc.documentElement.localName === 'svg') {
-		doc = parseSvg(svg.replace(/<svg(?=[\s/>])/, `<svg xmlns="${SVG_NS}"`));
-	}
-	const root = doc?.documentElement;
+	// Well-formed but outside the SVG namespace (`<svg>` written for html) is not an svg document
+	// either; it goes the html way too.
+	const xml = parseSvg(svg)?.documentElement;
+	const root = xml?.namespaceURI === SVG_NS ? xml : svgInHtml(svg);
 	if (!root || root.namespaceURI !== SVG_NS || root.localName !== 'svg') return null;
-	cleanElement(root);
-	return new XMLSerializer().serializeToString(root);
+	cleanAttributes(root);
+	cleanChildren(root);
+	const out = new XMLSerializer().serializeToString(root);
+	const back = parseSvg(out)?.documentElement;
+	if (!back || back.namespaceURI !== SVG_NS || back.localName !== 'svg') return null;
+	return out;
 }
 
 function parseSvg(text: string): Document | null {
@@ -50,7 +57,13 @@ function parseSvg(text: string): Document | null {
 	return doc;
 }
 
+/** The first svg element the html parser makes of `text`, as the app's frame would show it. */
+function svgInHtml(text: string): Element | null {
+	return new DOMParser().parseFromString(text, 'text/html').getElementsByTagNameNS(SVG_NS, 'svg')[0] ?? null;
+}
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
+const XMLNS_NS = 'http://www.w3.org/2000/xmlns/';
 
 /** Elements that carry an image by address, where a `data:` address is an image and loads nothing more. */
 const DATA_IMAGE_ELEMENTS = new Set(['image', 'feimage']);
@@ -77,7 +90,7 @@ function cssCanReachOut(css: string): boolean {
 	return /url|image-set|src|@import/i.test(withoutFragments);
 }
 
-function cleanElement(el: Element): void {
+function cleanChildren(el: Element): void {
 	// A processing instruction inside the root is not honoured as a stylesheet link, but it says
 	// nothing an exported picture needs either.
 	for (const node of Array.from(el.childNodes)) {
@@ -89,7 +102,7 @@ function cleanElement(el: Element): void {
 			child.remove();
 			continue;
 		}
-		if (name === 'style' && cssCanReachOut(child.textContent ?? '')) {
+		if (name === 'style' && (child.children.length > 0 || cssCanReachOut(child.textContent ?? ''))) {
 			child.remove();
 			continue;
 		}
@@ -98,17 +111,16 @@ function cleanElement(el: Element): void {
 			continue;
 		}
 		cleanAttributes(child);
-		cleanElement(child);
+		cleanChildren(child);
 	}
-	if (el.parentNode === el.ownerDocument) cleanAttributes(el);
 }
 
 function animationCanReachOut(el: Element): boolean {
 	const target = (el.getAttribute('attributeName') ?? '').toLowerCase().replace(/^[^:]*:/, '');
-	if (target === 'href' || target === 'base' || target.startsWith('on')) return true;
+	if (target === 'href' || target === 'ping' || target === 'base' || target.startsWith('on')) return true;
 	return ANIMATION_VALUES.some((a) => {
 		const value = el.getAttribute(a);
-		return value !== null && (cssCanReachOut(value) || value.includes('//') || /^\s*[a-z][a-z0-9+.-]*:/i.test(value));
+		return value !== null && (cssCanReachOut(value) || namesAddress(value));
 	});
 }
 
@@ -118,11 +130,21 @@ function cleanAttributes(el: Element): void {
 		const name = attr.localName.toLowerCase();
 		const value = attr.value;
 		let drop = false;
-		if (name.startsWith('on') || name === 'base') drop = true;
+		if (attr.namespaceURI === XMLNS_NS) continue;
+		if (name.startsWith('on') || name === 'base' || name === 'ping') drop = true;
 		else if (name === 'href') drop = !hrefStaysInside(value, elementName);
-		else if (!NAME_ATTRIBUTES.has(name) && cssCanReachOut(value)) drop = true;
+		else if (NAME_ATTRIBUTES.has(name)) drop = false;
+		else if (cssCanReachOut(value)) drop = true;
+		// A style attribute is CSS, where `fill:red` is not a scheme; every other value is read as
+		// an address could be.
+		else if (name !== 'style' && namesAddress(value)) drop = true;
 		if (drop) el.removeAttributeNode(attr);
 	}
+}
+
+/** A value that is or starts like an absolute address: `//host`, or a scheme (`http:host` is read as `http://host`). */
+function namesAddress(value: string): boolean {
+	return value.includes('//') || /^\s*[a-z][a-z0-9+.-]*:/i.test(value);
 }
 
 function hrefStaysInside(value: string, elementName: string): boolean {
