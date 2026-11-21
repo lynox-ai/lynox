@@ -335,16 +335,20 @@ export function bulkOwnerNoticeShown(haltKey: string | null): boolean {
 /** A sentence cut into plain text and the hosts it names (`shop-name.myshopify.com`), so a page
  *  can keep a host from breaking at a hyphen (with {@link bulkWrapParts}) while the rest of the
  *  sentence wraps as text does; a long token that is no host still breaks where the browser breaks it.
- *  The punctuation right after a host (`.`, `,`, a closing quote) goes with it, and an opening quote
- *  right before it: the host's last word box keeps it on its line, never alone at the next one's start. */
+ *  The punctuation right after a host (`.`, `,`, a closing quote or bracket) goes with it, and an
+ *  opening quote or bracket right before it, so a page's own sentence never starts a line with the
+ *  mark after its host. A dot followed by more marks still ends a word (`com.` / `)`), which only a
+ *  raw engine reason can show. */
 export function bulkHostSegments(text: string): { text: string; host: boolean }[] {
 	const segments: { text: string; host: boolean }[] = [];
 	let at = 0;
 	for (const m of text.matchAll(/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+/gi)) {
-		if (!m[0].includes('-') || m.index < at) continue;
-		const open = /[(\[„“‚‘«"']*$/.exec(text.slice(at, m.index))?.[0] ?? '';
+		// A match never starts inside a glued run: the marks are no letter or digit, a host starts with one.
+		if (!m[0].includes('-')) continue;
+		// Only the marks right before the host: a short window, so a long run of brackets costs nothing.
+		const open = /[(\[„“‚‘«»"']*$/.exec(text.slice(Math.max(at, m.index - 4), m.index))?.[0] ?? '';
 		const end = m.index + m[0].length;
-		const close = /^[.,;:!?)\]»“”’"']*/.exec(text.slice(end))?.[0] ?? '';
+		const close = /^[.,;:!?)\]«»“”‘’"']*/.exec(text.slice(end, end + 4))?.[0] ?? '';
 		const start = m.index - open.length;
 		if (start > at) segments.push({ text: text.slice(at, start), host: false });
 		segments.push({ text: text.slice(start, end + close.length), host: true });

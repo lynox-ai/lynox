@@ -1047,8 +1047,8 @@ describe('a way on is said once on the run page (U-374)', () => {
 			{ text: 'summer-shoes-test.myshopify.com', host: true },
 			{ text: ' nicht erneuern.', host: false },
 		]);
-		// The punctuation right after a host, and an opening quote before it, go with it: never alone
-		// at the start of the next line.
+		// The punctuation right after a host, and an opening quote before it, go with the host's segment,
+		// so the page's word boxes keep them on the host's line.
 		expect(bulkHostSegments('Your instance may not reach summer-shoes.myshopify.com.')).toEqual([
 			{ text: 'Your instance may not reach ', host: false },
 			{ text: 'summer-shoes.myshopify.com.', host: true },
@@ -1057,6 +1057,11 @@ describe('a way on is said once on the run page (U-374)', () => {
 			{ text: 'In the profile for ', host: false },
 			{ text: '„summer-shoes.myshopify.com“,', host: true },
 			{ text: ' the app', host: false },
+		]);
+		expect(bulkHostSegments('Der Shop »summer-shoes.myshopify.com« ist aus.')).toEqual([
+			{ text: 'Der Shop ', host: false },
+			{ text: '»summer-shoes.myshopify.com«', host: true },
+			{ text: ' ist aus.', host: false },
 		]);
 		// A word with a hyphen but no dot, and a host without a hyphen, stay text: neither can break at a hyphen inside a name.
 		expect(bulkHostSegments('Diese Shopify-Verbindung, shop.example.com.')).toEqual([{ text: 'Diese Shopify-Verbindung, shop.example.com.', host: false }]);
