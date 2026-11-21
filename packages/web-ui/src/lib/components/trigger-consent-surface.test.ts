@@ -165,7 +165,8 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		expect(next.cond).toBe('trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.paused !== true');
 		const run = ifBlockAround('runNow(trigger)');
 		// Nor at a completed plan that keeps its pause (ux U-179): the refusal names no way out there.
-		expect(run.cond).toBe('!held(trigger) && !pausedDone(trigger)');
+		// Nor at a watch the policy keeps from its page (U-392): the run would read nothing.
+		expect(run.cond).toBe('!held(trigger) && !pausedDone(trigger) && !trigger.blocked_reason');
 		expect(run.body.trim().startsWith('<button onclick={() => runNow(trigger)}')).toBe(true);
 	});
 
