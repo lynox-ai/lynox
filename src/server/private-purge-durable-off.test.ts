@@ -8,6 +8,8 @@ import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import type { ThreadStore } from '../core/thread-store.js';
 import type { KnowledgeStore } from '../core/knowledge-store.js';
+import { EngineDb } from '../core/engine-db.js';
+import { SubjectStore } from '../core/subject-store.js';
 
 /**
  * Switching durable memory off deletes nothing: the entries a chat seeded while it was on stay in
@@ -66,17 +68,25 @@ describe('private mode and chat deletion while durable memory is off (real engin
     return body.durable_knowledge.entries.map((e) => e.text);
   }
 
-  /** With durable memory on: two chats, each seeding one entry. */
-  async function seed(): Promise<void> {
+  /** With durable memory on: two chats, each seeding one entry; chat a's names a subject it
+   *  creates. Returns that subject's id. */
+  async function seed(): Promise<string> {
     await boot(true);
     const ts = engine().getThreadStore();
     const ks = engine().getKnowledgeStore();
     if (!ts || !ks) throw new Error('fixture: a store is missing');
     ts.createThread('chat-a', { title: 'chat a' });
     ts.createThread('chat-b', { title: 'chat b' });
-    ks.write({ text: 'Walkfalke ships in March', sourceChannel: 'user', sourceUntrusted: false, sourceThreadId: 'chat-a' });
+    const minted = ks.write({ text: 'Walkfalke ships in March', subjectName: 'Walkfalke', sourceChannel: 'user', sourceUntrusted: false, sourceThreadId: 'chat-a' });
     ks.write({ text: 'Nordberg pays monthly', sourceChannel: 'user', sourceUntrusted: false, sourceThreadId: 'chat-b' });
     await stop();
+    if (minted.subjectId === null) throw new Error('fixture: the entry created no subject');
+    return minted.subjectId;
+  }
+  /** Whether engine.db still holds the subject, read with no engine running. */
+  function subjectExists(id: string): boolean {
+    const db = new EngineDb(join(dir, 'engine.db'));
+    try { return new SubjectStore(db).getSubject(id) !== null; } finally { db.close(); }
   }
 
   beforeEach(() => {
@@ -104,13 +114,15 @@ describe('private mode and chat deletion while durable memory is off (real engin
     }
   });
 
-  it('private mode while off removes the chat\'s entry: after a boot with it on, neither recall nor the export has it', async () => {
-    await seed();
+  it('private mode while off removes the chat\'s entry and the subject it created: after a boot with it on, neither recall nor the export has it', async () => {
+    const subject = await seed();
+    expect(subjectExists(subject), 'fixture: the chat created a subject').toBe(true);
 
     await boot(false);
     expect(engine().getKnowledgeStore(), 'fixture: no store while it is off').toBeNull();
     expect(await call('PATCH', '/api/threads/chat-a', { skip_extraction: true })).toBe(200);
     await stop();
+    expect(subjectExists(subject), 'the subject the chat created goes with it').toBe(false);
 
     await boot(true);
     const ks = engine().getKnowledgeStore()!;
@@ -124,13 +136,14 @@ describe('private mode and chat deletion while durable memory is off (real engin
     await seed();
 
     await boot(false);
+    expect(engine().getKnowledgeStore(), 'fixture: no store while it is off').toBeNull();
     expect(await call('DELETE', '/api/threads/chat-a')).toBe(200);
     await stop();
 
     await boot(true);
     const ks = engine().getKnowledgeStore()!;
     const sources = ks.listSourcesMasked(10);
-    expect(sources.find((s) => s.threadId === 'chat-a')?.threadDeletedAt, 'the deleted chat is marked').not.toBeNull();
+    expect(sources.find((s) => s.threadId === 'chat-a')?.threadDeletedAt, 'the deleted chat is marked').toEqual(expect.any(String));
     expect(sources.find((s) => s.threadId === 'chat-b')?.threadDeletedAt, 'the other chat is not').toBeNull();
     expect(ks.recall({ query: 'Walkfalke ships' }).map((e) => e.text)).toContain('Walkfalke ships in March');
   }, 120_000);

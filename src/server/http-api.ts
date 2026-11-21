@@ -450,9 +450,6 @@ function containedFields(states: { contained: Set<string>; unknown: Set<string> 
   return { contained: false };
 }
 
-/** What a chat opened from a contained one may promise for a store change, as this instance runs
- *  now: bulk runs on (their ledger is there), who turns them on, the Shopify read in a bulk run,
- *  and whether a billing tier is set, the same test the settings page reads `managed` by. */
 /**
  * The durable knowledge store a removal reaches: the engine's, or one built over engine.db while
  * durable memory is switched off. Switching it off deletes nothing, so the entries a chat seeded
@@ -466,9 +463,17 @@ async function durableStoreForRemoval(engine: Engine): Promise<import('../core/k
   if (!engineDb) return null;
   const { SubjectStore } = await import('../core/subject-store.js');
   const { KnowledgeStore } = await import('../core/knowledge-store.js');
-  return new KnowledgeStore(engineDb, engine.getSubjectStore() ?? new SubjectStore(engineDb), engine.getSecretStore() ?? null);
+  const { makeSubjectExternalRefs } = await import('../core/subject-store.js');
+  const store = new KnowledgeStore(engineDb, engine.getSubjectStore() ?? new SubjectStore(engineDb), engine.getSecretStore() ?? null);
+  // The same two questions the engine's own store asks before private mode removes a subject the
+  // chat created (does a thread or a table row still link it?), or the removal leaves it.
+  store.setSubjectRefs(makeSubjectExternalRefs(engine.getThreadStore(), engine.getDataStore()));
+  return store;
 }
 
+/** What a chat opened from a contained one may promise for a store change, as this instance runs
+ *  now: bulk runs on (their ledger is there), who turns them on, the Shopify read in a bulk run,
+ *  and whether a billing tier is set, the same test the settings page reads `managed` by. */
 function containedWayOutOf(engine: Engine): ContainedWayOutState {
   const tier = readEnvAlias('LYNOX_BILLING_TIER') ?? undefined;
   return {
