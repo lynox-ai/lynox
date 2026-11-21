@@ -89,7 +89,7 @@ describe('a registered frame', () => {
 		expect(keyOf(iframe)).not.toBe(keyIn(src));
 	});
 
-	it('keeps its key when it is moved and gets a new window, and only the new window is answered with it', () => {
+	it('keeps its key when it is moved and gets a new window, and the new window is answered with it', () => {
 		const iframe = document.createElement('iframe');
 		const sentA: unknown[] = [];
 		const sentB: unknown[] = [];

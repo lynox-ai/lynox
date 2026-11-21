@@ -125,10 +125,12 @@ export const ARTIFACT_FIT_CODE =
  * are set explicitly. So unifying on `'none'` is de-duplication, not tightening
  * — which is why it is safe to do in the same change.
  *
- * `img-src` allows `data:` and `blob:` only, no remote host. That is the state
- * artifacts had before they moved to the frame endpoint: as `srcdoc` frames they
- * inherited the app's policy (`img-src 'self' data: blob:`), so remote images
- * were already blocked whatever this policy said. The endpoint inherits nothing,
+ * `img-src` allows `data:` and `blob:` only, no remote host. For remote images
+ * that is the state artifacts had before they moved to the frame endpoint: as
+ * `srcdoc` frames they inherited the app's policy (`img-src 'self' data: blob:`),
+ * so remote images were already blocked whatever this policy said. Same-origin
+ * images, which that policy allowed, are now blocked too: an artifact has an
+ * opaque origin and no use for them. The endpoint inherits nothing,
  * so this policy has to hold that state itself; an image request to another
  * host is a way to send data out without any script. Allowing remote images in
  * artifacts would be a product decision, not a change this module makes on its

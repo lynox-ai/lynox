@@ -134,7 +134,7 @@ describe('the frame bootstrap', () => {
 		expect(h.posted).toEqual([{ target: 'parent', message: { type: FRAME_READY, [FRAME_KEY_FIELD]: '' }, targetOrigin: ORIGIN }]);
 	});
 
-	it('reads the key before anything else, so a later change of the fragment does not reach its ready', () => {
+	it('reads the key once, so a later change of the fragment does not reach its ready', () => {
 		// A location whose hash changes after its first read: the ready carries the first value.
 		let reads = 0;
 		const loc = { origin: ORIGIN, get hash(): string { reads++; return reads === 1 ? `#${KEY}` : '#changed'; } };
