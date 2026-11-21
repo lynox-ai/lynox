@@ -4,6 +4,11 @@
 
 ### Upgrade notes
 
+- With durable memory switched off, turning a chat private now removes the
+  durable knowledge entries that chat seeded while durable memory was on, and
+  deleting a chat marks their source as a deleted chat. Switching durable memory
+  off never deleted those entries, and until now both actions left them as they
+  were.
 - Managed instances now sign the Google connect start token in the
   provider-bound v2 format. A control plane that does not accept v2 yet answers
   every Connect with `bad_signature`, so the control plane has to be updated

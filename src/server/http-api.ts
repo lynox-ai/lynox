@@ -453,6 +453,22 @@ function containedFields(states: { contained: Set<string>; unknown: Set<string> 
 /** What a chat opened from a contained one may promise for a store change, as this instance runs
  *  now: bulk runs on (their ledger is there), who turns them on, the Shopify read in a bulk run,
  *  and whether a billing tier is set, the same test the settings page reads `managed` by. */
+/**
+ * The durable knowledge store a removal reaches: the engine's, or one built over engine.db while
+ * durable memory is switched off. Switching it off deletes nothing, so the entries a chat seeded
+ * while it was on are still there, and private mode or deleting the chat has to reach them, as
+ * the person erasure does. Null only without engine.db.
+ */
+async function durableStoreForRemoval(engine: Engine): Promise<import('../core/knowledge-store.js').KnowledgeStore | null> {
+  const open = engine.getKnowledgeStore();
+  if (open) return open;
+  const engineDb = engine.getEngineDb();
+  if (!engineDb) return null;
+  const { SubjectStore } = await import('../core/subject-store.js');
+  const { KnowledgeStore } = await import('../core/knowledge-store.js');
+  return new KnowledgeStore(engineDb, engine.getSubjectStore() ?? new SubjectStore(engineDb), engine.getSecretStore() ?? null);
+}
+
 function containedWayOutOf(engine: Engine): ContainedWayOutState {
   const tier = readEnvAlias('LYNOX_BILLING_TIER') ?? undefined;
   return {
@@ -6526,14 +6542,15 @@ export class LynoxHTTPApi {
               failed.push(`memories: ${err instanceof Error ? err.message : String(err)}`);
             }
           }
-          const knowledgeStore = engine.getKnowledgeStore();
-          if (knowledgeStore) {
-            try {
+          // Also while durable memory is off: what the chat seeded while it was on is still held.
+          try {
+            const knowledgeStore = await durableStoreForRemoval(engine);
+            if (knowledgeStore) {
               const purged = knowledgeStore.deleteByThread(id);
               if (purged > 0) process.stderr.write(`[lynox:private] Purged ${purged} durable entries from thread ${id.slice(0, 8)}\n`);
-            } catch (err: unknown) {
-              failed.push(`durable knowledge: ${err instanceof Error ? err.message : String(err)}`);
             }
+          } catch (err: unknown) {
+            failed.push(`durable knowledge: ${err instanceof Error ? err.message : String(err)}`);
           }
           if (failed.length > 0) {
             process.stderr.write(`[lynox:private] Purge incomplete for thread ${id.slice(0, 8)}: ${failed.join('; ')}\n`);
@@ -6580,11 +6597,12 @@ export class LynoxHTTPApi {
           failed.push(`memories: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
-      const knowledgeStore = engine.getKnowledgeStore();
-      if (knowledgeStore) {
-        try { knowledgeStore.markThreadDeleted(id); } catch (err: unknown) {
-          failed.push(`durable knowledge: ${err instanceof Error ? err.message : String(err)}`);
-        }
+      // Also while durable memory is off: entries the chat seeded while it was on are still held.
+      try {
+        const knowledgeStore = await durableStoreForRemoval(engine);
+        if (knowledgeStore) knowledgeStore.markThreadDeleted(id);
+      } catch (err: unknown) {
+        failed.push(`durable knowledge: ${err instanceof Error ? err.message : String(err)}`);
       }
       if (failed.length > 0) {
         process.stderr.write(`[lynox:thread-delete] Not deleted, marking the source failed for thread ${id.slice(0, 8)}: ${failed.join('; ')}\n`);
