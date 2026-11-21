@@ -68,6 +68,11 @@ describe('accountFromStoreOrigin', () => {
 });
 
 describe('accountLabel', () => {
+  it('a control character between two mark runs does not join them past four marks', () => {
+    const marks = '\u0301'.repeat(4);
+    expect(accountLabel(`e${marks}\u0080${marks}\u0099${marks}`)).toBe(`e${marks}`);
+  });
+
   it('keeps a plain name as it is', () => {
     expect(accountLabel('person@example.invalid')).toBe('person@example.invalid');
   });

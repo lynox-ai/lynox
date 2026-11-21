@@ -91,7 +91,8 @@ import { PROMPT_TEXT_BRAND, type PromptSegment, type PromptText } from '../types
  * 4. It keeps at most four non-spacing or enclosing marks (`\p{Mn}`, `\p{Me}`)
  *    on one base character; a longer run is cut, so stacked marks cannot paint
  *    over the text around a value. Vietnamese needs two, Indic scripts one or
- *    two; Tibetan stacks of more than four are cut too, accepted. Spacing marks
+ *    two; Tibetan stacks, Hebrew with cantillation and Quranic Arabic can carry
+ *    more than four and are cut too, accepted. Spacing marks
  *    (`\p{Mc}`) are visible and stay uncapped.
  * All of this runs before any cut a caller makes, so characters past a cut
  * cannot shorten what the cut keeps.

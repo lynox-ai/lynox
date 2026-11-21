@@ -26,6 +26,8 @@ const BLANK: ReadonlyArray<readonly [string, string]> = [
   ['combining grapheme joiner U+034F', '\u034F'],
   ['variation selector-16 U+FE0F', '\uFE0F'],
   ['variation selector-1 U+FE00', '\uFE00'],
+  ['Mongolian free variation selector U+180B', '\u180B'],
+  ['variation selector-17 U+E0100', '\u{E0100}'],
 ];
 
 describe('singleLine removes what renders blank', () => {
@@ -62,6 +64,8 @@ describe('singleLine keeps at most four marks on one base character', () => {
 
   it('a mixed run of non-spacing and enclosing marks is cut to four in all', () => {
     expect(singleLine(`a${'\u0301\u20DD'.repeat(5)}b`)).toBe('a\u0301\u20DD\u0301\u20DDb');
+    expect(dialogValue(`/etc/shadowa${'\u0301\u20DD'.repeat(5)}`)).toBe('/etc/shadowa\u0301\u20DD\u0301\u20DD');
+    expect(dialogToolWord(`a${'\u0301\u20DD'.repeat(5)}`)).toBe('External tool "a\u0301\u20DD\u0301\u20DD"');
   });
 
   it('blank characters are removed before the marks are counted', () => {
@@ -85,6 +89,8 @@ describe('real text still reads', () => {
   for (const text of ['안녕하세요', '한국어 텍스트', 'Tiếng Việt có dấu', 'Ngoại hối ưu đãi']) {
     it(`${text} in decomposed form survives`, () => {
       expect(singleLine(text.normalize('NFD')).normalize('NFC')).toBe(text);
+      expect(dialogValue(`/etc/shadow ${text.normalize('NFD')}`).normalize('NFC')).toBe(`/etc/shadow ${text}`);
+      expect(dialogToolWord(text.normalize('NFD')).normalize('NFC')).toBe(`External tool "${text}"`);
     });
   }
 });
