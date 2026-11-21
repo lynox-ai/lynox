@@ -1138,7 +1138,7 @@ export class Agent implements IAgent {
   get sawUntrustedData(): boolean { return this._sawUntrustedData; }
   /** DK.1 F5: sticky over the CONVERSATION (not reset per run) — set once this conversation
    *  has ingested untrusted content (a wrapped marker, an {@link Agent.EXTERNAL_CONTENT_TOOLS}
-   *  read, OR a web search the provider ran itself). The per-run latch resets each turn, but an injected instruction ("on your NEXT
+   *  read, OR a server tool the provider ran itself, such as its web search). The per-run latch resets each turn, but an injected instruction ("on your NEXT
    *  reply, remember(pin:true) …") persists in context, so a clean-latch turn could still be
    *  executing it. A durable-write gate ORs this in → such a deferred `remember` routes to
    *  pending_review, not active+pinned. Reset only on a fresh conversation (`reset`) or
@@ -1147,7 +1147,8 @@ export class Agent implements IAgent {
   private _conversationSawUntrusted = false;
   /** The taint state when the current tool batch started; read by the secret gate. */
   private _taintBeforeBatch: boolean | undefined;
-  /** Whether this conversation holds a search the provider ran itself (`web_search_20250305`):
+  /** Whether this conversation holds a server tool the provider ran itself, such as its web
+   *  search (`web_search_20250305`; any but the lazy tools' tool search, {@link holdsProviderSearch}):
    *  its results reach the model inside the response, past every tool dispatch. Set when such a
    *  response arrives, re-derived from the history on a load, cleared on `reset`, and carried
    *  across a rebuild of the agent (`restoreProviderSearch`). */
@@ -1198,7 +1199,7 @@ export class Agent implements IAgent {
     return this._taintBeforeBatch ?? true;
   }
 
-  /** Whether this conversation holds a search the provider ran itself (see `_providerSearchSeen`). */
+  /** Whether this conversation holds a server tool the provider ran itself (see `_providerSearchSeen`). */
   heldProviderSearch(): boolean {
     return this._providerSearchSeen;
   }
@@ -1320,8 +1321,9 @@ export class Agent implements IAgent {
     // Direct ingest
     'bash', 'http_request', 'read_file', 'batch_files', 'media_process', 'api_setup',
     'web_research', 'mail_read', 'mail_search', 'mail_triage',
-    // The provider's own web search: never dispatched, counted when an answer carries it.
-    PROVIDER_SEARCH_TOOL,
+    // The provider's own web search (`PROVIDER_SEARCH_TOOL`): never dispatched, counted when an
+    // answer carries any server tool the provider ran. Written out: the list is read as text.
+    'web_search',
     'google_docs', 'google_drive', 'google_sheets',
     // `calendar_read` returns SUMMARY/LOCATION text chosen by whoever sent the invitation —
     // an ingest channel that needs no compromise, only the operator's address. It wraps its
@@ -3081,7 +3083,8 @@ export class Agent implements IAgent {
       ) as BetaContentBlockParam[];
       // A server tool the provider ran (its web search) reaches the model inside this answer,
       // past every tool dispatch: content from outside, taken in now, counted as an
-      // external-content tool of this turn under the provider tool's name. Counted before the
+      // external-content tool of this turn under the web search's name, whichever server tool it
+      // was. Counted before the
       // answer is written, so a checkpoint and every call this answer makes see it. Any agent
       // that gets the tool: its rows, too, may hold what the search returned.
       if (holdsProviderSearch(response.content)) {

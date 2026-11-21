@@ -172,6 +172,19 @@ describe('a search the provider ran counts as content from outside', () => {
     expect(grants.has(UNKNOWN_GRANT)).toBe(false);
   });
 
+  it("CONTROL: a conversation loaded with a client tool's call and result is not, nor does its set hold unknown", () => {
+    const grants = ConversationGrants.detached();
+    const agent = agentFor([], [], grants, [], true);
+    agent.loadMessages([
+      { role: 'user', content: 'what time is it' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'tu_9', name: 'get_time', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_9', content: '12:00' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'noon' }] },
+    ]);
+    expect(agent.conversationSawUntrusted).toBe(false);
+    expect(grants.has(UNKNOWN_GRANT)).toBe(false);
+  });
+
   it('CONTROL: a conversation loaded without one is not', () => {
     const grants = ConversationGrants.detached();
     const agent = agentFor([], [], grants, [], true);
