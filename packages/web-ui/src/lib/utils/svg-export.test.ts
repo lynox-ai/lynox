@@ -50,6 +50,11 @@ const REACHING_OUT: Record<string, string> = {
 	'an @import split by a script inside the style element': `<svg ${NS}><style>@im<script>x</script>port "${AT}";</style></svg>`,
 	'an image in an svg that is not well-formed': `<svg ${NS}><image href="${AT}"/><g></svg>`,
 	'an @import split by an element in an svg with no namespace': `<svg><style>@im<g>x</g>port "${AT}";</style></svg>`,
+	'a script behind a prefix the html parser keeps in its name': `<svg><g xmlns:xlink="http://www.w3.org/2000/svg"><xlink:script>fetch("${AT}")</xlink:script></g></svg>`,
+	'a style behind a prefix the html parser keeps in its name': `<svg><g xmlns:xlink="http://www.w3.org/2000/svg"><xlink:style>@import "${AT}";</xlink:style></g></svg>`,
+	'an XHTML img behind a prefix the html parser keeps in its name': `<svg><g xmlns:xlink="http://www.w3.org/1999/xhtml"><xlink:img src="${AT}"/></g></svg>`,
+	'an address split by a tab in an animated value': `<svg ${NS}><image width="9" height="9" href="#x"><set attributeName="fill" to="h&#9;ttp:${HOST}/x"/></image></svg>`,
+	'an address split by a tab in an attribute': `<svg ${NS}><rect width="9" height="9" data-x="h&#9;ttp:${HOST}/x"/></svg>`,
 };
 
 describe('svgExportDocument', () => {
@@ -81,6 +86,13 @@ describe('svgExportDocument', () => {
 		expect(uses[1]!.getAttributeNS('http://www.w3.org/1999/xlink', 'href')).toBe('#dot');
 		expect(doc.querySelector('text')?.textContent).toBe('Umsatz 2026');
 		expect(doc.documentElement.getAttribute('viewBox')).toBe('0 0 10 10');
+	});
+
+	it('keeps a label with a word before a colon', () => {
+		const out = svgExportDocument(`<svg ${NS}><g aria-label="Umsatz: 2026" font-family="Times: x"><rect width="9" height="9"/></g></svg>`)!;
+		const g = new DOMParser().parseFromString(out, 'image/svg+xml').querySelector('g')!;
+		expect(g.getAttribute('aria-label')).toBe('Umsatz: 2026');
+		expect(g.getAttribute('font-family')).toBe('Times: x');
 	});
 
 	it('keeps a data: image in an image but not a data: address in a use', () => {

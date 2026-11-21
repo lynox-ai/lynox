@@ -33,22 +33,34 @@
  *
  * Text that is not a well-formed svg document (the app shows it inside html, where `<svg>` needs
  * no namespace and a stray tag is forgiven) is read the way the app reads it, by the html parser,
- * and the svg it holds is cleaned and written out well-formed. The result is parsed back as an
- * svg document before it is handed out: a browser renders a broken file up to its first error,
- * so nothing that does not parse back is handed out. Returns null when there is no svg to write.
+ * and the svg it holds is written out and read back as an svg document BEFORE anything is taken
+ * out. What is cleaned is then the tree the file will hold, not the html parser's tree: the two
+ * can differ (a prefix the html parser keeps as part of a name, `xlink:script`, is a real
+ * namespace prefix to the svg parser), and a check on one says nothing about the other.
+ *
+ * The cleaned file is read back and cleaned once more, and is handed out only if that changes
+ * nothing. Whatever reads differently once written, by a route no line above names, makes the
+ * export refuse rather than hand out a file that was not the one checked. Returns null then, and
+ * when there is no svg to write.
  */
 export function svgExportDocument(svg: string): string | null {
 	// Well-formed but outside the SVG namespace (`<svg>` written for html) is not an svg document
 	// either; it goes the html way too.
 	const xml = parseSvg(svg)?.documentElement;
-	const root = xml?.namespaceURI === SVG_NS ? xml : svgInHtml(svg);
-	if (!root || root.namespaceURI !== SVG_NS || root.localName !== 'svg') return null;
+	const html = xml?.namespaceURI === SVG_NS ? null : svgInHtml(svg);
+	const root = html ? parseSvg(new XMLSerializer().serializeToString(html))?.documentElement : xml;
+	const out = root ? cleaned(root) : null;
+	if (out === null) return null;
+	const back = parseSvg(out)?.documentElement;
+	return back && cleaned(back) === out ? out : null;
+}
+
+/** `root` cleaned and written out, or null when it is not an svg root. */
+function cleaned(root: Element): string | null {
+	if (root.namespaceURI !== SVG_NS || root.localName !== 'svg') return null;
 	cleanAttributes(root);
 	cleanChildren(root);
-	const out = new XMLSerializer().serializeToString(root);
-	const back = parseSvg(out)?.documentElement;
-	if (!back || back.namespaceURI !== SVG_NS || back.localName !== 'svg') return null;
-	return out;
+	return new XMLSerializer().serializeToString(root);
 }
 
 function parseSvg(text: string): Document | null {
@@ -142,9 +154,15 @@ function cleanAttributes(el: Element): void {
 	}
 }
 
-/** A value that is or starts like an absolute address: `//host`, or a scheme (`http:host` is read as `http://host`). */
+/**
+ * A value that is or starts like an address that loads: `//host`, or a scheme that fetches or runs
+ * (`http:host` is read as `http://host`). Read as the URL parser reads it: tab, carriage return
+ * and line feed anywhere are dropped, a backslash is a slash, and leading spaces and controls go.
+ * Only schemes that load count, so a word before a colon (`Umsatz: 2026` in a label) stays.
+ */
 function namesAddress(value: string): boolean {
-	return value.includes('//') || /^\s*[a-z][a-z0-9+.-]*:/i.test(value);
+	const v = value.replace(/[\t\n\r]/g, '').replace(/\\/g, '/').replace(/^[\u0000-\u0020\s]+/, '');
+	return v.includes('//') || /^(?:https?|ftp|wss?|file|javascript|data|blob|vbscript):/i.test(v);
 }
 
 function hrefStaysInside(value: string, elementName: string): boolean {

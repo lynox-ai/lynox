@@ -176,6 +176,7 @@ describe('the gallery preview frame', () => {
 		await settle();
 		expect(shared).toHaveLength(1);
 		expect(shared[0]!.type).toBe('text/plain');
+		expect(await shared[0]!.text()).toBe(artifactContent);
 	});
 
 	it('loads the endpoint with no srcdoc and is sent the artifact when its own window is ready', async () => {
