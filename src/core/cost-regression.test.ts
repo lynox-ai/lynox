@@ -482,7 +482,12 @@ function measureStaticPrefixTokens(): number {
 // main d33659095, the only file that differs) — `update_workflow_steps` gains `rename_step` and a
 // `goal` field: the way out for a workflow stored with a step id or goal the save now refuses, and
 // `#2` names a step by its position. The rules for a new id stay in the refusals, not the schema.
-const STATIC_PREFIX_BUDGET = 24061;
+// 2026-11-17: +14 (24061 → 24075, both measured the same run, the base with update-workflow.ts of
+// main 9d9c96b42, the only file that differs) — `update_workflow_steps` gains `set_input_from`, the
+// way to repair a stored step whose `{{<id>.result}}` reference names a step missing from its
+// `input_from`, which the save and every run now refuse. The field's text is one short phrase; how
+// to repair a reference stays in the refusals.
+const STATIC_PREFIX_BUDGET = 24075;
 
 /**
  * How far ABOVE the measurement the budget may sit before the ratchet is a

@@ -6,6 +6,7 @@
  *
  */
 
+import { recipientConfirmDigest, recipientsConfirmable } from '../core/recipient-confirm.js';
 import { errorText, errorTextReduced, processErrorText } from '../core/error-egress.js';
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
@@ -27,7 +28,7 @@ import { shapeRequestForModel } from '../core/llm-wire-rules.js';
 import {
   exchangeToken, serializeTokenBody, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
-import { derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
+import { consentNoticeVersion, derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
 import { bindShopifyCallback, shopifyCallbackRefusalLine, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import { connectNoteFor, noteButton, noteLang, noteText, noteTitle, type ConnectNote, type NoteLang } from './connect-note.js';
@@ -39,7 +40,7 @@ import { planOfTrigger, stampEntriesFor, stampExpect, stampListState, stampProfi
 import { workflowAwaitsStampResult } from '../core/workflow-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
-import { askedScopes, scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
+import { scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_RESULT_TEXTS, connectedText, connectedWithMoreText, engineLessPageText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthBack, type OAuthLang, type OAuthText } from './oauth-pages.js';
 import { Engine } from '../core/engine.js';
@@ -56,16 +57,17 @@ import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js
 import { openRunGroup } from '../core/run-group.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
+import type { UntrustedCause } from '../core/untrusted-signals.js';
 import { getLynoxDir, loadConfig, describePinForDisplay, admitBackgroundModel, poolEndpointFor, POOL_ANTHROPIC_ENDPOINT, POOL_MISTRAL_ENDPOINTS } from '../core/config.js';
 import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
 import { shellIsolation, type ShellIsolation } from '../core/shell-isolation.js';
-import { eraseRefusal, importRefusal } from '../core/sidecar-refusals.js';
+import { billingTierSet, eraseRefusal, importRefusal } from '../core/sidecar-refusals.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
 import { APPROVAL_DRAFT_UNAVAILABLE, resolveChatContext, closeLoadedContext, type ChatApprovalReader, type ChatContextRef, type ContainedWayOutState } from '../core/chat-context.js';
 import { bulkRunsSource, bulkRunsTurnedOnBy } from '../core/bulk-switch.js';
-import { shopifyBulkReadEnabled } from '../core/bulk-shopify.js';
+import { shopifyBulkReadEnabled, shopifyConsentBlock } from '../core/bulk-shopify.js';
 import { containedThreadStates, containedThreads, threadIsContained, type Containment } from '../core/containment.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getActiveRoutingMode, effectiveTierModelId } from '../core/tier-resolver.js';
@@ -86,7 +88,7 @@ import { promoteOnboardingBasics, type OnboardingBasicAnswer } from '../core/onb
 import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding-domain.js';
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
-import { MANDATE_KEY_INPUT_REFUSAL, MandateKeyInputError, mandateCredentialInput, maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
+import { MANDATE_KEY_INPUT_REFUSAL, MandateKeyInputError, mandateCredentialInput, mandateDocumentCredential, maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptClosedReason, type PromptStore } from '../core/prompt-store.js';
 import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
 import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
@@ -134,7 +136,7 @@ import { awaitsOwnQuestion } from './own-question.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
-import { BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson } from '../core/bulk-ledger.js';
+import { BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson, externalHostOf } from '../core/bulk-ledger.js';
 import { BULK_LIST_NOTE, hasListPageUrl, isShopifyListSource, listPageUrl, shopifyListFiltersOf } from '../core/bulk-list.js';
 import { shopifyGraphqlEndpoint } from '../core/shopify-graphql.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../core/bulk-write-forms.js';
@@ -147,6 +149,7 @@ import { WebhookReceiver, isCanonicalRequestPath, webhookRouteToken } from './we
 import { requestLogUrl } from './request-log-url.js';
 import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
+import { EngineLessRefused } from '../core/engine-less-refusal.js';
 import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
@@ -1351,6 +1354,13 @@ function authorshipOrNone(read: () => WorkflowAuthorship | undefined): WorkflowA
 /** The code beside `MANDATE_KEY_INPUT_REFUSAL`, read by the web UI. */
 export const MANDATE_KEY_INPUT_CODE = 'mandate_key_input';
 
+/** The code beside the key check's refusal while the provider list applies, read by the web UI. */
+export const PROVIDER_LIST_KEY_CODE = 'provider_list_own_key';
+
+/** Upload size caps on the run route, as base64 length: 5 MB for an image, 10 MB for any other file. */
+const CHAT_IMAGE_B64_MAX = 5 * 1024 * 1024;
+const CHAT_FILE_B64_MAX = 10 * 1024 * 1024;
+
 /**
  * Whether text a mandate's helper typed somewhere other than the chat reads as carrying a key — a
  * conversation's title, a task's fields, a compaction's focus — and was refused for it (422, the
@@ -1380,6 +1390,9 @@ function keyInputRefused(res: ServerResponse, err: unknown): boolean {
   errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE);
   return true;
 }
+
+/** How the destination's importer starts its refusal of a second handshake while a session runs. */
+const MIGRATION_SESSION_ACTIVE = 'Migration session already active';
 
 function errorResponse(
   res: ServerResponse,
@@ -1734,8 +1747,9 @@ function scopeNameOf(consent: ConsentNotice, scope: string): string {
  */
 export function consentPageHtml(consent: ConsentNotice | undefined, scopes: readonly string[], note?: ConnectNote): string {
   // The note's version travels with the confirmation, so a confirmation is refused when the
-  // provider's note is another one by the time it arrives (`shown_note`).
-  const action = `?shown_scopes=${scopes.map(encodeURIComponent).join('+')}${note ? `&shown_note=${note.version}` : ''}`;
+  // provider's note is another one by the time it arrives (`shown_note`). So does the customer
+  // text's (`shown_consent`): the grant records the text the person read, not a later one.
+  const action = `?shown_scopes=${scopes.map(encodeURIComponent).join('+')}${note ? `&shown_note=${note.version}` : ''}${consent ? `&shown_consent=${consentNoticeVersion(consent)}` : ''}`;
   const noteIn = (lang: NoteLang): string =>
     note ? `<p data-connect-note="${note.version}">${escapeHtml(noteText(note.version, lang, note.provider))}</p>` : '';
   if (!consent) {
@@ -1896,6 +1910,18 @@ const PROCESS_STARTED_AT = Date.now() - Math.round(process.uptime() * 1000);
 const ERASURE_MANY_UNKNOWN = 20;
 
 // ── Server Class ─────────────────────────────────────────────────────────────
+
+/** Longer than any message a person types into the composer: such a `typed` is not recorded. */
+export const TYPED_TEXT_MAX = 20_000;
+
+/**
+ * The run's typed text from a request: the client's `typed` field, only when it is a non-empty
+ * string found word for word in the request's task, cleaned like the task. Anything else: none.
+ */
+export function typedOf(typed: unknown, taskText: string): { typedText: string } | undefined {
+  if (typeof typed !== 'string' || typed.trim() === '' || typed.length > TYPED_TEXT_MAX || !taskText.includes(typed)) return undefined;
+  return { typedText: withoutTypedCredentials(stripUntrustedSeparators(typed)) };
+}
 
 export class LynoxHTTPApi {
   private engine: Engine | null = null;
@@ -2251,6 +2277,14 @@ export class LynoxHTTPApi {
    * intent.
    */
   private _lookupRouteScope(method: string, pathname: string): RouteScope | null {
+    return this._matchRoute(method, pathname)?.scope ?? null;
+  }
+
+  /**
+   * The route a request matches: its scope and its path as registered. One walk for both, so the
+   * scope check and the row that names a refused route never disagree on the route.
+   */
+  private _matchRoute(method: string, pathname: string): { readonly scope: RouteScope; readonly path: string } | null {
     const dispatchMethods = method === 'HEAD' ? ['HEAD', 'GET'] : [method];
     const candidates: string[] = [pathname];
     if (pathname.endsWith('/') && pathname.length > 1) {
@@ -2260,10 +2294,10 @@ export class LynoxHTTPApi {
       const key = `${method} ${candidate}`;
       const staticScope = this.staticRouteScopes.get(key)
         ?? (method === 'HEAD' ? this.staticRouteScopes.get(`GET ${candidate}`) : undefined);
-      if (staticScope !== undefined) return staticScope;
+      if (staticScope !== undefined) return { scope: staticScope, path: candidate };
       for (const route of this.dynamicRoutes) {
         if (!dispatchMethods.includes(route.method)) continue;
-        if (route.pattern.test(candidate)) return route.scope;
+        if (route.pattern.test(candidate)) return { scope: route.scope, path: route.path };
       }
     }
     return null;
@@ -2472,6 +2506,8 @@ export class LynoxHTTPApi {
 
   /** The principal a request's session cookie carried, set by the auth block. */
   private readonly _sessionPrincipal = new WeakMap<IncomingMessage, RequestPrincipal>();
+  /** The route a request was dispatched to, for a refusal's row in a mandate's trail. */
+  private readonly _dispatchRoute = new WeakMap<IncomingMessage, { readonly method: string; readonly routePath: string; readonly pathname: string }>();
 
   /** The requests the auth block admitted as the control plane's admin bearer (`cp-admin`). */
   private readonly _cpAdminRequests = new WeakSet<IncomingMessage>();
@@ -2695,7 +2731,12 @@ export class LynoxHTTPApi {
     const phase = requestOutcomePhase(status);
     const note = this._requestTrailNotes.get(req);
     const closing: AuditEntry = { ...entry, phase, action: note === undefined ? entry.action : `${entry.action} ${note}` };
-    try { this.engine?.getAuditLog()?.record(closing); } catch { /* the attempt row stands alone */ }
+    try {
+      this.engine?.getAuditLog()?.record(closing);
+    } catch (err) {
+      // The attempt row stands alone; say so, so a missing outcome is not silent.
+      process.stderr.write(`[lynox] the outcome of a mandate's change could not be recorded: ${processErrorText(err)}\n`);
+    }
   }
 
   /**
@@ -2710,6 +2751,14 @@ export class LynoxHTTPApi {
     if (method === 'GET' || method === 'HEAD') return true;
     const principal = this._principalOf(req);
     if (!writesMandateTrail(principal)) return true;
+    // Asked again here, not only at sign-in: a revoke can land while the body is still arriving,
+    // and a change that has not begun by the revoke must not begin. One already begun is not
+    // stopped here; its attempt row stands before the revoke row. Closed like every revoke check:
+    // a mandate without a grant id, or without a store to ask, counts as ended.
+    if (principalHasEnded(principal, (id) => this._mandateLive(id))) {
+      errorResponse(res, 403, 'This access has ended.', 'mandate_revoked');
+      return false;
+    }
     if (this._openTrail(req, principal, `${method} ${routePath}`, requestPathTarget(pathname))) return true;
     errorResponse(res, 503, 'This change cannot be recorded in the instance log right now, so it was not made.');
     return false;
@@ -2823,11 +2872,61 @@ export class LynoxHTTPApi {
     return loop.stopTask(id).kind === 'requested' ? 'stopped' : 'unstoppable_now';
   }
 
-  /** The 403 a mandate gets for an act only the owner may perform. */
-  private _refuseUnlessOwner(req: IncomingMessage, res: ServerResponse, what: string): boolean {
-    if (isOwnerPrincipal(this._principalOf(req))) return false;
+  /**
+   * The 403 a mandate gets for an act only the owner may perform. A mandate's refusal is a row in
+   * its trail ({@link _recordMandateRefusal}); `target` names what was asked for where the path
+   * alone does not (a reveal of a secret, whose route answers a mandate a plain status too).
+   */
+  private _refuseUnlessOwner(req: IncomingMessage, res: ServerResponse, what: string, target?: string): boolean {
+    const principal = this._principalOf(req);
+    if (isOwnerPrincipal(principal)) return false;
+    this._recordMandateRefusal(req, principal, target);
     errorResponse(res, 403, `Only the owner of this instance can ${what}.`);
     return true;
+  }
+
+  /**
+   * A `refused` row for an act only the owner may perform, so the owner sees the attempt: the
+   * route as registered, the path as sent (or `target`). Its own correlation id: the refusal is
+   * the whole act. A write refused inside its handler already has its attempt row, and the
+   * dispatcher closes that pair as refused, so it gets no second row here. The refusal stands
+   * whether or not the row is written, as it grants nothing; a row that cannot be written is logged.
+   */
+  private _recordMandateRefusal(req: IncomingMessage, principal: RequestPrincipal, target?: string): void {
+    if (!writesMandateTrail(principal) || this._openTrails.has(req)) return;
+    const route = this._dispatchRoute.get(req);
+    if (route === undefined) return;
+    try {
+      const log = this.engine?.getAuditLog() ?? null;
+      if (log === null) throw new Error('no audit log');
+      log.record({ principal, action: `${route.method} ${route.routePath}`, target: target ?? requestPathTarget(route.pathname), phase: 'refused', correlationId: newCorrelationId() });
+    } catch (err: unknown) {
+      process.stderr.write(`[lynox] a mandate's refused attempt could not be recorded: ${processErrorText(err)}\n`);
+    }
+  }
+
+  /** What the browser attached on its own, for `_refusedAsAmbientCrossSite`. */
+  private _ambientOf(req: IncomingMessage, secret: string | undefined): 'none' | 'no-secret' | 'cookie' {
+    return !secret ? 'no-secret' : (this._authOrigin.get(req) ?? '').startsWith('cookie:') ? 'cookie' : 'none';
+  }
+
+  /**
+   * The mark a trigger's instruction gets when the owner's token, not the owner's browser
+   * session, wrote it (`created_untrusted`), or undefined when the words count as the owner's.
+   * The same line `typed` draws: a token's client (a script, an integration) passes on text it
+   * did not have typed, so the targets it names must not be owner-known in the trigger's run
+   * (`ownerInstructionCounts`). Stored as the cause a webhook event's content gets, content that
+   * reached the engine from outside: every reader takes it as not clean. A mandate's write is
+   * marked by its own rules, so only the owner's principal is looked at here.
+   */
+  private _ownerTokenWords(req: IncomingMessage): UntrustedCause | undefined {
+    if (!isOwnerPrincipal(this._principalOf(req))) return undefined;
+    return this._ambientOf(req, process.env['LYNOX_HTTP_SECRET']) === 'none' ? 'external-tool' : undefined;
+  }
+
+  /** The route a request matches, as registered (`/api/x/:id`), or null for none. */
+  private _routeTemplateOf(method: string, pathname: string): string | null {
+    return this._matchRoute(method, pathname)?.path ?? null;
   }
 
   /**
@@ -2916,7 +3015,8 @@ export class LynoxHTTPApi {
   /**
    * E2 (§3.13): a mandate answers only a question its own run asked. Every question the route
    * could answer is checked — the one named by id and the one pending on the session, which a
-   * body without an id answers — so no request reaches a question the check did not see. Both are
+   * body without an id answers on the secret and mailbox routes (`/reply` refuses one) — so no
+   * request reaches a question the check did not see. Both are
    * checked even when an id is given, which refuses more than that request could reach. The question
    * of a scheduled run carries the owner, or the mandate its stamped plan acts for (`planOf`),
    * which then answers it as its own run's question (N1). With no question at all the route
@@ -3063,6 +3163,8 @@ export class LynoxHTTPApi {
   private _answerTodoRefusal(res: ServerResponse, err: unknown): boolean {
     if (err instanceof ForeignTodoError) { errorResponse(res, 403, err.message); return true; }
     if (err instanceof TodoHasForeignSubtasksError) { errorResponse(res, 409, err.message); return true; }
+    // An engine without engine.db: the client's sentence, not the model's (`EngineLessRefused`).
+    if (err instanceof EngineLessRefused) { errorResponse(res, 409, err.client, 'engine_less'); return true; }
     return false;
   }
 
@@ -4134,6 +4236,17 @@ export class LynoxHTTPApi {
           return;
         }
       } else if (routeScope === 'admin' && authScope !== 'admin') {
+        // A mandate is `user`, so an owner's admin route refuses it here (D6): its attempt too,
+        // with the two checks the dispatch puts before every row of a mandate's: charged first, so
+        // a session that keeps asking is stopped before it writes rows, and refused when another
+        // site sent it, so no site can write an attempt into the trail the person never made.
+        const routePath = this._routeTemplateOf(method, pathname);
+        if (routePath !== null && writesMandateTrail(this._principalOf(req))) {
+          if (this._rateLimit(req, res, clientIp)) return;
+          if (this._refusedAsAmbientCrossSite(req, res, method, undefined, this._ambientOf(req, secret), trustProxy)) return;
+          this._dispatchRoute.set(req, { method, routePath, pathname });
+          this._recordMandateRefusal(req, this._principalOf(req));
+        }
         errorResponse(res, 403, 'Admin scope required');
         return;
       }
@@ -4186,10 +4299,7 @@ export class LynoxHTTPApi {
       }
     }
 
-    // What the browser attached on its own, for `_refusedAsAmbientCrossSite`.
-    const ambient: 'none' | 'no-secret' | 'cookie' = !secret
-      ? 'no-secret'
-      : (this._authOrigin.get(req) ?? '').startsWith('cookie:') ? 'cookie' : 'none';
+    const ambient = this._ambientOf(req, secret);
 
     if (!this._beginCpTrail(req, res, method, pathname, authScope, body)) return;
 
@@ -4203,9 +4313,10 @@ export class LynoxHTTPApi {
       if (staticHandler) {
         const stanceKey = this.staticRoutes.has(routeKey) ? routeKey : `GET ${pathname}`;
         const stance = this.staticRouteStances.get(stanceKey);
+        const routePath = stanceKey.slice(stanceKey.indexOf(' ') + 1);
+        this._dispatchRoute.set(req, { method, routePath, pathname });
         if (this._refusedAsAmbientCrossSite(req, res, method, stance, ambient, trustProxy)) return;
         if (this._refusedByStance(req, res, stance)) return;
-        const routePath = stanceKey.slice(stanceKey.indexOf(' ') + 1);
         if (!this._recordedMandateRead(req, res, method, routePath, pathname, url.searchParams, stance, {})) return;
         if (!this._beganMandateChange(req, res, method, routePath, pathname)) return;
         try { await staticHandler(req, res, {}, body); } finally { this._closeTrail(req, res); }
@@ -4225,6 +4336,7 @@ export class LynoxHTTPApi {
               params[name] = value;
             }
           }
+          this._dispatchRoute.set(req, { method, routePath: route.path, pathname });
           if (this._refusedAsAmbientCrossSite(req, res, method, route.stance, ambient, trustProxy)) return;
           if (this._refusedByStance(req, res, route.stance)) return;
           if (!this._recordedMandateRead(req, res, method, route.path, pathname, url.searchParams, route.stance, params)) return;
@@ -4687,6 +4799,44 @@ export class LynoxHTTPApi {
           return;
         }
       }
+      // An attached file is no way around it: every file is read here, before a takeover could end a
+      // parked run and before the file loop below writes any of them to the file area, so a refused
+      // upload changes nothing. The name gets the check a typed message gets; the content only the
+      // credential forms (`mandateDocumentCredential`), read both as text and, for a PDF or Word
+      // file, as what the extraction below gives. An image block is stored and sent as the `data`
+      // string came, so for a file declared as an image that string is read, and its bytes as text
+      // too (the type is the sender's word, and bytes after a valid header are still stored). The
+      // string must be plain base64: a decoder stops at a `=` inside it, and what follows would be
+      // stored unread. A real image's pixels are not read.
+      const attached = (body as Record<string, unknown> | null)?.['files'];
+      if (Array.isArray(attached) && !isOwnerPrincipal(this._principalOf(req))) {
+        for (const file of attached as { name?: unknown; type?: unknown; data?: unknown }[]) {
+          const rawName = typeof file.name === 'string' ? file.name : 'unknown';
+          if (mandateCredentialInput(rawName) !== null) {
+            errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE); return;
+          }
+          const rawType = typeof file.type === 'string' ? file.type : '';
+          // Past its size limit the loop below refuses this file (413) before it is stored.
+          if (typeof file.data !== 'string' || file.data.length > (rawType.startsWith('image/') ? CHAT_IMAGE_B64_MAX : CHAT_FILE_B64_MAX)) continue;
+          const buf = Buffer.from(file.data, 'base64');
+          const readings: string[] = [];
+          if (rawType.startsWith('image/')) {
+            if (!/^[A-Za-z0-9+/]*={0,2}$/.test(file.data)) {
+              errorResponse(res, 400, `Invalid file: ${sanitizeUploadFilename(rawName)}`); return;
+            }
+            readings.push(file.data, buf.toString('utf-8'));
+          } else {
+            readings.push(buf.toString('utf-8'));
+            try {
+              const extracted = await extractDocumentText(buf, sanitizeUploadFilename(rawName));
+              if (extracted) readings.push(extracted.text);
+            } catch { /* the loop below answers an unreadable document */ }
+          }
+          if (readings.some((t) => mandateDocumentCredential(t) !== null)) {
+            errorResponse(res, 422, MANDATE_KEY_INPUT_REFUSAL, MANDATE_KEY_INPUT_CODE); return;
+          }
+        }
+      }
       // Which erasure this request started under; see `erasureGeneration`.
       const erasureGenAtEntry = this.erasureGeneration;
       const erasedSinceEntry = (): boolean => this.erasureGeneration !== erasureGenAtEntry;
@@ -4896,6 +5046,15 @@ export class LynoxHTTPApi {
         principal: this._principalOf(req),
         // Said by the client that will show the review (the web UI), for this run only.
         showsChangesetReview: b?.['shows_changeset_review'] === true,
+        // Only what the person typed, kept apart from the loaded context and the files above:
+        // the boundary is this string, not a sentinel in the composed message, which loaded
+        // content could carry itself. Never derived from `task`: a task can be a prefill (a
+        // mail's subject, a chip, a retry), which the person did not write. The client sends
+        // `typed` only for a message started from an empty composer, and it counts only when it
+        // stands in this request's task word for word. Only from the owner's browser session, as
+        // "Confirm recipients" takes it: a token's client (a script, an integration) passes on
+        // text it did not have typed, and it must not make an address in it the owner's.
+        ...(this._ambientOf(req, process.env['LYNOX_HTTP_SECRET']) !== 'none' ? (typedOf(b?.['typed'], taskText) ?? {}) : {}),
       };
       // Every question this run asks carries who runs it (§3.13 E2): taken from the request
       // that started the run, never read later from the session, whose principal moves on
@@ -4921,8 +5080,8 @@ export class LynoxHTTPApi {
         // earlier with a typed error so the user sees a friendly message instead
         // of a raw provider 400. The frontend downscales to 1568px first, so a
         // real photo/screenshot lands far under this on any provider.
-        const MAX_IMAGE_B64_BYTES = 5 * 1024 * 1024;
-        const MAX_FILE_B64_BYTES = 10 * 1024 * 1024;
+        const MAX_IMAGE_B64_BYTES = CHAT_IMAGE_B64_MAX;
+        const MAX_FILE_B64_BYTES = CHAT_FILE_B64_MAX;
         const MAX_TEXT_FILE_DECODED_CHARS = 200_000;
         // Above this the upload becomes a real file in the tenant's file area
         // instead of message content.
@@ -5931,13 +6090,13 @@ export class LynoxHTTPApi {
         return;
       }
 
-      // Only a body without a promptId answers the session's open question (legacy clients).
+      // Without a promptId nothing is answered: the open question may not be the one the answer
+      // was meant for (the one the client saw closed, and another opened in its place). The
+      // question carries its id in the `prompt` event and in `/pending-prompt`; nothing is recorded.
       const pending = ps.getPending(params['id']!);
       if (pending && pending.prompt_type === 'ask_user' && !pending.questions_json) {
-        if (!this._answerRecorded(_req, res, by, pending.id)) return;
-        let answered: boolean;
-        try { answered = ps.answerUser(pending.id, answer, by); } catch (err) { if (keyInputRefused(res, err)) return; throw err; }
-        if (answered) { jsonResponse(res, 200, { ok: true }); return; }
+        errorResponse(res, 409, 'A question is open: answer it with its promptId.', 'prompt_id_required');
+        return;
       }
 
       errorResponse(res, 404, 'No pending prompt');
@@ -6461,8 +6620,16 @@ export class LynoxHTTPApi {
       const records = threadStore.getMessages(params['id']!, { fromSeq, limit });
       // Apply render projection: merge tool-result carriers into preceding
       // tool-use blocks, strip safety wrappers for display, flatten into the
-      // UI-ready shape that mirrors the client's ChatMessage.
-      const messages = projectMessages(records);
+      // UI-ready shape that mirrors the client's ChatMessage. The ledger says which calls did not
+      // succeed although their stored result reads as a plain answer (a soft failure). A ledger
+      // that cannot be read marks nothing: the chat still opens, as it did before the marks.
+      let unsuccessfulToolUseIds: ReadonlySet<string> | undefined;
+      try {
+        unsuccessfulToolUseIds = engine.getRunHistory()?.getFailedToolUseIds(params['id']!);
+      } catch {
+        unsuccessfulToolUseIds = undefined;
+      }
+      const messages = projectMessages(records, { unsuccessfulToolUseIds });
       // Resumable re-attach (Tier 2, AC2/AC3): read this thread's live run
       // SYNCHRONOUSLY in the same tick as the transcript above. Two synchronous
       // reads can't be interleaved by an eager-persist checkpoint (which runs on
@@ -6771,6 +6938,17 @@ export class LynoxHTTPApi {
     // ── Memory ──
     const VALID_MEMORY_NS = new Set(['knowledge', 'methods', 'status', 'learnings']);
     type MemoryNs = 'knowledge' | 'methods' | 'status' | 'learnings';
+    /**
+     * On an engine that started without engine.db a change to memory is refused with a plain
+     * reason (`Memory.refuseChangesWithoutStore`): 409 with the code `engine_less`, before anything in
+     * the body is looked at or written. Reading stays.
+     */
+    const refuseEngineLessMemory = (res: ServerResponse, memory: { engineLessRefusal?(reader: 'client'): string | null }): boolean => {
+      const refusal = memory.engineLessRefusal?.('client') ?? null;
+      if (refusal === null) return false;
+      errorResponse(res, 409, refusal, 'engine_less');
+      return true;
+    };
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/memory/:ns', async (_req, res, params) => {
       const memory = engine.getMemory();
@@ -6784,6 +6962,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PUT', '/api/memory/:ns', async (_req, res, params, body) => {
       const memory = engine.getMemory();
       if (!requireService(res, memory, 'Memory')) return;
+      if (refuseEngineLessMemory(res, memory)) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       if (refuseContainedSource(res, body, engine.getToolContext().containment)) return;
@@ -6796,6 +6975,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/memory/:ns/append', async (_req, res, params, body) => {
       const memory = engine.getMemory();
       if (!requireService(res, memory, 'Memory')) return;
+      if (refuseEngineLessMemory(res, memory)) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       if (refuseContainedSource(res, body, engine.getToolContext().containment)) return;
@@ -6809,6 +6989,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/memory/:ns', async (req, res, params) => {
       const memory = engine.getMemory();
       if (!requireService(res, memory, 'Memory')) return;
+      if (refuseEngineLessMemory(res, memory)) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -6820,6 +7001,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/memory/:ns', async (_req, res, params, body) => {
       const memory = engine.getMemory();
       if (!requireService(res, memory, 'Memory')) return;
+      if (refuseEngineLessMemory(res, memory)) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       // Accept BOTH body contracts: the UI sends {old_content,new_content}; older/tool
@@ -7463,6 +7645,17 @@ export class LynoxHTTPApi {
       // Mistral's global endpoint is checked where a model request would go: the EU one.
       const apiBaseUrl = b && typeof b['api_base_url'] === 'string' ? toMistralEuBase(b['api_base_url']) : '';
       if (!provider || !key) { errorResponse(res, 400, 'Missing provider or key'); return; }
+      // On an instance connected to a Shopify store a request goes only where a model request may
+      // go (`contained-providers.ts`). The key checked here is always one the user typed, so the
+      // check is refused for any provider named, before anything is sent. `invalid` keeps the page from saving it, and
+      // the code lets the page say why in its own words (`setup-key-check.ts`).
+      {
+        const { providerListApplies, PROVIDER_NOT_ON_LIST_REFUSAL } = await import('../core/contained-providers.js');
+        if (providerListApplies()) {
+          jsonResponse(res, 200, { state: 'invalid', error: PROVIDER_NOT_ON_LIST_REFUSAL, code: PROVIDER_LIST_KEY_CODE });
+          return;
+        }
+      }
       const { validateAnthropicKey, validateMistralKey, validateOpenAICompatKey } = await import('../cli/docker-installer.js');
       try {
         if (provider === 'anthropic') {
@@ -7590,6 +7783,10 @@ export class LynoxHTTPApi {
         // re-synced. cpSuppliesLLMKey above already normalizes internally.
         redacted['managed'] = normalizeBillingTier(tier) ?? tier;
       }
+      // Any tier value at all, canonical or not: the switch the engine's refusals name their way
+      // out by (`sidecar-refusals.ts`). The Web UI's notices take theirs from this, not from
+      // `managed`, so both name the same one.
+      redacted['billing_tier_set'] = billingTierSet();
       // Capability probe: what this instance *can* do, independent of tier.
       // Drives capability-based gating in the Web UI so working features stop
       // being hidden by tier checks (see PRD-SETTINGS-REFACTOR Principle 6).
@@ -9117,6 +9314,7 @@ export class LynoxHTTPApi {
       const rows = pausedFilter
         ? taskManager.listTriggers({ paused: true })
         : taskManager.listTriggers(status ? { status } : undefined);
+      const bulkLedgerForList = engine.getBulkLedger() ?? engine.getBulkLedgerSwitchedOff?.() ?? null;
       const triggers = rows
         .map((trigger) => {
           const starter = loop?.runningStarterTag(trigger.id);
@@ -9125,11 +9323,27 @@ export class LynoxHTTPApi {
           // not run (a webhook's is switched off), and the view says so instead of a next run.
           // The same state the run refusal reads (`workflow-stamp.ts`).
           const workflow = trigger.effect === 'run_workflow' && trigger.pipeline_id ? history?.getWorkflowExact(trigger.pipeline_id) : undefined;
+          // A bulk run's trigger is titled with its run id, for the model; the view names it by its
+          // stage and the host it works on instead (U-324). Null: no host (the data store,
+          // workspace files) or no run any more.
+          // One row whose run cannot be read must not cost the owner the whole list: it shows no host.
+          // A row stored without an effect is no bulk row, and does not cost the list either.
+          const isBulk = typeof trigger.effect === 'string' && trigger.effect.startsWith('bulk_');
+          let bulkSystem: string | undefined;
+          if (isBulk && trigger.bulk_run_id !== undefined) {
+            try { bulkSystem = bulkLedgerForList?.getRunForApply(trigger.bulk_run_id)?.targetSystem; } catch { bulkSystem = undefined; }
+          }
           return {
             ...triggerForRoute(trigger, principal),
             running: visible,
             stoppable: visible && loop?.runningStoppable(trigger.id) === true,
             workflow_awaits_stamp: workflow !== undefined && history?.workflowStampState(workflow) === 'awaits_owner_stamp',
+            // A trigger from before its creator was recorded sends to nobody its instruction names
+            // until the owner confirms its recipients; the view offers that to the owner only, and
+            // only for a trigger whose run can send (an agent's or a workflow's run, not a reminder).
+            recipients_unconfirmed: isOwnerPrincipal(principal) && recipientsConfirmable(trigger)
+              && (trigger.effect === undefined || trigger.effect === null || trigger.effect === 'run_agent' || trigger.effect === 'run_workflow'),
+            ...(isBulk ? { bulk_host: bulkSystem === undefined ? null : externalHostOf(bulkSystem) } : {}),
           };
         });
       // What the owner's stamp of each confirmed plan lists, and how each entry stands (B3), for the
@@ -9244,6 +9458,12 @@ export class LynoxHTTPApi {
           if (this._refuseUnlessOwner(_req, res, 'grant a workflow unattended writes')) return;
           const { workflowGrantEnabled, acceptWorkflowGrant } = await import('../core/workflow-grant.js');
           if (!workflowGrantEnabled()) { errorResponse(res, 403, 'Granting a workflow unattended writes is not enabled on this instance.'); return; }
+          // A grant makes the contract's hosts count as named by the owner, so it is given in the
+          // owner's browser session only, as recipients are confirmed: never with a token.
+          if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+            errorResponse(res, 403, 'Unattended writes are granted only in the owner\'s browser session, not with a token.', 'session_only');
+            return;
+          }
           if (typeof rawGrant !== 'object' || rawGrant === null || Array.isArray(rawGrant)) { errorResponse(res, 400, 'Invalid "grant".'); return; }
           const g = rawGrant as Record<string, unknown>;
           const engineDb = engine.getEngineDb();
@@ -9318,15 +9538,19 @@ export class LynoxHTTPApi {
         // non-run_agent effects.
         // Only the owner's request stamps; a mandate's trigger lands unconfirmed, like one
         // the agent tool creates.
+        // The stamp below is the same either way; only whose words the instruction counts as differs.
+        const tokenWords = this._ownerTokenWords(_req);
         const baseParams = {
           title, description, assignee, dueDate, createdBy, createdMandateId,
           ...(byOwner ? { confirmedAt: new Date().toISOString(), confirmedBy: createdBy } : {}),
+          ...(tokenWords !== undefined ? { createdUntrusted: tokenWords } : {}),
         };
         const task = scheduleCron
           ? taskManager.createScheduled({ ...baseParams, scheduleCron })
           : taskManager.create({ ...baseParams, ...(runAt ? { nextRunAt: runAt } : {}) });
         jsonResponse(res, 201, task);
       } catch (e) {
+        if (e instanceof EngineLessRefused) { errorResponse(res, 409, e.client, 'engine_less'); return; }
         errorResponse(res, 400, e instanceof Error ? e.message : 'Failed to create task');
       }
     }, MARK);
@@ -9392,8 +9616,15 @@ export class LynoxHTTPApi {
       try {
         // `untrusted` is what the agent's turn had taken in (task_update reads it off the agent); a
         // request does not get to say it, so it is dropped here rather than stored as sent.
+        // An owner's token that rewrites the instruction marks it, as a creation does
+        // (`_ownerTokenWords`). The store reads the mark only with a title or description edit, and
+        // only adds it: a schedule change marks nothing, and the owner's browser session clears none.
+        // A workflow's schedule is not marked, as at its creation: its instruction is the stamped
+        // steps, not its title, and a mark would start every run of it as after outside content.
         const { untrusted: _fromClient, ...edit } = body as Record<string, unknown>;
-        task = taskManager.update(params['id']!, edit as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
+        const scheduledWorkflow = engine.getRunHistory()?.getTrigger(params['id']!)?.pipeline_id;
+        const tokenWords = scheduledWorkflow ? undefined : this._ownerTokenWords(_req);
+        task = taskManager.update(params['id']!, { ...edit, ...(tokenWords !== undefined ? { untrusted: tokenWords } : {}) } as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
       } catch (err: unknown) {
         if (this._answerTodoRefusal(res, err)) return;
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
@@ -9594,7 +9825,13 @@ export class LynoxHTTPApi {
     }, ownerOnly('see what a schedule would be confirmed with')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/confirm', async (_req, res, params, body) => {
-      // Only the owner stamps (§3.12 point 2).
+      // Only the owner stamps (§3.12 point 2), and only in their browser session, as recipients
+      // are confirmed: a token, the owner's included, could otherwise stamp a schedule a run it
+      // started had just written, and that schedule would then run as the owner's instruction.
+      if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+        errorResponse(res, 403, 'A schedule is confirmed only in the owner\'s browser session, not with a token.', 'session_only');
+        return;
+      }
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       if (this._refusePaused(_req, res, taskManager, params['id']!, 'confirm')) return;
@@ -9675,6 +9912,41 @@ export class LynoxHTTPApi {
       }
       jsonResponse(res, 200, { ...triggerForRoute(out.trigger, this._principalOf(_req)), runsAs: out.runsAs });
     }, ownerOnly('take over a plan')));
+
+    // "Confirm recipients" (`recipient-confirm.ts`): the owner, in a browser session, makes a
+    // trigger from before its creator was recorded count as their own. The preview shows the
+    // instruction and its digest; the confirmation sends the digest back and records the owner
+    // as the trigger's creator, and nothing else. A token is refused, the owner's included: a
+    // script or a tool must never be able to make an instruction the owner's.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/triggers/:id/confirm-recipients-preview', async (_req, res, params) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'Run history')) return;
+      const t = history.getTrigger(params['id']!);
+      if (!t) { errorResponse(res, 404, 'Trigger not found'); return; }
+      if (!recipientsConfirmable(t)) { errorResponse(res, 409, 'This trigger has no recipients to confirm.', 'not_confirmable'); return; }
+      jsonResponse(res, 200, {
+        title: t.title, description: t.description ?? '', effect: t.effect ?? null,
+        pipeline_id: t.pipeline_id ?? null, params: t.pipeline_params ?? null, watch_config: t.watch_config ?? null,
+        expect: recipientConfirmDigest(t),
+      });
+    }, ownerOnly('confirm a trigger\'s recipients')));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/triggers/:id/confirm-recipients', async (req, res, params, body) => {
+      if (this._ambientOf(req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+        errorResponse(res, 403, 'Recipients are confirmed only in the owner\'s browser session, not with a token.', 'session_only');
+        return;
+      }
+      const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
+        ? (body as { expect: string }).expect : undefined;
+      if (expected === undefined) { errorResponse(res, 400, '"expect" is required: confirm from the preview.', 'expect_required'); return; }
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'Run history')) return;
+      const out = history.confirmTriggerRecipients(params['id']!, expected);
+      if (out === 'not_found') { errorResponse(res, 404, 'Trigger not found'); return; }
+      if (out === 'changed') { errorResponse(res, 409, 'Nothing confirmed: the trigger has changed in the meantime.', 'changed'); return; }
+      if (out === 'not_confirmable') { errorResponse(res, 409, 'This trigger has no recipients to confirm.', 'not_confirmable'); return; }
+      jsonResponse(res, 200, { confirmed: true });
+    }, ownerOnly('confirm a trigger\'s recipients')));
 
     // Run a trigger immediately, off-schedule (the Triggers-home "Run now"
     // control). Delegates to the WorkerLoop so the manual run goes through the
@@ -9818,6 +10090,10 @@ export class LynoxHTTPApi {
     };
     /** Which halt a run stands at, by name: the owner's page words its own sentences on the
      *  name, never on the engine's English text. Null for no halt, or a text it does not know. */
+    const bulkConsentFieldsOf = (ledger: import('../core/bulk-ledger.js').BulkLedger, runId: string): string[] => {
+      const apply = ledger.shopifyApplyOf(runId);
+      return apply === null ? [] : shopifyConsentBlock(apply, undefined);
+    };
     const bulkHaltKey = (haltReason: string | null): string | null =>
       haltReason === null ? null : (Object.entries(BULK_HALT_REASONS).find(([, text]) => text === haltReason)?.[0] ?? null);
     const withBinding = <T extends { checksumBinding: 'keyed' | 'unkeyed'; haltReason: string | null }>(status: T): T & { checksumNote?: string; haltKey: string | null } => {
@@ -9924,6 +10200,14 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, {
         ...withBinding(status),
         checksum: actionable ? ledger.computeChecksum(params['id']!) : null,
+        // The targets that add hidden characters the page marks but does not otherwise show: a
+        // line wherever the run is approved or its probe confirmed.
+        ...(() => {
+          // One pass for both counts; a target with a field past the reading bounds is counted
+          // on its own, as not checked, never as one that adds.
+          const hidden = actionable ? ledger.hiddenCounts(params['id']!) : null;
+          return { hiddenAddsTargets: hidden?.adds ?? null, hiddenUncheckedTargets: hidden?.unchecked ?? null };
+        })(),
         // A Shopify list has no page address: what is read is the store's GraphQL endpoint, with
         // the engine's own documents. It stands here so the owner sees where the read goes. A stored
         // source with no address to build (a form without a spec, a filter holding a list) shows its
@@ -9934,6 +10218,10 @@ export class LynoxHTTPApi {
         // A Shopify product list's filters ({} for every product): shown wherever the run is started or
         // approved, so the owner sees which group and which statuses it reads (PRD shopify-preset §22.2 item 5).
         listFilters: shopifyListFiltersOf(status.list === null ? null : ledger.getListRun(params['id']!)),
+        // The form a list run reads, as stored, and whether its judge decides an HTML field: the
+        // sentences under a target lynox leaves out and the halt's step are worded on them.
+        listForm: status.list === null ? null : ledger.getListRun(params['id']!)?.source.form ?? null,
+        judgesHtml: ledger.judgesHtml(params['id']!),
         // An unmeasured apply run writes one target first and is approved only with this
         // confirmation. An undo is neither: it restores what its source wrote, under the
         // source's confirmation, so the note's promise of one target first would not hold.
@@ -9961,6 +10249,9 @@ export class LynoxHTTPApi {
         // Why a run halted for want of a probe cannot go past one target, read now: the effect
         // checks the probe again when it starts, so a resume the route let through can halt here.
         probeBlock: bulkHaltKey(status.haltReason) === 'probeRequired' ? ledger.probeBlockFor(status.id) : null,
+        // The fields a connection confirmed under no or another text does not cover, for the halt's
+        // sentence: the same check the apply ran, read under no grant.
+        consentFields: bulkHaltKey(status.haltReason) === 'consentOutdated' ? bulkConsentFieldsOf(ledger, status.id) : null,
         // What an undo would take back now; for an external run that includes a failed write,
         // which may have landed although its answer never came back.
         undoable: ledger.countUndoable(status.id),
@@ -10155,6 +10446,20 @@ export class LynoxHTTPApi {
       if (!out.ok) { refuseOut(res, out); return; }
       jsonResponse(res, 200, withBinding(out.status));
     }, ownerOnly('approve a bulk run')));
+
+    // Discarding a run before its approval: the owner's act, like the approval it forgoes. A
+    // mandate asks the owner (U-324). Nothing was written, so nothing is told: the owner did it.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/discard', async (_req, res, params) => {
+      const ledger = bulkLedger(res);
+      if (!ledger) return;
+      const id = params['id']!;
+      if (ledger.getStatus(id) === null) { errorResponse(res, 404, 'No bulk run with this id.', 'not_found'); return; }
+      if (!ledger.discardRun(id)) {
+        errorResponse(res, 409, 'Only a run that is not yet approved can be discarded; an approved run is stopped instead.', 'not_discardable');
+        return;
+      }
+      jsonResponse(res, 200, withBinding(ledger.getStatus(id)!));
+    }, ownerOnly('discard a bulk run')));
 
     // Taking one target out of a previewed run before approving it, or putting it back (PRD
     // shopify-preset §20.2 item 4). An owner's act like the approval it changes; the checksum is
@@ -11823,7 +12128,7 @@ export class LynoxHTTPApi {
         return;
       }
 
-      const token = mintBrokerStartToken(instanceId, httpSecret);
+      const token = mintBrokerStartToken('google', instanceId, httpSecret);
       const url =
         `${controlPlaneUrl}/oauth/google/start` +
         `?instance_id=${encodeURIComponent(instanceId)}` +
@@ -12069,10 +12374,17 @@ export class LynoxHTTPApi {
 
       const { verifier, challenge, method } = createPkcePair();
       const state = randomUUID();
+      // The version of the customer text this start shows, and the confirmation below is checked
+      // against: the callback records it as the text the connection was confirmed under.
+      const consentVersion = decision.consent ? consentNoticeVersion(decision.consent) : undefined;
       const signed = signProfileOAuthState(
         {
           state, profileId: id, verifier,
           by: principal.kind === 'mandate' ? { tag: principalTag(principal), mandateId: principal.mandateId } : { tag: 'owner' },
+          // What the link asks for, from the same decision the confirmation is checked against
+          // below (`shown_scopes`) and the link is built from: the callback records it as asked.
+          asked: decision.scopes,
+          consent: consentVersion,
         },
         httpSecret,
         Math.floor(Date.now() / 1000),
@@ -12080,9 +12392,10 @@ export class LynoxHTTPApi {
       if (!signed) {
         // `decideConnect` has already established the secret and the profile, and
         // the id it saw is the id signed here. What still lands here is a value the
-        // format cannot carry: a mandate address with enough non-ASCII characters
-        // that its encoding exceeds what the reader accepts. Refused before the
-        // user is sent anywhere, and never asserted, because this is the one place
+        // format cannot carry: a mandate address whose encoding exceeds what the
+        // reader accepts, a list of asked scopes the format refuses, or a whole value
+        // longer than a browser keeps (`PROFILE_OAUTH_STATE_MAX_LEN`). Refused before
+        // the user is sent anywhere, and never asserted, because this is the one place
         // where a wrong value would mint a cookie that verifies as a DIFFERENT one.
         sendOAuthHtml(res, 500, OAUTH_RESULT_TEXTS.startFailed, 'apis');
         return;
@@ -12145,6 +12458,12 @@ export class LynoxHTTPApi {
       // page never named.
       if (decision.consent && new URL(req.url ?? '', 'http://x').searchParams.get('shown_scopes') !== decision.scopes.join(' ')) {
         sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.scopesChanged, 'apis');
+        return;
+      }
+      // The confirmation holds for the customer text the page showed. A page rendered by an engine
+      // before an upgrade that changed the text would otherwise record the new text as confirmed.
+      if (consentVersion !== undefined && new URL(req.url ?? '', 'http://x').searchParams.get('shown_consent') !== consentVersion) {
+        sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.consentChanged, 'apis');
         return;
       }
 
@@ -12606,11 +12925,22 @@ export class LynoxHTTPApi {
           if (lapsed.length > 0) grantNext.lapsed_slots = lapsed;
           // What the token can do, as the provider says: a narrower grant is recorded as granted.
           // A broader one is recorded too, and the page below names what it holds beyond the ask.
+          // What was asked is what the confirmed start signed, not the profile now: a save in
+          // between changes the next link, not this consent.
+          const asked = signed.asked ?? [];
+          grantNext.asked_scope = [...asked];
+          // Which customer text the person confirmed, from the same signed start: a start that
+          // showed none records none, so a connection reads as confirmed under no text. Only the
+          // owner's: the owner approves a bulk run against what the text promises, and a text a
+          // mandate confirmed is one the owner never read, so it opens no further field.
+          if (signed.consent !== undefined && by.tag === 'owner') {
+            grantNext.consent_version = signed.consent;
+            grantNext.consented_at = new Date().toISOString();
+          }
           const grantedNow = scopesOfAnswer(parsed.scope);
           if (grantedNow !== undefined) {
             grantNext.granted_scope = grantedNow;
-            const asked = askedScopes(fresh.auth?.oauth ?? {});
-            if (asked !== undefined) grantedBeyond = scopesBeyondAsked(grantedNow, asked);
+            if (preset?.compareGrantedScope === true) grantedBeyond = scopesBeyondAsked(grantedNow, asked);
           }
           // The account this consent signed in with, for the person to read: the store the
           // provider signed for, or the account an OpenID Connect preset's id_token names.
@@ -14835,7 +15165,7 @@ export class LynoxHTTPApi {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       if (url.searchParams.get('reveal') === 'true') {
         // The key opens every stored secret: the owner's own session only.
-        if (this._refuseUnlessOwner(req, res, 'see the vault key')) return;
+        if (this._refuseUnlessOwner(req, res, 'see the vault key', requestPathTarget(url.pathname, [['reveal', 'true']]))) return;
         // Managed mode: never expose vault key to users
         if (readEnvAlias('LYNOX_BILLING_TIER')) {
           errorResponse(res, 403, 'Managed instance: vault key is system-controlled');
@@ -14877,7 +15207,7 @@ export class LynoxHTTPApi {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       if (url.searchParams.get('reveal') === 'true') {
         // The token logs in as the owner: the owner's own session only.
-        if (this._refuseUnlessOwner(req, res, 'see the access token')) return;
+        if (this._refuseUnlessOwner(req, res, 'see the access token', requestPathTarget(url.pathname, [['reveal', 'true']]))) return;
         if (readEnvAlias('LYNOX_BILLING_TIER')) {
           errorResponse(res, 403, 'Managed instance: access token is system-controlled');
           return;
@@ -15190,9 +15520,43 @@ export class LynoxHTTPApi {
         res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
       };
 
+      // From the first handshake request on, the target may hold a session: a stop says when to
+      // try again (the catch below adds it where a step did not), unless it asks to check the target.
+      let sessionMayBeHeld = false;
       try {
         const crypto = await import('../core/migration-crypto.js');
         const { MigrationExporter } = await import('../core/migration-export.js');
+        const { TARGET_BODY_CAPS, TARGET_BODY_TIMEOUT_MS, TARGET_REQUEST_TIMEOUTS_MS, TargetAnswerTooSlow, TargetDidNotAnswer, askTarget, capText, isConnectionFailure, discardBody, durationText, readTargetBody, readTargetJson, relayedReport, relayedText } = await import('../core/migration-target-reply.js');
+        // Why an answer of the target could not be used, in the user's words.
+        type Why = 'large' | 'format' | 'slow' | 'broken' | 'silent' | 'unreachable';
+        const why = (w: Why, cap: number, unread: string, waited: number = TARGET_BODY_TIMEOUT_MS): string =>
+          w === 'large' ? `its answer is over ${capText(cap)}${unread}`
+            : w === 'format' ? 'its answer is not in the expected format'
+              : w === 'slow' ? `it did not finish its answer within ${durationText(TARGET_BODY_TIMEOUT_MS)}`
+                : w === 'silent' ? `it did not answer within ${durationText(waited)}`
+                  : w === 'unreachable' ? 'it could not be reached'
+                    : 'the connection broke before its answer was complete';
+        // Nothing leaves the instance before the handshake is complete: the first request is this
+        // one, and the data goes only with the manifest and the chunks.
+        // After the first handshake request the target may hold a session for 30 minutes and turns
+        // a new attempt away until then; every stop from here says when to try again, except where
+        // the user has to check the target first.
+        const AGAIN = 'You can start the migration again in 30 minutes at the latest.';
+        const handshakeFailed = (w: Why): string =>
+          `lynox could not set up the connection to the target instance: ${why(w, TARGET_BODY_CAPS.handshake, ', so lynox did not read it', TARGET_REQUEST_TIMEOUTS_MS.handshake)}. Nothing was transferred. ${AGAIN}`;
+        /**
+         * A request to the target with its deadline for the answer to start. Past it, or when the
+         * connection fails, the step's own words (`words`); the transport's text never reaches the user.
+         */
+        const ask = async (path: string, init: RequestInit, ms: number, words: (w: 'silent' | 'unreachable') => string): Promise<Response> => {
+          try {
+            return await askTarget(fetchPinned, `${targetUrl}${path}`, init, ms);
+          } catch (err: unknown) {
+            if (err instanceof TargetDidNotAnswer) throw new Error(words('silent'));
+            if (isConnectionFailure(err)) throw new Error(words('unreachable'));
+            throw err;
+          }
+        };
 
         // 1. Preview
         sendEvent('progress', { phase: 'preview', message: 'Collecting data inventory...' });
@@ -15203,14 +15567,34 @@ export class LynoxHTTPApi {
         // 2. ECDH Handshake with target
         sendEvent('progress', { phase: 'handshake', message: 'Establishing secure connection...' });
 
-        const hsRes = await fetchPinned(`${targetUrl}/api/migration/handshake`, {
+        const hsRes = await ask('/api/migration/handshake', {
           headers: { 'X-Migration-Token': migrationToken, 'Accept': 'application/json' },
-        });
+        }, TARGET_REQUEST_TIMEOUTS_MS.handshake, handshakeFailed);
         if (!hsRes.ok) {
-          const errText = await hsRes.text();
-          throw new Error(`Handshake failed: ${errText}`);
+          let errText: string | null;
+          try { errText = await readTargetBody(hsRes, TARGET_BODY_CAPS.handshake, TARGET_BODY_TIMEOUT_MS); } catch (err: unknown) {
+            throw new Error(handshakeFailed(err instanceof TargetAnswerTooSlow ? 'slow' : 'broken'));
+          }
+          if (errText === null) throw new Error(handshakeFailed('large'));
+          // A target still holding an earlier attempt: by its code, or by its text on an older one.
+          let refused: { error?: unknown; code?: unknown } | null = null;
+          try { refused = JSON.parse(errText) as { error?: unknown; code?: unknown }; } catch { /* not JSON */ }
+          if (refused?.code === 'migration_session_active' || (typeof refused?.error === 'string' && refused.error.startsWith(MIGRATION_SESSION_ACTIVE))) {
+            throw new Error(`The target instance is still holding an earlier migration attempt, so it did not accept a new one. Nothing was transferred. ${AGAIN}`);
+          }
+          // The target's own words, cleaned and cut; a refusal here starts no session on it.
+          const said = typeof refused?.error === 'string' ? refused.error : errText;
+          const words = relayedText(said).trim();
+          throw new Error(words === ''
+            ? 'The target instance did not accept the migration. Nothing was transferred.'
+            : `The target instance did not accept the migration. It says: ${words}${/[.!?…]$/.test(words) ? '' : '.'} Nothing was transferred.`);
         }
-        const handshake = await hsRes.json() as { serverPubKey: string; signature: string; challengeNonce: string };
+        // The target answered the handshake: from here it holds a session (a refusal above starts none).
+        sessionMayBeHeld = true;
+        const answer = await readTargetJson(hsRes, TARGET_BODY_CAPS.handshake, handshakeFailed, TARGET_BODY_TIMEOUT_MS);
+        const field = (k: string): unknown => (answer !== null && typeof answer === 'object' ? (answer as Record<string, unknown>)[k] : undefined);
+        if (!['serverPubKey', 'signature', 'challengeNonce'].every((k) => typeof field(k) === 'string')) throw new Error(handshakeFailed('format'));
+        const handshake = answer as { serverPubKey: string; signature: string; challengeNonce: string; acceptsPlainStores?: unknown };
 
         // Verify the server's signature over its public key — without this, a MITM
         // can substitute the responder's keypair and decrypt the entire transfer.
@@ -15224,14 +15608,18 @@ export class LynoxHTTPApi {
           crypto.zeroize(signingKey);
         }
         if (!handshakeValid) {
-          throw new Error('Handshake signature invalid — refusing to derive transfer key');
+          // Not passing: it fails the same way on every attempt (a wrong token or a foreign key).
+          throw new Error('Handshake signature invalid — refusing to derive transfer key. If this happens again, write to support@lynox.ai.');
         }
 
         // Client key agreement
         const clientKp = crypto.generateEphemeralKeypair();
-        const serverPub = crypto.deserializePublicKey(handshake.serverPubKey);
+        // A key or nonce the target sent that does not parse is its answer in the wrong format.
+        let serverPub: ReturnType<typeof crypto.deserializePublicKey>;
+        try { serverPub = crypto.deserializePublicKey(handshake.serverPubKey); } catch { throw new Error(handshakeFailed('format')); }
         const nonce = Buffer.from(handshake.challengeNonce, 'hex');
-        const transferKey = crypto.deriveTransferKey(clientKp.privateKey, serverPub, nonce);
+        let transferKey: Buffer;
+        try { transferKey = crypto.deriveTransferKey(clientKp.privateKey, serverPub, nonce); } catch { throw new Error(handshakeFailed('format')); }
 
         const migrationHeaders = {
           'Content-Type': 'application/json',
@@ -15239,32 +15627,64 @@ export class LynoxHTTPApi {
           'X-Migration-Token': migrationToken,
         };
 
-        const completeRes = await fetchPinned(`${targetUrl}/api/migration/handshake`, {
-          method: 'POST',
-          headers: migrationHeaders,
-          body: JSON.stringify({ clientPubKey: crypto.serializePublicKey(clientKp.publicKey) }),
-        });
-        if (!completeRes.ok) throw new Error('Handshake completion failed');
+        // The transfer key is zeroized once the chunks are encrypted, and also when the handshake
+        // completion or the export fails or refuses (a bundle over the destination's bounds).
+        let exported: ReturnType<typeof exporter.export>;
+        try {
+          const completeRes = await ask('/api/migration/handshake', {
+            method: 'POST',
+            headers: migrationHeaders,
+            body: JSON.stringify({ clientPubKey: crypto.serializePublicKey(clientKp.publicKey) }),
+          }, TARGET_REQUEST_TIMEOUTS_MS.handshake, handshakeFailed);
+          await discardBody(completeRes);
+          if (!completeRes.ok) throw new Error(`Handshake completion failed. ${AGAIN}`);
 
-        sendEvent('progress', { phase: 'handshake_done', message: 'Secure connection established' });
+          sendEvent('progress', { phase: 'handshake_done', message: 'Secure connection established' });
 
-        // 3. Export + Encrypt
-        sendEvent('progress', { phase: 'exporting', message: 'Exporting and encrypting data...' });
-        const { manifest, chunks, skipped: exportSkipped, workspace: exportWorkspace } = exporter.export(transferKey, (p) => {
-          sendEvent('progress', { phase: p.phase, message: p.currentName, current: p.currentChunk, total: p.totalChunks });
-        });
+          // A destination that takes plaintext stores says so in its handshake; its numbers come
+          // from its health route. Anything short of both is the raw path, as for an older one.
+          const { plainOffer, readDestinationHealth } = await import('../core/migration-plain-source.js');
+          const ceiling = handshake.acceptsPlainStores === true
+            ? plainOffer(handshake, await readDestinationHealth(fetchPinned, targetUrl))
+            : null;
 
-        // Zeroize transfer key — no longer needed after encryption
-        crypto.zeroize(transferKey);
+          // 3. Export + Encrypt
+          sendEvent('progress', { phase: 'exporting', message: 'Exporting and encrypting data...' });
+          exported = exporter.export(transferKey, (p) => {
+            sendEvent('progress', { phase: p.phase, message: p.currentName, current: p.currentChunk, total: p.totalChunks });
+          }, ceiling ? { plain: { ceiling } } : undefined);
+        } finally {
+          crypto.zeroize(transferKey);
+        }
+        const { manifest, chunks, skipped: exportSkipped, workspace: exportWorkspace, plain: exportPlain } = exported;
+        // A refusal from the destination is shown as its own text, which is written for the
+        // person migrating; the raw response only when it carries none.
+        // `step` names the step for a diagnosis (the raw answer); `told` says it to the user, followed
+        // by the target's own words when it gave any, cut at 500 characters with a mark that it was.
+        // The answer is read up to its cap, and the target's words lose control and bidi characters.
+        // `then` is what the user can do next: try again later, or, once the restore ran, check the target.
+        const refusal = async (r: Response, step: string, told: string, then: string = AGAIN): Promise<Error> => {
+          let text: string | null;
+          try { text = await readTargetBody(r, TARGET_BODY_CAPS.refusal, TARGET_BODY_TIMEOUT_MS); } catch (err: unknown) {
+            if (err instanceof TargetAnswerTooSlow) return new Error(`${told} It did not finish its answer within ${durationText(TARGET_BODY_TIMEOUT_MS)}. ${then}`);
+            return new Error(`${told} The connection broke before its answer was complete. ${then}`);
+          }
+          if (text === null) return new Error(`${told} Its answer is over ${capText(TARGET_BODY_CAPS.refusal)}, so lynox did not read it. ${then}`);
+          let message: unknown;
+          try { message = (JSON.parse(text) as { error?: unknown }).error; } catch { /* not JSON */ }
+          if (typeof message !== 'string' || message === '') return new Error(`${step}: ${relayedText(text)} ${then}`);
+          return new Error(`${told} It says: ${relayedText(message)} ${then}`);
+        };
 
         // 4. Send manifest
         sendEvent('progress', { phase: 'transferring', message: 'Sending manifest...' });
-        const mRes = await fetchPinned(`${targetUrl}/api/migration/manifest`, {
+        const mRes = await ask('/api/migration/manifest', {
           method: 'POST',
           headers: migrationHeaders,
           body: JSON.stringify(manifest),
-        });
-        if (!mRes.ok) throw new Error(`Manifest rejected: ${await mRes.text()}`);
+        }, TARGET_REQUEST_TIMEOUTS_MS.manifest, (w) => `${w === 'silent' ? `The target instance did not answer within ${durationText(TARGET_REQUEST_TIMEOUTS_MS.manifest)}.` : 'lynox could not reach the target instance.'} lynox stopped before sending your data. ${AGAIN}`);
+        if (!mRes.ok) throw await refusal(mRes, 'Manifest rejected', 'The target instance refused the migration.');
+        await discardBody(mRes);
 
         // 5. Send chunks
         for (let i = 0; i < chunks.length; i++) {
@@ -15275,32 +15695,62 @@ export class LynoxHTTPApi {
             total: chunks.length,
           });
 
-          const cRes = await fetchPinned(`${targetUrl}/api/migration/chunk`, {
+          const cRes = await ask('/api/migration/chunk', {
             method: 'POST',
             headers: migrationHeaders,
             body: JSON.stringify(chunks[i]),
-          });
-          if (!cRes.ok) throw new Error(`Chunk ${String(i)} rejected: ${await cRes.text()}`);
+          }, TARGET_REQUEST_TIMEOUTS_MS.chunk, (w) => `${w === 'silent' ? `The target instance did not answer within ${durationText(TARGET_REQUEST_TIMEOUTS_MS.chunk)} while receiving part ${String(i + 1)} of the data.` : `lynox lost the connection to the target instance while sending part ${String(i + 1)} of the data.`} lynox stopped; the target instance has not restored anything. ${AGAIN}`);
+          if (!cRes.ok) throw await refusal(cRes, `Chunk ${String(i)} rejected`, `The target instance refused part ${String(i + 1)} of the data.`);
+          await discardBody(cRes);
         }
 
         // 6. Restore
         sendEvent('progress', { phase: 'restoring', message: 'Restoring data on target...' });
-        const rRes = await fetchPinned(`${targetUrl}/api/migration/restore`, {
-          method: 'POST',
-          headers: migrationHeaders,
-        });
-        if (!rRes.ok) throw new Error(`Restore failed: ${await rRes.text()}`);
+        // From here the data has gone out: when the source cannot tell whether the restore ran, it
+        // says where to look instead of what failed inside.
+        const restoreUnknown = (w: Why): string =>
+          `The target instance's report on restoring the data could not be read: ${why(w, TARGET_BODY_CAPS.restore, '', TARGET_REQUEST_TIMEOUTS_MS.restore)}. Check on the target instance whether your data arrived before you migrate again.`;
+        let rRes: Response;
+        try {
+          rRes = await askTarget(fetchPinned, `${targetUrl}/api/migration/restore`, { method: 'POST', headers: migrationHeaders }, TARGET_REQUEST_TIMEOUTS_MS.restore);
+        } catch (err: unknown) {
+          if (err instanceof TargetDidNotAnswer) throw new Error(restoreUnknown('silent'));
+          if (isConnectionFailure(err)) throw new Error(restoreUnknown('broken'));
+          // The network guard refusing the address (it follows no redirects): nothing was sent, so a
+          // new attempt can get past it. Anything else: the user checks the target first.
+          const text = relayedText(err instanceof Error ? err.message : String(err)).trim();
+          if (text.startsWith('Blocked:')) {
+            const reason = text.slice('Blocked:'.length).trim().replace(/[.!?…]+$/, '');
+            throw new Error(`lynox did not send the request to restore the data${reason === '' ? '' : `: ${reason}`}. The target instance has not restored anything. ${AGAIN}`);
+          }
+          throw new Error(`${text === '' ? 'The request to restore the data ended unexpectedly' : text}${/[.!?…]$/.test(text) ? '' : '.'} Check on the target instance whether your data arrived before you migrate again.`);
+        }
+        // A 4xx is the target turning the restore down before it started (a missing chunk, sidecar
+        // mode); a 5xx is the restore failing on the way, which can leave part of it applied.
+        if (!rRes.ok) throw await refusal(rRes, 'Restore failed', 'The target instance could not restore the data.', rRes.status >= 500 ? 'Check on the target instance whether your data arrived before you migrate again.' : AGAIN);
 
-        const result = await rRes.json() as { success: boolean; verification: unknown };
+        const result = await readTargetJson(rRes, TARGET_BODY_CAPS.restore, restoreUnknown, TARGET_BODY_TIMEOUT_MS) as { success?: unknown; verification?: unknown } | null;
         // Files the export could not carry (a link, a name that cannot travel) are named in the result,
         // and so is a workspace left out in shell sidecar mode (PRD D7, walker 2).
         sendEvent('done', {
-          success: true, verification: result.verification,
+          // The report is the target's: shown, so its strings lose what would not display as itself.
+          success: true, verification: relayedReport(result?.verification),
           ...(exportSkipped !== undefined ? { skipped: exportSkipped } : {}),
           ...(exportWorkspace !== undefined ? { workspace: exportWorkspace } : {}),
+          // Per store the path it took and why a store took the raw path, for the report.
+          ...(exportPlain !== undefined ? { plain: exportPlain } : {}),
         });
       } catch (err: unknown) {
-        sendEvent('error', { message: err instanceof Error ? err.message : 'Migration failed' });
+        // Every text to the user goes through the same cleaning, the guard's and the exporter's too.
+        const { relayedText: clean } = await import('../core/migration-target-reply.js');
+        const message = clean(err instanceof Error ? err.message : '', 2000).trim()
+          || `The migration stopped for a reason lynox could not read.${sessionMayBeHeld ? '' : ' Nothing was transferred.'}`;
+        // A stop after the handshake that names no next step (a read failing on this instance) gets
+        // the retry sentence. A stop that names one (check the target, write to support) does not:
+        // there the same attempt fails again, and the sentence would send the user round in a loop.
+        const AGAIN_TEXT = 'You can start the migration again in 30 minutes at the latest.';
+        const said = message.includes(AGAIN_TEXT) || message.includes('Check on the target instance') || message.includes('support@lynox.ai');
+        sendEvent('error', { message: sessionMayBeHeld && !said ? `${message}${/[.!?…]$/.test(message) ? '' : '.'} ${AGAIN_TEXT}` : message });
       } finally {
         res.end();
       }
@@ -15351,7 +15801,9 @@ export class LynoxHTTPApi {
         const payload = importer.startHandshake(storedToken);
         jsonResponse(res, 200, payload);
       } catch (err: unknown) {
-        errorResponse(res, 400, err instanceof Error ? err.message : 'Handshake failed');
+        const message = err instanceof Error ? err.message : 'Handshake failed';
+        // The source words this refusal for the person migrating; the code lets it tell it apart.
+        errorResponse(res, 400, message, message.startsWith(MIGRATION_SESSION_ACTIVE) ? 'migration_session_active' : undefined);
       }
     });
 

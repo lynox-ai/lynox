@@ -817,7 +817,11 @@ export async function ensureSession(resumeThreadId?: string | null): Promise<str
 	const res = await fetch(`${getApiBase()}/sessions`, init);
 	if (res.status === 401) throw new SessionExpiredError();
 	if (res.status === 410) throw new ThreadDeletedError();
-	const data = (await res.json()) as { sessionId: string; model?: string; contextWindow?: number };
+	// Any other refusal (a rate limit, a server fault) opens no session: its answer carries no id,
+	// and a run must never be sent to a session it does not name.
+	if (!res.ok) throw new SessionStartRefusedError(res.status);
+	const data = (await res.json()) as { sessionId?: unknown; model?: string; contextWindow?: number };
+	if (typeof data.sessionId !== 'string' || data.sessionId === '') throw new SessionStartRefusedError(res.status);
 	sessionId = data.sessionId;
 	if (data.model) { sessionModel = data.model; sessionTier = data.model; }
 	if (data.contextWindow) contextWindow = data.contextWindow;
@@ -826,6 +830,12 @@ export async function ensureSession(resumeThreadId?: string | null): Promise<str
 
 class SessionExpiredError extends Error {
 	constructor() { super('session_expired'); this.name = 'SessionExpiredError'; }
+}
+
+/** The server answered the request for a session without one (a rate limit, a fault). No turn
+ *  started, so nothing ran; the message is kept, failed, for the user to send again. */
+class SessionStartRefusedError extends Error {
+	constructor(readonly status: number) { super(`session_refused_${status}`); this.name = 'SessionStartRefusedError'; }
 }
 
 /** The conversation was deleted (410). It is not opened again, so nothing retries it. */
@@ -876,6 +886,10 @@ export interface RunOptions {
 	/** The text is what the user typed or dictated in the composer. Client-only, never sent:
 	 *  it marks the message `typed` (see `ChatMessage.typed`). */
 	typed?: boolean;
+	/** The text is the composer's, and the composer was empty when the person started it: no
+	 *  prefill, no retry, no follow-up chip, nothing the app put there. Only then the run carries
+	 *  the text as `typed`, which the engine may count as words the owner wrote. */
+	composedFromEmpty?: boolean;
 }
 
 /**
@@ -1185,7 +1199,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 			console.error('[chat] a run failed after its stream began', err);
 			return;
 		}
-		failTurnStart(turn, displayText ?? task, files, queueId, err instanceof ThreadDeletedError);
+		failTurnStart(turn, displayText ?? task, files, queueId, err instanceof ThreadDeletedError, err instanceof SessionStartRefusedError ? err.status : null);
 	}
 }
 
@@ -1195,7 +1209,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
  * the message is marked failed AND unconfirmed: it is never sent again without first asking
  * whether a turn is still running (`askBeforeResend`).
  */
-function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[] | undefined, queueId: string | undefined, threadDeleted = false): void {
+function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[] | undefined, queueId: string | undefined, threadDeleted = false, refusedStatus: number | null = null): void {
 	// Still the turn's thread: its own message is in the list (the list may have been rebuilt),
 	// or, for a turn that failed before adding one, the list is the one it started in.
 	let ownMsg = turn.userMsg && messages.includes(turn.userMsg) ? turn.userMsg : null;
@@ -1265,7 +1279,11 @@ function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[]
 	// The thread was deleted meanwhile (another tab, another device): the server answered, and it
 	// will answer the same to every turn queued behind this one, so none of them is started. The
 	// message stays on screen, failed, to be copied into a new chat.
-	chatError = threadDeleted ? t('chat.error_thread_deleted') : t('chat.error_connection');
+	// A session the server refused is not a lost connection. A rate limit says so; other refusals
+	// get the text their status maps to (often the general one), since the body is not read.
+	chatError = threadDeleted ? t('chat.error_thread_deleted')
+		: refusedStatus !== null ? mapApiError(refusedStatus, '')
+		: t('chat.error_connection');
 	chatErrorDetail = null;
 	if (threadDeleted) {
 		// The turns queued behind it are failed too, not left showing a send that never comes,
@@ -1402,10 +1420,39 @@ export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<v
 	}
 	if (sendBlockedByReview()) return;
 	if (!await askBeforeResend()) return;
+	const shown = messages.includes(msg);
+	if (!shown) {
+		msg.failed = false;
+		msg.sendUnconfirmed = false;
+		// A typed message sent again is still the user's own words.
+		await sendMessage(text, undefined, undefined, msg.typed === true ? { typed: true } : undefined);
+		return;
+	}
+	// The message on screen is the one sent again, not a copy added under it: it goes out as a
+	// queued turn, which the run finds by its id, as the automatic re-send does. The checks
+	// sendMessage makes are made again here, after the question to the server: a review may
+	// have opened meanwhile.
+	if (isStreaming) {
+		addToast(t('chat.still_running'), 'info', 6000);
+		return;
+	}
+	if (sendBlockedByReview()) return;
+	threadReadRefusal = null;
+	const id = newQueueId();
 	msg.failed = false;
 	msg.sendUnconfirmed = false;
-	// A typed message sent again is still the user's own words.
-	await sendMessage(text, undefined, undefined, msg.typed === true ? { typed: true } : undefined);
+	msg.queued = true;
+	msg.queueId = id;
+	// A typed message sent again is still the user's own words, also if the run cannot find it
+	// by its id (the list was replaced meanwhile) and adds it anew.
+	await _executeRun(text, undefined, undefined, msg.typed === true ? { typed: true } : undefined, id);
+	// A turn that stopped before its run took the message (offline, a signed-out session) leaves
+	// it queued with an id no queue holds: nothing would ever send it. It is failed again, so the
+	// tap and the reconnect can.
+	if (msg.queued === true && msg.queueId === id) {
+		msg.queued = false;
+		msg.failed = true;
+	}
 }
 
 async function _runTurn(task: string, files: FileAttachment[] | undefined, displayText: string | undefined, runOptions: RunOptions | undefined, queueId: string | undefined, turn: TurnStart): Promise<void> {
@@ -1478,6 +1525,9 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	}
 	if (runOptions?.effort) payload['effort'] = runOptions.effort;
 	if (runOptions?.thinking) payload['thinking'] = runOptions.thinking;
+	// Only a message the person wrote from an empty composer says what was typed; everything else
+	// (a prefill, a retry, a chip, a view's own message) sends none.
+	if (runOptions?.composedFromEmpty === true && runOptions.typed === true) payload['typed'] = task;
 	if (runOptions?.context) payload['context'] = runOptions.context;
 	// The first run of a chat opened with "Plan in a new chat" carries where it came from: the
 	// engine turns that into a fixed sentence pointing at a bulk run, and reads nothing by it.
@@ -2673,6 +2723,9 @@ export async function replyPermission(answer: string): Promise<void> {
 	pendingPermission = null;
 	// The prompt is gone from the screen either way; an answer that did not arrive is said aloud.
 	const sid = sessionId;
+	// Without the question's id the answer is not sent: the server would take it for whatever
+	// question is open by then, so the open one is brought back to be answered by name.
+	if (!promptId) { await reportReply(sid, 'id_required', null); return; }
 	await reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId }), draftable);
 }
 
@@ -2711,6 +2764,22 @@ async function reportReply(sid: string, outcome: ReplyOutcome, answer: string | 
 		const returned = answer !== null && composerDraft !== null && composerDraft(answer);
 		chatError = t(returned ? 'chat.mandate_key_input_returned' : 'chat.mandate_key_input');
 		chatErrorDetail = null;
+		return;
+	}
+	if (outcome === 'id_required') {
+		// Nothing was answered. The open question comes back with its id, to be answered again on
+		// purpose: sending the same answer to it unasked could approve what the person never saw.
+		if (sessionId !== sid) return;
+		let saidNoneOpen = false;
+		await checkPendingPrompt((nothingOpen) => { saidNoneOpen = nothingOpen; });
+		if (sessionId !== sid) return;
+		// The answer does not go back into the message field: which question is open now is not
+		// known to match the one answered (a mail to send, say), and one keystroke would answer it.
+		// "Nothing is open" only when the server said so; a failed check says nothing either way.
+		const none = saidNoneOpen;
+		chatError = t(none ? 'chat.reply_needs_question_none' : 'chat.reply_needs_question');
+		chatErrorDetail = null;
+		unmatchedAnswerCount++;
 		return;
 	}
 	if (outcome === 'settled' || sessionId !== sid) return;
@@ -2760,8 +2829,9 @@ export async function postTabProgress(promptId: string, partial: (string | null)
 /** How a reply ended: `lost` when the server could not be reached or failed twice, `closed` when
  *  it answered 410 (a closed question, with the reason the server gave, or null), `key_refused`
  *  when it refused the answer as carrying a key (422 `mandate_key_input`), and `settled` for
- *  every other final word. */
-type ReplyOutcome = 'settled' | 'lost' | 'key_refused' | { readonly closed: ClosedCode | null };
+ *  every other final word except `id_required`: the answer went without the question's id
+ *  (409 `prompt_id_required`), so nothing was answered. */
+type ReplyOutcome = 'settled' | 'lost' | 'key_refused' | 'id_required' | { readonly closed: ClosedCode | null };
 
 /** POST a reply with a single retry on a network error or 5xx. The server is idempotent for
  *  repeat promptIds (returns 200 with `idempotent: true`), so retrying is safe. Never rejects. */
@@ -2783,6 +2853,12 @@ async function postReplyWithRetry(url: string, body: Record<string, unknown>): P
 				let detail: string | null = null;
 				try { detail = await res.text(); } catch { /* no body */ }
 				if (isKeyInputRefusal(422, detail)) return 'key_refused';
+			}
+			// Sent without the question's id: nothing was answered, the open question waits.
+			if (res.status === 409) {
+				let code: unknown;
+				try { code = ((await res.clone().json()) as { code?: unknown } | null)?.code; } catch { /* no body */ }
+				if (code === 'prompt_id_required') return 'id_required';
 			}
 			// 5xx → retry once
 			if (res.status >= 500) {
@@ -3008,7 +3084,7 @@ export type PendingCard = 'question' | 'decision' | 'other' | null;
  * Check the server for a pending prompt that survived a disconnect/refresh.
  * Restores pendingPermission or pendingSecretPrompt so the UI re-shows it, and says which card.
  */
-export async function checkPendingPrompt(): Promise<PendingCard> {
+export async function checkPendingPrompt(onAnswered?: (nothingOpen: boolean) => void): Promise<PendingCard> {
 	const sid = sessionId;
 	if (!sid) return null;
 	let card: PendingCard = null;
@@ -3020,6 +3096,8 @@ export async function checkPendingPrompt(): Promise<PendingCard> {
 		// The chat may have changed while the request ran: the card belongs to the chat it was
 		// asked for, and set now it would show in another one.
 		if (sessionId !== sid) return null;
+		// This call got the server's word on what is open; a failed one knows nothing about it.
+		onAnswered?.(data['pending'] === false);
 		if (!data['pending']) return null;
 
 		const promptType = data['promptType'] as string;
@@ -3443,6 +3521,12 @@ export function getRunStartedAt(): number | null {
 export function getRunPromptCount(): number {
 	return runPromptCount;
 }
+/** Bumped each time an answer named no question: the chat moves focus to the sentence then. */
+let unmatchedAnswerCount = $state(0);
+export function getUnmatchedAnswerCount(): number {
+	return unmatchedAnswerCount;
+}
+
 export function getChatError() {
 	return chatError;
 }
