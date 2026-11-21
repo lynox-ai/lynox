@@ -4,7 +4,8 @@ import { randomUUID } from 'node:crypto';
 import type { UntrustedCause } from './untrusted-signals.js';
 
 import type { Engine, RunContext } from './engine.js';
-import { checkPersistentBudget } from './session-budget.js';
+import { budgetRefusal, checkPersistentBudget } from './session-budget.js';
+import { noticeLanguage, RUN_BLOCKED_PREFIX } from './notice-language.js';
 import { toolLockFor } from './mandate-tool-lock.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { runSavedWorkflow, type RunSavedWorkflowResult } from '../tools/builtin/pipeline.js';
@@ -114,7 +115,8 @@ export async function runGuardedSavedWorkflow(
   // 1. Persistent daily/monthly cap — same gate Session.run() checks first.
   const budgetCheck = checkPersistentBudget();
   if (!budgetCheck.allowed) {
-    return { ok: false, error: budgetCheck.reason ?? 'Budget exceeded.' };
+    // Read by a person, in the instance's language, as a chat's refusal is.
+    return { ok: false, error: budgetRefusal(budgetCheck, noticeLanguage(engine.config.language)) };
   }
 
   const config = engine.getUserConfig();
@@ -152,7 +154,8 @@ export async function runGuardedSavedWorkflow(
         await hook.onBeforeRun(runContext.runId, runContext);
       } catch (err: unknown) {
         const reason = err instanceof Error ? err.message : String(err);
-        return { ok: false, error: `Run blocked: ${reason}` };
+        // The hook words its reason in the instance's language; the prefix follows it.
+        return { ok: false, error: `${RUN_BLOCKED_PREFIX[noticeLanguage(engine.config.language)]}${reason}` };
       }
     }
   }

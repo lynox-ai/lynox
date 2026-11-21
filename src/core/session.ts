@@ -72,10 +72,7 @@ import type { TierModelInfo } from './prompts.js';
 import { isFeatureEnabled } from './features.js';
 import { opensLoadedApprovalDraft, stripLoadedContext } from './chat-context.js';
 import { approvalChatTitle } from './approval-chat-title.js';
-import { noticeLanguage, type NoticeLanguage } from './notice-language.js';
-
-/** How a run a hook blocked opens its result, before the hook's reason; the chat cuts it off. */
-export const RUN_BLOCKED_PREFIX: Readonly<Record<NoticeLanguage, string>> = { en: 'Run blocked: ', de: 'Lauf blockiert: ' };
+import { noticeLanguage, RUN_BLOCKED_PREFIX, type NoticeLanguage } from './notice-language.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { capSecretsListing, setupHistorySubscriptions } from './engine-init.js';
 import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker, persistRefusedTurn, capStopNote, CONTENT_REFUSED_NOTE, type EngineNoticeCode } from './eager-persist.js';
