@@ -124,6 +124,8 @@
 		if (shown === null || sending) return;
 		sending = true;
 		error = '';
+		// Set only when this confirm reloaded a moved version: then the focus goes to what changed.
+		let toMark = false;
 		try {
 			const res = await fetch(`${getApiBase()}/workflows/${encodeURIComponent(workflow.id)}/takeover`, {
 				method: 'POST',
@@ -141,6 +143,7 @@
 					changedLine = outcome.text;
 					// A step shows its note too: a connection that changed hands changes the step.
 					changes = stampChanges(shown, preview, (q, i) => `${JSON.stringify(q.steps[i])}\n${stepConnectionNote(q, q.steps[i]!) ?? ''}`);
+					toMark = true;
 				}
 				return;
 			}
@@ -153,10 +156,11 @@
 			// The confirm was turned off, or the content it sat in was replaced: focus goes back to the
 			// head of the dialog rather than to the page behind it, unless something outside the
 			// dialog took it meanwhile, such as an overlay above it. After a change it goes to the
-			// first changed part, brought into sight: that is what the owner has to read again.
+			// first changed part, brought into sight: that is what the owner has to read again. The
+			// line above, which says why, may scroll out of sight then; it is announced as a status.
 			await tick();
 			if (dialog?.isConnected === true && keyIsOurs()) {
-				const mark = dialog.querySelector<HTMLElement>('[data-stamp-changed]');
+				const mark = toMark ? dialog.querySelector<HTMLElement>('[data-stamp-changed]') : null;
 				(mark ?? heading)?.focus();
 				mark?.scrollIntoView?.({ block: 'nearest' });
 			}

@@ -590,7 +590,7 @@ describe('the stamp part reads as sentences, not as stored values', () => {
 
 	it('says what the mode and the failure strategy do, and prints neither stored value', async () => {
 		await openStamp(twoSteps('d1', undefined, { mode: 'autonomous', onFailure: 'notify' }));
-		expect(q('stamp-mode')?.textContent?.trim()).toBe('Läuft selbstständig, ohne nachzufragen');
+		expect(q('stamp-mode')?.textContent?.trim()).toBe('Läuft, ohne bei dir nachzufragen');
 		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Führt die übrigen Schritte aus und meldet den Fehler');
 		expect(q('stamp-mode')!.classList.contains('font-mono')).toBe(false);
 		const settings = q('stamp-settings')?.textContent ?? '';
@@ -599,7 +599,7 @@ describe('the stamp part reads as sentences, not as stored values', () => {
 
 	it('the other values read as their own sentences', async () => {
 		await openStamp(twoSteps('d1', undefined, { mode: 'interactive', onFailure: 'continue' }));
-		expect(q('stamp-mode')?.textContent?.trim()).toBe('Läuft im Chat und darf dort nachfragen');
+		expect(q('stamp-mode')?.textContent?.trim()).toBe('Darf beim Lauf bei dir nachfragen');
 		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Führt die übrigen Schritte trotzdem aus');
 	});
 
@@ -610,10 +610,15 @@ describe('the stamp part reads as sentences, not as stored values', () => {
 		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('halt');
 	});
 
-	it('heads each step with its place and its id, and prints the task once', async () => {
+	it('the stop strategy says no further step starts, not that the run halts at a place', async () => {
+		await openStamp(twoSteps('d1', undefined, { onFailure: 'stop' }));
+		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Startet nach einem Fehler keine weiteren Schritte');
+	});
+
+	it('heads each step with its id and no number, and prints the task once', async () => {
 		await openStamp(twoSteps('d1'));
 		const stepEls = [...target.querySelectorAll<HTMLElement>('[data-testid="stamp-step"]')];
-		expect(stepEls.map((s) => s.querySelector('[data-testid="stamp-step-head"]')?.textContent?.replace(/\s+/g, ' ').trim())).toEqual(['Schritt 1 fetch_orders', 'Schritt 2 post']);
+		expect(stepEls.map((s) => s.querySelector('[data-testid="stamp-step-head"]')?.textContent?.replace(/\s+/g, ' ').trim())).toEqual(['Schritt fetch_orders', 'Schritt post']);
 		for (const [i, task] of ['Read the open orders', 'Send the report'].entries()) {
 			expect(stepEls[i]!.textContent!.split(task).length - 1, task).toBe(1);
 			expect(stepEls[i]!.querySelector('[data-testid="stamp-step-task"]')?.textContent).toBe(task);

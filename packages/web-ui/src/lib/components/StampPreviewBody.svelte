@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { t, tf } from '../i18n.svelte.js';
+	import { t } from '../i18n.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
 	import MarkedLine from './MarkedLine.svelte';
 	import { modeKey, onFailureKey, templateText, timeoutText, visible, type StampChanges, type StampPreview } from '../utils/workflow-stamp.js';
@@ -82,9 +82,10 @@
 			tabindex="-1"
 			class="rounded-[var(--radius-sm)] bg-bg-subtle px-3 py-2 text-xs outline-none {changed ? 'border-2 border-warning/60' : 'border border-border'}"
 		>
-			<!-- A step has no name: its place in the workflow heads it, its id stands beside. The task
-			     follows once, whole. -->
-			<p data-testid="stamp-step-head" class="flex flex-wrap items-baseline gap-x-2 gap-y-1"><span class="font-medium">{tf('workflow_library.stamp.step_n', { n: String(i + 1) })}</span>{' '}<span class="font-mono text-text-subtle {WRAP}">{visible(step.id)}</span>{#if changed}{@render changedMark()}{/if}</p>
+			<!-- A step has no name, so its id heads it, after a word that says what it is. No number:
+			     the engine starts steps by what they depend on, not by their place in this list, and a
+			     number would claim an order. The task follows once, whole. -->
+			<p data-testid="stamp-step-head" class="flex flex-wrap items-baseline gap-x-2 gap-y-1"><span class="font-medium">{t('workflow_library.stamp.step')}</span>{' '}<span class="font-mono text-text-subtle {WRAP}">{visible(step.id)}</span>{#if changed}{@render changedMark()}{/if}</p>
 			{#if stepNote}
 				{@const note = stepNote(i)}
 				{#if note !== null}

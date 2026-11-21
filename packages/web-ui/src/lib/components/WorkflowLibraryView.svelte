@@ -524,6 +524,7 @@
 					stampLine = 'steps_changed';
 					stampChangesShown = stampChanges(shown, stampPreview);
 					// Brought into sight and focused: the changed part is what the owner has to read again.
+					// The line above, which says why, may scroll out of sight then; it is announced as a status.
 					await tick();
 					const mark = stampDialog?.querySelector<HTMLElement>('[data-stamp-changed]');
 					mark?.focus();

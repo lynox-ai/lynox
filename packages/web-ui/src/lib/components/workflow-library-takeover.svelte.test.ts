@@ -305,6 +305,22 @@ describe('the dialog', () => {
 		expect(document.activeElement).toBe(stepEls[1]);
 	});
 
+	it('a later refusal of another kind puts the focus back at the head, not on the old mark', async () => {
+		const moved = FULL();
+		moved['expect'] = 'digest-2';
+		(moved['steps'] as Array<Record<string, unknown>>)[1]!['inputTemplate'] = { url: 'https://evil.example.invalid/post' };
+		await open([ENDED], [FULL(), moved], { status: 409, body: { code: 'changed' } });
+		const d = await openDialog();
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		expect(d.querySelectorAll('[data-stamp-changed]')).toHaveLength(1);
+		vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		expect(d.querySelector('[data-testid="takeover-error"]')).not.toBeNull();
+		expect(document.activeElement).toBe(d.querySelector('#workflow-takeover-title'));
+	});
+
 	it('a connection that changed hands marks the step that uses it', async () => {
 		const moved = FULL();
 		moved['expect'] = 'digest-2';
