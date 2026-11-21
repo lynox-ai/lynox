@@ -16,6 +16,12 @@ const DATABASE: Readonly<Record<string, SetAsideStore['database']>> = {
   history: 'history.db', engine: 'engine.db', datastore: 'datastore.db', 'agent-memory': 'agent-memory.db',
 };
 
+/** The database a set-aside file name belongs to (the copy itself, not its `-wal` or `-shm`). */
+export function setAsideDatabaseOf(name: string): SetAsideStore['database'] | undefined {
+  const m = SET_ASIDE.exec(name);
+  return DATABASE[m?.[1] ?? m?.[2] ?? ''];
+}
+
 /**
  * The databases of `dir` that were set aside, with the set-aside file names (names only, never
  * content). Their data is still on disk but in none of the stores the engine reads, so an export
@@ -24,8 +30,7 @@ const DATABASE: Readonly<Record<string, SetAsideStore['database']>> = {
 export function listSetAsideStores(dir: string): SetAsideStore[] {
   const byDb = new Map<SetAsideStore['database'], string[]>();
   for (const name of readdirSync(dir)) {
-    const m = SET_ASIDE.exec(name);
-    const db = DATABASE[m?.[1] ?? m?.[2] ?? ''];
+    const db = setAsideDatabaseOf(name);
     if (db === undefined) continue;
     const files = byDb.get(db) ?? [];
     files.push(name);
