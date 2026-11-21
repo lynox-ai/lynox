@@ -67,15 +67,14 @@ const MARKER_REASON: Record<MarkerKind, OutlierReason> = { link: 'new_link', ema
 /** A dot written obfuscated — `[.]`, `(.)`, `{.}`, `[dot]`, `(dot)`, ` dot `, ` . ` — read as a dot. Anchored at the
  *  start of the blank before it, so a long run of blanks is read once, not once per blank. */
 const OBFUSCATED_DOT = /(?<!\s)\s*(?:\[\.\]|\(\.\)|\{\.\}|\[dot\]|\(dot\))\s*|(?<!\s)\s+dot\s+(?=[\p{L}\p{N}])|(?<=[\p{L}\p{N}])[ \t]+\.[ \t]+(?=[\p{L}\p{N}])|[\u3002\uFF0E\uFF61]/giu;
-/** Top-level domains that are also words or abbreviations ("Baumwolle.Es ist", "Holz.Co", "Art.Nr"):
- *  written capitalised after a full stop that lacks its space, they start a sentence, not a host. Every
- *  other top-level domain (TOP_LEVEL_DOMAINS, all of them) counts however it is written ("Evil.Com",
- *  "Evil.Cloud"). A host with a scheme needs none. */
-const WORD_TLDS = new Set([
-  'es', 'it', 'in', 'at', 'to', 'no', 'de', 'be', 'me', 'co', 'so', 'am', 'an', 'is', 'us', 'do', 'my', 'la', 'ma', 'id',
-  // Abbreviations a product text writes after a full stop: "Art.Nr", "Mo.Fr", "Str.St", "ca.Ca", "Tel".
-  'nr', 'fr', 'mo', 'sa', 'st', 'gr', 'ca', 'tel', 'ag',
-]);
+/** Top-level domains that are also words ("Baumwolle.Es ist", "Holz.Co"): written capitalised after a
+ *  full stop that lacks its space, they start a sentence, not a host. A host with a scheme needs no
+ *  top-level domain at all. */
+const WORD_TLDS = new Set(['es', 'it', 'in', 'at', 'to', 'no', 'de', 'be', 'me', 'co', 'so', 'am', 'an']);
+/** The top-level domains a host counts under when it is written capitalised ("Evil.Com"). Most of the
+ *  others are words a sentence starts with ("Eiche.Design", "Navy.Black", "Holz.Art"), so a
+ *  capitalised one of them is read as a sentence; written in lower case or all capitals they count. */
+const CAPITALISED_TLDS = new Set('com net org info biz io co ai app dev shop store online site xyz top club link click icu ch li de at fr it es nl be lu uk eu us ru cn me tv cc ws ly gl to gg su tk ml ga cf pw in br pl cz se no dk fi pt gr tr jp kr au ca'.split(' '));
 /** One label of a host: letters and digits of any script, inner hyphens. */
 const HOST_LABEL = /^[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?$/u;
 /** A letter or digit of any script, tested once per character outside ASCII. */
@@ -122,6 +121,15 @@ export function markersOf(text: string): Map<MarkerKind, Set<string>> {
   return out;
 }
 
+/** Elements a browser shows on a line of their own: removing one leaves a gap, so the end of one
+ *  paragraph and the start of the next ("Eiche.</p><p>Design") are not read as one word. An inline
+ *  tag leaves none ("evil<b></b>.com" shows "evil.com"). */
+const BLOCK_TAGS = new Set([
+  'p', 'div', 'br', 'li', 'ul', 'ol', 'dl', 'dt', 'dd', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'tr', 'td', 'th', 'table',
+  'thead', 'tbody', 'tfoot', 'caption', 'section', 'article', 'header', 'footer', 'aside', 'nav', 'blockquote', 'pre', 'hr',
+  'figure', 'figcaption', 'address', 'main', 'details', 'summary',
+]);
+
 /** A text as a browser shows it, near enough: without its tags, its character references decoded. */
 function shownText(text: string): string {
   let shown = '';
@@ -133,6 +141,8 @@ function shownText(text: string): string {
     const close = text.indexOf('>', open + 1);
     if (close < 0) { shown += text.slice(i); break; }
     shown += text.slice(i, open);
+    const name = /^\/?\s*([a-z][a-z0-9]*)/iu.exec(text.slice(open + 1, Math.min(close, open + 16)))?.[1]?.toLowerCase();
+    if (name !== undefined && BLOCK_TAGS.has(name)) shown += ' ';
     i = close + 1;
   }
   return shown.replace(/&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|(amp|lt|gt|quot|apos|nbsp));/giu, (whole, dec?: string, hex?: string, name?: string) => {
@@ -237,7 +247,10 @@ function hostOfWord(token: string): string | undefined {
   if (!token.includes('.') || !token.split('.').every((l) => HOST_LABEL.test(l))) return undefined;
   // "Baumwolle.Es ist": a sentence whose space after the full stop is missing, not a host. Only where
   // the TLD is also a word: "Evil.Com" is a host.
-  if (WORD_TLDS.has(tld.toLowerCase()) && /^\p{Lu}\p{Ll}/u.test(tld) && !/^www\./iu.test(token)) return undefined;
+  // Only a top-level domain of the letters a-z is a word that can start a sentence; one in Punycode or
+  // in another script counts however it is capitalised.
+  if (/^[A-Z][a-z]+$/.test(tld) && !/^www\./iu.test(token)
+    && (WORD_TLDS.has(tld.toLowerCase()) || !CAPITALISED_TLDS.has(tld.toLowerCase()))) return undefined;
   const host = asciiHost(token);
   if (host === undefined) return undefined;
   const asciiTld = host.slice(host.lastIndexOf('.') + 1);

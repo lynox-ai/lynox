@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { judgeOutliers, markersOf, OUTLIER_MIN_VERDICTS, targetMarkers, type OutlierFieldKind, type OutlierInput } from './bulk-outliers.js';
+import { TOP_LEVEL_DOMAINS } from './top-level-domains.js';
 
 const OWN = ['teehaus.example.ch'];
 const KINDS: Record<string, OutlierFieldKind> = { title: 'text', description: 'text', status: 'enum', weight_g: 'number', vegan: 'boolean', price: 'number', origin: 'text', note: 'text' };
@@ -349,13 +350,14 @@ describe('markersOf', () => {
     expect([...m.values()].every((x) => x.size === 0)).toBe(true);
   });
 
-  it('reads a host under any top-level domain, however it is capitalised where that domain is no word or abbreviation', () => {
-    for (const text of ['Mehr auf evil.cloud', 'evil.swiss', 'evil.live', 'Evil.Cloud', 'EVIL.SWISS', 'evil.zip']) {
+  it('reads a host under any top-level domain written in lower case or capitals, and no abbreviation or file name', () => {
+    for (const text of ['Mehr auf evil.cloud', 'evil.swiss', 'evil.live', 'EVIL.SWISS', 'evil.zip']) {
       expect([...markersOf(text).get('link')!], text).toHaveLength(1);
     }
-    for (const text of ['Art.Nr 4711', 'Mo.Fr offen', 'Str.St Gallen', 'Lager.Ca 5 kg', 'Tel.Tel', 'datei.pdf']) {
+    for (const text of ['Art.Nr 4711', 'Str.St Gallen', 'Tel.Tel', 'datei.pdf']) {
       expect([...markersOf(text).get('link')!], text).toEqual([]);
     }
+    expect(TOP_LEVEL_DOMAINS.size).toBe(1449);
   });
 
   it('reads a host whose dot markup or a character reference hides, or blanks or braces surround', () => {
@@ -363,6 +365,23 @@ describe('markersOf', () => {
       expect([...markersOf(text).get('link')!], text).toEqual(['evil.com']);
     }
     expect([...markersOf('info&#64;evil.com').get('link')!]).toEqual(['evil.com']);
+  });
+
+  it('reads no host across the end of one paragraph and the start of the next, in any case', () => {
+    for (const word of ['design', 'Design', 'DESIGN', 'black', 'Black', 'bio']) {
+      for (const tag of ['</p><p>', '<br>', '</li><li>', '</div>\n<div class="x">', '</td><td>']) {
+        const text = `<p>Aus Eiche.${tag}${word} zeitlos</p>`;
+        expect([...markersOf(text).get('link')!], text).toEqual([]);
+      }
+    }
+  });
+
+  it('reads a capitalised host only under a common top-level domain, and any in lower case or capitals', () => {
+    expect([...markersOf('Navy.Black, Material.Bio, Holz.Art, Eiche.Design').get('link')!]).toEqual([]);
+    expect([...markersOf('Evil.Com und Evil.Shop').get('link')!].sort()).toEqual(['evil.com', 'evil.shop']);
+    expect([...markersOf('evil.design und EVIL.CLOUD').get('link')!].sort()).toEqual(['evil.cloud', 'evil.design']);
+    expect([...markersOf('Evil.Xn--p1ai').get('link')!]).toEqual(['evil.xn--p1ai']);
+    expect([...markersOf('Evil.Рф').get('link')!]).toEqual(['evil.xn--p1ai']);
   });
 
   it('reads a host however its top-level domain is capitalised, where that domain is no word, and one under icu', () => {
