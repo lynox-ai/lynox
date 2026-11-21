@@ -23,10 +23,11 @@
 - A watch (`task_create` with `watch_url`) now follows `network_policy` like
   every other credential-free read: under `allow-list` a page outside the list
   is not watched, under `deny-all` no page is, and with `enforce_https` a plain
-  `http://` page is not either. A new watch is refused when it is
+  `http://` page is not either; an address that is not http or https is refused
+  when the watch is set up instead of failing at every check. A new watch is refused when it is
   set up; an existing one stops being read at its next check and records why.
-  Watches on a page in the list, and every watch under `guarded` and
-  `allow-all`, are unchanged.
+  Apart from that, watches on a page in the list and watches under `guarded`
+  and `allow-all` are unchanged.
 - `POST /api/tasks/:id/confirm` now requires `{ "expect": "<digest>" }`, the
   digest from `GET /api/tasks/:id/stamp-preview`, and answers 400 without it.
   Until now a confirm without it stamped whatever the schedule held when the

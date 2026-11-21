@@ -1280,6 +1280,7 @@ export function watchPolicyRefusal(url: string, ctx: HostPolicyContext | undefin
     return null;
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
+    if (message.includes('unsupported protocol') || err instanceof TypeError) return 'it is not an http or https address.';
     if (message.includes('network_policy=deny-all')) return 'this instance\'s network_policy is deny-all, which reads no page.';
     if (message.includes('not in network allow-list')) {
       let host = url;

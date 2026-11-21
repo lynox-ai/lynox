@@ -346,6 +346,10 @@ describe('Task Tools', () => {
       Object.assign(https.toolContext, { networkPolicy: 'guarded', enforceHttps: true });
       expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'http://other.example/p' }, https))
         .toBe("Error: watch_url not watched: this instance's network settings refuse it: HTTP not allowed — enforce_https is enabled. Use HTTPS. No watch was created.");
+      for (const watch_url of ['ftp://other.example/p', 'not a url']) {
+        expect(await taskCreateTool.handler({ title: 'Watch', watch_url }, withPolicy('guarded')))
+          .toBe('Error: watch_url not watched: it is not an http or https address. No watch was created.');
+      }
       expect(created, 'no watch was stored').not.toHaveBeenCalled();
       // Controls: the list's own host, and guarded and allow-all, which let a credential-free read through.
       expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'https://listed.example/p' }, withPolicy('allow-list'))).toContain('Watch task created');
