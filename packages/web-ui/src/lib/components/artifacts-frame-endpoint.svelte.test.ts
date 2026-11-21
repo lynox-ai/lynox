@@ -18,6 +18,8 @@ const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLI
 
 vi.mock('$app/stores', () => ({ page: readable({ url: new URL('http://localhost/app/artifacts') }) }));
 vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
+const shared: Blob[] = [];
+vi.mock('../utils/save-blob.js', () => ({ saveOrShareBlob: vi.fn(async (blob: Blob) => { shared.push(blob); }) }));
 vi.mock('./MarkdownRenderer.svelte', () => ({
 	default: (anchor: Comment) => { anchor.before(document.createElement('div')); },
 }));
@@ -116,6 +118,19 @@ async function openDeck(): Promise<void> {
 }
 
 describe('the gallery preview frame', () => {
+	it('exports an html artifact with the artifact policy in the file, as the chat download does', async () => {
+		shared.length = 0;
+		await openDeck();
+		const share = [...target.querySelectorAll('button')].find((b) => /share|teilen/i.test(b.textContent ?? ''));
+		expect(share, 'no share button').toBeDefined();
+		share!.click();
+		await settle();
+		expect(shared).toHaveLength(1);
+		const file = await shared[0]!.text();
+		expect(file).toContain('<p>version-1</p>');
+		expect(file).toMatch(/<meta http-equiv="Content-Security-Policy" content="[^"]*img-src data: blob:/);
+	});
+
 	it('loads the endpoint with no srcdoc and is sent the artifact when its own window is ready', async () => {
 		await openDeck();
 		const f = previewFrame();

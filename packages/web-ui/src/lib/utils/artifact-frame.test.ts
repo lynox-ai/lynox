@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import {
-	isViewportDeck, deckFrameHeight, computeFitZoom, injectArtifactPreview,
+	isViewportDeck, deckFrameHeight, computeFitZoom, injectArtifactPreview, artifactExportDocument,
 	injectIntoArtifactFrame, buildArtifactBubbleFrame, hasOwnDocument, bringsOwnStyling,
 	ARTIFACT_CSP, ARTIFACT_FIT_CODE,
 	clearArtifactFitStyles,
@@ -140,6 +140,18 @@ describe('injectIntoArtifactFrame — the policy is not a parameter', () => {
 		// save actions hand over.
 		for (const html of ['<html><head></head><body>x</body></html>', '<div>frag</div>']) {
 			expect(injectIntoArtifactFrame(html, '', 'void 0;').startsWith('<!DOCTYPE html>')).toBe(true);
+		}
+	});
+});
+
+describe('artifactExportDocument', () => {
+	it('exports an html artifact under the artifact policy, so a copy opened from disk loads no remote image', () => {
+		for (const html of ['<html><head></head><body><img src="https://elsewhere.example/x.png"></body></html>', '<div><img src="https://elsewhere.example/x.png"></div>']) {
+			const doc = asDoc(artifactExportDocument(html));
+			const policy = doc.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute('content') ?? '';
+			expect(policy, `no policy for ${html}`).toContain('img-src data: blob:');
+			expect(policy).toContain("connect-src 'none'");
+			expect(doc.querySelector('img')?.getAttribute('src')).toBe('https://elsewhere.example/x.png');
 		}
 	});
 });

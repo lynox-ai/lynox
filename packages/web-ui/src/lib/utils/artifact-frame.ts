@@ -421,3 +421,15 @@ export function buildArtifactBubbleFrame(
 export function injectArtifactPreview(html: string): string {
 	return injectIntoArtifactFrame(html, '', ARTIFACT_FIT_CODE);
 }
+
+/**
+ * The file an html artifact is exported as from the gallery: the artifact under the same
+ * policy it runs under in the app, carried as a meta element. A copy opened from disk has no
+ * frame endpoint and no response header around it, so without the meta it would load remote
+ * images (and anything else the policy keeps out) that it never loads in the app. The chat's
+ * download already carries the policy through its frame document; this keeps the gallery's
+ * export the same.
+ */
+export function artifactExportDocument(html: string): string {
+	return injectIntoArtifactFrame(html, '', '');
+}

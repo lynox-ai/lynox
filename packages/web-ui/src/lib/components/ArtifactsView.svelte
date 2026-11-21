@@ -15,7 +15,7 @@
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
-	import { injectArtifactPreview as injectArtifactFit } from '../utils/artifact-frame.js';
+	import { artifactExportDocument, injectArtifactPreview as injectArtifactFit } from '../utils/artifact-frame.js';
 	import { attachArtifactFrame } from '../utils/artifact-frame-host.js';
 	import { saveOrShareBlob } from '../utils/save-blob.js';
 
@@ -181,7 +181,9 @@
 	// behaviour as the inline artifact pill's share, so the two views are coherent.
 	function exportArtifact(a: Artifact) {
 		const filename = `${a.title.replace(/\s+/g, '-').toLowerCase()}.${extensionFor(a.type)}`;
-		void saveOrShareBlob(new Blob([a.content], { type: mimeFor(a.type) }), filename);
+		// An html file keeps the artifact policy, as the chat's download does (artifactExportDocument).
+		const body = a.type === 'html' ? artifactExportDocument(a.content) : a.content;
+		void saveOrShareBlob(new Blob([body], { type: mimeFor(a.type) }), filename);
 	}
 
 	/** Save as PDF via the browser print pipeline — same path as the inline
