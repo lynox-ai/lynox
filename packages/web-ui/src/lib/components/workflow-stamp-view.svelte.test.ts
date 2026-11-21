@@ -615,6 +615,8 @@ describe('the stamp part names settings, and shows no stored value', () => {
 		await openStamp(twoSteps('d1', undefined, { onFailure: 'stop' }));
 		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Keine Folgeschritte starten');
 		expect(q('stamp-on-failure-note')?.textContent?.trim()).toBe('Schritte, die mit dem fehlgeschlagenen an der Reihe waren, starten noch und laufen zu Ende.');
+		// Under the name: the next element after the strategy's own value.
+		expect(q('stamp-on-failure')!.nextElementSibling).toBe(q('stamp-on-failure-note'));
 	});
 
 	it.each(['continue', 'notify', 'halt'])('the %s strategy carries no such line', async (onFailure) => {
