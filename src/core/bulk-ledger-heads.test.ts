@@ -48,11 +48,11 @@ interface Row {
 }
 
 /** A run of the given targets, its counters as the rows say. */
-function run(targetSystem: string, rows: Row[]): string {
+function run(targetSystem: string, rows: Row[], phase = 'aborted'): string {
   const id = `run-${targetSystem}-${String(rows.length)}-${String(Math.random()).slice(2)}`;
   const db = engineDb.getDb();
   db.prepare(`INSERT INTO bulk_runs (id, rule_hash, target_system, undo, phase, targets_total, targets_applied)
-    VALUES (?, 'fixture', ?, 'restorable', 'aborted', ?, ?)`).run(id, targetSystem, rows.length, rows.filter((r) => r.applied).length);
+    VALUES (?, 'fixture', ?, 'restorable', ?, ?, ?)`).run(id, targetSystem, phase, rows.length, rows.filter((r) => r.applied).length);
   rows.forEach((r, seq) => {
     db.prepare(`INSERT INTO bulk_targets (run_id, seq, target_key, change, deselected_at, applied_at, undone_at, error, unknown_sends, claimed_at, write_sent, failed_once, found_unsent)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
@@ -165,6 +165,22 @@ describe('the head counts of a run', () => {
     const id = run(EXTERNAL, [{ sent: true, unknownSends: 1 }]);
     ledger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 0, 'already');
     expect(ledger.getStatus(id)!.heads.written).toBe(1);
+  });
+
+  it('a local run takes back and rolls back a target it found as planned after a refused send', () => {
+    // A local writer may throw after its write, which counts as refused: the find is its own.
+    const id = run(LOCAL, [{ sent: true, failedOnce: true }]);
+    ledger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 0, 'already');
+    expect(ledger.countUndoable(id)).toBe(1);
+    expect(ledger.listAppliedDesc(id).map((t) => t.seq)).toEqual([0]);
+  });
+
+  it('names a refused send then a find as already_first only while no later send may have landed', () => {
+    const step = (row: Row) => ledger.probeBlockFor(run(EXTERNAL, [row], 'writing'))?.step ?? null;
+    expect(step({ applied: true, found: 'refused', sent: true })).toBe('already_first');
+    expect(step({ applied: true, found: 'refused', sent: true, unknownSends: 1 })).toBeNull();
+    // Found before a send, from a run that could not count unclear sends: not known as refused.
+    expect(step({ applied: true, found: true, sent: true })).toBeNull();
   });
 
   it('a target a live loop holds is not unclear: its answer may still come', () => {
