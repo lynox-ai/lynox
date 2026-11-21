@@ -4,7 +4,7 @@
 	import { untrack } from 'svelte';
 	import { connectHref } from '../oauth-connect-path.js';
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
-	import { hostParts, storeAccessShown, type StoreAccessProfile, type StoreAccessShown } from '../utils/store-access-end.js';
+	import { hostParts, hostSegments, storeAccessShown, type StoreAccessProfile, type StoreAccessShown } from '../utils/store-access-end.js';
 
 	// The owner's line per store whose access runs out soon or has (U-391): without web push the
 	// owner learns of it here, before the end, and not only when a run halts. Hidden until the next
@@ -36,7 +36,7 @@
 			{#each lines as line (line.profileId)}
 				{@const parts = hostParts(tf(line.kind === 'soon' ? 'store_access.banner_soon' : 'store_access.banner_ended', { date: line.date, host: '{host}' }))}
 				<li class="flex items-center gap-3 flex-wrap text-[12px] text-warning" data-testid="store-access-line">
-					<span class="min-w-0 break-words">{parts.before}<span class="font-mono rounded-[var(--radius-sm)] bg-bg-muted px-1 py-0.5 text-text break-all" data-testid="store-access-host">{line.host}</span>{parts.after}</span>
+					<span class="min-w-0 break-words">{parts.before}<span class="font-mono rounded-[var(--radius-sm)] bg-bg-muted px-1 py-0.5 text-text" data-testid="store-access-host">{#each hostSegments(line.host) as seg, i (i)}{#if i > 0}<wbr />{/if}<span class="whitespace-nowrap">{seg}</span>{/each}</span>{parts.after}</span>
 					<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
 					<a href={connectHref(getApiBase(), line.profileId)} data-sveltekit-reload data-testid="store-access-reconnect"
 						class="shrink-0 rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1 text-[12px] text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>

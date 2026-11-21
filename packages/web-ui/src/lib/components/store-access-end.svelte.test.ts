@@ -79,6 +79,14 @@ describe('the shell banner of a store whose access runs out', () => {
 			`Der Zugang von lynox zum Shop beta-shop.myshopify.com läuft am ${de(soonIso)} ab. Verbinde den Shop vorher neu, damit Läufe und Abfragen weiterlaufen. Erneut verbinden`,
 		]);
 		expect(all('store-access-host').map(text)).toEqual(['acme.myshopify.com', 'beta-shop.myshopify.com']);
+		// A break only after a dot: `<wbr>` there and nowhere else, never at the hyphen.
+		// Each piece unbreakable (a browser breaks after a hyphen otherwise), `<wbr>` between them.
+		const W = (x: string): string => `<span class="whitespace-nowrap">${x}</span>`;
+		expect(all('store-access-host').map((h) => h.innerHTML.replace(/<!---->/g, ''))).toEqual([
+			`${W('acme.')}<wbr>${W('myshopify.')}<wbr>${W('com')}`,
+			`${W('beta-shop.')}<wbr>${W('myshopify.')}<wbr>${W('com')}`,
+		]);
+		expect(all('store-access-host').every((h) => !h.className.includes('break-all'))).toBe(true);
 		expect(all('store-access-reconnect').map((a) => (a.getAttribute('href') ?? '').replace(/^.*\/oauth\/connect\//, ''))).toEqual(['a', 'b']);
 		expect(all('store-access-reconnect').every((a) => (a.getAttribute('href') ?? '').includes('/oauth/connect/'))).toBe(true);
 		expect(all('store-access-reconnect').every((a) => a.hasAttribute('data-sveltekit-reload'))).toBe(true);

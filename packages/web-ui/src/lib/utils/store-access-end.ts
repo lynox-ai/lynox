@@ -41,3 +41,11 @@ export function hostParts(sentence: string): { before: string; after: string } {
 	const i = sentence.indexOf('{host}');
 	return i < 0 ? { before: sentence, after: '' } : { before: sentence.slice(0, i), after: sentence.slice(i + '{host}'.length) };
 }
+
+/**
+ * A host in pieces that end after each dot, for a line break only there: never inside a name, at a
+ * hyphen or mid-word (`acme-store.` / `myshopify.com`). The page keeps each piece whole.
+ */
+export function hostSegments(host: string): string[] {
+	return host.split(/(?<=\.)/);
+}
