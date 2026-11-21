@@ -903,7 +903,8 @@ describe('the webhook drain', () => {
     const id = deliver(t);
     expect(ledger.begin(id, 'a1')).toBe(true);
     expect(ledger.finish(id, 'a1', { state: 'failed', reason: 'x' })).toBe(true);
-    expect(ledger.sweepValues(arrivedAt(0))).toBe(0);
+    // Not before its own arrival: the window clears what arrived strictly before it.
+    expect(ledger.sweepValues(arrivedAt(seq))).toBe(0);
     expect(ledger.sweepValues(new Date(arrivedFrom + 39 * 24 * 60 * 60 * 1000).toISOString())).toBe(1);
     expect(eventOf(t, id).valuesJson).toBeNull();
   });
