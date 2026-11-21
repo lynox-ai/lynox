@@ -14,8 +14,9 @@
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import BulkStartDomains from './BulkStartDomains.svelte';
+	import WrapParts from './WrapParts.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkOwnerNoticeShown, bulkWrapParts, bulkHostSegments, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkOwnerNoticeShown, bulkHostSegments, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked,
 		type BulkRunDetailData, type BulkTarget, type BulkSentencePart,
 	} from './bulk-runs.js';
 
@@ -597,7 +598,7 @@
 	{:else}
 		<section class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 space-y-4">
 			<!-- A host wraps after its dot, never at a hyphen inside its name (U-374). -->
-			<h1 class="text-lg font-medium">{#each bulkWrapParts(bulkLabel(run, i18n)) as part, i (i)}<span class="whitespace-nowrap">{part.text}</span>{#if part.wrap}<wbr />{/if}{/each}</h1>
+			<h1 class="text-lg font-medium" data-testid="bulk-heading"><WrapParts text={bulkLabel(run, i18n)} /></h1>
 
 			<ol class="flex flex-wrap gap-1.5 text-[11px]">
 				{#each steps as s (s)}
@@ -615,7 +616,7 @@
 
 			<dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
 				<dt class="text-text-subtle">{t('bulk.head.target')}</dt>
-				<dd>{#each bulkWrapParts(provider) as part, i (i)}<span class="whitespace-nowrap">{part.text}</span>{#if part.wrap}<wbr />{/if}{/each}{run.writeMethod ? ` · ${run.writeMethod}` : ''}</dd>
+				<dd><WrapParts text={provider} />{run.writeMethod ? ` · ${run.writeMethod}` : ''}</dd>
 				<dt class="text-text-subtle">{t('bulk.head.targets')}</dt>
 				<dd>{tf('bulk.head.counts', { n: String(run.total), a: String(run.applied), c: String(run.conflicts), f: String(run.failed) })}</dd>
 				{#if run.costUsd > 0 || run.costCapUsd !== null}
@@ -625,7 +626,7 @@
 				{#if run.haltReason}
 					<dt class="text-text-subtle">{t(bulkHaltHeadKey(run))}</dt>
 					<!-- A host in the sentence wraps after its dot, never at a hyphen inside its name (U-383). -->
-					<dd>{#each bulkHostSegments(bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, !ownerActs)) as seg, i (i)}{#if seg.host}{#each bulkWrapParts(seg.text) as part, j (j)}<span class="whitespace-nowrap">{part.text}</span>{#if part.wrap}<wbr />{/if}{/each}{:else}{seg.text}{/if}{/each}</dd>
+					<dd>{#each bulkHostSegments(bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, !ownerActs)) as seg, i (i)}{#if seg.host}<WrapParts text={seg.text} />{:else}{seg.text}{/if}{/each}</dd>
 				{/if}
 			</dl>
 
