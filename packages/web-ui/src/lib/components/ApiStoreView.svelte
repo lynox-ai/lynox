@@ -10,7 +10,7 @@
 	import { connectionLine, type ConnectionLine, type OAuthGrantView } from '../utils/oauth-connection.js';
 	import { localDay, noticesByProfile, revocationView, type ProviderNotice } from '../utils/provider-revocation.js';
 	import { connectHref } from '../oauth-connect-path.js';
-	import { storeAccessShown, type StoreAccessEnd } from '../utils/store-access-end.js';
+	import { storeAccessShown, type StoreAccessEnd, type StoreAccessShown } from '../utils/store-access-end.js';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 
@@ -59,6 +59,19 @@
 	// The time the notices are read against, moved on each minute: a hold or a deadline that passes
 	// while the page is open takes the way out and the dates away without a reload.
 	let now = $state(new Date());
+
+	/**
+	 * A store's access end on its row (U-391): before it, beside any revocation view but a revoked or
+	 * ended one, which say what to do; after it, only while no view says so yet (the grant still
+	 * reads connected, no refresh was tried).
+	 */
+	function accessLine(profile: ApiProfile): StoreAccessShown | null {
+		const access = storeAccessShown(profile, now, getLocale());
+		if (access === null) return null;
+		const view = revocationView(profile.oauth_grant, notices.get(profile.id), now);
+		if (access.kind === 'soon') return view?.kind === 'revoked' || view?.kind === 'ended' ? null : access;
+		return view === null ? access : null;
+	}
 	$effect(() => {
 		const timer = setInterval(() => { now = new Date(); }, 60_000);
 		return () => clearInterval(timer);
@@ -251,12 +264,16 @@
 							{/if}
 						</div>
 					{/if}
-					<!-- Before a store's access runs out (U-391); after the end, `ended` above says so. -->
-					{#if revocationView(profile.oauth_grant, notices.get(profile.id), now) === null && storeAccessShown(profile, now, getLocale())?.kind === 'soon'}
-						{@const soon = storeAccessShown(profile, now, getLocale())!}
+					<!-- A store's access end (U-391), as `accessLine` has it. -->
+					{#if accessLine(profile)}
+						{@const access = accessLine(profile)!}
 						<div class="border-t border-border px-4 py-3 space-y-2 text-xs text-text-muted" data-testid="api-access-ends">
-							<p data-testid="api-access-ends-text">{isOwnerSession() ? `${tf('apis.access_ends_on', { date: soon.date })} ${t('apis.access_ends_way')}` : tf('apis.access_ends_on', { date: soon.date })}</p>
-							{#if soon.mayConnect}
+							{#if access.kind === 'soon'}
+								<p data-testid="api-access-ends-text">{isOwnerSession() ? `${tf('apis.access_ends_on', { date: access.date })} ${t('apis.access_ends_way')}` : tf('apis.access_ends_on', { date: access.date })}</p>
+							{:else}
+								<p data-testid="api-access-ended">{t('apis.access_ended')}</p>
+							{/if}
+							{#if access.mayConnect}
 								<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
 									class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
 							{:else}

@@ -3,30 +3,36 @@
 	import { getLocale, t, tf } from '../i18n.svelte.js';
 	import { untrack } from 'svelte';
 	import { connectHref } from '../oauth-connect-path.js';
-	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
-	import { hostParts, hostSegments, storeAccessShown, type StoreAccessProfile, type StoreAccessShown } from '../utils/store-access-end.js';
+	import { isOwnerSession, isViewerKnown, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
+	import { hostParts, hostSegments, storeAccessShown, type StoreAccessProfile } from '../utils/store-access-end.js';
 
 	// The owner's line per store whose access runs out soon or has (U-391): without web push the
 	// owner learns of it here, before the end, and not only when a run halts. Hidden until the next
-	// load at most, never for good: the end would come unnoticed again.
-	let lines = $state<StoreAccessShown[]>([]);
+	// load at most, never for good: the end would come unnoticed again. Shown once the server named
+	// the session the owner's, also when that answer comes late (a retry).
+	let profiles = $state<StoreAccessProfile[]>([]);
 	let dismissed = $state(false);
+	let now = $state(new Date());
+	const lines = $derived(profiles.flatMap((p) => { const shown = storeAccessShown(p, now, getLocale()); return shown === null ? [] : [shown]; }));
 
 	async function load(): Promise<void> {
-		const viewerRead = loadSettingsViewer();
+		await loadSettingsViewer();
+		// A session the server named another's is not asked; one not named yet is, and shows only
+		// once the owner's.
+		if (isViewerKnown() && !isOwnerSession()) return;
 		try {
 			const res = await fetch(`${getApiBase()}/api-profiles`);
 			if (!res.ok) return;
 			const data = (await res.json()) as { profiles?: StoreAccessProfile[] };
-			await viewerRead;
-			if (!isOwnerSession()) return;
-			const now = new Date();
-			lines = (data.profiles ?? []).flatMap((p) => { const shown = storeAccessShown(p, now, getLocale()); return shown === null ? [] : [shown]; });
+			profiles = data.profiles ?? [];
 		} catch { /* silent: StatusBar handles an engine that is down */ }
 	}
 
 	$effect(() => {
 		untrack(() => void load());
+		// An end that passes while the page is open: the line says so within a minute.
+		const timer = setInterval(() => { now = new Date(); }, 60_000);
+		return () => clearInterval(timer);
 	});
 </script>
 

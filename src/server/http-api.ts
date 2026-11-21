@@ -28,7 +28,7 @@ import { shapeRequestForModel } from '../core/llm-wire-rules.js';
 import {
   exchangeToken, serializeTokenBody, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
-import { beginStoreConnect, endStoreConnect, storeReconnectDue } from '../core/store-token-refresh.js';
+import { beginStoreConnect, endStoreConnect, storeAccessEnd } from '../core/store-token-refresh.js';
 import { codeExchangeExtraParams, consentNoticeVersion, derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
 import { bindShopifyCallback, shopifyCallbackRefusalLine, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
@@ -13882,18 +13882,19 @@ export class LynoxHTTPApi {
       // connection somebody else made. `importWaiting`: the files the import of the earlier
       // profiles waits on, for the owner to repair or delete. `reader_may_connect`: whether this
       // reader's connect start goes through (`mayStartConnect`), so the page offers the link only there.
-      // `store_access_ends`: a store whose access runs out within the hint's window
-      // or has (`storeReconnectDue`), with the host the engine derives, so an owner without web push
-      // sees it in the app before the end.
+      // `store_access_ends`: a store whose access runs out within the hint's window, has run out, or
+      // whose refresh ended, until it is connected again (`storeAccessEnd`): the host the engine
+      // derives, whether it ended, and the end when known; so an owner without web push sees it in
+      // the app before the end.
       const reader = this._principalOf(req);
       const now = Date.now();
       jsonResponse(res, 200, {
         profiles: store.getAll().map((p) => {
-          const due = storeReconnectDue(p, now);
+          const end = storeAccessEnd(p, now);
           return {
             ...profileForReader(p, reader),
             reader_may_connect: mayStartConnect(reader, p),
-            ...(due === null ? {} : { store_access_ends: { host: due.host, at: new Date(due.until).toISOString() } }),
+            ...(end === null ? {} : { store_access_ends: { host: end.host, ended: end.ended, ...(end.until === null ? {} : { at: new Date(end.until).toISOString() }) } }),
           };
         }),
         importWaiting: store.importWaitsOn(),

@@ -40,7 +40,7 @@ import { hasRevokedGrant } from './api-store.js';
 import { isStorePass, storePassBodyRefusal } from './store-pass.js';
 import { serializeTokenBody } from './oauth-token-exchange.js';
 import {
-  beginStoreConnect, endStoreConnect, refreshStoreToken, resetStoreRefreshForTests, claimStoreReconnectHints, storeReconnectDue, STORE_RECONNECT_HINT_MS,
+  beginStoreConnect, endStoreConnect, refreshStoreToken, resetStoreRefreshForTests, claimStoreReconnectHints, storeReconnectDue, storeAccessEnd, STORE_RECONNECT_HINT_MS,
   STORE_REFRESH_WINDOW_MS, storeRefreshPassFor, type StoreRefreshContext,
 } from './store-token-refresh.js';
 
@@ -712,9 +712,35 @@ describe('the refresh of an expiring store connection', () => {
       expect(storeReconnectDue({ ...p, oauth_grant: { ...grant, refresh_expires_at: NOW + DAY } } as ApiProfile, NOW)).toBeNull();
       const { refresh_expires_at: _r, ...noEnd } = p.oauth_grant!;
       expect(storeReconnectDue({ ...p, oauth_grant: noEnd } as ApiProfile, NOW)).toBeNull();
+      // An end no date can hold (a file edited by hand) is none, so the list never throws on it.
+      expect(storeReconnectDue({ ...p, oauth_grant: { ...p.oauth_grant!, refresh_expires_at: -1e16 } } as ApiProfile, NOW)).toBeNull();
+      expect(storeReconnectDue({ ...p, oauth_grant: { ...p.oauth_grant!, refresh_expires_at: -8.64e15 } } as ApiProfile, NOW)).not.toBeNull();
       // Last: a revoked grant is not connected again by a save.
       expiring(NOW + DAY, { state: 'revoked' });
       expect(storeReconnectDue(profile(), NOW)).toBeNull();
+    });
+
+    // The app keeps telling of a store whose refresh ended, which drops its binding, until it is
+    // connected again; the push says nothing more of it.
+    it('the app is told an ended store until it is connected again: an end passed, a refresh ended with or without a known end', () => {
+      expiring(NOW + 10 * DAY);
+      expect(storeAccessEnd(profile(), NOW)).toEqual({ host: 'acme.myshopify.com', until: NOW + 10 * DAY, ended: false });
+      expiring(NOW - DAY);
+      expect(storeAccessEnd(profile(), NOW)).toEqual({ host: 'acme.myshopify.com', until: NOW - DAY, ended: true });
+      expiring(NOW + STORE_RECONNECT_HINT_MS + DAY);
+      expect(storeAccessEnd(profile(), NOW)).toBeNull();
+      const p = profile();
+      const { store_binding: _b, ...unbound } = p.oauth_grant!;
+      const dead = { ...p, oauth_grant: { ...unbound, state: 'refresh-dead', refresh_expires_at: NOW + 3 * DAY } } as ApiProfile;
+      expect(storeAccessEnd(dead, NOW)).toEqual({ host: 'acme.myshopify.com', until: NOW + 3 * DAY, ended: true });
+      expect(storeReconnectDue(dead, NOW)).toBeNull();
+      const { refresh_expires_at: _r, ...noEnd } = dead.oauth_grant!;
+      expect(storeAccessEnd({ ...dead, oauth_grant: noEnd } as ApiProfile, NOW)).toEqual({ host: 'acme.myshopify.com', until: null, ended: true });
+      expect(storeAccessEnd({ ...dead, oauth_grant: { ...dead.oauth_grant!, refresh_expires_at: -1e16 } } as ApiProfile, NOW)).toEqual({ host: 'acme.myshopify.com', until: null, ended: true });
+      // A profile of no store whose tokens expire, ended or not, is told nothing.
+      expect(storeAccessEnd({ ...dead, auth: { type: 'oauth2', vault_keys: [], oauth: { preset_id: 'bexio' } } } as ApiProfile, NOW)).toBeNull();
+      expiring(NOW + DAY, { state: 'revoked' });
+      expect(storeAccessEnd(profile(), NOW)).toBeNull();
     });
   });
 });
