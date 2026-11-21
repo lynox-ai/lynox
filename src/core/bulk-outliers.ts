@@ -136,7 +136,7 @@ export function markersOf(text: string): Map<MarkerKind, Set<string>> {
 const BLOCK_TAGS = new Set([
   'p', 'div', 'br', 'li', 'ul', 'ol', 'dl', 'dt', 'dd', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'tr', 'td', 'th', 'table',
   'thead', 'tbody', 'tfoot', 'caption', 'section', 'article', 'header', 'footer', 'aside', 'nav', 'blockquote', 'pre', 'hr',
-  'figure', 'figcaption', 'address', 'main', 'details', 'summary', 'legend', 'fieldset', 'form', 'center', 'dialog', 'menu',
+  'figure', 'figcaption', 'address', 'main', 'details', 'summary', 'legend', 'fieldset', 'form', 'center', 'menu',
 ]);
 
 /** Whether a block tag's own attributes may show it inline or not at all, so that it breaks no line: a

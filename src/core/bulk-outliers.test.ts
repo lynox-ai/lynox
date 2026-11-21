@@ -393,6 +393,12 @@ describe('markersOf', () => {
       expect([...markersOf(text).get('link')!], text).toEqual(['evil.com']);
     }
     expect([...markersOf('evil<br hidden>.com').get('link')!]).toEqual(['evil.com']);
+    for (const text of ['evil<p STYLE="display:inline">.com', 'evil<BR STYLE=display:none>.com', 'evil<p sTyLe=x;display:inline>.com', 'evil<dialog></dialog>.com', 'evil<BR HIDDEN>.com']) {
+      expect([...markersOf(text).get('link')!], text).toEqual(['evil.com']);
+    }
+    for (const tag of ['<form>', '<legend>', '<fieldset>', '<center>', '<menu>']) {
+      expect([...markersOf(`Eiche.${tag}shop`).get('link')!], tag).toEqual([]);
+    }
     // The cost, accepted: a word after a full stop and a block a style may show inline is a host as well.
     expect([...markersOf('Eiche.<br style="display:block">shop').get('link')!]).toEqual(['eiche.shop']);
     // A style naming no display, and a class, keep the break: a shop's editor puts them on every block.
