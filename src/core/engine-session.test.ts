@@ -350,7 +350,7 @@ vi.mock('./task-manager.js', () => ({
     this.list = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
     this.getWeekSummary = vi.fn().mockReturnValue({ overdue: [], dueToday: [], dueThisWeek: [], inProgress: [] });
-    // Called by Engine.init() whenever engine.db does not open (see the test that boots without it).
+    // Called by Engine.init() when engine.db does not open and run history does (see the test that boots without it).
     // @ts-expect-error mock constructor
     this.refuseTaskChangesWithoutStore = vi.fn();
   }),
@@ -755,7 +755,6 @@ describe('Engine + Session (Orchestrator)', () => {
     });
 
     it('boots without engine.db and tells the task manager to refuse changes', async () => {
-      const { TaskManager } = await import('./task-manager.js');
       // A data dir that is a plain file: engine.db cannot be created under it, so init() runs
       // the branch where engineDb is null.
       const dir = mkdtempForWorkspace(joinForWorkspace(tmpdirForWorkspace(), 'lynox-no-engine-db-'));
@@ -766,9 +765,7 @@ describe('Engine + Session (Orchestrator)', () => {
         const engine = new Engine({} as import('../types/index.js').LynoxConfig);
         await expect(engine.init(), 'init() must not throw when engine.db is missing').resolves.toBe(engine);
         expect((engine as unknown as { engineDb: unknown }).engineDb).toBeNull();
-        const tm = vi.mocked(TaskManager).mock.instances.at(-1) as unknown as {
-          refuseTaskChangesWithoutStore: ReturnType<typeof vi.fn>;
-        };
+        const tm = (engine as unknown as { _taskManager: { refuseTaskChangesWithoutStore: ReturnType<typeof vi.fn> } })._taskManager;
         expect(tm.refuseTaskChangesWithoutStore).toHaveBeenCalledTimes(1);
       } finally {
         vi.unstubAllEnvs();
