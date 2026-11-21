@@ -859,6 +859,8 @@ describe('going on from a run that halted', () => {
 		expect(ap(4, 0, 1, EN)).toBe('3 written targets get their previous value back. For one more target, taking back checks first and only resets where the value from the original run is in place. Targets someone has changed since stay as they are.');
 		expect(ap(2, 0, 2, DE)).toBe('Bei 2 Zielen sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus dem ursprünglichen Lauf steht.');
 		expect(ap(1, 0, 1, EN)).toBe('For one target, taking back checks first and only resets where the value from the original run is in place.');
+		// An older or out-of-step count above the targets is held to them: never a negative written count.
+		expect(ap(1, 0, 2, DE)).toBe('Bei einem Ziel sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus dem ursprünglichen Lauf steht.');
 	});
 
 	it('says what writing on lets fail, by the limit against the open targets', () => {

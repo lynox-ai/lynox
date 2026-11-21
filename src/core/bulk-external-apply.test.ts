@@ -320,6 +320,11 @@ describe('applying an external run', () => {
       // Of the two targets it gives a value back, one takes back a write never confirmed.
       expect(ledger.countUndoOpenTargets(undo.status.id)).toBe(1);
       expect(ledger.countUndoOpenTargets(runId)).toBe(0);
+      // Only targets that get a value back count: one the undo removes is listed apart.
+      const openSeq = (engineDb.getDb().prepare('SELECT seq FROM bulk_targets WHERE run_id = ? AND source_seq = 1').get(undo.status.id) as { seq: number }).seq;
+      engineDb.getDb().prepare(`UPDATE bulk_targets SET change = 'delete' WHERE run_id = ? AND seq = ?`).run(undo.status.id, openSeq);
+      expect(ledger.countUndoOpenTargets(undo.status.id)).toBe(0);
+      engineDb.getDb().prepare(`UPDATE bulk_targets SET change = 'update' WHERE run_id = ? AND seq = ?`).run(undo.status.id, openSeq);
       expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
       expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: contractWriter })).status).toBe('done');
       expect([s.items.get('/products/0')!['price'], s.items.get('/products/1')!['price']]).toEqual(['12.00', '12.00']);
@@ -363,6 +368,25 @@ describe('applying an external run', () => {
       expect(ledger.getStatus(runId)!.heads?.written).toBe(2);
       expect(ledger.countUndoable(runId)).toBe(2);
       expect(ledger.countUndoableParts(runId)).toEqual({ written: 2, open: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it('does not count an undo target the owner took out as one that is checked first', async () => {
+    const s = shop();
+    s.dropAfter = new Set(['PATCH /products/1']);
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15.00' } }, { target: url(1), after: { price: '20.00' } }]);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter });
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted' WHERE id = ? AND phase = 'writing'`).run(runId);
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      expect(ledger.countUndoOpenTargets(undo.status.id)).toBe(1);
+      const openSeq = (engineDb.getDb().prepare('SELECT seq FROM bulk_targets WHERE run_id = ? AND source_seq = 1').get(undo.status.id) as { seq: number }).seq;
+      expect(ledger.deselectTarget(undo.status.id, openSeq, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
+      expect(ledger.countUndoOpenTargets(undo.status.id)).toBe(0);
     } finally {
       restore();
     }
