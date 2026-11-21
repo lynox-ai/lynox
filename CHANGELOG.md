@@ -46,8 +46,8 @@
   values.
 - When a database was set aside as corrupt (`<name>.corrupt-<ms>`: by the boot
   for `history.db` and `engine.db`, by a restore for those and `datastore.db`
-  and `agent-memory.db`, with its staging copy
-  `<name>.migration-tmp.corrupt-<ms>`), `GET /api/export` now names the set-aside files in
+  and `agent-memory.db`, and an `engine.db.migration-tmp.corrupt-<ms>` left by
+  older builds), `GET /api/export` now names the set-aside files in
   `set_aside_databases` (names only) and marks the blocks read from that
   database incomplete: the threads for `history.db`; durable knowledge for
   `engine.db`, and the knowledge graph too while the subject graph is on; the

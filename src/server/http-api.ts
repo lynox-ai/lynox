@@ -14535,7 +14535,9 @@ export class LynoxHTTPApi {
           exportData['set_aside_databases_unknown'] = err instanceof Error ? err.name : 'error';
           setAside = new Set(['history.db', 'engine.db', 'datastore.db', 'agent-memory.db']);
         }
-        const subjectGraphOn = engine.getUserConfig().subject_graph_enabled === true;
+        // The layer fixes the switch at boot; the config can say otherwise after a reload.
+        const subjectGraphOn = engine.getKnowledgeLayer()?.readsSubjectGraph === true
+          || engine.getUserConfig().subject_graph_enabled === true;
         if (setAside.has('history.db')) exportData['threads_may_be_incomplete'] = true;
         if (setAside.has('agent-memory.db') || (subjectGraphOn && setAside.has('engine.db'))) {
           exportData['knowledge_graph_may_be_incomplete'] = true;

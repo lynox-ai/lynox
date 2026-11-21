@@ -434,4 +434,18 @@ describe('export with a set-aside engine.db while the subject graph is on (real 
     expect(body.knowledge_graph_may_be_incomplete).toBe(true);
     expect(body.durable_knowledge.may_be_incomplete).toBe(true);
   }, 60_000);
+
+  it('still marks it after a config reload turned the switch off, since the layer keeps reading engine.db', async () => {
+    // What a reload leaves: the config says off, the layer built at boot still reads the subject graph.
+    const view = h.engine() as unknown as { userConfig: { subject_graph_enabled?: boolean } };
+    const saved = view.userConfig;
+    view.userConfig = { ...saved, subject_graph_enabled: false };
+    try {
+      expect(h.engine().getUserConfig().subject_graph_enabled, 'fixture: the config now says off').toBe(false);
+      const body = await h.exportBody();
+      expect(body.knowledge_graph_may_be_incomplete).toBe(true);
+    } finally {
+      view.userConfig = saved;
+    }
+  }, 60_000);
 });
