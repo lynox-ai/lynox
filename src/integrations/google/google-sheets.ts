@@ -8,7 +8,7 @@ import { getErrorMessage } from '../../core/utils.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { pv, joinPrompts, singleLine } from '../../core/prompt-value.js';
 import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
-import { formulaCells, formulasAsText, formulasInRequests } from './sheets-formula.js';
+import { formulaCells, formulasAsText, type FormulaCell } from './sheets-formula.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
 import { namedTarget, withoutAddresses } from '../../core/audit-log.js';
@@ -126,20 +126,21 @@ function valuesToMarkdownTable(values: string[][]): string {
 
 const WRITE_AS_TEXT = 'Write as text';
 const WRITE_AS_FORMULAS = 'Write as formulas';
-const WRITE = 'Write';
 const DONT_WRITE = 'Don’t write';
-/** For write and append: the first is the one preselected, and it writes no formula. */
-const CELL_FORMULA_OPTIONS = [WRITE_AS_TEXT, WRITE_AS_FORMULAS, DONT_WRITE];
-/** For format, whose raw requests have no text form: in the order of the plain question. */
-const FORMAT_FORMULA_OPTIONS = [WRITE, DONT_WRITE];
+/** Listed first: the choice that writes no formula. */
+const FORMULA_OPTIONS = [WRITE_AS_TEXT, WRITE_AS_FORMULAS, DONT_WRITE];
+/**
+ * When some formulas are only counted: writing formulas the owner was not shown is not offered,
+ * since a harmless five could stand in front of the one that fetches.
+ */
+const FORMULA_OPTIONS_SOME_HIDDEN = [WRITE_AS_TEXT, DONT_WRITE];
 /** Formula lines shown before the rest is counted. */
 const FORMULAS_SHOWN = 5;
 
-/** The cells (or, for format, the formulas) that may be read as a formula, in call order. */
-function formulasToShow(input: SheetsInput): Array<{ cell?: string; formula: string }> {
+/** The cells of a write or an append that may be read as a formula, in call order. */
+function formulasToShow(input: SheetsInput): FormulaCell[] {
   if (input.action === 'write') return formulaCells(input.values, input.range, 'write');
   if (input.action === 'append') return formulaCells(input.values, input.range, 'append');
-  if (input.action === 'format') return formulasInRequests(input.format_requests).map((formula) => ({ formula }));
   return [];
 }
 
@@ -156,19 +157,14 @@ function chosenOption(answer: string, options: readonly string[]): string | unde
  * formula is never shortened, since the address in it is what the owner decides on; a line
  * break in it is not kept, so it cannot draw another cell's line.
  */
-function formulaNote(formulas: ReadonlyArray<{ cell?: string; formula: string }>): PromptText {
+function formulaNote(formulas: readonly FormulaCell[]): PromptText {
   const n = formulas.length;
   const head = n === 1
     ? pv`This chat has read content from outside lynox, such as a web page, an email or a file. 1 of these cells starts like a formula, and Google runs a formula when it is written. A formula can make Google fetch an address named in it, with data from the sheet in that address.`
     : pv`This chat has read content from outside lynox, such as a web page, an email or a file. ${n} of these cells start like a formula, and Google runs a formula when it is written. A formula can make Google fetch an address named in it, with data from the sheet in that address.`;
-  const lines = formulas.slice(0, FORMULAS_SHOWN).map(({ cell, formula }) =>
-    cell === undefined ? pv`${singleLine(formula)}` : pv`${cell}: ${singleLine(formula)}`);
+  const lines = formulas.slice(0, FORMULAS_SHOWN).map(({ cell, formula }) => pv`${cell}: ${singleLine(formula)}`);
   const more = n > FORMULAS_SHOWN ? [pv`and ${n - FORMULAS_SHOWN} more`] : [];
-  return joinPrompts([
-    head,
-    ...lines,
-    ...more,
-  ], '\n');
+  return joinPrompts([head, ...lines, ...more], '\n');
 }
 
 // === Tool Creation ===
@@ -279,11 +275,11 @@ export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<Sh
               return 'Action cancelled by user.';
             }
           } else {
-            const options = input.action === 'format' ? FORMAT_FORMULA_OPTIONS : CELL_FORMULA_OPTIONS;
+            const options = formulas.length > FORMULAS_SHOWN ? FORMULA_OPTIONS_SOME_HIDDEN : FORMULA_OPTIONS;
             const chosen = chosenOption(await agent.promptUser(joinPrompts([confirmMsg, formulaNote(formulas)], '\n\n'), options), options);
             if (chosen === WRITE_AS_TEXT) {
               call = { ...input, values: formulasAsText(input.values ?? []) };
-            } else if (chosen !== WRITE_AS_FORMULAS && chosen !== WRITE) {
+            } else if (chosen !== WRITE_AS_FORMULAS) {
               return 'Action cancelled by user.';
             }
           }

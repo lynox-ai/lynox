@@ -17,15 +17,17 @@ const PLAIN_NUMBER = /^[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:e[+-]?\d+)?%?$/i;
  *
  * `=` makes a formula. `+` and `-` are counted too unless the value is a plain number: whether
  * Sheets reads `+A1` as a formula is not measured here, and counting it only means the owner is
- * asked once more. Leading white space is skipped, for the same reason.
+ * asked once more. For the same reason the value is read as Google might normalise it: without
+ * leading white space and invisible format characters, and with compatibility forms folded
+ * (a full-width `＝` reads as `=`).
  */
 export function startsLikeFormula(value: unknown): value is string {
   if (typeof value !== 'string') return false;
-  const text = value.trimStart();
+  const text = value.normalize('NFKC').replace(/\p{Cf}/gu, '').trim();
   const first = text[0];
   if (first === '=') return true;
   if (first !== '+' && first !== '-') return false;
-  return !PLAIN_NUMBER.test(text.trimEnd());
+  return !PLAIN_NUMBER.test(text);
 }
 
 /**
@@ -37,7 +39,7 @@ export function asText(value: string): string {
 }
 
 export interface FormulaCell {
-  /** Where the cell goes: an A1 address when the range names its first cell, else row and column. */
+  /** Where the cell goes: its address when the write names its first cell, else its place. */
   readonly cell: string;
   readonly formula: string;
 }
@@ -61,21 +63,16 @@ function columnIndex(letters: string): number {
   return n - 1;
 }
 
-/** The first cell a range names, as column index and row number; undefined when it names none. */
+/**
+ * The first cell a range names in A1 form (`B2`, `Sheet1!$B$2:D5`), as column index and row
+ * number; undefined when it names none (`Sheet1`, `B:D`, `R2C3`).
+ */
 function firstCell(range: string | undefined): { col: number; row: number } | undefined {
   if (range === undefined) return undefined;
   const local = range.slice(range.lastIndexOf('!') + 1);
-  const match = /^\$?([A-Za-z]{1,3})\$?(\d+)/.exec(local);
+  const match = /^\$?([A-Za-z]{1,3})\$?(\d+)(?=$|:)/.exec(local);
   if (!match) return undefined;
   return { col: columnIndex(match[1]!), row: Number(match[2]) };
-}
-
-/** The first column a range names when it names no row (`A:C`, `Sheet1!B:B`); undefined otherwise. */
-function firstColumn(range: string | undefined): number | undefined {
-  if (range === undefined) return undefined;
-  const local = range.slice(range.lastIndexOf('!') + 1);
-  const match = /^\$?([A-Za-z]{1,3})\$?\d*:/.exec(local);
-  return match ? columnIndex(match[1]!) : undefined;
 }
 
 /** 1 → 1st, 2 → 2nd, 11 → 11th, 23 → 23rd. */
@@ -87,24 +84,22 @@ function ordinal(n: number): string {
 
 /**
  * Every cell of `values` that may be read as a formula, named as the owner finds it. A write
- * whose range names its first cell gives the address (`C2`). Otherwise the cell is named by its
- * place among the rows given — for an append, the new rows, which Google places after the
- * table — and by its column letter when the range names the first column.
+ * whose range names its first cell starts there, so the cell gets its address (`C2`). Otherwise
+ * it is named by its place in the values given (`1st row, 2nd value`): an append's rows go where
+ * Google finds the end of the table, and where its columns start is Google's to find too.
  */
 export function formulaCells(values: unknown, range: string | undefined, action: 'write' | 'append'): FormulaCell[] {
   if (!Array.isArray(values)) return [];
   const start = action === 'write' ? firstCell(range) : undefined;
-  const col0 = start?.col ?? firstColumn(range);
   const rows = action === 'append' ? 'new row' : 'row';
   const found: FormulaCell[] = [];
   values.forEach((row, r) => {
     if (!Array.isArray(row)) return;
     row.forEach((value, c) => {
       if (!startsLikeFormula(value)) return;
-      const column = col0 === undefined ? `column ${c + 1}` : `column ${columnName(col0 + c)}`;
       const cell = start
         ? `${columnName(start.col + c)}${start.row + r}`
-        : `${ordinal(r + 1)} ${rows}, ${column}`;
+        : `${ordinal(r + 1)} ${rows}, ${ordinal(c + 1)} value`;
       found.push({ cell, formula: value });
     });
   });
@@ -114,39 +109,4 @@ export function formulaCells(values: unknown, range: string | undefined, action:
 /** `values` with every cell that may be read as a formula written as text instead. */
 export function formulasAsText(values: unknown[][]): unknown[][] {
   return values.map((row) => (Array.isArray(row) ? row.map((v) => (startsLikeFormula(v) ? asText(v) : v)) : row));
-}
-
-/**
- * The formulas raw `batchUpdate` requests carry: every `formulaValue`, and every piece of a
- * `pasteData` or a `findReplace` replacement that starts like one (pasted data and a replacement
- * are read as typed).
- */
-export function formulasInRequests(requests: unknown): string[] {
-  const found: string[] = [];
-  const pieces = (text: string, delimiter: string | undefined): void => {
-    for (const line of text.split(/\r?\n/)) {
-      for (const piece of delimiter ? line.split(delimiter) : [line]) {
-        if (startsLikeFormula(piece)) found.push(piece);
-      }
-    }
-  };
-  const walk = (node: unknown, key: string | undefined): void => {
-    if (Array.isArray(node)) {
-      for (const item of node) walk(item, undefined);
-      return;
-    }
-    if (node === null || typeof node !== 'object') return;
-    const obj = node as Record<string, unknown>;
-    if (key === 'pasteData' && typeof obj['data'] === 'string') {
-      // Sheets splits pasted data at `delimiter`; without one it reads commas.
-      pieces(obj['data'], typeof obj['delimiter'] === 'string' && obj['delimiter'] !== '' ? obj['delimiter'] : ',');
-    }
-    if (key === 'findReplace' && typeof obj['replacement'] === 'string') pieces(obj['replacement'], undefined);
-    for (const [k, v] of Object.entries(obj)) {
-      if (k === 'formulaValue' && typeof v === 'string') found.push(v);
-      else walk(v, k);
-    }
-  };
-  walk(requests, undefined);
-  return found;
 }

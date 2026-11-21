@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 import { createSheetsTool } from './google-sheets.js';
-import { startsLikeFormula, formulaCells, formulasAsText, formulasInRequests } from './sheets-formula.js';
+import { startsLikeFormula, formulaCells, formulasAsText } from './sheets-formula.js';
 import type { IAgent, PromptText } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
 import { FULL_SCOPES } from './google-auth.js';
@@ -64,6 +64,8 @@ describe('a cell that starts like a formula', () => {
     ['=A1', true], ['  =SUM(A1:A3)', true], ['+A1', true], ['-A1', true], ['- item', true],
     ['-5', false], ['+3.5', false], ['1,5', false], ['12%', false], ['-1e3', false],
     ['Alice', false], ['', false], ['a=b', false],
+    // Read as Google might normalise it: a full-width sign, an invisible character in front.
+    ['＝IMPORTXML("https://x.example", "//a")', true], ['\u200b=A1', true], ['\ufeff=A1', true], ['＋A1', true],
   ])('%j is counted as a formula: %s', (value, expected) => {
     expect(startsLikeFormula(value)).toBe(expected);
   });
@@ -74,15 +76,16 @@ describe('a cell that starts like a formula', () => {
     expect(startsLikeFormula(true)).toBe(false);
   });
 
-  it('names a written cell by its address from the range, and an appended one by its place among the new rows', () => {
+  it('names a written cell by its address from the range, and any other by its place in the values', () => {
     const values = [['a', '=1+1'], ['=B9', 'b']];
     expect(formulaCells(values, 'Sheet1!B2:C3', 'write')).toEqual([{ cell: 'C2', formula: '=1+1' }, { cell: 'B3', formula: '=B9' }]);
     expect(formulaCells([['=x']], "'My sheet'!$Z$10", 'write')).toEqual([{ cell: 'Z10', formula: '=x' }]);
     expect(formulaCells([['a', '=x']], 'Z1', 'write')).toEqual([{ cell: 'AA1', formula: '=x' }]);
-    expect(formulaCells(values, 'Sheet1', 'write')).toEqual([{ cell: '1st row, column 2', formula: '=1+1' }, { cell: '2nd row, column 1', formula: '=B9' }]);
-    expect(formulaCells(values, 'Sheet1!B:C', 'write')).toEqual([{ cell: '1st row, column C', formula: '=1+1' }, { cell: '2nd row, column B', formula: '=B9' }]);
-    expect(formulaCells(values, 'Sheet1!B2:C3', 'append')).toEqual([{ cell: '1st new row, column C', formula: '=1+1' }, { cell: '2nd new row, column B', formula: '=B9' }]);
-    expect(formulaCells(values, 'Sheet1', 'append')).toEqual([{ cell: '1st new row, column 2', formula: '=1+1' }, { cell: '2nd new row, column 1', formula: '=B9' }]);
+    const byPlace = [{ cell: '1st row, 2nd value', formula: '=1+1' }, { cell: '2nd row, 1st value', formula: '=B9' }];
+    expect(formulaCells(values, 'Sheet1', 'write')).toEqual(byPlace);
+    expect(formulaCells(values, 'Sheet1!B:C', 'write')).toEqual(byPlace);
+    expect(formulaCells(values, 'Sheet1!R2C3', 'write')).toEqual(byPlace);
+    expect(formulaCells(values, 'Sheet1!B2:C3', 'append')).toEqual([{ cell: '1st new row, 2nd value', formula: '=1+1' }, { cell: '2nd new row, 1st value', formula: '=B9' }]);
   });
 
   it('counts the rows in English ordinals', () => {
@@ -91,23 +94,7 @@ describe('a cell that starts like a formula', () => {
   });
 
   it('writes only the formula cells as text', () => {
-    expect(formulasAsText([['a', '=1+1', 5], ['-x', '-5']])).toEqual([['a', "'=1+1", 5], ["'-x", '-5']]);
-  });
-
-  it('is found in raw requests: a formulaValue, pasted data and a replacement, never a stringValue', () => {
-    expect(formulasInRequests([
-      { updateCells: { rows: [{ values: [{ userEnteredValue: { formulaValue: '=IMAGE("https://a.example")' } }, { userEnteredValue: { stringValue: '=literal' } }] }] } },
-      { repeatCell: { cell: { userEnteredValue: { formulaValue: '=IMPORTDATA("https://b.example")' } } } },
-      { pasteData: { data: 'x;=IMPORTHTML("https://c.example")\ny;z', delimiter: ';' } },
-      { pasteData: { data: 'p,=1+1' } },
-      { findReplace: { find: 'x', replacement: '=IMPORTFEED("https://d.example")' } },
-    ])).toEqual([
-      '=IMAGE("https://a.example")',
-      '=IMPORTDATA("https://b.example")',
-      '=IMPORTHTML("https://c.example")',
-      '=1+1',
-      '=IMPORTFEED("https://d.example")',
-    ]);
+    expect(formulasAsText([['a', '=1+1', 5], ['-x', '-5'], ['\u200b=A1']])).toEqual([['a', "'=1+1", 5], ["'-x", '-5'], ["'\u200b=A1"]]);
   });
 });
 
@@ -204,12 +191,26 @@ describe('google_sheets after content from outside the chat', () => {
     expect(flattenPrompt(asked(a).prompt)).toContain('a file. 1 of these cells starts like a formula, and Google');
   });
 
-  it('shows five formulas and counts the rest', async () => {
+  it('shows five formulas, counts the rest, and then does not offer to write formulas the owner was not shown', async () => {
     const a = agent('sawUntrustedData', 'Don’t write');
     await createSheetsTool(auth).handler({ ...write, range: 'A1', values: [['=1', '=2', '=3', '=4', '=5', '=6', '=7']] }, a);
     const lines = flattenPrompt(asked(a).prompt).split('\n');
     expect(lines.slice(-6)).toEqual(['A1: =1', 'B1: =2', 'C1: =3', 'D1: =4', 'E1: =5', 'and 2 more']);
     expect(lines[2]).toContain('7 of these cells start like a formula');
+    expect(asked(a).options).toEqual(['Write as text', 'Don’t write']);
+  });
+
+  it('writes nothing when "Write as formulas" is answered though it was not offered', async () => {
+    const result = await createSheetsTool(auth).handler({ ...write, range: 'A1', values: [['=1', '=2', '=3', '=4', '=5', '=IMAGE("https://x.example")']] }, agent('sawUntrustedData', 'Write as formulas'));
+    expect(result).toBe('Action cancelled by user.');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('offers to write formulas when exactly five are shown and none is hidden', async () => {
+    const a = agent('sawUntrustedData', 'Don’t write');
+    await createSheetsTool(auth).handler({ ...write, range: 'A1', values: [['=1', '=2', '=3', '=4', '=5']] }, a);
+    expect(asked(a).options).toEqual(['Write as text', 'Write as formulas', 'Don’t write']);
+    expect(flattenPrompt(asked(a).prompt)).not.toContain('more');
   });
 
   it('keeps a formula whole but on one line, so it cannot draw another cell', async () => {
@@ -227,35 +228,15 @@ describe('google_sheets after content from outside the chat', () => {
     const result = await createSheetsTool(auth).handler({ action: 'append', spreadsheet_id: 'sid', range: 'Sheet1!A:B', values: [['x', FETCHING]] }, a);
     expect(result).toContain('Data appended');
     expect(asked(a).options).toEqual(['Write as text', 'Write as formulas', 'Don’t write']);
-    expect(flattenPrompt(asked(a).prompt).split('\n').at(-1)).toBe(`1st new row, column B: ${FETCHING}`);
+    expect(flattenPrompt(asked(a).prompt).split('\n').at(-1)).toBe(`1st new row, 2nd value: ${FETCHING}`);
     expect(sentValues()).toEqual([['x', `'${FETCHING}`]]);
   });
 
-  describe('format', () => {
-    const format = { action: 'format' as const, spreadsheet_id: 'sid', format_requests: [{ repeatCell: { cell: { userEnteredValue: { formulaValue: FETCHING } } } }] };
-
-    it('shows the formulas of the requests and offers to write or not', async () => {
-      const a = agent('sawUntrustedData', 'Write');
-      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ replies: [{}] }) });
-      await createSheetsTool(auth).handler(format, a);
-      expect(asked(a).options).toEqual(['Write', 'Don’t write']);
-      expect(flattenPrompt(asked(a).prompt).split('\n').at(-1)).toBe(FETCHING);
-      expect(flattenPrompt(asked(a).prompt)).toContain('1 of these cells starts like a formula');
-      expect(mockFetch).toHaveBeenCalledTimes(1);
-    });
-
-    it('sends nothing when the owner chooses not to write', async () => {
-      const result = await createSheetsTool(auth).handler(format, agent('sawUntrustedData', 'Don’t write'));
-      expect(result).toBe('Action cancelled by user.');
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
-
-    it('asks as always before any content from outside', async () => {
-      const a = agent('none', 'Yes');
-      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ replies: [{}] }) });
-      await createSheetsTool(auth).handler(format, a);
-      expect(asked(a).options).toEqual(['Yes', 'No']);
-      expect(mockFetch).toHaveBeenCalledTimes(1);
-    });
+  it('leaves format as it was: its raw requests are not read for formulas', async () => {
+    const a = agent('sawUntrustedData', 'Yes');
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ replies: [{}] }) });
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [{ repeatCell: { cell: { userEnteredValue: { formulaValue: FETCHING } } } }] }, a);
+    expect(asked(a).options).toEqual(['Yes', 'No']);
+    expect(flattenPrompt(asked(a).prompt)).toBe('Apply batch changes to spreadsheet sid? Formatting requests can delete or overwrite cells and sheets.');
   });
 });
