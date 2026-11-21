@@ -134,4 +134,30 @@ describe('toolCallLabel', () => {
       expect(out?.subject).toBe('GET https://api.example.com/x');
     });
   });
+
+  describe('api_setup', () => {
+    it('labels the call as API profiles, never by its raw tool name', () => {
+      const out = toolCallLabel('api_setup', { action: 'list' }, tk);
+      expect(out).toEqual({ action: 'tool.api_profiles', subject: '' });
+    });
+
+    it('names the profile by its id when the call has one', () => {
+      expect(toolCallLabel('api_setup', { action: 'view', id: 'bexio' }, tk)).toEqual({ action: 'tool.api_profiles', subject: 'bexio' });
+      expect(toolCallLabel('api_setup', { action: 'create', profile: { id: 'stripe', name: 'Stripe' } }, tk)).toEqual({ action: 'tool.api_profiles', subject: 'stripe' });
+      // An explicit id wins over the profile's.
+      expect(toolCallLabel('api_setup', { action: 'update', id: 'a', profile: { id: 'b' } }, tk)?.subject).toBe('a');
+      // A blank id falls back to the profile's.
+      expect(toolCallLabel('api_setup', { action: 'update', id: '  ', profile: { id: 'b' } }, tk)?.subject).toBe('b');
+    });
+
+    it('shows no subject for a missing or malformed profile', () => {
+      expect(toolCallLabel('api_setup', { action: 'create', profile: 'stripe' }, tk)?.subject).toBe('');
+      expect(toolCallLabel('api_setup', { action: 'create', profile: null }, tk)?.subject).toBe('');
+      expect(toolCallLabel('api_setup', undefined, tk)?.subject).toBe('');
+    });
+
+    it('cuts an id longer than a stored one can be at 64 chars', () => {
+      expect(toolCallLabel('api_setup', { action: 'view', id: 'z'.repeat(200) }, tk)?.subject).toBe('z'.repeat(64));
+    });
+  });
 });
