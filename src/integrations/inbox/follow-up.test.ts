@@ -512,6 +512,7 @@ describe('a flagged follow-up brings its item back to where the owner sees it', 
       expect(open()).toEqual([]);
       await hook()(ACCOUNT.id, envelope(OTP));
       expect(inbox.getItem(id)!.snoozeUntil).toBeUndefined();
+      expect(inbox.getItem(id)!.classifierVersion).toBe('sensitive-follow-up');
       expect(open()).toEqual([id]);
       expect(raises(id)).toHaveLength(1);
       expect(notifyNewItem).toHaveBeenCalledTimes(1);
@@ -818,7 +819,7 @@ describe('a snooze set to wake on a reply wakes for the messages that may reopen
     const id = seedReplied();
     const g = gate();
     const hookG = graphHook(async (_a, env) => { if (env.messageId === '<otp@x>') await g.wait; return false; });
-    const flagged = hookG(ACCOUNT.id, envelope({ messageId: '<otp@x>', subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' }));
+    const flagged = hookG(ACCOUNT.id, envelope({ messageId: '<otp@x>', date: new Date('2026-11-05T09:00:00Z'), subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' }));
     await hookG(ACCOUNT.id, envelope({ messageId: '<plain@x>' }));
     expect(inbox.getItem(id)!.userAction).toBeUndefined();
     notifyNewItem.mockClear();
@@ -828,7 +829,7 @@ describe('a snooze set to wake on a reply wakes for the messages that may reopen
     expect(woke(id)).toBe(true);
     expect(inbox.listAuditForItem(id).filter((a) => a.action === 'raised_on_sensitive_follow_up')).toHaveLength(1);
     expect(inbox.getItem(id)!.classifierVersion).toBe('sensitive-follow-up');
-    expect(inbox.getItem(id)!.mailDate?.toISOString()).toBe('2026-11-04T09:00:00.000Z');
+    expect(inbox.getItem(id)!.mailDate?.toISOString()).toBe('2026-11-05T09:00:00.000Z');
     expect(notifyNewItem).toHaveBeenCalledTimes(1);
   });
 
