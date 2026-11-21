@@ -16,6 +16,16 @@ describe('watchRefusedNow', () => {
     expect(watchRefusedNow(watch('http://other.example/p'), ctx('guarded', true))).toEqual({ kind: 'watch_https' });
   });
 
+  it('tells the reason by the whole refusal, not by a word a host name carries', () => {
+    expect(watchRefusedNow(watch('https://network_policy=deny-all.x/p'), ctx('allow-list'))).toEqual({ kind: 'watch_allow_list', host: 'network_policy=deny-all.x' });
+  });
+
+  it('under enforce_https tells the reason the https address would meet too', () => {
+    expect(watchRefusedNow(watch('http://listed.example/p'), ctx('deny-all', true))).toEqual({ kind: 'watch_deny_all' });
+    expect(watchRefusedNow(watch('http://other.example/p'), ctx('allow-list', true))).toEqual({ kind: 'watch_allow_list', host: 'other.example' });
+    expect(watchRefusedNow(watch('http://listed.example/p'), ctx('allow-list', true))).toEqual({ kind: 'watch_https' });
+  });
+
   it('says nothing for a page that is read', () => {
     expect(watchRefusedNow(watch('https://listed.example/p'), ctx('allow-list'))).toBeNull();
     expect(watchRefusedNow(watch('https://other.example/p'), ctx('guarded'))).toBeNull();

@@ -92,8 +92,10 @@ describe('GET /api/triggers names a watch the network policy refuses (real engin
     Object.assign(engine.getToolContext(), { networkPolicy: 'deny-all' });
     let rows = await list();
     expect(rows['w-in']!['blocked_reason']).toEqual({ kind: 'watch_deny_all' });
+    expect(rows['w-out']!['blocked_reason']).toEqual({ kind: 'watch_deny_all' });
     Object.assign(engine.getToolContext(), { networkPolicy: 'guarded' });
     rows = await list();
     expect(rows['w-out']!['blocked_reason']).toBeUndefined();
+    expect(rows['w-in']!['blocked_reason']).toBeUndefined();
   });
 });

@@ -1268,20 +1268,23 @@ export class TaskManager {
 const MAX_RUN_RESULT_CHARS = 10_000;
 
 /**
- * Why `network_policy` keeps a watch from reading `url`, or null when it may. A watch is a
- * credential-free read, so it gets the `discovery` surface, as every other such read: under
- * `allow-list` a host outside the list is refused, under `deny-all` every host, under `guarded`
- * and `allow-all` it passes. Asked at creation and before every poll, so a watch the policy forbids
- * is neither created nor read, and one created before the policy changed stops being read.
- */
-/** Why a watch's page is not read, for the Triggers view: the policy's own reasons only. */
-/**
  * Why a trigger's run does not do its work, for the Triggers view (`blocked_reason` in
  * `GET /api/triggers`): a cause, never text, which the view says in its own language. Watch kinds
  * only for now; another cause adds a kind.
  */
 export type BlockedReason = { kind: 'watch_allow_list'; host: string } | { kind: 'watch_deny_all' } | { kind: 'watch_https' };
 
+const DENY_ALL_REFUSAL = 'Blocked: network access denied for this tool (network_policy=deny-all)';
+const HTTPS_REFUSAL_START = 'Blocked: HTTP not allowed';
+
+/**
+ * Why `network_policy` keeps a watch from reading `url`, or null when it may. A watch is a
+ * credential-free read, so it gets the `discovery` surface, as every other such read: under
+ * `allow-list` a host outside the list is refused, under `deny-all` every host, under `guarded`
+ * and `allow-all` it passes. Asked at creation and before every poll, so a watch the policy forbids
+ * is neither created nor read, and one created before the policy changed stops being read.
+ * The reason is told by the whole refusal, never by a word in it, since a host name can carry one.
+ */
 export function watchPolicyRefusal(url: string, ctx: HostPolicyContext | undefined): { why: string; wayOut: string; shown: BlockedReason | null } | null {
   try {
     assertHostPolicy(url, { surface: 'discovery' }, ctx);
@@ -1289,15 +1292,21 @@ export function watchPolicyRefusal(url: string, ctx: HostPolicyContext | undefin
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     if (message.includes('unsupported protocol') || err instanceof TypeError) return { why: 'it is not an http or https address.', wayOut: '', shown: null };
-    if (message.includes('network_policy=deny-all')) {
+    // enforce_https is checked first; when the https address would be refused too, that reason
+    // is the one to tell, since switching to https would not help.
+    if (message.startsWith(HTTPS_REFUSAL_START) && /^http:/i.test(url)) {
+      const deeper = watchPolicyRefusal(`https:${url.slice('http:'.length)}`, ctx);
+      if (deeper !== null) return deeper;
+    }
+    if (message === DENY_ALL_REFUSAL) {
       return { why: 'this instance\'s network_policy is deny-all, so lynox reads no web page.', wayOut: 'Only the operator can change network_policy.', shown: { kind: 'watch_deny_all' } };
     }
-    if (message.includes('not in network allow-list')) {
+    if (message.startsWith('Blocked: hostname "') && message.endsWith('" not in network allow-list')) {
       let host = url;
       try { host = new URL(url).hostname; } catch { /* the address as given */ }
       return { why: `its host ${host} is not in this instance's network allow-list.`, wayOut: 'The operator can add the host to the allow-list (network_policy).', shown: { kind: 'watch_allow_list', host } };
     }
-    if (message.includes('enforce_https')) return { why: 'this instance only reads HTTPS pages (enforce_https).', wayOut: 'Watch the https:// address instead.', shown: { kind: 'watch_https' } };
+    if (message.startsWith(HTTPS_REFUSAL_START)) return { why: 'this instance only reads HTTPS pages (enforce_https).', wayOut: 'Watch the https:// address instead.', shown: { kind: 'watch_https' } };
     const why = message.replace(/^Blocked:\s*/, '');
     return { why: `this instance's network settings refuse it: ${/[.!?]$/.test(why) ? why : `${why}.`}`, wayOut: '', shown: null };
   }
