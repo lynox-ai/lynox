@@ -187,6 +187,8 @@ describe('every record of a displaced loop holds the run lease (one write each)'
     expect((await runB(runId, m.writer, h.ledger, lease)).status).toBe('displaced');
     expect(target(runId, 0).write_sent).toBe(0);
     expect(m.writes).toEqual([]);
+    // The send's lost lease ends the loop: it goes on to no other target.
+    expect(h.calls.get('claimTarget')).toBe(1);
   });
 
   it('renewClaim: the claim heartbeat fires during a write, finds the lease gone, does not renew, and the loop ends displaced', async () => {
@@ -210,6 +212,8 @@ describe('every record of a displaced loop holds the run lease (one write each)'
     // Still the time of B's claim: no renewal landed after the takeover, and nothing was recorded.
     expect(target(runId, 0).claimed_at).toBe(new Date(claimedAt).toISOString());
     expect(target(runId, 0).applied_at).toBeNull();
+    // The heartbeat's lost lease ends the loop once the write returns: no record is even tried.
+    expect(h.calls.get('recordApplied')).toBeUndefined();
   });
 
   it('recordApplied: a loop displaced while its write ran records nothing of it (the one write in flight lands)', async () => {
@@ -307,6 +311,29 @@ describe('every record of a displaced loop holds the run lease (one write each)'
     expect((await runB(runId, m.writer, h.ledger, lease)).status).toBe('displaced');
     // The restore in flight landed (the named rest); its record did not.
     expect(m.state.get('k000')).toBe('v0');
+    expect(target(runId, 0).undone_at).toBeNull();
+    expect(runRow(runId).phase).toBe('writing');
+  });
+
+  it('a rollback displaced between its read and its restore sends no restore: the holder\'s value stands', async () => {
+    const { runId, initial, tid } = approvedRun(2, { atomic: true });
+    const lease = bTakesLease(tid);
+    const m = memory(initial, { fail: new Set(['k001']) });
+    let k000Reads = 0;
+    const writer: TargetWriter = {
+      async read(k, f) {
+        const cur = await m.writer.read(k, f);
+        // The rollback's read of k000 (its second): right after it, A takes the lease over and writes the target.
+        if (k === 'k000' && ++k000Reads === 2) { aTakesOver(tid); m.state.set('k000', 'a0'); }
+        return cur;
+      },
+      write: (k, a) => m.writer.write(k, a),
+    };
+    expect((await runB(runId, writer, ledB, lease)).status).toBe('displaced');
+    expect(k000Reads).toBe(2);
+    // The run's two sends, and no restore of k000.
+    expect(m.writes).toEqual(['k000', 'k001']);
+    expect(m.state.get('k000')).toBe('a0');
     expect(target(runId, 0).undone_at).toBeNull();
     expect(runRow(runId).phase).toBe('writing');
   });
@@ -499,7 +526,7 @@ describe('the owner\'s stop as a mark in the ledger', () => {
     expect(runRow(runId).halt_reason).toBe(BULK_HALT_REASONS.stoppedByOwner);
   });
 
-  it('a stop is recorded only on a run approved or writing, unhalted and not stopped already', () => {
+  it('a stop is recorded only on a run approved or writing, unhalted and not stopped already', async () => {
     const { runId } = approvedRun(2);
     // Approved (not yet writing): taken.
     expect(ledA.requestStop(runId)).toBe(true);
@@ -513,6 +540,17 @@ describe('the owner\'s stop as a mark in the ledger', () => {
     const planned = ledA.recordDryRun({ createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'mem', targets: [{ key: 'x', before: { absent: true }, after: 'y' }] });
     expect(ledA.requestStop(planned.id)).toBe(false);
     expect(ledA.isStopRequested(planned.id)).toBe(false);
+    // Ended: done (no halt reason) and aborted.
+    const done = approvedRun(1);
+    expect((await runB(done.runId, memory(done.initial).writer, ledB, null)).status).toBe('done');
+    expect(runRow(done.runId)).toMatchObject({ phase: 'done', halt_reason: null });
+    expect(ledA.requestStop(done.runId)).toBe(false);
+    expect(ledA.isStopRequested(done.runId)).toBe(false);
+    const aborted = approvedRun(2, { atomic: true });
+    expect((await runB(aborted.runId, memory(aborted.initial, { fail: new Set(['k001']) }).writer, ledB, null)).status).toBe('aborted');
+    expect(runRow(aborted.runId).phase).toBe('aborted');
+    expect(ledA.requestStop(aborted.runId)).toBe(false);
+    expect(ledA.isStopRequested(aborted.runId)).toBe(false);
   });
 
   it('a stop with `arm` makes the run\'s trigger due now', () => {

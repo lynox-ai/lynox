@@ -623,6 +623,8 @@ async function rollBack(
       }
       // Left as it is, and unmarked: the owner's view marks it as one to check by hand.
       if (cur === 'path_changed' || cur === 'foreign' || !sameImage(cur, t.after)) { complete = false; continue; }
+      // A loop that lost its lease restores nothing more: the holder may have written the target since.
+      if (lease !== null && !ledger.holdsLease(lease)) return displaced;
       await writer.write(t.key, t.expected);
       const booked = recorded ? ledger.recordRolledBack(run, t.seq, now(), lease) : ledger.recordUnrecordedSettled(run.id, t.seq, now(), lease);
       if (booked === 'lease') return displaced;

@@ -953,8 +953,14 @@ export class WorkerLoop {
     // reads to decide whether to retry. An honest refusal is cheaper than a wrong word.
     if (via === undefined) return { kind: 'unstoppable', effect: active.effect };
     // A bulk write run reads the owner's stop from its ledger, where a loop in another process
-    // reads it too: recorded before anything is aborted.
-    this.requestBulkStop(active.effect, active.bulkRunId);
+    // reads it too: recorded before anything is aborted. A store that refuses the write must not
+    // cost the aborts below, nor the stops of the other tasks a sweep goes on to: it is reported,
+    // and the run's own records meet the same store.
+    try {
+      this.requestBulkStop(active.effect, active.bulkRunId);
+    } catch (err: unknown) {
+      process.stderr.write(`[lynox:worker] recording the stop of "${taskId}" in its ledger threw: ${err instanceof Error ? err.message : String(err)}\n`);
+    }
     active.stopRequested = true;
     active.ownerStop.abort();
     try {
