@@ -14516,36 +14516,42 @@ export class LynoxHTTPApi {
       }
       if (!omitted) exportData['workspace_archive'] = '/api/export/workspace';
 
-      // A history.db or engine.db the boot found corrupt was set aside as `<name>.corrupt-<ms>`
-      // and an empty one opened in its place. The blocks read from the new store then look
-      // complete while the owner's older data sits in the set-aside file. Name the file (not its
-      // content) and mark every block read from that database incomplete: history.db holds the
-      // threads and half of the knowledge graph, engine.db the other half and the durable
-      // knowledge. A data directory that cannot be listed marks all of them.
+      // A database set aside as corrupt (`<name>.corrupt-<ms>`: by the boot for history.db and
+      // engine.db, by a restore for any of the four) leaves an empty or restored one in its
+      // place. The blocks read from it then look complete while older data sits in the set-aside
+      // file. Name the file (not its content) and mark every block read from that database:
+      // history.db holds the threads; engine.db the durable knowledge, and the knowledge graph
+      // while the subject graph is on; agent-memory.db the knowledge graph otherwise; datastore.db
+      // the contacts, deals and tables. A data directory that cannot be listed marks all of them.
       {
-        let fromHistory = false;
-        let fromEngine = false;
+        let setAside: Set<string>;
         try {
           const { getLynoxDir } = await import('../core/config.js');
           const { listSetAsideStores } = await import('../core/set-aside-stores.js');
-          const setAside = listSetAsideStores(getLynoxDir());
-          if (setAside.length > 0) exportData['set_aside_databases'] = setAside;
-          fromHistory = setAside.some((s) => s.database === 'history.db');
-          fromEngine = setAside.some((s) => s.database === 'engine.db');
+          const found = listSetAsideStores(getLynoxDir());
+          if (found.length > 0) exportData['set_aside_databases'] = found;
+          setAside = new Set(found.map((s) => s.database));
         } catch (err: unknown) {
           exportData['set_aside_databases_unknown'] = err instanceof Error ? err.name : 'error';
-          fromHistory = true;
-          fromEngine = true;
+          setAside = new Set(['history.db', 'engine.db', 'datastore.db', 'agent-memory.db']);
         }
-        if (fromHistory) exportData['threads_may_be_incomplete'] = true;
-        if (fromHistory || fromEngine) exportData['knowledge_graph_may_be_incomplete'] = true;
-        if (fromEngine) {
+        const subjectGraphOn = engine.getUserConfig().subject_graph_enabled === true;
+        if (setAside.has('history.db')) exportData['threads_may_be_incomplete'] = true;
+        if (setAside.has('agent-memory.db') || (subjectGraphOn && setAside.has('engine.db'))) {
+          exportData['knowledge_graph_may_be_incomplete'] = true;
+        }
+        if (setAside.has('engine.db')) {
           const durable = exportData['durable_knowledge'];
           if (durable !== null && typeof durable === 'object') {
             exportData['durable_knowledge'] = { ...(durable as Record<string, unknown>), may_be_incomplete: true };
           }
         }
-        if (fromHistory || fromEngine) {
+        if (setAside.has('datastore.db')) {
+          exportData['contacts_may_be_incomplete'] = true;
+          exportData['deals_may_be_incomplete'] = true;
+          exportData['datastore_may_be_incomplete'] = true;
+        }
+        if (setAside.size > 0) {
           process.stderr.write('⚠ /api/export: a database was set aside as corrupt — blocks read from it marked incomplete\n');
         }
       }

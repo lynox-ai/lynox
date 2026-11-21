@@ -35,7 +35,7 @@ type EngineView = {
   getKnowledgeStore: () => unknown;
   getKnowledgeLayer: () => unknown;
   getSecretStore: () => unknown;
-  getUserConfig: () => { durable_memory_enabled?: boolean | undefined; knowledge_graph_enabled?: boolean | undefined };
+  getUserConfig: () => { durable_memory_enabled?: boolean | undefined; knowledge_graph_enabled?: boolean | undefined; subject_graph_enabled?: boolean | undefined };
   _crm: unknown;
   knowledgeLayer: unknown;
   secretStore: unknown;
@@ -44,7 +44,7 @@ type EngineView = {
 
 const ENV = [
   'LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY',
-  'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE', 'LYNOX_DURABLE_MEMORY_ENABLED',
+  'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE', 'LYNOX_DURABLE_MEMORY_ENABLED', 'LYNOX_SUBJECT_GRAPH_ENABLED',
 ];
 
 function harness(prepare: (dir: string) => void, durableMemory: boolean) {
@@ -64,6 +64,7 @@ function harness(prepare: (dir: string) => void, durableMemory: boolean) {
     process.env['LYNOX_VAULT_KEY'] = `v-${randomBytes(12).toString('hex')}`;
     delete process.env['LYNOX_BILLING_TIER'];
     delete process.env['LYNOX_MANAGED_MODE'];
+    delete process.env['LYNOX_SUBJECT_GRAPH_ENABLED'];
     process.env['LYNOX_DURABLE_MEMORY_ENABLED'] = durableMemory ? 'true' : 'false';
     reloadConfig();
     prepare(dir);
@@ -339,11 +340,12 @@ describe('export with the knowledge graph switched off (real engine)', () => {
 function corrupt(dir: string, file: string): void {
   writeFileSync(join(dir, file), Buffer.from('not a database '.repeat(512)));
 }
+const IS_ROOT = process.getuid?.() === 0;
 
 describe('export after the boot set a corrupt history.db aside (real engine)', () => {
   const h = harness((dir) => corrupt(dir, 'history.db'), true);
 
-  it('names the set-aside file and marks the threads and the knowledge graph incomplete, not durable knowledge', async () => {
+  it('names the set-aside file and marks the threads incomplete, not durable knowledge or the knowledge graph', async () => {
     const setAside = readdirSync(h.dir()).filter((f) => /^history\.db\.corrupt-\d+$/.test(f));
     expect(setAside, 'fixture: the boot set history.db aside').toHaveLength(1);
     expect(h.engine().getThreadStore(), 'fixture: an empty thread store opened in its place').not.toBeNull();
@@ -352,27 +354,28 @@ describe('export after the boot set a corrupt history.db aside (real engine)', (
     expect(body.set_aside_databases).toEqual([{ database: 'history.db', files: setAside }]);
     expect(body.threads).toEqual([]);
     expect(body.threads_may_be_incomplete, 'the old threads are in the set-aside file').toBe(true);
-    expect(body.knowledge_graph_may_be_incomplete, 'half of the graph lived in history.db').toBe(true);
     expect(body.durable_knowledge.may_be_incomplete, 'engine.db was not set aside').toBe(false);
+    expect(body.knowledge_graph_may_be_incomplete, 'the graph is not read from history.db').toBe(false);
   }, 60_000);
 });
 
 describe('export after the boot set a corrupt engine.db aside (real engine)', () => {
   const h = harness((dir) => corrupt(dir, 'engine.db'), true);
 
-  it('names the set-aside file and marks durable knowledge and the knowledge graph incomplete, not the threads', async () => {
+  it('names the set-aside file and marks durable knowledge incomplete, not the threads or the legacy knowledge graph', async () => {
     const setAside = readdirSync(h.dir()).filter((f) => /^engine\.db\.corrupt-\d+$/.test(f));
     expect(setAside, 'fixture: the boot set engine.db aside').toHaveLength(1);
     expect(h.engine().getKnowledgeStore(), 'fixture: an empty knowledge store opened in its place').not.toBeNull();
+    expect(h.engine().getUserConfig().subject_graph_enabled, 'fixture: the graph reads agent-memory.db').not.toBe(true);
 
     const body = await h.exportBody();
     expect(body.set_aside_databases).toEqual([{ database: 'engine.db', files: setAside }]);
     expect(body.durable_knowledge.may_be_incomplete, 'the old entries are in the set-aside file').toBe(true);
-    expect(body.knowledge_graph_may_be_incomplete, 'half of the graph lived in engine.db').toBe(true);
     expect(body.threads_may_be_incomplete, 'history.db was not set aside').toBe(false);
+    expect(body.knowledge_graph_may_be_incomplete, 'with the subject graph off the graph is not read from engine.db').toBe(false);
   }, 60_000);
 
-  it('marks every block from both databases when the data directory cannot be listed', async () => {
+  it.skipIf(IS_ROOT)('marks every block of every database when the data directory cannot be listed', async () => {
     const dir = h.dir();
     chmodSync(dir, 0o300);
     try {
@@ -382,8 +385,53 @@ describe('export after the boot set a corrupt engine.db aside (real engine)', ()
       expect(body.threads_may_be_incomplete).toBe(true);
       expect(body.knowledge_graph_may_be_incomplete).toBe(true);
       expect(body.durable_knowledge.may_be_incomplete).toBe(true);
+      expect(body.contacts_may_be_incomplete).toBe(true);
+      expect(body.deals_may_be_incomplete).toBe(true);
+      expect(body.datastore_may_be_incomplete).toBe(true);
     } finally {
       chmodSync(dir, 0o700);
     }
+  }, 60_000);
+});
+
+describe('export with a restore\'s set-aside datastore.db and agent-memory.db left in the data directory (real engine)', () => {
+  // A restore sets the database it replaces aside under the boot's name; the stores open on the
+  // restored files.
+  const h = harness((dir) => {
+    writeFileSync(join(dir, 'datastore.db.corrupt-100'), '');
+    writeFileSync(join(dir, 'agent-memory.db.corrupt-100'), '');
+  }, false);
+
+  it('names both and marks contacts, deals, tables and the knowledge graph incomplete, not the threads', async () => {
+    expect(h.engine().getDataStore(), 'fixture: the store opened').not.toBeNull();
+    expect(h.engine().getKnowledgeLayer(), 'fixture: the graph opened').not.toBeNull();
+
+    const body = await h.exportBody();
+    expect(body.set_aside_databases).toEqual([
+      { database: 'agent-memory.db', files: ['agent-memory.db.corrupt-100'] },
+      { database: 'datastore.db', files: ['datastore.db.corrupt-100'] },
+    ]);
+    expect(body.contacts_may_be_incomplete).toBe(true);
+    expect(body.deals_may_be_incomplete).toBe(true);
+    expect(body.datastore_may_be_incomplete).toBe(true);
+    expect(body.knowledge_graph_may_be_incomplete).toBe(true);
+    expect(body.threads_may_be_incomplete, 'history.db was not set aside').toBe(false);
+  }, 60_000);
+});
+
+describe('export with a set-aside engine.db while the subject graph is on (real engine)', () => {
+  // With the subject graph on, the knowledge graph block is read from engine.db.
+  const h = harness((dir) => {
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ subject_graph_enabled: true }));
+    writeFileSync(join(dir, 'engine.db.corrupt-100'), '');
+  }, false);
+
+  it('marks the knowledge graph incomplete as well', async () => {
+    expect(h.engine().getUserConfig().subject_graph_enabled, 'fixture: the subject graph is on').toBe(true);
+
+    const body = await h.exportBody();
+    expect(body.set_aside_databases).toEqual([{ database: 'engine.db', files: ['engine.db.corrupt-100'] }]);
+    expect(body.knowledge_graph_may_be_incomplete).toBe(true);
+    expect(body.durable_knowledge.may_be_incomplete).toBe(true);
   }, 60_000);
 });
