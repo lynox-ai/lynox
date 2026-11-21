@@ -292,7 +292,8 @@ export function assertHostPolicy(
       // command reaches only what src/shell-sidecar/egress.ts registers: under
       // allow-all and no policy every host, until a tool round starts after the
       // conversation took in foreign content; then, and under guarded, exact
-      // host names this policy names plus hosts the owner typed; under
+      // host names this policy names plus hosts the owner typed,
+      // and under guarded before that round a connected API's host; under
       // allow-list the list; under deny-all none). This list is
       // stated identically in engine-init.ts and types/config.ts; a review found
       // all three carrying DIFFERENT lists in the very change that introduced
