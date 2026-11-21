@@ -412,7 +412,13 @@ describe('markersOf', () => {
       '<li style="display:inline">evil<li hidden></li>.com', 'evil<p hidden>zz</p><p style="display:inline">.com</p>',
       'evil<p style="display:none">zz</p><p style="display:inline">.com</p>', 'evil<p hidden style="display:inline">.com</p>',
       'evil<p style="--x: display:none; display:inline">.com</p>', 'evil<rp style="display:inline"><p style="display:inline">.com</p></rp>',
-      'evil<p hidden>zz</p>.com', 'ev<span hidden="until-found">il</span>.com']) {
+      'evil<p hidden>zz</p>.com', 'ev<span hidden="until-found">il</span>.com',
+      `evil<span style="font-family:'Arial';display:none">zz</span>.com`, 'evil<span style="font-family:&quot;Arial&quot;;display:none">zz</span>.com',
+      'evil<span style="color:rgb(0,0,0);display:none">zz</span>.com', `evil<p hidden style="font-family:'A'">zz</p>.com`,
+      `evil<dialog style="font-family:'A'">zz</dialog>.com`, 'evil<span style="display:none;--y:{;display:inline}">zz</span>.com',
+      'evil<span style="display:none!important;display:inline">zz</span>.com',
+      `evil<span style="font-family:'A';display:none">zz</span><p style="display:inline">.com</p>`,
+      'ev<span hidden style="d\\69splay:inline">il</span>.com', '<p style="display:inline">ev<span hidden="until-found">il</span></p>.com']) {
       expect([...markersOf(text).get('link')!], text).toContain('evil.com');
     }
     for (const text of ['evil<p STYLE="display:inline">.com', 'evil<BR STYLE=display:none>.com', 'evil<p sTyLe=x;display:inline>.com', 'evil<dialog></dialog>.com', 'evil<BR HIDDEN>.com']) {

@@ -135,6 +135,11 @@ export function markersOf(text: string): Map<MarkerKind, Set<string>> {
       readMarkers(treeText(tree, true), out);
       // A style can show a block inline: where one may, the tree is also read with no gap at that block.
       if (/style/iu.test(text)) readMarkers(treeText(tree, false), out);
+      // Hidden by something whose effect this cannot decide: read once with it and once without.
+      if (/style|hidden|<rp|dialog/iu.test(text)) {
+        readMarkers(treeText(tree, true, true), out);
+        readMarkers(treeText(tree, false, true), out);
+      }
     }
   }
   return out;
@@ -171,18 +176,21 @@ function styleOf(el: Element): string | null {
 
 
 /** Whether a browser shows nothing of an element: `hidden` (not `until-found`), a ruby fallback, a dialog
- *  not open, or a style whose display is none. A style that sets another display as well, or one this
- *  cannot read (a quote, a function, an escape, a comment), may show it all the same: then it counts as
- *  shown. Both readings leave a hidden element out. */
-function shownNot(el: Element): boolean {
+ *  not open, or a style whose display is none. `maybe` where its style sets another display as well, or
+ *  is one this cannot read (a quote, a bracket, a brace, an escape, a comment, `all`): it may show the
+ *  element all the same, so it is read both ways. */
+function shownNot(el: Element): 'yes' | 'maybe' | 'no' {
   const style = styleOf(el);
-  if (style !== null && (/["'(\\]|\/\*/u.test(style)
-    || [...style.matchAll(/(?:^|;) ?display ?:([^;]*)/giu)].some((m) => !/^ ?none ?(?:! ?important)? ?$/iu.test(m[1]!)))) return false;
   const attrs = defaultTreeAdapter.getAttrList(el);
   const hidden = attrs.find((a) => a.name === 'hidden');
-  return (hidden !== undefined && hidden.value.toLowerCase() !== 'until-found')
+  const signal = (hidden !== undefined && hidden.value.toLowerCase() !== 'until-found')
     || el.tagName === 'rp' || (el.tagName === 'dialog' && !attrs.some((a) => a.name === 'open'))
-    || (style !== null && /(?:^|;) ?display ?: ?none\b/iu.test(style));
+    || (style !== null && /(?:^|[;\s])display ?: ?none ?(?:!|;|$)/iu.test(style));
+  if (!signal) return 'no';
+  if (style === null) return 'yes';
+  if (/["'(\\{[]|\/\*|(?:^|[;\s])all ?:/iu.test(style)
+    || [...style.matchAll(/(?:^|;) ?display ?:([^;]*)/giu)].some((m) => !/^ ?none ?(?:! ?important)? ?$/iu.test(m[1]!))) return 'maybe';
+  return 'yes';
 }
 
 /** Whether a block's own style may show it inline, so that it breaks no line: a display no block has,
@@ -201,7 +209,7 @@ function mayShowInline(el: Element): boolean {
  *  it hides or whose content it does not show, a gap around each block — with `gapAtInline` false, not
  *  around a block whose style may show it inline. Implicitly closed elements, end tags without a start
  *  and the content of hidden ones are the parser's: the tree is the one a browser builds. */
-function treeText(tree: HtmlFragment, gapAtInline: boolean): string {
+function treeText(tree: HtmlFragment, gapAtInline: boolean, keepUnsure = false): string {
   let shown = '';
   const stack: (Node | ' ')[] = [...defaultTreeAdapter.getChildNodes(tree)].reverse();
   while (stack.length > 0) {
@@ -209,7 +217,9 @@ function treeText(tree: HtmlFragment, gapAtInline: boolean): string {
     if (node === ' ') { shown += ' '; continue; }
     if (defaultTreeAdapter.isTextNode(node)) { shown += node.value; continue; }
     if (!defaultTreeAdapter.isElementNode(node)) continue;
-    if (UNSHOWN.has(node.tagName) || shownNot(node)) continue;
+    if (UNSHOWN.has(node.tagName)) continue;
+    const hidden = shownNot(node);
+    if (hidden === 'yes' || (hidden === 'maybe' && !keepUnsure)) continue;
     const html = node.namespaceURI === p5.NS.HTML;
     const gap = html && BLOCK_TAGS.has(node.tagName) && (gapAtInline || !mayShowInline(node));
     if (gap) { shown += ' '; stack.push(' '); }
