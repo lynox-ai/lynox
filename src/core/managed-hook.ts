@@ -35,6 +35,7 @@ import { readExactHeld } from '../contract/http.js';
 import { keyDeliveryHeaders } from './vault-key-source.js';
 import type { ProviderBillingFailure } from './provider-failure.js';
 import type { DeliverySummary } from './notification-router.js';
+import type { NoticeLanguage } from './notice-language.js';
 
 const DEFAULT_FLUSH_INTERVAL_MS = 30_000;
 const FLUSH_BATCH_SIZE = 10;
@@ -94,10 +95,36 @@ function parsePositiveIntEnv(name: string, fallback: number, min = 1, max = Numb
   return Math.min(Math.max(n, min), max);
 }
 
+interface ManagedHookText {
+  /** The billing service did not answer in time, so the credit could not be confirmed. */
+  readonly unreachable: string;
+  /** The credit of this period is used up. */
+  readonly exhausted: string;
+}
+
+/** Why the hook refused a run, in the instance's language: the chat shows it under the note. */
+export const MANAGED_HOOK_TEXT: Readonly<Record<NoticeLanguage, ManagedHookText>> = {
+  en: {
+    unreachable: 'lynox cannot reach its billing service right now, so it could not confirm your credit and holds new runs for safety. '
+      + 'This usually clears within a minute; runs start again on their own.',
+    exhausted: 'AI budget for this period reached. Buy a credit pack to continue now, or wait for your next billing cycle.\n'
+      + 'Manage your account at https://lynox.ai/managed/account',
+  },
+  de: {
+    unreachable: 'lynox erreicht gerade seinen Abrechnungsdienst nicht und konnte darum dein Guthaben nicht bestätigen. '
+      + 'Neue Läufe hält lynox zur Sicherheit an. Meist ist das nach einer Minute vorbei, danach starten sie von selbst wieder.',
+    exhausted: 'Das KI-Budget für diesen Zeitraum ist aufgebraucht. Kauf ein Guthaben-Paket, um gleich weiterzumachen, '
+      + 'oder warte auf deinen nächsten Abrechnungszeitraum.\nDein Konto: https://lynox.ai/managed/account',
+  },
+};
+
 export function createManagedHook(opts: {
   /** What each successful status sync read for `exact_held` (`readExactHeld`), for the re-assert (B7). */
   onExactHeld?: ((held: boolean | null) => void) | undefined;
+  /** The instance's language, read per refusal: a person reads the reason in the chat. */
+  language?: (() => NoticeLanguage) | undefined;
 } = {}): LynoxHooks {
+  const text = (): ManagedHookText => MANAGED_HOOK_TEXT[opts.language?.() ?? 'en'];
   const controlPlaneUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] ?? '';
   const instanceId = process.env['LYNOX_MANAGED_INSTANCE_ID'] ?? '';
   const secret = process.env['LYNOX_HTTP_SECRET'] ?? '';
@@ -465,10 +492,7 @@ export function createManagedHook(opts: {
       // ANDed after the existing two — it can only REFUSE more, never admit what
       // `!isStale() && allowed` already refuses.
       if (isStale()) {
-        throw new Error(
-          'Managed control plane temporarily unreachable — credit status could not be confirmed and the engine paused new runs for safety. ' +
-          'This usually clears within a minute; runs resume automatically once the control plane responds again.',
-        );
+        throw new Error(text().unreachable);
       }
       if (allowed && mirrorAdmits()) return;
       // Refused on the cached state, which can be minutes old: a credit pack bought since
@@ -487,10 +511,7 @@ export function createManagedHook(opts: {
         await flush();
         if ((await syncStatus()) && mirrorAdmits()) return;
       }
-      throw new Error(
-        'AI budget for this period reached. Buy a credit pack to continue now, or wait for your next billing cycle.\n' +
-        'Manage your account at https://lynox.ai/managed/account',
-      );
+      throw new Error(text().exhausted);
     },
 
     onAfterRun(runId: string, costUsd: number, context: RunContext) {

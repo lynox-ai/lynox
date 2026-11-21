@@ -71,7 +71,7 @@ describe('fireBeforeRunGate — the instance\'s spending caps', () => {
     configurePersistentBudget({ costProvider: spentToday(5), dailyCapUSD: 5, monthlyCapUSD: 500 });
     const onBeforeRun = vi.fn();
     const result = await fireBeforeRunGate(makeEngine([{ onBeforeRun }]), 'fast');
-    expect(result.blockedReason).toBe('Daily spending cap ($5) reached. Today: $5.00.');
+    expect(result.blockedReason).toBe('Daily budget of $5.00 reached, today $5.00.');
     expect(result.capReached).toBe('daily');
     expect(onBeforeRun).not.toHaveBeenCalled();
   });
@@ -79,14 +79,14 @@ describe('fireBeforeRunGate — the instance\'s spending caps', () => {
   it('blocks at a reached monthly cap', async () => {
     configurePersistentBudget({ costProvider: spentToday(20), dailyCapUSD: 100, monthlyCapUSD: 20 });
     const result = await fireBeforeRunGate(makeEngine([]), 'fast');
-    expect(result.blockedReason).toBe('Monthly spending cap ($20) reached. This month: $20.00.');
+    expect(result.blockedReason).toBe('Monthly budget of $20.00 reached, this month $20.00.');
     expect(result.capReached).toBe('monthly');
   });
 
   it('checks the caps without a host (self-host, BYOK), and passes under them', async () => {
     configurePersistentBudget({ costProvider: spentToday(5), dailyCapUSD: 5, monthlyCapUSD: 500 });
     const blocked = await fireBeforeRunGate(null, 'fast');
-    expect(blocked.blockedReason).toBe('Daily spending cap ($5) reached. Today: $5.00.');
+    expect(blocked.blockedReason).toBe('Daily budget of $5.00 reached, today $5.00.');
     expect(blocked.capReached).toBe('daily');
 
     configurePersistentBudget({ costProvider: spentToday(4.99), dailyCapUSD: 5, monthlyCapUSD: 500 });

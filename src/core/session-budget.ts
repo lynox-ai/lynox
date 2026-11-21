@@ -8,6 +8,7 @@
 
 import type { PersistentBudgetCheck, PersistentBudgetReservation, SessionCounters } from '../types/index.js';
 import type { BudgetNoteRef } from './render-projection.js';
+import type { NoticeLanguage } from './notice-language.js';
 
 const DEFAULT_SESSION_COST_USD = 50;
 
@@ -172,22 +173,70 @@ export function describeSetCaps(): string {
   ].filter((c): c is string => c !== null).join(', ');
 }
 
+/** An amount as the budget sentences show it: always two decimals. */
+function usd(amount: number): string {
+  return `$${amount.toFixed(2)}`;
+}
+
+/** The budgets that are set, named in a sentence: "the daily budget of $15.00 and the monthly …". */
+function budgetsPhrase(language: NoticeLanguage): string {
+  const parts = language === 'de'
+    ? [_dailyCapUSD < Infinity ? `das Tagesbudget von ${usd(_dailyCapUSD)}` : null,
+      _monthlyCapUSD < Infinity ? `das Monatsbudget von ${usd(_monthlyCapUSD)}` : null]
+    : [_dailyCapUSD < Infinity ? `the daily budget of ${usd(_dailyCapUSD)}` : null,
+      _monthlyCapUSD < Infinity ? `the monthly budget of ${usd(_monthlyCapUSD)}` : null];
+  return parts.filter((c): c is string => c !== null).join(language === 'de' ? ' und ' : ' and ');
+}
+
 /**
- * The refusal while spend is unknown. Two readers: a self-hoster can read the startup log and
+ * The refusal while spend is unknown. Two readers: a self-hoster can read the server log and
  * repair the file; a managed tenant can do neither, and the operator is alerted instead (the
- * health probe reports the instance degraded). Managed is recognised by the same env as
- * everywhere else in the engine. Read per refusal, not cached at boot.
+ * health probe reports the instance degraded, and the control plane's health monitor alerts on
+ * it). Managed is recognised by the same env as everywhere else in the engine. Read per refusal,
+ * not cached at boot.
  */
-function unverifiableReason(): string {
-  const head = `Spending cap (${describeSetCaps()}) cannot be checked: `;
-  const tail = "so today's and this month's spend are unknown. The agent does not run, not even for a chat, until lynox opens the history database again at a restart. ";
-  if (process.env['LYNOX_MANAGED_INSTANCE_ID']) {
-    return `${head}the history database did not open when lynox started, ${tail}`
-      + 'The lynox team gets an automatic alert about it.';
+function unverifiableReason(language: NoticeLanguage): string {
+  const managed = Boolean(process.env['LYNOX_MANAGED_INSTANCE_ID']);
+  if (language === 'de') {
+    const head = `lynox kann ${budgetsPhrase('de')} nicht prüfen: Die Verlaufsdatenbank (history.db) hat sich beim Start nicht geöffnet, `
+      + 'darum sind die Ausgaben von heute und diesem Monat unbekannt. '
+      + 'Bis lynox sie bei einem Neustart wieder öffnet, läuft der Agent nicht, auch nicht für einen Chat. ';
+    return managed
+      ? `${head}Das lynox-Team bekommt dazu automatisch eine Meldung.`
+      : `${head}Den Grund nennt das lynox-Server-Log („RunHistory init failed“). Behebe ihn, zum Beispiel `
+        + 'eine volle Festplatte, fehlende Dateirechte oder eine beschädigte Datei, und starte lynox neu.';
   }
-  return `${head}the history database (history.db) did not open when lynox started, ${tail}`
-    + 'The log lynox writes at startup names the cause ("RunHistory init failed"); fix it, for example '
-    + 'a full disk, missing file permissions or a damaged file, and restart lynox.';
+  const head = `lynox cannot check ${budgetsPhrase('en')}: the history database (history.db) did not open at startup, `
+    + "so today's and this month's spend are unknown. "
+    + 'Until lynox opens it again at a restart, the agent does not run, not even for a chat. ';
+  return managed
+    ? `${head}The lynox team gets an automatic alert about it.`
+    : `${head}The lynox server log names the reason ("RunHistory init failed"). Fix it, for example `
+      + 'a full disk, missing file permissions or a damaged file, and restart lynox.';
+}
+
+/** A reached budget, as a person reads it. */
+function capReason(cap: 'daily' | 'monthly', limitUSD: number, spentUSD: number, language: NoticeLanguage): string {
+  if (language === 'de') {
+    return cap === 'daily'
+      ? `Tagesbudget von ${usd(limitUSD)} erreicht, heute ${usd(spentUSD)}.`
+      : `Monatsbudget von ${usd(limitUSD)} erreicht, diesen Monat ${usd(spentUSD)}.`;
+  }
+  return cap === 'daily'
+    ? `Daily budget of ${usd(limitUSD)} reached, today ${usd(spentUSD)}.`
+    : `Monthly budget of ${usd(limitUSD)} reached, this month ${usd(spentUSD)}.`;
+}
+
+/**
+ * A refused check's reason in `language`. The check's own `reason` is English, for logs, the
+ * worker and every caller without a reader; a chat shows this one, in the instance's language.
+ */
+export function budgetRefusal(check: PersistentBudgetCheck, language: NoticeLanguage): string {
+  const cap = reachedCap(check);
+  if (cap === 'daily' && check.dailyLimitUSD !== null) return capReason('daily', check.dailyLimitUSD, check.todayCostUSD, language);
+  if (cap === 'monthly' && check.monthlyLimitUSD !== null) return capReason('monthly', check.monthlyLimitUSD, check.monthCostUSD, language);
+  if (check.cap === 'unknown') return unverifiableReason(language);
+  return check.reason ?? (language === 'de' ? 'Budget erreicht.' : 'Budget reached.');
 }
 
 /**
@@ -245,7 +294,7 @@ export function checkPersistentBudget(): PersistentBudgetCheck {
       allowed: false, todayCostUSD: 0, monthCostUSD: 0,
       dailyLimitUSD: _dailyCapUSD < Infinity ? _dailyCapUSD : null,
       monthlyLimitUSD: _monthlyCapUSD < Infinity ? _monthlyCapUSD : null,
-      reason: unverifiableReason(), cap: 'unknown',
+      reason: unverifiableReason('en'), cap: 'unknown',
     };
   }
   const spend = computeRecordedSpend();
@@ -258,7 +307,7 @@ export function checkPersistentBudget(): PersistentBudgetCheck {
     return {
       allowed: false, todayCostUSD: todayCost, monthCostUSD: monthCost,
       dailyLimitUSD: _dailyCapUSD, monthlyLimitUSD: _monthlyCapUSD < Infinity ? _monthlyCapUSD : null,
-      reason: `Daily spending cap ($${_dailyCapUSD}) reached. Today: $${todayCost.toFixed(2)}.`, cap: 'daily',
+      reason: capReason('daily', _dailyCapUSD, todayCost, 'en'), cap: 'daily',
     };
   }
 
@@ -266,7 +315,7 @@ export function checkPersistentBudget(): PersistentBudgetCheck {
     return {
       allowed: false, todayCostUSD: todayCost, monthCostUSD: monthCost,
       dailyLimitUSD: _dailyCapUSD < Infinity ? _dailyCapUSD : null, monthlyLimitUSD: _monthlyCapUSD,
-      reason: `Monthly spending cap ($${_monthlyCapUSD}) reached. This month: $${monthCost.toFixed(2)}.`, cap: 'monthly',
+      reason: capReason('monthly', _monthlyCapUSD, monthCost, 'en'), cap: 'monthly',
     };
   }
 
@@ -294,7 +343,7 @@ export function checkPersistentBudget(): PersistentBudgetCheck {
  */
 export function reservePersistentBudget(estimatedCostUSD: number): PersistentBudgetReservation {
   // Before the zero-estimate shortcut: with spend unknown there is no headroom to admit into.
-  if (spendUnverifiable()) return { allowed: false, reservedUSD: 0, reason: unverifiableReason() };
+  if (spendUnverifiable()) return { allowed: false, reservedUSD: 0, reason: unverifiableReason('en') };
   const spend = computeRecordedSpend();
   if (!spend || estimatedCostUSD <= 0) {
     // No enforcement (no provider / caps disabled), or nothing to reserve.

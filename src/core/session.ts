@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { consentMeta, consentOptions, decideConsent } from './consent-ask.js';
 import { runTaskTitle } from './run-task-turn.js';
-import { CONTENT_FLAG_DIALOG, contentFlagFound, contentFlagRefusal } from '../tools/dialog-text.js';
+import { CONTENT_FLAG_DIALOG, contentBlockRefusal, contentFlagFound, contentFlagRefusal } from '../tools/dialog-text.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { getErrorMessage } from './utils.js';
 import { extractErrorDetail } from './error-detail.js';
@@ -51,7 +51,7 @@ import {
   evictImagesFrom,
 } from './tool-result-blob-store.js';
 import { isWorkspaceActive } from './workspace.js';
-import { budgetNoteRef, checkPersistentBudget } from './session-budget.js';
+import { budgetNoteRef, budgetRefusal, checkPersistentBudget } from './session-budget.js';
 import {
   SYSTEM_PROMPT,
   GOOGLE_PROMPT_SUFFIX,
@@ -73,6 +73,9 @@ import { isFeatureEnabled } from './features.js';
 import { opensLoadedApprovalDraft, stripLoadedContext } from './chat-context.js';
 import { approvalChatTitle } from './approval-chat-title.js';
 import { noticeLanguage, type NoticeLanguage } from './notice-language.js';
+
+/** How a run a hook blocked opens its result, before the hook's reason; the chat cuts it off. */
+export const RUN_BLOCKED_PREFIX: Readonly<Record<NoticeLanguage, string>> = { en: 'Run blocked: ', de: 'Lauf blockiert: ' };
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { capSecretsListing, setupHistorySubscriptions } from './engine-init.js';
 import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker, persistRefusedTurn, capStopNote, CONTENT_REFUSED_NOTE, type EngineNoticeCode } from './eager-persist.js';
@@ -962,7 +965,8 @@ export class Session {
     // Check persistent daily/monthly budget before running
     const budgetCheck = checkPersistentBudget();
     if (!budgetCheck.allowed) {
-      const reason = budgetCheck.reason ?? 'Budget exceeded.';
+      // Read by the person in the chat, so in the instance's language.
+      const reason = budgetRefusal(budgetCheck, noticeLanguage(this.engine.config.language));
       // An internal (compaction) run must NOT return the block string — it would
       // be injected as the thread's authoritative summary. Throw instead.
       if (runOptions?.internal === true) throw new InternalRunBlockedError(reason);
@@ -1014,7 +1018,7 @@ export class Session {
             this._titleBlockedThread(threadStore, taskText);
           }
           this._lastRunNotice = 'run_blocked';
-          return `Run blocked: ${reason}`;
+          return `${RUN_BLOCKED_PREFIX[noticeLanguage(this.engine.config.language)]}${reason}`;
         }
       }
     }
@@ -1025,7 +1029,8 @@ export class Session {
       const { checkInput } = await import('./input-guard.js');
       const inputCheck = checkInput(task, this.agentOverrides.autonomy);
       if (inputCheck.action === 'block') {
-        const msg = `⚠ Request blocked by content policy: ${inputCheck.reason ?? 'prohibited content'}. This request was not sent to the AI model.`;
+        // Read by the person, in the instance's language, as the flagged refusals are.
+        const msg = contentBlockRefusal(noticeLanguage(this.engine.config.language), inputCheck.reason);
         if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
         persistRefusedTurn(threadStore, this.sessionId, task, msg);
         this._lastRunNotice = CONTENT_REFUSED_NOTE;
@@ -1046,7 +1051,7 @@ export class Session {
           // before the run starts, which is why it is answered here and not left to the run's
           // failure handling.
           if (!isInputRequired(err)) throw err;
-          const msg = `⚠ Request flagged by content policy: ${inputCheck.reason ?? 'suspicious content'}. There is no one to allow it, so it was not sent to the AI model.`;
+          const msg = contentFlagRefusal(language, 'nobody', inputCheck.reason);
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
           persistRefusedTurn(threadStore, this.sessionId, task, msg);
           this._lastRunNotice = CONTENT_REFUSED_NOTE;

@@ -5,6 +5,7 @@ import {
   reservePersistentBudget, releasePersistentBudget, getReservedInFlight,
   persistentBudgetHeadroom, reachedCap,
   type CostQueryProvider,
+  budgetRefusal,
 } from './session-budget.js';
 import type { SessionCounters } from '../types/index.js';
 
@@ -122,7 +123,7 @@ describe('persistent budget', () => {
     });
     const result = checkPersistentBudget();
     expect(result.allowed).toBe(false);
-    expect(result.reason).toContain('Daily spending cap');
+    expect(result.reason).toContain('Daily budget of');
     expect(result.cap).toBe('daily');
   });
 
@@ -137,7 +138,7 @@ describe('persistent budget', () => {
     });
     const result = checkPersistentBudget();
     expect(result.allowed).toBe(false);
-    expect(result.reason).toContain('Monthly spending cap');
+    expect(result.reason).toContain('Monthly budget of');
     expect(result.cap).toBe('monthly');
     expect(result.monthCostUSD).toBeCloseTo(25.00, 2);
   });
@@ -388,40 +389,64 @@ describe('persistent budget — a cap that cannot be checked refuses (no cost pr
     vi.unstubAllEnvs();
   });
 
-  // The two texts word for word: one for a self-hoster, who reads the startup log
-  // and repairs the file, one for a managed tenant, who can do neither.
-  const selfHost = (caps: string): string =>
-    `Spending cap (${caps}) cannot be checked: the history database (history.db) did not open when lynox started, `
-    + "so today's and this month's spend are unknown. The agent does not run, not even for a chat, until lynox opens the history database again at a restart. "
-    + 'The log lynox writes at startup names the cause ("RunHistory init failed"); fix it, for example '
-    + 'a full disk, missing file permissions or a damaged file, and restart lynox.';
-  const managed = (caps: string): string =>
-    `Spending cap (${caps}) cannot be checked: the history database did not open when lynox started, `
-    + "so today's and this month's spend are unknown. The agent does not run, not even for a chat, until lynox opens the history database again at a restart. "
-    + 'The lynox team gets an automatic alert about it.';
+  // The texts word for word, in both languages: one for a self-hoster, who reads the server
+  // log and repairs the file, one for a managed tenant, who can do neither.
+  const selfHost = { en: (budgets: string): string =>
+    `lynox cannot check ${budgets}: the history database (history.db) did not open at startup, `
+    + "so today's and this month's spend are unknown. Until lynox opens it again at a restart, the agent does not run, not even for a chat. "
+    + 'The lynox server log names the reason ("RunHistory init failed"). Fix it, for example '
+    + 'a full disk, missing file permissions or a damaged file, and restart lynox.',
+  de: (budgets: string): string =>
+    `lynox kann ${budgets} nicht prüfen: Die Verlaufsdatenbank (history.db) hat sich beim Start nicht geöffnet, `
+    + 'darum sind die Ausgaben von heute und diesem Monat unbekannt. Bis lynox sie bei einem Neustart wieder öffnet, läuft der Agent nicht, auch nicht für einen Chat. '
+    + 'Den Grund nennt das lynox-Server-Log („RunHistory init failed“). Behebe ihn, zum Beispiel '
+    + 'eine volle Festplatte, fehlende Dateirechte oder eine beschädigte Datei, und starte lynox neu.' };
+  const managed = { en: (budgets: string): string =>
+    `lynox cannot check ${budgets}: the history database (history.db) did not open at startup, `
+    + "so today's and this month's spend are unknown. Until lynox opens it again at a restart, the agent does not run, not even for a chat. "
+    + 'The lynox team gets an automatic alert about it.',
+  de: (budgets: string): string =>
+    `lynox kann ${budgets} nicht prüfen: Die Verlaufsdatenbank (history.db) hat sich beim Start nicht geöffnet, `
+    + 'darum sind die Ausgaben von heute und diesem Monat unbekannt. Bis lynox sie bei einem Neustart wieder öffnet, läuft der Agent nicht, auch nicht für einen Chat. '
+    + 'Das lynox-Team bekommt dazu automatisch eine Meldung.' };
 
-  const capVariants: Array<[string, { dailyCapUSD?: number; monthlyCapUSD?: number }, string]> = [
-    ['both caps set', { dailyCapUSD: 15, monthlyCapUSD: 150 }, 'daily $15, monthly $150'],
-    ['both caps at their defaults', {}, 'daily $100, monthly $500'],
-    ['only the daily cap set', { dailyCapUSD: 15, monthlyCapUSD: Infinity }, 'daily $15'],
-    ['only the monthly cap set', { dailyCapUSD: Infinity, monthlyCapUSD: 150 }, 'monthly $150'],
+  const capVariants: Array<[string, { dailyCapUSD?: number; monthlyCapUSD?: number }, { en: string; de: string }]> = [
+    ['both caps set', { dailyCapUSD: 15, monthlyCapUSD: 150 },
+      { en: 'the daily budget of $15.00 and the monthly budget of $150.00', de: 'das Tagesbudget von $15.00 und das Monatsbudget von $150.00' }],
+    ['both caps at their defaults', {},
+      { en: 'the daily budget of $100.00 and the monthly budget of $500.00', de: 'das Tagesbudget von $100.00 und das Monatsbudget von $500.00' }],
+    ['only the daily cap set', { dailyCapUSD: 15, monthlyCapUSD: Infinity }, { en: 'the daily budget of $15.00', de: 'das Tagesbudget von $15.00' }],
+    ['only the monthly cap set', { dailyCapUSD: Infinity, monthlyCapUSD: 150 }, { en: 'the monthly budget of $150.00', de: 'das Monatsbudget von $150.00' }],
   ];
   for (const [what, caps, named] of capVariants) {
-    it(`self-host, ${what}: refuses with the self-host text, word for word`, () => {
+    it(`self-host, ${what}: refuses with the self-host text, word for word, in both languages`, () => {
       vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', undefined);
       configurePersistentBudget({ costProvider: null, ...caps });
       const r = checkPersistentBudget();
       expect(r.allowed).toBe(false);
-      expect(r.reason).toBe(selfHost(named));
+      expect(r.reason).toBe(selfHost.en(named.en));
+      expect(budgetRefusal(r, 'en')).toBe(selfHost.en(named.en));
+      expect(budgetRefusal(r, 'de')).toBe(selfHost.de(named.de));
     });
-    it(`managed, ${what}: refuses with the managed text, word for word`, () => {
+    it(`managed, ${what}: refuses with the managed text, word for word, in both languages`, () => {
       vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-test');
       configurePersistentBudget({ costProvider: null, ...caps });
       const r = checkPersistentBudget();
       expect(r.allowed).toBe(false);
-      expect(r.reason).toBe(managed(named));
+      expect(r.reason).toBe(managed.en(named.en));
+      expect(budgetRefusal(r, 'en')).toBe(managed.en(named.en));
+      expect(budgetRefusal(r, 'de')).toBe(managed.de(named.de));
     });
   }
+
+  it('a reached budget, word for word, in both languages: amounts with two decimals', () => {
+    const daily = { allowed: false, todayCostUSD: 15.2, monthCostUSD: 40, dailyLimitUSD: 15, monthlyLimitUSD: 150, cap: 'daily' as const, reason: 'x' };
+    expect(budgetRefusal(daily, 'en')).toBe('Daily budget of $15.00 reached, today $15.20.');
+    expect(budgetRefusal(daily, 'de')).toBe('Tagesbudget von $15.00 erreicht, heute $15.20.');
+    const monthly = { allowed: false, todayCostUSD: 3, monthCostUSD: 151, dailyLimitUSD: 15, monthlyLimitUSD: 150, cap: 'monthly' as const, reason: 'x' };
+    expect(budgetRefusal(monthly, 'en')).toBe('Monthly budget of $150.00 reached, this month $151.00.');
+    expect(budgetRefusal(monthly, 'de')).toBe('Monatsbudget von $150.00 erreicht, diesen Monat $151.00.');
+  });
 
   it('names the refusal as unknown, also with a cap of $0 that zero spend would "reach"', () => {
     configurePersistentBudget({ costProvider: null, dailyCapUSD: 0, monthlyCapUSD: Infinity });
@@ -444,7 +469,7 @@ describe('persistent budget — a cap that cannot be checked refuses (no cost pr
       const r = reservePersistentBudget(estimate);
       expect(r.allowed).toBe(false);
       expect(r.reservedUSD).toBe(0);
-      expect(r.reason).toContain('cannot be checked');
+      expect(r.reason).toContain('lynox cannot check');
     }
     expect(getReservedInFlight()).toBe(0);
   });

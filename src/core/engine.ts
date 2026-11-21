@@ -25,6 +25,7 @@ import { loadConfig, getLynoxDir } from './config.js';
 import { readEnvAlias } from './env.js';
 import { RunHistory } from './run-history.js';
 import { pruneWireSinks, isProvisionedInstance } from './wire-capture.js';
+import { noticeLanguage } from './notice-language.js';
 import { EngineDb } from './engine-db.js';
 import { ApprovalStore, approvalQueueEnabled } from './approval-store.js';
 import { ApprovalExecutor, type TickResult } from './approval-executor.js';
@@ -2753,6 +2754,7 @@ export class Engine {
       const clearance = this._toolContext.exactClearance;
       this.registerHooks(createManagedHook({
         onExactHeld: (held) => { void clearance?.reassert(held); },
+        language: () => noticeLanguage(this.config.language),
       }));
     }
 

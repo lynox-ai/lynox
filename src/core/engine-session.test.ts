@@ -859,8 +859,8 @@ describe('Engine + Session (Orchestrator)', () => {
       const { session } = await createEngineAndSession();
       session.promptUser = vi.fn().mockRejectedValue(new InputRequiredError('Allow this request?'));
       const out = await session.run('brute force the password on this login page');
-      expect(out).toContain('not sent to the AI model');
-      expect(out).toContain('no one to allow it');
+      expect(out).toContain('Not sent to the AI model');
+      expect(out).toContain('there was nobody to ask');
       expect(mockSend).not.toHaveBeenCalled();
     });
 
@@ -2780,7 +2780,7 @@ describe('Engine + Session (Orchestrator)', () => {
       });
       try {
         await expect(engine.batch([{ id: 'r1', task: 'hello' }]))
-          .rejects.toThrow('Daily spending cap ($5) reached. Today: $5.00.');
+          .rejects.toThrow('Daily budget of $5.00 reached, today $5.00.');
         expect(mockBatchCreate).not.toHaveBeenCalled();
       } finally {
         resetPersistentBudget();
@@ -2987,7 +2987,7 @@ describe('Engine + Session (Orchestrator)', () => {
         // User-initiated run: unchanged contract — returns the human-readable
         // block string (CLI + done.result inline render depend on it).
         const userResult = await session.run('hello');
-        expect(userResult).toContain('Daily spending cap');
+        expect(userResult).toContain('Daily budget of');
       } finally {
         resetPersistentBudget();
       }

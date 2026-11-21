@@ -480,8 +480,8 @@ export const CONSENT_LABELS: Readonly<Record<DialogLanguage, Readonly<Record<Con
 };
 
 /** Why a refused flagged request was refused: the person declined, answered with none of the
- *  choices, or nobody answered. */
-export type ContentFlagRefusal = 'declined' | 'unrecognised' | 'unanswered';
+ *  choices, nobody answered, or there was nobody the question could reach. */
+export type ContentFlagRefusal = 'declined' | 'unrecognised' | 'unanswered' | 'nobody';
 
 interface ContentFlagText {
   /** What the content check found, as a whole phrase, by the check's label. */
@@ -489,6 +489,10 @@ interface ContentFlagText {
   /** For a label without its own phrase. */
   readonly foundFallback: string;
   readonly refused: (why: ContentFlagRefusal, found: string) => string;
+  /** What the content check found in a request it always refuses, by the check's label. */
+  readonly blockedFound: Readonly<Record<string, string>>;
+  /** The result of a request the content check always refuses. */
+  readonly blocked: (found: string) => string;
 }
 
 /**
@@ -510,7 +514,18 @@ export const CONTENT_FLAG_TEXT: Readonly<Record<DialogLanguage, ContentFlagText>
       ? `Not sent to the AI model: you declined. lynox had found ${found} in your message.`
       : why === 'unrecognised'
         ? `Not sent to the AI model. lynox had found ${found} in your message. If you meant it, send it again and allow it with the button.`
-        : `Not sent to the AI model: nobody answered the question. lynox had found ${found} in your message. If you meant it, send it again and allow it.`,
+        : why === 'nobody'
+          ? `Not sent to the AI model: there was nobody to ask. lynox had found ${found} in your message. If you meant it, send it again in the chat and allow it.`
+          : `Not sent to the AI model: nobody answered the question. lynox had found ${found} in your message. If you meant it, send it again and allow it.`,
+    blockedFound: {
+      'malware creation request': 'a request for malware',
+      'phishing creation request': 'a request for a phishing message or page',
+      'exploit framework setup': 'a request to set up attack tooling',
+      'exploit payload creation': 'a request for attack code',
+      'security evasion request': 'a request to get around security protections',
+      'weaponization request': 'a request for a ready-to-use attack',
+    },
+    blocked: (found) => `Not sent to the AI model: lynox found ${found} in your message and does not pass such requests on.`,
   },
   de: {
     found: {
@@ -524,7 +539,18 @@ export const CONTENT_FLAG_TEXT: Readonly<Record<DialogLanguage, ContentFlagText>
       ? `Nicht an das KI-Modell geschickt: Du hast abgelehnt. lynox hatte in deiner Nachricht ${found} gefunden.`
       : why === 'unrecognised'
         ? `Nicht an das KI-Modell geschickt. lynox hatte in deiner Nachricht ${found} gefunden. War sie so gemeint, schick sie noch einmal und erlaube sie mit dem Knopf.`
-        : `Nicht an das KI-Modell geschickt: Niemand hat die Frage beantwortet. lynox hatte in deiner Nachricht ${found} gefunden. War sie so gemeint, schick sie noch einmal und erlaube sie.`,
+        : why === 'nobody'
+          ? `Nicht an das KI-Modell geschickt: Es war niemand da, den lynox fragen konnte. lynox hatte in deiner Nachricht ${found} gefunden. War sie so gemeint, schick sie im Chat noch einmal und erlaube sie.`
+          : `Nicht an das KI-Modell geschickt: Niemand hat die Frage beantwortet. lynox hatte in deiner Nachricht ${found} gefunden. War sie so gemeint, schick sie noch einmal und erlaube sie.`,
+    blockedFound: {
+      'malware creation request': 'eine Anfrage nach Schadsoftware',
+      'phishing creation request': 'eine Anfrage nach einer Phishing-Nachricht oder -Seite',
+      'exploit framework setup': 'eine Anfrage nach einem Angriffswerkzeug',
+      'exploit payload creation': 'eine Anfrage nach Angriffscode',
+      'security evasion request': 'eine Anfrage zum Umgehen von Schutzmassnahmen',
+      'weaponization request': 'eine Anfrage nach einem einsatzfähigen Angriff',
+    },
+    blocked: (found) => `Nicht an das KI-Modell geschickt: lynox hat in deiner Nachricht ${found} gefunden und gibt solche Anfragen nicht weiter.`,
   },
 };
 
@@ -532,6 +558,17 @@ export const CONTENT_FLAG_TEXT: Readonly<Record<DialogLanguage, ContentFlagText>
 export function contentFlagRefusal(language: DialogLanguage, why: ContentFlagRefusal, label: string | undefined): string {
   const text = CONTENT_FLAG_TEXT[language];
   return text.refused(why, (label !== undefined ? text.found[label] : undefined) ?? text.foundFallback);
+}
+
+/**
+ * The result of a request the content check refused without asking, in `language`. `label` is the
+ * check's reason: a request it always refuses has its own phrase, and a flagged one refused
+ * without asking (full autonomy) has the flagged phrase.
+ */
+export function contentBlockRefusal(language: DialogLanguage, label: string | undefined): string {
+  const text = CONTENT_FLAG_TEXT[language];
+  const found = (label !== undefined ? text.blockedFound[label] ?? text.found[label] : undefined) ?? text.foundFallback;
+  return text.blocked(found);
 }
 
 /** What the content check found, as engine text: a fixed phrase from the table, so it is

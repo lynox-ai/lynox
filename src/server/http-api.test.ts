@@ -18461,7 +18461,7 @@ describe('metered audio routes: managed credit gate + debit', () => {
       }
       expect(res.status).toBe(402);
       const body = await res.json() as { error: string };
-      expect(body.error).toBe('Daily spending cap ($5) reached. Today: $5.00.');
+      expect(body.error).toBe('Daily budget of $5.00 reached, today $5.00.');
       expect(mockTranscribeWithStream).not.toHaveBeenCalled();
     });
 

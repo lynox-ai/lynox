@@ -2426,15 +2426,15 @@
 				</div>
 			{/if}
 			{#if note.detail && refusedSentence === undefined && budgetLines}
-				<!-- A capped message's note says it in the reader's words; the engine's English
-				     sentence is for debugging and waits behind Details. -->
+				<!-- A capped message's note says it in the reader's words; the engine's sentence
+				     names the amounts again and waits behind Details. -->
 				<details class="mt-1" data-budget-details>
 					<summary class="cursor-pointer text-[11px] text-text-subtle/80">{t('chat.note.budget.details')}</summary>
-					<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words" lang="en">{note.detail}</div>
+					<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words">{note.detail}</div>
 				</details>
 			{:else if note.detail && refusedSentence === undefined}
-				<!-- A blocked run's reason is the engine's English sentence. -->
-				<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words" lang={note.code === 'run_blocked' ? 'en' : undefined}>{note.detail}</div>
+				<!-- A blocked run's reason is the engine's sentence, in the instance's language. -->
+				<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words">{note.detail}</div>
 			{/if}
 		</div>
 	</div>

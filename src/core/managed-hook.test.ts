@@ -84,8 +84,19 @@ describe('managed-hook credit heartbeat', () => {
 
     await vi.advanceTimersByTimeAsync(305_000);
 
-    await expect(hook.onBeforeRun!('run-2', CTX)).rejects.toThrow(/control plane temporarily unreachable/i);
+    await expect(hook.onBeforeRun!('run-2', CTX)).rejects.toThrow('lynox cannot reach its billing service right now, so it could not confirm your credit and holds new runs for safety. '
+      + 'This usually clears within a minute; runs start again on their own.');
 
+    await hook.onShutdown?.();
+  });
+
+  it('says the unreachable billing service in German on a German instance', async () => {
+    const hook = createManagedHook({ language: () => 'de' });
+    await hook.onInit?.();
+    fetchSpy.mockRejectedValue(new Error('network down'));
+    await vi.advanceTimersByTimeAsync(305_000);
+    await expect(hook.onBeforeRun!('run-2', CTX)).rejects.toThrow('lynox erreicht gerade seinen Abrechnungsdienst nicht und konnte darum dein Guthaben nicht bestätigen. '
+      + 'Neue Läufe hält lynox zur Sicherheit an. Meist ist das nach einer Minute vorbei, danach starten sie von selbst wieder.');
     await hook.onShutdown?.();
   });
 });
@@ -460,6 +471,24 @@ describe('managed-hook balance mirror', () => {
     await hook.onShutdown?.();
   });
 
+  it('says the refusal in the instance\'s language, read at each refusal', async () => {
+    let language: 'de' | 'en' = 'de';
+    const hook = createManagedHook({ language: () => language });
+    await hook.onInit?.();
+    hook.onAfterRun?.('r1', 0.60, CTX);
+    statusBalance = -10;
+    const refused = async (id: string): Promise<string> => {
+      try { await hook.onBeforeRun!(id, CTX); } catch (err: unknown) { return (err as Error).message; }
+      return 'admitted';
+    };
+    expect(await refused('run-x')).toBe('Das KI-Budget für diesen Zeitraum ist aufgebraucht. Kauf ein Guthaben-Paket, um gleich weiterzumachen, '
+      + 'oder warte auf deinen nächsten Abrechnungszeitraum.\nDein Konto: https://lynox.ai/managed/account');
+    language = 'en';
+    expect(await refused('run-y')).toBe('AI budget for this period reached. Buy a credit pack to continue now, or wait for your next billing cycle.\n'
+      + 'Manage your account at https://lynox.ai/managed/account');
+    await hook.onShutdown?.();
+  });
+
   it('the first run after a credit-pack purchase is admitted once the resync re-anchors the mirror above 0', async () => {
     const hook = createManagedHook();
     await hook.onInit?.(); // mirror = 50c
@@ -739,7 +768,7 @@ describe('managed-hook balance mirror', () => {
     vi.advanceTimersByTime(305_000); // clock past the 300s staleness threshold; nothing resyncs it
     // isStale() is evaluated first, so the message is the staleness one — the mirror
     // term (mirror ≤ 0) is never reached even though it would refuse.
-    await expect(hook.onBeforeRun!('run-x', CTX)).rejects.toThrow(/control plane temporarily unreachable/i);
+    await expect(hook.onBeforeRun!('run-x', CTX)).rejects.toThrow(/cannot reach its billing service/i);
   });
 });
 
