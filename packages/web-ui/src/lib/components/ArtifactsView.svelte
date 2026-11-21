@@ -178,14 +178,15 @@
 	}
 
 	// iOS/Android → the native share sheet ("Save to Files"/"Save to Drive"); a raw
-	// <a download> is a dead click on iOS. Desktop → direct download. Same helper +
-	// behaviour as the inline artifact pill's share, so the two views are coherent.
+	// <a download> is a dead click on iOS. Desktop → direct download. Same helper as the inline
+	// artifact pill's share; the file differs for svg only (the pill gives the html it shows).
 	function exportArtifact(a: Artifact) {
 		const base = a.title.replace(/\s+/g, '-').toLowerCase();
 		// An html file keeps the artifact policy, as the chat's download does (artifactExportDocument).
 		// An svg file cannot carry the policy, so it goes out without anything that reaches another
-		// address (svgExportDocument). Content with no svg in it goes out as plain text, which a
-		// browser opened on it only shows.
+		// address (svgExportDocument). Content it cannot write as such a file (no svg in it, or
+		// one that reads back differently once written) goes out as plain text, which a browser
+		// opened on it only shows.
 		let type = a.type;
 		let body = a.content;
 		if (a.type === 'html') body = artifactExportDocument(a.content);

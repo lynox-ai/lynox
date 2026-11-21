@@ -19,7 +19,8 @@ const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLI
 vi.mock('$app/stores', () => ({ page: readable({ url: new URL('http://localhost/app/artifacts') }) }));
 vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
 const shared: Blob[] = [];
-vi.mock('../utils/save-blob.js', () => ({ saveOrShareBlob: vi.fn(async (blob: Blob) => { shared.push(blob); }) }));
+const sharedNames: string[] = [];
+vi.mock('../utils/save-blob.js', () => ({ saveOrShareBlob: vi.fn(async (blob: Blob, name: string) => { shared.push(blob); sharedNames.push(name); }) }));
 vi.mock('./MarkdownRenderer.svelte', () => ({
 	default: (anchor: Comment) => { anchor.before(document.createElement('div')); },
 }));
@@ -136,6 +137,7 @@ describe('the gallery preview frame', () => {
 
 	it('exports an svg artifact as an svg file without its remote image and keeps the drawing', async () => {
 		shared.length = 0;
+		sharedNames.length = 0;
 		artifactType = 'svg';
 		artifactContent = '<svg xmlns="http://www.w3.org/2000/svg"><circle id="dot" r="4"/><image href="https://elsewhere.example/x.png" width="9" height="9"/></svg>';
 		await openDeck();
@@ -144,6 +146,7 @@ describe('the gallery preview frame', () => {
 		await settle();
 		expect(shared).toHaveLength(1);
 		expect(shared[0]!.type).toBe('image/svg+xml');
+		expect(sharedNames).toEqual(['deck.svg']);
 		const file = await shared[0]!.text();
 		expect(file).toContain('<circle id="dot" r="4"/>');
 		expect(file).not.toContain('elsewhere.example');
@@ -151,6 +154,7 @@ describe('the gallery preview frame', () => {
 
 	it('exports an svg artifact that is not well-formed as a well-formed svg file without its remote image', async () => {
 		shared.length = 0;
+		sharedNames.length = 0;
 		artifactType = 'svg';
 		artifactContent = '<svg viewBox="0 0 9 9"><circle r="2"><image href="https://elsewhere.example/x.png"/><g></svg>';
 		await openDeck();
@@ -168,6 +172,7 @@ describe('the gallery preview frame', () => {
 
 	it('exports an svg artifact with no svg in it as plain text', async () => {
 		shared.length = 0;
+		sharedNames.length = 0;
 		artifactType = 'svg';
 		artifactContent = '<p>no drawing</p><img src="https://elsewhere.example/x.png">';
 		await openDeck();
@@ -176,6 +181,7 @@ describe('the gallery preview frame', () => {
 		await settle();
 		expect(shared).toHaveLength(1);
 		expect(shared[0]!.type).toBe('text/plain');
+		expect(sharedNames).toEqual(['deck.txt']);
 		expect(await shared[0]!.text()).toBe(artifactContent);
 	});
 

@@ -11,19 +11,23 @@
  * What is taken out, and why each is needed:
  *  - every element outside the SVG namespace, with its content. An XHTML `img` or `iframe` the
  *    parser creates starts loading whether or not it is ever rendered, and `foreignObject` exists
- *    to hold such elements;
+ *    to hold such elements. A `foreignObject` leaves its text behind as an svg `text` at its place,
+ *    so a label written as html does not vanish from the drawing;
  *  - `script`, every `on…` attribute, and `xml:base` (it moves the base an in-document reference
  *    resolves against);
  *  - every `href` (in any namespace) that is not a fragment (`#id`); `image` and `feImage` may
  *    also keep a `data:` address, which a browser loads as an image without any further fetch;
  *  - every other attribute whose value names an address (`//`, or a scheme such as `http:` at
  *    its start): `ping` on a link posts to its list on a click, and the next such attribute
- *    should not need its own line here;
- *  - every piece of CSS (a `style` element, a `style` attribute, a presentation attribute) that
- *    could name an address. CSS can reach an address only through a function or rule whose name
- *    is spelled out (`url`, `image-set`, `src`, `@import`) or through an escape (`\75 rl(` is
- *    `url(`), so the test is on those spellings, not on a parse: CSS with a backslash, or with
- *    any of those names other than a `url(#id)`, is dropped whole. A `style` element with any
+ *    should not need its own line here. Names and labels (`id`, `class`, `role`, `aria-…`) are
+ *    left alone: they load nothing, and a label may well mention an address;
+ *  - every `style` element and every other attribute value whose CSS could name an address. CSS
+ *    reaches an address only through a function or rule spelled out (`url(`, `image-set(`,
+ *    `image(`, `cross-fade(`, `element(`, `@import`) or through an escape (`\75 rl(` is `url(`),
+ *    so the test is on those spellings, not on a parse: CSS with a backslash, or with any of them
+ *    other than a `url(#id)` or a `url(data:…)` (a reference into the document, and a value that
+ *    loads nothing further), is dropped whole. A word that only contains one (`.urlaub`,
+ *    `.src-box`) is not a function and stays. A `style` element with any
  *    element inside it is dropped as well: the browser joins the text around a child into one
  *    sheet (`@im<g/>port`), so the text the test sees is not the text it reads;
  *  - every animation element that could set one of the above (an `href`, a `ping`, an event
@@ -32,8 +36,10 @@
  * root element is written out.
  *
  * Text that is not a well-formed svg document (the app shows it inside html, where `<svg>` needs
- * no namespace and a stray tag is forgiven) is read the way the app reads it, by the html parser,
- * and the svg it holds is written out and read back as an svg document BEFORE anything is taken
+ * no namespace and a stray tag is forgiven) is read the way the app reads it, by the html parser.
+ * Its first svg is the one written (a second one in the same text is left out); an element or
+ * attribute with a prefix the html parser cannot bind (`inkscape:label` with no declaration) is
+ * taken out first, as it would make the written file unreadable. The svg is then written out and read back as an svg document BEFORE anything is taken
  * out. What is cleaned is then the tree the file will hold, not the html parser's tree: the two
  * can differ (a prefix the html parser keeps as part of a name, `xlink:script`, is a real
  * namespace prefix to the svg parser), and a check on one says nothing about the other.
@@ -48,6 +54,7 @@ export function svgExportDocument(svg: string): string | null {
 	// either; it goes the html way too.
 	const xml = parseSvg(svg)?.documentElement;
 	const html = xml?.namespaceURI === SVG_NS ? null : svgInHtml(svg);
+	if (html) dropUnboundPrefixes(html);
 	const root = html ? parseSvg(new XMLSerializer().serializeToString(html))?.documentElement : xml;
 	const out = root ? cleaned(root) : null;
 	if (out === null) return null;
@@ -74,6 +81,21 @@ function svgInHtml(text: string): Element | null {
 	return new DOMParser().parseFromString(text, 'text/html').getElementsByTagNameNS(SVG_NS, 'svg')[0] ?? null;
 }
 
+/**
+ * The html parser keeps an unknown prefix as part of a name (`inkscape:label`, `xlink:script`),
+ * which the svg parser then reads as an unbound prefix and refuses. Taking those out keeps such a
+ * drawing exportable; what is cleaned is still only the tree read back as svg.
+ */
+function dropUnboundPrefixes(el: Element): void {
+	for (const attr of Array.from(el.attributes)) {
+		if (attr.namespaceURI === null && attr.name.includes(':')) el.removeAttributeNode(attr);
+	}
+	for (const child of Array.from(el.children)) {
+		if (child.localName.includes(':')) child.remove();
+		else dropUnboundPrefixes(child);
+	}
+}
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const XMLNS_NS = 'http://www.w3.org/2000/xmlns/';
 
@@ -82,8 +104,8 @@ const DATA_IMAGE_ELEMENTS = new Set(['image', 'feimage']);
 
 const PROCESSING_INSTRUCTION = 7;
 
-/** Names, not CSS: a word like `src` in an id or class loads nothing, and dropping an id breaks the references to it. */
-const NAME_ATTRIBUTES = new Set(['id', 'class']);
+/** Names and labels, not CSS or addresses: they load nothing, and dropping an id breaks the references to it. */
+const NAME_ATTRIBUTES = new Set(['id', 'class', 'role']);
 
 const ANIMATION_ELEMENTS = new Set(['set', 'animate', 'animatetransform', 'animatemotion', 'animatecolor']);
 
@@ -91,15 +113,15 @@ const ANIMATION_ELEMENTS = new Set(['set', 'animate', 'animatetransform', 'anima
 const ANIMATION_VALUES = ['from', 'to', 'by', 'values'];
 
 /**
- * CSS that can name an address: an escape, or a `url`, `image-set`, `src` or `@import` spelled
- * out. A `url(` followed by `#` (a reference into the document, e.g. a gradient) is allowed and
- * is taken out before the test.
+ * CSS that can name an address: an escape, a function that takes one (`url(`, `image-set(` with
+ * its prefixed forms, `image(`, `cross-fade(`, `element(`), or an `@import`. A `url(#id)` (a
+ * reference into the document, e.g. a gradient) and a `url(data:…)` are taken out before the test.
  */
 function cssCanReachOut(css: string): boolean {
 	if (css.includes('\\')) return true;
 	// The whole reference goes, name included: a fragment named `src-grad` is still a fragment.
-	const withoutFragments = css.replace(/url\(\s*(['"]?)#[^)'"]*\1\s*\)/gi, '');
-	return /url|image-set|src|@import/i.test(withoutFragments);
+	const withoutInside = css.replace(/url\(\s*(['"]?)(?:#|data:)[^)'"]*\1\s*\)/gi, '');
+	return /(?:url|image-set|image|cross-fade|element)\s*\(|@import/i.test(withoutInside);
 }
 
 function cleanChildren(el: Element): void {
@@ -110,7 +132,13 @@ function cleanChildren(el: Element): void {
 	}
 	for (const child of Array.from(el.children)) {
 		const name = child.localName.toLowerCase();
-		if (child.namespaceURI !== SVG_NS || name === 'script' || name === 'foreignobject') {
+		if (name === 'foreignobject' && child.namespaceURI === SVG_NS) {
+			const label = textOf(child);
+			if (label) child.replaceWith(labelAt(child, label));
+			else child.remove();
+			continue;
+		}
+		if (child.namespaceURI !== SVG_NS || name === 'script') {
 			child.remove();
 			continue;
 		}
@@ -126,6 +154,35 @@ function cleanChildren(el: Element): void {
 		cleanChildren(child);
 	}
 }
+
+/** The text a foreignObject shows: its text nodes outside any script or style, run together. */
+function textOf(el: Element): string {
+	const parts: string[] = [];
+	const walk = (node: Node): void => {
+		for (const n of Array.from(node.childNodes)) {
+			if (n.nodeType === TEXT_NODE || n.nodeType === CDATA_NODE) parts.push(n.nodeValue ?? '');
+			else if (n.nodeType === ELEMENT_NODE && !/^(?:script|style)$/i.test((n as Element).localName)) walk(n);
+		}
+	};
+	walk(el);
+	return parts.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+/** An svg `text` holding `label` at the top left of `el`, with no attribute but its position. */
+function labelAt(el: Element, label: string): Element {
+	const text = el.ownerDocument.createElementNS(SVG_NS, 'text');
+	for (const a of ['x', 'y']) {
+		const v = el.getAttribute(a);
+		if (v !== null && /^-?\d+(?:\.\d+)?$/.test(v.trim())) text.setAttribute(a, v.trim());
+	}
+	text.setAttribute('dominant-baseline', 'hanging');
+	text.textContent = label;
+	return text;
+}
+
+const TEXT_NODE = 3;
+const CDATA_NODE = 4;
+const ELEMENT_NODE = 1;
 
 function animationCanReachOut(el: Element): boolean {
 	const target = (el.getAttribute('attributeName') ?? '').toLowerCase().replace(/^[^:]*:/, '');
@@ -145,7 +202,7 @@ function cleanAttributes(el: Element): void {
 		if (attr.namespaceURI === XMLNS_NS) continue;
 		if (name.startsWith('on') || name === 'base' || name === 'ping') drop = true;
 		else if (name === 'href') drop = !hrefStaysInside(value, elementName);
-		else if (NAME_ATTRIBUTES.has(name)) drop = false;
+		else if (NAME_ATTRIBUTES.has(name) || name.startsWith('aria-')) drop = false;
 		else if (cssCanReachOut(value)) drop = true;
 		// A style attribute is CSS, where `fill:red` is not a scheme; every other value is read as
 		// an address could be.

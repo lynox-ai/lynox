@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { svgExportDocument } from './svg-export.js';
 
 // jsdom parses the svg here; what a browser does with the exported file opened from disk is not
@@ -68,6 +68,72 @@ describe('svgExportDocument', () => {
 		});
 	}
 
+	// Each rule on its own: the forms above all carry an address, which the address rule takes out
+	// as well, so a rule could go missing behind it. These carry none.
+	describe('takes out, with no address to give it away,', () => {
+		const clean = (svg: string): Document => new DOMParser().parseFromString(svgExportDocument(svg)!, 'image/svg+xml');
+
+		it('an element outside the SVG namespace', () => {
+			const doc = clean(`<svg ${NS}><p xmlns="http://www.w3.org/1999/xhtml">x</p><rect width="9" height="9"/></svg>`);
+			expect(doc.getElementsByTagNameNS('http://www.w3.org/1999/xhtml', 'p')).toHaveLength(0);
+			expect(doc.querySelector('rect')).not.toBeNull();
+		});
+
+		it('a foreignObject, even one holding only svg', () => {
+			const doc = clean(`<svg ${NS}><foreignObject width="9" height="9"><rect width="9" height="9"/></foreignObject></svg>`);
+			expect(doc.getElementsByTagNameNS('http://www.w3.org/2000/svg', 'foreignObject')).toHaveLength(0);
+		});
+
+		it('an animation that sets an href', () => {
+			const doc = clean(`<svg ${NS}><image width="9" height="9" href="#x"><set attributeName="href" to="y.png"/></image></svg>`);
+			expect(doc.querySelector('set')).toBeNull();
+		});
+
+		it('an animation that sets a ping', () => {
+			const doc = clean(`<svg ${NS}><a href="#r"><set attributeName="ping" to="y"/><rect id="r" width="9" height="9"/></a></svg>`);
+			expect(doc.querySelector('set')).toBeNull();
+		});
+
+		it('an animation whose value is css that reaches out', () => {
+			const doc = clean(`<svg ${NS}><rect width="9" height="9"><animate attributeName="fill" values="red;url(y.svg#a)"/></rect></svg>`);
+			expect(doc.querySelector('animate')).toBeNull();
+		});
+
+		it('an event attribute', () => {
+			const doc = clean(`<svg ${NS}><rect width="9" height="9" onclick="alert(1)"/></svg>`);
+			expect(doc.querySelector('rect')?.hasAttribute('onclick')).toBe(false);
+		});
+
+		it('an xml:base', () => {
+			const doc = clean(`<svg ${NS}><g xml:base="sub/"><rect width="9" height="9"/></g></svg>`);
+			expect(doc.querySelector('g')?.getAttributeNS('http://www.w3.org/XML/1998/namespace', 'base')).toBeNull();
+		});
+
+		it('a ping', () => {
+			const doc = clean(`<svg ${NS}><a href="#r" ping="y"><rect id="r" width="9" height="9"/></a></svg>`);
+			expect(doc.querySelector('a')?.hasAttribute('ping')).toBe(false);
+		});
+	});
+
+	it('refuses a file that holds, once written, what the cleaning takes out', () => {
+		// No input is known that makes a browser's writer and reader disagree; this stands in for
+		// one, so the check that catches it is exercised: the first write slips in a script.
+		const write = XMLSerializer.prototype.serializeToString;
+		let calls = 0;
+		const spy = vi.spyOn(XMLSerializer.prototype, 'serializeToString').mockImplementation(function (this: XMLSerializer, node: Node) {
+			const out = write.call(this, node);
+			return ++calls === 1 ? out.replace(/<\/svg>$/, '<script>x</script></svg>') : out;
+		});
+		try {
+			expect(svgExportDocument(`<svg ${NS}><rect width="9" height="9"/></svg>`)).toBeNull();
+			expect(calls).toBe(2);
+		} finally {
+			spy.mockRestore();
+		}
+		// Control: the same input, written as it is, goes out.
+		expect(svgExportDocument(`<svg ${NS}><rect width="9" height="9"/></svg>`)).not.toBeNull();
+	});
+
 	it('keeps a drawing whole: shapes, text, a gradient by url(#id) in an attribute and in css, an in-document use', () => {
 		const svg = `<svg ${NS} viewBox="0 0 10 10"><defs><linearGradient id="src-grad"><stop offset="0" stop-color="red"/></linearGradient>`
 			+ `<circle id="dot" r="1"/></defs><style>.c{fill:url(#src-grad)}</style>`
@@ -86,6 +152,37 @@ describe('svgExportDocument', () => {
 		expect(uses[1]!.getAttributeNS('http://www.w3.org/1999/xlink', 'href')).toBe('#dot');
 		expect(doc.querySelector('text')?.textContent).toBe('Umsatz 2026');
 		expect(doc.documentElement.getAttribute('viewBox')).toBe('0 0 10 10');
+	});
+
+	it('keeps style rules whose names only contain a css function word, and an embedded font', () => {
+		const css = '.urlaub{fill:red}.src-box{fill:blue}@font-face{font-family:f;src:url(data:font/woff2;base64,d09GMg==)}';
+		const out = svgExportDocument(`<svg ${NS}><style>${css}</style><rect class="urlaub" width="9" height="9"/></svg>`)!;
+		expect(new DOMParser().parseFromString(out, 'image/svg+xml').querySelector('style')?.textContent).toBe(css);
+	});
+
+	it('keeps labels and roles that mention an address or a css word', () => {
+		const out = svgExportDocument(`<svg ${NS} role="img" aria-labelledby="src-title" aria-label="see ${AT}"><title id="src-title">Urlaub 2026</title></svg>`)!;
+		const root = new DOMParser().parseFromString(out, 'image/svg+xml').documentElement;
+		expect(root.getAttribute('role')).toBe('img');
+		expect(root.getAttribute('aria-labelledby')).toBe('src-title');
+		expect(root.getAttribute('aria-label')).toBe(`see ${AT}`);
+	});
+
+	it('leaves the text of a foreignObject behind as svg text at its place', () => {
+		const out = svgExportDocument(`<svg ${NS}><foreignObject x="10" y="20" width="90" height="30"><div xmlns="http://www.w3.org/1999/xhtml">Label <b>A</b><script>x()</script></div></foreignObject></svg>`)!;
+		const doc = new DOMParser().parseFromString(out, 'image/svg+xml');
+		const text = doc.querySelector('text')!;
+		expect(text.textContent).toBe('Label A');
+		expect(text.getAttribute('x')).toBe('10');
+		expect(text.getAttribute('y')).toBe('20');
+		expect(doc.getElementsByTagNameNS('http://www.w3.org/1999/xhtml', '*')).toHaveLength(0);
+	});
+
+	it('exports a drawing written for html with an undeclared editor prefix', () => {
+		const out = svgExportDocument('<svg viewBox="0 0 9 9"><g inkscape:label="L"><circle r="2"/></g><sodipodi:namedview/></svg>');
+		expect(out).not.toBeNull();
+		const doc = new DOMParser().parseFromString(out!, 'image/svg+xml');
+		expect(doc.querySelector('circle')?.getAttribute('r')).toBe('2');
 	});
 
 	it('keeps a label with a word before a colon', () => {
