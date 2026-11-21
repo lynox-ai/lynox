@@ -171,8 +171,9 @@ export function visible(text: string): string {
   return text.replace(HIDDEN, (c) => `<U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}>`);
 }
 
-// The sentence for each mode and failure strategy the engine knows. A value outside these is printed
-// as it came (with hidden characters shown): a sentence is never guessed for something unknown.
+// The name of each mode and failure strategy the engine knows, as a setting is named, not a promise
+// of how a run goes (a stop, for one, lets the steps of the failed step's phase finish). A value
+// outside these is printed as it came (with hidden characters shown): no name is guessed for it.
 const MODE_KEYS: ReadonlyMap<string, string> = new Map([
   ['interactive', 'workflow_library.stamp.mode_interactive'],
   ['autonomous', 'workflow_library.stamp.mode_autonomous'],
@@ -182,11 +183,11 @@ const ON_FAILURE_KEYS: ReadonlyMap<string, string> = new Map([
   ['continue', 'workflow_library.stamp.on_failure_continue'],
   ['notify', 'workflow_library.stamp.on_failure_notify'],
 ]);
-/** The key of a mode's sentence, or null for a mode this view does not know. */
+/** The key of a mode's name, or null for a mode this view does not know. */
 export function modeKey(mode: string): string | null {
   return MODE_KEYS.get(mode) ?? null;
 }
-/** The key of a failure strategy's sentence, or null for one this view does not know. */
+/** The key of a failure strategy's name, or null for one this view does not know. */
 export function onFailureKey(onFailure: string): string | null {
   return ON_FAILURE_KEYS.get(onFailure) ?? null;
 }

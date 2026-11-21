@@ -157,7 +157,7 @@
 			// head of the dialog rather than to the page behind it, unless something outside the
 			// dialog took it meanwhile, such as an overlay above it. After a change it goes to the
 			// first changed part, brought into sight: that is what the owner has to read again. The
-			// line above, which says why, may scroll out of sight then; it is announced as a status.
+			// line above, which says why, may scroll out of sight then (it carries role=status).
 			await tick();
 			if (dialog?.isConnected === true && keyIsOurs()) {
 				const mark = toMark ? dialog.querySelector<HTMLElement>('[data-stamp-changed]') : null;

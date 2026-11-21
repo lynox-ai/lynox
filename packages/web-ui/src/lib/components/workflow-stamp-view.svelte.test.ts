@@ -588,19 +588,19 @@ describe('the stamp part reads as sentences, not as stored values', () => {
 		await click(q('stamp-review'));
 	};
 
-	it('says what the mode and the failure strategy do, and prints neither stored value', async () => {
+	it('names the mode and the failure strategy, and prints neither stored value', async () => {
 		await openStamp(twoSteps('d1', undefined, { mode: 'autonomous', onFailure: 'notify' }));
-		expect(q('stamp-mode')?.textContent?.trim()).toBe('Läuft, ohne bei dir nachzufragen');
-		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Führt die übrigen Schritte aus und meldet den Fehler');
+		expect(q('stamp-mode')?.textContent?.trim()).toBe('Selbstständig');
+		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Weitermachen und melden');
 		expect(q('stamp-mode')!.classList.contains('font-mono')).toBe(false);
 		const settings = q('stamp-settings')?.textContent ?? '';
 		expect(settings).not.toMatch(/\bautonomous\b|\bnotify\b/);
 	});
 
-	it('the other values read as their own sentences', async () => {
+	it('the other values have their own names', async () => {
 		await openStamp(twoSteps('d1', undefined, { mode: 'interactive', onFailure: 'continue' }));
-		expect(q('stamp-mode')?.textContent?.trim()).toBe('Darf beim Lauf bei dir nachfragen');
-		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Führt die übrigen Schritte trotzdem aus');
+		expect(q('stamp-mode')?.textContent?.trim()).toBe('Mit Rückfragen');
+		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Weitermachen');
 	});
 
 	it('a value the view does not know is printed as it came, hidden characters shown', async () => {
@@ -610,9 +610,9 @@ describe('the stamp part reads as sentences, not as stored values', () => {
 		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('halt');
 	});
 
-	it('the stop strategy says no further step starts, not that the run halts at a place', async () => {
+	it('the stop strategy has its own name', async () => {
 		await openStamp(twoSteps('d1', undefined, { onFailure: 'stop' }));
-		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Startet nach einem Fehler keine weiteren Schritte');
+		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Anhalten');
 	});
 
 	it('heads each step with its id and no number, and prints the task once', async () => {

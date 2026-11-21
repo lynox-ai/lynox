@@ -217,8 +217,8 @@ describe('the dialog', () => {
 		expect(text('afterwards')).toBe('Danach gehört der Workflow keiner Person mit Zugang mehr. Jede Person, die Zugang hat, kann ihn dann im Chat ausführen oder planen lassen, unter ihrem eigenen Namen. Macht diese Person eine Kopie davon, gehört die Kopie ihr.');
 		// The stamp's own part: the fields beside the steps, and the steps.
 		const stamp = d.querySelector<HTMLElement>('[data-takeover-part="stamp"]')!;
-		// The failure strategy as a sentence, not its stored value.
-		expect(stamp.textContent).toContain('Führt die übrigen Schritte trotzdem aus');
+		// The failure strategy by its name, not its stored value.
+		expect(stamp.textContent).toContain('Weitermachen');
 		expect(stamp.textContent).not.toMatch(/\bcontinue\b/);
 		expect(stamp.textContent).toContain('recipient = someone@example.invalid');
 		expect(stamp.querySelectorAll('[data-testid="stamp-step"]').length).toBe(3);
