@@ -66,6 +66,8 @@ describe('a cell that starts like a formula', () => {
     ['Alice', false], ['', false], ['a=b', false],
     // Read as Google might normalise it: a full-width sign, an invisible character in front.
     ['＝IMPORTXML("https://x.example", "//a")', true], ['\u200b=A1', true], ['\ufeff=A1', true], ['＋A1', true],
+    // …and a number or a word stays what it is after that.
+    ['－５', false], ['\u200b12', false], ['\u200b-5', false], ['Ａlice', false], ['１,５', false],
   ])('%j is counted as a formula: %s', (value, expected) => {
     expect(startsLikeFormula(value)).toBe(expected);
   });

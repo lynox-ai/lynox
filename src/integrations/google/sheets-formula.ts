@@ -18,8 +18,10 @@ const PLAIN_NUMBER = /^[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:e[+-]?\d+)?%?$/i;
  * `=` makes a formula. `+` and `-` are counted too unless the value is a plain number: whether
  * Sheets reads `+A1` as a formula is not measured here, and counting it only means the owner is
  * asked once more. For the same reason the value is read as Google might normalise it: without
- * leading white space and invisible format characters, and with compatibility forms folded
- * (a full-width `＝` reads as `=`).
+ * leading white space and invisible format characters (`\p{Cf}`), and with compatibility forms
+ * folded (a full-width `＝` reads as `=`). That is where it stops: a value that starts with
+ * another invisible character (a combining mark, a Hangul filler, the blank braille cell) is not
+ * counted. What Google itself strips before reading a formula is not measured.
  */
 export function startsLikeFormula(value: unknown): value is string {
   if (typeof value !== 'string') return false;
