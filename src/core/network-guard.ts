@@ -231,7 +231,10 @@ export function policyNamesHost(hostname: string, ctx: Pick<HostPolicyContext, '
   if (policy === undefined || policy === 'allow-all' || policy === 'guarded') {
     return (!BASELINE_LOOPBACK.has(hostname) && isGuardedBaselineHost(`https://${hostname}/`)) || hostInFloor(hostname, ctx);
   }
-  // `deny-all`, and a policy this code does not know: no host.
+  if (policy === 'deny-all') return false;
+  // A policy this code does not know names no host, and a new value fails the build here.
+  const _exhaustive: never = policy;
+  void _exhaustive;
   return false;
 }
 
