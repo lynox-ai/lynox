@@ -335,7 +335,7 @@ export function bulkOwnerNoticeShown(haltKey: string | null): boolean {
 /** A sentence cut into plain text and the hosts it names (`shop-name.myshopify.com`), so a page
  *  can keep a host from breaking at a hyphen (with {@link bulkWrapParts}) while the rest of the
  *  sentence wraps as text does; a long token that is no host still breaks where the browser breaks it.
- *  The marks the page's own sentences put right after a host (`.`, `,`, `:`) go with its segment,
+ *  The marks the page's own sentences put right after a host (`.`, `,`) go with its segment,
  *  so such a sentence never starts a line with them. Which marks go along is the two patterns below;
  *  text that is not the page's own, a raw engine reason, may still break before a mark. */
 export function bulkHostSegments(text: string): { text: string; host: boolean }[] {
