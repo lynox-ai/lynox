@@ -470,13 +470,20 @@ export function providerSearchAdmitted(ctx: ToolContext | undefined): boolean {
   return policy === undefined || policy === 'allow-all' || policy === 'guarded';
 }
 
-/** Whether message content carries a web search the provider ran itself: its call or its
- *  results. Only the web search: the lazy tools' tool search is a server tool too, but it searches
- *  the request's own tool definitions and fetches nothing. */
+/** The name the provider's web search is offered under, and counted under as an external-content
+ *  tool of the turn that ran it ({@link holdsProviderSearch}). */
+const PROVIDER_SEARCH_TOOL = 'web_search' as const;
+
+/** Whether message content carries a server tool the provider ran itself, its call or its result:
+ *  the web search, and any server tool offered later, which may reach outside content too. All but
+ *  the lazy tools' tool search, which searches the request's own tool definitions and fetches
+ *  nothing. A client tool's `tool_result` is not one. */
 function holdsProviderSearch(content: unknown): boolean {
   return Array.isArray(content) && content.some((b: unknown) => {
     const block = b as { type?: unknown; name?: unknown } | null;
-    return (block?.type === 'server_tool_use' && block.name === 'web_search') || block?.type === 'web_search_tool_result';
+    const type = block?.type;
+    if (type === 'server_tool_use') return !(typeof block?.name === 'string' && block.name.startsWith('tool_search_tool_'));
+    return typeof type === 'string' && type.endsWith('_tool_result') && !type.startsWith('tool_search_tool_');
   });
 }
 
@@ -1313,6 +1320,8 @@ export class Agent implements IAgent {
     // Direct ingest
     'bash', 'http_request', 'read_file', 'batch_files', 'media_process', 'api_setup',
     'web_research', 'mail_read', 'mail_search', 'mail_triage',
+    // The provider's own web search: never dispatched, counted when an answer carries it.
+    PROVIDER_SEARCH_TOOL,
     'google_docs', 'google_drive', 'google_sheets',
     // `calendar_read` returns SUMMARY/LOCATION text chosen by whoever sent the invitation —
     // an ingest channel that needs no compromise, only the operator's address. It wraps its
@@ -3070,19 +3079,21 @@ export class Agent implements IAgent {
       const contentForHistory = response.content.filter(
         (b): b is Exclude<typeof b, { type: 'thinking' }> => b.type !== 'thinking',
       ) as BetaContentBlockParam[];
+      // A server tool the provider ran (its web search) reaches the model inside this answer,
+      // past every tool dispatch: content from outside, taken in now, counted as an
+      // external-content tool of this turn under the provider tool's name. Counted before the
+      // answer is written, so a checkpoint and every call this answer makes see it. Any agent
+      // that gets the tool: its rows, too, may hold what the search returned.
+      if (holdsProviderSearch(response.content)) {
+        this._providerSearchSeen = true;
+        this._turnToolNames.add(PROVIDER_SEARCH_TOOL);
+        this._armConversationLatch();
+        this.conversationGrants?.add(UNKNOWN_GRANT);
+      }
       // A thinking-only response (entire output budget spent on extended
       // thinking before max_tokens) strips to an empty array. Anthropic rejects
       // an assistant message with empty content and that would break the very
       // next request — substitute a minimal placeholder so history stays valid.
-      // A search the provider ran itself reaches the model inside this answer, past every tool
-      // dispatch: content from outside, taken in now. Counted before the answer is written, so a
-      // checkpoint and every call this answer makes see it. Any agent that gets the tool: its
-      // rows, too, may hold what the search returned.
-      if (holdsProviderSearch(response.content)) {
-        this._providerSearchSeen = true;
-        this.noteUntrustedData();
-        this.conversationGrants?.add(UNKNOWN_GRANT);
-      }
       this.messages.push({
         role: 'assistant',
         content: contentForHistory.length > 0
@@ -3754,7 +3765,7 @@ export class Agent implements IAgent {
     // when the policy leaves search open, never because `web_research` happens to be missing.
     const searchAdmitted = providerSearchAdmitted(this.toolContext);
     const builtinTools = !this.isNonDirectAnthropic && !hasWebResearch && !searchExcluded && !this._suppressTools && !contained && searchAdmitted
-      ? [{ type: 'web_search_20250305' as const, name: 'web_search' as const }]
+      ? [{ type: 'web_search_20250305' as const, name: PROVIDER_SEARCH_TOOL }]
       : [];
     // Lazy-tools: OPT-IN (dormant by default). Anthropic-direct only, never on the
     // compaction (suppress) path. Heavy/long-tail tool schemas are deferred behind

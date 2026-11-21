@@ -78,7 +78,32 @@ describe('a search the provider ran counts as content from outside', () => {
       await agent.send('find the CRM API');
       expect(seen[0]).toEqual({ latch: true, unknown: true });
       expect(agent.conversationSawUntrusted).toBe(true);
-      expect(agent.sawUntrustedData).toBe(true);
+      expect(agent.sawExternalContentTool).toBe(true);
+      expect(agent.sawUntrustedData).toBe(false);
+    });
+  }
+
+  it("a sub-agent's answer that carries a search adds unknown too, as its rows may hold the results", async () => {
+    const grants = ConversationGrants.detached(); const seen: Seen[] = [];
+    mockProcess.mockResolvedValueOnce(answer(searchCall, searchResult, { type: 'text', text: 'found it' }));
+    const agent = agentFor([], [], grants, seen, false);
+    expect(agent.conversationRoot).toBe(false);
+    await agent.send('find the CRM API');
+    expect(seen[0]).toEqual({ latch: true, unknown: true });
+  });
+
+  const fetchCall = { type: 'server_tool_use', id: 'srv_3', name: 'web_fetch', input: { url: 'https://page.example/' } };
+  const fetchResult = { type: 'web_fetch_tool_result', tool_use_id: 'srv_3', content: { type: 'web_fetch_result', url: 'https://page.example/', content: {} } };
+  for (const [label, blocks] of [
+    ['its call', [fetchCall]],
+    ['its result', [fetchResult]],
+  ] as const) {
+    it(`a server tool added later counts too: ${label}`, async () => {
+      const grants = ConversationGrants.detached(); const seen: Seen[] = [];
+      mockProcess.mockResolvedValueOnce(answer(...blocks, { type: 'text', text: 'read it' }));
+      const agent = agentFor([], [], grants, seen);
+      await agent.send('read the page');
+      expect(seen[0]).toEqual({ latch: true, unknown: true });
     });
   }
 
@@ -92,7 +117,7 @@ describe('a search the provider ran counts as content from outside', () => {
     const agent = agentFor([], [], grants, seen);
     await agent.send('find a mail tool');
     expect(seen[0]).toEqual({ latch: false, unknown: false });
-    expect(agent.sawUntrustedData).toBe(false);
+    expect(agent.sawExternalContentTool).toBe(false);
   });
 
   it('CONTROL: an answer without such a search arms nothing', async () => {
@@ -134,6 +159,17 @@ describe('a search the provider ran counts as content from outside', () => {
     ]);
     expect(agent.conversationSawUntrusted).toBe(true);
     expect(grants.has(UNKNOWN_GRANT)).toBe(true);
+  });
+
+  it("a sub-agent loaded with such a search is armed, but only a conversation's own agent refills its set", () => {
+    const grants = ConversationGrants.detached();
+    const agent = agentFor([], [], grants, [], false);
+    agent.loadMessages([
+      { role: 'user', content: 'find the CRM API' },
+      { role: 'assistant', content: [searchCall, searchResult, { type: 'text', text: 'found it' }] as never },
+    ]);
+    expect(agent.conversationSawUntrusted).toBe(true);
+    expect(grants.has(UNKNOWN_GRANT)).toBe(false);
   });
 
   it('CONTROL: a conversation loaded without one is not', () => {
