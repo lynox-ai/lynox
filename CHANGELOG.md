@@ -30,10 +30,12 @@
 
 ### Fixed
 
-- A scheduled agent task or scheduled workflow that was set up in a chat after
-  that chat had read outside content now records its writes as coming from an
-  unknown source. Until now such a run wrote its rows with no source at all, so
-  removing a connection's data did not find what the run derived from it.
+- A scheduled agent task or scheduled workflow whose instruction was set up or
+  changed in a chat after that chat had read outside content now records, on
+  every row it writes, that its sources include an unknown one. Until now such a
+  run recorded only the connections it read itself, not the ones the chat had
+  read, so a row it wrote from one of those could look as if it came from the
+  run's own connections alone.
 
 ## 2.18.0 — 2026-11-17
 

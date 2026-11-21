@@ -2138,7 +2138,7 @@ describe('WorkerLoop', () => {
     expect(opts['sendOrigin']).toEqual({ kind: 'triggerRun', name: task.title, setUpBy: { kind: 'owner' } });
   });
 
-  it.each([['marker', true], ['none', undefined]] as const)('a task created after outside content (%s) starts its session with unknown in its grant set', async (stored, expected) => {
+  it.each([['marker', true], ['conversation', true], ['a spelling it does not know', true], ['none', undefined]] as const)('a task created after outside content (%s) asks its session to seed unknown into the grant set', async (stored, expected) => {
     const task = makeTask({ created_untrusted: stored });
     const session = makeSession('ok');
     const engine = makeEngine({ taskManager: makeTaskManager([task]), session });
