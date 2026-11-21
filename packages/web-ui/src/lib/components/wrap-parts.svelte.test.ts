@@ -42,6 +42,11 @@ describe('a line of the run page in word boxes', () => {
 		expect(el.innerHTML.replace(/<!---->/g, '')).toBe(`${B('Shop-Inhalte')} ${B('·')} ${B('my-very-long-store-name-for-testing-2024.')}<wbr>${B('myshopify.')}<wbr>${B('com')}`);
 	});
 
+	it('puts no empty box before a leading space', async () => {
+		const el = await render(' Neu');
+		expect(el.innerHTML.replace(/<!---->/g, '')).toBe(` ${B('Neu')}`);
+	});
+
 	it('gives a word that ends a sentence no `<wbr>` of its own when a space follows', async () => {
 		const el = await render('Gestoppt. Neu');
 		expect(el.innerHTML.replace(/<!---->/g, '')).toBe(`${B('Gestoppt.')} ${B('Neu')}`);

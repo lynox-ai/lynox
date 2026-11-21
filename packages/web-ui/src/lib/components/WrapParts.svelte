@@ -9,4 +9,4 @@
 	let { text }: { text: string } = $props();
 </script>
 
-{#each bulkWrapParts(text) as part, i (i)}{@const word = part.text.trimEnd()}<span class="inline-block max-w-full break-all">{word}</span>{part.text.slice(word.length)}{#if part.wrap && word.length === part.text.length}<wbr />{/if}{/each}
+{#each bulkWrapParts(text) as part, i (i)}{@const word = part.text.trimEnd()}{#if word !== ''}<span class="inline-block max-w-full break-all">{word}</span>{/if}{part.text.slice(word.length)}{#if part.wrap && word.length === part.text.length}<wbr />{/if}{/each}
