@@ -3,10 +3,11 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { readable } from 'svelte/store';
 
-// A message the instance's own spending cap blocked: the note says why, when the cap opens again,
-// and who can change it — the limits page on an instance whose owner sets the cap, support on a
-// managed plan, the owner in someone else's workspace. The engine's English reason stays a debug
-// line. Live (from `done`) and after a reload (from the note) the words are the same.
+// A message the instance's own spending cap blocked: the note says why and when a new period
+// starts, and names a step only where one helps — the limits page on a self-hosted instance, the
+// owner in someone else's workspace. A hosted owner (the control plane's cap wins over the page)
+// and a managed plan get the reason alone. The engine's English reason stays a debug line. Live
+// (from `done`) and after a reload (from the note) the words are the same.
 
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
 type SvelteClient = {
@@ -65,6 +66,9 @@ beforeEach(async () => {
 	notes = await import('../utils/budget-note.js');
 	target = document.createElement('div');
 	document.body.appendChild(target);
+	// Mid-month, so the monthly reset is always a date, never "today" or "tomorrow".
+	vi.useFakeTimers({ toFake: ['Date'] });
+	vi.setSystemTime(new Date('2026-11-15T12:00:00Z'));
 });
 
 afterEach(() => {
@@ -76,6 +80,7 @@ afterEach(() => {
 	store.newChat();
 	localStorage.removeItem('lynox-chat');
 	vi.unstubAllGlobals();
+	vi.useRealTimers();
 });
 
 /** The instance as the page asks it: its billing tier ('' = self-host) and whose session it is. */
@@ -148,10 +153,33 @@ const HOSTED: Instance = { tier: 'hosted', viewer: 'owner' };
 const MANAGED: Instance = { tier: 'managed_pro', viewer: 'owner' };
 const MANDATE: Instance = { tier: 'hosted', viewer: 'mandate' };
 
+describe('the reason, word for word, in a fixed time zone', () => {
+	it('daily and monthly, in German and in English', () => {
+		const zurich = 'Europe/Zurich';
+		const afternoon = new Date('2026-11-20T13:00:00Z');
+		const reasonIn = (lang: 'de' | 'en', cap: 'daily' | 'monthly', limit: number, spent: number): string => {
+			i18n.setLocale(lang);
+			return i18n.tf(`chat.note.budget.${cap}`, {
+				limit: notes.formatCapUSD(limit),
+				spent: notes.formatSpentUSD(spent),
+				when: notes.formatResetWhen(notes.budgetResetAt(cap, afternoon), afternoon, lang, zurich),
+			});
+		};
+		expect(reasonIn('de', 'daily', 5, 5.12)).toBe('Das Tagesbudget von $5.00 ist erreicht (heute $5.12). Morgen um 01:00 beginnt ein neuer Tag.');
+		expect(reasonIn('en', 'daily', 5, 5.12)).toBe('The daily budget of $5.00 is reached (today $5.12). A new day starts tomorrow at 01:00 AM.');
+		expect(reasonIn('de', 'monthly', 150, 150.4)).toBe('Das Monatsbudget von $150.00 ist erreicht (diesen Monat $150.40). Am 1. Dezember um 01:00 beginnt ein neuer Monat.');
+		expect(reasonIn('en', 'monthly', 150, 150.4)).toBe('The monthly budget of $150.00 is reached (this month $150.40). A new month starts on December 1 at 01:00 AM.');
+	});
+
+	it('the step that sent a managed plan to support is gone', () => {
+		expect(i18n.t('chat.note.budget.next_plan')).toBe('chat.note.budget.next_plan');
+	});
+});
+
 describe('a message the spending cap blocked says why, until when, and what to do', () => {
 	it('de, daily cap, self-hosted owner: the reason with amounts and reset, then the limits page', async () => {
 		await live('de', SELF, { result: DAILY, notice: 'run_blocked', budget: DAILY_REF });
-		expect(reason()).toBe(`Das Tageslimit von $5 ist erreicht (heute $5.12). Es gilt wieder ab ${when('daily', 'de')}.`);
+		expect(reason()).toBe(`Das Tagesbudget von $5.00 ist erreicht (heute $5.12). ${when('daily', 'de')} beginnt ein neuer Tag.`);
 		expect(text(next())).toBe('Du kannst das Limit unter Einstellungen → Limits ändern.');
 		expect(next()?.querySelector('a')?.getAttribute('href')).toBe('/app/settings/workspace/limits');
 		// Only the place it leads to is the link, not the whole step.
@@ -163,33 +191,56 @@ describe('a message the spending cap blocked says why, until when, and what to d
 		expect(target.querySelector('.ai-badge')).toBeNull();
 	});
 
-	it('en, daily cap, hosted with its own key: the owner sets the cap too', async () => {
-		await live('en', HOSTED, { result: DAILY, notice: 'run_blocked', budget: DAILY_REF });
-		expect(reason()).toBe(`The daily limit of $5 is reached (today $5.12). It resets ${when('daily', 'en')}.`);
+	it('en, daily cap, self-hosted owner: the limits page', async () => {
+		await live('en', SELF, { result: DAILY, notice: 'run_blocked', budget: DAILY_REF });
+		expect(reason()).toBe(`The daily budget of $5.00 is reached (today $5.12). A new day starts ${when('daily', 'en')}.`);
 		expect(text(next())).toBe('You can change the limit under Settings → Limits.');
 		expect(next()?.querySelector('a')?.getAttribute('href')).toBe('/app/settings/workspace/limits');
+		expect(link()).toBe('Settings → Limits');
 	});
 
-	for (const locale of ['de', 'en'] as const) {
-		it(`${locale}, monthly cap on a managed plan: support changes it, by mail`, async () => {
-			await live(locale, MANAGED, { result: MONTHLY, notice: 'run_blocked', budget: MONTHLY_REF });
-			expect(reason()).toBe(i18n.tf('chat.note.budget.monthly', { limit: '$150', spent: '$150.40', when: when('monthly', locale) }));
-			expect(text(next())).toBe(i18n.t('chat.note.budget.next_plan').replace('{link}', 'support@lynox.ai'));
-			expect(next()?.querySelector('a')?.getAttribute('href')).toBe('mailto:support@lynox.ai');
-			expect(link()).toBe('support@lynox.ai');
-		});
+	it('de, daily cap, hosted with its own key: the reason alone, no limits page', async () => {
+		await live('de', HOSTED, { result: DAILY, notice: 'run_blocked', budget: DAILY_REF });
+		expect(reason()).toBe(`Das Tagesbudget von $5.00 ist erreicht (heute $5.12). ${when('daily', 'de')} beginnt ein neuer Tag.`);
+		expect(next()).toBeNull();
+		expect(target.querySelector('a[href="/app/settings/workspace/limits"]')).toBeNull();
+	});
 
-		it(`${locale}, someone else's workspace: only the owner can change it, and no link`, async () => {
-			await live(locale, MANDATE, { result: DAILY, notice: 'run_blocked', budget: DAILY_REF });
-			expect(text(next())).toBe(i18n.t('chat.note.budget.next_owner'));
-			expect(next()?.querySelector('a')).toBeNull();
-		});
-	}
+	it('en, daily cap, hosted with its own key: the reason alone, no limits page', async () => {
+		await live('en', HOSTED, { result: DAILY, notice: 'run_blocked', budget: DAILY_REF });
+		expect(reason()).toBe(`The daily budget of $5.00 is reached (today $5.12). A new day starts ${when('daily', 'en')}.`);
+		expect(next()).toBeNull();
+		expect(target.querySelector('a[href="/app/settings/workspace/limits"]')).toBeNull();
+	});
 
-	it('de: the monthly reset reads "ab dem 1. …", never "ab am"', async () => {
+	it('de, monthly cap on a managed plan: the reason alone, with a capital "Am" opening the reset', async () => {
 		await live('de', MANAGED, { result: MONTHLY, notice: 'run_blocked', budget: MONTHLY_REF });
-		expect(reason()).toMatch(/Es gilt wieder ab dem \d{1,2}\. \S+ um \d{2}:\d{2}\.$/);
-		expect(reason()).not.toContain('ab am');
+		expect(reason()).toBe(`Das Monatsbudget von $150.00 ist erreicht (diesen Monat $150.40). ${when('monthly', 'de')} beginnt ein neuer Monat.`);
+		expect(reason()).toMatch(/\. Am \d{1,2}\. \S+ um \d{2}:\d{2} beginnt ein neuer Monat\.$/);
+		expect(next()).toBeNull();
+		expect(target.querySelector('a[href="mailto:support@lynox.ai"]')).toBeNull();
+	});
+
+	it('en, monthly cap on a managed plan: the reason alone, the date month first', async () => {
+		await live('en', MANAGED, { result: MONTHLY, notice: 'run_blocked', budget: MONTHLY_REF });
+		expect(reason()).toBe(`The monthly budget of $150.00 is reached (this month $150.40). A new month starts ${when('monthly', 'en')}.`);
+		expect(reason()).toMatch(/A new month starts on [A-Z][a-z]+ \d{1,2} at \d{2}:\d{2} [AP]M\.$/);
+		expect(next()).toBeNull();
+		expect(target.querySelector('a[href="mailto:support@lynox.ai"]')).toBeNull();
+	});
+
+	it('de, someone else\'s workspace: only the owner can change it, and no link', async () => {
+		await live('de', MANDATE, { result: DAILY, notice: 'run_blocked', budget: DAILY_REF });
+		expect(reason()).toBe(`Das Tagesbudget von $5.00 ist erreicht (heute $5.12). ${when('daily', 'de')} beginnt ein neuer Tag.`);
+		expect(text(next())).toBe('Ändern kann es die Person, der der Arbeitsbereich gehört.');
+		expect(next()?.querySelector('a')).toBeNull();
+	});
+
+	it('en, someone else\'s workspace: only the owner can change it, and no link', async () => {
+		await live('en', MANDATE, { result: DAILY, notice: 'run_blocked', budget: DAILY_REF });
+		expect(reason()).toBe(`The daily budget of $5.00 is reached (today $5.12). A new day starts ${when('daily', 'en')}.`);
+		expect(text(next())).toBe('Only the owner of the workspace can change it.');
+		expect(next()?.querySelector('a')).toBeNull();
 	});
 
 	it('de, spend cannot be checked, self-hosted: no amounts, restart', async () => {
@@ -217,7 +268,8 @@ describe('a message the spending cap blocked says why, until when, and what to d
 		const stream = sseStream();
 		run = stream;
 		i18n.setLocale('de');
-		stubFetch(MANDATE, (url) => {
+		// Self-hosted, where an owner would get the limits page: only the unknown reader holds it back.
+		stubFetch({ tier: '', viewer: 'mandate' }, (url) => {
 			if (url.endsWith('/config')) return json({}, 503);
 			return url.endsWith('/sessions/t1/run') ? new Response(stream.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }) : undefined;
 		});
@@ -258,6 +310,26 @@ describe('a message the spending cap blocked says why, until when, and what to d
 		const stream = sseStream();
 		run = stream;
 		stubFetch(MANAGED, (url) => {
+			if (url.endsWith('/secrets/status')) return json({}, 500);
+			return url.endsWith('/sessions/t1/run') ? new Response(stream.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }) : undefined;
+		});
+		void store.sendMessage('summarise the quarter');
+		await settle();
+		const { default: ChatView } = await import('./ChatView.svelte');
+		component = svelte.mount(ChatView, { target });
+		svelte.flushSync();
+		stream.send('done', { result: DAILY, notice: 'run_blocked', budget: DAILY_REF });
+		await settle();
+		svelte.flushSync();
+		expect(reason()).toContain('$5.12');
+		expect(next()).toBeNull();
+	});
+
+	it('a tier probe that failed names no step in someone else\'s workspace either', async () => {
+		i18n.setLocale('de');
+		const stream = sseStream();
+		run = stream;
+		stubFetch(MANDATE, (url) => {
 			if (url.endsWith('/secrets/status')) return json({}, 500);
 			return url.endsWith('/sessions/t1/run') ? new Response(stream.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }) : undefined;
 		});
