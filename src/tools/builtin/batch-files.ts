@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, statSync, realpathSync, fstatSync, closeSync, existsSync } from 'node:fs';
 import { join, dirname, basename, resolve, posix } from 'node:path';
 import type { ToolEntry, IAgent, ChangesetWriter } from '../../types/index.js';
-import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
+import { isWorkspaceActive, validatePath, isPathWithin, resolveToolPath } from '../../core/workspace.js';
 import { processUmask, toWorkspaceRel } from '../../core/workspace-rel.js';
 import { sidecarWriteModes } from '../../core/workspace-write-modes.js';
 import { FILE_TOOL_READ_CAP_BYTES, listDir, mkdirAt, openRead, renameAt, type WorkspaceAnchor } from '../../core/workspace-fd.js';
@@ -216,7 +216,7 @@ function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: stri
     }
     case 'move': {
       if (!input.destination) return 'destination is required for move operation';
-      const dest = toWorkspaceRel(resolve(input.destination), ws);
+      const dest = toWorkspaceRel(resolveToolPath(input.destination), ws);
       if (dest.kind !== 'inside') {
         return `destination ${input.destination} is outside the workspace; batch_files moves files within the workspace only.`;
       }
@@ -311,7 +311,7 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
     }
     const base = reachWorkspace(input.directory);
     if (base !== null) {
-      const mapped = toWorkspaceRel(resolve(input.directory), base.ws);
+      const mapped = toWorkspaceRel(resolveToolPath(input.directory), base.ws);
       if (mapped.kind === 'inside') return batchAnchored(input, base.anchor, base.ws, mapped.rel, changeset, wayOut);
     }
     // In shell sidecar mode a directory below the label outside the context workspace is not
@@ -320,7 +320,7 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
       throw new Error(`${input.directory} is in the workspace but not in this conversation's folder. Name a directory in ${base?.ws ?? 'the workspace'}.`);
     }
     // Resolve symlinks on the directory itself to prevent traversal via symlinked root
-    const dir = realpathSync(resolve(input.directory));
+    const dir = realpathSync(resolveToolPath(input.directory));
     if (base !== null) {
       // Outside the workspace by name; one that lands in it through a link would reach its files by name.
       if (landsInWorkspace(dir, base.ws)) {
@@ -331,19 +331,19 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
       if (isPathWithin(base.ws, dir) || isPathWithin(wsReal, dir)) {
         throw new Error(`${input.directory} holds the workspace. Name a directory in the workspace (${base.ws}), or one beside it.`);
       }
-      if (input.operation === 'move' && input.destination && landsInWorkspace(resolve(input.destination), base.ws)) {
+      if (input.operation === 'move' && input.destination && landsInWorkspace(resolveToolPath(input.destination), base.ws)) {
         return `destination ${input.destination} is in the workspace, the directory is not; batch_files moves files within one of them only.`;
       }
     }
     if (isWorkspaceActive()) {
       validatePath(dir, 'write');
       if (input.operation === 'move' && input.destination) {
-        validatePath(resolve(input.destination), 'write');
+        validatePath(resolveToolPath(input.destination), 'write');
       }
     } else {
       refuseOutsideWriteRoots(dir, input.directory);
       if (input.operation === 'move' && input.destination) {
-        refuseOutsideWriteRoots(resolve(input.destination), input.destination);
+        refuseOutsideWriteRoots(resolveToolPath(input.destination), input.destination);
       }
     }
     const files = findFiles(dir, input.pattern);
@@ -380,7 +380,7 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
       }
       case 'move': {
         if (!input.destination) return 'destination is required for move operation';
-        const dest = resolve(input.destination);
+        const dest = resolveToolPath(input.destination);
         mkdirSync(dest, { recursive: true });
         for (const file of files) {
           try {
