@@ -590,7 +590,7 @@ describe('the stamp part names settings, and shows no stored value', () => {
 
 	it('names the mode and the failure strategy, and prints neither stored value', async () => {
 		await openStamp(twoSteps('d1', undefined, { mode: 'autonomous', onFailure: 'notify' }));
-		expect(q('stamp-mode')?.textContent?.trim()).toBe('Selbstständig');
+		expect(q('stamp-mode')?.textContent?.trim()).toBe('Autonom');
 		// notify runs as continue does and reports to no one: it is not named as if it reported.
 		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Weitermachen');
 		expect(q('stamp-mode')!.classList.contains('font-mono')).toBe(false);
@@ -600,7 +600,7 @@ describe('the stamp part names settings, and shows no stored value', () => {
 
 	it('the interactive mode and the continue strategy are named too', async () => {
 		await openStamp(twoSteps('d1', undefined, { mode: 'interactive', onFailure: 'continue' }));
-		expect(q('stamp-mode')?.textContent?.trim()).toBe('Kann nachfragen');
+		expect(q('stamp-mode')?.textContent?.trim()).toBe('Interaktiv');
 		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Weitermachen');
 	});
 
