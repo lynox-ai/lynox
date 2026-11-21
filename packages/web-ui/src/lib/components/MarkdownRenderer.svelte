@@ -117,7 +117,9 @@
 	}
 
 	function extractTitle(code: string): { title: string; clean: string } {
-		const match = code.match(/<!--\s*title:\s*(.+?)\s*-->/);
+		// `<!-{2}` instead of `<!--` in these patterns: the same match, but a module parser that
+		// reads `<!--` as the start of an HTML-like comment refuses the file (the component tests).
+		const match = code.match(/<!-{2}\s*title:\s*(.+?)\s*-->/);
 		if (match) return { title: match[1]!, clean: code.replace(match[0], '').trim() };
 		const titleTag = code.match(/<title>(.+?)<\/title>/);
 		if (titleTag) return { title: titleTag[1]!, clean: code };
@@ -127,7 +129,7 @@
 
 	/** Detect whether an artifact fence body is explicitly typed as markdown. */
 	function isMarkdownArtifact(code: string): boolean {
-		return /<!--\s*type:\s*markdown\s*-->/i.test(code);
+		return /<!-{2}\s*type:\s*markdown\s*-->/i.test(code);
 	}
 
 	/** Build a markdown-typed artifact: same collapsed-pill chrome as the iframe
@@ -138,7 +140,7 @@
 	 *  original text (not the rendered HTML). */
 	function buildMarkdownArtifact(code: string, artifactId = ''): string {
 		const { title, clean } = extractTitle(code);
-		const body = clean.replace(/<!--\s*type:\s*markdown\s*-->\s*/i, '').trim();
+		const body = clean.replace(/<!-{2}\s*type:\s*markdown\s*-->\s*/i, '').trim();
 		const displayTitle = title || 'Artifact';
 		const safeTitle = escapeHtml(displayTitle);
 		const rendered = DOMPurify.sanitize(marked.parse(fixMarkdownPreprocessing(body), { async: false }) as string);
@@ -166,7 +168,7 @@
 
 	/** Return the data-artifact type if the fence body is marked as one. */
 	function artifactDataType(code: string): string | null {
-		const m = code.match(/<!--\s*type:\s*(csv|tsv|json|text)\s*-->/i);
+		const m = code.match(/<!-{2}\s*type:\s*(csv|tsv|json|text)\s*-->/i);
 		return m ? m[1]!.toLowerCase() : null;
 	}
 
@@ -179,7 +181,7 @@
 		const { title, clean } = extractTitle(code);
 		// Anchored: only strip the leading marker we ourselves prepended, never
 		// a literal `<!-- type: … -->` that happens to sit inside the data.
-		const body = clean.replace(/^<!--\s*type:\s*\w+\s*-->\s*/i, '').trim();
+		const body = clean.replace(/^<!-{2}\s*type:\s*\w+\s*-->\s*/i, '').trim();
 		const safeTitle = escapeHtml(title || 'Data');
 		const encodedRaw = btoa(unescape(encodeURIComponent(body)));
 		const lines = body.split('\n');
@@ -212,10 +214,11 @@
 		const dataType = artifactDataType(src);
 		if (dataType) return { markup: buildDataArtifact(src, dataType, artifactId), frame: null };
 		const { title, clean } = extractTitle(src);
-		// PRD-LIGHT-MODE PR 2a — srcdoc is sandboxed; CSS-vars from parent don't
-		// inherit into the iframe document. Read the theme at render time and
-		// inject matching styles. Theme-flip invalidates richCache (downstream
-		// $effect on getResolvedTheme) so srcdoc is regenerated.
+		// PRD-LIGHT-MODE PR 2a — the frame document runs on the sandboxed frame
+		// endpoint; CSS-vars from parent don't inherit into it. Read the theme at
+		// render time and inject matching styles. Theme-flip clears richCache and
+		// frameCache (downstream $effect on getResolvedTheme), so the frame
+		// document is rebuilt and gets a new frame element.
 		// ⚠ NOTHING about the frame's head is composed here any more — not the
 		// policy, not the viewport, not the default colours or the overflow fix.
 		// A mutation round emptied the head string this used to build and nothing
@@ -233,7 +236,7 @@
 		const encoded = btoa(unescape(encodeURIComponent(fullHtml)));
 		const displayTitle = title || 'Artifact';
 		const safeTitle = escapeHtml(displayTitle);
-		const typeMatch = src.match(/<!--\s*type:\s*([a-z]+)\s*-->/i);
+		const typeMatch = src.match(/<!-{2}\s*type:\s*([a-z]+)\s*-->/i);
 		const typeKey = typeMatch ? typeMatch[1]!.toLowerCase() : 'html';
 		const typeLabel = typeKey.toUpperCase();
 		const idAttr = artifactId ? ` data-artifact-id="${escapeHtml(artifactId)}"` : '';
@@ -307,7 +310,7 @@
 	// viewport-unit scan is cached (`vu`) since style text doesn't change after
 	// load, so each ResizeObserver tick only re-reads scrollHeight/innerHeight
 	// instead of re-walking the whole DOM. (String backslashes are doubled so the
-	// emitted srcdoc carries a valid `\d`/`\b` regex literal.)
+	// script written into the frame document carries a valid `\d`/`\b` regex literal.)
 	/**
 	 * The resize script's CODE, not a markup string. It is inserted as a
 	 * `script` element's `textContent` (see `injectIntoArtifactFrame`), so the
@@ -625,35 +628,58 @@
 	 * differ, something on the page is not what this view built, and no slot gets a frame.
 	 *
 	 * A slot whose document did not change gets its previous frame element back (it reloads on
-	 * insertion, the browser gives a moved frame a new window), and a rebuilt one starts at the
-	 * last measured height, so a re-render does not collapse the card to the default height.
+	 * insertion, the browser gives a moved frame a new window). The previous frames are matched
+	 * by their document, not by their position: when a block before it changes, a frame keeps
+	 * its element even if its slot moved to another index. Equal documents are matched in the
+	 * order they appear. A frame element only ever shows one document (`attachArtifactFrame`),
+	 * so a slot with a new document gets a new element. That one starts at the last measured
+	 * height of the frame that held the same position, if no other slot kept that frame, so a
+	 * re-render (e.g. a theme flip, which changes every document) does not collapse the card to
+	 * the default height.
 	 */
 	function attachFrames(root: HTMLElement): void {
 		const slots = Array.from(root.querySelectorAll<HTMLElement>(`.artifact-frame-slot[${OWN_ATTR}]`));
 		const frames = slots.length === shownFrames.length ? shownFrames : [];
+		// The previous frames by document, in the order they appeared.
+		const byHtml = new Map<string, { html: string; iframe: HTMLIFrameElement }[]>();
+		for (const a of attached) {
+			const list = byHtml.get(a.html);
+			if (list) list.push(a);
+			else byHtml.set(a.html, [a]);
+		}
+		// First pass: every slot whose document had a frame takes that frame back.
+		const kept = new Map<number, { html: string; iframe: HTMLIFrameElement }>();
+		const claimed = new Set<HTMLIFrameElement>();
+		slots.forEach((_slot, i) => {
+			const html = frames[i];
+			if (html === undefined) return;
+			const prev = byHtml.get(html)?.shift();
+			if (!prev) return;
+			kept.set(i, prev);
+			claimed.add(prev.iframe);
+		});
 		const next: { html: string; iframe: HTMLIFrameElement }[] = [];
 		slots.forEach((slot, i) => {
 			const html = frames[i];
 			if (html === undefined) return;
-			const prev = attached[i];
-			if (prev && prev.html === html && prev.iframe.parentElement === slot) {
+			const prev = kept.get(i);
+			if (prev) {
+				// Already in place: appending it again would reload it.
+				if (prev.iframe.parentElement !== slot) slot.appendChild(prev.iframe);
+				attachArtifactFrame(prev.iframe, html);
 				next.push(prev);
 				return;
 			}
-			let iframe: HTMLIFrameElement;
-			if (prev && prev.html === html) {
-				iframe = prev.iframe;
-			} else {
-				iframe = document.createElement('iframe');
-				iframe.className = 'artifact-frame';
-				iframe.setAttribute('sandbox', 'allow-scripts');
-				iframe.setAttribute('scrolling', 'no');
-				iframe.setAttribute('loading', 'lazy');
-				if (prev) {
-					iframe.style.height = prev.iframe.style.height;
-					const cw = prev.iframe.dataset['cw'];
-					if (cw !== undefined) iframe.dataset['cw'] = cw;
-				}
+			const iframe = document.createElement('iframe');
+			iframe.className = 'artifact-frame';
+			iframe.setAttribute('sandbox', 'allow-scripts');
+			iframe.setAttribute('scrolling', 'no');
+			iframe.setAttribute('loading', 'lazy');
+			const before = attached[i];
+			if (before && !claimed.has(before.iframe)) {
+				iframe.style.height = before.iframe.style.height;
+				const cw = before.iframe.dataset['cw'];
+				if (cw !== undefined) iframe.dataset['cw'] = cw;
 			}
 			slot.appendChild(iframe);
 			attachArtifactFrame(iframe, html);
@@ -796,7 +822,7 @@
 	prose-headings:text-text prose-headings:font-medium prose-headings:tracking-tight
 	prose-p:leading-relaxed prose-li:leading-relaxed
 	prose-strong:text-text prose-strong:font-semibold">
-	<!-- eslint-disable-next-line svelte/no-at-html-tags -- baseHtml: renderSanitizedMarkdown (marked, DOMPurify, then link and table wrapping on the sanitized DOM). highlightedHtml: baseHtml re-parsed into an inert template, each whole fence element replaced by markup this file builds (Shiki output, escaped code, mermaid SVG at mermaid's default strict level with its action buttons (static icons, base64 source), mermaid error and reloading cards (escaped message and source), artifact cards with escaped values, sanitized markdown or a sandboxed iframe, static i18n strings), then serialized once (utils/code-fences.ts) -->
+	<!-- eslint-disable-next-line svelte/no-at-html-tags -- baseHtml: renderSanitizedMarkdown (marked, DOMPurify, then link and table wrapping on the sanitized DOM). highlightedHtml: baseHtml re-parsed into an inert template, each whole fence element replaced by markup this file builds (Shiki output, escaped code, mermaid SVG at mermaid's default strict level with its action buttons (static icons, base64 source), mermaid error and reloading cards (escaped message and source), artifact cards with escaped values, sanitized markdown or an empty frame slot that `attachFrames` fills with a frame on the sandboxed endpoint, static i18n strings), then serialized once (utils/code-fences.ts) -->
 	{@html highlightedHtml || baseHtml}
 </div>
 

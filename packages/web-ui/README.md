@@ -41,6 +41,8 @@ Domain views: `KnowledgeGraphView`, `MemoryInsightsView`, `MemoryView`, `History
 
 UI: `CommandPalette`, `StatusBar`, `ContextPanel`, `MarkdownRenderer`, `ChangesetReview`, `ToastContainer`, `MobileAccess`, `ColdStartBanner`, `KeyboardShortcutsHelp`, `PromptAnchor`, `StreamingActivityBar`, `ToolToggles`.
 
+`MarkdownRenderer` and `ArtifactsView` (and every view that renders chat messages with them) show HTML artifacts in sandboxed frames on the route `/_artifact-frame`, and print through it. The host app has to serve that route itself with `artifactFrameResponse` (`src/lib/server/artifact-frame-endpoint.ts`), as `src/routes/_artifact-frame/+server.ts` in the lynox repo does; it is not part of the packaged library. Without it, artifacts stay blank.
+
 Primitives: `Checkbox`, `Icon` (+ `IconName` type).
 
 For the authoritative list, see [`packages/web-ui/src/lib/index.ts`](https://github.com/lynox-ai/lynox/blob/main/packages/web-ui/src/lib/index.ts) in the repo.

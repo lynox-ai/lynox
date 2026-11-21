@@ -76,7 +76,7 @@ describe('a registered frame', () => {
 		expect(sent).toEqual([{ type: FRAME_RENDER, html: '<p>doc</p>' }]);
 	});
 
-	it('keeps its src and key when it is attached again with the same document, and gets a new key for a new one', () => {
+	it('keeps its src and key when it is attached again with the same document', () => {
 		const { iframe } = frame();
 		attachArtifactFrame(iframe, '<p>doc</p>');
 		const src = iframe.getAttribute('src');
@@ -84,9 +84,16 @@ describe('a registered frame', () => {
 		attachArtifactFrame(iframe, '<p>doc</p>');
 		expect(iframe.getAttribute('src')).toBe(src);
 		expect(set).not.toHaveBeenCalled();
-		attachArtifactFrame(iframe, '<p>new</p>');
-		expect(iframe.getAttribute('src')).not.toBe(src);
-		expect(keyOf(iframe)).not.toBe(keyIn(src));
+	});
+
+	it('throws when the same element is attached with another document, and keeps serving the first', () => {
+		const { iframe, sent } = frame();
+		attachArtifactFrame(iframe, '<p>doc</p>');
+		const src = iframe.getAttribute('src');
+		expect(() => attachArtifactFrame(iframe, '<p>new</p>')).toThrow(/another document/);
+		expect(iframe.getAttribute('src')).toBe(src);
+		expect(answerFrameReady({ data: ready(keyIn(src)), origin: 'null', source: iframe.contentWindow })).toBe(true);
+		expect(sent).toEqual([{ type: FRAME_RENDER, html: '<p>doc</p>' }]);
 	});
 
 	it('keeps its key when it is moved and gets a new window, and the new window is answered with it', () => {

@@ -360,7 +360,7 @@ const OVERFLOW_FIX =
 
 /**
  * The frame's own styling for an artifact that brought NO document of its own.
- * An iframe srcdoc does not inherit the parent's CSS variables, so a fragment
+ * A frame document does not inherit the parent's CSS variables, so a fragment
  * would otherwise render black-on-white inside a dark app.
  */
 function fragmentDefaults(theme: 'light' | 'dark'): string {
@@ -371,7 +371,8 @@ function fragmentDefaults(theme: 'light' | 'dark'): string {
 }
 
 /**
- * The srcdoc for the INLINE artifact bubble.
+ * The frame document for the INLINE artifact bubble: the endpoint writes it into its
+ * sandboxed frame (see `artifact-frame-host.ts`).
  *
  * ## Why the head is built here and not by the component
  *
@@ -404,7 +405,8 @@ export function buildArtifactBubbleFrame(
 }
 
 /**
- * Build the srcdoc for a fullscreen artifact preview: the CSP and a default
+ * Build the frame document for a fullscreen artifact preview (written into the
+ * sandboxed endpoint frame): the CSP and a default
  * viewport first in `<head>`, the fit-to-width script last in `<body>`.
  *
  * ⚠ This docstring used to say "Pure string transform — DOM-free so it is

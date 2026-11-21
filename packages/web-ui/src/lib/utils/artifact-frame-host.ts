@@ -107,13 +107,22 @@ function listen(): void {
 /**
  * Register a frame that is already in the document, then point it at the endpoint. The order
  * matters: registered first, so its `ready` can never arrive before its entry exists.
+ *
+ * One document per frame element. Attaching the same element again with the same document is
+ * fine (a frame that was moved). Attaching it with ANOTHER document throws: only the fragment of
+ * `src` would change, and a fragment change does not reload the endpoint, so no new `ready`
+ * would come and the frame would keep showing the old document. A caller with a new document
+ * builds a new element.
  */
 export function attachArtifactFrame(iframe: HTMLIFrameElement, html: string): void {
+	const prior = frameKeys.get(iframe);
+	if (prior && prior.html !== html) {
+		throw new Error('attachArtifactFrame: this frame already shows another document; build a new frame element for a new document');
+	}
 	const win = iframe.contentWindow;
 	if (!win) return;
 	// The same document in the same frame keeps its key, so its `src` stays the same.
-	const prior = frameKeys.get(iframe);
-	const key = prior && prior.html === html ? prior.key : newKey();
+	const key = prior ? prior.key : newKey();
 	frameKeys.set(iframe, { html, key });
 	entries.set(win, { html, key, iframe, once: false });
 	listen();
