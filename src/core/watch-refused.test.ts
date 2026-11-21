@@ -30,15 +30,19 @@ describe('watchRefusedNow', () => {
   it('tells the model both steps when the https address would be refused too', () => {
     expect(watchPolicyRefusal('http://other.example/p', ctx('allow-list', true))).toEqual({
       why: "its host other.example is not in this instance's network allow-list.",
-      wayOut: 'The operator can add the host to the allow-list (network_policy). The watch also needs the https:// address, since this instance only reads HTTPS pages (enforce_https).',
+      wayOut: 'The operator can add the host to the allow-list (network_policy). The address must also be https://, since this instance only reads HTTPS pages (enforce_https).',
       shown: { kind: 'watch_allow_list', host: 'other.example' },
     });
     expect(watchPolicyRefusal('http://listed.example/p', ctx('deny-all', true))).toEqual({
       why: "this instance's network_policy is deny-all, so lynox reads no web page.",
-      wayOut: 'Only the operator can change network_policy. The watch also needs the https:// address, since this instance only reads HTTPS pages (enforce_https).',
+      wayOut: 'Only the operator can change network_policy. The address must also be https://, since this instance only reads HTTPS pages (enforce_https).',
       shown: { kind: 'watch_deny_all' },
     });
     expect(watchPolicyRefusal('http://listed.example/p', ctx('allow-list', true))).toEqual({
+      why: 'this instance only reads HTTPS pages (enforce_https).', wayOut: 'Watch the https:// address instead.', shown: { kind: 'watch_https' },
+    });
+    // A private address is refused at https too, but by no policy setting: the https reason stays.
+    expect(watchPolicyRefusal('http://10.0.0.1/p', ctx('guarded', true))).toEqual({
       why: 'this instance only reads HTTPS pages (enforce_https).', wayOut: 'Watch the https:// address instead.', shown: { kind: 'watch_https' },
     });
   });

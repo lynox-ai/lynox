@@ -1291,13 +1291,13 @@ export function watchPolicyRefusal(url: string, ctx: HostPolicyContext | undefin
     return null;
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    if (message.includes('unsupported protocol') || err instanceof TypeError) return { why: 'it is not an http or https address.', wayOut: '', shown: null };
-    // enforce_https is checked first; when the https address would be refused too, that reason
-    // is the one to tell, since switching to https alone would not help, and the way out names
-    // both steps.
+    if (message.startsWith('Blocked: unsupported protocol') || err instanceof TypeError) return { why: 'it is not an http or https address.', wayOut: '', shown: null };
+    // enforce_https is checked first; when the policy would refuse the https address too, that
+    // reason is the one to tell, since switching to https alone would not help, and the way out
+    // names both steps. Another refusal of the https address keeps the https reason.
     if (message.startsWith(HTTPS_REFUSAL_START) && /^http:/i.test(url)) {
       const deeper = watchPolicyRefusal(`https:${url.slice('http:'.length)}`, ctx);
-      if (deeper !== null) return { ...deeper, wayOut: `${deeper.wayOut} The watch also needs the https:// address, since this instance only reads HTTPS pages (enforce_https).`.trim() };
+      if (deeper !== null && deeper.shown !== null) return { ...deeper, wayOut: `${deeper.wayOut} The address must also be https://, since this instance only reads HTTPS pages (enforce_https).` };
     }
     if (message === DENY_ALL_REFUSAL) {
       return { why: 'this instance\'s network_policy is deny-all, so lynox reads no web page.', wayOut: 'Only the operator can change network_policy.', shown: { kind: 'watch_deny_all' } };
