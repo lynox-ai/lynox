@@ -598,9 +598,9 @@ describe('the stamp part names settings, and shows no stored value', () => {
 		expect(settings).not.toMatch(/\bautonomous\b|\bnotify\b/);
 	});
 
-	it('the other values have their own names', async () => {
+	it('the interactive mode and the continue strategy are named too', async () => {
 		await openStamp(twoSteps('d1', undefined, { mode: 'interactive', onFailure: 'continue' }));
-		expect(q('stamp-mode')?.textContent?.trim()).toBe('Mit Fragen an dich');
+		expect(q('stamp-mode')?.textContent?.trim()).toBe('Mit Fragen');
 		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Weitermachen');
 	});
 

@@ -183,7 +183,7 @@ const MODE_KEYS: ReadonlyMap<string, string> = new Map([
 const ON_FAILURE_KEYS: ReadonlyMap<string, string> = new Map([
   ['stop', 'workflow_library.stamp.on_failure_stop'],
   ['continue', 'workflow_library.stamp.on_failure_continue'],
-  ['notify', 'workflow_library.stamp.on_failure_notify'],
+  ['notify', 'workflow_library.stamp.on_failure_continue'],
 ]);
 /** The key of a mode's name, or null for a mode this view does not know. */
 export function modeKey(mode: string): string | null {
@@ -210,7 +210,14 @@ export interface StampChanges {
  * is not marked.
  */
 export function stampChanges<P extends StampPreview>(before: P, after: P, stepKey: (p: P, i: number) => string = (p, i) => JSON.stringify(p.steps[i])): StampChanges {
-  const settingsOf = (p: P): string => JSON.stringify([p.mode, p.onFailure, p.limits, p.parameters, p.contract]);
+  // Mode and failure strategy by what the view shows for them: two values with one name (notify and
+  // continue) are no change the owner could find.
+  const shown = (key: string | null, raw: string | null): string | null => key ?? raw;
+  const settingsOf = (p: P): string => JSON.stringify([
+    p.mode === null ? null : shown(modeKey(p.mode), p.mode),
+    p.onFailure === null ? null : shown(onFailureKey(p.onFailure), p.onFailure),
+    p.limits, p.parameters, p.contract,
+  ]);
   const was = new Map<string, string>();
   before.steps.forEach((s, i) => { if (!was.has(s.id)) was.set(s.id, stepKey(before, i)); });
   const steps = new Set<number>();

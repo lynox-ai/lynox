@@ -181,7 +181,8 @@ describe('modeKey, onFailureKey — a sentence for each value the engine knows, 
     expect(modeKey('autonomous')).toBe('workflow_library.stamp.mode_autonomous');
     expect(onFailureKey('stop')).toBe('workflow_library.stamp.on_failure_stop');
     expect(onFailureKey('continue')).toBe('workflow_library.stamp.on_failure_continue');
-    expect(onFailureKey('notify')).toBe('workflow_library.stamp.on_failure_notify');
+    // notify runs as continue does and reports to no one: it carries continue's name.
+    expect(onFailureKey('notify')).toBe('workflow_library.stamp.on_failure_continue');
   });
 
   it('has no sentence for another value, an inherited name among them', () => {
@@ -224,6 +225,12 @@ describe('stampChanges — what moved between the version shown and the one load
       expect(c.settings, JSON.stringify(over)).toBe(true);
       expect([...c.steps], JSON.stringify(over)).toEqual([]);
     }
+  });
+
+  it('a change between two values with one name (continue, notify) marks nothing', () => {
+    expect(stampChanges(p({ onFailure: 'continue' }), p({ onFailure: 'notify' })).settings).toBe(false);
+    // An unknown value is compared as it came.
+    expect(stampChanges(p({ onFailure: 'halt' }), p({ onFailure: 'Halt' })).settings).toBe(true);
   });
 
   it('compares what the caller says a step shows', () => {
