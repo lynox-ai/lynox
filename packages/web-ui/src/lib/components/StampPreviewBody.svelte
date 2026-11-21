@@ -89,7 +89,7 @@
 			<!-- A step has no name, so its id heads it, after a word that says what it is. No number:
 			     the engine starts steps by what they depend on, not by their place in this list, and a
 			     number would claim an order. The task follows once, whole. -->
-			<p data-testid="stamp-step-head" class="flex flex-wrap items-baseline gap-x-2 gap-y-1"><span class="font-medium">{t('workflow_library.stamp.step')}</span>{' '}<span class="font-mono text-text-subtle {WRAP}">{visible(step.id)}</span>{#if changed}{@render changedMark()}{/if}</p>
+			<p data-testid="stamp-step-head" class="flex flex-wrap items-baseline gap-x-2 gap-y-1"><span class="font-medium">{t('workflow_library.stamp.step')}</span> <span class="font-mono text-text-subtle {WRAP}">{visible(step.id)}</span>{#if changed}{@render changedMark()}{/if}</p>
 			{#if stepNote}
 				{@const note = stepNote(i)}
 				{#if note !== null}
