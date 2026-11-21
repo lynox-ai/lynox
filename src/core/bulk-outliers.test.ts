@@ -406,6 +406,9 @@ describe('markersOf', () => {
       expect([...markersOf(text).get('link')!], text).toContain('evil.com');
     }
     expect([...markersOf('<p>Neu<p style="display:inline">evil</p>.com').get('link')!]).toContain('evil.com');
+    for (const text of ['evil<script>x</script>.com', 'evil<style>x{}</style>.com', 'evil<div style="float\t:\tleft"></div>.com']) {
+      expect([...markersOf(text).get('link')!], text).toContain('evil.com');
+    }
     for (const text of ['evil<p STYLE="display:inline">.com', 'evil<BR STYLE=display:none>.com', 'evil<p sTyLe=x;display:inline>.com', 'evil<dialog></dialog>.com', 'evil<BR HIDDEN>.com']) {
       expect([...markersOf(text).get('link')!], text).toEqual(['evil.com']);
     }
@@ -556,5 +559,9 @@ describe('markersOf beyond the tree it reads', () => {
   it('leaves a text beyond the reading bounds to checkMarkup, which refuses to write it', () => {
     const after = '<p>x</p>'.repeat(MARKUP_MAX_TAGS) + 'evil<p hidden></p>.com';
     expect(checkMarkup({ before: '<p>x</p>', after, storeHost: 'moebel-meier.myshopify.com', startDomains: [] }).ok).toBe(false);
+  });
+
+  it('still reads a text beyond the reading bounds by its tags', () => {
+    expect([...markersOf('<p>x</p>'.repeat(MARKUP_MAX_TAGS) + 'evil<b></b>.com').get('link')!]).toEqual(['evil.com']);
   });
 });
