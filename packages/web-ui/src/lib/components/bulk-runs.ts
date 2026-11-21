@@ -1382,7 +1382,8 @@ export interface BulkJudgeOutliers {
 	decided: number;
 	measured: boolean;
 	flagged: { seq: number; reasons: BulkOutlierReason[] }[];
-	spread: { kind: BulkMarkerKind; count: number; hosts: string[] }[];
+	/** `marked`: how many of `hosts`, at its start, mark a row; absent counts as none. */
+	spread: { kind: BulkMarkerKind; count: number; hosts: string[]; marked?: number }[];
 }
 
 /** How many flagged verdicts the view lists first; the count line names the rest (U-387). */
@@ -1412,15 +1413,21 @@ export function bulkOutlierCountText(outliers: BulkJudgeOutliers | null | undefi
 	return i18n.tf(bulkOne('bulk.outliers.count', n), { n: String(n) });
 }
 
-/** The lines for a kind of marker many verdicts add (U-387 Nachtrag): count, kind and up to five hosts
- *  as text, never as a link, with the way out. */
+/** How many hosts that mark no row a line names; the rest it counts. */
+export const BULK_SPREAD_UNMARKED_SHOWN = 5;
+
+/** The lines for a kind of marker many verdicts add (U-387 Nachtrag): count, kind and hosts as text,
+ *  never as a link, with the way out. Every host that marks a row is named, first: past the first
+ *  fifty flagged rows the line is the one place it shows. Of the others up to five, then how many more. */
 export function bulkOutlierSpreadTexts(outliers: BulkJudgeOutliers | null | undefined, i18n: BulkI18n): string[] {
 	if (!outliers) return [];
 	return outliers.spread.map((s) => {
 		const n = String(s.count);
 		// A host is not running text: every hidden character in it is shown (`inPlace: false`).
-		const listed = s.hosts.slice(0, 5).map((h) => visibleText(h, { inPlace: false }));
-		const rest = s.hosts.length - listed.length;
+		const marked = Math.min(Math.max(s.marked ?? 0, 0), s.hosts.length);
+		const others = s.hosts.slice(marked);
+		const listed = [...s.hosts.slice(0, marked), ...others.slice(0, BULK_SPREAD_UNMARKED_SHOWN)].map((h) => visibleText(h, { inPlace: false }));
+		const rest = others.length - Math.min(others.length, BULK_SPREAD_UNMARKED_SHOWN);
 		const hosts = s.kind === 'link' || s.kind === 'email'
 			? (rest > 0
 				? i18n.tf(`bulk.outliers.spread.${s.kind}_hosts_more`, { hosts: listed.join(', '), k: String(rest) })

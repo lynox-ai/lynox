@@ -108,7 +108,7 @@ describe('judgeOutliers', () => {
   it('names a link that most verdicts add on a line for the run, and still flags each verdict whose host no before text holds', () => {
     const inputs = run(200, (t) => withAfter(t, { description: `${(t.after as Record<string, string>)['description']} Lieferant: https://feed-partner.example.biz/p` }));
     const result = judgeOutliers(inputs, OWN, KINDS);
-    expect(result.spread).toEqual([{ kind: 'link', count: 200, hosts: ['feed-partner.example.biz'] }]);
+    expect(result.spread).toEqual([{ kind: 'link', count: 200, hosts: ['feed-partner.example.biz'], marked: 1 }]);
     expect(result.flagged).toHaveLength(200);
     expect(result.flagged.every((f) => f.reasons.includes('new_link'))).toBe(true);
   });
@@ -120,7 +120,7 @@ describe('judgeOutliers', () => {
       return t;
     });
     const result = judgeOutliers(inputs, OWN, KINDS);
-    expect(result.spread).toEqual([{ kind: 'link', count: 35, hosts: ['tee-wissen.example.org'] }]);
+    expect(result.spread).toEqual([{ kind: 'link', count: 35, hosts: ['tee-wissen.example.org'], marked: 0 }]);
     expect(result.flagged).toEqual([]);
   });
 
@@ -205,7 +205,7 @@ describe('judgeOutliers on domains in other scripts, phone numbers and the own s
     }
   });
 
-  it('lists a verdict with a new link before many that only jump in length, and names a host that marks no row first', () => {
+  it('lists a verdict with a new link before many that only jump in length, and names a host that marks rows first, the rarest too', () => {
     const inputs = run(200, (t) => {
       const desc = (t.after as Record<string, string>)['description'];
       if (t.seq <= 60) return withAfter(t, { description: desc.repeat(6) });
@@ -214,7 +214,8 @@ describe('judgeOutliers on domains in other scripts, phone numbers and the own s
     });
     const flagged = judgeOutliers(inputs, OWN, KINDS).flagged;
     expect(flagged[0]).toEqual({ seq: 150, reasons: ['new_link'] });
-    // A host most verdicts add: the one some before-image holds is named before one with more rows.
+    // A host most verdicts add: the one that marks rows (no before-image holds it) is named first, even
+    // with fewer rows than one some before-image holds.
     const spreadInputs = run(200, (t) => {
       const desc = (t.after as Record<string, string>)['description'];
       if (t.seq === 1) return { ...t, before: { ...(t.before as object), note: 'Partner gepflanzt-shop.net' } };
@@ -222,7 +223,24 @@ describe('judgeOutliers on domains in other scripts, phone numbers and the own s
       if (t.seq <= 60) return withAfter(t, { description: `${desc} haeufig-shop.net` });
       return t;
     });
-    expect(judgeOutliers(spreadInputs, OWN, KINDS).spread.find((x) => x.kind === 'link')!.hosts).toEqual(['gepflanzt-shop.net', 'haeufig-shop.net']);
+    expect(judgeOutliers(spreadInputs, OWN, KINDS).spread.find((x) => x.kind === 'link')).toMatchObject({ hosts: ['haeufig-shop.net', 'gepflanzt-shop.net'], marked: 1 });
+    // The rarest host is the one that marks: seven hosts before-images hold, added often, and one no
+    // before-image holds, added once. It stands first; domains of addresses alike.
+    const rare = run(200, (t) => {
+      const desc = (t.after as Record<string, string>)['description'];
+      const common = ['eins-shop.net', 'zwei-shop.net', 'drei-shop.net', 'vier-shop.net', 'fuenf-shop.net', 'sechs-shop.net', 'sieben-shop.net'];
+      if (t.seq >= 150) return { ...t, before: { ...(t.before as object), note: `Partner ${common[t.seq % 7]!} info@${common[t.seq % 7]!}` } };
+      if (t.seq >= 20 && t.seq < 48) return withAfter(t, { description: `${desc} ${common[t.seq % 7]!} info@${common[t.seq % 7]!}` });
+      if (t.seq === 5) return withAfter(t, { description: `${desc} selten-direkt.net info@selten-direkt.net` });
+      return t;
+    });
+    const lines = judgeOutliers(rare, OWN, KINDS).spread;
+    for (const kind of ['link', 'email'] as const) {
+      const line = lines.find((x) => x.kind === kind)!;
+      expect(line.hosts[0], kind).toBe('selten-direkt.net');
+      expect(line.marked, kind).toBe(1);
+      expect(line.hosts, kind).toHaveLength(8);
+    }
   });
 
   it('does not flag a verdict that changes four fields where the run changes one or two, and flags one that changes all eight', () => {

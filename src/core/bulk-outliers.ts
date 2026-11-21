@@ -46,8 +46,13 @@ export interface SpreadMarker {
   kind: MarkerKind;
   /** How many verdicts add this kind. */
   count: number;
-  /** The hosts (links) or domains (addresses) they add, most frequent first; empty for phone and script. */
+  /** The hosts (links) or domains (addresses) they add: first those no before-image of the run holds,
+   *  which mark the rows that add them, then the others; each part most frequent first. Empty for
+   *  phone and script. */
   hosts: string[];
+  /** How many of {@link hosts}, at its start, mark a row. The view names every one of them: a host past
+   *  the first fifty flagged rows is not lifted, and the line is then the one place it shows. */
+  marked: number;
 }
 
 export interface OutlierResult {
@@ -559,10 +564,11 @@ export function judgeOutliers(
       if (kind === 'link' || kind === 'email') {
         for (const keys of perTarget.values()) for (const k of keys) hostCounts.set(k, (hostCounts.get(k) ?? 0) + 1);
       }
-      // A host some before-image of the run holds marks no row: it is named first, then by count.
-      const unmarked = (h: string): number => (inBefores.get(kind)!.has(h) ? 0 : 1);
-      const hosts = [...hostCounts].sort((a, b) => unmarked(a[0]) - unmarked(b[0]) || b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([h]) => h);
-      spread.push({ kind, count: perTarget.size, hosts });
+      // A host no before-image of the run holds marks its rows: those come first, then the others,
+      // each by count. The view names every marked one and up to five of the others.
+      const marks = (h: string): number => (inBefores.get(kind)!.has(h) ? 1 : 0);
+      const hosts = [...hostCounts].sort((a, b) => marks(a[0]) - marks(b[0]) || b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([h]) => h);
+      spread.push({ kind, count: perTarget.size, hosts, marked: hosts.filter((h) => !inBefores.get(kind)!.has(h)).length });
     }
   }
 

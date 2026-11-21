@@ -1806,6 +1806,27 @@ describe('verdicts that differ from the rest of the run', () => {
 		expect(target.querySelector('[data-testid="bulk-outlier-spread"] a')).toBeNull();
 	});
 
+	it('names every host that marks a row, first, and of the others five and how many more, for links and for addresses', async () => {
+		const marking = ['m1.example', 'm2.example', 'm3.example', 'm4.example', 'm5.example', 'm6.example', 'm7.example'];
+		const others = ['o1.example', 'o2.example', 'o3.example', 'o4.example', 'o5.example', 'o6.example', 'o7.example'];
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 20, hosts: [...marking, ...others], marked: 7 }, { kind: 'email', count: 20, hosts: [...marking, ...others], marked: 7 }] } });
+		targets = many(25);
+		await render();
+		for (const [i, kind] of (['link', 'email'] as const).entries()) {
+			expect(spread()[i], kind).toBe(tf(`bulk.outliers.spread.${kind}`, { n: '20', hosts: tf(`bulk.outliers.spread.${kind}_hosts_more`, { hosts: [...marking, ...others.slice(0, 5)].join(', '), k: '2' }) }));
+		}
+	});
+
+	it('names the one host that marks a row before seven that do not, and counts only those it leaves out', async () => {
+		const others = ['o1.example', 'o2.example', 'o3.example', 'o4.example', 'o5.example', 'o6.example', 'o7.example'];
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [{ seq: 5, reasons: ['new_link'] }],
+			spread: [{ kind: 'link', count: 15, hosts: ['selten.example', ...others], marked: 1 }] } });
+		targets = many(25);
+		await render();
+		expect(spread()).toEqual([tf('bulk.outliers.spread.link', { n: '15', hosts: tf('bulk.outliers.spread.link_hosts_more', { hosts: ['selten.example', ...others.slice(0, 5)].join(', '), k: '2' }) })]);
+	});
+
 	it('shows a hidden character in a host of that line instead of hiding it', async () => {
 		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
 			spread: [{ kind: 'link', count: 25, hosts: ['shop\u200b.example', 'sh\u200cop.example'] }] } });
