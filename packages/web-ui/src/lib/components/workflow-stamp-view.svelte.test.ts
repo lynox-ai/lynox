@@ -600,7 +600,7 @@ describe('the stamp part names settings, and shows no stored value', () => {
 
 	it('the interactive mode and the continue strategy are named too', async () => {
 		await openStamp(twoSteps('d1', undefined, { mode: 'interactive', onFailure: 'continue' }));
-		expect(q('stamp-mode')?.textContent?.trim()).toBe('Mit Fragen');
+		expect(q('stamp-mode')?.textContent?.trim()).toBe('Mit Rückfragen');
 		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Weitermachen');
 	});
 
@@ -613,7 +613,7 @@ describe('the stamp part names settings, and shows no stored value', () => {
 
 	it('the stop strategy has its own name', async () => {
 		await openStamp(twoSteps('d1', undefined, { onFailure: 'stop' }));
-		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Anhalten');
+		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Keine weiteren Schritte starten');
 	});
 
 	it('heads each step with its id and no number, and prints the task once', async () => {

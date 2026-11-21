@@ -171,8 +171,10 @@ export function visible(text: string): string {
   return text.replace(HIDDEN, (c) => `<U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}>`);
 }
 
-// The name of each mode and failure strategy the engine knows, as a setting is named, not a promise
-// of how a run goes (a stop, for one, lets the steps of the failed step's phase finish). `notify`
+// The name of each mode and failure strategy the engine knows. A name says what a run does and
+// nothing it does not: a stop starts no further steps but lets the started steps of the failed
+// step's phase finish, and an interactive run asks questions without the name saying who answers
+// (a plan can run it too). `notify`
 // carries the name of `continue`: it runs the same and tells no one but a debug log, so a name
 // that promised a report would promise what no run does. A value outside these is printed as it
 // came (with hidden characters shown): no name is guessed for it.
