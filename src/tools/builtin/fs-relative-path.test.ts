@@ -91,6 +91,14 @@ describe('with isolation, the permission guard judges a relative path where the 
     expect(warning).not.toContain(cwd);
   });
 
+  it('names the workspace file when asking about emptying it by a relative path', () => {
+    writeFileSync(join(ws, 'report.md'), 'text');
+    writeFileSync(join(cwd, 'report.md'), 'text');
+    const warning = isDangerous('write_file', { path: 'report.md', content: '' });
+    expect(warning).toContain(join(ws, 'report.md'));
+    expect(warning).not.toContain(cwd);
+  });
+
   it('lets an unattended move within the workspace by relative paths through, and blocks one out of it', () => {
     mkdirSync(join(ws, 'in'));
     expect(isDangerous('batch_files', { directory: 'in', pattern: '*.txt', operation: 'move', destination: 'out' }, 'autonomous')).toBeNull();

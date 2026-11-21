@@ -2019,7 +2019,8 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   // against the process cwd that check would judge a path the tool never writes.
   if ((toolName === 'write_file' || toolName === 'edit_file') && input && typeof input === 'object' && 'path' in input) {
     const rawPath = asPath('path', String((input as { path: unknown }).path));
-    const filePath = resolveRealPath(rawPath);
+    // Read from the workspace under isolation as the tool reads it, so a prompt names that file.
+    const filePath = resolveRealPath(resolveToolPath(rawPath));
     // The file the tool writes, as its handler resolves it (`ToolEntry.writeTarget`): without a
     // workspace a path is confined to the data dir's workspace and a link in it is followed, so the
     // file written need not be the path as written. Both are read; null means the tool refuses it.
