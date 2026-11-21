@@ -17,9 +17,9 @@
 // child reads what its parent's searches listed (a listed address is the provider's either way). A
 // reloaded thread starts empty, which asks more, not less.
 //
-// The holder also keeps the HOSTS of those results, for the shell's egress set, but only for a search
-// sent while the conversation had taken in no foreign content: a search sent after that may have been
-// worded by an injection to list the host it wants to reach.
+// The HOSTS of those results do not join the shell's egress set. A search arms the conversation's
+// latch when it is dispatched, before its results exist, so every batch after it starts tainted, and
+// a shell call whose batch started tainted takes no search's hosts (src/shell-sidecar/egress.ts).
 
 /**
  * An address as it is fetched: the WHATWG form `new URL()` gives, the one the request is built from.
@@ -51,43 +51,18 @@ function formsOf(raw: string, fetched: string): string[] {
   return forms;
 }
 
-/** The most result hosts the shell's egress set takes from searches; the oldest leave first. */
-export const MAX_RESULT_HOSTS = 128;
-
 export class SearchResultAddresses {
   private readonly _seen = new Set<string>();
-  /** Insertion order is age: a host noted again moves to the end. */
-  private readonly _cleanHosts = new Set<string>();
 
-  /**
-   * Notes the result addresses of one search for `query`. `sentUntainted`: the search was sent
-   * while the conversation had taken in no foreign content; only then do its hosts count for the
-   * shell (`cleanHosts`).
-   */
-  noteResults(query: string, addresses: readonly string[], sentUntainted = false): void {
+  /** Notes the result addresses of one search for `query`. */
+  noteResults(query: string, addresses: readonly string[]): void {
     const q = query.trim().toLowerCase();
     for (const raw of addresses) {
       const address = fetchedForm(raw);
       if (address === null) continue;
       if (q !== '' && formsOf(raw, address).some((f) => f.includes(q) || q.includes(f))) continue;
       this._seen.add(address);
-      if (sentUntainted) this._noteHost(new URL(address).hostname);
     }
-  }
-
-  private _noteHost(host: string): void {
-    if (host === '') return;
-    this._cleanHosts.delete(host);
-    this._cleanHosts.add(host);
-    if (this._cleanHosts.size > MAX_RESULT_HOSTS) {
-      const oldest = this._cleanHosts.values().next().value;
-      if (oldest !== undefined) this._cleanHosts.delete(oldest);
-    }
-  }
-
-  /** The hosts of results from searches sent untainted, newest last. */
-  cleanHosts(): string[] {
-    return [...this._cleanHosts];
   }
 
   /** Whether a search listed this address, compared in the form it is fetched in. */
