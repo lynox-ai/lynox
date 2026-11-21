@@ -71,6 +71,9 @@
 		type UsageInfo,
 		type ToolCallInfo,
 		type ChatMessage,
+		getBudgetAudience,
+		learnBudgetAudience,
+		isInstanceSelfHosted,
 	} from '../stores/chat.svelte.js';
 	import type { PromptOrigin } from '../utils/prompt-origin.js';
 	import { getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
@@ -116,6 +119,7 @@
 	import OnboardingBasics from './OnboardingBasics.svelte';
 	import { canChooseModel, isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
+	import { budgetNoteLines, splitAtLink, type BudgetNoteRef } from '../utils/budget-note.js';
 	import { speakHttpFailureText, transcribeFailureText } from './voice-failure.js';
 	import { currentQuote, currentGreeting, startWallClock } from '../stores/wall-clock.svelte.js';
 	import { createMicSession, MicSessionReleased } from '../utils/mic-session.js';
@@ -535,7 +539,7 @@
 		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> }
 		| { type: 'spawn'; spawnId: string }
 		| { type: 'answer'; text: string }
-		| { type: 'notice'; code: string; text: string };
+		| { type: 'notice'; code: string; text: string; budget?: BudgetNoteRef };
 
 	/** Wrap artifact content in a fenced code block whose delimiter is long
 	 *  enough to survive any backtick run inside the content. CommonMark closes
@@ -601,7 +605,7 @@
 			} else if (block.type === 'answer') {
 				result.push({ type: 'answer', text: block.text });
 			} else if (block.type === 'notice') {
-				result.push({ type: 'notice', code: block.code, text: block.text });
+				result.push(block.budget ? { type: 'notice', code: block.code, text: block.text, budget: block.budget } : { type: 'notice', code: block.code, text: block.text });
 			} else if (block.type === 'spawn') {
 				// Never folded into a neighbouring group: a delegation is its own
 				// panel, and two batches in a row must stay two panels.
@@ -1474,6 +1478,11 @@
 	$effect(() => { if (!isStreaming && !pendingPermission && answeredPrompts.length > 0) answeredPrompts = []; });
 
 	const messages = $derived(getMessages());
+	// A note for a capped message names a step by who can change the cap; whichever way the note
+	// arrived (live, from the server, from this browser's copy), ask for that once.
+	$effect(() => {
+		if (messages.some((m) => m.note?.budget !== undefined || (m.blocks?.some((b) => b.type === 'notice' && b.budget !== undefined) ?? false))) learnBudgetAudience();
+	});
 	const isStreaming = $derived(getIsStreaming());
 	const streamActivity = $derived(getStreamingActivity());
 	const streamToolName = $derived(getStreamingToolName());
@@ -2367,7 +2376,7 @@
 	</button>
 {/snippet}
 
-{#snippet noteRow(note: { code: string; detail?: string; approval?: { id: string; outcome: string } })}
+{#snippet noteRow(note: { code: string; detail?: string; approval?: { id: string; outcome: string }; budget?: BudgetNoteRef })}
 	<!-- B-full failure note (display-only, survives reload). Localized
 	     from the engine's structured code; the raw provider detail is
 	     a small monospace line so the user can debug without it
@@ -2379,6 +2388,8 @@
 	     the words the chat showed live, so that sentence is the body, not a debug line. -->
 	{@const refusedSentence = note.code === 'content_refused' && note.detail ? note.detail : undefined}
 	{@const noteBody = refusedSentence ?? (t(noteKey) === noteKey ? t('chat.note.generic') : t(noteKey))}
+	<!-- A message the spending cap blocked: why, when it opens again, and who can change it. -->
+	{@const budgetLines = note.code === 'run_blocked' && note.budget ? budgetNoteLines(note.budget, getBudgetAudience(), isInstanceSelfHosted(), new Date(), getLocale()) : undefined}
 	{@const titleKey = `chat.note.${note.code}.title`}
 	{@const noteTitle = t(titleKey) === titleKey ? t('chat.note.title') : t(titleKey)}
 	{@const isInfoNote = note.code === 'context_compacted' || note.code === 'run_interrupted' || note.code === 'tool_loop_break' || note.code === 'continuation_loop' || note.code === 'thinking_loop' || note.code === 'tool_call_imitation' || note.code === 'turn_limit' || note.code === 'cost_budget' || note.code === 'input_required' || note.code === 'approval_sent' || note.code === 'content_refused' || note.code === 'run_blocked'}
@@ -2391,6 +2402,14 @@
 		<div class="min-w-0">
 			<div class="text-text-muted">{noteTitle}</div>
 			<div class="text-text-subtle">{noteBody}</div>
+			{#if budgetLines}
+				<div class="text-text-subtle" data-budget-reason>{tf(budgetLines.reasonKey, budgetLines.reasonVars)}</div>
+				{#if budgetLines.nextKey}
+					<!-- Only the place the step leads to is a link; the rest of the step is plain text. -->
+					{@const stepParts = budgetLines.href && budgetLines.linkKey ? splitAtLink(t(budgetLines.nextKey)) : null}
+					<div class="text-text-subtle" data-budget-next>{#if stepParts && budgetLines.linkKey}{stepParts.before}<a href={budgetLines.href} class="text-accent hover:underline">{t(budgetLines.linkKey)}</a>{stepParts.after}{:else}{t(budgetLines.nextKey)}{/if}</div>
+				{/if}
+			{/if}
 			{#if (note.code === 'thinking_loop' || note.code === 'tool_call_imitation') && canChooseModel()}
 				<div class="text-text-subtle" data-model-choice>{t('chat.note.thinking_loop.model')}</div>
 			{/if}
@@ -2406,7 +2425,14 @@
 					<button type="button" class="mt-1 inline-flex min-h-6 items-center rounded-[var(--radius-sm)] border border-border px-3 py-1 text-xs text-text-muted hover:text-text" onclick={() => rewriteApprovalInChat(rewriteId)} data-approval-rewrite>{t('chat.note.approval_rewrite')}</button>
 				</div>
 			{/if}
-			{#if note.detail && refusedSentence === undefined}
+			{#if note.detail && refusedSentence === undefined && budgetLines}
+				<!-- A capped message's note says it in the reader's words; the engine's English
+				     sentence is for debugging and waits behind Details. -->
+				<details class="mt-1" data-budget-details>
+					<summary class="cursor-pointer text-[11px] text-text-subtle/80">{t('chat.note.budget.details')}</summary>
+					<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words" lang="en">{note.detail}</div>
+				</details>
+			{:else if note.detail && refusedSentence === undefined}
 				<!-- A blocked run's reason is the engine's English sentence. -->
 				<div class="mt-1 font-mono text-[11px] text-text-subtle/60 break-words" lang={note.code === 'run_blocked' ? 'en' : undefined}>{note.detail}</div>
 			{/if}
@@ -2977,7 +3003,7 @@
 							{:else if gBlock.type === 'notice'}
 								<!-- The run ended with lynox's own sentence, not a model reply: shown as the
 								     same note a reload shows, without the AI mark. -->
-								<div data-engine-notice data-ai-generated="false">{@render noteRow({ code: gBlock.code, detail: gBlock.text })}</div>
+								<div data-engine-notice data-ai-generated="false">{@render noteRow(gBlock.budget ? { code: gBlock.code, detail: gBlock.text, budget: gBlock.budget } : { code: gBlock.code, detail: gBlock.text })}</div>
 							{:else if gBlock.type === 'answer'}
 								<p class="text-xs text-text-subtle pl-3" data-typed-answer data-ai-generated="false">{t('chat.typed_answer')} <span class="font-mono">"{gBlock.text}"</span></p>
 							{:else if gBlock.type === 'thinking' && gBlock.text}

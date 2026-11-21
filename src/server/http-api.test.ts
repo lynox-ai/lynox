@@ -252,6 +252,7 @@ const mockSessionInstance = {
   getChangesetManager: vi.fn().mockReturnValue(null),
   getLastRunUsage: vi.fn().mockReturnValue(null),
   getLastRunNotice: vi.fn().mockReturnValue(undefined),
+  getLastRunBudget: vi.fn().mockReturnValue(undefined),
   getAgent: vi.fn().mockReturnValue(null),
   sessionId: 'mock-session-id',
 };
@@ -2943,12 +2944,21 @@ describe('LynoxHTTPApi', () => {
       expect(doneFrame(await res.text())).toMatchObject({ notice: 'content_refused' });
     });
 
+    it('done names the cap a blocked run reached, as the session reports it', async () => {
+      mockSessionRun.mockResolvedValueOnce('Daily spending cap ($5) reached. Today: $5.12.');
+      mockSessionInstance.getLastRunNotice.mockReturnValueOnce('run_blocked');
+      mockSessionInstance.getLastRunBudget.mockReturnValueOnce({ cap: 'daily', limitUSD: 5, spentUSD: 5.12 });
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'x' }) });
+      expect(doneFrame(await res.text())).toMatchObject({ notice: 'run_blocked', budget: { cap: 'daily', limitUSD: 5, spentUSD: 5.12 } });
+    });
+
     it('control: a model reply\'s done carries no notice', async () => {
       mockSessionRun.mockResolvedValueOnce('Paris.');
       const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'capital of France' }) });
       const done = doneFrame(await res.text());
       expect(done['result']).toBe('Paris.');
       expect('notice' in done).toBe(false);
+      expect('budget' in done).toBe(false);
     });
 
     it('a run that ended needing input carries no notice: its question may be the model\'s own words', async () => {

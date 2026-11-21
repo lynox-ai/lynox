@@ -13,6 +13,8 @@
  * plain data, and a reducer is worth testing on its own.
  */
 
+import type { BudgetNoteRef } from '../utils/budget-note.js';
+
 import { normalizeTier, type ModelTier } from '../contract/vocab.js';
 import { containedReason, type ContainedRefusalReason } from './contained-way-out.js';
 
@@ -94,7 +96,7 @@ export type ContentBlock =
 	| { type: 'answer'; text: string }
 	/** The run ended with a sentence of lynox's own instead of a model reply (`done.notice`):
 	 *  shown as a lynox note, without the AI mark. `code` is the note code it renders as. */
-	| { type: 'notice'; code: string; text: string };
+	| { type: 'notice'; code: string; text: string; budget?: BudgetNoteRef };
 
 /**
  * The slice of a chat message this module owns.

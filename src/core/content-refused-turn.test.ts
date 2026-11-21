@@ -16,7 +16,7 @@ const { mockProcess, streamParams, budget } = vi.hoisted(() => ({
   mockProcess: vi.fn(),
   streamParams: [] as Array<{ messages: BetaMessageParam[] }>,
   /** Set to a reason to have the persistent budget refuse the next run. */
-  budget: { refuse: undefined as string | undefined },
+  budget: { refuse: undefined as string | undefined, override: {} as Record<string, unknown> },
 }));
 
 vi.mock('./session-budget.js', async (importOriginal) => {
@@ -25,7 +25,7 @@ vi.mock('./session-budget.js', async (importOriginal) => {
     ...actual,
     checkPersistentBudget: () => budget.refuse === undefined
       ? actual.checkPersistentBudget()
-      : { allowed: false, todayCostUSD: 5, monthCostUSD: 5, dailyLimitUSD: 5, monthlyLimitUSD: null, reason: budget.refuse },
+      : { allowed: false, todayCostUSD: 5.12, monthCostUSD: 5.12, dailyLimitUSD: 5, monthlyLimitUSD: null, reason: budget.refuse, ...budget.override },
   };
 });
 
@@ -87,6 +87,7 @@ async function boot(config: Partial<LynoxConfig> = {}): Promise<Engine> {
 
 beforeEach(() => {
   budget.refuse = undefined;
+  budget.override = {};
   mockProcess.mockReset();
   streamParams.length = 0;
 });
@@ -274,7 +275,7 @@ describe('a message the budget or a run hook blocked is kept for the person, not
     const rows = shown(engine, session);
     expect(rows.map((r) => r.role)).toEqual(['user', 'assistant']);
     expect(rows[0]!.content).toBe('summarise the quarter');
-    expect(rows[1]!.note).toEqual({ code: 'run_blocked', detail: CAP });
+    expect(rows[1]!.note).toEqual({ code: 'run_blocked', detail: CAP, budget: { cap: 'daily', limitUSD: 5, spentUSD: 5.12 } });
     expect(engine.getThreadStore()!.getMessages(session.sessionId, { apiOnly: true })).toEqual([]);
     expect(engine.getThreadStore()!.getThread(session.sessionId)?.message_count).toBe(2);
 
@@ -330,19 +331,80 @@ describe('a message the budget or a run hook blocked is kept for the person, not
     expect(engine.getThreadStore()!.getMessages(session.sessionId, { apiOnly: true })).toEqual([]);
   });
 
-  it('a blocked first message does not take the title from the next accepted one', async () => {
+  it('a blocked first message names the thread from its words, and the next accepted one keeps that name', async () => {
     const engine = await boot();
     const session = engine.createSession();
     budget.refuse = CAP;
     await session.run('summarise the quarter');
     const store = engine.getThreadStore()!;
-    expect(store.getThread(session.sessionId)?.title ?? '').toBe('');
+    expect(store.getThread(session.sessionId)?.title).toBe('summarise the quarter');
     budget.refuse = undefined;
     mockProcess.mockResolvedValue(endTurn('Paris.'));
     await session.run('what is the capital of France');
-    const title = store.getThread(session.sessionId)?.title ?? '';
-    expect(title).not.toBe('');
-    expect(title.toLowerCase()).not.toContain('quarter');
+    expect(store.getThread(session.sessionId)?.title).toBe('summarise the quarter');
+  });
+
+  it('a message a hook blocked names the thread too; a name already there stays', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    session.registerHooks({ onBeforeRun: async () => { throw new Error(HOOK); } });
+    await session.run('draft the offer');
+    const store = engine.getThreadStore()!;
+    expect(store.getThread(session.sessionId)?.title).toBe('draft the offer');
+    store.updateThread(session.sessionId, { title: 'My own name' });
+    await session.run('draft the second offer');
+    expect(store.getThread(session.sessionId)?.title).toBe('My own name');
+  });
+
+  it('the note names the cap the budget reached and its amounts; a hook\'s note names none', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    budget.refuse = 'Monthly spending cap ($150) reached. This month: $150.40.';
+    budget.override = { todayCostUSD: 3, monthCostUSD: 150.4, dailyLimitUSD: 20, monthlyLimitUSD: 150 };
+    await session.run('summarise the quarter');
+    expect(session.getLastRunBudget()).toEqual({ cap: 'monthly', limitUSD: 150, spentUSD: 150.4 });
+    expect(shown(engine, session)[1]!.note!.budget).toEqual({ cap: 'monthly', limitUSD: 150, spentUSD: 150.4 });
+
+    // A cap that cannot be checked refuses with neither cap over its spend: no amounts are named.
+    budget.refuse = 'Spending cap (daily $20) cannot be checked.';
+    budget.override = { todayCostUSD: 0, monthCostUSD: 0, dailyLimitUSD: 20, monthlyLimitUSD: null };
+    await session.run('summarise the year');
+    expect(session.getLastRunBudget()).toEqual({ cap: 'unknown' });
+    expect(shown(engine, session)[3]!.note!.budget).toEqual({ cap: 'unknown' });
+
+    budget.refuse = undefined;
+    session.registerHooks({ onBeforeRun: async () => { throw new Error(HOOK); } });
+    await session.run('draft the offer');
+    expect(session.getLastRunBudget()).toBeUndefined();
+    expect(shown(engine, session)[5]!.note).toEqual({ code: 'run_blocked', detail: HOOK });
+  });
+
+  it('the note names the cap the check refused on, not one it works out again', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    // Both caps over: the check refuses on the daily one, and so does the note.
+    budget.refuse = CAP;
+    budget.override = { todayCostUSD: 6, monthCostUSD: 200, dailyLimitUSD: 5, monthlyLimitUSD: 150, cap: 'daily' };
+    await session.run('summarise the quarter');
+    expect(session.getLastRunBudget()).toEqual({ cap: 'daily', limitUSD: 5, spentUSD: 6 });
+    // Spend unknown with a cap of $0: zero spend is "over" a zero cap, but the check refused
+    // because it could not count, and the note names no amounts.
+    budget.refuse = 'Spending cap (daily $0) cannot be checked.';
+    budget.override = { todayCostUSD: 0, monthCostUSD: 0, dailyLimitUSD: 0, monthlyLimitUSD: null, cap: 'unknown' };
+    await session.run('summarise the year');
+    expect(session.getLastRunBudget()).toEqual({ cap: 'unknown' });
+  });
+
+  it('a run after a blocked one carries no budget of the earlier run', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    budget.refuse = CAP;
+    await session.run('summarise the quarter');
+    expect(session.getLastRunBudget()).toEqual({ cap: 'daily', limitUSD: 5, spentUSD: 5.12 });
+    budget.refuse = undefined;
+    mockProcess.mockResolvedValue(endTurn('Paris.'));
+    await session.run('what is the capital of France');
+    expect(session.getLastRunBudget()).toBeUndefined();
   });
 
   it('a scheduled or watch run the budget or a hook blocks keeps nothing: no thread fills up tick by tick', async () => {

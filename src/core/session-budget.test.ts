@@ -3,7 +3,7 @@ import {
   checkSessionBudget, recordSessionCost, getSessionCost,
   configurePersistentBudget, checkPersistentBudget, resetPersistentBudget,
   reservePersistentBudget, releasePersistentBudget, getReservedInFlight,
-  persistentBudgetHeadroom,
+  persistentBudgetHeadroom, reachedCap,
   type CostQueryProvider,
 } from './session-budget.js';
 import type { SessionCounters } from '../types/index.js';
@@ -123,6 +123,7 @@ describe('persistent budget', () => {
     const result = checkPersistentBudget();
     expect(result.allowed).toBe(false);
     expect(result.reason).toContain('Daily spending cap');
+    expect(result.cap).toBe('daily');
   });
 
   it('blocks when monthly cap exceeded', () => {
@@ -137,6 +138,7 @@ describe('persistent budget', () => {
     const result = checkPersistentBudget();
     expect(result.allowed).toBe(false);
     expect(result.reason).toContain('Monthly spending cap');
+    expect(result.cap).toBe('monthly');
     expect(result.monthCostUSD).toBeCloseTo(25.00, 2);
   });
 
@@ -169,6 +171,7 @@ describe('persistent budget', () => {
     const result = checkPersistentBudget();
     expect(result.allowed).toBe(false);
     expect(result.reason).toContain('Daily');
+    expect(result.cap).toBe('daily');
   });
 
   it('uses default monthly cap when not explicitly set', () => {
@@ -419,6 +422,14 @@ describe('persistent budget — a cap that cannot be checked refuses (no cost pr
       expect(r.reason).toBe(managed(named));
     });
   }
+
+  it('names the refusal as unknown, also with a cap of $0 that zero spend would "reach"', () => {
+    configurePersistentBudget({ costProvider: null, dailyCapUSD: 0, monthlyCapUSD: Infinity });
+    const r = checkPersistentBudget();
+    expect(r.allowed).toBe(false);
+    expect(r.cap).toBe('unknown');
+    expect(reachedCap(r)).toBe('unknown');
+  });
 
   it('reports the caps it refuses on', () => {
     configurePersistentBudget({ costProvider: null, dailyCapUSD: 15, monthlyCapUSD: 150 });

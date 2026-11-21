@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { projectMessages, stripSafetyMarkers, buildDisplayNoteContent, buildApprovalNoteContent, sanitizeNoteDetail, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER, MAX_TOKENS_CONTINUATION_PROMPT, THINKING_ONLY_CONTINUATION_PROMPT } from './render-projection.js';
+import { projectMessages, stripSafetyMarkers, buildDisplayNoteContent, buildApprovalNoteContent, sanitizeNoteDetail, parseBudgetRef, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER, MAX_TOKENS_CONTINUATION_PROMPT, THINKING_ONLY_CONTINUATION_PROMPT } from './render-projection.js';
 import type { ThreadMessageRecord } from './thread-store.js';
 
 function rec(seq: number, role: string, content: unknown): ThreadMessageRecord {
@@ -749,5 +749,34 @@ describe('max_tokens continuation prompt', () => {
       rec(4, 'assistant', [{ type: 'text', text: 'Answer.' }]),
     ], { mergeTurns: false });
     expect(out.filter((m) => m.role === 'user').map((m) => m.content)).toEqual(['go']);
+  });
+});
+
+describe('a blocked run\'s budget on its note', () => {
+  it('keeps a cap with its amounts as the engine wrote it', () => {
+    expect(parseBudgetRef({ cap: 'daily', limitUSD: 5, spentUSD: 5.12 })).toEqual({ cap: 'daily', limitUSD: 5, spentUSD: 5.12 });
+    expect(parseBudgetRef({ cap: 'monthly', limitUSD: 150, spentUSD: 150 })).toEqual({ cap: 'monthly', limitUSD: 150, spentUSD: 150 });
+    expect(parseBudgetRef({ cap: 'unknown' })).toEqual({ cap: 'unknown' });
+  });
+
+  it('drops anything else, field by field', () => {
+    expect(parseBudgetRef(null)).toBeNull();
+    expect(parseBudgetRef('daily')).toBeNull();
+    expect(parseBudgetRef({ cap: 'weekly', limitUSD: 5 })).toBeNull();
+    expect(parseBudgetRef({ cap: 'daily', limitUSD: -1, spentUSD: '5' })).toEqual({ cap: 'daily' });
+    expect(parseBudgetRef({ cap: 'daily', limitUSD: Number.NaN, spentUSD: Infinity })).toEqual({ cap: 'daily' });
+    expect(parseBudgetRef({ cap: 'daily', limitUSD: 0, spentUSD: 0, extra: '<b>' })).toEqual({ cap: 'daily', limitUSD: 0, spentUSD: 0 });
+  });
+
+  it('a note row carries the budget through a reload; a foreign one is dropped', () => {
+    const note = (budget: unknown): unknown => {
+      const content = buildDisplayNoteContent('run_blocked', 'x') as unknown as Record<string, Record<string, unknown>>;
+      for (const marker of Object.values(content)) marker['budget'] = budget;
+      return content;
+    };
+    const kept = projectMessages([rec(0, 'assistant', note({ cap: 'daily', limitUSD: 5, spentUSD: 5.12 }))]);
+    expect(kept[0]?.note).toEqual({ code: 'run_blocked', detail: 'x', budget: { cap: 'daily', limitUSD: 5, spentUSD: 5.12 } });
+    const dropped = projectMessages([rec(0, 'assistant', note({ cap: 'all' }))]);
+    expect(dropped[0]?.note).toEqual({ code: 'run_blocked', detail: 'x' });
   });
 });

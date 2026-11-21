@@ -7,6 +7,7 @@
  */
 
 import type { PersistentBudgetCheck, PersistentBudgetReservation, SessionCounters } from '../types/index.js';
+import type { BudgetNoteRef } from './render-projection.js';
 
 const DEFAULT_SESSION_COST_USD = 50;
 
@@ -189,6 +190,26 @@ function unverifiableReason(): string {
     + 'a full disk, missing file permissions or a damaged file, and restart lynox.';
 }
 
+/**
+ * Which of the instance's own spending caps a refused check reached: the cap the check says it
+ * refused on, or else the one over its spend; `unknown` when it refused without either (spend
+ * cannot be checked).
+ */
+export function reachedCap(check: PersistentBudgetCheck): 'daily' | 'monthly' | 'unknown' {
+  if (check.cap !== undefined) return check.cap;
+  if (check.dailyLimitUSD !== null && check.todayCostUSD >= check.dailyLimitUSD) return 'daily';
+  if (check.monthlyLimitUSD !== null && check.monthCostUSD >= check.monthlyLimitUSD) return 'monthly';
+  return 'unknown';
+}
+
+/** What a chat names about a refused check: the cap reached, its limit and the spend against it. */
+export function budgetNoteRef(check: PersistentBudgetCheck): BudgetNoteRef {
+  const cap = reachedCap(check);
+  if (cap === 'daily' && check.dailyLimitUSD !== null) return { cap, limitUSD: check.dailyLimitUSD, spentUSD: check.todayCostUSD };
+  if (cap === 'monthly' && check.monthlyLimitUSD !== null) return { cap, limitUSD: check.monthlyLimitUSD, spentUSD: check.monthCostUSD };
+  return { cap: 'unknown' };
+}
+
 /** Check if persistent daily/monthly budget allows another run. */
 export function checkPersistentBudget(): PersistentBudgetCheck {
   if (spendUnverifiable()) {
@@ -196,7 +217,7 @@ export function checkPersistentBudget(): PersistentBudgetCheck {
       allowed: false, todayCostUSD: 0, monthCostUSD: 0,
       dailyLimitUSD: _dailyCapUSD < Infinity ? _dailyCapUSD : null,
       monthlyLimitUSD: _monthlyCapUSD < Infinity ? _monthlyCapUSD : null,
-      reason: unverifiableReason(),
+      reason: unverifiableReason(), cap: 'unknown',
     };
   }
   const spend = computeRecordedSpend();
@@ -209,7 +230,7 @@ export function checkPersistentBudget(): PersistentBudgetCheck {
     return {
       allowed: false, todayCostUSD: todayCost, monthCostUSD: monthCost,
       dailyLimitUSD: _dailyCapUSD, monthlyLimitUSD: _monthlyCapUSD < Infinity ? _monthlyCapUSD : null,
-      reason: `Daily spending cap ($${_dailyCapUSD}) reached. Today: $${todayCost.toFixed(2)}.`,
+      reason: `Daily spending cap ($${_dailyCapUSD}) reached. Today: $${todayCost.toFixed(2)}.`, cap: 'daily',
     };
   }
 
@@ -217,7 +238,7 @@ export function checkPersistentBudget(): PersistentBudgetCheck {
     return {
       allowed: false, todayCostUSD: todayCost, monthCostUSD: monthCost,
       dailyLimitUSD: _dailyCapUSD < Infinity ? _dailyCapUSD : null, monthlyLimitUSD: _monthlyCapUSD,
-      reason: `Monthly spending cap ($${_monthlyCapUSD}) reached. This month: $${monthCost.toFixed(2)}.`,
+      reason: `Monthly spending cap ($${_monthlyCapUSD}) reached. This month: $${monthCost.toFixed(2)}.`, cap: 'monthly',
     };
   }
 

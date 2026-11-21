@@ -126,6 +126,17 @@ export interface DisplayNoteMarker {
    *  the approvals page shows for it (`approval-view.ts`), so the chat can name the reason and
    *  lead to the entry. */
   approval?: { id: string; outcome: string };
+  /** For a run the instance's own spending cap blocked: which cap, and the amounts the chat names
+   *  ("the daily limit of $5 is reached, today $5.12"). The page words the sentence; the engine's
+   *  English reason stays the note's `detail`. */
+  budget?: BudgetNoteRef;
+}
+
+/** Which cap a blocked run reached, with its limit and the spend held against it, in USD. */
+export interface BudgetNoteRef {
+  cap: 'daily' | 'monthly' | 'unknown';
+  limitUSD?: number;
+  spentUSD?: number;
 }
 
 export interface RenderedMessage {
@@ -160,6 +171,21 @@ export function buildApprovalNoteContent(code: string, approval: { id: string; o
 const APPROVAL_ID_RE = /^[A-Za-z0-9-]{1,64}$/;
 const APPROVAL_OUTCOME_RE = /^[a-z_]{1,40}$/;
 
+/** A budget reference as the engine writes it; anything else on read is dropped, field by field. */
+export function parseBudgetRef(v: unknown): BudgetNoteRef | null {
+  if (typeof v !== 'object' || v === null) return null;
+  const r = v as Record<string, unknown>;
+  const cap = r['cap'];
+  if (cap !== 'daily' && cap !== 'monthly' && cap !== 'unknown') return null;
+  const ref: BudgetNoteRef = { cap };
+  const amount = (x: unknown): number | undefined => typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : undefined;
+  const limitUSD = amount(r['limitUSD']);
+  const spentUSD = amount(r['spentUSD']);
+  if (limitUSD !== undefined) ref.limitUSD = limitUSD;
+  if (spentUSD !== undefined) ref.spentUSD = spentUSD;
+  return ref;
+}
+
 function parseApprovalRef(v: unknown): { id: string; outcome: string } | null {
   if (typeof v !== 'object' || v === null) return null;
   const id = (v as Record<string, unknown>)['id'];
@@ -193,6 +219,8 @@ function parseDisplayNote(raw: string): DisplayNoteMarker | null {
           const note: DisplayNoteMarker = typeof detail === 'string' ? { code, detail } : { code };
           const approval = parseApprovalRef((m as Record<string, unknown>)['approval']);
           if (approval !== null) note.approval = approval;
+          const budget = parseBudgetRef((m as Record<string, unknown>)['budget']);
+          if (budget !== null) note.budget = budget;
           return note;
         }
       }

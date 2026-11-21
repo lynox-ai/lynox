@@ -5677,7 +5677,7 @@ export class LynoxHTTPApi {
             res.write(`event: changeset_ready\ndata: ${JSON.stringify({ fileCount: csm.size, runId: csm.runId })}\n\n`);
           }
           // `notice`: the result is lynox's own sentence, not the model's (set by the engine only).
-          res.write(`event: done\ndata: ${JSON.stringify({ result, usage: session.getLastRunUsage() ?? undefined, notice: session.getLastRunNotice() })}\n\n`);
+          res.write(`event: done\ndata: ${JSON.stringify({ result, usage: session.getLastRunUsage() ?? undefined, notice: session.getLastRunNotice(), budget: session.getLastRunBudget() })}\n\n`);
           res.end();
         }
       } catch (err: unknown) {

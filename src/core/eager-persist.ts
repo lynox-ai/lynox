@@ -5,7 +5,7 @@
 
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import type { ThreadStore } from './thread-store.js';
-import { buildDisplayNoteContent, sanitizeNoteDetail } from './render-projection.js';
+import { buildDisplayNoteContent, sanitizeNoteDetail, type BudgetNoteRef } from './render-projection.js';
 import { getErrorMessage } from './utils.js';
 import type { SendStopCause } from './agent.js';
 import { isInputRequired } from './input-required.js';
@@ -251,6 +251,7 @@ export function persistRefusedTurn(
   task: string | unknown[],
   sentence: string,
   code: EngineNoticeCode = CONTENT_REFUSED_NOTE,
+  budget?: BudgetNoteRef,
 ): boolean {
   if (!threadStore) return false;
   try {
@@ -259,7 +260,7 @@ export function persistRefusedTurn(
       sessionId,
       [
         { role: 'user', content: task },
-        { role: 'assistant', content: buildDisplayNoteContent(code, sanitizeNoteDetail(sentence)) },
+        { role: 'assistant', content: withBudget(buildDisplayNoteContent(code, sanitizeNoteDetail(sentence)), budget) },
       ],
       threadStore.getNextSeq(sessionId),
     );
@@ -268,6 +269,13 @@ export function persistRefusedTurn(
   } catch {
     return false;
   }
+}
+
+/** A blocked run's note carries which cap it reached, so the chat can word it (see `BudgetNoteRef`). */
+function withBudget(content: ReturnType<typeof buildDisplayNoteContent>, budget: BudgetNoteRef | undefined): ReturnType<typeof buildDisplayNoteContent> {
+  if (budget === undefined) return content;
+  for (const marker of Object.values(content)) marker.budget = { ...budget };
+  return content;
 }
 
 /** The note code of a message the content check refused. */
