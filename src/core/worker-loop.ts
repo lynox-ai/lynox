@@ -3990,7 +3990,7 @@ export class WorkerLoop {
       // The planning grant reads the fact without the member-connection lines: they are the
       // owner's, naming another member's provider and profile and the owner's way to change it.
       // They stand in the history, which a mandate reads, as recorded. The sentence is where
-      // `told.result` starts, so this splits only where `readers` did.
+      // `told.result` starts, so this finds a part only where `readers` found one too.
       const forMandate = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, said ?? resultSummary, lang);
       if (forMandate !== null && mandateId !== null && (this.engine.getMandateEnds()?.isLive(mandateId) ?? false)) {
         void this.notificationRouter.notify({
