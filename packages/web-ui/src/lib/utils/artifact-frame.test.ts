@@ -149,7 +149,8 @@ describe('artifactExportDocument', () => {
 		for (const html of ['<html><head></head><body><img src="https://elsewhere.example/x.png"></body></html>', '<div><img src="https://elsewhere.example/x.png"></div>']) {
 			const doc = asDoc(artifactExportDocument(html));
 			const policy = doc.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute('content') ?? '';
-			expect(policy, `no policy for ${html}`).toContain('img-src data: blob:');
+			expect(policy, `no policy for ${html}`).toMatch(/(^|; )img-src data: blob:(;|$)/);
+			expect(policy).not.toMatch(/img-src[^;]*(https?:|\*|'self')/);
 			expect(policy).toContain("connect-src 'none'");
 			expect(doc.querySelector('img')?.getAttribute('src')).toBe('https://elsewhere.example/x.png');
 		}
