@@ -966,7 +966,8 @@ export class WorkerLoop {
       this.requestBulkStop(active.effect, active.bulkRunId);
     } catch (err: unknown) {
       active.stopMarkFailed = true;
-      process.stderr.write(`[lynox:worker] recording the stop of "${taskId}" in its ledger threw: ${err instanceof Error ? err.message : String(err)}\n`);
+      const reduce = errorTextReduced(this.engine.getToolContext().containment, { bulkRunId: active.bulkRunId });
+      process.stderr.write(`[lynox:worker] recording the stop of "${taskId}" in its ledger threw: ${errorText(err, reduce)}\n`);
     }
     active.stopRequested = true;
     active.ownerStop.abort();
