@@ -19,9 +19,12 @@ const { setLocale } = await import('../i18n.svelte.js');
 // shows FIELD px of it and is scrolled by its own scrollTop, as a browser would lay it out.
 const LINE = 23;
 let fieldBottom = 100;
+/** Screen lines each value line takes (1 unless the test wraps it). */
+let wraps: number[] = [];
 let fieldHeights = { client: 100, scroll: 0 };
 let stackOver = 0;
 const realRect = Element.prototype.getBoundingClientRect;
+const realStyle = window.getComputedStyle;
 const realRaf = globalThis.requestAnimationFrame;
 const realCaf = globalThis.cancelAnimationFrame;
 const realRO = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
@@ -40,8 +43,11 @@ let tooLow = false;
 const field = (): HTMLElement => host.querySelector<HTMLElement>('[data-prompt-field]')!;
 const readMore = (): HTMLButtonElement | null => host.querySelector<HTMLButtonElement>('[data-prompt-read-more]');
 
-async function show(head: string, lines: string[]): Promise<void> {
-	fieldHeights = { client: Math.min(fieldBottom, lines.length * LINE), scroll: lines.length * LINE };
+type Seg = { kind: 'frame' | 'value'; text: string };
+async function show(headIn: string | Seg[], lines: string[]): Promise<void> {
+	const head: Seg[] = typeof headIn === 'string' ? (headIn ? [{ kind: 'frame', text: headIn }] : []) : headIn;
+	const total = lines.reduce((a, _l, i) => a + (wraps[i] ?? 1) * LINE, 0);
+	fieldHeights = { client: Math.min(fieldBottom, total), scroll: total };
 	app = mount(PromptQuestionField, {
 		target: host,
 		props: { head, lines, get tooLow() { return tooLow; }, set tooLow(v: boolean) { tooLow = v; } },
@@ -63,14 +69,17 @@ beforeEach(() => {
 	setLocale('en');
 	document.body.innerHTML = '';
 	fieldBottom = 100;
+	wraps = [];
 	stackOver = 0;
+	window.getComputedStyle = ((el: Element) => ({ lineHeight: el.hasAttribute('data-prompt-field') ? `${LINE}px` : '' })) as unknown as typeof window.getComputedStyle;
 	tooLow = false;
 	Element.prototype.getBoundingClientRect = function (this: Element) {
 		if (this.hasAttribute('data-prompt-field')) return rect(0, fieldBottom);
 		if (this.hasAttribute('data-prompt-line')) {
 			const f = this.closest<HTMLElement>('[data-prompt-field]')!;
 			const i = [...f.children].indexOf(this);
-			return rect(i * LINE - f.scrollTop, (i + 1) * LINE - f.scrollTop);
+			const top = wraps.slice(0, i).reduce((a, w) => a + w * LINE, 0) + Math.max(0, i - wraps.length) * LINE;
+			return rect(top - f.scrollTop, top + (wraps[i] ?? 1) * LINE - f.scrollTop);
 		}
 		return rect(0, 0);
 	};
@@ -93,6 +102,7 @@ afterEach(() => {
 	if (app) unmount(app);
 	app = null;
 	Element.prototype.getBoundingClientRect = realRect;
+	window.getComputedStyle = realStyle;
 	globalThis.requestAnimationFrame = realRaf;
 	globalThis.cancelAnimationFrame = realCaf;
 	(globalThis as { ResizeObserver?: unknown }).ResizeObserver = realRO;
@@ -107,7 +117,9 @@ describe('a confirmation\'s question field at little height', () => {
 		await show('⚠ Command: delete files (cannot be undone) — "', fourteen);
 		// 100 px show four lines whole (to 92 px); lines 5 to 14 end below the edge.
 		expect(readMore()?.textContent).toBe('Read 10 more lines ↓');
-		expect(readMore()?.getAttribute('aria-label')).toBe('Show more lines of the question');
+		// The visible text is the button's name, count included; the arrow is not read out.
+		expect(readMore()?.hasAttribute('aria-label')).toBe(false);
+		expect(readMore()?.querySelector('[aria-hidden="true"]')?.textContent).toBe('↓');
 		expect(host.querySelector('[data-prompt-fade]')).not.toBeNull();
 	});
 
@@ -117,11 +129,17 @@ describe('a confirmation\'s question field at little height', () => {
 		expect(readMore()?.textContent).toBe('Read 1 more line ↓');
 	});
 
+	it('counts a long one-line value by the screen lines it still hides', async () => {
+		wraps = [12];
+		await show([{ kind: 'frame', text: '⚠ File access: "' }], [`/srv/${'d/'.repeat(150)}secret"`]);
+		// 12 screen lines, 100 px show 4 of them and a third of the fifth: 8 screen lines still hidden.
+		expect(readMore()?.textContent).toBe('Read 8 more lines ↓');
+	});
+
 	it('says it in German on a German instance', async () => {
 		setLocale('de');
 		await show('⚠ Befehl: Dateien löschen (nicht rückgängig zu machen) — "', fourteen);
 		expect(readMore()?.textContent).toBe('10 weitere Zeilen lesen ↓');
-		expect(readMore()?.getAttribute('aria-label')).toBe('Weitere Zeilen der Frage anzeigen');
 	});
 
 	it('follows the scroll and goes away at the end', async () => {
@@ -144,6 +162,14 @@ describe('a confirmation\'s question field at little height', () => {
 		field().scrollBy = ((o: ScrollToOptions) => { by = o; }) as HTMLElement['scrollBy'];
 		readMore()!.click();
 		expect(by?.top).toBe(fieldHeights.client);
+	});
+
+	it('shows a short value in the head as a value, not merged into the frame', async () => {
+		await show([{ kind: 'frame', text: '⚠ External tool "' }, { kind: 'value', text: 'Merge' }, { kind: 'frame', text: '": delete files (cannot be undone) — "' }], fourteen);
+		const head = host.querySelector<HTMLElement>('[data-prompt-head]')!;
+		expect(head.textContent).toBe('⚠ External tool "Merge": delete files (cannot be undone) — "');
+		const values = [...head.querySelectorAll('[data-prompt-value]')].map((v) => v.textContent);
+		expect(values).toEqual(['Merge']);
 	});
 
 	it('keeps the head out of the scrolling field, above it', async () => {

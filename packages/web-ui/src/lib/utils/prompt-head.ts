@@ -13,33 +13,40 @@
 const LONG_VALUE = 80;
 
 export interface PromptSplit {
-	/** The system-written opening that never scrolls; empty when there is none. */
-	head: string;
+	/** The opening that never scrolls, as its segments: a short value in it stays a value. Empty
+	 *  when there is none. */
+	head: Segment[];
 	/** Everything from the first value on, as the lines the field shows and counts. */
 	lines: string[];
 }
 
-interface Segment {
+export interface Segment {
 	kind: 'frame' | 'value';
 	text: string;
 }
 
 export function splitPromptHead(question: string, segments: readonly Segment[] | undefined): PromptSplit {
 	const firstLong = segments ? segments.findIndex((s) => s.kind === 'value' && (s.text.includes('\n') || s.text.length > LONG_VALUE)) : -1;
-	if (!segments || firstLong <= 0) return { head: '', lines: question.split('\n') };
-	const head = segments.slice(0, firstLong).map((s) => s.text).join('');
+	if (!segments || firstLong <= 0) return { head: [], lines: question.split('\n') };
+	const head = segments.slice(0, firstLong).map((s) => ({ kind: s.kind, text: s.text }));
 	const body = segments.slice(firstLong).map((s) => s.text).join('');
 	return { head, lines: body.split('\n') };
 }
 
 /**
- * How many of the field's lines are not wholly in view: a line counts while its bottom edge lies
- * below the field's bottom edge, so a line cut in half still counts. Lines are the value's own
- * lines, each its own block, so a line the browser wraps counts once.
+ * How much of the value is not yet in view, in lines. Each of the value's own lines that runs past
+ * the field's bottom edge counts with the screen lines it still hides there, rounded up, and at
+ * least one: a line cut in half counts, a short line below counts once, and a long line (a path
+ * the browser wraps over many screen lines) counts every screen line it hides, so the end of a
+ * long value cannot hide behind a "1".
  */
-export function linesBelow(lineBottoms: readonly number[], fieldBottom: number): number {
+export function linesBelow(lineBoxes: readonly { top: number; bottom: number }[], fieldBottom: number, lineHeight: number): number {
 	let n = 0;
-	for (const bottom of lineBottoms) if (bottom > fieldBottom + 0.5) n++;
+	for (const { top, bottom } of lineBoxes) {
+		if (bottom <= fieldBottom + 0.5) continue;
+		const hidden = bottom - Math.max(top, fieldBottom);
+		n += Math.max(1, Math.ceil((hidden - 0.5) / lineHeight));
+	}
 	return n;
 }
 

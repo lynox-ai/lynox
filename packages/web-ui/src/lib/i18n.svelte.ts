@@ -1524,9 +1524,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.skipped': { de: 'Übersprungen', en: 'Skipped' },
 	'chat.dismiss': { de: 'Abbrechen', en: 'Cancel' },
 	'chat.prompt_timeout_left': { de: 'Verbleibende Zeit', en: 'Time remaining' },
-	'chat.prompt_read_more': { de: '{n} weitere Zeilen lesen ↓', en: 'Read {n} more lines ↓' },
-	'chat.prompt_read_more_one': { de: '1 weitere Zeile lesen ↓', en: 'Read 1 more line ↓' },
-	'chat.prompt_read_more_aria': { de: 'Weitere Zeilen der Frage anzeigen', en: 'Show more lines of the question' },
+	'chat.prompt_read_more': { de: '{n} weitere Zeilen lesen', en: 'Read {n} more lines' },
+	'chat.prompt_read_more_one': { de: '1 weitere Zeile lesen', en: 'Read 1 more line' },
 	// Provenance of a confirmation raised from inside a workflow step. Composed
 	// from these two halves rather than one sentence: a step can be reached
 	// without a named workflow (and vice versa), and a half-filled sentence
