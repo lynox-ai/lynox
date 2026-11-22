@@ -344,7 +344,10 @@ export class WebPushNotificationChannel implements NotificationChannel {
    */
   async send(msg: NotificationMessage): Promise<ChannelOutcome> {
     const result = await this.sendDetailed(msg);
-    if (msg.audience === 'mandates' || msg.audience === 'all_mandates') return result.sent > 0 ? 'delivered' : 'failed';
+    if (msg.audience === 'mandates') return result.sent > 0 ? 'delivered' : 'failed';
+    // Every grant's sentence of a notice the owner is told apart: an instance where no mandate has
+    // a device has nobody it is for, which is no failure (`skipped`).
+    if (msg.audience === 'all_mandates') return result.sent > 0 ? 'delivered' : result.failed > 0 ? 'failed' : 'skipped';
     return result.sentToOwner > 0 ? 'delivered' : result.sent > 0 ? 'reached_others' : 'failed';
   }
 

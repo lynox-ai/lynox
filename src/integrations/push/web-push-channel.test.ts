@@ -325,10 +325,18 @@ describe('WebPushNotificationChannel — a mandate\'s subscriptions', () => {
 		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'all_mandates' })).toBe('delivered');
 		expect(sendCalls().sort()).toEqual(['https://push.example/eva', 'https://push.example/max']);
 		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
-		// With no mandate's device, nobody it is for was told: the owner's does not count.
+		// A mandate's device that refused it: nobody it is for was told.
+		const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockRejectedValue(Object.assign(new Error('down'), { statusCode: 500 }));
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'all_mandates' })).toBe('failed');
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockReset();
+		stderr.mockRestore();
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
+		// With no mandate's device at all, there is nobody it is for: skipped, not failed. The owner's
+		// device takes no part either way.
 		ch.unsubscribe('https://push.example/eva');
 		ch.unsubscribe('https://push.example/max');
-		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'all_mandates' })).toBe('failed');
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'all_mandates' })).toBe('skipped');
 		expect(sendCalls()).toEqual([]);
 	});
 
