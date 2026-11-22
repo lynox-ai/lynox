@@ -17,6 +17,7 @@
  * - Nothing of an element reaches the model or a log. What a page is decides a fixed reason.
  */
 import { BULK_MAX_SOURCE_BYTES, BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BulkSourceError } from './bulk-plan.js';
+import { readWithinBounds, walkHtml } from './html-tree.js';
 import { externalTargetKey, isPlainObject, isScalar, BULK_WRITE_METHODS, type BulkWriteMethod, type ExternalImage } from './bulk-external.js';
 import { isMailProviderTarget } from './bulk-mail-targets.js';
 import { urlScanForms } from './url-scan-forms.js';
@@ -99,6 +100,42 @@ export type BulkListSourceForm = BulkListForm | ShopifyListSourceForm;
 /** Whether `form` is one of a Shopify store's list forms as stored: its products, filtered or not, or their images. */
 export function isShopifyListForm(form: unknown): form is ShopifyListSourceForm {
   return form === SHOPIFY_LIST_FORM || form === SHOPIFY_FILTERED_LIST_FORM || form === SHOPIFY_MEDIA_LIST_FORM;
+}
+
+/** Elements that only hold text: a description built of these and nothing else shows only its text. */
+const TEXT_ONLY_ELEMENTS: ReadonlySet<string> = new Set([
+  'p', 'br', 'div', 'span', 'strong', 'em', 'b', 'i', 'u', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+]);
+/** Text that shows nothing: white space, the no-break space, and the code points no font draws. */
+const INVISIBLE_TEXT = /^[\s\u00a0\p{Default_Ignorable_Code_Point}]*$/u;
+const HTML_NS = 'http://www.w3.org/1999/xhtml';
+
+/**
+ * Whether the HTML `value` shows nothing on a product page: its tree holds no text but white space,
+ * and every element in it is a text element without attributes. Comments do not count. An image,
+ * an embed or any attribute makes it not blank, so a description of one image stays allowed.
+ * A value past the reading bounds ({@link readWithinBounds}) is not walked here and counts as not
+ * blank: the markup check refuses such a value before it is written (`not_canonical`).
+ */
+export function isBlankHtml(value: string): boolean {
+  const tree = readWithinBounds(value);
+  if (tree === null) return false;
+  return walkHtml(tree).every((node) =>
+    node.kind === 'comment'
+    || (node.kind === 'text' && INVISIBLE_TEXT.test(node.value))
+    || (node.kind === 'element' && node.namespace === HTML_NS && TEXT_ONLY_ELEMENTS.has(node.name) && node.attrs.length === 0));
+}
+
+/**
+ * Whether `value` is a product description no run may set: `null`, which Shopify ignores, or a text
+ * that shows nothing (`isBlankHtml`), `""` among them, which clears the page
+ * (PRD shopify-preset §16.8 M6b (iii)). Neither is a run's purpose, and an empty text from a model is
+ * far more often its failure. On a Shopify products list only; an undo, which writes back a
+ * before-image that was empty, does not ask.
+ */
+export function isEmptyShopifyDescription(form: BulkListSourceForm | null, field: string, value: unknown): boolean {
+  return (form === SHOPIFY_LIST_FORM || form === SHOPIFY_FILTERED_LIST_FORM) && field === 'descriptionHtml'
+    && (value === null || (typeof value === 'string' && isBlankHtml(value)));
 }
 
 /** The write form a Shopify list's targets are written with. */
@@ -258,9 +295,11 @@ export function parseListSource(host: string, input: unknown, method: BulkWriteM
  * A Shopify list source as the planner gave it: on a store host, the products — every one, or
  * those of one product type, vendor and/or status — and no path or id field. A filter value is taken
  * as written or refused, never rewritten ({@link isShopifyFilterValue}). The after-state may
- * only name the fields the write document sets ({@link SHOPIFY_WRITABLE_FIELDS}):
- * `descriptionHtml` is read into the before-image but not written yet. Checked like any list's
- * after-state otherwise.
+ * only name the fields the write document sets ({@link SHOPIFY_WRITABLE_FIELDS}). Checked like any
+ * list's after-state otherwise. A judge's template (every field `null`) and a stored source pass
+ * here too, so an empty description is refused where the planner writes one, in `bulk_plan`
+ * ({@link isEmptyShopifyDescription}), and where a verdict sets one, at the step that settles it
+ * (`emptiesDescription`, `bulk-judge.ts`).
  */
 function parseShopifyListSource(host: string, input: Record<string, unknown>, scan: (text: string) => string | null): BulkListSource {
   if (!isShopifyStoreHostName(host)) throw new BulkSourceError('source_list.form shopify reads a store: target_host must be <store>.myshopify.com.');
@@ -269,10 +308,6 @@ function parseShopifyListSource(host: string, input: Record<string, unknown>, sc
   }
   const filters = parseShopifyFilters(input['filters'], scan);
   const after = checkAfter(input['after'], 'id', scan);
-  // Read, but not written yet: the way on is named, not only the refusal.
-  if (Object.hasOwn(after, 'descriptionHtml')) {
-    throw new BulkSourceError(`source_list.after cannot set descriptionHtml yet: writing product descriptions comes with a later step of the Shopify form. Set only: ${SHOPIFY_WRITABLE_FIELDS.join(', ')}.`);
-  }
   if (!Object.keys(after).every((k) => SHOPIFY_WRITABLE_FIELDS.includes(k))) {
     throw new BulkSourceError(`source_list.after may only set: ${SHOPIFY_WRITABLE_FIELDS.join(', ')}.`);
   }

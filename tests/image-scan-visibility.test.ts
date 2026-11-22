@@ -71,7 +71,6 @@ function deletesDpkgStatus(segment: string): boolean {
   return paths.some((p) => isTarget(p) || (recursive && isParent(p)));
 }
 
-const AMD64_ONLY = "matrix.platform == 'linux/amd64'";
 const GATE_WITH = { 'image-ref': 'ghcr.io/lynox-ai/lynox:scan', format: 'table', 'exit-code': '1', severity: 'CRITICAL', 'ignore-unfixed': true };
 const isTrivy = (s: Step) => (s.uses ?? '').startsWith('aquasecurity/trivy-action@');
 
@@ -123,11 +122,11 @@ describe('the release scan', () => {
   const job = entry?.[1];
   const steps = job?.steps ?? [];
 
-  it('runs in a job that cannot be skipped or let through, on an amd64 leg', () => {
+  it('runs in a job that cannot be skipped or let through, on both architecture legs', () => {
     expect(job).toBeDefined();
     expect(job!.if).toBeUndefined();
     expect(job!['continue-on-error']).toBeUndefined();
-    expect((job!.strategy?.matrix?.include ?? []).map((i) => i.platform)).toContain('linux/amd64');
+    expect((job!.strategy?.matrix?.include ?? []).map((i) => i.platform).sort()).toEqual(['linux/amd64', 'linux/arm64']);
   });
 
   it('builds the image and scans exactly it, at the release threshold, with nothing switched off', () => {
@@ -137,9 +136,35 @@ describe('the release scan', () => {
     expect(gates).toHaveLength(1);
     expect(gates[0]!.with).toEqual(GATE_WITH);
     for (const s of [build!, gates[0]!]) {
-      expect(s.if).toBe(AMD64_ONLY);
+      expect(s.if).toBeUndefined();
       expect(s['continue-on-error']).toBeUndefined();
     }
+  });
+
+  // The apt layer's cache key is its instruction text and its parents; neither changes when
+  // Debian publishes a fix, so a cached layer keeps the packages of the release that wrote it.
+  it('builds the production stage fresh, and ships the layer it scanned', () => {
+    const text = shellText(dockerfile);
+    const lastFrom = text.split('\n').filter((l) => l.startsWith('FROM ')).at(-1) ?? '';
+    const stage = /\sAS\s+(\S+)\s*$/i.exec(lastFrom)?.[1];
+    expect(stage).toBe('production');
+    const buildAt = steps.findIndex((s) => s.with?.load === true && s.with?.tags === 'ghcr.io/lynox-ai/lynox:scan');
+    const pushAt = steps.findIndex((s) => typeof s.with?.outputs === 'string' && (s.with.outputs as string).includes('push=true'));
+    const gateAt = steps.findIndex((s) => isTrivy(s) && s.with?.format === 'table');
+    expect(steps[buildAt]?.with?.['no-cache-filters']).toBe(stage);
+    // The push build reads the same cache scope after the scan, in the same job and builder,
+    // so it takes the layer the scan build just made instead of building its own.
+    expect(gateAt).toBeGreaterThan(buildAt);
+    expect(pushAt).toBeGreaterThan(gateAt);
+    expect(steps[pushAt]?.with?.['cache-from']).toBe(steps[buildAt]?.with?.['cache-from']);
+    // The scan build exports what it made, so the push build finds it even if the builder lost it.
+    expect(steps[buildAt]?.with?.['cache-to']).toBe(steps[pushAt]?.with?.['cache-to']);
+    expect(String(steps[buildAt]?.with?.['cache-to'])).toContain('mode=max');
+    expect(steps[pushAt]?.with?.['no-cache-filters']).toBeUndefined();
+    expect(steps[pushAt]?.with?.['no-cache']).toBeUndefined();
+    // One builder for both builds: a second setup-buildx would give the push build its own.
+    expect(steps.filter((s) => (s.uses ?? '').startsWith('docker/setup-buildx-action@'))).toHaveLength(1);
+    expect(steps[pushAt]?.if).toBeUndefined();
   });
 
   it('fails when the scan saw no OS packages', () => {
@@ -149,7 +174,7 @@ describe('the release scan', () => {
     expect(check?.run).toMatch(/select\(\.Class == "os-pkgs"\)/);
     expect(check?.run).toMatch(/if \[ "\$n" -eq 0 \]; then[\s\S]*exit 1/);
     for (const s of [list!, check!]) {
-      expect(s.if).toBe(AMD64_ONLY);
+      expect(s.if).toBeUndefined();
       expect(s['continue-on-error']).toBeUndefined();
     }
   });

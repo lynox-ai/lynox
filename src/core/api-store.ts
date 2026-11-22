@@ -29,6 +29,7 @@ import type { SecretStoreLike } from '../types/index.js';
 import { MANDATE_TAG_PREFIX, isMandateTag } from './request-principal.js';
 import { credentialBearing, credentialHosts, slotConflicts, slotNames, type SlotConflict } from './profile-secret-view.js';
 import { processErrorText, reducedErrorText } from './error-egress.js';
+import { engineLessSentence, type EngineLessReader } from './engine-less-refusal.js';
 
 // ── Errors ──
 
@@ -426,6 +427,24 @@ export interface OAuthGrantRecord {
    * the answer named none: then nothing is known beyond what was asked.
    */
   granted_scope?: string[] | undefined;
+  /**
+   * The scopes the authorize link asked for, as the person confirmed them on the consent page:
+   * written only by the connect callback, from the signed state of the confirmed start, never from
+   * the profile. A save over the profile changes `auth.oauth.scope` for the NEXT link and leaves
+   * this as it is, so a scope added without a new consent never reads as asked. A renewal keeps
+   * it. Absent on every grant from before it was recorded, which reads as nothing asked.
+   */
+  asked_scope?: string[] | undefined;
+  /**
+   * The version of the customer text the consent page showed and the person confirmed
+   * (`consentNoticeVersion`), and when: written only by the connect callback, from the signed state
+   * of the confirmed start, never from the profile, a tool or a client. A start whose page showed
+   * no text records none. Absent on every grant from before it was recorded, which reads as
+   * confirmed under no text: a Shopify bulk run then writes only the fields an earlier text named
+   * (`shopifyConsentBlock`).
+   */
+  consent_version?: string | undefined;
+  consented_at?: string | undefined;
   /**
    * The binding of this grant's access token to the profile and the store the provider signed
    * for (PRD-SHOPIFY-CONTAINMENT-ERASURE Appendix B, B4): `EngineDb.storeBindingDigest` over the
@@ -1257,24 +1276,17 @@ const ENGINE_LESS_HEADS = {
   connect: "This engine is running without engine.db, which it could not open when it was started, so lynox does not connect API accounts now: the connection would be lost once the engine opens engine.db again. Nothing was sent to the provider, and nothing is connected later on its own; once someone has restarted the engine, the account has to be connected again.",
   renew: "This engine is running without engine.db, which it could not open when it was started, so lynox does not renew an API connection's access now: the renewed access would be lost once the engine opens engine.db again. Nothing was sent to the provider.",
 } as const;
-/** True for every reader: it lasts until a restart, and the log says why. */
-const ENGINE_LESS_LASTS = "This does not end on its own: it lasts until someone restarts the engine and the engine can open all its files again; the log the engine writes at start says why it could not.";
-/**
- * For the model only: without it, models measured on these refusals offered to do it after the
- * restart, which nothing in lynox would carry out. An HTTP answer is read by a person or a
- * program, not by the model, so it gets no such advice; the JSON error body is also capped at 600
- * characters, which the sentences with it would exceed.
- */
-const ENGINE_LESS_TO_MODEL = "Do not retry and do not offer to do it later on your own: nothing will remind you after the restart. Tell the user it did not happen; after the restart they can ask again. Do not ask whether to try again later either; if they want that, they ask after the restart.";
 
 export type EngineLessKind = keyof typeof ENGINE_LESS_HEADS;
 /** `model`: a tool result the model reads. `client`: an HTTP answer (a JSON error or an OAuth page). */
-export type EngineLessReader = 'model' | 'client';
+export type { EngineLessReader };
 
-/** The refusal of `kind` for `reader`; both readers' sentences are built from the same parts. */
+/**
+ * The refusal of `kind` for `reader`; both readers' sentences are built from the same parts, which
+ * memory and tasks share (`engine-less-refusal.ts`).
+ */
 export function engineLessText(kind: EngineLessKind, reader: EngineLessReader): string {
-  const told = `${ENGINE_LESS_HEADS[kind]} ${ENGINE_LESS_LASTS}`;
-  return reader === 'model' ? `${told} ${ENGINE_LESS_TO_MODEL}` : told;
+  return engineLessSentence(ENGINE_LESS_HEADS[kind], reader);
 }
 
 /** A save the store refused, with the reason it gives the caller. */
@@ -1449,6 +1461,37 @@ function missingRequiredField(profile: unknown): boolean {
   const p = profile as Record<string, unknown>;
   return ['id', 'base_url'].some((f) => typeof p[f] !== 'string' || p[f] === '') || !p['name'] ||
     (typeof p['name'] !== 'string' && typeof p['name'] !== 'number') || !p['description'];
+}
+
+/**
+ * The catalog's step for a provider the user names, and what a locked turn (a mandate's) reads in
+ * its place (U-185): there `ask_secret` stores nothing, and only the owner of this instance
+ * stores keys. The owner's briefing carries the first; `lockedTurnBriefing` swaps it.
+ */
+const CATALOG_OWNER_STORE_STEP = 'walk them through creating the credential in their own account, have them store it with `ask_secret`, then call';
+const CATALOG_LOCKED_STORE_STEP = 'tell them which credential the API needs and that the owner of this instance has to store it, then call';
+
+/** What `Session` appends where it cuts a briefing that is too long (`session.ts`). */
+export const BRIEFING_CUT_MARKER = '\n[...truncated]';
+/** A cut-off start of the owner's step shorter than this is too generic to tell apart from other text. */
+const MIN_CUT_STEP = 20;
+
+/**
+ * The briefing a locked turn gets: the catalog's store step swapped, the rest as it is. `Session`
+ * cuts a long briefing before this runs, so the step can also stand cut off at the very end; then
+ * the cut-off start is swapped for the whole locked step, because what is left of the owner's
+ * step can still name `ask_secret`.
+ */
+export function lockedTurnBriefing(briefing: string): string {
+  const swapped = briefing.split(CATALOG_OWNER_STORE_STEP).join(CATALOG_LOCKED_STORE_STEP);
+  const cut = swapped.endsWith(BRIEFING_CUT_MARKER);
+  const head = cut ? swapped.slice(0, -BRIEFING_CUT_MARKER.length) : swapped;
+  for (let n = CATALOG_OWNER_STORE_STEP.length - 1; n >= MIN_CUT_STEP; n--) {
+    if (head.endsWith(CATALOG_OWNER_STORE_STEP.slice(0, n))) {
+      return head.slice(0, -n) + CATALOG_LOCKED_STORE_STEP + (cut ? BRIEFING_CUT_MARKER : '');
+    }
+  }
+  return swapped;
 }
 
 export class ApiStore {
@@ -1756,9 +1799,10 @@ export class ApiStore {
   private _othersWatching(id: string, names: readonly string[]): void {
     if (names.length === 0) return;
     // Registered profiles only, as in `secretWritten` and `_followRenewal`: a profile the boot
-    // held back has no grant in use, and it comes back only through a save, which mints it as
-    // new (it is not in `profiles`, so `prev` is undefined), or through the next boot, whose
-    // fingerprint comparison reads the vault as it is then.
+    // held back has no grant in use, and it comes back only through a save, which reads its
+    // stored grant as a registered one's and mints for the same reasons (a new consent, other
+    // credentials, an exchange on a credential its fingerprints do not know), or through the
+    // next boot, whose fingerprint comparison reads the vault as it is then.
     for (const p of [...this.profiles.values()]) {
       if (p.id !== id && watchedNames(p).some((n) => names.includes(n))) this._reissue(p.id, 'engine-write');
     }
@@ -1874,19 +1918,40 @@ export class ApiStore {
     if (!this.grantLedger || this.fingerprinter === null) return 0;
     let minted = 0;
     for (const p of [...this.profiles.values()]) {
-      const stored = storedFingerprints(p);
-      const check: unknown = p.oauth_grant?.fingerprint_check;
-      let reason: GrantMintReason | null = stored === undefined || typeof check !== 'string' ? 'baseline'
-        : check !== this.fingerprinter.keyCheck ? 'rekey'
-        : null;
-      for (const [name, fp] of Object.entries(this._credentialsOf(p)?.fingerprints ?? {})) {
-        if (reason !== null) break;
-        if (!Object.hasOwn(stored!, name)) reason = 'baseline';
-        else if (stored![name] !== fp) reason = 'secret-changed';
-      }
+      const reason = this._fingerprintDrift(p);
       if (reason !== null && this._reissue(p.id, reason)) minted++;
     }
     return minted;
+  }
+
+  /** Why the boot comparison ({@link checkFingerprints}) would mint for `p`, or null where the
+   *  vault holds what its grant recorded. Null without a fingerprinter: nothing to compare with. */
+  private _fingerprintDrift(p: ApiProfile): GrantMintReason | null {
+    if (this.fingerprinter === null) return null;
+    const stored = storedFingerprints(p);
+    const check: unknown = p.oauth_grant?.fingerprint_check;
+    let reason: GrantMintReason | null = stored === undefined || typeof check !== 'string' ? 'baseline'
+      : check !== this.fingerprinter.keyCheck ? 'rekey'
+      : null;
+    for (const [name, fp] of Object.entries(this._credentialsOf(p)?.fingerprints ?? {})) {
+      if (reason !== null) break;
+      if (!Object.hasOwn(stored!, name)) reason = 'baseline';
+      else if (stored![name] !== fp) reason = 'secret-changed';
+    }
+    return reason;
+  }
+
+  /** `held`, a profile the boot held back, where its grant is one {@link backfillGrants} would
+   *  keep: recorded for this connection and its latest. The boot backfills registered profiles
+   *  only, so a held-back one may carry no grant, an unknown one or another connection's; a save
+   *  that brings it back then starts the connection's line (`new`), as it did before it read the
+   *  held-back grant at all. */
+  private _heldBackGrantKept(held: ApiProfile | undefined): ApiProfile | undefined {
+    const g = held?.oauth_grant?.grant_id;
+    const ledger = this.grantLedger;
+    if (held === undefined || ledger === null || typeof g !== 'string' || g === '') return undefined;
+    // The latest grant the ledger records for this id is this connection's by construction.
+    return ledger.latest(held.id)?.grant_id === g ? held : undefined;
   }
 
   /**
@@ -2719,6 +2784,11 @@ export class ApiStore {
     const prev = this.profiles.get(profile.id);
     const heldBefore = this.heldBack.get(profile.id);
     const isNew = prev === undefined;
+    // What the grant decisions read: the registered profile, or the one the boot held back. A
+    // held-back profile is out of service, not new: where its grant is still the connection's,
+    // a save that brings it back keeps it, or mints for the same reasons a registered one would —
+    // and a new consent then ends a provider's erasure still held on it, as it does there.
+    const stored = prev ?? this._heldBackGrantKept(heldBefore);
     const ledger = this.grantLedger;
     const exchange = options?.exchange;
     // The grant is the engine's, never the caller's: a save mints when it creates the
@@ -2726,10 +2796,13 @@ export class ApiStore {
     // that ran on a credential this epoch did not record, and otherwise keeps the stored grant
     // and its fingerprints — whatever the passed profile says.
     const mintReason: GrantMintReason | null = ledger === null ? null
-      : isNew ? 'new'
+      : stored === undefined ? 'new'
       : options?.newConsent === true ? 'consent'
-      : credentialTuple(prev) !== credentialTuple(profile) ? 'credentials'
-      : exchange !== undefined && this.fingerprinter !== null && !exchangeKnown(prev, exchange) ? 'exchange'
+      : credentialTuple(stored) !== credentialTuple(profile) ? 'credentials'
+      : exchange !== undefined && this.fingerprinter !== null && !exchangeKnown(stored, exchange) ? 'exchange'
+      // A held-back profile coming back: the writes, renewals and boot comparison it missed
+      // while held back, made up for here as the boot would.
+      : prev === undefined ? this._fingerprintDrift(stored)
       : null;
     // What the engine itself just wrote into the vault for this connection, which any other
     // connection reading the same name must treat as a new credential.
@@ -2741,20 +2814,20 @@ export class ApiStore {
       // A known exchange moves the fingerprints of the watched names it wrote, read back now:
       // the new values are this epoch's, so neither the next exchange nor the boot reads them as
       // a change. The foreign tokens stay as they are; the next mint keeps those still held.
-      const fps = storedFingerprints(prev);
-      const check: unknown = prev?.oauth_grant?.fingerprint_check;
-      let kept: GrantCredentials = { fingerprints: fps, foreign: storedForeign(prev), check: typeof check === 'string' ? check : undefined };
+      const fps = storedFingerprints(stored);
+      const check: unknown = stored?.oauth_grant?.fingerprint_check;
+      let kept: GrantCredentials = { fingerprints: fps, foreign: storedForeign(stored), check: typeof check === 'string' ? check : undefined };
       const f = this.fingerprinter;
       if (fps !== undefined && exchange !== undefined && f !== null) {
         const moved = { ...fps };
         for (const name of exchange.wrote) if (Object.hasOwn(moved, name)) moved[name] = keyedOf(f, name);
         kept = { ...kept, fingerprints: moved };
       }
-      const persist = (): ReturnType<ApiStore['save']> => this._persist(withGrant(profile, prev?.oauth_grant?.grant_id, kept), apisDir, isNew, options?.trailId);
+      const persist = (): ReturnType<ApiStore['save']> => this._persist(withGrant(profile, stored?.oauth_grant?.grant_id, kept), apisDir, isNew, options?.trailId);
       // A save that clears a revocation from the grant it keeps (an exchange that worked again with
       // the same token) lifts it: a provider's erasure of that grant still held is cancelled with it,
       // whoever saves, since the same grant works again. A save that names no actor cancels nothing.
-      const liftedGrant = prev?.oauth_grant?.state === 'revoked' && profile.oauth_grant?.state !== 'revoked' ? prev.oauth_grant.grant_id : undefined;
+      const liftedGrant = stored?.oauth_grant?.state === 'revoked' && profile.oauth_grant?.state !== 'revoked' ? stored.oauth_grant.grant_id : undefined;
       const conn = this.connStore;
       const actor = options?.actor;
       let saved: ReturnType<ApiStore['save']>;
@@ -2786,7 +2859,7 @@ export class ApiStore {
     try {
       const saved = ledger.transaction(() => {
         const minted = withGrant(profile, ledger.mint(profile.id, 'api', mintReason), this._credentialsOf(profile, {
-          prevForeign: storedForeign(prev),
+          prevForeign: storedForeign(stored),
           consentRefresh: options?.newConsent === true ? options.consentRefresh : undefined,
           adopt: mintReason === 'exchange' ? exchange?.presentedRefreshTokenFp ?? undefined : undefined,
         }));
@@ -2801,7 +2874,7 @@ export class ApiStore {
         // never reaches an erasure of a grant someone else connected. A `credentials` mint (a
         // configuration change) does not count.
         const actor = options?.actor;
-        const refused = prev?.oauth_grant;
+        const refused = stored?.oauth_grant;
         if ((mintReason === 'consent' || mintReason === 'exchange') && this.connStore !== null && mayCancelProviderErasure(actor, refused)) {
           const onlyGrant = actor.kind === 'owner' ? undefined : refused?.grant_id;
           if (actor.kind === 'owner' || onlyGrant !== undefined) {
@@ -3360,7 +3433,7 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
     // would be the very thing the section forbids.
     if (cat.connect_when_user_asks.length > 0) {
       lines.push('');
-      lines.push('Connect ONLY after the user names one of these providers — this is the "without the user explicitly asking" carve-out of the rule above, not a second list to offer from. Never name one yourself: if the user says only what kind of tool it is, ask which product they use and wait. Once they name it: walk them through creating the credential in their own account, have them store it with `ask_secret`, then call `api_setup` action=bootstrap with the docs_url (an entry that names a built-in preset says to create the profile directly instead). `bootstrap` derives base_url from the DOCS host, which is wrong for every entry here — take the API base from the entry, or ask the user for their own site when it says so:');
+      lines.push('Connect ONLY after the user names one of these providers — this is the "without the user explicitly asking" carve-out of the rule above, not a second list to offer from. Never name one yourself: if the user says only what kind of tool it is, ask which product they use and wait. Once they name it: ' + CATALOG_OWNER_STORE_STEP + ' `api_setup` action=bootstrap with the docs_url (an entry that names a built-in preset says to create the profile directly instead). `bootstrap` derives base_url from the DOCS host, which is wrong for every entry here — take the API base from the entry, or ask the user for their own site when it says so:');
       for (const api of cat.connect_when_user_asks) {
         lines.push(`- ${api.name} (${api.category}, auth=${api.auth_type}) — ${api.value_prop} Docs: ${api.docs_url}`);
       }

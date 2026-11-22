@@ -42,7 +42,8 @@ function agentWith(store: ApiStore): never {
   return {
     principal: OWNER_PRINCIPAL,
     sessionCounters: { httpRequests: 0 },
-    secretStore: { resolve: (): string | null => null, extractSecretNames: (): string[] => [], resolveSecretRefs: (input: unknown): unknown => input },
+    // An empty vault the save can read: a built-in provider's profile is not saved where its slots cannot be seen.
+    secretStore: { resolve: (): string | null => null, listNames: (): string[] => [], extractSecretNames: (): string[] => [], resolveSecretRefs: (input: unknown): unknown => input },
     toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store, dataStore: null, taskManager: null, knowledgeLayer: null, runHistory: null, userConfig: {}, tools: [], streamHandler: null, networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], rateLimitProvider: null, hourlyRateLimit: Infinity, dailyRateLimit: Infinity, isolationEnvOverride: undefined, isolationMinimalEnv: false },
   } as never;
 }

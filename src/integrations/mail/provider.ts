@@ -467,6 +467,10 @@ export type MailErrorCode =
   | 'rate_limited'
   | 'timeout'
   | 'unsupported'
+  // The session was lost between two steps of one read (the mailbox was deselected, or the
+  // server said BYE), so the read never ran. Not `connection_failed`, whose owner text says
+  // the server could not be reached, and not `not_found`: nothing is known about the mail.
+  | 'connection_dropped'
   | 'unknown';
 
 export class MailError extends Error {
