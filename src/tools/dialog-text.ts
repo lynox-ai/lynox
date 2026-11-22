@@ -26,7 +26,7 @@ export const QUOTE_MARKS: Readonly<Record<DialogLanguage, readonly [open: string
 
 /** `\` and every character that reads as a double quotation mark (the straight one, both
  *  languages' marks, and their lookalikes), so a value cannot close the marks around it. */
-const QUOTE_LIKE = /[\\"“”„‟″‶＂〝〞〟〃ˮ״❝❞❠ʺ˝˵˶⹂🙶🙷🙸̋̎̏]/gu;
+const QUOTE_LIKE = /[\\"“”„‟″‶＂〝〞〟〃ˮ״❝❞❠ʺ˝˵˶⹂🙶🙷🙸\u{030B}\u{030E}\u{030F}]/gu;
 
 /** `text` as it stands between a dialog's quotation marks: each quote-like character escaped. */
 export function escapeQuoted(text: string): string {
