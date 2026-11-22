@@ -1643,13 +1643,14 @@ const MIGRATIONS: string[] = [
   // does not run again would keep them in reach of every reader. So each such result is split at
   // its first `\n• `: what follows goes into the column as one entry. The owner reads the same
   // text as before (`lastRunResultFor` puts it back with the same separator); anyone else reads
-  // the sentence, also for a reply of the model's own whose list happens to start that way.
+  // the sentence. Not a success: a run that noted lines never ends as one (`withMemberNotes`
+  // halts it), so a successful reply with a list of its own stays as it is.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (71);
    ALTER TABLE triggers ADD COLUMN last_run_member_notes TEXT;
    UPDATE triggers SET
      last_run_member_notes = json_array(substr(last_run_result, instr(last_run_result, char(10) || '• ') + 3)),
      last_run_result = substr(last_run_result, 1, instr(last_run_result, char(10) || '• ') - 1)
-   WHERE instr(last_run_result, char(10) || '• ') > 0;`,
+   WHERE instr(last_run_result, char(10) || '• ') > 0 AND last_run_status IS NOT 'success';`,
 ];
 
 export interface EngineDbOptions {

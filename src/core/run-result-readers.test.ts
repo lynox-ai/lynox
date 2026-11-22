@@ -15,6 +15,7 @@ import { WORKER_NOTICES } from './worker-notices.js';
 import { noticeLanguage } from './notice-language.js';
 import { loadConfig } from './config.js';
 import { triggerForRoute, rowForRoute } from '../server/http-api.js';
+import { triggerDbRowToRecord } from './trigger-store.js';
 import { testAuditLog } from '../../tests/helpers/audit-log.js';
 
 /**
@@ -87,18 +88,44 @@ describe("a run's end with member lines, by reader", () => {
     const legacy = `${REPLY}\n• ${LINE}\n• Another line.`;
     raw.exec('ALTER TABLE triggers DROP COLUMN last_run_member_notes; DELETE FROM schema_version WHERE version >= 71;');
     raw.prepare("INSERT INTO triggers (id, title, source, effect, last_run_result, last_run_status) VALUES ('old', 'Old', 'cron', 'run_agent', ?, 'halted')").run(legacy);
-    raw.prepare("INSERT INTO triggers (id, title, source, effect, last_run_result, last_run_status) VALUES ('plain', 'Plain', 'cron', 'run_agent', 'All done.', 'success')").run();
+    const listed = 'Done:\n• first item\n• second item';
+    const failedWithList = `Found:\n• one\n• ${LINE}`;
+    const insert = raw.prepare('INSERT INTO triggers (id, title, source, effect, last_run_result, last_run_status) VALUES (?, ?, ?, ?, ?, ?)');
+    insert.run('plain', 'Plain', 'cron', 'run_agent', 'All done.', 'success');
+    insert.run('listed', 'Listed', 'cron', 'run_agent', listed, 'success');
+    insert.run('failed', 'Failed', 'cron', 'run_agent', failedWithList, 'failed');
+    insert.run('headless', 'Headless', 'cron', 'run_agent', `\n• ${LINE}`, 'halted');
+    insert.run('none', 'None', 'cron', 'run_agent', null, null);
     raw.close();
     const migrated = new EngineDb(path, '');
-    const rows = migrated.getDb().prepare("SELECT id, last_run_result, last_run_member_notes FROM triggers WHERE id IN ('old', 'plain') ORDER BY id").all();
+    const rows = migrated.getDb().prepare('SELECT id, last_run_result, last_run_member_notes FROM triggers ORDER BY id').all();
     migrated.close();
     expect(rows).toEqual([
+      { id: 'failed', last_run_result: 'Found:', last_run_member_notes: JSON.stringify([`one\n• ${LINE}`]) },
+      { id: 'headless', last_run_result: '', last_run_member_notes: JSON.stringify([LINE]) },
+      // A success never carries lines: its own list stays where it is.
+      { id: 'listed', last_run_result: listed, last_run_member_notes: null },
+      { id: 'none', last_run_result: null, last_run_member_notes: null },
       { id: 'old', last_run_result: REPLY, last_run_member_notes: JSON.stringify([`${LINE}\n• Another line.`]) },
       { id: 'plain', last_run_result: 'All done.', last_run_member_notes: null },
     ]);
-    const old = { last_run_result: REPLY, last_run_member_notes: [`${LINE}\n• Another line.`] };
-    expect(lastRunResultFor(old, true, 'S')).toBe(legacy);
-    expect(lastRunResultFor(old, false, 'S')).toBe('S');
+    // Read back as the routes read it: the owner the text as it was stored, a mandate the sentence.
+    const reopened = new EngineDb(path, '');
+    const read = (id: string): Record<string, unknown> => {
+      const row = reopened.getDb().prepare(`SELECT * FROM triggers WHERE id = ?`).get(id) as Parameters<typeof triggerDbRowToRecord>[0];
+      return triggerForRoute(triggerDbRowToRecord(row), OWNER_PRINCIPAL) as Record<string, unknown>;
+    };
+    const readAsMandate = (id: string): Record<string, unknown> => {
+      const row = reopened.getDb().prepare(`SELECT * FROM triggers WHERE id = ?`).get(id) as Parameters<typeof triggerDbRowToRecord>[0];
+      return triggerForRoute(triggerDbRowToRecord(row), MANDATE) as Record<string, unknown>;
+    };
+    expect(read('old')['last_run_result']).toBe(legacy);
+    expect(read('failed')['last_run_result']).toBe(failedWithList);
+    expect(read('headless')['last_run_result']).toBe(`\n• ${LINE}`);
+    expect(read('listed')['last_run_result']).toBe(listed);
+    for (const id of ['old', 'failed', 'headless']) expect(readAsMandate(id)['last_run_result']).toBe(forMandatesHere());
+    expect(readAsMandate('listed')['last_run_result']).toBe(listed);
+    reopened.close();
   });
 
   it('a repeat is read off the stored lines', () => {
