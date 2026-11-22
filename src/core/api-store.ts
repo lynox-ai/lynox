@@ -428,6 +428,24 @@ export interface OAuthGrantRecord {
    */
   granted_scope?: string[] | undefined;
   /**
+   * The scopes the authorize link asked for, as the person confirmed them on the consent page:
+   * written only by the connect callback, from the signed state of the confirmed start, never from
+   * the profile. A save over the profile changes `auth.oauth.scope` for the NEXT link and leaves
+   * this as it is, so a scope added without a new consent never reads as asked. A renewal keeps
+   * it. Absent on every grant from before it was recorded, which reads as nothing asked.
+   */
+  asked_scope?: string[] | undefined;
+  /**
+   * The version of the customer text the consent page showed and the person confirmed
+   * (`consentNoticeVersion`), and when: written only by the connect callback, from the signed state
+   * of the confirmed start, never from the profile, a tool or a client. A start whose page showed
+   * no text records none. Absent on every grant from before it was recorded, which reads as
+   * confirmed under no text: a Shopify bulk run then writes only the fields an earlier text named
+   * (`shopifyConsentBlock`).
+   */
+  consent_version?: string | undefined;
+  consented_at?: string | undefined;
+  /**
    * The binding of this grant's access token to the profile and the store the provider signed
    * for (PRD-SHOPIFY-CONTAINMENT-ERASURE Appendix B, B4): `EngineDb.storeBindingDigest` over the
    * profile id, the store origin and the token. Written by the callback in the same save as the
@@ -1443,6 +1461,37 @@ function missingRequiredField(profile: unknown): boolean {
   const p = profile as Record<string, unknown>;
   return ['id', 'base_url'].some((f) => typeof p[f] !== 'string' || p[f] === '') || !p['name'] ||
     (typeof p['name'] !== 'string' && typeof p['name'] !== 'number') || !p['description'];
+}
+
+/**
+ * The catalog's step for a provider the user names, and what a locked turn (a mandate's) reads in
+ * its place (U-185): there `ask_secret` stores nothing, and only the owner of this instance
+ * stores keys. The owner's briefing carries the first; `lockedTurnBriefing` swaps it.
+ */
+const CATALOG_OWNER_STORE_STEP = 'walk them through creating the credential in their own account, have them store it with `ask_secret`, then call';
+const CATALOG_LOCKED_STORE_STEP = 'tell them which credential the API needs and that the owner of this instance has to store it, then call';
+
+/** What `Session` appends where it cuts a briefing that is too long (`session.ts`). */
+export const BRIEFING_CUT_MARKER = '\n[...truncated]';
+/** A cut-off start of the owner's step shorter than this is too generic to tell apart from other text. */
+const MIN_CUT_STEP = 20;
+
+/**
+ * The briefing a locked turn gets: the catalog's store step swapped, the rest as it is. `Session`
+ * cuts a long briefing before this runs, so the step can also stand cut off at the very end; then
+ * the cut-off start is swapped for the whole locked step, because what is left of the owner's
+ * step can still name `ask_secret`.
+ */
+export function lockedTurnBriefing(briefing: string): string {
+  const swapped = briefing.split(CATALOG_OWNER_STORE_STEP).join(CATALOG_LOCKED_STORE_STEP);
+  const cut = swapped.endsWith(BRIEFING_CUT_MARKER);
+  const head = cut ? swapped.slice(0, -BRIEFING_CUT_MARKER.length) : swapped;
+  for (let n = CATALOG_OWNER_STORE_STEP.length - 1; n >= MIN_CUT_STEP; n--) {
+    if (head.endsWith(CATALOG_OWNER_STORE_STEP.slice(0, n))) {
+      return head.slice(0, -n) + CATALOG_LOCKED_STORE_STEP + (cut ? BRIEFING_CUT_MARKER : '');
+    }
+  }
+  return swapped;
 }
 
 export class ApiStore {
@@ -3384,7 +3433,7 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
     // would be the very thing the section forbids.
     if (cat.connect_when_user_asks.length > 0) {
       lines.push('');
-      lines.push('Connect ONLY after the user names one of these providers — this is the "without the user explicitly asking" carve-out of the rule above, not a second list to offer from. Never name one yourself: if the user says only what kind of tool it is, ask which product they use and wait. Once they name it: walk them through creating the credential in their own account, have them store it with `ask_secret`, then call `api_setup` action=bootstrap with the docs_url (an entry that names a built-in preset says to create the profile directly instead). `bootstrap` derives base_url from the DOCS host, which is wrong for every entry here — take the API base from the entry, or ask the user for their own site when it says so:');
+      lines.push('Connect ONLY after the user names one of these providers — this is the "without the user explicitly asking" carve-out of the rule above, not a second list to offer from. Never name one yourself: if the user says only what kind of tool it is, ask which product they use and wait. Once they name it: ' + CATALOG_OWNER_STORE_STEP + ' `api_setup` action=bootstrap with the docs_url (an entry that names a built-in preset says to create the profile directly instead). `bootstrap` derives base_url from the DOCS host, which is wrong for every entry here — take the API base from the entry, or ask the user for their own site when it says so:');
       for (const api of cat.connect_when_user_asks) {
         lines.push(`- ${api.name} (${api.category}, auth=${api.auth_type}) — ${api.value_prop} Docs: ${api.docs_url}`);
       }
