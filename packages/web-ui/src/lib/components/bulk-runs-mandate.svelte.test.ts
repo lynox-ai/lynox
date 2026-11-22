@@ -321,3 +321,13 @@ describe('a sentence that names an act of the owner\'s', () => {
 		expect(target.textContent).toContain(t('bulk.intro'));
 	});
 });
+
+describe('the reason under a value lynox leaves out, as a mandate reads it', () => {
+	it('names the owner as the one who can still approve the other products', async () => {
+		run = makeRun({ total: 2, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		shownTargets = [...TARGETS, { seq: 2, key: 'gid://shopify/Product/2', change: 'invalid', diff: { kind: 'none' } as BulkTarget['diff'], error: 'html_too_long', deselected: false }];
+		await renderDetail();
+		expect(target.textContent).toContain(t('bulk.invalid.html_too_long_mandate'));
+		expect(target.textContent).not.toContain(t('bulk.invalid.html_too_long'));
+	});
+});

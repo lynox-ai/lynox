@@ -25,7 +25,7 @@ import { repairStrayCloseTag } from './model-json-body.js';
 import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy, refuseRedirectToStore } from '../../core/network-guard.js';
 import type { EgressCall, HostPolicyContext } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
-import { WRITE_POSSIBLY_LANDED_PREFIX, refusedReviewedHeaders, ungrantedWriteNote, urlForNote, writeFollowedAsReadNote, writeForNote, writeForShortNote } from '../../core/write-notes.js';
+import { WRITE_POSSIBLY_LANDED_PREFIX, hostShowsStoredValue, refusedReviewedHeaders, ungrantedWriteNote, urlForNote, writeFollowedAsReadNote, writeForNote, writeForShortNote } from '../../core/write-notes.js';
 import { isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
 import { isProtectedSecretWrite, SECRET_SHAPES } from '../../core/secret-store.js';
 import type { SecretShape, SecretShapeKind } from '../../core/secret-store.js';
@@ -50,6 +50,7 @@ import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_E
 import type { VerifiedStoreCallback } from '../../core/oauth-callback-hmac.js';
 import { chatIsContained, containedStoreWrite, containerOf, CONTAINED_WRITE_REFUSAL_AT_SEND, type ContainedConnection, type StoreContainer } from '../../core/containment.js';
 import { controlPlaneFromEnv } from '../../core/exact-clearance.js';
+import { hostTargets } from '../../core/send-target.js';
 import { timingSafeEqual } from 'node:crypto';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
@@ -3112,22 +3113,26 @@ interface HttpRequestInput {
   timeout_ms?: number | undefined;
 }
 
+// The effective method, overrides included; one that is not a method counts as a write. When
+// an override names other writes, every write the request names, as the approval keys them
+// (`PATCH+POST`): a server may run any of them.
+function httpOutwardWrite(input: HttpRequestInput): string | null {
+  const headers = input.headers ?? {};
+  const body = gateBodyReadings(input.body, headers);
+  const method = effectiveWriteMethod(input.method ?? 'GET', headers, input.url, body) ?? 'OVERRIDE';
+  if (isReadMethod(method)) return null;
+  const named = method === 'OVERRIDE' ? [] : writeMethodsNamed(input.method ?? 'GET', headers, input.url, body);
+  return named.length > 1 ? named.join('+') : method;
+}
+
 export const httpRequestTool: ToolEntry<HttpRequestInput> = {
   // The classification itself lives at `undoClassFor`, which the two gates in the handler
   // read as well — see its docblock for why PUT/PATCH are restorable and POST/DELETE are
   // not. Declaring it here a second time is what let the two drift.
   undo: (input) => undoClassFor(input.method ?? 'GET'),
-  // The effective method, overrides included; one that is not a method counts as a write. When
-  // an override names other writes, every write the request names, as the approval keys them
-  // (`PATCH+POST`): a server may run any of them.
-  outwardWrite: (input) => {
-    const headers = input.headers ?? {};
-    const body = gateBodyReadings(input.body, headers);
-    const method = effectiveWriteMethod(input.method ?? 'GET', headers, input.url, body) ?? 'OVERRIDE';
-    if (isReadMethod(method)) return null;
-    const named = method === 'OVERRIDE' ? [] : writeMethodsNamed(input.method ?? 'GET', headers, input.url, body);
-    return named.length > 1 ? named.join('+') : method;
-  },
+  outwardWrite: (input) => httpOutwardWrite(input),
+  // A write sends to the host of its URL. A read (GET, HEAD) declares no target here.
+  sendTargets: (input) => (httpOutwardWrite(input) === null ? null : hostTargets(input.url)),
   // The same method read the other way round: a GET or HEAD reads at the URL, host and path.
   outwardRead: (input) => {
     const method = effectiveWriteMethod(input.method ?? 'GET', input.headers ?? {}, input.url, gateBodyReadings(input.body, input.headers ?? {})) ?? 'OVERRIDE';
@@ -3255,7 +3260,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // malformed URL is refused by the host policy further down, with its own message.
     // Under a mandate a host that holds a stored secret is not named: the text reaches the
     // mandate's run report too. Read as parsed (lower-cased, percent-decoded) and as the request
-    // wrote it, where a secret keeps its case; and the parsed host as DNS and TLS read it.
+    // wrote it, where a secret keeps its case; and the parsed host as DNS and TLS read it. Also
+    // a value the host holds only in part, or in a form the parser undoes (`hostShowsStoredValue`).
     const hostHoldsSecret = (): boolean => {
       if (isOwnerPrincipal(agent.principal)) return false;
       const parsed = new URL(input.url);
@@ -3263,7 +3269,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const rawHost = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(input.url)?.[1] ?? '';
       const decodedHost = ((): string => { try { return decodeURIComponent(rawHost); } catch { return rawHost; } })();
       return [parsed.hostname, rawHost, decodedHost].some((h) => maskOf(h) !== h)
-        || (agent.secretStore?.containsSecretAsHost(parsed.hostname) ?? false);
+        || (agent.secretStore?.containsSecretAsHost(parsed.hostname) ?? false)
+        || hostShowsStoredValue(input.url, maskOf);
     };
     const service = (): string => (hostHoldsSecret() ? 'this service' : approvalOrigin(new URL(input.url)));
     const writeShown = writeForNote(method.trim().toUpperCase(), gatedMethod, writeMethodsNamed(method, headers, input.url, gateBodyReadings(input.body, headers)));
