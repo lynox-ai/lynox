@@ -108,6 +108,11 @@ jobs:
           ACCEPTED=$(jq '(.accepted // []) | length' /tmp/osv-verdict.json)
           TOTAL=$(jq '(.blocking | length) + (.below | length) + ((.accepted // []) | length)' /tmp/osv-verdict.json)
           jq -r '(.accepted // [])[] | "::warning::osv watch: \(.package) \(.id) (\(.severity)) accepted until \(.until)"' /tmp/osv-verdict.json
+          # A stale acceptance (one no finding named any more, e.g. a withdrawn advisory) fails the
+          # merge gate on every pull request. The watch says so and fails at the end of this step, so
+          # the alert job below reports it, instead of closing the tracking issue and staying green.
+          STALE=$(jq '(.unused // []) | length' /tmp/osv-verdict.json)
+          jq -r '(.unused // [])[] | "::error::osv watch: stale acceptance " + . + " matched no HIGH or CRITICAL finding; remove it"' /tmp/osv-verdict.json
           STAMP=$(date -u +'%Y-%m-%d %H:%M UTC')
           echo "total=${TOTAL} high_or_critical=${HIGH} accepted=${ACCEPTED}"
 
@@ -148,6 +153,10 @@ jobs:
             else
               echo "No HIGH/CRITICAL and no open tracking issue — nothing to do."
             fi
+          fi
+          if [ "${STALE}" -gt 0 ]; then
+            echo "::error::osv watch: ${STALE} stale acceptance(s); the merge gate fails until they are removed"
+            exit 1
           fi
 
   # Report this run's outcome to the workflow's one alert issue: opened on the

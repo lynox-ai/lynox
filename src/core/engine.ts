@@ -34,7 +34,7 @@ import { Containment } from './containment.js';
 import { ContainmentMirror, ExactMirror, exactHeldAtBoot, exactMarkerOf, syncContainmentMirror, syncExactMarker } from './history-markers.js';
 import { exactMarkerOnDisk, isExactHeld, refuseDebug } from './exact-debug-refusal.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
-import { AuditLog } from './audit-log.js';
+import { AuditLog, recordMandateRevoked } from './audit-log.js';
 import { MandateEnds } from './mandate-ends.js';
 import { pauseEndedPlans } from './plan-pause.js';
 import { processErrorText } from './error-egress.js';
@@ -1689,6 +1689,12 @@ export class Engine {
       runOutsideGroup(() => queueMicrotask(() => this.endEndedMandateRuns()));
     });
     this._mandateEnds?.onRevoke(() => this.endEndedMandateRuns());
+    // The revoke in the revoked person's trail. A throw is logged by `MandateEnds.revoke` and
+    // undoes nothing: the end is already written and every later request is refused by it.
+    this._mandateEnds?.onRevoke((mandateId) => {
+      const log = this.getAuditLog();
+      if (log !== null) recordMandateRevoked(log, mandateId);
+    });
     this._runSweepTimer = setInterval(() => this.endEndedMandateRuns(), 5 * 60_000);
     this._runSweepTimer.unref?.();
 
