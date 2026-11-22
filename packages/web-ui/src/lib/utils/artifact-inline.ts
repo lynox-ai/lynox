@@ -164,9 +164,13 @@ const LEADING_FENCE_MARKERS_RE = /^<!--\s*title:[^\n]*?-->\n(?:<!--\s*type:\s*\w
 
 /** Whether a rendered fence body holds only the placeholder, measured on what
  *  the store would hold: the content without the markers the chat put before
- *  it. Measured with them, a stored placeholder near the bound got no badge. */
+ *  it and without the line end the markdown parser adds to every code block.
+ *  Measured with them, a stored placeholder near the bound got no badge.
+ *  Bounded, not exact, at two edges, and both only miss a badge near the
+ *  bound, never add one: a title with a line break keeps its marker in the
+ *  count, and whitespace that opened the content is gone with the id marker. */
 export function fenceHoldsOnlyPlaceholder(src: string): boolean {
-	return holdsOnlyPlaceholder(src.replace(LEADING_FENCE_MARKERS_RE, ''));
+	return holdsOnlyPlaceholder(src.replace(LEADING_FENCE_MARKERS_RE, '').replace(/\n$/, ''));
 }
 
 /** Put the badge after the card's title. `label` is shown as text and escaped

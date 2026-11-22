@@ -15,6 +15,8 @@ import {
 	resolveArtifactRender,
 	withPlaceholderBadge,
 } from './artifact-inline.js';
+import { parseFences } from './code-fences.js';
+import { renderSanitizedMarkdown } from './markdown-render.js';
 
 // The engine's placeholder as a damaged file holds it (measured on a real instance: 176 bytes).
 const OLD_FORM = '[evicted after successful save — 5251 chars. The artifact is persisted; its id and file path are in the tool result below. read_file that path if you need the content again.]';
@@ -69,19 +71,26 @@ describe('an inline artifact that holds only the engine\'s placeholder', () => {
 describe('a fence body is measured as the store measured the content', () => {
 	/** A stored placeholder of exactly `bytes` bytes: the old form, padded. */
 	const stored = (bytes: number): string => OLD_FORM + 'x'.repeat(bytes - new TextEncoder().encode(OLD_FORM).length);
-	/** The body MarkdownRenderer hands on: the chat's fence header, then the content, id marker stripped. */
-	const rendered = (content: string, typed: boolean): string =>
-		resolveArtifactRender(artifactFenceHeader({ title: 'Ein längerer Titel für das Angebot', type: 'markdown', id: 'abc123', typed }) + content).src;
+	/** The body MarkdownRenderer hands on, through the renderer's own steps: the fence as the chat
+	 *  writes it (`artifactFenceWrap` in ChatView), the markdown render, the fence parse, the id strip. */
+	const throughRenderer = (fenceBody: string): string => {
+		const fences = parseFences(renderSanitizedMarkdown('```artifact\n' + fenceBody + '\n```'), document).fences;
+		expect(fences, 'the fence reaches the renderer as one artifact fence').toHaveLength(1);
+		return resolveArtifactRender(fences[0]!.code).src;
+	};
+	const chatFence = (content: string, typed: boolean): string =>
+		throughRenderer(artifactFenceHeader({ title: 'Ein längerer Titel für das Angebot', type: 'markdown', id: 'abc123', typed }) + content);
 
 	it.each([['an untyped fence', false], ['a typed fence', true]])('%s: a stored placeholder at the bound gets the badge, one byte over does not', (_l, typed) => {
-		expect(rendered(stored(PLACEHOLDER_MAX_BYTES), typed).length, 'positive control: with its header the body is over the bound').toBeGreaterThan(PLACEHOLDER_MAX_BYTES);
-		expect(fenceHoldsOnlyPlaceholder(rendered(stored(PLACEHOLDER_MAX_BYTES), typed))).toBe(true);
-		expect(fenceHoldsOnlyPlaceholder(rendered(stored(PLACEHOLDER_MAX_BYTES + 1), typed))).toBe(false);
+		expect(holdsOnlyPlaceholder(chatFence(stored(PLACEHOLDER_MAX_BYTES), typed)), 'positive control: measured as it arrives, the body is over the bound').toBe(false);
+		expect(fenceHoldsOnlyPlaceholder(chatFence(stored(PLACEHOLDER_MAX_BYTES), typed))).toBe(true);
+		expect(fenceHoldsOnlyPlaceholder(chatFence(stored(PLACEHOLDER_MAX_BYTES + 1), typed))).toBe(false);
 	});
 
-	it('a fence the model wrote without the chat\'s header is measured as it stands', () => {
-		expect(fenceHoldsOnlyPlaceholder(OLD_FORM)).toBe(true);
-		expect(fenceHoldsOnlyPlaceholder('# Pitch\n\nOur offer.')).toBe(false);
+	it('a fence the model wrote without the chat\'s header is measured as it stands, at the bound and one byte over', () => {
+		expect(fenceHoldsOnlyPlaceholder(throughRenderer(stored(PLACEHOLDER_MAX_BYTES)))).toBe(true);
+		expect(fenceHoldsOnlyPlaceholder(throughRenderer(stored(PLACEHOLDER_MAX_BYTES + 1)))).toBe(false);
+		expect(fenceHoldsOnlyPlaceholder(throughRenderer('# Pitch\n\nOur offer.'))).toBe(false);
 	});
 });
 
