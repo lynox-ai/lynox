@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, uxJsonKeyChanges, uxConfirmBlocks, UX_SELF_PATH, UX_LINE_MARK, deltaRangeErrors, deltaPredates, DELTA_LINE_MARK, DELTA_RANGE, wrongRunErrors, OTHER_REPO_MARKER } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, uxJsonKeyChanges, uxConfirmBlocks, UX_SELF_PATH, UX_LINE_MARK, deltaRangeErrors, deltaPredates, DELTA_LINE_MARK, DELTA_RANGE, securityModelPredates, securityModelErrors, SECURITY_MODEL_MARK, SECURITY_MODELS, SECURITY_LINE_MAX, wrongRunErrors, OTHER_REPO_MARKER } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -485,7 +485,7 @@ describe('gate-record — which gates a diff requires', () => {
     expect(named.errors.join(' ')).toMatch(/needs a `security:` line/);
 
     const proven = evaluate({
-      body: record({ gates: 'code-review, delta, security', security: 'own round, no findings' }),
+      body: record({ gates: 'code-review, delta, security', security: 'own round (opus), no findings' }),
       head: HEAD,
       files: ['src/core/data-boundary.ts'],
     });
@@ -626,7 +626,7 @@ describe('gate-record — the shipped template does not answer its own questions
     // A base that PASSES, so the only thing under test is the one substituted field. It owes the
     // security gate, so `security:` is live here too — on a code diff that field is not read at
     // all and this test would silently skip it.
-    const base = { gates: 'code-review, delta, security', security: 'own round, no findings' };
+    const base = { gates: 'code-review, delta, security', security: 'own round (opus), no findings' };
     expect(evaluate({ body: record(base), head: HEAD, files: SEC }).ok, 'the base is not valid — every case below would pass for the wrong reason').toBe(true);
     for (const [field, line] of Object.entries(shipped)) {
       const v = evaluate({ body: record({ ...base, [field]: line }), head: HEAD, files: SEC });
@@ -807,7 +807,7 @@ describe('gate-record — the shipped template does not answer its own questions
     // to the template, be nonsense, and nothing would notice until a security diff hit it. Same
     // reasoning as the assertion above, one gate further.
     const errors = evaluate({ body: TEMPLATE, head: HEAD, files: SEC }).errors.join(' ');
-    expect(errors).toContain('`security: <origin>, <result>`');
+    expect(errors).toContain('`security: <origin> (<model>), <result>`');
   });
 
   /**
@@ -850,7 +850,7 @@ describe('gate-record — the shipped template does not answer its own questions
       head: HEAD.slice(0, 8),
       gates: 'code-review, delta, security',
       review: '1 opus round, no findings',
-      security: 'own round, no findings',
+      security: 'own round (opus), no findings',
       delta: `clean on e91555e4..${HEAD.slice(0, 8)}`,
       mutations: '12 killed, 0 survived',
       closes: 'none',
@@ -1668,8 +1668,8 @@ describe('the `security:` evidence line', () => {
   });
 
   it('accepts `own round` and `leaning on <what>`', () => {
-    for (const sec of ['own round, no findings', 'leaning on the v1/v2 parity run, no findings',
-                       'own round, 2 findings, 1 fixed, 1 filed', 'Own Round, no findings.'])
+    for (const sec of ['own round (opus), no findings', 'leaning on the v1/v2 parity run (opus), no findings',
+                       'own round (opus), 2 findings, 1 fixed, 1 filed', 'Own Round (opus), no findings.'])
       // ⚠ `visibility: 'private'`: one of these counts an OPEN finding, which a PUBLIC record
       // refuses for its own reason. The origin vocabulary is what this test is about.
       expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: sec }), head: HEAD, files: SEC, visibility: 'private' }), sec).toMatchObject({ ok: true });
@@ -1680,8 +1680,8 @@ describe('the `security:` evidence line', () => {
     // that does not KNOW whose round it was to write `own round` — which is the lie this field
     // exists to prevent, and which is how the one recorded instance arose. So this is a plain
     // accept, with no penalty and no second-class message.
-    expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: 'origin unclear, no findings' }), head: HEAD, files: SEC }).ok).toBe(true);
-    expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: 'origin unclear, 2 findings, 1 fixed, 1 filed' }), head: HEAD, files: SEC, visibility: 'private' }).ok).toBe(true);
+    expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: 'origin unclear (opus), no findings' }), head: HEAD, files: SEC }).ok).toBe(true);
+    expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: 'origin unclear (opus), 2 findings, 1 fixed, 1 filed' }), head: HEAD, files: SEC, visibility: 'private' }).ok).toBe(true);
   });
 
   it('names `origin unclear` in the message a missing line produces', () => {
@@ -1704,7 +1704,7 @@ describe('the `security:` evidence line', () => {
   it('REACHES the shared result grammar — the wiring, not the grammar', () => {
     // Delete the `roundResultErrors(...)` call from this branch and every other test here stays
     // green while `own round, 2 findings, 1 fixed` passes. One grammar, two callers, two wirings.
-    const v = evaluate({ body: record({ gates: 'code-review, security, delta', security: 'own round, 2 findings, 1 fixed' }), head: HEAD, files: SEC });
+    const v = evaluate({ body: record({ gates: 'code-review, security, delta', security: 'own round (opus), 2 findings, 1 fixed' }), head: HEAD, files: SEC });
     expect(v.ok).toBe(false);
     expect(v.errors.join(' ')).toMatch(/sums to 1, not 2/);
   });
@@ -1722,8 +1722,8 @@ describe('the `security:` evidence line', () => {
     // while every other test here stays green, because none of them put junk in front of a VALID
     // origin. `nonsense` and `own` do not contain one, so they witness the vocabulary and not the
     // anchor. Measured by refuting, not by reading.
-    for (const sec of ['x own round, no findings', 'my own round, no findings',
-                       'see origin unclear, no findings'])
+    for (const sec of ['x own round (opus), no findings', 'my own round (opus), no findings',
+                       'see origin unclear (opus), no findings'])
       expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: sec }), head: HEAD, files: SEC }).ok, sec).toBe(false);
   });
 
@@ -1731,8 +1731,8 @@ describe('the `security:` evidence line', () => {
     // `leaning\s+on\s+` weakened to `\s*` accepts `leaning onwards, no findings`, with `wards` as
     // the reference. Three origins, and each needs its word boundary witnessed — a vocabulary that
     // matches prefixes is not closed.
-    for (const sec of ['leaning onwards, no findings', 'own rounds, no findings',
-                       'origin unclearly, no findings'])
+    for (const sec of ['leaning onwards (opus), no findings', 'own rounds (opus), no findings',
+                       'origin unclearly (opus), no findings'])
       expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: sec }), head: HEAD, files: SEC }).ok, sec).toBe(false);
   });
 
@@ -1741,8 +1741,8 @@ describe('the `security:` evidence line', () => {
     // than `,`. Without these the field would refuse `own  round` and `own round , …`, which are
     // typos and not different claims — and a false red is how a guard earns a bypass. Asserting
     // the tolerance is what keeps a later tightening honest.
-    for (const sec of ['own  round, no findings', 'own round , no findings',
-                       'own round,no findings', 'origin   unclear, no findings'])
+    for (const sec of ['own  round (opus), no findings', 'own round (opus) , no findings',
+                       'own round (opus),no findings', 'origin   unclear (opus), no findings'])
       expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: sec }), head: HEAD, files: SEC }).ok, sec).toBe(true);
   });
 
@@ -1762,7 +1762,7 @@ describe('the `security:` evidence line', () => {
       expect(v.errors.join(' '), sec).toMatch(/leans on nothing/);
     }
     // And it does not fire on a reference that says something.
-    expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: 'leaning on x, no findings' }), head: HEAD, files: SEC }).ok).toBe(true);
+    expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: 'leaning on x (opus), no findings' }), head: HEAD, files: SEC }).ok).toBe(true);
   });
 
   it('adds the comma hint for a CAPITALISED origin too', () => {
@@ -1777,7 +1777,7 @@ describe('the `security:` evidence line', () => {
     // The second half of the hint's condition: `resultErrors.length > 0`. Without it the hint
     // would ride along on a perfectly good line — and advice that appears when nothing is wrong
     // is how advice stops being read.
-    const v = evaluate({ body: record({ gates: 'code-review, security, delta', security: 'leaning on the parity run, no findings' }), head: HEAD, files: SEC });
+    const v = evaluate({ body: record({ gates: 'code-review, security, delta', security: 'leaning on the parity run (opus), no findings' }), head: HEAD, files: SEC });
     expect(v.ok).toBe(true);
     expect((v.errors ?? []).join(' ')).not.toMatch(/read as the/);
   });
@@ -1785,7 +1785,7 @@ describe('the `security:` evidence line', () => {
   it('does NOT add the comma hint when the origin was not a reference', () => {
     // The discriminator: a sum error under `own round` has nothing to do with commas, and a hint
     // that fires on every result error would be noise — which is how a message stops being read.
-    const e = evaluate({ body: record({ gates: 'code-review, security, delta', security: 'own round, 2 findings, 1 fixed' }), head: HEAD, files: SEC }).errors.join(' ');
+    const e = evaluate({ body: record({ gates: 'code-review, security, delta', security: 'own round (opus), 2 findings, 1 fixed' }), head: HEAD, files: SEC }).errors.join(' ');
     expect(e).toMatch(/sums to 1, not 2/);
     expect(e).not.toMatch(/read as the/);
   });
@@ -1800,7 +1800,7 @@ describe('a PUBLIC record does not count open findings', () => {
   // was the gap.
   const G = 'code-review, security, delta';
   const WITH_COUNT = '1 opus round, 2 findings, 1 fixed, 1 filed';
-  const SEC_COUNT = 'own round, 2 findings, 1 fixed, 1 filed';
+  const SEC_COUNT = 'own round (opus), 2 findings, 1 fixed, 1 filed';
   const pub = (over: Record<string, string>, files = SEC, visibility = 'public') =>
     evaluate({ body: record(over), head: HEAD, files, visibility });
 
@@ -1837,7 +1837,7 @@ describe('a PUBLIC record does not count open findings', () => {
   });
 
   it('sums EVERY mention, so an early `0 filed` cannot hide a later count', () => {
-    expect(openFiledCount('leaning on the 0 filed sweep, 2 findings, 2 filed')).toBe(2);
+    expect(openFiledCount('leaning on the 0 filed sweep (opus), 2 findings, 2 filed')).toBe(2);
   });
 
   it('counts the other open words: open, left/remaining/still open, deferred, `2x filed`', () => {
@@ -1852,8 +1852,8 @@ describe('a PUBLIC record does not count open findings', () => {
   it('REFUSES an open count in ANY field of a public record, also one whose grammar did not run', () => {
     // `security:` on a code-only diff, `review:` on a docs diff, and an unknown field.
     const cases: Array<[Record<string, string>, string[]]> = [
-      [{ security: 'own round, 2 findings, 2 open' }, CODE],
-      [{ security: 'leaning on the round that left 3 open, no findings' }, CODE],
+      [{ security: 'own round (opus), 2 findings, 2 open' }, CODE],
+      [{ security: 'leaning on the round that left 3 open (opus), no findings' }, CODE],
       [{ open: '3' + ' open' }, CODE],
     ];
     for (const [over, files] of cases) {
@@ -1880,7 +1880,7 @@ describe('a PUBLIC record does not count open findings', () => {
   it('REFUSES a `review:` count in public WHEN the record also owes security', () => {
     // The overlap is real wherever security is in play: the same findings get counted in both
     // halves, and the two numbers are then one set rather than two.
-    const v = pub({ gates: G, review: WITH_COUNT, security: 'own round, findings filed privately' });
+    const v = pub({ gates: G, review: WITH_COUNT, security: 'own round (opus), findings filed privately' });
     expect(v.ok).toBe(false);
     expect(v.errors.join(' ')).toMatch(/the `review:` line counts OPEN findings/);
   });
@@ -1931,7 +1931,7 @@ describe('a PUBLIC record does not count open findings', () => {
     // Measured GREEN before: `leaning on the 2 findings 2 filed round, no findings` — the count was
     // read from the result half only, and `leaning on <what>` is free text by design.
     const v = evaluate({
-      body: record({ gates: G, review: '1 opus round, no findings', security: 'leaning on the 2 findings 2 filed round, no findings' }),
+      body: record({ gates: G, review: '1 opus round, no findings', security: 'leaning on the 2 findings 2 filed round (opus), no findings' }),
       head: HEAD, files: SEC, visibility: 'public',
     });
     expect(v.ok).toBe(false);
@@ -1964,7 +1964,7 @@ describe('a PUBLIC record does not count open findings', () => {
     // witnessed through `security:`. Fail-closed has to hold in both branches, and a rule proven
     // in one place is proven in one place.
     const v = evaluate({
-      body: record({ gates: G, review: WITH_COUNT, security: 'own round, findings filed privately' }),
+      body: record({ gates: G, review: WITH_COUNT, security: 'own round (opus), findings filed privately' }),
       head: HEAD, files: SEC, visibility: 'unknown',
     });
     expect(v.ok).toBe(false);
@@ -1984,7 +1984,7 @@ describe('a PUBLIC record does not count open findings', () => {
   it('ACCEPTS the count-free form everywhere, in both fields', () => {
     for (const visibility of ['public', 'private', 'unknown']) {
       const v = evaluate({
-        body: record({ gates: G, review: '1 opus round, findings filed privately', security: 'own round, findings filed privately' }),
+        body: record({ gates: G, review: '1 opus round, findings filed privately', security: 'own round (opus), findings filed privately' }),
         head: HEAD, files: SEC, visibility,
       });
       expect(v.ok, `${visibility}: ${(v.errors ?? []).join(' ')}`).toBe(true);
@@ -2003,7 +2003,7 @@ describe('a PUBLIC record does not count open findings', () => {
   });
 
   it('still ACCEPTS `all fixed` in public — nothing is open, so there is nothing to hide', () => {
-    const v = pub({ gates: G, review: '1 opus round, 2 findings, all fixed', security: 'own round, 2 findings, all fixed' });
+    const v = pub({ gates: G, review: '1 opus round, 2 findings, all fixed', security: 'own round (opus), 2 findings, all fixed' });
     expect(v.ok, (v.errors ?? []).join(' ')).toBe(true);
   });
 
@@ -3398,4 +3398,200 @@ describe('a run this script cannot judge is refused', () => {
     expect(wrongRunErrors({ ...none, localBranch: (n: string) => n === 'def' })[0]).toContain('`--base-tip def`');
   });
 
+});
+
+describe('the `security:` line names the model of the round', () => {
+  // The rule: a security round runs on Opus, on Fable when Opus answers 429, never on Sonnet.
+  // Before the model was part of the line, `own round, no findings` passed whatever ran it.
+  const sec = (security: string, over: Record<string, unknown> = {}) =>
+    evaluate({ body: record({ gates: 'code-review, security, delta', security }), head: HEAD, files: SEC, ...over });
+
+  it('accepts the two models the rule allows, under every origin', () => {
+    for (const origin of ['own round', 'leaning on the parity run', 'origin unclear'])
+      for (const model of ['opus', 'fable', 'Opus', ' FABLE '])
+        expect(sec(`${origin} (${model}), no findings`), `${origin} (${model})`).toMatchObject({ ok: true });
+    expect(SECURITY_MODELS).toEqual(['opus', 'fable']);
+  });
+
+  it('refuses Sonnet and every other name — an ALLOW list, not a deny list of one', () => {
+    for (const origin of ['own round', 'leaning on the parity run', 'origin unclear'])
+      for (const model of ['sonnet', 'Sonnet', 'haiku', 'sonet', 'opus or sonnet', 'gpt']) {
+        const v = sec(`${origin} (${model}), no findings`);
+        expect(v.ok, `${origin} (${model})`).toBe(false);
+        expect(v.errors.join(' '), `${origin} (${model})`).toContain(`names the model \`${model.toLowerCase()}\``);
+      }
+  });
+
+  it('refuses a missing model under every origin, `origin unclear` included', () => {
+    for (const line of ['own round, no findings', 'leaning on the parity run, no findings',
+                        'origin unclear, no findings', 'own round (), no findings', 'own round (  ), no findings']) {
+      const v = sec(line);
+      expect(v.ok, line).toBe(false);
+      expect(v.errors.join(' '), line).toContain('names no model');
+    }
+  });
+
+  it('keeps a parenthesis inside a `leaning on` reference in the reference', () => {
+    // The reference is lazy, so the model slot must not be able to take half of it.
+    expect(sec('leaning on the (old) parity run (opus), no findings')).toMatchObject({ ok: true });
+    const v = sec('leaning on the (opus) parity run, no findings');
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toContain('names no model');
+  });
+
+  it('refuses a reference that names a model, in any shape', () => {
+    // The lazy reference may hold a parenthesis, so a Sonnet name parked in it with `(opus)` behind
+    // would pass. A shape rule missed `(sonnet) x (opus)` and refused `(#123) (opus)`; the rule
+    // is the model WORD outside the model slot.
+    for (const line of ['leaning on the run (sonnet) (opus), no findings', 'leaning on the run (sonnet) x (opus), no findings',
+                        'leaning on the run [sonnet] (opus), no findings', 'leaning on the run (sonnet) \u200b(opus), no findings',
+                        'leaning on the sonnet run (opus), no findings', 'leaning on the Opus parity run (opus), no findings',
+                        'leaning on the fable run (opus), no findings', 'leaning on the haiku scan (opus), no findings']) {
+      const v = sec(line);
+      expect(v.ok, line).toBe(false);
+      expect(v.errors.join(' '), line).toContain('the reference names a model');
+    }
+    // Controls: a parenthesis, a PR number, and a word that merely CONTAINS a model name stay allowed.
+    for (const line of ['leaning on the (old) parity run (opus), no findings', 'leaning on run (#123) (opus), no findings',
+                        'leaning on the run) (opus), no findings', 'leaning on the magnum-opusx run (fable), no findings'])
+      expect(sec(line), line).toMatchObject({ ok: true });
+  });
+
+  it('says the model sat behind a comma rather than "names no model"', () => {
+    const e = sec('leaning on a, b (opus), no findings').errors.join(' ');
+    expect(e).toContain('comes after a comma');
+    expect(e).not.toContain('names no model');
+    // Every model word, not only the allowed one: a Sonnet name behind the comma is the same mistake.
+    for (const model of ['sonnet', 'fable', 'haiku'])
+      expect(sec(`leaning on a, b (${model}), no findings`).errors.join(' '), model).toContain('comes after a comma');
+    // The fix it names follows the origin: only a `leaning on` line has a reference to rewrite.
+    expect(e).toContain('write the reference without one');
+    for (const line of ['own round, (opus), no findings', 'origin unclear, x (opus), no findings']) {
+      const o = sec(line).errors.join(' ');
+      expect(o, line).toContain('comes after a comma');
+      expect(o, line).toContain('right after the origin');
+      expect(o, line).not.toContain('write the reference without one');
+    }
+    // The plain missing case keeps its own message — also when the result holds a parenthesis that
+    // is not a model.
+    expect(sec('leaning on a b, no findings').errors.join(' ')).toContain('names no model');
+    const other = sec('own round, 2 findings (x), 2 fixed').errors.join(' ');
+    expect(other).toContain('names no model');
+    expect(other).not.toContain('comes after a comma');
+  });
+
+  it('refuses an over-long line before the pattern runs — the pattern is polynomial on whitespace', () => {
+    const long = `leaning on ${' '.repeat(5000)}x (opus), no findings`;
+    const t0 = Date.now();
+    const v = sec(long);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toContain(`may be at most ${SECURITY_LINE_MAX}`);
+    // The boundary: exactly the cap still parses (control), one more does not.
+    const pad = (n: number) => `leaning on ${'x'.repeat(n - 'leaning on  (opus), no findings'.length)} (opus), no findings`;
+    expect(pad(SECURITY_LINE_MAX)).toHaveLength(SECURITY_LINE_MAX);
+    expect(sec(pad(SECURITY_LINE_MAX))).toMatchObject({ ok: true });
+    expect(sec(pad(SECURITY_LINE_MAX + 1)).ok).toBe(false);
+  });
+
+  it('the result half is still read after the model', () => {
+    const v = sec('own round (opus), 2 findings, 1 fixed');
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toMatch(/sums to 1, not 2/);
+  });
+
+  it('the missing-line message shows the model', () => {
+    const e = evaluate({ body: record({ gates: 'code-review, security, delta' }), head: HEAD, files: SEC }).errors.join(' ');
+    expect(e).toContain('own round (opus), no findings');
+  });
+
+  it('a diff that does not owe security is not asked for a model', () => {
+    expect(evaluate({ body: record(), head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  it('the transition: a base from before the rule owes no model, and the run says so', () => {
+    const old = sec('own round, no findings', { securityModel: { predates: true } });
+    expect(old.ok).toBe(true);
+    expect(old.notes.join(' ')).toContain('security: the model is not owed');
+    // Only the MODEL is waived: the rest of the line is still checked.
+    expect(sec('own round, 2 findings, 1 fixed', { securityModel: { predates: true } }).ok).toBe(false);
+    expect(sec('own round, no findings', { securityModel: { predates: false } }).ok).toBe(false);
+  });
+
+  it('securityModelPredates reads the base the way the other transitions do', () => {
+    expect(securityModelPredates({ base: 'b', read: () => 'export const x = 1;' })).toBe(true);
+    expect(securityModelPredates({ base: 'b', read: () => null })).toBe(true);
+    expect(securityModelPredates({ base: 'b', read: () => `x\n${SECURITY_MODEL_MARK}m, l) {}` })).toBe(false);
+    expect(securityModelPredates({ base: '', read: () => 'x' })).toBe(false);
+    expect(securityModelPredates({ base: 'b', read: () => { throw new Error('gone'); } })).toBe(false);
+  });
+
+  it('securityModelErrors on its own', () => {
+    expect(securityModelErrors('opus', 'l')).toEqual([]);
+    expect(securityModelErrors(' Fable ', 'l')).toEqual([]);
+    expect(securityModelErrors(undefined, 'l')[0]).toContain('names no model');
+    expect(securityModelErrors('sonnet', 'l')[0]).toContain('names the model `sonnet`');
+  });
+});
+
+describe('gate-record CLI — `main` hands the `security:` model transition to evaluate', () => {
+  const SCRIPT = fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url));
+  const git = (cwd: string, ...args: string[]): string => {
+    const r = spawnSync('git', args, { cwd, encoding: 'utf-8' });
+    if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  const SEC_FILE = SEC[0];
+
+  /** A repo whose base carries `script` as the gate-record script, and a head that changes a security path. */
+  function run(script: string, security: string): { code: number; out: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-gr-secm-'));
+    try {
+      git(dir, 'init', '--quiet', '--initial-branch=main');
+      git(dir, 'config', 'user.name', 't');
+      git(dir, 'config', 'user.email', 't@t.t');
+      git(dir, 'config', 'commit.gpgsign', 'false');
+      mkdirSync(join(dir, 'scripts'), { recursive: true });
+      writeFileSync(join(dir, 'scripts/gate-record.mjs'), script, 'utf-8');
+      git(dir, 'add', '-A');
+      git(dir, 'commit', '--quiet', '-m', 'base');
+      const base = git(dir, 'rev-parse', 'HEAD');
+      mkdirSync(join(dir, SEC_FILE, '..'), { recursive: true });
+      writeFileSync(join(dir, SEC_FILE), 'export const x = 1;\n', 'utf-8');
+      git(dir, 'add', '-A');
+      git(dir, 'commit', '--quiet', '-m', 'head');
+      const head = git(dir, 'rev-parse', 'HEAD');
+      const body = ['## S', '', '```gate-record', `head: ${head}`,
+        'gates: code-review, security, delta', 'review: 1 opus round, no findings', `security: ${security}`,
+        `delta: clean on ${base}..${head}`, 'mutations: 3 killed, 0 survived',
+        'ux: not user-facing — a test fixture', 'closes: none', '```', ''].join('\n');
+      writeFileSync(join(dir, 'body.txt'), body, 'utf-8');
+      writeFileSync(join(dir, 'files.txt'), `${SEC_FILE}\n`, 'utf-8');
+      const r = spawnSync(process.execPath, [SCRIPT,
+        '--body-file', join(dir, 'body.txt'), '--head', head, '--base', base, '--base-tip', base,
+        '--files-file', join(dir, 'files.txt'), '--repo-visibility', 'public'],
+        { encoding: 'utf-8', cwd: dir, env: (() => { const e = { ...process.env }; delete e.REPO_PRIVATE; delete e.GITHUB_REPOSITORY; return e; })() });
+      return { code: r.status ?? -1, out: `${r.stdout}${r.stderr}` };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  const CURRENT = readFileSync(SCRIPT, 'utf-8');
+
+  it('a base with the rule: Sonnet and a missing model fail, Opus passes (control)', () => {
+    const sonnet = run(CURRENT, 'own round (sonnet), no findings');
+    expect(sonnet.code, sonnet.out).toBe(1);
+    expect(sonnet.out).toContain('names the model `sonnet`');
+    const none = run(CURRENT, 'own round, no findings');
+    expect(none.code, none.out).toBe(1);
+    expect(none.out).toContain('names no model');
+    const opus = run(CURRENT, 'own round (opus), no findings');
+    expect(opus.code, opus.out).toBe(0);
+  }, 60_000);
+
+  it('a base from before the rule: no model owed, and the run says so', () => {
+    const old = run(CURRENT.split(SECURITY_MODEL_MARK).join('export function securityModelErrorsOld('), 'own round, no findings');
+    expect(old.code, old.out).toBe(0);
+    expect(old.out).toContain('security: the model is not owed');
+  }, 60_000);
 });
