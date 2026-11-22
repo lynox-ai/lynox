@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { resolveInputTemplate, resolveTaskTemplate } from '../../src/orchestrator/context.js';
 
 const SRC = join(import.meta.dirname, '../../src');
 
@@ -235,13 +236,38 @@ describe('Agent Security Audit', () => {
 
     it('pipeline template resolution is single-pass', () => {
       const contextContent = readFileSync(join(SRC, 'orchestrator/context.ts'), 'utf-8');
-      // resolveTaskTemplate must use String.replace() (single-pass) — NOT a while loop
-      // that would re-interpret {{}} patterns injected by step results.
-      // Verify it uses .replace() with the template regex, not a recursive/iterative approach.
+      // resolveTaskTemplate must resolve in one pass — NOT a while loop that would re-interpret
+      // {{}} patterns injected by step results. It goes through replacePlaceholders, which builds
+      // its output from the original text and never reads a replacement again.
       expect(contextContent, 'context.ts must contain resolveTaskTemplate').toContain('resolveTaskTemplate');
-      expect(contextContent, 'context.ts must use .replace() for template resolution').toMatch(/\.replace\(\s*\/\\\{\\{/);
+      expect(contextContent, 'resolveTaskTemplate must resolve through replacePlaceholders').toMatch(/return replacePlaceholders\(task,/);
+      // And the behaviour itself: a placeholder inside a step result stays as text, whether it
+      // names a param or another step, in a task and in a captured call's input template (which
+      // goes into tool arguments unfenced).
+      const resolved = resolveTaskTemplate('{{s1.result}}', { s1: { result: '{{params.secret}}' }, params: { secret: 'zz-not-resolved-9' } });
+      expect(resolved, 'a placeholder inside a step result must not be resolved').not.toContain('zz-not-resolved-9');
+      expect(resolved).toContain('{{params.secret}}');
+      const viaStep = resolveTaskTemplate('{{s1.result}}', { s1: { result: '{{s2.result}}' }, s2: { result: 'zz-not-resolved-8' } });
+      expect(viaStep, 'a step reference inside a step result must not be resolved').toBe('{{s2.result}}');
+      const inputCtx = { s1: { result: '{{params.k}}' }, params: { k: 'zz-not-resolved-7' } };
+      // Embedded in text and as the whole string: the two branches of an input-template string.
+      expect(resolveInputTemplate({ q: '{{s1.result}} x' }, inputCtx), 'an input template must not resolve a placeholder inside a step result').toEqual({ q: '{{params.k}} x' });
+      expect(resolveInputTemplate({ q: '{{s1.result}}' }, inputCtx), 'a whole-string input template must not resolve a placeholder inside a step result').toEqual({ q: '{{params.k}}' });
+      // The behaviour above covers the paths it calls. A second resolver on a path no test drives
+      // is caught here when it is written the usual ways: an escaped brace (`\\{`), a regex that
+      // opens with a bare pair (`/{{`), the class `[{]`, or a bare `'{{'` literal (a split or
+      // indexOf by hand); and the scanner is called as often as today (twice replacePlaceholders,
+      // once solePlaceholder, never placeholders). A bare pair later in a regex, a brace spelled
+      // another way (`\\x7b`, a char code, another class), an aliased import or a moved call is
+      // not caught; review covers that.
+      expect(contextContent, 'context.ts must not match {{ with a regex of its own').not.toMatch(/\\\{|\/\{\{|\[\{\]/);
+      expect(contextContent, 'context.ts must not look for {{ by hand').not.toMatch(/(['"`])\{\{\1/);
+      expect(contextContent.match(/\breplacePlaceholders\(/g)?.length, 'replacePlaceholders is called in exactly two places').toBe(2);
+      expect(contextContent.match(/\bsolePlaceholder\(/g)?.length, 'solePlaceholder is called in exactly one place').toBe(1);
+      expect(contextContent.match(/\bplaceholders\(/g), 'context.ts must not walk placeholders by hand').toBeNull();
       // Ensure there is no recursive call or while loop for template resolution
       const fnMatch = contextContent.match(/function resolveTaskTemplate[\s\S]*?^}/m);
+      expect(fnMatch, 'resolveTaskTemplate must be found as a function declaration').not.toBeNull();
       if (fnMatch) {
         const fnBody = fnMatch[0];
         // Remove the function signature line, then check the body for recursive calls
