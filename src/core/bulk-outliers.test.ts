@@ -570,9 +570,10 @@ describe('markersOf', () => {
     expect([...markersOf('a.com+'.repeat(5000)).get('link')!]).toEqual(['a.com']);
     expect(best('a.com '.repeat(5000))).toBeLessThan(distinct / 2);
     expect(best('a.com+'.repeat(5000))).toBeLessThan(distinct / 2);
-    // An address is read once per word as well.
+    // An address is read once per word as well: read anew, the repeated text costs a third of the
+    // distinct one or more; read once, a twentieth or less.
     const addresses = Array.from({ length: 5000 }, (_, i) => `i@a${String(i)}.com`).join(' ');
-    expect(best('i@a.com '.repeat(5000))).toBeLessThan(best(addresses) / 2);
+    expect(best('i@a.com '.repeat(5000))).toBeLessThan(best(addresses) / 6);
   });
 
   it('reads a long run of signs inside a word, of @, of letters before an @, of labels, of brackets, or of blanks and obfuscated dots in time linear in its length', () => {
