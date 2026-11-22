@@ -108,19 +108,19 @@ describe('judgeOutliers', () => {
   it('names a link that most verdicts add on a line for the run, and still flags each verdict whose host no before text holds', () => {
     const inputs = run(200, (t) => withAfter(t, { description: `${(t.after as Record<string, string>)['description']} Lieferant: https://feed-partner.example.biz/p` }));
     const result = judgeOutliers(inputs, OWN, KINDS);
-    expect(result.spread).toEqual([{ kind: 'link', count: 200, hosts: ['feed-partner.example.biz'], marked: 1 }]);
+    expect(result.spread).toEqual([{ kind: 'link', count: 200, hosts: ['feed-partner.example.biz'], marked: 1, seqs: Array.from({ length: 200 }, (_, i) => i + 1) }]);
     expect(result.flagged).toHaveLength(200);
     expect(result.flagged.every((f) => f.reasons.includes('new_link'))).toBe(true);
   });
 
-  it('names a link many verdicts add for the run without flagging each, when before texts of the run already hold it', () => {
+  it('names a link many verdicts add for the run, with the verdicts that add it in plan order, without flagging each, when before texts of the run already hold it', () => {
     const inputs = run(200, (t) => {
       if (t.seq <= 5) return { ...t, before: { ...(t.before as object), description: `${(t.before as Record<string, string>)['description']} Siehe tee-wissen.example.org` } };
       if (t.seq <= 40) return withAfter(t, { description: `${(t.after as Record<string, string>)['description']} Mehr: tee-wissen.example.org` });
       return t;
     });
     const result = judgeOutliers(inputs, OWN, KINDS);
-    expect(result.spread).toEqual([{ kind: 'link', count: 35, hosts: ['tee-wissen.example.org'], marked: 0 }]);
+    expect(result.spread).toEqual([{ kind: 'link', count: 35, hosts: ['tee-wissen.example.org'], marked: 0, seqs: Array.from({ length: 35 }, (_, i) => i + 6) }]);
     expect(result.flagged).toEqual([]);
   });
 
