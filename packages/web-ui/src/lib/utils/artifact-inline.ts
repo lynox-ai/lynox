@@ -166,9 +166,12 @@ const LEADING_FENCE_MARKERS_RE = /^<!--\s*title:[^\n]*?-->\n(?:<!--\s*type:\s*\w
  *  the store would hold: the content without the markers the chat put before
  *  it and without the line end the markdown parser adds to every code block.
  *  Measured with them, a stored placeholder near the bound got no badge.
- *  Bounded, not exact, at two edges, and both only miss a badge near the
- *  bound, never add one: a title with a line break keeps its marker in the
- *  count, and whitespace that opened the content is gone with the id marker. */
+ *  Bounded, not exact: within a few bytes of the bound the count can differ
+ *  from the store's in either direction, so a badge can be missed or shown
+ *  there. A title with a line break keeps its marker in the count; content
+ *  that opened with whitespace, ended with a line end or opened with a type
+ *  comment of its own loses those bytes. Away from the bound both agree. The
+ *  badge only warns: it changes no save, open or share. */
 export function fenceHoldsOnlyPlaceholder(src: string): boolean {
 	return holdsOnlyPlaceholder(src.replace(LEADING_FENCE_MARKERS_RE, '').replace(/\n$/, ''));
 }
