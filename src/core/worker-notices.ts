@@ -120,6 +120,9 @@ export interface WorkerNotices {
   consentOneBody(title: string, setUpAfterOutsideContent: boolean): string;
   /** A run that failed or was stopped, with the error as it came. */
   failed(message: string): string;
+  /** A saved workflow that did not run because step `step` (1-based) refers to the output of a step
+   *  it does not read (`template-refs.ts`). The owner reads it, so no tool name and no stored text. */
+  workflowRefUnresolved(step: number): string;
   stoppedWith(message: string): string;
   /** The first line of a run the owner ended; the run's own text follows after a blank line. */
   readonly stopped: string;
@@ -297,6 +300,7 @@ const EN: WorkerNotices = Object.freeze({
   consentOneBody: (title: string, outside: boolean) =>
     `It came due and has not run.${outside ? ' It was set up after reading content from outside.' : ''} Review “${title}” under Automation › Triggers before you confirm it.`,
   failed: (message: string) => `Task failed: ${message}`,
+  workflowRefUnresolved: (step: number) => `Step ${String(step)} of this workflow uses the result of a step it does not read, so the workflow did not run. Ask lynox in a chat to fix that step.`,
   stoppedWith: (message: string) => `Stopped on your instruction: ${message}`,
   stopped: 'Stopped on your instruction.',
   chipRunAgain: 'Run again',
@@ -431,6 +435,7 @@ const DE: WorkerNotices = Object.freeze({
   consentOneBody: (title: string, outside: boolean) =>
     `Fällig, aber nicht gelaufen.${outside ? ' Eingerichtet, nachdem ein Lauf Inhalte von aussen gelesen hatte.' : ''} Prüf „${title}“ unter Automation → Trigger, bevor du bestätigst.`,
   failed: (message: string) => `Aufgabe fehlgeschlagen: ${message}`,
+  workflowRefUnresolved: (step: number) => `Schritt ${String(step)} dieses Workflows nutzt das Ergebnis eines Schritts, den er nicht liest. Darum lief der Workflow nicht. Bitte lynox im Chat, diesen Schritt zu reparieren.`,
   stoppedWith: (message: string) => `Auf deine Anweisung gestoppt: ${message}`,
   stopped: 'Auf deine Anweisung gestoppt.',
   chipRunAgain: 'Erneut ausführen',

@@ -6,6 +6,7 @@
 import { visibleText } from '../visible-text.js';
 import { hiddenCharIndexes, inPlaceReferences } from '../hidden-chars.js';
 import { startDomainOf } from './bulk-start-domains.js';
+import { fillTemplate } from '../i18n-fill.js';
 
 /** The two i18n lookups the helpers need, `t` and `tf` from `i18n.svelte.ts`. */
 export interface BulkI18n {
@@ -19,7 +20,7 @@ export interface BulkI18n {
 export const BULK_MANDATE_KEYS: ReadonlySet<string> = new Set([
 	'bulk.intro', 'bulk.deselect.taken_out',
 	'bulk.skipped.products', 'bulk.skipped.targets', 'bulk.skipped.both_products', 'bulk.skipped.both_targets', 'bulk.skipped.taken_out',
-	'bulk.halt.probeRequired', 'bulk.halt.shopifyWriteOff', 'bulk.halt.costCap', 'bulk.halt.superseded',
+	'bulk.halt.probeRequired', 'bulk.halt.shopifyWriteOff', 'bulk.halt.costCap', 'bulk.halt.superseded', 'bulk.halt.discarded',
 	'bulk.halt.mandateEnded', 'bulk.halt.checksum', 'bulk.markup.restores_note', 'bulk.markup.restores_note_active',
 	// Only the owner approves: a mandate reads that the owner can still approve the rest.
 	'bulk.invalid.html_too_long', 'bulk.invalid.html_too_long_woocommerce',
@@ -153,8 +154,22 @@ export function bulkTakesStartDomains(run: Pick<BulkRunDetailData, 'judge' | 'li
 
 /** The word over a halted run's cause. An owner's stop is a stop, not a halt: „angehalten“ is
  *  the word of a run that ended where its approval, a failure or a limit told it to. */
-export function bulkHaltHeadKey(run: Pick<BulkRun, 'haltKey'>): 'bulk.head.stopped' | 'bulk.head.halted' {
+export function bulkHaltHeadKey(run: Pick<BulkRun, 'haltKey'>): 'bulk.head.stopped' | 'bulk.head.halted' | 'bulk.head.discarded' {
+	// A discarded run reads "Discarded" next to the sentence and the chip that say so (U-324).
+	if (run.haltKey === 'discarded') return 'bulk.head.discarded';
 	return run.haltKey === 'stoppedByOwner' ? 'bulk.head.stopped' : 'bulk.head.halted';
+}
+
+/** A run's phase as the list names it: a run the owner discarded before approving it reads
+ *  "discarded", not "aborted" (U-324); every other run by its phase. */
+export function bulkPhaseKey(run: Pick<BulkRun, 'phase' | 'haltKey'>): string {
+	return run.phase === 'aborted' && run.haltKey === 'discarded' ? 'bulk.phase.discarded' : `bulk.phase.${run.phase}`;
+}
+
+/** A run's phase carries the halted or stopped suffix in the list; a discarded one does not, since
+ *  its phase already says why it ended. */
+export function bulkPhaseHasSuffix(run: Pick<BulkRun, 'phase' | 'haltKey' | 'haltReason'>): boolean {
+	return run.haltReason !== null && !(run.phase === 'aborted' && run.haltKey === 'discarded');
 }
 
 /** The same distinction for the suffix on a run's phase in the list. */
@@ -793,6 +808,85 @@ export function bulkFieldNamesText(host: string | null, fields: readonly string[
 	return fields.map((f) => { const key = bulkFieldLabelKey(host, f); return key === null ? bulkVisibleText(f) : label(key); }).join(', ');
 }
 
+/** One piece of a sentence split at a field-name slot: plain text, or the place where the field
+ *  names stand. */
+export type BulkSentencePart = { text: string } | { slot: true };
+
+/** A template sentence split at its `{slot}` placeholder, every other placeholder filled from
+ *  `vars` (U-333). The page renders the slot itself, so a field name the planner set can stand in
+ *  its value box inside the sentence while the words around it stay lynox's, in the order the
+ *  language has them. The template is split BEFORE it is filled, so a value that holds the text
+ *  `{slot}` cannot open a second slot. */
+export function bulkSentenceParts(template: string, slot: string, vars: Record<string, string>): BulkSentencePart[] {
+	const pieces = template.split(`{${slot}}`);
+	const parts: BulkSentencePart[] = [];
+	pieces.forEach((piece, i) => {
+		if (i > 0) parts.push({ slot: true });
+		const text = fillTemplate(piece, vars);
+		if (text !== '') parts.push({ text });
+	});
+	return parts;
+}
+
+/** The sentence key for a target refused because a field it only reads held a credential: by
+ *  where the field lives (Shopify product, data-store column, any other list's entry). */
+export function bulkSecretInContextKey(shopify: boolean, dataStore: boolean): string {
+	return `bulk.invalid.${shopify ? 'secret_in_context' : dataStore ? 'secret_in_context_column' : 'secret_in_context_field'}`;
+}
+
+/** A field's shape in a judged rule, in words (U-333): the four shapes the engine's rule takes
+ *  (text with a length, a choice, a number or whole number with bounds, yes/no). A choice says only
+ *  "one of:" here: its values are the planner's text and are shown one by one by
+ *  {@link bulkFieldChoices}, each in its own box, so a quote inside a value cannot end it. A shape
+ *  the page does not know says nothing rather than showing the schema as JSON. */
+export function bulkFieldShapeText(shape: unknown, i18n: BulkI18n): string | null {
+	if (typeof shape !== 'object' || shape === null) return null;
+	const s = shape as Record<string, unknown>;
+	const num = (v: unknown): string | null => (typeof v === 'number' && Number.isFinite(v) ? String(v) : null);
+	switch (s['type']) {
+		case 'string': {
+			if (bulkFieldChoices(s) !== null) return i18n.t('bulk.shape.choice');
+			const max = num(s['maxLength']);
+			if (max === null) return i18n.t('bulk.shape.text');
+			const min = num(s['minLength']);
+			return min === null || min === '0' ? i18n.tf('bulk.shape.text_max', { max }) : i18n.tf('bulk.shape.text_range', { min, max });
+		}
+		case 'number':
+		case 'integer': {
+			const kind = s['type'] === 'integer' ? 'integer' : 'number';
+			const min = num(s['minimum']);
+			const max = num(s['maximum']);
+			if (min !== null && max !== null) return i18n.tf(`bulk.shape.${kind}_range`, { min, max });
+			if (min !== null) return i18n.tf(`bulk.shape.${kind}_min`, { min });
+			if (max !== null) return i18n.tf(`bulk.shape.${kind}_max`, { max });
+			return i18n.t(`bulk.shape.${kind}`);
+		}
+		case 'boolean':
+			return i18n.t('bulk.shape.boolean');
+		default:
+			return null;
+	}
+}
+
+/** The values of a choice field in a judged rule, as the planner wrote them, or null for a field
+ *  that is no choice. Shown through {@link bulkVisibleText} by the caller. */
+export function bulkFieldChoices(shape: unknown): string[] | null {
+	if (typeof shape !== 'object' || shape === null) return null;
+	const choices = (shape as Record<string, unknown>)['enum'];
+	return (shape as Record<string, unknown>)['type'] === 'string' && Array.isArray(choices) && choices.length > 0 && choices.every((c) => typeof c === 'string')
+		? (choices as string[]) : null;
+}
+
+/** Why the judged run's start button is disabled, as the line under it (U-333), or null. The cost
+ *  limit is named only while its field is empty: an entered, invalid amount has its own line. */
+export function bulkStartHintKey(capInput: string, startDomainsValid: boolean): string | null {
+	const cap = capInput === '';
+	if (cap && !startDomainsValid) return 'bulk.start.hint_both';
+	if (cap) return 'bulk.start.hint_cap';
+	if (!startDomainsValid) return 'bulk.start.hint_domains';
+	return null;
+}
+
 /** The target system as the owner reads it: the host of an external run, a name otherwise. */
 export function bulkSystemName(targetSystem: string, i18n: BulkI18n): string {
 	const host = bulkHostOf(targetSystem);
@@ -891,7 +985,7 @@ export function bulkRollbackText(run: Pick<BulkRun, 'phase' | 'haltKey'>, i18n: 
 
 /** The halts that end an unapproved run before it wrote anything: another judged run took its
  *  place, or the access that planned it ended. Both leave the run aborted. */
-const BULK_ENDED_UNAPPROVED = new Set(['superseded', 'mandateEnded']);
+const BULK_ENDED_UNAPPROVED = new Set(['superseded', 'mandateEnded', 'discarded']);
 
 /** The label key of the button that starts a run waiting for its start, exactly as the page
  *  shows it; null where the page shows no button (a judge it cannot use, or a list or judge
@@ -1030,9 +1124,12 @@ export function bulkStep(run: BulkStepRun): BulkStepName {
 }
 
 /** The i18n key of a step's chip. An undone run's last step reads as the list reads its phase
- *  („zurückgenommen“), not „fertig“: its values are no longer live. */
-export function bulkStepLabelKey(run: Pick<BulkRun, 'phase'>, step: BulkStepName): string {
-	return step === 'done' && run.phase === 'undone' ? 'bulk.phase.undone' : `bulk.step.${step}`;
+ *  („zurückgenommen“), not „fertig“: its values are no longer live. A discarded run's reads
+ *  „verworfen“ the same way: it was never written. */
+export function bulkStepLabelKey(run: Pick<BulkRun, 'phase'> & Partial<Pick<BulkRun, 'haltKey'>>, step: BulkStepName): string {
+	if (step === 'done' && run.phase === 'undone') return 'bulk.phase.undone';
+	if (step === 'done' && run.phase === 'aborted' && run.haltKey === 'discarded') return 'bulk.phase.discarded';
+	return `bulk.step.${step}`;
 }
 
 /** Whether a target's after-value is shown as not live: an undo or a rollback took it back, or, on
@@ -1120,8 +1217,7 @@ export function bulkInvalidText(
 	if (reason === 'secret_in_context') {
 		const name = context?.field;
 		const field = name === undefined ? '—' : shopify ? bulkFieldNamesText(context?.host ?? null, [name], (k) => i18n.t(k)) : bulkVisibleText(name);
-		const key = shopify ? 'secret_in_context' : context?.dataStore === true ? 'secret_in_context_column' : 'secret_in_context_field';
-		return i18n.tf(`bulk.invalid.${key}`, { field });
+		return i18n.tf(bulkSecretInContextKey(shopify, context?.dataStore === true), { field });
 	}
 	// A WooCommerce run has two HTML fields and the ledger names neither: its own sentence (U-186).
 	if (reason === 'html_too_long' && context?.listForm === 'woocommerce') return i18n.t('bulk.invalid.html_too_long_woocommerce');

@@ -5,6 +5,7 @@ import type { Manifest } from '../types/orchestration.js';
 import type { InlinePipelineStep, PipelineMode, PlannedPipeline } from '../types/index.js';
 import { findAutonomousViolations } from './human-in-the-loop.js';
 import { INLINE_CORE_TOOLS, INLINE_NAMED_ONLY_TOOLS } from './runtime-adapter.js';
+import { templateRefIssue } from './template-refs.js';
 
 /**
  * Default policy ceiling on workflow steps. The run-path enforcement points in
@@ -185,6 +186,11 @@ export function validateManifest(raw: unknown): Manifest {
     validateGraph(manifest.agents);
   }
 
+  // A `{{<id>.result}}` no run resolves would stay as raw text in the step's task: refused before the
+  // run, against the context this run brings (`template-refs.ts`).
+  const refIssue = templateRefIssue(manifest.agents, manifest.context);
+  if (refIssue) throw new Error(`Invalid manifest: ${refIssue}`);
+
   return manifest;
 }
 
@@ -220,9 +226,9 @@ export class AutonomousPipelineViolation extends Error {
  * `isSchedulableWorkflow` (human-in-the-loop.ts), asked by every planning
  * surface and again by the worker when the schedule fires.
  */
-export function assertPipelineModeIsValid(steps: InlinePipelineStep[], mode: PipelineMode): void {
+export function assertPipelineModeIsValid(steps: InlinePipelineStep[], mode: PipelineMode, locked = false): void {
   if (mode === 'interactive') return;
-  const issues = findAutonomousViolations(steps);
+  const issues = findAutonomousViolations(steps, locked);
   if (issues.length > 0) throw new AutonomousPipelineViolation(issues);
 }
 
@@ -265,8 +271,11 @@ export function assertDeclaredToolsAreValid(steps: InlinePipelineStep[]): void {
   }
 }
 
-/** Convenience overload that takes a stored PlannedPipeline. */
-export function assertPlannedPipelineIsValid(planned: PlannedPipeline): void {
-  assertPipelineModeIsValid(planned.steps, planned.mode);
+/**
+ * Convenience overload that takes a stored PlannedPipeline. `locked`: the save runs in a locked
+ * turn (`turnIsLocked`), which reads its own text for a step on `ask_secret`.
+ */
+export function assertPlannedPipelineIsValid(planned: PlannedPipeline, locked = false): void {
+  assertPipelineModeIsValid(planned.steps, planned.mode, locked);
   assertDeclaredToolsAreValid(planned.steps);
 }
