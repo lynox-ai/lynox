@@ -249,7 +249,7 @@ describe('the card\'s fields', () => {
     const card = approvalCard(entry({ status: 'failed', resultJson: '{"reason":"rate_limit","message":"secret-ish"}' }), owner);
     expect(Object.keys(card).sort()).toEqual([
       'afterUntrusted', 'afterUntrustedBy', 'ageMs', 'chatThreadId', 'checksum', 'createdAt', 'decidedAt', 'executable', 'executedAt', 'expiresAt', 'held',
-      'id', 'kind', 'mail', 'massSend', 'origin', 'outcome', 'recipientDiffers', 'replyToElsewhere', 'setup', 'status', 'tombstoned',
+      'id', 'kind', 'mail', 'massSend', 'origin', 'outcome', 'recipientDiffers', 'replyToElsewhere', 'setup', 'status', 'targetOrigin', 'tombstoned',
     ]);
     expect(JSON.stringify(card)).not.toContain('secret-ish');
     expect(JSON.stringify(card)).not.toContain('keyed');
@@ -265,6 +265,20 @@ describe('the card\'s fields', () => {
     const card = approvalCard(entry({ origin: { source: 'task', triggerId: 'trg-u', runId: 'run-u', rootRunId: 'run-u', ...flags } }), owner);
     expect(card.afterUntrustedBy).toBe(by);
     expect(card.afterUntrusted).toBe(flags.afterUntrusted);
+  });
+
+  it('names where a recipient the owner did not name comes from, in both languages, and nothing without it', () => {
+    const card = approvalCard(entry({ origin: {
+      source: 'task', triggerId: 'trg-o', runId: 'run-o', rootRunId: 'run-o',
+      targetOrigin: { unnamed: ['x@evil.example'], origin: { kind: 'triggerRun', name: 'Bericht', setUpBy: { kind: 'other', who: 'h@x.ch' } } },
+    } }), owner);
+    expect(card.targetOrigin).toEqual({
+      de: 'Empfänger stammt aus dem Trigger "Bericht" von "h@x.ch".',
+      en: 'Recipient comes from the trigger "Bericht" set up by "h@x.ch".',
+    });
+    const unknown = approvalCard(entry({ origin: { source: 'task', triggerId: 'trg-o', runId: 'run-o', rootRunId: 'run-o', targetOrigin: { unnamed: ['x@evil.example'], origin: { kind: 'unknown' } } } }), owner);
+    expect(unknown.targetOrigin).toEqual({ de: 'Woher der Empfänger stammt, kann lynox nicht feststellen.', en: 'lynox cannot tell where the recipient comes from.' });
+    expect(approvalCard(entry(), owner).targetOrigin).toBeNull();
   });
 
   it('shows a reply\'s original, persona and the origin it came from', () => {

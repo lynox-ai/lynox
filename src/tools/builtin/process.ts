@@ -8,6 +8,7 @@ import { getErrorMessage, logErrorChain } from '../../core/utils.js';
 import { randomUUID } from 'node:crypto';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
+import { turnIsLocked } from '../../core/mandate-tool-lock.js';
 import { INLINE_NAMED_ONLY_TOOLS } from '../../orchestrator/runtime-adapter.js';
 import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 import { runStepIds } from '../../orchestrator/step-id.js';
@@ -197,7 +198,7 @@ function promoteExistingWorkflow(input: SaveWorkflowInput, agent: IAgent): strin
   };
 
   // Save-time gate — same as plan_task.
-  assertPlannedPipelineIsValid(reusable);
+  assertPlannedPipelineIsValid(reusable, turnIsLocked(agent.principal));
   // Commit the durable engine.db workflow definition FIRST — it runs the
   // fail-closed contract validator and throws on a bad contract, so the volatile
   // in-memory store is only populated once the durable write succeeded (no
@@ -338,7 +339,7 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
     };
 
     // Save-time gate — same as plan_task.
-    assertPlannedPipelineIsValid(planned);
+    assertPlannedPipelineIsValid(planned, turnIsLocked(agent.principal));
 
     // Commit the durable engine.db workflow definition FIRST — it runs
     // the fail-closed contract validator and throws on a bad contract, so the

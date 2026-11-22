@@ -595,3 +595,42 @@ describe('web_research and a stop of the run', () => {
     }
   });
 });
+
+// A locked turn (a mandate's) enters no key, so its reminder says who stores it instead of
+// holding ask_secret (U-185 §4); the owner's reminder stays as it was.
+describe('API-setup reminder in a locked turn', () => {
+  const MANDATE = { kind: 'mandate', email: 'helper@example.org', mandateId: 'M-1' };
+  const OWNER_LINE = '- Hold `ask_secret` until the user explicitly signals readiness ("done", "have the token"). Don\'t open the secret prompt mid-walkthrough.';
+  const LOCKED_LINE = '- In this session no key is entered: when the walkthrough reaches the credential, tell the user that the owner of this instance has to store it.';
+  const search = (principal: unknown): Promise<string> => createWebSearchTool(mockProvider([
+    // A host that resolves nowhere: the owner's search reads the pages behind its results.
+    { title: 'Shop scopes', url: 'https://docs.example.invalid/api/access-scopes', snippet: 'read_products write_products …' },
+  ])).handler({ action: 'search', query: 'Shopify custom app access token OAuth scopes' }, { principal } as never);
+
+  it('search: the locked line in a locked turn, the owner\'s line for the owner, the rest of the reminder the same', async () => {
+    const owner = await search(OWNER_PRINCIPAL);
+    const locked = await search(MANDATE);
+    expect(owner).toContain(OWNER_LINE);
+    expect(owner).not.toContain(LOCKED_LINE);
+    expect(locked).toContain(LOCKED_LINE);
+    expect(locked).not.toContain('ask_secret');
+    // The reminder after the data block, compared: the owner's search also reads the pages
+    // behind its results, a delegated one does not, so the blocks differ by design.
+    const reminder = (r: string): string => r.slice(r.lastIndexOf('</untrusted_data>'));
+    expect(reminder(locked)).toBe(reminder(owner).replace(OWNER_LINE, LOCKED_LINE));
+  });
+
+  it('read: the locked line in a locked turn', async () => {
+    const extractMod = await import('./content-extractor.js');
+    vi.spyOn(extractMod, 'extractContent').mockResolvedValue({
+      title: 'Shopify Admin API', url: 'https://shopify.dev/docs/admin-api/getting-started', wordCount: 100, content: 'GraphQL Admin API…', truncated: false,
+    });
+    const read = (principal: unknown): Promise<string> => createWebSearchTool(mockProvider())
+      .handler({ action: 'read', url: 'https://shopify.dev/docs/admin-api/getting-started' }, { principal } as never);
+    const owner = await read(OWNER_PRINCIPAL);
+    const locked = await read(MANDATE);
+    expect(owner).toContain(OWNER_LINE);
+    expect(locked).toContain(LOCKED_LINE);
+    expect(locked).not.toContain('ask_secret');
+  });
+});
