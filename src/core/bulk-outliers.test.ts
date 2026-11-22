@@ -369,6 +369,62 @@ describe('markersOf against every form an earlier reading caught', () => {
   });
 });
 
+describe('markersOf on a dot a browser shows, written otherwise', () => {
+  // Beside the dot or for it: a character a browser shows as nothing, one that only looks like a dot, or a
+  // reference to either. Each in plain text and in a paragraph.
+  const FORMS = [
+    'evil\u200b.com', 'evil.\u200bcom', 'evil.\u00adcom', 'evil\u2060.com', 'evil.\ufeffcom', 'evil.\u200ecom', 'evil\u202e.com',
+    'evil.&shy;com', 'evil&#8203;.com', 'evil.&ZeroWidthSpace;com', 'evil&#x200B;.com', 'evil&#46com', 'evil&#00000000046;com',
+    'evil&period;com', '<!-- a > b --> evil&#46;com', '<span title="a>b">x</span> evil&#46;com', 'evil\ufe52com', 'evil\u2024com',
+    'evil\ufe0f.com', 'evil.\u034fcom', 'evil\u180b.com', 'evil\udb40\udd00.com', 'evil\ua4f8com', 'evil\u0702com',
+  ];
+
+  it('reads the host in each form, in plain text and in a paragraph', () => {
+    const missed = FORMS.flatMap((form) => [`Mehr bei ${form} heute`, `<p>Mehr bei ${form} heute</p>`])
+      .filter((text) => !markersOf(text).get('link')!.has('evil.com'));
+    expect(missed).toEqual([]);
+  });
+
+  it('reads an address whose domain carries such a form', () => {
+    expect([...markersOf('Schreib an info@evil\u200b.com').get('email')!]).toEqual(['evil.com']);
+    expect([...markersOf('Schreib an info@evil&shy;.com').get('email')!]).toEqual(['evil.com']);
+  });
+
+  it('keeps the reading a character a browser shows as nothing cuts', () => {
+    expect(markersOf('ev\u200dil.com').get('link')).toEqual(new Set(['il.com', 'evil.com']));
+  });
+
+  it('reads a text with such a character as it reads the text a browser shows, a host where the shown text has one', () => {
+    const pairs: [string, string][] = [
+      ['inkl.\u00adbio', 'inkl.bio'], ['ca.\u200bshop', 'ca.shop'],
+      ['\u0646\u0647\u0627\u064a\u0629.\u200f\u0628\u062f\u0627\u064a\u0629', '\u0646\u0647\u0627\u064a\u0629.\u0628\u062f\u0627\u064a\u0629'],
+    ];
+    for (const [written, shown] of pairs) {
+      expect(markersOf(written).get('link')).toEqual(markersOf(shown).get('link'));
+      expect(markersOf(shown).get('link')!.size).toBe(1);
+    }
+  });
+
+  it('reads a text with thousands of halves of a character around a hidden one at once, and finds no host in it', () => {
+    const raw = `Gruentee ${'\udb40'.repeat(12000)}${'\udc20'.repeat(12000)}`;
+    const referenced = `<p>Gruentee ${'&#xDB40;'.repeat(12000)}${'&#xDC20;'.repeat(12000)}</p>`;
+    for (const text of [raw, referenced]) expect(markersOf(text).get('link')).toEqual(new Set());
+  });
+
+  it('reads a reference to half a character, to none or to nothing as the replacement character a browser shows, so no host across it', () => {
+    for (const text of ['evil&#xD800;.com', 'evil&#xDC20;.com', 'evil&#0;.com', 'evil&#1114112;.com', 'evil\ufffd.com']) {
+      expect(markersOf(`Mehr bei ${text}`).get('link')).toEqual(new Set());
+    }
+  });
+
+  it('flags no verdict of 200 whose words carry soft hyphens and joiners where a text breaks or joins them', () => {
+    const inputs = run(200, (t) => withAfter(t, {
+      description: `Unser Grün\u00adtee ist mild und aus\u00adgewogen. Bio\u200d-Qualität, Ei\u00adche.\u00adDesign, Kl.\u200bGr. M. Dose 12\u2060x\u20608 cm. Im Tee\u00adshop-Angebot, Bio\u200binfo auf der Dose.`,
+    }));
+    expect(judgeOutliers(inputs, OWN, KINDS).flagged).toEqual([]);
+  });
+});
+
 describe('markersOf', () => {
   it('reads no link where a full stop lacks its space before a word, nor a part number or a GTIN as a phone number', () => {
     const m = markersOf('Aus Baumwolle.Es ist weich. Holz.Co und Stk.No. Bestellnummer 0815 123456, Teil 0711 2345678, EAN 0041234567890, Lot 00123456789.');
