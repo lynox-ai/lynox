@@ -27,7 +27,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
 import type { ApiProfile, OAuthGrantRecord, WrittenSecret } from './api-store.js';
-import { accessTokenKey, recordedWrites, refreshTokenKey } from './api-store.js';
+import { accessTokenKey, isMandateAuthored, recordedWrites, refreshTokenKey } from './api-store.js';
 import { controlPlaneFromEnv } from './exact-clearance.js';
 import { derivePresetEndpoints, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, scopesOfAnswer } from './oauth-presets.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
@@ -145,7 +145,7 @@ export function claimStoreReconnectHints(
       claimed = false;
     }
     if (!claimed) continue;
-    out.push(...storeReconnectHints(host, until, now, lang));
+    out.push(...storeReconnectHints(host, until, now, lang, isMandateAuthored(profile)));
   }
   return out;
 }
@@ -153,13 +153,14 @@ export function claimStoreReconnectHints(
 const MONTHS_DE = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
 const MONTHS_EN = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
-/** The hint as the router takes it, one per reader. Only the owner can connect a store again (a
- *  mandate's connect is refused for a profile it did not set up), so only the owner's devices read
- *  the way; every live grant reads the same notice in the sentence that is true for it: the fact,
- *  the date, and that the owner connects it again. A mandate is told what the owner is told. */
+/** The hint as the router takes it, one per reader. The owner can connect any store again and reads
+ *  the way. A mandate can connect only a store it set up itself (`mayStartConnect`), and one push
+ *  reaches every live grant, so their sentence is true for each of them: for a store the owner set
+ *  up, that only the owner connects it; for one a mandate set up, the way for whoever set it up and
+ *  the owner for everyone else. The push names no mandate. A mandate is told what the owner is told. */
 export interface StoreReconnectHint { title: string; body: string; priority: 'normal'; audience: 'owner' | 'all_mandates' }
 
-function storeReconnectHints(host: string, until: number, now: number, lang: 'de' | 'en'): StoreReconnectHint[] {
+function storeReconnectHints(host: string, until: number, now: number, lang: 'de' | 'en', setUpByMandate: boolean): StoreReconnectHint[] {
   const d = new Date(until);
   const day = String(d.getUTCDate());
   const year = String(d.getUTCFullYear());
@@ -169,22 +170,22 @@ function storeReconnectHints(host: string, until: number, now: number, lang: 'de
     return ended
       ? [
         { title: 'Shop neu verbinden', body: `Der Zugang von lynox zum Shop ${host} ist abgelaufen. Bitte lynox im Chat, den Shop neu zu verbinden, damit Läufe und Abfragen wieder laufen.`, priority: 'normal', audience: 'owner' },
-        { title: 'Shop-Zugang abgelaufen', body: `Der Zugang von lynox zum Shop ${host} ist abgelaufen. Den Shop neu verbinden kann nur der Inhaber dieser Instanz. Wende dich an den Inhaber.`, priority: 'normal', audience: 'all_mandates' },
+        { title: 'Shop-Zugang abgelaufen', body: `Der Zugang von lynox zum Shop ${host} ist abgelaufen. ${setUpByMandate ? 'Hast du den Shop in lynox eingerichtet, bitte lynox im Chat, ihn neu zu verbinden. Sonst wende dich an den Inhaber dieser Instanz.' : 'Den Shop neu verbinden kann nur der Inhaber dieser Instanz. Wende dich an den Inhaber.'}`, priority: 'normal', audience: 'all_mandates' },
       ]
       : [
         { title: 'Shop bald neu verbinden', body: `Der Zugang von lynox zum Shop ${host} läuft am ${date} ab. Bitte lynox vorher im Chat, den Shop neu zu verbinden, damit Läufe und Abfragen weiterlaufen.`, priority: 'normal', audience: 'owner' },
-        { title: 'Shop-Zugang läuft bald ab', body: `Der Zugang von lynox zum Shop ${host} läuft am ${date} ab. Den Shop neu verbinden kann nur der Inhaber dieser Instanz. Wende dich an den Inhaber.`, priority: 'normal', audience: 'all_mandates' },
+        { title: 'Shop-Zugang läuft bald ab', body: `Der Zugang von lynox zum Shop ${host} läuft am ${date} ab. ${setUpByMandate ? 'Hast du den Shop in lynox eingerichtet, bitte lynox vorher im Chat, ihn neu zu verbinden. Sonst wende dich an den Inhaber dieser Instanz.' : 'Den Shop neu verbinden kann nur der Inhaber dieser Instanz. Wende dich an den Inhaber.'}`, priority: 'normal', audience: 'all_mandates' },
       ];
   }
   const date = `${MONTHS_EN[d.getUTCMonth()] ?? ''} ${day}, ${year}`;
   return ended
     ? [
       { title: 'Connect the store again', body: `lynox's access to the store ${host} has run out. Ask lynox in the chat to connect the store again, so runs and requests work again.`, priority: 'normal', audience: 'owner' },
-      { title: 'Store access has run out', body: `lynox's access to the store ${host} has run out. Only the owner of this instance can connect the store again. Contact the owner.`, priority: 'normal', audience: 'all_mandates' },
+      { title: 'Store access has run out', body: `lynox's access to the store ${host} has run out. ${setUpByMandate ? 'If you set up the store in lynox, ask lynox in the chat to connect it again. Otherwise, contact the owner of this instance.' : 'Only the owner of this instance can connect the store again. Contact the owner.'}`, priority: 'normal', audience: 'all_mandates' },
     ]
     : [
       { title: 'Connect the store again soon', body: `lynox's access to the store ${host} runs out on ${date}. Ask lynox in the chat to connect the store again before then, so runs and requests keep going.`, priority: 'normal', audience: 'owner' },
-      { title: 'Store access runs out soon', body: `lynox's access to the store ${host} runs out on ${date}. Only the owner of this instance can connect the store again. Contact the owner.`, priority: 'normal', audience: 'all_mandates' },
+      { title: 'Store access runs out soon', body: `lynox's access to the store ${host} runs out on ${date}. ${setUpByMandate ? 'If you set up the store in lynox, ask lynox in the chat to connect it again before then. Otherwise, contact the owner of this instance.' : 'Only the owner of this instance can connect the store again. Contact the owner.'}`, priority: 'normal', audience: 'all_mandates' },
     ];
 }
 
