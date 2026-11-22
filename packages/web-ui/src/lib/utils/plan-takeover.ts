@@ -141,17 +141,21 @@ export function planList(titles: readonly string[]): string {
 	return tf('takeover.plans_more', { plans: shown.slice(0, 5).join(', '), n: String(shown.length - 5) });
 }
 
+type WorkflowRole = 'workflow-created' | 'workflow-edited';
+
 /**
- * The role lines of one member (Fassung 4): every role that applies, except the workflow role F2
- * already says for this member (ux, review of the dialog: the two lines said the same).
+ * The role lines of one member (Fassung 4): each role on the plan, then one line for the workflow:
+ * `workflowRoles` are the person's roles on it over all of their accesses, and both read as
+ * one sentence. Where F2 names the person, F2 says the workflow and no line here does.
  */
-function roleLines(m: TakeoverMember, workflow: string | null, saidByF2: TakeoverMember['roles'][number] | null): TakeoverLine[] {
-	return m.roles.filter((role) => role !== saidByF2).map((role) => ({
-		kind: 'role' as const,
-		text: role === 'created' || role === 'edited'
-			? tf(`takeover.role.${role}`, { name: shownValue(m.name) })
-			: tf(`takeover.role.${role}`, { name: shownValue(m.name), workflow: workflow === null ? '' : shownValue(workflow) }),
-	}));
+function roleLines(m: TakeoverMember, workflow: string | null, workflowRoles: ReadonlySet<WorkflowRole>): TakeoverLine[] {
+	const lines: TakeoverLine[] = m.roles
+		.filter((role): role is 'created' | 'edited' => role === 'created' || role === 'edited')
+		.map((role) => ({ kind: 'role' as const, text: tf(`takeover.role.${role}`, { name: shownValue(m.name) }) }));
+	if (!m.roles.some((role) => role === 'workflow-created' || role === 'workflow-edited') || workflowRoles.size === 0) return lines;
+	const key = workflowRoles.size === 2 ? 'takeover.role.workflow-created-edited' : `takeover.role.${[...workflowRoles][0]}`;
+	lines.push({ kind: 'role', text: tf(key, { name: shownValue(m.name), workflow: workflow === null ? '' : shownValue(workflow) }) });
+	return lines;
 }
 
 /**
@@ -244,10 +248,18 @@ export function takeoverLines(p: TakeoverPreview, formatDate: (iso: string) => s
 	// One person can be listed once per access, and the roles an ended access was paused with are
 	// a copy from the pause: the same role under two accesses is one sentence, said once.
 	const said = new Set<string>();
-	// The workflow role F2 says for its member counts as said, also for the same person's other access.
-	if (f2 !== null) for (const line of roleLines({ ...f2.by, roles: [f2.role] }, p.workflow?.name ?? null, null)) said.add(line.text);
+	// A person's roles on the workflow over all of their accesses; none for the person F2 names,
+	// also under their other access.
+	const workflowRoles = new Map<string, Set<WorkflowRole>>();
 	for (const m of p.members) {
-		for (const line of roleLines(m, p.workflow?.name ?? null, f2 !== null && f2.by === m ? f2.role : null)) {
+		const roles = workflowRoles.get(m.name) ?? new Set<WorkflowRole>();
+		if (f2 === null || f2.by.name !== m.name) {
+			for (const role of m.roles) if (role === 'workflow-created' || role === 'workflow-edited') roles.add(role);
+		}
+		workflowRoles.set(m.name, roles);
+	}
+	for (const m of p.members) {
+		for (const line of roleLines(m, p.workflow?.name ?? null, workflowRoles.get(m.name) ?? new Set())) {
 			if (said.has(line.text)) continue;
 			said.add(line.text);
 			lines.push(line);
