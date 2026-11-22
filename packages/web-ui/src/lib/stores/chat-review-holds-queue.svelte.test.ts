@@ -34,7 +34,11 @@ function serve(): void {
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
 		const url = String(input);
 		if (url.endsWith('/changeset/review')) return json({ ok: reviewStatus === 200 }, reviewStatus);
-		if (url.endsWith('/sessions')) return json({ sessionId: 't1' });
+		if (url.endsWith('/sessions')) {
+			// A thread that is opened again keeps its id; a new chat gets t1.
+			const body = init?.body ? JSON.parse(String(init.body)) as { threadId?: string } : {};
+			return json({ sessionId: body.threadId ?? 't1' });
+		}
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
 		if (url.endsWith('/run')) {
 			const body = JSON.parse(String(init?.body)) as { task?: string };
@@ -203,6 +207,21 @@ describe('a turn queued before a reload waits for the review the server holds', 
 		await settle();
 		expect(store.getPendingChangeset(), 'the review the server holds is shown').not.toBeNull();
 		expect(runTasks, 'nothing sent past it').toEqual([]);
+	});
+
+	it('a re-send due in the thread left behind neither sends there nor stops the restored turn', async () => {
+		seed();
+		await store.sendMessage('first');
+		await settle();
+		store.getMessages().push({ role: 'user', content: 'sent while offline', failed: true });
+		listeners.online!();
+		await settle();
+		expect(store.getMessages().find((m) => m.content === 'sent while offline')?.queued, 'positive control: the re-send is due').toBe(true);
+		await store.resumeThread('t9');
+		await settle();
+		await wait(700); // past both delays
+		await settle();
+		expect(runTasks, 'the restored turn goes, once, and the re-send of the other thread does not').toEqual(['first', 'typed before reload']);
 	});
 
 	it('with no review the restored turn is sent (control)', async () => {

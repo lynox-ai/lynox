@@ -659,8 +659,9 @@ let isOffline = $state(typeof navigator !== 'undefined' ? !navigator.onLine : fa
 
 /** The changeset fetch in flight, so a drain that starts meanwhile waits for what it says. */
 let _changesetFetch: Promise<boolean> | null = null;
-/** A drain is due or waiting: a second one asked for meanwhile is the same one. */
-let _drainDue = false;
+/** The thread a drain is due or waiting for: a second one asked for there meanwhile is the
+ *  same one. A drain asked for in another thread is its own; the earlier one drops itself. */
+let _drainDueFor: string | null | undefined;
 
 /**
  * Start the next queued turn after `delayMs`. Every automatic send from the queue goes through
@@ -670,16 +671,16 @@ let _drainDue = false;
  * two that wait for the same fetch do not start two turns.
  */
 function drainQueueSoon(delayMs: number): void {
-	if (messageQueue.length === 0 || _drainDue) return;
-	_drainDue = true;
+	if (messageQueue.length === 0 || _drainDueFor === sessionId) return;
 	const sid = sessionId;
+	_drainDueFor = sid;
 	setTimeout(() => { void drainQueueNow(sid); }, delayMs);
 }
 
 async function drainQueueNow(sid: string | null): Promise<void> {
 	// The fetch never rejects (`loadChangeset` answers false instead).
 	while (_changesetFetch) await _changesetFetch;
-	_drainDue = false;
+	if (_drainDueFor === sid) _drainDueFor = undefined;
 	if (sessionId !== sid || pendingChangeset || isStreaming || messageQueue.length === 0) return;
 	const next = messageQueue.shift()!;
 	persistChatNow(); // queue shrank — keep the durable copy in sync
