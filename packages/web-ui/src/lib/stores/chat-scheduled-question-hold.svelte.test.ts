@@ -39,6 +39,8 @@ let stopPoll: (() => void) | null = null;
 let openRun = false;
 let gateEach = false;
 let gates: Array<() => void> = [];
+/** The status the server answers a review with. */
+let reviewStatus = 409;
 let finishRun: (() => void) | null = null;
 let emitRun: ((event: string, data: unknown) => void) | null = null;
 
@@ -63,8 +65,8 @@ function serve(): void {
 			if (activeFails) throw new TypeError('fetch failed');
 			return json(active);
 		}
-		// An answer to a review the server refuses: the store fetches the review again.
-		if (url.endsWith('/changeset/review')) return json({}, 409);
+		// An answer to a review; a refused one (409) makes the store fetch the review again.
+		if (url.endsWith('/changeset/review')) return json({}, reviewStatus);
 		if (url.endsWith('/changeset')) return json({ hasChanges: true, runId: 'run-x', files: [{ file: 'notes.md', status: 'modified', diff: '-a\n+b' }] });
 		if (url.endsWith('/pending-prompt')) {
 			if (holdPending) await holdPending;
@@ -129,6 +131,7 @@ beforeEach(async () => {
 	emitRun = null;
 	gateEach = false;
 	gates = [];
+	reviewStatus = 409;
 	serve();
 });
 afterEach(() => { stopPoll?.(); stopPoll = null; vi.unstubAllGlobals(); });
@@ -753,6 +756,15 @@ describe('a new message', () => {
 		await settle();
 		expect(runPosts()).toBe(1);
 		expect(heldOnes().map((m) => m.content)).toEqual(['hello']);
+		// Once the review is answered, a tap sends it, once.
+		reviewStatus = 200;
+		await store.submitChangesetReview('accept');
+		await settle();
+		expect(store.getPendingChangeset(), 'positive control: the review is closed').toBeNull();
+		await store.sendHeldMessage(heldOnes()[0]!);
+		await settle();
+		expect(runPosts()).toBe(2);
+		expect(heldOnes()).toEqual([]);
 	});
 
 	it('an ask that never answers gives way after its time limit: the message is sent, the next one too', async () => {

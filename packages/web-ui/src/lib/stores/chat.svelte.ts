@@ -124,7 +124,7 @@ export interface ChatMessage {
 	 *  sends it again without first asking the server whether a turn is still running. */
 	sendUnconfirmed?: boolean;
 	/** A new message held back, unsent, because a scheduled run's question waited in this chat
-	 *  when it was sent. Not a failure: nothing sends it by itself (not the reconnect, not an
+	 *  when it was sent, or a changeset review opened while the server was asked. Not a failure: nothing sends it by itself (not the reconnect, not an
 	 *  answered question), it outlives a reload and the server's transcript, and only a tap
 	 *  sends it (`sendHeldMessage`), asking the server first. */
 	held?: boolean;
