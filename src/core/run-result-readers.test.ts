@@ -96,6 +96,7 @@ describe("a run's end with member lines, by reader", () => {
     insert.run('failed', 'Failed', 'cron', 'run_agent', failedWithList, 'failed');
     insert.run('headless', 'Headless', 'cron', 'run_agent', `\n• ${LINE}`, 'halted');
     insert.run('none', 'None', 'cron', 'run_agent', null, null);
+    insert.run('unstated', 'Unstated', 'cron', 'run_agent', `${REPLY}\n• ${LINE}`, null);
     raw.close();
     const migrated = new EngineDb(path, '');
     const rows = migrated.getDb().prepare('SELECT id, last_run_result, last_run_member_notes FROM triggers ORDER BY id').all();
@@ -108,24 +109,28 @@ describe("a run's end with member lines, by reader", () => {
       { id: 'none', last_run_result: null, last_run_member_notes: null },
       { id: 'old', last_run_result: REPLY, last_run_member_notes: JSON.stringify([`${LINE}\n• Another line.`]) },
       { id: 'plain', last_run_result: 'All done.', last_run_member_notes: null },
+      // No status says success: split, the side that hides.
+      { id: 'unstated', last_run_result: REPLY, last_run_member_notes: JSON.stringify([LINE]) },
     ]);
     // Read back as the routes read it: the owner the text as it was stored, a mandate the sentence.
     const reopened = new EngineDb(path, '');
-    const read = (id: string): Record<string, unknown> => {
-      const row = reopened.getDb().prepare(`SELECT * FROM triggers WHERE id = ?`).get(id) as Parameters<typeof triggerDbRowToRecord>[0];
-      return triggerForRoute(triggerDbRowToRecord(row), OWNER_PRINCIPAL) as Record<string, unknown>;
-    };
-    const readAsMandate = (id: string): Record<string, unknown> => {
-      const row = reopened.getDb().prepare(`SELECT * FROM triggers WHERE id = ?`).get(id) as Parameters<typeof triggerDbRowToRecord>[0];
-      return triggerForRoute(triggerDbRowToRecord(row), MANDATE) as Record<string, unknown>;
-    };
-    expect(read('old')['last_run_result']).toBe(legacy);
-    expect(read('failed')['last_run_result']).toBe(failedWithList);
-    expect(read('headless')['last_run_result']).toBe(`\n• ${LINE}`);
-    expect(read('listed')['last_run_result']).toBe(listed);
-    for (const id of ['old', 'failed', 'headless']) expect(readAsMandate(id)['last_run_result']).toBe(forMandatesHere());
-    expect(readAsMandate('listed')['last_run_result']).toBe(listed);
-    reopened.close();
+    try {
+      const read = (id: string): Record<string, unknown> => {
+        const row = reopened.getDb().prepare(`SELECT * FROM triggers WHERE id = ?`).get(id) as Parameters<typeof triggerDbRowToRecord>[0];
+        return triggerForRoute(triggerDbRowToRecord(row), OWNER_PRINCIPAL) as Record<string, unknown>;
+      };
+      const readAsMandate = (id: string): Record<string, unknown> => {
+        const row = reopened.getDb().prepare(`SELECT * FROM triggers WHERE id = ?`).get(id) as Parameters<typeof triggerDbRowToRecord>[0];
+        return triggerForRoute(triggerDbRowToRecord(row), MANDATE) as Record<string, unknown>;
+      };
+      expect(read('old')['last_run_result']).toBe(legacy);
+      expect(read('failed')['last_run_result']).toBe(failedWithList);
+      expect(read('headless')['last_run_result']).toBe(`\n• ${LINE}`);
+      expect(read('listed')['last_run_result']).toBe(listed);
+      for (const id of ['old', 'failed', 'headless']) expect(readAsMandate(id)['last_run_result']).toBe(forMandatesHere());
+      expect(readAsMandate('listed')['last_run_result']).toBe(listed);
+      expect(readAsMandate('unstated')['last_run_result']).toBe(forMandatesHere());
+    } finally { reopened.close(); }
   });
 
   it('a repeat is read off the stored lines', () => {
