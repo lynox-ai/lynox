@@ -8,6 +8,7 @@ import type { ModelTier } from './models.js';
 import type { UntrustedCause } from '../core/untrusted-signals.js';
 import type { CallApiCost, CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 import type { ContainedRefusalReason } from '../core/containment.js';
+import type { SendTarget } from '../core/send-target.js';
 
 export type ToolHandler<TInput = unknown> =
   (input: TInput, agent: IAgent) => Promise<string>;
@@ -44,6 +45,13 @@ export interface WarningPayload {
 
 export interface ToolEntry<TInput = unknown> {
   definition: BetaTool;
+  /**
+   * The definition a locked turn (a mandate's, `toolLockFor`) sends instead of `definition`,
+   * for a tool whose own text is written for the owner. The name and the input schema's
+   * properties stay those of `definition`: only descriptions differ, so a call the model makes
+   * reaches the same handler with the same input.
+   */
+  lockedDefinition?: BetaTool | undefined;
   handler:    ToolHandler<TInput>;
   /**
    * When true, the tool handles its own user confirmation via
@@ -166,6 +174,25 @@ export interface ToolEntry<TInput = unknown> {
    */
   storedMailRead?: ((input: TInput) => string | null) | undefined;
   /**
+   * Where a call SENDS to, as the person would name it: each mail address and each host the
+   * call delivers to, normalized (`send-target.ts`), or `null` for a call that sends to no
+   * target the model chose (a read). Read from the input as the model wrote it, before any
+   * secret is resolved. A declaration that throws means the targets are unknown, and unknown
+   * counts as foreign. A tool reads its targets with the same parser its handler sends with,
+   * so the list checked is the list sent. An empty list is no assurance: it says the input
+   * names no target, not that the call sends to none (a reply without an override still goes
+   * to the mail's sender). A reader never treats `[]` as owner-known.
+   */
+  sendTargets?: ((input: TInput) => readonly SendTarget[] | null) | undefined;
+  /**
+   * Like `sendTargets`, but read only while the conversation latch is set: once something from
+   * outside the owner's own words is in the conversation. For a call that is a plain read on a
+   * clean conversation and can carry data out only after foreign content arrived (a GET whose
+   * query a read page could have filled). Same contract as `sendTargets`; a tool declares one of
+   * the two, and `sendTargets` wins if both are set.
+   */
+  sendTargetsWhenLatched?: ((input: TInput) => readonly SendTarget[] | null) | undefined;
+  /**
    * When true, calling this tool ENDS the agent's turn: after the tool_result
    * is appended and checkpointed, the loop returns the turn's text instead of
    * looping back to the model. Use for terminal tools whose whole job is a
@@ -191,6 +218,11 @@ export interface ToolEntry<TInput = unknown> {
    * stacks with a later tool-availability classifier.
    */
   detailedGuidance?: string | undefined;
+  /**
+   * The guidance a locked turn gets instead of `detailedGuidance`, for a tool whose guidance is
+   * written for the owner. `''` sends none. Left out, a locked turn gets `detailedGuidance`.
+   */
+  lockedGuidance?: string | undefined;
   /**
    * What reversing this tool's effect takes — the declaration half of the undo
    * contract (PRD bulk-changes-reversible §1.4). A SEPARATE axis from

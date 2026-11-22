@@ -18,6 +18,7 @@ import { connectionRowToProfile } from './api-store.js';
 import type { ConnectionRow } from './connection-store.js';
 import { presetStoreHost } from './oauth-presets.js';
 import type { InlinePipelineStep } from '../types/pipeline.js';
+import { placeholders } from '../orchestrator/placeholders.js';
 
 export type WebhookVerifierKind = 'shopify-hmac' | 'shared-token';
 
@@ -258,12 +259,12 @@ export function mappedValueOutsideTaskText(steps: readonly InlinePipelineStep[],
   for (const step of steps) {
     const { task: _task, ...rest } = step;
     const text = JSON.stringify(rest);
-    for (const m of text.matchAll(/\{\{([^}]+)\}\}/g)) {
+    for (const { inner } of placeholders(text)) {
       // Split as the resolver does (`getByPath`, on `.` only): `{{params[0].result}}` names the
       // context key `params[0]`, not `params`.
-      const segments = m[1]!.trim().split('.').map((x) => x.trim());
+      const segments = inner.trim().split('.').map((x) => x.trim());
       if (segments[0] !== 'params') {
-        return `Step "${step.id}" uses "{{${m[1]!.trim()}}}" outside its task text. In a run an event started, an earlier step's output can carry the event's text, and there it would choose what the step executes with. Refer to it only in a step's task text.`;
+        return `Step "${step.id}" uses "{{${inner.trim()}}}" outside its task text. In a run an event started, an earlier step's output can carry the event's text, and there it would choose what the step executes with. Refer to it only in a step's task text.`;
       }
       const name = segments[1];
       if (name === undefined || mapped.has(name)) {
