@@ -960,6 +960,9 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 		const sid = sessionId!;
 		const held = await inHoldOrder(() => holdAtScheduledQuestion(sid, task, displayText, runOptions));
 		if (held) return;
+		// A review that opened while the server was asked blocks this send, as it would have
+		// before the ask.
+		if (sendBlockedByReview()) return;
 	}
 	await sendNow(task, displayText, files, runOptions);
 }
@@ -998,7 +1001,8 @@ function inHoldOrder<T>(step: () => Promise<T>): Promise<T> {
 const HOLD_ASK_MS = 5_000;
 
 /** What a held message keeps of its run options: those a reload can save. A context opens a new
- *  chat first, so a message carrying one is never held. */
+ *  chat first, so a message carrying one is never held. `composedFromEmpty` is not kept, so a held
+ *  message is never sent as words the owner typed; `typed` only marks its bubble. */
 function heldOptions(runOptions: RunOptions | undefined): RunOptions | undefined {
 	if (!runOptions) return undefined;
 	const { effort, thinking, typed } = runOptions;
@@ -1061,7 +1065,8 @@ function holdInSavedThread(threadId: string, msg: ChatMessage): void {
 /**
  * The tap on a held message. Asks the server first: while the question still waits, the message
  * stays held and the card comes back; once it is gone, the message is sent at once, without
- * asking the user again (the text in the bubble is the check) and without asking the server a
+ * asking the user again (the bubble is the check; for a chip it shows the chip's label, and the
+ * chip's prompt is sent as the chip offered it) and without asking the server a
  * second time, so it is never off screen unsaved. Never rejects.
  */
 export async function sendHeldMessage(msg: ChatMessage): Promise<void> {

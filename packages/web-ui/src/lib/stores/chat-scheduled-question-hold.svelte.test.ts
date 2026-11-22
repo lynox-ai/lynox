@@ -63,6 +63,8 @@ function serve(): void {
 			if (activeFails) throw new TypeError('fetch failed');
 			return json(active);
 		}
+		// An answer to a review the server refuses: the store fetches the review again.
+		if (url.endsWith('/changeset/review')) return json({}, 409);
 		if (url.endsWith('/changeset')) return json({ hasChanges: true, runId: 'run-x', files: [{ file: 'notes.md', status: 'modified', diff: '-a\n+b' }] });
 		if (url.endsWith('/pending-prompt')) {
 			if (holdPending) await holdPending;
@@ -727,6 +729,24 @@ describe('a new message', () => {
 		finishRun?.();
 		await settle();
 		expect(runPosts()).toBe(2);
+	});
+
+	it('a review that opens while a send is asked about blocks that send', async () => {
+		await questionWaits(QUESTION);
+		active = NOTHING;
+		let release!: () => void;
+		holdActive = new Promise((r) => { release = r; });
+		const send = store.sendMessage('hello');
+		await settle();
+		await store.submitChangesetReview('accept');
+		await settle();
+		expect(store.getPendingChangeset(), 'positive control: the review is open').not.toBeNull();
+		holdActive = null;
+		release();
+		await send;
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(store.getMessages().filter((m) => m.content === 'hello')).toEqual([]);
 	});
 
 	it('an ask that never answers gives way after its time limit: the message is sent, the next one too', async () => {
