@@ -981,7 +981,8 @@
 	}
 
 	/* "Content missing" next to the name, as in the gallery and the chips: the
-	   saved file holds only the engine's placeholder. Never truncated, the name is.
+	   saved file, or the fence the model wrote, holds only the engine's
+	   placeholder. Never truncated, the name is.
 	   The badge takes the name's auto margin, so it stays beside the name and
 	   the buttons keep the right edge. */
 	div :global(.artifact-title:has(+ .artifact-lost-badge)) {
