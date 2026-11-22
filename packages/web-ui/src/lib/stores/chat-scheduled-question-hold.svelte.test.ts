@@ -764,6 +764,8 @@ describe('a new message', () => {
 		await store.sendHeldMessage(heldOnes()[0]!);
 		await settle();
 		expect(runPosts()).toBe(2);
+		const body = JSON.parse(String((vi.mocked(fetch).mock.calls.filter(([u]) => String(u).endsWith('/run')).at(-1)![1] as RequestInit).body)) as { task?: string };
+		expect(body.task).toContain('hello');
 		expect(heldOnes()).toEqual([]);
 	});
 
