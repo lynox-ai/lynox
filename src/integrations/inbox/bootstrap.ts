@@ -14,7 +14,7 @@ import { randomUUID } from 'node:crypto';
 import type Anthropic from '@anthropic-ai/sdk';
 import type { CRM } from '../../core/crm.js';
 import { reportMeteredCost, type HookHost } from '../../core/metered-request.js';
-import { getModelId, MISTRAL_MODEL_MAP, MODEL_CAPABILITIES } from '../../types/index.js';
+import { getModelId, MISTRAL_MODEL_MAP, MODEL_CAPABILITIES, type InboxItem } from '../../types/index.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import type { LLMCaller } from './classifier/index.js';
 import {
@@ -348,6 +348,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   const notifier = opts.notificationRouter
     ? createInboxNotifier({
         router: opts.notificationRouter,
+        language: opts.language,
         isEnabled: () => state.getSetting('push.inbox_enabled', 'true') !== 'false',
         perMinute: () => parseIntSetting(state.getSetting('push.per_minute'), 1),
         perHour: () => parseIntSetting(state.getSetting('push.per_hour'), 10),
@@ -427,6 +428,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
   // The store as the inbox view reads it (api.ts handleGetCounts / handleListItems /
   // handleGetItemFull / handleGetItemThread), scoped to this runtime's tenant.
   const readerTenant = opts.tenantId ?? DEFAULT_TENANT_ID;
+  const sensitiveAtIngest = (item: InboxItem): string[] => state.sensitiveCategoriesAtIngest(item);
   const inboxReader: InboxReader = {
     countByBucket: (exclude) => state.countItemsByBucket(readerTenant, exclude),
     listItems: (bucket, limit, offset, exclude, ruleId) =>
@@ -441,16 +443,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
       return legacy !== null && legacy.bodyMd.length > 0 ? legacy.bodyMd : null;
     },
     threadOf: (item, limit) => state.listThreadMessages(item.accountId, item.threadKey, { tenantId: item.tenantId, limit }),
-    sensitiveAtIngest: (item) => {
-      const found = new Set<string>();
-      for (const entry of state.listAuditForItem(item.id, item.tenantId)) {
-        let payload: unknown;
-        try { payload = JSON.parse(entry.payloadJson); } catch { continue; }
-        const cats = (payload as { sensitive_categories?: unknown } | null)?.sensitive_categories;
-        if (Array.isArray(cats)) for (const c of cats) if (typeof c === 'string' && c.length > 0) found.add(c);
-      }
-      return [...found];
-    },
+    sensitiveAtIngest,
     disabledAccounts: disabledAccounts ?? new Set<string>(),
   };
 
@@ -492,6 +485,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
       state,
       router: opts.notificationRouter,
       language: opts.language,
+      isFlagged: (item) => sensitiveAtIngest(item).length > 0,
     };
     if (opts.reminderPollIntervalMs !== undefined) {
       pollerOpts.intervalMs = opts.reminderPollIntervalMs;

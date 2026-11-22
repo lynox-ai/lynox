@@ -16,7 +16,7 @@ import { ExactClearance, type ExactMarker } from '../../core/exact-clearance.js'
 import { isStorePass, type StorePass } from '../../core/store-pass.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { exchangeToken, serializeTokenBody, vetTokenEndpoint, isTokenEndpointRefused } from '../../core/oauth-token-exchange.js';
-import { SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
+import { SHOPIFY_FETCH_TOKEN } from '../../core/shopify-host.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { storeExchangePassFor } from './http.js';
 
@@ -115,7 +115,7 @@ describe('with the switch off, the exchange is refused as before', () => {
     expect(cpCalls).toBe(0);
     expect(markerSets).toBe(0);
     const r = await exchange(pass);
-    expect(r).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_UNAVAILABLE}` });
+    expect(r).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}` });
     expect(sent).toHaveLength(0);
   });
 });
@@ -184,7 +184,7 @@ describe('exchangeToken under the pass', () => {
   it('a credential pass does not open the exchange', async () => {
     const { mintStorePass } = await import('../../core/store-pass.js');
     const r = await exchange(mintStorePass(ORIGIN, 'X-Shopify-Access-Token', 'shpat_x'));
-    expect(r).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_UNAVAILABLE}` });
+    expect(r).toEqual({ ok: false, message: `token exchange refused: ${SHOPIFY_FETCH_TOKEN}` });
     expect(sent).toHaveLength(0);
   });
 

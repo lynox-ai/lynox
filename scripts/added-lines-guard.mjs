@@ -299,4 +299,4 @@ try {
   process.stderr.write(`added-lines-guard: could not resolve ${process.argv[1]}\n`);
   process.exitCode = 2;
 }
-if (invoked !== null && fileURLToPath(import.meta.url) === invoked) process.exit(main(process.argv));
+if (invoked !== null && fileURLToPath(import.meta.url) === invoked) process.exitCode = main(process.argv);
