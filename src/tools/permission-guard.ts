@@ -1991,7 +1991,9 @@ function framedIn(language: DialogLanguage): (strings: TemplateStringsArray, ...
       if (Array.from(singleLine(v.agentText)).length > LONG_VALUE) {
         frames[i] = `${before.replace(/\s*(?:—\s*)?$/u, '').replace(/:?$/u, ':')}\n${open}`;
         const rest = after.trimStart().replace(/^—\s*/u, '');
-        frames[i + 1] = after === '' ? close : `${close}\n${capitalFirst(rest, language)}`;
+        // The rest after the dash is the engine's own text (a `system` value, capitalised below)
+        // or a `[BLOCKED …]` marker, which stays as it is.
+        frames[i + 1] = after === '' ? close : `${close}\n${rest}`;
         const next = values[i + 1];
         if (after !== '' && rest === '' && next !== undefined && 'systemText' in next) capitalized.add(i + 1);
         if (after !== '') restOwnLine = true;

@@ -242,6 +242,9 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     // A rest that already ends a sentence, or a `[…]` marker, gets no second stop.
     for (const t of ['done.', 'done?', 'done!', 'done…', '[BLOCKED]', 'done. ']) expect(endsSentence(t)).toBe(true);
     for (const t of ['done', 'done)', 'done:', '']) expect(endsSentence(t)).toBe(false);
+    // A long value that ends the question gets no stop after its closing mark.
+    const empty = ask(['write_file', { path: `notes/${'archiv/'.repeat(14)}notes.md`, content: '  ' }, 'guided'] as unknown as (typeof CASES)[number], 'en');
+    expect(flattenPrompt(empty.prompt)).toMatch(/:\n“[^\n]*notes\.md”$/u);
     // A short value keeps the rest as it is.
     expect(flattenPrompt(ask(CASES[3]!, 'en').prompt)).toBe(`⚠ File access: ${GUARD_TEXT.en.readSensitive} — “/etc/shadow” — ${GUARD_TEXT.en.systemFiles}`);
   });
