@@ -37,7 +37,8 @@ import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog, recordMandateRevoked } from './audit-log.js';
 import { MandateEnds } from './mandate-ends.js';
 import { pauseEndedPlans } from './plan-pause.js';
-import { processErrorText } from './error-egress.js';
+import { isErrorTextReducedForProcess, processErrorText } from './error-egress.js';
+import { tableInLog } from './data-store-boot-log.js';
 import { fireBeforeRunGate } from './metered-request.js';
 import { SecretReleases } from './secret-releases.js';
 import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
@@ -2158,15 +2159,21 @@ export class Engine {
       // constructor, which the operator scripts also run against a live store. A table
       // that fails stays readable but refuses inserts and upserts until a restart migrates
       // it; the rest of the store is unaffected.
+      // On an instance with an exact connection these lines name no table, and the database's
+      // text, which can quote one, is left out (data-store-boot-log.ts). `refuseDebug` has run by
+      // now (`_initPersistence`), so the marker is read.
+      const reducedLog = isErrorTextReducedForProcess();
       const sourceColumns = this._dataStore.ensureSourceColumns();
       for (const f of sourceColumns.failed) {
-        process.stderr.write(`[lynox] DataStore: table "${f.collection}" could not get its source columns and refuses writes until a restart migrates it: ${f.error}\n`);
+        process.stderr.write(`[lynox] DataStore: ${tableInLog(f.collection, reducedLog)} could not get its source columns and refuses writes until a restart migrates it${reducedLog ? '' : `: ${f.error}`}\n`);
       }
       if (sourceColumns.invalid.length > 0) {
         process.stderr.write(`[lynox] DataStore: skipped ${String(sourceColumns.invalid.length)} listed table name(s) that are not valid table names; they were left unchanged\n`);
       }
       if (sourceColumns.missing.length > 0) {
-        process.stderr.write(`[lynox] DataStore: listed table(s) without a database table: ${sourceColumns.missing.join(', ')}\n`);
+        process.stderr.write(reducedLog
+          ? `[lynox] DataStore: ${String(sourceColumns.missing.length)} listed table(s) without a database table\n`
+          : `[lynox] DataStore: listed table(s) without a database table: ${sourceColumns.missing.join(', ')}\n`);
       }
       // The opaque id a mandate's row in the instance trail names a table by. Every boot, so a
       // table created without one (by an older build on this file) gets it here. Never thrown:
@@ -2179,7 +2186,7 @@ export class Engine {
         process.stderr.write(`[lynox] DataStore: the unique index on table ids could not be created: ${collectionIds.indexFailed}\n`);
       }
       for (const r of collectionIds.renumbered) {
-        process.stderr.write(`[lynox] DataStore: ${r.name === null ? 'a table with an invalid name' : `table "${r.name}"`} shared its id with another and got a new one: ${r.from} -> ${r.to}\n`);
+        process.stderr.write(`[lynox] DataStore: ${tableInLog(r.name, reducedLog)} shared its id with another and got a new one: ${r.from} -> ${r.to}\n`);
       }
       // Registered as soon as the store exists — all six, unconditionally. This
       // used to wait for `listCollections().length > 0`, which an instance with
