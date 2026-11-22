@@ -681,9 +681,10 @@ describe('the refresh of an expiring store connection', () => {
       expect(claimStoreReconnectHints(setUpByMandate, hold.dir, 'en', NOW)[1]).toEqual({ title: 'Store access has run out', body: 'lynox\'s access to the store acme.myshopify.com has run out. If you set up the store in lynox, ask lynox in the chat to connect it again. Otherwise, contact the owner of this instance.', priority: 'normal', audience: 'all_mandates' });
     });
 
-    // Once the owner connected a store a mandate set up, the connection is the owner's, and the
-    // mandate that set it up can no longer connect it again: every grant reads that only the owner can.
-    it('for a store a mandate set up and the owner connected, tells every grant only the owner connects it again', () => {
+    // A store a mandate set up: the mandate connects it again only while the connection is its own or
+    // none was made yet. Once the owner, or another mandate, connected it, every grant reads that
+    // only the owner can.
+    it('for a store a mandate set up, gives the way while the connection is its own or not yet made, and only the owner once someone else connected it', () => {
       const MANDATE_TAG = 'mandate:setup@example.org';
       const asSetUp = (by: string | undefined) => ({
         getAll: () => store.getAll().map((p) => ({ ...p, created_by: MANDATE_TAG, oauth_grant: { ...p.oauth_grant!, connected_by: by } })),
@@ -695,6 +696,8 @@ describe('the refresh of an expiring store connection', () => {
       expect(claimStoreReconnectHints(asSetUp(MANDATE_TAG), hold.dir, 'de', NOW)[1]?.body).toContain('Hast du den Shop in lynox eingerichtet');
       expiring(NOW + 12 * DAY);
       expect(claimStoreReconnectHints(asSetUp('mandate:other@example.org'), hold.dir, 'de', NOW)[1]?.body).toContain('kann nur der Inhaber dieser Instanz');
+      expiring(NOW + 13 * DAY);
+      expect(claimStoreReconnectHints(asSetUp(undefined), hold.dir, 'de', NOW)[1]?.body).toContain('Hast du den Shop in lynox eingerichtet');
     });
 
     it('in English with the date written out, the month first', () => {
