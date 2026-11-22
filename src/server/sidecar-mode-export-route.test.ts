@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
 import { MigrationImporter } from '../core/migration-import.js';
@@ -843,10 +843,10 @@ describe('the migration export route in sidecar mode (real engine)', () => {
 
   it('gives the stops whose retry follows the target\'s session their code and that retry', async () => {
     setShellIsolationForTest(sidecar);
-    // A target still holding an earlier attempt: its refusal starts no session of this one, so
-    // nothing holds a new attempt.
+    // A target still holding an earlier attempt: its refusal starts no session of this one, but the
+    // earlier attempt holds the target until it expires, so a new one waits for it.
     target.handshakeRefusal = { error: 'x', code: 'migration_session_active' };
-    expect(await stopOf()).toMatchObject({ code: 'target_session_active', retry: 'now' });
+    expect(await stopOf()).toMatchObject({ code: 'target_session_active', retry: 'later' });
     target.handshakeRefusal = undefined;
     // The completion refused: the target answered the handshake and holds a session it did not end.
     target.failCompletion = true;
@@ -945,6 +945,12 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     try {
       // After the handshake, and the target did not end its session: wait for it.
       expect(await stopOf()).toMatchObject({ code: 'export_failed', params: { detail: 'config unreadable' }, retry: 'later' });
+    } finally { spy.mockRestore(); }
+    // This instance's home directory shows as ~, in the UI's detail and in the English message.
+    const home = homedir();
+    spy = vi.spyOn(proto, 'export').mockImplementation(() => { throw new Error(`cannot open ${home}/.lynox/a.db`); });
+    try {
+      expect(await stopOf()).toMatchObject({ code: 'export_failed', params: { detail: 'cannot open ~/.lynox/a.db' }, message: expect.stringMatching(/^cannot open ~\/\.lynox\/a\.db\b/) });
     } finally { spy.mockRestore(); }
     // Nothing readable before the handshake: lynox could not read why, and nothing was sent.
     spy = vi.spyOn(proto, 'preview').mockImplementation(() => { throw 'no error object'; });

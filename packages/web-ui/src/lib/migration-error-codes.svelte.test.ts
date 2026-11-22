@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { MIGRATION_START_CODES, MIGRATION_STOP_RETRY } from '../../../../src/core/migration-stop.js';
 import { getLocale, setLocale, t } from './i18n.svelte.js';
-import { MIGRATION_BROWSER_CODES, migrationErrorView, migrationNotStarted, migrationStopKey } from './migration-error-text.js';
+import { MIGRATION_BROWSER_CODES, migrationErrorPlain, migrationErrorView, migrationNotStarted, migrationStopKey } from './migration-error-text.js';
 
 /**
  * Every code a migration stop can reach the wizard with has its sentence in both languages, and the
@@ -29,7 +29,7 @@ const CASES: Record<string, 'none' | 'check' | 'later' | 'now' | 'state'> = {
 	handshake_unreachable: 'state',
 	handshake_blocked: 'none',
 	handshake_not_lynox: 'none',
-	target_session_active: 'state',
+	target_session_active: 'later',
 	// The target refusing: as it is (4xx), or failing or busy (5xx, 429).
 	handshake_refused: 'none',
 	handshake_unavailable: 'state',
@@ -94,7 +94,7 @@ describe('the codes of a migration stop', () => {
 			if (code === 'start_refused') inBoth('migration.error_not_started');
 			else inBoth(migrationStopKey(code));
 		}
-		for (const key of ['migration.stop.unknown_nothing_sent', 'migration.stop.data_too_large_parts', 'migration.stop.data_too_large_size', 'migration.size_bytes', 'migration.stop.and', 'migration.target_says', 'migration.message', 'migration.part', 'migration.part_kind', 'migration.duration_minutes', 'migration.duration_seconds']) inBoth(key);
+		for (const key of ['migration.stop.unknown_nothing_sent', 'migration.stop.data_too_large_parts', 'migration.stop.data_too_large_size', 'migration.stop.data_too_large_both', 'migration.stop.start_not_public_example', 'migration.size_bytes', 'migration.target_says', 'migration.message', 'migration.part', 'migration.part_kind', 'migration.duration_minutes', 'migration.duration_seconds']) inBoth(key);
 	});
 
 	it('name the start codes the route sends as the ones that say the migration did not start', () => {
@@ -122,7 +122,7 @@ describe('the codes of a migration stop', () => {
 
 describe('the sentence of a migration stop', () => {
 	const plain = (code: string, params: Record<string, string | number | boolean>): string =>
-		migrationErrorView(code, params).segments.map((s) => ('text' in s ? s.text : `[${s.value}]`)).join('');
+		migrationErrorView(code, params).segments.map((s) => ('text' in s ? s.text : 'value' in s ? `[${s.value}]` : s.nowrap)).join('');
 
 	it('names a part by its number out of all, with its kind only for a kind it knows', () => {
 		const before = getLocale();
@@ -141,13 +141,46 @@ describe('the sentence of a migration stop', () => {
 		const before = getLocale();
 		try {
 			setLocale('de');
-			expect(plain('data_too_large', { parts: 9, maxParts: 8, bytes: 600 * 1024 * 1024, maxBytes: 500 * 1024 * 1024 })).toBe('Die Daten dieser Instanz passen nicht in eine Migration: sie brauchen 9 Teile, eine Migration trägt höchstens 8 und sie sind 600 MiB gross, eine Migration trägt höchstens 500 MiB. Es wurde nichts übertragen, und die Daten hier sind unverändert. Eine Migration kann nicht nur einen Teil davon übertragen. Schreib an support@lynox.ai und leg diese Meldung bei.');
 			expect(plain('transfer_out_of_time', { durationMs: 15 * 60_000 })).toContain('länger als 15 Minuten');
 			expect(plain('folder_too_large', { dir: 'apis', entries: 20000, bytes: 64 * 1024 * 1024 })).toBe(`Der Ordner „[apis]“ ist zu gross für eine Migration. Möglich sind höchstens ${(20000).toLocaleString('de-CH')} Einträge und 64 MiB. lynox überträgt keine halbe Kopie davon. Es wurde nichts übertragen. Verkleinere den Ordner oder schreib an support@lynox.ai.`);
 			setLocale('en');
 			expect(plain('restore_out_of_time', { durationMs: 90_000 })).toContain('longer than 90 seconds');
 			// Two sizes that would read the same are said in bytes.
 			expect(plain('data_too_large', { bytes: 500 * 1024 * 1024 + 1, maxBytes: 500 * 1024 * 1024 })).toContain('it is 524,288,001 bytes, and a migration carries at most 524,288,000 bytes');
+		} finally {
+			setLocale(before);
+		}
+	});
+
+	it('says data over a limit in full sentences: the parts, the size, or both in a form of their own', () => {
+		const before = getLocale();
+		const MiB = 1024 * 1024;
+		try {
+			setLocale('de');
+			const deTail = '. Es wurde nichts übertragen, und die Daten hier sind unverändert. Eine Migration kann nicht nur einen Teil davon übertragen. Schreib an support@lynox.ai und leg diese Meldung bei.';
+			expect(plain('data_too_large', { parts: 9, maxParts: 8 })).toBe(`Die Daten dieser Instanz passen nicht in eine Migration: Sie brauchen 9 Teile, eine Migration trägt höchstens 8${deTail}`);
+			expect(plain('data_too_large', { bytes: 600 * MiB, maxBytes: 500 * MiB })).toBe(`Die Daten dieser Instanz passen nicht in eine Migration: Sie sind 600 MiB gross, eine Migration trägt höchstens 500 MiB${deTail}`);
+			expect(plain('data_too_large', { parts: 9, maxParts: 8, bytes: 600 * MiB, maxBytes: 500 * MiB })).toBe(`Die Daten dieser Instanz passen nicht in eine Migration: Sie brauchen 9 Teile und sind 600 MiB gross. Eine Migration trägt höchstens 8 Teile und 500 MiB${deTail}`);
+			setLocale('en');
+			const enTail = '. Nothing was transferred, and the data here is unchanged. A migration cannot move only part of it. Write to support@lynox.ai and include this message.';
+			expect(plain('data_too_large', { parts: 9, maxParts: 8 })).toBe(`This instance's data does not fit into one migration: it needs 9 parts, and a migration carries at most 8${enTail}`);
+			expect(plain('data_too_large', { bytes: 600 * MiB, maxBytes: 500 * MiB })).toBe(`This instance's data does not fit into one migration: it is 600 MiB, and a migration carries at most 500 MiB${enTail}`);
+			expect(plain('data_too_large', { parts: 9, maxParts: 8, bytes: 600 * MiB, maxBytes: 500 * MiB })).toBe(`This instance's data does not fit into one migration: it needs 9 parts and is 600 MiB. A migration carries at most 8 parts and 500 MiB${enTail}`);
+		} finally {
+			setLocale(before);
+		}
+	});
+
+	it('keeps the example address of a start check on one line, as words rather than a value', () => {
+		const before = getLocale();
+		try {
+			for (const [lang, url] of [['de', 'https://dein-name.lynox.cloud'], ['en', 'https://your-name.lynox.cloud']] as const) {
+				setLocale(lang);
+				const view = migrationErrorView('start_not_public');
+				expect(view.segments.at(-2)).toEqual({ nowrap: url });
+				expect(view.segments.some((s) => 'value' in s)).toBe(false);
+				expect(migrationErrorPlain(view)).toBe(t('migration.stop.start_not_public').replace('{example}', url));
+			}
 		} finally {
 			setLocale(before);
 		}

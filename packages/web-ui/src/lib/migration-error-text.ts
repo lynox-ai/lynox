@@ -2,8 +2,9 @@
  * The migration wizard's error sentence, from the code the engine (or the wizard itself) gives and
  * its parameters, in the UI's language.
  *
- * The sentence comes as segments: plain text, and values (a variable name, a path, a folder) that
- * the card sets apart in a box of their own. The target's words or this instance's error text come
+ * The sentence comes as segments: plain text, values (a variable name, a path, a folder) that
+ * the card sets apart in a box of their own, and text that must not break across lines (an example
+ * address). The target's words or this instance's error text come
  * as a separate box under the sentence, with its label. Everything is text: nothing here is HTML.
  */
 
@@ -12,8 +13,8 @@ import { getLocale, t, tf } from './i18n.svelte.js';
 /** What the user can do after the error (the engine's `retry`, or the wizard's own for its codes). */
 export type MigrationRetry = 'now' | 'later' | 'check' | 'none';
 
-/** A part of the sentence: words, or a value shown in a box. */
-export type MigrationErrorSegment = { readonly text: string } | { readonly value: string };
+/** A part of the sentence: words, a value shown in a box, or words kept on one line. */
+export type MigrationErrorSegment = { readonly text: string } | { readonly value: string } | { readonly nowrap: string };
 
 /** A value under the sentence, with its label: the target's words, or this instance's error text. */
 export interface MigrationErrorBox {
@@ -128,6 +129,7 @@ function fill(template: string, vars: Readonly<Record<string, MigrationErrorSegm
 
 const text = (s: string): MigrationErrorSegment => ({ text: s });
 const value = (s: string): MigrationErrorSegment => ({ value: s });
+const nowrap = (s: string): MigrationErrorSegment => ({ nowrap: s });
 
 /** The view of C21, said for an unknown code too: "nothing was transferred" only where that is certain. */
 function unreadable(params: MigrationErrorParams): MigrationErrorView {
@@ -148,24 +150,31 @@ export function migrationErrorView(code: string, params: MigrationErrorParams = 
 	const template = t(migrationStopKey(code));
 	const vars: Record<string, MigrationErrorSegment> = {};
 	switch (code) {
+		case 'start_not_public':
+			vars['example'] = nowrap(t('migration.stop.start_not_public_example'));
+			break;
 		case 'vault_key_missing':
 			vars['env'] = value('LYNOX_VAULT_KEY');
 			vars['envFile'] = value('~/.lynox/.env');
 			vars['keyFile'] = value('vault.key');
 			break;
 		case 'data_too_large': {
-			const over: string[] = [];
 			const parts = int(params['parts']);
 			const maxParts = int(params['maxParts']);
-			if (parts !== null && maxParts !== null) over.push(tf('migration.stop.data_too_large_parts', { n: num(parts), m: num(maxParts) }));
 			const bytes = int(params['bytes']);
 			const maxBytes = int(params['maxBytes']);
-			if (bytes !== null && maxBytes !== null) {
-				const [size, max] = sizePair(bytes, maxBytes);
-				over.push(tf('migration.stop.data_too_large_size', { size, max }));
-			}
-			if (over.length === 0) return unreadable({ nothingSent: true });
-			vars['over'] = text(over.join(t('migration.stop.and')));
+			const byParts = parts !== null && maxParts !== null;
+			const sizes = bytes !== null && maxBytes !== null ? sizePair(bytes, maxBytes) : null;
+			// Both limits are said in a form of their own; one limit in its own.
+			const over = byParts && sizes !== null
+				? tf('migration.stop.data_too_large_both', { n: num(parts), m: num(maxParts), size: sizes[0], max: sizes[1] })
+				: byParts
+					? tf('migration.stop.data_too_large_parts', { n: num(parts), m: num(maxParts) })
+					: sizes !== null
+						? tf('migration.stop.data_too_large_size', { size: sizes[0], max: sizes[1] })
+						: null;
+			if (over === null) return unreadable({ nothingSent: true });
+			vars['over'] = text(over);
 			break;
 		}
 		case 'folder_too_large': {
@@ -205,5 +214,5 @@ export function migrationErrorView(code: string, params: MigrationErrorParams = 
 
 /** The view as one plain line (for `getError`), the values in place. */
 export function migrationErrorPlain(view: MigrationErrorView): string {
-	return view.segments.map((s) => ('text' in s ? s.text : s.value)).join('');
+	return view.segments.map((s) => ('text' in s ? s.text : 'value' in s ? s.value : s.nowrap)).join('');
 }

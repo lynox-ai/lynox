@@ -7,6 +7,8 @@
  * or bidi characters, so it displays as what it says.
  */
 
+import { homedir } from 'node:os';
+
 /** Bytes the source reads at most, per kind of answer. A real one is far below each. */
 export const TARGET_BODY_CAPS = {
   /** The handshake's key material, or its refusal text. */
@@ -226,6 +228,31 @@ export function relayedText(text: string, max: number = 500): string {
     if (n === max) return `${out.slice(0, end)}…`;
     n++;
     end += ch.length;
+  }
+  return out;
+}
+
+/** The home directories of this instance: the system's, and `HOME` when it names another one. */
+function ownHomes(): string[] {
+  let system = '';
+  try { system = homedir(); } catch { /* no home known */ }
+  return [system, process.env['HOME'] ?? ''];
+}
+
+/**
+ * This instance's own error text with its home directory written as `~` wherever it starts a path
+ * (`/home/x/.lynox/a.db` becomes `~/.lynox/a.db`). A home counts only as a whole path segment:
+ * `/home/xy` stays as it is when the home is `/home/x`, and so does a home inside a longer path.
+ * A home that is empty, relative or the root is left out. Only for this instance's text, never
+ * for the target's words.
+ */
+export function homeAsTilde(text: string, homes: readonly string[] = ownHomes()): string {
+  const usable = [...new Set(homes.map((h) => h.replace(/\/+$/, '')).filter((h) => h.startsWith('/') && h.length > 1))]
+    .sort((a, b) => b.length - a.length);
+  let out = text;
+  for (const home of usable) {
+    const escaped = home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`(?<![\\w.~/-])${escaped}(?=/|$|[^\\w.~-])`, 'g'), '~');
   }
   return out;
 }

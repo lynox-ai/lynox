@@ -35,7 +35,7 @@ export const MIGRATION_STOP_RETRY = {
   handshake_unreachable: 'state',
   handshake_blocked: 'none',
   handshake_not_lynox: 'none',
-  target_session_active: 'state',
+  target_session_active: 'later',
   handshake_refused: 'none',
   handshake_unavailable: 'state',
   handshake_unverified: 'none',

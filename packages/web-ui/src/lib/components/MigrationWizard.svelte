@@ -352,12 +352,13 @@
 			<div class="px-4 py-6 text-center space-y-3">
 				<p data-testid="migration-error-title" class="text-sm font-medium text-danger">{t(errorNotStarted ? 'migration.error_title_not_started' : 'migration.error_title')}</p>
 				<!-- lynox's own sentence in the UI's language. A value in it (a variable name, a path, a folder)
-				     is set apart in its own isolated element, as text, never as markup. -->
-				<p data-testid="migration-error-detail" class="break-words text-xs text-text-muted">{#each errorView.segments as segment, i (i)}{#if 'value' in segment}<bdi data-foreign-value class="rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 box-decoration-clone font-mono">{segment.value}</bdi>{:else}{segment.text}{/if}{/each}</p>
+				     is set apart in its own isolated element, as text, never as markup; it wraps as a whole and
+				     breaks inside only when it is longer than a line. An example address stays on one line. -->
+				<p data-testid="migration-error-detail" class="break-words text-xs text-text-muted">{#each errorView.segments as segment, i (i)}{#if 'value' in segment}<bdi data-foreign-value class="inline-block max-w-full rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono [overflow-wrap:anywhere]">{segment.value}</bdi>{:else if 'nowrap' in segment}<span class="whitespace-nowrap">{segment.nowrap}</span>{:else}{segment.text}{/if}{/each}</p>
 				{#if errorView.box}
 					<!-- Someone else's words (the target's, or this instance's error text): unchanged, in their own
 					     isolated element with a border, as a value rather than a sentence. They are English. -->
-					<p data-testid="migration-error-reason" class="break-words text-xs text-text-muted">{errorView.box.label} <bdi data-foreign-value lang="en" class="rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 box-decoration-clone font-mono">{errorView.box.value}</bdi></p>
+					<p data-testid="migration-error-reason" class="break-words text-xs text-text-muted">{errorView.box.label} <bdi data-foreign-value lang="en" class="inline-block max-w-full rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono [overflow-wrap:anywhere]">{errorView.box.value}</bdi></p>
 				{/if}
 				{#if retry === 'check'}
 					<p data-testid="migration-check-target" class="text-xs text-warning">{t('migration.check_target_first')}</p>

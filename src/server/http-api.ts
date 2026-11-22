@@ -15422,7 +15422,7 @@ export class LynoxHTTPApi {
       try {
         const crypto = await import('../core/migration-crypto.js');
         const { MigrationExporter } = await import('../core/migration-export.js');
-        const { TARGET_BODY_CAPS, TARGET_BODY_TIMEOUT_MS, TARGET_REQUEST_TIMEOUTS_MS, TargetAnswerTooSlow, TargetDidNotAnswer, TransferOutOfTime, askTarget, capText, transferDeadlineMs, isConnectionFailure, discardBody, durationText, readTargetBody, readTargetJson, relayedReport, relayedText } = await import('../core/migration-target-reply.js');
+        const { TARGET_BODY_CAPS, TARGET_BODY_TIMEOUT_MS, TARGET_REQUEST_TIMEOUTS_MS, TargetAnswerTooSlow, TargetDidNotAnswer, TransferOutOfTime, askTarget, capText, transferDeadlineMs, isConnectionFailure, discardBody, durationText, readTargetBody, readTargetJson, relayedReport, relayedText, homeAsTilde } = await import('../core/migration-target-reply.js');
         // Why an answer of the target could not be used, in the user's words.
         type Why = 'large' | 'format' | 'slow' | 'broken' | 'silent' | 'unreachable' | 'unsent' | 'failed';
         const why = (w: Why, cap: number, unread: string, waited: number = TARGET_BODY_TIMEOUT_MS): string =>
@@ -15478,7 +15478,8 @@ export class LynoxHTTPApi {
             return f();
           } catch (err: unknown) {
             if (err instanceof MigrationStop) throw err;
-            const text = err instanceof Error ? err.message : '';
+            // This instance's home directory shows as `~`: the path below it is what the user can act on.
+            const text = homeAsTilde(err instanceof Error ? err.message : '');
             const detail = relayedText(text).trim();
             throw new MigrationStop('export_failed', text, detail === '' ? {} : { detail });
           }
@@ -15692,7 +15693,7 @@ export class LynoxHTTPApi {
           if (isConnectionFailure(err)) throw restoreUnknown('broken');
           // The network guard refusing the address (it follows no redirects): nothing was sent, so a
           // new attempt can get past it. Anything else: the user checks the target first.
-          const text = relayedText(err instanceof Error ? err.message : String(err)).trim();
+          const text = homeAsTilde(relayedText(err instanceof Error ? err.message : String(err)).trim());
           if (text.startsWith('Blocked:')) {
             const reason = text.slice('Blocked:'.length).trim().replace(/[.!?…]+$/, '');
             // The guard's reason is technical: only the English message carries it; the UI says the address is blocked.
