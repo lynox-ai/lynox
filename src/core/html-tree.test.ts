@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { CONTENT_CARRYING_ELEMENTS, canonicalHtml, carriesContent, htmlEqual, normalizeHtml, parseHtmlFragment, walkHtml } from './html-tree.js';
+import { CONTENT_CARRYING_ELEMENTS, canonicalHtml, carriesContent, htmlEqual, htmlEqualIgnoringLayout, normalizeHtml, parseHtmlFragment, walkHtml } from './html-tree.js';
 
 /**
  * The fixed cases of Shopify PRD §21.2 item 5 and §21.7 for `html-tree.ts`. The generated cases
@@ -144,6 +144,26 @@ describe('normalizeHtml: what it keeps apart (§21.7)', () => {
   ];
   it.each(apart)('%s', (_name, a, b) => {
     expect(htmlEqual(a, b)).toBe(false);
+  });
+});
+
+describe('htmlEqualIgnoringLayout: looser, for finding a marked value', () => {
+  it('equates a line break a store adds where normalizeHtml keeps it, at a cell and between inline elements', () => {
+    for (const [a, b] of [
+      ['<table><tr><td>\n<b>a</b></td></tr></table>', '<table><tr><td><b>a</b></td></tr></table>'],
+      ['<p>Neu</p>\n<script>steal()</script>', '<p>Neu</p><script>steal()</script>'],
+      ['<ul><li><b>a</b>\n</li></ul>', '<ul><li><b>a</b></li></ul>'],
+    ]) {
+      expect(htmlEqual(a!, b!), a).toBe(false);
+      expect(htmlEqualIgnoringLayout(a!, b!), a).toBe(true);
+    }
+  });
+
+  it('keeps apart what differs in text, element or attribute', () => {
+    expect(htmlEqualIgnoringLayout('<p>a b</p>', '<p>ab</p>')).toBe(false);
+    expect(htmlEqualIgnoringLayout('<p>a</p>', '<div>a</div>')).toBe(false);
+    expect(htmlEqualIgnoringLayout('<p class="x">a</p>', '<p>a</p>')).toBe(false);
+    expect(htmlEqualIgnoringLayout('<p>a</p><script>x()</script>', '<p>a</p>')).toBe(false);
   });
 });
 

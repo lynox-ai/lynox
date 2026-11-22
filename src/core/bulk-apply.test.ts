@@ -349,6 +349,7 @@ describe('a planned halt is not a failure', () => {
     expect(out.notes).toHaveLength(1);
     expect(out.notes[0]!.priority).toBe('normal');
     expect(out.notes[0]!.title.startsWith('\u23F8 ')).toBe(true);
+    expect(out.notes[0]!.title).toBe('\u23F8 Bulk run halted');
   });
 
   it('a failure halt is still recorded `failed` and announced with ✗ at high priority', async () => {
@@ -360,6 +361,26 @@ describe('a planned halt is not a failure', () => {
     expect(out.notes).toHaveLength(1);
     expect(out.notes[0]!.priority).toBe('high');
     expect(out.notes[0]!.title.startsWith('\u2717 ')).toBe(true);
+    // It halted and can be continued: the title says so, the mark says it was a failure (U-324).
+    expect(out.notes[0]!.title).toBe('\u2717 Bulk run halted');
+  });
+
+  it('a run refused because it is already halted is titled halted too, read from its ledger', async () => {
+    const { runId, initial } = recordMemoryRun(4);
+    approve(runId);
+    ledger.halt(runId, BULK_HALT_REASONS.consecutiveFailures);
+    const out = await tickMemoryRun(runId, memory(initial).writer);
+    expect(out.status).toBe('failed');
+    expect(out.notes.map((n) => n.title)).toEqual(['\u2717 Bulk run halted']);
+  });
+
+  it('a run that ended before it was approved is titled failed, though it holds a reason: nothing waits to go on', async () => {
+    const { runId, initial } = recordMemoryRun(4);
+    approve(runId);
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted', halt_reason = ? WHERE id = ?`).run(BULK_HALT_REASONS.superseded, runId);
+    const out = await tickMemoryRun(runId, memory(initial).writer);
+    expect(out.status).toBe('failed');
+    expect(out.notes.map((n) => n.title)).toEqual(['\u2717 Bulk run failed']);
   });
 });
 
@@ -393,6 +414,27 @@ describe('the effect can only come from the approval (§7 b, the derivation prop
     expect(ledger.getStatus(runId)!.phase).toBe('previewed');
     // Refused by the phase check itself — the expiry check would halt it instead.
     expect(ledger.getStatus(runId)!.haltReason).toBeNull();
+  });
+
+  // The customer texts count an undo as a bulk run of its own: it writes only after the owner
+  // confirmed its list, like the run it takes back.
+  it('refuses an undo that was never approved and takes nothing back', async () => {
+    const { runId } = recordMemoryRun(2);
+    approve(runId);
+    const { writer, state } = memory({ k000: 'v0', k001: 'v1' });
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('done');
+    expect(state.get('k000')).toBe('w0');
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    expect((await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('refused');
+    expect([state.get('k000'), state.get('k001')]).toEqual(['w0', 'w1']);
+    expect(ledger.getStatus(undo.status.id)!.phase).toBe('previewed');
+    // Refused by the phase check itself — the expiry check would halt it instead.
+    expect(ledger.getStatus(undo.status.id)!.haltReason).toBeNull();
+    // Control: the same undo, approved, takes both back.
+    approve(undo.status.id);
+    expect((await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('done');
+    expect([state.get('k000'), state.get('k001')]).toEqual(['v0', 'v1']);
   });
 
   it('refuses an effect that does not match the run kind', async () => {
@@ -884,7 +926,8 @@ describe('the owner stops a running write — between targets, never inside one'
     expect(out.records).toHaveLength(1);
     expect(out.records[0]![2]).toBe('stopped');
     expect(out.records[0]![1]).toContain('4 applied');
-    expect(out.records[0]![1]).toContain(BULK_HALT_REASONS.stoppedByOwner);
+    // Said as a sentence, not the reason the run stores (that stays in the ledger, above).
+    expect(out.records[0]![1]).toContain('Stopped manually.');
     expect(out.notified, 'the owner asked; nobody is notified of it').toBe(0);
   });
 
@@ -1842,7 +1885,7 @@ describe('data-store runs', () => {
     approve(runId);
     const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: () => null, notices: BULK_NOTICES.de });
     expect(out.status).toBe('refused');
-    expect(out.summary).toMatch(/^Massenlauf angehalten: Zielsystem nicht erreichbar oder Fehler in lynox\. .* von 1 Zielen\.$/);
+    expect(out.summary).toMatch(/^Zielsystem nicht erreichbar oder Fehler in lynox\. .* von 1 Zielen\.$/);
   });
 });
 
@@ -2222,7 +2265,7 @@ describe('a write told to a German owner', () => {
     engineDb.getDb().prepare('UPDATE bulk_targets SET after_planned = ? WHERE run_id = ? AND seq = 0')
       .run(engineDb.enc(JSON.stringify('evil')), runId);
     const out = await runBulkEffect(runId, 'bulk_apply', de(memory(initial).writer));
-    expect(out.summary).toBe('Massenlauf angehalten: Der Lauf hat sich seit der Freigabe geändert. 0 geschrieben, von 3 Zielen.');
+    expect(out.summary).toBe('Der Lauf hat sich seit der Freigabe geändert. 0 geschrieben, von 3 Zielen.');
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.checksum);
   });
 
@@ -2231,7 +2274,7 @@ describe('a write told to a German owner', () => {
     approve(runId);
     vi.spyOn(ledger, 'isWriteSwitchedOff').mockReturnValue(true);
     const out = await runBulkEffect(runId, 'bulk_apply', de(memory(initial).writer));
-    expect(out.summary).toBe('Massenlauf angehalten: Schreiben in Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet. Ist es wieder an, lässt sich der Lauf fortsetzen. 0 geschrieben, von 3 Zielen.');
+    expect(out.summary).toBe('Schreiben in Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet. Ist es wieder an, lässt sich der Lauf fortsetzen. 0 geschrieben, von 3 Zielen.');
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.shopifyWriteOff);
   });
 
@@ -2240,7 +2283,7 @@ describe('a write told to a German owner', () => {
     approve(runId);
     const unwritable: BulkRunTrail = { begin: () => { throw new Error('SQLITE_FULL'); }, end: () => { /* none */ } };
     const out = await runBulkEffect(runId, 'bulk_apply', { ...de(memory(initial).writer), trailFor: () => unwritable });
-    expect(out.summary).toBe('Massenlauf angehalten: Der Lauf liess sich nicht im Protokoll der Instanz festhalten; nichts gelesen, nichts geschrieben. 0 geschrieben, von 2 Zielen.');
+    expect(out.summary).toBe('Der Lauf liess sich nicht im Protokoll der Instanz festhalten; nichts gelesen, nichts geschrieben. 0 geschrieben, von 2 Zielen.');
   });
 
   it('tells each end of an atomic run in German: failed, out of time, stopped', async () => {
