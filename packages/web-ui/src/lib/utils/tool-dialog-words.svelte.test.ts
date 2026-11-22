@@ -82,9 +82,9 @@ describe('the delegation consent names its button as the button reads', () => {
     while (!existsSync(join(root, 'src/tools/dialog-text.ts')) && dirname(root) !== root) root = dirname(root);
     const text = readFileSync(join(root, 'src/tools/dialog-text.ts'), 'utf8');
     setLocale('de');
-    expect(text).toContain(`sonst wähle „${t('chat.consent_run_balanced')}“.`);
+    expect(text).toContain(`Sonst wähle „${t('chat.consent_run_balanced')}“.`);
     setLocale('en');
-    expect(text).toContain(`otherwise choose "${t('chat.consent_run_balanced')}".`);
+    expect(text).toContain(`Otherwise choose “${t('chat.consent_run_balanced')}”.`);
   });
 });
 

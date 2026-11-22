@@ -18,7 +18,7 @@ import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 import { PROMPT_TEXT_BRAND, type PromptText } from '../types/agent.js';
 import { promptSegments, promptValue, pv, singleLine } from '../core/prompt-value.js';
 import { dialogToolHead, dialogToolWord } from './tool-words.js';
-import { GUARD_TEXT, QUOTE_MARKS, actionWords, ruleLabel, type DialogLanguage } from './dialog-text.js';
+import { GUARD_TEXT, QUOTE_MARKS, actionWords, escapeQuoted, ruleLabel, type DialogLanguage } from './dialog-text.js';
 import { BUILTIN_TOOL_NAMES } from '../core/builtin-tool-names.js';
 
 // lynox-internal secret files. Specific names, NOT the whole `~/.lynox/` dir — the agent may
@@ -1928,14 +1928,14 @@ function system(text: string): SystemText {
 /** Mark the tool a danger prompt is about: its dialog word, or an external tool's name as a value. */
 interface ToolText { readonly toolName: string; readonly language: DialogLanguage }
 
-/** `\` and every quotation mark escaped, so the marks around a value are the prompt's own. */
+/** `\` and every quote-like character escaped, so the marks around a value are the prompt's own. */
 function quoted(text: string): string {
-  return text.replace(/[\\"“”„]/g, (c) => `\\${c}`);
+  return escapeQuoted(text);
 }
 
-/** A value longer than a line is not quoted: the sentence ends with a colon and the value
- *  follows on a line of its own, where it can wrap without a lone mark at either end. The web UI
- *  draws the same line between a short and a long value. */
+/** A value longer than a line, in characters: the sentence ends with a colon and the value
+ *  follows, still between its marks, on a line of its own, where it can wrap without leaving a
+ *  lone mark at the end of the sentence. */
 const LONG_VALUE = 80;
 
 /** A danger as `_detectDanger` returns it: the prompt the person is asked with, the warning, and
@@ -1972,16 +1972,17 @@ function askable(danger: Danger): Danger {
 function framedIn(language: DialogLanguage): (strings: TemplateStringsArray, ...values: ReadonlyArray<AgentText | SystemText | ToolText>) => Danger {
   const [open, close] = QUOTE_MARKS[language];
   return (strings, ...values) => {
-    // The template writes a value's quotes as `"`; the prompt shows the language's marks, or for a
-    // long value a colon and a line break. The warning keeps the template's text as it is.
+    // The template writes a value's quotes as `"`; the prompt shows the language's marks, and puts
+    // a long value after a colon on a line of its own, the rest of the sentence on the next. The
+    // warning keeps the template's text as it is.
     const frames = [...strings];
     values.forEach((v, i) => {
       if (!('agentText' in v) || !frames[i]!.endsWith('"') || !frames[i + 1]!.startsWith('"')) return;
       const before = frames[i]!.slice(0, -1);
       const after = frames[i + 1]!.slice(1);
-      if (singleLine(v.agentText).length > LONG_VALUE) {
-        frames[i] = `${before.replace(/\s*(?:—\s*)?$/u, '').replace(/:?$/u, ':')}\n`;
-        frames[i + 1] = after === '' ? '' : `\n${after.trimStart()}`;
+      if (Array.from(singleLine(v.agentText)).length > LONG_VALUE) {
+        frames[i] = `${before.replace(/\s*(?:—\s*)?$/u, '').replace(/:?$/u, ':')}\n${open}`;
+        frames[i + 1] = after === '' ? close : `${close}\n${after.trimStart().replace(/^—\s*/u, '')}`;
       } else {
         frames[i] = before + open;
         frames[i + 1] = close + after;

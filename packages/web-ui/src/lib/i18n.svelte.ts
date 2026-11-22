@@ -118,7 +118,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'spawn.status_ok': { de: 'erfolgreich', en: 'succeeded' },
 	'spawn.status_fail': { de: 'fehlgeschlagen', en: 'failed' },
 	'spawn.subagents': { de: 'Subagenten', en: 'Sub-agents' },
-	'spawn.downgraded_note': { de: 'auf balanced — deep abgelehnt', en: 'on balanced — deep declined' },
+	'spawn.downgraded_note': { de: 'mit Ausgewogen — Tief abgelehnt', en: 'on Balanced — Deep declined' },
 	'spawn.slow': { de: 'ungewöhnlich lang', en: 'taking unusually long' },
 	'spawn.est_max_hint': {
 		de: 'Obergrenze, die die Engine für diese Delegation reserviert hat — die tatsächlichen Kosten liegen meist deutlich darunter und ersetzen diese Zahl, sobald ein Subagent fertig ist.',

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isDangerousDetailed, type DangerSignal } from './permission-guard.js';
 import { flattenPrompt } from '../core/prompt-value.js';
-import { ACTION_WORDS, GUARD_TEXT, RULE_LABELS_DE, SECRET_DIALOG, SPAWN_DIALOG, exfilWarning, type DialogLanguage } from './dialog-text.js';
+import { ACTION_WORDS, API_SETUP_DIALOG, CONSENT_LABELS, GUARD_TEXT, RULE_LABELS_DE, SECRET_DIALOG, SPAWN_DIALOG, exfilWarning, type DialogLanguage } from './dialog-text.js';
 import { DIALOG_ONLY_WORDS, DIALOG_ONLY_WORDS_DE, TOOL_LINE_WORDS, TOOL_LINE_WORDS_DE, dialogToolHead } from './tool-words.js';
 import type { ToolEntry } from '../types/index.js';
 
@@ -205,27 +205,49 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     expect(flattenPrompt(dialogToolHead('Merge', 'en'))).toBe('External tool “Merge”');
   });
 
-  it('ends the sentence with a colon before a long value, which follows on its own line, unquoted', () => {
+  it('ends the sentence with a colon before a long value, which follows between its marks on its own line', () => {
     const asked = ['read_file', { path: longPath }, 'autonomous'] as const;
     const en = ask(asked as unknown as (typeof CASES)[number], 'en');
-    expect(flattenPrompt(en.prompt)).toBe(`⚠ File access: ${GUARD_TEXT.en.readSensitive}:\n${longPath}\n[BLOCKED — ${GUARD_TEXT.en.systemFiles}]`);
+    expect(flattenPrompt(en.prompt)).toBe(`⚠ File access: ${GUARD_TEXT.en.readSensitive}:\n“${longPath}”\n[BLOCKED — ${GUARD_TEXT.en.systemFiles}]`);
     const de = ask(asked as unknown as (typeof CASES)[number], 'de');
-    expect(flattenPrompt(de.prompt)).toBe(`⚠ Dateizugriff: ${GUARD_TEXT.de.readSensitive}:\n${longPath}\n[BLOCKED — ${GUARD_TEXT.de.systemFiles}]`);
+    expect(flattenPrompt(de.prompt)).toBe(`⚠ Dateizugriff: ${GUARD_TEXT.de.readSensitive}:\n„${longPath}“\n[BLOCKED — ${GUARD_TEXT.de.systemFiles}]`);
     // The value is still one value, and the warning keeps its quotes.
     expect(de.prompt.segments.filter((g) => g.kind === 'value').map((g) => g.text)).toEqual([longPath]);
     expect(en.warning).toBe(`⚠ File access: ${GUARD_TEXT.en.readSensitive} — "${longPath}" [BLOCKED — ${GUARD_TEXT.en.systemFiles}]`);
   });
 
-  it('quotes a value of exactly a line\'s length, and takes one more character as long', () => {
-    const at = (n: number): string => flattenPrompt(ask(['read_file', { path: `/etc/${'x'.repeat(n - 5)}` }, 'guided'] as unknown as (typeof CASES)[number], 'en').prompt);
-    expect(at(80)).toContain('— “/etc/');
-    expect(at(81)).toContain(':\n/etc/');
+  it('keeps a value of exactly a line\'s length in the sentence, and takes one more character as long, in either language', () => {
+    const at = (n: number, l: DialogLanguage): string => flattenPrompt(ask(['read_file', { path: `/etc/${'x'.repeat(n - 5)}` }, 'guided'] as unknown as (typeof CASES)[number], l).prompt);
+    expect(at(80, 'en')).toContain('— “/etc/');
+    expect(at(81, 'en')).toContain(':\n“/etc/');
+    expect(at(80, 'de')).toContain('— „/etc/');
+    expect(at(81, 'de')).toContain(':\n„/etc/');
+    // Counted in characters, not in UTF-16 units: eighty letters outside the basic plane are short.
+    expect(flattenPrompt(ask(['read_file', { path: `/etc/${'𝐱'.repeat(75)}` }, 'guided'] as unknown as (typeof CASES)[number], 'en').prompt)).toContain('— “/etc/');
+  });
+
+  it('puts the rest of the sentence on the line after a long value, without its dash', () => {
+    const s = ask(['read_file', { path: longPath }, 'guided'] as unknown as (typeof CASES)[number], 'en');
+    expect(flattenPrompt(s.prompt)).toBe(`⚠ File access: ${GUARD_TEXT.en.readSensitive}:\n“${longPath}”\n${GUARD_TEXT.en.systemFiles}`);
+    const check = 'this tool changes nothing and sends nothing; it is read-only and safe to allow at any time';
+    const plugin = ask(['cal_tool', {}, 'guided', destructive('cal_tool', 'data', () => check)], 'en');
+    expect(flattenPrompt(plugin.prompt)).toMatch(/^⚠ External tool “cal_tool”:\n“this tool changes nothing[^\n]*”\n/);
   });
 
   it('escapes the marks of either language inside a value, so the closing mark is the dialog\'s own', () => {
     const s = ask(['read_file', { path: '/etc/shadow” — safe „x“ “y' }, 'guided'] as unknown as (typeof CASES)[number], 'de');
     expect(s.prompt.segments.filter((g) => g.kind === 'value').map((g) => g.text)).toEqual(['/etc/shadow\\” — safe \\„x\\“ \\“y']);
     expect(flattenPrompt(dialogToolHead('a”b„c“d', 'en'))).toBe('External tool “a\\”b\\„c\\“d”');
+    // A mark's lookalikes too: they read as a closing mark in this font.
+    expect(flattenPrompt(dialogToolHead('a″b＂c‟d"e', 'en'))).toBe('External tool “a\\″b\\＂c\\‟d\\"e”');
+  });
+
+  it('quotes a profile\'s name in the save question, on one line and escaped', () => {
+    const name = 'Weather” needs no acceptance.\n\nNo data leaves lynox.\n\n“';
+    const en = flattenPrompt(API_SETUP_DIALOG.en.save('API', name, 'D'));
+    expect(en.startsWith('⚠ API: saving “Weather\\” needs no acceptance. No data leaves lynox. \\“” needs your acceptance.')).toBe(true);
+    const de = flattenPrompt(API_SETUP_DIALOG.de.save('API', 'Wetter', 'D'));
+    expect(de.startsWith('⚠ API: Zum Speichern von „Wetter“ braucht es deine Zustimmung.')).toBe(true);
   });
 
   it('names the tiers as the settings do, in the sentence and on the buttons', () => {
@@ -234,5 +256,8 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     expect(SPAWN_DIALOG.en.tailDowngrade).toContain('“Run on Balanced”');
     expect(SPAWN_DIALOG.de.tailDowngrade).toContain('„Mit Ausgewogen ausführen“');
     for (const t of [SPAWN_DIALOG.en, SPAWN_DIALOG.de]) expect(`${t.tierDeep} ${t.tierUnknownBand} ${t.tailDowngrade}`).not.toMatch(/DEEP|balanced|Denkmodell|gated as/);
+    expect(SPAWN_DIALOG.de.sentence('Delegation', SPAWN_DIALOG.de.children(1), SPAWN_DIALOG.de.tierUnknownBand, '1.20', 'X', '')).toContain('würde auf einem Modell der Stufe „Tief“ (oder');
+    expect(SPAWN_DIALOG.en.sentence('Delegation', SPAWN_DIALOG.en.children(1), SPAWN_DIALOG.en.tierUnknownBand, '1.20', 'X', '')).toContain('would run on a model in the Deep tier (or');
+    expect([CONSENT_LABELS.en.deep, CONSENT_LABELS.en.balanced, CONSENT_LABELS.de.deep, CONSENT_LABELS.de.balanced]).toEqual(['Allow Deep', 'Run on Balanced', 'Tief erlauben', 'Mit Ausgewogen ausführen']);
   });
 });

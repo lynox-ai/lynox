@@ -14,7 +14,7 @@
 
 import type { ConsentKey } from '../contract/prompt.js';
 import type { NoticeLanguage } from '../core/notice-language.js';
-import { pv } from '../core/prompt-value.js';
+import { pv, singleLine } from '../core/prompt-value.js';
 import type { PromptText } from '../types/agent.js';
 
 /** The language a confirmation dialog is asked in. */
@@ -23,6 +23,15 @@ export type DialogLanguage = NoticeLanguage;
 /** The quotation marks of each dialog language, opening and closing: a value is quoted as its
  *  readers write it. */
 export const QUOTE_MARKS: Readonly<Record<DialogLanguage, readonly [open: string, close: string]>> = { en: ['“', '”'], de: ['„', '“'] };
+
+/** `\` and every character that reads as a double quotation mark (the straight one, both
+ *  languages' marks, and their lookalikes), so a value cannot close the marks around it. */
+const QUOTE_LIKE = /[\\"“”„‟″＂〝〞〃]/gu;
+
+/** `text` as it stands between a dialog's quotation marks: each quote-like character escaped. */
+export function escapeQuoted(text: string): string {
+  return text.replace(QUOTE_LIKE, (c) => `\\${c}`);
+}
 
 /** The guard's fixed sentence parts (`_detectDanger`). */
 export interface GuardText {
@@ -403,22 +412,22 @@ export const PRESET_NOTE: Readonly<Record<DialogLanguage, PresetNote>> = {
   en: {
     unknownProvider: (known) => `No authorization address could be derived: this profile names a provider this engine does not have built in, so there is nothing here to disclose or accept. It knows: ${known}.`,
     noProviders: 'No authorization address could be derived: this engine has no built-in providers yet, so there is nothing here to disclose or accept.',
-    badPreset: (id, detail) => `No authorization address could be derived: the built-in provider "${id}" is defined wrongly in this engine — ${detail}. Nothing on this profile fixes that; report it.`,
-    missingParam: (id, describe, name) => `No authorization address could be derived: the provider "${id}" needs ${describe} (auth.oauth.preset_params.${name}), which this profile does not supply. Set it with api_setup update — the host is disclosed then.`,
-    refusedParam: (id, describe, name) => `No authorization address could be derived: the value this profile supplies for ${describe} (auth.oauth.preset_params.${name}) is not one the provider "${id}" accepts. Correct it with api_setup update — the host is disclosed then.`,
+    badPreset: (id, detail) => `No authorization address could be derived: the built-in provider “${id}” is defined wrongly in this engine — ${detail}. Nothing on this profile fixes that; report it.`,
+    missingParam: (id, describe, name) => `No authorization address could be derived: the provider “${id}” needs ${describe} (auth.oauth.preset_params.${name}), which this profile does not supply. Set it with api_setup update — the host is disclosed then.`,
+    refusedParam: (id, describe, name) => `No authorization address could be derived: the value this profile supplies for ${describe} (auth.oauth.preset_params.${name}) is not one the provider “${id}” accepts. Correct it with api_setup update — the host is disclosed then.`,
   },
   de: {
     unknownProvider: (known) => `Es liess sich keine Anmeldeadresse ableiten: Dieses Profil nennt einen Anbieter, den lynox nicht eingebaut hat, daher gibt es hier nichts offenzulegen oder anzunehmen. Eingebaut sind: ${known}.`,
     noProviders: 'Es liess sich keine Anmeldeadresse ableiten: lynox hat noch keine eingebauten Anbieter, daher gibt es hier nichts offenzulegen oder anzunehmen.',
-    badPreset: (id, detail) => `Es liess sich keine Anmeldeadresse ableiten: Der eingebaute Anbieter "${id}" ist in lynox falsch definiert — ${detail}. An diesem Profil lässt sich das nicht beheben; melde es.`,
-    missingParam: (id, describe, name) => `Es liess sich keine Anmeldeadresse ableiten: Der Anbieter "${id}" braucht ${describe} (auth.oauth.preset_params.${name}), und dieses Profil gibt es nicht an. Setze es mit api_setup update — dann wird der Host offengelegt.`,
-    refusedParam: (id, describe, name) => `Es liess sich keine Anmeldeadresse ableiten: Der Wert, den dieses Profil für ${describe} (auth.oauth.preset_params.${name}) angibt, ist keiner, den der Anbieter "${id}" annimmt. Korrigiere ihn mit api_setup update — dann wird der Host offengelegt.`,
+    badPreset: (id, detail) => `Es liess sich keine Anmeldeadresse ableiten: Der eingebaute Anbieter „${id}“ ist in lynox falsch definiert — ${detail}. An diesem Profil lässt sich das nicht beheben; melde es.`,
+    missingParam: (id, describe, name) => `Es liess sich keine Anmeldeadresse ableiten: Der Anbieter „${id}“ braucht ${describe} (auth.oauth.preset_params.${name}), und dieses Profil gibt es nicht an. Setze es mit api_setup update — dann wird der Host offengelegt.`,
+    refusedParam: (id, describe, name) => `Es liess sich keine Anmeldeadresse ableiten: Der Wert, den dieses Profil für ${describe} (auth.oauth.preset_params.${name}) angibt, ist keiner, den der Anbieter „${id}“ annimmt. Korrigiere ihn mit api_setup update — dann wird der Host offengelegt.`,
   },
 };
 
 /** The German for a provider parameter's description (`OAuthPresetParam.describe`), keyed by the English. */
 const PRESET_PARAM_DESCRIBE_DE: Readonly<Record<string, string>> = {
-  'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case': 'die myshopify.com-Subdomain des Stores in Kleinbuchstaben, z. B. "my-store" für my-store.myshopify.com',
+  'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case': 'die myshopify.com-Subdomain des Stores in Kleinbuchstaben, z. B. „my-store“ für my-store.myshopify.com',
 };
 
 /** A provider parameter's description in `language`; English as written. */
@@ -444,7 +453,7 @@ const ADOPT_NAMES_SHOWN = 30;
 
 export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> = {
   en: {
-    save: (word, name, disclosure) => pv`⚠ ${word}: saving “${name}” needs your acceptance.\n\n${disclosure}\n\nAccept and save this profile?`,
+    save: (word, name, disclosure) => pv`⚠ ${word}: saving “${escapeQuoted(singleLine(name))}” needs your acceptance.\n\n${disclosure}\n\nAccept and save this profile?`,
     redirect: (hosts) => `You will be sent to ${hosts.join(' and ')} in your own browser to authorize this profile. You sign in there, to that provider — not to lynox — and what comes back is stored here for this profile.`,
     deleteUnreadable: (word, id, source) => pv`⚠ ${word}: delete the stored API profile ${id}, which could not be read (${source})? Every vault name it carries is free for other profiles once it is gone. Delete it?`,
     deleteProfile: (word, name, id, host, loses) => pv`⚠ ${word}: delete the API profile ${name} (id ${id}${host ? pv`, host ${host}` : pv``})?${loses} Delete it?`,
@@ -457,7 +466,7 @@ export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> 
     },
   },
   de: {
-    save: (word, name, disclosure) => pv`⚠ ${word}: Zum Speichern von „${name}“ braucht es deine Zustimmung.\n\n${disclosure}\n\nDieses Profil annehmen und speichern?`,
+    save: (word, name, disclosure) => pv`⚠ ${word}: Zum Speichern von „${escapeQuoted(singleLine(name))}“ braucht es deine Zustimmung.\n\n${disclosure}\n\nDieses Profil annehmen und speichern?`,
     redirect: (hosts) => `Zur Freigabe dieses Profils öffnet sich ${hosts.join(' und ')} in deinem eigenen Browser. Du meldest dich dort beim Anbieter an, nicht bei lynox, und was zurückkommt, wird hier für dieses Profil gespeichert.`,
     deleteUnreadable: (word, id, source) => pv`⚠ ${word}: das gespeicherte API-Profil ${id} löschen, das sich nicht lesen liess (${source})? Jeder Vault-Name darin ist danach für andere Profile frei. Löschen?`,
     deleteProfile: (word, name, id, host, loses) => pv`⚠ ${word}: das API-Profil ${name} löschen (Id ${id}${host ? pv`, Host ${host}` : pv``})?${loses} Löschen?`,

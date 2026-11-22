@@ -17,7 +17,7 @@
  */
 
 import { singleLine } from '../core/prompt-value.js';
-import { QUOTE_MARKS, type DialogLanguage } from './dialog-text.js';
+import { QUOTE_MARKS, escapeQuoted, type DialogLanguage } from './dialog-text.js';
 import { PROMPT_TEXT_BRAND, type PromptText } from '../types/agent.js';
 
 /** Tools whose dialog word is the chat's tool-line word, word for word. */
@@ -98,13 +98,13 @@ const EXTERNAL_NAME_MAX = 64;
 
 /**
  * A foreign tool's name as a dialog shows it: on one line, without control or bidi
- * characters, at most 64 characters with "…", and with `\` and every quotation mark escaped, so
- * the marks around it are the dialog's own.
+ * characters, at most 64 characters with "…", and with `\` and every quote-like character
+ * escaped, so the marks around it are the dialog's own.
  */
 function externalToolName(toolName: string): string {
   const chars = Array.from(singleLine(toolName).trim());
   const shown = chars.length > EXTERNAL_NAME_MAX ? `${chars.slice(0, EXTERNAL_NAME_MAX - 1).join('')}…` : chars.join('');
-  return shown.replace(/[\\"“”„]/g, (c) => `\\${c}`);
+  return escapeQuoted(shown);
 }
 
 /**
