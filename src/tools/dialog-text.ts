@@ -26,11 +26,21 @@ export const QUOTE_MARKS: Readonly<Record<DialogLanguage, readonly [open: string
 
 /** `\` and every character that reads as a double quotation mark (the straight one, both
  *  languages' marks, and their lookalikes), so a value cannot close the marks around it. */
-const QUOTE_LIKE = /[\\"“”„‟″＂〝〞〃]/gu;
+const QUOTE_LIKE = /[\\"“”„‟″‶＂〝〞〟〃ˮ״❝❞]/gu;
 
 /** `text` as it stands between a dialog's quotation marks: each quote-like character escaped. */
 export function escapeQuoted(text: string): string {
   return text.replace(QUOTE_LIKE, (c) => `\\${c}`);
+}
+
+/** The longest a profile's name is shown in a question, "…" included: a long name cannot push
+ *  the disclosure after it out of view. */
+const PROFILE_NAME_MAX = 64;
+
+/** A profile's name as a question quotes it: on one line, at most 64 characters, escaped. */
+function shownName(name: string): string {
+  const chars = Array.from(singleLine(name).trim());
+  return escapeQuoted(chars.length > PROFILE_NAME_MAX ? `${chars.slice(0, PROFILE_NAME_MAX - 1).join('')}…` : chars.join(''));
 }
 
 /** The guard's fixed sentence parts (`_detectDanger`). */
@@ -453,7 +463,7 @@ const ADOPT_NAMES_SHOWN = 30;
 
 export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> = {
   en: {
-    save: (word, name, disclosure) => pv`⚠ ${word}: saving “${escapeQuoted(singleLine(name))}” needs your acceptance.\n\n${disclosure}\n\nAccept and save this profile?`,
+    save: (word, name, disclosure) => pv`⚠ ${word}: saving “${shownName(name)}” needs your acceptance.\n\n${disclosure}\n\nAccept and save this profile?`,
     redirect: (hosts) => `You will be sent to ${hosts.join(' and ')} in your own browser to authorize this profile. You sign in there, to that provider — not to lynox — and what comes back is stored here for this profile.`,
     deleteUnreadable: (word, id, source) => pv`⚠ ${word}: delete the stored API profile ${id}, which could not be read (${source})? Every vault name it carries is free for other profiles once it is gone. Delete it?`,
     deleteProfile: (word, name, id, host, loses) => pv`⚠ ${word}: delete the API profile ${name} (id ${id}${host ? pv`, host ${host}` : pv``})?${loses} Delete it?`,
@@ -466,7 +476,7 @@ export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> 
     },
   },
   de: {
-    save: (word, name, disclosure) => pv`⚠ ${word}: Zum Speichern von „${escapeQuoted(singleLine(name))}“ braucht es deine Zustimmung.\n\n${disclosure}\n\nDieses Profil annehmen und speichern?`,
+    save: (word, name, disclosure) => pv`⚠ ${word}: Zum Speichern von „${shownName(name)}“ braucht es deine Zustimmung.\n\n${disclosure}\n\nDieses Profil annehmen und speichern?`,
     redirect: (hosts) => `Zur Freigabe dieses Profils öffnet sich ${hosts.join(' und ')} in deinem eigenen Browser. Du meldest dich dort beim Anbieter an, nicht bei lynox, und was zurückkommt, wird hier für dieses Profil gespeichert.`,
     deleteUnreadable: (word, id, source) => pv`⚠ ${word}: das gespeicherte API-Profil ${id} löschen, das sich nicht lesen liess (${source})? Jeder Vault-Name darin ist danach für andere Profile frei. Löschen?`,
     deleteProfile: (word, name, id, host, loses) => pv`⚠ ${word}: das API-Profil ${name} löschen (Id ${id}${host ? pv`, Host ${host}` : pv``})?${loses} Löschen?`,

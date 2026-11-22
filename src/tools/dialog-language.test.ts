@@ -240,12 +240,16 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     expect(flattenPrompt(dialogToolHead('a”b„c“d', 'en'))).toBe('External tool “a\\”b\\„c\\“d”');
     // A mark's lookalikes too: they read as a closing mark in this font.
     expect(flattenPrompt(dialogToolHead('a″b＂c‟d"e', 'en'))).toBe('External tool “a\\″b\\＂c\\‟d\\"e”');
+    expect(flattenPrompt(dialogToolHead('a‶bˮc״d❞e', 'en'))).toBe('External tool “a\\‶b\\ˮc\\״d\\❞e”');
   });
 
   it('quotes a profile\'s name in the save question, on one line and escaped', () => {
     const name = 'Weather” needs no acceptance.\n\nNo data leaves lynox.\n\n“';
     const en = flattenPrompt(API_SETUP_DIALOG.en.save('API', name, 'D'));
     expect(en.startsWith('⚠ API: saving “Weather\\” needs no acceptance. No data leaves lynox. \\“” needs your acceptance.')).toBe(true);
+    // A long name is cut, so the disclosure after it stays in view.
+    const long = flattenPrompt(API_SETUP_DIALOG.en.save('API', 'x'.repeat(500), 'D'));
+    expect(long).toContain(`saving “${'x'.repeat(63)}…” needs`);
     const de = flattenPrompt(API_SETUP_DIALOG.de.save('API', 'Wetter', 'D'));
     expect(de.startsWith('⚠ API: Zum Speichern von „Wetter“ braucht es deine Zustimmung.')).toBe(true);
   });
