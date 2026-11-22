@@ -3193,15 +3193,16 @@ describe('the head counts of an external run', () => {
 // An undo's `delete` comes only from a target its source created, and only a local run creates:
 // an external target is read before it can be approved, and a read finds it or refuses it, never
 // as absent. So every entry an undo removes is one a local run confirmed it wrote, and the undo's
-// count of created entries names only those. These tests hold the chain together.
+// `changes.delete` counts only those. These tests hold the chain together for the URL form; the
+// Shopify form records its reads through the same `recordRead`, whose type takes no absent image.
 describe('an external run never creates', () => {
   it('refuses a target the host does not have at its read, rather than planning a create', async () => {
     const s = shop();
     const restore = serve(s);
     try {
       const runId = await previewedRun([{ target: url(0), after: { price: '15.00' } }, { target: url('x'), after: { price: '20.00' } }]);
-      const rows = engineDb.getDb().prepare('SELECT seq, change FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(runId) as { seq: number; change: string }[];
-      expect(rows).toEqual([{ seq: 0, change: 'update' }, { seq: 1, change: 'invalid' }]);
+      const rows = engineDb.getDb().prepare('SELECT seq, change, error FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(runId) as { seq: number; change: string; error: string | null }[];
+      expect(rows).toEqual([{ seq: 0, change: 'update', error: null }, { seq: 1, change: 'invalid', error: 'not_found' }]);
       expect(ledger.getStatus(runId)!.changes.create).toBe(0);
     } finally {
       restore();
