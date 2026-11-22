@@ -153,6 +153,7 @@ describe('the undo approval with entries the source created', () => {
 	] as const) {
 		it(`names one created entry in the singular and two in the plural (${locale})`, async () => {
 			setLocale(locale);
+			onTestFinished(() => setLocale('de'));
 			targets = [created(1)];
 			run = undoOf(1);
 			await render();
