@@ -1021,6 +1021,9 @@ describe('WorkerLoop', () => {
         ['owner', undefined, `ran\n• ${LINE}`],
         ['mandates', EVA.mandateId, 'ran'],
       ]);
+      // The owner's push is the one it was, with the audience added: title, priority, thread, chips.
+      expect(sent[0]).toMatchObject({ title: `⏸ ${task.title}`, priority: 'normal', taskId: 'po-1', data: { threadId: 'thread-worker-test' } });
+      expect(sent[0]!.followUps?.map((f) => f.label)).toEqual([WORKER_NOTICES.en.chipDetails, WORKER_NOTICES.en.chipRunAgain]);
       // Both are the same end: one title, one thread.
       expect(sent[1]!.title).toBe(`⏸ ${task.title}`);
       expect(sent[1]!.title).toBe(sent[0]!.title);
@@ -2406,6 +2409,33 @@ describe('WorkerLoop', () => {
     await end();
     expect(tm.recordTaskRun).toHaveBeenCalledTimes(2);
     expect(router.notify).toHaveBeenCalledTimes(1);
+  });
+
+  // A workflow's end of a mandate's run: the run's own grant reads the end without the line, the
+  // owner's devices read it with the line; an ended grant reads nothing.
+  it.each([
+    ['the plan it acts for', { planOf: { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'G-EVA' }, starter: OWNER_PRINCIPAL }, 'G-EVA', true],
+    ['the mandate that started it by hand', { starter: { kind: 'mandate', email: 'arno@kanzlei.example', mandateId: 'G-ARNO' } }, 'G-ARNO', true],
+    ['an ended grant', { starter: { kind: 'mandate', email: 'arno@kanzlei.example', mandateId: 'G-ARNO' } }, 'G-ARNO', false],
+  ] as const)('a workflow\'s end with a member line reaches %s without the line', async (_case, slot, grant, live) => {
+    const { noteMemberConnection, runCollectingMemberNotes } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: CRM was connected by jo@kanzlei.example with their own login.';
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const router = makeNotificationRouter();
+    const engine = makeEngine({ taskManager: tm });
+    Object.assign(engine, { getMandateEnds: vi.fn(() => ({ isLive: (id: string) => live && id === grant })) });
+    const loop = new WorkerLoop(engine, router, 60_000);
+    (loop as unknown as { activeTasks: Map<string, unknown> }).activeTasks.set(task.id, { planMembers: [], ...slot });
+    await runCollectingMemberNotes(async () => {
+      noteMemberConnection(LINE);
+      (loop as unknown as { recordAndNotify: (t: TriggerRecord, r: string, e: boolean) => void }).recordAndNotify(task, 'Pipeline completed.', true);
+    }).done;
+    const sent = vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.mandateId, m.body]);
+    expect(sent).toEqual([
+      ['owner', undefined, `Pipeline completed.\n• ${LINE}`],
+      ...(live ? [['mandates', grant, 'Pipeline completed.']] : []),
+    ]);
   });
 
   // UX-065: a contained run's push leaves out the result but keeps the member lines, in German too.

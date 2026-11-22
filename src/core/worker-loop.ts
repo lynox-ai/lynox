@@ -3988,7 +3988,9 @@ export class WorkerLoop {
       const message = { title, body: told.result, taskId: task.id, priority: toldLook.priority };
       if (readers === null && withLines) {
         // Not split by reader, but with the owner's member-connection lines: see #notifyMemberEnd.
-        void this.#notifyMemberEnd(message, said ?? resultSummary, haltRow === null ? this.#mandateReaderOf(task.id) : byReader ? haltRow.mandateId ?? null : null);
+        // The grant a bulk run's ledger names as its planner, else the run's own reader.
+        const reader = (byReader ? haltRow.mandateId ?? null : null) ?? this.#mandateReaderOf(task.id);
+        void this.#notifyMemberEnd(message, said ?? resultSummary, reader);
         return;
       }
       void this.notificationRouter.notify({

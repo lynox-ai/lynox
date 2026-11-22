@@ -14,7 +14,7 @@ import { noteMemberConnection, runCollectingMemberNotes } from './member-connect
 const R = BULK_HALT_REASONS;
 const CLOSING = 'Lösen kann das nur der Inhaber.';
 
-function harness(opts: { reason: string; plannedBy: 'owner' | 'mandate' | 'mandate-without-grant'; live?: boolean }) {
+function harness(opts: { reason: string; plannedBy: 'owner' | 'mandate' | 'mandate-without-grant'; live?: boolean; startedBy?: string }) {
   const recorded: string[] = [];
   const sent: NotificationMessage[] = [];
   const planner = opts.plannedBy === 'mandate' ? { kind: 'mandate', mandateId: 'grant-1' }
@@ -33,6 +33,10 @@ function harness(opts: { reason: string; plannedBy: 'owner' | 'mandate' | 'manda
     notify: vi.fn(async (m: NotificationMessage) => { sent.push(m); }),
   } as unknown as NotificationRouter;
   const loop = new WorkerLoop(engine, router, 60_000);
+  // A run a mandate started by hand: its run slot names that grant as the starter.
+  if (opts.startedBy !== undefined) {
+    (loop as unknown as { activeTasks: Map<string, unknown> }).activeTasks.set('t-1', { planMembers: [], starter: { kind: 'mandate', email: 'member@example.invalid', mandateId: opts.startedBy } });
+  }
   const task = { id: 't-1', title: 'Bulk apply run-1', effect: 'bulk_apply', bulk_run_id: 'run-1' } as unknown as TriggerRecord;
   const end = (summary: string, said?: string): void => {
     (loop as unknown as { recordAndNotify: (t: TriggerRecord, s: string, e: boolean, said?: string) => void }).recordAndNotify(task, summary, false, said);
@@ -143,6 +147,21 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
         h.end(BULK_NOTICES.de.halted('apply', R.listTooLarge));
       }).done;
       expect(h.sent.map((m) => m.audience), JSON.stringify(setup)).toEqual(['owner']);
+    }
+  });
+
+  it('pushes such lines without the lines to the grant that started the run by hand, where the ledger names no planning grant', async () => {
+    for (const plannedBy of ['owner', 'mandate-without-grant'] as const) {
+      const h = harness({ reason: R.listTooLarge, plannedBy, startedBy: 'grant-1' });
+      const summary = BULK_NOTICES.de.halted('apply', R.listTooLarge);
+      await runCollectingMemberNotes(async () => {
+        noteMemberConnection('Connection not used: a line.');
+        h.end(summary);
+      }).done;
+      expect(h.sent.map((m) => [m.audience, m.mandateId, m.body]), plannedBy).toEqual([
+        ['owner', undefined, `${summary}\n• Connection not used: a line.`],
+        ['mandates', 'grant-1', summary],
+      ]);
     }
   });
 
