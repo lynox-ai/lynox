@@ -141,6 +141,32 @@ describe('the undo approval with targets that take back a write never confirmed'
 	});
 });
 
+describe('the undo approval with entries the source created', () => {
+	const created = (seq: number): BulkTarget =>
+		({ seq, key: `rows/${seq}`, change: 'delete', diff: { kind: 'none' }, error: null, deselected: false, written: false, undone: false }) as BulkTarget;
+	const undoOf = (deletes: number): BulkRunDetailData =>
+		makeRun({ total: deletes, kind: 'undo', phase: 'previewed', sourceRunId: 'r0', targetSystem: 'data_store', changes: { update: 0, create: 0, delete: deletes, unchanged: 0, invalid: 0 }, failed: 0, undoable: 0 });
+
+	for (const [locale, one, two] of [
+		['de', 'Der ursprüngliche Lauf hat 1 Eintrag neu angelegt. Die Rücknahme löscht ihn, ausser jemand hat ihn seither geändert:', 'Der ursprüngliche Lauf hat 2 Einträge neu angelegt. Die Rücknahme löscht sie, ausser jemand hat sie seither geändert:'],
+		['en', 'The original run created 1 new entry. The undo deletes it unless someone has changed it since:', 'The original run created 2 new entries. The undo deletes them unless someone has changed them since:'],
+	] as const) {
+		it(`names one created entry in the singular and two in the plural (${locale})`, async () => {
+			setLocale(locale);
+			targets = [created(1)];
+			run = undoOf(1);
+			await render();
+			expect(text('bulk-undo-creates')).toBe(one);
+			unmount(component!);
+			component = undefined;
+			targets = [created(1), created(2)];
+			run = undoOf(2);
+			await render();
+			expect(text('bulk-undo-creates')).toBe(two);
+		});
+	}
+});
+
 describe('the resume block after a halt on failures', () => {
 	it('says the window first and what may fail then right behind it, in one sentence pair', async () => {
 		setLocale('de');

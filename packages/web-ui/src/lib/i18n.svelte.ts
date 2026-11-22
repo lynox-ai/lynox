@@ -757,6 +757,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.undo.approve_open_only': { de: 'Bei {n} Zielen sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus dem ursprünglichen Lauf steht.', en: 'For {n} targets, taking back checks first and only resets where the value from the original run is in place.' },
 	'bulk.undo.approve_open_only_one': { de: 'Bei einem Ziel sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus dem ursprünglichen Lauf steht.', en: 'For one target, taking back checks first and only resets where the value from the original run is in place.' },
 	'bulk.undo.creates': { de: 'Der ursprüngliche Lauf hat {k} Einträge neu angelegt. Die Rücknahme löscht sie, ausser jemand hat sie seither geändert:', en: 'The original run created {k} new entries. The undo deletes them unless someone has changed them since:' },
+	'bulk.undo.creates_one': { de: 'Der ursprüngliche Lauf hat 1 Eintrag neu angelegt. Die Rücknahme löscht ihn, ausser jemand hat ihn seither geändert:', en: 'The original run created 1 new entry. The undo deletes it unless someone has changed it since:' },
 	'bulk.undo.approve': { de: 'Rücknahme freigeben', en: 'Approve the undo' },
 	'activity.kpi.today': { de: 'Heute',         en: 'Today' },
 	'activity.kpi.7d':    { de: 'Letzte 7 Tage', en: 'Last 7 days' },
