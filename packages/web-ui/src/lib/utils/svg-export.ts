@@ -43,7 +43,8 @@
  * attribute whose name carries a prefix (`inkscape:label`, declared or not) is taken out first: the
  * html parser keeps a prefix as part of the name, which would make the written file unreadable, and
  * a prefix it keeps in a name (`xlink:script`) is a real namespace prefix once the file is read as
- * svg. The html tree is then cleaned; that the file it writes holds nothing more is the next check.
+ * svg. The html tree is then cleaned; whether the file it writes reads as the same clean tree is the
+ * next check.
  *
  * The cleaned file is read back and cleaned once more, and is handed out only if that changes
  * nothing. Whatever reads differently once written, by a route no line above names, makes the
@@ -87,7 +88,8 @@ function svgInHtml(text: string): Element | null {
  * parser then reads as an unbound prefix and refuses. Every such name goes, declared or not (an
  * element like `svg:rect` included); an attribute in a namespace the html parser does bind (xlink,
  * xml, xmlns) has a namespace in this tree and stays. Taking those out keeps such a
- * drawing exportable; a name that would read differently once written makes the export refuse.
+ * drawing exportable, and a prefixed name cannot turn into a different element once the file is
+ * read as svg.
  */
 function dropUnboundPrefixes(el: Element): void {
 	for (const attr of Array.from(el.attributes)) {
