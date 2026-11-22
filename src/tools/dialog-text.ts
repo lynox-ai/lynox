@@ -26,7 +26,7 @@ export const QUOTE_MARKS: Readonly<Record<DialogLanguage, readonly [open: string
 
 /** `\` and every character that reads as a double quotation mark (the straight one, both
  *  languages' marks, and their lookalikes), so a value cannot close the marks around it. */
-const QUOTE_LIKE = /[\\"“”„‟″‶＂〝〞〟〃ˮ״❝❞❠ʺ˝˵˶⹂🙶🙷🙸\u{030B}\u{030E}\u{030F}]/gu;
+const QUOTE_LIKE = /[\\"“”„‟″‶＂〝〞〟〃ˮ״❝❞❠ʺ˝˵˶⹂🙶🙷🙸‴⁗\u{030B}\u{030E}\u{030F}]/gu;
 
 /** `text` as it stands between a dialog's quotation marks: each quote-like character escaped. */
 export function escapeQuoted(text: string): string {
@@ -49,10 +49,11 @@ const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 const codePoints = (text: string): number => Array.from(text).length;
 
-/** A profile's name as a question quotes it: on one line, within both limits, then escaped. Only a
- *  bounded head of the name is read, however long the name is. */
+/** A profile's name as a question quotes it: on one line, composed (so a letter written with a
+ *  separate mark is one letter, not a letter and an escaped mark), within both limits, then
+ *  escaped. Only a bounded head of the name is segmented, however long the name is. */
 function shownName(name: string): string {
-  const text = singleLine(name).trim();
+  const text = singleLine(name).normalize('NFC').trim();
   // Twice the limit in code units holds more than the limit in code points, or the whole name.
   const head = text.slice(0, 2 * PROFILE_NAME_CODE_POINTS_MAX + 2);
   const chars = Array.from(GRAPHEMES.segment(head), (g) => g.segment);

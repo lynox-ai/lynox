@@ -261,7 +261,7 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     // A mark's lookalikes too: they read as a closing mark in this font.
     expect(flattenPrompt(dialogToolHead('a″b＂c‟d"e', 'en'))).toBe('External tool “a\\″b\\＂c\\‟d\\"e”');
     expect(flattenPrompt(dialogToolHead('a‶bˮc״d❞e〟f❝g〝h〞i〃j', 'en'))).toBe('External tool “a\\‶b\\ˮc\\״d\\❞e\\〟f\\❝g\\〝h\\〞i\\〃j”');
-    expect(flattenPrompt(dialogToolHead('aʺb˝c˶d⹂e🙶f🙷g🙸h˵i❠j', 'en'))).toBe('External tool “a\\ʺb\\˝c\\˶d\\⹂e\\🙶f\\🙷g\\🙸h\\˵i\\❠j”');
+    expect(flattenPrompt(dialogToolHead('aʺb˝c˶d⹂e🙶f🙷g🙸h˵i❠j‴k⁗l', 'en'))).toBe('External tool “a\\ʺb\\˝c\\˶d\\⹂e\\🙶f\\🙷g\\🙸h\\˵i\\❠j\\‴k\\⁗l”');
     // Combining double marks read as a quote after a space.
     expect(flattenPrompt(dialogToolHead('a \u030Bb \u030Ec \u030Fd', 'en'))).toBe('External tool “a \\\u030Bb \\\u030Ec \\\u030Fd”');
   });
@@ -278,16 +278,21 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', '😀'.repeat(100), 'D'))).toContain(`saving “${'😀'.repeat(63)}…” needs`);
     // A flag is two code points but one character: the cut never leaves half of one.
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', '🇨🇭'.repeat(100), 'D'))).toContain(`saving “${'🇨🇭'.repeat(63)}…” needs`);
-    // One character can carry any number of marks: the name is also held to 256 code points.
-    const marked = 'e\u0301\u0302\u0303';
+    // One character can carry any number of marks (on `x` they stay separate, composed or not):
+    // the name is also held to 256 code points.
+    const marked = 'x\u0301\u0302\u0303';
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', marked.repeat(64), 'D'))).toContain(`saving “${marked.repeat(64)}” needs`);
-    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${marked.repeat(64)}e`, 'D'))).toContain(`saving “${marked.repeat(63)}…” needs`);
-    const heavy = 'e\u0301\u0302\u0303\u0304';
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${marked.repeat(64)}x`, 'D'))).toContain(`saving “${marked.repeat(63)}…” needs`);
+    const heavy = 'x\u0301\u0302\u0303\u0304';
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', heavy.repeat(60), 'D'))).toContain(`saving “${heavy.repeat(51)}…” needs`);
     // 257 code points in 52 characters is one too many; 255 and the "…" fill the limit exactly.
-    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${heavy.repeat(51)}e\u0301`, 'D'))).toContain(`saving “${heavy.repeat(51)}…” needs`);
-    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${heavy.repeat(51)}e${heavy}`, 'D'))).toContain(`saving “${heavy.repeat(51)}…” needs`);
-    // Only the name's head is read: a name of millions of characters costs no more than a short one.
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${heavy.repeat(51)}x\u0301`, 'D'))).toContain(`saving “${heavy.repeat(51)}…” needs`);
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${heavy.repeat(51)}x${heavy}`, 'D'))).toContain(`saving “${heavy.repeat(51)}…” needs`);
+    // A character beyond the BMP fills two code units: the head still reaches past the limit.
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `😀${'\u{1F3FB}'.repeat(256)}`, 'D'))).toContain('saving “…” needs');
+    // A letter written with a separate mark is shown as one letter, not with an escaped mark.
+    expect(flattenPrompt(API_SETUP_DIALOG.de.save('API', 'Gyo\u030Br', 'D'))).toContain('von „Győr“ braucht');
+    // Only the name's head is segmented: a name of millions of characters costs no more than a short one.
     const started = performance.now();
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', 'x'.repeat(10_000_000), 'D'))).toContain(`saving “${'x'.repeat(63)}…” needs`);
     expect(performance.now() - started).toBeLessThan(2000);
