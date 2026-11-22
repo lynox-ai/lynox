@@ -9,6 +9,7 @@
  * referenced name only when it has the step id shape: the model reads this text, so it carries no
  * other stored or typed text back (`step-id.ts`).
  */
+import { placeholders } from './placeholders.js';
 import { isStepIdShape } from './step-id.js';
 
 interface RefStep {
@@ -18,12 +19,10 @@ interface RefStep {
   input_template?: Record<string, unknown> | undefined;
 }
 
-/** The same placeholder `resolveTaskTemplate` and `resolveInputTemplate` substitute. */
-const PLACEHOLDER = /\{\{([^}]+)\}\}/g;
-
-/** Every reference path in `text`, trimmed as the resolvers trim it. */
+/** Every reference path in `text` (the placeholders `resolveTaskTemplate` and `resolveInputTemplate`
+ *  substitute), trimmed as the resolvers trim it. */
 function referencePaths(text: string): string[] {
-  return [...text.matchAll(PLACEHOLDER)].map(m => m[1]!.trim());
+  return placeholders(text).map(p => p.inner.trim());
 }
 
 /** Every string leaf of an input template with its path below `input_template`. A key is part of

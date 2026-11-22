@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { collectWriteNotes } from '../tools/builtin/pipeline.js';
-import { UNGRANTED_WRITE_PREFIX, ungrantedWriteNote, writeForShortNote } from './write-notes.js';
+import { UNGRANTED_WRITE_PREFIX, hostShowsStoredValue, ungrantedWriteNote, writeForShortNote } from './write-notes.js';
 
 const METHODS = ['POST', 'PUT', 'PATCH', 'DELETE', ...Array.from({ length: 22 }, (_, i) => `X${String.fromCharCode(65 + i)}`)];
 const UNTRUSTED = 'The run read external content before this call, and its grant does not cover writes after that.';
@@ -96,11 +96,86 @@ describe('the line a run report keeps of a refused write', () => {
       expect(line).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://api.example.com/v1/***Lm4k/run.`);
     });
 
-    // A value with a `?` of its own is cut where the parser cuts the path; the query stays out. The
-    // part of the value before its `?` is shown as it was before (here `/h`): no mask knows it.
-    it('CONTROL: a value that runs into the query shows nothing of the query', () => {
-      const line = note('https://hooks.example/h?sig=ABCDEFGHIJKLMNOP&email=alice@corp.example', maskOf('h?sig=ABCDEFGHIJKLMNOP'));
-      expect(line).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://hooks.example/h.`);
+    // A value with a `?` or `#` of its own is cut where the parser cuts the path, and the mask run
+    // over the path alone no longer finds it: the part before its `?` (here `/hookpart`) would be
+    // shown. The path is left out, and the query stays out as always.
+    it('in a value that runs from the path into the query or the fragment: the path is left out', () => {
+      expect(note('https://hooks.example/hookpart?sig=ABCDEFGHIJKLMNOP&email=alice@corp.example', maskOf('hookpart?sig=ABCDEFGHIJKLMNOP')))
+        .toBe(`${UNGRANTED_WRITE_PREFIX} POST https://hooks.example${PATH}.`);
+      expect(note('https://api.example.com/v1/Q7x9#Lm4kZr', maskOf('Q7x9#Lm4kZr'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://api.example.com${PATH}.`);
+    });
+
+    // The same at the host's edges: a value that starts in the userinfo or before the host's own
+    // `/`, or runs from the host into the query, is in the host only in part.
+    it('in a value that runs into the host from before it, or out of it into the query: the host is left out', () => {
+      expect(note('https://tok@ACME-Tenant7.example.com/x', maskOf('tok@ACME-Tenant7'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://${HOST}/x.`);
+      expect(note('https:/ACME-Tenant7.example.com/p', maskOf('/ACME-Tenant7'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://${HOST}/p.`);
+      expect(note('https://ACME-Tenant7.example.com?x=1', maskOf('ACME-Tenant7.example.com?x'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://${HOST}/.`);
+    });
+
+    // The parser keeps percent escapes as written, and the mask does not decode them.
+    it('in a value written percent-encoded: the part that holds it is left out', () => {
+      expect(note('https://api.example.com/v1/%51%37x9Lm4kZr/run', maskOf('Q7x9Lm4kZr'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://api.example.com${PATH}.`);
+      expect(note('https://%41CME-Tenant7.example.com/v1', maskOf('ACME-Tenant7'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://${HOST}/v1.`);
+      // A stray byte that is no UTF-8 does not keep the rest of its run encoded.
+      expect(note('https://api.example.com/v1/Lm4kZr%51%37%FF/run', maskOf('Lm4kZrQ7'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://api.example.com${PATH}.`);
+      // Nor one before a character of several bytes.
+      expect(note('https://h.example.com/%E2%C3%A9SECRET1234', maskOf('éSECRET1234'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://h.example.com${PATH}.`);
+      // A value that holds a tab and is written percent-encoded in part.
+      expect(note('https://h.example.com/A%42\tCDEFGHIJ', maskOf('AB\tCDEFGHIJ'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://h.example.com${PATH}.`);
+      expect(note('https://A%42\tCDEFGHIJ.example.com/v1', maskOf('AB\tCDEFGHIJ'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://${HOST}/v1.`);
+      // Split by a tab and percent-encoded: found only decoded, with the tab dropped.
+      expect(note('https://api.example.com/v1/%51%37x\t9Lm4kZr/run', maskOf('Q7x9Lm4kZr'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://api.example.com${PATH}.`);
+      expect(note('https://%41C\tME-Tenant7.example.com/v1', maskOf('ACME-Tenant7'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://${HOST}/v1.`);
+    });
+
+    it('CONTROL: a percent escape beside a value written plainly leaves the path named, the value masked', () => {
+      expect(note('https://api.example.com/My%20Doc/botQ7x9Lm4kZr/x', maskOf('Q7x9Lm4kZr'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://api.example.com/My%20Doc/bot***4kZr/x.`);
+    });
+
+    // The parser drops tabs and line breaks, so a value that holds one is no longer whole in the URL
+    // it reads.
+    it('in a value that holds a tab or a line break: the part that holds it is left out', () => {
+      expect(note('https://api.example.com/v1/Q7x9\tLm4kZr/run', maskOf('Q7x9\tLm4kZr'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://api.example.com${PATH}.`);
+      expect(note('https://ACME\nTenant7.example.com/v1', maskOf('ACME\nTenant7'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://${HOST}/v1.`);
+    });
+
+    it('CONTROL: a value in the query, or one that runs from the host into the path shown whole, leaves the URL named', () => {
+      expect(note('https://api.example.com/v1/items?key=Q7x9Lm4kZr', maskOf('Q7x9Lm4kZr'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://api.example.com/v1/items.`);
+      expect(note('https://hooks.example.com/Q7x9Lm4kZr/run', maskOf('hooks.example.com/Q7x9Lm4kZr'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://***4kZr/run.`);
+    });
+
+    // A value that runs over a part's edge in only one of the forms the parser undoes: split by a
+    // tab it drops, holding a tab, or written percent-encoded.
+    it('in a value that runs over a part\'s edge only once a tab is dropped, with its tab, or once decoded: the part is left out', () => {
+      expect(note('https://tok@AC\tME-Tenant7.example.com/x', maskOf('tok@ACME-Tenant7'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://${HOST}/x.`);
+      // With a percent sign of its own the value is not found decoded either: only once the tab is dropped.
+      expect(note('https://hooks.example/hook%2Fpa\trt?sig=ABCDEFGHIJKLMNOP', maskOf('hook%2Fpart?sig=ABCDEFGHIJKLMNOP'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://hooks.example${PATH}.`);
+      // Each other form the parser undoes, alone: with its tab and a percent sign of its own (as
+      // written), split by a tab and encoded (decoded), with a tab and encoded (both).
+      expect(note('https://hooks.example/h%2Fx\tyz?sig=ABCDEFGH', maskOf('h%2Fx\tyz?sig=ABCDEFGH'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://hooks.example${PATH}.`);
+      expect(note('https://hooks.example/hook%70a\trt?sig=ABCDEFGHIJKLMNOP', maskOf('hookpart?sig=ABCDEFGHIJKLMNOP'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://hooks.example${PATH}.`);
+      expect(note('https://hooks.example/A%42\tC?q=ABCDEFGH', maskOf('AB\tC?q=ABCDEFGH'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://hooks.example${PATH}.`);
+      expect(note('https://tok@ACME\tTenant7.example.com/x', maskOf('tok@ACME\tTenant7'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://${HOST}/x.`);
+      expect(note('https://hooks.example/hook%70art?sig=ABCDEFGHIJKLMNOP', maskOf('hookpart?sig=ABCDEFGHIJKLMNOP'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://hooks.example${PATH}.`);
+    });
+
+    // The same from the host into the path, with the tab kept: shown whole, the parser has dropped
+    // the tab, and the mask no longer finds the value.
+    it('in a value with a tab that runs from the host into the path: both are left out', () => {
+      expect(note('https://hooks.example.com/Q7x9\tLm4k/run', maskOf('example.com/Q7x9\tLm4k'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://${HOST}${PATH}.`);
+    });
+
+    // A value that runs from the host into the path, where the host is left out for another reason:
+    // the path would show the rest of it.
+    it('in a value that runs from a host left out into the path: both are left out', () => {
+      expect(note('https://hooks.example.com/Q7x9Lm4kZr/run', maskOf('hooks.example.com/Q7x9Lm4kZr'), true)).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://${HOST}${PATH}.`);
+    });
+
+    // The parser writes an internationalised host in its `xn--` form, the form the note shows: a
+    // value stored that way is masked there like any other.
+    it('CONTROL: a host written in Unicode, its value stored in the `xn--` form: masked in place', () => {
+      expect(note('https://bücher.example.com/v1', maskOf('xn--bcher-kva'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://***-kva.example.com/v1.`);
     });
 
     // The control character after the URL is dropped before the path is compared with the parsed one.
@@ -156,6 +231,26 @@ describe('the line a run report keeps of a refused write', () => {
     it('in a URL of another scheme: both parts are left out; without a value it is named', () => {
       expect(note('mailto:Q7 x9Lm@example.com', maskOf('Q7 x9Lm'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST mailto://${HOST}${PATH}.`);
       expect(note('mailto:anna@example.com', maskOf('Q7 x9Lm'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST mailto://anna@example.com.`);
+    });
+
+    // Read only as written, a value split by a tab the parser drops, or written percent-encoded,
+    // was missed there; read only without the tabs, a value that holds one would be.
+    it('in a URL of another scheme, the value split by a tab, holding one, or percent-encoded: both parts are left out', () => {
+      expect(note('wss://api.example.com/Q7 x\t9Lm', maskOf('Q7 x9Lm'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST wss://${HOST}${PATH}.`);
+      expect(note('wss://api.example.com/Q7 x\t9Lm', maskOf('Q7 x\t9Lm'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST wss://${HOST}${PATH}.`);
+      expect(note('wss://api.example.com/%51%37x9Lm', maskOf('Q7x9Lm'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST wss://${HOST}${PATH}.`);
+      // A value holding a percent sign of its own, split by a tab: found only without the tab, not decoded.
+      expect(note('wss://api.example.com/Q7%20x\t9Lm', maskOf('Q7%20x9Lm'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST wss://${HOST}${PATH}.`);
+      expect(note('wss://h.example.com/A%42\tCDEFGHIJ', maskOf('AB\tCDEFGHIJ'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST wss://${HOST}${PATH}.`);
+      expect(note('wss://h.example.com/%51%37x\t9Lm', maskOf('Q7x9Lm'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST wss://${HOST}${PATH}.`);
+      expect(note('wss://h.example.com/A%42\tCD', maskOf('A%42\tCD'))).toBe(`${UNGRANTED_WRITE_PREFIX} POST wss://${HOST}${PATH}.`);
+    });
+
+    // `http_request` asks this of an http or https host only; another scheme's host its own checks read.
+    it('hostShowsStoredValue: a host that holds a value in part; another scheme is left to the caller', () => {
+      expect(hostShowsStoredValue('https://tok@ACME-Tenant7.example.com/x', maskOf('tok@ACME-Tenant7'))).toBe(true);
+      expect(hostShowsStoredValue('https://api.example.com/x', maskOf('tok@ACME-Tenant7'))).toBe(false);
+      expect(hostShowsStoredValue('wss://api.example.com/x?k=Q7x9Lm', maskOf('Q7x9Lm'))).toBe(false);
     });
 
     // The parser drops whitespace around the URL first; read as written without that, the host

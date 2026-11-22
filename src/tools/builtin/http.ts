@@ -25,7 +25,7 @@ import { repairStrayCloseTag } from './model-json-body.js';
 import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy, refuseRedirectToStore } from '../../core/network-guard.js';
 import type { EgressCall, HostPolicyContext } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
-import { WRITE_POSSIBLY_LANDED_PREFIX, refusedReviewedHeaders, ungrantedWriteNote, urlForNote, writeFollowedAsReadNote, writeForNote, writeForShortNote } from '../../core/write-notes.js';
+import { WRITE_POSSIBLY_LANDED_PREFIX, hostShowsStoredValue, refusedReviewedHeaders, ungrantedWriteNote, urlForNote, writeFollowedAsReadNote, writeForNote, writeForShortNote } from '../../core/write-notes.js';
 import { isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
 import { isProtectedSecretWrite, SECRET_SHAPES } from '../../core/secret-store.js';
 import type { SecretShape, SecretShapeKind } from '../../core/secret-store.js';
@@ -3260,7 +3260,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // malformed URL is refused by the host policy further down, with its own message.
     // Under a mandate a host that holds a stored secret is not named: the text reaches the
     // mandate's run report too. Read as parsed (lower-cased, percent-decoded) and as the request
-    // wrote it, where a secret keeps its case; and the parsed host as DNS and TLS read it.
+    // wrote it, where a secret keeps its case; and the parsed host as DNS and TLS read it. Also
+    // a value the host holds only in part, or in a form the parser undoes (`hostShowsStoredValue`).
     const hostHoldsSecret = (): boolean => {
       if (isOwnerPrincipal(agent.principal)) return false;
       const parsed = new URL(input.url);
@@ -3268,7 +3269,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const rawHost = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(input.url)?.[1] ?? '';
       const decodedHost = ((): string => { try { return decodeURIComponent(rawHost); } catch { return rawHost; } })();
       return [parsed.hostname, rawHost, decodedHost].some((h) => maskOf(h) !== h)
-        || (agent.secretStore?.containsSecretAsHost(parsed.hostname) ?? false);
+        || (agent.secretStore?.containsSecretAsHost(parsed.hostname) ?? false)
+        || hostShowsStoredValue(input.url, maskOf);
     };
     const service = (): string => (hostHoldsSecret() ? 'this service' : approvalOrigin(new URL(input.url)));
     const writeShown = writeForNote(method.trim().toUpperCase(), gatedMethod, writeMethodsNamed(method, headers, input.url, gateBodyReadings(input.body, headers)));
