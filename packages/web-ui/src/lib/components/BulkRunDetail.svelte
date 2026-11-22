@@ -525,6 +525,13 @@
 	// The buttons of the box by line: showing all from over the table removes that line, so the focus goes
 	// back to the button of the same kind in the box.
 	let spreadButtons = $state<(HTMLButtonElement | null)[]>([]);
+	// Showing all from the approval: the focus stays at the approval, where the owner is.
+	let approveButton = $state<HTMLButtonElement | null>(null);
+	async function showAllAtApproval(): Promise<void> {
+		spreadShown = null;
+		await tick();
+		approveButton?.focus();
+	}
 	async function showAllFromTable(): Promise<void> {
 		const kind = spreadKind;
 		spreadShown = null;
@@ -1026,8 +1033,12 @@
 							{t('bulk.approve.targets_write')}
 						</label>
 					{/if}
+					{#if spreadKind !== null}
+						<!-- The approval is for the whole run, the table may show part of it (U-417). -->
+						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-approve-filtered">{tf('bulk.approve.filtered', { n: String(shownTargets.length), m: String(unfolded.length) })} <button type="button" class="block sm:inline whitespace-nowrap underline text-accent hover:opacity-80" data-testid="bulk-approve-filtered-all" onclick={() => showAllAtApproval()}>{t('bulk.outliers.spread.show_all')}</button></p>
+					{/if}
 					<div class="flex flex-wrap gap-2">
-						<button type="button" class={btnPrimary}
+						<button type="button" class={btnPrimary} bind:this={approveButton}
 							disabled={busy || (run.writeForm === 'unmeasured' && !unmeasuredOk)}
 							aria-describedby={run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}
 							onclick={() => approve(host !== null && !run!.probeConfirmed)}>

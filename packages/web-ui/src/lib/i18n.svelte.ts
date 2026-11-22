@@ -745,6 +745,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.outliers.spread.link_marked_more_one': { de: ' Dazu kommt 1 weiterer Host aus einer markierten Beurteilung.', en: ' Plus 1 more host from a marked verdict.' },
 	'bulk.outliers.spread.email_marked_more': { de: ' Dazu kommen {m} weitere Domains aus markierten Beurteilungen.', en: ' Plus {m} more domains from marked verdicts.' },
 	'bulk.outliers.spread.email_marked_more_one': { de: ' Dazu kommt 1 weitere Domain aus einer markierten Beurteilung.', en: ' Plus 1 more domain from a marked verdict.' },
+	'bulk.approve.filtered': { de: 'Die Tabelle zeigt nur {n} von {m} Beurteilungen. Die Freigabe gilt für alle {m}.', en: 'The table shows only {n} of {m} verdicts. Approving covers all {m}.' },
 	'bulk.outliers.spread.closing': { de: 'Gehört das nicht zu deinem Auftrag, gib den Lauf nicht frei.', en: 'If that is not part of what you asked for, do not approve the run.' },
 	'bulk.outliers.spread.show': { de: 'Diese {n} Beurteilungen zeigen', en: 'Show these {n} verdicts' },
 	'bulk.outliers.spread.show_one': { de: 'Diese Beurteilung zeigen', en: 'Show this verdict' },

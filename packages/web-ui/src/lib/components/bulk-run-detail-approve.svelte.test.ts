@@ -1929,6 +1929,24 @@ describe('verdicts that differ from the rest of the run', () => {
 		expect(filtered()).toBeUndefined();
 	});
 
+	it('says at the approval, while the table is filtered, that the approval covers every verdict, and shows all from there', async () => {
+		const note = (): string | null | undefined => target.querySelector('[data-testid="bulk-approve-filtered"]')?.textContent;
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		targets = many(25);
+		await render();
+		expect(note()).toBeUndefined();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(note()).toBe(`${tf('bulk.approve.filtered', { n: '3', m: '25' })} ${t('bulk.outliers.spread.show_all')}`);
+		const approveButton = buttonByText(t('bulk.approve.write_one')) ?? buttonByText(t('bulk.approve.approve'));
+		(target.querySelector('[data-testid="bulk-approve-filtered-all"]') as HTMLButtonElement).click();
+		await settle();
+		expect(note()).toBeUndefined();
+		expect(rowNames()).toHaveLength(25);
+		expect(document.activeElement).toBe(approveButton);
+	});
+
 	it('offers no button on a line whose verdicts the server does not name, or names none of', async () => {
 		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
 			spread: [{ kind: 'link', count: 20, hosts: ['a.example'] }, { kind: 'email', count: 20, hosts: ['b.example'], seqs: [] }] } });
