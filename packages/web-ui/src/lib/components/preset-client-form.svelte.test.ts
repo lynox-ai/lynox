@@ -254,6 +254,15 @@ describe('PresetClientForm', () => {
 		expect(secretInput()).not.toBeNull();
 	});
 
+	it('keeps the replace button\'s label on one line, and lets the button move under the note instead', async () => {
+		getExtra = { client_id: 'client-1', client_secret_set: true };
+		await open();
+
+		const replace = button('Replace Client Secret')!;
+		expect(replace.classList.contains('whitespace-nowrap')).toBe(true);
+		expect(replace.parentElement!.classList.contains('flex-wrap')).toBe(true);
+	});
+
 	it('keeps the client id field plain text that no browser fills or checks', async () => {
 		await open();
 
