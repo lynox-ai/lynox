@@ -45,15 +45,24 @@ describe('the suite runs with its own home', () => {
 describe('the local embedding provider is the test run’s, not the product’s', () => {
   it('an engine with no provider chosen still embeds with ONNX', () => {
     // Constructing the ONNX provider loads nothing; the model loads on the first `embed`.
-    const before = process.env.LYNOX_EMBEDDING_PROVIDER;
+    // Its own empty home: the run's home is shared by every test file of the run, and a user
+    // config there naming `onnx` would make this pass without reaching the default.
+    const before = { home: process.env.HOME, provider: process.env.LYNOX_EMBEDDING_PROVIDER };
+    const home = mkdtempSync(join(tmpdir(), 'product-default-home-'));
     try {
+      process.env.HOME = home;
       delete process.env.LYNOX_EMBEDDING_PROVIDER;
       reloadConfig();
-      expect(initEmbeddingProvider(loadConfig(), {} as RunHistory)).toBeInstanceOf(OnnxProvider);
+      const config = loadConfig();
+      // The precondition the claim rests on: nothing chose a provider.
+      expect(config.embedding_provider).toBeUndefined();
+      expect(initEmbeddingProvider(config, {} as RunHistory)).toBeInstanceOf(OnnxProvider);
     } finally {
-      if (before === undefined) delete process.env.LYNOX_EMBEDDING_PROVIDER;
-      else process.env.LYNOX_EMBEDDING_PROVIDER = before;
+      if (before.home === undefined) delete process.env.HOME; else process.env.HOME = before.home;
+      if (before.provider === undefined) delete process.env.LYNOX_EMBEDDING_PROVIDER;
+      else process.env.LYNOX_EMBEDDING_PROVIDER = before.provider;
       reloadConfig();
+      rmSync(home, { recursive: true, force: true });
     }
   });
 

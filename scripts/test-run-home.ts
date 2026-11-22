@@ -117,10 +117,12 @@ export function evalResultsDir(env: NodeJS.ProcessEnv = process.env): string {
  * exists: the variables reach the worker processes the same way `TMPDIR` does.
  *
  * ⛔ WHY THE EMBEDDING PROVIDER. An engine booted without a choice embeds with the ONNX model,
- * which it downloads into `$HOME/.cache/huggingface` on first use: 470 MB from huggingface.co.
+ * which it downloads into `$HOME/.cache/huggingface` on first use: the fp32 `onnx/model.onnx` it
+ * asks for (`dtype: 'fp32'`), 470,268,533 bytes from huggingface.co. (The ~118 MB quantized file
+ * of the same model is a different file, which this code does not load.)
  * The home above is new for every run, so every run downloaded it again, and a test that boots
  * an engine waited on that download inside its own timeout (measured on
- * `compaction-taint.test.ts`: 470,268,533 bytes, tests 22.7 s against 7.2 s with `local`; on CI
+ * `compaction-taint.test.ts`: that file downloaded, tests 22.7 s against 7.2 s with `local`; on CI
  * every test of such a file ran into its ceiling whenever the download was slow). `local` is the
  * hash provider, with no download and the same 384 dimensions. A run that sets `onnx` or `local`
  * keeps its choice, so a run that asks for the real model still gets it. Any other value, empty
