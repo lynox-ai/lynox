@@ -11,7 +11,7 @@
 	import { fixMarkdownPreprocessing } from '../utils/markdown-preprocess.js';
 	import { deckFrameHeight, buildArtifactBubbleFrame } from '../utils/artifact-frame.js';
 	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
-	import { resolveArtifactRender } from '../utils/artifact-inline.js';
+	import { holdsOnlyPlaceholder, resolveArtifactRender, withPlaceholderBadge } from '../utils/artifact-inline.js';
 	import { parseFences, type CodeFence } from '../utils/code-fences.js';
 	import { OWN_MARK, resolveOwnAction } from '../utils/markdown-actions.js';
 	import { saveOrShareBlob } from '../utils/save-blob.js';
@@ -195,6 +195,13 @@
 	}
 
 	function buildArtifact(code: string): string {
+		// A body that holds only the engine's placeholder gets the gallery's badge
+		// ("Content missing"): the card reads the message, not the store's flag.
+		const card = buildArtifactCard(code);
+		return holdsOnlyPlaceholder(resolveArtifactRender(code).src) ? withPlaceholderBadge(card, t('artifacts.lost_badge')) : card;
+	}
+
+	function buildArtifactCard(code: string): string {
 		// The inline card threads the already-saved gallery id in as a marker.
 		// Pull it out and strip it from the body so it can't leak into the
 		// rendered prose / data preview, then hand it to the builder so the pill
@@ -970,6 +977,15 @@
 		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	/* "Content missing" next to the name, as in the gallery and the chips: the
+	   body holds only the engine's placeholder. Never truncated, the name is. */
+	div :global(.artifact-lost-badge) {
+		font-size: 0.625rem;
+		color: var(--color-warning);
+		flex-shrink: 0;
 		white-space: nowrap;
 	}
 

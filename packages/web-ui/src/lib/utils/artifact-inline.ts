@@ -123,3 +123,48 @@ export function resolveArtifactRender(code: string): { artifactId: string; src: 
 	const artifactId = extractArtifactId(code);
 	return { artifactId, src: artifactId ? stripArtifactIdMarker(code) : code };
 }
+
+// ── An inline artifact that holds only the engine's placeholder ───────
+//
+// The gallery and the chips under the chat mark an artifact whose file holds
+// the engine's placeholder for a saved body instead of a document (`lostOnSave`,
+// set by the engine's artifact store). The inline card reads its body from the
+// message, not from the store, so it gets no such flag: an older thread whose
+// save stored the placeholder, or a fence the model filled with it, showed the
+// placeholder as if it were the document. These helpers apply the store's own
+// rule to the fence body, so the card carries the same badge.
+
+/** The three openings of the references the engine writes where a saved body
+ *  was (`src/core/artifact-eviction.ts`, `containsEvictionMarker`): the old
+ *  in-field form and the two notes. Kept equal to the engine's by a test that
+ *  runs both on the same inputs. */
+const PLACEHOLDER_OPENINGS = [
+	'[evicted after successful save',
+	'[The body of this document was removed from the conversation',
+	'[The content of this call was the engine\'s placeholder',
+] as const;
+
+/** The store's size bound (`LOST_ON_SAVE_MAX_BYTES`): a larger body that holds
+ *  a placeholder is a document quoting it, still readable, and the badge would
+ *  be false there. */
+export const PLACEHOLDER_MAX_BYTES = 2048;
+
+/** Whether a fence body holds only the engine's placeholder, by the store's
+ *  rule: at most {@link PLACEHOLDER_MAX_BYTES} bytes of UTF-8 and a placeholder
+ *  opening anywhere in it. */
+export function holdsOnlyPlaceholder(src: string): boolean {
+	if (new TextEncoder().encode(src).length > PLACEHOLDER_MAX_BYTES) return false;
+	return PLACEHOLDER_OPENINGS.some((opening) => src.includes(opening));
+}
+
+/** Put the badge after the card's title. `label` is shown as text and escaped
+ *  here; `card` is one of MarkdownRenderer's own card builders' output, whose
+ *  title span holds escaped text only, so the first such span is the card's. A
+ *  card without a title span is returned unchanged. */
+export function withPlaceholderBadge(card: string, label: string): string {
+	const safe = label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+	return card.replace(
+		/(<span class="artifact-title">[^<]*<\/span>)/,
+		`$1\n\t\t\t\t<span class="artifact-lost-badge" data-testid="artifact-inline-lost-badge" title="${safe}">${safe}</span>`,
+	);
+}
