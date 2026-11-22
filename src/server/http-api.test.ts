@@ -1,12 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll, onTestFinished } from 'vitest';
-import { CP_ADMIN_PRINCIPAL, principalFromTag, OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
-import { parseBrokerStartToken } from '../contract/broker-start.js';
+import { recipientConfirmDigest } from '../core/recipient-confirm.js';
+import { CP_ADMIN_PRINCIPAL, principalFromTag, OWNER_PRINCIPAL, ownerInstructionCounts, type RequestPrincipal } from '../core/request-principal.js';
+import { parseBrokerStartTokenV2 } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
 import { request as httpRequest, Agent as HttpAgent, ServerResponse, type Server } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync, linkSync, readlinkSync, truncateSync, appendFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, statSync, chmodSync, linkSync, readlinkSync, truncateSync, appendFileSync } from 'node:fs';
 import { closeWorkspaceBase } from '../core/workspace-rel.js';
 import { workflowAwaitsStampResult } from '../core/workflow-stamp.js';
 import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
@@ -27,7 +28,7 @@ import { EngineDb } from '../core/engine-db.js';
 import { ApprovalStore, type ApprovalFiling } from '../core/approval-store.js';
 import { MandateEnds } from '../core/mandate-ends.js';
 import { secretsForProfile } from '../core/profile-secret-view.js';
-import { eraseRefusal } from '../core/sidecar-refusals.js';
+import { billingTierSet, eraseRefusal } from '../core/sidecar-refusals.js';
 import type { ApiProfile } from '../core/api-store.js';
 import type { SecretStoreLike } from '../types/index.js';
 import type { MailConnectPromptData } from '../types/agent.js';
@@ -594,6 +595,21 @@ function portOf(instance: { boundPort: number | undefined }): number {
 }
 
 let api: InstanceType<typeof LynoxHTTPApi>;
+
+/**
+ * Every grant live, as sign-in leaves the grant of a session it let in. For tests that set a
+ * mandate's principal directly and so skip sign-in: a change asks again whether its grant is
+ * live, and the mock engine has no store, which counts as ended.
+ */
+function liveMandateEnds(): void {
+  let orig: unknown;
+  beforeEach(() => {
+    const engine = (api as unknown as { engine: Record<string, unknown> }).engine;
+    orig = engine['getMandateEnds'];
+    engine['getMandateEnds'] = () => ({ record: (): void => {}, isLive: (): boolean => true });
+  });
+  afterEach(() => { (api as unknown as { engine: Record<string, unknown> }).engine['getMandateEnds'] = orig; });
+}
 let baseUrl: string;
 
 function authHeaders(): Record<string, string> {
@@ -605,6 +621,20 @@ async function jsonFetch(path: string, opts: RequestInit = {}): Promise<Response
   if (opts.body && !headers['Content-Type']) {
     headers['Content-Type'] = 'application/json';
   }
+  return fetch(`${baseUrl}${path}`, { ...opts, headers });
+}
+
+/**
+ * The owner's browser session, without the token: a schedule is confirmed and a grant accepted
+ * only there. A request carrying both counts as the token, so the bearer is left out.
+ */
+async function ownerSessionFetch(path: string, opts: RequestInit = {}): Promise<Response> {
+  const headers: Record<string, string> = {
+    cookie: `lynox_session=${webUiLoginSession(TEST_SECRET, null)!.token}`,
+    'sec-fetch-site': 'same-origin',
+    ...(opts.headers as Record<string, string> | undefined),
+  };
+  if (opts.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
   return fetch(`${baseUrl}${path}`, { ...opts, headers });
 }
 
@@ -1308,6 +1338,96 @@ describe('LynoxHTTPApi', () => {
       delete process.env['LYNOX_BILLING_TIER'];
     });
 
+    describe('confirm a trigger\'s recipients', () => {
+      const LEGACY = { id: 'old-1', title: 'Bericht', description: 'an anna@firma.ch', effect: 'run_agent' };
+      const withHistory = async <T>(trigger: Record<string, unknown> | undefined, run: (confirmed: Array<[string, string]>) => Promise<T>): Promise<T> => {
+        const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+        const saved = ref['getRunHistory'];
+        const confirmed: Array<[string, string]> = [];
+        ref['getRunHistory'] = () => ({
+          getTrigger: () => trigger,
+          confirmTriggerRecipients: (id: string, expect: string) => { confirmed.push([id, expect]); return expect === recipientConfirmDigest(trigger as never) ? 'confirmed' : 'changed'; },
+        });
+        try { return await run(confirmed); } finally { ref['getRunHistory'] = saved; }
+      };
+      const post = (headers: Record<string, string>, expect: string): Promise<Response> => fetch(`${baseUrl}/api/triggers/old-1/confirm-recipients`, {
+        method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ expect }),
+      });
+      const owner = (): Record<string, string> => ({ cookie: `lynox_session=${webUiLoginSession(TEST_SECRET, null)!.token}` });
+
+      it('the owner\'s browser session confirms what the preview showed', async () => {
+        repayRateWindow();
+        await withHistory(LEGACY, async (confirmed) => {
+          const shown = await (await fetch(`${baseUrl}/api/triggers/old-1/confirm-recipients-preview`, { headers: owner() })).json() as { expect: string; description: string };
+          expect(shown.description).toBe('an anna@firma.ch');
+          const res = await post(owner(), shown.expect);
+          expect(res.status).toBe(200);
+          expect(confirmed).toEqual([['old-1', shown.expect]]);
+        });
+      });
+
+      it('a token is refused, the owner\'s own included, and nothing is confirmed', async () => {
+        repayRateWindow();
+        await withHistory(LEGACY, async (confirmed) => {
+          const res = await post(authHeaders(), recipientConfirmDigest(LEGACY as never));
+          expect(res.status).toBe(403);
+          expect(((await res.json()) as { code?: string }).code).toBe('session_only');
+          expect(confirmed).toEqual([]);
+        });
+      });
+
+      it('a mandate\'s session is refused, and nothing is confirmed', async () => {
+        repayRateWindow();
+        await withHistory(LEGACY, async (confirmed) => {
+          const res = await post({ cookie: `lynox_session=${webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token}` }, recipientConfirmDigest(LEGACY as never));
+          expect(res.status).toBe(403);
+          expect(confirmed).toEqual([]);
+        });
+      });
+
+      it('a trigger changed between the preview and the click answers 409 changed', async () => {
+        repayRateWindow();
+        const shownBefore = recipientConfirmDigest(LEGACY as never);
+        await withHistory({ ...LEGACY, description: 'an x@evil.example' }, async () => {
+          const res = await post(owner(), shownBefore);
+          expect(res.status).toBe(409);
+          expect(((await res.json()) as { code?: string }).code).toBe('changed');
+        });
+      });
+
+      it('the list flags such a trigger for the owner only', async () => {
+        repayRateWindow();
+        // A reminder sends to nobody: no hint that it does not send.
+        const listed = [{ ...LEGACY, status: 'open' }, { ...LEGACY, id: 'own-1', created_by: 'owner', status: 'open' }, { ...LEGACY, id: 'remind-1', effect: 'notify', status: 'open' }];
+        const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+        const saved = [ref['getTaskManager'], ref['getWorkerLoop']];
+        ref['getTaskManager'] = () => ({ listTriggers: () => listed });
+        ref['getWorkerLoop'] = () => null;
+        try {
+          const rowsFor = async (headers: Record<string, string>): Promise<Array<[string, unknown]>> =>
+            ((await (await fetch(`${baseUrl}/api/triggers`, { headers })).json()) as { triggers: Array<{ id: string; recipients_unconfirmed?: boolean }> }).triggers.map((r) => [r.id, r.recipients_unconfirmed]);
+          expect(await rowsFor(owner())).toEqual([['old-1', true], ['own-1', false], ['remind-1', false]]);
+          expect(await rowsFor({ cookie: `lynox_session=${webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token}` })).toEqual([['old-1', false], ['own-1', false], ['remind-1', false]]);
+        } finally { [ref['getTaskManager'], ref['getWorkerLoop']] = saved; }
+      });
+    });
+
+    it('no tool reaches the route that confirms a trigger\'s recipients', () => {
+      const hits: string[] = [];
+      const walk = (dir: string): void => {
+        for (const name of readdirSync(dir)) {
+          const path = join(dir, name);
+          if (statSync(path).isDirectory()) { walk(path); continue; }
+          if (!path.endsWith('.ts') || path.endsWith('.test.ts')) continue;
+          if (readFileSync(path, 'utf8').includes('confirm-recipients')) hits.push(path.slice(path.indexOf('src/')));
+        }
+      };
+      walk(join(import.meta.dirname, '..'));
+      // Positive control: the scan finds the route itself.
+      expect(hits).toContain('src/server/http-api.ts');
+      expect(hits).toEqual(['src/server/http-api.ts']);
+    });
+
     it('takes a target out of a bulk run, or puts it back, for the owner only', async () => {
       repayRateWindow();
       const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
@@ -1943,6 +2063,7 @@ describe('LynoxHTTPApi', () => {
   });
 
   describe('POST /api/tasks — schedule a saved workflow (Slice B2)', () => {
+    liveMandateEnds();
     // This file shares ONE per-IP rate window; the requests of this block are paid back so a
     // test thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
     const rateCounts = (): Map<string, { count: number }> =>
@@ -2183,7 +2304,9 @@ describe('LynoxHTTPApi', () => {
       });
 
       describe('switch on', () => {
-        beforeEach(() => { vi.stubEnv('LYNOX_FEATURE_WORKFLOW_REVIEWED_GRANT', '1'); });
+        // The secret is set here too: the `unstubAllEnvs` after each test above takes it away, and
+        // without it every caller is the owner, so a token could not be told from a session.
+        beforeEach(() => { vi.stubEnv('LYNOX_FEATURE_WORKFLOW_REVIEWED_GRANT', '1'); vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET); });
 
         // PRD 3b-2 §4.3: the preview asks the same predicate as the schedule route.
         it.each([
@@ -2211,7 +2334,7 @@ describe('LynoxHTTPApi', () => {
 
         it('the acceptance schedules and writes the grant with the schedule\'s id and the request\'s auth origin', async () => {
           await withGrantServices(async () => {
-            const res = await jsonFetch('/api/tasks', {
+            const res = await ownerSessionFetch('/api/tasks', {
               method: 'POST',
               body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: CRON, params: VALUES, grant: { ...GRANT, checksum: await shownChecksum(), name: 'Ada' } }),
             });
@@ -2230,12 +2353,25 @@ describe('LynoxHTTPApi', () => {
 
         it('answers 409 when the accepted grant is not the one shown', async () => {
           await withGrantServices(async () => {
-            const res = await jsonFetch('/api/tasks', {
+            const res = await ownerSessionFetch('/api/tasks', {
               method: 'POST',
               body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: CRON, params: { month: '2026-07' }, grant: { ...GRANT, checksum: await shownChecksum() } }),
             });
             expect(res.status).toBe(409);
             expect(setGrant).not.toHaveBeenCalled();
+          });
+        });
+
+        it('a token, the owner\'s included, cannot accept a grant: nothing is written or scheduled', async () => {
+          await withGrantServices(async () => {
+            const res = await jsonFetch('/api/tasks', {
+              method: 'POST',
+              body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: CRON, params: VALUES, grant: { ...GRANT, checksum: await shownChecksum(), name: 'Ada' } }),
+            });
+            expect(res.status).toBe(403);
+            expect(((await res.json()) as { code?: string }).code).toBe('session_only');
+            expect(setGrant).not.toHaveBeenCalled();
+            expect(mockTaskCreatePipeline).not.toHaveBeenCalled();
           });
         });
       });
@@ -4863,6 +4999,7 @@ describe('LynoxHTTPApi', () => {
   // principal on every route that stores one; a mandate's answer also leaves a row in its trail
   // naming the question, written before the answer is stored.
   describe('an answer records who gave it', () => {
+    liveMandateEnds();
     const EVA: RequestPrincipal = { kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' };
     type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
     type Ref = { getPromptStore: () => unknown; getAuditLog: () => unknown };
@@ -4949,14 +5086,37 @@ describe('LynoxHTTPApi', () => {
       });
     }
 
-    it('reply without a promptId (the legacy path) records the answerer too', async () => {
+    it('reply without a promptId answers nothing and records nothing, and names the way to answer', async () => {
       await withStore(async (store, rows) => {
         api.setPrincipalResolverForTesting(() => EVA);
         const id = store.insertAskUser('s-legacy', 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: EVA });
         const res = await jsonFetch('/api/sessions/s-legacy/reply', { method: 'POST', body: JSON.stringify({ answer: 'B' }) });
-        expect(res.status).toBe(200);
+        expect(res.status).toBe(409);
+        expect((await res.json() as { code?: string }).code).toBe('prompt_id_required');
+        expect(by(store, id)).toEqual({ status: 'pending', answered_by: null, answered_mandate_id: null });
+        expect(answerRows(rows)).toEqual([]);
+        // The way to answer: the id the open question carries.
+        const open = await (await jsonFetch('/api/sessions/s-legacy/pending-prompt')).json() as { promptId?: string };
+        expect(open.promptId).toBe(id);
+        expect((await jsonFetch('/api/sessions/s-legacy/reply', { method: 'POST', body: JSON.stringify({ promptId: open.promptId, answer: 'B' }) })).status).toBe(200);
         expect(by(store, id)).toEqual({ status: 'answered', answered_by: 'mandate:eva@example.invalid', answered_mandate_id: 'grant-1' });
-        expect(answerRows(rows)).toEqual([{ target: `prompt:${id}`, phase: 'attempt' }]);
+      });
+    });
+
+    it('reply without a promptId does not answer a confirmation that opened after the question the client saw', async () => {
+      await withStore(async (store) => {
+        // The client saw the model's question offering `Yes`; it closed, and a tool's own
+        // confirmation (a mail send asks `Yes`/`No`) opened in its place.
+        const seen = store.insertAskUser('s-swap', 'Go on?', ['Yes', 'No']);
+        expect(store.expirePrompt(seen, 'timed_out')).toBe(true);
+        const send = store.insertAskUser('s-swap', 'Send this mail?', ['Yes', 'No']);
+        const late = await jsonFetch('/api/sessions/s-swap/reply', { method: 'POST', body: JSON.stringify({ answer: 'Yes' }) });
+        expect(late.status).toBe(409);
+        expect(store.getById(send)?.status).toBe('pending');
+        expect(store.getById(send)?.answer ?? null).toBeNull();
+        // Named, it is answered.
+        expect((await jsonFetch('/api/sessions/s-swap/reply', { method: 'POST', body: JSON.stringify({ promptId: send, answer: 'Yes' }) })).status).toBe(200);
+        expect(store.getById(send)?.answer).toBe('Yes');
       });
     });
 
@@ -4991,7 +5151,6 @@ describe('LynoxHTTPApi', () => {
     });
 
     const NO_PROMPT_ID: Array<[label: string, ask: (store: import('../core/prompt-store.js').PromptStore, sid: string) => string, path: string, body: Record<string, unknown>]> = [
-      ['reply (legacy)', (s, sid) => s.insertAskUser(sid, 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: EVA }), 'reply', { answer: 'B' }],
       ['secret-saved', (s, sid) => s.insertAskSecret(sid, 'API_KEY', 'Paste the key', undefined, undefined, { principal: EVA }), 'secret-saved', { status: 'saved' }],
       ['mail-connected', (s, sid) => s.insertConnectMail(sid, 'Connect the office mailbox?', '{}', undefined, { principal: EVA }), 'mail-connected', { status: 'connected' }],
     ];
@@ -6087,7 +6246,7 @@ describe('LynoxHTTPApi', () => {
     const reEsc = (t: string): string => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     /** The note, then right after it the form with the one button, posting the note's version. */
     const noteThenButton = (note: string, button: string, version = '3'): RegExp =>
-      new RegExp(`<p data-connect-note="${version}">${reEsc(note)}</p><form method="post" action="\\?shown_scopes=[^"]*&amp;shown_note=${version}"><button type="submit">${reEsc(button)}</button></form>`);
+      new RegExp(`<p data-connect-note="${version}">${reEsc(note)}</p><form method="post" action="\\?shown_scopes=[^"]*&amp;shown_note=${version}(?:&amp;shown_consent=[0-9a-f]{16})?"><button type="submit">${reEsc(button)}</button></form>`);
 
     it('shows a mandate\'s session the note before a connect that only reads, and starts nothing', async () => {
       const r = await connect(TAG, true, 'books', { method: 'GET', lang: 'de-CH,de;q=0.9,en;q=0.8' });
@@ -6132,7 +6291,7 @@ describe('LynoxHTTPApi', () => {
       const scope = 'openid offline_access contact_show kb_invoice_edit note_edit';
       const page = await connect(TAG, true, 'books', { method: 'GET', scope });
       const action = /<form method="post" action="([^"]+)">/.exec(page.text)?.[1]?.replaceAll('&amp;', '&') ?? '';
-      expect(action).toMatch(/^\?shown_scopes=.+&shown_note=3$/);
+      expect(action).toMatch(/^\?shown_scopes=.+&shown_note=3&shown_consent=[0-9a-f]{16}$/);
       const without = await connect(TAG, true, 'books', { method: 'POST', scope, query: action.replace('&shown_note=3', '') });
       expect(without.status).toBe(409);
       expect(without.text).toContain('another note than the page you confirmed');
@@ -6281,14 +6440,14 @@ describe('LynoxHTTPApi', () => {
     // approved; change it only with a new approval.
     const APPROVED = [
       'lynox kann in bexio Kontakte, Notizen, Aufgaben, Offerten und Rechnungen anlegen und ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt lynox vorher der Person, für die es gerade arbeitet, mit allem, was lynox an bexio schickt. Das kann auch jemand sein, dem der Inhaber dieser lynox-Instanz Zugang gegeben hat. Der Schritt geschieht erst nach einem Ja dieser Person oder des Inhabers; das Ja einer Person mit Zugang gilt für diese Verbindung, und lynox protokolliert jede solche Anfrage. Ohne ein solches Ja schreibt lynox nicht in bexio, auch nicht in einem geplanten Ablauf: Dort wartet der Schritt auf die Antwort, und kommt keine, unterbleibt er. Das gilt auch, wenn lynox eine Zahlung auf einer Rechnung erfasst oder eine Rechnung storniert.',
-      'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
-      'Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.',
+      'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was in dieser Liste steht.',
+      'Für Buchhaltung, Bank und Lohn fragt lynox bei bexio keine Rechte an. Welche Rechte der Zugang am Ende erhält, legt bexio fest. Gewährt bexio mehr, als lynox anfragt, gilt auch dafür: kein Schreibschritt ohne Ja, ausser im Massenlauf wie oben.',
     ];
     // The page around it, approved 2026-10-21 under the same rule.
     const APPROVED_FRAME = {
       title: 'Schreibrechte für bexio bestätigen',
-      scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in bexio:',
-      scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Ein Massenlauf nutzt davon nur einen kleinen Teil. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
+      scopesIntro: 'lynox fragt bei bexio diese Schreibrechte an:',
+      scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Ein Massenlauf ändert nur, was in seiner Liste steht. Jeder andere Schreibschritt geschieht erst nach einem Ja.',
       button: 'Zustimmen und weiter zu bexio',
       afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in bexio.',
     };
@@ -6347,7 +6506,10 @@ describe('LynoxHTTPApi', () => {
       }
     }
     // What the page's form posts to: the scopes it was shown for, in the order the link asks.
-    const SHOWN = '?shown_scopes=openid+offline_access+contact_show+kb_invoice_edit+note_edit';
+    const SHOWN_SCOPES = '?shown_scopes=openid+offline_access+contact_show+kb_invoice_edit+note_edit';
+    // The version of the bexio customer text the page shows (`consentNoticeVersion`), held below.
+    const BEXIO_VERSION = '3347d732bbb7b688';
+    const SHOWN = `${SHOWN_SCOPES}&shown_consent=${BEXIO_VERSION}`;
     const confirm = { method: 'POST', contentType: 'application/x-www-form-urlencoded', body: '', query: SHOWN };
 
     it('holds the approved wording in the preset, byte for byte', async () => {
@@ -6391,30 +6553,36 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
-      it('without one, is a plain frame in the text\'s language: German for a German text', () => {
+      it('without one, is a plain frame in the text\'s language: German for a German text', async () => {
+        const { consentNoticeVersion } = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
+        const v = consentNoticeVersion(TEXT);
         expect(consentPageHtml(TEXT, SCOPES)).toBe(oauthPageHtml('de', 'Verbindung bestätigen',
           '<h1>Verbindung bestätigen</h1>'
           + '<div lang="de"><p>Erster Absatz.</p><p>Zweiter &amp; &lt;letzter&gt;.</p></div>'
           + '<p>Schreibrechte, die diese Verbindung verlangt: kb_invoice_edit, note_edit</p>'
-          + '<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit"><button type="submit">Weiter</button></form>'));
+          + `<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit&amp;shown_consent=${v}">`+'<button type="submit">Weiter</button></form>'));
       });
 
-      it('without one, is the English plain frame for a text in any other language', () => {
+      it('without one, is the English plain frame for a text in any other language', async () => {
+        const { consentNoticeVersion } = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
+        const v = consentNoticeVersion({ ...TEXT, lang: 'fr' });
         expect(consentPageHtml({ ...TEXT, lang: 'fr' }, SCOPES)).toBe(oauthPageHtml('en', 'Authorization',
           '<h1>Authorization</h1>'
           + '<div lang="fr"><p>Erster Absatz.</p><p>Zweiter &amp; &lt;letzter&gt;.</p></div>'
           + '<p>Write access this connection asks for: kb_invoice_edit, note_edit</p>'
-          + '<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit"><button type="submit">Continue</button></form>'));
+          + `<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit&amp;shown_consent=${v}">`+'<button type="submit">Continue</button></form>'));
       });
 
-      it('with one, is wholly in the text\'s language and names each write access in the order asked', () => {
+      it('with one, is wholly in the text\'s language and names each write access in the order asked', async () => {
+        const { consentNoticeVersion } = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
+        const v = consentNoticeVersion({ ...TEXT, frame: FRAME, scopeNames: NAMES });
         expect(consentPageHtml({ ...TEXT, frame: FRAME, scopeNames: NAMES }, SCOPES)).toBe(oauthPageHtml('de', 'Titel',
           '<h1>Titel</h1>'
           + '<p>Erster Absatz.</p><p>Zweiter &amp; &lt;letzter&gt;.</p>'
           + '<p>Vor der Liste:</p>'
           + '<ul><li>Rechnungen: Schreibzugriff</li><li>Notizen: Schreibzugriff</li></ul>'
           + '<p class="small">Nach der Liste.</p>'
-          + '<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit"><button type="submit">Zustimmen</button></form>'
+          + `<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit&amp;shown_consent=${v}">`+'<button type="submit">Zustimmen</button></form>'
           + '<p class="small">Nach dem Knopf.</p>'));
       });
 
@@ -6449,7 +6617,7 @@ describe('LynoxHTTPApi', () => {
         + `<p>${APPROVED_FRAME.scopesIntro}</p>`
         + `<ul><li>${APPROVED_NAMES.kb_invoice_edit}</li><li>${APPROVED_NAMES.note_edit}</li></ul>`
         + `<p class="small">${APPROVED_FRAME.scopesNote}</p>`
-        + `<form method="post" action="${SHOWN}"><button type="submit">${APPROVED_FRAME.button}</button></form>`
+        + `<form method="post" action="${SHOWN.replace('&', '&amp;')}"><button type="submit">${APPROVED_FRAME.button}</button></form>`
         + `<p class="small">${APPROVED_FRAME.afterButton}</p>`));
       // Sent with the frame's one stylesheet admitted, and nothing else.
       expect(r.csp).toBe(OAUTH_CONSENT_CSP);
@@ -6475,6 +6643,46 @@ describe('LynoxHTTPApi', () => {
       const link = new URL(r.location);
       expect(link.host).toBe('auth.bexio.com');
       expect(link.searchParams.get('scope')?.split(' ')).toEqual(expect.arrayContaining(['kb_invoice_edit', 'note_edit']));
+    });
+
+    // The callback records as asked what this cookie carries, so it has to be exactly what the
+    // link asks for and the page showed: the scopes the confirmation was checked against.
+    it('signs into the cookie exactly the scopes the confirmed link asks for', async () => {
+      const r = await open(WRITING, confirm);
+      expect(r.status).toBe(302);
+      const value = decodeURIComponent((r.state ?? '').split(';')[0]!.slice('lynox_profile_oauth_state='.length));
+      const { verifyProfileOAuthState } = await import('../core/oauth-state-cookie.js');
+      const read = verifyProfileOAuthState(value, TEST_SECRET, Math.floor(Date.now() / 1000));
+      expect(read?.asked).toEqual(new URL(r.location).searchParams.get('scope')?.split(' '));
+      expect(read?.asked).toEqual(SHOWN_SCOPES.slice('?shown_scopes='.length).split('+'));
+      // And the version of the text the page showed, which the callback records.
+      expect(read?.consent).toBe(BEXIO_VERSION);
+    });
+
+    it('holds the version the page carries equal to the text\'s', async () => {
+      const presets = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
+      expect(presets.consentNoticeVersion(presets.OAUTH_PRESETS.get('bexio')!.consentNotice!)).toBe(BEXIO_VERSION);
+    });
+
+    // A page rendered before the text changed: the confirmation does not hold for the new text.
+    // Refused before anything goes to the provider: no cookie, no redirect.
+    it.each([
+      ['without the version it showed', SHOWN_SCOPES],
+      ['for another version of the text', `${SHOWN_SCOPES}&shown_consent=0123456789abcdef`],
+    ])('refuses a confirmation %s, and sends nothing to the provider', async (_label, query) => {
+      const r = await open(WRITING, { ...confirm, query });
+      expect(r.status).toBe(409);
+      expect(r.text).toContain('changed while you had the page open');
+      expect(r.state).toBeNull();
+      expect(r.location).toBe('');
+    });
+
+    it('refuses a confirmation when the profile now asks for more than the page showed, and sets no cookie', async () => {
+      const r = await open(`${WRITING} contact_edit`, confirm);
+      expect(r.status).toBe(409);
+      expect(r.text).toContain('asks for other access than the page you confirmed showed');
+      expect(r.state).toBeNull();
+      expect(r.location).toBe('');
     });
 
     it.each([
@@ -9896,6 +10104,7 @@ describe('LynoxHTTPApi', () => {
     // started it, and by nobody else, on any route about it: the dispatcher checks the chat a
     // route names (`readsThread`), and the lists leave the chat's text out.
     describe('a contained chat is read only by the owner and by whoever started it', () => {
+      liveMandateEnds();
       const EVA: RequestPrincipal = { kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' };
       type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
       let cookieResolver: Resolver;
@@ -10843,7 +11052,8 @@ describe('LynoxHTTPApi', () => {
         ['/api/tasks/bulk-r/confirm', 'POST', await confirmBody('bulk-r')],
       ];
       for (const [path, method, body] of calls) {
-        const res = await jsonFetch(path.replace(/\/$/, ''), { method, ...(body ? { body } : {}) });
+        const send = path.endsWith('/confirm') ? ownerSessionFetch : jsonFetch;
+        const res = await send(path.replace(/\/$/, ''), { method, ...(body ? { body } : {}) });
         expect(res.status, `${method} ${path}`).toBe(409);
         expect(((await res.json()) as { error: string }).error, path).toBe(new BulkTriggerLockedError().message);
       }
@@ -10859,15 +11069,26 @@ describe('LynoxHTTPApi', () => {
 
     // triggers-consent — the human consent surface.
     it('POST /api/tasks/:id/confirm confirms a trigger (200)', async () => {
-      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') });
+      const res = await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') });
       expect(res.status).toBe(200);
       const body = await res.json() as { confirmed_at: string };
       expect(body.confirmed_at).toBeTruthy();
     });
 
+    it('POST /api/tasks/:id/confirm with a token, the owner\'s included, stamps nothing (403): a schedule is confirmed in the owner\'s session', async () => {
+      // Set here, not left to the file's setup: a block above takes it away with `unstubAllEnvs`,
+      // and without it every caller is the owner.
+      vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+      mockConfirmTrigger.mockClear();
+      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { code?: string }).code).toBe('session_only');
+      expect(mockConfirmTrigger).not.toHaveBeenCalled();
+    });
+
     it('POST /api/tasks/:id/confirm returns 404 for a trigger gone by the time it is stamped', async () => {
       mockConfirmTrigger.mockReturnValueOnce(undefined);
-      const res = await jsonFetch('/api/tasks/nope/confirm', { method: 'POST', body: await confirmBody('nope') });
+      const res = await ownerSessionFetch('/api/tasks/nope/confirm', { method: 'POST', body: await confirmBody('nope') });
       expect(res.status).toBe(404);
     });
 
@@ -10877,7 +11098,7 @@ describe('LynoxHTTPApi', () => {
       ref['getRunHistory'] = () => ({ getTrigger: () => undefined });
       try {
         mockConfirmTrigger.mockClear();
-        const res = await jsonFetch('/api/tasks/nope/confirm', { method: 'POST', body: JSON.stringify({ expect: 'any' }) });
+        const res = await ownerSessionFetch('/api/tasks/nope/confirm', { method: 'POST', body: JSON.stringify({ expect: 'any' }) });
         expect(res.status).toBe(404);
         expect(mockConfirmTrigger).not.toHaveBeenCalled();
       } finally {
@@ -10891,7 +11112,7 @@ describe('LynoxHTTPApi', () => {
       ['a digest that is not a string', JSON.stringify({ expect: 1 })],
     ])('POST /api/tasks/:id/confirm with %s stamps nothing (400): the owner confirms from the preview', async (_label, body) => {
       mockConfirmTrigger.mockClear();
-      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', ...(body !== undefined ? { body } : {}) });
+      const res = await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', ...(body !== undefined ? { body } : {}) });
       expect(res.status).toBe(400);
       const answer = (await res.json()) as { error: string; code: string };
       expect(answer.error).toContain('"expect" is required');
@@ -11216,6 +11437,28 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    it('GET /api/triggers gives a bulk run\'s trigger the host its run works on, null without one or when its run cannot be read, and no other trigger the field', async () => {
+      const bulk = [
+        { id: 'bulk-ext', title: 'Bulk run r-ext', effect: 'bulk_apply', bulk_run_id: 'r-ext' },
+        { id: 'bulk-store', title: 'Bulk preview r-store', effect: 'bulk_preview', bulk_run_id: 'r-store' },
+        { id: 'bulk-gone', title: 'Bulk undo r-gone', effect: 'bulk_undo', bulk_run_id: 'r-gone' },
+        // A run whose read throws: its row shows no host, and the list stands.
+        { id: 'bulk-bad', title: 'Bulk judge r-bad', effect: 'bulk_judge', bulk_run_id: 'r-bad' },
+        { id: 'trg-agent', title: 'agent', effect: 'run_agent' },
+      ];
+      const systems: Record<string, string> = { 'r-ext': 'http:demo-shop.myshopify.com', 'r-store': 'data_store' };
+      await withEngine({
+        getTaskManager: () => ({ listTriggers: () => bulk }),
+        getWorkerLoop: () => null,
+        getBulkLedger: () => ({ getRunForApply: (id: string) => { if (id === 'r-bad') throw new Error('SQLITE_CORRUPT'); return systems[id] === undefined ? null : { targetSystem: systems[id] }; } }),
+      }, async () => {
+        const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+        expect(triggers.map((t) => [t.id, Object.hasOwn(t, 'bulk_host') ? t['bulk_host'] : 'absent'])).toEqual([
+          ['bulk-ext', 'demo-shop.myshopify.com'], ['bulk-store', null], ['bulk-gone', null], ['bulk-bad', null], ['trg-agent', 'absent'],
+        ]);
+      });
+    });
+
     it('GET /api/triggers says false for every row when there is no worker loop', async () => {
       await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => null }, async () => {
         expect(await flagsOf()).toEqual([['trg-agent', false, false], ['trg-backup', false, false], ['trg-idle', false, false]]);
@@ -11374,7 +11617,7 @@ describe('LynoxHTTPApi', () => {
       // (`triggerForRoute`), on by default since the takeover is in the view.
       await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => loopWith('owner') }, async () => {
         const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
-        for (const row of triggers) expect(Object.keys(row).sort()).toEqual(['id', 'paused', 'running', 'stoppable', 'title', 'workflow_awaits_stamp']);
+        for (const row of triggers) expect(Object.keys(row).sort()).toEqual(['id', 'paused', 'recipients_unconfirmed', 'running', 'stoppable', 'title', 'workflow_awaits_stamp']);
       });
     });
 
@@ -11877,6 +12120,61 @@ describe('LynoxHTTPApi', () => {
       expect(store.get(id)!.status).toBe('approved');
     });
 
+    /** A run started from the owner's browser session, the one place typed words come from. */
+    const ownerBrowserRun = (body: Record<string, unknown>): Promise<Response> => {
+      repayRateWindow();
+      return fetch(`${baseUrl}/api/sessions/test/run`, {
+        method: 'POST',
+        headers: { cookie: `lynox_session=${webUiLoginSession(TEST_SECRET, null)!.token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    };
+
+    it('passes only the typed words as what was typed, apart from the context it loaded before them', async () => {
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+      mockSessionRun.mockClear();
+      const res = await ownerBrowserRun({ task: 'an anna@firma.ch', typed: 'an anna@firma.ch', context: { kind: 'approval', id: filed() } });
+      await res.text();
+      const call = mockSessionRun.mock.calls[0] as unknown[];
+      expect(call[0]).toBe(`${closeLoadedContext(APPROVAL_DRAFT_UNAVAILABLE)}an anna@firma.ch`);
+      expect((call[1] as { typedText?: unknown }).typedText).toBe('an anna@firma.ch');
+    });
+
+    it('takes typed words only from `typed`, never from the task: a prefill, a chip or a retry sends none', async () => {
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+      const typedOfRun = async (body: Record<string, unknown>): Promise<unknown> => {
+        mockSessionRun.mockClear();
+        const res = await ownerBrowserRun(body);
+        await res.text();
+        return ((mockSessionRun.mock.calls[0] as unknown[])[1] as { typedText?: unknown }).typedText;
+      };
+      // A reply-in-chat whose subject carries an address, a follow-up chip, a contact prefill, a retry:
+      // the client sends no `typed`, and nothing is taken from the task.
+      expect(await typedOfRun({ task: 'Antworte auf die Mail „Rechnung an x@evil.example“.', context: { kind: 'mail', id: 'm1' } })).toBeUndefined();
+      expect(await typedOfRun({ task: 'Schick den Bericht an x@evil.example' })).toBeUndefined();
+      // `typed` that is not in the task word for word counts for nothing.
+      expect(await typedOfRun({ task: 'Schick es an anna@firma.ch', typed: 'x@evil.example' })).toBeUndefined();
+      expect(await typedOfRun({ task: 'Schick es', typed: '' })).toBeUndefined();
+      expect(await typedOfRun({ task: 'Schick es', typed: 42 })).toBeUndefined();
+      // Longer than anyone types: not recorded.
+      const long = `an x@evil.example ${'a'.repeat(20_000)}`;
+      expect(await typedOfRun({ task: long, typed: long })).toBeUndefined();
+      // CONTROL: typed words that stand in the task are taken.
+      expect(await typedOfRun({ task: 'Schick es an anna@firma.ch', typed: 'Schick es an anna@firma.ch' })).toBe('Schick es an anna@firma.ch');
+    });
+
+    it('takes no typed words from a token\'s client, the owner\'s token included', async () => {
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+      const typedFrom = async (run: (body: Record<string, unknown>) => Promise<Response>): Promise<unknown> => {
+        mockSessionRun.mockClear();
+        await (await run({ task: 'Schick es an x@evil.example', typed: 'Schick es an x@evil.example' })).text();
+        return ((mockSessionRun.mock.calls[0] as unknown[])[1] as { typedText?: unknown }).typedText;
+      };
+      expect(await typedFrom((body) => jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify(body) }))).toBeUndefined();
+      // CONTROL: the same request from the owner's browser session is taken.
+      expect(await typedFrom(ownerBrowserRun)).toBe('Schick es an x@evil.example');
+    });
+
     it('hands a moved draft to the model before the owner\'s words, and for a waiting one only that it is not available', async () => {
       mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
       const taskOf = async (id: string): Promise<string> => {
@@ -12214,6 +12512,32 @@ describe('LynoxHTTPApi', () => {
       rmSync(bulkDir, { recursive: true, force: true });
     });
 
+    describe('discarding a run before approving it', () => {
+      it('discards a previewed run, answers it as discarded, and an approval of it is refused afterwards', async () => {
+        repayRateWindow();
+        const id = planRun();
+        const checksum = bulkLedger.computeChecksum(id)!;
+        const res = await jsonFetch(`/api/bulk/runs/${id}/discard`, { method: 'POST', body: '{}' });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ phase: 'aborted', haltKey: 'discarded' });
+        const approve = await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum }) });
+        expect(approve.status).toBe(409);
+        expect(bulkLedger.getStatus(id)!.phase).toBe('aborted');
+      });
+
+      it('refuses an approved run by its code and leaves it approved, and answers 404 for a run that is not there', async () => {
+        repayRateWindow();
+        const id = planRun();
+        const ok = bulkLedger.approve(id, { checksum: bulkLedger.computeChecksum(id)!, maxTargets: 1 });
+        if (!ok.ok) throw new Error(ok.reason);
+        const res = await jsonFetch(`/api/bulk/runs/${id}/discard`, { method: 'POST', body: '{}' });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: 'not_discardable' });
+        expect(bulkLedger.getStatus(id)!.phase).toBe('approved');
+        expect((await jsonFetch('/api/bulk/runs/no-such-run/discard', { method: 'POST', body: '{}' })).status).toBe(404);
+      });
+    });
+
     describe('taking a target out before approving (PRD shopify-preset §20.2 item 4)', () => {
       it('deselects with the checksum the owner saw, answers the new one, and puts it back', async () => {
         repayRateWindow();
@@ -12417,6 +12741,16 @@ describe('LynoxHTTPApi', () => {
       expect(shown['writeFormNote']).toBeNull();
       // A store's product list without a filter names an empty set, so the page says every status is read.
       expect(shown['listFilters']).toEqual({});
+      // The page words a target it leaves out and the halt's step by the stored form and whether the
+      // judge decides the description.
+      expect([shown['listForm'], shown['judgesHtml']]).toEqual(['shopify', false]);
+      const judge = normalizeJudgeRule({ rule: 'Write a description.', schema: { descriptionHtml: { type: 'string', maxLength: 100 } } }, { htmlFields: ['descriptionHtml'] });
+      const judgedSource = parseListSource(host, { form: 'shopify', filters: { vendor: 'Acme' }, after: judgeTemplate(judge) }, 'PATCH', () => null);
+      bulkDb.getDb().prepare('DELETE FROM bulk_runs').run();
+      const judged = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source: judgedSource, readContract: listReadContract(host, judgedSource), judge });
+      if (!judged.ok) throw new Error('not planned');
+      const judgedShown = await (await jsonFetch(`/api/bulk/runs/${judged.status.id}`)).json() as Record<string, unknown>;
+      expect([judgedShown['listForm'], judgedShown['judgesHtml']]).toEqual(['shopify_filtered', true]);
     });
 
     it('shows a list whose stored filters were changed past what a parse takes by its host, without failing and with no store filters, and a withdrawn path as its address', async () => {
@@ -12449,6 +12783,7 @@ describe('LynoxHTTPApi', () => {
       expect(shown['listStartChecksum']).toBe(bulkLedger.listStartChecksum(id));
       expect(shown['list']).toMatchObject({ state: 'pending', filters: { category: '12' }, idField: 'id', method: 'PUT', after: { status: 'draft' } });
       expect(shown['listNote']).toBe(BULK_LIST_NOTE);
+      expect(shown['listForm']).toBe('woocommerce');
 
       const resume = (body: unknown): Promise<Response> => jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify(body) });
       expect((await resume({})).status).toBe(400);
@@ -12486,6 +12821,35 @@ describe('LynoxHTTPApi', () => {
       // Not the network policy: a GID read as an address would be refused there. The store's
       // credential needs a store pass, which the S5 measurement exercises (PRD shopify-preset §16.10).
       expect(bulkLedger.getStatus(id)!.phase).toBe('previewed');
+    });
+
+    // A write the mint leaves out (PRD shopify-preset §21.7, #4c) leaves the run a Shopify run: the
+    // approve and resume routes check its reach at the store's endpoint, as for any Shopify run.
+    it('checks the reach of a Shopify run whose description write the mint leaves out at its store\'s endpoint, on approve and on resume', async () => {
+      const host = 'acme.myshopify.com';
+      const gid = 'gid://shopify/Product/7';
+      const source = parseListSource(host, { form: 'shopify', after: { descriptionHtml: '<p>Neu</p>' } }, 'PATCH', () => null);
+      const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      expect(bulkLedger.resumePreview(id, Date.now(), { listChecksum: bulkLedger.listStartChecksum(id)! }).ok).toBe(true);
+      bulkLedger.recordListPage(id, { page: 1, items: [{ key: gid, id: gid }], bytes: 10, lastId: 7 });
+      expect(bulkLedger.finishList(id, () => listReadContract(host, source))).toBe('listed');
+      expect(bulkLedger.resumePreview(id).ok).toBe(true);
+      bulkLedger.recordRead(id, 0, { before: { descriptionHtml: '<p>Alt</p>' } });
+      expect(bulkLedger.finishPreview(id)).toBe(true);
+      // Past the preview's check, as a ledger changed after it would hold it.
+      bulkDb.getDb().prepare('UPDATE bulk_targets SET after_planned = ? WHERE run_id = ? AND seq = 0')
+        .run(bulkDb.enc(JSON.stringify({ descriptionHtml: '<p>Neu</p><script>steal()</script>' })), id);
+      const body = JSON.stringify({ checksum: bulkLedger.computeChecksum(id), unmeasuredConfirmed: true, maxTargets: 1 });
+      for (const route of ['approve', 'resume']) {
+        const refused = await jsonFetch(`/api/bulk/runs/${id}/${route}`, { method: 'POST', body });
+        expect(((await refused.json()) as { error: string }).error, route).toMatch(/stored credential for this run's host cannot be attached/);
+        expect(refused.status, route).toBe(409);
+      }
+      expect(bulkLedger.getStatus(id)!.phase).toBe('previewed');
+      // The write is left out; the run stays one the routes read as a Shopify run.
+      expect(bulkLedger.shopifyApplyOf(id)).toMatchObject({ reads: [gid], writes: [] });
     });
 
     // A bulk run writes, and a profile on bexio's API that does not go through the provider gets
@@ -12533,6 +12897,8 @@ describe('LynoxHTTPApi', () => {
         const id = judgedRun();
         const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
         expect(shown['judgeRule']).toEqual({ rule: RULE.rule, schema: RULE.schema, tier: 'fast' });
+        // A data-store run reads no list and has no HTML field.
+        expect([shown['listForm'], shown['judgesHtml']]).toEqual([null, false]);
         expect(shown['judgeRuleHash']).toBe(bulkLedger.getJudgeRuleForOwner(id)!.hash);
         expect(typeof shown['judgeModel']).toBe('string');
         // Who judges, as the start names it: the provider whose decided model this is, and the
@@ -16648,12 +17014,12 @@ describe('LynoxHTTPApi', () => {
 
       const token = parsedUrl.searchParams.get('token');
       expect(token, 'no token — the control plane answers missing_token').toBeTruthy();
-      const parsed = parseBrokerStartToken(token!);
+      const parsed = parseBrokerStartTokenV2(token!);
       expect(parsed, 'token does not even parse as the contract framing').not.toBeNull();
 
       const key = createHmac('sha256', TEST_SECRET).update('lynox-broker-start-v1').digest();
       const expected = createHmac('sha256', key)
-        .update(`v1.inst-42.${parsed!.ts}.${parsed!.nonce}`)
+        .update(`v2.google.inst-42.${parsed!.ts}.${parsed!.nonce}`)
         .digest('hex');
       expect(parsed!.sig, 'signed with the wrong key or over the wrong bytes').toBe(expected);
     });
@@ -16661,7 +17027,7 @@ describe('LynoxHTTPApi', () => {
     it('mints a fresh nonce per call — the control plane consumes each one', async () => {
       const nonceOf = async () => {
         const { url } = await (await jsonFetch('/api/google/oauth-url')).json() as { url: string };
-        return parseBrokerStartToken(new URL(url).searchParams.get('token')!)?.nonce;
+        return parseBrokerStartTokenV2(new URL(url).searchParams.get('token')!)?.nonce;
       };
       expect(await nonceOf()).not.toBe(await nonceOf());
     });
@@ -18072,6 +18438,7 @@ describe('POST /api/push/subscribe', () => {
 // channel's rules (who it reaches, the end, the caps) are its own tests; here the routes hand it
 // the request's principal and refuse what is not the mandate's. The owner is the control.
 describe('push routes and a mandate\'s session', () => {
+  liveMandateEnds();
   const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'eva@example.invalid', mandateId: 'TEST-MANDATE-1' };
   const sub = (endpoint: string) => ({ subscription: { endpoint, keys: { p256dh: 'p', auth: 'a' } } });
   const rateCounts = (): Map<string, { count: number }> =>
@@ -20077,7 +20444,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     mockSecretSet.mockReset();
   });
 
-  async function arrange(opts: { base?: string; oauthExtra?: Record<string, unknown>; tokenBody?: string; by?: import('../core/oauth-state-cookie.js').ConnectingPrincipal } = {}): Promise<{ cookie: string; store: InstanceType<Awaited<typeof import('../core/api-store.js')>['ApiStore']> }> {
+  async function arrange(opts: { base?: string; oauthExtra?: Record<string, unknown>; tokenBody?: string; by?: import('../core/oauth-state-cookie.js').ConnectingPrincipal; asked?: string[]; consent?: string } = {}): Promise<{ cookie: string; store: InstanceType<Awaited<typeof import('../core/api-store.js')>['ApiStore']> }> {
     const { ApiStore } = await import('../core/api-store.js');
     const store = new ApiStore();
     expect(store.register({
@@ -20095,7 +20462,11 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     mockExchangeToken.mockReset();
     mockExchangeToken.mockResolvedValue({ ok: true, status: 200, responseOk: true, text: opts.tokenBody ?? JSON.stringify({ access_token: 'at-1', scope: 'read_products,read_orders' }) });
     const { signProfileOAuthState } = await import('../core/oauth-state-cookie.js');
-    const cookie = signProfileOAuthState({ state: STATE, profileId: PROFILE, verifier: VERIFIER, by: opts.by ?? { tag: 'owner' } }, TEST_SECRET, Math.floor(Date.now() / 1000));
+    // What the confirmed start signs: the scopes its link asks for, as the route computes them.
+    const { askedScopes } = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
+    const scope = opts.oauthExtra?.['scope'];
+    const asked = opts.asked ?? askedScopes({ preset_id: 'shopify', scope: typeof scope === 'string' ? scope : undefined }) ?? [];
+    const cookie = signProfileOAuthState({ state: STATE, profileId: PROFILE, verifier: VERIFIER, by: opts.by ?? { tag: 'owner' }, asked, consent: opts.consent }, TEST_SECRET, Math.floor(Date.now() / 1000));
     if (cookie === null) throw new Error('fixture could not be signed');
     return { cookie: `lynox_profile_oauth_state=${encodeURIComponent(cookie)}`, store };
   }
@@ -20275,6 +20646,41 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products', 'write_products']);
   });
 
+  // What counts as asked is what the confirmed start signed. A save between the start and the
+  // callback that adds a scope changes the next link, not this consent: the grant does not record
+  // it as asked, and the page names it as granted beyond the ask.
+  it('records as asked what the start signed, not the profile as the callback reads it', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const { cookie, store } = await arrange({ oauthExtra: { scope: 'read_products' }, asked: ['read_products'], tokenBody: JSON.stringify({ access_token: 'at-1', scope: 'read_products,write_files' }) });
+    const before = store.get(PROFILE)!;
+    expect(store.register({ ...before, auth: { ...before.auth!, oauth: { ...before.auth!.oauth!, scope: 'read_products write_files' } } })).toBe(true);
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('The provider granted more access than this connection asks for: write_files.');
+    expect(store.get(PROFILE)?.oauth_grant?.asked_scope).toEqual(['read_products']);
+    expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products', 'write_files']);
+  });
+
+  // Which customer text the person confirmed is what the confirmed start signed: recorded with its
+  // time, and a start whose page showed no text records none.
+  it('records the version of the customer text the start signed', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const shown = await arrange({ consent: '0123456789abcdef' });
+    const before = Date.now();
+    expect((await call(signed(good()), shown.cookie)).status).toBe(200);
+    const grant = shown.store.get(PROFILE)?.oauth_grant;
+    expect(grant?.consent_version).toBe('0123456789abcdef');
+    expect(Date.parse(grant?.consented_at ?? '')).toBeGreaterThanOrEqual(before - 1000);
+  });
+
+  it('records no version for a start whose page showed no text', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const none = await arrange();
+    expect((await call(signed(good()), none.cookie)).status).toBe(200);
+    expect(none.store.get(PROFILE)?.oauth_grant?.consent_version).toBeUndefined();
+    expect(none.store.get(PROFILE)?.oauth_grant?.consented_at).toBeUndefined();
+  });
+
   it('says only "Connected" for a grant narrower than the ask, and records it as granted', async () => {
     repayRateWindow(); // this file shares one per-IP rate window
     const { cookie, store } = await arrange({ oauthExtra: { scope: 'read_products read_orders' }, tokenBody: JSON.stringify({ access_token: 'at-1', scope: 'read_products' }) });
@@ -20359,6 +20765,22 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
       });
     });
     afterEach(() => { engineRef()['getMandateEnds'] = origEnds; engineRef()['getSecretReleases'] = origReleases; });
+
+    // Only the owner's yes counts: a mandate's reconnect records no version, drops the owner's it
+    // replaced, and a run of a new form stays held while a run of the old one writes.
+    it('records no version for a mandate\'s reconnect, and drops the owner\'s it replaced', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID }, consent: '0123456789abcdef' });
+      store.register({ ...store.get(PROFILE)!, created_by: TAG, oauth_grant: { origin: 'callback', consent_version: '0123456789abcdef', consented_at: '2026-11-27T10:00:00.000Z' } });
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      const grant = store.get(PROFILE)?.oauth_grant;
+      expect(grant).toMatchObject({ connected_by: TAG, connected_mandate_id: MID });
+      expect(grant?.consent_version).toBeUndefined();
+      expect(grant?.consented_at).toBeUndefined();
+      const { shopifyConsentBlock } = await import('../core/bulk-shopify.js');
+      expect(shopifyConsentBlock({ form: 'shopify_product', writes: [{ after: { descriptionHtml: '<p>a</p>' } }] }, grant)).toEqual(['descriptionHtml']);
+      expect(shopifyConsentBlock({ form: 'shopify_product', writes: [{ after: { seo_title: 'a' } }] }, grant)).toEqual([]);
+    });
 
     it('control: stores the token for a mandate when the profile still names the store', async () => {
       repayRateWindow(); // this file shares one per-IP rate window
@@ -21640,6 +22062,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       origin: 'callback', state: 'revoked', revoked_fp: 'dead-fp', revoked_at: '2026-01-01T00:00:00.000Z',
       minted_by: 'old-client-fp', minted_for: 'old-token-fp', connected_by: 'mandate:eva@kanzlei.example',
       connected_mandate_id: 'm-old', a_future_field: 'from the old grant',
+      consent_version: '0123456789abcdef', consented_at: '2026-01-01T00:00:00.000Z',
     } as import('../core/api-store.js').OAuthGrantRecord;
     const { cookie, store } = await arrange({ grant: old });
 
@@ -21649,7 +22072,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     expect(res.status).toBe(200);
 
     const grant = store.get(PROFILE)?.oauth_grant ?? {};
-    expect(Object.keys(grant).sort()).toEqual(['connected_by', 'minted_by', 'minted_for', 'origin', 'state', 'written']);
+    expect(Object.keys(grant).sort()).toEqual(['asked_scope', 'connected_by', 'minted_by', 'minted_for', 'origin', 'state', 'written']);
     expect(grant).toMatchObject({ origin: 'callback', state: 'connected', connected_by: 'owner' });
   });
 });
@@ -21681,6 +22104,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
   }
 
   describe('as a mandate', () => {
+    liveMandateEnds();
     beforeEach(() => {
       asMandate();
       mockTaskCreate.mockClear(); mockTaskCreatePipeline.mockClear(); mockSetWorkflowConfirmedAt.mockClear();
@@ -21714,13 +22138,13 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
     });
 
     it('may not confirm a schedule', async () => {
-      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' });
+      const res = await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST' });
       expect(res.status).toBe(403);
       expect(((await res.json()) as { error: string }).error).toContain('Only the owner');
       expect(mockConfirmTrigger).not.toHaveBeenCalled();
     });
 
-    it.each(['approve', 'resume', 'confirm-probe', 'undo'])('may not %s a bulk run', async (verb) => {
+    it.each(['approve', 'resume', 'confirm-probe', 'undo', 'discard'])('may not %s a bulk run', async (verb) => {
       const res = await jsonFetch(`/api/bulk/runs/run-1/${verb}`, { method: 'POST', body: '{}' });
       expect(res.status).toBe(403);
       expect(((await res.json()) as { error: string }).error).toContain('Only the owner');
@@ -22093,7 +22517,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
     });
 
     it('confirms a schedule, recorded as the owner, and its changes leave no mark', async () => {
-      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') })).status).toBe(200);
+      expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') })).status).toBe(200);
       expect(mockConfirmTrigger).toHaveBeenCalledWith('task-1', undefined, 'owner', undefined);
       await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ title: 'new' }) });
       expect(mockTaskMarkEditedBy).not.toHaveBeenCalled();
@@ -22128,7 +22552,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
 
         // A connection added since the preview: the digest no longer matches, nothing is stamped.
         profiles = [crm, { ...crm, id: 'crm2-api', name: 'CRM 2', oauth_grant: { ...crm.oauth_grant, grant_id: 'grant-2' } }];
-        const stale = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) });
+        const stale = await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) });
         expect(stale.status).toBe(409);
         // The one 409 that asks for another look carries its own code; the view reloads only on it.
         expect(((await stale.json()) as { code?: unknown }).code).toBe('changed');
@@ -22138,22 +22562,22 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         // confirms it.
         profiles = [crm];
         trigger.title = 'Report, then mail every customer';
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(409);
+        expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(409);
         // A digest shown for another schedule of the same mandate does not confirm this one.
         const other = { ...trigger, id: 'task-2' };
         ref['getRunHistory'] = () => ({ getTrigger: (id: string) => (id === 'task-1' ? trigger : id === 'task-2' ? other : undefined) });
         const otherShown = await (await jsonFetch('/api/tasks/task-2/stamp-preview')).json() as { expect: string };
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: otherShown.expect }) })).status).toBe(409);
+        expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: otherShown.expect }) })).status).toBe(409);
         expect(mockConfirmTrigger).not.toHaveBeenCalled();
         const again = await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json() as { expect: string };
 
         // The list it showed, on the schedule it showed: stamped with it.
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: again.expect }) })).status).toBe(200);
+        expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: again.expect }) })).status).toBe(200);
         expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', { wf: null, entries: [expect.objectContaining({ profile: 'crm-api', grant: 'grant-secret-1' })] });
 
         // Without the digest: nothing is stamped, not even without a list.
         mockConfirmTrigger.mockClear();
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(400);
+        expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(400);
         expect(mockConfirmTrigger).not.toHaveBeenCalled();
 
         // A mandate's backup or notice never uses a connection: nothing is listed or shown for it.
@@ -22161,7 +22585,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
           Object.assign(trigger, { effect });
           const none = await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json() as { expect: string; connections: unknown[]; by: unknown };
           expect([none.connections, none.by]).toEqual([[], null]);
-          expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: none.expect }) })).status).toBe(200);
+          expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: none.expect }) })).status).toBe(200);
           expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', undefined);
         }
         Object.assign(trigger, { effect: 'run_agent' });
@@ -22170,7 +22594,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         Object.assign(trigger, { created_by: 'owner', created_mandate_id: undefined });
         const own = await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json() as { expect: string; connections: unknown[] };
         expect(own.connections).toEqual([]);
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: own.expect }) })).status).toBe(200);
+        expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: own.expect }) })).status).toBe(200);
         expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', undefined);
       } finally {
         ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
@@ -22207,14 +22631,14 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         // The workflow was confirmed again since the preview: the list shown went with the
         // earlier confirmation, so it does not confirm this one.
         mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W', confirmedAt: '2026-10-09T00:00:00.000Z' } : undefined));
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(409);
+        expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(409);
         mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W', confirmedAt: WF } : undefined));
         // The schedule changes while the confirm looks the list up: the read after it decides.
         editAfter = reads + 1;
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(409);
+        expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(409);
         expect(mockConfirmTrigger).not.toHaveBeenCalled();
         editAfter = Infinity;
-        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(200);
+        expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(200);
         expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', { wf: WF, entries: [expect.objectContaining({ profile: 'crm-api', grant: 'grant-1' })] });
         // A workflow nobody confirmed: the preview says so, and the view offers no confirm (a
         // confirmed schedule on it is switched off by its first run).
@@ -22229,7 +22653,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
     it('confirming a workflow schedule never stamps the workflow, which every schedule naming it shares', async () => {
       mockConfirmTrigger.mockReturnValueOnce({ id: 'task-1', effect: 'run_workflow', pipeline_id: 'wf-sched', confirmed_at: '2026-10-08T00:00:00.000Z' });
       storeWf(); // an unstamped workflow
-      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') })).status).toBe(200);
+      expect((await ownerSessionFetch('/api/tasks/task-1/confirm', { method: 'POST', body: await confirmBody('task-1') })).status).toBe(200);
       expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
     });
 
@@ -22269,6 +22693,7 @@ describe('mayStopRun — who may stop a run (§3.13 E7)', () => {
 // after, joined by one correlation id; a request whose attempt cannot be written is refused
 // and does not act. The owner leaves no trail here. The rows are read from a real engine.db.
 describe('actor trail — what a mandate\'s request leaves in audit_log', () => {
+  liveMandateEnds();
   const MANDATE: RequestPrincipal = {
     kind: 'mandate', email: 'recipient@example.invalid', display: 'TEST-DISPLAY', mandateId: 'TEST-MANDATE-1',
   };
@@ -22518,9 +22943,9 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
 
   describe('DELETE /api/workflows/:id', () => {
     // Owner-only: deleting a workflow silences every schedule that runs it. The stance refuses a
-    // mandate before dispatch reaches the trail writer, so it leaves no row: nothing was
-    // attempted. The day the route opens, the dispatcher records it like every other change.
-    it('refuses a mandate before anything runs: nothing deleted, no row', async () => {
+    // mandate before dispatch reaches the change's trail writer, so no attempt row: nothing was
+    // attempted. The refusal itself is one `refused` row, so the owner sees what was tried.
+    it('refuses a mandate before anything runs: nothing deleted, one refused row', async () => {
       const deletePlannedPipeline = vi.fn().mockReturnValue(true);
       await withEngine({ getRunHistory: () => ({ deletePlannedPipeline }) }, async () => {
         asMandate();
@@ -22529,7 +22954,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
         expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can delete a workflow.');
       });
       expect(deletePlannedPipeline).not.toHaveBeenCalled();
-      expect(rows()).toEqual([]);
+      expect(rows().map((r) => [r.action, r.target, r.phase])).toEqual([['DELETE /api/workflows/:id', '/api/workflows/wf-1', 'refused']]);
     });
   });
 
@@ -22623,6 +23048,25 @@ describe('mandate stance of every user route', () => {
 
   it('allows `reads` only on a GET', () => {
     expect(users().filter(r => r.stance?.kind === 'reads' && r.method !== 'GET').map(name)).toEqual([]);
+  });
+
+  // The customer texts of the Shopify and bexio presets say a bulk run writes without asking at each
+  // change only after the OWNER confirmed its list. Every route that releases a run's writes —
+  // approving it, confirming its probe, resuming it, planning its undo, whose approval is the same
+  // approve route — and every route that changes the list it confirms (taking a target out or
+  // putting it back) refuses everyone else. A new writing bulk route joins the set by its path.
+  it('lets only the owner release the writes of a bulk run, its undo included', () => {
+    const writing = users().filter(r => WRITE.has(r.method) && r.path.startsWith('/api/bulk/'));
+    expect(writing.map(name).sort()).toEqual([
+      'POST /api/bulk/runs/stance-probe/approve',
+      'POST /api/bulk/runs/stance-probe/confirm-probe',
+      'POST /api/bulk/runs/stance-probe/discard',
+      'POST /api/bulk/runs/stance-probe/resume',
+      'POST /api/bulk/runs/stance-probe/targets/stance-probe/deselect',
+      'POST /api/bulk/runs/stance-probe/targets/stance-probe/reselect',
+      'POST /api/bulk/runs/stance-probe/undo',
+    ]);
+    expect(writing.filter(r => r.stance?.kind !== 'owner-only').map(name), 'Zustimmungstext Absatz 2: nur der Inhaber gibt einen Massenlauf frei').toEqual([]);
   });
 
   // Register 1112: a GET about one chat (by its id, a live run's or a recorded run's) names the chat,
@@ -22730,7 +23174,7 @@ describe('mandate stance of every user route', () => {
   });
 
   describe('owner-only is applied, not only declared', () => {
-    const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+    const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid', mandateId: 'TEST-MANDATE-1' };
     const rateCounts = (): Map<string, { count: number }> =>
       (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
     let windowBefore = new Map<string, number>();
@@ -22758,7 +23202,7 @@ describe('mandate stance of every user route', () => {
 
     it('refuses a mandate at an owner-only GET when it comes as HEAD, which runs the GET handler', async () => {
       const closed = users().filter(r => r.method === 'GET' && r.stance?.kind === 'owner-only');
-      expect(closed.map(name).sort()).toEqual(['GET /api/access-trail', 'GET /api/api-profiles/stance-probe/client', 'GET /api/connections/records', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview', 'GET /api/triggers/stance-probe/takeover-preview', 'GET /api/workflows/stance-probe/stamp-preview']);
+      expect(closed.map(name).sort()).toEqual(['GET /api/access-trail', 'GET /api/api-profiles/stance-probe/client', 'GET /api/connections/records', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview', 'GET /api/triggers/stance-probe/confirm-recipients-preview', 'GET /api/triggers/stance-probe/takeover-preview', 'GET /api/workflows/stance-probe/stamp-preview']);
       api.setPrincipalResolverForTesting(() => MANDATE);
       for (const r of closed) {
         const res = await jsonFetch(concrete(r.path), { method: 'HEAD' });
@@ -22779,7 +23223,7 @@ describe('mandate stance of every user route', () => {
 });
 
 describe('PUT /api/secrets/:name and a mandate', () => {
-  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid', mandateId: 'TEST-MANDATE-1' };
   afterEach(() => { api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL); });
 
   async function put(principal: RequestPrincipal, slot: string): Promise<{ status: number; set: ReturnType<typeof vi.fn> }> {
@@ -22823,11 +23267,12 @@ describe('PUT /api/secrets/:name and a mandate', () => {
 
 
 describe('a mandate and a to-do', () => {
+  liveMandateEnds();
   // A to-do records who created it; a mandate changes only its own, a rule TaskManager checks
   // on the row it resolves (the witnesses over real stores are in 'a mandate's own to-dos over
   // the task routes'). Here: the routes hand TaskManager the principal and answer its refusal.
   // A trigger is marked.
-  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid', mandateId: 'TEST-MANDATE-1' };
   afterEach(() => {
     api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
     mockTaskMarkEditedBy.mockReturnValue(true);
@@ -22907,7 +23352,8 @@ describe('a mandate and a to-do', () => {
 // stores (history.db with every migration, the engine.db mirror, the audit log), once with the
 // to-do reads on history.db and once on engine.db.
 describe.each([false, true])('a mandate\'s own to-dos over the task routes (subject graph %s)', (graph) => {
-  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+  liveMandateEnds();
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid', mandateId: 'TEST-MANDATE-1' };
   const M = 'mandate:recipient@example.invalid';
   const rateCounts = (): Map<string, { count: number }> =>
     (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
@@ -23042,10 +23488,99 @@ describe.each([false, true])('a mandate\'s own to-dos over the task routes (subj
   });
 });
 
+// Whose words a trigger's instruction is: the owner's token writes it, but the owner did not
+// type it (the line `typed` draws on a run). Over real stores, so the rule reads stored rows.
+describe('an instruction the owner\'s token wrote does not count as the owner\'s', () => {
+  const rateCounts = (): Map<string, { count: number }> =>
+    (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+  let windowBefore = new Map<string, number>();
+  let dir = '';
+  let history: RunHistory;
+  let edb: EngineDb;
+  let tm: TaskManager;
+  let restore: Array<() => void> = [];
+  const swap = (key: string, value: unknown): void => {
+    const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+    const orig = ref[key]; ref[key] = value; restore.push(() => { ref[key] = orig; });
+  };
+  const ownerSession = (): Record<string, string> => ({
+    cookie: `lynox_session=${webUiLoginSession(TEST_SECRET, null)!.token}`,
+    'Content-Type': 'application/json', 'sec-fetch-site': 'same-origin',
+  });
+  const create = async (headers: Record<string, string>): Promise<string> => {
+    const res = await fetch(`${baseUrl}/api/tasks`, {
+      method: 'POST', headers, body: JSON.stringify({ title: 'Weekly report', description: 'send it to anna@firma.example', scheduleCron: '0 9 * * 1' }),
+    });
+    expect(res.status).toBe(201);
+    return ((await res.json()) as { id: string }).id;
+  };
+  const counts = (id: string): boolean => ownerInstructionCounts(tm.getTrigger(id)!);
+
+  beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-token-words-'));
+    history = new RunHistory(join(dir, 'history.db'));
+    edb = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(edb, true);
+    tm = new TaskManager(history);
+    swap('getRunHistory', () => history);
+    swap('getTaskManager', () => tm);
+  });
+  afterEach(() => {
+    for (const r of restore.reverse()) r();
+    restore = [];
+    api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+    for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0;
+    edb.close();
+    history.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('a trigger the owner\'s token creates does not count, and is stamped all the same', async () => {
+    const id = await create({ ...authHeaders(), 'Content-Type': 'application/json' });
+    expect(counts(id)).toBe(false);
+    expect(tm.getTrigger(id)!.confirmed_at).toBeTruthy();
+  });
+
+  it('control: a trigger the owner\'s browser session creates counts', async () => {
+    const id = await create(ownerSession());
+    expect(counts(id)).toBe(true);
+  });
+
+  it('the owner\'s token rewriting the description of the owner\'s trigger makes it not count', async () => {
+    const id = await create(ownerSession());
+    const res = await jsonFetch(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify({ description: 'send it to x@other.example' }) });
+    expect(res.status).toBe(200);
+    expect(counts(id)).toBe(false);
+  });
+
+  it('control: the owner\'s token changing only the schedule leaves it counting', async () => {
+    const id = await create(ownerSession());
+    const res = await jsonFetch(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify({ scheduleCron: '0 10 * * 1' }) });
+    expect(res.status).toBe(200);
+    expect(tm.getTrigger(id)!.schedule_cron).toBe('0 10 * * 1');
+    expect(counts(id)).toBe(true);
+  });
+
+  it('the owner\'s token renaming a workflow\'s schedule leaves it unmarked, as at its creation', async () => {
+    const id = await create(ownerSession());
+    // Only the trigger's workflow link matters here, not the workflow, so its key check is off for this one write.
+    edb.getDb().pragma('foreign_keys = OFF');
+    edb.getDb().prepare('UPDATE triggers SET target_workflow_id = ? WHERE id = ?').run('wf-1', id);
+    edb.getDb().pragma('foreign_keys = ON');
+    expect(tm.getTrigger(id)!.pipeline_id, 'positive control: a workflow\'s schedule').toBe('wf-1');
+    const res = await jsonFetch(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify({ title: 'Weekly report, renamed' }) });
+    expect(res.status).toBe(200);
+    expect(tm.getTrigger(id)!.title).toBe('Weekly report, renamed');
+    expect(tm.getTrigger(id)!.created_untrusted ?? null).toBeNull();
+  });
+});
+
 describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9, B6)', () => {
+  liveMandateEnds();
   // Real stores over a real history.db (every migration, v57 included); only the session
   // objects are mocks, each told who ran in it last.
-  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid', mandateId: 'TEST-MANDATE-1' };
   const M = 'mandate:recipient@example.invalid';
   const OWN = '11111111-1111-4111-8111-111111111111';
   const FOREIGN = '22222222-2222-4222-8222-222222222222';
@@ -23428,6 +23963,44 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
     });
   });
 
+  // The Web UI's migration done step names the target's support whatever the source runs as. That holds
+  // because a target takes a migration only with a tier set: every import route turns it down otherwise,
+  // on the same switch the refusals name their way out by. A route that took one without would leave the
+  // done step naming the wrong way out.
+  it('takes a migration in only where the refusals name support as the way out', async () => {
+    const routes = [
+      ['GET', '/api/migration/handshake'], ['POST', '/api/migration/handshake'], ['POST', '/api/migration/manifest'],
+      ['POST', '/api/migration/chunk'], ['POST', '/api/migration/restore'],
+    ] as const;
+    // As a source sends it: the target's migration token, nothing else.
+    const TOKEN = 'a'.repeat(64);
+    const refused = async (method: string, path: string): Promise<boolean> => {
+      const res = await fetch(`${baseUrl}${path}`, {
+        method, headers: { 'x-migration-token': TOKEN, 'Content-Type': 'application/json' }, ...(method === 'POST' ? { body: '{}' } : {}),
+      });
+      const body = (await res.json().catch(() => ({}))) as { error?: unknown };
+      // Past the token check in every case, so the route itself decides.
+      expect(body.error, `${method} ${path}`).not.toMatch(/migration token/i);
+      return res.status === 404 && body.error === 'Migration import only available on managed instances';
+    };
+    const cases = [
+      ['no tier', {}],
+      ['a canonical tier', { LYNOX_BILLING_TIER: 'managed' }],
+      ['a tier that does not normalize', { LYNOX_BILLING_TIER: 'gold' }],
+      ['the legacy alias behind an empty canonical name', { LYNOX_BILLING_TIER: '', LYNOX_MANAGED_MODE: 'eu' }],
+    ] as const;
+    for (const [label, env] of cases) {
+      await withEnv({ ...SELF_HOSTED, LYNOX_MIGRATION_TOKEN: TOKEN, LYNOX_VAULT_KEY: undefined, ...env }, async () => {
+        const supportNamed = billingTierSet();
+        // Control: both sides of the switch occur in the table.
+        expect(supportNamed, label).toBe(label !== 'no tier');
+        for (const [method, path] of routes) {
+          expect(await refused(method, path), `${label}: ${method} ${path}`).toBe(!supportNamed);
+        }
+      });
+    }
+  });
+
   it('on a self-hosted instance with two secrets, the admin bearer keeps the user routes', async () => {
     await withEnv(SELF_HOSTED, async () => {
       expect((await as(ADMIN, USER_ROUTE)).status).toBe(200);
@@ -23468,6 +24041,26 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
       expect(res.status).toBe(503);
       expect(((await res.json()) as { error: string }).error).toBe('Migration not available — missing vault key');
     });
+  });
+
+  it('refuses a second handshake while a migration session runs, with a code the source tells apart', async () => {
+    const token = randomBytes(32).toString('hex');
+    const holder = api as unknown as { _migrationImporter: { cleanup(): void } | null };
+    try {
+    await withEnv({ ...MANAGED, LYNOX_MIGRATION_TOKEN: token, LYNOX_VAULT_KEY: 'a-vault-key-for-the-session-code-test' }, async () => {
+      const first = await fetch(`${baseUrl}/api/migration/handshake`, { headers: { 'x-migration-token': token } });
+      expect(first.status).toBe(200);
+      const second = await fetch(`${baseUrl}/api/migration/handshake`, { headers: { 'x-migration-token': token } });
+      expect(second.status).toBe(400);
+      const body = (await second.json()) as { error: string; code?: string };
+      expect(body.code).toBe('migration_session_active');
+      expect(body.error.startsWith('Migration session already active')).toBe(true);
+    });
+    } finally {
+      // Leave no session behind for the tests after this one, also when an assertion fails.
+      holder._migrationImporter?.cleanup();
+      holder._migrationImporter = null;
+    }
   });
 
   it('with no secret at all, a local request is admin, on a managed instance too', async () => {
@@ -23750,7 +24343,7 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
         const origEnds = engine['getMandateEnds'];
         engine['getAuditLog'] = () => null;
         // A store that takes the empty list, so the route answers 200 when it runs at all.
-        engine['getMandateEnds'] = () => ({ revoke: () => false });
+        engine['getMandateEnds'] = () => ({ revoke: () => false, isLive: () => true });
         const revoke = (): Promise<Response> => as(ADMIN, '/api/admin/mandates/revoke', { method: 'POST', body: JSON.stringify({ revoked_mandate_ids: [] }) }, freshBase);
         try {
           await withEnv(MANAGED, async () => {
@@ -24604,7 +25197,7 @@ describe('PUT /api/secrets/:name and a built-in provider\'s client secret', () =
 });
 
 describe('the connection form of a built-in provider (/api/api-profiles/:id/client)', () => {
-  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid', mandateId: 'TEST-MANDATE-1' };
   const SHOP = {
     id: 'shop-admin', name: 'Shop', base_url: 'https://acme.myshopify.com/admin/api/2026-04', description: 'd',
     auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' } },
