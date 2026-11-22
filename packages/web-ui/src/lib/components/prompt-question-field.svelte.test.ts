@@ -156,12 +156,23 @@ describe('a confirmation\'s question field at little height', () => {
 		expect(readMore()).toBeNull();
 	});
 
-	it('scrolls on by the field\'s height when the hint is clicked', async () => {
+	it('scrolls on by the field\'s height less one line when the hint is clicked', async () => {
 		await show('⚠ Command: delete files (cannot be undone) — "', fourteen);
 		let by: ScrollToOptions | undefined;
 		field().scrollBy = ((o: ScrollToOptions) => { by = o; }) as HTMLElement['scrollBy'];
 		readMore()!.click();
-		expect(by?.top).toBe(fieldHeights.client);
+		// The line cut at the edge stands whole at the top afterwards.
+		expect(by?.top).toBe(fieldHeights.client - LINE);
+	});
+
+	it('puts the hint on its own row under the field, where it covers no line', async () => {
+		await show('⚠ Command: delete files (cannot be undone) — "', fourteen);
+		const wrapper = field().parentElement!;
+		expect(wrapper.contains(readMore())).toBe(false);
+		expect(wrapper.compareDocumentPosition(readMore()!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		expect(readMore()!.className).not.toMatch(/\babsolute\b/);
+		// The fade stays on the field.
+		expect(wrapper.querySelector('[data-prompt-fade]')).not.toBeNull();
 	});
 
 	it('shows a short value in the head as a value, not merged into the frame', async () => {

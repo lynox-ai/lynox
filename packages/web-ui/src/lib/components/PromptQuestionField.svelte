@@ -58,13 +58,19 @@
 		};
 	});
 
+	/** On by the field's height less one line: the line cut at the edge stands whole at the top after. */
 	function readOn(): void {
-		field?.scrollBy({ top: field.clientHeight, behavior: scrollBehaviorForMotion(prefersReducedMotion()) });
+		const el = field;
+		if (!el) return;
+		const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 22;
+		el.scrollBy({ top: Math.max(lineHeight, el.clientHeight - lineHeight), behavior: scrollBehaviorForMotion(prefersReducedMotion()) });
 	}
 </script>
 
 <!-- The question opens with its head, which never scrolls; below it the value's lines scroll in
-     their own field. While lines lie below the field's edge, a fade and a button say how many. -->
+     their own field. While lines lie below the field's edge, a fade on the field and a button on its
+     own row under it say how many; the button never covers a line, so the end of a command stays
+     readable. -->
 <div data-prompt-question class="flex min-h-0 min-w-0 flex-1 flex-col text-sm text-text-muted font-sans leading-relaxed">
 	{#if head.length > 0}
 		<div data-prompt-head class="shrink-0 whitespace-pre-wrap [overflow-wrap:anywhere]">{#each head as seg, i (i)}{#if seg.kind === 'value'}<span data-prompt-value class="text-text">{seg.text}</span>{:else}{seg.text}{/if}{/each}</div>
@@ -73,7 +79,11 @@
 		<pre data-prompt-field bind:this={field} onscroll={schedule} class="min-h-0 flex-1 max-h-64 overflow-y-auto scrollbar-thin whitespace-pre-wrap font-sans [overflow-wrap:anywhere]">{#each lines as line, i (i)}<span data-prompt-line class="block min-h-[1lh]">{line}</span>{/each}</pre>
 		{#if below > 0}
 			<div data-prompt-fade class="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-bg-subtle to-transparent"></div>
-			<button data-prompt-read-more type="button" onclick={readOn} class="absolute bottom-0 right-0 whitespace-nowrap rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-xs text-text-muted hover:text-text">{label} <span aria-hidden="true">↓</span></button>
 		{/if}
 	</div>
+	{#if below > 0}
+		<div class="flex shrink-0 justify-end pt-1">
+			<button data-prompt-read-more type="button" onclick={readOn} class="whitespace-nowrap rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-xs text-text-muted hover:text-text">{label} <span aria-hidden="true">↓</span></button>
+		</div>
+	{/if}
 </div>
