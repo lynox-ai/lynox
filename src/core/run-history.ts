@@ -1651,6 +1651,30 @@ const MIGRATIONS: string[] = [
   // NULL means unknown: it is never read as the owner's. No backfill.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (73);
    ALTER TABLE thread_messages ADD COLUMN author TEXT;`,
+  // v74: two facts about a thread that a check before a send reads.
+  // `thread_typed_text`: the words a person typed into a turn, apart from what the route put
+  // around them in the same message (a loaded mail or run as context, an uploaded file). Keyed
+  // by the message's seq, written in the transaction that writes the message; only a route that
+  // knows where the typed words end writes one. A turn without a row has no typed words anyone
+  // can rely on, and reads as none. `principal` is the author tag of the run that wrote them;
+  // only rows whose principal is the owner are read as the owner's words.
+  // `thread_read_outside`: the thread's conversation has taken in content from outside (the
+  // agent's sticky latch). Only ever inserted, never deleted except with its thread, and
+  // written in the transaction of the message that carries what was read, so a resume after a
+  // compaction that summarized the read away still knows it. Tables, not columns: the
+  // statements can run again on a database that has them.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (74);
+   CREATE TABLE IF NOT EXISTS thread_typed_text (
+     thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+     seq INTEGER NOT NULL,
+     text TEXT NOT NULL,
+     principal TEXT,
+     PRIMARY KEY (thread_id, seq)
+   );
+   CREATE TABLE IF NOT EXISTS thread_read_outside (
+     thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+     at TEXT NOT NULL DEFAULT (datetime('now'))
+   );`,
 ];
 
 /** What {@link RunHistory.readWorkflowGrant} found for a grant id. */
@@ -3606,6 +3630,16 @@ export class RunHistory {
    *  the owner's (TriggerStore.markEditedBy). Call BEFORE the change. */
   markTriggerEditedBy(id: string, editor: RequestPrincipal, clearStamp: boolean): boolean {
     return this._requireTriggerStore().markEditedBy(id, editor, clearStamp);
+  }
+
+  /** See `TriggerStore.confirmOwnerCreator`. */
+  confirmTriggerRecipients(id: string, expect: string): import('./recipient-confirm.js').RecipientConfirmOutcome {
+    return this._requireTriggerStore().confirmOwnerCreator(id, expect);
+  }
+
+  /** See `TriggerStore.markEditedByRun`. */
+  markTriggerEditedByRun(id: string, runTag: string): boolean {
+    return this._requireTriggerStore().markEditedByRun(id, runTag);
   }
 
 
