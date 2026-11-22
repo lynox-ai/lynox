@@ -522,16 +522,24 @@ describe('ChatView wiring', () => {
 		const origin = svelteNodes(ast).filter((n) => n.type === 'SnippetBlock' && code(source, n['expression']) === 'promptOrigin');
 		expect(origin).toHaveLength(1);
 		expect(svelteNodes(origin[0]!['body']).filter((n) => /^(HtmlTag|RenderTag|Component|Svelte|UseDirective|AttachTag)/.test(n.type))).toEqual([]);
-		// Outside the card, the prompt's question is never markup either.
-		expect(svelteNodes(ast).filter((n) => n.type === 'HtmlTag' && code(source, n).includes('pendingPermission'))).toEqual(html);
+		// Nowhere else in the view is there markup but the chat error's own links: a
+		// second card under another condition cannot render the question.
+		const allHtml = svelteNodes(ast).filter((n) => n.type === 'HtmlTag');
+		expect(allHtml).toHaveLength(2);
+		expect(allHtml.filter((n) => n !== html[0]).map((n) => code(source, n['expression']).slice(0, 18))).toEqual(['chatError.replace(']);
 
 		// The field: plain elements and text, and a script that only measures and scrolls.
 		const fieldSource = readFileSync(new URL('../components/PromptQuestionField.svelte', import.meta.url), 'utf-8');
 		const field = parse(fieldSource, { modern: true });
 		const inField = svelteNodes(field);
 		expect(inField.filter((n) => /^(HtmlTag|RenderTag|Component|Svelte|UseDirective|AttachTag|ImportExpression)/.test(n.type))).toEqual([]);
-		expect([...new Set(inField.filter((n) => n.type === 'RegularElement').map((n) => n['name']))].sort()).toEqual(['button', 'div', 'pre', 'span']);
-		expect(inField.filter((n) => n.type === 'BindDirective').map((n) => n['name'])).toEqual(['this']);
+		// Its markup as a whole, classes aside: every line and the head shown as text, none
+		// hidden or left out, no further element or attribute. A change here is a change to
+		// the boundary and is made on purpose, by updating this line.
+		const markup = (field.fragment.nodes as SvelteNode[])
+			.filter((n) => n.type !== 'Comment' && !(n.type === 'Text' && !String(n['data']).trim()))
+			.map((n) => code(fieldSource, n).replace(/class='[^']*'/g, '')).join('');
+		expect(markup).toBe("<divdata-prompt-question>{#ifhead.length>0}<divdata-prompt-head>{#eachheadasseg,i(i)}{#ifseg.kind==='value'}<spandata-prompt-value>{seg.text}</span>{:else}{seg.text}{/if}{/each}</div>{/if}<div><predata-prompt-fieldbind:this={field}onscroll={schedule}>{#eachlinesasline,i(i)}<spandata-prompt-line>{line}</span>{/each}</pre>{#ifbelow>0}<divdata-prompt-fade></div>{/if}</div>{#ifbelow>0}<div><buttondata-prompt-read-moretype='button'onclick={readOn}>{label}<spanaria-hidden='true'>↓</span></button></div>{/if}</div>");
 		expect(inField.filter((n) => n.type === 'ImportDeclaration').map((n) => (n['source'] as SvelteNode)['value']).sort())
 			.toEqual(['../i18n.svelte.js', '../utils/pipeline-status.js', '../utils/prompt-head.js', 'svelte']);
 		// Every DOM call is named, none is computed, and no property is written: a
@@ -555,8 +563,8 @@ function svelteNodes(root: unknown, out: SvelteNode[] = []): SvelteNode[] {
 	for (const [key, value] of Object.entries(node)) if (key !== 'parent' && key !== 'metadata') svelteNodes(value, out);
 	return out;
 }
-/** A node's source without whitespace, so a formatter run changes nothing. */
+/** A node's source without comments, whitespace or a choice of quotes, so a formatter run changes nothing. */
 function code(source: string, node: unknown): string {
 	const n = node as SvelteNode;
-	return source.slice(n.start, n.end).replace(/\s+/g, '');
+	return source.slice(n.start, n.end).replace(/<!--[\s\S]*?-->/g, '').replace(/\s+/g, '').replace(/"/g, "'");
 }
