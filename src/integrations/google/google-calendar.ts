@@ -1,5 +1,8 @@
 import type { ToolEntry, IAgent, PromptText } from '../../types/index.js';
-import { currentCallSignal } from '../../core/call-connection.js';
+import { currentCallSignal, currentCallTargetOrigin } from '../../core/call-connection.js';
+import { originAsk, originDenied, originRefusedMandate, originRefusedUnattended, originUnreadable, type OriginTargets, type SendOrigin } from '../../core/origin-notices.js';
+import { noticeLanguage } from '../../core/notice-language.js';
+import { UNATTENDED_BLOCK_ANSWER } from '../../core/prompt-store.js';
 import type { GoogleAuth } from './google-auth.js';
 import { SCOPES } from './google-auth.js';
 import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
@@ -10,7 +13,7 @@ import { pv, joinPrompts } from '../../core/prompt-value.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
 import { ADDRESS_PLACEHOLDER, namedTarget } from '../../core/audit-log.js';
-import { mailTargets, type SendTarget } from '../../core/send-target.js';
+import { mailTargets, normalizeMailTarget, type SendTarget } from '../../core/send-target.js';
 
 // === Types ===
 
@@ -279,6 +282,11 @@ export function createCalendarTool(getAuth: () => GoogleAuth | null): ToolEntry<
         if (CONFIRM_ACTIONS.has(input.action) && !agent.promptUser) {
           return `Error: "${input.action}" requires user confirmation but no interactive prompt is available (autonomous/background mode). Use assistant mode for this action.`;
         }
+        // The guests already on an event the update changes, before anything is asked.
+        const guestCheck: GuestCheck = input.action === 'update_event' && agent.promptUser
+          ? await checkExistingGuests(auth, input, agent)
+          : { kind: 'pass' };
+        if (guestCheck.kind === 'refused') return guestCheck.text;
         if (CONFIRM_ACTIONS.has(input.action) && agent.promptUser) {
           // `pv` splits frame from value — this prompt has a real FIELD
           // STRUCTURE (`Time:` on its own line), which is exactly what a
@@ -291,9 +299,18 @@ export function createCalendarTool(getAuth: () => GoogleAuth | null): ToolEntry<
             case 'update_event': confirmMsg = describeEventUpdate(input.event_id, input.calendar_id, eventUpdates); break;
             case 'delete_event': confirmMsg = pv`Delete event ${input.event_id ?? '(unknown)'}${calendarLine(input.calendar_id)}\nThis cannot be undone.`; break;
           }
-          const answer = await agent.promptUser(confirmMsg, ['Yes', 'No']);
+          // One question: a guest already invited whom the owner did not name is asked about in
+          // the confirmation of the update itself, which is then a blocked question.
+          if (guestCheck.kind === 'ask') {
+            const lang = agent.noticeLanguage ?? noticeLanguage(undefined);
+            confirmMsg = pv`${confirmMsg}\n\n${originAsk('google_calendar', input, 'mail', guestCheck.targets, guestCheck.origin, lang)}`;
+          }
+          const answer = await agent.promptUser(confirmMsg, ['Yes', 'No'], guestCheck.kind === 'ask' ? { blocked: true } : undefined);
+          if (guestCheck.kind === 'ask' && answer === UNATTENDED_BLOCK_ANSWER) {
+            return guestCheck.refused(originRefusedUnattended(guestCheck.targets, guestCheck.origin));
+          }
           if (answer.toLowerCase() !== 'yes' && answer !== '1') {
-            return 'Action cancelled by user.';
+            return guestCheck.kind === 'ask' ? originDenied(guestCheck.targets, guestCheck.origin, 'mail') : 'Action cancelled by user.';
           }
         }
 
@@ -532,6 +549,76 @@ export function describeEventUpdate(eventId: string | undefined, calendarId: str
     [pv`${head}\nThese fields change:`, ...lines, ...(guestsChange ? [pv`Everyone listed under Guests can see this event.`] : [])],
     '\n',
   );
+}
+
+/**
+ * The guests of the event an update changes, read before the update. `null` when they could not
+ * be read: then none of them is known, and the check counts that as a guest the owner did not name.
+ */
+async function existingGuests(auth: GoogleAuth, input: CalendarInput): Promise<string[] | null> {
+  if (!input.event_id) return [];
+  try {
+    const calendarId = input.calendar_id ?? 'primary';
+    const response = await calendarFetch(auth, `${CALENDAR_BASE}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(input.event_id)}`, { method: 'GET' });
+    if (!response.ok) return null;
+    const event = await response.json() as { attendees?: unknown };
+    if (event.attendees === undefined) return [];
+    if (!Array.isArray(event.attendees)) return null;
+    const out: string[] = [];
+    for (const a of event.attendees) {
+      const email = typeof a === 'object' && a !== null ? (a as { email?: unknown }).email : undefined;
+      if (typeof email !== 'string') return null;
+      // The calendar's own entry for the owner is not a guest the change goes out to.
+      if ((a as { self?: unknown }).self === true) continue;
+      out.push(email);
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** What the check of an event's existing guests found before an update. */
+type GuestCheck =
+  | { readonly kind: 'pass' }
+  | { readonly kind: 'refused'; readonly text: string }
+  | { readonly kind: 'ask'; readonly targets: OriginTargets; readonly origin: SendOrigin; readonly refused: (text: string) => string };
+
+/**
+ * The guests already on the event an update changes, checked before the confirmation, so the
+ * owner is never asked a yes that is then refused. A guest list that cannot be read, or a guest
+ * that does not read as an address, refuses the update unasked; a guest the owner did not name is
+ * refused in a session of someone else and otherwise asked about in the same question as the
+ * update itself.
+ *
+ * Read, then changed: a guest someone adds to the event between this read and the update is not
+ * checked. The update sends only the fields it changes, so Google keeps that guest and notifies
+ * them. The window is the length of the confirmation; closing it needs a conditional update
+ * (an ETag), which this tool does not send yet.
+ */
+async function checkExistingGuests(auth: GoogleAuth, input: CalendarInput, agent: IAgent): Promise<GuestCheck> {
+  const guests = await existingGuests(auth, input);
+  const report = (targets: OriginTargets, origin: SendOrigin): void => {
+    try { agent.onOriginRefused?.({ targets, noun: 'mail', origin }); } catch { /* the refusal stands */ }
+  };
+  if (guests === null || guests.some((g) => normalizeMailTarget(g) === null)) {
+    report({ values: [], unreadable: true }, { kind: 'unknown' });
+    return { kind: 'refused', text: originUnreadable('mail') };
+  }
+  // The guest list was read: a guest on it comes from it, and every sentence says so.
+  const origin: SendOrigin = { kind: 'eventGuests' };
+  const checked = new Set(currentCallTargetOrigin()?.known ?? []);
+  const unnamed: string[] = [];
+  for (const g of guests) {
+    const target = normalizeMailTarget(g)!;
+    if (checked.has(target.value)) continue;
+    if ((agent.ownerKnown?.known(target) ?? 'foreign') !== 'known') unnamed.push(target.value);
+  }
+  if (unnamed.length === 0) return { kind: 'pass' };
+  const targets: OriginTargets = { values: unnamed, unreadable: false };
+  const refused = (text: string): string => { report(targets, origin); return text; };
+  if (agent.principal.kind !== 'owner') return { kind: 'refused', text: refused(originRefusedMandate(targets, origin, 'mail')) };
+  return { kind: 'ask', targets, origin, refused };
 }
 
 async function handleUpdateEvent(auth: GoogleAuth, input: CalendarInput, updates: Record<string, unknown>): Promise<string> {
