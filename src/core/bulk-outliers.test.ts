@@ -557,22 +557,31 @@ describe('markersOf', () => {
     expect([...markersOf('info@evil.com_').get('email')!]).toEqual(['evil.com']);
   });
 
-  it('reads a host or an address a text repeats thousands of times, as words or as parts of one word, in a fraction of the time as many', () => {
-    const time = (text: string): number => { const t0 = performance.now(); markersOf(text); return performance.now() - t0; };
-    const many = Array.from({ length: 5000 }, (_, i) => `a${String(i)}.com`);
-    time(many.join(' '));
-    // The fastest of five runs each, so a pause of the process does not decide. Read anew, the repeated
-    // text costs about as much as the distinct one; read once per word, a quarter or less. Half leaves a
-    // loaded machine room and still tells the two apart.
-    const best = (text: string): number => Math.min(time(text), time(text), time(text), time(text), time(text));
-    const distinct = Math.min(best(many.join(' ')), best(many.join('+')));
+  // The fastest of five runs each, so a pause of the process does not decide.
+  const timeOf = (text: string): number => { const t0 = performance.now(); markersOf(text); return performance.now() - t0; };
+  const best = (text: string): number => Math.min(timeOf(text), timeOf(text), timeOf(text), timeOf(text), timeOf(text));
+  const distinctHosts = (sign: string): string => Array.from({ length: 5000 }, (_, i) => `a${String(i)}.com`).join(sign);
+
+  it('reads a host a text repeats thousands of times as words once, in a fraction of the time as many', () => {
+    timeOf(distinctHosts(' '));
     expect([...markersOf('a.com '.repeat(5000)).get('link')!]).toEqual(['a.com']);
+    // Read anew, the repeated text costs about as much as the distinct one; read once, a tenth or
+    // less. Half leaves a loaded machine room and still tells the two apart.
+    expect(best('a.com '.repeat(5000))).toBeLessThan(best(distinctHosts(' ')) / 2);
+  });
+
+  it('reads a host a text repeats thousands of times as parts of one word once, in a fraction of the time as many', () => {
+    timeOf(distinctHosts('+'));
     expect([...markersOf('a.com+'.repeat(5000)).get('link')!]).toEqual(['a.com']);
-    expect(best('a.com '.repeat(5000))).toBeLessThan(distinct / 2);
-    expect(best('a.com+'.repeat(5000))).toBeLessThan(distinct / 2);
-    // An address is read once per word as well: read anew, the repeated text costs a third of the
-    // distinct one or more; read once, a twentieth or less.
+    expect(best('a.com+'.repeat(5000))).toBeLessThan(best(distinctHosts('+')) / 2);
+  });
+
+  it('reads an address a text repeats thousands of times once per word, in a fraction of the time as many', () => {
     const addresses = Array.from({ length: 5000 }, (_, i) => `i@a${String(i)}.com`).join(' ');
+    timeOf(addresses);
+    expect([...markersOf('i@a.com '.repeat(5000)).get('email')!]).toEqual(['a.com']);
+    // Read anew, the repeated text costs a third of the distinct one or more; read once, a twentieth
+    // or less.
     expect(best('i@a.com '.repeat(5000))).toBeLessThan(best(addresses) / 6);
   });
 
