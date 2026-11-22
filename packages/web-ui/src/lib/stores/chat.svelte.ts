@@ -960,9 +960,14 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 		const sid = sessionId!;
 		const held = await inHoldOrder(() => holdAtScheduledQuestion(sid, task, displayText, runOptions));
 		if (held) return;
-		// A review that opened while the server was asked blocks this send, as it would have
-		// before the ask.
-		if (sendBlockedByReview()) return;
+		// A review that opened while the server was asked blocks this send. The composer is
+		// cleared already, so the message stays as a held bubble; a tap sends it once the
+		// review is answered (`sendHeldMessage` checks the review again).
+		if (sendBlockedByReview()) {
+			messages.push(heldBubble(task, displayText, runOptions));
+			persistChatNow();
+			return;
+		}
 	}
 	await sendNow(task, displayText, files, runOptions);
 }
@@ -1010,6 +1015,19 @@ function heldOptions(runOptions: RunOptions | undefined): RunOptions | undefined
 	return Object.keys(kept).length > 0 ? kept : undefined;
 }
 
+/** An unsent bubble for a message that is held: only a tap sends it. */
+function heldBubble(task: string, displayText: string | undefined, runOptions: RunOptions | undefined): ChatMessage {
+	const shown = displayText ?? task;
+	const options = heldOptions(runOptions);
+	return {
+		role: 'user', content: shown, held: true,
+		...(task !== shown ? { heldTask: task } : {}),
+		...(options ? { heldOptions: options } : {}),
+		...(options?.typed === true ? { typed: true } : {}),
+		createdAt: new Date().toISOString(),
+	};
+}
+
 /**
  * Asks the server whether a scheduled run's question waits in thread `sid`, and if so holds the
  * message: an unsent bubble marked `held` (or `existing`, the held bubble a tap sends), and the
@@ -1029,15 +1047,7 @@ async function holdAtScheduledQuestion(sid: string, task: string, displayText: s
 			}
 		} catch { /* not asked: sent as before */ }
 	}
-	const shown = displayText ?? task;
-	const options = heldOptions(runOptions);
-	const held: ChatMessage = existing ?? {
-		role: 'user', content: shown, held: true,
-		...(task !== shown ? { heldTask: task } : {}),
-		...(options ? { heldOptions: options } : {}),
-		...(options?.typed === true ? { typed: true } : {}),
-		createdAt: new Date().toISOString(),
-	};
+	const held: ChatMessage = existing ?? heldBubble(task, displayText, runOptions);
 	if (sessionId !== sid) {
 		if (!existing) holdInSavedThread(sid, held);
 		return true;

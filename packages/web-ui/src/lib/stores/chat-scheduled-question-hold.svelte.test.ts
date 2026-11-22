@@ -731,7 +731,7 @@ describe('a new message', () => {
 		expect(runPosts()).toBe(2);
 	});
 
-	it('a review that opens while a send is asked about blocks that send', async () => {
+	it('a review that opens while a send is asked about blocks that send and keeps it held, unsent', async () => {
 		await questionWaits(QUESTION);
 		active = NOTHING;
 		let release!: () => void;
@@ -746,7 +746,13 @@ describe('a new message', () => {
 		await send;
 		await settle();
 		expect(runPosts()).toBe(1);
-		expect(store.getMessages().filter((m) => m.content === 'hello')).toEqual([]);
+		// The composer is cleared before the send, so the words stay as a held bubble.
+		expect(heldOnes().map((m) => m.content)).toEqual(['hello']);
+		// A tap while the review is still open keeps it held.
+		await store.sendHeldMessage(heldOnes()[0]!);
+		await settle();
+		expect(runPosts()).toBe(1);
+		expect(heldOnes().map((m) => m.content)).toEqual(['hello']);
 	});
 
 	it('an ask that never answers gives way after its time limit: the message is sent, the next one too', async () => {
