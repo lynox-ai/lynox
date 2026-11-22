@@ -226,27 +226,36 @@ describe('threadHoldsForeignTurns: what counts as the owner\'s thread', () => {
 
 describe('setUpByOther: whose plan an escalation is about', () => {
   it('the owner\'s plan (the owner\'s tag, or no tag): not another\'s', async () => {
-    const { setUpByOther } = await import('./worker-loop.js');
+    const { setUpByOther } = await import('./request-principal.js');
     expect(setUpByOther({ created_by: 'owner' })).toBe(false);
     expect(setUpByOther({})).toBe(false);
     expect(setUpByOther({ created_by: null })).toBe(false);
   });
 
   it('created or last changed by a mandate: another\'s, whatever the owner did after', async () => {
-    const { setUpByOther } = await import('./worker-loop.js');
+    const { setUpByOther } = await import('./request-principal.js');
     expect(setUpByOther({ created_by: 'mandate:h@x.test' })).toBe(true);
     expect(setUpByOther({ created_by: 'owner', mandate_editor: 'mandate:h@x.test' })).toBe(true);
   });
 
+  it('a run\'s tag (a trigger\'s or a workflow\'s run, or one whose author is unknown): the owner\'s plan, as with no tag', async () => {
+    const { setUpByOther } = await import('./request-principal.js');
+    expect(setUpByOther({ created_by: 'trigger:t-1' })).toBe(false);
+    expect(setUpByOther({ created_by: 'workflow:r-1' })).toBe(false);
+    expect(setUpByOther({ created_by: 'unknown' })).toBe(false);
+    // A mandate's change still makes it another's.
+    expect(setUpByOther({ created_by: 'trigger:t-1', mandate_editor: 'mandate:h@x.test' })).toBe(true);
+  });
+
   it('fail-closed: a tag this does not know counts as another\'s', async () => {
-    const { setUpByOther } = await import('./worker-loop.js');
+    const { setUpByOther } = await import('./request-principal.js');
     expect(setUpByOther({ created_by: 'cp-admin' })).toBe(true);
   });
 });
 
 describe('shownMandate: the address an escalation title may name', () => {
   it('a mandate\'s plain address, the last editor first', async () => {
-    const { shownMandate } = await import('./worker-loop.js');
+    const { shownMandate } = await import('./request-principal.js');
     expect(shownMandate({ created_by: 'mandate:eva@kanzlei.example' })).toEqual({ address: 'eva@kanzlei.example', changed: false });
     // The same mandate changing its own plan still set it up.
     expect(shownMandate({ created_by: 'mandate:eva@kanzlei.example', mandate_editor: 'mandate:eva@kanzlei.example' })).toEqual({ address: 'eva@kanzlei.example', changed: false });
@@ -257,7 +266,7 @@ describe('shownMandate: the address an escalation title may name', () => {
   });
 
   it('no address for the owner, an unknown tag, or an address of another shape', async () => {
-    const { shownMandate } = await import('./worker-loop.js');
+    const { shownMandate } = await import('./request-principal.js');
     expect(shownMandate({})).toBeUndefined();
     expect(shownMandate({ created_by: 'owner' })).toBeUndefined();
     expect(shownMandate({ created_by: 'cp-admin' })).toBeUndefined();
