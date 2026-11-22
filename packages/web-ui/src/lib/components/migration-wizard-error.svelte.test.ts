@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { t, tf, setLocale, getLocale } from '../i18n.svelte.js';
-import { reset, setTarget, startMigration, cancelMigration, getStep, getRetry, getError, getErrorReason, getErrorNotStarted, getTargetUrl, MIGRATION_HOLD_MS } from '../stores/migration.svelte.js';
+import { reset, setTarget, startMigration, cancelMigration, getStep, getRetry, getError, getErrorReason, getErrorNotStarted, MIGRATION_HOLD_MS } from '../stores/migration.svelte.js';
 import { getToasts, dismissToast } from '../stores/toast.svelte.js';
 import { _resetManagedStatus } from '../stores/integrations/managed.svelte.js';
 
@@ -145,14 +145,35 @@ describe('the migration wizard after an error', () => {
 	});
 
 	it('offers no retry where a retry would change nothing, and goes back to the inputs as they were', async () => {
-		await failWith({ code: 'handshake_unverified', params: {}, retry: 'none' });
+		const TOKEN = 'b'.repeat(64);
+		events = sse('error', { code: 'handshake_unverified', params: {}, retry: 'none' });
+		const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
+		component = mount(MigrationWizard, { target });
+		await settle();
+		const button = (label: string): HTMLButtonElement | undefined => [...target.querySelectorAll('button')].find((b) => b.textContent?.trim() === label);
+		button(t('migration.next'))!.click();
+		await settle();
+		const enter = (id: string, value: string): void => {
+			const input = target.querySelector<HTMLInputElement>(`#${id}`)!;
+			input.value = value;
+			input.dispatchEvent(new Event('input', { bubbles: true }));
+		};
+		enter('target-url', 'https://target.example.com');
+		enter('migration-token', TOKEN);
+		await settle();
+		button(t('migration.start'))!.click();
+		await settle();
+		expect(getStep()).toBe('error');
 		expect(retryButton()).toBeNull();
 		expect(q('migration-check-target')).toBeNull();
 		expect(q('migration-retry-from')).toBeNull();
 		(q('migration-back') as HTMLButtonElement).click();
 		await settle();
 		expect(getStep()).toBe('plan');
-		expect(getTargetUrl()).toBe('https://target.example.com');
+		// What the user sees: the fields hold what was entered before.
+		expect(target.querySelector<HTMLInputElement>('#target-url')?.value).toBe('https://target.example.com');
+		expect(target.querySelector<HTMLInputElement>('#migration-token')?.value).toBe(TOKEN);
+		expect(button(t('migration.start'))?.disabled).toBe(false);
 	});
 
 	it('says an unknown code as a reason lynox could not read', async () => {
@@ -187,6 +208,21 @@ describe('the migration wizard after an error', () => {
 	it('asks to check the target first, with no retry, when the restore may have run', async () => {
 		await failWith({ code: 'restore_failed_on_target', params: { targetText: 'x' }, message: 'The target instance could not restore the data. It says: "x". Check on the target instance whether your data arrived before you migrate again.', retry: 'check' });
 		expect(text('migration-error-detail')).toBe(t('migration.stop.restore_failed_on_target'));
+		expect(text('migration-check-target')).toBe(t('migration.check_target_first'));
+		expect(retryButton()).toBeNull();
+	});
+
+	it('asks to check the target when the stream says done without success', async () => {
+		events = sse('progress', { phase: 'transferring', message: 'Sending chunk 1/2...' }) + sse('done', { success: false });
+		const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
+		component = mount(MigrationWizard, { target });
+		await settle();
+		setTarget('https://target.example.com', 'a'.repeat(64));
+		await startMigration();
+		await settle();
+		expect(getStep()).toBe('error');
+		expect(text('migration-error-detail')).toBe(t('migration.stop.unknown'));
+		expect(getRetry()).toBe('check');
 		expect(text('migration-check-target')).toBe(t('migration.check_target_first'));
 		expect(retryButton()).toBeNull();
 	});
@@ -388,6 +424,42 @@ describe('the migration wizard when the event stream breaks', () => {
 		expect(text('migration-check-target')).toBe(t('migration.check_target_first'));
 		expect(retryButton()).toBeNull();
 	});
+});
+
+describe('the migration wizard after a cancel', () => {
+	// A cancel stops only the browser listening: the engine carries on, so the target may still
+	// restore the data. The card asks to check it first at every step, the first one included.
+	for (const phase of ['preview', 'transferring', 'restoring']) {
+		it(`asks to check the target first, with no retry, after a cancel during ${phase}`, async () => {
+			let release: (() => void) | undefined;
+			exportAnswer = () => new Response(new ReadableStream<Uint8Array>({
+				start(c) {
+					c.enqueue(new TextEncoder().encode(sse('progress', { phase, message: '...' })));
+					release = () => c.close();
+				},
+			}), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+			const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
+			component = mount(MigrationWizard, { target });
+			await settle();
+			setTarget('https://target.example.com', 'a'.repeat(64));
+			const running = startMigration();
+			await settle();
+			expect(getStep()).toBe('transferring');
+			const cancel = [...target.querySelectorAll('button')].find((b) => b.textContent?.trim() === t('migration.cancel'));
+			expect(cancel, 'the transfer step offers its cancel button').toBeDefined();
+			cancel!.click();
+			await settle();
+			release?.();
+			await running;
+			await settle();
+			expect(getStep()).toBe('error');
+			expect(text('migration-error-detail')).toBe(t('migration.stop.cancelled'));
+			expect(getRetry()).toBe('check');
+			expect(text('migration-check-target')).toBe(t('migration.check_target_first'));
+			expect(retryButton()).toBeNull();
+			expect(target.textContent).not.toContain(t('migration.retry'));
+		});
+	}
 });
 
 describe('the migration wizard when the preview cannot be loaded', () => {

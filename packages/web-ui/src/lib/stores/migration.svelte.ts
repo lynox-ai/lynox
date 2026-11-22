@@ -118,21 +118,12 @@ function fail(code: string, from: { retry: MigrationRetry; params?: MigrationErr
 	step = 'error';
 }
 
-/** The wizard's own codes give their own retry; a cancel's follows how far the migration got. */
-function browserRetry(code: keyof typeof MIGRATION_BROWSER_CODES): MigrationRetry {
-	const rule = MIGRATION_BROWSER_CODES[code];
-	return rule === 'state' ? cancelledRetry() : rule;
-}
-
 /**
- * The retry after a cancel: before the first request to the target nothing holds a new attempt;
- * from then on the target may hold its session; once the restore was asked for, it may have run.
+ * The retry of one of the wizard's own codes. A cancel gives `check`: the engine carries on after
+ * the browser stops listening, so whether the target restored the data is not known.
  */
-function cancelledRetry(): MigrationRetry {
-	const phase = progress?.phase ?? '';
-	if (phase === 'restoring') return 'check';
-	if (phase === '' || phase === 'starting' || phase === 'preview') return 'now';
-	return 'later';
+function browserRetry(code: keyof typeof MIGRATION_BROWSER_CODES): MigrationRetry {
+	return MIGRATION_BROWSER_CODES[code];
 }
 export function getPreview(): MigrationPreview | null { return preview; }
 export function getLoading(): boolean { return loading; }
@@ -282,7 +273,8 @@ export async function startMigration(): Promise<void> {
 				console.warn('[migration] the request to this instance failed:', err.message);
 				fail('connection_failed', { retry: browserRetry('connection_failed') });
 			} else {
-				fail('unknown', { retry: 'now' });
+				// Not a failure this code can read: what happened on the target is not known.
+				fail('unknown', { retry: 'check' });
 			}
 		}
 	} finally {
@@ -399,8 +391,9 @@ function handleSSEEvent(event: string, data: Record<string, unknown>): void {
 				else if (doneSkipped.length > 1) addToast(tf('migration.success_skipped_many', { n: String(doneSkipped.length) }), 'info', 8000);
 				else addToast(t('migration.success'), 'success', 5000);
 			} else {
-				// The engine says `done` only on success: anything else is a result lynox cannot read.
-				fail('unknown', { retry: 'now' });
+				// The engine says `done` only on success: anything else is a result lynox cannot read,
+				// and what the target restored is not known.
+				fail('unknown', { retry: 'check' });
 			}
 			break;
 		}

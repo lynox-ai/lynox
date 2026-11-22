@@ -30,17 +30,20 @@ export type MigrationErrorParams = Readonly<Record<string, string | number | boo
 
 /**
  * The codes the wizard gives itself, and the retry each one has: the start check in the browser,
- * a stream that ends without a result, a cancel (its retry follows how far the migration got), a
- * request that does not reach this instance, and a start this instance turned down without a code
- * (a proxy, the auth layer).
+ * a stream that ends without a result, a cancel, a request that does not reach this instance, and a
+ * start this instance turned down without a code (a proxy, the auth layer).
+ *
+ * A cancel asks to check the target first, whatever step it came at: it only stops the browser
+ * listening. The engine carries on with the migration (connection, transfer, restore), so whether
+ * the target restored the data is not known here.
  */
 export const MIGRATION_BROWSER_CODES = {
 	browser_invalid_url: 'none',
 	connection_lost: 'check',
-	cancelled: 'state',
+	cancelled: 'check',
 	connection_failed: 'now',
 	start_refused: 'now',
-} as const satisfies Record<string, MigrationRetry | 'state'>;
+} as const satisfies Record<string, MigrationRetry>;
 
 /** The engine's codes of a start request it turned down: they say that the migration did not start. */
 const START_CODES = new Set(['start_missing_input', 'start_not_https', 'start_invalid_url', 'start_not_public', 'start_managed']);

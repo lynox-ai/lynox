@@ -841,6 +841,51 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.unreachable = undefined;
   });
 
+  it('gives the stops whose retry follows the target\'s session their code and that retry', async () => {
+    setShellIsolationForTest(sidecar);
+    // A target still holding an earlier attempt: its refusal starts no session of this one, so
+    // nothing holds a new attempt.
+    target.handshakeRefusal = { error: 'x', code: 'migration_session_active' };
+    expect(await stopOf()).toMatchObject({ code: 'target_session_active', retry: 'now' });
+    target.handshakeRefusal = undefined;
+    // The completion refused: the target answered the handshake and holds a session it did not end.
+    target.failCompletion = true;
+    expect(await stopOf()).toMatchObject({ code: 'handshake_incomplete', retry: 'later' });
+    // The target ended it: start again now.
+    target.abort = 'real';
+    expect(await stopOf()).toMatchObject({ code: 'handshake_incomplete', retry: 'now' });
+    target.abort = undefined;
+    target.failCompletion = false;
+    // A refusal of the manifest that breaks off mid-way: read as the target not being reachable, its
+    // session still held.
+    target.broken = 'manifest';
+    expect(await stopOf()).toMatchObject({ code: 'manifest_unreachable', params: {}, retry: 'later' });
+    target.abort = 'real';
+    expect(await stopOf()).toMatchObject({ code: 'manifest_unreachable', params: {}, retry: 'now' });
+    target.abort = undefined;
+    target.broken = undefined;
+  });
+
+  it('gives a folder over the limits its code and no retry, after the handshake too', async () => {
+    setShellIsolationForTest(sidecar);
+    const { MigrationExporter } = await import('../core/migration-export.js');
+    const proto = MigrationExporter.prototype as unknown as { export: (...a: unknown[]) => unknown };
+    const real = proto.export;
+    // The real exporter, with limits the data dir's `apis` folder is over: two files, one allowed.
+    const extra = join(dir, 'apis', 'more.json');
+    writeFileSync(extra, '{"id":"more"}');
+    const spy = vi.spyOn(proto, 'export').mockImplementation(function (this: unknown, ...a: unknown[]) {
+      (this as { portableDirLimits: unknown }).portableDirLimits = { maxEntries: 1, maxBytes: 1024 };
+      return real.apply(this, a);
+    });
+    try {
+      expect(await stopOf()).toMatchObject({ code: 'folder_too_large', params: { dir: 'apis', entries: 1, bytes: 1024 }, retry: 'none' });
+    } finally {
+      spy.mockRestore();
+      rmSync(extra, { force: true });
+    }
+  });
+
   it('names a part by its number out of all parts and by its kind, never by its name', async () => {
     setShellIsolationForTest(sidecar);
     target.unreachable = 'chunk';

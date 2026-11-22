@@ -55,11 +55,11 @@ const CASES: Record<string, 'none' | 'check' | 'later' | 'now' | 'state'> = {
 	unknown: 'state',
 };
 
-/** The wizard's own codes and their retry. */
-const BROWSER_CASES: Record<string, 'none' | 'check' | 'later' | 'now' | 'state'> = {
+/** The wizard's own codes and their retry. A cancel stops only the browser listening: the engine carries on. */
+const BROWSER_CASES: Record<string, 'none' | 'check' | 'later' | 'now'> = {
 	browser_invalid_url: 'none',
 	connection_lost: 'check',
-	cancelled: 'state',
+	cancelled: 'check',
 	connection_failed: 'now',
 	start_refused: 'now',
 };
@@ -94,7 +94,7 @@ describe('the codes of a migration stop', () => {
 			if (code === 'start_refused') inBoth('migration.error_not_started');
 			else inBoth(migrationStopKey(code));
 		}
-		for (const key of ['migration.stop.unknown_nothing_sent', 'migration.stop.data_too_large_parts', 'migration.stop.data_too_large_size', 'migration.target_says', 'migration.message', 'migration.part', 'migration.part_kind', 'migration.duration_minutes', 'migration.duration_seconds']) inBoth(key);
+		for (const key of ['migration.stop.unknown_nothing_sent', 'migration.stop.data_too_large_parts', 'migration.stop.data_too_large_size', 'migration.size_bytes', 'migration.stop.and', 'migration.target_says', 'migration.message', 'migration.part', 'migration.part_kind', 'migration.duration_minutes', 'migration.duration_seconds']) inBoth(key);
 	});
 
 	it('name the start codes the route sends as the ones that say the migration did not start', () => {
