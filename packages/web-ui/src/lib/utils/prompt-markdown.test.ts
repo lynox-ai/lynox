@@ -533,13 +533,20 @@ describe('ChatView wiring', () => {
 		const field = parse(fieldSource, { modern: true });
 		const inField = svelteNodes(field);
 		expect(inField.filter((n) => /^(HtmlTag|RenderTag|Component|Svelte|UseDirective|AttachTag|ImportExpression)/.test(n.type))).toEqual([]);
-		// Its markup as a whole, classes aside: every line and the head shown as text, none
-		// hidden or left out, no further element or attribute. A change here is a change to
-		// the boundary and is made on purpose, by updating this line.
+		// Its markup as a whole, classes included: every line and the head shown as text, none
+		// hidden, clipped or left out, no further element or attribute, no stylesheet of its own.
+		// A change here is a change to the boundary and is made on purpose, by updating this line.
 		const markup = (field.fragment.nodes as SvelteNode[])
 			.filter((n) => n.type !== 'Comment' && !(n.type === 'Text' && !String(n['data']).trim()))
-			.map((n) => code(fieldSource, n).replace(/class='[^']*'/g, '')).join('');
-		expect(markup).toBe("<divdata-prompt-question>{#ifhead.length>0}<divdata-prompt-head>{#eachheadasseg,i(i)}{#ifseg.kind==='value'}<spandata-prompt-value>{seg.text}</span>{:else}{seg.text}{/if}{/each}</div>{/if}<div><predata-prompt-fieldbind:this={field}onscroll={schedule}>{#eachlinesasline,i(i)}<spandata-prompt-line>{line}</span>{/each}</pre>{#ifbelow>0}<divdata-prompt-fade></div>{/if}</div>{#ifbelow>0}<div><buttondata-prompt-read-moretype='button'onclick={readOn}>{label}<spanaria-hidden='true'>↓</span></button></div>{/if}</div>");
+			.map((n) => code(fieldSource, n)).join('');
+		expect(markup).toBe("<divdata-prompt-questionclass='flexmin-h-0min-w-0flex-1flex-coltext-smtext-text-mutedfont-sansleading-relaxed'>{#ifhead.length>0}<divdata-prompt-headclass='shrink-0whitespace-pre-wrap[overflow-wrap:anywhere]'>{#eachheadasseg,i(i)}{#ifseg.kind==='value'}<spandata-prompt-valueclass='text-text'>{seg.text}</span>{:else}{seg.text}{/if}{/each}</div>{/if}<divclass='relativeflexmin-h-0flex-1flex-col'><predata-prompt-fieldbind:this={field}onscroll={schedule}class='min-h-0flex-1max-h-64overflow-y-autoscrollbar-thinwhitespace-pre-wrapfont-sans[overflow-wrap:anywhere]'>{#eachlinesasline,i(i)}<spandata-prompt-lineclass='blockmin-h-[1lh]'>{line}</span>{/each}</pre>{#ifbelow>0}<divdata-prompt-fadeclass='pointer-events-noneabsoluteinset-x-0bottom-0h-8bg-gradient-to-tfrom-bg-subtleto-transparent'></div>{/if}</div>{#ifbelow>0}<divclass='flexshrink-0justify-endpt-1'><buttondata-prompt-read-moretype='button'onclick={readOn}class='whitespace-nowraprounded-[var(--radius-sm)]borderborder-borderbg-bgpx-2py-0.5text-xstext-text-mutedhover:text-text'>{label}<spanaria-hidden='true'>↓</span></button></div>{/if}</div>");
+		expect(field.css).toBeNull();
+		// What it shows are the props as given: nothing in the script derives or reassigns them.
+		expect(inField.filter((n) => n.type === 'VariableDeclarator' && code(fieldSource, n).includes('$props(')).map((n) => code(fieldSource, n)))
+			.toEqual(['{head,lines,tooLow=$bindable(false)}:Props=$props()']);
+		const names = (n: SvelteNode): string[] => svelteNodes(n).filter((x) => x.type === 'Identifier').map((x) => String(x['name']));
+		expect(inField.filter((n) => (n.type === 'VariableDeclarator' && !code(fieldSource, n).includes('$props(') && names(n['id'] as SvelteNode).some((x) => x === 'head' || x === 'lines'))
+			|| (n.type === 'AssignmentExpression' && names(n['left'] as SvelteNode).some((x) => x === 'head' || x === 'lines')))).toEqual([]);
 		expect(inField.filter((n) => n.type === 'ImportDeclaration').map((n) => (n['source'] as SvelteNode)['value']).sort())
 			.toEqual(['../i18n.svelte.js', '../utils/pipeline-status.js', '../utils/prompt-head.js', 'svelte']);
 		// Every DOM call is named, none is computed, and no property is written: a
