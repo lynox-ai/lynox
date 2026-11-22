@@ -215,7 +215,9 @@ describe('Task Tools', () => {
       const id = await owners('Bericht');
       const report = await taskUpdateTool.handler({ task_id: id, status: 'completed', title: 'Bericht an alle' }, { ...makeAgent(), writeAuthor: 'trigger:t-1' } as IAgent);
       expect(report).toMatch(/^Task completed: /);
-      expect(row('Bericht').id, 'the title stays: completing writes only the status').toBe(id);
+      const stored = engine.getDb().prepare('SELECT title, status FROM triggers WHERE id = ?').get(id) as { title: string; status: string };
+      expect(stored.status, 'the completion was written').toBe('completed');
+      expect(stored.title, 'the title stays: completing writes only the status').toBe('Bericht');
       expect(row('Bericht').edited_by).toBe('trigger:t-1');
       expect(ownerInstructionCounts(row('Bericht'))).toBe(false);
     });
