@@ -26,7 +26,7 @@ export const QUOTE_MARKS: Readonly<Record<DialogLanguage, readonly [open: string
 
 /** `\` and every character that reads as a double quotation mark (the straight one, both
  *  languages' marks, and their lookalikes), so a value cannot close the marks around it. */
-const QUOTE_LIKE = /[\\"“”„‟″‶＂〝〞〟〃ˮ״❝❞ʺ˝˶⹂🙶🙷🙸]/gu;
+const QUOTE_LIKE = /[\\"“”„‟″‶＂〝〞〟〃ˮ״❝❞❠ʺ˝˵˶⹂🙶🙷🙸̋̎̏]/gu;
 
 /** `text` as it stands between a dialog's quotation marks: each quote-like character escaped. */
 export function escapeQuoted(text: string): string {
@@ -39,16 +39,31 @@ export function endsSentence(text: string): boolean {
 }
 
 /** The longest a profile's name is shown in a question, "…" included and before escaping: a long
- *  name cannot push the disclosure after it out of view. */
+ *  name cannot push the disclosure after it out of view. Counted as a reader counts characters (a
+ *  flag or an emoji with its modifier is one), and in code points too, since one such character
+ *  can carry any number of marks. */
 const PROFILE_NAME_MAX = 64;
+const PROFILE_NAME_CODE_POINTS_MAX = 256;
 
 const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
-/** A profile's name as a question quotes it: on one line, at most 64 characters as a reader counts
- *  them (a flag or an emoji with its modifier is one), then escaped. */
+const codePoints = (text: string): number => Array.from(text).length;
+
+/** A profile's name as a question quotes it: on one line, within both limits, then escaped. Only a
+ *  bounded head of the name is read, however long the name is. */
 function shownName(name: string): string {
-  const chars = Array.from(GRAPHEMES.segment(singleLine(name).trim()), (g) => g.segment);
-  return escapeQuoted(chars.length > PROFILE_NAME_MAX ? `${chars.slice(0, PROFILE_NAME_MAX - 1).join('')}…` : chars.join(''));
+  const text = singleLine(name).trim();
+  // Twice the limit in code units holds more than the limit in code points, or the whole name.
+  const head = text.slice(0, 2 * PROFILE_NAME_CODE_POINTS_MAX + 2);
+  const chars = Array.from(GRAPHEMES.segment(head), (g) => g.segment);
+  // A head shorter than the name holds more code points than the limit, so the name is cut.
+  if (chars.length <= PROFILE_NAME_MAX && codePoints(head) <= PROFILE_NAME_CODE_POINTS_MAX) return escapeQuoted(text);
+  let shown = '';
+  for (const c of chars.slice(0, PROFILE_NAME_MAX - 1)) {
+    if (codePoints(shown + c) > PROFILE_NAME_CODE_POINTS_MAX - 1) break;
+    shown += c;
+  }
+  return escapeQuoted(`${shown}…`);
 }
 
 /** The guard's fixed sentence parts (`_detectDanger`). */

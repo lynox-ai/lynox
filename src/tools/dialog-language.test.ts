@@ -261,7 +261,9 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     // A mark's lookalikes too: they read as a closing mark in this font.
     expect(flattenPrompt(dialogToolHead('a″b＂c‟d"e', 'en'))).toBe('External tool “a\\″b\\＂c\\‟d\\"e”');
     expect(flattenPrompt(dialogToolHead('a‶bˮc״d❞e〟f❝g〝h〞i〃j', 'en'))).toBe('External tool “a\\‶b\\ˮc\\״d\\❞e\\〟f\\❝g\\〝h\\〞i\\〃j”');
-    expect(flattenPrompt(dialogToolHead('aʺb˝c˶d⹂e🙶f🙷g🙸h', 'en'))).toBe('External tool “a\\ʺb\\˝c\\˶d\\⹂e\\🙶f\\🙷g\\🙸h”');
+    expect(flattenPrompt(dialogToolHead('aʺb˝c˶d⹂e🙶f🙷g🙸h˵i❠j', 'en'))).toBe('External tool “a\\ʺb\\˝c\\˶d\\⹂e\\🙶f\\🙷g\\🙸h\\˵i\\❠j”');
+    // Combining double marks read as a quote after a space.
+    expect(flattenPrompt(dialogToolHead('a \u030Bb \u030Ec \u030Fd', 'en'))).toBe('External tool “a \\\u030Bb \\\u030Ec \\\u030Fd”');
   });
 
   it('quotes a profile\'s name in the save question, on one line and escaped', () => {
@@ -276,6 +278,15 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', '😀'.repeat(100), 'D'))).toContain(`saving “${'😀'.repeat(63)}…” needs`);
     // A flag is two code points but one character: the cut never leaves half of one.
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', '🇨🇭'.repeat(100), 'D'))).toContain(`saving “${'🇨🇭'.repeat(63)}…” needs`);
+    // One character can carry any number of marks: the name is also held to 256 code points.
+    const marked = 'e\u0301\u0302\u0303';
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', marked.repeat(64), 'D'))).toContain(`saving “${marked.repeat(64)}” needs`);
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${marked.repeat(64)}e`, 'D'))).toContain(`saving “${marked.repeat(63)}…” needs`);
+    const heavy = 'e\u0301\u0302\u0303\u0304';
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', heavy.repeat(60), 'D'))).toContain(`saving “${heavy.repeat(51)}…” needs`);
+    const huge = flattenPrompt(API_SETUP_DIALOG.en.save('API', `क${'ा'.repeat(200_000)}`, 'D'));
+    expect(huge.length).toBeLessThan(400);
+    expect(huge).toContain('saving “…” needs');
     const de = flattenPrompt(API_SETUP_DIALOG.de.save('API', '  Wetter  ', 'D'));
     expect(de.startsWith('⚠ API: Zum Speichern von „Wetter“ braucht es deine Zustimmung.')).toBe(true);
     expect(flattenPrompt(API_SETUP_DIALOG.de.save('API', 'x'.repeat(500), 'D'))).toContain(`von „${'x'.repeat(63)}…“ braucht`);
