@@ -3506,7 +3506,9 @@ describe('the `security:` line names the model of the round', () => {
   });
 
   it('a diff that does not owe security is not asked for a model', () => {
-    expect(evaluate({ body: record(), head: HEAD, files: CODE }).ok).toBe(true);
+    // The line is there and has no model (or a refused one), and the diff owes no security gate.
+    for (const security of ['own round, no findings', 'own round (sonnet), no findings'])
+      expect(evaluate({ body: record({ security }), head: HEAD, files: CODE }).ok, security).toBe(true);
   });
 
   it('the transition: a base from before the rule owes no model, and the run says so', () => {
@@ -3537,7 +3539,7 @@ describe('the `security:` line names the model of the round', () => {
 describe('gate-record CLI — `main` hands the `security:` model transition to evaluate', () => {
   const SCRIPT = fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url));
   const git = (cwd: string, ...args: string[]): string => {
-    const r = spawnSync('git', args, { cwd, encoding: 'utf-8' });
+    const r = spawnSync('git', args, { cwd, encoding: 'utf-8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
     if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
     return r.stdout.trim();
   };

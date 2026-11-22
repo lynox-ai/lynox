@@ -1590,7 +1590,7 @@ export const DELTA_RANGE = /^clean on ([0-9a-f]{7,40})\.\.([0-9a-f]{7,40})$/;
  * What it cannot do: prove the name is true. It makes the claim falsifiable and turns a Sonnet
  * round under an `opus` label into a deliberate statement rather than a silence.
  *
- * THE TRANSITION, as for `controls:`: a PR whose merge base predates this function is not held to
+ * THE TRANSITION, as for `ux:` and the `delta:` range: a PR whose merge base predates this function is not held to
  * the model; merging main into it brings it under the rule.
  */
 export const SECURITY_MODEL_MARK = 'export function ' + 'securityModelErrors(';
