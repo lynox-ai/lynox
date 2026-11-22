@@ -284,6 +284,13 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${marked.repeat(64)}e`, 'D'))).toContain(`saving “${marked.repeat(63)}…” needs`);
     const heavy = 'e\u0301\u0302\u0303\u0304';
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', heavy.repeat(60), 'D'))).toContain(`saving “${heavy.repeat(51)}…” needs`);
+    // 257 code points in 52 characters is one too many; 255 and the "…" fill the limit exactly.
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${heavy.repeat(51)}e\u0301`, 'D'))).toContain(`saving “${heavy.repeat(51)}…” needs`);
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${heavy.repeat(51)}e${heavy}`, 'D'))).toContain(`saving “${heavy.repeat(51)}…” needs`);
+    // Only the name's head is read: a name of millions of characters costs no more than a short one.
+    const started = performance.now();
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', 'x'.repeat(10_000_000), 'D'))).toContain(`saving “${'x'.repeat(63)}…” needs`);
+    expect(performance.now() - started).toBeLessThan(2000);
     const huge = flattenPrompt(API_SETUP_DIALOG.en.save('API', `क${'ा'.repeat(200_000)}`, 'D'));
     expect(huge.length).toBeLessThan(400);
     expect(huge).toContain('saving “…” needs');
