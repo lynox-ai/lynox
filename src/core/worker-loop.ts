@@ -4024,9 +4024,13 @@ export class WorkerLoop {
    */
   async #notifyMemberEnd(message: NotificationMessage, forMandates: string): Promise<void> {
     const owner = this.notificationRouter.notify({ ...message, audience: 'owner' });
+    // Only what names the end: no deep link into the run's thread and no follow-ups, which would
+    // lead a mandate back to the reply this sentence stands in for.
     void this.notificationRouter.notify({
-      ...message,
+      title: message.title,
       body: forMandates,
+      taskId: message.taskId,
+      priority: message.priority,
       audience: 'all_mandates',
     });
     await owner;

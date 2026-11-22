@@ -1004,7 +1004,7 @@ describe('WorkerLoop', () => {
     // The owner's wording of a refused member connection names another member's provider, profile
     // and login and the owner's way to change it: the owner's devices read it, every live grant
     // reads the same end without it, and no push goes to every device.
-    it('pushes a run\'s end with a member line to the owner\'s devices, and to every grant a fixed sentence instead of the result', async () => {
+    it('pushes a run\'s end with a member line to the owner\'s devices, and to every grant a fixed sentence instead of the result, with no link back to it', async () => {
       const { noteMemberConnection } = await import('./member-connection-notes.js');
       const LINE = 'Connection not used: CRM was connected by jo@kanzlei.example with their own login. Change it under Settings → APIs.';
       const task = stamped();
@@ -1027,10 +1027,14 @@ describe('WorkerLoop', () => {
       // The owner's push is the one it was, with the audience added: title, priority, thread, chips.
       expect(sent[0]).toMatchObject({ title: `⏸ ${task.title}`, priority: 'normal', taskId: 'po-1', data: { threadId: 'thread-worker-test' } });
       expect(sent[0]!.followUps?.map((f) => f.label)).toEqual([WORKER_NOTICES.en.chipDetails, WORKER_NOTICES.en.chipRunAgain]);
-      // Both are the same end: one title, one thread.
+      // Both are the same end, one title; the grants' push leads nowhere back to the reply: no
+      // deep link into the run's thread, no follow-ups.
       expect(sent[1]!.title).toBe(`⏸ ${task.title}`);
       expect(sent[1]!.title).toBe(sent[0]!.title);
-      expect(sent[1]!.data).toEqual(sent[0]!.data);
+      expect(sent[1]!.taskId).toBe('po-1');
+      expect(sent[1]!.priority).toBe(sent[0]!.priority);
+      expect(sent[1]!.data).toBeUndefined();
+      expect(sent[1]!.followUps).toBeUndefined();
       loop.stop();
     });
 
