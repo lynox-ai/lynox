@@ -485,11 +485,26 @@ describe('ChatView wiring', () => {
 		// goes, split into its head and its lines, to the question field, and the
 		// field shows every part as a text node: lines in a plain <pre>, the head
 		// as text, never {@html}.
-		expect(source).toMatch(/splitPromptHead\(\s*pendingPermission\.question\s*,\s*pendingPermission\.segments\s*\)/);
-		expect(source).toMatch(/<PromptQuestionField\s+head=\{split\.head\}\s+lines=\{split\.lines\}/);
-		const field = readFileSync(new URL('../components/PromptQuestionField.svelte', import.meta.url), 'utf-8');
+		// Comments are dropped first: markup inside one renders nothing, so it must
+		// not count as the wiring.
+		const live = (s: string): string => s.replace(/<!--[\s\S]*?-->/g, '');
+		const start = source.indexOf('{#if pendingPermission && !inBatchMode}');
+		expect(start).toBeGreaterThan(-1);
+		const card = live(source.slice(start, source.indexOf('\n\t{/if}', start)));
+		// Where it is wired, not only that: the engine's own confirmation is the
+		// first branch, and it holds the field and nothing else.
+		const guardBranch = /\{#if isPermissionGuard \|\| isDeepConsent\}\s*\{@const split = splitPromptHead\(\s*pendingPermission\.question\s*,\s*pendingPermission\.segments\s*\)\}\s*<PromptQuestionField\s+head=\{split\.head\}\s+lines=\{split\.lines\}[^>]*\/>\s*\{:else\}/.exec(card);
+		expect(guardBranch).not.toBeNull();
+		// The card renders markup once, for the model's own question, after that branch.
+		const htmlAt = [...card.matchAll(/\{@html/g)].map((m) => m.index);
+		expect(htmlAt).toHaveLength(1);
+		expect(htmlAt[0]).toBeGreaterThan(guardBranch!.index + guardBranch![0].length - 1);
+		const field = live(readFileSync(new URL('../components/PromptQuestionField.svelte', import.meta.url), 'utf-8'));
 		expect(field).not.toMatch(/\{@html/);
 		expect(field).not.toMatch(/MarkdownRenderer|renderPrompt/);
+		// Nor any other way to markup: a DOM write, an action, or a child component.
+		expect(field).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|createContextualFragment|\buse:/);
+		expect(field).not.toMatch(/from\s+['"][^'"]+\.svelte['"]/);
 		expect(field).toMatch(/<pre[^>]*data-prompt-field[^>]*>\{#each lines as line, i \(i\)\}<span[^>]*>\{line\}<\/span>\{\/each\}<\/pre>/);
 		expect(field).toMatch(/\{#if seg\.kind === 'value'\}<span[^>]*>\{seg\.text\}<\/span>\{:else\}\{seg\.text\}\{\/if\}/);
 	});
