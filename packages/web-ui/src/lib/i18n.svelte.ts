@@ -2433,6 +2433,7 @@ const translations: Record<string, Record<Locale, string>> = {
 		en: 'Paused: the access of the person who set it up has ended. The plan runs again only once you take it over.',
 	},
 	'triggers.paused_takeover': { de: 'Pausiert · Übernahme nötig', en: 'Paused · needs takeover' },
+	'triggers.paused_owner_takes_over': { de: 'Pausiert, bis der Inhaber den Plan übernimmt.', en: 'Paused until the owner takes the plan over.' },
 	// 641c-2: the owner's takeover of a paused plan (`utils/plan-takeover.ts`); wording ux U-037/U-039, PRD 641c "Texte".
 	'takeover.button': { de: 'Übernehmen', en: 'Take over' },
 	'takeover.title': { de: 'Plan übernehmen?', en: 'Take over this plan?' },
