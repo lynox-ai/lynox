@@ -3949,13 +3949,11 @@ export class WorkerLoop {
   private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted' | 'stopped', said?: string, opts?: { readonly noRetry: true }): void {
     const look = RUN_END_LOOK[end === true ? 'success' : end === false ? 'failed' : end];
     // A bulk halt whose way on only the owner can take: the history, which a mandate reads too,
-    // keeps the fact; the owner's push keeps the way; the planning mandate's push says the owner
+    // keeps the fact; the owner's push keeps the way; every mandate's push says the owner
     // resolves it (U-383).
     const haltRow = this.#bulkRunRow(task);
     const lang = noticeLanguage(this.engine.config?.language);
-    // A run a mandate planned before the ledger kept its grant cannot reach that grant's devices on
-    // its own: it stays one sentence for every reader and device, as before.
-    const byReader = haltRow !== null && haltRow.grantUnknown !== true;
+    const byReader = haltRow !== null;
     const recordAs = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, resultSummary, lang);
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
@@ -3986,15 +3984,15 @@ export class WorkerLoop {
         // Only the owner can take the way this sentence names: no other device reads it.
         ...(readers === null ? {} : { audience: 'owner' as const }),
       });
-      const mandateId = haltRow?.mandateId ?? null;
-      if (readers !== null && mandateId !== null && (this.engine.getMandateEnds()?.isLive(mandateId) ?? false)) {
+      // Every live grant reads the same end in the mandates' sentence, not only the planning one:
+      // a mandate gets the notices the owner gets, in the sentence that is true for it.
+      if (readers !== null) {
         void this.notificationRouter.notify({
           title,
           body: readers.mandate,
           taskId: task.id,
           priority: toldLook.priority,
-          audience: 'mandates',
-          mandateId,
+          audience: 'all_mandates',
         });
       }
     }
@@ -4004,27 +4002,20 @@ export class WorkerLoop {
    * The run a bulk trigger leads to, as its ledger row holds it: null for any other trigger, a
    * run that is gone, or a read that fails, which costs a push its words, never the push.
    */
-  #bulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null; mandateId?: string | null; grantUnknown?: true } | null {
+  #bulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null } | null {
     const row = this.#readBulkRunRow(task);
     return row === 'unreadable' ? null : row;
   }
 
   /** {@link #bulkRunRow}, with a read that failed told apart from a run that is gone. */
-  #readBulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null; mandateId?: string | null; grantUnknown?: true } | null | 'unreadable' {
+  #readBulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null } | null | 'unreadable' {
     if (task.bulk_run_id === undefined || !task.effect.startsWith('bulk_')) return null;
     try {
       const ledger = this.engine.getBulkLedger() ?? this.engine.getBulkLedgerSwitchedOff?.() ?? null;
       // A plain row read: `getStatus` frees dead reads as it reads, and a push must not write.
       const st = ledger?.getRunForApply(task.bulk_run_id);
       if (st === null || st === undefined) return null;
-      const planner = st.delegatedPlanner;
-      return {
-        phase: st.phase, haltReason: typeof st.haltReason === 'string' ? st.haltReason : null,
-        // The grant that planned the run, if a mandate did: whose devices a halt's mandate sentence is for.
-        mandateId: planner?.kind === 'mandate' ? planner.mandateId ?? null : null,
-        // A mandate planned it, but the row names no grant (a run from before the ledger kept it).
-        ...(planner?.kind === 'mandate' && (planner.mandateId ?? null) === null ? { grantUnknown: true as const } : {}),
-      };
+      return { phase: st.phase, haltReason: typeof st.haltReason === 'string' ? st.haltReason : null };
     } catch {
       return 'unreadable';
     }
