@@ -9,7 +9,7 @@ import { readEnvAlias } from './env.js';
 import { cpSuppliesLLMKey } from '../contract/vocab.js';
 import { compose, renderFence } from '../core/data-boundary.js';
 import { isHandRunOf } from './hand-run-door.js';
-import { isMandateTag, isOwnerPrincipal, ownedBy, type RequestPrincipal } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, ownedBy, principalTag, type RequestPrincipal } from './request-principal.js';
 import { MAPPING_MAX_ENTRIES, mintRouteToken, parseWebhookSpec, type WebhookVerifierKind } from './webhook-verifiers.js';
 import { encodeStamp } from './plan-stamp.js';
 import type { StampEntry } from './plan-run-context.js';
@@ -405,7 +405,7 @@ export class TaskManager {
       dueDate: params.dueDate ? params.dueDate.slice(0, 10) : undefined,
       tags: params.tags ? JSON.stringify(params.tags) : undefined,
       parentTaskId: params.parentTaskId,
-      ...(isMandateTag(params.createdBy) ? { createdBy: params.createdBy } : {}),
+      ...(isMandateTag(params.createdBy) || params.createdBy === principalTag(OWNER_PRINCIPAL) ? { createdBy: params.createdBy } : {}),
     });
 
     return this.history.getTask(id)!;
@@ -952,6 +952,14 @@ export class TaskManager {
     // refused attempt must not leave a mark that would hold the owner's approved run.
     refuseBulkTrigger(trigger);
     return this.history.markTriggerEditedBy(trigger.id, editor, clearStamp);
+  }
+
+  /** A run's change of a trigger under the owner's principal: see `TriggerStore.markEditedByRun`. */
+  markEditedByRun(id: string, runTag: string): boolean {
+    const trigger = this.history.getTrigger(id);
+    if (!trigger) return false;
+    refuseBulkTrigger(trigger);
+    return this.history.markTriggerEditedByRun(trigger.id, runTag);
   }
 
   /** Create a watch/monitor AGENT-TRIGGER → source='watch', effect='run_agent', assignee='lynox', computes next_run_at from interval. */

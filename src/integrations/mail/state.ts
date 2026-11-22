@@ -625,6 +625,22 @@ const MIGRATIONS: string[] = [
    INSERT OR IGNORE INTO schema_version (version) VALUES (22);
    ALTER TABLE mail_sent_log ADD COLUMN origin_owner_known INTEGER NOT NULL DEFAULT 0;
    COMMIT;`,
+
+  // v23: the recipients of the sends flagged in v22, one normalized address per row, so the
+  // check before a send (`isOwnerKnownRecipient`) is one indexed probe instead of a scan of the
+  // whole log. Written with the log row by `recordSentMail`, only for a flagged send. No
+  // backfill: nothing set the flag before this version was written, and an address missing
+  // here only reads as not known.
+  `BEGIN;
+   INSERT OR IGNORE INTO schema_version (version) VALUES (23);
+   CREATE TABLE IF NOT EXISTS mail_sent_owner_known (
+     sent_id TEXT NOT NULL,
+     tenant_id TEXT NOT NULL,
+     address TEXT NOT NULL,
+     PRIMARY KEY (sent_id, address)
+   );
+   CREATE INDEX IF NOT EXISTS idx_mail_sent_owner_known_address ON mail_sent_owner_known(tenant_id, address);
+   COMMIT;`,
 ];
 
 export interface MailStateDbOptions {
@@ -1411,33 +1427,47 @@ export class MailStateDb {
    */
   recordSentMail(input: SentMailLogInput): string {
     const id = randomUUID().slice(0, 12);
-    this.db
-      .prepare<[
-        string, string, string, string, string | null,
-        string, string | null, string | null,
-        string, number, number, string | null, number,
-      ], unknown>(
-        `INSERT INTO mail_sent_log (
-           id, tenant_id, account_id, message_id, in_reply_to,
-           to_json, cc_json, bcc_json,
-           subject, body_chars, sent_at, followup_id, origin_owner_known
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        id,
-        input.tenantId ?? 'default',
-        input.accountId,
-        input.messageId,
-        input.inReplyTo ?? null,
-        JSON.stringify(input.to),
-        input.cc && input.cc.length > 0 ? JSON.stringify(input.cc) : null,
-        input.bcc && input.bcc.length > 0 ? JSON.stringify(input.bcc) : null,
-        input.subject,
-        input.bodyChars,
-        (input.sentAt ?? new Date()).getTime(),
-        input.followupId ?? null,
-        input.originOwnerKnown === true ? 1 : 0,
-      );
+    // The log row and its owner-known recipients in one transaction: a recipient is never
+    // counted for a send the log does not hold.
+    this.db.transaction(() => {
+      this.db
+        .prepare<[
+          string, string, string, string, string | null,
+          string, string | null, string | null,
+          string, number, number, string | null, number,
+        ], unknown>(
+          `INSERT INTO mail_sent_log (
+             id, tenant_id, account_id, message_id, in_reply_to,
+             to_json, cc_json, bcc_json,
+             subject, body_chars, sent_at, followup_id, origin_owner_known
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.tenantId ?? 'default',
+          input.accountId,
+          input.messageId,
+          input.inReplyTo ?? null,
+          JSON.stringify(input.to),
+          input.cc && input.cc.length > 0 ? JSON.stringify(input.cc) : null,
+          input.bcc && input.bcc.length > 0 ? JSON.stringify(input.bcc) : null,
+          input.subject,
+          input.bodyChars,
+          (input.sentAt ?? new Date()).getTime(),
+          input.followupId ?? null,
+          input.originOwnerKnown === true ? 1 : 0,
+        );
+      if (input.originOwnerKnown === true) {
+        const tenantId = input.tenantId ?? 'default';
+        const insert = this.db.prepare<[string, string, string], unknown>(
+          'INSERT OR IGNORE INTO mail_sent_owner_known (sent_id, tenant_id, address) VALUES (?, ?, ?)',
+        );
+        for (const entry of [...input.to, ...(input.cc ?? []), ...(input.bcc ?? [])]) {
+          const address = normalizeMailTarget(entry.address)?.value;
+          if (address !== undefined) insert.run(id, tenantId, address);
+        }
+      }
+    })();
     return id;
   }
 
@@ -1451,25 +1481,17 @@ export class MailStateDb {
   isOwnerKnownRecipient(address: string, opts: { tenantId?: string | undefined } = {}): boolean {
     const wanted = normalizeMailTarget(address)?.value;
     if (wanted === undefined) return false;
-    const rows = this.db
-      .prepare<[string], { to_json: string; cc_json: string | null; bcc_json: string | null }>(
-        `SELECT to_json, cc_json, bcc_json FROM mail_sent_log
-         WHERE tenant_id = ? AND origin_owner_known = 1`,
+    // One indexed probe on the normalized recipients of flagged sends (v23), joined to the log
+    // row so a recipient whose send is gone, or no longer flagged, does not count.
+    const row = this.db
+      .prepare<[string, string], { hit: number }>(
+        `SELECT 1 AS hit FROM mail_sent_owner_known r
+         JOIN mail_sent_log l ON l.id = r.sent_id
+         WHERE r.tenant_id = ? AND r.address = ? AND l.origin_owner_known = 1
+         LIMIT 1`,
       )
-      .iterate(opts.tenantId ?? 'default');
-    for (const row of rows) {
-      for (const json of [row.to_json, row.cc_json, row.bcc_json]) {
-        if (json === null) continue;
-        let list: unknown;
-        try { list = JSON.parse(json); } catch { continue; }
-        if (!Array.isArray(list)) continue;
-        for (const entry of list) {
-          const addr = (entry as { address?: unknown } | null)?.address;
-          if (typeof addr === 'string' && normalizeMailTarget(addr)?.value === wanted) return true;
-        }
-      }
-    }
-    return false;
+      .get(opts.tenantId ?? 'default', wanted);
+    return row !== undefined;
   }
 
   /**
