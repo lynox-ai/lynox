@@ -145,13 +145,19 @@ const HOST_HIDDEN = '(host not shown: its address holds a stored secret)';
 const PATH_HIDDEN = '/(path not shown: it holds a stored secret)';
 
 /**
- * `urlForNote`, with the host or the path left out where it holds a stored value the mask would
- * miss in the parsed URL. The parser rewrites what it reads — it lower-cases the host and
- * percent-encodes a space or a quote in the path — and a value rewritten that way no longer
- * matches its stored form. So the host and the path are also read as the request wrote them, and
- * a part that holds a value there and reads differently once parsed is left out, never rewritten:
- * what is shown is always the parser's own reading, so the note names the host the request goes to
- * and never shows the query. `hideHost`: the caller already knows the host holds a stored secret.
+ * `urlForNote`, with the host or the path left out where it would show a stored value, or a part
+ * of one, that the mask misses in the parsed URL. What is shown is always the parser's own
+ * reading, so the note names the host the request goes to and never shows the query; but the
+ * parser rewrites what it reads, and a value rewritten no longer matches its stored form. So the
+ * URL is also read in the forms a value can take before the parser rewrites it, and a part that
+ * holds a value in one of them is left out, never rewritten:
+ *  - as written (`writtenParts`): the host lower-cased or a space in the path percent-encoded;
+ *  - a value that runs over a part's edge — into the userinfo or the scheme before the host, the
+ *    query or the fragment after the path (`tok@Host`, `h?sig=…`): the mask, run over the part
+ *    alone, no longer finds it;
+ *  - with the tabs and line breaks the parser drops: a value that holds one;
+ *  - percent-decoded: a value written percent-encoded, which the parser keeps encoded.
+ * `hideHost`: the caller already knows the host holds a stored secret.
  */
 function urlWithHidden(raw: string, hideHost: boolean, mask: (text: string) => string): string {
   let u: URL;
@@ -160,39 +166,159 @@ function urlWithHidden(raw: string, hideHost: boolean, mask: (text: string) => s
   } catch {
     return '(unparsable URL)';
   }
-  const written = writtenHostAndPath(raw);
-  const holds = (text: string): boolean => mask(text) !== text;
-  const rewritten = (as: string, parsed: string): boolean => holds(as) && as !== parsed;
-  let host = hideHost;
-  let path = false;
-  if (written === undefined) {
-    // Not split as the parser splits it (a scheme other than http or https): a stored value the
-    // mask finds in the URL as written leaves both parts out.
-    if (holds(raw)) host = path = true;
-  } else {
-    if (rewritten(written.host, u.host)) host = true;
-    if (rewritten(written.path, u.pathname)) path = true;
-    // A value that runs from the host into the path is in neither part alone.
-    if (!host && !path && rewritten(written.host + written.path, u.host + u.pathname)) host = path = true;
-  }
+  const { host, path } = partsHidden(raw, u, hideHost, mask);
   return `${u.protocol}//${host ? HOST_HIDDEN : u.host}${path ? PATH_HIDDEN : u.pathname}`;
 }
 
 /**
- * The host (with port, without userinfo) and the path of an http or https URL as written, cut
- * where the URL parser cuts them: it first drops control characters and spaces around the URL and
- * every tab and line break in it, skips any run of `/` and `\` after the scheme (`https:host`,
+ * Whether the host of an http or https URL shows a stored value, or a part of one, in any of the
+ * forms `urlWithHidden` reads (a value running into the host from the userinfo, written
+ * percent-encoded, holding a tab, …). Any other scheme, or a URL that does not parse: false — the
+ * caller's own checks decide those.
+ */
+export function hostShowsStoredValue(raw: string, mask: (text: string) => string): boolean {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (writtenParts(parserCleaned(raw).text) === undefined) return false;
+  return partsHidden(raw, u, false, mask).host;
+}
+
+function partsHidden(raw: string, u: URL, hideHost: boolean, mask: (text: string) => string): { host: boolean; path: boolean } {
+  const holds = (text: string): boolean => mask(text) !== text;
+  const cleaned = parserCleaned(raw);
+  const written = writtenParts(cleaned.text);
+  let host = hideHost;
+  let path = false;
+  if (written === undefined) {
+    // Not split as the parser splits it (a scheme other than http or https): a stored value the
+    // mask finds in the URL in any of its forms leaves both parts out.
+    if ([raw, cleaned.text, percentDecoded(cleaned.text), percentDecoded(raw)].some(holds)) host = path = true;
+  } else {
+    const { text, hostStart, hostEnd, pathEnd } = written;
+    const writtenHost = text.slice(hostStart, hostEnd);
+    const writtenPath = text.slice(hostEnd, pathEnd);
+    const rewritten = (as: string, parsed: string): boolean => holds(as) && as !== parsed;
+    // Read as written, the value is whole in a part the parser rewrites.
+    if (rewritten(writtenHost, u.host)) host = true;
+    if (rewritten(writtenPath, u.pathname)) path = true;
+    // Read in each form the parser undoes, the value is whole in a part, or runs over its edge.
+    const asRaw = rawCut(raw, cleaned.kept, written);
+    const decoded = decodedCut(written);
+    // Both at once: a value that holds a tab and is written percent-encoded in part.
+    const rawDecoded = decodedCut(asRaw);
+    const forms = [asRaw, decoded, rawDecoded];
+    for (const form of [written, ...forms]) {
+      if (crossesAt(form.text, form.hostStart, mask)) host = true;
+      if (crossesAt(form.text, form.pathEnd, mask)) {
+        if (form.pathEnd > form.hostEnd) path = true;
+        else host = true;
+      }
+    }
+    const rawHost = asRaw.text.slice(asRaw.hostStart, asRaw.hostEnd);
+    const rawPath = asRaw.text.slice(asRaw.hostEnd, asRaw.pathEnd);
+    // A value holding a tab or a line break: masked as written, not once the parser drops them.
+    const lostBreak = (asWritten: string, part: string): boolean => mask(withoutBreaks(mask(asWritten))) !== mask(part);
+    if (lostBreak(rawHost, writtenHost)) host = true;
+    if (lostBreak(rawPath, writtenPath)) path = true;
+    // A value written percent-encoded: the masked part, decoded, still holds it.
+    if (holds(percentDecoded(mask(writtenHost)))) host = true;
+    if (holds(percentDecoded(mask(writtenPath)))) path = true;
+    if (holds(percentDecoded(mask(rawHost)))) host = true;
+    if (holds(percentDecoded(mask(rawPath)))) path = true;
+    // A value that runs from the host into the path is in neither part alone. Shown whole and as
+    // written it is masked whole; with either part left out or rewritten, or written in another
+    // form, the other part shows a piece of it.
+    const shownWhole = !host && !path && writtenHost === u.host && writtenPath === u.pathname;
+    if (pathEnd > hostEnd && (
+      (!shownWhole && crossesAt(text, hostEnd, mask))
+      || forms.some((form) => form.text !== text && crossesAt(form.text, form.hostEnd, mask))
+    )) host = path = true;
+  }
+  return { host, path };
+}
+
+/** A URL read in one form, with where its host starts, where the host ends and where the path ends. */
+interface CutUrl { text: string; hostStart: number; hostEnd: number; pathEnd: number }
+
+const BREAKS = /[\t\n\r]/g;
+const withoutBreaks = (text: string): string => text.replace(BREAKS, '');
+
+/**
+ * Whether the mask finds a stored value in `text` that runs over `at`: masked whole, the text
+ * reads otherwise than its two sides masked apart.
+ */
+function crossesAt(text: string, at: number, mask: (text: string) => string): boolean {
+  if (at <= 0 || at >= text.length) return false;
+  return mask(text) !== mask(text.slice(0, at)) + mask(text.slice(at));
+}
+
+/**
+ * The URL as the parser first cleans it: C0 controls and space around it dropped, every tab and
+ * line break in it dropped. `kept[i]` is where the i-th character of `text` stood in `raw`.
+ */
+function parserCleaned(raw: string): { text: string; kept: number[] } {
+  let start = 0;
+  let end = raw.length;
+  while (start < end && raw.charCodeAt(start) <= 0x20) start++;
+  while (end > start && raw.charCodeAt(end - 1) <= 0x20) end--;
+  const kept: number[] = [];
+  let text = '';
+  for (let i = start; i < end; i++) {
+    const c = raw[i] ?? '';
+    if (c === '\t' || c === '\n' || c === '\r') continue;
+    kept.push(i);
+    text += c;
+  }
+  return { text, kept };
+}
+
+/**
+ * The host (with port, without userinfo) and the path of a cleaned http or https URL, cut where
+ * the URL parser cuts them: it skips any run of `/` and `\` after the scheme (`https:host`,
  * `https:\\host` read as `https://host`), ends the authority at the first `/`, `\`, `?` or `#`,
  * takes the host after its last `@`, and ends the path at `?` or `#`. Any other scheme: undefined.
  */
-function writtenHostAndPath(raw: string): { host: string; path: string } | undefined {
-  // The parser's own clean-up: C0 controls and space around the URL, tabs and line breaks in it.
-  const cleaned = raw.replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, '').replace(/[\t\n\r]/g, '');
-  const m = /^https?:[/\\]*([^/\\?#]*)([^?#]*)/i.exec(cleaned);
+function writtenParts(cleaned: string): CutUrl | undefined {
+  const m = /^(https?:[/\\]*)([^/\\?#]*)([^?#]*)/i.exec(cleaned);
   if (m === null) return undefined;
-  const authority = m[1] ?? '';
-  return { host: authority.slice(authority.lastIndexOf('@') + 1), path: m[2] ?? '' };
+  const authority = m[2] ?? '';
+  const hostStart = (m[1] ?? '').length + authority.lastIndexOf('@') + 1;
+  const hostEnd = (m[1] ?? '').length + authority.length;
+  return { text: cleaned, hostStart, hostEnd, pathEnd: hostEnd + (m[3] ?? '').length };
 }
+
+/**
+ * The URL as written, tabs and line breaks kept, cut where its cleaned form is cut. A cut at the
+ * cleaned form's end falls right after its last character, before what the parser drops around it.
+ */
+function rawCut(raw: string, kept: readonly number[], cut: CutUrl): CutUrl {
+  const end = kept.length === 0 ? 0 : (kept[kept.length - 1] ?? 0) + 1;
+  const at = (i: number): number => kept[i] ?? end;
+  return { text: raw, hostStart: at(cut.hostStart), hostEnd: at(cut.hostEnd), pathEnd: at(cut.pathEnd) };
+}
+
+/** A URL percent-decoded, each part apart so the cuts stay where they were. */
+function decodedCut(cut: CutUrl): CutUrl {
+  const before = percentDecoded(cut.text.slice(0, cut.hostStart));
+  const host = percentDecoded(cut.text.slice(cut.hostStart, cut.hostEnd));
+  const path = percentDecoded(cut.text.slice(cut.hostEnd, cut.pathEnd));
+  const after = percentDecoded(cut.text.slice(cut.pathEnd));
+  return { text: before + host + path + after, hostStart: before.length, hostEnd: before.length + host.length, pathEnd: before.length + host.length + path.length };
+}
+
+/**
+ * Every run of percent escapes decoded as UTF-8, a byte that is no UTF-8 read as U+FFFD: one stray
+ * byte does not keep the characters around it encoded.
+ */
+function percentDecoded(text: string): string {
+  return text.replace(/(?:%[0-9a-f]{2})+/gi, (run) =>
+    UTF8.decode(Uint8Array.from(run.slice(1).split('%'), (hex) => parseInt(hex, 16))));
+}
+const UTF8 = new TextDecoder('utf-8', { fatal: false });
 
 /** What a run report keeps of one such line (`collectWriteNotes`). */
 const NOTE_LINE_MAX_CHARS = 300;

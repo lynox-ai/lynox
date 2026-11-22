@@ -238,6 +238,15 @@ describe('setUpByOther: whose plan an escalation is about', () => {
     expect(setUpByOther({ created_by: 'owner', mandate_editor: 'mandate:h@x.test' })).toBe(true);
   });
 
+  it('a run\'s tag (a trigger\'s or a workflow\'s run, or one whose author is unknown): the owner\'s plan, as with no tag', async () => {
+    const { setUpByOther } = await import('./request-principal.js');
+    expect(setUpByOther({ created_by: 'trigger:t-1' })).toBe(false);
+    expect(setUpByOther({ created_by: 'workflow:r-1' })).toBe(false);
+    expect(setUpByOther({ created_by: 'unknown' })).toBe(false);
+    // A mandate's change still makes it another's.
+    expect(setUpByOther({ created_by: 'trigger:t-1', mandate_editor: 'mandate:h@x.test' })).toBe(true);
+  });
+
   it('fail-closed: a tag this does not know counts as another\'s', async () => {
     const { setUpByOther } = await import('./request-principal.js');
     expect(setUpByOther({ created_by: 'cp-admin' })).toBe(true);
