@@ -166,12 +166,13 @@ describe('a completed plan that keeps its pause', () => {
 
 describe('Run now at a paused plan (ux U-179)', () => {
 	const runNow = (): HTMLButtonElement | null => target.querySelector<HTMLButtonElement>('[data-trigger-run-now]');
-	it('is not offered at a completed plan that keeps its pause', async () => {
+	it('is not offered at a completed plan that keeps its pause, which keeps its switch', async () => {
 		rows = [{ ...PAUSED, status: 'completed' }];
 		await render();
 		// The row is there, so the button is missing at it, not with an empty list.
 		expect(target.textContent).toContain('Wochenreport');
 		expect(runNow()).toBeNull();
+		expect(target.querySelector('[data-trigger-toggle]')?.textContent?.trim()).toBe('Pausieren');
 	});
 	it('is not offered to a helper there either, who is told the pause without the names', async () => {
 		viewer = 'mandate';

@@ -318,8 +318,8 @@ describe('a bulk run never waits for a takeover', () => {
     const id = new TriggerStore(b.engineDb).armBulkEffect({ runId: 'r1', effect: 'bulk_apply', title: 'Bulk run r1', nextRunAt: DUE });
     // Beside it, a plan the same helper created: the box pauses that one, so the bulk run's state is not the box's.
     plan(b, 'p', { by: 'h@x.ch' });
-    const row = b.db.prepare('SELECT created_by, created_mandate_id, mandate_editor_id, target_workflow_id FROM triggers WHERE id = ?').get(id);
-    expect(row).toEqual({ created_by: null, created_mandate_id: null, mandate_editor_id: null, target_workflow_id: null });
+    const row = b.db.prepare('SELECT created_by, created_mandate_id, edited_by, mandate_editor, mandate_editor_id, target_workflow_id FROM triggers WHERE id = ?').get(id);
+    expect(row).toEqual({ created_by: null, created_mandate_id: null, edited_by: null, mandate_editor: null, mandate_editor_id: null, target_workflow_id: null });
     const helper = { kind: 'mandate' as const, email: 'h@x.ch', mandateId: 'g-h@x.ch' };
     expect(() => b.manager.markEditedBy(id, helper, true)).toThrow(BulkTriggerLockedError);
     expect(() => b.manager.markEditedByRun(id, tag('h@x.ch'))).toThrow(BulkTriggerLockedError);
