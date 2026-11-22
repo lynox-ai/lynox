@@ -261,7 +261,7 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     // A mark's lookalikes too: they read as a closing mark in this font.
     expect(flattenPrompt(dialogToolHead('a″b＂c‟d"e', 'en'))).toBe('External tool “a\\″b\\＂c\\‟d\\"e”');
     expect(flattenPrompt(dialogToolHead('a‶bˮc״d❞e〟f❝g〝h〞i〃j', 'en'))).toBe('External tool “a\\‶b\\ˮc\\״d\\❞e\\〟f\\❝g\\〝h\\〞i\\〃j”');
-    expect(flattenPrompt(dialogToolHead('aʺb˝c˶d⹂e🙶f🙷g🙸h˵i❠j‴k⁗l', 'en'))).toBe('External tool “a\\ʺb\\˝c\\˶d\\⹂e\\🙶f\\🙷g\\🙸h\\˵i\\❠j\\‴k\\⁗l”');
+    expect(flattenPrompt(dialogToolHead('aʺb˝c˶d⹂e🙶f🙷g🙸h˵i❠j‴k⁗l‷m', 'en'))).toBe('External tool “a\\ʺb\\˝c\\˶d\\⹂e\\🙶f\\🙷g\\🙸h\\˵i\\❠j\\‴k\\⁗l\\‷m”');
     // Combining double marks read as a quote after a space.
     expect(flattenPrompt(dialogToolHead('a \u030Bb \u030Ec \u030Fd', 'en'))).toBe('External tool “a \\\u030Bb \\\u030Ec \\\u030Fd”');
   });
@@ -298,6 +298,11 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     const started = performance.now();
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', 'x'.repeat(10_000_000), 'D'))).toContain(`saving “${'x'.repeat(63)}…” needs`);
     expect(performance.now() - started).toBeLessThan(2000);
+    // Nor does a long run of marks that composing would have to reorder, or a long run of spaces before it.
+    const marks = performance.now();
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `a${'\u0301'.repeat(100_000)}${'\u0316'.repeat(100_000)}`, 'D'))).toContain('saving “…” needs');
+    expect(performance.now() - marks).toBeLessThan(2000);
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `${' '.repeat(5000)}Wetter`, 'D'))).toContain('saving “Wetter” needs');
     const huge = flattenPrompt(API_SETUP_DIALOG.en.save('API', `क${'ा'.repeat(200_000)}`, 'D'));
     expect(huge.length).toBeLessThan(400);
     expect(huge).toContain('saving “…” needs');
