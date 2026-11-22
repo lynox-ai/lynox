@@ -135,19 +135,20 @@ export function capText(bytes: number): string {
 }
 
 /**
- * A target answer read as JSON, or a throw with `fail`'s text when it is over `cap`, does not
- * arrive in full in time, or is not JSON. The answer's own text is never quoted.
+ * A target answer read as JSON, or a throw with `fail`'s text (or the error `fail` gives) when it
+ * is over `cap`, does not arrive in full in time, or is not JSON. The answer's own text is never quoted.
  */
-export async function readTargetJson(r: Response, cap: number, fail: (why: UnreadAnswer) => string, timeoutMs: number = TARGET_BODY_TIMEOUT_MS): Promise<unknown> {
+export async function readTargetJson(r: Response, cap: number, fail: (why: UnreadAnswer) => string | Error, timeoutMs: number = TARGET_BODY_TIMEOUT_MS): Promise<unknown> {
+  const failure = (why: UnreadAnswer): Error => { const said = fail(why); return said instanceof Error ? said : new Error(said); };
   let text: string | null;
   try {
     text = await readTargetBody(r, cap, timeoutMs);
   } catch (err: unknown) {
     // Any other failure of the read (a reset, a closed connection) is the connection breaking.
-    throw new Error(fail(err instanceof TargetAnswerTooSlow ? 'slow' : 'broken'));
+    throw failure(err instanceof TargetAnswerTooSlow ? 'slow' : 'broken');
   }
-  if (text === null) throw new Error(fail('large'));
-  try { return JSON.parse(text) as unknown; } catch { throw new Error(fail('format')); }
+  if (text === null) throw failure('large');
+  try { return JSON.parse(text) as unknown; } catch { throw failure('format'); }
 }
 
 /**

@@ -18613,7 +18613,30 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       body: JSON.stringify({ targetUrl: 'https://evil.example.com', migrationToken: 'a'.repeat(64) }),
     });
     expect(res.status).toBe(403);
-    expect((await res.json() as { error: string }).error).toContain('system-controlled');
+    const body = await res.json() as { error: string; code?: string };
+    expect(body.error).toContain('system-controlled');
+    // The Web UI says it by its code, in its own words.
+    expect(body.code).toBe('start_managed');
+  });
+
+  it('turns a migration export down before it starts with a code per check', async () => {
+    const start = async (body: unknown): Promise<{ status: number; error: string; code?: string }> => {
+      const res = await jsonFetch('/api/migration/export', { method: 'POST', body: JSON.stringify(body) });
+      return { status: res.status, ...(await res.json() as { error: string; code?: string }) };
+    };
+    const token = 'a'.repeat(64);
+    // This file shares ONE per-IP rate window; the requests below are paid back so a test
+    // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
+    const rateCounts = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    const windowBefore = new Map([...rateCounts].map(([k, v]) => [k, v.count]));
+    try {
+      expect(await start({ targetUrl: 'https://target.example.com' })).toEqual({ status: 400, error: 'Missing targetUrl or migrationToken', code: 'start_missing_input' });
+      expect(await start({ targetUrl: 'http://192.168.1.5', migrationToken: token })).toEqual({ status: 400, error: 'targetUrl must use HTTPS', code: 'start_not_https' });
+      expect(await start({ targetUrl: 'not a url', migrationToken: token })).toEqual({ status: 400, error: 'Invalid targetUrl', code: 'start_invalid_url' });
+      expect(await start({ targetUrl: 'https://127.0.0.1', migrationToken: token })).toEqual({ status: 400, error: 'targetUrl must resolve to a public host', code: 'start_not_public' });
+    } finally {
+      for (const [k, e] of rateCounts) e.count = windowBefore.get(k) ?? 0;
+    }
   });
 
   it('403s bulk data deletion on a managed instance', async () => {
