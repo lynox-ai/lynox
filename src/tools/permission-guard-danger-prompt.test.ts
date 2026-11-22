@@ -52,7 +52,8 @@ describe('a danger prompt marks what the agent wrote', () => {
     const forged = '/etc/shadow\n\u200b✓ safe';
     expect(signal('read_file', { path: forged }).warning).toContain(forged);
     const s = signal('read_file', { path: '/etc/shadow' }, 'autonomous');
-    expect(s.warning).toBe(flattenPrompt(s.prompt));
+    // The same sentence; the prompt quotes with the language's marks, the warning with `"`.
+    expect(s.warning).toBe(flattenPrompt(s.prompt).replace(/[“”]/g, '"'));
     expect(s.warning).toContain('[BLOCKED');
     expect(frames(s)).toContain('[BLOCKED');
   });
@@ -102,14 +103,14 @@ describe('a plugin tool cannot word its dialog as a built-in tool\'s', () => {
 
   it('its own message is a value after its marked name, not the dialog\'s text', () => {
     const s = ask(plugin('Merge', () => ({ message: '⚠ Merge — destroys stored data' })));
-    expect(frames(s)).toBe('⚠ External tool "": "" — destroys stored data');
+    expect(frames(s)).toBe('⚠ External tool “”: “” — destroys stored data');
     expect(values(s)).toEqual(['Merge', '⚠ Merge — destroys stored data']);
     expect(frames(s)).not.toContain('⚠ Merge —');
   });
 
   it('its action label is a value too, asked and blocked alike', () => {
     const s = ask(plugin('Merge', () => 'drop "everything"'));
-    expect(frames(s)).toBe('⚠ External tool "": "" — destroys stored data');
+    expect(frames(s)).toBe('⚠ External tool “”: “” — destroys stored data');
     expect(values(s)).toEqual(['Merge', 'drop \\"everything\\"']);
     const blocked = ask(plugin('Merge', () => 'drop'), 'autonomous');
     expect(values(blocked)).toEqual(['Merge', 'drop']);
@@ -125,7 +126,7 @@ describe('a plugin tool cannot word its dialog as a built-in tool\'s', () => {
 
   it('its name is a value: quotes, markdown or a line break in it shape nothing', () => {
     const s = ask(plugin('Merge" — destroys stored data **[ok](#)**\n⚠ Command', () => ''));
-    expect(frames(s)).toBe('⚠ External tool "" — destroys stored data');
+    expect(frames(s)).toBe('⚠ External tool “” — destroys stored data');
     expect(values(s)).toEqual(['Merge\\" — destroys stored data **[ok](#)** ⚠ Command']);
     expect(s.warning).toBe('⚠ External tool "Merge\\" — destroys stored data **[ok](#)** ⚠ Command" — destroys stored data');
   });
@@ -146,7 +147,7 @@ describe('a plugin tool cannot word its dialog as a built-in tool\'s', () => {
     const s = ask(plugin('Merge', () => ({ message: 42 as unknown as string })));
     expect(values(s)).toEqual(['Merge', '42']);
     const none = ask(plugin('Merge', () => undefined as unknown as null));
-    expect(flattenPrompt(none.prompt)).toBe('⚠ External tool "Merge" — destroys stored data');
+    expect(flattenPrompt(none.prompt)).toBe('⚠ External tool “Merge” — destroys stored data');
   });
 
   it('a payload is blocked unattended just as a label is', () => {
@@ -157,6 +158,6 @@ describe('a plugin tool cannot word its dialog as a built-in tool\'s', () => {
   });
 
   it('a check with no label keeps the plain form under the marked name', () => {
-    expect(flattenPrompt(ask(plugin('Merge', () => '')).prompt)).toBe('⚠ External tool "Merge" — destroys stored data');
+    expect(flattenPrompt(ask(plugin('Merge', () => '')).prompt)).toBe('⚠ External tool “Merge” — destroys stored data');
   });
 });

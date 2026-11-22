@@ -20,6 +20,10 @@ import type { PromptText } from '../types/agent.js';
 /** The language a confirmation dialog is asked in. */
 export type DialogLanguage = NoticeLanguage;
 
+/** The quotation marks of each dialog language, opening and closing: a value is quoted as its
+ *  readers write it. */
+export const QUOTE_MARKS: Readonly<Record<DialogLanguage, readonly [open: string, close: string]>> = { en: ['“', '”'], de: ['„', '“'] };
+
 /** The guard's fixed sentence parts (`_detectDanger`). */
 export interface GuardText {
   readonly runManually: string;
@@ -353,17 +357,17 @@ export interface SpawnDialog {
 export const SPAWN_DIALOG: Readonly<Record<DialogLanguage, SpawnDialog>> = {
   en: {
     children: (count) => count === 1 ? 'One child would run' : `${count} children would run`,
-    tierUnknownBand: 'a model gated as DEEP (or an unregistered custom model whose cost band the engine cannot prove)',
-    tierDeep: 'the DEEP tier (a stronger reasoning model, more capable but more expensive)',
-    tailDowngrade: 'Allow only if the work genuinely needs deep; otherwise choose "Run on balanced".',
+    tierUnknownBand: 'a model in the Deep tier (or an unregistered custom model whose cost band the engine cannot prove)',
+    tierDeep: 'the Deep tier (a stronger model, more thorough but more expensive)',
+    tailDowngrade: 'Allow this only if the task really needs the Deep tier. Otherwise choose “Run on Balanced”.',
     tailPinned: 'A model profile pins a specific endpoint and cannot be substituted down — allow only if you want this run on that model.',
     sentence: (word, children, tier, costUsd, providers, tail) => `⚠ ${word}: ${children} on ${tier}. Estimated model cost for this session: about $${costUsd}. Provider: ${providers}. ${tail}`,
   },
   de: {
     children: (count) => count === 1 ? 'Eine Teilaufgabe würde' : `${count} Teilaufgaben würden`,
-    tierUnknownBand: 'einem Modell der Stufe DEEP (oder einem nicht registrierten eigenen Modell, dessen Kostenrahmen lynox nicht belegen kann)',
-    tierDeep: 'der Stufe DEEP (ein stärkeres Denkmodell, leistungsfähiger, aber teurer)',
-    tailDowngrade: 'Erlaube das nur, wenn die Arbeit wirklich DEEP braucht; sonst wähle „Auf balanced ausführen“.',
+    tierUnknownBand: 'einem Modell der Stufe „Tief“ (oder einem nicht registrierten eigenen Modell, dessen Kostenrahmen lynox nicht belegen kann)',
+    tierDeep: 'der Stufe „Tief“ (ein stärkeres Modell, gründlicher, aber teurer)',
+    tailDowngrade: 'Erlaube das nur, wenn die Aufgabe die Stufe „Tief“ wirklich braucht. Sonst wähle „Mit Ausgewogen ausführen“.',
     tailPinned: 'Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.',
     sentence: (word, children, tier, costUsd, providers, tail) => `⚠ ${word}: ${children} auf ${tier} laufen. Geschätzte Modellkosten für diese Sitzung: etwa $${costUsd}. Anbieter: ${providers}. ${tail}`,
   },
@@ -440,7 +444,7 @@ const ADOPT_NAMES_SHOWN = 30;
 
 export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> = {
   en: {
-    save: (word, name, disclosure) => pv`⚠ ${word}: saving "${name}" needs your acceptance.\n\n${disclosure}\n\nAccept and save this profile?`,
+    save: (word, name, disclosure) => pv`⚠ ${word}: saving “${name}” needs your acceptance.\n\n${disclosure}\n\nAccept and save this profile?`,
     redirect: (hosts) => `You will be sent to ${hosts.join(' and ')} in your own browser to authorize this profile. You sign in there, to that provider — not to lynox — and what comes back is stored here for this profile.`,
     deleteUnreadable: (word, id, source) => pv`⚠ ${word}: delete the stored API profile ${id}, which could not be read (${source})? Every vault name it carries is free for other profiles once it is gone. Delete it?`,
     deleteProfile: (word, name, id, host, loses) => pv`⚠ ${word}: delete the API profile ${name} (id ${id}${host ? pv`, host ${host}` : pv``})?${loses} Delete it?`,
@@ -453,7 +457,7 @@ export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> 
     },
   },
   de: {
-    save: (word, name, disclosure) => pv`⚠ ${word}: Zum Speichern von "${name}" braucht es deine Zustimmung.\n\n${disclosure}\n\nDieses Profil annehmen und speichern?`,
+    save: (word, name, disclosure) => pv`⚠ ${word}: Zum Speichern von „${name}“ braucht es deine Zustimmung.\n\n${disclosure}\n\nDieses Profil annehmen und speichern?`,
     redirect: (hosts) => `Zur Freigabe dieses Profils öffnet sich ${hosts.join(' und ')} in deinem eigenen Browser. Du meldest dich dort beim Anbieter an, nicht bei lynox, und was zurückkommt, wird hier für dieses Profil gespeichert.`,
     deleteUnreadable: (word, id, source) => pv`⚠ ${word}: das gespeicherte API-Profil ${id} löschen, das sich nicht lesen liess (${source})? Jeder Vault-Name darin ist danach für andere Profile frei. Löschen?`,
     deleteProfile: (word, name, id, host, loses) => pv`⚠ ${word}: das API-Profil ${name} löschen (Id ${id}${host ? pv`, Host ${host}` : pv``})?${loses} Löschen?`,
@@ -475,6 +479,6 @@ export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> 
  * equal. The keys themselves are the wire (`src/contract/prompt.ts`).
  */
 export const CONSENT_LABELS: Readonly<Record<DialogLanguage, Readonly<Record<ConsentKey, string>>>> = {
-  en: { allow: 'Allow', deny: 'Deny', deep: 'Allow deep', balanced: 'Run on balanced', cancel: 'Cancel' },
-  de: { allow: 'Erlauben', deny: 'Ablehnen', deep: 'Deep erlauben', balanced: 'Auf balanced ausführen', cancel: 'Abbrechen' },
+  en: { allow: 'Allow', deny: 'Deny', deep: 'Allow Deep', balanced: 'Run on Balanced', cancel: 'Cancel' },
+  de: { allow: 'Erlauben', deny: 'Ablehnen', deep: 'Tief erlauben', balanced: 'Mit Ausgewogen ausführen', cancel: 'Abbrechen' },
 };

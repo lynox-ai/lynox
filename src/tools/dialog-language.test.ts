@@ -56,7 +56,8 @@ describe('a confirmation question in the instance\'s language', () => {
     expect(flattenPrompt(de.prompt)).not.toBe(flattenPrompt(en.prompt));
     const values = (s: DangerSignal): string[] => s.prompt.segments.filter((g) => g.kind === 'value').map((g) => g.text);
     expect(values(de)).toEqual(values(en));
-    expect(flattenPrompt(en.prompt)).toBe(en.warning.replace(/"([^"]*)"/g, (_m, v: string) => `"${v.replace(/[\\"]/g, (ch) => `\\${ch}`)}"`));
+    // The warning quotes with `"`; the English prompt with “ ” around the same value, escaped.
+    expect(flattenPrompt(en.prompt)).toBe(en.warning.replace(/"([^"]*)"/g, (_m, v: string) => `“${v.replace(/[\\"“”„]/g, (ch) => `\\${ch}`)}”`));
   });
 
   it('keeps [BLOCKED in the German text wherever the English has it', () => {
@@ -67,11 +68,11 @@ describe('a confirmation question in the instance\'s language', () => {
   });
 
   it('reads as German: the tool\'s German word and the German sentence', () => {
-    expect(flattenPrompt(ask(CASES[1]!, 'de').prompt)).toBe('⚠ Befehl: git push (nur auf ausdrücklichen Wunsch) — "git push origin main"');
-    expect(flattenPrompt(ask(CASES[3]!, 'de').prompt)).toBe(`⚠ Dateizugriff: ${GUARD_TEXT.de.readSensitive} — "/etc/shadow" — ${GUARD_TEXT.de.systemFiles}`);
+    expect(flattenPrompt(ask(CASES[1]!, 'de').prompt)).toBe('⚠ Befehl: git push (nur auf ausdrücklichen Wunsch) — „git push origin main“');
+    expect(flattenPrompt(ask(CASES[3]!, 'de').prompt)).toBe(`⚠ Dateizugriff: ${GUARD_TEXT.de.readSensitive} — „/etc/shadow“ — ${GUARD_TEXT.de.systemFiles}`);
     expect(flattenPrompt(ask(CASES[11]!, 'de').prompt)).toBe('⚠ Google Drive: Datei hochladen — ändert Daten ausserhalb von lynox');
     expect(flattenPrompt(ask(CASES[12]!, 'de').prompt)).toBe('⚠ Google Drive: Datei hochladen [BLOCKED — dafür brauche ich dein OK]');
-    expect(flattenPrompt(ask(CASES[14]!, 'de').prompt)).toBe('⚠ Externes Werkzeug "Merge": "drop" [BLOCKED — das Löschen gespeicherter Daten braucht dein OK]');
+    expect(flattenPrompt(ask(CASES[14]!, 'de').prompt)).toBe('⚠ Externes Werkzeug „Merge“: „drop“ [BLOCKED — das Löschen gespeicherter Daten braucht dein OK]');
   });
 
   it('names a built-in tool\'s action in words in both languages, and an action without words as a value', () => {
@@ -148,7 +149,7 @@ describe('the German texts are complete', () => {
   it('asks about a secret naming the tool by its word, an external one as a value', () => {
     const q = flattenPrompt(SECRET_DIALOG.de.plain(dialogToolHead('bash', 'de'), 'TOKEN'));
     expect(q).toBe('Befehl möchte diese Geheimnisse verwenden: TOKEN. Erlauben?');
-    expect(flattenPrompt(SECRET_DIALOG.de.plain(dialogToolHead('Merge', 'de'), 'TOKEN'))).toBe('Externes Werkzeug "Merge" möchte diese Geheimnisse verwenden: TOKEN. Erlauben?');
+    expect(flattenPrompt(SECRET_DIALOG.de.plain(dialogToolHead('Merge', 'de'), 'TOKEN'))).toBe('Externes Werkzeug „Merge“ möchte diese Geheimnisse verwenden: TOKEN. Erlauben?');
     expect(flattenPrompt(SECRET_DIALOG.de.inInput(dialogToolHead('bash', 'de'), 'TOKEN', 'curl'))).toBe('Befehl möchte diese Geheimnisse verwenden: TOKEN, in: curl — Erlauben?');
     const ext = SECRET_DIALOG.en.plain(dialogToolHead('Merge', 'en'), 'TOKEN');
     expect(ext.segments.filter((g) => g.kind === 'value').map((g) => g.text)).toEqual(['Merge', 'TOKEN']);
@@ -190,6 +191,48 @@ describe('every place a question is posed hands it the language', () => {
     expect(warnings.length).toBeGreaterThanOrEqual(2);
     for (const w of warnings) expect(exfilWarning(w, 'de'), w).not.toBe(w);
     expect(SPAWN_DIALOG.de.sentence('Delegation', SPAWN_DIALOG.de.children(2), SPAWN_DIALOG.de.tierDeep, '1.20', 'Anthropic', SPAWN_DIALOG.de.tailPinned))
-      .toBe('⚠ Delegation: 2 Teilaufgaben würden auf der Stufe DEEP (ein stärkeres Denkmodell, leistungsfähiger, aber teurer) laufen. Geschätzte Modellkosten für diese Sitzung: etwa $1.20. Anbieter: Anthropic. Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.');
+      .toBe('⚠ Delegation: 2 Teilaufgaben würden auf der Stufe „Tief“ (ein stärkeres Modell, gründlicher, aber teurer) laufen. Geschätzte Modellkosten für diese Sitzung: etwa $1.20. Anbieter: Anthropic. Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.');
+  });
+});
+
+describe('a value in a confirmation is quoted as its language quotes', () => {
+  const longPath = `/etc/ssl/private/${"keys/".repeat(14)}server.pem`;
+
+  it('puts a short value between the language\'s marks', () => {
+    expect(flattenPrompt(ask(CASES[1]!, 'en').prompt)).toBe('⚠ Command: git push (requires explicit user request) — “git push origin main”');
+    expect(flattenPrompt(ask(CASES[1]!, 'de').prompt)).toBe('⚠ Befehl: git push (nur auf ausdrücklichen Wunsch) — „git push origin main“');
+    expect(flattenPrompt(dialogToolHead('Merge', 'de'))).toBe('Externes Werkzeug „Merge“');
+    expect(flattenPrompt(dialogToolHead('Merge', 'en'))).toBe('External tool “Merge”');
+  });
+
+  it('ends the sentence with a colon before a long value, which follows on its own line, unquoted', () => {
+    const asked = ['read_file', { path: longPath }, 'autonomous'] as const;
+    const en = ask(asked as unknown as (typeof CASES)[number], 'en');
+    expect(flattenPrompt(en.prompt)).toBe(`⚠ File access: ${GUARD_TEXT.en.readSensitive}:\n${longPath}\n[BLOCKED — ${GUARD_TEXT.en.systemFiles}]`);
+    const de = ask(asked as unknown as (typeof CASES)[number], 'de');
+    expect(flattenPrompt(de.prompt)).toBe(`⚠ Dateizugriff: ${GUARD_TEXT.de.readSensitive}:\n${longPath}\n[BLOCKED — ${GUARD_TEXT.de.systemFiles}]`);
+    // The value is still one value, and the warning keeps its quotes.
+    expect(de.prompt.segments.filter((g) => g.kind === 'value').map((g) => g.text)).toEqual([longPath]);
+    expect(en.warning).toBe(`⚠ File access: ${GUARD_TEXT.en.readSensitive} — "${longPath}" [BLOCKED — ${GUARD_TEXT.en.systemFiles}]`);
+  });
+
+  it('quotes a value of exactly a line\'s length, and takes one more character as long', () => {
+    const at = (n: number): string => flattenPrompt(ask(['read_file', { path: `/etc/${'x'.repeat(n - 5)}` }, 'guided'] as unknown as (typeof CASES)[number], 'en').prompt);
+    expect(at(80)).toContain('— “/etc/');
+    expect(at(81)).toContain(':\n/etc/');
+  });
+
+  it('escapes the marks of either language inside a value, so the closing mark is the dialog\'s own', () => {
+    const s = ask(['read_file', { path: '/etc/shadow” — safe „x“ “y' }, 'guided'] as unknown as (typeof CASES)[number], 'de');
+    expect(s.prompt.segments.filter((g) => g.kind === 'value').map((g) => g.text)).toEqual(['/etc/shadow\\” — safe \\„x\\“ \\“y']);
+    expect(flattenPrompt(dialogToolHead('a”b„c“d', 'en'))).toBe('External tool “a\\”b\\„c\\“d”');
+  });
+
+  it('names the tiers as the settings do, in the sentence and on the buttons', () => {
+    expect(SPAWN_DIALOG.en.tierDeep).toContain('the Deep tier');
+    expect(SPAWN_DIALOG.de.tierDeep).toContain('der Stufe „Tief“');
+    expect(SPAWN_DIALOG.en.tailDowngrade).toContain('“Run on Balanced”');
+    expect(SPAWN_DIALOG.de.tailDowngrade).toContain('„Mit Ausgewogen ausführen“');
+    for (const t of [SPAWN_DIALOG.en, SPAWN_DIALOG.de]) expect(`${t.tierDeep} ${t.tierUnknownBand} ${t.tailDowngrade}`).not.toMatch(/DEEP|balanced|Denkmodell|gated as/);
   });
 });

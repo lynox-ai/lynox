@@ -6209,7 +6209,7 @@ describe('spawn_agent tool', () => {
       expect(payload).not.toBeNull();
       expect(typeof payload).toBe('object');
       const p = payload as WarningPayload;
-      expect(p.message).toContain('DEEP');
+      expect(p.message).toContain('the Deep tier');
       // The amount is the model's list-price cost in the budget's own unit ($), named as model cost,
       // at the end of its sentence.
       expect(p.message).toMatch(/Estimated model cost for this session: about \$\d+\.\d{2}\./);
@@ -6474,7 +6474,7 @@ describe('spawn_agent tool', () => {
 
       it('through the real guard: the parent\'s config reaches the check', () => {
         const input = { agents: [{ name: 'r', task: 'x' }] };
-        expect(isDangerous('spawn_agent', input, 'guided', spawnAgentTool, undefined, undefined, pinnedTo('claude-opus-4-6'))).toContain('DEEP');
+        expect(isDangerous('spawn_agent', input, 'guided', spawnAgentTool, undefined, undefined, pinnedTo('claude-opus-4-6'))).toContain('the Deep tier');
         // The payload the GO is built from is read on its own path, and must see it too.
         const detailed = isDangerousDetailed('spawn_agent', input, 'guided', spawnAgentTool, undefined, undefined, pinnedTo('claude-opus-4-6'));
         expect(detailed?.payload?.tier).toBe('deep');
@@ -6505,7 +6505,7 @@ describe('spawn_agent tool', () => {
       // autonomous does not gate (the handler clamps instead).
       const guided = isDangerous('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided', spawnAgentTool);
       expect(guided).not.toBeNull();
-      expect(guided).toContain('DEEP');
+      expect(guided).toContain('the Deep tier');
       const autonomous = isDangerous('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'autonomous', spawnAgentTool);
       expect(autonomous).toBeNull();
     });
@@ -6524,7 +6524,7 @@ describe('spawn_agent tool', () => {
       const p = consent({ agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided') as WarningPayload;
       expect(p.downgradeTo).toBe('balanced');
       // Predicate 6: the text must match the buttons offered.
-      expect(p.message).toContain('Run on balanced');
+      expect(p.message).toContain('Run on Balanced');
     });
 
     it('a deep-band profile does NOT offer downgrade (cannot substitute) — mutate canDowngrade → dishonest offer', async () => {
@@ -6608,10 +6608,10 @@ describe('spawn_agent tool', () => {
     it('isDangerousDetailed threads the payload (downgradeTo); isDangerous stays a plain string', () => {
       const signal = isDangerousDetailed('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided', spawnAgentTool);
       expect(signal).not.toBeNull();
-      expect(signal!.warning).toContain('DEEP');
+      expect(signal!.warning).toContain('the Deep tier');
       expect(signal!.payload?.downgradeTo).toBe('balanced');
       // Legacy string view unchanged (287 existing assertions depend on it).
-      expect(isDangerous('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided', spawnAgentTool)).toContain('DEEP');
+      expect(isDangerous('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided', spawnAgentTool)).toContain('the Deep tier');
       // A non-destructive danger (bash) carries NO payload — only the declarative
       // gate produces one. Mutate extractDangerPayload to always read and a bash
       // danger would gain a spurious payload.

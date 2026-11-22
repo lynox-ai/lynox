@@ -18,7 +18,7 @@ import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 import { PROMPT_TEXT_BRAND, type PromptText } from '../types/agent.js';
 import { promptSegments, promptValue, pv, singleLine } from '../core/prompt-value.js';
 import { dialogToolHead, dialogToolWord } from './tool-words.js';
-import { GUARD_TEXT, actionWords, ruleLabel, type DialogLanguage } from './dialog-text.js';
+import { GUARD_TEXT, QUOTE_MARKS, actionWords, ruleLabel, type DialogLanguage } from './dialog-text.js';
 import { BUILTIN_TOOL_NAMES } from '../core/builtin-tool-names.js';
 
 // lynox-internal secret files. Specific names, NOT the whole `~/.lynox/` dir — the agent may
@@ -1928,10 +1928,15 @@ function system(text: string): SystemText {
 /** Mark the tool a danger prompt is about: its dialog word, or an external tool's name as a value. */
 interface ToolText { readonly toolName: string; readonly language: DialogLanguage }
 
-/** `\` and `"` escaped, so the quotes around a value are the prompt's own. */
+/** `\` and every quotation mark escaped, so the marks around a value are the prompt's own. */
 function quoted(text: string): string {
-  return text.replace(/[\\"]/g, (c) => `\\${c}`);
+  return text.replace(/[\\"“”„]/g, (c) => `\\${c}`);
 }
+
+/** A value longer than a line is not quoted: the sentence ends with a colon and the value
+ *  follows on a line of its own, where it can wrap without a lone mark at either end. The web UI
+ *  draws the same line between a short and a long value. */
+const LONG_VALUE = 80;
 
 /** A danger as `_detectDanger` returns it: the prompt the person is asked with, the warning, and
  *  whether it is a hard block (see {@link hardBlock}). */
@@ -1964,17 +1969,35 @@ function askable(danger: Danger): Danger {
  * each one is marked by hand; marking the agent's text with `system` is not caught here. `warning` is the same text with the
  * agent's part as it was written, for the audit and the `[BLOCKED` checks.
  */
-function framed(strings: TemplateStringsArray, ...values: ReadonlyArray<AgentText | SystemText | ToolText>): Danger {
-  const prompt = pv(strings, ...values.map((v) => ('agentText' in v
-    ? promptValue(quoted(singleLine(v.agentText)))
-    : 'toolName' in v
-      ? dialogToolHead(v.toolName, v.language)
-      : { [PROMPT_TEXT_BRAND]: true as const, segments: promptSegments(v.systemText) })));
-  let warning = strings[0] ?? '';
-  values.forEach((v, i) => {
-    warning += ('agentText' in v ? v.agentText : 'toolName' in v ? dialogToolWord(v.toolName, v.language) : v.systemText) + (strings[i + 1] ?? '');
-  });
-  return { prompt, warning };
+function framedIn(language: DialogLanguage): (strings: TemplateStringsArray, ...values: ReadonlyArray<AgentText | SystemText | ToolText>) => Danger {
+  const [open, close] = QUOTE_MARKS[language];
+  return (strings, ...values) => {
+    // The template writes a value's quotes as `"`; the prompt shows the language's marks, or for a
+    // long value a colon and a line break. The warning keeps the template's text as it is.
+    const frames = [...strings];
+    values.forEach((v, i) => {
+      if (!('agentText' in v) || !frames[i]!.endsWith('"') || !frames[i + 1]!.startsWith('"')) return;
+      const before = frames[i]!.slice(0, -1);
+      const after = frames[i + 1]!.slice(1);
+      if (singleLine(v.agentText).length > LONG_VALUE) {
+        frames[i] = `${before.replace(/\s*(?:—\s*)?$/u, '').replace(/:?$/u, ':')}\n`;
+        frames[i + 1] = after === '' ? '' : `\n${after.trimStart()}`;
+      } else {
+        frames[i] = before + open;
+        frames[i + 1] = close + after;
+      }
+    });
+    const prompt = pv(Object.assign(frames, { raw: frames }) as unknown as TemplateStringsArray, ...values.map((v) => ('agentText' in v
+      ? promptValue(quoted(singleLine(v.agentText)))
+      : 'toolName' in v
+        ? dialogToolHead(v.toolName, v.language)
+        : { [PROMPT_TEXT_BRAND]: true as const, segments: promptSegments(v.systemText) })));
+    let warning = strings[0] ?? '';
+    values.forEach((v, i) => {
+      warning += ('agentText' in v ? v.agentText : 'toolName' in v ? dialogToolWord(v.toolName, v.language) : v.systemText) + (strings[i + 1] ?? '');
+    });
+    return { prompt, warning };
+  };
 }
 
 /** How a rule below reads an input field as a file path: the field's name and its value. Every
@@ -2001,6 +2024,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   const tool = (name: string): ToolText => ({ toolName: name, language });
   const T = GUARD_TEXT[language];
   const L = (label: string): string => ruleLabel(label, language);
+  const framed = framedIn(language);
   if (toolName === 'bash' && input && typeof input === 'object' && 'command' in input) {
     const rawCmd = String((input as { command: unknown }).command);
 
