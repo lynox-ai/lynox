@@ -5,7 +5,7 @@ import type { Server as HttpServer } from 'node:http';
 import { MAX_EXEC_TIMEOUT_MS } from '../shell-sidecar/protocol.js';
 import { CredentialRegistry, DENIAL_REASONS, hostInSet, DENIAL_RETENTION_MS, MAX_CREDS, MAX_DENIED_HOST_CHARS, MAX_DENIALS_PER_CRED, MAX_TTL_S, type TunnelHandle } from './registry.js';
 import { MAX_HELLO_BYTES, credentialFromHeader, isExactHostname, isHelloRetryRequest, parseAuthority, parseClientHello, parseDenyIps, parseRegistration, pickAddress } from './policy.js';
-import { hostForLog, targetForLog } from './log-host.js';
+import { MAX_LOGGED_LABEL, hostForLog, targetForLog } from './log-host.js';
 import { ShellProxy, bearerMatches, createAdminServer, type ProxyLimits } from './server.js';
 import { interfaceAddress, secretFromEnv } from './main.js';
 
@@ -1040,6 +1040,15 @@ describe('log: a host or target the model chose', () => {
     expect(hostForLog('*', '93.184.215.14')).toBe('93.184.215.14');
   });
 
+  it('names a label longer than the bound only as long, in a short host as in a long one', () => {
+    const long = 'secret'.padEnd(MAX_LOGGED_LABEL + 1, 'x');
+    const short = 'x'.repeat(MAX_LOGGED_LABEL);
+    expect(hostForLog('*', `${long}.example`)).toBe('(long label).example');
+    expect(hostForLog('*', `a.${long}.example`)).toBe('*.(long label).example (+1 labels)');
+    expect(hostForLog('*', `a.${short}.example`)).toBe(`*.${short}.example (+1 labels)`);
+    expect(hostForLog(new Set([`${long}.example`]), `${long}.example`)).toBe(`${long}.example`);
+  });
+
   it('names a refused target by its scheme and host form only, never its user part, port, path or query', () => {
     expect(targetForLog('*', 'http://user:secretpw@secret.attacker.example:8080/secretpath?q=secretquery')).toBe('http://*.attacker.example (+1 labels)');
     expect(targetForLog('*', 'HTTP://a@b@secret.Attacker.Example/x')).toBe('http://*.attacker.example (+1 labels)');
@@ -1049,16 +1058,14 @@ describe('log: a host or target the model chose', () => {
     expect(targetForLog('*', '/secretpath?q=secretquery')).toBe('(unreadable target)');
     expect(targetForLog('*', 'secret.evil.example.:443')).toBe('(unreadable target)');
     expect(targetForLog('*', 'secret.sub.attacker.example:443')).toBe('*.attacker.example (+2 labels)');
+    expect(targetForLog('*', 'HTTPS://a.example/secretpath')).toBe('https://a.example');
+    expect(targetForLog('*', 'secretdata.x://a.example/')).toBe('(other scheme)://a.example');
   });
 
-  /** The log lines that hold `match` (at least one); no line of the log holds `secret`. */
-  const linesOf = (logs: string[], match: string): string[] => {
-    const found = logs.filter((l) => l.includes(match));
-    // Positive control: the case's line is there.
-    expect(found.length).toBeGreaterThan(0);
-    for (const l of logs) expect(l).not.toMatch(/secret/);
-    return found;
-  };
+  /** The log lines that hold `match`. Each test asserts there is one (the positive control). */
+  const linesOf = (logs: string[], match: string): string[] => logs.filter((l) => l.includes(match));
+  /** The log lines that hold the recognisable value. */
+  const secretLines = (logs: string[]): string[] => logs.filter((l) => /secret/.test(l));
 
   it('not-in-set: names the host in part', async () => {
     const logs: string[] = [];
@@ -1068,6 +1075,7 @@ describe('log: a host or target the model chose', () => {
     expect(linesOf(logs, 'why=not-in-set')[0]).toContain('host="*.attacker.example (+2 labels)"');
     // The denial the run is told about keeps the host whole.
     expect(r.registry.denials(CRED)?.[0]?.host).toBe('secret.x7.attacker.example');
+    expect(secretLines(logs)).toEqual([]);
   });
 
   it('port: names a host outside the set in part, and one the set names whole', async () => {
@@ -1080,6 +1088,7 @@ describe('log: a host or target the model chose', () => {
     expect(port).toHaveLength(2);
     expect(port[0]).toContain(' host="*.attacker.example (+2 labels)" port=22 why=port');
     expect(port[1]).toContain(' host="a.example" port=22 why=port');
+    expect(secretLines(logs)).toEqual([]);
   });
 
   it('plain-http and bad-target: name the scheme and host form, never path, query or user part', async () => {
@@ -1094,6 +1103,7 @@ describe('log: a host or target the model chose', () => {
     const bad = linesOf(logs, 'why=bad-target');
     expect(bad).toHaveLength(2);
     for (const l of bad) expect(l).toContain('host="(unreadable target)"');
+    expect(secretLines(logs)).toEqual([]);
   });
 
   it('unresolved, ssrf and busy: name a host the model chose in part', async () => {
@@ -1102,13 +1112,16 @@ describe('log: a host or target the model chose', () => {
     r.registry.put(CRED, reg('*'));
     expect((await shellRequest(r, connectHead('secret.x7.attacker.example:443'))).status).toBe(502);
     expect(linesOf(logs, 'unresolved ')[0]).toContain('host=*.attacker.example (+2 labels)');
+    expect(secretLines(logs)).toEqual([]);
     expect((await shellRequest(r, connectHead('secret.x7.private.example:443'))).status).toBe(403);
     expect(linesOf(logs, 'why=ssrf')[0]).toContain('host="*.private.example (+2 labels)"');
+    expect(secretLines(logs)).toEqual([]);
     const fullLogs: string[] = [];
     const full = await rig({ logs: fullLogs, limits: { tunnelsPerCred: 0 } });
     full.registry.put(CRED, reg('*'));
     expect((await shellRequest(full, connectHead('secret.x7.attacker.example:443'))).status).toBe(503);
     expect(linesOf(fullLogs, 'busy ')[0]).toContain('host=*.attacker.example (+2 labels)');
+    expect(secretLines(fullLogs)).toEqual([]);
   });
 
   it('open: names a host the model chose in part, and one the set names whole', async () => {
@@ -1119,12 +1132,14 @@ describe('log: a host or target the model chose', () => {
     expect((await shellRequest(r, connectHead('secret.x7.attacker.example:443'))).status).toBe(200);
     await until(() => logs.some((l) => l.startsWith('open ')));
     expect(linesOf(logs, 'open ')[0]).toContain('host=*.attacker.example (+2 labels) ip=93.184.215.14');
+    expect(secretLines(logs)).toEqual([]);
+    // A host of three labels, so writing it in part would show.
     const setLogs: string[] = [];
-    const named = await rig({ logs: setLogs, addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port });
-    named.registry.put(CRED, reg(['a.example']));
-    const res = await shellRequest(named, connectHead('a.example:443'));
-    res.socket.write(hello(['a.example']));
+    const named = await rig({ logs: setLogs, addresses: { 'api.shop.example': ['93.184.215.14'] }, originPort: o.port });
+    named.registry.put(CRED, reg(['api.shop.example']));
+    const res = await shellRequest(named, connectHead('api.shop.example:443'));
+    res.socket.write(hello(['api.shop.example']));
     await until(() => setLogs.some((l) => l.startsWith('open ')));
-    expect(linesOf(setLogs, 'open ')[0]).toContain('host=a.example ip=');
+    expect(linesOf(setLogs, 'open ')[0]).toContain('host=api.shop.example ip=');
   });
 });
