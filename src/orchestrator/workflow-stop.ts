@@ -26,3 +26,13 @@ export const WORKFLOW_QUESTION_NOT_ASKED_ERROR = 'Question not asked: the workfl
  * worker records this without a retry or an escalation, and without saying they stopped it.
  */
 export const WORKFLOW_QUESTION_THREAD_DELETED_ERROR = 'Question withdrawn: the conversation it was asked in was deleted, so the workflow stopped before acting without an answer.';
+
+/** A run that hit one of its bounds (`workflowBoundExceeded`): the run's error, written by the runner. */
+export function workflowBoundError(kind: 'step' | 'wall-clock' | 'spend', value: string): string {
+  return `Workflow exceeded its ${kind} limit (${value}) — aborting to prevent a runaway.`;
+}
+
+/** Whether `text` is word for word one of the errors {@link workflowBoundError} writes for the runner. */
+export function isWorkflowBoundError(text: string): boolean {
+  return /^Workflow exceeded its (?:step limit \(\d+\)|wall-clock limit \(\d+s\)|spend limit \(\$\d+\.\d{2}\)) — aborting to prevent a runaway\.$/.test(text);
+}

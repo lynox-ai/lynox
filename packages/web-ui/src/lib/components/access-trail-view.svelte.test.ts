@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
+import { setLocale, getLocale } from '../i18n.svelte.js';
 
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
 // for the client, so it is mounted with the client entry, loaded by path.
@@ -133,6 +134,49 @@ describe('each kind of entry', () => {
 		expect(text(li?.querySelector('[data-note]'))).toBe('Angehalten wie geplant, wartet auf dich');
 	});
 
+	it('counts a bulk run\'s windows with a singular in EN, and DE as it was', async () => {
+		const bulk = (windows: number): unknown => ({
+			kind: 'bulk', runId: `r${String(windows)}`, action: 'bulk:apply', host: 'shop.example.invalid', at: NOW, person: IDA, status: 'done',
+			planned: false, windows, targets: { written: 1, failed: 0, atLeast: false },
+		});
+		const before = getLocale();
+		try {
+			setLocale('en');
+			await render([bulk(1), bulk(2)]);
+			const [one, two] = items();
+			expect(text(one)).toMatch(/(^|\s)1 window(\s|$)/);
+			expect(text(two)).toMatch(/(^|\s)2 windows(\s|$)/);
+			unmount(component!);
+			setLocale('de');
+			await render([bulk(1), bulk(2)]);
+			const [oneDe, twoDe] = items();
+			expect(text(oneDe)).toMatch(/(^|\s)1 Fenster(\s|$)/);
+			expect(text(twoDe)).toMatch(/(^|\s)2 Fenster(\s|$)/);
+		} finally {
+			setLocale(before);
+		}
+	});
+
+	it('counts a plan run\'s write steps with a singular, in DE and EN', async () => {
+		const plan = (writeSteps: number): unknown => ({
+			kind: 'plan', run: 'plan', key: `k${String(writeSteps)}`, trigger: null, startedBy: null, at: NOW, person: IDA, status: 'done', writeSteps, entries: [],
+		});
+		const before = getLocale();
+		try {
+			setLocale('de');
+			await render([plan(1), plan(2)]);
+			expect(items().map((li) => text(li.querySelector('[data-targets]')))).toEqual(['1 Schreibschritt', '2 Schreibschritte']);
+			unmount(component!);
+			setLocale('en');
+			await render([plan(1), plan(2)]);
+			const [one, two] = items();
+			expect(text(one?.querySelector('[data-targets]'))).toBe('1 write step');
+			expect(text(two?.querySelector('[data-targets]'))).toBe('2 write steps');
+		} finally {
+			setLocale(before);
+		}
+	});
+
 	it('a bulk run that did not halt as planned says nothing of a plan', async () => {
 		await render([{
 			kind: 'bulk', runId: 'r1', action: 'bulk:apply', host: null, at: NOW, person: IDA, status: 'done',
@@ -166,6 +210,51 @@ describe('each kind of entry', () => {
 		expect(text(read)).toContain('/api/threads/t-1');
 		expect(text(other)).toContain('Ereignis');
 		expect(text(other)).not.toContain('Lesezugriff');
+	});
+});
+
+describe('a refused attempt and a revoke', () => {
+	it('a refused attempt is named an attempt, refused, with the route behind it; a refused reveal by what it tried', async () => {
+		await render([
+			{ kind: 'event', action: 'GET /api/secrets', target: '/api/secrets', phase: 'refused', at: NOW, person: IDA },
+			{ kind: 'event', action: 'GET /api/vault/key', target: '/api/vault/key?reveal=true', phase: 'refused', at: NOW, person: IDA },
+			{ kind: 'event', action: 'GET /api/auth/token', target: '/api/auth/token?reveal=true', phase: 'refused', at: NOW, person: IDA },
+			{ kind: 'event', action: 'GET /api/vault/key', target: '/api/vault/key', phase: 'read', at: NOW, person: IDA },
+		]);
+		const [plain, vault, token, status] = items();
+		expect(text(plain)).toContain('Versuch (verweigert)');
+		expect(text(plain)).toContain('GET /api/secrets');
+		expect(text(vault)).toContain('Versuch, den Tresorschlüssel anzuzeigen (verweigert)');
+		expect(text(token)).toContain('Versuch, das Zugangstoken anzuzeigen (verweigert)');
+		// The plain status read of the same route stays a read access: only the refused reveal says reveal.
+		expect(text(status)).toContain('Lesezugriff');
+		expect(text(status)).not.toContain('verweigert');
+	});
+
+	it('the refused words in EN', async () => {
+		const before = getLocale();
+		setLocale('en');
+		try {
+			await render([
+				{ kind: 'event', action: 'GET /api/secrets', target: '/api/secrets', phase: 'refused', at: NOW, person: IDA },
+				{ kind: 'event', action: 'GET /api/vault/key', target: '/api/vault/key?reveal=true', phase: 'refused', at: NOW, person: IDA },
+				{ kind: 'event', action: 'mandate:revoke', target: null, phase: 'done', at: NOW, person: IDA },
+			]);
+			const [plain, vault, revoke] = items();
+			expect(text(plain)).toContain('Attempt (refused)');
+			expect(text(vault)).toContain('Attempt to reveal the vault key (refused)');
+			expect(text(revoke)).toContain('Access revoked');
+		} finally {
+			setLocale(before);
+		}
+	});
+
+	it('a revoke is named, and its engine action does not show', async () => {
+		await render([{ kind: 'event', action: 'mandate:revoke', target: null, phase: 'done', at: NOW, person: IDA }]);
+		const [revoke] = items();
+		expect(text(revoke)).toContain('Zugang widerrufen');
+		expect(text(revoke)).not.toContain('mandate:revoke');
+		expect(text(revoke)).not.toContain('Ereignis');
 	});
 });
 
@@ -237,7 +326,7 @@ describe('the states around the list', () => {
 
 	it('no entries: the empty line', async () => {
 		await render([]);
-		expect(text(target.querySelector('[data-state="empty"]'))).toBe('Noch keine Einträge.');
+		expect(text(target.querySelector('[data-state="empty"]'))).toBe('Noch keine Einträge. Hier erscheinen Läufe, Schritte und Ereignisse von Personen, denen du Zugang gegeben hast.');
 	});
 });
 

@@ -34,7 +34,7 @@ import { Containment } from './containment.js';
 import { ContainmentMirror, ExactMirror, exactHeldAtBoot, exactMarkerOf, syncContainmentMirror, syncExactMarker } from './history-markers.js';
 import { exactMarkerOnDisk, isExactHeld, refuseDebug } from './exact-debug-refusal.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
-import { AuditLog } from './audit-log.js';
+import { AuditLog, recordMandateRevoked } from './audit-log.js';
 import { MandateEnds } from './mandate-ends.js';
 import { pauseEndedPlans } from './plan-pause.js';
 import { processErrorText } from './error-egress.js';
@@ -1689,6 +1689,12 @@ export class Engine {
       runOutsideGroup(() => queueMicrotask(() => this.endEndedMandateRuns()));
     });
     this._mandateEnds?.onRevoke(() => this.endEndedMandateRuns());
+    // The revoke in the revoked person's trail. A throw is logged by `MandateEnds.revoke` and
+    // undoes nothing: the end is already written and every later request is refused by it.
+    this._mandateEnds?.onRevoke((mandateId) => {
+      const log = this.getAuditLog();
+      if (log !== null) recordMandateRevoked(log, mandateId);
+    });
     this._runSweepTimer = setInterval(() => this.endEndedMandateRuns(), 5 * 60_000);
     this._runSweepTimer.unref?.();
 
@@ -2085,6 +2091,10 @@ export class Engine {
     // path every newly provisioned tenant takes. Falling back to the legacy tools here is not a
     // silent downgrade over the alternative — the alternative was silence with nothing working.
     this._legacyMemory = legacyMemoryReason(this.userConfig.durable_memory_enabled, this._knowledgeStore);
+    // The old tools here stand in for the durable ones, whose next boot with engine.db does not read
+    // what these write: a change is refused with a plain reason instead. With durable memory off the
+    // files are the memory, and they are written as before.
+    if (this._legacyMemory === 'store_missing' && this.engineDb === null) this.memory?.refuseChangesWithoutStore();
     if (this._legacyMemory === null) {
       this.registry
         .register(rememberTool)
@@ -2108,6 +2118,9 @@ export class Engine {
       const { TaskManager, setPipelineModeLookup } = await import('./task-manager.js');
       this._taskManager = new TaskManager(this.runHistory);
       this._toolContext.taskManager = this._taskManager;
+      // Without engine.db a to-do lands in history.db only, which the next boot with engine.db may
+      // not read: refused with a plain reason instead (`refuseTaskChangesWithoutStore`).
+      if (this.engineDb === null) this._taskManager.refuseTaskChangesWithoutStore();
       // Wire the pipeline-mode lookup so TaskManager can refuse to schedule
       // pipelines it may not run. Lazy-imported to avoid a tools→core cycle.
       // Fail-closed: if the import or wiring fails, install a lookup that
@@ -2154,6 +2167,19 @@ export class Engine {
       }
       if (sourceColumns.missing.length > 0) {
         process.stderr.write(`[lynox] DataStore: listed table(s) without a database table: ${sourceColumns.missing.join(', ')}\n`);
+      }
+      // The opaque id a mandate's row in the instance trail names a table by. Every boot, so a
+      // table created without one (by an older build on this file) gets it here. Never thrown:
+      // a table without an id is named by its kind only.
+      const collectionIds = this._dataStore.ensureCollectionIds();
+      if (collectionIds.failed !== null) {
+        process.stderr.write(`[lynox] DataStore: tables could not get their ids; a mandate's rows name them by their kind only until a restart assigns them: ${collectionIds.failed}\n`);
+      }
+      if (collectionIds.indexFailed !== null) {
+        process.stderr.write(`[lynox] DataStore: the unique index on table ids could not be created: ${collectionIds.indexFailed}\n`);
+      }
+      for (const r of collectionIds.renumbered) {
+        process.stderr.write(`[lynox] DataStore: ${r.name === null ? 'a table with an invalid name' : `table "${r.name}"`} shared its id with another and got a new one: ${r.from} -> ${r.to}\n`);
       }
       // Registered as soon as the store exists — all six, unconditionally. This
       // used to wait for `listCollections().length > 0`, which an instance with
@@ -2643,7 +2669,8 @@ export class Engine {
           if (result.success) {
             process.stderr.write(`[lynox] Pre-update backup created: ${result.path}\n`);
           } else {
-            process.stderr.write(`[lynox] Pre-update backup failed: ${result.error ?? 'unknown'}\n`);
+            const { backupFailureDetail } = await import('./backup.js');
+            process.stderr.write(`[lynox] Pre-update backup failed${backupFailureDetail(result.error, 'unknown')}\n`);
           }
         }
 

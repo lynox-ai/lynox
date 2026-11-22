@@ -60,18 +60,30 @@
 		loading = false;
 	}
 
-	async function deleteTask(id: string) {
+	/**
+	 * A change to a to-do, then the list again. A refused one is said and the list is not reloaded
+	 * (`loadTasks` clears the line): an engine that started without engine.db answers 409 with the
+	 * code `engine_less` and gets its own line, any other refusal the generic one.
+	 */
+	async function changeTask(path: string, method: 'DELETE' | 'POST') {
+		error = '';
 		try {
-			await fetch(`${getApiBase()}/tasks/${id}`, { method: 'DELETE' });
+			const res = await fetch(`${getApiBase()}${path}`, { method });
+			if (!res.ok) {
+				const body = (await res.json().catch(() => null)) as { code?: unknown } | null;
+				error = t(body?.code === 'engine_less' ? 'tasks.change_engine_less' : 'common.save_failed');
+				return;
+			}
 			await loadTasks();
 		} catch { error = t('common.save_failed'); }
 	}
 
+	async function deleteTask(id: string) {
+		await changeTask(`/tasks/${id}`, 'DELETE');
+	}
+
 	async function markDone(id: string) {
-		try {
-			await fetch(`${getApiBase()}/tasks/${id}/complete`, { method: 'POST' });
-			await loadTasks();
-		} catch { error = t('common.save_failed'); }
+		await changeTask(`/tasks/${id}/complete`, 'POST');
 	}
 
 	const statusLabel: Record<string, string> = {
