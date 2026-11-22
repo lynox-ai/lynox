@@ -53,6 +53,8 @@ const REACHING_OUT: Record<string, string> = {
 	'an @import split by a script inside the style element': `<svg ${NS}><style>@im<script>x</script>port "${AT}";</style></svg>`,
 	'an image in an svg that is not well-formed': `<svg ${NS}><image href="${AT}"/><g></svg>`,
 	'an @import split by an element in an svg with no namespace': `<svg><style>@im<g>x</g>port "${AT}";</style></svg>`,
+	'an @import in an svg document named by url(data:) as a mask': `<svg ${NS}><rect width="9" height="9" mask="url(data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22%3E%3Cstyle%3E@import '${AT}';%3C/style%3E%3Cmask id=%22m%22/%3E%3C/svg%3E#m)"/></svg>`,
+	'an @import in an svg document named by url(data:) in a style element': `<svg ${NS}><style>rect{fill:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Cstyle%3E@import '${AT}';%3C/style%3E%3C/svg%3E#p")}</style></svg>`,
 	'a script behind a prefix the html parser keeps in its name': `<svg><g xmlns:xlink="http://www.w3.org/2000/svg"><xlink:script>fetch("${AT}")</xlink:script></g></svg>`,
 	'a style behind a prefix the html parser keeps in its name': `<svg><g xmlns:xlink="http://www.w3.org/2000/svg"><xlink:style>@import "${AT}";</xlink:style></g></svg>`,
 	'an XHTML img behind a prefix the html parser keeps in its name': `<svg><g xmlns:xlink="http://www.w3.org/1999/xhtml"><xlink:img src="${AT}"/></g></svg>`,
@@ -157,8 +159,8 @@ describe('svgExportDocument', () => {
 		expect(doc.documentElement.getAttribute('viewBox')).toBe('0 0 10 10');
 	});
 
-	it('keeps style rules whose names only contain a css function word, and an embedded font', () => {
-		const css = '.urlaub{fill:red}.src-box{fill:blue}@font-face{font-family:f;src:url(data:font/woff2;base64,d09GMg==)}';
+	it('keeps style rules whose names only contain a css function word', () => {
+		const css = '.urlaub{fill:red}.src-box{fill:blue}';
 		const out = svgExportDocument(`<svg ${NS}><style>${css}</style><rect class="urlaub" width="9" height="9"/></svg>`)!;
 		expect(new DOMParser().parseFromString(out, 'image/svg+xml').querySelector('style')?.textContent).toBe(css);
 	});
@@ -186,6 +188,8 @@ describe('svgExportDocument', () => {
 		expect(out).not.toBeNull();
 		const doc = new DOMParser().parseFromString(out!, 'image/svg+xml');
 		expect(doc.querySelector('circle')?.getAttribute('r')).toBe('2');
+		expect(out).not.toContain('inkscape');
+		expect(out).not.toContain('namedview');
 	});
 
 	it('keeps a label with a word before a colon', () => {

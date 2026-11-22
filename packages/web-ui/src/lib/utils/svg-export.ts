@@ -25,8 +25,10 @@
  *    reaches an address only through a function or rule spelled out (`url(`, `image-set(`,
  *    `image(`, `cross-fade(`, `element(`, `@import`) or through an escape (`\75 rl(` is `url(`),
  *    so the test is on those spellings, not on a parse: CSS with a backslash, or with any of them
- *    other than a `url(#id)` or a `url(data:…)` (a reference into the document, and a value that
- *    loads nothing further), is dropped whole. A word that only contains one (`.urlaub`,
+ *    other than a `url(#id)` (a reference into the document) is dropped whole. A `url(data:…)` is
+ *    not spared either: as a mask, fill, filter, marker or clip it names a document, not an
+ *    image, and Firefox loads what that document imports (measured), so an embedded font goes
+ *    with it. A word that only contains one (`.urlaub`,
  *    `.src-box`) is not a function and stays. A `style` element with any
  *    element inside it is dropped as well: the browser joins the text around a child into one
  *    sheet (`@im<g/>port`), so the text the test sees is not the text it reads;
@@ -38,10 +40,10 @@
  * Text that is not a well-formed svg document (the app shows it inside html, where `<svg>` needs
  * no namespace and a stray tag is forgiven) is read the way the app reads it, by the html parser.
  * Its first svg is the one written (a second one in the same text is left out); an element or
- * attribute with a prefix the html parser cannot bind (`inkscape:label` with no declaration) is
- * taken out first, as it would make the written file unreadable. The svg is then written out and read back as an svg document BEFORE anything is taken
+ * attribute whose name carries a prefix (`inkscape:label`, declared or not) is taken out first: the
+ * html parser keeps a prefix as part of the name, which would make the written file unreadable. The svg is then written out and read back as an svg document BEFORE anything is taken
  * out. What is cleaned is then the tree the file will hold, not the html parser's tree: the two
- * can differ (a prefix the html parser keeps as part of a name, `xlink:script`, is a real
+ * can differ (as with a prefix the html parser keeps as part of a name, which is a real
  * namespace prefix to the svg parser), and a check on one says nothing about the other.
  *
  * The cleaned file is read back and cleaned once more, and is handed out only if that changes
@@ -82,8 +84,10 @@ function svgInHtml(text: string): Element | null {
 }
 
 /**
- * The html parser keeps an unknown prefix as part of a name (`inkscape:label`, `xlink:script`),
- * which the svg parser then reads as an unbound prefix and refuses. Taking those out keeps such a
+ * The html parser keeps a prefix as part of a name (`inkscape:label`, `xlink:script`), which the svg
+ * parser then reads as an unbound prefix and refuses. Every such name goes, declared or not (an
+ * element like `svg:rect` included); the namespaces the html parser does bind (xlink, xml, xmlns)
+ * are not names with a colon in this tree and stay. Taking those out keeps such a
  * drawing exportable; what is cleaned is still only the tree read back as svg.
  */
 function dropUnboundPrefixes(el: Element): void {
@@ -115,12 +119,13 @@ const ANIMATION_VALUES = ['from', 'to', 'by', 'values'];
 /**
  * CSS that can name an address: an escape, a function that takes one (`url(`, `image-set(` with
  * its prefixed forms, `image(`, `cross-fade(`, `element(`), or an `@import`. A `url(#id)` (a
- * reference into the document, e.g. a gradient) and a `url(data:…)` are taken out before the test.
+ * reference into the document, e.g. a gradient) is taken out before the test; a `url(data:…)` is not,
+ * as it can name a document that loads more.
  */
 function cssCanReachOut(css: string): boolean {
 	if (css.includes('\\')) return true;
 	// The whole reference goes, name included: a fragment named `src-grad` is still a fragment.
-	const withoutInside = css.replace(/url\(\s*(['"]?)(?:#|data:)[^)'"]*\1\s*\)/gi, '');
+	const withoutInside = css.replace(/url\(\s*(['"]?)#[^)'"]*\1\s*\)/gi, '');
 	return /(?:url|image-set|image|cross-fade|element)\s*\(|@import/i.test(withoutInside);
 }
 
