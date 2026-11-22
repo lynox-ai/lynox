@@ -13,6 +13,8 @@ import { svgExportDocument } from './svg-export.js';
 const NS = 'xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"';
 const HOST = 'elsewhere.example';
 const AT = `https://${HOST}/x`;
+/** An svg document as a data address whose style imports {@link AT}, every telling character encoded. */
+const DATA_DOC = `data:image/svg+xml,%3Csvg%20xmlns=%22http:%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cstyle%3E%40import%20%22https:%2F%2F${HOST}%2Fx%22%3B%3C%2Fstyle%3E%3Cmask%20id=%22m%22%2F%3E%3C%2Fsvg%3E#m`;
 
 /** Each form an svg can reach another address with, by the name a failing test reports. */
 const REACHING_OUT: Record<string, string> = {
@@ -53,8 +55,12 @@ const REACHING_OUT: Record<string, string> = {
 	'an @import split by a script inside the style element': `<svg ${NS}><style>@im<script>x</script>port "${AT}";</style></svg>`,
 	'an image in an svg that is not well-formed': `<svg ${NS}><image href="${AT}"/><g></svg>`,
 	'an @import split by an element in an svg with no namespace': `<svg><style>@im<g>x</g>port "${AT}";</style></svg>`,
-	'an @import in an svg document named by url(data:) as a mask': `<svg ${NS}><rect width="9" height="9" mask="url(data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22%3E%3Cstyle%3E@import '${AT}';%3C/style%3E%3Cmask id=%22m%22/%3E%3C/svg%3E#m)"/></svg>`,
-	'an @import in an svg document named by url(data:) in a style element': `<svg ${NS}><style>rect{fill:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Cstyle%3E@import '${AT}';%3C/style%3E%3C/svg%3E#p")}</style></svg>`,
+	// Fully percent-encoded, so no literal `//`, `@` or quote gives the address away: only the rule
+	// that a url(data:) is not spared takes these out.
+	'an @import in an svg document named by url(data:) as a mask': `<svg ${NS}><rect width="9" height="9" mask="url(${DATA_DOC})"/></svg>`,
+	'an @import in an svg document named by url(data:) in a style attribute': `<svg ${NS}><rect width="9" height="9" style="mask:url(${DATA_DOC})"/></svg>`,
+	'an @import in an svg document named by url(data:) in a style element': `<svg ${NS}><style>rect{fill:url(${DATA_DOC})}</style><rect width="9" height="9"/></svg>`,
+	'an @import in an svg document named by url(data:) set by an animation': `<svg ${NS}><rect width="9" height="9"><set attributeName="mask" to="url(${DATA_DOC})"/></rect></svg>`,
 	'a script behind a prefix the html parser keeps in its name': `<svg><g xmlns:xlink="http://www.w3.org/2000/svg"><xlink:script>fetch("${AT}")</xlink:script></g></svg>`,
 	'a style behind a prefix the html parser keeps in its name': `<svg><g xmlns:xlink="http://www.w3.org/2000/svg"><xlink:style>@import "${AT}";</xlink:style></g></svg>`,
 	'an XHTML img behind a prefix the html parser keeps in its name': `<svg><g xmlns:xlink="http://www.w3.org/1999/xhtml"><xlink:img src="${AT}"/></g></svg>`,
@@ -163,6 +169,12 @@ describe('svgExportDocument', () => {
 		const css = '.urlaub{fill:red}.src-box{fill:blue}';
 		const out = svgExportDocument(`<svg ${NS}><style>${css}</style><rect class="urlaub" width="9" height="9"/></svg>`)!;
 		expect(new DOMParser().parseFromString(out, 'image/svg+xml').querySelector('style')?.textContent).toBe(css);
+	});
+
+	it('takes out an embedded font, as a data address is not spared', () => {
+		const out = svgExportDocument(`<svg ${NS}><style>@font-face{font-family:f;src:url(data:font/woff2;base64,d09GMg==)}</style><rect width="9" height="9"/></svg>`)!;
+		expect(out).not.toContain('d09GMg');
+		expect(new DOMParser().parseFromString(out, 'image/svg+xml').querySelector('rect')).not.toBeNull();
 	});
 
 	it('keeps labels and roles that mention an address or a css word', () => {

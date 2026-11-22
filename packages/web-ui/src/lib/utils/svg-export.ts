@@ -86,8 +86,8 @@ function svgInHtml(text: string): Element | null {
 /**
  * The html parser keeps a prefix as part of a name (`inkscape:label`, `xlink:script`), which the svg
  * parser then reads as an unbound prefix and refuses. Every such name goes, declared or not (an
- * element like `svg:rect` included); the namespaces the html parser does bind (xlink, xml, xmlns)
- * are not names with a colon in this tree and stay. Taking those out keeps such a
+ * element like `svg:rect` included); an attribute in a namespace the html parser does bind (xlink,
+ * xml, xmlns) has a namespace in this tree and stays. Taking those out keeps such a
  * drawing exportable; what is cleaned is still only the tree read back as svg.
  */
 function dropUnboundPrefixes(el: Element): void {
