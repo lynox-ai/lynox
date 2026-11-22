@@ -6,6 +6,7 @@ import {
   BROKER_START_PROVIDERS,
   brokerStartPayloadV2,
   formatBrokerStartTokenV2,
+  parseBrokerStartTokenV2,
   BROKER_START_NONCE_BYTES,
   BROKER_START_PURPOSE,
   brokerStartPayload,
@@ -29,7 +30,9 @@ import {
 describe('the golden broker start token — the bytes the control plane must also compute', () => {
   // The vector is the EXPECTED value; this test is what binds it to the real
   // serializer. A vector nobody drives is a literal, not a control.
-  it('is what this repo actually emits, byte for byte', () => {
+  // The minter no longer emits v1; the vector stays pinned while the control plane
+  // still accepts v1 at the Google start, and goes with the contract step.
+  it('is what this repo\'s v1 serializer and signer produce, byte for byte', () => {
     const payload = brokerStartPayload({
       instanceId: golden.instanceId,
       ts: golden.ts,
@@ -58,9 +61,9 @@ describe('the golden broker start token — the bytes the control plane must als
 });
 
 describe('the golden v2 tokens — provider-bound, the bytes the control plane must also compute (row 1224)', () => {
-  // The engine does not MINT v2 yet (expand/contract: it switches once a control plane that
-  // accepts v2 is on prod). What this repo owes now is the arithmetic: the same signer, over
-  // the v2 payload, produces the contract's vectors, so the control plane can test against them.
+  // The engine mints v2 (`mintBrokerStartToken`, tested below); these pin the arithmetic: the
+  // same signer, over the v2 payload, produces the contract's vectors that the control plane
+  // tests its verifier against.
   it.each(BROKER_START_PROVIDERS)('%s: this repo\'s signer produces the contract vector', (provider) => {
     const payload = brokerStartPayloadV2({ provider, instanceId: goldenV2.instanceId, ts: goldenV2.ts, nonce: goldenV2.nonce });
     expect(payload).toBe(goldenV2[provider].payload);
@@ -85,18 +88,33 @@ describe('the golden v2 tokens — provider-bound, the bytes the control plane m
 describe('mintBrokerStartToken', () => {
   const SECRET = 'TEST-SIGNING-KEY';
 
+  it('mints the provider-bound v2 token, and signs the provider it is given', () => {
+    const at = 1700000000_000;
+    for (const provider of BROKER_START_PROVIDERS) {
+      const parsed = parseBrokerStartTokenV2(mintBrokerStartToken(provider, 'inst_TEST', SECRET, at))!;
+      expect(parsed).not.toBeNull();
+      expect(parsed.sig).toBe(signBrokerStartPayload(
+        brokerStartPayloadV2({ provider, instanceId: 'inst_TEST', ts: parsed.ts, nonce: parsed.nonce }), SECRET));
+    }
+    const g = parseBrokerStartTokenV2(mintBrokerStartToken('google', 'inst_TEST', SECRET, at))!;
+    const asMicrosoft = signBrokerStartPayload(
+      brokerStartPayloadV2({ provider: 'microsoft', instanceId: 'inst_TEST', ts: g.ts, nonce: g.nonce }), SECRET);
+    expect(g.sig, 'a Google token must not be a Microsoft token').not.toBe(asMicrosoft);
+    expect(parseBrokerStartToken(mintBrokerStartToken('google', 'inst_TEST', SECRET, at)), 'no v1 any more').toBeNull();
+  });
+
   it('produces a token the contract parser accepts', () => {
-    const parsed = parseBrokerStartToken(mintBrokerStartToken('inst_TEST', SECRET));
+    const parsed = parseBrokerStartTokenV2(mintBrokerStartToken('google', 'inst_TEST', SECRET));
     expect(parsed).not.toBeNull();
     expect(parsed?.nonce).toHaveLength(BROKER_START_NONCE_BYTES * 2);
   });
 
   it('signs over the instance id — a token for one tenant must not verify for another', () => {
-    const token = mintBrokerStartToken('inst_A', SECRET, 1700000000_000);
-    const parsed = parseBrokerStartToken(token);
+    const token = mintBrokerStartToken('google', 'inst_A', SECRET, 1700000000_000);
+    const parsed = parseBrokerStartTokenV2(token);
     expect(parsed).not.toBeNull();
     const forB = signBrokerStartPayload(
-      brokerStartPayload({ instanceId: 'inst_B', ts: parsed!.ts, nonce: parsed!.nonce }),
+      brokerStartPayloadV2({ provider: 'google', instanceId: 'inst_B', ts: parsed!.ts, nonce: parsed!.nonce }),
       SECRET,
     );
     expect(parsed!.sig).not.toBe(forB);
@@ -107,7 +125,7 @@ describe('mintBrokerStartToken', () => {
   // user as a Connect button that broke for no reason.
   it('mints a FRESH nonce every call', () => {
     const nonces = new Set(
-      Array.from({ length: 20 }, () => parseBrokerStartToken(mintBrokerStartToken('inst_TEST', SECRET))?.nonce),
+      Array.from({ length: 20 }, () => parseBrokerStartTokenV2(mintBrokerStartToken('google', 'inst_TEST', SECRET))?.nonce),
     );
     expect(nonces.size).toBe(20);
   });
@@ -116,15 +134,15 @@ describe('mintBrokerStartToken', () => {
   // against is proven in `tests/contract-broker-start.test.ts`, which builds the
   // two colliding tenants; claiming it here would borrow that test's evidence.
   it('carries unix SECONDS, floored', () => {
-    const parsed = parseBrokerStartToken(mintBrokerStartToken('inst_TEST', SECRET, 1700000000_999));
+    const parsed = parseBrokerStartTokenV2(mintBrokerStartToken('google', 'inst_TEST', SECRET, 1700000000_999));
     expect(parsed?.ts).toBe(1700000000);
   });
 
   it('binds the secret — the wrong key produces a different signature', () => {
-    const token = mintBrokerStartToken('inst_TEST', SECRET, 1700000000_000);
-    const parsed = parseBrokerStartToken(token)!;
+    const token = mintBrokerStartToken('google', 'inst_TEST', SECRET, 1700000000_000);
+    const parsed = parseBrokerStartTokenV2(token)!;
     const wrong = signBrokerStartPayload(
-      brokerStartPayload({ instanceId: 'inst_TEST', ts: parsed.ts, nonce: parsed.nonce }),
+      brokerStartPayloadV2({ provider: 'google', instanceId: 'inst_TEST', ts: parsed.ts, nonce: parsed.nonce }),
       'TEST-OTHER-SECRET',
     );
     expect(parsed.sig).not.toBe(wrong);
