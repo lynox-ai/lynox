@@ -23,7 +23,7 @@ function topUpBaselineTables(raw: Database.Database): void {
     CREATE TABLE IF NOT EXISTS workflows (id TEXT PRIMARY KEY);
     -- confirmed_at (v6): every caller of this stub starts at v6 or later, and v20's backfill
     -- reads it. The v2/v5 tests build their own triggers table first, so IF NOT EXISTS skips this.
-    CREATE TABLE IF NOT EXISTS triggers (id TEXT PRIMARY KEY, source TEXT, effect TEXT, confirmed_at TEXT);
+    CREATE TABLE IF NOT EXISTS triggers (id TEXT PRIMARY KEY, source TEXT, effect TEXT, confirmed_at TEXT, last_run_result TEXT);  -- v71 splits last_run_result
     CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY);
     -- v49 adds a column to it and fills that from the grant ledger; v50 sets it again from
     -- created_at and config_json, which every real connections table has had since the baseline.
@@ -106,7 +106,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     raw.exec(`
       CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
       INSERT INTO schema_version (version) VALUES (2);
-      CREATE TABLE triggers (id TEXT PRIMARY KEY, source TEXT NOT NULL, condition_json TEXT NOT NULL DEFAULT '{}', target_workflow_id TEXT);
+      CREATE TABLE triggers (id TEXT PRIMARY KEY, source TEXT NOT NULL, condition_json TEXT NOT NULL DEFAULT '{}', target_workflow_id TEXT, last_run_result TEXT);  -- v71 splits last_run_result, which the v1 baseline has
       -- A real pre-v4 engine.db has the memories table (v1 baseline); the v4 migration
       -- indexes memories(created_at), so the fixture must carry it or v4 fails the open.
       CREATE TABLE memories (id TEXT PRIMARY KEY, created_at TEXT);
@@ -184,7 +184,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     raw.exec(`
       CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
       INSERT INTO schema_version (version) VALUES (5);
-      CREATE TABLE triggers (id TEXT PRIMARY KEY, source TEXT NOT NULL, effect TEXT NOT NULL, condition_json TEXT NOT NULL DEFAULT '{}', next_run_at TEXT);
+      CREATE TABLE triggers (id TEXT PRIMARY KEY, source TEXT NOT NULL, effect TEXT NOT NULL, condition_json TEXT NOT NULL DEFAULT '{}', next_run_at TEXT, last_run_result TEXT);  -- v71 splits last_run_result, which the v1 baseline has
       CREATE TABLE subjects (id TEXT PRIMARY KEY);   -- v7 ALTERs it (see the v3 fixture note)
       CREATE TABLE memories (id TEXT PRIMARY KEY);   -- v8 ALTERs it (adds evidence columns)
     `);

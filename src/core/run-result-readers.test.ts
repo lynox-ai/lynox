@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
+import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
@@ -70,6 +71,36 @@ describe("a run's end with member lines, by reader", () => {
     expect(history.getTrigger('a')?.last_run_member_notes).toBeUndefined();
   });
 
+  it('a run that keeps its schedule (a hand run, a webhook, a pause) also clears the lines of the run before', () => {
+    seed('a');
+    tm.recordTaskRun('a', REPLY, 'halted', { memberNotes: [LINE], keepSchedule: true });
+    expect(stored('a')).toEqual({ last_run_result: REPLY, last_run_member_notes: JSON.stringify([LINE]) });
+    tm.recordTaskRun('a', 'All done.', 'success', { keepSchedule: true });
+    expect(stored('a')).toEqual({ last_run_result: 'All done.', last_run_member_notes: null });
+  });
+
+  it('the migration splits a result recorded with its lines: the owner reads it as before, a mandate the sentence', () => {
+    // A database from before: the column and its version taken back out, a result with its lines under it.
+    const path = join(dir, 'old.db');
+    new EngineDb(path, '').close();
+    const raw = new Database(path);
+    const legacy = `${REPLY}\n• ${LINE}\n• Another line.`;
+    raw.exec('ALTER TABLE triggers DROP COLUMN last_run_member_notes; DELETE FROM schema_version WHERE version >= 71;');
+    raw.prepare("INSERT INTO triggers (id, title, source, effect, last_run_result, last_run_status) VALUES ('old', 'Old', 'cron', 'run_agent', ?, 'halted')").run(legacy);
+    raw.prepare("INSERT INTO triggers (id, title, source, effect, last_run_result, last_run_status) VALUES ('plain', 'Plain', 'cron', 'run_agent', 'All done.', 'success')").run();
+    raw.close();
+    const migrated = new EngineDb(path, '');
+    const rows = migrated.getDb().prepare("SELECT id, last_run_result, last_run_member_notes FROM triggers WHERE id IN ('old', 'plain') ORDER BY id").all();
+    migrated.close();
+    expect(rows).toEqual([
+      { id: 'old', last_run_result: REPLY, last_run_member_notes: JSON.stringify([`${LINE}\n• Another line.`]) },
+      { id: 'plain', last_run_result: 'All done.', last_run_member_notes: null },
+    ]);
+    const old = { last_run_result: REPLY, last_run_member_notes: [`${LINE}\n• Another line.`] };
+    expect(lastRunResultFor(old, true, 'S')).toBe(legacy);
+    expect(lastRunResultFor(old, false, 'S')).toBe('S');
+  });
+
   it('a repeat is read off the stored lines', () => {
     seed('a');
     tm.recordTaskRun('a', REPLY, 'halted', { memberNotes: [LINE] });
@@ -107,8 +138,7 @@ describe("a run's end with member lines, by reader", () => {
     seed('a');
     tm.recordTaskRun('a', REPLY, 'halted', { memberNotes: [LINE] });
     const owner = await taskListTool.handler({}, agent(OWNER_PRINCIPAL));
-    expect(owner).toContain('jo@kanzlei.example');
-    expect(owner).toContain('shop-jo');
+    expect(owner).toContain(`• ${LINE}`);
     const mandate = await taskListTool.handler({}, agent(MANDATE));
     expect(mandate).toContain('Plan a');
     expect(mandate).toContain(forMandatesTool());
@@ -125,9 +155,10 @@ describe("a run's end with member lines, by reader", () => {
     expect(updated).toContain(forMandatesTool());
     expect(updated).not.toContain('jo@kanzlei.example');
     const completed = await taskUpdateTool.handler({ task_id: 'b', status: 'completed' }, agent(MANDATE));
+    expect(completed).toContain(forMandatesTool());
     expect(completed).not.toContain('jo@kanzlei.example');
     expect(completed).not.toContain('shop-jo');
     const byOwner = await taskUpdateTool.handler({ task_id: 'a', title: 'Renamed again' }, agent(OWNER_PRINCIPAL));
-    expect(byOwner).toContain('jo@kanzlei.example');
+    expect(byOwner).toContain(`• ${LINE}`);
   });
 });
