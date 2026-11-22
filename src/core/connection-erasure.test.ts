@@ -564,6 +564,10 @@ describe('T3 — the fallback blanks every content column it names and keeps the
     tasks: 'tasks the customer keeps and deletes (remainder)',
     tenants: 'tenant configuration',
     thread_messages: 'the chat itself: deleted with the chat, cut by cut 1b',
+    // A copy of the typed part of a thread_messages row, keyed by thread and seq like it: no run
+    // id to blank it by, deleted with the chat (ON DELETE CASCADE), and cut wherever its message is.
+    thread_typed_text: 'the typed words of a chat message: deleted with the chat, cut with its message',
+    thread_read_outside: 'a thread id and a time: whether the chat read outside content',
     threads: 'the chat itself: deleted with the chat',
     triggers: 'the legacy table, superseded by engine.db',
     workflow_run_claims: 'workflow, key and run ids',

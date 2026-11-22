@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { bulkRunTrail } from './worker-loop.js';
-import { namedTarget, newCorrelationId, type AuditEntry } from './audit-log.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { bulkReadRecorder, bulkRunTrail } from './worker-loop.js';
+import { AuditLog, httpTarget, namedTarget, newCorrelationId, outwardReadRecorder, type AuditEntry } from './audit-log.js';
+import { EngineDb } from './engine-db.js';
 import { externalHostOf, type BulkRunForApply } from './bulk-ledger.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
 
@@ -98,5 +102,42 @@ describe('bulkRunTrail', () => {
   it('throws from the row before for a run inside the instance too', () => {
     expect(() => bulkRunTrail(run({ targetSystem: 'workspace' }), null, tools)!.begin()).toThrow();
     expect(() => bulkRunTrail(run({ targetSystem: 'data_store' }), null, tools)!.begin()).toThrow();
+  });
+
+  // The run row keeps the planner's tag and grant, not the name; the trail entry named
+  // the address only, where every other row of the same person shows the name too.
+  it('names the planner as the grant\'s other rows do, and keeps the address alone when none carries a name', () => {
+    const named = { ...log(), displayNameOf: (id: string) => (id === 'grant-1' ? 'Helper AG, Hanna' : null) };
+    bulkRunTrail(run(), named as never, tools)!.begin();
+    bulkRunTrail(run({ delegatedPlanner: { ...HELPER, mandateId: 'grant-2' } }), named as never, tools)!.begin();
+    const failing = { ...log(), displayNameOf: () => { throw new Error('locked'); } };
+    bulkRunTrail(run(), failing as never, tools)!.begin();
+    expect(named.rows.map((r) => r.principal)).toEqual([
+      { ...HELPER, display: 'Helper AG, Hanna' },
+      { ...HELPER, mandateId: 'grant-2' },
+    ]);
+    expect(failing.rows[0]!.principal).toEqual(HELPER);
+  });
+
+  it('writes the name into the run\'s rows and its reads on a real trail', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-bulk-trail-name-'));
+    const db = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
+    try {
+      const audit = new AuditLog(db.getDb());
+      audit.record({ principal: { ...HELPER, display: 'Helper AG, Hanna' }, action: 'http:get', target: 'GET https://a.example/', phase: 'done', correlationId: newCorrelationId() });
+      const t = bulkRunTrail(run(), audit, tools)!;
+      t.begin();
+      t.end('done', 1, 0, false);
+      bulkReadRecorder(run(), audit, outwardReadRecorder, httpTarget)!('https://shop.example.com/x');
+      const rows = db.getDb().prepare("SELECT action, actor_email, actor_display FROM audit_log WHERE action LIKE 'bulk:%' ORDER BY id").all();
+      expect(rows).toEqual([
+        { action: 'bulk:apply', actor_email: HELPER.email, actor_display: 'Helper AG, Hanna' },
+        { action: 'bulk:apply', actor_email: HELPER.email, actor_display: 'Helper AG, Hanna' },
+        { action: 'bulk:read', actor_email: HELPER.email, actor_display: 'Helper AG, Hanna' },
+      ]);
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

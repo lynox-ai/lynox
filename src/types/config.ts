@@ -99,6 +99,27 @@ export interface AgentConfig {
    * A spawned child carries its parent's.
    */
   principal?:          import('../core/request-principal.js').RequestPrincipal | undefined;
+  /** Who this agent's writes are recorded as (`IAgent.writeAuthor`). Absent: unknown. */
+  writeAuthor?:        string | null | undefined;
+  /** Which send targets the owner named (`IAgent.ownerKnown`). Absent: none, every target is foreign. */
+  ownerKnown?:         import('../core/owner-known-targets.js').OwnerKnownReader | undefined;
+  /** Where a target this agent sends to comes from when the owner did not name it (`IAgent.sendOrigin`). */
+  sendOrigin?:         import('../core/origin-notices.js').SendOrigin | undefined;
+  /** The language of the questions this agent asks in its own words. Absent: the engine's default. */
+  noticeLanguage?:     import('../core/notice-language.js').NoticeLanguage | undefined;
+  /** The thread's record that the conversation read content from outside (`IAgent.conversationLatch`). */
+  conversationLatch?:  import('../core/conversation-latch.js').ConversationLatch | undefined;
+  /** Told of every send this agent refused in a run nobody watches (`IAgent.onOriginRefused`). */
+  onOriginRefused?:    ((refusal: import('../core/origin-notices.js').OriginRefusal) => void) | undefined;
+  /**
+   * A workflow step's own `fail_step` tool (runtime-adapter.ts, `createFailStepTool`), when this
+   * agent runs a step. Matched by IDENTITY of this entry, never by its name: it passes the
+   * mandate lock (it has no effect beyond ending its own step), it runs alone in the model
+   * response that calls it (the other calls of that response are skipped, not run), and it is
+   * not handed on to children (`getAvailableTools`). A different tool that happens to carry the
+   * same name gets none of the three. Absent for every agent that is not a step agent.
+   */
+  stepFailTool?:       import('./tools.js').ToolEntry | undefined;
   /**
    * Sink for this agent's own tool calls — the ONE owner of tool-call
    * persistence. The agent calls it with the run id it is currently working

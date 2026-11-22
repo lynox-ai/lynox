@@ -12,6 +12,8 @@ import type { FetchMessageObject } from 'imapflow';
 interface Fake {
   usable: boolean;
   mailbox: { path: string } | false;
+  state: string;
+  states: { SELECTED: string };
   connect: ReturnType<typeof vi.fn>;
   logout: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
@@ -111,6 +113,8 @@ function makeFake(): Fake {
   return {
     usable: true,
     mailbox: { path: 'INBOX' },
+    state: 'SELECTED',
+    states: { SELECTED: 'SELECTED' },
     connect: vi.fn().mockResolvedValue(undefined),
     logout: vi.fn().mockResolvedValue(undefined),
     close: vi.fn(),
