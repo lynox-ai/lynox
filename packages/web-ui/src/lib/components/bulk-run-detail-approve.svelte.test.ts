@@ -1832,6 +1832,15 @@ describe('verdicts that differ from the rest of the run', () => {
 		]);
 	});
 
+	it('counts one marking host past twenty in the singular, also when no other host is on the line', async () => {
+		const marking = Array.from({ length: 21 }, (_, i) => `m${String(i + 1)}.example`);
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 21, hosts: marking, marked: 21 }] } });
+		targets = many(25);
+		await render();
+		expect(spread()).toEqual([tf('bulk.outliers.spread.link', { n: '21', hosts: tf('bulk.outliers.spread.link_hosts', { hosts: marking.slice(0, 20).join(', ') }) + t('bulk.outliers.spread.link_marked_more_one') })]);
+	});
+
 	it('names the one host that marks a row before seven that do not, and counts only those it leaves out', async () => {
 		const others = ['o1.example', 'o2.example', 'o3.example', 'o4.example', 'o5.example', 'o6.example', 'o7.example'];
 		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [{ seq: 5, reasons: ['new_link'] }],

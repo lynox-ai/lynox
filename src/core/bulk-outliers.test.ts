@@ -233,12 +233,16 @@ describe('judgeOutliers on domains in other scripts, phone numbers and the own s
       if (t.seq >= 20 && t.seq < 48) return withAfter(t, { description: `${desc} ${common[t.seq % 7]!} info@${common[t.seq % 7]!}` });
       if (t.seq === 5) return withAfter(t, { description: `${desc} selten-direkt.net info@selten-direkt.net` });
       if (t.seq >= 6 && t.seq <= 8) return withAfter(t, { description: `${desc} dreimal-direkt.net info@dreimal-direkt.net` });
+      // Two of the held hosts are added more often than the other five: the others go most frequent first.
+      if (t.seq >= 50 && t.seq < 57) return withAfter(t, { description: `${desc} eins-shop.net info@eins-shop.net` });
+      if (t.seq >= 57 && t.seq < 60) return withAfter(t, { description: `${desc} zwei-shop.net info@zwei-shop.net` });
       return t;
     });
     const lines = judgeOutliers(rare, OWN, KINDS).spread;
     for (const kind of ['link', 'email'] as const) {
       const line = lines.find((x) => x.kind === kind)!;
-      expect(line.hosts.slice(0, 2), kind).toEqual(['selten-direkt.net', 'dreimal-direkt.net']);
+      expect(line.hosts, kind).toEqual(['selten-direkt.net', 'dreimal-direkt.net', 'eins-shop.net', 'zwei-shop.net',
+        'drei-shop.net', 'fuenf-shop.net', 'sechs-shop.net', 'sieben-shop.net', 'vier-shop.net']);
       expect(line.marked, kind).toBe(2);
       expect(line.hosts, kind).toHaveLength(9);
     }
