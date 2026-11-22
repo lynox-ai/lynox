@@ -273,6 +273,8 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     // A long name is cut, so the disclosure after it stays in view.
     const long = flattenPrompt(API_SETUP_DIALOG.en.save('API', 'x'.repeat(500), 'D'));
     expect(long).toContain(`saving “${'x'.repeat(63)}…” needs`);
+    // A cut name is escaped too: a quote mark inside it cannot close the frame early.
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', `a” b${'x'.repeat(500)}`, 'D'))).toContain(`saving “a\\” b${'x'.repeat(59)}…” needs`);
     // Up to the limit a name stays whole; the limit counts characters, not code units.
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', 'y'.repeat(64), 'D'))).toContain(`saving “${'y'.repeat(64)}” needs`);
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', '😀'.repeat(100), 'D'))).toContain(`saving “${'😀'.repeat(63)}…” needs`);
