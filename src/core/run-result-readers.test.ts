@@ -124,6 +124,10 @@ describe("a run's end with member lines, by reader", () => {
         return triggerForRoute(triggerDbRowToRecord(row), MANDATE) as Record<string, unknown>;
       };
       expect(read('old')['last_run_result']).toBe(legacy);
+      // The entry is read as its lines, so the first run after the upgrade that halts on them again is a repeat.
+      const oldRow = reopened.getDb().prepare('SELECT * FROM triggers WHERE id = ?').get('old') as Parameters<typeof triggerDbRowToRecord>[0];
+      expect(triggerDbRowToRecord(oldRow).last_run_member_notes).toEqual([LINE, 'Another line.']);
+      expect(memberNotesRepeat(triggerDbRowToRecord(oldRow), [LINE, 'Another line.'])).toBe(true);
       expect(read('failed')['last_run_result']).toBe(failedWithList);
       expect(read('headless')['last_run_result']).toBe(`\n• ${LINE}`);
       expect(read('listed')['last_run_result']).toBe(listed);

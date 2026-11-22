@@ -278,12 +278,16 @@ const TRIGGER_READ_COLS =
  * Optional columns map `null → undefined` (the legacy cast types them
  * `string | undefined`; both mean "absent" and every consumer treats them so).
  */
-/** The stored lines of a last run; a malformed or empty value is none, never a throw. */
+/**
+ * The stored lines of a last run; a malformed or empty value is none, never a throw. An entry the
+ * v71 migration split off a result holds every line after the first, joined as recorded: it is
+ * read as those lines, so a repeat compares line by line, and read back joined it is the same text.
+ */
 function memberNotesOf(raw: string | null): { last_run_member_notes?: string[] } {
   if (raw === null) return {};
   try {
     const parsed: unknown = JSON.parse(raw);
-    const lines = Array.isArray(parsed) ? parsed.filter((l): l is string => typeof l === 'string') : [];
+    const lines = Array.isArray(parsed) ? parsed.filter((l): l is string => typeof l === 'string').flatMap((l) => l.split('\n• ')) : [];
     return lines.length > 0 ? { last_run_member_notes: lines } : {};
   } catch { return {}; }
 }

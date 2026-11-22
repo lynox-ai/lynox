@@ -313,6 +313,21 @@ describe('the webhook drain', () => {
     expect(runner.run.mock.calls.map((c) => c[2])).toEqual([{ n: 1 }, { n: 2 }]);
   });
 
+  it('records a failed run that met a member\'s connection with its reason, the lines apart on the trigger and not in the event', async () => {
+    const { noteMemberConnection } = await import('./member-connection-notes.js');
+    const line = 'Connection not used: jo@kanzlei.example set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login.';
+    runner.run.mockImplementation(async () => { noteMemberConnection(line); return { ok: false, error: 'the shop said no' }; });
+    const t = sharedTrigger();
+    const id = deliver(t);
+    await loop.tick();
+    await settled(t, id, 'failed');
+    const ev = eventOf(t, id);
+    expect(ev.reason).toContain('the shop said no');
+    expect(ev.reason).not.toContain('jo@kanzlei.example');
+    // Control: the run did collect the line; it went to the trigger, for the owner to read.
+    expect(tm.getTrigger(t)!.last_run_member_notes).toEqual([line]);
+  });
+
   it('records a failed run failed, with its reason, and keeps the values for a run again', async () => {
     runner.run.mockResolvedValue({ ok: false, error: 'the shop said no' });
     const t = sharedTrigger();

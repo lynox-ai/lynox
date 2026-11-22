@@ -19,6 +19,8 @@ import type { LynoxHooks } from '../core/engine.js';
 // Mocked below (vi.mock '../core/config.js') — imported so the model-blocklist
 // gate tests can override its return value per-test.
 import { loadConfig } from '../core/config.js';
+import { WORKER_NOTICES } from '../core/worker-notices.js';
+import { noticeLanguage } from '../core/notice-language.js';
 import { buildPdf, buildDocx } from '../../tests/fixtures/minimal-documents.js';
 import { MAX_EXTRACTED_CHARS } from '../core/document-extract.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
@@ -11432,6 +11434,26 @@ describe('LynoxHTTPApi', () => {
     type Flags = { triggers: Array<Record<string, unknown> & { id: string; running: unknown; stoppable: unknown }> };
     const flagsOf = async (): Promise<Array<[string, unknown, unknown]>> =>
       ((await (await jsonFetch('/api/triggers')).json()) as Flags).triggers.map((t) => [t.id, t.running, t.stoppable]);
+
+    it('GET /api/triggers: the owner reads a last run\'s member lines under its result, a mandate the fixed end notice and no name', async () => {
+      const line = 'The plan "Weekly" did not use Shopify (profile shop-jo). jo@kanzlei.example set it up with their own login.';
+      const reply = 'I could not reach Shopify: jo@kanzlei.example set up profile shop-jo.';
+      const ended = [{ id: 'trg-ended', title: 'ended', effect: 'run_agent', last_run_status: 'halted', last_run_result: reply, last_run_member_notes: [line] }];
+      const mandate = webUiLoginSession(TEST_SECRET, {
+        kind: 'mandate', email: 'recipient@example.invalid', display: 'TEST-DISPLAY', mandate_id: 'TEST-MANDATE-1', mandate_expires_at: '2100-01-01T00:00:00.000Z',
+      })!.token;
+      await withEngine({ getTaskManager: () => ({ listTriggers: () => ended }), getWorkerLoop: () => null, getMandateEnds: () => ({ record: (): void => {}, isLive: (): boolean => true }) }, async () => {
+        const asOwner = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+        expect(asOwner.triggers[0]!['last_run_result']).toBe(`${reply}\n• ${line}`);
+        expect(asOwner.triggers[0]).not.toHaveProperty('last_run_member_notes');
+        const res = await fetch(`${baseUrl}/api/triggers`, { headers: { cookie: `lynox_session=${mandate}` } });
+        expect(res.status).toBe(200);
+        const asMandate = (await res.json()) as Flags;
+        expect(asMandate.triggers[0]!['last_run_result']).toBe(WORKER_NOTICES[noticeLanguage(loadConfig().language)].memberEndForMandates);
+        expect(JSON.stringify(asMandate)).not.toContain('jo@kanzlei.example');
+        expect(JSON.stringify(asMandate)).not.toContain('shop-jo');
+      });
+    });
 
     it('GET /api/triggers tells the owner which run is going and which of them a stop can end', async () => {
       await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => loopWith('owner') }, async () => {

@@ -854,7 +854,7 @@ export class WorkerLoop {
     // `null`: the caller decided there is no run, so nothing is looked up.
     const slot = run === undefined ? this.#runSlotOf(id) : run ?? undefined;
     // Inside the run its collector answers; the catch records outside it, from the run's entry.
-    const memberNotes = collectingMemberNotes() ? currentMemberNotes() : [...(slot?.memberNotes ?? [])];
+    let memberNotes = collectingMemberNotes() ? currentMemberNotes() : [...(slot?.memberNotes ?? [])];
     ({ status } = withMemberNotes(result, status, memberNotes));
     // Kept for the end row, which reads the running entry. Both: the slot the caller passed is
     // that entry in the run's catch, where the lookup can miss it (outside the run's context,
@@ -868,6 +868,9 @@ export class WorkerLoop {
     if (status === 'stopped' && slot?.accessEnded === true && planPauseOn()) {
       const paused = this.#pauseForStop(id);
       result = paused ? ACCESS_ENDED_PAUSED_RESULT : ACCESS_ENDED_RESULT;
+      // The access's end stands in for what the run did, its lines included: a mandate reads it
+      // as it is, not the sentence for an end with lines.
+      memberNotes = [];
       if (paused) {
         opts = { keepSchedule: true };
         slot.endedPaused = true;
