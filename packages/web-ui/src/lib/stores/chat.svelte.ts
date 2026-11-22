@@ -657,6 +657,28 @@ let _offlineProbeInFlight = false;
 let _userStopEpoch = -1;
 let isOffline = $state(typeof navigator !== 'undefined' ? !navigator.onLine : false);
 
+/** The changeset fetch in flight, so a drain that starts meanwhile waits for what it says. */
+let _changesetFetch: Promise<void> | null = null;
+
+/**
+ * Start the next queued turn after `delayMs`. Every automatic send from the queue goes through
+ * here, and checks when the turn would start what `sendMessage` checks for a typed send: an open
+ * changeset review holds it, also one whose fetch is still in flight, and so does a running turn.
+ * A held turn stays first in the queue; answering the review starts it.
+ */
+function drainQueueSoon(delayMs: number): void {
+	if (messageQueue.length === 0) return;
+	setTimeout(() => { void drainQueueNow(); }, delayMs);
+}
+
+async function drainQueueNow(): Promise<void> {
+	if (_changesetFetch) await _changesetFetch;
+	if (pendingChangeset || isStreaming || messageQueue.length === 0) return;
+	const next = messageQueue.shift()!;
+	persistChatNow(); // queue shrank — keep the durable copy in sync
+	await _executeRun(next.task, next.files, undefined, next.runOptions, next.id);
+}
+
 /** Queue a failed user turn for another send. Extracted so the confirmed and
  *  the offline-verified paths below re-fire through exactly one place. */
 function refireFailedTurn(msg: ChatMessage): void {
@@ -671,13 +693,8 @@ function refireFailedTurn(msg: ChatMessage): void {
 	msg.queueId = newQueueId();
 	messageQueue.push({ id: msg.queueId, task: msg.content });
 	chatError = null;
-	// Small delay to let network stabilize
-	setTimeout(() => {
-		if (messageQueue.length > 0) {
-			const next = messageQueue.shift()!;
-			void _executeRun(next.task, next.files, undefined, next.runOptions, next.id);
-		}
-	}, 500);
+	// Small delay to let network stabilize. A review can open in it: the drain checks again.
+	drainQueueSoon(500);
 }
 
 // Offline detection + auto-retry on reconnect
@@ -1477,11 +1494,7 @@ function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[]
 	// The turns queued behind this one still get their go, once there is a connection to try:
 	// a turn started offline returns without sending and would be dropped from the queue.
 	const online = typeof navigator === 'undefined' || navigator.onLine;
-	if (online && !pendingChangeset && messageQueue.length > 0) {
-		const next = messageQueue.shift()!;
-		persistChatNow();
-		setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
-	}
+	if (online) drainQueueSoon(100);
 }
 
 /** The same user turn in another copy of a thread's list: same text, sent at the same time. */
@@ -2200,13 +2213,9 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 		setTimeout(() => { void loadThreads(); }, 6000);
 	}
 
-	// Process queue: send next queued message
-	if (messageQueue.length > 0) {
-		const next = messageQueue.shift()!;
-		persistChatNow(); // queue shrank — keep the durable copy in sync
-		// Small delay so the UI updates before next run starts
-		setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
-	}
+	// Process queue: send next queued message. Small delay so the UI updates before the next
+	// run starts; a review this run left open holds it (`drainQueueSoon`).
+	drainQueueSoon(100);
 }
 
 /**
@@ -3459,7 +3468,14 @@ export async function compactNow(): Promise<{ ok: boolean; error?: string }> {
 	}
 }
 
-async function fetchChangeset(): Promise<void> {
+function fetchChangeset(): Promise<void> {
+	const run = loadChangeset();
+	_changesetFetch = run;
+	void run.finally(() => { if (_changesetFetch === run) _changesetFetch = null; });
+	return run;
+}
+
+async function loadChangeset(): Promise<void> {
 	if (!sessionId) return;
 	changesetLoading = true;
 	try {
@@ -3520,12 +3536,16 @@ export async function submitChangesetReview(
 				: shown;
 			addToast(tf('changeset.not_restored', { files }), 'error', null);
 		}
+		// The turns typed while the review was open go now.
+		drainQueueSoon(100);
 		return;
 	}
 	// The answer did nothing. Closing the review silently would read as done: say so, and show
 	// what is pending now. 409 is the review of an earlier run, or a run in progress.
 	addToast(t(status === 409 ? 'changeset.review_refused' : 'changeset.review_failed'), 'info', 5000);
 	await fetchChangeset();
+	// Nothing pending any more: the queued turns go. A review still shown holds them.
+	drainQueueSoon(100);
 }
 
 export function cancelQueue(): void {
@@ -4257,11 +4277,7 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 			// normal-path drain in _executeRun's finally; skip if the resumed
 			// run left a changeset to review (sendMessage's guard is bypassed
 			// because we call _executeRun directly).
-			if (!pendingChangeset && messageQueue.length > 0) {
-				const next = messageQueue.shift()!;
-				persistChatNow(); // queue shrank — keep the durable copy in sync
-				setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
-			}
+			drainQueueSoon(100);
 		}
 		persistChat();
 	}
@@ -4590,11 +4606,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 		// streamed, then carried across a reload. Only when this resume is still
 		// current, the thread is idle, there's no pending prompt blocking, and
 		// we're not re-attaching to a live run (the queued turn drains after it).
-		if (gen === _resumeGeneration && !isStreaming && !reattaching && !pendingChangeset && messageQueue.length > 0) {
-			const next = messageQueue.shift()!;
-			persistChatNow();
-			setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
-		}
+		if (gen === _resumeGeneration && !isStreaming && !reattaching) drainQueueSoon(100);
 		// The chip that announced any queued write in this thread is client-only and did not
 		// survive the reload, so ask the server what is still waiting HERE.
 		void refreshThreadPendingCount();
