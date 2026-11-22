@@ -76,6 +76,12 @@ export function shouldRenderArtifactCard(
 
 const ID_MARKER_RE = /<!--\s*lynox-artifact-id:\s*([^\s>]+)\s*-->\s*/i;
 
+/** Set in the fence header when the save's content holds only the engine's
+ *  placeholder, so the card can carry the gallery's badge. Namespaced like the
+ *  id marker; a model that writes it into its own fence only raises a warning. */
+const LOST_MARKER = '<!-- lynox-artifact-lost -->\n';
+const LOST_MARKER_RE = /<!--\s*lynox-artifact-lost\s*-->\n?/i;
+
 /** Pull the saved artifact id out of an `artifact_save` tool result string.
  *  '' when the result carries no id (error strings, older results). The id
  *  sits at the END of the first line; a title can itself contain literal
@@ -98,9 +104,9 @@ export function artifactIdMarker(id: string): string {
 
 /** Build the leading marker block for an inline artifact fence. Single source
  *  of the fence format shared by the writer and the round-trip test. */
-export function artifactFenceHeader(opts: { title: string; type: string; id: string; typed: boolean }): string {
+export function artifactFenceHeader(opts: { title: string; type: string; id: string; typed: boolean; lost?: boolean }): string {
 	const typeMarker = opts.typed ? `<!-- type: ${opts.type} -->\n` : '';
-	return `<!-- title: ${opts.title} -->\n${typeMarker}${artifactIdMarker(opts.id)}`;
+	return `<!-- title: ${opts.title} -->\n${typeMarker}${artifactIdMarker(opts.id)}${opts.lost ? LOST_MARKER : ''}`;
 }
 
 /** Read the gallery id back out of a fence body. '' when absent. */
@@ -119,9 +125,11 @@ export function stripArtifactIdMarker(code: string): string {
  *  with the id marker stripped. What MarkdownRenderer.buildArtifact consumes —
  *  extracted so the writer→reader round-trip is driven by a test, not asserted
  *  on the helpers in isolation. */
-export function resolveArtifactRender(code: string): { artifactId: string; src: string } {
+export function resolveArtifactRender(code: string): { artifactId: string; src: string; lost: boolean } {
 	const artifactId = extractArtifactId(code);
-	return { artifactId, src: artifactId ? stripArtifactIdMarker(code) : code };
+	const withoutId = artifactId ? stripArtifactIdMarker(code) : code;
+	const lost = LOST_MARKER_RE.test(withoutId);
+	return { artifactId, src: lost ? withoutId.replace(LOST_MARKER_RE, '') : withoutId, lost };
 }
 
 // ── An inline artifact that holds only the engine's placeholder ───────
@@ -157,23 +165,19 @@ export function holdsOnlyPlaceholder(src: string): boolean {
 	return PLACEHOLDER_OPENINGS.some((opening) => src.includes(opening));
 }
 
-/** The leading markers the chat writes before a saved artifact's content in
- *  its fence ({@link artifactFenceHeader}: title, then type; the id marker is
- *  gone by the time {@link resolveArtifactRender} hands the body on). */
-const LEADING_FENCE_MARKERS_RE = /^<!--\s*title:[^\n]*?-->\n(?:<!--\s*type:\s*\w+\s*-->\n)?/;
-
-/** Whether a rendered fence body holds only the placeholder, measured on what
- *  the store would hold: the content without the markers the chat put before
- *  it and without the line end the markdown parser adds to every code block.
- *  Measured with them, a stored placeholder near the bound got no badge.
- *  Bounded, not exact: within a few bytes of the bound the count can differ
- *  from the store's in either direction, so a badge can be missed or shown
- *  there. A title with a line break keeps its marker in the count; content
- *  that opened with whitespace, ended with a line end or opened with a type
- *  comment of its own loses those bytes. Away from the bound both agree. The
- *  badge only warns: it changes no save, open or share. */
-export function fenceHoldsOnlyPlaceholder(src: string): boolean {
-	return holdsOnlyPlaceholder(src.replace(LEADING_FENCE_MARKERS_RE, '').replace(/\n$/, ''));
+/** Whether an inline card gets the badge. A card the chat built from a save
+ *  carries the answer in its fence ({@link LOST_MARKER}): the chat applied
+ *  {@link holdsOnlyPlaceholder} to the save's content, the exact text the store
+ *  measured. A fence the model wrote in its answer has no stored content; it is
+ *  measured as it stands, with the line end the markdown parser adds, so near
+ *  the bound it can only miss a badge, and one that opens with a title comment
+ *  of its own is not checked at all. The badge only warns: it changes no save,
+ *  open or share. */
+export function fenceHoldsOnlyPlaceholder(code: string): boolean {
+	if (resolveArtifactRender(code).lost) return true;
+	// The raw fence text, nothing stripped: what is measured can only be longer than what the
+	// model wrote, never shorter.
+	return !/^<!--\s*title:/i.test(code) && holdsOnlyPlaceholder(code);
 }
 
 /** Put the badge after the card's title. `label` is shown as text and escaped

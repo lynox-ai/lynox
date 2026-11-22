@@ -68,29 +68,46 @@ describe('an inline artifact that holds only the engine\'s placeholder', () => {
 	});
 });
 
-describe('a fence body is measured as the store measured the content', () => {
+describe('which inline card gets the badge', () => {
 	/** A stored placeholder of exactly `bytes` bytes: the old form, padded. */
 	const stored = (bytes: number): string => OLD_FORM + 'x'.repeat(bytes - new TextEncoder().encode(OLD_FORM).length);
-	/** The body MarkdownRenderer hands on, through the renderer's own steps: the fence as the chat
-	 *  writes it (`artifactFenceWrap` in ChatView), the markdown render, the fence parse, the id strip. */
+	/** The fence code MarkdownRenderer's buildArtifact receives, through the renderer's own steps:
+	 *  the fence as the chat writes it (`artifactFenceWrap` in ChatView), the markdown render and
+	 *  the fence parse. */
 	const throughRenderer = (fenceBody: string): string => {
 		const fences = parseFences(renderSanitizedMarkdown('```artifact\n' + fenceBody + '\n```'), document).fences;
 		expect(fences, 'the fence reaches the renderer as one artifact fence').toHaveLength(1);
-		return resolveArtifactRender(fences[0]!.code).src;
+		return fences[0]!.code;
 	};
-	const chatFence = (content: string, typed: boolean): string =>
-		throughRenderer(artifactFenceHeader({ title: 'Ein längerer Titel für das Angebot', type: 'markdown', id: 'abc123', typed }) + content);
+	/** A card the chat builds from a save, as ChatView builds it: the header decides `lost` from the content. */
+	const chatCard = (content: string, typed: boolean): string =>
+		throughRenderer(artifactFenceHeader({ title: 'Ein längerer Titel für das Angebot', type: 'markdown', id: 'abc123', typed, lost: holdsOnlyPlaceholder(content) }) + content);
 
-	it.each([['an untyped fence', false], ['a typed fence', true]])('%s: a stored placeholder at the bound gets the badge, one byte over does not', (_l, typed) => {
-		expect(holdsOnlyPlaceholder(chatFence(stored(PLACEHOLDER_MAX_BYTES), typed)), 'positive control: measured as it arrives, the body is over the bound').toBe(false);
-		expect(fenceHoldsOnlyPlaceholder(chatFence(stored(PLACEHOLDER_MAX_BYTES), typed))).toBe(true);
-		expect(fenceHoldsOnlyPlaceholder(chatFence(stored(PLACEHOLDER_MAX_BYTES + 1), typed))).toBe(false);
+	it.each([['an untyped card', false], ['a typed card', true]])('%s from a save: the store\'s answer on the content, exactly at the bound and one byte over', (_l, typed) => {
+		expect(holdsOnlyPlaceholder(chatCard(stored(PLACEHOLDER_MAX_BYTES), typed)), 'positive control: measured as it arrives, the fence is over the bound').toBe(false);
+		expect(fenceHoldsOnlyPlaceholder(chatCard(stored(PLACEHOLDER_MAX_BYTES), typed))).toBe(true);
+		expect(fenceHoldsOnlyPlaceholder(chatCard(stored(PLACEHOLDER_MAX_BYTES + 1), typed))).toBe(false);
+		expect(fenceHoldsOnlyPlaceholder(chatCard('# Pitch\n\nOur offer.', typed))).toBe(false);
 	});
 
-	it('a fence the model wrote without the chat\'s header is measured as it stands, at the bound and one byte over', () => {
-		expect(fenceHoldsOnlyPlaceholder(throughRenderer(stored(PLACEHOLDER_MAX_BYTES)))).toBe(true);
-		expect(fenceHoldsOnlyPlaceholder(throughRenderer(stored(PLACEHOLDER_MAX_BYTES + 1)))).toBe(false);
+	it('the marker is not part of what the card renders', () => {
+		const { src, lost } = resolveArtifactRender(chatCard(OLD_FORM, false));
+		expect(lost).toBe(true);
+		expect(src).not.toContain('lynox-artifact-lost');
+		expect(src).toContain(OLD_FORM);
+	});
+
+	it('a fence the model wrote is measured as it stands: it can miss a badge at the bound, never show one over it', () => {
+		// The parser adds a line end, so the measured text is one byte longer than the model's.
+		expect(fenceHoldsOnlyPlaceholder(throughRenderer(stored(PLACEHOLDER_MAX_BYTES - 1)))).toBe(true);
+		expect(fenceHoldsOnlyPlaceholder(throughRenderer(stored(PLACEHOLDER_MAX_BYTES)))).toBe(false);
+		// Nothing is stripped before measuring: leading whitespace still counts.
+		expect(fenceHoldsOnlyPlaceholder(throughRenderer(' '.repeat(1500) + OLD_FORM + 'x'.repeat(500)))).toBe(false);
 		expect(fenceHoldsOnlyPlaceholder(throughRenderer('# Pitch\n\nOur offer.'))).toBe(false);
+	});
+
+	it('a fence the model wrote with a title comment of its own is not checked', () => {
+		expect(fenceHoldsOnlyPlaceholder(throughRenderer(`<!-- title: Pitch -->\n${OLD_FORM}`))).toBe(false);
 	});
 });
 

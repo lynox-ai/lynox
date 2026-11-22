@@ -198,7 +198,7 @@
 		// A body that holds only the engine's placeholder gets the gallery's badge
 		// ("Content missing"): the card reads the message, not the store's flag.
 		const card = buildArtifactCard(code);
-		return fenceHoldsOnlyPlaceholder(resolveArtifactRender(code).src) ? withPlaceholderBadge(card, t('artifacts.lost_badge')) : card;
+		return fenceHoldsOnlyPlaceholder(code) ? withPlaceholderBadge(card, t('artifacts.lost_badge')) : card;
 	}
 
 	function buildArtifactCard(code: string): string {

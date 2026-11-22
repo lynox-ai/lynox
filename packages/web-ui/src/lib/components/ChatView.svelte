@@ -101,7 +101,7 @@
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { formatCountdown } from '../utils/time.js';
 	import { toolCallLabel as resolveToolCallLabel, HIDDEN_TOOLS } from '../utils/tool-call-label.js';
-	import { shouldRenderArtifactCard, parseArtifactIdFromResult, artifactFenceHeader } from '../utils/artifact-inline.js';
+	import { shouldRenderArtifactCard, parseArtifactIdFromResult, artifactFenceHeader, holdsOnlyPlaceholder } from '../utils/artifact-inline.js';
 	import { isPipelineRunning } from '../utils/pipeline-status.js';
 	import { renderPromptMarkdown, renderPromptSegments } from '../utils/prompt-markdown.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
@@ -631,6 +631,7 @@
 							type: artifactType,
 							id: parseArtifactIdFromResult(tc.result),
 							typed: TYPED_ARTIFACT_FENCE.has(artifactType),
+							lost: holdsOnlyPlaceholder(content),
 						});
 						result.push({ type: 'text', text: artifactFenceWrap(header, content) });
 					}
