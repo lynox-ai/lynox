@@ -375,7 +375,7 @@ export interface SpawnDialog {
 
 export const SPAWN_DIALOG: Readonly<Record<DialogLanguage, SpawnDialog>> = {
   en: {
-    children: (count) => count === 1 ? 'One child would run' : `${count} children would run`,
+    children: (count) => count === 1 ? '1 subtask would run' : `${count} subtasks would run`,
     tierUnknownBand: 'a model in the Deep tier (or an unregistered custom model whose cost band the engine cannot prove)',
     tierDeep: 'the Deep tier (a stronger model, more thorough but more expensive)',
     tailDowngrade: 'Allow this only if the task really needs the Deep tier. Otherwise choose “Run on Balanced”.',

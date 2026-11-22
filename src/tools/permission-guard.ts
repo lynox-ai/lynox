@@ -1962,6 +1962,11 @@ function askable(danger: Danger): Danger {
   return danger;
 }
 
+/** `text` with its first character upper-cased when it is a lower-case letter. */
+function capitalFirst(text: string, language: DialogLanguage): string {
+  return text.replace(/^\p{Ll}/u, (c) => c.toLocaleUpperCase(language));
+}
+
 /**
  * The danger prompts' template. Every interpolation says who wrote it, by type: {@link agentText}
  * becomes a value in `prompt`, {@link system} frame, and {@link tool} the tool's dialog word (frame)
@@ -1974,25 +1979,40 @@ function framedIn(language: DialogLanguage): (strings: TemplateStringsArray, ...
   return (strings, ...values) => {
     // The template writes a value's quotes as `"`; the prompt shows the language's marks, and puts
     // a long value after a colon on a line of its own, the rest of the sentence on the next. The
-    // warning keeps the template's text as it is.
+    // warning keeps the template's text as it is. A rest on its own line reads as a sentence: it
+    // starts with a capital and ends with a full stop.
     const frames = [...strings];
+    const capitalized = new Set<number>();
+    let restOwnLine = false;
     values.forEach((v, i) => {
       if (!('agentText' in v) || !frames[i]!.endsWith('"') || !frames[i + 1]!.startsWith('"')) return;
       const before = frames[i]!.slice(0, -1);
       const after = frames[i + 1]!.slice(1);
       if (Array.from(singleLine(v.agentText)).length > LONG_VALUE) {
         frames[i] = `${before.replace(/\s*(?:—\s*)?$/u, '').replace(/:?$/u, ':')}\n${open}`;
-        frames[i + 1] = after === '' ? close : `${close}\n${after.trimStart().replace(/^—\s*/u, '')}`;
+        const rest = after.trimStart().replace(/^—\s*/u, '');
+        frames[i + 1] = after === '' ? close : `${close}\n${capitalFirst(rest, language)}`;
+        const next = values[i + 1];
+        if (after !== '' && rest === '' && next !== undefined && 'systemText' in next) capitalized.add(i + 1);
+        if (after !== '') restOwnLine = true;
       } else {
         frames[i] = before + open;
         frames[i + 1] = close + after;
       }
     });
-    const prompt = pv(Object.assign(frames, { raw: frames }) as unknown as TemplateStringsArray, ...values.map((v) => ('agentText' in v
+    if (restOwnLine) {
+      // The end of the sentence: the last frame, or the value before it when that frame is empty.
+      // A `[BLOCKED …]` marker is left as it is.
+      const last = frames.length - 1;
+      const lastValue = values[last - 1];
+      const end = frames[last] !== '' ? frames[last]! : lastValue !== undefined && 'systemText' in lastValue ? lastValue.systemText : '';
+      if (end !== '' && !/[.!?…\]]$/u.test(end.trimEnd())) frames[last] = `${frames[last]!.trimEnd()}.`;
+    }
+    const prompt = pv(Object.assign(frames, { raw: frames }) as unknown as TemplateStringsArray, ...values.map((v, i) => ('agentText' in v
       ? promptValue(quoted(singleLine(v.agentText)))
       : 'toolName' in v
         ? dialogToolHead(v.toolName, v.language)
-        : { [PROMPT_TEXT_BRAND]: true as const, segments: promptSegments(v.systemText) })));
+        : { [PROMPT_TEXT_BRAND]: true as const, segments: promptSegments(capitalized.has(i) ? capitalFirst(v.systemText, language) : v.systemText) })));
     let warning = strings[0] ?? '';
     values.forEach((v, i) => {
       warning += ('agentText' in v ? v.agentText : 'toolName' in v ? dialogToolWord(v.toolName, v.language) : v.systemText) + (strings[i + 1] ?? '');

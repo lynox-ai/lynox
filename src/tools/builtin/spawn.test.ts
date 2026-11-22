@@ -6448,7 +6448,7 @@ describe('spawn_agent tool', () => {
         const p = ask({ agents: [{ name: 'a', task: 'x', model: 'deep' }, { name: 'b', task: 'y' }] }, 'claude-opus-4-6') as WarningPayload;
         expect(p.tier).toBe('deep');
         expect(p.downgradeTo).toBeUndefined();
-        expect(p.message).toMatch(/2 children would run/);
+        expect(p.message).toMatch(/2 subtasks would run/);
       });
 
       it('in hybrid routing nothing is inherited, so the pin is not judged', async () => {

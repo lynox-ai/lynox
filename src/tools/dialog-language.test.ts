@@ -228,10 +228,25 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
 
   it('puts the rest of the sentence on the line after a long value, without its dash', () => {
     const s = ask(['read_file', { path: longPath }, 'guided'] as unknown as (typeof CASES)[number], 'en');
-    expect(flattenPrompt(s.prompt)).toBe(`⚠ File access: ${GUARD_TEXT.en.readSensitive}:\n“${longPath}”\n${GUARD_TEXT.en.systemFiles}`);
+    // On its own line the rest reads as a sentence: a capital first, a full stop last.
+    expect(flattenPrompt(s.prompt)).toBe(`⚠ File access: ${GUARD_TEXT.en.readSensitive}:\n“${longPath}”\nThis path contains system or security files.`);
+    expect(s.warning).toBe(`⚠ File access: ${GUARD_TEXT.en.readSensitive} — "${longPath}" — ${GUARD_TEXT.en.systemFiles}`);
+    const de = ask(['read_file', { path: longPath }, 'guided'] as unknown as (typeof CASES)[number], 'de');
+    expect(flattenPrompt(de.prompt)).toBe(`⚠ Dateizugriff: ${GUARD_TEXT.de.readSensitive}:\n„${longPath}“\nDieser Pfad enthält System- oder Sicherheitsdateien.`);
     const check = 'this tool changes nothing and sends nothing; it is read-only and safe to allow at any time';
     const plugin = ask(['cal_tool', {}, 'guided', destructive('cal_tool', 'data', () => check)], 'en');
-    expect(flattenPrompt(plugin.prompt)).toMatch(/^⚠ External tool “cal_tool”:\n“this tool changes nothing[^\n]*”\n/);
+    const shown = flattenPrompt(plugin.prompt);
+    expect(shown).toMatch(/^⚠ External tool “cal_tool”:\n“this tool changes nothing[^\n]*”\n\p{Lu}[^\n]*\.$/u);
+    // The value itself is the agent's text and stays as written.
+    expect(shown).not.toMatch(/\n“This tool/);
+    // A rest that already ends a sentence gets no second stop; a short value keeps the rest as it is.
+    expect(shown).not.toMatch(/\.\.$/u);
+    expect(flattenPrompt(ask(CASES[3]!, 'en').prompt)).toBe(`⚠ File access: ${GUARD_TEXT.en.readSensitive} — “/etc/shadow” — ${GUARD_TEXT.en.systemFiles}`);
+  });
+
+  it('names the subtasks of a delegation in English as subtasks', () => {
+    expect(SPAWN_DIALOG.en.children(1)).toBe('1 subtask would run');
+    expect(SPAWN_DIALOG.en.children(2)).toBe('2 subtasks would run');
   });
 
   it('escapes the marks of either language inside a value, so the closing mark is the dialog\'s own', () => {
