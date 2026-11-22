@@ -76,11 +76,13 @@ export function shouldRenderArtifactCard(
 
 const ID_MARKER_RE = /<!--\s*lynox-artifact-id:\s*([^\s>]+)\s*-->\s*/i;
 
-/** Set in the fence header when the save's content holds only the engine's
- *  placeholder, so the card can carry the gallery's badge. Namespaced like the
- *  id marker; a model that writes it into its own fence only raises a warning. */
+/** Opens the fence of a card whose saved file the store marks as lost
+ *  (`lostOnSave`), so the card carries the gallery's badge. Namespaced like the
+ *  id marker and read only where the chat writes it, at the fence's start: a
+ *  model that opens its own fence with it raises a warning and loses that one
+ *  line from the card; anywhere else it is content. */
 const LOST_MARKER = '<!-- lynox-artifact-lost -->\n';
-const LOST_MARKER_RE = /<!--\s*lynox-artifact-lost\s*-->\n?/i;
+const LOST_MARKER_RE = /^<!--\s*lynox-artifact-lost\s*-->\n/i;
 
 /** Pull the saved artifact id out of an `artifact_save` tool result string.
  *  '' when the result carries no id (error strings, older results). The id
@@ -106,7 +108,7 @@ export function artifactIdMarker(id: string): string {
  *  of the fence format shared by the writer and the round-trip test. */
 export function artifactFenceHeader(opts: { title: string; type: string; id: string; typed: boolean; lost?: boolean }): string {
 	const typeMarker = opts.typed ? `<!-- type: ${opts.type} -->\n` : '';
-	return `<!-- title: ${opts.title} -->\n${typeMarker}${artifactIdMarker(opts.id)}${opts.lost ? LOST_MARKER : ''}`;
+	return `${opts.lost ? LOST_MARKER : ''}<!-- title: ${opts.title} -->\n${typeMarker}${artifactIdMarker(opts.id)}`;
 }
 
 /** Read the gallery id back out of a fence body. '' when absent. */
@@ -126,10 +128,10 @@ export function stripArtifactIdMarker(code: string): string {
  *  extracted so the writer→reader round-trip is driven by a test, not asserted
  *  on the helpers in isolation. */
 export function resolveArtifactRender(code: string): { artifactId: string; src: string; lost: boolean } {
-	const artifactId = extractArtifactId(code);
-	const withoutId = artifactId ? stripArtifactIdMarker(code) : code;
-	const lost = LOST_MARKER_RE.test(withoutId);
-	return { artifactId, src: lost ? withoutId.replace(LOST_MARKER_RE, '') : withoutId, lost };
+	const lost = LOST_MARKER_RE.test(code);
+	const body = lost ? code.replace(LOST_MARKER_RE, '') : code;
+	const artifactId = extractArtifactId(body);
+	return { artifactId, src: artifactId ? stripArtifactIdMarker(body) : body, lost };
 }
 
 // ── An inline artifact that holds only the engine's placeholder ───────
@@ -166,17 +168,16 @@ export function holdsOnlyPlaceholder(src: string): boolean {
 }
 
 /** Whether an inline card gets the badge. A card the chat built from a save
- *  carries the answer in its fence ({@link LOST_MARKER}): the chat applied
- *  {@link holdsOnlyPlaceholder} to the save's content, the exact text the store
- *  measured. A fence the model wrote in its answer has no stored content; it is
- *  measured as it stands, with the line end the markdown parser adds, so near
- *  the bound it can only miss a badge, and one that opens with a title comment
- *  of its own is not checked at all. The badge only warns: it changes no save,
- *  open or share. */
+ *  carries the store's own answer in its fence ({@link LOST_MARKER}): the store
+ *  read the file, and only it can tell a lost document from an intact one whose
+ *  call still holds the placeholder (threads persisted before 2026-10-10 hold
+ *  such calls, see `src/core/artifact-eviction.ts`). A fence the model wrote in
+ *  its answer has no file behind it; {@link holdsOnlyPlaceholder} is applied to
+ *  the fence text as the renderer receives it, and a fence that opens with a
+ *  title comment, the chat's own form, is not checked that way. The badge only
+ *  warns: it changes no save, open or share. */
 export function fenceHoldsOnlyPlaceholder(code: string): boolean {
 	if (resolveArtifactRender(code).lost) return true;
-	// The raw fence text, nothing stripped: what is measured can only be longer than what the
-	// model wrote, never shorter.
 	return !/^<!--\s*title:/i.test(code) && holdsOnlyPlaceholder(code);
 }
 
@@ -185,7 +186,7 @@ export function fenceHoldsOnlyPlaceholder(code: string): boolean {
  *  title span holds escaped text only, so the first such span is the card's. A
  *  card without a title span is returned unchanged. */
 export function withPlaceholderBadge(card: string, label: string): string {
-	const safe = label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+	const safe = label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 	// A function, not a replacement string: `$&` or `$'` in a label would be read as patterns.
 	return card.replace(
 		/<span class="artifact-title">[^<]*<\/span>/,

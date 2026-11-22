@@ -79,29 +79,41 @@ describe('which inline card gets the badge', () => {
 		expect(fences, 'the fence reaches the renderer as one artifact fence').toHaveLength(1);
 		return fences[0]!.code;
 	};
-	/** A card the chat builds from a save, as ChatView builds it: the header decides `lost` from the content. */
-	const chatCard = (content: string, typed: boolean): string =>
-		throughRenderer(artifactFenceHeader({ title: 'Ein längerer Titel für das Angebot', type: 'markdown', id: 'abc123', typed, lost: holdsOnlyPlaceholder(content) }) + content);
+	/** A card the chat builds from a save, as ChatView builds it; `lost` is the store's flag. */
+	const chatCard = (content: string, opts: { typed: boolean; id: string; lost: boolean }): string =>
+		throughRenderer(artifactFenceHeader({ title: 'Pitch', type: 'markdown', ...opts }) + content);
+	const shapes = [
+		{ typed: false, id: 'abc123' }, { typed: true, id: 'abc123' }, { typed: false, id: '' }, { typed: true, id: '' },
+	];
 
-	it.each([['an untyped card', false], ['a typed card', true]])('%s from a save: the store\'s answer on the content, exactly at the bound and one byte over', (_l, typed) => {
-		expect(holdsOnlyPlaceholder(chatCard(stored(PLACEHOLDER_MAX_BYTES), typed)), 'positive control: measured as it arrives, the fence is over the bound').toBe(false);
-		expect(fenceHoldsOnlyPlaceholder(chatCard(stored(PLACEHOLDER_MAX_BYTES), typed))).toBe(true);
-		expect(fenceHoldsOnlyPlaceholder(chatCard(stored(PLACEHOLDER_MAX_BYTES + 1), typed))).toBe(false);
-		expect(fenceHoldsOnlyPlaceholder(chatCard('# Pitch\n\nOur offer.', typed))).toBe(false);
+	it.each(shapes)('a card from a save follows the store\'s flag, not its content (typed: $typed, id: "$id")', (shape) => {
+		expect(fenceHoldsOnlyPlaceholder(chatCard('# Pitch\n\nOur offer.', { ...shape, lost: true }))).toBe(true);
+		// An older thread: the call holds the placeholder, the file holds the document.
+		expect(fenceHoldsOnlyPlaceholder(chatCard(OLD_FORM, { ...shape, lost: false }))).toBe(false);
 	});
 
-	it('the marker is not part of what the card renders', () => {
-		const { src, lost } = resolveArtifactRender(chatCard(OLD_FORM, false));
+	it.each(shapes)('the marker is not part of what the card renders, and the card keeps its title and id (typed: $typed, id: "$id")', (shape) => {
+		const { src, lost, artifactId } = resolveArtifactRender(chatCard(OLD_FORM, { ...shape, lost: true }));
 		expect(lost).toBe(true);
+		expect(artifactId).toBe(shape.id);
 		expect(src).not.toContain('lynox-artifact-lost');
+		expect(src.startsWith('<!-- title: Pitch -->')).toBe(true);
 		expect(src).toContain(OLD_FORM);
 	});
 
-	it('a fence the model wrote is measured as it stands: it can miss a badge at the bound, never show one over it', () => {
+	it('the marker counts only where the chat writes it: inside a body it is content', () => {
+		const body = 'Notes\n<!-- lynox-artifact-lost -->\nmore';
+		const { src, lost } = resolveArtifactRender(chatCard(body, { typed: false, id: 'abc123', lost: false }));
+		expect(lost).toBe(false);
+		expect(src).toContain(body);
+		expect(fenceHoldsOnlyPlaceholder(throughRenderer(body))).toBe(false);
+	});
+
+	it('a fence the model wrote is measured on the text the renderer receives, line end included', () => {
 		// The parser adds a line end, so the measured text is one byte longer than the model's.
 		expect(fenceHoldsOnlyPlaceholder(throughRenderer(stored(PLACEHOLDER_MAX_BYTES - 1)))).toBe(true);
 		expect(fenceHoldsOnlyPlaceholder(throughRenderer(stored(PLACEHOLDER_MAX_BYTES)))).toBe(false);
-		// Nothing is stripped before measuring: leading whitespace still counts.
+		// This check strips nothing: leading whitespace still counts.
 		expect(fenceHoldsOnlyPlaceholder(throughRenderer(' '.repeat(1500) + OLD_FORM + 'x'.repeat(500)))).toBe(false);
 		expect(fenceHoldsOnlyPlaceholder(throughRenderer('# Pitch\n\nOur offer.'))).toBe(false);
 	});

@@ -3,11 +3,11 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { readable } from 'svelte/store';
 
-// The wiring half of the inline card's "Content missing" badge: ChatView must decide it from the
-// save's content, the text the store measured, and write it into the card's fence. A save whose
-// content was only the engine's placeholder succeeded before the save refused it, so older threads
-// still hold such a save with a success result. A real turn goes through the chat store, then
-// ChatView renders it. Setup as in chatview-artifact-card.svelte.test.ts.
+// The wiring half of the inline card's "Content missing" badge: ChatView must take it from the
+// store's flag on the saved artifact (`lostOnSave`, as the gallery and the chips show it) and write
+// it into the card's fence. Not from the call's content: an older thread can hold the placeholder
+// there while the file holds the document. A real turn goes through the chat store, then ChatView
+// renders it. Setup as in chatview-artifact-card.svelte.test.ts.
 
 // `svelte` resolves to its server entry under node, where `mount` throws; mount with the client entry.
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
@@ -76,7 +76,7 @@ afterEach(() => {
 });
 
 /** Runs a turn with one `artifact_save` call and the given result (or none), then renders ChatView. */
-async function renderSave(content: string): Promise<string[]> {
+async function renderSave(content: string, opts: { result: string; lostOnSave: boolean }): Promise<string[]> {
 	const run = sseStream();
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
 		const url = String(input);
@@ -85,18 +85,23 @@ async function renderSave(content: string): Promise<string[]> {
 		if (url.endsWith('/threads/t1')) return json({ thread: null });
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
 		if (url.endsWith('/threads/t1/messages')) return json({ messages: [] });
-		if (url.endsWith('/artifacts')) return json({ artifacts: [] });
+		if (url.endsWith('/artifacts')) return json({ artifacts: [{ id: 'ab12cd34', title: 'Pitch', description: '', type: 'html', createdAt: '2026-10-09T19:34:00.000Z', updatedAt: '2026-10-09T19:34:00.000Z', threadId: 't1', version: 1, ...(opts.lostOnSave ? { lostOnSave: true } : {}) }] });
 		return json({});
 	}));
 	const turn = store.sendMessage('write the pitch');
 	await settle();
 	run.send('tool_call', { name: 'artifact_save', input: { title: 'Pitch', content }, agent: 'lynox' });
 	await settle();
-	run.send('tool_result', { name: 'artifact_save', agent: 'lynox', result: 'Saved artifact "Pitch" (id: ab12cd34, v1).' });
+	run.send('tool_result', { name: 'artifact_save', agent: 'lynox', result: opts.result });
 	run.send('done', { agent: 'lynox' });
 	run.close();
 	await turn; await settle();
 
+	// The list is loaded before the mount: the renderer mock above writes its content once and does
+	// not follow a later prop change, where the real renderer does.
+	const artifactsStore = await import('../stores/artifacts.svelte.js');
+	await artifactsStore.loadArtifacts();
+	expect(artifactsStore.getArtifacts(), 'the store holds the saved artifact').toHaveLength(1);
 	const { default: ChatView } = await import('./ChatView.svelte');
 	component = svelte.mount(ChatView, { target });
 	svelte.flushSync();
@@ -104,15 +109,23 @@ async function renderSave(content: string): Promise<string[]> {
 	return [...target.querySelectorAll('.md-probe')].map((el) => el.textContent ?? '').filter((t) => t.includes(content));
 }
 
-describe('ChatView marks the card of a save whose content was only the placeholder', () => {
-	it('writes the marker into that card\'s fence', async () => {
-		const cards = await renderSave(PLACEHOLDER);
+const SAVED = 'Saved artifact "Pitch" (id: ab12cd34, v1).';
+
+describe('ChatView marks the card of a save the store marks as lost', () => {
+	it('writes the marker into the card when the store marks the artifact as lost', async () => {
+		const cards = await renderSave(PLACEHOLDER, { result: SAVED, lostOnSave: true });
 		expect(cards, 'positive control: the card is drawn').toHaveLength(1);
 		expect(cards[0]).toContain('<!-- lynox-artifact-lost -->');
 	});
 
-	it('writes no marker into the card of a document', async () => {
-		const cards = await renderSave(DOC);
+	it('writes no marker when the call holds the placeholder but the store keeps the document', async () => {
+		const cards = await renderSave(PLACEHOLDER, { result: SAVED, lostOnSave: false });
+		expect(cards, 'positive control: the card is drawn').toHaveLength(1);
+		expect(cards[0]).not.toContain('lynox-artifact-lost');
+	});
+
+	it('writes no marker when the result names no artifact id', async () => {
+		const cards = await renderSave(PLACEHOLDER, { result: 'Saved artifact "Pitch".', lostOnSave: true });
 		expect(cards, 'positive control: the card is drawn').toHaveLength(1);
 		expect(cards[0]).not.toContain('lynox-artifact-lost');
 	});

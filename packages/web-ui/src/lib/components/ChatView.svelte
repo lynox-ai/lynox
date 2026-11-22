@@ -73,7 +73,7 @@
 		type ChatMessage,
 	} from '../stores/chat.svelte.js';
 	import type { PromptOrigin } from '../utils/prompt-origin.js';
-	import { getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
+	import { getArtifacts, getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
 	import { getApiBase, getDemoMode } from '../config.svelte.js';
 	import { isDiagnosticsEnabled } from '../stores/diagnostics.svelte.js';
 	import { footerChipSeparator, footerStatParts } from '../stores/chat-usage.js';
@@ -101,7 +101,7 @@
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { formatCountdown } from '../utils/time.js';
 	import { toolCallLabel as resolveToolCallLabel, HIDDEN_TOOLS } from '../utils/tool-call-label.js';
-	import { shouldRenderArtifactCard, parseArtifactIdFromResult, artifactFenceHeader, holdsOnlyPlaceholder } from '../utils/artifact-inline.js';
+	import { shouldRenderArtifactCard, parseArtifactIdFromResult, artifactFenceHeader } from '../utils/artifact-inline.js';
 	import { isPipelineRunning } from '../utils/pipeline-status.js';
 	import { renderPromptMarkdown, renderPromptSegments } from '../utils/prompt-markdown.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
@@ -626,12 +626,16 @@
 						// the id in its result string. Thread it into the fence so the
 						// inline card LINKS to that existing entry instead of re-saving on
 						// pin/open — the re-save added a duplicate gallery row per click.
+						const id = parseArtifactIdFromResult(tc.result);
 						const header = artifactFenceHeader({
 							title,
 							type: artifactType,
-							id: parseArtifactIdFromResult(tc.result),
+							id,
 							typed: TYPED_ARTIFACT_FENCE.has(artifactType),
-							lost: holdsOnlyPlaceholder(content),
+							// The store's flag, as the gallery and the chips show it. Not the call's
+							// content: an older thread can hold the placeholder there while the file
+							// holds the document.
+							lost: id !== '' && getArtifacts().some((a) => a.id === id && a.lostOnSave === true),
 						});
 						result.push({ type: 'text', text: artifactFenceWrap(header, content) });
 					}
