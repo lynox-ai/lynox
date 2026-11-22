@@ -3458,7 +3458,7 @@ export class WorkerLoop {
         ],
       };
       // With the owner's member-connection lines, told by reader (#notifyMemberEnd).
-      if (memberSaid.length > 0) await this.#notifyMemberEnd(message, bodyOf([]));
+      if (memberSaid.length > 0) await this.#notifyMemberEnd(message, notices.memberEndForMandates);
       else await this.notificationRouter.notify(message);
     }
   }
@@ -3986,7 +3986,7 @@ export class WorkerLoop {
       const message = { title, body: told.result, taskId: task.id, priority: toldLook.priority };
       if (readers === null && withLines) {
         // Not split by reader, but with the owner's member-connection lines: see #notifyMemberEnd.
-        void this.#notifyMemberEnd(message, said ?? resultSummary);
+        void this.#notifyMemberEnd(message, WORKER_NOTICES[lang].memberEndForMandates);
         return;
       }
       void this.notificationRouter.notify({
@@ -4016,13 +4016,19 @@ export class WorkerLoop {
   /**
    * A run's end that carries the owner's member-connection lines, told by reader. The lines name
    * another member's provider, profile and login and the owner's way to change it, so only the
-   * owner's devices read `message` as it is. Every live grant reads the same end without them
-   * (`withoutLines`): a mandate gets the notices the owner gets, in the sentence that is true for
-   * it. A push without an audience would reach every live grant's devices with the lines.
+   * owner's devices read `message` as it is. Every live grant reads the same end in its own
+   * sentence (`forMandates`), a fixed one, not the run's result: the model words its reply after a
+   * refusal that names the other member, so the result without the lines can still carry them. A
+   * mandate gets the notices the owner gets, in the sentence that is true for it. A push without an
+   * audience would reach every live grant's devices with the lines.
    */
-  async #notifyMemberEnd(message: NotificationMessage, withoutLines: string): Promise<void> {
+  async #notifyMemberEnd(message: NotificationMessage, forMandates: string): Promise<void> {
     const owner = this.notificationRouter.notify({ ...message, audience: 'owner' });
-    void this.notificationRouter.notify({ ...message, body: withoutLines, audience: 'all_mandates' });
+    void this.notificationRouter.notify({
+      ...message,
+      body: forMandates,
+      audience: 'all_mandates',
+    });
     await owner;
   }
 

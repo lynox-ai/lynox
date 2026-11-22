@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { WorkerLoop } from './worker-loop.js';
 import { BULK_HALT_REASONS } from './bulk-ledger.js';
 import { BULK_NOTICES } from './bulk-notices.js';
+import { WORKER_NOTICES } from './worker-notices.js';
 import type { Engine } from './engine.js';
 import type { NotificationMessage, NotificationRouter } from './notification-router.js';
 import type { TriggerRecord } from '../types/index.js';
@@ -116,7 +117,7 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
   // A halt whose way is not the owner's alone, ended with the owner's member-connection lines: the
   // lines go to the owner's devices only; every grant reads the halt without them, whoever
   // planned the run (a mandate gets the notices the owner gets).
-  it('pushes another halt\'s member-connection lines to the owner\'s devices only, and the halt without them to every grant, whoever planned it', async () => {
+  it('pushes another halt\'s member-connection lines to the owner\'s devices only, and a fixed sentence to every grant, whoever planned it', async () => {
     for (const plannedBy of ['mandate', 'owner', 'mandate-without-grant'] as const) {
       const h = harness({ reason: R.listTooLarge, plannedBy });
       const summary = BULK_NOTICES.de.halted('apply', R.listTooLarge);
@@ -127,7 +128,7 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
       }).done;
       expect(h.sent.map((m) => [m.audience, m.mandateId, m.body]), plannedBy).toEqual([
         ['owner', undefined, `${summary}\n• ${NOTE.de}`],
-        ['all_mandates', undefined, summary],
+        ['all_mandates', undefined, WORKER_NOTICES.de.memberEndForMandates],
       ]);
     }
   });
