@@ -1419,7 +1419,7 @@ export const BULK_SPREAD_UNMARKED_SHOWN = 5;
  *  this many, a host planted among throwaway ones hides by their number, not by a fold. */
 export const BULK_SPREAD_MARKED_SHOWN = 20;
 
-/** The lines for a kind of marker many verdicts add (U-387 Nachtrag): count, kind and hosts as text,
+/** The lines for a kind of marker many verdicts add (U-387): count, kind and hosts as text,
  *  never as a link, with the way out. The hosts that mark a row come first, up to twenty, the rarest
  *  first: past the first fifty flagged rows the line is the one place they show. Then up to five of the
  *  others and how many more, and how many more marking hosts there are, in a sentence of its own. */

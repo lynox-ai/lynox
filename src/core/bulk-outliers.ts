@@ -1,7 +1,7 @@
 // Which verdicts of a judged bulk run differ from the rest of the run: a reading order for the owner's
 // approval, never a check. A verdict that sets an allowed field to an allowed but wrong value looks
 // like any other in the preview; among thousands approved with one click, the ones that stand out
-// are listed first, with the reason (PRD bulk-loop §4, prompt injection into the verdict).
+// are listed first, with the reason (a verdict a prompt injection steered).
 //
 // Deterministic and local: no model, no network. What the markup checks already refuse or mark is
 // not repeated here — links and scripts as markup, links to a domain outside the store and the
