@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { readable } from 'svelte/store';
 import { t, getLocale, setLocale } from '../i18n.svelte.js';
 import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
-import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
+import { bulkVisibleText, type BulkRunDetailData, type BulkTarget } from './bulk-runs.js';
 
 // lynox writes a judged run's rule, from the owner's words or from data it read. Where the owner
 // starts the judging and where they approve its values, the page shows the rule and says who wrote
@@ -190,5 +190,53 @@ describe('a judged run that judges again shows its rule as at the start', () => 
 		await render({ ...halted('unavailable'), judgeRule: null });
 		expect(target.textContent).toContain(t('bulk.restart.judge'));
 		expect(target.querySelector('[data-testid="bulk-restart-rule"]')).toBeNull();
+	});
+});
+
+// The agent writes the rule, up to the engine's 4000 characters and possibly from data it read. At
+// each of the three places the rule sits in one box of bounded height that scrolls on its own, so a
+// long rule with many empty lines leaves the sentence under it and the preview or the button after
+// it in view; a word without spaces breaks inside the box. The whole rule stays in the box.
+describe('a long rule stays in a bounded box at every place it is shown', () => {
+	const LONG = (`${'W'.repeat(300)}\n` + 'Regel\n\n\n\n\n'.repeat(700)).slice(0, 4000);
+	const longRule = { ...judged.judgeRule!, rule: LONG } as BulkRunDetailData['judgeRule'];
+	const FOLLOWING = Node.DOCUMENT_POSITION_FOLLOWING;
+
+	function boundedBox(place: string): Element {
+		const box = target.querySelector(`[data-testid="${place}"] [data-testid="bulk-rule-box"]`);
+		expect(box, place).not.toBeNull();
+		const cls = box!.className.split(/\s+/);
+		// Bounded height with its own scrolling, and a long word breaks inside the box.
+		expect(cls).toEqual(expect.arrayContaining(['max-h-48', 'overflow-y-auto', '[overflow-wrap:anywhere]', 'whitespace-pre-wrap']));
+		// The scrolling region can be reached and scrolled from the keyboard, and is named.
+		expect(box!.getAttribute('tabindex')).toBe('0');
+		expect(box!.getAttribute('aria-label')).toBe(t('bulk.start.rule'));
+		// The whole rule, every empty line kept.
+		expect(LONG.length).toBe(4000);
+		expect(box!.textContent).toBe(bulkVisibleText(LONG));
+		// The sentence that says lynox wrote it comes after the box, inside the same place.
+		const sentence = target.querySelector(`[data-testid="${place}"] [data-testid="bulk-rule-drafted"]`)!;
+		expect(box!.compareDocumentPosition(sentence) & FOLLOWING).toBeTruthy();
+		return box!;
+	}
+	const buttonAfter = (box: Element, label: string): boolean =>
+		[...target.querySelectorAll('button')].some((b) => b.textContent?.trim() === label && (box.compareDocumentPosition(b) & FOLLOWING) !== 0);
+
+	it('where the owner starts the judging, with the start button after it', async () => {
+		await render({ ...atStart, judgeRule: longRule });
+		const box = boundedBox('bulk-start-rule');
+		expect([...target.querySelectorAll('button')].some((b) => (box.compareDocumentPosition(b) & FOLLOWING) !== 0)).toBe(true);
+	});
+
+	it('where the owner approves, with the preview after it', async () => {
+		await render({ ...judged, judgeRule: longRule });
+		const box = boundedBox('bulk-approve-rule');
+		expect(box.compareDocumentPosition(target.querySelector('table')!) & FOLLOWING).toBeTruthy();
+	});
+
+	it('where the owner judges again after a halt, with the button after it', async () => {
+		await render({ ...judged, judgeRule: longRule, phase: 'planned', haltKey: 'unavailable', haltReason: 'unavailable', checksum: null, total: 1, costCapUsd: 1 });
+		const box = boundedBox('bulk-restart-rule');
+		expect(buttonAfter(box, t('bulk.restart.judge'))).toBe(true);
 	});
 });

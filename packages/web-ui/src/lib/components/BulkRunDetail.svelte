@@ -13,6 +13,7 @@
 	import { isMandateSession, isOwnerSession, viewerNote } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
+	import BulkRuleBox from './BulkRuleBox.svelte';
 	import BulkStartDomains from './BulkStartDomains.svelte';
 	import {
 		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked,
@@ -653,7 +654,7 @@
 				<!-- What the values were decided by, for the owner who approves them: the rule the start showed (U-335). -->
 				<div data-testid="bulk-approve-rule">
 					<h2 class="text-sm font-medium mb-1">{t('bulk.start.rule')}</h2>
-					<p class="text-sm whitespace-pre-wrap rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">{bulkVisibleText(run.judgeRule.rule)}</p>
+					<BulkRuleBox rule={run.judgeRule.rule} />
 					<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t('bulk.approve.rule_drafted')}</p>
 				</div>
 			{/if}
@@ -780,9 +781,9 @@
 			{:else if startKind === 'judge' && run.judgeServedBy && run.judgeRule}
 				<div class="space-y-3 border-t border-border pt-4">
 					<p class="text-sm">{tf('bulk.start.judge_explain', { provider: bulkJudgeProviderName(run.judgeServedBy.provider), model: run.judgeServedBy.label })}</p>
-					<div>
+					<div data-testid="bulk-start-rule">
 						<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.rule')}</h3>
-						<p class="text-sm whitespace-pre-wrap rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">{bulkVisibleText(run.judgeRule.rule)}</p>
+						<BulkRuleBox rule={run.judgeRule.rule} />
 						<!-- The agent wrote the rule, from the owner's words or from data it read: the owner checks it (U-335). -->
 						<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t('bulk.start.rule_drafted')}</p>
 					</div>
@@ -862,7 +863,7 @@
 							<!-- Judging again goes on with the same rule: the owner sees it as at the first start (U-340). -->
 							<div data-testid="bulk-restart-rule">
 								<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.rule')}</h3>
-								<p class="text-sm whitespace-pre-wrap rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">{bulkVisibleText(run.judgeRule.rule)}</p>
+								<BulkRuleBox rule={run.judgeRule.rule} />
 								<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t('bulk.restart.rule_drafted')}</p>
 							</div>
 						{/if}
