@@ -254,12 +254,14 @@ describe('PresetClientForm', () => {
 		expect(secretInput()).not.toBeNull();
 	});
 
-	it('keeps the replace button\'s label on one line, and lets the button move under the note instead', async () => {
+	it('keeps the replace button\'s label on one line, shaped as a button, and lets it move under the note instead', async () => {
 		getExtra = { client_id: 'client-1', client_secret_set: true };
 		await open();
 
 		const replace = button('Replace Client Secret')!;
 		expect(replace.classList.contains('whitespace-nowrap')).toBe(true);
+		// A border and padding, so it does not read as the note's next line.
+		expect(['border', 'border-border', 'px-3', 'py-1.5'].every((c) => replace.classList.contains(c))).toBe(true);
 		expect(replace.parentElement!.classList.contains('flex-wrap')).toBe(true);
 	});
 
