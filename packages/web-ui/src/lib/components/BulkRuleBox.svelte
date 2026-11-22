@@ -13,11 +13,13 @@
 	import { untrack } from 'svelte';
 	import { t, tf } from '../i18n.svelte.js';
 	import { prefersReducedMotion, scrollBehaviorForMotion } from '../utils/pipeline-status.js';
-	import { bulkRuleLinesBelow, bulkVisibleText } from './bulk-runs.js';
+	import { bulkRuleLinesBelow } from './bulk-runs.js';
 
-	let { rule }: { rule: string } = $props();
+	// The rule as the page shows it: already through bulkVisibleText at the call, where the check
+	// over the bulk pages' templates reads it, so a hidden character in it is visible here too.
+	let { visibleRule }: { visibleRule: string } = $props();
 
-	const lines = $derived(bulkVisibleText(rule).split('\n'));
+	const lines = $derived(visibleRule.split('\n'));
 
 	let box = $state<HTMLElement | null>(null);
 	/** The rule's lines, whose height changes without the box's when the box is at its bound. */

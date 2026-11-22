@@ -654,7 +654,7 @@
 				<!-- What the values were decided by, for the owner who approves them: the rule the start showed (U-335). -->
 				<div data-testid="bulk-approve-rule">
 					<h2 class="text-sm font-medium mb-1">{t('bulk.start.rule')}</h2>
-					<BulkRuleBox rule={run.judgeRule.rule} />
+					<BulkRuleBox visibleRule={bulkVisibleText(run.judgeRule.rule)} />
 					<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t('bulk.approve.rule_drafted')}</p>
 				</div>
 			{/if}
@@ -783,7 +783,7 @@
 					<p class="text-sm">{tf('bulk.start.judge_explain', { provider: bulkJudgeProviderName(run.judgeServedBy.provider), model: run.judgeServedBy.label })}</p>
 					<div data-testid="bulk-start-rule">
 						<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.rule')}</h3>
-						<BulkRuleBox rule={run.judgeRule.rule} />
+						<BulkRuleBox visibleRule={bulkVisibleText(run.judgeRule.rule)} />
 						<!-- The agent wrote the rule, from the owner's words or from data it read: the owner checks it (U-335). -->
 						<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t('bulk.start.rule_drafted')}</p>
 					</div>
@@ -863,7 +863,7 @@
 							<!-- Judging again goes on with the same rule: the owner sees it as at the first start (U-340). -->
 							<div data-testid="bulk-restart-rule">
 								<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.rule')}</h3>
-								<BulkRuleBox rule={run.judgeRule.rule} />
+								<BulkRuleBox visibleRule={bulkVisibleText(run.judgeRule.rule)} />
 								<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t('bulk.restart.rule_drafted')}</p>
 							</div>
 						{/if}
