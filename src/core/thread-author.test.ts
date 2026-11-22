@@ -134,12 +134,12 @@ describe('migration v73', () => {
     history.close();
     // Back to v72: the column gone, as on a store written before it existed.
     const raw = new Database(path);
-    raw.exec('ALTER TABLE thread_messages DROP COLUMN author; DELETE FROM schema_version WHERE version = 73;');
+    raw.exec('ALTER TABLE thread_messages DROP COLUMN author; DELETE FROM schema_version WHERE version >= 73;');
     raw.close();
 
     const upgraded = new RunHistory(path);
     try {
-      expect((upgraded.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(73);
+      expect((upgraded.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(74);
       expect(new ThreadStore(upgraded.getDb()).getMessages('th').map((r) => r.author)).toEqual([null]);
     } finally {
       upgraded.close();

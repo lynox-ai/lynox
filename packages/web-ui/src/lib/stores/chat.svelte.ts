@@ -886,6 +886,10 @@ export interface RunOptions {
 	/** The text is what the user typed or dictated in the composer. Client-only, never sent:
 	 *  it marks the message `typed` (see `ChatMessage.typed`). */
 	typed?: boolean;
+	/** The text is the composer's, and the composer was empty when the person started it: no
+	 *  prefill, no retry, no follow-up chip, nothing the app put there. Only then the run carries
+	 *  the text as `typed`, which the engine may count as words the owner wrote. */
+	composedFromEmpty?: boolean;
 }
 
 /**
@@ -1521,6 +1525,9 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	}
 	if (runOptions?.effort) payload['effort'] = runOptions.effort;
 	if (runOptions?.thinking) payload['thinking'] = runOptions.thinking;
+	// Only a message the person wrote from an empty composer says what was typed; everything else
+	// (a prefill, a retry, a chip, a view's own message) sends none.
+	if (runOptions?.composedFromEmpty === true && runOptions.typed === true) payload['typed'] = task;
 	if (runOptions?.context) payload['context'] = runOptions.context;
 	// The first run of a chat opened with "Plan in a new chat" carries where it came from: the
 	// engine turns that into a fixed sentence pointing at a bulk run, and reads nothing by it.

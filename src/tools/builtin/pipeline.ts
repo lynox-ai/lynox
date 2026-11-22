@@ -646,6 +646,9 @@ export interface RunSavedWorkflowResult {
    *  succeeded; present for every step that recorded an error (incl. on_failure
    *  = 'continue'/'notify' runs that finished 'completed' with errored steps). */
   stepErrors?: Array<{ stepId: string; error?: string | undefined; costUsd: number; reported?: true | undefined }> | undefined;
+  /** The sends its steps refused because a target was not one the owner named, for the run's
+   *  result: a run with no calling conversation has nobody else to tell. */
+  originRefusals?: import('../../core/origin-notices.js').OriginRefusal[] | undefined;
   /** The step whose reported failure (`fail_step`) is `error`: `error` is then the model's text,
    *  and a sink that may not carry it (the escalation thread) names the step instead. A
    *  `stepErrors` entry with `reported` is the same for that entry. */
@@ -964,6 +967,9 @@ export async function runSavedWorkflow(
   }
 
   const writeNotes = new Set<string>();
+  // The sends its steps refuse for a target the owner did not name: kept for the run's result,
+  // also when the run then throws.
+  const originRefusals: import('../../core/origin-notices.js').OriginRefusal[] = [];
 
   // A reference no run resolves (`template-refs.ts`), here before `validateManifest` refuses it, so
   // the caller can tell the owner which step in fixed words (`unresolvedRefStep`).
@@ -993,6 +999,8 @@ export async function runSavedWorkflow(
     // contract rides along only when `decideGrant` passed it, i.e. it came from the
     // grant dialog of the scheduling route while that feature is on, and its stamp
     // still matches.
+    const headlessTaint = headlessRunTaint(runtime?.seed, runParams, runtime?.startedVia);
+    headlessTaint.onOriginRefused = (r) => { originRefusals.push(r); };
     const state = await runManifest(manifest, config, buildRunCtx({
       // A run of a saved workflow depends on the mandates that shaped it (`run-source.ts`).
       source: savedWorkflowSource(planned.id, runHistory ? (id) => runHistory.getWorkflowAuthorship(id) : undefined, runtime?.toolContext?.mandateEnds),
@@ -1017,7 +1025,7 @@ export async function runSavedWorkflow(
       // Headless: no caller to seed from, except what the scheduling session had taken in
       // (`runtime.seed`). The accumulator still carries taint ACROSS steps — a saved workflow
       // whose step 1 reads external content must not land step 2's durable write as active.
-      runTaint: headlessRunTaint(runtime?.seed, runParams, runtime?.startedVia),
+      runTaint: headlessTaint,
       // The claim seam: both are undefined for every caller that holds no claim.
       runId: runtime?.runId,
       hooks: runtime?.hooks,
@@ -1049,10 +1057,14 @@ export async function runSavedWorkflow(
       // The decision's note, or the runner's when it had to drop the contract (an unrecorded run).
       ...(grant.note !== null ? { grantNote: grant.note } : state.grantNote !== undefined ? { grantNote: state.grantNote } : {}),
       ...(writeNotes.size > 0 ? { writeNotes: [...writeNotes] } : {}),
+      ...(originRefusals.length > 0 ? { originRefusals } : {}),
     };
   } catch (err: unknown) {
     // A refusal before the run (validation, the graph, a role) quotes the stored step id and name.
-    return { ok: false, error: `Workflow execution failed: ${stripHidden(getErrorMessage(err))}` };
+    return {
+      ok: false, error: `Workflow execution failed: ${stripHidden(getErrorMessage(err))}`,
+      ...(originRefusals.length > 0 ? { originRefusals } : {}),
+    };
   }
 }
 
