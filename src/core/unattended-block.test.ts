@@ -177,8 +177,8 @@ describe('a tool from outside the engine that confirms by itself', () => {
 
 describe('the agent asks in the instance\'s language', () => {
   it.each([
-    ['de-CH', '⚠ Befehl: rm -rf / — "rm -rf /tmp/x" [BLOCKED — diese Aktion musst du aus Sicherheitsgründen selbst ausführen]'],
-    ['en', '⚠ Command: rm -rf / — "rm -rf /tmp/x" [BLOCKED — this action needs to be run manually for safety]'],
+    ['de-CH', '⚠ Befehl: rm -rf / — „rm -rf /tmp/x“ [BLOCKED — diese Aktion musst du aus Sicherheitsgründen selbst ausführen]'],
+    ['en', '⚠ Command: rm -rf / — “rm -rf /tmp/x” [BLOCKED — this action needs to be run manually for safety]'],
   ])('configured %s', async (language, question) => {
     const bash = stub('bash');
     const asked: string[] = [];
