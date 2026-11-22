@@ -244,11 +244,15 @@ describe('bulk_judge through the worker: what leaves as an error', () => {
     vi.spyOn(ledger, 'getRunForPreview').mockImplementation(() => { throw new Error(`SQLITE_CORRUPT near ${MARK}`); });
     const { records, notes } = await tick(id, [], 'de');
     const de = 'KI-Modell oder Zielsystem nicht erreichbar, oder Fehler in lynox.';
-    // The history keeps the fact; the owner's push keeps the way on (U-383).
+    // The history keeps the fact; the owner's push keeps the way on, every mandate's says the owner
+    // resolves it (U-383).
     expect(records).toEqual([de]);
-    expect(notes.map((n) => n.slice(n.indexOf('\n') + 1))).toEqual([`${de} Der Lauf lässt sich fortsetzen; hält er gleich wieder an, später erneut versuchen.`]);
-    // Its run is held halted: the title says so, the mark that it was a failure (U-324).
-    expect(notes.map((n) => n.slice(0, n.indexOf('\n')).split(' · ')[0])).toEqual(['\u2717 Beurteilung angehalten']);
+    expect(notes.map((n) => n.slice(n.indexOf('\n') + 1))).toEqual([
+      `${de} Der Lauf lässt sich fortsetzen; hält er gleich wieder an, später erneut versuchen.`,
+      `${de} Lösen kann das nur der Inhaber.`,
+    ]);
+    // Its run is held halted: the title says so, the mark that it was a failure (U-324), on both.
+    expect(notes.map((n) => n.slice(0, n.indexOf('\n')).split(' · ')[0])).toEqual(['\u2717 Beurteilung angehalten', '\u2717 Beurteilung angehalten']);
     expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
   });
 

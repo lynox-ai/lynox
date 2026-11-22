@@ -1002,9 +1002,9 @@ describe('WorkerLoop', () => {
     });
 
     // The owner's wording of a refused member connection names another member's provider, profile
-    // and login and the owner's way to change it: the owner's devices read it, the grant the plan
-    // is for reads the end without it, and no push goes to every device.
-    it('pushes a run\'s end with a member line to the owner\'s devices, and to the plan\'s grant without the line', async () => {
+    // and login and the owner's way to change it: the owner's devices read it, every live grant
+    // reads the same end without it, and no push goes to every device.
+    it('pushes a run\'s end with a member line to the owner\'s devices, and to every grant without the line', async () => {
       const { noteMemberConnection } = await import('./member-connection-notes.js');
       const LINE = 'Connection not used: CRM was connected by jo@kanzlei.example with their own login. Change it under Settings → APIs.';
       const task = stamped();
@@ -1019,7 +1019,7 @@ describe('WorkerLoop', () => {
       const sent = vi.mocked(router.notify).mock.calls.map(([m]) => m);
       expect(sent.map((m) => [m.audience, m.mandateId, m.body])).toEqual([
         ['owner', undefined, `ran\n• ${LINE}`],
-        ['mandates', EVA.mandateId, 'ran'],
+        ['all_mandates', undefined, 'ran'],
       ]);
       // The owner's push is the one it was, with the audience added: title, priority, thread, chips.
       expect(sent[0]).toMatchObject({ title: `⏸ ${task.title}`, priority: 'normal', taskId: 'po-1', data: { threadId: 'thread-worker-test' } });
@@ -1031,7 +1031,7 @@ describe('WorkerLoop', () => {
       loop.stop();
     });
 
-    it('pushes the owner\'s own plan\'s end with a member line to the owner\'s devices only', async () => {
+    it('pushes the owner\'s own plan\'s end with a member line to the owner\'s devices, and to every grant without it', async () => {
       const { noteMemberConnection } = await import('./member-connection-notes.js');
       const task = makeTask();
       const tm = makeTaskManager([task]);
@@ -1041,7 +1041,7 @@ describe('WorkerLoop', () => {
       const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000);
       await loop.tick();
       await vi.advanceTimersByTimeAsync(0);
-      expect(vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.body])).toEqual([['owner', 'ran\n• Connection not used: a line.']]);
+      expect(vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.body])).toEqual([['owner', 'ran\n• Connection not used: a line.'], ['all_mandates', 'ran']]);
       loop.stop();
     });
 
@@ -2323,12 +2323,15 @@ describe('WorkerLoop', () => {
 
     expect(tm.recordTaskRun).toHaveBeenCalledTimes(1);
     expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, `All done.\n• ${LINE}`, 'halted');
-    expect(router.notify).toHaveBeenCalledTimes(1);
+    // One end, told by reader: with the line to the owner's devices, without it to every grant's.
+    expect(router.notify).toHaveBeenCalledTimes(2);
     expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({
       title: `\u23F8 ${task.title}`,
       body: `All done.\n• ${LINE}`,
       priority: 'normal',
+      audience: 'owner',
     }));
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u23F8 ${task.title}`, body: 'All done.', audience: 'all_mandates' }));
 
     // The next run of the schedule meets the same refusal: recorded again, not pushed again.
     Object.assign(task, { last_run_status: 'halted', last_run_result: `All done.\n• ${LINE}` });
@@ -2337,7 +2340,7 @@ describe('WorkerLoop', () => {
 
     expect(tm.recordTaskRun).toHaveBeenCalledTimes(2);
     expect(vi.mocked(tm.recordTaskRun).mock.calls[1]).toEqual([task.id, `All done.\n• ${LINE}`, 'halted']);
-    expect(router.notify).toHaveBeenCalledTimes(1);
+    expect(router.notify).toHaveBeenCalledTimes(2);
     loop.stop();
   });
 
@@ -2375,18 +2378,19 @@ describe('WorkerLoop', () => {
     const recordedLine = 'The plan "Daily Report" did not use api.crm.example (profile "CRM" (id crm-api)). setup@example.org set it up with their own login, so only setup@example.org\'s own session uses it. If the plan should use this service, there are two ways: once setup@example.org\'s access has ended, ask in a chat to take over the connection and confirm with “Allow”; or delete the profile under Settings → APIs and connect the service yourself, which disconnects setup@example.org. Otherwise the plan cannot run this step.';
     expect(modelLine).toMatch(/^Connection not used: setup@example\.org set up this connection .*Say so in your reply, and do not ask for permission\.$/);
     expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, `All done.\n• ${recordedLine}`, 'halted');
-    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u23F8 ${task.title}`, body: `All done.\n• ${pushedLine}` }));
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u23F8 ${task.title}`, body: `All done.\n• ${pushedLine}`, audience: 'owner' }));
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u23F8 ${task.title}`, body: 'All done.', audience: 'all_mandates' }));
 
     // The next run meets the same refusal: compared as recorded, so not pushed again, in either language.
     Object.assign(task, { last_run_status: 'halted', last_run_result: `All done.\n• ${recordedLine}` });
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
     expect(tm.recordTaskRun).toHaveBeenCalledTimes(2);
-    expect(router.notify).toHaveBeenCalledTimes(1);
+    expect(router.notify).toHaveBeenCalledTimes(2);
     loop.stop();
   });
 
-  it('a run ended through recordAndNotify (a workflow\'s end) is told with its line and ⏸, once', async () => {
+  it('a run ended through recordAndNotify (a workflow\'s end) is told with its line and ⏸ to the owner, without it to every grant, once', async () => {
     const { noteMemberConnection, runCollectingMemberNotes } = await import('./member-connection-notes.js');
     const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
     const task = makeTask();
@@ -2400,32 +2404,29 @@ describe('WorkerLoop', () => {
 
     await end();
     expect(tm.recordTaskRun).toHaveBeenLastCalledWith(task.id, `Pipeline completed.\n• ${LINE}`, 'halted');
-    expect(router.notify).toHaveBeenCalledTimes(1);
+    expect(router.notify).toHaveBeenCalledTimes(2);
     expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u23F8 ${task.title}`, body: `Pipeline completed.\n• ${LINE}`, priority: 'normal' }));
-    // The line names another member's connection: the owner's devices only.
-    expect(vi.mocked(router.notify).mock.calls[0]![0].audience).toBe('owner');
+    // The line names another member's connection: the owner's devices only; every grant reads the end without it.
+    expect(vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.body])).toEqual([['owner', `Pipeline completed.\n• ${LINE}`], ['all_mandates', 'Pipeline completed.']]);
 
     Object.assign(task, { last_run_status: 'halted', last_run_result: `Pipeline completed.\n• ${LINE}` });
     await end();
     expect(tm.recordTaskRun).toHaveBeenCalledTimes(2);
-    expect(router.notify).toHaveBeenCalledTimes(1);
+    expect(router.notify).toHaveBeenCalledTimes(2);
   });
 
-  // A workflow's end of a mandate's run: the run's own grant reads the end without the line, the
-  // owner's devices read it with the line; an ended grant reads nothing.
+  // A workflow's end with a member line: the owner's devices read it with the line, every live
+  // grant reads it without, whoever started or planned the run.
   it.each([
-    ['the plan it acts for', { planOf: { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'G-EVA' }, starter: OWNER_PRINCIPAL }, 'G-EVA', true],
-    ['the mandate that started it by hand', { starter: { kind: 'mandate', email: 'arno@kanzlei.example', mandateId: 'G-ARNO' } }, 'G-ARNO', true],
-    ['an ended grant', { starter: { kind: 'mandate', email: 'arno@kanzlei.example', mandateId: 'G-ARNO' } }, 'G-ARNO', false],
-  ] as const)('a workflow\'s end with a member line reaches %s without the line', async (_case, slot, grant, live) => {
+    ['a plan a mandate acts for', { planOf: { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'G-EVA' }, starter: OWNER_PRINCIPAL }],
+    ['a run a mandate started by hand', { starter: { kind: 'mandate', email: 'arno@kanzlei.example', mandateId: 'G-ARNO' } }],
+  ] as const)('a workflow\'s end with a member line reaches every grant without the line, for %s', async (_case, slot) => {
     const { noteMemberConnection, runCollectingMemberNotes } = await import('./member-connection-notes.js');
     const LINE = 'Connection not used: CRM was connected by jo@kanzlei.example with their own login.';
     const task = makeTask();
     const tm = makeTaskManager([task]);
     const router = makeNotificationRouter();
-    const engine = makeEngine({ taskManager: tm });
-    Object.assign(engine, { getMandateEnds: vi.fn(() => ({ isLive: (id: string) => live && id === grant })) });
-    const loop = new WorkerLoop(engine, router, 60_000);
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm }), router, 60_000);
     (loop as unknown as { activeTasks: Map<string, unknown> }).activeTasks.set(task.id, { planMembers: [], ...slot });
     await runCollectingMemberNotes(async () => {
       noteMemberConnection(LINE);
@@ -2434,7 +2435,7 @@ describe('WorkerLoop', () => {
     const sent = vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.mandateId, m.body]);
     expect(sent).toEqual([
       ['owner', undefined, `Pipeline completed.\n• ${LINE}`],
-      ...(live ? [['mandates', grant, 'Pipeline completed.']] : []),
+      ['all_mandates', undefined, 'Pipeline completed.'],
     ]);
   });
 

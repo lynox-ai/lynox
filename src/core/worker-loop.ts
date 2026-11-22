@@ -3458,7 +3458,7 @@ export class WorkerLoop {
         ],
       };
       // With the owner's member-connection lines, told by reader (#notifyMemberEnd).
-      if (memberSaid.length > 0) await this.#notifyMemberEnd(message, bodyOf([]), this.#mandateReaderOf(task.id));
+      if (memberSaid.length > 0) await this.#notifyMemberEnd(message, bodyOf([]));
       else await this.notificationRouter.notify(message);
     }
   }
@@ -3955,13 +3955,11 @@ export class WorkerLoop {
   private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted' | 'stopped', said?: string, opts?: { readonly noRetry: true }): void {
     const look = RUN_END_LOOK[end === true ? 'success' : end === false ? 'failed' : end];
     // A bulk halt whose way on only the owner can take: the history, which a mandate reads too,
-    // keeps the fact; the owner's push keeps the way; the planning mandate's push says the owner
+    // keeps the fact; the owner's push keeps the way; every mandate's push says the owner
     // resolves it (U-383).
     const haltRow = this.#bulkRunRow(task);
     const lang = noticeLanguage(this.engine.config?.language);
-    // A run a mandate planned before the ledger kept its grant cannot reach that grant's devices on
-    // its own: it stays one sentence for every reader and device, as before.
-    const byReader = haltRow !== null && haltRow.grantUnknown !== true;
+    const byReader = haltRow !== null;
     const recordAs = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, resultSummary, lang);
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
@@ -3988,9 +3986,7 @@ export class WorkerLoop {
       const message = { title, body: told.result, taskId: task.id, priority: toldLook.priority };
       if (readers === null && withLines) {
         // Not split by reader, but with the owner's member-connection lines: see #notifyMemberEnd.
-        // The grant a bulk run's ledger names as its planner, else the run's own reader.
-        const reader = (byReader ? haltRow.mandateId ?? null : null) ?? this.#mandateReaderOf(task.id);
-        void this.#notifyMemberEnd(message, said ?? resultSummary, reader);
+        void this.#notifyMemberEnd(message, said ?? resultSummary);
         return;
       }
       void this.notificationRouter.notify({
@@ -3998,20 +3994,20 @@ export class WorkerLoop {
         // Only the owner can take the way this sentence names: no other device reads it.
         ...(readers === null ? {} : { audience: 'owner' as const }),
       });
-      const mandateId = haltRow?.mandateId ?? null;
-      // The planning grant reads the fact without the member-connection lines: they are the
-      // owner's, naming another member's provider and profile and the owner's way to change it.
-      // They stand in the history, which a mandate reads, as recorded. The sentence is where
-      // `told.result` starts, so this finds a part only where `readers` found one too.
+      // Every live grant reads the same end in the mandates' sentence, not only the planning one:
+      // a mandate gets the notices the owner gets, in the sentence that is true for it. It reads
+      // the fact without the member-connection lines: they are the owner's, naming another
+      // member's provider and profile and the owner's way to change it. They stand in the history,
+      // which a mandate reads, as recorded. The sentence is where `told.result` starts, so this
+      // finds a part only where `readers` found one too.
       const forMandate = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, said ?? resultSummary, lang);
-      if (forMandate !== null && mandateId !== null && (this.engine.getMandateEnds()?.isLive(mandateId) ?? false)) {
+      if (forMandate !== null) {
         void this.notificationRouter.notify({
           title,
           body: forMandate.mandate,
           taskId: task.id,
           priority: toldLook.priority,
-          audience: 'mandates',
-          mandateId,
+          audience: 'all_mandates',
         });
       }
     }
@@ -4020,53 +4016,34 @@ export class WorkerLoop {
   /**
    * A run's end that carries the owner's member-connection lines, told by reader. The lines name
    * another member's provider, profile and login and the owner's way to change it, so only the
-   * owner's devices read `message` as it is. The grant the run was for, while it is live, reads
-   * the same end without them (`withoutLines`). No other device reads this end: a push without an
-   * audience would reach every live grant's devices with another member's connection.
+   * owner's devices read `message` as it is. Every live grant reads the same end without them
+   * (`withoutLines`): a mandate gets the notices the owner gets, in the sentence that is true for
+   * it. A push without an audience would reach every live grant's devices with the lines.
    */
-  async #notifyMemberEnd(message: NotificationMessage, withoutLines: string, mandateId: string | null): Promise<void> {
+  async #notifyMemberEnd(message: NotificationMessage, withoutLines: string): Promise<void> {
     const owner = this.notificationRouter.notify({ ...message, audience: 'owner' });
-    if (mandateId !== null && (this.engine.getMandateEnds()?.isLive(mandateId) ?? false)) {
-      void this.notificationRouter.notify({ ...message, body: withoutLines, audience: 'mandates', mandateId });
-    }
+    void this.notificationRouter.notify({ ...message, body: withoutLines, audience: 'all_mandates' });
     await owner;
-  }
-
-  /**
-   * The grant a run is for, when a mandate's: the one its plan acts for (`planOf`), else the one
-   * that started it by hand. Null for the owner's run and for a mandate that names no grant.
-   */
-  #mandateReaderOf(id: string): string | null {
-    const slot = this.#runSlotOf(id);
-    const reader = slot?.planOf ?? slot?.starter;
-    return reader?.kind === 'mandate' && reader.mandateId !== undefined ? reader.mandateId : null;
   }
 
   /**
    * The run a bulk trigger leads to, as its ledger row holds it: null for any other trigger, a
    * run that is gone, or a read that fails, which costs a push its words, never the push.
    */
-  #bulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null; mandateId?: string | null; grantUnknown?: true } | null {
+  #bulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null } | null {
     const row = this.#readBulkRunRow(task);
     return row === 'unreadable' ? null : row;
   }
 
   /** {@link #bulkRunRow}, with a read that failed told apart from a run that is gone. */
-  #readBulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null; mandateId?: string | null; grantUnknown?: true } | null | 'unreadable' {
+  #readBulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null } | null | 'unreadable' {
     if (task.bulk_run_id === undefined || !task.effect.startsWith('bulk_')) return null;
     try {
       const ledger = this.engine.getBulkLedger() ?? this.engine.getBulkLedgerSwitchedOff?.() ?? null;
       // A plain row read: `getStatus` frees dead reads as it reads, and a push must not write.
       const st = ledger?.getRunForApply(task.bulk_run_id);
       if (st === null || st === undefined) return null;
-      const planner = st.delegatedPlanner;
-      return {
-        phase: st.phase, haltReason: typeof st.haltReason === 'string' ? st.haltReason : null,
-        // The grant that planned the run, if a mandate did: whose devices a halt's mandate sentence is for.
-        mandateId: planner?.kind === 'mandate' ? planner.mandateId ?? null : null,
-        // A mandate planned it, but the row names no grant (a run from before the ledger kept it).
-        ...(planner?.kind === 'mandate' && (planner.mandateId ?? null) === null ? { grantUnknown: true as const } : {}),
-      };
+      return { phase: st.phase, haltReason: typeof st.haltReason === 'string' ? st.haltReason : null };
     } catch {
       return 'unreadable';
     }
