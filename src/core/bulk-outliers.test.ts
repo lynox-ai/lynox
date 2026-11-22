@@ -219,27 +219,28 @@ describe('judgeOutliers on domains in other scripts, phone numbers and the own s
     const spreadInputs = run(200, (t) => {
       const desc = (t.after as Record<string, string>)['description'];
       if (t.seq === 1) return { ...t, before: { ...(t.before as object), note: 'Partner gepflanzt-shop.net' } };
-      if (t.seq <= 20) return withAfter(t, { description: `${desc} gepflanzt-shop.net` });
-      if (t.seq <= 60) return withAfter(t, { description: `${desc} haeufig-shop.net` });
+      if (t.seq <= 50) return withAfter(t, { description: `${desc} gepflanzt-shop.net` });
+      if (t.seq <= 70) return withAfter(t, { description: `${desc} haeufig-shop.net` });
       return t;
     });
     expect(judgeOutliers(spreadInputs, OWN, KINDS).spread.find((x) => x.kind === 'link')).toMatchObject({ hosts: ['haeufig-shop.net', 'gepflanzt-shop.net'], marked: 1 });
-    // The rarest host is the one that marks: seven hosts before-images hold, added often, and one no
-    // before-image holds, added once. It stands first; domains of addresses alike.
+    // Seven hosts before-images hold, added often, and two no before-image holds: one added once, one
+    // three times. Those two stand first, the rarest first; domains of addresses alike.
     const rare = run(200, (t) => {
       const desc = (t.after as Record<string, string>)['description'];
       const common = ['eins-shop.net', 'zwei-shop.net', 'drei-shop.net', 'vier-shop.net', 'fuenf-shop.net', 'sechs-shop.net', 'sieben-shop.net'];
       if (t.seq >= 150) return { ...t, before: { ...(t.before as object), note: `Partner ${common[t.seq % 7]!} info@${common[t.seq % 7]!}` } };
       if (t.seq >= 20 && t.seq < 48) return withAfter(t, { description: `${desc} ${common[t.seq % 7]!} info@${common[t.seq % 7]!}` });
       if (t.seq === 5) return withAfter(t, { description: `${desc} selten-direkt.net info@selten-direkt.net` });
+      if (t.seq >= 6 && t.seq <= 8) return withAfter(t, { description: `${desc} dreimal-direkt.net info@dreimal-direkt.net` });
       return t;
     });
     const lines = judgeOutliers(rare, OWN, KINDS).spread;
     for (const kind of ['link', 'email'] as const) {
       const line = lines.find((x) => x.kind === kind)!;
-      expect(line.hosts[0], kind).toBe('selten-direkt.net');
-      expect(line.marked, kind).toBe(1);
-      expect(line.hosts, kind).toHaveLength(8);
+      expect(line.hosts.slice(0, 2), kind).toEqual(['selten-direkt.net', 'dreimal-direkt.net']);
+      expect(line.marked, kind).toBe(2);
+      expect(line.hosts, kind).toHaveLength(9);
     }
   });
 

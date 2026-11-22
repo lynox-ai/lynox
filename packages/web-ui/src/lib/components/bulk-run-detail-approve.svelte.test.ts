@@ -1806,7 +1806,7 @@ describe('verdicts that differ from the rest of the run', () => {
 		expect(target.querySelector('[data-testid="bulk-outlier-spread"] a')).toBeNull();
 	});
 
-	it('names every host that marks a row, first, and of the others five and how many more, for links and for addresses', async () => {
+	it('names seven hosts that mark a row, all of them first, and of the others five and how many more, for links and for addresses', async () => {
 		const marking = ['m1.example', 'm2.example', 'm3.example', 'm4.example', 'm5.example', 'm6.example', 'm7.example'];
 		const others = ['o1.example', 'o2.example', 'o3.example', 'o4.example', 'o5.example', 'o6.example', 'o7.example'];
 		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
@@ -1816,6 +1816,20 @@ describe('verdicts that differ from the rest of the run', () => {
 		for (const [i, kind] of (['link', 'email'] as const).entries()) {
 			expect(spread()[i], kind).toBe(tf(`bulk.outliers.spread.${kind}`, { n: '20', hosts: tf(`bulk.outliers.spread.${kind}_hosts_more`, { hosts: [...marking, ...others.slice(0, 5)].join(', '), k: '2' }) }));
 		}
+	});
+
+	it('names twenty hosts that mark a row and counts the rest in a sentence of its own, apart from the others it leaves out', async () => {
+		const marking = Array.from({ length: 25 }, (_, i) => `m${String(i + 1)}.example`);
+		const others = ['o1.example', 'o2.example', 'o3.example', 'o4.example', 'o5.example', 'o6.example', 'o7.example'];
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 20, hosts: [...marking, ...others], marked: 25 }, { kind: 'email', count: 20, hosts: [...marking.slice(0, 21), ...others], marked: 21 }] } });
+		targets = many(25);
+		await render();
+		const listed = (n: number) => [...marking.slice(0, n), ...others.slice(0, 5)].join(', ');
+		expect(spread()).toEqual([
+			tf('bulk.outliers.spread.link', { n: '20', hosts: tf('bulk.outliers.spread.link_hosts_more', { hosts: listed(20), k: '2' }) + tf('bulk.outliers.spread.link_marked_more', { m: '5' }) }),
+			tf('bulk.outliers.spread.email', { n: '20', hosts: tf('bulk.outliers.spread.email_hosts_more', { hosts: listed(20), k: '2' }) + t('bulk.outliers.spread.email_marked_more_one') }),
+		]);
 	});
 
 	it('names the one host that marks a row before seven that do not, and counts only those it leaves out', async () => {
