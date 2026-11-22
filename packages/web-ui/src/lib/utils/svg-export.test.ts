@@ -171,6 +171,14 @@ describe('svgExportDocument', () => {
 		expect(new DOMParser().parseFromString(out, 'image/svg+xml').querySelector('style')?.textContent).toBe(css);
 	});
 
+	it('exports an html-written svg whose foreignObject declares the html namespace, its text kept', () => {
+		const out = svgExportDocument('<svg viewBox="0 0 9 9"><foreignObject x="1" y="1" width="9" height="9"><p xmlns="http://www.w3.org/1999/xhtml">Hallo <b>Welt</b></p></foreignObject><circle r="2"/><g></svg>');
+		expect(out).not.toBeNull();
+		const doc = new DOMParser().parseFromString(out!, 'image/svg+xml');
+		expect(doc.querySelector('text')?.textContent).toBe('Hallo Welt');
+		expect(doc.querySelector('circle')).not.toBeNull();
+	});
+
 	it('takes out an embedded font, as a data address is not spared', () => {
 		const out = svgExportDocument(`<svg ${NS}><style>@font-face{font-family:f;src:url(data:font/woff2;base64,d09GMg==)}</style><rect width="9" height="9"/></svg>`)!;
 		expect(out).not.toContain('d09GMg');

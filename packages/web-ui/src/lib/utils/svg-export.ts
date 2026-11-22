@@ -41,10 +41,9 @@
  * no namespace and a stray tag is forgiven) is read the way the app reads it, by the html parser.
  * Its first svg is the one written (a second one in the same text is left out); an element or
  * attribute whose name carries a prefix (`inkscape:label`, declared or not) is taken out first: the
- * html parser keeps a prefix as part of the name, which would make the written file unreadable. The svg is then written out and read back as an svg document BEFORE anything is taken
- * out. What is cleaned is then the tree the file will hold, not the html parser's tree: the two
- * can differ (as with a prefix the html parser keeps as part of a name, which is a real
- * namespace prefix to the svg parser), and a check on one says nothing about the other.
+ * html parser keeps a prefix as part of the name, which would make the written file unreadable, and
+ * a prefix it keeps in a name (`xlink:script`) is a real namespace prefix once the file is read as
+ * svg. The html tree is then cleaned; that the file it writes holds nothing more is the next check.
  *
  * The cleaned file is read back and cleaned once more, and is handed out only if that changes
  * nothing. Whatever reads differently once written, by a route no line above names, makes the
@@ -57,7 +56,7 @@ export function svgExportDocument(svg: string): string | null {
 	const xml = parseSvg(svg)?.documentElement;
 	const html = xml?.namespaceURI === SVG_NS ? null : svgInHtml(svg);
 	if (html) dropUnboundPrefixes(html);
-	const root = html ? parseSvg(new XMLSerializer().serializeToString(html))?.documentElement : xml;
+	const root = html ?? xml;
 	const out = root ? cleaned(root) : null;
 	if (out === null) return null;
 	const back = parseSvg(out)?.documentElement;
@@ -88,7 +87,7 @@ function svgInHtml(text: string): Element | null {
  * parser then reads as an unbound prefix and refuses. Every such name goes, declared or not (an
  * element like `svg:rect` included); an attribute in a namespace the html parser does bind (xlink,
  * xml, xmlns) has a namespace in this tree and stays. Taking those out keeps such a
- * drawing exportable; what is cleaned is still only the tree read back as svg.
+ * drawing exportable; a name that would read differently once written makes the export refuse.
  */
 function dropUnboundPrefixes(el: Element): void {
 	for (const attr of Array.from(el.attributes)) {
