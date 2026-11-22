@@ -5,6 +5,7 @@ import type { Server as HttpServer } from 'node:http';
 import { MAX_EXEC_TIMEOUT_MS } from '../shell-sidecar/protocol.js';
 import { CredentialRegistry, DENIAL_REASONS, hostInSet, DENIAL_RETENTION_MS, MAX_CREDS, MAX_DENIED_HOST_CHARS, MAX_DENIALS_PER_CRED, MAX_TTL_S, type TunnelHandle } from './registry.js';
 import { MAX_HELLO_BYTES, credentialFromHeader, isExactHostname, isHelloRetryRequest, parseAuthority, parseClientHello, parseDenyIps, parseRegistration, pickAddress } from './policy.js';
+import { hostForLog, targetForLog } from './log-host.js';
 import { ShellProxy, bearerMatches, createAdminServer, type ProxyLimits } from './server.js';
 import { interfaceAddress, secretFromEnv } from './main.js';
 
@@ -427,6 +428,8 @@ interface RigOpts {
   duringLookup?: (registry: CredentialRegistry) => void;
   /** Replaces the stand-in connection. */
   connect?: () => Socket;
+  /** Collects the proxy's log lines. */
+  logs?: string[];
 }
 
 async function rig(opts: RigOpts = {}): Promise<Rig> {
@@ -447,7 +450,7 @@ async function rig(opts: RigOpts = {}): Promise<Rig> {
     },
     // Records the address it was asked for, then reaches the stand-in origin locally.
     connect: (ip, port) => { connects.push({ ip, port }); return opts.connect ? opts.connect() : connect({ host: '127.0.0.1', port: opts.originPort ?? 1 }); },
-    log: () => { /* quiet */ },
+    log: (line) => { opts.logs?.push(line); },
     ...(opts.limits ? { limits: opts.limits } : {}),
   });
   const admin = createAdminServer({ registry, secret: SECRET, log: () => { /* quiet */ } });
@@ -1025,5 +1028,103 @@ describe('hostInSet', () => {
     expect(hostInSet(set, 'evilexample.org')).toBe(false);
     expect(hostInSet(set, 'sub.example.org')).toBe(false);
     expect(hostInSet(set, 'example.org.evil.example')).toBe(false);
+  });
+});
+
+describe('log: a host or target the model chose', () => {
+  it('names a host by its last two labels and the count of the rest, unless the set names it or it is an address', () => {
+    expect(hostForLog('*', 'secret.x7.attacker.example')).toBe('*.attacker.example (+2 labels)');
+    expect(hostForLog(new Set(['a.example']), 'secret.a.example')).toBe('*.a.example (+1 labels)');
+    expect(hostForLog(new Set(['api.shop.example']), 'api.shop.example')).toBe('api.shop.example');
+    expect(hostForLog('*', 'attacker.example')).toBe('attacker.example');
+    expect(hostForLog('*', '93.184.215.14')).toBe('93.184.215.14');
+  });
+
+  it('names a refused target by its scheme and host form only, never its user part, port, path or query', () => {
+    expect(targetForLog('*', 'http://user:secretpw@secret.attacker.example:8080/secretpath?q=secretquery')).toBe('http://*.attacker.example (+1 labels)');
+    expect(targetForLog('*', 'HTTP://a@b@secret.Attacker.Example/x')).toBe('http://*.attacker.example (+1 labels)');
+    expect(targetForLog('*', 'http://93.184.215.14/secretpath')).toBe('http://93.184.215.14');
+    expect(targetForLog('*', 'http://[::1]/secretpath')).toBe('http://(unreadable host)');
+    expect(targetForLog('*', 'http://secret data/x')).toBe('http://(unreadable host)');
+    expect(targetForLog('*', '/secretpath?q=secretquery')).toBe('(unreadable target)');
+    expect(targetForLog('*', 'secret.evil.example.:443')).toBe('(unreadable target)');
+    expect(targetForLog('*', 'secret.sub.attacker.example:443')).toBe('*.attacker.example (+2 labels)');
+  });
+
+  /** The log lines that hold `match` (at least one); no line of the log holds `secret`. */
+  const linesOf = (logs: string[], match: string): string[] => {
+    const found = logs.filter((l) => l.includes(match));
+    // Positive control: the case's line is there.
+    expect(found.length).toBeGreaterThan(0);
+    for (const l of logs) expect(l).not.toMatch(/secret/);
+    return found;
+  };
+
+  it('not-in-set: names the host in part', async () => {
+    const logs: string[] = [];
+    const r = await rig({ logs });
+    r.registry.put(CRED, reg(['a.example']));
+    expect((await shellRequest(r, connectHead('secret.x7.attacker.example:443'))).status).toBe(403);
+    expect(linesOf(logs, 'why=not-in-set')[0]).toContain('host="*.attacker.example (+2 labels)"');
+    // The denial the run is told about keeps the host whole.
+    expect(r.registry.denials(CRED)?.[0]?.host).toBe('secret.x7.attacker.example');
+  });
+
+  it('port: names a host outside the set in part, and one the set names whole', async () => {
+    const logs: string[] = [];
+    const r = await rig({ logs });
+    r.registry.put(CRED, reg(['a.example']));
+    expect((await shellRequest(r, connectHead('secret.x7.attacker.example:22'))).status).toBe(403);
+    expect((await shellRequest(r, connectHead('a.example:22'))).status).toBe(403);
+    const port = linesOf(logs, 'why=port');
+    expect(port).toHaveLength(2);
+    expect(port[0]).toContain(' host="*.attacker.example (+2 labels)" port=22 why=port');
+    expect(port[1]).toContain(' host="a.example" port=22 why=port');
+  });
+
+  it('plain-http and bad-target: name the scheme and host form, never path, query or user part', async () => {
+    const logs: string[] = [];
+    const r = await rig({ logs });
+    r.registry.put(CRED, reg('*'));
+    const auth = `Proxy-Authorization: ${basic(CRED)}\r\n`;
+    expect((await shellRequest(r, `GET http://u:secretpw@secret.x7.attacker.example/secretpath?q=secretquery HTTP/1.1\r\nHost: a.example\r\n${auth}\r\n`)).status).toBe(403);
+    expect((await shellRequest(r, `GET /secretpath?q=secretquery HTTP/1.1\r\nHost: a.example\r\n${auth}\r\n`)).status).toBe(403);
+    expect((await shellRequest(r, connectHead('secret.evil.example.:443'))).status).toBe(403);
+    expect(linesOf(logs, 'why=plain-http')[0]).toContain('host="http://*.attacker.example (+2 labels)"');
+    const bad = linesOf(logs, 'why=bad-target');
+    expect(bad).toHaveLength(2);
+    for (const l of bad) expect(l).toContain('host="(unreadable target)"');
+  });
+
+  it('unresolved, ssrf and busy: name a host the model chose in part', async () => {
+    const logs: string[] = [];
+    const r = await rig({ logs, addresses: { 'secret.x7.private.example': ['10.0.0.1'] } });
+    r.registry.put(CRED, reg('*'));
+    expect((await shellRequest(r, connectHead('secret.x7.attacker.example:443'))).status).toBe(502);
+    expect(linesOf(logs, 'unresolved ')[0]).toContain('host=*.attacker.example (+2 labels)');
+    expect((await shellRequest(r, connectHead('secret.x7.private.example:443'))).status).toBe(403);
+    expect(linesOf(logs, 'why=ssrf')[0]).toContain('host="*.private.example (+2 labels)"');
+    const fullLogs: string[] = [];
+    const full = await rig({ logs: fullLogs, limits: { tunnelsPerCred: 0 } });
+    full.registry.put(CRED, reg('*'));
+    expect((await shellRequest(full, connectHead('secret.x7.attacker.example:443'))).status).toBe(503);
+    expect(linesOf(fullLogs, 'busy ')[0]).toContain('host=*.attacker.example (+2 labels)');
+  });
+
+  it('open: names a host the model chose in part, and one the set names whole', async () => {
+    const o = await origin();
+    const logs: string[] = [];
+    const r = await rig({ logs, addresses: { 'secret.x7.attacker.example': ['93.184.215.14'], 'a.example': ['93.184.215.14'] }, originPort: o.port });
+    r.registry.put(CRED, reg('*'));
+    expect((await shellRequest(r, connectHead('secret.x7.attacker.example:443'))).status).toBe(200);
+    await until(() => logs.some((l) => l.startsWith('open ')));
+    expect(linesOf(logs, 'open ')[0]).toContain('host=*.attacker.example (+2 labels) ip=93.184.215.14');
+    const setLogs: string[] = [];
+    const named = await rig({ logs: setLogs, addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port });
+    named.registry.put(CRED, reg(['a.example']));
+    const res = await shellRequest(named, connectHead('a.example:443'));
+    res.socket.write(hello(['a.example']));
+    await until(() => setLogs.some((l) => l.startsWith('open ')));
+    expect(linesOf(setLogs, 'open ')[0]).toContain('host=a.example ip=');
   });
 });
