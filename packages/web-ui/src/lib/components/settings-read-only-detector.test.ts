@@ -38,7 +38,8 @@ const EXEMPT: Record<string, string> = {
 	'OnboardingBasics.svelte': 'Mounted only by ChatView, which never runs the owner\'s introduction in a mandate\'s session.',
 	'PersonErasurePanel.svelte': 'Mounted only by SubjectsView, behind a button shown in the owner\'s session only; a mandate is told where an erasure request goes.',
 	'StampConfirm.svelte': 'Mounted only by TriggersView, at a schedule a known owner stamps (`ownerStamps`) or checks (`offersCheck`); anyone else reads, in its place, that the owner confirms the plan.',
-	'TriggersView.svelte': 'Its one owner-only button (confirming a plan) shows only to a known owner (isOwnerSession); anyone else reads, in its place, that the owner confirms the plan.',
+	'TriggersView.svelte': 'Its owner-only buttons (confirming a plan, confirming recipients) show only to a known owner (isOwnerSession); anyone else reads, in its place, that the owner confirms the plan.',
+	'RecipientConfirm.svelte': 'Mounted only by TriggersView, behind "Confirm recipients", which shows to a known owner (`ownerActs`) at a trigger the list flags for the owner only (`recipients_unconfirmed`); a mandate never sees it.',
 };
 /**
  * Pages outside the settings that write through an owner-only route: the actions on them (approve,
@@ -259,7 +260,7 @@ describe('every page that writes through an owner-only route has a read-only vie
 	});
 
 	it('exempts only pages the scan finds, each with its reason', () => {
-		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte', 'BulkRunsView.svelte', 'ContactsView.svelte', 'FileBrowserView.svelte', 'AccessTrailView.svelte', 'ChatView.svelte', 'ApprovalsView.svelte', 'OnboardingBasics.svelte', 'PersonErasurePanel.svelte', 'StampConfirm.svelte', 'TriggersView.svelte']);
+		expect(Object.keys(EXEMPT)).toEqual(['BulkRunsSetting.svelte', 'BulkRunsView.svelte', 'ContactsView.svelte', 'FileBrowserView.svelte', 'AccessTrailView.svelte', 'ChatView.svelte', 'ApprovalsView.svelte', 'OnboardingBasics.svelte', 'PersonErasurePanel.svelte', 'StampConfirm.svelte', 'TriggersView.svelte', 'RecipientConfirm.svelte']);
 		for (const name of OUTSIDE_SETTINGS) expect(pages.map((p) => basename(p))).toContain(name);
 		expect(Object.keys(HIDDEN)).toEqual(['SetupBanner.svelte', 'WorkspaceSecurityView.svelte', 'SecretsView.svelte', 'KeysView.svelte', 'CalendarSettings.svelte']);
 		for (const [name, reason] of [...Object.entries(EXEMPT), ...Object.entries(HIDDEN)]) {
