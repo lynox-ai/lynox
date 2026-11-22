@@ -165,6 +165,16 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
     }
   });
 
+  it('pushes such lines without the lines to the grant the ledger names, not to another grant that started the run by hand', async () => {
+    const h = harness({ reason: R.listTooLarge, plannedBy: 'mandate', startedBy: 'grant-2' });
+    const summary = BULK_NOTICES.de.halted('apply', R.listTooLarge);
+    await runCollectingMemberNotes(async () => {
+      noteMemberConnection('Connection not used: a line.');
+      h.end(summary);
+    }).done;
+    expect(h.sent.map((m) => [m.audience, m.mandateId])).toEqual([['owner', undefined], ['mandates', 'grant-1']]);
+  });
+
   it('keeps every other halt one push to every device, with its sentence recorded as it is', () => {
     const h = harness({ reason: R.listTooLarge, plannedBy: 'mandate' });
     const summary = BULK_NOTICES.de.halted('apply', R.listTooLarge);
