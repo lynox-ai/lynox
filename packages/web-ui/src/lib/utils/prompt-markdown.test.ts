@@ -479,9 +479,18 @@ describe('ChatView wiring', () => {
 		expect(contents).toStrictEqual(['gBlock.text', 'lg.text', 'msg.content']);
 	});
 
-	it('keeps the Allow/Deny branch on plain pre', () => {
+	it('keeps the Allow/Deny branch on plain text', () => {
 		// That branch is immune because it never parses markdown at all; losing
-		// the <pre> would quietly opt the guard prompts into rendering.
-		expect(source).toMatch(/<pre[^>]*>\{pendingPermission\.question\}<\/pre>/);
+		// that would quietly opt the guard prompts into rendering. The question
+		// goes, split into its head and its lines, to the question field, and the
+		// field shows every part as a text node: lines in a plain <pre>, the head
+		// as text, never {@html}.
+		expect(source).toMatch(/splitPromptHead\(\s*pendingPermission\.question\s*,\s*pendingPermission\.segments\s*\)/);
+		expect(source).toMatch(/<PromptQuestionField\s+head=\{split\.head\}\s+lines=\{split\.lines\}/);
+		const field = readFileSync(new URL('../components/PromptQuestionField.svelte', import.meta.url), 'utf-8');
+		expect(field).not.toMatch(/\{@html/);
+		expect(field).not.toMatch(/MarkdownRenderer|renderPrompt/);
+		expect(field).toMatch(/<pre[^>]*data-prompt-field[^>]*>\{#each lines as line, i \(i\)\}<span[^>]*>\{line\}<\/span>\{\/each\}<\/pre>/);
+		expect(field).toMatch(/\{#if seg\.kind === 'value'\}<span[^>]*>\{seg\.text\}<\/span>\{:else\}\{seg\.text\}\{\/if\}/);
 	});
 });
