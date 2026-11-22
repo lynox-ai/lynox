@@ -1636,6 +1636,11 @@ const MIGRATIONS: string[] = [
   // this, a grant with no named row walks the whole trail.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (70);
    CREATE INDEX IF NOT EXISTS idx_audit_log_mandate ON audit_log(mandate_id, id);`,
+  // v71: the member-connection lines of a trigger's last run, apart from its result (a JSON array
+  // of the lines as recorded; NULL: none). The owner reads them under the result; anyone else
+  // reads a fixed sentence in place of a result that has them (`lastRunResultFor`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (71);
+   ALTER TABLE triggers ADD COLUMN last_run_member_notes TEXT;`,
 ];
 
 export interface EngineDbOptions {

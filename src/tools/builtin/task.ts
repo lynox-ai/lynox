@@ -6,6 +6,9 @@ import { findHiddenChar, hiddenCharRefusal, stripHidden } from '../../core/hidde
 import { describeTurnUntrusted, type UntrustedCause } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
 import { OWNER_PRINCIPAL, UNKNOWN_RUN_TAG, isOwnerPrincipal, isRunTag, mandateIdOf, mandateNeedsOwnerStamp, principalTag } from '../../core/request-principal.js';
+import { lastRunResultFor } from '../../core/member-connection-notes.js';
+import { noticeLanguage } from '../../core/notice-language.js';
+import { WORKER_NOTICES } from '../../core/worker-notices.js';
 import { PAUSED_MODEL_TEXT, isPaused } from '../../core/plan-pause.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
@@ -227,12 +230,13 @@ export function triggerDetailLine(t: {
 // (TriggerRecord: neither) since v42 split them — priority/due_date are optional
 // so a trigger renders without them.
 function formatTaskLine(
-  t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined; pipeline_params?: string | undefined; effect?: string | undefined; next_run_at?: string | undefined; paused_at?: number | undefined },
+  t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_member_notes?: readonly string[] | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined; pipeline_params?: string | undefined; effect?: string | undefined; next_run_at?: string | undefined; paused_at?: number | undefined },
   // Callers used to append their own suffix to the RESULT of this function.
   // That was harmless while the result was one line; with a detail line it put
   // "— next run: …" underneath "workflow <id>", where it reads as a property of
   // the workflow. The suffix belongs on the head line, so it is passed in
   // rather than concatenated on.
+  reader: TaskReader,
   suffix = '',
 ): string {
   // Title, assignee, scope and due date as stored, without the characters that render as nothing
@@ -242,7 +246,24 @@ function formatTaskLine(
   const due = t.due_date ? ` — due ${stripHidden(t.due_date)}` : '';
   const assign = t.assignee ? ` @${stripHidden(t.assignee)}` : '';
   const prio = t.priority ? `[${t.priority.toUpperCase()}] ` : '';
-  return `${prio}${t.id} ${stripHidden(t.title)}${assign}${scope}${due} [${t.status}]${suffix}${triggerDetailLine(t)}`;
+  return `${prio}${t.id} ${stripHidden(t.title)}${assign}${scope}${due} [${t.status}]${suffix}${triggerDetailLine({ ...t, last_run_result: (t.last_run_member_notes ?? []).length === 0 ? t.last_run_result : lastRunResultFor(t, reader.owner(), reader.forMandates()) })}`;
+}
+
+/**
+ * Who reads a task line: the owner reads a last run's member-connection lines under its result;
+ * anyone else, for a run that has them, the fixed sentence in its place (`lastRunResultFor`).
+ */
+interface TaskReader {
+  readonly owner: () => boolean;
+  readonly forMandates: () => string;
+}
+
+/** Asked only for a row whose last run has lines. */
+function taskReaderOf(agent: IAgent): TaskReader {
+  return {
+    owner: () => isOwnerPrincipal(agent.principal),
+    forMandates: () => WORKER_NOTICES[agent.noticeLanguage ?? noticeLanguage(undefined)].memberEndForMandates,
+  };
 }
 
 // Catches an LLM output failure mode where the model emits an escaped close-quote
@@ -557,7 +578,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           w.created('create', task.id);
           const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
           const scheduleInfo = input.schedule ? ` (schedule: ${input.schedule})` : '';
-          return `Workflow task created: ${formatTaskLine(task, `${nextRun}${scheduleInfo}${createdNote(task, byOwner)}`)}`;
+          return `Workflow task created: ${formatTaskLine(task, taskReaderOf(agent), `${nextRun}${scheduleInfo}${createdNote(task, byOwner)}`)}`;
         });
       }
 
@@ -570,7 +591,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           }), ifReturned);
           w.created('create', task.id);
           const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
-          return `Scheduled task created: ${formatTaskLine(task, `${nextRun}${createdNote(task, byOwner)}`)}`;
+          return `Scheduled task created: ${formatTaskLine(task, taskReaderOf(agent), `${nextRun}${createdNote(task, byOwner)}`)}`;
         });
       }
 
@@ -589,7 +610,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
             watchIntervalMinutes: intervalMinutes,
           }), ifReturned);
           w.created('create', task.id);
-          return `Watch task created: ${formatTaskLine(task, ` — it checks ${input.watch_url} every ${String(intervalMinutes)}min${createdNote(task, byOwner)}`)}`;
+          return `Watch task created: ${formatTaskLine(task, taskReaderOf(agent), ` — it checks ${input.watch_url} every ${String(intervalMinutes)}min${createdNote(task, byOwner)}`)}`;
         });
       }
 
@@ -600,7 +621,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         return withInstanceWrite(agent, { site: 'task_create#one-shot', kind: 'create', store: 'tasks', target: () => [['type', 'one-shot']], main: ['create'] }, (w) => {
           const task = w.run('create', () => managerRef.create({ ...baseParams, nextRunAt: input.run_at }), ifReturned);
           w.created('create', task.id);
-          return `Task scheduled for ${input.run_at}: ${formatTaskLine(task, createdNote(task, byOwner))}`;
+          return `Task scheduled for ${input.run_at}: ${formatTaskLine(task, taskReaderOf(agent), createdNote(task, byOwner))}`;
         });
       }
 
@@ -609,7 +630,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
       return withInstanceWrite(agent, { site: 'task_create#todo', kind: 'create', store: 'tasks', target: () => [['type', 'todo']], main: ['create'] }, (w) => {
         const task = w.run('create', () => managerRef.create(baseParams), ifReturned);
         w.created('create', task.id);
-        return `Created: ${formatTaskLine(task, createdNote(task, byOwner))}`;
+        return `Created: ${formatTaskLine(task, taskReaderOf(agent), createdNote(task, byOwner))}`;
       });
     } catch (e: unknown) {
       logErrorChain('task_create', e);
@@ -714,7 +735,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         if (input.status === 'completed') {
           const task = w.run('apply', () => managerRef.complete(input.task_id, scopeFilter, agent.principal), ifNonNull);
           if (!task) return `Task not found: ${input.task_id}`;
-          return `Task completed: ${formatTaskLine(task)}`;
+          return `Task completed: ${formatTaskLine(task, taskReaderOf(agent))}`;
         }
 
         const task = w.run('apply', () => managerRef.update(input.task_id, {
@@ -749,7 +770,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         // An edit can re-open consent: changing what a trigger RUNS clears the stamp
         // (`trigger-store.ts`), so the row just edited may be held back again — and
         // this report is the only place that says so.
-        return `Task updated: ${formatTaskLine(task, `${scheduleNote}${pendingConsent(task, isOwnerPrincipal(agent.principal))}`)}`;
+        return `Task updated: ${formatTaskLine(task, taskReaderOf(agent), `${scheduleNote}${pendingConsent(task, isOwnerPrincipal(agent.principal))}`)}`;
       });
     } catch (e: unknown) {
       logErrorChain('task_update', e);
@@ -791,19 +812,19 @@ export const taskListTool: ToolEntry<TaskListInput> = {
         // Use the history directly for overdue
         const overdue = managerRef.getWeekSummary(scopes).overdue;
         if (overdue.length === 0) return 'No overdue tasks.';
-        return overdue.map(t => formatTaskLine(t)).join('\n');
+        return overdue.map(t => formatTaskLine(t, taskReaderOf(agent))).join('\n');
       }
       if (input.due === 'today') {
         const summary = managerRef.getWeekSummary(scopes);
         const tasks = [...summary.overdue, ...summary.dueToday];
         if (tasks.length === 0) return 'No tasks due today (and none overdue).';
-        return tasks.map(t => formatTaskLine(t)).join('\n');
+        return tasks.map(t => formatTaskLine(t, taskReaderOf(agent))).join('\n');
       }
       if (input.due === 'week') {
         const summary = managerRef.getWeekSummary(scopes);
         const tasks = [...summary.overdue, ...summary.dueToday, ...summary.dueThisWeek];
         if (tasks.length === 0) return 'No tasks due this week.';
-        return tasks.map(t => formatTaskLine(t)).join('\n');
+        return tasks.map(t => formatTaskLine(t, taskReaderOf(agent))).join('\n');
       }
     }
 
@@ -847,7 +868,7 @@ export const taskListTool: ToolEntry<TaskListInput> = {
     const limited = tasks.slice(0, input.limit ?? 20);
     if (limited.length === 0) return 'No tasks found.';
 
-    const lines = limited.map(t => formatTaskLine(t));
+    const lines = limited.map(t => formatTaskLine(t, taskReaderOf(agent)));
     if (tasks.length > limited.length) {
       lines.push(`... and ${tasks.length - limited.length} more`);
     }

@@ -202,6 +202,7 @@ interface TriggerFullDbRow {
   last_run_at: string | null;
   last_run_result: string | null;
   last_run_status: string | null;
+  last_run_member_notes: string | null;
   notification_channel: string | null;
   max_retries: number | null;
   retry_count: number;
@@ -259,7 +260,8 @@ const TRIGGER_READ_COLS =
    confirmed_at, waiting_until, created_untrusted, created_by, edited_by, confirmed_by,
    created_mandate_id, mandate_editor, mandate_editor_id, mandate_edited_at, model_tier, last_escalation_at,
    last_escalation_outcome, paused_at, paused_due_at, paused_for,
-   covered_created_by, covered_created_id, covered_created_at, covered_edited_by, covered_edited_id, covered_edited_at`;
+   covered_created_by, covered_created_id, covered_created_at, covered_edited_by, covered_edited_id, covered_edited_at,
+   last_run_member_notes`;
 
 /**
  * Pure INVERSE of {@link triggerRecordToRow}: map an engine.db `triggers` row onto
@@ -276,6 +278,16 @@ const TRIGGER_READ_COLS =
  * Optional columns map `null → undefined` (the legacy cast types them
  * `string | undefined`; both mean "absent" and every consumer treats them so).
  */
+/** The stored lines of a last run; a malformed or empty value is none, never a throw. */
+function memberNotesOf(raw: string | null): { last_run_member_notes?: string[] } {
+  if (raw === null) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    const lines = Array.isArray(parsed) ? parsed.filter((l): l is string => typeof l === 'string') : [];
+    return lines.length > 0 ? { last_run_member_notes: lines } : {};
+  } catch { return {}; }
+}
+
 export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
   let scheduleCron: string | undefined;
   let watchConfig: string | undefined;
@@ -301,6 +313,7 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
     last_run_at: row.last_run_at ?? undefined,
     last_run_result: row.last_run_result ?? undefined,
     last_run_status: row.last_run_status ?? undefined,
+    ...memberNotesOf(row.last_run_member_notes),
     waiting_until: row.waiting_until ?? undefined,
     source: row.source as TriggerSource,
     effect: row.effect as TriggerEffect,
@@ -964,11 +977,14 @@ export class TriggerStore {
     lastRunAt: string;
     lastRunResult: string;
     lastRunStatus: string;
+    /** The run's member-connection lines; none clears the last run's. */
+    lastRunMemberNotes?: readonly string[] | undefined;
     nextRunAt?: string | null | undefined;
     retryCount?: number | undefined;
   }): void {
-    const sets: string[] = ['last_run_at = ?', 'last_run_result = ?', 'last_run_status = ?'];
-    const values: unknown[] = [update.lastRunAt, update.lastRunResult, update.lastRunStatus];
+    const notes = update.lastRunMemberNotes ?? [];
+    const sets: string[] = ['last_run_at = ?', 'last_run_result = ?', 'last_run_status = ?', 'last_run_member_notes = ?'];
+    const values: unknown[] = [update.lastRunAt, update.lastRunResult, update.lastRunStatus, notes.length > 0 ? JSON.stringify(notes) : null];
     if (update.nextRunAt !== undefined) { sets.push('next_run_at = ?'); values.push(update.nextRunAt); }
     if (update.retryCount !== undefined) { sets.push('retry_count = ?'); values.push(update.retryCount); }
     sets.push("updated_at = datetime('now')");

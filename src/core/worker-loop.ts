@@ -848,12 +848,14 @@ export class WorkerLoop {
     run?: RunStarterSlot | null,
     opts?: { readonly keepSchedule?: true; readonly noRetry?: true },
   ): boolean {
-    // A request of this run that would have carried someone else's own login was refused: its
-    // line goes under the result, and what ends as a success halts (`withMemberNotes`).
+    // A request of this run that would have carried someone else's own login was refused: what
+    // ends as a success halts (`withMemberNotes`), and its lines are recorded apart from the
+    // result, for the owner alone to read under it (`lastRunResultFor`).
     // `null`: the caller decided there is no run, so nothing is looked up.
     const slot = run === undefined ? this.#runSlotOf(id) : run ?? undefined;
     // Inside the run its collector answers; the catch records outside it, from the run's entry.
-    ({ result, status } = withMemberNotes(result, status, collectingMemberNotes() ? currentMemberNotes() : [...(slot?.memberNotes ?? [])]));
+    const memberNotes = collectingMemberNotes() ? currentMemberNotes() : [...(slot?.memberNotes ?? [])];
+    ({ status } = withMemberNotes(result, status, memberNotes));
     // Kept for the end row, which reads the running entry. Both: the slot the caller passed is
     // that entry in the run's catch, where the lookup can miss it (outside the run's context,
     // after `stop()` cleared the map); the lookup is that entry where the caller passed a slot
@@ -874,7 +876,11 @@ export class WorkerLoop {
     // A webhook run's event takes the end where nothing more specific was set: lynox's own
     // sentence, or the masked error of a run that threw.
     endEvent(slot ?? live, status === 'success' ? { state: 'done' } : { state: 'failed', reason: result });
-    const record = { ...(startedByOther(slot) || opts?.noRetry === true ? { noRetry: true } : {}), ...(opts?.keepSchedule === true ? { keepSchedule: true } : {}) };
+    const record = {
+      ...(startedByOther(slot) || opts?.noRetry === true ? { noRetry: true } : {}),
+      ...(opts?.keepSchedule === true ? { keepSchedule: true } : {}),
+      ...(memberNotes.length > 0 ? { memberNotes } : {}),
+    };
     return tm?.recordTaskRun(id, result, status, ...(Object.keys(record).length > 0 ? [record] : [])) ?? false;
   }
 
@@ -3997,8 +4003,8 @@ export class WorkerLoop {
       // Every live grant reads the same end in the mandates' sentence, not only the planning one:
       // a mandate gets the notices the owner gets, in the sentence that is true for it. It reads
       // the fact without the member-connection lines: they are the owner's, naming another
-      // member's provider and profile and the owner's way to change it. They stand in the history,
-      // which a mandate reads, as recorded. The sentence is where `told.result` starts, so this
+      // member's provider and profile and the owner's way to change it. The history keeps them apart
+      // from the result, for the owner alone (`lastRunResultFor`). The sentence is where `told.result` starts, so this
       // finds a part only where `readers` found one too.
       const forMandate = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, said ?? resultSummary, lang);
       if (forMandate !== null) {

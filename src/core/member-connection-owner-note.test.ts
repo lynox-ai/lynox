@@ -185,7 +185,7 @@ describe('recording and repeating the owner\'s line (UX-065)', () => {
     const r = await inPlan(B, () => refuseMemberConnection(crm(), B, ends(['M-1'])));
     const recorded = withMemberNotes('All done.', 'success', r.en);
     expect(recorded.status).toBe('halted');
-    expect(memberNotesRepeat({ last_run_status: 'halted', last_run_result: recorded.result }, r.en)).toBe(true);
+    expect(memberNotesRepeat({ last_run_status: 'halted', last_run_member_notes: [...r.en] }, r.en)).toBe(true);
   });
 
   it('an inner collector passes its lines on with their German', async () => {

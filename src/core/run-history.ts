@@ -3908,6 +3908,7 @@ export class RunHistory {
     lastRunAt: string;
     lastRunResult: string;
     lastRunStatus: string;
+    lastRunMemberNotes?: readonly string[] | undefined;
     // `undefined` leaves next_run_at unchanged; `null` clears it.
     // Clearing is required after a one-shot trigger reaches a terminal
     // state, otherwise getDueTriggers would re-select it forever.

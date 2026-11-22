@@ -1120,7 +1120,7 @@ export class TaskManager {
    *   conditions drifted from it (a cron or watch with retries set was never retried here,
    *   and its failures were reported nowhere).
    */
-  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted', opts?: { noRetry?: boolean | undefined; keepSchedule?: boolean | undefined }): boolean {
+  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted', opts?: { noRetry?: boolean | undefined; keepSchedule?: boolean | undefined; memberNotes?: readonly string[] | undefined }): boolean {
     const task = this.history.getTrigger(id);
     // The schedule was deleted while this run was in flight: deleting removes the row and
     // leaves the run going, so there is nothing left to record the run against.
@@ -1155,6 +1155,7 @@ export class TaskManager {
         lastRunAt: new Date().toISOString(),
         lastRunResult: result.length > MAX_RUN_RESULT_CHARS ? result.slice(0, MAX_RUN_RESULT_CHARS) : result,
         lastRunStatus: status,
+        lastRunMemberNotes: opts?.memberNotes,
         nextRunAt: undefined,
         retryCount: undefined,
       });
@@ -1250,6 +1251,7 @@ export class TaskManager {
       lastRunAt: now.toISOString(),
       lastRunResult: truncatedResult,
       lastRunStatus: status,
+      lastRunMemberNotes: opts?.memberNotes,
       nextRunAt,
       retryCount,
     });
