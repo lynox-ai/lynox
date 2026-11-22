@@ -3424,11 +3424,14 @@ export class WorkerLoop {
       const resultReduced = errorTextReduced(this.engine.getToolContext().containment, {
         threadId: session.sessionId, bulkRunId: task.bulk_run_id ?? undefined,
       });
-      const pushed = resultReduced
-        ? withMemberNotes(capStop === null ? notices.containedResult : `${capStop}\n\n${notices.containedResult}`, 'other', memberSaid).result
-        : capStop === null ? memberTold.result
-          : withMemberNotes(truncate(`${capStop}\n\n${withRefusals}`), 'other', memberSaid).result;
-      await this.notificationRouter.notify({
+      const pushedText = resultReduced
+        ? (capStop === null ? notices.containedResult : `${capStop}\n\n${notices.containedResult}`)
+        : capStop === null ? truncatedResult : truncate(`${capStop}\n\n${withRefusals}`);
+      const bodyOf = (lines: readonly string[]): string => {
+        const pushed = withMemberNotes(pushedText, 'other', lines).result;
+        return endedByOwner ? `${notices.stopped}\n\n${pushed}` : pushed;
+      };
+      const message: NotificationMessage = {
         // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
         // engine itself cut off is the same false report as the `success` status was.
         //
@@ -3442,7 +3445,7 @@ export class WorkerLoop {
         // finish) nor ✗ at high priority (nothing went wrong). The budget word stays in
         // the body; the title answers who ended it.
         title: `${endedByOwner ? '\u23f9' : (budgetCut !== null ? '\u2717' : memberTold.status === 'halted' ? RUN_END_LOOK.halted.mark : '\u2713')} ${task.title}`,
-        body: endedByOwner ? `${notices.stopped}\n\n${pushed}` : pushed,
+        body: bodyOf(memberSaid),
         taskId: task.id,
         priority: endedByOwner || budgetCut === null ? 'normal' : 'high',
         // Deep-link the notification to THIS run's chat thread so a tap opens the
@@ -3453,7 +3456,10 @@ export class WorkerLoop {
           { label: notices.chipDetails, task: `Show me more details about: ${stripHidden(task.title)}` },
           { label: notices.chipRunAgain, task: stripHidden(task.description ?? task.title) },
         ],
-      });
+      };
+      // With the owner's member-connection lines, told by reader (#notifyMemberEnd).
+      if (memberSaid.length > 0) await this.#notifyMemberEnd(message, bodyOf([]), this.#mandateReaderOf(task.id));
+      else await this.notificationRouter.notify(message);
     }
   }
 
@@ -3978,11 +3984,15 @@ export class WorkerLoop {
         : told.status === 'stopped' && this.#bulkRunDiscarded(task) ? 'discarded' : told.status;
       const title = `${toldLook.mark} ${this.#pushTitleOf(task, shownEnd)}`;
       const readers = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, told.result, lang);
+      const withLines = notes.length > 0;
+      const message = { title, body: told.result, taskId: task.id, priority: toldLook.priority };
+      if (readers === null && withLines) {
+        // Not split by reader, but with the owner's member-connection lines: see #notifyMemberEnd.
+        void this.#notifyMemberEnd(message, said ?? resultSummary, haltRow === null ? this.#mandateReaderOf(task.id) : byReader ? haltRow.mandateId ?? null : null);
+        return;
+      }
       void this.notificationRouter.notify({
-        title,
-        body: told.result,
-        taskId: task.id,
-        priority: toldLook.priority,
+        ...message,
         // Only the owner can take the way this sentence names: no other device reads it.
         ...(readers === null ? {} : { audience: 'owner' as const }),
       });
@@ -4003,6 +4013,31 @@ export class WorkerLoop {
         });
       }
     }
+  }
+
+  /**
+   * A run's end that carries the owner's member-connection lines, told by reader. The lines name
+   * another member's provider, profile and login and the owner's way to change it, so only the
+   * owner's devices read `message` as it is. The grant the run was for, while it is live, reads
+   * the same end without them (`withoutLines`). No other device reads this end: a push without an
+   * audience would reach every live grant's devices with another member's connection.
+   */
+  async #notifyMemberEnd(message: NotificationMessage, withoutLines: string, mandateId: string | null): Promise<void> {
+    const owner = this.notificationRouter.notify({ ...message, audience: 'owner' });
+    if (mandateId !== null && (this.engine.getMandateEnds()?.isLive(mandateId) ?? false)) {
+      void this.notificationRouter.notify({ ...message, body: withoutLines, audience: 'mandates', mandateId });
+    }
+    await owner;
+  }
+
+  /**
+   * The grant a run is for, when a mandate's: the one its plan acts for (`planOf`), else the one
+   * that started it by hand. Null for the owner's run and for a mandate that names no grant.
+   */
+  #mandateReaderOf(id: string): string | null {
+    const slot = this.#runSlotOf(id);
+    const reader = slot?.planOf ?? slot?.starter;
+    return reader?.kind === 'mandate' && reader.mandateId !== undefined ? reader.mandateId : null;
   }
 
   /**

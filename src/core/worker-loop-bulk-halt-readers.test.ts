@@ -119,6 +119,33 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
     expect(h.sent[0]!.audience).toBeUndefined();
   });
 
+  // A halt whose way is not the owner's alone, ended with the owner's member-connection lines: the
+  // lines go to the owner's devices only, the planning grant reads the halt without them.
+  it('pushes another halt\'s member-connection lines to the owner\'s devices only, and the halt without them to the planning grant', async () => {
+    const h = harness({ reason: R.listTooLarge, plannedBy: 'mandate' });
+    const summary = BULK_NOTICES.de.halted('apply', R.listTooLarge);
+    const NOTE = { en: 'Connection not used: CRM was connected by eva@kanzlei.example.', de: 'Verbindung nicht genutzt: CRM hat eva@kanzlei.example verbunden.' };
+    await runCollectingMemberNotes(async () => {
+      noteMemberConnection('Connection not used: the model\'s line', () => NOTE);
+      h.end(summary);
+    }).done;
+    expect(h.sent.map((m) => [m.audience, m.mandateId, m.body])).toEqual([
+      ['owner', undefined, `${summary}\n• ${NOTE.de}`],
+      ['mandates', 'grant-1', summary],
+    ]);
+  });
+
+  it('pushes such lines to the owner\'s devices only where the planning grant has ended or is not recorded', async () => {
+    for (const setup of [{ plannedBy: 'mandate' as const, live: false }, { plannedBy: 'mandate-without-grant' as const }, { plannedBy: 'owner' as const }]) {
+      const h = harness({ reason: R.listTooLarge, ...setup });
+      await runCollectingMemberNotes(async () => {
+        noteMemberConnection('Connection not used: a line.');
+        h.end(BULK_NOTICES.de.halted('apply', R.listTooLarge));
+      }).done;
+      expect(h.sent.map((m) => m.audience), JSON.stringify(setup)).toEqual(['owner']);
+    }
+  });
+
   it('keeps every other halt one push to every device, with its sentence recorded as it is', () => {
     const h = harness({ reason: R.listTooLarge, plannedBy: 'mandate' });
     const summary = BULK_NOTICES.de.halted('apply', R.listTooLarge);

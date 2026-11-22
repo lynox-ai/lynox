@@ -1001,6 +1001,47 @@ describe('WorkerLoop', () => {
       }
     });
 
+    // The owner's wording of a refused member connection names another member's provider, profile
+    // and login and the owner's way to change it: the owner's devices read it, the grant the plan
+    // is for reads the end without it, and no push goes to every device.
+    it('pushes a run\'s end with a member line to the owner\'s devices, and to the plan\'s grant without the line', async () => {
+      const { noteMemberConnection } = await import('./member-connection-notes.js');
+      const LINE = 'Connection not used: CRM was connected by jo@kanzlei.example with their own login. Change it under Settings → APIs.';
+      const task = stamped();
+      const tm = makeTaskManager([task]);
+      const session = makeSession('ran');
+      vi.mocked(session.run).mockImplementation(async () => { noteMemberConnection(LINE); return 'ran'; });
+      const router = makeNotificationRouter();
+      const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000);
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(tm.recordTaskRun).toHaveBeenCalledWith('po-1', `ran\n• ${LINE}`, 'halted');
+      const sent = vi.mocked(router.notify).mock.calls.map(([m]) => m);
+      expect(sent.map((m) => [m.audience, m.mandateId, m.body])).toEqual([
+        ['owner', undefined, `ran\n• ${LINE}`],
+        ['mandates', EVA.mandateId, 'ran'],
+      ]);
+      // Both are the same end: one title, one thread.
+      expect(sent[1]!.title).toBe(`⏸ ${task.title}`);
+      expect(sent[1]!.title).toBe(sent[0]!.title);
+      expect(sent[1]!.data).toEqual(sent[0]!.data);
+      loop.stop();
+    });
+
+    it('pushes the owner\'s own plan\'s end with a member line to the owner\'s devices only', async () => {
+      const { noteMemberConnection } = await import('./member-connection-notes.js');
+      const task = makeTask();
+      const tm = makeTaskManager([task]);
+      const session = makeSession('ran');
+      vi.mocked(session.run).mockImplementation(async () => { noteMemberConnection('Connection not used: a line.'); return 'ran'; });
+      const router = makeNotificationRouter();
+      const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000);
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.body])).toEqual([['owner', 'ran\n• Connection not used: a line.']]);
+      loop.stop();
+    });
+
     it('builds the run for the mandate when the owner starts it by hand too, and says it was by hand', async () => {
       const { loop, engine, rows } = setup(stamped());
       expect(await loop.runTriggerNow('po-1')).toEqual({ ok: true });
@@ -2358,6 +2399,8 @@ describe('WorkerLoop', () => {
     expect(tm.recordTaskRun).toHaveBeenLastCalledWith(task.id, `Pipeline completed.\n• ${LINE}`, 'halted');
     expect(router.notify).toHaveBeenCalledTimes(1);
     expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u23F8 ${task.title}`, body: `Pipeline completed.\n• ${LINE}`, priority: 'normal' }));
+    // The line names another member's connection: the owner's devices only.
+    expect(vi.mocked(router.notify).mock.calls[0]![0].audience).toBe('owner');
 
     Object.assign(task, { last_run_status: 'halted', last_run_result: `Pipeline completed.\n• ${LINE}` });
     await end();
