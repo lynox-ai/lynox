@@ -87,17 +87,11 @@ describe('the migration done step', () => {
 		await migrate();
 		expect(target.textContent).toContain(t('migration.success_desc_without_workspace'));
 		expect(target.textContent).not.toContain(t('migration.success_desc'));
-		expect(omittedLine()).toBe(t('migration.workspace_omitted_self'));
+		// A self-hosted source (this file's default) still names the target's support (U-304).
+		expect(omittedLine()).toBe(t('migration.workspace_omitted_managed'));
 		expect(target.querySelector('[data-testid="migration-workspace-omitted"]')?.className).toContain('text-warning');
 		expect(toastMessages()).toEqual([t('migration.success_without_workspace')]);
 		// Not the green success toast: it is read and dismissed with the files left behind.
 		expect(getToasts().map((toast) => toast.type)).toEqual(['info']);
-	});
-
-	it('names support on a managed instance', async () => {
-		config = { managed: 'managed', billing_tier_set: true };
-		done = { ...done, workspace: 'omitted-sidecar' };
-		await migrate();
-		expect(omittedLine()).toBe(t('migration.workspace_omitted_managed'));
 	});
 });
