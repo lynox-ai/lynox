@@ -447,10 +447,24 @@ describe('buildInboxRunner — a mail the sensitive check flagged is never filed
         sensitive_categories: ['otp'],
         sensitive_masked: sensitive.masked,
       });
-      // Shown like any mail that needs the owner: the notification goes out.
+      // Shown like any mail that needs the owner: the notification goes out, told it is flagged.
       expect(notifyNewItem).toHaveBeenCalledTimes(1);
+      expect((notifyNewItem.mock.calls[0] as unknown[])[1]).toEqual({ flagged: true });
     });
   }
+
+  it('tells the notifier a flagged mail is flagged on the dead-letter path, and a plain one is not', async () => {
+    const notifyNewItem = vi.fn(async () => true);
+    const queue = buildInboxRunner({ state: inbox, llm: async () => { throw new Error('boom'); }, policy: { retryOnce: false }, notifier: { notifyNewItem } });
+    queue.enqueue(payload({ sensitive: { categories: ['otp'], masked: true, redactionCount: 1 } }));
+    queue.enqueue(payload({ threadKey: 'thr-plain' }));
+    await queue.drain();
+    const byThread = Object.fromEntries(notifyNewItem.mock.calls.map((c) => {
+      const [item, opts] = c as unknown as [{ threadKey: string }, unknown];
+      return [item.threadKey, opts];
+    }));
+    expect(byThread).toEqual({ 'imap:t1': { flagged: true }, 'thr-plain': { flagged: false } });
+  });
 
   it('keeps the classifier\'s bucket for a mail without the flag (control)', async () => {
     const { item, audit, notifyNewItem } = await run(undefined);

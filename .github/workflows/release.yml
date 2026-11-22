@@ -109,14 +109,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # amd64-only: build with load+tag-for-scan so trivy can read the same
-      # layers we ship. arm64 builds from the same node:22-slim digest, the
-      # same Debian release for both architectures, so the scan stays
-      # amd64-only (per-architecture package lists not compared). The
-      # push-by-digest build below re-uses the gha cache, so this step is
-      # essentially free on its second invocation.
+      # Both architectures: build with load+tag-for-scan so trivy reads the layers this
+      # leg ships. `no-cache-filters: production` runs the production stage fresh, so the
+      # packages its apt-get install adds come at their current Debian versions instead of
+      # those of whichever release first wrote the cached layer (the layer's cache key does
+      # not change when Debian publishes a fix). Packages already in the base image move only
+      # when its digest is bumped; the scan below judges them like the rest. The push-by-digest
+      # build below runs in the same builder and reuses the layers this step just built, so
+      # the scan sees the layers that ship; cache-to writes them for the next release.
       - name: Build (load) for trivy scan
-        if: matrix.platform == 'linux/amd64'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
@@ -125,11 +126,11 @@ jobs:
           tags: ghcr.io/lynox-ai/lynox:scan
           build-args: |
             BUILD_SHA=${{ github.sha }}
+          no-cache-filters: production
           cache-from: type=gha,scope=${{ matrix.arch_tag }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch_tag }}
 
       - name: Scan image for vulnerabilities
-        if: matrix.platform == 'linux/amd64'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/lynox-ai/lynox:scan
@@ -142,7 +143,6 @@ jobs:
       # blindness itself instead of guessing at its cause: list every package trivy
       # found, and fail when the OS share is empty.
       - name: List what the scan saw
-        if: matrix.platform == 'linux/amd64'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/lynox-ai/lynox:scan
@@ -153,7 +153,6 @@ jobs:
           exit-code: '0'
 
       - name: The scan saw the OS packages
-        if: matrix.platform == 'linux/amd64'
         run: |
           set -euo pipefail
           n=$(jq '[.Results[]? | select(.Class == "os-pkgs") | .Packages[]?] | length' trivy-packages.json)
