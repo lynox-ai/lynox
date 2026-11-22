@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
+import { containsUntrustedMarker } from './data-boundary.js';
 
 export interface ThreadRecord {
   id: string;
@@ -94,8 +95,23 @@ export class ThreadDeletedError extends Error {
   }
 }
 
+/**
+ * The record that a thread's conversation took in content from outside could not be written, so
+ * the message that carries the read was not stored either (`ThreadStore.appendMessages`). The turn
+ * ends with this error: a conversation whose record is behind its messages would read as clean on
+ * its next resume.
+ */
+export class ReadOutsideUnrecordedError extends Error {
+  constructor(cause: unknown) {
+    super('This conversation could not be saved.', { cause });
+    this.name = 'ReadOutsideUnrecordedError';
+  }
+}
+
 export class ThreadStore {
   private readonly db: Database.Database;
+  /** Threads whose next message carries the record of outside reads (`armReadOutside`). */
+  private readonly _readOutsideArmed = new Set<string>();
 
   constructor(db: Database.Database) {
     this.db = db;
@@ -339,16 +355,28 @@ export class ThreadStore {
   /**
    * `author` is recorded on every message of this call (see `ThreadMessageRecord.author`). Only
    * the run's own typed turn passes one; every other writer leaves it out, and the rows are NULL.
+   *
+   * A thread armed with {@link armReadOutside}, or a call whose messages carry outside content,
+   * writes the thread's record of outside reads (`thread_read_outside`) in the same transaction:
+   * if that write fails, no message is stored and this throws {@link ReadOutsideUnrecordedError}.
    */
   appendMessages(threadId: string, messages: BetaMessageParam[], startSeq: number, threadUpdates?: {
     message_count?: number | undefined;
     total_tokens?: number | undefined;
     total_cost_usd?: number | undefined;
-  }, author?: string | undefined): void {
+  }, author?: string | undefined, typedText?: string | undefined): void {
     const insert = this.db.prepare(`
       INSERT INTO thread_messages (thread_id, seq, role, content_json, author)
       VALUES (?, ?, ?, ?, ?)
     `);
+    // The words the person typed into the first message of this call, apart from what the route
+    // put around them (v74). In the same transaction as the message, so neither is ever there
+    // without the other.
+    const insertTyped = typedText !== undefined
+      ? this.db.prepare('INSERT OR REPLACE INTO thread_typed_text (thread_id, seq, text, principal) VALUES (?, ?, ?, ?)')
+      : undefined;
+    const recordRead = this._readOutsideArmed.has(threadId)
+      || messages.some((m) => containsUntrustedMarker(typeof m.content === 'string' ? m.content : JSON.stringify(m.content)));
 
     // Share one transaction (and one fsync under WAL) between the insert
     // batch and the rollup updateThread — better-sqlite3 includes any
@@ -365,10 +393,48 @@ export class ThreadStore {
           author ?? null,
         );
       }
+      if (insertTyped !== undefined && msgs.length > 0) insertTyped.run(threadId, start, typedText ?? '', author ?? null);
+      if (recordRead && msgs.length > 0) {
+        try {
+          this.db.prepare('INSERT OR IGNORE INTO thread_read_outside (thread_id) VALUES (?)').run(threadId);
+        } catch (err) {
+          throw new ReadOutsideUnrecordedError(err);
+        }
+      }
       if (threadUpdates) this.updateThread(threadId, threadUpdates);
     });
 
     batch(messages, startSeq);
+    // Disarmed only once the record is stored. A failed write leaves the thread armed, so every
+    // later message of it tries the record again and is refused with it until one succeeds: the
+    // turns of a conversation whose read is not on record are not stored (fail-closed).
+    if (recordRead && messages.length > 0) this._readOutsideArmed.delete(threadId);
+  }
+
+  /**
+   * What the owner typed in this thread: the typed words (v74) of every message whose author is
+   * the owner. A message with no typed words recorded, and every message of anyone else, gives
+   * nothing. Only the words: what the route loaded around them, and every upload, is not in here.
+   */
+  ownerTypedTexts(threadId: string): string[] {
+    const rows = this.db.prepare(
+      `SELECT text FROM thread_typed_text WHERE thread_id = ? AND principal = 'owner' ORDER BY seq`,
+    ).all(threadId) as Array<{ text: string }>;
+    return rows.map(r => r.text);
+  }
+
+  /**
+   * Arm a thread whose conversation took in content from outside: its next message is written
+   * together with the record (`thread_read_outside`, v74), or not at all. Only ever set.
+   */
+  armReadOutside(threadId: string): void {
+    this._readOutsideArmed.add(threadId);
+  }
+
+  /** Whether the thread is armed or its record is written. */
+  readOutside(threadId: string): boolean {
+    if (this._readOutsideArmed.has(threadId)) return true;
+    return this.db.prepare('SELECT 1 FROM thread_read_outside WHERE thread_id = ?').get(threadId) !== undefined;
   }
 
   /**
