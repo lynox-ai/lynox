@@ -157,14 +157,27 @@ export function holdsOnlyPlaceholder(src: string): boolean {
 	return PLACEHOLDER_OPENINGS.some((opening) => src.includes(opening));
 }
 
+/** The leading markers the chat writes before a saved artifact's content in
+ *  its fence ({@link artifactFenceHeader}: title, then type; the id marker is
+ *  gone by the time {@link resolveArtifactRender} hands the body on). */
+const LEADING_FENCE_MARKERS_RE = /^<!--\s*title:[^\n]*?-->\n(?:<!--\s*type:\s*\w+\s*-->\n)?/;
+
+/** Whether a rendered fence body holds only the placeholder, measured on what
+ *  the store would hold: the content without the markers the chat put before
+ *  it. Measured with them, a stored placeholder near the bound got no badge. */
+export function fenceHoldsOnlyPlaceholder(src: string): boolean {
+	return holdsOnlyPlaceholder(src.replace(LEADING_FENCE_MARKERS_RE, ''));
+}
+
 /** Put the badge after the card's title. `label` is shown as text and escaped
  *  here; `card` is one of MarkdownRenderer's own card builders' output, whose
  *  title span holds escaped text only, so the first such span is the card's. A
  *  card without a title span is returned unchanged. */
 export function withPlaceholderBadge(card: string, label: string): string {
 	const safe = label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+	// A function, not a replacement string: `$&` or `$'` in a label would be read as patterns.
 	return card.replace(
-		/(<span class="artifact-title">[^<]*<\/span>)/,
-		`$1\n\t\t\t\t<span class="artifact-lost-badge" data-testid="artifact-inline-lost-badge" title="${safe}">${safe}</span>`,
+		/<span class="artifact-title">[^<]*<\/span>/,
+		(title) => `${title}\n\t\t\t\t<span class="artifact-lost-badge" data-testid="artifact-inline-lost-badge" title="${safe}">${safe}</span>`,
 	);
 }

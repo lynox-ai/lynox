@@ -7,7 +7,14 @@ import {
 	EVICTION_NOTE,
 	LEGACY_EVICTION_NOTE,
 } from '../../../../../src/core/artifact-eviction.js';
-import { holdsOnlyPlaceholder, PLACEHOLDER_MAX_BYTES, withPlaceholderBadge } from './artifact-inline.js';
+import {
+	artifactFenceHeader,
+	fenceHoldsOnlyPlaceholder,
+	holdsOnlyPlaceholder,
+	PLACEHOLDER_MAX_BYTES,
+	resolveArtifactRender,
+	withPlaceholderBadge,
+} from './artifact-inline.js';
 
 // The engine's placeholder as a damaged file holds it (measured on a real instance: 176 bytes).
 const OLD_FORM = '[evicted after successful save — 5251 chars. The artifact is persisted; its id and file path are in the tool result below. read_file that path if you need the content again.]';
@@ -59,6 +66,25 @@ describe('an inline artifact that holds only the engine\'s placeholder', () => {
 	});
 });
 
+describe('a fence body is measured as the store measured the content', () => {
+	/** A stored placeholder of exactly `bytes` bytes: the old form, padded. */
+	const stored = (bytes: number): string => OLD_FORM + 'x'.repeat(bytes - new TextEncoder().encode(OLD_FORM).length);
+	/** The body MarkdownRenderer hands on: the chat's fence header, then the content, id marker stripped. */
+	const rendered = (content: string, typed: boolean): string =>
+		resolveArtifactRender(artifactFenceHeader({ title: 'Ein längerer Titel für das Angebot', type: 'markdown', id: 'abc123', typed }) + content).src;
+
+	it.each([['an untyped fence', false], ['a typed fence', true]])('%s: a stored placeholder at the bound gets the badge, one byte over does not', (_l, typed) => {
+		expect(rendered(stored(PLACEHOLDER_MAX_BYTES), typed).length, 'positive control: with its header the body is over the bound').toBeGreaterThan(PLACEHOLDER_MAX_BYTES);
+		expect(fenceHoldsOnlyPlaceholder(rendered(stored(PLACEHOLDER_MAX_BYTES), typed))).toBe(true);
+		expect(fenceHoldsOnlyPlaceholder(rendered(stored(PLACEHOLDER_MAX_BYTES + 1), typed))).toBe(false);
+	});
+
+	it('a fence the model wrote without the chat\'s header is measured as it stands', () => {
+		expect(fenceHoldsOnlyPlaceholder(OLD_FORM)).toBe(true);
+		expect(fenceHoldsOnlyPlaceholder('# Pitch\n\nOur offer.')).toBe(false);
+	});
+});
+
 describe('the badge on the inline card', () => {
 	const card = `<div class="artifact-container artifact-collapsed" data-title="Pitch">
 			<div class="artifact-toolbar" data-action="toggle">
@@ -85,6 +111,12 @@ describe('the badge on the inline card', () => {
 		const badge = el.querySelector('[data-testid="artifact-inline-lost-badge"]')!;
 		expect(badge.querySelector('img')).toBeNull();
 		expect(badge.textContent).toBe('<img src=x onerror=alert(1)> "a"');
+	});
+
+	it('shows a label with replacement patterns as written', () => {
+		const el = document.createElement('div');
+		el.innerHTML = withPlaceholderBadge(card, "a $& b $' c");
+		expect(el.querySelector('[data-testid="artifact-inline-lost-badge"]')!.textContent).toBe("a $& b $' c");
 	});
 
 	it('leaves a card without a title span unchanged', () => {

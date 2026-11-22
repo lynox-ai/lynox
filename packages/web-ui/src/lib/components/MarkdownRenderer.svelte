@@ -11,7 +11,7 @@
 	import { fixMarkdownPreprocessing } from '../utils/markdown-preprocess.js';
 	import { deckFrameHeight, buildArtifactBubbleFrame } from '../utils/artifact-frame.js';
 	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
-	import { holdsOnlyPlaceholder, resolveArtifactRender, withPlaceholderBadge } from '../utils/artifact-inline.js';
+	import { fenceHoldsOnlyPlaceholder, resolveArtifactRender, withPlaceholderBadge } from '../utils/artifact-inline.js';
 	import { parseFences, type CodeFence } from '../utils/code-fences.js';
 	import { OWN_MARK, resolveOwnAction } from '../utils/markdown-actions.js';
 	import { saveOrShareBlob } from '../utils/save-blob.js';
@@ -198,7 +198,7 @@
 		// A body that holds only the engine's placeholder gets the gallery's badge
 		// ("Content missing"): the card reads the message, not the store's flag.
 		const card = buildArtifactCard(code);
-		return holdsOnlyPlaceholder(resolveArtifactRender(code).src) ? withPlaceholderBadge(card, t('artifacts.lost_badge')) : card;
+		return fenceHoldsOnlyPlaceholder(resolveArtifactRender(code).src) ? withPlaceholderBadge(card, t('artifacts.lost_badge')) : card;
 	}
 
 	function buildArtifactCard(code: string): string {
@@ -981,12 +981,18 @@
 	}
 
 	/* "Content missing" next to the name, as in the gallery and the chips: the
-	   body holds only the engine's placeholder. Never truncated, the name is. */
+	   body holds only the engine's placeholder. Never truncated, the name is.
+	   The badge takes the name's auto margin, so it stays beside the name and
+	   the buttons keep the right edge. */
+	div :global(.artifact-title:has(+ .artifact-lost-badge)) {
+		margin-right: 0;
+	}
 	div :global(.artifact-lost-badge) {
 		font-size: 0.625rem;
 		color: var(--color-warning);
 		flex-shrink: 0;
 		white-space: nowrap;
+		margin-right: auto;
 	}
 
 	/* Chevron: the universal expand affordance; rotates 90° when expanded. */
