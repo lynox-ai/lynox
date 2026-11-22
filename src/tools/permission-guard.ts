@@ -18,7 +18,7 @@ import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 import { PROMPT_TEXT_BRAND, type PromptText } from '../types/agent.js';
 import { promptSegments, promptValue, pv, singleLine } from '../core/prompt-value.js';
 import { dialogToolHead, dialogToolWord } from './tool-words.js';
-import { GUARD_TEXT, QUOTE_MARKS, actionWords, escapeQuoted, ruleLabel, type DialogLanguage } from './dialog-text.js';
+import { GUARD_TEXT, QUOTE_MARKS, actionWords, endsSentence, escapeQuoted, ruleLabel, type DialogLanguage } from './dialog-text.js';
 import { BUILTIN_TOOL_NAMES } from '../core/builtin-tool-names.js';
 
 // lynox-internal secret files. Specific names, NOT the whole `~/.lynox/` dir — the agent may
@@ -2006,7 +2006,7 @@ function framedIn(language: DialogLanguage): (strings: TemplateStringsArray, ...
       const last = frames.length - 1;
       const lastValue = values[last - 1];
       const end = frames[last] !== '' ? frames[last]! : lastValue !== undefined && 'systemText' in lastValue ? lastValue.systemText : '';
-      if (end !== '' && !/[.!?…\]]$/u.test(end.trimEnd())) frames[last] = `${frames[last]!.trimEnd()}.`;
+      if (end !== '' && !endsSentence(end)) frames[last] = `${frames[last]!.trimEnd()}.`;
     }
     const prompt = pv(Object.assign(frames, { raw: frames }) as unknown as TemplateStringsArray, ...values.map((v, i) => ('agentText' in v
       ? promptValue(quoted(singleLine(v.agentText)))

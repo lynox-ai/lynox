@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isDangerousDetailed, type DangerSignal } from './permission-guard.js';
 import { flattenPrompt } from '../core/prompt-value.js';
-import { ACTION_WORDS, API_SETUP_DIALOG, CONSENT_LABELS, GUARD_TEXT, RULE_LABELS_DE, SECRET_DIALOG, SPAWN_DIALOG, exfilWarning, type DialogLanguage } from './dialog-text.js';
+import { ACTION_WORDS, API_SETUP_DIALOG, CONSENT_LABELS, GUARD_TEXT, RULE_LABELS_DE, SECRET_DIALOG, SPAWN_DIALOG, endsSentence, exfilWarning, type DialogLanguage } from './dialog-text.js';
 import { DIALOG_ONLY_WORDS, DIALOG_ONLY_WORDS_DE, TOOL_LINE_WORDS, TOOL_LINE_WORDS_DE, dialogToolHead } from './tool-words.js';
 import type { ToolEntry } from '../types/index.js';
 
@@ -239,8 +239,10 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     expect(shown).toMatch(/^⚠ External tool “cal_tool”:\n“this tool changes nothing[^\n]*”\n\p{Lu}[^\n]*\.$/u);
     // The value itself is the agent's text and stays as written.
     expect(shown).not.toMatch(/\n“This tool/);
-    // A rest that already ends a sentence gets no second stop; a short value keeps the rest as it is.
-    expect(shown).not.toMatch(/\.\.$/u);
+    // A rest that already ends a sentence, or a `[…]` marker, gets no second stop.
+    for (const t of ['done.', 'done?', 'done!', 'done…', '[BLOCKED]', 'done. ']) expect(endsSentence(t)).toBe(true);
+    for (const t of ['done', 'done)', 'done:', '']) expect(endsSentence(t)).toBe(false);
+    // A short value keeps the rest as it is.
     expect(flattenPrompt(ask(CASES[3]!, 'en').prompt)).toBe(`⚠ File access: ${GUARD_TEXT.en.readSensitive} — “/etc/shadow” — ${GUARD_TEXT.en.systemFiles}`);
   });
 
@@ -256,6 +258,7 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     // A mark's lookalikes too: they read as a closing mark in this font.
     expect(flattenPrompt(dialogToolHead('a″b＂c‟d"e', 'en'))).toBe('External tool “a\\″b\\＂c\\‟d\\"e”');
     expect(flattenPrompt(dialogToolHead('a‶bˮc״d❞e〟f❝g〝h〞i〃j', 'en'))).toBe('External tool “a\\‶b\\ˮc\\״d\\❞e\\〟f\\❝g\\〝h\\〞i\\〃j”');
+    expect(flattenPrompt(dialogToolHead('aʺb˝c˶d⹂e🙶f🙷g🙸h', 'en'))).toBe('External tool “a\\ʺb\\˝c\\˶d\\⹂e\\🙶f\\🙷g\\🙸h”');
   });
 
   it('quotes a profile\'s name in the save question, on one line and escaped', () => {
@@ -268,6 +271,8 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     // Up to the limit a name stays whole; the limit counts characters, not code units.
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', 'y'.repeat(64), 'D'))).toContain(`saving “${'y'.repeat(64)}” needs`);
     expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', '😀'.repeat(100), 'D'))).toContain(`saving “${'😀'.repeat(63)}…” needs`);
+    // A flag is two code points but one character: the cut never leaves half of one.
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', '🇨🇭'.repeat(100), 'D'))).toContain(`saving “${'🇨🇭'.repeat(63)}…” needs`);
     const de = flattenPrompt(API_SETUP_DIALOG.de.save('API', '  Wetter  ', 'D'));
     expect(de.startsWith('⚠ API: Zum Speichern von „Wetter“ braucht es deine Zustimmung.')).toBe(true);
     expect(flattenPrompt(API_SETUP_DIALOG.de.save('API', 'x'.repeat(500), 'D'))).toContain(`von „${'x'.repeat(63)}…“ braucht`);

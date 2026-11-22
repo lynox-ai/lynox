@@ -26,20 +26,28 @@ export const QUOTE_MARKS: Readonly<Record<DialogLanguage, readonly [open: string
 
 /** `\` and every character that reads as a double quotation mark (the straight one, both
  *  languages' marks, and their lookalikes), so a value cannot close the marks around it. */
-const QUOTE_LIKE = /[\\"“”„‟″‶＂〝〞〟〃ˮ״❝❞]/gu;
+const QUOTE_LIKE = /[\\"“”„‟″‶＂〝〞〟〃ˮ״❝❞ʺ˝˶⹂🙶🙷🙸]/gu;
 
 /** `text` as it stands between a dialog's quotation marks: each quote-like character escaped. */
 export function escapeQuoted(text: string): string {
   return text.replace(QUOTE_LIKE, (c) => `\\${c}`);
 }
 
-/** The longest a profile's name is shown in a question, "…" included: a long name cannot push
- *  the disclosure after it out of view. */
+/** Whether `text` already ends a sentence (or a `[…]` marker), so no full stop is added after it. */
+export function endsSentence(text: string): boolean {
+  return /[.!?…\]]$/u.test(text.trimEnd());
+}
+
+/** The longest a profile's name is shown in a question, "…" included and before escaping: a long
+ *  name cannot push the disclosure after it out of view. */
 const PROFILE_NAME_MAX = 64;
 
-/** A profile's name as a question quotes it: on one line, at most 64 characters, escaped. */
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+/** A profile's name as a question quotes it: on one line, at most 64 characters as a reader counts
+ *  them (a flag or an emoji with its modifier is one), then escaped. */
 function shownName(name: string): string {
-  const chars = Array.from(singleLine(name).trim());
+  const chars = Array.from(GRAPHEMES.segment(singleLine(name).trim()), (g) => g.segment);
   return escapeQuoted(chars.length > PROFILE_NAME_MAX ? `${chars.slice(0, PROFILE_NAME_MAX - 1).join('')}…` : chars.join(''));
 }
 
