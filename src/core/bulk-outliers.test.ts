@@ -419,6 +419,11 @@ describe('markersOf on a dot a browser shows, written otherwise', () => {
     }
   });
 
+  it('does not join two halves of a character around a hidden one into a letter, where a browser shows two replacement characters', () => {
+    expect(markersOf('Mehr bei evil\ud840\u200b\udc00.com').get('link')).toEqual(new Set());
+    expect(markersOf('<p>Mehr bei evil\ud840&#8203;\udc00.com</p>').get('link')).toEqual(new Set());
+  });
+
   it('flags no verdict of 200 whose words carry soft hyphens and joiners where a text breaks or joins them', () => {
     const inputs = run(200, (t) => withAfter(t, {
       description: `Unser Grün\u00adtee ist mild und aus\u00adgewogen. Bio\u200d-Qualität, Ei\u00adche.\u00adDesign, Kl.\u200bGr. M. Dose 12\u2060x\u20608 cm. Im Tee\u00adshop-Angebot, Bio\u200binfo auf der Dose.`,
