@@ -2180,10 +2180,10 @@ export class Engine {
       // a table without an id is named by its kind only.
       const collectionIds = this._dataStore.ensureCollectionIds();
       if (collectionIds.failed !== null) {
-        process.stderr.write(`[lynox] DataStore: tables could not get their ids; a mandate's rows name them by their kind only until a restart assigns them: ${collectionIds.failed}\n`);
+        process.stderr.write(`[lynox] DataStore: tables could not get their ids; a mandate's rows name them by their kind only until a restart assigns them${reducedLog ? '' : `: ${collectionIds.failed}`}\n`);
       }
       if (collectionIds.indexFailed !== null) {
-        process.stderr.write(`[lynox] DataStore: the unique index on table ids could not be created: ${collectionIds.indexFailed}\n`);
+        process.stderr.write(`[lynox] DataStore: the unique index on table ids could not be created${reducedLog ? '' : `: ${collectionIds.indexFailed}`}\n`);
       }
       for (const r of collectionIds.renumbered) {
         process.stderr.write(`[lynox] DataStore: ${tableInLog(r.name, reducedLog)} shared its id with another and got a new one: ${r.from} -> ${r.to}\n`);

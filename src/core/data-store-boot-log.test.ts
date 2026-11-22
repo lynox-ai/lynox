@@ -101,4 +101,29 @@ describe('Engine boot — DataStore lines in the container log', () => {
     expect(lines).toHaveLength(3);
     for (const line of lines) expect(line).not.toMatch(/_kunde/);
   });
+
+  /** The id lines, whose cases a real file does not give: the database's text is stubbed. */
+  function stubIdFailures(): void {
+    vi.spyOn(DataStore.prototype, 'ensureCollectionIds').mockReturnValue({
+      assigned: 0, renumbered: [], failed: 'no such table: ds_secret_kunde', indexFailed: 'index on ds_secret_kunde',
+    });
+  }
+
+  it('gives the database text on the id lines where no exact connection is held', async () => {
+    const dir = dataDir();
+    stubIdFailures();
+    const lines = await bootLines(dir);
+    expect(lines).toContain("[lynox] DataStore: tables could not get their ids; a mandate's rows name them by their kind only until a restart assigns them: no such table: ds_secret_kunde\n");
+    expect(lines).toContain('[lynox] DataStore: the unique index on table ids could not be created: index on ds_secret_kunde\n');
+  });
+
+  it('leaves out the database text on the id lines under an exact connection', async () => {
+    const dir = dataDir();
+    stubIdFailures();
+    reduceErrorTextForProcess();
+    const lines = await bootLines(dir);
+    expect(lines).toContain("[lynox] DataStore: tables could not get their ids; a mandate's rows name them by their kind only until a restart assigns them\n");
+    expect(lines).toContain('[lynox] DataStore: the unique index on table ids could not be created\n');
+    for (const line of lines) expect(line).not.toMatch(/_kunde/);
+  });
 });
