@@ -240,7 +240,7 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     expect(flattenPrompt(dialogToolHead('a”b„c“d', 'en'))).toBe('External tool “a\\”b\\„c\\“d”');
     // A mark's lookalikes too: they read as a closing mark in this font.
     expect(flattenPrompt(dialogToolHead('a″b＂c‟d"e', 'en'))).toBe('External tool “a\\″b\\＂c\\‟d\\"e”');
-    expect(flattenPrompt(dialogToolHead('a‶bˮc״d❞e', 'en'))).toBe('External tool “a\\‶b\\ˮc\\״d\\❞e”');
+    expect(flattenPrompt(dialogToolHead('a‶bˮc״d❞e〟f❝g〝h〞i〃j', 'en'))).toBe('External tool “a\\‶b\\ˮc\\״d\\❞e\\〟f\\❝g\\〝h\\〞i\\〃j”');
   });
 
   it('quotes a profile\'s name in the save question, on one line and escaped', () => {
@@ -250,8 +250,12 @@ describe('a value in a confirmation is quoted as its language quotes', () => {
     // A long name is cut, so the disclosure after it stays in view.
     const long = flattenPrompt(API_SETUP_DIALOG.en.save('API', 'x'.repeat(500), 'D'));
     expect(long).toContain(`saving “${'x'.repeat(63)}…” needs`);
-    const de = flattenPrompt(API_SETUP_DIALOG.de.save('API', 'Wetter', 'D'));
+    // Up to the limit a name stays whole; the limit counts characters, not code units.
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', 'y'.repeat(64), 'D'))).toContain(`saving “${'y'.repeat(64)}” needs`);
+    expect(flattenPrompt(API_SETUP_DIALOG.en.save('API', '😀'.repeat(100), 'D'))).toContain(`saving “${'😀'.repeat(63)}…” needs`);
+    const de = flattenPrompt(API_SETUP_DIALOG.de.save('API', '  Wetter  ', 'D'));
     expect(de.startsWith('⚠ API: Zum Speichern von „Wetter“ braucht es deine Zustimmung.')).toBe(true);
+    expect(flattenPrompt(API_SETUP_DIALOG.de.save('API', 'x'.repeat(500), 'D'))).toContain(`von „${'x'.repeat(63)}…“ braucht`);
   });
 
   it('names the tiers as the settings do, in the sentence and on the buttons', () => {
