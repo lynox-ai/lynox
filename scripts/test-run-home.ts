@@ -112,9 +112,20 @@ export function evalResultsDir(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /**
- * Point `HOME` at a directory inside the run root and remove the data-dir variables. Returns the
- * home. Called from `globalSetup`, after the run root exists: the variables reach the worker
- * processes the same way `TMPDIR` does.
+ * Point `HOME` at a directory inside the run root, remove the data-dir variables and pick the
+ * local embedding provider. Returns the home. Called from `globalSetup`, after the run root
+ * exists: the variables reach the worker processes the same way `TMPDIR` does.
+ *
+ * ⛔ WHY THE EMBEDDING PROVIDER. An engine booted without a choice embeds with the ONNX model,
+ * which it downloads into `$HOME/.cache/huggingface` on first use: 470 MB from huggingface.co.
+ * The home above is new for every run, so every run downloaded it again, and a test that boots
+ * an engine waited on that download inside its own timeout (measured on
+ * `compaction-taint.test.ts`: 470,268,533 bytes, tests 22.7 s against 7.2 s with `local`; on CI
+ * every test of such a file ran into its ceiling whenever the download was slow). `local` is the
+ * hash provider, with no download and the same 384 dimensions. A run that sets `onnx` or `local`
+ * keeps its choice, so a run that asks for the real model still gets it. Any other value, empty
+ * included, is replaced: the config ignores it and would fall back to ONNX and its download.
+ * (`HF_HOME`, when set, moves the model cache out of the home; this does not depend on it.)
  */
 export function redirectHomeForRun(runRoot: string): string {
   const home = join(runRoot, RUN_HOME_DIR);
@@ -125,6 +136,8 @@ export function redirectHomeForRun(runRoot: string): string {
   process.env.HOME = home;
   delete process.env.LYNOX_DATA_DIR;
   delete process.env.LYNOX_DIR;
+  const provider = process.env.LYNOX_EMBEDDING_PROVIDER;
+  if (provider !== 'onnx' && provider !== 'local') process.env.LYNOX_EMBEDDING_PROVIDER = 'local';
   return home;
 }
 

@@ -3,10 +3,13 @@
  * that the guard refuses every other shape, and that the redirect does what it says.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getLynoxDir } from './config.js';
+import { getLynoxDir, loadConfig, reloadConfig } from './config.js';
+import { LocalProvider, OnnxProvider } from './embedding.js';
+import { initEmbeddingProvider } from './engine-init.js';
+import type { RunHistory } from './run-history.js';
 import { RUN_MARKER_ENV, RUN_MARKER_FILE } from '../../scripts/test-run-tmpdir.js';
 import {
   HOME_GUARD_RAN, REAL_HOME_ENV, RUN_HOME_DIR, evalOperatorConfig, evalResultsDir, operatorHome, readOperatorConfig,
@@ -26,6 +29,46 @@ describe('the suite runs with its own home', () => {
 
   it('the guard ran in this worker, so the project still has it in its setupFiles', () => {
     expect((globalThis as Record<symbol, unknown>)[HOME_GUARD_RAN]).toBe(true);
+  });
+
+  // Skipped only when the run itself asked for the real model (`LYNOX_EMBEDDING_PROVIDER=onnx`
+  // exported before the run), which `redirectHomeForRun` keeps on purpose.
+  it.skipIf(process.env.LYNOX_EMBEDDING_PROVIDER === 'onnx')('an engine booted in this worker embeds locally, so it downloads no model', () => {
+    // The ONNX provider downloads its model into the run's home on first use; see
+    // `redirectHomeForRun`. A booted engine picks the provider this way.
+    reloadConfig();
+    const provider = initEmbeddingProvider(loadConfig(), {} as RunHistory);
+    expect(provider).toBeInstanceOf(LocalProvider);
+  });
+});
+
+describe('the local embedding provider is the test run’s, not the product’s', () => {
+  it('an engine with no provider chosen still embeds with ONNX', () => {
+    // Constructing the ONNX provider loads nothing; the model loads on the first `embed`.
+    const before = process.env.LYNOX_EMBEDDING_PROVIDER;
+    try {
+      delete process.env.LYNOX_EMBEDDING_PROVIDER;
+      reloadConfig();
+      expect(initEmbeddingProvider(loadConfig(), {} as RunHistory)).toBeInstanceOf(OnnxProvider);
+    } finally {
+      if (before === undefined) delete process.env.LYNOX_EMBEDDING_PROVIDER;
+      else process.env.LYNOX_EMBEDDING_PROVIDER = before;
+      reloadConfig();
+    }
+  });
+
+  it('no product source imports the test run’s home setup', () => {
+    const repo = join(import.meta.dirname, '..', '..');
+    const roots = ['src', ...readdirSync(join(repo, 'packages')).map((p) => join('packages', p, 'src'))];
+    const importers: string[] = [];
+    for (const root of roots) {
+      if (!existsSync(join(repo, root))) continue;
+      for (const rel of readdirSync(join(repo, root), { recursive: true, encoding: 'utf8' })) {
+        if (!/\.(ts|js|svelte)$/.test(rel) || /\.test\.ts$/.test(rel)) continue;
+        if (readFileSync(join(repo, root, rel), 'utf8').includes('test-run-home')) importers.push(join(root, rel));
+      }
+    }
+    expect(importers).toEqual([]);
   });
 });
 
@@ -163,6 +206,37 @@ describe('redirectHomeForRun', () => {
       if (before.home === undefined) delete process.env.HOME; else process.env.HOME = before.home;
       if (before.data === undefined) delete process.env.LYNOX_DATA_DIR; else process.env.LYNOX_DATA_DIR = before.data;
       if (before.legacy === undefined) delete process.env.LYNOX_DIR; else process.env.LYNOX_DIR = before.legacy;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('picks the local embedding provider unless the run chose onnx or local', () => {
+    const before = { home: process.env.HOME, provider: process.env.LYNOX_EMBEDDING_PROVIDER };
+    const root = mkdtempSync(join(tmpdir(), 'home-redirect-embedding-'));
+    try {
+      delete process.env.LYNOX_EMBEDDING_PROVIDER;
+      mkdirSync(join(root, 'unset'));
+      redirectHomeForRun(join(root, 'unset'));
+      expect(process.env.LYNOX_EMBEDDING_PROVIDER).toBe('local');
+
+      // The positive control: a run or test that asks for the real model must still get it.
+      process.env.LYNOX_EMBEDDING_PROVIDER = 'onnx';
+      mkdirSync(join(root, 'set'));
+      redirectHomeForRun(join(root, 'set'));
+      expect(process.env.LYNOX_EMBEDDING_PROVIDER).toBe('onnx');
+
+      // A value the config ignores (empty, or a typo) would leave the engine on ONNX.
+      for (const ignored of ['', 'onxx']) {
+        process.env.LYNOX_EMBEDDING_PROVIDER = ignored;
+        const sub = join(root, `ignored-${ignored.length}`);
+        mkdirSync(sub);
+        redirectHomeForRun(sub);
+        expect(process.env.LYNOX_EMBEDDING_PROVIDER).toBe('local');
+      }
+    } finally {
+      if (before.home === undefined) delete process.env.HOME; else process.env.HOME = before.home;
+      if (before.provider === undefined) delete process.env.LYNOX_EMBEDDING_PROVIDER;
+      else process.env.LYNOX_EMBEDDING_PROVIDER = before.provider;
       rmSync(root, { recursive: true, force: true });
     }
   });
