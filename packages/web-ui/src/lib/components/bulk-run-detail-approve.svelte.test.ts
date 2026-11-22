@@ -1902,8 +1902,9 @@ describe('verdicts that differ from the rest of the run', () => {
 		expect(seqsShown()).toEqual([3, 5, 7]);
 		expect(filtered()).toBe(`${tf('bulk.outliers.filtered.link', { n: '3' })} ${t('bulk.outliers.spread.show_all')}`);
 		expect(shows()).toEqual([t('bulk.outliers.spread.show_all'), t('bulk.outliers.spread.show_one')]);
-		const linkButton = target.querySelectorAll('[data-testid="bulk-outlier-spread-show"]')[0]!;
-		expect(linkButton.getAttribute('aria-pressed')).toBe('true');
+		// Over the table, not below it.
+		const line = target.querySelector('[data-testid="bulk-outlier-filtered"]')!;
+		expect(line.compareDocumentPosition(target.querySelector('table')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
 		// Another line's button changes the kind shown.
 		buttonByText(t('bulk.outliers.spread.show_one'))!.click();
@@ -1928,13 +1929,33 @@ describe('verdicts that differ from the rest of the run', () => {
 		expect(filtered()).toBeUndefined();
 	});
 
-	it('offers no button on a line whose verdicts the server does not name', async () => {
+	it('offers no button on a line whose verdicts the server does not name, or names none of', async () => {
 		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
-			spread: [{ kind: 'link', count: 20, hosts: ['a.example'] }] } });
+			spread: [{ kind: 'link', count: 20, hosts: ['a.example'] }, { kind: 'email', count: 20, hosts: ['b.example'], seqs: [] }] } });
 		targets = many(25);
 		await render();
-		expect(spread()).toHaveLength(1);
+		expect(spread()).toHaveLength(2);
 		expect(target.querySelector('[data-testid="bulk-outlier-spread-show"]')).toBeNull();
+	});
+
+	it('shows the table of another run whole, without the line over it, after filtering this one', async () => {
+		const judgedRun = (id: string) => makeRun({ id, total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		run = judgedRun('r1');
+		runsById['r2'] = judgedRun('r2');
+		targets = many(25);
+		const { default: BulkRunDetail } = await import('./BulkRunDetail.svelte');
+		const props = $state({ runId: 'r1', onBack: () => {}, onOpen: () => {} });
+		component = mount(BulkRunDetail, { target, props });
+		await settle();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(rowNames()).toHaveLength(3);
+		props.runId = 'r2';
+		await settle();
+		expect(target.querySelector('[data-testid="bulk-outlier-filtered"]')).toBeNull();
+		expect(rowNames()).toHaveLength(25);
+		expect(buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))).toBeDefined();
 	});
 
 	it('shows no line and no mark where the run is not one to approve', async () => {

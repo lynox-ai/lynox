@@ -553,7 +553,8 @@
 	const outlierCount = $derived(bulkOutlierCountText(outliers, view));
 	const outlierSpread = $derived(bulkOutlierSpreadTexts(outliers, view));
 	const outlierSpreadClosing = $derived(bulkOutlierSpreadClosing(outliers, view));
-	const spreadCount = $derived(spreadSeqs === null ? 0 : spreadSeqs.size);
+	// The rows the table shows, not the server's count: the line over the table says what is in it.
+	const spreadCount = $derived(spreadSeqs === null ? 0 : shownTargets.length);
 
 	const btn = 'rounded-[var(--radius-sm)] px-3 py-1.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed';
 	const btnPrimary = `${btn} bg-accent text-accent-fg hover:opacity-90`;
@@ -696,7 +697,7 @@
 						<div class="text-sm mb-2 rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2 space-y-1" data-testid="bulk-outlier-spread-box">
 							{#each outlierSpread as line, i (i)}
 								{@const entry = outliers.spread[i]!}
-								<p class="[overflow-wrap:anywhere]"><span data-testid="bulk-outlier-spread">{bulkVisibleText(line)}</span>{#if entry.seqs !== undefined && entry.seqs.length > 0}<button type="button" class="block sm:inline sm:ml-1 whitespace-nowrap underline text-accent hover:opacity-80" data-testid="bulk-outlier-spread-show" bind:this={spreadButtons[i]} aria-pressed={spreadKind === entry.kind} onclick={() => toggleSpread(entry.kind)}>{bulkOutlierShowText(entry.seqs.length, spreadKind === entry.kind, view)}</button>{/if}</p>
+								<p class="[overflow-wrap:anywhere]"><span data-testid="bulk-outlier-spread">{bulkVisibleText(line)}</span>{#if entry.seqs !== undefined && entry.seqs.length > 0}<button type="button" class="block sm:inline sm:ml-1 whitespace-nowrap underline text-accent hover:opacity-80" data-testid="bulk-outlier-spread-show" bind:this={spreadButtons[i]} onclick={() => toggleSpread(entry.kind)}>{bulkOutlierShowText(entry.seqs.length, spreadKind === entry.kind, view)}</button>{/if}</p>
 							{/each}
 							{#if outlierSpreadClosing}
 								<p data-testid="bulk-outlier-spread-closing">{outlierSpreadClosing}</p>
@@ -790,7 +791,7 @@
 							</tbody>
 						</table>
 					</div>
-					{#if foldedUnchanged > 0}
+					{#if foldedUnchanged > 0 && spreadKind === null}
 						<button type="button" class="{btnPlain} mt-2" onclick={() => { showUnchanged = true; }}>{tf(shopify ? bulkOne('bulk.preview.show_unchanged', foldedUnchanged) : bulkOne('bulk.preview.show_unchanged_targets', foldedUnchanged), { n: String(foldedUnchanged) })}</button>
 					{/if}
 					{#if targets.length < run.total}
