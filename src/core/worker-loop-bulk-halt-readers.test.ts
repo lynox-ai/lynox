@@ -75,7 +75,8 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
     expect(h.sent[1]!.body).not.toContain('eva@kanzlei.example');
     // The result is stored without the lines; the lines are stored beside it, for the owner's reads.
     expect(h.recorded).toEqual([`lynox konnte den Zugang zum Shop nicht erneuern.${COUNTS}`]);
-    expect(h.recordedNotes).toEqual([[NOTE.en]]);
+    const storedLines = [NOTE.en];
+    expect(h.recordedNotes).toEqual([storedLines]);
   });
 
   it('builds every grant\'s push from the sentence in the owner\'s language, as before the lines were left out', async () => {
