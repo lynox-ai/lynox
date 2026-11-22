@@ -21,7 +21,7 @@ import type { BulkWriteEffect } from '../types/index.js';
 import type { AttachedConnection } from './bulk-connection.js';
 import { coercePlainColumnValue, SYSTEM_COLUMNS } from './data-store.js';
 import {
-  BULK_CLAIM_HEARTBEAT_MS, BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, sameValue,
+  BULK_CLAIM_HEARTBEAT_MS, BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, externalHostOf, sameValue,
   type ActualImage, type ApplyTarget, type BeforeImage, type BulkHaltReason, type BulkLedger, type BulkRunForApply, type BulkTargetError,
 } from './bulk-ledger.js';
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
@@ -29,6 +29,8 @@ import { processUmask } from './workspace-rel.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
 import { canonicalHtml, withinReadingBounds } from './html-tree.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
+import { shopifyConsentBlock } from './bulk-shopify.js';
+import { isShopifyStoreHostName } from './shopify-graphql.js';
 import { sidecarReplaceMode, sidecarWriteModes } from './workspace-write-modes.js';
 import { statEntry, unlinkAt, WorkspaceAccessError, writeFileAt } from './workspace-fd.js';
 
@@ -207,6 +209,13 @@ export interface BulkEffectDeps {
   trailFor: (run: BulkRunForApply) => BulkRunTrail | null;
   /** The sentences of the outcome's summary, in the instance's notice language; English without. */
   notices?: BulkNotices | undefined;
+  /**
+   * The grant of the Shopify connection a store host maps to (`OAuthGrantRecord`), read on every
+   * call of a Shopify run: which customer text it was confirmed under decides which fields the run
+   * may write (`shopifyConsentBlock`). Without it, or for a host no single connection maps to, no
+   * grant is known, and the run writes only what a connection confirmed under no text may.
+   */
+  shopifyGrantOf?: ((host: string) => unknown) | undefined;
 }
 
 /**
@@ -281,6 +290,29 @@ async function applyRunEffect(
   if (ledger.isWriteSwitchedOff(runId)) {
     ledger.halt(runId, BULK_HALT_REASONS.shopifyWriteOff);
     return { status: 'refused', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.shopifyWriteOff), say) };
+  }
+  // A run on a store host that is not a Shopify run by its rows (`shopifyApplyOf` null) writes
+  // nothing: neither the consent below nor the markup check before sending would read it.
+  const host = externalHostOf(run.targetSystem);
+  const apply = ledger.shopifyApplyOf(runId);
+  if (apply === null && host !== null && isShopifyStoreHostName(host)) {
+    ledger.halt(runId, BULK_HALT_REASONS.contract);
+    return { status: 'refused', summary: summarize(ledger, runId, say.halted('apply', BULK_HALT_REASONS.contract), say) };
+  }
+  // A Shopify run that writes a field its connection was not confirmed for writes nothing: halted
+  // before its writer is built, on the first call and on every resume. An undo of a run that was not
+  // itself an undo restores what that run found and is not held back; an undo of an undo writes the
+  // new values again and is held like the run that first wrote them. Further down a chain every undo
+  // is held, also one that only restores: held too much, never too little.
+  const source = run.kind === 'undo' && run.sourceRunId !== null ? ledger.getRunForApply(run.sourceRunId) : null;
+  const restoresOnly = source !== null && source.kind !== 'undo';
+  if (!restoresOnly) {
+    const blocked = apply === null ? [] : shopifyConsentBlock(apply, host === null ? undefined : deps.shopifyGrantOf?.(host));
+    if (blocked.length > 0) {
+      ledger.halt(runId, BULK_HALT_REASONS.consentOutdated);
+      const nothingYet = run.applied === 0 && ledger.sentCount(runId) === 0;
+      return { status: 'refused', summary: summarize(ledger, runId, say.consentOutdated(blocked, nothingYet), say) };
+    }
   }
   const writer = deps.writerFor(run);
   if (!writer) {
@@ -806,7 +838,7 @@ export function dataStoreWriter(store: DataStore, collection: string): TargetWri
       if (row === null || typeof row !== 'object' || Array.isArray(row)) throw new Error('not a row');
       // Bulk apply runs in the worker, outside any conversation, so it holds no grant set:
       // the row reads as unknown, and an update keeps what the row already held beside it.
-      return store.putRowVerbatim(collection, row as Record<string, unknown>, { grants: null, runId: null });
+      return store.putRowVerbatim(collection, row as Record<string, unknown>, { grants: null, runId: null, writtenBy: null, untrusted: false });
     },
   };
 }
