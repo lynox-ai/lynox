@@ -195,8 +195,8 @@
 	}
 
 	function buildArtifact(code: string): string {
-		// A body that holds only the engine's placeholder gets the gallery's badge
-		// ("Content missing"): the card reads the message, not the store's flag.
+		// The gallery's badge ("Content missing"): for a card from a save, the store's flag the
+		// chat wrote into the fence; for a fence the model wrote, the store's rule on its text.
 		const card = buildArtifactCard(code);
 		return fenceHoldsOnlyPlaceholder(code) ? withPlaceholderBadge(card, t('artifacts.lost_badge')) : card;
 	}
@@ -981,7 +981,7 @@
 	}
 
 	/* "Content missing" next to the name, as in the gallery and the chips: the
-	   body holds only the engine's placeholder. Never truncated, the name is.
+	   saved file holds only the engine's placeholder. Never truncated, the name is.
 	   The badge takes the name's auto margin, so it stays beside the name and
 	   the buttons keep the right edge. */
 	div :global(.artifact-title:has(+ .artifact-lost-badge)) {

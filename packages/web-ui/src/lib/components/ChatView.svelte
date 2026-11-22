@@ -634,7 +634,9 @@
 							typed: TYPED_ARTIFACT_FENCE.has(artifactType),
 							// The store's flag, as the gallery and the chips show it. Not the call's
 							// content: an older thread can hold the placeholder there while the file
-							// holds the document.
+							// holds the document. The flag is the artifact's, read from its current
+							// file, so every card of that artifact carries it, as the file its open
+							// button opens does.
 							lost: id !== '' && getArtifacts().some((a) => a.id === id && a.lostOnSave === true),
 						});
 						result.push({ type: 'text', text: artifactFenceWrap(header, content) });
