@@ -32,6 +32,7 @@ import {
   timingSafeEqual,
 } from 'node:crypto';
 import type { KeyObject } from 'node:crypto';
+import type { PlainColumn } from './migration-rekey.js';
 import {
   CRYPTO_ALGORITHM,
   CRYPTO_KEY_LENGTH,
@@ -48,6 +49,16 @@ const ECDH_CURVE = 'x25519';
 /** Maximum chunk payload size (8 MB — leaves room for base64 overhead within 30 MB body limit). */
 export const MAX_CHUNK_BYTES = 8 * 1024 * 1024;
 
+/**
+ * Most chunks one migration carries. The destination refuses a manifest with more (it bounds the
+ * memory a transfer may hold), and the source checks it before it encrypts anything. Each kind
+ * of data starts its own chunks, so a part-filled chunk per kind uses up count without size.
+ */
+export const MIGRATION_MAX_CHUNKS = 64;
+
+/** Most bytes one migration carries, summed over the chunks' original sizes; checked on both sides like the count. */
+export const MIGRATION_MAX_TOTAL_BYTES = 500 * 1024 * 1024;
+
 /** Migration token TTL (30 minutes). */
 export const MIGRATION_TOKEN_TTL_MS = 30 * 60 * 1000;
 
@@ -62,6 +73,16 @@ export interface HandshakeServerPayload {
   serverPubKey: string;   // base64
   signature: string;      // hex — HMAC-SHA256(serverPubKey, signingKey)
   challengeNonce: string; // hex — 32 random bytes, used as HKDF salt
+  /**
+   * The importer that answers this handshake takes `sqlite_db_plain` stores. Only `true` counts;
+   * absent on an older destination. Not covered by the signature, and it need not be: the bundle
+   * goes only to the peer the signature names, and that peer already receives the vault's secrets
+   * in plaintext under the transfer key alone. A `true` from that peer gives it the stores' columns
+   * readable, which on the raw path it could not read; given the secrets it holds, that adds no
+   * reach. Anyone else on the way can only flip the flag, not read the bundle. A destination that
+   * does not take plaintext refuses such a manifest at `setManifest`.
+   */
+  acceptsPlainStores?: boolean | undefined;
 }
 
 export interface HandshakeClientPayload {
@@ -93,18 +114,40 @@ export interface MigrationManifest {
  * the table is derived from this list, so it cannot lag behind it.
  */
 export const MIGRATION_CHUNK_TYPES = [
-  'secrets', 'sqlite_db', 'artifacts', 'config', 'memory', 'sweeps', 'portable_dir',
+  'secrets', 'sqlite_db', 'sqlite_db_plain', 'artifacts', 'config', 'memory', 'sweeps', 'portable_dir',
 ] as const;
 
 /** A chunk type, derived from the list above so the two can never disagree. */
 export type MigrationChunkType = (typeof MIGRATION_CHUNK_TYPES)[number];
 
+/**
+ * The fields below `checksum` are optional and live on the meta, not on the manifest, on
+ * purpose: `computeManifestHash` covers the whole `chunks` array and so every field of a meta,
+ * which binds them into every chunk's additional data. A new top-level manifest field would not
+ * be covered.
+ */
 export interface MigrationChunkMeta {
   seq: number;
   type: MigrationChunkType;
   name: string;                     // e.g. 'history.db', 'vault_secrets'
   originalSize: number;             // bytes before encryption
   checksum: string;                 // SHA-256 of plaintext
+  /**
+   * `sqlite_db_plain` only, on its first (or only) part: the columns the source decrypted, and
+   * those its image does not have (`migration-rekey.ts`).
+   */
+  columns?: PlainColumn[] | undefined;
+  /** `sweeps` only, on its first (or only) part: `plain` when the ledgers' cells travel decrypted. Absent: raw. */
+  ledgerForm?: 'plain' | undefined;
+  /**
+   * With `ledgerForm: 'plain'`: the bytes the sweeps chunk takes in its raw form, which the
+   * destination's re-encrypted bundle must match exactly. The source computes it over the same
+   * files it sends in plaintext, each parsed and written back as `JSON.stringify(ledger, null, 2)`
+   * with its cells still encrypted, as `Buffer.byteLength(JSON.stringify({ files }))`: the
+   * destination writes each ledger that way, and a cell's ciphertext length depends only on its
+   * plaintext's.
+   */
+  ledgerRawBytes?: number | undefined;
 }
 
 // ── Key Generation ──

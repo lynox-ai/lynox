@@ -1,3 +1,4 @@
+import type { PlannedPipeline } from '../types/pipeline.js';
 import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -132,11 +133,17 @@ describe('WorkflowStore (Foundation Rework v2 — S3a)', () => {
     expect(store.rename('nope', 'X', null)).toBe(false);
   });
 
-  it('setConfirmedAt stamps definition_json.$.confirmedAt', () => {
+  it('stampCurrent stamps definition_json.$.confirmedAt with the stamp beside it, by exact id only', () => {
     const { store } = make();
-    store.upsert({ id: 'wf1', name: 'W', definitionJson: JSON.stringify({ id: 'wf1', name: 'W' }), isTemplate: true }, null);
-    expect(store.setConfirmedAt('wf1', '2026-07-01T00:00:00Z')).toBe(true);
-    expect((JSON.parse(store.get('wf1')!.definitionJson) as { confirmedAt: string }).confirmedAt).toBe('2026-07-01T00:00:00Z');
+    store.upsert({ id: 'wf1', name: 'W', definitionJson: JSON.stringify({ id: 'wf1', name: 'W', steps: [] }), isTemplate: true }, null);
+    store.upsert({ id: 'wf1-sibling', name: 'S', definitionJson: JSON.stringify({ id: 'wf1-sibling', name: 'S', steps: [] }), isTemplate: true }, null);
+    expect(store.stampCurrent('wf1', '2026-07-01T00:00:00Z')).toBe(true);
+    const blob = JSON.parse(store.get('wf1')!.definitionJson) as { confirmedAt: string; stamp: { at: string } };
+    expect(blob.confirmedAt).toBe('2026-07-01T00:00:00Z');
+    expect(blob.stamp.at).toBe('2026-07-01T00:00:00Z');
+    // A prefix is not an id: the sibling the old prefix match would have stamped keeps none.
+    expect(store.stampCurrent('wf', '2026-07-01T00:00:00Z')).toBe(false);
+    expect((JSON.parse(store.get('wf1-sibling')!.definitionJson) as { confirmedAt?: string }).confirmedAt).toBeUndefined();
   });
 
   it('remove deletes by exact id and by an unambiguous prefix', () => {
@@ -160,7 +167,7 @@ describe('WorkflowStore (Foundation Rework v2 — S3a)', () => {
 
     it('confirming', () => {
       const store = two();
-      expect(store.setConfirmedAt('wf-a', '2026-11-01T00:00:00Z')).toBe(true);
+      expect(store.stampCurrent('wf-a', '2026-11-01T00:00:00Z')).toBe(true);
       expect((JSON.parse(ab(store).definitionJson) as { confirmedAt?: string }).confirmedAt).toBeUndefined();
       const a = store.list().find((w) => w.id === 'wf-a')!;
       expect((JSON.parse(a.definitionJson) as { confirmedAt?: string }).confirmedAt).toBe('2026-11-01T00:00:00Z');
@@ -192,11 +199,11 @@ describe('WorkflowStore (Foundation Rework v2 — S3a)', () => {
   it('a prefix of two names neither: confirming and deleting write nothing', () => {
     const { store } = make();
     for (const id of ['wf-ab', 'wf-ac']) store.upsert({ id, name: id, definitionJson: JSON.stringify({ id, name: id }), isTemplate: true }, null);
-    expect(store.setConfirmedAt('wf-a', '2026-11-01T00:00:00Z')).toBe(false);
+    expect(store.stampCurrent('wf-a', '2026-11-01T00:00:00Z')).toBe(false);
     expect(store.remove('wf-a')).toBe(false);
     expect(store.list().map((w) => w.id).sort()).toEqual(['wf-ab', 'wf-ac']);
     for (const w of store.list()) expect((JSON.parse(w.definitionJson) as { confirmedAt?: string }).confirmedAt).toBeUndefined();
-    expect(store.setConfirmedAt('wf-ab', '2026-11-01T00:00:00Z')).toBe(true);   // the exact id still writes
+    expect(store.stampCurrent('wf-ab', '2026-11-01T00:00:00Z')).toBe(true);   // the exact id still writes
   });
 
   it('reads the exact id before a longer one it is a prefix of', () => {
@@ -223,7 +230,7 @@ describe('WorkflowStore (Foundation Rework v2 — S3a)', () => {
     // must short-circuit an empty id to a no-match instead of a table-wipe.
     expect(store.remove('')).toBe(false);
     expect(store.rename('', 'X', null)).toBe(false);
-    expect(store.setConfirmedAt('', '2026-07-01T00:00:00Z')).toBe(false);
+    expect(store.stampCurrent('', '2026-07-01T00:00:00Z')).toBe(false);
     expect(store.get('')).toBeUndefined();
     expect(store.list()).toHaveLength(2);
   });
@@ -422,12 +429,13 @@ describe('WorkflowStore authorship (engine.db v45)', () => {
     save(store, 'wf', MAX);
     ageEdit(db, 'wf');
     const before = store.authorship('wf');
-    expect(store.setConfirmedAt('wf', '2026-10-20T00:00:00.000Z')).toBe(true);
-    expect(store.setReviewedGrant('wf', '{}', '{}', '2026-10-20T00:00:00.000Z')).toBe(true);
+    const seen = JSON.parse(store.get('wf')!.definitionJson) as PlannedPipeline;
+    expect(store.stampCurrent('wf', '2026-10-20T00:00:00.000Z')).toBe(true);
+    expect(store.setReviewedGrant('wf', '{}', '{}', '2026-10-20T00:00:00.000Z', seen)).toBe(true);
     expect(store.acceptReviewedGrant({
       grantId: 'g-1', workflowId: 'wf', contractJson: '{}', by: 'local', name: null, at: '2026-10-20T00:00:00.000Z',
       checksum: '0'.repeat(64), binding: 'keyed', triggerId: 't-1', cron: '0 9 * * 1', boundParamsJson: '{}', afterUntrusted: false,
-    }, '{}', '2026-10-20T00:00:00.000Z')).toBe(true);
+    }, '{}', '2026-10-20T00:00:00.000Z', seen)).toBe(true);
     expect(store.authorship('wf')).toEqual(before);
   });
 

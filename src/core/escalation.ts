@@ -8,7 +8,14 @@ export interface EscalateOpts {
   /** Stable source key — one escalation thread per key, bumped on repeat
    *  (e.g. a scheduled task id, so a flaky daily cron = one thread, not N). */
   key: string;
+  /** The thread's title and the push's. Not a turn: someone else may have written it. */
   title: string;
+  /**
+   * The `user` turn that fronts the body where the conversation needs one. The model reads it as
+   * words the owner wrote, so it is a fixed sentence of the engine's, never the title or anything
+   * a run read.
+   */
+  opener: string;
   /** The context the user needs — becomes the thread's seed message. */
   body: string;
   /** What the push says instead of `body`, when the push speaks the owner's language and the seed
@@ -101,9 +108,11 @@ export function escalateToUser(
   const currentCount = threadStore.getThread(threadId)?.message_count ?? 0;
   // The turns the model reads when the owner replies, without the characters that render as
   // nothing (`hidden-text.ts`): a plan's title and a run's error can carry text someone else wrote.
+  // The title is not one of them: a `user` turn speaks with the owner's voice, so it holds the
+  // engine's opener, and the title is named in the body, where it reads as the report's data.
   const seeds: BetaMessageParam[] = [];
   if (lastRole === null || lastRole === 'assistant') {
-    seeds.push({ role: 'user', content: [{ type: 'text', text: stripHidden(opts.title) }] });
+    seeds.push({ role: 'user', content: [{ type: 'text', text: opts.opener }] });
   }
   seeds.push({ role: 'assistant', content: [{ type: 'text', text: stripHidden(opts.body) }] });
   threadStore.appendMessages(threadId, seeds, startSeq, { message_count: currentCount + seeds.length });

@@ -387,6 +387,8 @@ vi.mock('./data-store.js', () => ({
     this.dropEmptyCrmOverlaps = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
     this.ensureSourceColumns = vi.fn().mockReturnValue({ migrated: [], missing: [], invalid: [], failed: [] });
+    // @ts-expect-error mock constructor
+    this.ensureCollectionIds = vi.fn().mockReturnValue({ assigned: 0, renumbered: [], failed: null, indexFailed: null });
   }),
 }));
 
@@ -444,6 +446,9 @@ vi.mock('./run-history.js', () => ({
     this.insertToolCall = vi.fn();
     // @ts-expect-error mock constructor — sub-agent spend rollup (session.ts run-end).
     this.getDescendantCostUsd = mockGetDescendantCostUsd;
+    // @ts-expect-error mock constructor — the cost record the daily/monthly caps read. A
+    // history without it is treated as no cost record, and every run is refused.
+    this.getCostByDay = vi.fn().mockReturnValue([]);
     this.getApiCallsOfRun = mockGetApiCallsOfRun;
     // @ts-expect-error mock constructor
     this.getEmbeddings = vi.fn().mockReturnValue([]);
@@ -2720,6 +2725,40 @@ describe('Engine + Session (Orchestrator)', () => {
         'default',
         expect.any(String),
       );
+    });
+
+    it('rejects with the cap reason and submits nothing when the daily cap is reached (no host)', async () => {
+      const { engine } = await createEngineAndSession();
+      mockBatchCreate.mockClear();
+      const today = new Date().toISOString().slice(0, 10);
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: today, cost_usd: 5, run_count: 1 }] },
+        dailyCapUSD: 5, monthlyCapUSD: 500,
+      });
+      try {
+        await expect(engine.batch([{ id: 'r1', task: 'hello' }]))
+          .rejects.toThrow('Daily spending cap ($5) reached. Today: $5.00.');
+        expect(mockBatchCreate).not.toHaveBeenCalled();
+      } finally {
+        resetPersistentBudget();
+      }
+    });
+
+    it('submits the batch when spend is under the cap (no host)', async () => {
+      const { engine } = await createEngineAndSession();
+      mockBatchCreate.mockClear();
+      const today = new Date().toISOString().slice(0, 10);
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: today, cost_usd: 4.99, run_count: 1 }] },
+        dailyCapUSD: 5, monthlyCapUSD: 500,
+      });
+      try {
+        const batchId = await engine.batch([{ id: 'r1', task: 'hello' }]);
+        expect(mockBatchCreate).toHaveBeenCalledOnce();
+        expect(batchId).toBe('batch-abc');
+      } finally {
+        resetPersistentBudget();
+      }
     });
 
     it('inserts promptHash on child runs', async () => {

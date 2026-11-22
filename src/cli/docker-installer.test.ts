@@ -565,6 +565,16 @@ describe('compose files match the hardening the docs and settings.yml claim', ()
         expect(Object.keys(services).sort()).toEqual(['lynox', 'searxng']);
       });
 
+      // The image is a multi-arch manifest (amd64 + arm64). A `platform:` pin runs ARM hosts
+      // under emulation, and under rootless Podman it pulls ghcr's image on every start even
+      // when a matching image is already in the local store (measured on Podman 4.9.3).
+      it('pins no platform on any service, so ARM hosts run the native image', () => {
+        for (const [name, svc] of Object.entries(services)) {
+          expect((svc as { platform?: unknown }).platform, name).toBeUndefined();
+        }
+        expect(text).not.toMatch(/^\s*platform:/m);
+      });
+
       // Whichever user a container runs as, the hardening stays. A branch that
       // sets `user:` and loses one of these fails here.
       it('keeps cap_drop ALL, no-new-privileges, read_only and pids_limit on every service', () => {

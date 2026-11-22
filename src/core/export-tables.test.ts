@@ -13,6 +13,8 @@ import { DATA_DIR_INVENTORY } from './data-dir-inventory.js';
 import { inventoryExportWelds } from './data-dir-inventory-welds.js';
 import { DATASTORE_EXPORT, EXPORT_TABLES, GRANT_RECORD_PATHS, KEYED_COLUMNS, type ExportedStore } from './export-tables.js';
 import { withoutFingerprints, type ApiProfile } from './api-store.js';
+import { withOwnerStamp } from './workflow-stamp.js';
+import type { PlannedPipeline } from '../types/pipeline.js';
 
 /** Each store, created and migrated the way the engine creates it. */
 function migratedStores(): { dir: string; tables: (file: string) => Map<string, string[]> } {
@@ -115,6 +117,7 @@ const KEYED_CALLERS: Readonly<Record<string, string>> = {
   'src/core/approval-store.ts': 'stores: approval_entries.checksum, dedup_key, family_key',
   'src/core/bulk-ledger.ts': 'stores: bulk_runs.rule_hash, judge_rule_hash, approval_checksum; computes only: the list-start and resume checksums',
   'src/core/workflow-grant.ts': 'stores: workflow_grants.checksum and the reviewedGrant stamp in workflows.definition_json',
+  'src/core/workflow-stamp.ts': 'stores: the owner\'s stamp digest in workflows.definition_json ($.stamp), written by workflow-store.ts',
   'src/core/engine.ts': 'stores: the grant fingerprints, handed to ApiStore.setFingerprinter, in the API profile (connections.config_json and apis/*.json)',
   'src/server/http-api.ts': 'stores: the store binding in the API profile, as above',
   'src/core/person-erasure.ts': 'computes only: the plan digest a confirmation must repeat',
@@ -139,6 +142,18 @@ describe('keyed digests never leave the instance', () => {
       if (k.jsonPath === undefined) expect(d?.strip ?? [], `${k.table}.${k.column}`).toContain(k.column);
       else expect(d?.stripJson?.[k.column] ?? [], `${k.table}.${k.column} ${k.jsonPath}`).toContain(k.jsonPath);
     }
+  });
+
+  it('every field the owner\'s stamp writes into a workflow is registered as a keyed digest', () => {
+    // Read from what the stamp writes, not from the list: a field it adds with a digest in it is a
+    // keyed value in workflows.definition_json, and the list is what the strip check walks.
+    const hasher = { keyedHash: (): string => 'h'.repeat(64), hashIsKeyed: true };
+    const planned = { id: 'wf', name: 'W', goal: 'g', reasoning: 'r', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z', executed: false, steps: [{ id: 's1', task: 't' }] } as PlannedPipeline;
+    const stamped = withOwnerStamp(hasher, planned, '2026-01-01T00:00:00.000Z') as unknown as Record<string, unknown>;
+    const added = Object.keys(stamped).filter((k) => !(k in planned) && JSON.stringify(stamped[k]).includes('h'.repeat(64)));
+    expect(added).toEqual(['stamp']);
+    const registered = KEYED_COLUMNS.filter((k) => k.table === 'workflows' && k.column === 'definition_json').map((k) => k.jsonPath);
+    for (const key of added) expect(registered, key).toContain(`$.${key}`);
   });
 
   it('the grant paths stripped are the fields the engine itself never hands out, plus the store binding', () => {

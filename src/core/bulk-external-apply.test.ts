@@ -665,6 +665,22 @@ describe('applying an external run', () => {
     }
   });
 
+  // An API whose URL does not say it speaks GraphQL runs a `query` field as a document: the
+  // contract reads the body the run sends, not only its method and path.
+  it('sends no record whose body a GraphQL server would run as a mutation; CONTROL: a field that only names one is sent', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, [url(0)], 'POST') });
+      expect(await c.write(url(0), 'POST', { query: 'mutation { deleteAll { id } }' })).toEqual({ kind: 'not_granted' });
+      expect(await c.write(url(0), 'POST', { documentId: 'stored-1' })).toEqual({ kind: 'not_granted' });
+      expect(s.requests.filter((r) => r.method === 'POST')).toEqual([]);
+      expect(await c.write(url(0), 'POST', { subscription: 'premium', note: 'Mutation (Variante) {neu}' })).not.toEqual({ kind: 'not_granted' });
+    } finally {
+      restore();
+    }
+  });
+
   it('waits out one 429 on a write, then writes', async () => {
     const s = shop();
     const restore = serve(s);
@@ -1935,6 +1951,9 @@ describe('an unmeasured write form', () => {
       engineDb.getDb().prepare('UPDATE bulk_targets SET target_key = ? WHERE run_id = ? AND applied_at IS NOT NULL').run('not a url', runId);
       expect(ledger.probeBlockFor(runId)).toEqual({ missing: [{ kind: '/products/', cause: 'own_missing' }], step: null });
       expect(ledger.probeKey(runId)).toBeNull();
+      // A direct confirmation answers as for any target that is not a probe, and files nothing.
+      expect(ledger.confirmProbe(runId)).toEqual({ ok: false, reason: 'not_a_probe' });
+      expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_host_probes').get()).toEqual({ n: 0 });
     } finally {
       restore();
     }

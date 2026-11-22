@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
+import type { PlannedPipeline } from '../types/pipeline.js';
 import { TaskManager } from './task-manager.js';
 import { WorkflowStore } from './workflow-store.js';
 import { ConnectionStore } from './connection-store.js';
@@ -11,6 +12,7 @@ import { InboundEventStore } from './inbound-events.js';
 import { TriggerStore } from './trigger-store.js';
 import { EVENT_MAPPING_REFUSED, EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED, EVENT_SHOP_MOVED, EVENT_STOPPED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE, WEBHOOK_ASKS_RESULT, WorkerLoop, outcomeOfRun } from './worker-loop.js';
 import { WORKER_NOTICES } from './worker-notices.js';
+import { currentWorkerRunStart } from './worker-run-start.js';
 import { WORKFLOW_STOPPED_ERROR } from '../orchestrator/workflow-stop.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
 import { setPlanPauseForTests } from './plan-pause.js';
@@ -25,6 +27,10 @@ const runner = vi.hoisted(() => ({
   mode: { value: 'autonomous' as string },
   steps: { value: [] as unknown[] },
   confirmedAt: { value: '2026-10-01T00:00:00.000Z' as string | undefined },
+  // The engine's hash, so a confirmed workflow carries a stamp that holds (`workflow-stamp.ts`).
+  hasher: { value: null as EngineDb | null },
+  // The stamp was taken over other steps than the ones the workflow has now.
+  staleStamp: { value: false },
 }));
 const budget = vi.hoisted(() => ({ refuse: false, released: 0 }));
 vi.mock('./session-budget.js', async (importOriginal) => {
@@ -36,10 +42,19 @@ vi.mock('./session-budget.js', async (importOriginal) => {
   };
 });
 vi.mock('./saved-workflow-runner.js', () => ({ runGuardedSavedWorkflow: (...args: unknown[]) => runner.run(...args) }));
-vi.mock('../tools/builtin/pipeline.js', async (importOriginal) => ({
+vi.mock('../tools/builtin/pipeline.js', async (importOriginal) => {
+  const { withOwnerStamp } = await import('./workflow-stamp.js');
+  return {
   ...(await importOriginal<object>()),
-  getPipeline: (id: string) => ({ id, name: 'Orders', mode: runner.mode.value, steps: runner.steps.value, confirmedAt: runner.confirmedAt.value }),
-}));
+  getPipeline: (id: string) => {
+    const planned = { id, name: 'Orders', mode: runner.mode.value, steps: runner.steps.value } as unknown as PlannedPipeline;
+    const at = runner.confirmedAt.value;
+    if (at === undefined || runner.hasher.value === null) return planned;
+    const stamped = withOwnerStamp(runner.hasher.value, planned, at);
+    return runner.staleStamp.value ? { ...stamped, steps: [{ id: 'later', task: 'changed after the stamp' }] } : stamped;
+  },
+  };
+});
 
 const SHOP = 'demo-store.myshopify.com';
 
@@ -61,11 +76,13 @@ describe('the webhook drain', () => {
     runner.mode.value = 'autonomous';
     runner.steps.value = [];
     runner.confirmedAt.value = '2026-10-01T00:00:00.000Z';
+    runner.staleStamp.value = false;
     budget.refuse = false;
     budget.released = 0;
     dir = mkdtempSync(join(tmpdir(), 'lynox-webhook-drain-'));
     history = new RunHistory(join(dir, 'history.db'));
     engineDb = new EngineDb(join(dir, 'engine.db'));
+    runner.hasher.value = engineDb;
     history.setVerbGraph(engineDb);
     tm = new TaskManager(history);
     ledger = new InboundEventStore(engineDb);
@@ -147,6 +164,18 @@ describe('the webhook drain', () => {
     expect([after.status, after.next_run_at, after.enabled]).toEqual([before.status, before.next_run_at, before.enabled]);
     expect(after.last_run_status).toBe('success');
     expect(eventOf(t, id).runId).toBe('run-1');
+  });
+
+  // The run is held as an event's start, so a workflow its steps start never says it was
+  // started by hand or by a schedule.
+  it("holds the run as an event's start for everything it does", async () => {
+    let seen: string | undefined = 'unread';
+    runner.run.mockImplementationOnce(() => { seen = currentWorkerRunStart(); return Promise.resolve({ ok: true, status: 'completed', runId: 'run-1' }); });
+    const t = sharedTrigger();
+    const id = deliver(t, { email: 'kim@example.com', total: 12.5 });
+    await loop.tick();
+    await settled(t, id, 'done');
+    expect(seen).toBe('event');
   });
 
   // A push per order is noise; the run history holds the success.
@@ -314,6 +343,20 @@ describe('the webhook drain', () => {
   });
 
   // A refusal before the run that holds until the owner acts drops the event.
+  it('drops an event of a workflow whose steps changed after its stamp, switches the trigger off, and says so once', async () => {
+    runner.staleStamp.value = true;
+    const t = sharedTrigger();
+    const id = deliver(t);
+    await loop.tick();
+    await settled(t, id, 'dropped');
+    expect(runner.run).not.toHaveBeenCalled();
+    expect(eventOf(t, id).reason).toContain('waits for its owner to review its steps');
+    expect(Boolean(tm.getTrigger(t)!.enabled)).toBe(false);
+    await loop.tick();
+    await loop.tick();
+    expect(pushes('waits for its owner to review its steps')).toBe(1);
+  });
+
   it('drops an event of a workflow nobody confirmed, switches the trigger off, and says so once', async () => {
     runner.confirmedAt.value = undefined;
     const t = sharedTrigger();

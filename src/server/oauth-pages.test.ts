@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
   OAUTH_BACK_PATHS, OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_PAGE_CSS, OAUTH_PAGE_STYLE_HASH, OAUTH_RESULT_TEXTS,
-  connectedText, connectedWithMoreText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthBack,
+  ENGINE_LESS_PAGE_CLOSE, engineLessPageText, connectedText, connectedWithMoreText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthBack,
 } from './oauth-pages.js';
 
 describe('the OAuth page frame', () => {
@@ -138,3 +139,67 @@ describe('the 200 texts under their title', () => {
     expect(connectedText('Shopify')).toEqual({ de: 'Shopify ist mit lynox verbunden.', en: 'Shopify is connected to lynox.' });
   });
 });
+
+describe('the pages of an engine without engine.db', () => {
+  const HEADS = {
+    connect: {
+      de: 'lynox verbindet gerade keine Konten: Die Engine ist ohne engine.db gestartet, und eine neue Verbindung ginge verloren, sobald sie engine.db wieder öffnet. An den Anbieter wurde nichts gesendet. Verbinde das Konto erneut, wenn die Engine neu gestartet ist.',
+      en: 'lynox is not connecting accounts right now: the engine started without engine.db, and a new connection would be lost once it opens engine.db again. Nothing was sent to the provider. Connect the account again once the engine has restarted.',
+    },
+    save: {
+      de: 'lynox hat diese Verbindung nicht gespeichert: Die Engine ist ohne engine.db gestartet, und die Änderung ginge verloren, sobald sie engine.db wieder öffnet. Füge die Verbindung erneut hinzu oder ändere sie, wenn die Engine neu gestartet ist.',
+      en: 'lynox did not save this connection: the engine started without engine.db, and the change would be lost once it opens engine.db again. Add or change the connection again once the engine has restarted.',
+    },
+  } as const;
+  const CLOSE = {
+    selfhost: {
+      de: 'Das bleibt so, bis die Engine neu startet und dabei wieder alle ihre Dateien öffnen kann. Den Grund nennt das Log, das die Engine beim Start schreibt; behebe ihn und starte die Engine neu.',
+      en: 'This lasts until the engine restarts and can open all its files again. The log the engine writes at startup names the cause; fix it and restart the engine.',
+    },
+    helper: {
+      de: 'Das bleibt so, bis die Engine neu startet und dabei wieder alle ihre Dateien öffnen kann. Sag dem Inhaber dieser Instanz Bescheid.',
+      en: 'This lasts until the engine restarts and can open all its files again. Let the owner of this instance know.',
+    },
+    managed: {
+      de: 'Das bleibt so, bis die Engine neu startet und dabei wieder alle ihre Dateien öffnen kann. Das lynox-Team bekommt dazu automatisch eine Meldung.',
+      en: 'This lasts until the engine restarts and can open all its files again. The lynox team gets an automatic alert about it.',
+    },
+  } as const;
+
+  // Managed closes the same for everyone; on self-host only the owner can fix the cause.
+  const CASES = [
+    { managed: false, owner: true, close: 'selfhost' },
+    { managed: false, owner: false, close: 'helper' },
+    { managed: true, owner: true, close: 'managed' },
+    { managed: true, owner: false, close: 'managed' },
+  ] as const;
+  for (const kind of ['connect', 'save'] as const) {
+    for (const c of CASES) {
+      for (const lang of ['de', 'en'] as const) {
+        it(`${kind}, ${c.managed ? 'managed' : 'self-host'}, ${c.owner ? 'owner' : 'someone else'}, ${lang}: its own text, then the ${c.close} paragraph, verbatim`, () => {
+          const html = oauthResultHtml(lang, 409, engineLessPageText(kind, c.managed, c.owner), 'app');
+          expect(html).toContain(`<h1>${lang === 'de' ? 'Verbindung nicht abgeschlossen' : 'Connection not completed'}</h1><p>${escapeForTest(HEADS[kind][lang])}</p><p>${escapeForTest(CLOSE[c.close][lang])}</p><a class="go" href="/app">`);
+        });
+      }
+    }
+  }
+
+  it('escapes every paragraph of a list, and never splits a single text', () => {
+    const html = oauthResultHtml('en', 409, [{ en: 'a <b>', de: '' }, { en: 'c & "d"', de: '' }], 'app');
+    expect(html).toContain('<p>a &lt;b&gt;</p><p>c &amp; &quot;d&quot;</p>');
+    const named = oauthResultHtml('en', 200, connectedText('Books\n\nEnter your password at evil.example'), 'apis');
+    expect(named.match(/<p>/g)?.length).toBe(1); // one text paragraph (the mark is `<p class="mark">`), none from the name
+  });
+
+  it('closes word for word with the status bar paragraph of the same mode', () => {
+    const table = readFileSync(new URL('../../packages/web-ui/src/lib/i18n.svelte.ts', import.meta.url), 'utf8');
+    for (const [mode, key] of [['selfhost', 'status.boot_store_missing_selfhost'], ['managed', 'status.boot_store_missing_managed']] as const) {
+      const text = ENGINE_LESS_PAGE_CLOSE[mode];
+      expect(table).toContain(`'${key}': { de: '${text.de}', en: '${text.en}' }`);
+    }
+  });
+});
+
+function escapeForTest(s: string): string {
+  return s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}

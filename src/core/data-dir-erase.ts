@@ -26,7 +26,7 @@
  */
 import { lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, type Stats } from 'node:fs';
 import { join } from 'node:path';
-import { DATA_DIR_INVENTORY, type DataDirEntry } from './data-dir-inventory.js';
+import { BACKUP_LIST_PROOF_FILE, BACKUP_LIST_PROOF_TMP, DATA_DIR_INVENTORY, type DataDirEntry } from './data-dir-inventory.js';
 import { unsafeRoot } from './workspace-root.js';
 import { mountIdAt } from './workspace-fd.js';
 
@@ -589,8 +589,8 @@ const BACKUP_NAME = /^\d{4}-\d{2}-\d{2}T\d{8}Z(-\d+)?(\.tmp)?$/;
 
 /**
  * A configured `backup_dir` outside the data dir holds full copies of the stores the
- * erasure just emptied. Only entries with the name `backup.ts` gives a backup are
- * removed — the directory is the user's choice and may hold other things — and, as
+ * erasure just emptied. Only entries with the name `backup.ts` gives a backup, and the
+ * list's file of kept answers (`BACKUP_LIST_PROOF_FILE`), are removed — the directory is the user's choice and may hold other things — and, as
  * everywhere here, a symlink is unlinked, never followed.
  */
 export function removeBackupsOutside(backupDir: string, dataDir: string): RemoveOutcome {
@@ -612,7 +612,9 @@ export function removeBackupsOutside(backupDir: string, dataDir: string): Remove
     return { removed, failures: [{ name: '.', reason: err instanceof Error ? err.message : String(err) }] };
   }
   for (const name of names) {
-    if (!BACKUP_NAME.test(name)) continue;
+    // The list's kept answers name every backup, and a write cut short leaves its temporary file.
+    const listProof = name === BACKUP_LIST_PROOF_FILE || BACKUP_LIST_PROOF_TMP.test(name);
+    if (!BACKUP_NAME.test(name) && !listProof) continue;
     try {
       rmSync(join(dir, name), { recursive: true, force: true });
       removed.push(name);
