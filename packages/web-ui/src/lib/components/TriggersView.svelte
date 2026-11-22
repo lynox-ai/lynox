@@ -13,6 +13,7 @@
 	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
 	import StampConfirm from './StampConfirm.svelte';
 	import MarkedLine from './MarkedLine.svelte';
+	import RecipientConfirm from './RecipientConfirm.svelte';
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
@@ -66,6 +67,9 @@
 		paused_ended?: PausedEnded[];
 		// A bulk run's trigger: the host its run works on, or null where it has none (`GET /api/triggers`).
 		bulk_host?: string | null;
+		// From before its creator was recorded, nobody else's hand in it: it sends to none of the
+		// recipients it names until the owner confirms them (`GET /api/triggers`, owner only).
+		recipients_unconfirmed?: boolean;
 	}
 
 	// A bulk run's trigger is titled with its run id, which the model reads; the list names it by
@@ -197,6 +201,8 @@
 	// "Check connections": a confirmed schedule whose run can use a connection, opened on demand,
 	// so the preview is not asked for on every refresh (ux U-058, ii-c-min).
 	let checking = $state<Record<string, boolean>>({});
+	// "Confirm recipients" opened per row.
+	let confirmingRecipients = $state<Record<string, boolean>>({});
 	function offersCheck(trigger: Trigger): boolean {
 		// Not once a member's access ended: the gate refuses the run whatever is listed, so allowing a
 		// connection there changes nothing, and the ended note already names the way out.
@@ -689,6 +695,19 @@
 									</ul>
 									{#if note}
 										<p class="mt-0.5 text-warning" data-stamp-note>{note}</p>
+									{/if}
+								</div>
+							{/if}
+							{#if ownerActs && trigger.recipients_unconfirmed === true}
+								<!-- The engine does not count this trigger's instruction as the owner's, so its run
+								     sends to none of the recipients it names. The hint leads to the button; the
+								     button opens the instruction to confirm. -->
+								<div class="mt-2 text-xs" data-recipients-unconfirmed>
+									<p class="text-warning">{t('recipients.unconfirmed_hint')}</p>
+									{#if confirmingRecipients[trigger.id]}
+										<RecipientConfirm id={trigger.id} onconfirmed={() => { confirmingRecipients[trigger.id] = false; void loadTriggers(true); }} onclose={() => (confirmingRecipients[trigger.id] = false)} />
+									{:else}
+										<button onclick={() => (confirmingRecipients[trigger.id] = true)} class="mt-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1 text-xs text-text-muted hover:text-text" data-recipients-open>{t('recipients.button')}</button>
 									{/if}
 								</div>
 							{/if}
