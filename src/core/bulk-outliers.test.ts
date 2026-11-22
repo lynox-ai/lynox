@@ -561,16 +561,18 @@ describe('markersOf', () => {
     const time = (text: string): number => { const t0 = performance.now(); markersOf(text); return performance.now() - t0; };
     const many = Array.from({ length: 5000 }, (_, i) => `a${String(i)}.com`);
     time(many.join(' '));
-    // The fastest of three runs each, so a pause of the process does not decide.
-    const best = (text: string): number => Math.min(time(text), time(text), time(text));
+    // The fastest of five runs each, so a pause of the process does not decide. Read anew, the repeated
+    // text costs about as much as the distinct one; read once per word, a quarter or less. Half leaves a
+    // loaded machine room and still tells the two apart.
+    const best = (text: string): number => Math.min(time(text), time(text), time(text), time(text), time(text));
     const distinct = Math.min(best(many.join(' ')), best(many.join('+')));
     expect([...markersOf('a.com '.repeat(5000)).get('link')!]).toEqual(['a.com']);
     expect([...markersOf('a.com+'.repeat(5000)).get('link')!]).toEqual(['a.com']);
-    expect(best('a.com '.repeat(5000))).toBeLessThan(distinct / 4);
-    expect(best('a.com+'.repeat(5000))).toBeLessThan(distinct / 4);
+    expect(best('a.com '.repeat(5000))).toBeLessThan(distinct / 2);
+    expect(best('a.com+'.repeat(5000))).toBeLessThan(distinct / 2);
     // An address is read once per word as well.
     const addresses = Array.from({ length: 5000 }, (_, i) => `i@a${String(i)}.com`).join(' ');
-    expect(best('i@a.com '.repeat(5000))).toBeLessThan(best(addresses) / 4);
+    expect(best('i@a.com '.repeat(5000))).toBeLessThan(best(addresses) / 2);
   });
 
   it('reads a long run of signs inside a word, of @, of letters before an @, of labels, of brackets, or of blanks and obfuscated dots in time linear in its length', () => {

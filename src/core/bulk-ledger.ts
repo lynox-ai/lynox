@@ -1817,6 +1817,7 @@ export class BulkLedger {
     let read = 0;
     let since = performance.now();
     let after = -1;
+    // run-group-starter: a loop over this call's own pages; it ends when the last page is read and reports no spend.
     for (;;) {
       const rows = page.all(runId, after) as { seq: number; before: string | null; after_planned: string | null }[];
       for (const r of rows) {
@@ -1824,6 +1825,7 @@ export class BulkLedger {
         if (r.after_planned === null) continue;
         if (read >= OUTLIER_CHUNK || performance.now() - since >= OUTLIER_SLICE_MS) {
           read = 0;
+          // run-group-starter: a single yield this call awaits at once; it only resumes this call and reports no spend.
           await new Promise<void>((resolve) => { setImmediate(resolve); });
           since = performance.now();
         }
