@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from './workflow-stop.js';
+import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR, workflowBoundError } from './workflow-stop.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
 import { join } from 'node:path';
@@ -410,13 +410,13 @@ export function workflowBoundExceeded(
 ): string | null {
   if (!limits) return null;
   if (limits.maxIterations !== undefined && iterations >= limits.maxIterations) {
-    return `Workflow exceeded its step limit (${limits.maxIterations}) — aborting to prevent a runaway.`;
+    return workflowBoundError('step', String(limits.maxIterations));
   }
   if (limits.maxWallClockMs !== undefined && Date.now() - startMs > limits.maxWallClockMs) {
-    return `Workflow exceeded its wall-clock limit (${Math.round(limits.maxWallClockMs / 1000)}s) — aborting to prevent a runaway.`;
+    return workflowBoundError('wall-clock', `${Math.round(limits.maxWallClockMs / 1000)}s`);
   }
   if (limits.maxSpendUsd !== undefined && stepCounters.costUSD > limits.maxSpendUsd) {
-    return `Workflow exceeded its spend limit ($${limits.maxSpendUsd.toFixed(2)}) — aborting to prevent a runaway.`;
+    return workflowBoundError('spend', `$${limits.maxSpendUsd.toFixed(2)}`);
   }
   return null;
 }

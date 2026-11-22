@@ -38,6 +38,7 @@
 	paying Managed customers).
 -->
 <script lang="ts">
+	import { ACCOUNT_PAGE_URL } from '../account-page.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -98,7 +99,7 @@
 	// Customer Portal handles the subscription only — credit packs are a separate
 	// one-time payment_intent, so they never appear there. Email-code login, so
 	// deep-linking cross-origin from a tenant subdomain works (no shared cookie).
-	const accountDashboardUrl = 'https://lynox.ai/managed/account';
+	const accountDashboardUrl = ACCOUNT_PAGE_URL;
 </script>
 
 <div class="space-y-6 max-w-3xl mx-auto p-4">

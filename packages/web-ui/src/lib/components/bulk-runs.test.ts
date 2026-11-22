@@ -3,9 +3,10 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
 	bulkHiddenSegments, bulkHiddenCountText, bulkRawText, bulkUncheckedCountText, bulkHiddenUnchecked,
-	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkPhaseKey, bulkPhaseHasSuffix, bulkStepLabelKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
-	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
+	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
+	bulkSentenceParts, bulkSecretInContextKey,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -285,8 +286,8 @@ describe('the approved unchecked-change texts', () => {
 
 	it('holds the Shopify note and the readable field names (ux 2026-10-26)', () => {
 		expect(line('bulk.approve.shopify_visible')).toBe(entry('bulk.approve.shopify_visible',
-			'Bei veröffentlichten Produkten sind Titel und SEO-Texte sofort in deinem Shop sichtbar, sobald lynox sie schreibt.',
-			'For published products, titles and SEO texts are visible in your shop as soon as lynox writes them.'));
+			'Bei veröffentlichten Produkten ist alles, was dieser Lauf schreibt, sofort live in deinem Shop.',
+			'For published products, everything this run writes is live in your shop right away.'));
 		for (const [key, de, en] of [['title', 'Titel', 'Title'], ['descriptionHtml', 'Beschreibung', 'Description'], ['seo_title', 'SEO-Titel', 'SEO title'], ['seo_description', 'SEO-Beschreibung', 'SEO description']] as const) {
 			expect(line(`bulk.field.shopify.${key}`)).toBe(entry(`bulk.field.shopify.${key}`, de, en));
 		}
@@ -506,8 +507,8 @@ describe('going on from a run that halted', () => {
 	// for a stated cause. A new halt reason fails here until it is placed.
 	it('places every halt the engine names', () => {
 		const STARTS = ['awaitingStart', 'listed'];
-		const ENDS_THE_RUN = ['superseded', 'mandateEnded'];
-		const WRITE_RUNS_ONLY = ['failureRate', 'expired', 'checksum', 'maxTargets', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete', 'runUnrecorded', 'shopifyWriteOff', 'markupAddedByShop'];
+		const ENDS_THE_RUN = ['superseded', 'mandateEnded', 'discarded'];
+		const WRITE_RUNS_ONLY = ['failureRate', 'expired', 'checksum', 'maxTargets', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete', 'runUnrecorded', 'shopifyWriteOff', 'markupAddedByShop', 'consentOutdated'];
 		const left = [...STARTS, ...ENDS_THE_RUN, ...WRITE_RUNS_ONLY];
 		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {
 			const kind = bulkRestartKind({ ...base, haltKey });
@@ -648,6 +649,8 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeKind(w('maxTargets'))).toBe('max');
 		expect(bulkResumeKind(w('checksum'))).toBe('none');
 		expect(bulkResumeKind(w('contract'))).toBe('none');
+		// Writing on would halt again until the connection is confirmed again; the sentence says to plan anew.
+		expect(bulkResumeKind(w('consentOutdated'))).toBe('none');
 		// A run halted before its first write (approved, here on an expired approval) writes on too.
 		expect(bulkResumeKind(w('expired', { phase: 'approved' }))).toBe('write');
 		// Not writing on: a run at its probe has its own way on, a planned run restarts, an ended run does neither.
@@ -743,7 +746,7 @@ describe('going on from a run that halted', () => {
 
 	it('places every halt the engine names for a write run', () => {
 		const PLANNING_ONLY = ['awaitingStart', 'listed', 'listNotAList', 'listUnreadable', 'listTooLarge', 'listNoProgress', 'listFormWithdrawn', 'listFilterWithdrawn', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'shopifyReadOff', 'costCap', 'spendLimit', 'creditRefused', 'judgeModel'];
-		const NO_WRITE_ON = ['superseded', 'mandateEnded', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete'];
+		const NO_WRITE_ON = ['superseded', 'mandateEnded', 'discarded', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete'];
 		const left = [...PLANNING_ONLY, ...NO_WRITE_ON];
 		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {
 			const kind = bulkResumeKind(w(haltKey));
@@ -753,11 +756,44 @@ describe('going on from a run that halted', () => {
 	});
 
 	it('has every sentence in both languages for every halt it writes on from or refuses', () => {
-		for (const k of [...WRITE_ON, 'maxTargets', 'checksum', 'contract']) {
+		for (const k of [...WRITE_ON, 'maxTargets', 'checksum', 'contract', 'consentOutdated']) {
 			for (const [lang, i] of [['de', DE], ['en', EN]] as const) {
 				const said = bulkResumeText(w(k), true, i, true)!;
 				for (const [part, text] of Object.entries(said)) if (text !== null) expect(text, `${lang} ${k} ${part}`).not.toMatch(/bulk\.|\{/);
 			}
+		}
+	});
+
+	// U-281: the fields with their article, the way on, and "wrote nothing" only where it is true.
+	it('words a halt for a connection that does not cover the run\'s fields', () => {
+		const none = { applied: 0, sentUnknown: 0 };
+		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, DE, false)).toEqual({
+			cause: 'lynox hat nichts geschrieben. Diese Shopify-Verbindung erlaubt lynox noch nicht, die Beschreibung zu ändern. Verbinde Shopify neu (Einstellungen → APIs).',
+			before: null, check: null, kept: null, soFar: null, allows: null,
+		});
+		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, EN, false)?.cause)
+			.toBe('lynox wrote nothing. This Shopify connection does not yet let lynox change the description. Reconnect Shopify (Settings → APIs).');
+		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['alt', 'descriptionHtml', 'title'] }), true, DE, false)?.cause)
+			.toContain('noch nicht, die Alt-Texte der Bilder, die Beschreibung und den Titel zu ändern.');
+		// A field this page has no name for, or none given: "these fields".
+		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml', 'vendor'] }), true, DE, false)?.cause).toContain('noch nicht, diese Felder zu ändern.');
+		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: null }), true, EN, false)?.cause).toContain('does not yet let lynox change these fields.');
+		// Something of the run was written, or sent without a clear answer: not "wrote nothing".
+		for (const o of [{ applied: 1, sentUnknown: 0 }, { applied: 0, sentUnknown: 1 }]) {
+			const de = bulkResumeText(w('consentOutdated', { ...o, consentFields: ['descriptionHtml'] }), true, DE, false)!.cause;
+			expect(de).not.toContain('nichts geschrieben');
+			expect(de.startsWith('lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt. Diese Shopify-Verbindung erlaubt lynox noch nicht, die Beschreibung zu ändern.')).toBe(true);
+		}
+		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, bulkMandateI18n(DE), false)?.cause)
+			.toBe('lynox hat nichts geschrieben. Diese Shopify-Verbindung erlaubt lynox noch nicht, die Beschreibung zu ändern. Das ändert sich nur, wenn der Inhaber dieser Instanz Shopify neu verbindet; bitte den Inhaber darum und lass den Lauf danach im Chat neu planen.');
+		// A mandate's session is not sent to a connection only the owner's reconnect sets right.
+		for (const [i, lang] of [[DE, 'de'], [EN, 'en']] as const) {
+			const mandate = bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, bulkMandateI18n(i), false)!.cause;
+			const owner = bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, i, false)!.cause;
+			expect(mandate, lang).not.toBe(owner);
+			expect(mandate, lang).toMatch(lang === 'de' ? /Inhaber/ : /owner/);
+			const more = bulkResumeText(w('consentOutdated', { applied: 1, sentUnknown: 0, consentFields: ['descriptionHtml'] }), true, bulkMandateI18n(i), false)!.cause;
+			expect(more, lang).toMatch(lang === 'de' ? /^lynox schreibt in diesem Lauf nichts mehr; .*Inhaber/ : /^lynox writes nothing more in this run; .*owner/);
 		}
 	});
 
@@ -1058,6 +1094,8 @@ describe('an owner\'s stop is called a stop, not a halt', () => {
 	it('the owner\'s stop gets the stop words, every other halt keeps the halt words', () => {
 		expect(bulkHaltHeadKey({ haltKey: 'stoppedByOwner', phase: 'writing' })).toBe('bulk.head.stopped');
 		expect(bulkHaltSuffixKey({ haltKey: 'stoppedByOwner', phase: 'writing' })).toBe('bulk.stopped_suffix');
+		// A discarded run is named as discarded, next to its chip and sentence (U-324).
+		expect(bulkHaltHeadKey({ haltKey: 'discarded', phase: 'aborted' })).toBe('bulk.head.discarded');
 		for (const haltKey of ['maxTargets', 'costCap', 'consecutiveFailures', null]) {
 			expect(bulkHaltHeadKey({ haltKey, phase: 'writing' })).toBe('bulk.head.halted');
 			expect(bulkHaltSuffixKey({ haltKey, phase: 'writing' })).toBe('bulk.halted_suffix');
@@ -1085,11 +1123,7 @@ describe('what the preview says about a target lynox leaves out', () => {
 	// Reasons no Shopify run can record: a workspace file, a data store row, an effect field
 	// (WooCommerce and bexio only).
 	const NOT_SHOPIFY = new Set(['path_outside_workspace', 'unreadable', 'target_too_large', 'after_not_text', 'not_text',
-		'unknown_column', 'subject_column', 'bad_value', 'bad_key', 'effect_field',
-		// The HTML check's reasons: a Shopify run writes no HTML field until descriptions are
-		// written (descriptionHtml is refused at planning), so these reach WooCommerce only, by code.
-		// The link reasons have a sentence on every run, tested below.
-		'element_not_allowed', 'attribute_not_allowed', 'content_changed', 'comment_added', 'new_img', 'not_canonical']);
+		'unknown_column', 'subject_column', 'bad_value', 'bad_key', 'effect_field']);
 	const i18nSource = readFileSync(`${HERE}../i18n.svelte.ts`, 'utf8');
 
 	it('has a sentence of its own for every reason a Shopify run can record, in both languages', () => {
@@ -1152,13 +1186,17 @@ describe('what the preview says about a target lynox leaves out', () => {
 		// A run that takes allowed link domains at the start of judging names that field; no other
 		// reason does, and no other run.
 		table['bulk.invalid.new_link_domain_judged'] = 'add it to the allowed domains, or by hand {where}';
+		table['bulk.invalid.new_link_domain_named'] = 'drop {domain}, or by hand {where}';
+		table['bulk.invalid.new_link_domain_judged_named'] = 'add {domain} to the allowed domains, or by hand {where}';
 		const judged = { ...ctx, startDomains: true, linkDomain: 'video.example' };
-		expect(bulkInvalidText('new_link_domain', true, true, own, judged)).toBe('add it to the allowed domains, or by hand in Shopify');
-		expect(bulkInvalidText('new_link_domain', true, true, own, { ...judged, startDomains: false })).toBe('drop it, or by hand in Shopify');
-		// A domain the field does not take, or one the page was not told, is not offered there.
-		for (const linkDomain of ['192.0.2.1', 'intranet', 'myshopify.com', undefined]) {
-			expect(bulkInvalidText('new_link_domain', true, true, own, { ...judged, linkDomain }), String(linkDomain)).toBe('drop it, or by hand in Shopify');
+		expect(bulkInvalidText('new_link_domain', true, true, own, judged)).toBe('add video.example to the allowed domains, or by hand in Shopify');
+		expect(bulkInvalidText('new_link_domain', true, true, own, { ...judged, startDomains: false })).toBe('drop video.example, or by hand in Shopify');
+		// A domain the field does not take is not offered there, but still named (U-311).
+		for (const linkDomain of ['192.0.2.1', 'intranet', 'myshopify.com']) {
+			expect(bulkInvalidText('new_link_domain', true, true, own, { ...judged, linkDomain }), linkDomain).toBe(`drop ${linkDomain}, or by hand in Shopify`);
 		}
+		// One the page was not told: the sentence that names none.
+		expect(bulkInvalidText('new_link_domain', true, true, own, { ...judged, linkDomain: undefined })).toBe('drop it, or by hand in Shopify');
 		expect(bulkInvalidText('url_scheme', true, true, own, judged)).toBe('not a link, by hand in Shopify');
 	});
 	it('holds the released link sentences word for word, in both languages', () => {
@@ -1309,7 +1347,7 @@ describe('the markup list of a target (1010)', () => {
 
 	it('lists a write under a head naming the field, added and removed, and says plain formatting is left out', () => {
 		const list = bulkMarkupList({ field: 'description', added: [link, templated], removed: [image], addsOutsideAllowlist: true }, false, 'Beschreibung', DE);
-		expect(list.head).toBe('Geändertes Markup in Beschreibung:');
+		expect(list.head).toBe('Geändertes Markup (Beschreibung):');
 		expect(list.restoresNote).toBeNull();
 		expect(list.lines).toEqual([
 			{ label: 'neu:', code: '<a href="https://partner.example/p?q=1&r=2">', template: null },
@@ -1319,7 +1357,7 @@ describe('the markup list of a target (1010)', () => {
 		expect(list.note).toBe('Einfache Formatierung wie Absätze, Fettschrift oder Listen ist nicht aufgeführt.');
 		const en = bulkMarkupList({ field: 'description', added: [templated], removed: [image] }, false, 'Description', EN);
 		expect([en.head, en.lines.map((l) => [l.label, l.template]), en.note]).toEqual([
-			'Markup that changes in Description:', [['added:', '(inside a <template> block)'], ['removed:', null]],
+			'Changed markup (Description):', [['added:', '(inside a <template> block)'], ['removed:', null]],
 			'Plain formatting such as paragraphs, bold text or lists is not listed.',
 		]);
 	});
@@ -1327,13 +1365,14 @@ describe('the markup list of a target (1010)', () => {
 	it('says a field it could not read was not listed, instead of calling the list complete', () => {
 		const de = bulkMarkupList({ field: 'description', added: [], removed: [], addsOutsideAllowlist: false, unread: true }, false, 'Beschreibung', DE);
 		expect([de.head, de.lines, de.note]).toEqual([
-			'Geändertes Markup in Beschreibung:', [],
+			'Geändertes Markup (Beschreibung):', [],
 			'Das Markup dieses Felds ist zu gross oder zu tief verschachtelt, um hier aufgelistet zu werden.',
 		]);
-		// On an undo the engine sets addsOutsideAllowlist with it, so the undo still says it may write back a script.
-		const en = bulkMarkupList({ field: 'description', added: [], removed: [], addsOutsideAllowlist: true, unread: true }, true, 'Description', EN);
+		// On an undo the engine sets addsOutsideAllowlist with it and never addsOnlyPassive, so the undo
+		// still says it may write back markup lynox cannot confirm is harmless.
+		const en = bulkMarkupList({ field: 'description', added: [], removed: [], addsOutsideAllowlist: true, addsOnlyPassive: false, unread: true }, true, 'Description', EN);
 		expect([en.head, en.restoresNote, en.note]).toEqual([
-			null, 'This markup was in your shop before the run. The undo writes it back, a script included.',
+			null, 'This markup was in your shop before the run. It includes markup that lynox cannot confirm is harmless, such as a script or an embedded page. The undo writes it back as it was.',
 			'The markup of this field is too large or nested too deeply to be listed here.',
 		]);
 	});
@@ -1347,14 +1386,27 @@ describe('the markup list of a target (1010)', () => {
 	});
 
 	it('says an undo writes back markup from before the run only where it lies outside the allowlist, in a mandate\'s words in a mandate', () => {
-		const change = { field: 'description', added: [script], removed: [], addsOutsideAllowlist: true };
-		expect(bulkMarkupList(change, true, 'Beschreibung', DE).restoresNote).toBe('Dieses Markup war vor dem Lauf schon in deinem Shop. Die Rücknahme schreibt es wieder hinein, auch ein Skript.');
-		expect(bulkMarkupList(change, true, 'Description', EN).restoresNote).toBe('This markup was in your shop before the run. The undo writes it back, a script included.');
-		expect(bulkMarkupList(change, true, 'Beschreibung', bulkMandateI18n(DE)).restoresNote).toBe('Dieses Markup war vor dem Lauf schon im Shop. Die Rücknahme schreibt es wieder hinein, auch ein Skript.');
-		expect(bulkMarkupList(change, true, 'Description', bulkMandateI18n(EN)).restoresNote).toBe('This markup was in the shop before the run. The undo writes it back, a script included.');
+		const change = { field: 'description', added: [script], removed: [], addsOutsideAllowlist: true, addsOnlyPassive: false };
+		const active = 'Es enthält Markup, bei dem lynox nicht feststellen kann, dass es harmlos ist, etwa ein Skript oder eine eingebettete Seite.';
+		const activeEn = 'It includes markup that lynox cannot confirm is harmless, such as a script or an embedded page.';
+		expect(bulkMarkupList(change, true, 'Beschreibung', DE).restoresNote).toBe(`Dieses Markup war vor dem Lauf schon in deinem Shop. ${active} Die Rücknahme schreibt es so wieder hinein, wie es war.`);
+		expect(bulkMarkupList(change, true, 'Description', EN).restoresNote).toBe(`This markup was in your shop before the run. ${activeEn} The undo writes it back as it was.`);
+		expect(bulkMarkupList(change, true, 'Beschreibung', bulkMandateI18n(DE)).restoresNote).toBe(`Dieses Markup war vor dem Lauf schon im Shop. ${active} Die Rücknahme schreibt es so wieder hinein, wie es war.`);
+		expect(bulkMarkupList(change, true, 'Description', bulkMandateI18n(EN)).restoresNote).toBe(`This markup was in the shop before the run. ${activeEn} The undo writes it back as it was.`);
 		// Twins: within the allowlist, and on a write, no such sentence.
 		expect(bulkMarkupList({ ...change, addsOutsideAllowlist: false }, true, 'd', DE).restoresNote).toBeNull();
 		expect(bulkMarkupList(change, false, 'd', DE).restoresNote).toBeNull();
+	});
+
+	it('says of an undo that restores only harmless markup, a table, that it was there before, and nothing about a script', () => {
+		const table = { kind: 'element' as const, namespace: 'html', element: 'table', attributes: [['width', '100%']] as [string, string][], text: null, inTemplate: false };
+		const change = { field: 'description', added: [table], removed: [], addsOutsideAllowlist: true, addsOnlyPassive: true };
+		expect(bulkMarkupList(change, true, 'Beschreibung', DE).restoresNote).toBe('Dieses Markup war vor dem Lauf schon in deinem Shop. Die Rücknahme schreibt es so wieder hinein, wie es war.');
+		expect(bulkMarkupList(change, true, 'Description', EN).restoresNote).toBe('This markup was in your shop before the run. The undo writes it back as it was.');
+		expect(bulkMarkupList(change, true, 'Beschreibung', bulkMandateI18n(DE)).restoresNote).toBe('Dieses Markup war vor dem Lauf schon im Shop. Die Rücknahme schreibt es so wieder hinein, wie es war.');
+		expect(bulkMarkupList(change, true, 'Description', bulkMandateI18n(EN)).restoresNote).toBe('This markup was in the shop before the run. The undo writes it back as it was.');
+		// An engine that does not say (older) reads as active: the sentence that warns.
+		expect(bulkMarkupList({ ...change, addsOnlyPassive: undefined }, true, 'd', DE).restoresNote).toContain('nicht feststellen kann');
 	});
 });
 
@@ -1437,6 +1489,123 @@ describe('the singular of a count of one', () => {
 	}
 });
 
+// A Shopify run writes descriptions, so the HTML check's refusals reach its owner. Each sentence is
+// chosen by the list's form, the run's judge and who reads it (U-186).
+describe('the sentences the page words by the list\'s form, the judge and the reader', () => {
+	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
+	// The English text is quoted either way: in single quotes, or in double ones where it holds an apostrophe.
+	const ENTRY = /^\s*'([^']+)': \{ de: '((?:[^'\\]|\\.)*)', en: (?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)") \},$/;
+	const de: Record<string, string> = {};
+	const en: Record<string, string> = {};
+	for (const l of source.split('\n')) {
+		const m = ENTRY.exec(l);
+		if (m) { de[m[1]!] = m[2]!.replace(/\\'/g, "'"); en[m[1]!] = (m[3] ?? m[4]!).replace(/\\(['"])/g, '$1'); }
+	}
+	const from = (table: Record<string, string>): BulkI18n => ({
+		t: (k) => table[k] ?? k,
+		tf: (k, vars) => Object.entries(vars).reduce((s, [name, v]) => s.split(`{${name}}`).join(v), table[k] ?? k),
+	});
+	const DE = from(de);
+	const EN = from(en);
+	const ctx = (o: Record<string, unknown> = {}) => ({ field: undefined, host: 'acme.myshopify.com', dataStore: false, listForm: 'shopify', ...o });
+
+	it('words a comment by the list\'s form: a hidden HTML comment on Shopify, a new block on WooCommerce', () => {
+		for (const listForm of ['shopify', 'shopify_filtered']) {
+			expect(bulkInvalidText('comment_added', true, true, DE, ctx({ listForm }))).toBe('Der neue Text fügt einen versteckten Kommentar im HTML (<!-- … -->) hinzu oder ändert einen. lynox schreibt ihn nicht. Bitte lynox im Chat, den Lauf neu zu planen und dabei keine solchen Kommentare hinzuzufügen oder zu ändern.');
+		}
+		expect(bulkInvalidText('comment_added', false, true, DE, ctx({ listForm: 'woocommerce', host: 'shop.example.com' }))).toBe('Der neue Text legt in der Beschreibung einen neuen Block an, etwa einen neuen Absatz. lynox schreibt das in WooCommerce nicht, weil solche Blöcke beim Anzeigen eigenen Inhalt erzeugen können. Bitte lynox im Chat, den Lauf neu zu planen, und dabei nur die bestehenden Absätze zu ändern.');
+	});
+
+	it('names a refused link\'s domain in both sentences and languages, and falls back to the sentence without it (U-311)', () => {
+		const named = { de: 'Der neue Text verweist auf „fremd.example“, eine Domain, auf die dieses Produkt bisher nicht verweist: als Link, als Adresse allein auf einer Zeile oder in einem Shortcode, etwa für ein Video. Auch ein Dateiname wie „video.mp4“ in einem Shortcode zählt als Domain. Gibt es weitere solche Verweise, nennt lynox sie erst, wenn du den Lauf neu planen lässt. lynox schreibt den Text nicht. Bitte lynox im Chat, den Lauf ohne diesen Verweis neu zu planen. Gehört er so hinein, schreib den Text von Hand im Shopify-Admin.',
+			en: 'The new text points to “fremd.example”, a domain this product did not point to before: in a link, as an address on a line of its own or in a shortcode, such as a video. A file name like “video.mp4” in a shortcode also counts as a domain. If there are more such references, lynox names them only once you have the run planned again. lynox does not write the text. Ask lynox in the chat to plan the run again without it. If it belongs there as it is, write the text by hand in the Shopify admin.' };
+		const judgedNamed = { de: 'Der neue Text verweist auf „fremd.example“, eine Domain, auf die dieses Produkt bisher nicht verweist und die nicht unter den erlaubten Link-Domains des Laufs steht: als Link, als Adresse allein auf einer Zeile oder in einem Shortcode, etwa für ein Video. Auch ein Dateiname wie „video.mp4“ in einem Shortcode zählt als Domain. Gibt es weitere solche Verweise, nennt lynox sie erst, wenn du den Lauf neu planen lässt. lynox schreibt den Text nicht. Bitte lynox im Chat, den Lauf neu zu planen: ohne diesen Verweis, oder, wenn er so hineingehört, mit „fremd.example“ unter „Erlaubte Link-Domains“, die du beim Start des Beurteilens einträgst. Du kannst den Text auch von Hand schreiben im Shopify-Admin.',
+			en: 'The new text points to “fremd.example”, a domain this product did not point to before and that is not among the run\'s allowed link domains: in a link, as an address on a line of its own or in a shortcode, such as a video. A file name like “video.mp4” in a shortcode also counts as a domain. If there are more such references, lynox names them only once you have the run planned again. lynox does not write the text. Ask lynox in the chat to plan the run again: without it, or, if it belongs there as it is, with “fremd.example” added under “Allowed link domains” when you start judging. You can also write the text by hand in the Shopify admin.' };
+		const linkDomain = 'fremd.example';
+		expect(bulkInvalidText('new_link_domain', true, true, DE, ctx({ linkDomain }))).toBe(named.de);
+		expect(bulkInvalidText('new_link_domain', true, true, EN, ctx({ linkDomain }))).toBe(named.en);
+		expect(bulkInvalidText('new_link_domain', true, true, DE, ctx({ linkDomain, startDomains: true }))).toBe(judgedNamed.de);
+		expect(bulkInvalidText('new_link_domain', true, true, EN, ctx({ linkDomain, startDomains: true }))).toBe(judgedNamed.en);
+		// Without a domain the engine may show: the released sentence that names none, without the hint on more.
+		const unnamed = bulkInvalidText('new_link_domain', true, true, DE, ctx());
+		expect(unnamed).toBe(de['bulk.invalid.new_link_domain']!.replace('{where}', 'im Shopify-Admin'));
+		expect(unnamed).not.toContain('Gibt es weitere');
+		expect(bulkInvalidText('new_link_domain', true, true, DE, ctx({ linkDomain: '' }))).toBe(unnamed);
+		expect(bulkInvalidText('new_link_domain', true, true, DE, ctx({ startDomains: true }))).toBe(de['bulk.invalid.new_link_domain']!.replace('{where}', 'im Shopify-Admin'));
+	});
+
+	it('cuts a long domain to 64 characters with „…“, and shows a direction override as text', () => {
+		const sixtyFour = `${'a'.repeat(56)}.example`;
+		expect(sixtyFour).toHaveLength(BULK_LINK_DOMAIN_SHOWN_MAX);
+		expect(bulkLinkDomainShown(sixtyFour)).toBe(sixtyFour);
+		const long = `${'b'.repeat(70)}.example`;
+		const shown = bulkLinkDomainShown(long);
+		expect(shown).toBe(`${'b'.repeat(63)}…`);
+		expect([...shown]).toHaveLength(64);
+		expect(bulkInvalidText('new_link_domain', true, true, DE, ctx({ linkDomain: long }))).toContain(`„${'b'.repeat(63)}…“`);
+		// The judged sentence asks to enter the domain: a cut one is not offered, the sentence names none.
+		const longValid = `${'b'.repeat(40)}.${'c'.repeat(40)}.example`;
+		expect(bulkInvalidText('new_link_domain', true, true, DE, ctx({ linkDomain: longValid, startDomains: true }))).toBe(de['bulk.invalid.new_link_domain_judged']!.replace('{where}', 'im Shopify-Admin'));
+		// Control: at 64 characters it is named in the judged sentence too.
+		expect(bulkInvalidText('new_link_domain', true, true, DE, ctx({ linkDomain: sixtyFour, startDomains: true }))).toContain(`„${sixtyFour}“ unter „Erlaubte Link-Domains“`);
+		expect(bulkInvalidText('new_link_domain', true, true, DE, ctx({ linkDomain: 'a\u202eb.example' }))).not.toContain('\u202e');
+	});
+
+	it('words a cut-off or over-long description as one to change by hand, and names the owner to a mandate', () => {
+		const mandate = bulkMandateI18n(DE);
+		// U-101: where the products are managed, by the list's form.
+		const cutOff = (where: string) => `Die Antwort des Modells für dieses Produkt war länger als erlaubt und wurde abgeschnitten. lynox schreibt hier nichts, die übrigen Produkte sind davon nicht betroffen. Bearbeite die Texte dieses Produkts bei Bedarf selbst ${where}.`;
+		expect(bulkInvalidText('cut_off', true, true, DE, ctx({ judgesHtml: true }))).toBe(cutOff('im Shopify-Admin'));
+		expect(bulkInvalidText('cut_off', false, true, DE, ctx({ judgesHtml: true, listForm: 'woocommerce', host: 'shop.example.com' }))).toBe(cutOff('in WordPress unter Produkte'));
+		expect(bulkInvalidText('cut_off', false, true, DE, ctx({ judgesHtml: true, listForm: null, host: 'api.example.com' }))).toBe(cutOff('dort, wo du die Produkte verwaltest'));
+		// In English, with English places.
+		const cutOffEn = (where: string) => `The model's answer for this product was longer than allowed and was cut off. lynox writes nothing here; the other products are not affected. Edit this product's texts yourself ${where} if needed.`;
+		expect(bulkInvalidText('cut_off', true, true, EN, ctx({ judgesHtml: true }))).toBe(cutOffEn('in the Shopify admin'));
+		expect(bulkInvalidText('cut_off', false, true, EN, ctx({ judgesHtml: true, listForm: 'woocommerce', host: 'shop.example.com' }))).toBe(cutOffEn('in WordPress under Products'));
+		// It names no act of the owner's: a mandate reads the same sentence.
+		expect(bulkInvalidText('cut_off', true, true, mandate, ctx({ judgesHtml: true }))).toBe(cutOff('im Shopify-Admin'));
+		// A run whose judge decides no description keeps the sentence that says to plan again.
+		expect(bulkInvalidText('cut_off', true, true, DE, ctx({ judgesHtml: false }))).toBe(de['bulk.invalid.cut_off']);
+		// U-186: one sentence per form, the whole product left out; the owner named to a mandate.
+		const shop = 'Die neue Beschreibung dieses Produkts ist nach dem Aufbereiten für Shopify länger, als der Lauf erlaubt. lynox ändert dieses Produkt nicht. Ändere die Beschreibung bei Bedarf selbst in Shopify; die übrigen Produkte ';
+		const woo = 'Die neue Beschreibung oder Kurzbeschreibung dieses Produkts ist nach dem Aufbereiten länger, als der Lauf erlaubt. lynox ändert dieses Produkt nicht. Ändere den Text bei Bedarf selbst in WordPress unter Produkte; die übrigen Produkte ';
+		for (const listForm of ['shopify', 'shopify_filtered']) {
+			expect(bulkInvalidText('html_too_long', true, true, DE, ctx({ judgesHtml: true, listForm }))).toBe(`${shop}kannst du trotzdem freigeben.`);
+			expect(bulkInvalidText('html_too_long', true, true, mandate, ctx({ judgesHtml: true, listForm }))).toBe(`${shop}kann der Inhaber trotzdem freigeben.`);
+		}
+		const wooCtx = ctx({ judgesHtml: true, listForm: 'woocommerce', host: 'shop.example.com' });
+		expect(bulkInvalidText('html_too_long', false, true, DE, wooCtx)).toBe(`${woo}kannst du trotzdem freigeben.`);
+		expect(bulkInvalidText('html_too_long', false, true, mandate, wooCtx)).toBe(`${woo}kann der Inhaber trotzdem freigeben.`);
+	});
+
+	it('words the markup refusals on Shopify without the bracket of what it found', () => {
+		for (const reason of ['element_not_allowed', 'attribute_not_allowed']) {
+			expect(bulkInvalidText(reason, true, true, DE, ctx())).toBe('Der neue Text enthält Formatierung, die lynox nicht schreibt. Darum ändert lynox dieses Produkt nicht. Bitte lynox im Chat, den Lauf neu zu planen; die Formatierung fällt dann weg.');
+		}
+		for (const reason of ['content_changed', 'new_img', 'not_canonical']) expect(bulkInvalidText(reason, true, true, DE, ctx())).toBe(de[`bulk.invalid.${reason}`]);
+		// The page's tags dropped by the fragment name where to remove them: the Shopify admin (U-103).
+		expect(bulkInvalidText('markup_dropped_before', true, true, DE, ctx())).toContain('im Shopify-Admin');
+	});
+
+	it('gives a list too large the step its form allows: fewer products on Shopify, a part of the list elsewhere', () => {
+		const halted = (listForm: string, targetSystem = 'http:acme.myshopify.com') => ({
+			phase: 'planned' as BulkRunDetailData['phase'], haltKey: 'listTooLarge', targetSystem, costUsd: 0, costCapUsd: null, judge: null,
+			listFirstPage: null, judgeServedBy: null, judgeOwnKey: false, listForm,
+		});
+		const cause = 'Die Liste ist länger oder grösser, als ein Massenlauf fassen kann. Dieser Lauf lässt sich nicht fortsetzen; lynox hat nichts geändert.';
+		for (const form of ['shopify', 'shopify_filtered']) {
+			expect(bulkHaltText(halted(form), true, DE, false)).toEqual({ cause, before: 'Bitte lynox im Chat, den Lauf für weniger Produkte neu zu planen, etwa nur für bestimmte Produkttypen oder Anbieter.' });
+		}
+		expect(bulkHaltText(halted('woocommerce', 'http:shop.example.com'), true, DE, false)).toEqual({ cause, before: 'Lässt sich die Liste bei ihrer Quelle in kleinere Teile aufteilen, bitte lynox im Chat, für einen Teil davon einen neuen Lauf zu planen.' });
+		// Only a list too large reads the Shopify step: another halt of a Shopify list keeps its own.
+		for (const haltKey of ['listNoProgress', 'listNotAList']) {
+			const shop = bulkHaltText({ ...halted('shopify'), haltKey }, true, DE, false);
+			expect(shop?.before ?? '').not.toContain('weniger Produkte');
+			expect(shop).toEqual(bulkHaltText({ ...halted('woocommerce', 'http:shop.example.com'), haltKey }, true, DE, false));
+		}
+	});
+});
+
 // The value with a mark behind each hidden character the run adds in place.
 describe('bulkHiddenSegments', () => {
 	const i18n = { t: (k: string) => k, tf: (k: string, v: Record<string, string>) => `${k}:${Object.values(v).join('|')}` };
@@ -1513,5 +1682,52 @@ describe('bulkHiddenCountText', () => {
 	it('names products on Shopify, as every count beside it does', () => {
 		expect(bulkHiddenCountText(4, true, i18n)).toBe('bulk.hidden.count_products:4');
 		expect(bulkHiddenCountText(1, true, i18n)).toBe('bulk.hidden.count_products_one:1');
+	});
+});
+
+describe('a run the owner discarded before approving it, as the list and the step chip name it', () => {
+	const DISCARDED = 'the owner discarded this run before approving it';
+	it('reads "discarded" without the halted suffix; every other aborted run reads "aborted"', () => {
+		expect(bulkPhaseKey({ phase: 'aborted', haltKey: 'discarded' })).toBe('bulk.phase.discarded');
+		expect(bulkPhaseHasSuffix({ phase: 'aborted', haltKey: 'discarded', haltReason: DISCARDED })).toBe(false);
+		// The twins: another end before approval, and a run that is not aborted.
+		expect(bulkPhaseKey({ phase: 'aborted', haltKey: 'superseded' })).toBe('bulk.phase.aborted');
+		// A cancelled run carries no suffix whatever ended it; a halted one that is not cancelled does.
+		expect(bulkPhaseHasSuffix({ phase: 'aborted', haltKey: 'superseded', haltReason: 'x' })).toBe(false);
+		expect(bulkPhaseHasSuffix({ phase: 'writing', haltKey: 'mandateEnded', haltReason: 'x' })).toBe(true);
+		expect(bulkPhaseKey({ phase: 'previewed', haltKey: null })).toBe('bulk.phase.previewed');
+		expect(bulkPhaseHasSuffix({ phase: 'previewed', haltKey: null, haltReason: null })).toBe(false);
+	});
+
+	it('names the last step of a discarded run "discarded", not "done"', () => {
+		expect(bulkStepLabelKey({ phase: 'aborted', haltKey: 'discarded' }, 'done')).toBe('bulk.phase.discarded');
+		expect(bulkStepLabelKey({ phase: 'aborted', haltKey: 'superseded' }, 'done')).toBe('bulk.phase.aborted');
+		expect(bulkStepLabelKey({ phase: 'done', haltKey: null }, 'done')).toBe('bulk.step.done');
+		expect(bulkStepLabelKey({ phase: 'aborted', haltKey: 'discarded' }, 'approval')).toBe('bulk.step.approval');
+	});
+});
+
+describe('bulkSentenceParts (U-333)', () => {
+	it('splits a sentence at its slot and fills the other placeholders around it, in order', () => {
+		expect(bulkSentenceParts('Open {target} and check “{field}” there.', 'field', { target: 'P 7' }))
+			.toEqual([{ text: 'Open P 7 and check “' }, { slot: true }, { text: '” there.' }]);
+	});
+
+	it('keeps a slot at either end without an empty piece, and every slot of a sentence that names it twice', () => {
+		expect(bulkSentenceParts('{field}: x {field}', 'field', {})).toEqual([{ slot: true }, { text: ': x ' }, { slot: true }]);
+		expect(bulkSentenceParts('sent unchanged: {fields}', 'fields', {})).toEqual([{ text: 'sent unchanged: ' }, { slot: true }]);
+	});
+
+	it('does not open a second slot for a value that holds the slot\'s own text', () => {
+		expect(bulkSentenceParts('{target} and {field}', 'field', { target: '{field}' }))
+			.toEqual([{ text: '{field} and ' }, { slot: true }]);
+	});
+});
+
+describe('bulkSecretInContextKey', () => {
+	it('picks the sentence by where the field lives', () => {
+		expect(bulkSecretInContextKey(true, false)).toBe('bulk.invalid.secret_in_context');
+		expect(bulkSecretInContextKey(false, true)).toBe('bulk.invalid.secret_in_context_column');
+		expect(bulkSecretInContextKey(false, false)).toBe('bulk.invalid.secret_in_context_field');
 	});
 });

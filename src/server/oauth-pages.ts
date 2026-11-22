@@ -212,6 +212,10 @@ export const OAUTH_RESULT_TEXTS = {
     en: 'This connection has no provider this instance knows, so it cannot show what the owner sees of it. Nothing was sent to the provider.',
     de: 'Diese Verbindung nennt keinen Anbieter, den lynox kennt. Deshalb kann diese Seite nicht zeigen, was der Inhaber dieser Instanz von ihr sieht. An den Anbieter wurde nichts gesendet.',
   },
+  consentChanged: {
+    en: 'The text for this connection changed while you had the page open. Open the link again and read the new text. Nothing was sent to the provider.',
+    de: 'Der Text zu dieser Verbindung hat sich geändert, während du die Seite offen hattest. Öffne den Link noch einmal und lies den neuen Text. An den Anbieter wurde nichts gesendet.',
+  },
   noteChanged: {
     en: 'This connection now shows another note than the page you confirmed. Open the link again and read the page. Nothing was sent to the provider.',
     de: 'Der Hinweis zu dieser Verbindung hat sich geändert, seit du die Seite bestätigt hast. Öffne den Link noch einmal und lies die Seite. An den Anbieter wurde nichts gesendet.',

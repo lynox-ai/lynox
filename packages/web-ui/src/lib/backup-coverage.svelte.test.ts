@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { backupCoverageNotice, migrationWorkspaceNotice, OMITTED_SIDECAR } from './backup-coverage.js';
+import { backupCoverageNotice, migrationWorkspaceNotice, skippedNextKey, OMITTED_SIDECAR } from './backup-coverage.js';
 import { t, setLocale, getLocale } from './i18n.svelte.js';
 
 const OMITTED = { workspace: OMITTED_SIDECAR };
@@ -42,15 +42,20 @@ describe('backupCoverageNotice: what the backup list says about the workspace (r
 
 describe('migrationWorkspaceNotice: the done step of a migration that left the workspace out (U-046)', () => {
 	it('is null when the workspace went along', () => {
-		expect(migrationWorkspaceNotice({}, 'managed')).toBeNull();
-		expect(migrationWorkspaceNotice({ workspace: 'something-else' }, 'self')).toBeNull();
+		expect(migrationWorkspaceNotice({})).toBeNull();
+		expect(migrationWorkspaceNotice({ workspace: 'something-else' })).toBeNull();
 	});
 
-	it('replaces the description and the toast, and names the way out of the tier', () => {
-		expect(migrationWorkspaceNotice({ workspace: OMITTED_SIDECAR }, 'managed')).toEqual({
+	it('replaces the description and the toast, and names the target\'s support (U-304)', () => {
+		expect(migrationWorkspaceNotice({ workspace: OMITTED_SIDECAR })).toEqual({
 			description: 'migration.success_desc_without_workspace', line: 'migration.workspace_omitted_managed', toast: 'migration.success_without_workspace',
 		});
-		expect(migrationWorkspaceNotice({ workspace: OMITTED_SIDECAR }, 'self')?.line).toBe('migration.workspace_omitted_self');
+	});
+
+	it('names the same way out as the next step for files it could not carry, in the right number', () => {
+		expect(skippedNextKey(1)).toBe('migration.skipped_next_managed_one');
+		expect(skippedNextKey(2)).toBe('migration.skipped_next_managed_many');
+		expect(skippedNextKey(53)).toBe('migration.skipped_next_managed_many');
 	});
 });
 
@@ -103,10 +108,6 @@ describe('the texts, as ux wrote them', () => {
 		expect(both('migration.workspace_omitted_managed')).toEqual({
 			de: 'Diese Dateien hat die Migration nicht übertragen. Für eine Kopie auf die neue Instanz schreib an support@lynox.ai.',
 			en: 'The migration did not transfer these files. To have them copied to the new instance, write to support@lynox.ai.',
-		});
-		expect(both('migration.workspace_omitted_self')).toEqual({
-			de: 'Diese Dateien hat die Migration nicht übertragen. Übertrage sie dort, wo du sie verwaltest.',
-			en: 'The migration did not transfer these files. Move them where you manage them.',
 		});
 	});
 });
