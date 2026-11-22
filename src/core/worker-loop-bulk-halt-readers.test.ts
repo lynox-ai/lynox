@@ -8,13 +8,13 @@ import type { TriggerRecord } from '../types/index.js';
 import { noteMemberConnection, runCollectingMemberNotes } from './member-connection-notes.js';
 
 // A halted bulk run's end goes to three readers: the run's history, which a mandate reads too;
-// the owner's devices; and the devices of the grant that planned the run. Where the halt's way on
-// is the owner's alone, each reads its own sentence (U-383); every other halt stays one push to
-// every device, as before.
+// the owner's devices; and the devices of every live grant, whoever planned the run (a mandate
+// gets the notices the owner gets). Where the halt's way on is the owner's alone, each reads its
+// own sentence (U-383); every other halt stays one push to every device, as before.
 const R = BULK_HALT_REASONS;
 const CLOSING = 'Lösen kann das nur der Inhaber.';
 
-function harness(opts: { reason: string; plannedBy: 'owner' | 'mandate' | 'mandate-without-grant'; live?: boolean }) {
+function harness(opts: { reason: string; plannedBy: 'owner' | 'mandate' | 'mandate-without-grant' }) {
   const recorded: string[] = [];
   const sent: NotificationMessage[] = [];
   const planner = opts.plannedBy === 'mandate' ? { kind: 'mandate', mandateId: 'grant-1' }
@@ -26,7 +26,6 @@ function harness(opts: { reason: string; plannedBy: 'owner' | 'mandate' | 'manda
     getBulkLedger: vi.fn(() => ({
       getRunForApply: vi.fn(() => ({ phase: 'approved', haltReason: opts.reason, targetSystem: 'api:acme.myshopify.com', delegatedPlanner: planner })),
     })),
-    getMandateEnds: vi.fn(() => ({ isLive: (id: string) => id === 'grant-1' && (opts.live ?? true) })),
   } as unknown as Engine;
   const router = {
     hasChannels: vi.fn(() => true),
@@ -43,7 +42,7 @@ function harness(opts: { reason: string; plannedBy: 'owner' | 'mandate' | 'manda
 const COUNTS = ' 2 von 5 Zielen geschrieben.';
 
 describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
-  it('records only the fact, pushes the way to the owner\'s devices and the owner to the planning grant\'s', () => {
+  it('records only the fact, pushes the way to the owner\'s devices and the owner to every grant\'s', () => {
     const h = harness({ reason: R.storeAccessEnded, plannedBy: 'mandate' });
     const summary = `${BULK_NOTICES.de.halted('apply', R.storeAccessEnded)}${COUNTS}`;
     h.end(summary);
@@ -51,12 +50,14 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
     expect(h.sent).toHaveLength(2);
     expect(h.sent[0]).toMatchObject({ body: summary, audience: 'owner' });
     expect(h.sent[0]!.mandateId).toBeUndefined();
-    expect(h.sent[1]).toMatchObject({ body: `lynox konnte den Zugang zum Shop nicht erneuern. ${CLOSING}${COUNTS}`, audience: 'mandates', mandateId: 'grant-1' });
+    expect(h.sent[1]).toMatchObject({ body: `lynox konnte den Zugang zum Shop nicht erneuern. ${CLOSING}${COUNTS}`, audience: 'all_mandates' });
+    // Every grant, not one: no grant named.
+    expect(h.sent[1]!.mandateId).toBeUndefined();
     // Both name the run the same way.
     expect(h.sent[1]!.title).toBe(h.sent[0]!.title);
   });
 
-  it('leaves the owner\'s member-connection lines out of the planning grant\'s push; the owner\'s push and the history keep them', async () => {
+  it('leaves the owner\'s member-connection lines out of every grant\'s push; the owner\'s push and the history keep them', async () => {
     const h = harness({ reason: R.storeAccessEnded, plannedBy: 'mandate' });
     const summary = `${BULK_NOTICES.de.halted('apply', R.storeAccessEnded)}${COUNTS}`;
     // The owner's wording of a refused member connection: another member's provider and profile,
@@ -68,13 +69,13 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
     }).done;
     expect(h.sent).toHaveLength(2);
     expect(h.sent[0]).toMatchObject({ audience: 'owner', body: `${summary}\n• ${NOTE.de}` });
-    expect(h.sent[1]).toMatchObject({ audience: 'mandates', mandateId: 'grant-1', body: `lynox konnte den Zugang zum Shop nicht erneuern. ${CLOSING}${COUNTS}` });
+    expect(h.sent[1]).toMatchObject({ audience: 'all_mandates', body: `lynox konnte den Zugang zum Shop nicht erneuern. ${CLOSING}${COUNTS}` });
     expect(h.sent[1]!.body).not.toContain('eva@kanzlei.example');
     expect(h.recorded).toHaveLength(1);
     expect(h.recorded[0]).toContain(NOTE.en);
   });
 
-  it('builds the planning grant\'s push from the sentence in the owner\'s language, as before the lines were left out', async () => {
+  it('builds every grant\'s push from the sentence in the owner\'s language, as before the lines were left out', async () => {
     const h = harness({ reason: R.storeAccessEnded, plannedBy: 'mandate' });
     // The stored sentence in English, its version in the owner's German pushed in its place.
     const stored = `${BULK_NOTICES.en.halted('apply', R.storeAccessEnded)} 2 of 5 targets written.`;
@@ -83,10 +84,10 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
       noteMemberConnection('Connection not used: the model\'s line', () => ({ en: 'Connection not used: a note.', de: 'Verbindung nicht genutzt: eine Notiz.' }));
       h.end(stored, said);
     }).done;
-    expect(h.sent[1]).toMatchObject({ audience: 'mandates', body: `lynox konnte den Zugang zum Shop nicht erneuern. ${CLOSING}${COUNTS}` });
+    expect(h.sent[1]).toMatchObject({ audience: 'all_mandates', body: `lynox konnte den Zugang zum Shop nicht erneuern. ${CLOSING}${COUNTS}` });
   });
 
-  it('pushes a product write\'s short form to the owner\'s devices as it is, records the fact, and tells the planning grant the owner resolves it', () => {
+  it('pushes a product write\'s short form to the owner\'s devices as it is, records the fact, and tells every grant the owner resolves it', () => {
     const h = harness({ reason: R.productWriteNotAsked, plannedBy: 'mandate' });
     const summary = BULK_NOTICES.de.productWriteNotAsked('not_asked', true);
     const push = BULK_NOTICES.de.productWriteNotAskedPush('not_asked', true);
@@ -96,27 +97,20 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
     expect(h.sent[0]).toMatchObject({ body: push, audience: 'owner' });
     expect(h.sent[1]).toMatchObject({
       body: `lynox hat nichts geschrieben. Beim Verbinden hat lynox Shopify nicht um das Recht gebeten, Produkte zu ändern. ${CLOSING}`,
-      audience: 'mandates', mandateId: 'grant-1',
+      audience: 'all_mandates',
     });
   });
 
-  it('sends no mandate push for a run the owner planned, or whose grant has ended', () => {
-    for (const setup of [{ plannedBy: 'owner' as const }, { plannedBy: 'mandate' as const, live: false }]) {
-      const h = harness({ reason: R.credential, ...setup });
+  // A mandate gets the notices the owner gets: whoever planned the run, every grant reads that
+  // the owner resolves it, as the planning grant does.
+  it('tells every grant the owner resolves it for a run the owner planned, and for one whose planning grant is not recorded', () => {
+    for (const plannedBy of ['owner', 'mandate-without-grant'] as const) {
+      const h = harness({ reason: R.credential, plannedBy });
       h.end(BULK_NOTICES.de.halted('apply', R.credential));
-      expect(h.sent.map((m) => m.audience), JSON.stringify(setup)).toEqual(['owner']);
-      expect(h.recorded, JSON.stringify(setup)).toEqual(['lynox findet keinen gespeicherten Zugang zum Zielsystem.']);
+      expect(h.sent.map((m) => [m.audience, m.mandateId]), plannedBy).toEqual([['owner', undefined], ['all_mandates', undefined]]);
+      expect(h.sent[1]!.body, plannedBy).toBe(`lynox findet keinen gespeicherten Zugang zum Zielsystem. ${CLOSING}`);
+      expect(h.recorded, plannedBy).toEqual(['lynox findet keinen gespeicherten Zugang zum Zielsystem.']);
     }
-  });
-
-  it('keeps a halt of a run a mandate planned without a recorded grant one push to every device, recorded as it is', () => {
-    const h = harness({ reason: R.storeAccessEnded, plannedBy: 'mandate-without-grant' });
-    const summary = `${BULK_NOTICES.de.halted('apply', R.storeAccessEnded)}${COUNTS}`;
-    h.end(summary);
-    expect(h.recorded).toEqual([summary]);
-    expect(h.sent).toHaveLength(1);
-    expect(h.sent[0]!.body).toBe(summary);
-    expect(h.sent[0]!.audience).toBeUndefined();
   });
 
   it('keeps every other halt one push to every device, with its sentence recorded as it is', () => {
