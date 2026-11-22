@@ -405,13 +405,15 @@ describe('markersOf on a dot a browser shows, written otherwise', () => {
     }
   });
 
-  it('reads a text with thousands of halves of a character around a hidden one at once, and finds no host in it', () => {
+  it('reads a text with thousands of halves of a character around a hidden one without failing, and finds no host in it', () => {
     const raw = `Gruentee ${'\udb40'.repeat(12000)}${'\udc20'.repeat(12000)}`;
     const referenced = `<p>Gruentee ${'&#xDB40;'.repeat(12000)}${'&#xDC20;'.repeat(12000)}</p>`;
     for (const text of [raw, referenced]) expect(markersOf(text).get('link')).toEqual(new Set());
   });
 
-  it('reads a reference to half a character, to none or to nothing as the replacement character a browser shows, so no host across it', () => {
+  it('reads half a character, written or as a reference, as the replacement character a browser shows: a separator, the same each way', () => {
+    const forms = ['Mehr: Q\ud800evil\u200b.com', 'Mehr: Q&#xD800;evil\u200b.com', 'Mehr: Q\ufffdevil\u200b.com'];
+    for (const text of forms) expect(markersOf(text).get('link')).toEqual(new Set(['evil.com']));
     for (const text of ['evil&#xD800;.com', 'evil&#xDC20;.com', 'evil&#0;.com', 'evil&#1114112;.com', 'evil\ufffd.com']) {
       expect(markersOf(`Mehr bei ${text}`).get('link')).toEqual(new Set());
     }

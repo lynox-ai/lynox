@@ -80,9 +80,9 @@ const MARKER_REASON: Record<MarkerKind, OutlierReason> = { link: 'new_link', ema
  *  or a dot that only looks like one — read as a dot. Anchored at the start of the blank before it, so a
  *  long run of blanks is read once, not once per blank. */
 const OBFUSCATED_DOT = /(?<!\s)\s*(?:\[\.\]|\(\.\)|\{\.\}|\[dot\]|\(dot\))\s*|(?<!\s)\s+dot\s+(?=[\p{L}\p{N}])|(?<=[\p{L}\p{N}])[ \t]+\.[ \t]+(?=[\p{L}\p{N}])|[\u3002\uFF0E\uFF61\uFE52\u2024\uA4F8\u0702]/giu;
-/** Characters a browser shows as nothing: format characters (the soft hyphen, the zero-width ones), the other
- *  default-ignorable ones (variation selectors among them), and halves of a character that stand alone. */
-const UNSHOWN_CHARS = /[\p{Default_Ignorable_Code_Point}\p{Cf}\p{Cs}]/gu;
+/** Characters a browser shows as nothing: format characters (the soft hyphen, the zero-width ones) and the other
+ *  default-ignorable ones (variation selectors among them). */
+const UNSHOWN_CHARS = /[\p{Default_Ignorable_Code_Point}\p{Cf}]/gu;
 /** Top-level domains that are also words ("Baumwolle.Es ist", "Holz.Co"): written capitalised after a
  *  full stop that lacks its space, they start a sentence, not a host. A host with a scheme needs no
  *  top-level domain at all. */
@@ -276,11 +276,14 @@ function decodeReferences(text: string): string {
 }
 
 function readMarkers(text: string, out: Map<MarkerKind, Set<string>>): void {
-  readText(text, out);
+  // Half a character that stands alone is stored, and shown, as the replacement character: a separator, and
+  // nothing left that could join with another half.
+  const shown = text.replace(/\p{Cs}/gu, '\uFFFD');
+  readText(shown, out);
   // What a browser shows as nothing may stand beside a dot or inside a name: the text is read once more
   // without it, and only once. Read with it as well, so a reading it cuts is kept.
-  const bare = text.replace(UNSHOWN_CHARS, '');
-  if (bare !== text) readText(bare, out);
+  const bare = shown.replace(UNSHOWN_CHARS, '');
+  if (bare !== shown) readText(bare, out);
 }
 
 function readText(text: string, out: Map<MarkerKind, Set<string>>): void {
