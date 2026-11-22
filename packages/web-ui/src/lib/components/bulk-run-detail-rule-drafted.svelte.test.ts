@@ -246,16 +246,13 @@ describe('a long rule stays in a bounded box at every place it is shown', () => 
 			},
 		},
 	};
-	const saved = new Map<string, PropertyDescriptor | undefined>();
+	// jsdom defines these on Element.prototype; defined on HTMLElement.prototype here, and deleted
+	// from it afterwards, so jsdom's own come back.
 	beforeEach(() => {
-		for (const [name, d] of Object.entries(layout)) {
-			saved.set(name, Object.getOwnPropertyDescriptor(HTMLElement.prototype, name) ?? Object.getOwnPropertyDescriptor(Element.prototype, name));
-			Object.defineProperty(HTMLElement.prototype, name, d);
-		}
+		for (const [name, d] of Object.entries(layout)) Object.defineProperty(HTMLElement.prototype, name, d);
 	});
 	afterEach(() => {
-		for (const name of saved.keys()) delete (HTMLElement.prototype as unknown as Record<string, unknown>)[name];
-		saved.clear();
+		for (const name of Object.keys(layout)) delete (HTMLElement.prototype as unknown as Record<string, unknown>)[name];
 	});
 
 	const readMore = (): HTMLButtonElement | null => target.querySelector('[data-testid="bulk-rule-read-more"]');
@@ -321,6 +318,36 @@ describe('a long rule stays in a bounded box at every place it is shown', () => 
 		box.dispatchEvent(new Event('scroll'));
 		await vi.waitFor(() => expect(readMore()).toBeNull());
 		expect(target.querySelector('[data-testid="bulk-rule-fade"]')).toBeNull();
+	});
+
+	it('counts again when the lines change height while the box keeps its own, as after a font swap', async () => {
+		// jsdom has none: this one records what it watches and is fired by hand.
+		const watched: Element[] = [];
+		let fire = (): void => {};
+		vi.stubGlobal('ResizeObserver', class {
+			constructor(cb: () => void) { fire = cb; }
+			observe(el: Element): void { watched.push(el); }
+			unobserve(): void {}
+			disconnect(): void {}
+		});
+		// Ten lines: the tenth is cut at the box's edge.
+		await render({ ...atStart, judgeRule: { ...longRule!, rule: Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join('\n') } });
+		const box = target.querySelector('[data-testid="bulk-rule-box"]')!;
+		const lines = box.querySelector('[data-rule-line]')!.parentElement!;
+		expect(watched).toContain(box);
+		expect(watched).toContain(lines);
+		expect(readMore()?.textContent).toBe(`${moreText(1)} ↓`);
+		// The new font wraps every line onto two screen lines; the box stays at its bound.
+		const plain = layout.getBoundingClientRect.value as (this: HTMLElement) => DOMRect;
+		Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
+			configurable: true, writable: true,
+			value(this: HTMLElement): DOMRect {
+				const r = plain.call(this);
+				return this.hasAttribute('data-rule-line') ? rect(r.top * 2, r.top * 2 + 2 * LINE) : r;
+			},
+		});
+		fire();
+		await vi.waitFor(() => expect(readMore()?.textContent).toBe(`${moreText(20 - 9)} ↓`));
 	});
 
 	it('names one hidden line in the singular, and reads in English', async () => {

@@ -20,6 +20,8 @@
 	const lines = $derived(bulkVisibleText(rule).split('\n'));
 
 	let box = $state<HTMLElement | null>(null);
+	/** The rule's lines, whose height changes without the box's when the box is at its bound. */
+	let body = $state<HTMLElement | null>(null);
 	/** Screen lines of the rule not wholly in view below the box's edge. */
 	let below = $state(0);
 
@@ -28,7 +30,6 @@
 	function measure(): void {
 		const el = box;
 		if (!el) return;
-		if (el.scrollHeight <= el.clientHeight + 1) { below = 0; return; }
 		const bottom = el.getBoundingClientRect().bottom;
 		const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 20;
 		below = bulkRuleLinesBelow([...el.querySelectorAll<HTMLElement>('[data-rule-line]')].map((l) => { const r = l.getBoundingClientRect(); return { top: r.top, bottom: r.bottom }; }), bottom, lineHeight);
@@ -48,6 +49,9 @@
 		untrack(measure);
 		const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => schedule());
 		ro?.observe(el);
+		// At its bound the box keeps its height while a font swap or a new wrap changes the lines'
+		// height, so the lines are watched as well.
+		if (body) ro?.observe(body);
 		window.addEventListener('resize', schedule);
 		return () => {
 			ro?.disconnect();
@@ -76,7 +80,7 @@
 		data-testid="bulk-rule-box"
 		bind:this={box}
 		onscroll={schedule}
-	>{#each lines as line, i (i)}<span data-rule-line class="block min-h-[1lh]">{line}</span>{/each}</div>
+	><div bind:this={body}>{#each lines as line, i (i)}<span data-rule-line class="block min-h-[1lh]">{line}</span>{/each}</div></div>
 	{#if below > 0}
 		<div data-testid="bulk-rule-fade" class="pointer-events-none absolute inset-x-px bottom-px h-8 rounded-b-[var(--radius-sm)] bg-gradient-to-t from-bg to-transparent"></div>
 	{/if}
