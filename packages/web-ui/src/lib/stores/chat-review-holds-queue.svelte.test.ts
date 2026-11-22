@@ -22,19 +22,24 @@ let changed: Array<{ file: string; status: string; diff: string }>;
 let holdFirstRun: Promise<void> | null;
 /** While set, the changeset answer waits until it resolves. */
 let holdChangeset: Promise<void> | null;
+/** While set, every run after the first streams until it resolves. */
+let holdLaterRuns: Promise<void> | null;
+let reviewStatus: number;
+let changesetFails: boolean;
+let saved: Map<string, string>;
 
 const notes = [{ file: 'notes.md', status: 'modified', diff: '-a\n+b' }];
 
 function serve(): void {
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
 		const url = String(input);
-		if (url.endsWith('/changeset/review')) return json({ ok: true });
+		if (url.endsWith('/changeset/review')) return json({ ok: reviewStatus === 200 }, reviewStatus);
 		if (url.endsWith('/sessions')) return json({ sessionId: 't1' });
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
 		if (url.endsWith('/run')) {
 			const body = JSON.parse(String(init?.body)) as { task?: string };
 			runTasks.push(String(body.task));
-			const held = runTasks.length === 1 ? holdFirstRun : null;
+			const held = runTasks.length === 1 ? holdFirstRun : holdLaterRuns;
 			const enc = new TextEncoder();
 			const stream = new ReadableStream<Uint8Array>({
 				async start(c) {
@@ -49,6 +54,7 @@ function serve(): void {
 		}
 		if (url.endsWith('/changeset')) {
 			if (holdChangeset) await holdChangeset;
+			if (changesetFails) return json({ error: 'unavailable' }, 503);
 			return json({ hasChanges: changed.length > 0, runId: 'run-7', files: changed });
 		}
 		return json({ messages: [], activeRun: null });
@@ -56,6 +62,15 @@ function serve(): void {
 }
 
 beforeEach(async () => {
+	saved = new Map();
+	vi.stubGlobal('localStorage', {
+		getItem: (k: string) => saved.get(k) ?? null,
+		setItem: (k: string, v: string) => { saved.set(k, String(v)); },
+		removeItem: (k: string) => { saved.delete(k); },
+		clear: () => { saved.clear(); },
+		key: (i: number) => [...saved.keys()][i] ?? null,
+		get length() { return saved.size; },
+	});
 	vi.stubGlobal('navigator', { onLine: true });
 	listeners = {};
 	vi.stubGlobal('window', { addEventListener: (event: string, fn: () => void) => { listeners[event] = fn; } });
@@ -66,6 +81,9 @@ beforeEach(async () => {
 	changed = [];
 	holdFirstRun = null;
 	holdChangeset = null;
+	holdLaterRuns = null;
+	reviewStatus = 200;
+	changesetFails = false;
 	serve();
 });
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -117,6 +135,46 @@ describe('a turn queued behind a run waits for the review that run left open', (
 		expect(runTasks, 'nothing sent past the review').toEqual(['edit the notes']);
 	});
 
+	it('a refused answer whose new fetch fails keeps the queued turn, unsent', async () => {
+		const release = await queueBehindRun();
+		changed = notes;
+		release();
+		await settle();
+		await wait(200);
+		await settle();
+		expect(store.getPendingChangeset(), 'positive control: the review is open').not.toBeNull();
+		reviewStatus = 409;
+		changesetFails = true;
+		await store.submitChangesetReview('accept');
+		await wait(200);
+		await settle();
+		expect(store.getPendingChangeset(), 'positive control: no review is shown now').toBeNull();
+		expect(runTasks, 'nothing sent past the review the server may still hold').toEqual(['edit the notes']);
+		expect(store.getMessages().find((m) => m.content === 'then this')?.queued, 'the turn keeps its place').toBe(true);
+	});
+
+	it('two drains that wait for the same fetch start one turn, not two', async () => {
+		const release = await queueBehindRun();
+		changed = notes; // the run announces changes, so their fetch starts
+		let answer!: () => void;
+		holdChangeset = new Promise<void>((r) => { answer = r; });
+		holdLaterRuns = new Promise<void>(() => {}); // the next turn keeps streaming
+		release();
+		await settle();
+		// A reconnect re-sends a failed turn while the end-of-run drain still waits for the fetch.
+		store.getMessages().push({ role: 'user', content: 'sent while offline', failed: true });
+		listeners.online!();
+		await settle();
+		expect(store.getMessages().find((m) => m.content === 'sent while offline')?.queued, 'positive control: queued for the re-send').toBe(true);
+		await wait(700); // both drains are due and wait for the fetch
+		changed = []; // the server answers: nothing to review
+		answer();
+		await settle();
+		await wait(50);
+		await settle();
+		expect(runTasks, 'one turn started, the other waits behind it').toEqual(['edit the notes', 'then this']);
+	});
+
 	it('with no review the queued turn is sent after the run (control)', async () => {
 		const release = await queueBehindRun();
 		release();
@@ -124,6 +182,36 @@ describe('a turn queued behind a run waits for the review that run left open', (
 		await wait(200);
 		await settle();
 		expect(runTasks).toEqual(['edit the notes', 'then this']);
+	});
+});
+
+describe('a turn queued before a reload waits for the review the server holds', () => {
+	const seed = (): void => {
+		saved.set('lynox-chat', JSON.stringify({
+			sessionId: 't9',
+			threads: { t9: [{ role: 'user', content: 'typed before reload', queued: true, queueId: 'q1' }] },
+			queues: { t9: [{ id: 'q1', task: 'typed before reload' }] },
+		}));
+	};
+
+	it('the review is fetched and shown, and the restored turn stays queued, unsent', async () => {
+		seed();
+		changed = notes;
+		await store.resumeThread('t9');
+		await settle();
+		await wait(200);
+		await settle();
+		expect(store.getPendingChangeset(), 'the review the server holds is shown').not.toBeNull();
+		expect(runTasks, 'nothing sent past it').toEqual([]);
+	});
+
+	it('with no review the restored turn is sent (control)', async () => {
+		seed();
+		await store.resumeThread('t9');
+		await settle();
+		await wait(200);
+		await settle();
+		expect(runTasks).toEqual(['typed before reload']);
 	});
 });
 
