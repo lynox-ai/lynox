@@ -290,6 +290,8 @@ describe('an undo with a send left unclear', () => {
 	it('tells a mandate, while the undo still runs, the same as the owner, with no link', async () => {
 		viewer = 'mandate';
 		await render({ phase: 'writing', haltKey: null, haltReason: null, sentUnknown: 1 });
+		// The page reads this session as a mandate's.
+		expect(target.textContent).toContain(t('bulk.owner_only_notice'));
 		expect(box()).toBe(t('bulk.sent_unknown.one_undo_running'));
 		expect(target.querySelector('[data-testid="bulk-sent-unknown"] button')).toBeNull();
 	});
