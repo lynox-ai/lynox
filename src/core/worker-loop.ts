@@ -3450,20 +3450,19 @@ export class WorkerLoop {
         // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
         // engine itself cut off is the same false report as the `success` status was.
         //
-        // ⚠ And the LIMIT of that, stated rather than left to look deliberate: a question
-        // left unanswered by a shutdown or by its expiry records `failed` and still
-        // notifies as a ✓ at `normal`. That asymmetry is older than this change and no
-        // test pins it either way. (Left unanswered because the OWNER stopped the run, it
-        // takes the branch below.)
+        // ⚠ So does a question left unanswered by a shutdown or by its expiry: the run records
+        // `failed`, so its push is a ✗ at `high`, with or without member-connection lines
+        // (U-420), not a ✓ over a run that did not finish. (Left unanswered because the OWNER
+        // stopped the run, it takes the branch below.)
         //
         // ⛔ A run its owner ended says so, as the catch path does: neither ✓ (it did not
         // finish) nor ✗ at high priority (nothing went wrong). The budget word stays in
         // the body; the title answers who ended it.
-        title: endedByOwner ? `\u23f9 ${task.title}` : budgetCut !== null ? `\u2717 ${task.title}`
+        title: endedByOwner ? `\u23f9 ${task.title}` : budgetCut !== null || questionWentUnanswered ? `\u2717 ${task.title}`
           : memberTold.status === 'halted' ? `${RUN_END_LOOK.noted.mark} ${notices.titleWithNote(task.title)}` : `\u2713 ${task.title}`,
         body: bodyOf(memberSaid),
         taskId: task.id,
-        priority: endedByOwner || budgetCut === null ? 'normal' : 'high',
+        priority: endedByOwner || (budgetCut === null && !questionWentUnanswered) ? 'normal' : 'high',
         // Deep-link the notification to THIS run's chat thread so a tap opens the
         // result instead of a blank new chat (the service worker routes
         // `data.threadId` \u2192 `/app?thread=\u2026`). session.sessionId is the thread id.

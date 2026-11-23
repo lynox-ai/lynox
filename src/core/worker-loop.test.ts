@@ -2397,9 +2397,9 @@ describe('WorkerLoop', () => {
     loop.stop();
   });
 
-  // A run whose question went unanswered did not finish: recorded failed, so its push does not
-  // read as finished with a note.
-  it('a run whose question went unanswered and that met a member\'s connection is not titled as finished with a note', async () => {
+  // A run whose question went unanswered did not finish: recorded failed, so its push is a ✗ at
+  // high priority, with or without member-connection lines (U-420), not a ✓ nor the note's title.
+  it('a run whose question went unanswered and that met a member\'s connection is pushed as failed, not as finished with a note', async () => {
     const { noteMemberConnection } = await import('./member-connection-notes.js');
     const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
     const task = makeTask();
@@ -2417,12 +2417,31 @@ describe('WorkerLoop', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, expect.any(String), 'failed', { memberNotes: [LINE] });
-    const titles = vi.mocked(router.notify).mock.calls.map(([m]) => m.title);
-    expect(titles.length).toBeGreaterThan(0);
-    for (const t of titles) {
-      expect(t).not.toContain(WORKER_NOTICES.en.titleWithNote(task.title));
-      expect(t.startsWith('\u23F8')).toBe(false);
-    }
+    // Owner and every grant: the same failed title, the owner with the line, every grant the fixed sentence.
+    expect(vi.mocked(router.notify).mock.calls.map(([m]) => [m.audience, m.title, m.priority])).toEqual([
+      ['owner', `\u2717 ${task.title}`, 'high'],
+      ['all_mandates', `\u2717 ${task.title}`, 'high'],
+    ]);
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ audience: 'all_mandates', body: WORKER_NOTICES.en.memberEndForMandates }));
+  });
+
+  it('a run whose question went unanswered is pushed as failed at high priority, also without member-connection lines', async () => {
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession('All done.');
+    vi.mocked(session.run).mockImplementation(async () => {
+      await session.promptUser!('Approve this?', ['Yes', 'No']);
+      return 'All done.';
+    });
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000);
+
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, expect.any(String), 'failed');
+    expect(router.notify).toHaveBeenCalledTimes(1);
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u2717 ${task.title}`, priority: 'high' }));
   });
 
   it('a run ended through recordAndNotify (a workflow\'s end) is told with its line, ⚠ and the note in the title to the owner, as a fixed sentence to every grant, once', async () => {
