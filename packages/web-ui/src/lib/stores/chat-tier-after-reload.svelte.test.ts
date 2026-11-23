@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // After a reload the chat holds its id (kept in this browser) and reads its transcript back; no
-// session is opened. The tier that shows the model row and picker comes from the thread's record.
+// session is opened. The tier that shows the model row and picker comes from the thread's record:
+// the tier it runs on (`run_tier`), not the pick as asked (`model_tier`).
 
 type Store = typeof import('./chat.svelte.js');
 
@@ -17,6 +18,10 @@ let thread: Record<string, unknown> | null;
 let threadHold: Promise<void> | null;
 let bodyHold: Promise<void> | null;
 let threadReads = 0;
+/** What the server says to a model change: the session is gone (404) until it is opened again. */
+let sessionGone: boolean;
+let reopenOk: boolean;
+let calls: string[];
 
 /** A page that reloads with chat `t1` open, as this browser kept it. */
 async function reload(): Promise<void> {
@@ -32,12 +37,16 @@ async function reload(): Promise<void> {
 
 beforeEach(() => {
 	vi.stubGlobal('navigator', { onLine: true });
-	thread = { id: 't1', model_tier: 'deep', skip_extraction: 0 };
+	thread = { id: 't1', model_tier: 'deep', run_tier: 'deep', skip_extraction: 0 };
+	sessionGone = false;
+	reopenOk = true;
+	calls = [];
 	threadHold = null;
 	bodyHold = null;
 	threadReads = 0;
-	vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
 		const url = String(input);
+		calls.push(`${init?.method ?? 'GET'} ${url.replace(/^.*\/api/, '')} ${typeof init?.body === 'string' ? init.body : ''}`.trim());
 		if (url.endsWith('/threads/t1')) {
 			threadReads++;
 			if (threadHold) await threadHold;
@@ -47,7 +56,12 @@ beforeEach(() => {
 			// A response whose body arrives only once `body` settles.
 			return { ok: true, status: 200, json: async () => { await body; return said; } } as unknown as Response;
 		}
-		if (url.endsWith('/sessions/t1/model')) return json({ model: 'fast', modelId: 'model-fast' });
+		if (url.endsWith('/sessions/t1/model')) return sessionGone ? json({ error: 'Session not found' }, 404) : json({ model: 'fast', modelId: 'model-fast' });
+		if (url.endsWith('/sessions') && init?.method === 'POST') {
+			if (!reopenOk) return json({ error: 'x' }, 500);
+			sessionGone = false;
+			return json({ sessionId: 't1', model: 'balanced' }, 201);
+		}
 		if (url.endsWith('/threads/t1/messages')) return json({ messages: [] });
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
 		return json({}, 404);
@@ -69,13 +83,21 @@ describe('the chat\'s tier after a reload', () => {
 		expect(store.getSessionTier()).toBe('deep');
 	});
 
+	it('is the tier the chat runs on, not the pick as asked, when today\'s ceiling holds it lower', async () => {
+		thread = { id: 't1', model_tier: 'deep', run_tier: 'balanced' };
+		await reload();
+		await store.reconcileThread();
+		await settle();
+		expect(store.getSessionTier()).toBe('balanced');
+	});
+
 	it('stays unknown for a chat whose record is gone or carries no tier', async () => {
 		thread = null;
 		await reload();
 		await store.reconcileThread();
 		await settle();
 		expect(store.getSessionTier()).toBeNull();
-		thread = { id: 't1', model_tier: '' };
+		thread = { id: 't1', model_tier: 'deep', run_tier: '' };
 		await store.reconcileThread();
 		await settle();
 		expect(store.getSessionTier()).toBeNull();
@@ -114,11 +136,48 @@ describe('the chat\'s tier after a reload', () => {
 		await store.reconcileThread();
 		await settle();
 		const reads = threadReads;
-		thread = { id: 't1', model_tier: 'fast' };
+		thread = { id: 't1', model_tier: 'fast', run_tier: 'fast' };
 		await store.reconcileThread();
 		await settle();
 		expect(store.getSessionTier()).toBe('deep');
 		// The contained-state read may still come; the tier read does not.
 		expect(threadReads - reads).toBeLessThanOrEqual(1);
+	});
+});
+
+describe('changing the model of a chat whose server session is gone', () => {
+	it('opens the session for this chat again and makes the change', async () => {
+		await reload();
+		await store.reconcileThread();
+		await settle();
+		sessionGone = true;
+		calls = [];
+		expect(await store.repickSessionModel('fast')).toEqual({ ok: true, model: 'fast' });
+		expect(store.getSessionTier()).toBe('fast');
+		expect(calls).toEqual([
+			'PATCH /sessions/t1/model {"tier":"fast"}',
+			'POST /sessions {"threadId":"t1"}',
+			'PATCH /sessions/t1/model {"tier":"fast"}',
+		]);
+	});
+
+	it('reports the change as failed when the session cannot be opened again', async () => {
+		await reload();
+		await store.reconcileThread();
+		await settle();
+		sessionGone = true;
+		reopenOk = false;
+		expect(await store.repickSessionModel('fast')).toEqual({ ok: false, reason: 'error' });
+		expect(store.getSessionTier()).toBe('deep');
+	});
+
+	it('leaves the chat open now alone when the change came back for another one', async () => {
+		await reload();
+		await store.reconcileThread();
+		await settle();
+		const picked = store.repickSessionModel('fast');
+		store.newChat();
+		expect(await picked).toEqual({ ok: true, model: 'fast' });
+		expect(store.getSessionTier()).toBeNull();
 	});
 });

@@ -31,6 +31,7 @@ import { secretsForProfile } from '../core/profile-secret-view.js';
 import { billingTierSet, eraseRefusal } from '../core/sidecar-refusals.js';
 import type { ApiProfile } from '../core/api-store.js';
 import type { SecretStoreLike } from '../types/index.js';
+import { getModelId } from '../types/index.js';
 import type { MailConnectPromptData } from '../types/agent.js';
 import { AuditLog } from '../core/audit-log.js';
 import { CpRefusalTally, CpTrail } from '../core/cp-trail.js';
@@ -8871,6 +8872,55 @@ describe('LynoxHTTPApi', () => {
         const body = await res.json() as { thread: unknown; threadMissing?: boolean };
         expect(body.thread).toBeNull();
         expect(body.threadMissing).toBe(true);
+      });
+    });
+
+    describe('GET /api/threads/:id says the tier the conversation runs on (run_tier)', () => {
+      const TID = '0b0a7c1e-5d3f-4c2a-9e8b-7f6a5d4c3b2a';
+      type EngineRef = { config?: unknown; getUserConfig: () => unknown; getToolContext: () => unknown };
+      const engineRef = (): EngineRef => (api as unknown as { engine: EngineRef }).engine;
+      const ss = (): { get: (id: string) => unknown } => (api as unknown as { sessionStore: { get: (id: string) => unknown } }).sessionStore;
+      async function runTier(stored: string, userConfig: Record<string, unknown>, live?: string): Promise<unknown> {
+        const e = engineRef();
+        const origConfig = e.config; const origUc = e.getUserConfig; const origGet = ss().get; const origCtx = e.getToolContext;
+        e.config = { model: 'balanced' };
+        e.getToolContext = (): unknown => ({ tools: [], containment: {
+          isContained: () => false,
+          containedThreadIds: () => new Set<string>(),
+          threadStates: () => ({ contained: new Set<string>(), unknown: new Set<string>() }),
+        } });
+        e.getUserConfig = (): unknown => userConfig;
+        // This file's session store answers every id with a stand-in session; this conversation has
+        // a live one only when the case gives it.
+        ss().get = (id: string): unknown => (id === TID ? (live !== undefined ? { getModelTier: () => live } : undefined) : origGet.call(ss(), id));
+        try {
+          let body: { thread: { model_tier?: string; run_tier?: string } } | undefined;
+          await withThreadStore({ getThread: (id: string) => (id === TID ? { id: TID, model_tier: stored } : null) }, async () => {
+            const res = await jsonFetch(`/api/threads/${TID}`);
+            expect(res.status).toBe(200);
+            body = await res.json() as typeof body;
+          });
+          expect(body!.thread.model_tier).toBe(stored);
+          return body!.thread.run_tier;
+        } finally {
+          e.config = origConfig; e.getUserConfig = origUc; ss().get = origGet; e.getToolContext = origCtx;
+        }
+      }
+
+      it('holds the stored pick to today\'s ceiling, as resuming it would', async () => {
+        expect(await runTier('deep', { max_tier: 'balanced' })).toBe('balanced');
+        expect(await runTier('fast', { max_tier: 'balanced' })).toBe('fast');
+        expect(await runTier('deep', {})).toBe('deep');
+      });
+
+      it('falls back to the fast tier when the pick\'s model is blocked, and says nothing when no model is left', async () => {
+        const block = (...tiers: Array<'fast' | 'balanced' | 'deep'>): Record<string, unknown> => ({ blocked_model_ids: tiers.map((t) => getModelId(t, 'anthropic')) });
+        expect(await runTier('deep', block('deep'))).toBe('fast');
+        expect(await runTier('deep', block('deep', 'fast'))).toBeUndefined();
+      });
+
+      it('is the live session\'s tier while one runs', async () => {
+        expect(await runTier('deep', { max_tier: 'deep' }, 'fast')).toBe('fast');
       });
     });
 

@@ -77,7 +77,7 @@ import { resolveProviderApiKey, mayFallBackToStoredKey, PROVIDER_KEY_SLOTS } fro
 import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, providerIdentity, type ProviderIdentity, mainChatTierLabels, mainChatTierLabelsFromTierSet } from '../core/llm/catalog.js';
 import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
-import type { Session } from '../core/session.js';
+import { sessionInitialTier, type Session } from '../core/session.js';
 import { RunAbortedError, TOOL_AUDIT_INPUT_MAX_CHARS } from '../core/agent.js';
 import { StreamIncompleteError } from '../core/stream-incomplete.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
@@ -3114,6 +3114,23 @@ export class LynoxHTTPApi {
     if (live) return [this._lastRunRow(live)];
     const row = this.engine?.getRunRegistry()?.getByThread(sessionId);
     return row ? [row] : [];
+  }
+
+  /**
+   * The tier a conversation runs on, for a page that reopens it without opening a session (a
+   * reload reads it back instead). Its live session's tier when there is one; otherwise the tier
+   * a session would start on: the stored pick held to today's ceiling, account tier and model
+   * blocklist, as resuming it would. The stored `model_tier` is the pick as asked, before those.
+   * Omitted when no permitted model is left for it.
+   */
+  private _runTierOf(engine: Engine, thread: { readonly id: string; readonly model_tier: string }): { run_tier?: string } {
+    const live = this.sessionStore.get(thread.id);
+    if (live) return { run_tier: live.getModelTier() };
+    try {
+      return { run_tier: sessionInitialTier(engine, normalizeTier(thread.model_tier)) };
+    } catch {
+      return {};
+    }
   }
 
   /** The thread row an `own` check reads for a session id (session id = thread id). */
@@ -6461,7 +6478,7 @@ export class LynoxHTTPApi {
       // 404 — mutating a nonexistent thread IS an error.
       if (!thread) { jsonResponse(res, 200, { thread: null, threadMissing: true }); return; }
       const states = containedThreadStates(engine.getToolContext().containment, [thread.id]);
-      jsonResponse(res, 200, { thread: { ...thread, ...containedFields(states, thread.id) } });
+      jsonResponse(res, 200, { thread: { ...thread, ...containedFields(states, thread.id), ...this._runTierOf(engine, thread) } });
     }, readsThread((p) => ({ thread: p['id'] ?? '' }))));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/threads/:id', async (_req, res, params, body) => {
