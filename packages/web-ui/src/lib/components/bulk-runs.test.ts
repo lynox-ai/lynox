@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
 	bulkHiddenSegments, bulkHiddenCountText, bulkRawText, bulkUncheckedCountText, bulkHiddenUnchecked,
-	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkPhaseKey, bulkPhaseHasSuffix, bulkStepLabelKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkPhaseKey, bulkPhaseHasSuffix, bulkStepLabelKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
 	bulkSentenceParts, bulkSecretInContextKey,
@@ -478,6 +478,28 @@ describe('going on from a run that halted', () => {
 		}
 		expect(bulkRollbackLeft({ phase: 'writing', haltKey: 'atomicRollbackIncomplete' }, { written: true, undone: false })).toBe(false);
 		expect(ATOMIC.filter((haltKey) => bulkRollbackIncomplete({ phase: 'aborted', haltKey }))).toEqual(ATOMIC.filter((k) => k.endsWith('Incomplete')));
+	});
+
+	it('says an undo\'s unclear sends in its own words, the start again from the run it undoes, never the chat', () => {
+		const one = 'Bei einem Ziel ist offen, ob die Rücknahme beim Anbieter angekommen ist. Die Sendung blieb ohne klare Antwort, und lynox sendet sie nicht noch einmal, sonst könnte sie doppelt ankommen. Starte die Rücknahme neu, auf der Seite des Massenlaufs, den sie zurücknimmt: lynox liest dann jedes Ziel zuerst und sendet nur dorthin, wo die Änderung des Laufs noch steht.';
+		expect(bulkSentUnknownText({ sentUnknown: 1, kind: 'undo' }, DE)).toBe(one);
+		expect(bulkSentUnknownText({ sentUnknown: 3, kind: 'undo' }, DE)).toBe('Bei 3 Zielen ist offen, ob die Rücknahme beim Anbieter angekommen ist. Die Sendungen blieben ohne klare Antwort, und lynox sendet sie nicht noch einmal, sonst könnte sie doppelt ankommen. Starte die Rücknahme neu, auf der Seite des Massenlaufs, den sie zurücknimmt: lynox liest dann jedes Ziel zuerst und sendet nur dorthin, wo die Änderung des Laufs noch steht.');
+		expect(bulkSentUnknownText({ sentUnknown: 3, kind: 'undo' }, EN)).toBe('For 3 targets it is unclear whether the undo reached the provider. The sends got no clear answer, and lynox does not send them again, or it could arrive twice. Start the undo again from the page of the bulk run it undoes: lynox then reads each target first and sends only where the run\'s change is still there.');
+		expect(bulkSentUnknownText({ sentUnknown: 0, kind: 'undo' }, DE)).toBeNull();
+		// The page links the words to the run the undo takes back, split around them.
+		expect(bulkSentUnknownParts({ sentUnknown: 1, kind: 'undo', sourceRunId: 'src' }, DE)).toEqual({
+			before: 'Bei einem Ziel ist offen, ob die Rücknahme beim Anbieter angekommen ist. Die Sendung blieb ohne klare Antwort, und lynox sendet sie nicht noch einmal, sonst könnte sie doppelt ankommen. Starte die Rücknahme neu, auf der ',
+			link: 'Seite des Massenlaufs',
+			after: ', den sie zurücknimmt: lynox liest dann jedes Ziel zuerst und sendet nur dorthin, wo die Änderung des Laufs noch steht.',
+		});
+		expect(bulkSentUnknownParts({ sentUnknown: 3, kind: 'undo', sourceRunId: 'src' }, DE)?.before).toMatch(/^Bei 3 Zielen /);
+		// No parts for a write, for no unclear send, or for an undo that names no run.
+		expect(bulkSentUnknownParts({ sentUnknown: 1, kind: 'apply', sourceRunId: null }, DE)).toBeNull();
+		expect(bulkSentUnknownParts({ sentUnknown: 0, kind: 'undo', sourceRunId: 'src' }, DE)).toBeNull();
+		expect(bulkSentUnknownParts({ sentUnknown: 1, kind: 'undo', sourceRunId: null }, DE)).toBeNull();
+		// A write keeps its words, with the chat.
+		expect(bulkSentUnknownText({ sentUnknown: 1, kind: 'apply' }, DE)).toBe(DE.t('bulk.sent_unknown.one'));
+		expect(bulkSentUnknownText({ sentUnknown: 1, kind: 'apply' }, DE)).toMatch(/im Chat/);
 	});
 
 	it('says the same about targets an earlier send left unclear on every halt, a finished run and every size', () => {

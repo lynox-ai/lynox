@@ -445,11 +445,28 @@ export function bulkResumeMax(input: unknown, current: number | null, all: numbe
 }
 
 /** What the page says about the targets an earlier send reached without a clear answer, or
- *  null when there are none. It hangs on their number alone: the same on every halt, on a
- *  finished run, and for every run size. */
-export function bulkSentUnknownText(run: Pick<BulkRun, 'sentUnknown'>, i18n: BulkI18n): string | null {
+ *  null when there are none. It hangs on their number and on the kind of run alone: the same on
+ *  every halt, on a finished run, and for every run size. A write sends the owner to the chat to
+ *  plan it again; an undo is not planned there, so it says to start the undo again from the run
+ *  it undoes, whose new pass reads each target first and sends only where the change still
+ *  stands. Here those words stand unlinked; {@link bulkSentUnknownParts} gives the page the link. */
+export function bulkSentUnknownText(run: Pick<BulkRun, 'sentUnknown'> & Partial<Pick<BulkRun, 'kind'>>, i18n: BulkI18n): string | null {
 	if (run.sentUnknown <= 0) return null;
-	return run.sentUnknown === 1 ? i18n.t('bulk.sent_unknown.one') : i18n.tf('bulk.sent_unknown.many', { count: String(run.sentUnknown) });
+	const key = `bulk.sent_unknown.${run.sentUnknown === 1 ? 'one' : 'many'}${run.kind === 'undo' ? '_undo' : ''}`;
+	return i18n.tf(key, { count: String(run.sentUnknown), link: i18n.t('bulk.resume.none_undo_link') });
+}
+
+/** An undo's sentence about unclear sends, split around the words the page links to the run it
+ *  undoes. Null for a write, for no unclear send, and for an undo that names no run (its sentence
+ *  then stands as {@link bulkSentUnknownText} words it). */
+export function bulkSentUnknownParts(
+	run: Pick<BulkRun, 'sentUnknown' | 'kind' | 'sourceRunId'>,
+	i18n: BulkI18n,
+): { before: string; link: string; after: string } | null {
+	if (run.kind !== 'undo' || run.sentUnknown <= 0 || run.sourceRunId === null) return null;
+	const key = `bulk.sent_unknown.${run.sentUnknown === 1 ? 'one' : 'many'}_undo`;
+	const [before = '', after = ''] = i18n.tf(key, { count: String(run.sentUnknown) }).split('{link}');
+	return { before, link: i18n.t('bulk.resume.none_undo_link'), after };
 }
 
 /** Whether `/api/config` says this is a managed instance: its config carries `managed` (the
