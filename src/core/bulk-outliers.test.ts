@@ -113,6 +113,11 @@ describe('judgeOutliers', () => {
     expect(result.flagged.every((f) => f.reasons.includes('new_link'))).toBe(true);
   });
 
+  it('names the verdicts that add a kind in plan order when they come in another order', () => {
+    const inputs = run(200, (t) => (t.seq >= 20 && t.seq < 40 ? withAfter(t, { description: `${(t.after as Record<string, string>)['description']} Lieferant: https://feed-partner.example.biz/p` }) : t)).reverse();
+    expect(judgeOutliers(inputs, OWN, KINDS).spread[0]!.seqs).toEqual(Array.from({ length: 20 }, (_, i) => i + 20));
+  });
+
   it('names a link many verdicts add for the run, with the verdicts that add it in plan order, without flagging each, when before texts of the run already hold it', () => {
     const inputs = run(200, (t) => {
       if (t.seq <= 5) return { ...t, before: { ...(t.before as object), description: `${(t.before as Record<string, string>)['description']} Siehe tee-wissen.example.org` } };

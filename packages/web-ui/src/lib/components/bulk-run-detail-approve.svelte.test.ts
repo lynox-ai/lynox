@@ -1947,6 +1947,45 @@ describe('verdicts that differ from the rest of the run', () => {
 		expect(document.activeElement).toBe(approveButton);
 	});
 
+	it('counts the rows the filtered table shows, leaves out the unchanged rows and their button, and offers that button again after', async () => {
+		const unchangedButton = (): HTMLButtonElement | undefined => [...target.querySelectorAll('button')]
+			.find((b) => [tf('bulk.preview.show_unchanged_one', { n: '1' }), tf('bulk.preview.show_unchanged_targets_one', { n: '1' })].includes(b.textContent?.trim() ?? ''));
+		run = makeRun({ total: 25, changes: { update: 24, create: 0, delete: 0, unchanged: 1, invalid: 0 }, judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		targets = many(25).map((x) => (x.seq === 7 ? { ...x, change: 'unchanged' as const, diff: { kind: 'none' } as BulkTarget['diff'] } : x));
+		await render();
+		expect(unchangedButton()).toBeDefined();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(rowNames()).toHaveLength(2);
+		expect(target.querySelector('[data-testid="bulk-outlier-filtered"]')?.textContent).toBe(`${tf('bulk.outliers.filtered.link', { n: '2' })} ${t('bulk.outliers.spread.show_all')}`);
+		expect(unchangedButton()).toBeUndefined();
+		(target.querySelector('[data-testid="bulk-outlier-filtered-all"]') as HTMLButtonElement).click();
+		await settle();
+		expect(unchangedButton()).toBeDefined();
+	});
+
+	it('drops the filter once the run is no longer one to approve', async () => {
+		const judgedRun = (id: string, phase: BulkRunDetailData['phase']) => makeRun({ id, phase, total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		run = judgedRun('r1', 'previewed');
+		runsById['r2'] = judgedRun('r2', 'previewed');
+		targets = many(25);
+		const { default: BulkRunDetail } = await import('./BulkRunDetail.svelte');
+		const props = $state({ runId: 'r1', onBack: () => {}, onOpen: () => {} });
+		component = mount(BulkRunDetail, { target, props });
+		await settle();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(target.querySelector('[data-testid="bulk-outlier-filtered"]')).not.toBeNull();
+		props.runId = 'r2';
+		await settle();
+		runsById['r1'] = judgedRun('r1', 'approved');
+		props.runId = 'r1';
+		await settle();
+		expect(target.querySelector('[data-testid="bulk-outlier-filtered"]')).toBeNull();
+	});
+
 	it('offers no button on a line whose verdicts the server does not name, or names none of', async () => {
 		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
 			spread: [{ kind: 'link', count: 20, hosts: ['a.example'] }, { kind: 'email', count: 20, hosts: ['b.example'], seqs: [] }] } });
