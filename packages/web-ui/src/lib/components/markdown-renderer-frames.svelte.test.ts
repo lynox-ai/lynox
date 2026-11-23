@@ -29,6 +29,8 @@ vi.mock('shiki', () => ({
 	},
 }));
 vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
+const shared = vi.hoisted(() => [] as { blob: Blob; name: string }[]);
+vi.mock('../utils/save-blob.js', () => ({ saveOrShareBlob: vi.fn(async (blob: Blob, name: string) => { shared.push({ blob, name }); }) }));
 
 const doc = (word: string): string => '```html\n<!DOCTYPE html><html><body><p>' + word + '</p></body></html>\n```';
 const A = doc('alpha');
@@ -103,6 +105,25 @@ afterEach(() => {
 	// The store is one module for the whole file; put the theme back to its start value.
 	setThemeMode('dark');
 	localStorage.removeItem('lyx-theme');
+});
+
+describe('the download of an svg artifact from the chat', () => {
+	it('is the html frame document with the artifact policy, not the raw svg', async () => {
+		shared.length = 0;
+		// Spelled in two parts: a module parser reads the comment opener as an HTML-like comment.
+		const open = '<!' + '--';
+		const svg = '<svg xmlns="http://www.w3.org/2000/svg"><image href="https://elsewhere.example/x.png" width="9" height="9"/></svg>';
+		await render({ content: '```artifact\n' + open + ' type: svg -->\n' + open + ' title: Logo -->\n' + svg + '\n```' });
+		const share = target.querySelector<HTMLElement>('.artifact-container[data-artifact-type="svg"] [data-action="share"]');
+		expect(share, 'no share button on the svg artifact').not.toBeNull();
+		share!.click();
+		await settle();
+		expect(shared).toHaveLength(1);
+		expect(shared[0]!.name).toBe('logo.html');
+		const file = await shared[0]!.blob.text();
+		expect(file).toContain('elsewhere.example');
+		expect(file).toMatch(/<meta http-equiv="Content-Security-Policy" content="[^"]*img-src data: blob:/);
+	});
 });
 
 describe('the artifact frames of a message', () => {
