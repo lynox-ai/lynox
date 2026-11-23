@@ -287,6 +287,13 @@ describe('an undo with a send left unclear', () => {
 		expect(target.querySelector('[data-testid="bulk-sent-unknown"] button')).toBeNull();
 	});
 
+	it('tells a mandate, while the undo still runs, the same as the owner, with no link', async () => {
+		viewer = 'mandate';
+		await render({ phase: 'writing', haltKey: null, haltReason: null, sentUnknown: 1 });
+		expect(box()).toBe(t('bulk.sent_unknown.one_undo_running'));
+		expect(target.querySelector('[data-testid="bulk-sent-unknown"] button')).toBeNull();
+	});
+
 	it('tells a mandate that only the owner starts the undo again, linked to the run it undoes', async () => {
 		viewer = 'mandate';
 		await render({ phase: 'done', haltKey: null, haltReason: null, sentUnknown: 1 });

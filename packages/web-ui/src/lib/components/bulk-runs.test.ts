@@ -514,6 +514,12 @@ describe('going on from a run that halted', () => {
 		expect(bulkSentUnknownParts({ ...halted, sentUnknown: 0, sourceRunId: 'src' }, DE)).toBeNull();
 		expect(bulkSentUnknownParts({ ...running, sentUnknown: 1, sourceRunId: 'src' }, DE)).toBeNull();
 		expect(bulkSentUnknownParts({ ...halted, sentUnknown: 1, sourceRunId: null }, DE)).toBeNull();
+		// The plural forms in German, for a mandate and while the undo runs.
+		expect(bulkSentUnknownText({ ...halted, sentUnknown: 3 }, mandate)).toBe('Bei 3 Zielen ist offen, ob die Rücknahme beim Anbieter angekommen ist. Die Sendungen blieben ohne klare Antwort, und lynox sendet sie nicht noch einmal, sonst könnte sie doppelt ankommen. Neu starten kann die Rücknahme nur der Inhaber dieser Instanz, auf der Seite des Massenlaufs, den sie zurücknimmt; bitte den Inhaber darum. lynox liest dann jedes Ziel zuerst und sendet nur dorthin, wo die Änderung des Laufs noch steht.');
+		expect(bulkSentUnknownText({ ...running, sentUnknown: 3 }, DE)).toBe('Bei 3 Zielen ist offen, ob die Rücknahme beim Anbieter angekommen ist. Die Sendungen blieben ohne klare Antwort, und lynox sendet sie nicht noch einmal, sonst könnte sie doppelt ankommen. Sobald diese Rücknahme angehalten oder fertig ist, steht hier, wie es weitergeht.');
+		// A mandate reads a write's sentence as the owner does.
+		expect(bulkSentUnknownText({ ...done, kind: 'apply', sentUnknown: 1 }, mandate)).toBe(DE.t('bulk.sent_unknown.one'));
+		expect(bulkSentUnknownText({ ...done, kind: 'apply', sentUnknown: 3 }, mandate)).toBe(DE.tf('bulk.sent_unknown.many', { count: '3' }));
 		// A write keeps its words, with the chat, and so does a run whose kind is not given.
 		expect(bulkSentUnknownText({ ...done, kind: 'apply', sentUnknown: 1 }, DE)).toBe(DE.t('bulk.sent_unknown.one'));
 		expect(bulkSentUnknownText({ ...done, kind: 'apply', sentUnknown: 1 }, DE)).toMatch(/im Chat/);
