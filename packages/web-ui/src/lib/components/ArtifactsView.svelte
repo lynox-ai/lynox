@@ -16,6 +16,7 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
 	import { artifactExportDocument, injectArtifactPreview as injectArtifactFit } from '../utils/artifact-frame.js';
+	import { svgExportDocument } from '../utils/svg-export.js';
 	import { attachArtifactFrame } from '../utils/artifact-frame-host.js';
 	import { saveOrShareBlob } from '../utils/save-blob.js';
 
@@ -177,13 +178,24 @@
 	}
 
 	// iOS/Android → the native share sheet ("Save to Files"/"Save to Drive"); a raw
-	// <a download> is a dead click on iOS. Desktop → direct download. Same helper +
-	// behaviour as the inline artifact pill's share, so the two views are coherent.
+	// <a download> is a dead click on iOS. Desktop → direct download. Same helper as the inline
+	// artifact pill's share; the file differs for svg only (the pill gives the html it shows).
 	function exportArtifact(a: Artifact) {
-		const filename = `${a.title.replace(/\s+/g, '-').toLowerCase()}.${extensionFor(a.type)}`;
+		const base = a.title.replace(/\s+/g, '-').toLowerCase();
 		// An html file keeps the artifact policy, as the chat's download does (artifactExportDocument).
-		const body = a.type === 'html' ? artifactExportDocument(a.content) : a.content;
-		void saveOrShareBlob(new Blob([body], { type: mimeFor(a.type) }), filename);
+		// An svg file cannot carry the policy, so it goes out without anything that reaches another
+		// address (svgExportDocument). Content it cannot write as such a file (no svg in it, or
+		// one that reads back differently once written) goes out as plain text, which a browser
+		// opened on it only shows.
+		let type = a.type;
+		let body = a.content;
+		if (a.type === 'html') body = artifactExportDocument(a.content);
+		else if (a.type === 'svg') {
+			const svg = svgExportDocument(a.content);
+			if (svg === null) type = 'text';
+			else body = svg;
+		}
+		void saveOrShareBlob(new Blob([body], { type: mimeFor(type) }), `${base}.${extensionFor(type)}`);
 	}
 
 	/** Save as PDF via the browser print pipeline — same path as the inline
