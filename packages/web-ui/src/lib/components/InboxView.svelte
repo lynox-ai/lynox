@@ -7,6 +7,7 @@
 	import { listInboxRules } from '../api/inbox-rules-read.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { isRaisedOpen } from '../utils/inbox-raised.js';
+	import { followUpLine, withFollowUpLine } from '../utils/inbox-follow-up.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import {
 		closeItem,
@@ -709,7 +710,7 @@
 													<Checkbox
 														checked={isSelectedForBulk(item.id)}
 														onclick={(e) => toggleBulkSelection(item.id, visibleIds, e.shiftKey)}
-														ariaLabel={`Auswählen: ${item.subject || item.reasonDe}`}
+														ariaLabel={`Auswählen: ${withFollowUpLine(item, item.subject || item.reasonDe, t, tf)}`}
 													/>
 												</div>
 											{/if}
@@ -720,16 +721,16 @@
 													selectedItemId = item.id;
 													void openItem(item.id);
 												}}
-												aria-label={`${t('inbox.reading_open')}: ${item.subject || item.reasonDe}`}
+												aria-label={`${t('inbox.reading_open')}: ${withFollowUpLine(item, item.subject || item.reasonDe, t, tf)}`}
 											>
 												<div class="flex items-baseline justify-between gap-2 mb-0.5">
-													<p class="text-sm font-medium text-text leading-snug truncate flex items-center gap-1.5" title={item.subject || item.reasonDe}>
+													<p class="text-sm font-medium text-text leading-snug truncate flex items-center gap-1.5" title={item.subject ? item.subject : withFollowUpLine(item, item.reasonDe, t, tf)}>
 														{#if zone === 'snoozed' && item.notifyOnUnsnooze === true}
 															<!-- Reminder badge — distinguishes "remind me at X" from silent
 															     snooze in the same Snoozed zone. -->
 															<span class="shrink-0 inline-block w-1.5 h-1.5 rounded-full bg-accent-text" aria-label={t('inbox.reminder_badge_label')} title={t('inbox.reminder_badge_label')}></span>
 														{/if}
-														<span class="truncate">{inboxHeadline(item)}</span>
+														<span class="truncate">{!item.subject?.trim() && !item.snippet?.trim() ? withFollowUpLine(item, inboxHeadline(item), t, tf) : inboxHeadline(item)}</span>
 													</p>
 													<span class="shrink-0 text-[11px] text-text-subtle tabular-nums">
 														{zone === 'snoozed' && item.snoozeUntil
@@ -750,6 +751,8 @@
 												</div>
 												{#if isRaisedOpen(item)}
 													<p class="mt-0.5 text-[11px] text-text-subtle min-w-0 break-words [overflow-wrap:anywhere]">{t('inbox.raised_reason')}</p>
+												{:else if followUpLine(item, t, tf) !== undefined}
+													<p class="mt-0.5 text-[11px] text-text-subtle min-w-0 break-words [overflow-wrap:anywhere]" data-testid="inbox-follow-up-line">{followUpLine(item, t, tf)}</p>
 												{/if}
 											</button>
 										</div>

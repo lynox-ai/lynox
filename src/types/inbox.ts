@@ -108,6 +108,22 @@ export interface InboxItem {
    * Always set on an item read from the store; optional so hand-built items compile.
    */
   ruleWithheld?: InboxRuleWithheld | null | undefined;
+  /**
+   * Mail that came into the thread after this item's own mail, while the item is open: how many,
+   * and the newest one's date, sender name (left out when that mail reads as sensitive) and
+   * thread-message row id. Set by the inbox API on the items it returns, absent when there is none;
+   * the item's reason and subject still describe its own mail.
+   */
+  followUps?: InboxItemFollowUps | undefined;
+}
+
+/** See {@link InboxItem.followUps}. */
+export interface InboxItemFollowUps {
+  count: number;
+  /** ISO date of the newest follow-up, absent when its date is not known. */
+  latestAt: string | undefined;
+  latestFromName: string | undefined;
+  latestMessageId: string;
 }
 
 /**
