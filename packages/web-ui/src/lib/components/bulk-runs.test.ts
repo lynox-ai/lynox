@@ -511,6 +511,7 @@ describe('going on from a run that halted', () => {
 		expect(bulkSentUnknownParts({ ...halted, sentUnknown: 1, sourceRunId: 'src' }, mandate)?.before).toMatch(/nur der Inhaber dieser Instanz, auf der $/);
 		// No parts for a write, for no unclear send, for an undo that still runs, or for one that names no run.
 		expect(bulkSentUnknownParts({ ...done, kind: 'apply', sentUnknown: 1, sourceRunId: null }, DE)).toBeNull();
+		expect(bulkSentUnknownParts({ ...done, kind: 'apply', sentUnknown: 1, sourceRunId: 'src' }, DE)).toBeNull();
 		expect(bulkSentUnknownParts({ ...halted, sentUnknown: 0, sourceRunId: 'src' }, DE)).toBeNull();
 		expect(bulkSentUnknownParts({ ...running, sentUnknown: 1, sourceRunId: 'src' }, DE)).toBeNull();
 		expect(bulkSentUnknownParts({ ...halted, sentUnknown: 1, sourceRunId: null }, DE)).toBeNull();
