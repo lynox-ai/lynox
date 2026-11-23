@@ -2599,6 +2599,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'triggers.pause': { de: 'Pausieren', en: 'Pause' },
 	'triggers.resume': { de: 'Fortsetzen', en: 'Resume' },
 	'triggers.paused': { de: 'Pausiert', en: 'Paused' },
+	'triggers.scheduled_title': { de: 'Geplant: {workflow}', en: 'Scheduled: {workflow}' },
 	'triggers.bulk.preview': { de: 'Vorschau', en: 'Preview' },
 	'triggers.bulk.judge': { de: 'Beurteilung', en: 'Judging' },
 	'triggers.bulk.apply': { de: 'Massenlauf', en: 'Bulk run' },
