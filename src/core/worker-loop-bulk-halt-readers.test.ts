@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { WorkerLoop } from './worker-loop.js';
 import { BULK_HALT_REASONS } from './bulk-ledger.js';
-import { BULK_NOTICES } from './bulk-notices.js';
+import { BULK_NOTICES, bulkPushTitle } from './bulk-notices.js';
 import { WORKER_NOTICES } from './worker-notices.js';
 import type { Engine } from './engine.js';
 import type { NotificationMessage, NotificationRouter } from './notification-router.js';
@@ -15,7 +15,7 @@ import { noteMemberConnection, runCollectingMemberNotes } from './member-connect
 const R = BULK_HALT_REASONS;
 const CLOSING = 'Lösen kann das nur der Inhaber.';
 
-function harness(opts: { reason: string; plannedBy: 'owner' | 'mandate' | 'mandate-without-grant' }) {
+function harness(opts: { reason: string | null; plannedBy: 'owner' | 'mandate' | 'mandate-without-grant' }) {
   const recorded: string[] = [];
   const recordedNotes: (readonly string[] | undefined)[] = [];
   const sent: NotificationMessage[] = [];
@@ -35,8 +35,8 @@ function harness(opts: { reason: string; plannedBy: 'owner' | 'mandate' | 'manda
   } as unknown as NotificationRouter;
   const loop = new WorkerLoop(engine, router, 60_000);
   const task = { id: 't-1', title: 'Bulk apply run-1', effect: 'bulk_apply', bulk_run_id: 'run-1' } as unknown as TriggerRecord;
-  const end = (summary: string, said?: string): void => {
-    (loop as unknown as { recordAndNotify: (t: TriggerRecord, s: string, e: boolean, said?: string) => void }).recordAndNotify(task, summary, false, said);
+  const end = (summary: string, said?: string, done = false): void => {
+    (loop as unknown as { recordAndNotify: (t: TriggerRecord, s: string, e: boolean, said?: string) => void }).recordAndNotify(task, summary, done, said);
   };
   return { recorded, recordedNotes, sent, end };
 }
@@ -77,6 +77,21 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
     expect(h.recorded).toEqual([`lynox konnte den Zugang zum Shop nicht erneuern.${COUNTS}`]);
     const storedLines = [NOTE.en];
     expect(h.recordedNotes).toEqual([storedLines]);
+  });
+
+  // A run that finished and noted member-connection lines is recorded as halted, so the same
+  // refusal is not pushed again; but it finished and nothing waits, so no title says it halted.
+  it('titles a bulk run that finished with member-connection lines as done with a note, for the owner and every grant', async () => {
+    const h = harness({ reason: null, plannedBy: 'owner' });
+    await runCollectingMemberNotes(async () => {
+      noteMemberConnection('Connection not used: the model\'s line', () => ({ en: 'Connection not used: a note.', de: 'Verbindung nicht genutzt: eine Notiz.' }));
+      h.end('Fertig.', undefined, true);
+    }).done;
+    const title = `\u26A0 ${bulkPushTitle('bulk_apply', 'success', 'api:acme.myshopify.com', 'de')}${WORKER_NOTICES.de.titleWithNote}`;
+    expect(title).toBe('\u26A0 Massenlauf fertig (mit Hinweis)');
+    expect(h.sent.map((m) => [m.audience, m.title, m.priority])).toEqual([['owner', title, 'normal'], ['all_mandates', title, 'normal']]);
+    // Still recorded as halted: the repeat check reads it.
+    expect(h.recordedNotes).toEqual([['Connection not used: a note.']]);
   });
 
   it('builds every grant\'s push from the sentence in the owner\'s language, as before the lines were left out', async () => {
