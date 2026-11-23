@@ -337,3 +337,23 @@ describe('artifact_save records the chat that made the artifact (row 1072)', () 
     expect(store.list().find(a => a.id === id)?.threadId).toBe('');
   });
 });
+
+describe('artifact_save: the model learns that remote images do not load in an html artifact', () => {
+  // The artifact policy allows images only from data: and blob: URLs, in the chat, the gallery and
+  // the downloaded copy. `detailedGuidance` reaches the model only after its first call of the tool,
+  // so the rule must also be in the definition the model sees before it writes the first artifact.
+  it('says so in the schema, next to the html content, before the first call', () => {
+    const props = artifactSaveTool.definition.input_schema.properties as Record<string, { description: string }>;
+    expect(props['content']!.description).toContain(
+      'full HTML (for type html; images only as inline SVG or data: URLs, remote image URLs do not load)',
+    );
+  });
+
+  it('gives the full rule, the ways around it and what to tell the user in the guidance on use', () => {
+    expect(artifactSaveTool.detailedGuidance).toContain(
+      'Images from other web addresses do not load in an html artifact — not in the chat, the gallery or a downloaded copy. '
+      + 'Draw them as inline SVG, embed them as a data: URL, or leave them out; if the user asked for a specific image such as their logo, '
+      + 'tell them in your reply that it cannot be shown from its web address.',
+    );
+  });
+});

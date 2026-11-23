@@ -18,7 +18,6 @@ import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import { turnIsLocked } from '../../core/mandate-tool-lock.js';
-import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
 import { currentCallSignal, currentCallTargetOrigin, joinCallSignal, noteOwnStopSentence } from '../../core/call-connection.js';
 import { CROSS_HOST_REFUSAL, crossHostRedirectGuard, readHopsGuarded } from '../../core/read-hops.js';
 import { carriesAddress, hostTargets, UnknownSendTargetError } from '../../core/send-target.js';
@@ -2349,15 +2348,21 @@ ${draftJson}
       const reserved = reservedAppNameRefusal(profile);
       if (reserved) return `Validation error: ${reserved}`;
       if (!isOwnerPrincipal(agent.principal)) profile.created_by = principalTag(agent.principal);
-      // The owner chose this host in their own chat, in a turn no foreign content had reached: a
-      // read from it after foreign content is then not asked about (`ApiStore.readKnownHosts`).
+      // The owner chose this host in their own chat, in a tool batch that began before any
+      // foreign content: a read from it after foreign content is then not asked about
+      // (`ApiStore.readKnownHosts`). The batch's snapshot, not the turn's: the dispatch counts
+      // this tool's own call as foreign content before the handler runs, so the turn would never
+      // be clean here. Only a save in a batch that began before the conversation's first foreign
+      // content records its host, and an earlier `api_setup` call counts as such content.
+      // Outside a batch nothing is recorded, nor in a conversation holding a search the provider
+      // ran itself: its results reach the model past every dispatch and arm nothing.
       // Only the owner's interactive run: a trigger's, a workflow's or a task's run carries a run
       // tag as its author even under the owner's principal, and a sub-agent a run origin of its
       // own; a workflow made in another conversation could otherwise name a host unattended. The
       // engine's to write, never the input's, and bound to the host it was saved with.
       delete profile.owner_clean_host;
       const ownersOwnChat = isOwnerPrincipal(agent.principal) && agent.writeAuthor === principalTag(OWNER_PRINCIPAL) && agent.sendOrigin === undefined;
-      if (ownersOwnChat && !deriveTurnUntrusted(agent)) {
+      if (ownersOwnChat && agent.batchStartedTainted?.() === false && agent.heldProviderSearch?.() === false) {
         const cleanHost = profileReadHost(profile);
         if (cleanHost !== null) profile.owner_clean_host = cleanHost;
       }
