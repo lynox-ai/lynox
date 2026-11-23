@@ -54,8 +54,8 @@ const codePoints = (text: string): number => Array.from(text).length;
  *  escaped. Only a bounded head of the name is segmented, however long the name is. */
 function shownName(name: string): string {
   // Composing costs more than linear time on a long run of marks, so only a raw head is composed.
-  // A code point fills at most two code units and composing joins at most three into one: three
-  // times the head below still holds more than the limit once composed, or the whole name.
+  // Composing joins at most four code units into one code point, so three times the head below
+  // (1542 units) still holds more than the limit once composed, or the whole name.
   const raw = singleLine(name).trimStart();
   const text = raw.slice(0, 3 * (2 * PROFILE_NAME_CODE_POINTS_MAX + 2)).normalize('NFC').trimEnd();
   // Twice the limit in code units holds more than the limit in code points, or the whole name.
