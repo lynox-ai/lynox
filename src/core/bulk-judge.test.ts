@@ -16,7 +16,9 @@ import { judgeCallSchema, judgeMaxOutputTokens, judgeTemplate, normalizeJudgeRul
 import {
   BudgetError, CutOffError, ExtractShapeError, SchemaValueError, attachExtractionSpend, validateAgainstSchema, type callForStructuredJson,
 } from './llm-helper.js';
-import { JUDGE_ENVELOPE_TEXT, JUDGE_MODELS, runBulkJudge, judgeErrorForTracker, classifyCallFailure, judgeWorstCaseUsd, JUDGE_CLAIM_STALE_MS, JUDGE_TOOL_OVERHEAD_TOKENS, verdictTextRefusal, type BulkJudgeDeps } from './bulk-judge.js';
+import { JUDGE_ENVELOPE_TEXT, JUDGE_MODELS, runBulkJudge, judgeErrorForTracker, classifyCallFailure, judgeWorstCaseUsd, JUDGE_CLAIM_STALE_MS, JUDGE_TOOL_OVERHEAD_TOKENS, verdictTextRefusal, emptiesDescription, type BulkJudgeDeps } from './bulk-judge.js';
+import { isEmptyShopifyDescription } from './bulk-list.js';
+import { MARKUP_MAX_DEPTH } from './html-tree.js';
 import { getPricing } from './pricing.js';
 import { abortedCallCounts } from './aborted-call.js';
 import { modelCapability, type IAgent, type MemoryScopeRef } from '../types/index.js';
@@ -1045,6 +1047,52 @@ describe('what a verdict\'s text may not add (PRD shopify-preset §20.2 item 5)'
     expect(verdictTextRefusal({ description: '<p>New</p><img src="/a.png">' }, before, woo)).toBe('new_img');
     // An HTML field is not held to the plain-text rule: its markup is the point.
     expect(verdictTextRefusal({ description: '<p>New <strong>text</strong></p>' }, before, woo)).toBeNull();
+  });
+
+  // M6b (iii): Shopify ignores a null description and clears it on "". A verdict that turns a
+  // description into either gave no new text. Asked of a verdict only: a judged target's planned
+  // after-state is the rule's template, every field null, and passes the preview's check.
+  it('names a verdict that sets a Shopify description to null or an empty text, and keeps one already empty', () => {
+    const before = { title: 'T', descriptionHtml: '<p>Old</p>' };
+    for (const listForm of ['shopify', 'shopify_filtered'] as const) {
+      for (const empty of [null, '']) {
+        expect(emptiesDescription(listForm, { descriptionHtml: empty }, before), `${listForm} ${String(empty)}`).toBe(true);
+        expect(emptiesDescription(listForm, { title: 'Neu', descriptionHtml: empty }, before)).toBe(true);
+      }
+      expect(emptiesDescription(listForm, { descriptionHtml: '' }, { descriptionHtml: '' })).toBe(false);
+      expect(emptiesDescription(listForm, { descriptionHtml: '<p>Neu</p>' }, before)).toBe(false);
+      expect(emptiesDescription(listForm, { seo_title: '' }, { seo_title: 'S' })).toBe(false);
+      const shop = { listForm, storeHost: 'acme.myshopify.com', startDomains: [] as string[] };
+      expect(verdictTextRefusal({ descriptionHtml: null, title: null }, before, shop)).toBeNull();
+    }
+    // A field of the same name elsewhere is no Shopify description: a data-store column, a WooCommerce field, an image.
+    expect(emptiesDescription(null, { descriptionHtml: '' }, before)).toBe(false);
+    expect(emptiesDescription('woocommerce', { descriptionHtml: '' }, before)).toBe(false);
+    expect(emptiesDescription('woocommerce', { description: '' }, { description: '<p>Old</p>' })).toBe(false);
+    expect(emptiesDescription('shopify_media', { alt: '' }, { alt: 'Bild' })).toBe(false);
+  });
+
+  // A description of text elements and white space only leaves the product page as empty as "".
+  it('names a verdict whose description shows nothing as emptying it, and keeps an image or an attribute', () => {
+    const before = { descriptionHtml: '<p>Old</p>' };
+    for (const blank of [' ', '<p></p>', '<br>', '<p><br></p>', '<p>&nbsp;</p>', '<div><span>\u200b</span></div><!-- x -->']) {
+      expect(isEmptyShopifyDescription('shopify', 'descriptionHtml', blank), JSON.stringify(blank)).toBe(true);
+      expect(emptiesDescription('shopify', { descriptionHtml: blank }, before), JSON.stringify(blank)).toBe(true);
+    }
+    // Control: an image, an embed or an attribute shows or carries something.
+    for (const shown of ['<p><img src="a.jpg"></p>', '<iframe src="https://v.example/1"></iframe>', '<p class="x"></p>', '<p>a</p>']) {
+      expect(isEmptyShopifyDescription('shopify', 'descriptionHtml', shown), shown).toBe(false);
+      expect(emptiesDescription('shopify', { descriptionHtml: shown }, before), shown).toBe(false);
+    }
+    // Past the reading bounds the value is not walked and counts as not blank: the markup check
+    // refuses it before it is written (bulk-shopify.test.ts, "past the reading bounds").
+    const deep = '<div>'.repeat(MARKUP_MAX_DEPTH + 1);
+    expect(isEmptyShopifyDescription('shopify', 'descriptionHtml', deep)).toBe(false);
+    // Control: the same shape within the bounds shows nothing.
+    expect(isEmptyShopifyDescription('shopify', 'descriptionHtml', '<div>'.repeat(8))).toBe(true);
+    // A description that already showed nothing is not emptied by another blank one.
+    expect(emptiesDescription('shopify', { descriptionHtml: '<p></p>' }, { descriptionHtml: '' })).toBe(false);
+    expect(emptiesDescription('shopify', { descriptionHtml: '' }, { descriptionHtml: '<p><br></p>' })).toBe(false);
   });
 
   it('checks only a field whose value changes: a description the store holds open at its end stays as it is', () => {
