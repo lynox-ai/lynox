@@ -42,6 +42,8 @@ function channelFromAccountId(_accountId: string): InboxChannel {
  */
 export interface AccountResolver {
   resolve(accountId: string): { address: string; displayName: string; authType?: MailAuthType | undefined } | null;
+  /** Whether a (lower-cased) address belongs to any mail account connected on this instance. */
+  isOwnAddress?(address: string): boolean;
 }
 
 /**
@@ -157,8 +159,10 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       snippet = masked.snippet;
     }
     // Our own mail coming back into the thread (a copy of the reply) is no new customer message:
-    // it is stored as sent, so neither reopening nor "Reply in chat" takes it.
-    const own = (fields.fromAddress ?? '').toLowerCase() === account.address.toLowerCase();
+    // it is stored as sent, so neither reopening nor "Reply in chat" takes it. Own is this account's
+    // address or that of any other account connected here (a reply sent from the shared address).
+    const from = (fields.fromAddress ?? '').toLowerCase();
+    const own = from === account.address.toLowerCase() || opts.accounts.isOwnAddress?.(from) === true;
     // Whether it is an automatic reply, stored with the message for "Reply in chat": true, false
     // (checked, not one), or undefined (not known). The envelope says it, except where it carries
     // no headers; there the message is fetched once. That fetch throwing leaves it unknown.

@@ -62,7 +62,8 @@ import { GRAPH_API_HOSTS, graphFetch } from '../../../core/connector-egress.js';
 import { joinCallSignal } from '../../../core/call-connection.js';
 import { assertHostPolicy } from '../../../core/network-guard.js';
 import { buildRfc2822 } from '../mime-compose.js';
-import { htmlToTextSnippet, isAutoRepliedHeader, isAutoSubmittedHeader } from './imap-smtp.js';
+import { htmlToTextSnippet } from './imap-smtp.js';
+import { automaticMail } from '../automatic-mail.js';
 
 const GRAPH_HOST = 'graph.microsoft.com';
 const GRAPH_ME = `https://${GRAPH_HOST}/v1.0/me`;
@@ -899,8 +900,7 @@ export class OAuthGraphProvider implements MailProvider {
       // `hasAttachments` does not count inline attachments.
       attachmentCount: hasAttachments ? 1 : 0,
       sizeBytes: undefined,
-      isAutoReply: isAutoSubmittedHeader(headerValue(msg, 'Auto-Submitted')),
-      isAutoReplied: isAutoRepliedHeader(headerValue(msg, 'Auto-Submitted')),
+      ...automaticMail((name) => headerValue(msg, name)),
     };
   }
 
