@@ -192,6 +192,8 @@ async function runInSidecarWithEgress(socketPath: string, input: BashInput, env:
       allowedHosts: ctx.allowedHosts,
       allowedWildcards: ctx.allowedWildcards,
       ackHosts: resolveGuardedAckHosts(ctx),
+      // What this conversation brought in: hosts its untainted searches listed, then what the owner typed.
+      provenanceHosts: [...(agent.searchResultAddresses?.cleanHosts() ?? []), ...(agent.ownerKnown?.typedHosts?.() ?? [])],
     },
     timeoutMs: input.timeout_ms,
     run: agent.currentRunId,

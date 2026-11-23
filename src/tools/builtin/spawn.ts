@@ -1787,6 +1787,8 @@ async function executeThinker(
     // Share the parent's Session counters so one conversation accumulates
     // a single http/write budget across the main agent + all sub-agents.
     sessionCounters: parentAgent.sessionCounters,
+    // One conversation, one record of what its searches listed (`SearchResultAddresses`).
+    searchResultAddresses: parentAgent.searchResultAddresses,
     // Share the recall blob store so a sub-agent's `recall_tool_result` can
     // resolve handles minted by the parent conversation's last compaction.
     toolResultBlobStore: parentAgent.toolResultBlobStore,
