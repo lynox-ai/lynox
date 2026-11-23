@@ -199,6 +199,9 @@ beforeEach(() => {
   scripts.length = 0;
   vi.spyOn(DuckDuckGoProvider.prototype, 'search').mockResolvedValue([
     { title: 'Shopify access scopes', url: 'https://docs.example.invalid/api/access-scopes', snippet: 'read_products write_products' },
+    // The page s2 reads: a search listed it, so the read after the search's foreign content passes
+    // the origin check, which a locked turn would otherwise refuse (this script is about its texts).
+    { title: 'Shopify Admin REST API', url: 'https://shopify.dev/docs/api/admin-rest', snippet: 'Admin REST API reference' },
   ]);
   vi.spyOn(extractor, 'extractContent').mockResolvedValue({
     title: 'Shopify Admin REST API', url: 'https://shopify.dev/docs/api/admin-rest', wordCount: 40, content: 'Create a custom app, then copy the Admin API access token.', truncated: false,
