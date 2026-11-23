@@ -605,7 +605,7 @@ describe('the stamp part names settings, and shows no stored value', () => {
 	});
 
 	it('a value the view does not know is printed as it came, hidden characters shown', async () => {
-		await openStamp(twoSteps('d1', undefined, { mode: 'turbo‮', onFailure: 'halt' }));
+		await openStamp(twoSteps('d1', undefined, { mode: 'turbo\u202E', onFailure: 'halt' }));
 		expect(q('stamp-mode')?.textContent?.trim()).toBe('turbo<U+202E>');
 		expect(q('stamp-mode')!.classList.contains('font-mono')).toBe(true);
 		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('halt');
