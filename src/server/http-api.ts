@@ -6,7 +6,9 @@
  *
  */
 
+import { recipientConfirmDigest, recipientsConfirmable } from '../core/recipient-confirm.js';
 import { errorText, errorTextReduced, processErrorText } from '../core/error-egress.js';
+import { jsonFault } from '../core/json-fault.js';
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
@@ -56,6 +58,7 @@ import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js
 import { openRunGroup } from '../core/run-group.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
+import type { UntrustedCause } from '../core/untrusted-signals.js';
 import { getLynoxDir, loadConfig, describePinForDisplay, admitBackgroundModel, poolEndpointFor, POOL_ANTHROPIC_ENDPOINT, POOL_MISTRAL_ENDPOINTS } from '../core/config.js';
 import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
@@ -134,7 +137,7 @@ import { awaitsOwnQuestion } from './own-question.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
-import { BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson } from '../core/bulk-ledger.js';
+import { BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson, externalHostOf } from '../core/bulk-ledger.js';
 import { BULK_LIST_NOTE, hasListPageUrl, isShopifyListSource, listPageUrl, shopifyListFiltersOf } from '../core/bulk-list.js';
 import { shopifyGraphqlEndpoint } from '../core/shopify-graphql.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../core/bulk-write-forms.js';
@@ -147,8 +150,9 @@ import { WebhookReceiver, isCanonicalRequestPath, webhookRouteToken } from './we
 import { requestLogUrl } from './request-log-url.js';
 import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
+import { takeOverWorkflow, workflowTakeoverPreview, type WorkflowTakeoverDeps, type WorkflowTakeoverRefusal } from '../core/workflow-takeover.js';
 import { EngineLessRefused } from '../core/engine-less-refusal.js';
-import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
+import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, SCHEDULED_TITLE_PREFIX, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -315,6 +319,71 @@ export const TAKEOVER_REFUSALS: Record<TakeoverRefusal | 'changed' | 'prompts' |
   changed: { status: 409, message: 'The plan changed while you were looking at it. Look at it again, then take it over. The plan stays paused.' },
   prompts: { status: 503, message: "lynox cannot close the plan's open questions right now, so it did not take the plan over. It stays paused. Try again in a few minutes." },
   unrecorded: { status: 503, message: 'The takeover cannot be recorded in the instance log right now, so lynox did not take the plan over; it stays paused. Try again in a few minutes.' },
+};
+
+/**
+ * What a workflow's stamp binds beside its steps (`workflowStampDigest`), as the stamp and the
+ * takeover previews show it: its mode, failure strategy, limits, contract and parameters with
+ * their defaults. `planned` is read with its defaults filled (`withWorkflowDefaults`).
+ */
+function stampShown(planned: PlannedPipeline): {
+  mode: PlannedPipeline['mode']; onFailure: NonNullable<PlannedPipeline['on_failure']>; limits: PlannedPipeline['limits'] | null;
+  contract: string[] | null; parameters: Array<{ name: string; required: boolean; default: unknown }>;
+} {
+  const contract = planned.capabilityContract;
+  return {
+    mode: planned.mode,
+    onFailure: planned.on_failure ?? 'stop',
+    limits: planned.limits ?? null,
+    // What the contract lets the run write, as the grant's preview words it.
+    contract: contract === undefined ? null : contract.hostPatterns.flatMap((h) => contract.pathPatterns.flatMap((p) => contract.httpMethods.map((m) => `${m} https://${h}${p}`))),
+    parameters: (planned.parameters ?? []).map((p) => ({ name: p.name, required: p.defaultValue === undefined || p.defaultValue === null, default: p.defaultValue ?? null })),
+  };
+}
+
+/**
+ * Each step of a workflow as it runs, as the stamp and the takeover previews show it: a captured
+ * step's literal call beside its task, and the tools it gets, worked out the way the runtime does
+ * (a step that names none gets the pool). `secret:` references stay names; no value is resolved
+ * here. A role can widen the tools and change the model at run time: it is shown by name, with
+ * what it grants (a role is built in, `roles.ts`, not stored).
+ */
+async function stepsShown(planned: PlannedPipeline) {
+  const { inlineStepToolNames } = await import('../orchestrator/runtime-adapter.js');
+  const { getRole } = await import('../core/roles.js');
+  const roleGrantOf = (name: string | undefined): { model: string; effort: string; allowTools: string[] | null; denyTools: string[] | null; readOnly: boolean } | null => {
+    const r = name === undefined ? undefined : getRole(name);
+    return r === undefined ? null : { model: r.model, effort: r.effort, allowTools: r.allowTools ? [...r.allowTools] : null, denyTools: r.denyTools ? [...r.denyTools] : null, readOnly: r.readOnly === true };
+  };
+  return (Array.isArray(planned.steps) ? planned.steps : []).map((st) => ({
+    id: st.id,
+    task: st.task,
+    tool: st.tool ?? null,
+    inputTemplate: st.tool !== undefined ? st.input_template ?? null : null,
+    tools: [...inlineStepToolNames(st)],
+    model: st.model ?? null,
+    role: st.role ?? null,
+    roleGrant: roleGrantOf(st.role),
+    effort: st.effort ?? null,
+    thinking: st.thinking ?? null,
+    timeoutMs: st.timeout_ms ?? null,
+    inputFrom: st.input_from ?? null,
+  }));
+}
+
+/**
+ * How the workflow takeover's refusals are answered. Plain placeholders: the texts the library
+ * shows are its own, by code.
+ */
+export const WORKFLOW_TAKEOVER_REFUSALS: Record<WorkflowTakeoverRefusal | 'changed' | 'prompts' | 'unrecorded' | 'stamp_refused', { readonly status: number; readonly message: string }> = {
+  unreadable: { status: 409, message: 'The workflow cannot be read, so it cannot be taken over.' },
+  nothing_to_take_over: { status: 409, message: 'This workflow does not need to be taken over.' },
+  mandate_live: { status: 409, message: 'Someone who set up or changed this workflow still has access, so it cannot be taken over.' },
+  running: { status: 409, message: 'A run of a plan on this workflow has not finished yet. Try again in a few minutes.' },
+  changed: { status: 409, message: 'The workflow changed while you were looking at it. Look at it again, then take it over.' },
+  prompts: { status: 503, message: 'The open questions of its plans cannot be closed right now, so the workflow was not taken over. Try again in a few minutes.' },
+  unrecorded: { status: 503, message: 'The takeover cannot be recorded in the instance log right now, so the workflow was not taken over. Try again in a few minutes.' },
+  stamp_refused: { status: 409, message: 'The steps of this workflow could not be stamped as shown, so it was not taken over. Look at it again, then take it over.' },
 };
 
 /**
@@ -1910,6 +1979,18 @@ const ERASURE_MANY_UNKNOWN = 20;
 
 // ── Server Class ─────────────────────────────────────────────────────────────
 
+/** Longer than any message a person types into the composer: such a `typed` is not recorded. */
+export const TYPED_TEXT_MAX = 20_000;
+
+/**
+ * The run's typed text from a request: the client's `typed` field, only when it is a non-empty
+ * string found word for word in the request's task, cleaned like the task. Anything else: none.
+ */
+export function typedOf(typed: unknown, taskText: string): { typedText: string } | undefined {
+  if (typeof typed !== 'string' || typed.trim() === '' || typed.length > TYPED_TEXT_MAX || !taskText.includes(typed)) return undefined;
+  return { typedText: withoutTypedCredentials(stripUntrustedSeparators(typed)) };
+}
+
 export class LynoxHTTPApi {
   private engine: Engine | null = null;
   private clientErrorResolver: (() => SecretStoreLike | null) | null = null;
@@ -2559,6 +2640,15 @@ export class LynoxHTTPApi {
   }
 
   /**
+   * Whether the person a workflow runs for, its last uncovered mandate mark, has lost access: the
+   * one reading the library's `runs_as.ended`, the trigger list's `ended_on` and the plan's stamp
+   * preview share. No such person (the owner's, or taken over): false.
+   */
+  private _workflowAuthorEnded(author: RequestPrincipal | undefined): boolean {
+    return author !== undefined && principalHasEnded(author, (id) => this._mandateLive(id));
+  }
+
+  /**
    * What the takeover reads and writes, or null with a 503 when engine.db is not there. The
    * prompt store may be missing; the takeover then refuses, since it could not close the questions.
    */
@@ -2581,6 +2671,22 @@ export class LynoxHTTPApi {
       audit: engine.getAuditLog(),
       prompts: engine.getPromptStore(),
     };
+  }
+
+  /**
+   * What the workflow takeover reads and writes (`workflow-takeover.ts`): the plan takeover's, the
+   * workflow store on the same engine.db, whose hash the stamp is taken with, and the connections.
+   * Null with a 503 when engine.db is not there, or the store of access ends: without it every
+   * person would read as ended, and a workflow a live person shaped could be taken over.
+   */
+  #workflowTakeoverDeps(res: ServerResponse): WorkflowTakeoverDeps | null {
+    const deps = this.#takeoverDepsIfReady();
+    const engineDb = this.engine?.getEngineDb() ?? null;
+    if (deps === null || engineDb === null || (this.engine?.getMandateEnds() ?? null) === null) {
+      errorResponse(res, 503, 'Taking over a workflow is not available on this instance right now.');
+      return null;
+    }
+    return { ...deps, workflows: new WorkflowStore(engineDb), hasher: engineDb, profiles: this.engine?.getApiStore() ?? null };
   }
 
   /** The plan's exact id from a path that may carry a prefix; null with the answer sent when it names none or more than one. */
@@ -2614,14 +2720,15 @@ export class LynoxHTTPApi {
   async #stampPlanOf(trigger: TriggerRecord): Promise<{
     listed: { wf: string | null; entries: readonly StampEntry[] } | null;
     by: string | null;
-    workflow: { name: string | null; confirmed: boolean } | null;
+    workflow: { name: string | null; confirmed: boolean; ended: boolean } | null;
   }> {
     const engine = this.engine;
     const apiStore = engine?.getApiStore();
     if (!engine || !apiStore || !stampUsesConnections(trigger.effect)) return { listed: null, by: null, workflow: null };
     const plan = await planOfTrigger(trigger, engine.getRunHistory() ?? null);
     const workflow = trigger.effect === 'run_workflow'
-      ? { name: plan.workflowName, confirmed: !plan.unreadable && plan.workflowConfirmedAt !== null }
+      // `ended` is shown only: the view then names the workflow's takeover as the way on.
+      ? { name: plan.workflowName, confirmed: !plan.unreadable && plan.workflowConfirmedAt !== null, ended: this._workflowAuthorEnded(plan.workflowMember) }
       : null;
     if (plan.unreadable || plan.of === undefined) return { listed: null, by: null, workflow };
     return {
@@ -2656,7 +2763,7 @@ export class LynoxHTTPApi {
     const isLive = (id: string): boolean => ends?.isLive(id) ?? false;
     const anyEnded = plan.members.some((m) => principalHasEnded(m, isLive));
     const wf = plan.workflowMember;
-    const endedOn = !anyEnded ? null : wf === undefined ? 'plan' : principalHasEnded(wf, isLive) ? 'workflow' : 'workflow_other';
+    const endedOn = !anyEnded ? null : wf === undefined ? 'plan' : this._workflowAuthorEnded(wf) ? 'workflow' : 'workflow_other';
     return { ...shown, ended: shown.ended || endedOn !== null, ended_on: endedOn };
   }
 
@@ -2897,6 +3004,20 @@ export class LynoxHTTPApi {
     return !secret ? 'no-secret' : (this._authOrigin.get(req) ?? '').startsWith('cookie:') ? 'cookie' : 'none';
   }
 
+  /**
+   * The mark a trigger's instruction gets when the owner's token, not the owner's browser
+   * session, wrote it (`created_untrusted`), or undefined when the words count as the owner's.
+   * The same line `typed` draws: a token's client (a script, an integration) passes on text it
+   * did not have typed, so the targets it names must not be owner-known in the trigger's run
+   * (`ownerInstructionCounts`). Stored as the cause a webhook event's content gets, content that
+   * reached the engine from outside: every reader takes it as not clean. A mandate's write is
+   * marked by its own rules, so only the owner's principal is looked at here.
+   */
+  private _ownerTokenWords(req: IncomingMessage): UntrustedCause | undefined {
+    if (!isOwnerPrincipal(this._principalOf(req))) return undefined;
+    return this._ambientOf(req, process.env['LYNOX_HTTP_SECRET']) === 'none' ? 'external-tool' : undefined;
+  }
+
   /** The route a request matches, as registered (`/api/x/:id`), or null for none. */
   private _routeTemplateOf(method: string, pathname: string): string | null {
     return this._matchRoute(method, pathname)?.path ?? null;
@@ -2988,7 +3109,8 @@ export class LynoxHTTPApi {
   /**
    * E2 (§3.13): a mandate answers only a question its own run asked. Every question the route
    * could answer is checked — the one named by id and the one pending on the session, which a
-   * body without an id answers — so no request reaches a question the check did not see. Both are
+   * body without an id answers on the secret and mailbox routes (`/reply` refuses one) — so no
+   * request reaches a question the check did not see. Both are
    * checked even when an id is given, which refuses more than that request could reach. The question
    * of a scheduled run carries the owner, or the mandate its stamped plan acts for (`planOf`),
    * which then answers it as its own run's question (N1). With no question at all the route
@@ -5027,6 +5149,15 @@ export class LynoxHTTPApi {
         principal: this._principalOf(req),
         // Said by the client that will show the review (the web UI), for this run only.
         showsChangesetReview: b?.['shows_changeset_review'] === true,
+        // Only what the person typed, kept apart from the loaded context and the files above:
+        // the boundary is this string, not a sentinel in the composed message, which loaded
+        // content could carry itself. Never derived from `task`: a task can be a prefill (a
+        // mail's subject, a chip, a retry), which the person did not write. The client sends
+        // `typed` only for a message started from an empty composer, and it counts only when it
+        // stands in this request's task word for word. Only from the owner's browser session, as
+        // "Confirm recipients" takes it: a token's client (a script, an integration) passes on
+        // text it did not have typed, and it must not make an address in it the owner's.
+        ...(this._ambientOf(req, process.env['LYNOX_HTTP_SECRET']) !== 'none' ? (typedOf(b?.['typed'], taskText) ?? {}) : {}),
       };
       // Every question this run asks carries who runs it (§3.13 E2): taken from the request
       // that started the run, never read later from the session, whose principal moves on
@@ -6061,13 +6192,13 @@ export class LynoxHTTPApi {
         return;
       }
 
-      // Only a body without a promptId answers the session's open question (legacy clients).
+      // Without a promptId nothing is answered: the open question may not be the one the answer
+      // was meant for (the one the client saw closed, and another opened in its place). The
+      // question carries its id in the `prompt` event and in `/pending-prompt`; nothing is recorded.
       const pending = ps.getPending(params['id']!);
       if (pending && pending.prompt_type === 'ask_user' && !pending.questions_json) {
-        if (!this._answerRecorded(_req, res, by, pending.id)) return;
-        let answered: boolean;
-        try { answered = ps.answerUser(pending.id, answer, by); } catch (err) { if (keyInputRefused(res, err)) return; throw err; }
-        if (answered) { jsonResponse(res, 200, { ok: true }); return; }
+        errorResponse(res, 409, 'A question is open: answer it with its promptId.', 'prompt_id_required');
+        return;
       }
 
       errorResponse(res, 404, 'No pending prompt');
@@ -6561,17 +6692,42 @@ export class LynoxHTTPApi {
         });
         return;
       }
-      threadStore.deleteThread(id);
+      // The chat's runs stay as rows, because they are the cost ledger, but the content they hold
+      // when the chat is deleted goes with it: prompts, answers, tool inputs and outputs, step
+      // results, the questions asked in it, and what the runs it spawned and the workflows it
+      // started wrote. A run or workflow still going when the chat is deleted can write more after
+      // this; that is not reached here. The blanking, the delete and the captured wire_snapshots
+      // share one transaction in history.db, so a failure leaves the chat and its runs as they
+      // were, and deleting again does all of it.
+      const runHistory = engine.getRunHistory();
+      let workflows: readonly string[] = [];
+      try {
+        if (runHistory) {
+          const { blankRunHistoryRows } = await import('../core/connection-erasure.js');
+          runHistory.getDb().transaction(() => {
+            workflows = blankRunHistoryRows(runHistory.getDb(), { threadIds: [id] }).pipelineIds;
+            threadStore.deleteThread(id);
+            runHistory.deleteWireSnapshotsForThread(id);
+          })();
+        } else {
+          threadStore.deleteThread(id);
+        }
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:thread-delete] Not deleted, removing the chat and the content of its runs failed for thread ${id.slice(0, 8)}: ${errorText(err, errorTextReduced(engine.getToolContext().containment, { threadId: id }))}\n`);
+        jsonResponse(res, 500, { error: 'The chat was not deleted: removing it and the content of its runs ran into an error.' });
+        return;
+      }
       // A run still waiting on a question in this chat could only be answered here. Its question
       // is withdrawn now, so the run ends with that reason instead of waiting out the TTL. After
       // the delete: a delete that answered 500 above leaves the chat, and its questions with it.
-      try { engine.getPromptStore()?.withdrawForDeletedThread(id); } catch (err: unknown) {
-        process.stderr.write(`[lynox:thread-delete] withdrawing the questions of deleted thread ${id.slice(0, 8)} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      // A step of a workflow the chat started asks under the workflow's id; its question was just
+      // blanked, so it is withdrawn too, before anything can read it: no await since the commit.
+      const promptStore = engine.getPromptStore();
+      for (const session of [id, ...workflows]) {
+        try { promptStore?.withdrawForDeletedThread(session); } catch (err: unknown) {
+          process.stderr.write(`[lynox:thread-delete] withdrawing the questions of deleted thread ${id.slice(0, 8)} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
       }
-      // Extended debug capture: drop the thread's captured wire_snapshots too (the
-      // runs stay — they are the cost ledger). Without this the redacted-but-personal
-      // snapshots outlive their deleted thread with no other prune path.
-      engine.getRunHistory()?.deleteWireSnapshotsForThread(params['id']!);
       jsonResponse(res, 200, { ok: true });
     }, OWN));
 
@@ -8595,7 +8751,7 @@ export class LynoxHTTPApi {
       // library agrees with the schedule handler on cron-eligibility (otherwise a
       // legacy autonomous workflow with no stored mode hides its Schedule button).
       const { inferPipelineMode, stepsThatAsk } = await import('../orchestrator/human-in-the-loop.js');
-      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string; mode?: string; schedulable: boolean; askingSteps: string[]; confirmedAt?: string; capabilityContract?: unknown; runs_as?: { person: string; ended: boolean; covered_by_takeover?: number }; schedule_refusal?: WorkflowScheduleRefusalKind; awaitsStamp: boolean }> = [];
+      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string; mode?: string; schedulable: boolean; askingSteps: string[]; confirmedAt?: string; capabilityContract?: unknown; runs_as?: { person: string; ended: boolean; undetermined?: true; covered_by_takeover?: number }; schedule_refusal?: WorkflowScheduleRefusalKind; awaitsStamp: boolean }> = [];
       // Whom the Run button runs each one as, for the owner only: a mandate's email is not another
       // mandate's to read (1055, ux U-063). Absent for the owner's own workflows.
       const viewer = this._principalOf(req);
@@ -8621,7 +8777,12 @@ export class LynoxHTTPApi {
         let parsed: { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown; parameters?: unknown; mode?: unknown; confirmedAt?: unknown; capabilityContract?: unknown };
         try {
           parsed = JSON.parse(row.manifest_json) as typeof parsed;
-        } catch { continue; } // skip corrupt rows
+        } catch {
+          // An unreadable definition is left out rather than costing the owner the library, and
+          // said on stderr by its id, never its content.
+          console.warn(`[lynox:http] workflow ${row.id} not readable, left out of the library`);
+          continue;
+        }
         if (parsed.template !== true) continue; // app-layer template filter
         // Narrow `parsed.steps` (typed `unknown`) to the InlinePipelineStep
         // subset the card needs (id + task). Drop malformed entries.
@@ -8683,8 +8844,10 @@ export class LynoxHTTPApi {
             }
             const runAs = workflowRunsAs(authorshipOrNone(() => history.getWorkflowAuthorship(row.id)));
             if (runAs.kind !== 'mandate') return {};
-            const ended = principalHasEnded(runAs, (id) => this._mandateLive(id));
-            return { runs_as: { person: runAs.email, ended, ...(ended ? { covered_by_takeover: coveredCount(row.id) } : {}) } };
+            const ended = this._workflowAuthorEnded(runAs);
+            // A mark without a grant id cannot tell whose access it was: the view names no one then.
+            const undetermined = runAs.mandateId === undefined ? { undetermined: true as const } : {};
+            return { runs_as: { person: runAs.email, ended, ...undetermined, ...(ended ? { covered_by_takeover: coveredCount(row.id) } : {}) } };
           })(),
         });
       }
@@ -9181,45 +9344,15 @@ export class LynoxHTTPApi {
       const planned = history.getWorkflowExact(params['id']!);
       const expect = planned === undefined ? null : history.workflowStampDigest(planned);
       if (planned === undefined || expect === null) { errorResponse(res, 404, 'Workflow not found'); return; }
-      const { inlineStepToolNames } = await import('../orchestrator/runtime-adapter.js');
-      const { getRole } = await import('../core/roles.js');
-      const roleGrantOf = (name: string | undefined): { model: string; effort: string; allowTools: string[] | null; denyTools: string[] | null; readOnly: boolean } | null => {
-        const r = name === undefined ? undefined : getRole(name);
-        return r === undefined ? null : { model: r.model, effort: r.effort, allowTools: r.allowTools ? [...r.allowTools] : null, denyTools: r.denyTools ? [...r.denyTools] : null, readOnly: r.readOnly === true };
-      };
       const state = history.workflowStampState(planned);
       const shaped = history.workflowMandateShaped(planned.id);
-      const contract = planned.capabilityContract;
       jsonResponse(res, 200, {
         expect,
         stampedAt: state === 'holds' ? planned.confirmedAt ?? null : null,
         changedBy: shaped ? 'mandate' : 'owner',
         awaitsStamp: state === 'awaits_owner_stamp',
-        mode: planned.mode,
-        onFailure: planned.on_failure ?? 'stop',
-        limits: planned.limits ?? null,
-        // What the contract lets the run write, as the grant's preview words it.
-        contract: contract === undefined ? null : contract.hostPatterns.flatMap((h) => contract.pathPatterns.flatMap((p) => contract.httpMethods.map((m) => `${m} https://${h}${p}`))),
-        parameters: (planned.parameters ?? []).map((p) => ({ name: p.name, required: p.defaultValue === undefined || p.defaultValue === null, default: p.defaultValue ?? null })),
-        // Each step as it runs: a captured step's literal call beside its task, and the tools it
-        // gets, worked out the way the runtime does (a step that names none gets the pool).
-        // `secret:` references stay names; no value is resolved here.
-        // A role can widen the tools and change the model at run time: it is shown by name.
-        steps: (Array.isArray(planned.steps) ? planned.steps : []).map((st) => ({
-          id: st.id,
-          task: st.task,
-          tool: st.tool ?? null,
-          inputTemplate: st.tool !== undefined ? st.input_template ?? null : null,
-          tools: [...inlineStepToolNames(st)],
-          model: st.model ?? null,
-          role: st.role ?? null,
-          // A role is built in (`roles.ts`), not stored: what it grants is shown beside its name.
-          roleGrant: roleGrantOf(st.role),
-          effort: st.effort ?? null,
-          thinking: st.thinking ?? null,
-          timeoutMs: st.timeout_ms ?? null,
-          inputFrom: st.input_from ?? null,
-        })),
+        ...stampShown(planned),
+        steps: await stepsShown(planned),
       });
     }, ownerOnly('see what stamping a workflow would confirm')));
 
@@ -9247,6 +9380,50 @@ export class LynoxHTTPApi {
         .filter((t) => t.pipeline_id === id && t.enabled === 0 && (t.last_run_result ?? '').startsWith(workflowAwaitsStampResult(id))).length;
       jsonResponse(res, 200, { stampedAt: now?.confirmedAt ?? null, awaitsStamp: false, stillOff });
     }, ownerOnly('stamp a workflow')));
+
+    // The owner's takeover of a workflow a mandate set up or changed, once that mandate's access
+    // ended (`workflow-takeover.ts`): the preview shows the steps as the stamp preview does, whose
+    // marks are covered, what moves on the other plans, and the connections a run as the owner no
+    // longer uses, with the digest the takeover is held to. Its own routes: the stamp's `expect`
+    // never covers a mark. Not held to the plan pause: a workflow is taken over without a plan.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/workflows/:id/takeover-preview', async (_req, res, params) => {
+      const deps = this.#workflowTakeoverDeps(res);
+      if (deps === null) return;
+      const out = workflowTakeoverPreview(deps, params['id']!);
+      if (out.kind === 'not_found') { errorResponse(res, 404, 'Workflow not found'); return; }
+      if (out.kind === 'refused') { jsonResponse(res, 200, { refusal: out.refusal, message: WORKFLOW_TAKEOVER_REFUSALS[out.refusal].message }); return; }
+      const { planned, foreignConnectionSteps, ...preview } = out.preview;
+      const marked = new Map(foreignConnectionSteps.map((f) => [f.step, f.profileId] as const));
+      // A step whose literal call goes to a profile some mandate connected is marked, whoever it was,
+      // with the profile, so the view can name the person where a connection below is that profile.
+      const steps = (await stepsShown(planned)).map((st) => ({ ...st, foreignConnection: marked.has(st.id), connectionProfile: marked.get(st.id) ?? null }));
+      // Everything the stamp binds beside the steps, as the stamp preview shows it: the takeover stamps it too.
+      jsonResponse(res, 200, { ...preview, ...stampShown(planned), steps, refusal: null });
+    }, ownerOnly('see what taking over a workflow would do')));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/takeover', async (_req, res, params, body) => {
+      // The digest from the preview is required: the takeover is the owner's consent to what the
+      // preview showed, and nothing else.
+      const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
+        ? (body as { expect: string }).expect : undefined;
+      if (expected === undefined) { errorResponse(res, 400, '"expect" is required: take the workflow over from its preview.', 'expect_required'); return; }
+      const deps = this.#workflowTakeoverDeps(res);
+      if (deps === null) return;
+      const out = takeOverWorkflow(deps, params['id']!, expected);
+      if (out.kind === 'not_found') { errorResponse(res, 404, 'Workflow not found'); return; }
+      if (out.kind === 'refused') {
+        const r = WORKFLOW_TAKEOVER_REFUSALS[out.refusal];
+        errorResponse(res, r.status, r.message, out.refusal);
+        return;
+      }
+      // The cached definition carries the old stamp: a run after this must read the new one.
+      const { forgetPipeline } = await import('../tools/builtin/pipeline.js');
+      forgetPipeline(out.id);
+      // As after the stamp: schedules the wait switched off stay off, counted for the page.
+      const stillOff = (engine.getTaskManager()?.listTriggers?.() ?? [])
+        .filter((t) => t.pipeline_id === out.id && t.enabled === 0 && (t.last_run_result ?? '').startsWith(workflowAwaitsStampResult(out.id))).length;
+      jsonResponse(res, 200, { takenOver: true, runsAs: out.runsAs, stillOff });
+    }, ownerOnly('take over a workflow')));
 
     // ── Tasks ──
     this.addStatic('user', 'GET /api/tasks', async (req, res) => {
@@ -9285,6 +9462,7 @@ export class LynoxHTTPApi {
       const rows = pausedFilter
         ? taskManager.listTriggers({ paused: true })
         : taskManager.listTriggers(status ? { status } : undefined);
+      const bulkLedgerForList = engine.getBulkLedger() ?? engine.getBulkLedgerSwitchedOff?.() ?? null;
       const triggers = rows
         .map((trigger) => {
           const starter = loop?.runningStarterTag(trigger.id);
@@ -9293,11 +9471,27 @@ export class LynoxHTTPApi {
           // not run (a webhook's is switched off), and the view says so instead of a next run.
           // The same state the run refusal reads (`workflow-stamp.ts`).
           const workflow = trigger.effect === 'run_workflow' && trigger.pipeline_id ? history?.getWorkflowExact(trigger.pipeline_id) : undefined;
+          // A bulk run's trigger is titled with its run id, for the model; the view names it by its
+          // stage and the host it works on instead (U-324). Null: no host (the data store,
+          // workspace files) or no run any more.
+          // One row whose run cannot be read must not cost the owner the whole list: it shows no host.
+          // A row stored without an effect is no bulk row, and does not cost the list either.
+          const isBulk = typeof trigger.effect === 'string' && trigger.effect.startsWith('bulk_');
+          let bulkSystem: string | undefined;
+          if (isBulk && trigger.bulk_run_id !== undefined) {
+            try { bulkSystem = bulkLedgerForList?.getRunForApply(trigger.bulk_run_id)?.targetSystem; } catch { bulkSystem = undefined; }
+          }
           return {
             ...triggerForRoute(trigger, principal),
             running: visible,
             stoppable: visible && loop?.runningStoppable(trigger.id) === true,
             workflow_awaits_stamp: workflow !== undefined && history?.workflowStampState(workflow) === 'awaits_owner_stamp',
+            // A trigger from before its creator was recorded sends to nobody its instruction names
+            // until the owner confirms its recipients; the view offers that to the owner only, and
+            // only for a trigger whose run can send (an agent's or a workflow's run, not a reminder).
+            recipients_unconfirmed: isOwnerPrincipal(principal) && recipientsConfirmable(trigger)
+              && (trigger.effect === undefined || trigger.effect === null || trigger.effect === 'run_agent' || trigger.effect === 'run_workflow'),
+            ...(isBulk ? { bulk_host: bulkSystem === undefined ? null : externalHostOf(bulkSystem) } : {}),
           };
         });
       // What the owner's stamp of each confirmed plan lists, and how each entry stands (B3), for the
@@ -9412,6 +9606,12 @@ export class LynoxHTTPApi {
           if (this._refuseUnlessOwner(_req, res, 'grant a workflow unattended writes')) return;
           const { workflowGrantEnabled, acceptWorkflowGrant } = await import('../core/workflow-grant.js');
           if (!workflowGrantEnabled()) { errorResponse(res, 403, 'Granting a workflow unattended writes is not enabled on this instance.'); return; }
+          // A grant makes the contract's hosts count as named by the owner, so it is given in the
+          // owner's browser session only, as recipients are confirmed: never with a token.
+          if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+            errorResponse(res, 403, 'Unattended writes are granted only in the owner\'s browser session, not with a token.', 'session_only');
+            return;
+          }
           if (typeof rawGrant !== 'object' || rawGrant === null || Array.isArray(rawGrant)) { errorResponse(res, 400, 'Invalid "grant".'); return; }
           const g = rawGrant as Record<string, unknown>;
           const engineDb = engine.getEngineDb();
@@ -9420,7 +9620,7 @@ export class LynoxHTTPApi {
             const accepted = acceptWorkflowGrant(planned, {
               method: g['method'], host: g['host'], paths: g['paths'], params: rawParams, cron: scheduleCron,
               afterUntrusted: g['afterUntrusted'], checksum: g['checksum'], name: g['name'],
-              title: title ?? `Scheduled: ${planned.name}`,
+              title: title ?? `${SCHEDULED_TITLE_PREFIX}${planned.name}`,
             }, this._authOrigin.get(_req) ?? 'unknown', { history, taskManager, hasher: engineDb });
             if (!accepted.ok) { errorResponse(res, accepted.status, accepted.error); return; }
             forgetPipeline(planned.id);
@@ -9456,7 +9656,7 @@ export class LynoxHTTPApi {
           }
           forgetPipeline(planned.id);
           const task = taskManager.createPipelineTask({
-            title: title ?? `Scheduled: ${planned.name}`,
+            title: title ?? `${SCHEDULED_TITLE_PREFIX}${planned.name}`,
             pipelineId: planned.id,
             scheduleCron,
             pipelineParams: JSON.stringify(bound.params),
@@ -9486,9 +9686,12 @@ export class LynoxHTTPApi {
         // non-run_agent effects.
         // Only the owner's request stamps; a mandate's trigger lands unconfirmed, like one
         // the agent tool creates.
+        // The stamp below is the same either way; only whose words the instruction counts as differs.
+        const tokenWords = this._ownerTokenWords(_req);
         const baseParams = {
           title, description, assignee, dueDate, createdBy, createdMandateId,
           ...(byOwner ? { confirmedAt: new Date().toISOString(), confirmedBy: createdBy } : {}),
+          ...(tokenWords !== undefined ? { createdUntrusted: tokenWords } : {}),
         };
         const task = scheduleCron
           ? taskManager.createScheduled({ ...baseParams, scheduleCron })
@@ -9561,8 +9764,15 @@ export class LynoxHTTPApi {
       try {
         // `untrusted` is what the agent's turn had taken in (task_update reads it off the agent); a
         // request does not get to say it, so it is dropped here rather than stored as sent.
+        // An owner's token that rewrites the instruction marks it, as a creation does
+        // (`_ownerTokenWords`). The store reads the mark only with a title or description edit, and
+        // only adds it: a schedule change marks nothing, and the owner's browser session clears none.
+        // A workflow's schedule is not marked, as at its creation: its instruction is the stamped
+        // steps, not its title, and a mark would start every run of it as after outside content.
         const { untrusted: _fromClient, ...edit } = body as Record<string, unknown>;
-        task = taskManager.update(params['id']!, edit as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
+        const scheduledWorkflow = engine.getRunHistory()?.getTrigger(params['id']!)?.pipeline_id;
+        const tokenWords = scheduledWorkflow ? undefined : this._ownerTokenWords(_req);
+        task = taskManager.update(params['id']!, { ...edit, ...(tokenWords !== undefined ? { untrusted: tokenWords } : {}) } as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
       } catch (err: unknown) {
         if (this._answerTodoRefusal(res, err)) return;
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
@@ -9763,7 +9973,13 @@ export class LynoxHTTPApi {
     }, ownerOnly('see what a schedule would be confirmed with')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/confirm', async (_req, res, params, body) => {
-      // Only the owner stamps (§3.12 point 2).
+      // Only the owner stamps (§3.12 point 2), and only in their browser session, as recipients
+      // are confirmed: a token, the owner's included, could otherwise stamp a schedule a run it
+      // started had just written, and that schedule would then run as the owner's instruction.
+      if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+        errorResponse(res, 403, 'A schedule is confirmed only in the owner\'s browser session, not with a token.', 'session_only');
+        return;
+      }
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       if (this._refusePaused(_req, res, taskManager, params['id']!, 'confirm')) return;
@@ -9844,6 +10060,41 @@ export class LynoxHTTPApi {
       }
       jsonResponse(res, 200, { ...triggerForRoute(out.trigger, this._principalOf(_req)), runsAs: out.runsAs });
     }, ownerOnly('take over a plan')));
+
+    // "Confirm recipients" (`recipient-confirm.ts`): the owner, in a browser session, makes a
+    // trigger from before its creator was recorded count as their own. The preview shows the
+    // instruction and its digest; the confirmation sends the digest back and records the owner
+    // as the trigger's creator, and nothing else. A token is refused, the owner's included: a
+    // script or a tool must never be able to make an instruction the owner's.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/triggers/:id/confirm-recipients-preview', async (_req, res, params) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'Run history')) return;
+      const t = history.getTrigger(params['id']!);
+      if (!t) { errorResponse(res, 404, 'Trigger not found'); return; }
+      if (!recipientsConfirmable(t)) { errorResponse(res, 409, 'This trigger has no recipients to confirm.', 'not_confirmable'); return; }
+      jsonResponse(res, 200, {
+        title: t.title, description: t.description ?? '', effect: t.effect ?? null,
+        pipeline_id: t.pipeline_id ?? null, params: t.pipeline_params ?? null, watch_config: t.watch_config ?? null,
+        expect: recipientConfirmDigest(t),
+      });
+    }, ownerOnly('confirm a trigger\'s recipients')));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/triggers/:id/confirm-recipients', async (req, res, params, body) => {
+      if (this._ambientOf(req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+        errorResponse(res, 403, 'Recipients are confirmed only in the owner\'s browser session, not with a token.', 'session_only');
+        return;
+      }
+      const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
+        ? (body as { expect: string }).expect : undefined;
+      if (expected === undefined) { errorResponse(res, 400, '"expect" is required: confirm from the preview.', 'expect_required'); return; }
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'Run history')) return;
+      const out = history.confirmTriggerRecipients(params['id']!, expected);
+      if (out === 'not_found') { errorResponse(res, 404, 'Trigger not found'); return; }
+      if (out === 'changed') { errorResponse(res, 409, 'Nothing confirmed: the trigger has changed in the meantime.', 'changed'); return; }
+      if (out === 'not_confirmable') { errorResponse(res, 409, 'This trigger has no recipients to confirm.', 'not_confirmable'); return; }
+      jsonResponse(res, 200, { confirmed: true });
+    }, ownerOnly('confirm a trigger\'s recipients')));
 
     // Run a trigger immediately, off-schedule (the Triggers-home "Run now"
     // control). Delegates to the WorkerLoop so the manual run goes through the
@@ -10094,6 +10345,7 @@ export class LynoxHTTPApi {
       // A list still to be read is started against what the owner sees here: the address its
       // first page is read at, and the checksum over its source and read contract (PRD bulk-loop §3.2).
       const listRun = status.list?.state === 'pending' ? ledger.getListRun(params['id']!) : null;
+      const judgeOutliers = status.phase === 'previewed' ? await ledger.judgeOutliersOf(params['id']!) : null;
       jsonResponse(res, 200, {
         ...withBinding(status),
         checksum: actionable ? ledger.computeChecksum(params['id']!) : null,
@@ -10105,6 +10357,9 @@ export class LynoxHTTPApi {
           const hidden = actionable ? ledger.hiddenCounts(params['id']!) : null;
           return { hiddenAddsTargets: hidden?.adds ?? null, hiddenUncheckedTargets: hidden?.unchecked ?? null };
         })(),
+        // A judged run's verdicts that differ from the rest of it, listed first in the approval view:
+        // a reading order, never a check (`bulk-outliers.ts`). Only where the run can be approved.
+        judgeOutliers,
         // A Shopify list has no page address: what is read is the store's GraphQL endpoint, with
         // the engine's own documents. It stands here so the owner sees where the read goes. A stored
         // source with no address to build (a form without a spec, a filter holding a list) shows its
@@ -10343,6 +10598,20 @@ export class LynoxHTTPApi {
       if (!out.ok) { refuseOut(res, out); return; }
       jsonResponse(res, 200, withBinding(out.status));
     }, ownerOnly('approve a bulk run')));
+
+    // Discarding a run before its approval: the owner's act, like the approval it forgoes. A
+    // mandate asks the owner (U-324). Nothing was written, so nothing is told: the owner did it.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/discard', async (_req, res, params) => {
+      const ledger = bulkLedger(res);
+      if (!ledger) return;
+      const id = params['id']!;
+      if (ledger.getStatus(id) === null) { errorResponse(res, 404, 'No bulk run with this id.', 'not_found'); return; }
+      if (!ledger.discardRun(id)) {
+        errorResponse(res, 409, 'Only a run that is not yet approved can be discarded; an approved run is stopped instead.', 'not_discardable');
+        return;
+      }
+      jsonResponse(res, 200, withBinding(ledger.getStatus(id)!));
+    }, ownerOnly('discard a bulk run')));
 
     // Taking one target out of a previewed run before approving it, or putting it back (PRD
     // shopify-preset §20.2 item 4). An owner's act like the approval it changes; the checksum is
@@ -12011,7 +12280,7 @@ export class LynoxHTTPApi {
         return;
       }
 
-      const token = mintBrokerStartToken(instanceId, httpSecret);
+      const token = mintBrokerStartToken('google', instanceId, httpSecret);
       const url =
         `${controlPlaneUrl}/oauth/google/start` +
         `?instance_id=${encodeURIComponent(instanceId)}` +
@@ -12087,6 +12356,13 @@ export class LynoxHTTPApi {
           await google.setTokens(tokens);
           jsonResponse(res, 200, { ok: true, scopes: tokens.scopes });
         } catch (err: unknown) {
+          if (err instanceof SyntaxError) {
+            // The claim answer carries the tokens: the log names the position, never the text around
+            // it, and the owner gets a code the page words for them.
+            process.stderr.write(`[lynox:google] the claim answer is ${jsonFault(err)}\n`);
+            jsonResponse(res, 500, { error: 'Google could not be connected', code: 'google_claim_invalid' });
+            return;
+          }
           const msg = err instanceof Error ? err.message : String(err);
           errorResponse(res, 500, msg);
         }

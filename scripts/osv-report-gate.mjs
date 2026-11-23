@@ -66,7 +66,9 @@ const BLOCKING_BANDS = new Set(['HIGH', 'CRITICAL']);
  * not to be reachable in this repo. An entry matches one advisory id on one package at the exact
  * versions listed, and only until its `expires` date (inclusive, UTC); after that the finding
  * blocks again and says that its acceptance ran out. A matched finding is still printed. An entry
- * that matches nothing in a run is reported, so a resolved one gets removed.
+ * that matches nothing in a run fails the gate: the advisory was withdrawn, the version moved, or
+ * its severity fell below the floor, and an acceptance nobody needs any more must not wait for the
+ * next finding that happens to fit it.
  *
  * Every entry has a premise check in tests/osv-accepted-premise.test.ts that fails as soon as the
  * code starts using what the advisory needs; an entry without one fails that test.
@@ -82,21 +84,6 @@ export const ACCEPTED = [
       'experimental remote functions flag and use form, query or command. core enables neither ' +
       '(no flag in svelte.config.js, no .remote files, no $app/server import). The fix is kit 3.1.1, ' +
       'a major upgrade, planned before the expiry.',
-  },
-  {
-    id: 'GHSA-fc5q-39xc-vjpf',
-    package: 'picomatch',
-    versions: ['2.3.2', '4.0.4', '4.0.7'],
-    expires: '2026-12-01',
-    reason:
-      'ReDoS in glob patterns with repeated single-branch extglobs; it needs an attacker-chosen ' +
-      'pattern. The picomatch package is only in build and test tooling (vite, vitest, tinyglobby, ' +
-      'fdir) and in the docs site, which is private and in neither package nor the image; no ' +
-      "runtime dependency of either published package reaches it. The error reporter's bundler " +
-      'plugins ship as a runtime dependency and bring two packages that inline their own copy, ' +
-      'which this scan cannot see: ' +
-      'rollup and the Sentry CLI package. The engine loads only the reporter\'s main entry, which ' +
-      'loads neither. No patched release exists yet; bump when one does.',
   },
 ];
 
@@ -189,6 +176,8 @@ export function evaluate({ doc, rc, accepted = ACCEPTED, today = new Date().toIS
   const blocking = [];
   const below = [];
   const acceptedHits = [];
+  /** Every acceptance entry a HIGH, CRITICAL or unresolved finding named, expired or not. */
+  const matched = [];
 
   if (!Number.isInteger(rc)) {
     errors.push(`the scanner exit code was not handed in (got ${JSON.stringify(rc)})`);
@@ -204,7 +193,7 @@ export function evaluate({ doc, rc, accepted = ACCEPTED, today = new Date().toIS
       `the report has no \`results\` array (got ${JSON.stringify(doc?.results ?? null)}) — ` +
         `an envelope this gate cannot read is not an empty one`,
     );
-    return { ok: false, errors, blocking, below, accepted: acceptedHits };
+    return { ok: false, errors, blocking, below, accepted: acceptedHits, matched };
   }
 
   // Every level is array-checked, not null-checked, and the reason is one level
@@ -224,9 +213,13 @@ export function evaluate({ doc, rc, accepted = ACCEPTED, today = new Date().toIS
         const entry = { id: vuln?.id ?? '(no id)', package: name, source, severity: band };
         if (band === null) {
           blocking.push({ ...entry, severity: 'UNRESOLVED' });
+          // Never accepted, but the entry it names is still in use: the finding is there.
+          const acc = acceptanceFor(entry.id, pkg?.package?.name, pkg?.package?.version, accepted, today);
+          if (acc) matched.push(acc.entry);
         } else if (BLOCKING_BANDS.has(band)) {
           // Only a finding that would block can be accepted; an unresolved severity never is.
           const acc = acceptanceFor(entry.id, pkg?.package?.name, pkg?.package?.version, accepted, today);
+          if (acc) matched.push(acc.entry);
           if (acc && !acc.expired) acceptedHits.push({ ...entry, until: acc.entry.expires, reason: acc.entry.reason });
           else if (acc) blocking.push({ ...entry, expired: acc.entry.expires });
           else blocking.push(entry);
@@ -247,7 +240,7 @@ export function evaluate({ doc, rc, accepted = ACCEPTED, today = new Date().toIS
     }
   }
 
-  return { ok: errors.length === 0 && blocking.length === 0, errors, blocking, below, accepted: acceptedHits };
+  return { ok: errors.length === 0 && blocking.length === 0, errors, blocking, below, accepted: acceptedHits, matched };
 }
 
 /**
@@ -275,7 +268,12 @@ function parseArgs(argv) {
   return out;
 }
 
-export function main(argv) {
+/**
+ * The CLI. `options` exists for tests only — the list of acceptances and the day to judge them on —
+ * so the process contract can be tested without the shipped list or the calendar; the entry point
+ * below never passes it.
+ */
+export function main(argv, { accepted: acceptedList = ACCEPTED, today } = {}) {
   const { reports, rcs, format, unknown } = parseArgs(argv);
   if (unknown.length > 0) {
     console.error(`osv-report-gate: unknown option(s): ${unknown.join(', ')}`);
@@ -302,6 +300,7 @@ export function main(argv) {
   const blocking = [];
   const below = [];
   const accepted = [];
+  const matched = [];
   for (const [i, report] of reports.entries()) {
     const rc = rcs[i];
     let doc;
@@ -317,16 +316,20 @@ export function main(argv) {
       errors.push(`cannot read ${report}${code}: ${String(err)}`);
       continue;
     }
-    const one = evaluate({ doc, rc: rc === undefined || Number.isNaN(rc) ? undefined : rc });
+    const one = evaluate({ doc, rc: rc === undefined || Number.isNaN(rc) ? undefined : rc, accepted: acceptedList, ...(today === undefined ? {} : { today }) });
     // With one report the reasons read as before; with several, each says which scan it is about.
     errors.push(...one.errors.map((e) => (reports.length > 1 ? `${report}: ${e}` : e)));
     blocking.push(...one.blocking);
     below.push(...one.below);
     accepted.push(...one.accepted);
+    matched.push(...one.matched);
   }
-  const ok = errors.length === 0 && blocking.length === 0;
-  // Over all reports: an entry no finding matched is due for removal. It does not block.
-  const unused = ACCEPTED.filter((a) => !accepted.some((h) => h.id === a.id && a.versions.some((v) => h.package === `${a.package}@${v}`))).map((a) => `${a.package} ${a.id}`);
+  // Over all reports: an entry that no HIGH, CRITICAL or unresolved finding named — accepted,
+  // expired or not — is stale and blocks until it is removed. Not judged when a report could not
+  // be read or was refused: its findings are unknown, and "remove it" would be the wrong advice.
+  // It stays apart from `errors`, which the daily watch reads as "no verdict".
+  const unused = errors.length > 0 ? [] : acceptedList.filter((a) => !matched.includes(a)).map((a) => `${a.package} ${a.id}`);
+  const ok = errors.length === 0 && blocking.length === 0 && unused.length === 0;
 
   // The daily watch needs the same classification as the merge gate but files
   // an issue instead of failing, so it reads counts rather than an exit code.
@@ -346,7 +349,7 @@ export function main(argv) {
   for (const a of accepted) {
     console.log(`::warning::${a.source}: ${a.package} ${a.id} (${a.severity}) accepted until ${a.until}: ${a.reason}`);
   }
-  for (const u of unused) console.log(`::warning::osv-report-gate: accepted entry ${u} matched no finding; remove it`);
+  for (const u of unused) console.error(`::error::osv-report-gate: accepted entry ${u} matched no HIGH or CRITICAL finding in this run; remove it (withdrawn, another version, or below the floor now)`);
   for (const b of below) console.log(`  below the floor: ${b.package} ${b.id} (${b.severity})`);
   // An annotation, as the step it replaces emitted: a line in a 3000-line log
   // that nobody scrolls to is not a report.
@@ -355,7 +358,7 @@ export function main(argv) {
   }
 
   console.log(
-    `osv-report-gate: ${blocking.length + below.length + accepted.length} finding(s), ${blocking.length} blocking, ${accepted.length} accepted`,
+    `osv-report-gate: ${blocking.length + below.length + accepted.length} finding(s), ${blocking.length} blocking, ${accepted.length} accepted, ${unused.length} stale acceptance(s)`,
   );
   return ok ? 0 : 1;
 }

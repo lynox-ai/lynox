@@ -182,13 +182,13 @@ describe('resolveChatContext (Slice C context-injection seam)', () => {
     expect(wf).not.toMatch(/[\u{E0000}-\u{E007F}\u200B]/u);
     expect(wf).toContain('Name: "Monthly Report"');
     // An id with such a character is outside the allowed shape: its position stands in for its text.
-    expect(wf).toContain('[#1 (id outside the allowed form)] Fetch the data');
+    expect(wf).toContain('[#1 (id outside the allowed form; runs as "step-1")] Fetch the data');
     expect(wf).not.toContain('[step-0');
     history.insertPipelineRun({ id: 'run-h', manifestName: `Monthly Report${tagged('x')}`, status: 'failed', manifestJson: '{}', error: `boom${String.fromCodePoint(0x202E)}`, workflowId: 'wf-1' });
     history.insertPipelineStepResult({ pipelineRunId: 'run-h', stepId: `step-0${tagged('y')}`, status: 'failed', error: `bad${String.fromCodePoint(0x200B)} path`, costUsd: 0 });
     const run = resolveChatContext(history, { kind: 'run', id: 'run-h' })!;
     expect(run).not.toMatch(/[\u{E0000}-\u{E007F}\u200B\u202E]/u);
-    expect(run).toContain('[failed] #1 (id outside the allowed form) — bad path');
+    expect(run).toContain('[failed] #1 (id outside the allowed form; runs as "step-1") — bad path');
   });
 
   it('shows a stored name without a ZWNJ between letters, which a task keeps, and such a step id by its position', () => {
@@ -196,7 +196,7 @@ describe('resolveChatContext (Slice C context-injection seam)', () => {
     seedStoredRow(engine, makePlanned({ name: `ab${ZWNJ}cd`, steps: [{ id: `ab${ZWNJ}cd`, task: `می${ZWNJ}خواهم` }] }));
     const wf = resolveChatContext(history, { kind: 'workflow', id: 'wf-1' })!;
     expect(wf).toContain('Name: "abcd"');
-    expect(wf).toContain(`[#1 (id outside the allowed form)] می${ZWNJ}خواهم`);
+    expect(wf).toContain(`[#1 (id outside the allowed form; runs as "step-1")] می${ZWNJ}خواهم`);
   });
 
   it('sanitises a step error in the run preamble (no injection)', () => {

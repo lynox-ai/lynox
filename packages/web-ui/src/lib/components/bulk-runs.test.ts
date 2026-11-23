@@ -3,9 +3,10 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
 	bulkHiddenSegments, bulkHiddenCountText, bulkRawText, bulkUncheckedCountText, bulkHiddenUnchecked,
-	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltSuffixKey, bulkPhaseKey, bulkPhaseHasSuffix, bulkStepLabelKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkConflictsText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkRollbackText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStateText, bulkStep, bulkSteps, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
+	bulkSentenceParts, bulkSecretInContextKey,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -506,7 +507,7 @@ describe('going on from a run that halted', () => {
 	// for a stated cause. A new halt reason fails here until it is placed.
 	it('places every halt the engine names', () => {
 		const STARTS = ['awaitingStart', 'listed'];
-		const ENDS_THE_RUN = ['superseded', 'mandateEnded'];
+		const ENDS_THE_RUN = ['superseded', 'mandateEnded', 'discarded'];
 		const WRITE_RUNS_ONLY = ['failureRate', 'expired', 'checksum', 'maxTargets', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete', 'runUnrecorded', 'shopifyWriteOff', 'markupAddedByShop', 'consentOutdated'];
 		const left = [...STARTS, ...ENDS_THE_RUN, ...WRITE_RUNS_ONLY];
 		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {
@@ -745,7 +746,7 @@ describe('going on from a run that halted', () => {
 
 	it('places every halt the engine names for a write run', () => {
 		const PLANNING_ONLY = ['awaitingStart', 'listed', 'listNotAList', 'listUnreadable', 'listTooLarge', 'listNoProgress', 'listFormWithdrawn', 'listFilterWithdrawn', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'shopifyReadOff', 'costCap', 'spendLimit', 'creditRefused', 'judgeModel'];
-		const NO_WRITE_ON = ['superseded', 'mandateEnded', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete'];
+		const NO_WRITE_ON = ['superseded', 'mandateEnded', 'discarded', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'atomicTimeRolledBack', 'atomicTimeRollbackIncomplete'];
 		const left = [...PLANNING_ONLY, ...NO_WRITE_ON];
 		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {
 			const kind = bulkResumeKind(w(haltKey));
@@ -1092,6 +1093,8 @@ describe('an owner\'s stop is called a stop, not a halt', () => {
 	const HERE = fileURLToPath(new URL('.', import.meta.url));
 	it('the owner\'s stop gets the stop words, every other halt keeps the halt words', () => {
 		expect(bulkHaltHeadKey({ haltKey: 'stoppedByOwner' })).toBe('bulk.head.stopped');
+		// A discarded run is named as discarded, next to its chip and sentence (U-324).
+		expect(bulkHaltHeadKey({ haltKey: 'discarded' })).toBe('bulk.head.discarded');
 		expect(bulkHaltSuffixKey({ haltKey: 'stoppedByOwner' })).toBe('bulk.stopped_suffix');
 		for (const haltKey of ['maxTargets', 'costCap', 'consecutiveFailures', null]) {
 			expect(bulkHaltHeadKey({ haltKey })).toBe('bulk.head.halted');
@@ -1679,5 +1682,49 @@ describe('bulkHiddenCountText', () => {
 	it('names products on Shopify, as every count beside it does', () => {
 		expect(bulkHiddenCountText(4, true, i18n)).toBe('bulk.hidden.count_products:4');
 		expect(bulkHiddenCountText(1, true, i18n)).toBe('bulk.hidden.count_products_one:1');
+	});
+});
+
+describe('a run the owner discarded before approving it, as the list and the step chip name it', () => {
+	const DISCARDED = 'the owner discarded this run before approving it';
+	it('reads "discarded" without the halted suffix; every other aborted run reads as before', () => {
+		expect(bulkPhaseKey({ phase: 'aborted', haltKey: 'discarded' })).toBe('bulk.phase.discarded');
+		expect(bulkPhaseHasSuffix({ phase: 'aborted', haltKey: 'discarded', haltReason: DISCARDED })).toBe(false);
+		// The twins: another end before approval, and a run that is not aborted.
+		expect(bulkPhaseKey({ phase: 'aborted', haltKey: 'superseded' })).toBe('bulk.phase.aborted');
+		expect(bulkPhaseHasSuffix({ phase: 'aborted', haltKey: 'superseded', haltReason: 'x' })).toBe(true);
+		expect(bulkPhaseKey({ phase: 'previewed', haltKey: null })).toBe('bulk.phase.previewed');
+		expect(bulkPhaseHasSuffix({ phase: 'previewed', haltKey: null, haltReason: null })).toBe(false);
+	});
+
+	it('names the last step of a discarded run "discarded", not "done"', () => {
+		expect(bulkStepLabelKey({ phase: 'aborted', haltKey: 'discarded' }, 'done')).toBe('bulk.phase.discarded');
+		expect(bulkStepLabelKey({ phase: 'aborted', haltKey: 'superseded' }, 'done')).toBe('bulk.step.done');
+		expect(bulkStepLabelKey({ phase: 'aborted', haltKey: 'discarded' }, 'approval')).toBe('bulk.step.approval');
+	});
+});
+
+describe('bulkSentenceParts (U-333)', () => {
+	it('splits a sentence at its slot and fills the other placeholders around it, in order', () => {
+		expect(bulkSentenceParts('Open {target} and check “{field}” there.', 'field', { target: 'P 7' }))
+			.toEqual([{ text: 'Open P 7 and check “' }, { slot: true }, { text: '” there.' }]);
+	});
+
+	it('keeps a slot at either end without an empty piece, and every slot of a sentence that names it twice', () => {
+		expect(bulkSentenceParts('{field}: x {field}', 'field', {})).toEqual([{ slot: true }, { text: ': x ' }, { slot: true }]);
+		expect(bulkSentenceParts('sent unchanged: {fields}', 'fields', {})).toEqual([{ text: 'sent unchanged: ' }, { slot: true }]);
+	});
+
+	it('does not open a second slot for a value that holds the slot\'s own text', () => {
+		expect(bulkSentenceParts('{target} and {field}', 'field', { target: '{field}' }))
+			.toEqual([{ text: '{field} and ' }, { slot: true }]);
+	});
+});
+
+describe('bulkSecretInContextKey', () => {
+	it('picks the sentence by where the field lives', () => {
+		expect(bulkSecretInContextKey(true, false)).toBe('bulk.invalid.secret_in_context');
+		expect(bulkSecretInContextKey(false, true)).toBe('bulk.invalid.secret_in_context_column');
+		expect(bulkSecretInContextKey(false, false)).toBe('bulk.invalid.secret_in_context_field');
 	});
 });
