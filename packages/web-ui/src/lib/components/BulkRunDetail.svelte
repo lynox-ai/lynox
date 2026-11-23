@@ -457,7 +457,9 @@
 			.catch(() => { managed = null; });
 	});
 
-	const host = $derived(run ? bulkHostOf(run.targetSystem) : null);
+	// Between two sentences of the probe's confirmation.
+	const SENTENCE_GAP = ' ';
+	const host = $derived(run ? bulkHostOf(run.targetSystem) || null : null);
 	const atProbe = $derived(run !== null && bulkAtProbe(run));
 	const step = $derived(run ? bulkStep(run) : 'planned');
 	const steps = $derived(run ? bulkSteps(run) : BULK_STEPS);
@@ -562,7 +564,11 @@
 {#snippet hostBox()}<BulkHost value={host ?? ''} />{/snippet}
 <!-- A text of the page that names the host among its words: the host boxed wherever it stands. -->
 {#snippet hostText(text: string)}{#each bulkHostSplit(text, host) as part, i (i)}{#if 'slot' in part}{@render hostBox()}{:else}{part.text}{/if}{/each}{/snippet}
-{#snippet sentence(parts: BulkSentencePart[], fields: readonly string[])}{#each parts as part, i (i)}{#if 'slot' in part}{@render fieldNames(fields)}{:else}{@render hostText(part.text)}{/if}{/each}{/snippet}
+{#snippet sentence(parts: BulkSentencePart[], fields: readonly string[])}{#each parts as part, i (i)}{#if 'slot' in part}{@render fieldNames(fields)}{:else}{part.text}{/if}{/each}{/snippet}
+<!-- A sentence of the page split at its placeholders: the host boxed, the target's name and the field
+     names as the page shows them. Text the page did not write (a target's key) is never searched for
+     the host, so it cannot get a box that vouches for part of another name. -->
+{#snippet placed(key: string, fields: readonly string[] = [])}{#each bulkTemplateParts(t(key), ['provider', 'host', 'target', 'field'], {}) as part, i (i)}{#if 'text' in part}{part.text}{:else if part.slot === 'target'}{probeLabel}{:else if part.slot === 'field'}{@render fieldNames(fields)}{:else if host !== null}{@render hostBox()}{:else}{provider}{/if}{/each}{/snippet}
 
 <!-- A target's new value with a mark behind each hidden character it adds where text may carry
      one: the word in the text, the kind and code point only in the label. -->
@@ -635,7 +641,9 @@
 				{/if}
 				{#if run.haltReason}
 					<dt class="text-text-subtle">{t(bulkHaltHeadKey(run))}</dt>
-					<dd data-testid="bulk-halt-cause">{@render hostText(bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, !ownerActs))}</dd>
+					<!-- The engine's own words for a halt (its reason, when the page has no sentence for it) stay text. -->
+					{@const cause = bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, !ownerActs)}
+					<dd data-testid="bulk-halt-cause">{#if cause === run.haltReason}{cause}{:else}{@render hostText(cause)}{/if}</dd>
 				{/if}
 			</dl>
 
@@ -773,7 +781,7 @@
 				<!-- Whose session it is is not known yet: no act is offered. -->
 			{:else if startKind === 'read'}
 				<div class="space-y-3 border-t border-border pt-4">
-					<p class="text-sm" data-testid="bulk-read-explain">{@render hostText(tf('bulk.start.read_explain', { provider }))}</p>
+					<p class="text-sm" data-testid="bulk-read-explain">{@render placed('bulk.start.read_explain')}</p>
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary} disabled={busy} onclick={() => start()}>{t(startButton ?? 'bulk.start.read')}</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
@@ -1012,7 +1020,7 @@
 			{:else if atProbe && run.probe}
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.probe.title')}</h2>
-					<p class="text-sm" data-testid="bulk-probe-explain">{#if run.probe.fields.length > 0}{@render sentence(bulkSentenceParts(t(run.probe.found === true ? 'bulk.probe.explain_found' : 'bulk.probe.explain'), 'field', { target: probeLabel, provider }), run.probe.fields)}{:else}{@render hostText(tf(run.probe.found === true ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_whole', { target: probeLabel, provider }))}{/if}</p>
+					<p class="text-sm" data-testid="bulk-probe-explain">{#if run.probe.fields.length > 0}{@render placed(run.probe.found === true ? 'bulk.probe.explain_found' : 'bulk.probe.explain', run.probe.fields)}{:else}{@render placed(run.probe.found === true ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_whole')}{/if}</p>
 					{#if hiddenCount}
 						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-hidden-count">{hiddenCount}</p>
 					{/if}
@@ -1024,7 +1032,7 @@
 					{/if}
 					<label class="flex gap-2 items-start text-sm">
 						<input type="checkbox" bind:checked={probeOk} class="mt-1" />
-						<span data-testid="bulk-probe-confirm">{@render hostText(tf(run.probe.fields.length > 0 ? 'bulk.probe.confirm' : 'bulk.probe.confirm_whole', { provider }))}{#if run.writeForm === 'measured'}{@render hostText(` ${tf('bulk.probe.confirm_measured', { provider })}`)}{/if}</span>
+						<span data-testid="bulk-probe-confirm">{@render placed(run.probe.fields.length > 0 ? 'bulk.probe.confirm' : 'bulk.probe.confirm_whole')}{#if run.writeForm === 'measured'}{SENTENCE_GAP}{@render placed('bulk.probe.confirm_measured')}{/if}</span>
 					</label>
 					<label class="flex items-center gap-2 text-sm">
 						{t('bulk.probe.in_total')}

@@ -938,7 +938,10 @@ export function bulkHostSplit(text: string, host: string | null): BulkSentencePa
 	// a full stop (U+3002, U+FF0E, U+FF61) before a further label, makes it part of a longer name.
 	const part = '\\p{L}\\p{M}\\p{N}\\p{Cf}_';
 	const dot = '.\\u3002\\uFF0E\\uFF61';
-	const whole = new RegExp(`(?<![${part}${dot}-])${name}(?![${part}-]|[${dot}][${part}])`, 'gu');
+	// A user, a port, an escape or the page's mark for a hidden character beside it (`shop.ch@other`,
+	// `other%2Eshop.ch`, `shop.ch\u27e8U+200B\u27e9other`) makes it part of another address too.
+	const joined = '@%:\\u27E8\\u27E9';
+	const whole = new RegExp(`(?<![${part}${dot}${joined}-])${name}(?![${part}${joined}-]|[${dot}][${part}])`, 'gu');
 	const parts: BulkSentencePart[] = [];
 	let from = 0;
 	for (const m of text.matchAll(whole)) {
@@ -953,7 +956,7 @@ export function bulkHostSplit(text: string, host: string | null): BulkSentencePa
 /** A run's label in parts: the host of an external run is the slot the page boxes; a system lynox
  *  names itself is text. */
 export function bulkLabelParts(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n): BulkSentencePart[] {
-	if (bulkHostOf(run.targetSystem) === null) return [{ text: bulkLabel(run, i18n) }];
+	if (!bulkHostOf(run.targetSystem)) return [{ text: bulkLabel(run, i18n) }];
 	const one = run.total === 1 ? '_one' : '';
 	return bulkSentenceParts(i18n.t(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`), 'target', { n: String(run.total) });
 }

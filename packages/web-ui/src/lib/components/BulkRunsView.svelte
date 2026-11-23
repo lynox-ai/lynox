@@ -109,7 +109,7 @@
 </script>
 
 <!-- Where a run writes: the host of an external run boxed as code, a system lynox names as text. -->
-{#snippet system(run: BulkRun)}{#if bulkHostOf(run.targetSystem) !== null}<BulkHost value={bulkHostOf(run.targetSystem) ?? ''} />{:else}{bulkSystemName(run.targetSystem, i18n)}{/if}{/snippet}
+{#snippet system(run: BulkRun)}{#if bulkHostOf(run.targetSystem)}<BulkHost value={bulkHostOf(run.targetSystem) ?? ''} />{:else}{bulkSystemName(run.targetSystem, i18n)}{/if}{/snippet}
 
 {#if selectedRun !== null}
 	<BulkRunDetail runId={selectedRun} onBack={() => openRun(null)} onOpen={(id) => openRun(id)} />

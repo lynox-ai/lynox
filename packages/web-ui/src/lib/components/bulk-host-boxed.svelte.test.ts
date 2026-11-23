@@ -220,11 +220,36 @@ describe('the host in the sentences of a run\'s page', () => {
 			{ text: 'bei ' }, { slot: true }, { text: ', nicht api.shop.ch, shop.ch.other.example, myshop.ch oder shop.chx; an ' }, { slot: true }, { text: '. Ende' },
 		]);
 		expect(bulkHostSplit('https://api.shop.ch.evil.example/p/1', 'shop.ch')).toEqual([{ text: 'https://api.shop.ch.evil.example/p/1' }]);
-		expect(bulkHostSplit('support@shop.ch', 'shop.ch')).toEqual([{ text: 'support@' }, { slot: true }]);
-		for (const longer of ['https://shop.ch_x.evil.example/p', 'shop.ch.\u00fcmlaut.example', '\u00e4shop.ch', 'x_shop.ch', 'a\u0308shop.ch', 'shop.ch\u0301', 'x\u00adshop.ch', 'shop.ch\u200dx', 'shop.ch\uff0eevil.example', 'evil\u3002shop.ch']) {
+		expect(bulkHostSplit('(shop.ch)', 'shop.ch')).toEqual([{ text: '(' }, { slot: true }, { text: ')' }]);
+		for (const longer of ['https://shop.ch_x.evil.example/p', 'shop.ch.\u00fcmlaut.example', '\u00e4shop.ch', 'x_shop.ch', 'a\u0308shop.ch', 'shop.ch\u0301', 'x\u00adshop.ch', 'shop.ch\u200dx', 'shop.ch\uff0eevil.example', 'evil\u3002shop.ch', 'https://shop.ch@evil.example/p/1', 'support@shop.ch', 'https://shop.ch%2eevil.example/', 'https://evil%2Eshop.ch/', 'shop.ch:8443', 'shop.ch\u27e8U+200B\u27e9evil.example']) {
 			expect(bulkHostSplit(longer, 'shop.ch')).toEqual([{ text: longer }]);
 		}
 		expect(bulkHostSplit('shop.ch', null)).toEqual([{ text: 'shop.ch' }]);
+	});
+
+	it('never searches a target\'s key for the host on the probe, boxing only the sentence\'s own place', async () => {
+		const host = 'shop.example.com';
+		const key = `https://${host}@evil.example/p/1`;
+		run = makeRun({ targetSystem: `http:${host}`, phase: 'writing', haltKey: 'maxTargets', haltReason: 'probe', applied: 1, probeConfirmed: false, writeForm: null, probe: { key, fields: ['title'] } });
+		await renderDetail();
+		const explain = target.querySelector('[data-testid="bulk-probe-explain"]');
+		expect(explain?.textContent).toContain(key);
+		expect(hostBoxes(explain)).toEqual([host]);
+	});
+
+	it('shows the engine\'s own reason for a halt as text, never boxing a host in it', async () => {
+		const reason = `request to https://${HOST}/x failed`;
+		run = ext({ phase: 'writing', haltKey: null, haltReason: reason, applied: 1 });
+		await renderDetail();
+		const cause = target.querySelector('[data-testid="bulk-halt-cause"]');
+		expect(cause?.textContent).toBe(reason);
+		expect(hostBoxes(cause)).toEqual([]);
+	});
+
+	it('draws no empty box for a run whose host is empty', async () => {
+		run = makeRun({ targetSystem: 'http:' });
+		await renderDetail();
+		expect(target.querySelectorAll('code[data-testid="bulk-host"]').length).toBe(0);
 	});
 
 	it('leaves the host inside a target\'s longer name unboxed on the probe', async () => {
