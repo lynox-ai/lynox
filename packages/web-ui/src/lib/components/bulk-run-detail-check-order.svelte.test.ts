@@ -121,6 +121,17 @@ describe('going on by checking', () => {
 		expect(lines.filter((l) => l === t('bulk.halt.support_mail'))).toHaveLength(1);
 	});
 
+	it('writing switched off, self-hosted: says to enable it in the configuration first, then the check, with no support link', async () => {
+		managed = false;
+		run = makeRun({ haltKey: 'shopifyWriteOff', haltReason: 'shopifyWriteOff' });
+		await render();
+		const lines = wayOn();
+		const enable = t('bulk.halt.shopifyWriteOff_before_check_selfhost');
+		expect(lines.indexOf(enable)).toBeGreaterThanOrEqual(0);
+		expect(lines.indexOf(CHECK)).toBeGreaterThan(lines.indexOf(enable));
+		expect(lines).not.toContain(t('bulk.halt.support_mail'));
+	});
+
 	it('writing switched off: the halt says nothing about continuing, managed and self-hosted', async () => {
 		for (const tier of [true, false]) {
 			managed = tier;

@@ -742,8 +742,8 @@ describe('going on from a run that halted', () => {
 		const off = bulkResumeText(w('shopifyWriteOff', unclear), true, DE);
 		expect([off?.before, off?.after]).toEqual(['Soll lynox in Shopify-Shops nachprüfen und schreiben, schreib an support@lynox.ai. Sobald Bulk-Änderungen freigeschaltet sind, kannst du nachprüfen.', null]);
 		const offSelf = bulkResumeText(w('shopifyWriteOff', unclear), false, DE);
-		expect([offSelf?.before, offSelf?.after]).toEqual(['Du schaltest sie in der Konfiguration deiner Instanz frei (`LYNOX_FEATURE_SHOPIFY_BULK_READ`). Danach kannst du nachprüfen.', null]);
-		expect(bulkResumeText(w('shopifyWriteOff', unclear), false, EN)?.before).toBe('You enable them in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`). Then you can check again.');
+		expect([offSelf?.before, offSelf?.after]).toEqual(['Du schaltest Bulk-Änderungen in der Konfiguration deiner Instanz frei (`LYNOX_FEATURE_SHOPIFY_BULK_READ`). Danach kannst du nachprüfen.', null]);
+		expect(bulkResumeText(w('shopifyWriteOff', unclear), false, EN)?.before).toBe('You enable bulk changes in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`). Then you can check again.');
 		expect(bulkResumeText(w('markupAddedByShop', unclear), true, DE)?.after).toBe(DE.tf('bulk.halt.markupAddedByShop_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
 		// A lost access stays first, as before.
 		expect(bulkResumeText(w('credential', unclear), true, DE)?.before).toBe(DE.tf('bulk.halt.credential_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
@@ -878,7 +878,7 @@ describe('going on from a run that halted', () => {
 			cause: 'Bulk-Änderungen an Shopify-Shops sind auf dieser Instanz nicht freigeschaltet. Der Lauf ist angehalten. Sobald sie wieder freigeschaltet sind, kannst du ihn hier fortsetzen.',
 			before: 'Soll lynox in Shopify-Shops schreiben, schreib an support@lynox.ai. Danach kannst du fortsetzen.',
 		});
-		expect(bulkResumeText(w('shopifyWriteOff'), false, EN)?.before).toBe('You enable them in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`).');
+		expect(bulkResumeText(w('shopifyWriteOff'), false, EN)?.before).toBe('You enable bulk changes in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`).');
 		// No way on past a changed run: no promise of what writing on keeps.
 		expect(bulkResumeText(w('checksum'), true, DE)).toEqual({ cause: 'Der Lauf hat sich seit deiner Freigabe geändert.', before: null, check: null, after: null, kept: null, soFar: null, allows: null });
 	});
