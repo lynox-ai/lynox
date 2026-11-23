@@ -524,7 +524,7 @@
 
 	/** Tool call label: returns { action, subject } or null if hidden.
 	 *  Logic lives in `utils/tool-call-label.ts` so the per-tool rules
-	 *  (especially memory_recall's query/namespace fallback) are unit-tested
+	 *  (the subject each tool shows, and the bounds on it) are unit-tested
 	 *  outside this component. */
 	function toolCallLabel(tc: ToolCallInfo): { action: string; subject: string } | null {
 		return resolveToolCallLabel(tc.name, tc.input, t);
