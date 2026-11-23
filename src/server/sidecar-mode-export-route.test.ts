@@ -916,6 +916,9 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(await stopOf()).toMatchObject({ code: 'restore_blocked', params: {}, retry: 'later' });
     target.guardText = 'socket hang up in the restore';
     expect(await stopOf()).toMatchObject({ code: 'restore_failed', params: { detail: 'socket hang up in the restore' }, retry: 'check' });
+    // This instance's home directory shows as ~ in the restore's error text too.
+    target.guardText = `cannot read ${homedir()}/.lynox/restore.log`;
+    expect(await stopOf()).toMatchObject({ code: 'restore_failed', params: { detail: 'cannot read ~/.lynox/restore.log' } });
     target.guardText = undefined;
     target.guardBlocksRestore = false;
   });
