@@ -116,7 +116,7 @@ describe('the status bar names the period of its cost', () => {
 		['answered with something other than a list', { error: 'x' }],
 		['a figure that is text', [{ day: today(), cost_usd: '0.40', run_count: 1, user_turns: 1 }]],
 		['a figure below zero', [{ day: today(), cost_usd: -5, run_count: 1, user_turns: 1 }]],
-		['a figure out of range', [{ day: today(), cost_usd: 1e309, run_count: 1, user_turns: 1 }]],
+		['a figure the answer leaves empty (null)', [{ day: today(), cost_usd: null, run_count: 1, user_turns: 1 }]],
 	] as const)('shows no figure and no period while the cost is unknown (%s)', async (_what, answer) => {
 		costAnswer = answer;
 		await mountIn('de');
