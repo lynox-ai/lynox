@@ -2473,6 +2473,9 @@ export class LynoxHTTPApi {
     // still the mutation the boot test fails on.
     this.clientErrorResolver = (): SecretStoreLike | null => this.engine?.getSecretStore() ?? null;
     setClientErrorSecretStore(this.clientErrorResolver);
+    // Push before the loop: the loop's first tick runs at once, and a question it escalates
+    // before the push channel is registered is recorded as "no channel" although push works.
+    await this._initPushChannel();
     this.engine.startWorkerLoop();
     // Claim the hand-run minter at once, in the same turn the loop is started: whoever
     // claims it first holds it, and nothing else may (hand-run-door.ts). Claimed on first
@@ -2481,7 +2484,6 @@ export class LynoxHTTPApi {
     const workerLoop = this.engine.getWorkerLoop();
     if (workerLoop) this.#handRunMinterFor(workerLoop);
     this._registerRoutes();
-    await this._initPushChannel();
     await this._tryLoadWebUiHandler();
   }
 
