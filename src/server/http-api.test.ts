@@ -31,6 +31,7 @@ import { secretsForProfile } from '../core/profile-secret-view.js';
 import { billingTierSet, eraseRefusal } from '../core/sidecar-refusals.js';
 import type { ApiProfile } from '../core/api-store.js';
 import type { SecretStoreLike } from '../types/index.js';
+import { getModelId } from '../types/index.js';
 import type { MailConnectPromptData } from '../types/agent.js';
 import { AuditLog } from '../core/audit-log.js';
 import { CpRefusalTally, CpTrail } from '../core/cp-trail.js';
@@ -332,6 +333,13 @@ vi.mock('../core/engine.js', () => ({
       getRun: mockHistoryGetRun,
       getRunToolCalls: mockHistoryGetRunToolCalls,
       deleteWireSnapshotsForThread: mockDeleteWireSnapshotsForThread,
+      // An empty history.db for the chat delete's blanking: it reaches no run here. What it
+      // blanks is tested on a real engine in thread-delete-provenance.test.ts.
+      getDb: () => ({
+        transaction: <A extends unknown[], R>(fn: (...a: A) => R) => (...a: A): R => fn(...a),
+        exec: () => undefined,
+        prepare: () => ({ run: () => ({ changes: 0 }), all: () => [] }),
+      }),
       getFailedToolUseIds: mockGetFailedToolUseIds,
       getStats: mockHistoryGetStats,
       getCostByDay: mockHistoryGetCostByDay,
@@ -8871,6 +8879,63 @@ describe('LynoxHTTPApi', () => {
         const body = await res.json() as { thread: unknown; threadMissing?: boolean };
         expect(body.thread).toBeNull();
         expect(body.threadMissing).toBe(true);
+      });
+    });
+
+    describe('GET /api/threads/:id says the tier the conversation runs on (run_tier)', () => {
+      const TID = '0b0a7c1e-5d3f-4c2a-9e8b-7f6a5d4c3b2a';
+      type EngineRef = { config?: unknown; getUserConfig: () => unknown; getToolContext: () => unknown };
+      const engineRef = (): EngineRef => (api as unknown as { engine: EngineRef }).engine;
+      const ss = (): { get: (id: string) => unknown } => (api as unknown as { sessionStore: { get: (id: string) => unknown } }).sessionStore;
+      let liveLookups = 0;
+      async function runTier(stored: string, userConfig: Record<string, unknown>, live?: string): Promise<{ status: number; stored?: string; run?: string }> {
+        const e = engineRef();
+        const origConfig = e.config; const origUc = e.getUserConfig; const origGet = ss().get; const origCtx = e.getToolContext;
+        e.config = { model: 'balanced' };
+        e.getToolContext = (): unknown => ({ tools: [], containment: {
+          isContained: () => false,
+          containedThreadIds: () => new Set<string>(),
+          threadStates: () => ({ contained: new Set<string>(), unknown: new Set<string>() }),
+        } });
+        e.getUserConfig = (): unknown => userConfig;
+        // This file's session store answers every id with a stand-in session; this conversation has
+        // a live one only when the case gives it.
+        liveLookups = 0;
+        ss().get = (id: string): unknown => {
+          if (id !== TID) return origGet.call(ss(), id);
+          liveLookups++;
+          return live !== undefined ? { getModelTier: () => live } : undefined;
+        };
+        try {
+          let status = 0;
+          let body: { thread: { model_tier?: string; run_tier?: string } } | undefined;
+          await withThreadStore({ getThread: (id: string) => (id === TID ? { id: TID, model_tier: stored } : null) }, async () => {
+            const res = await jsonFetch(`/api/threads/${TID}`);
+            status = res.status;
+            if (status === 200) body = await res.json() as typeof body;
+          });
+          return { status, stored: body?.thread.model_tier, run: body?.thread.run_tier };
+        } finally {
+          e.config = origConfig; e.getUserConfig = origUc; ss().get = origGet; e.getToolContext = origCtx;
+        }
+      }
+
+      it('holds the stored pick to today\'s ceiling, as resuming it would', async () => {
+        expect(await runTier('deep', { max_tier: 'balanced' })).toEqual({ status: 200, stored: 'deep', run: 'balanced' });
+        expect(await runTier('fast', { max_tier: 'balanced' })).toEqual({ status: 200, stored: 'fast', run: 'fast' });
+        expect(await runTier('deep', {})).toEqual({ status: 200, stored: 'deep', run: 'deep' });
+      });
+
+      it('falls back to the fast tier when the pick\'s model is blocked, and says nothing when no model is left', async () => {
+        const block = (...tiers: Array<'fast' | 'balanced' | 'deep'>): Record<string, unknown> => ({ blocked_model_ids: tiers.map((t) => getModelId(t, 'anthropic')) });
+        expect(await runTier('deep', block('deep'))).toEqual({ status: 200, stored: 'deep', run: 'fast' });
+        expect(await runTier('deep', block('deep', 'fast'))).toEqual({ status: 200, stored: 'deep', run: undefined });
+      });
+
+      it('is not the live session\'s tier of the moment (a compaction runs on the fast tier)', async () => {
+        expect(await runTier('deep', { max_tier: 'deep' }, 'fast')).toEqual({ status: 200, stored: 'deep', run: 'deep' });
+        // Not even looked up: a lookup marks the session used and keeps it from being dropped.
+        expect(liveLookups).toBe(0);
       });
     });
 
@@ -24113,6 +24178,97 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
       holder._migrationImporter?.cleanup();
       holder._migrationImporter = null;
     }
+  });
+
+  it('ends a session before its manifest for the token and the session id the handshake named, and nothing else', async () => {
+    const token = randomBytes(32).toString('hex');
+    const holder = api as unknown as { _migrationImporter: { cleanup(): void; session: { manifest: unknown } | null } | null };
+    // Some twenty requests below; the tests before this one in the same server may have used up
+    // this client's rate window, and a 429 would stand in for the answer under test.
+    (api as unknown as { rateCounts: Map<string, unknown> }).rateCounts.clear();
+    const handshake = async (): Promise<Response> => fetch(`${baseUrl}/api/migration/handshake`, { headers: { 'x-migration-token': token } });
+    const abort = async (body: unknown, tok: string | null = token, admin = false): Promise<Response> => fetch(`${baseUrl}/api/migration/abort`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(tok === null ? {} : { 'x-migration-token': tok }), ...(admin ? { Authorization: `Bearer ${TEST_SECRET}` } : {}) },
+      body: JSON.stringify(body),
+    });
+    try {
+    await withEnv({ ...MANAGED, LYNOX_MIGRATION_TOKEN: token, LYNOX_VAULT_KEY: 'a-vault-key-for-the-abort-test' }, async () => {
+      const a = (await (await handshake()).json()) as { sessionId: string };
+      expect(a.sessionId).toMatch(/^[0-9a-f]{32}$/);
+      // Without the token, with another, or without a session id: refused, the session stays.
+      expect((await abort({ sessionId: a.sessionId }, null)).status).toBe(401);
+      expect((await abort({ sessionId: a.sessionId }, randomBytes(32).toString('hex'))).status).toBe(403);
+      expect((await abort({})).status).toBe(400);
+      expect((await abort({ sessionId: 'A'.repeat(32) })).status).toBe(400);
+      // Past the door another way (a bearer that is admin here: no separate admin secret), the
+      // routes still check the token themselves.
+      await withEnv({ LYNOX_HTTP_ADMIN_SECRET: undefined }, async () => {
+        // Control: this bearer is admin here, so a 403 below is the route's own.
+        expect((await as(TEST_SECRET, ADMIN_ROUTE)).status).toBe(200);
+        const refused = await abort({ sessionId: a.sessionId }, 'not-the-token', true);
+        expect(refused.status).toBe(403);
+        expect(((await refused.json()) as { error: string }).error).toBe('Invalid migration token');
+        const bare = await abort({ sessionId: a.sessionId }, null, true);
+        expect(bare.status).toBe(401);
+        const shaken = await fetch(`${baseUrl}/api/migration/handshake`, { headers: { 'x-migration-token': 'not-the-token', Authorization: `Bearer ${TEST_SECRET}` } });
+        expect(shaken.status).toBe(403);
+        expect(((await shaken.json()) as { error: string }).error).toBe('Invalid migration token');
+        // The token with anything appended is not the token: refused by both routes.
+        const appended = await abort({ sessionId: a.sessionId }, `${token}z`, true);
+        expect(appended.status).toBe(403);
+        expect(((await appended.json()) as { error: string }).error).toBe('Invalid migration token');
+        const appendedShake = await fetch(`${baseUrl}/api/migration/handshake`, { headers: { 'x-migration-token': `${token}z`, Authorization: `Bearer ${TEST_SECRET}` } });
+        expect(appendedShake.status).toBe(403);
+      });
+      expect((await handshake()).status).toBe(400);
+      // With both: ended, and a new handshake goes through at once.
+      const ended = await abort({ sessionId: a.sessionId });
+      expect(ended.status).toBe(200);
+      expect(await ended.json()).toEqual({ aborted: true });
+      const b = await handshake();
+      expect(b.status).toBe(200);
+      const bId = ((await b.json()) as { sessionId: string }).sessionId;
+      expect(bId).not.toBe(a.sessionId);
+      // A late abort for the earlier session leaves the newer one as it is.
+      const late = await abort({ sessionId: a.sessionId });
+      expect(await late.json()).toEqual({ aborted: false });
+      expect((await handshake()).status).toBe(400);
+      // A session that took its manifest is not ended: its transfer runs on.
+      holder._migrationImporter!.session!.manifest = { chunks: [] };
+      const running = await abort({ sessionId: bId });
+      expect(running.status).toBe(409);
+      expect(((await running.json()) as { code?: string }).code).toBe('migration_in_transfer');
+      expect((await handshake()).status).toBe(400);
+      // No session at all: nothing to end.
+      holder._migrationImporter!.cleanup();
+      holder._migrationImporter = null;
+      expect(await (await abort({ sessionId: bId })).json()).toEqual({ aborted: false });
+    });
+    } finally {
+      holder._migrationImporter?.cleanup();
+      holder._migrationImporter = null;
+    }
+  });
+
+  it('says a stored migration token of the wrong shape is this instance\'s fault, not a wrong token', async () => {
+    const token = randomBytes(32).toString('hex');
+    // At the door (the token alone, as a source sends it) and past it another way (a bearer that is
+    // admin here, no separate admin secret), on both routes.
+    await withEnv({ LYNOX_BILLING_TIER: 'managed', LYNOX_HTTP_ADMIN_SECRET: undefined, LYNOX_MIGRATION_TOKEN: `${token}\n`, LYNOX_VAULT_KEY: 'a-vault-key-for-the-shape-test' }, async () => {
+      for (const bearer of [false, true]) {
+        for (const path of ['/api/migration/handshake', '/api/migration/abort']) {
+          const res = await fetch(`${baseUrl}${path}`, {
+            method: path.endsWith('abort') ? 'POST' : 'GET',
+            headers: { 'x-migration-token': bearer ? `${token}z` : token, ...(bearer ? { Authorization: `Bearer ${TEST_SECRET}` } : {}), 'Content-Type': 'application/json' },
+            ...(path.endsWith('abort') ? { body: JSON.stringify({ sessionId: '0'.repeat(32) }) } : {}),
+          });
+          expect(res.status).toBe(500);
+          expect(((await res.json()) as { error: string }).error).toBe('Migration token has invalid format');
+        }
+      }
+    });
+    (api as unknown as { _migrationImporter: { cleanup(): void } | null })._migrationImporter?.cleanup();
   });
 
   it('with no secret at all, a local request is admin, on a managed instance too', async () => {
