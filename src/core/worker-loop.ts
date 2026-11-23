@@ -528,7 +528,7 @@ export interface ActiveTask {
    * the run is not over, its question stays answerable where the owner got it, and the run
    * tells its real end once the answer re-arms it. However this process's part then ends,
    * on the normal end path or in the catch, it pushes nothing (U-420). On the entry, not in the
-   * run's closure, because the catch of `executeTask` reads it too.
+   * run's closure, because the catch in `#runFramed` reads it too.
    */
   questionKept?: boolean | undefined;
   /**
@@ -3443,7 +3443,7 @@ export class WorkerLoop {
     const memberSaid = currentMemberNotesIn(noticeLanguage(this.engine.config?.language));
     // A run whose question was kept for the next process is not over: no push, not ✗ (nothing
     // went wrong, a deploy is internal) and not ⏸ (a second notice of a question already asked).
-    // The catch of `executeTask` holds back its push on the same mark (`ActiveTask.questionKept`).
+    // The catch in `#runFramed` holds back its push on the same mark (`ActiveTask.questionKept`).
     if (active?.questionKept !== true && this.notificationRouter.hasChannels() && !memberNotesRepeat(task, memberNotes)) {
       // The push leaves the instance: a contained run's result goes out as a fixed sentence, as
       // its error does (above); the recorded run keeps the full text. Only the run's text is

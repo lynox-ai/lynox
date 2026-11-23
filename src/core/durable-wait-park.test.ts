@@ -906,9 +906,12 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     await waitUntil('the failed run to be recorded',
       () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
 
-    expect(h.history.getTrigger('trg-1')?.last_run_status).toBe('failed');
+    // The catch recorded it: its result is the continuation's error, not an answer's outcome.
+    expect(h.history.getTrigger('trg-1')?.last_run_result).toContain('continuation failed');
     expect(notify.mock.calls.slice(before)).toEqual([]);
     expect(h.prompts.getById(promptId)?.status).toBe('pending');
+    // Still parked and so still re-armable by the answer, failure recorded or not.
+    expect(h.history.getTrigger('trg-1')?.status).toBe('waiting');
   });
 
   it('W2-13 — control: the same failure after an owner\'s stop, which keeps nothing, does push its end', async () => {
@@ -921,7 +924,12 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     await waitUntil('the stopped run to be recorded',
       () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
 
-    expect(notify.mock.calls.slice(before)).toHaveLength(1);
+    // The catch's failure push: ✗ at high priority, with the error.
+    expect(notify.mock.calls.slice(before).map(([m]) => m)).toEqual([expect.objectContaining({
+      title: expect.stringMatching(/^\u2717 /) as unknown as string,
+      priority: 'high',
+      body: expect.stringContaining('continuation failed') as unknown as string,
+    })]);
   });
 
   it('W2-13 — control: the owner\'s stop of the same parked run, which keeps nothing, does push its end', async () => {
