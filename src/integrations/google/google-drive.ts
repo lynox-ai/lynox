@@ -127,7 +127,8 @@ export function createDriveTool(getAuth: () => GoogleAuth | null): ToolEntry<Dri
   return {
     outwardWrite: (input) => (DRIVE_WRITE_ACTIONS.has(input.action) ? input.action : null),
     // A share sends the file to the address it names. No other action names a recipient.
-    sendTargets: (input) => (input.action !== 'share' ? null : input.email ? mailTargets([input.email]) : []),
+    // A share without an address is unreadable: nobody can see whom it would go to.
+    sendTargets: (input) => (input.action !== 'share' ? null : mailTargets([typeof input.email === 'string' ? input.email : ''])),
     // A search names only that it searched: its query can name a customer. `move` reads the
     // file's folders before it moves it.
     outwardRead: (input) => {

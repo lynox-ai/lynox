@@ -17,7 +17,8 @@
 	import BulkRunDetail from './BulkRunDetail.svelte';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
-	import { bulkHaltSuffixKey, bulkLabel, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkMerge, type BulkRun } from './bulk-runs.js';
+	import BulkHost from './BulkHost.svelte';
+	import { bulkHaltSuffixKey, bulkHostOf, bulkLabelParts, bulkPhaseHasSuffix, bulkPhaseKey, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkMerge, type BulkRun } from './bulk-runs.js';
 
 	let runs = $state<BulkRun[]>([]);
 	let merges = $state<BulkMerge[]>([]);
@@ -103,7 +104,12 @@
 
 	const i18n = { t, tf };
 	const chipClass = 'inline-block rounded-full px-2 py-0.5 text-[11px]';
+	// Between a run's date and where it writes, on a narrow list.
+	const SYSTEM_SEP = ' · ';
 </script>
+
+<!-- Where a run writes: the host of an external run boxed as code, a system lynox names as text. -->
+{#snippet system(run: BulkRun)}{#if bulkHostOf(run.targetSystem)}<BulkHost value={bulkHostOf(run.targetSystem) ?? ''} />{:else}{bulkSystemName(run.targetSystem, i18n)}{/if}{/snippet}
 
 {#if selectedRun !== null}
 	<BulkRunDetail runId={selectedRun} onBack={() => openRun(null)} onOpen={(id) => openRun(id)} />
@@ -138,13 +144,13 @@
 							{#each runs as run (run.id)}
 								<tr class="border-b border-border hover:bg-bg-muted cursor-pointer" onclick={() => openRun(run.id)}>
 									<td class="py-2 pr-3">
-										<button type="button" class="text-left hover:underline" onclick={(e) => { e.stopPropagation(); openRun(run.id); }}>{bulkLabel(run, i18n)}</button>
-										<div class="text-xs text-text-subtle">{when(run.createdAt)}<span class="sm:hidden">{` · ${bulkSystemName(run.targetSystem, i18n)}`}</span></div>
+										<button type="button" class="text-left hover:underline" onclick={(e) => { e.stopPropagation(); openRun(run.id); }}>{#each bulkLabelParts(run, i18n) as part, i (i)}{#if 'slot' in part}{@render system(run)}{:else}{part.text}{/if}{/each}</button>
+										<div class="text-xs text-text-subtle">{when(run.createdAt)}<span class="sm:hidden">{SYSTEM_SEP}{@render system(run)}</span></div>
 									</td>
-									<td class="py-2 pr-3 hidden sm:table-cell">{bulkSystemName(run.targetSystem, i18n)}</td>
+									<td class="py-2 pr-3 hidden sm:table-cell">{@render system(run)}</td>
 									<td class="py-2 pr-3">
 										<span class="{chipClass} whitespace-nowrap {run.phase === 'done' ? 'bg-success/15 text-success' : run.haltReason && !bulkWaitsForStart(run) ? 'bg-warning/15 text-warning' : 'bg-bg-muted text-text-muted'}">
-											{t(`bulk.phase.${run.phase}`)}{run.haltReason && !bulkWaitsForStart(run) ? ` ${t(bulkHaltSuffixKey(run))}` : ''}
+											{t(bulkPhaseKey(run))}{bulkPhaseHasSuffix(run) && !bulkWaitsForStart(run) ? ` ${t(bulkHaltSuffixKey(run))}` : ''}
 										</span>
 										{#if run.writeForm === 'unmeasured'}
 											<span class="{chipClass} whitespace-nowrap bg-warning/15 text-warning">{t('bulk.unmeasured_chip')}</span>

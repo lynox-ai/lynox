@@ -4,7 +4,8 @@ import { builtInPresetOf, connectCallText, isPresetClientSecretName, presetClien
 import { tokenSlotNames, type ApiProfile } from '../../core/api-store.js';
 import { apiSetupTool } from './api-setup.js';
 import { toolLockFor } from '../../core/mandate-tool-lock.js';
-import { connectionTokenHolderName, connectionTokenHolders, describeConnectionTokens, FORGING_CHARS, sharedGrantOwner } from '../../core/profile-secret-view.js';
+import { connectionTokenHolderName, connectionTokenHolders, describeConnectionTokens, FORGING_CHARS, mandateMayConnect, sharedGrantOwner } from '../../core/profile-secret-view.js';
+import { principalTag } from '../../core/request-principal.js';
 import { vaultScopeOf, VAULT_SCOPE_ALL } from '../../core/secret-scope.js';
 
 interface AskSecretInput {
@@ -40,20 +41,20 @@ const NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 const PROMPT_MAX_CHARS = 300;
 
 /**
- * What a mandate's turn gets instead of a dialog. The dialog would send what the person at the
- * screen types to the vault route, which only the owner may write, so the key would leave their
- * hands and be refused. It says who stores keys, what a saved profile does, and where the owner
- * acts on it: the owner sees a release request only when lynox answers in the owner's own chat
- * (`releaseRequestsNote`). It asks for nothing again: the refusal is prompt surface, and a retry
- * instruction here would teach a loop.
+ * What a mandate's turn gets instead of a dialog (U-185). The dialog would send what the person
+ * at the screen types to the vault route, which only the owner may write, so the key would leave
+ * their hands and be refused. One constant, answered before the store is read: it depends on no
+ * name, vault entry, request or profile, and none of the call's input reaches it, so it tells the
+ * model nothing about what the owner stores. It names no place to store the key (a built-in
+ * provider's app goes through the owner's connection form, others do not), claims no step that
+ * was not taken (the owner is told nothing), and asks for nothing again: the refusal is prompt
+ * surface, and a retry instruction here would teach a loop.
  */
 export const MANDATE_SECRET_REFUSAL =
-  'Refused: in this session no key or password is entered. Only the owner of this instance stores keys. ' +
-  'A profile you save here asks the owner to release the keys it reads, and until the owner does, the engine ' +
-  'sends nothing under those keys. Tell the user to ask the owner to do it in a chat of the owner\'s own: ' +
-  'store the key there if it is not stored yet, and, if a profile saved here reads it, ask lynox there to release ' +
-  'it to that profile, naming the key and the profile. Do not ask for the key again, and never ask the user to ' +
-  'paste it into this chat.';
+  'Not collected: in this session no key, token or password is entered, and this call stored nothing and ' +
+  'told the owner nothing. Only the owner of this instance stores keys. Tell the user that the owner of this ' +
+  'instance has to store this key and that they can ask the owner to do it. There is no other way to enter it ' +
+  'here: do not ask the user for the key in this chat in any form. You can go on with the steps that need no key.';
 
 /**
  * A name in the vault that holds a connection's token is used through that connection's API
@@ -105,6 +106,72 @@ async function connectAnswer(agent: IAgent, id: string): Promise<string | null> 
   }
 }
 
+/**
+ * What `collect` answers for a token slot of a profile on a built-in provider: such a slot is filled
+ * by the provider's sign-in, so the answer is the way to connect, asked of `api_setup` as this
+ * agent would ask it.
+ */
+async function presetSlotAnswer(agent: IAgent, name: string, holder: ApiProfile): Promise<string> {
+  const provider = builtInPresetOf(holder);
+  const via = provider === undefined ? 'a built-in provider' : `the built-in "${provider.id}" provider`;
+  // A profile sharing another one's grant is signed in through that one: connecting it on its own
+  // would split it off, so the connect is asked for the profile that holds the grant.
+  const apiStore = agent.toolContext?.apiStore;
+  const signsIn = (apiStore ? sharedGrantOwner(apiStore, holder) : undefined) ?? holder;
+  const id: unknown = signsIn.id;
+  const head = `"${name}" is a token slot of a profile on ${via}, so it is not collected ` +
+    `through ask_secret: its tokens come only from the provider's sign-in, where the user sees what lynox may ` +
+    `do there.`;
+  // Asked here rather than left to the model, which wrote a link of its own instead (measured, U-195).
+  const answer = typeof id === 'string' ? await connectAnswer(agent, id) : null;
+  if (answer !== null) {
+    // "Act on", not "pass on": the answer is written to the model, and may make the link
+    // conditional (a profile already connected) — U-195.
+    return `${head} lynox has already asked api_setup to connect profile "${id}"; its answer follows. Act on its ` +
+      `answer: give the user the sign-in link it contains, on the condition it states if it states one, or the ` +
+      `reason it gives. Do not ask the user for a token, and write no other link.` +
+      `\n\napi_setup connect answered: ${answer}`;
+  }
+  return `${head} To connect or reconnect, ${connectCallText(typeof id === 'string' ? id : undefined)} Do not ask the user for a token.`;
+}
+
+/**
+ * In a locked turn, the profile on a built-in provider whose token slot `name` is, when the mandate
+ * may connect it (`mandateMayConnect`), and may connect the profile whose grant it shares as well.
+ * It holds for a profile the mandate wrote, or one whose grant it consented to, and not for a
+ * profile of the owner's: that one's slots are never released to a mandate (`releaseState`, not
+ * releasable). The slot is filled by the provider's sign-in, which the mandate
+ * may start, so the refusal ("only the owner stores keys") would send it the wrong way. Undefined
+ * for every other holder, for a name outside this agent's secret_scope, for a store that cannot
+ * list its profiles, and for a check that throws: then the answer stays the refusal, word for
+ * word, so it tells the mandate nothing about the owner's profiles.
+ */
+function ownPresetSlotHolder(agent: IAgent, name: string, principal: NonNullable<IAgent['principal']>): ApiProfile | undefined {
+  const apiStore = agent.toolContext?.apiStore;
+  const store = agent.secretStore;
+  if (!apiStore || !store) return undefined;
+  // A sub-agent asks only for names inside its secret_scope, as in the owner's turn below.
+  const scope = vaultScopeOf(store);
+  if (scope !== VAULT_SCOPE_ALL && !scope.includes(name)) return undefined;
+  try {
+    const tag = principalTag(principal);
+    const ctx = { principal, ends: agent.toolContext?.mandateEnds ?? null, releases: agent.toolContext?.secretReleases ?? null };
+    const own = (p: ApiProfile): boolean => mandateMayConnect(store, apiStore, tag, p, ctx);
+    // The first profile on a built-in provider that holds the slot. Which one comes first does not
+    // change the answer: `mandateMayConnect` is false for the mandate's own profile as soon as any
+    // profile of somebody else reads the slot too, so either order ends in the refusal.
+    const holder = apiStore.knownProfiles().find((p) => builtInPresetOf(p) !== undefined && tokenSlotNames(p).has(name));
+    if (holder === undefined) return undefined;
+    // The profile that signs in: the holder itself, or the one whose grant it shares. Asked of that
+    // one alone, which covers the holder too: a holder of somebody else's that shares the grant reads
+    // its refresh slot, and a token slot is never released, so `mandateMayConnect` is false for it.
+    const signsIn = sharedGrantOwner(apiStore, holder) ?? holder;
+    return own(signsIn) ? holder : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Collapse to one line and bound the length, ellipsising when it had to cut. */
 function boundPromptText(s: string): string {
   // Strip BEFORE collapsing — removing a character from between two spaces after
@@ -118,6 +185,19 @@ function boundPromptText(s: string): string {
     ? `${points.slice(0, PROMPT_MAX_CHARS - 1).join('')}…`
     : flat;
 }
+
+/**
+ * The definition a locked turn sends (U-185): the owner's, with the descriptions that offer a
+ * dialog replaced. Name, properties and `required` stay the owner's, so the handler and its input
+ * are the same; `name` and `key_type` keep their texts.
+ */
+const ASK_SECRET_LOCKED_DESCRIPTION =
+  'In this session ask_secret stores nothing and opens no input: it returns how a key gets stored here. ' +
+  'When a step needs a key, token or password, call it instead of asking the user for one.';
+const ASK_SECRET_LOCKED_ACTION =
+  'Optional, default "collect". In this session "collect" stores nothing and returns how a key gets stored here; "list" returns no names.';
+const ASK_SECRET_LOCKED_PROMPT =
+  'What the key is for, in a few words (e.g. "Stripe API key"). Not shown to the user in this session.';
 
 export const askSecretTool: ToolEntry<AskSecretInput> = {
   undo: 'restorable',
@@ -157,6 +237,9 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
       required: [],
     },
   },
+  // A locked turn gets no carrier: this guidance orders the steps before the dialog, and a locked
+  // turn opens none.
+  lockedGuidance: '',
   detailedGuidance:
     'For a third-party API/integration credential, first confirm the consuming integration exists — ' +
     'you created/bootstrapped its api_setup profile this turn, or api_setup({action:"list"|"view"}) shows it registered. ' +
@@ -208,7 +291,12 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     // turn: before the dialog, which would collect a key the vault refuses, and before the name
     // checks, whose answers name the keys the owner already stores.
     const principal = agent.principal as IAgent['principal'] | undefined;
-    if (principal === undefined || toolLockFor(principal) !== null) return MANDATE_SECRET_REFUSAL;
+    if (principal === undefined || toolLockFor(principal) !== null) {
+      // One exception: a token slot of the mandate's own profile on a built-in provider is filled by
+      // the provider's sign-in, which the mandate may start. Any other holder gets the refusal.
+      const own = principal !== undefined && input.name ? ownPresetSlotHolder(agent, input.name, principal) : undefined;
+      return own !== undefined && input.name ? presetSlotAnswer(agent, input.name, own) : MANDATE_SECRET_REFUSAL;
+    }
     if (!input.name || !input.prompt) {
       return 'Error: ask_secret with action:"collect" needs both `name` and `prompt`. To see what is already stored, call ask_secret with action:"list".';
     }
@@ -270,29 +358,7 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
         `did not collect it and opened no input. Do not ask the user for it in the chat instead. Tell the user that ` +
         `the API profiles could not be read just now and that this step can be tried again later.`;
     }
-    if (presetHolder !== undefined) {
-      const provider = builtInPresetOf(presetHolder);
-      const via = provider === undefined ? 'a built-in provider' : `the built-in "${provider.id}" provider`;
-      // A profile sharing another one's grant is signed in through that one: connecting it on its own
-      // would split it off, so the connect is asked for the profile that holds the grant.
-      const apiStore = agent.toolContext?.apiStore;
-      const signsIn = (apiStore ? sharedGrantOwner(apiStore, presetHolder) : undefined) ?? presetHolder;
-      const id: unknown = signsIn.id;
-      const head = `"${input.name}" is a token slot of a profile on ${via}, so it is not collected ` +
-        `through ask_secret: its tokens come only from the provider's sign-in, where the user sees what lynox may ` +
-        `do there.`;
-      // Asked here rather than left to the model, which wrote a link of its own instead (measured, U-195).
-      const answer = typeof id === 'string' ? await connectAnswer(agent, id) : null;
-      if (answer !== null) {
-        // "Act on", not "pass on": the answer is written to the model, and may make the link
-        // conditional (a profile already connected) — U-195.
-        return `${head} lynox has already asked api_setup to connect profile "${id}"; its answer follows. Act on its ` +
-          `answer: give the user the sign-in link it contains, on the condition it states if it states one, or the ` +
-          `reason it gives. Do not ask the user for a token, and write no other link.` +
-          `\n\napi_setup connect answered: ${answer}`;
-      }
-      return `${head} To connect or reconnect, ${connectCallText(typeof id === 'string' ? id : undefined)} Do not ask the user for a token.`;
-    }
+    if (presetHolder !== undefined) return presetSlotAnswer(agent, input.name, presetHolder);
     // `findNameMatches` leaves out the requested name itself. A token STORED under exactly that
     // name is the case that matters most (collecting it would overwrite the connection's token), so
     // it is added here and turned away below like a near-identical one. Stored, not merely named by
@@ -398,3 +464,22 @@ Reply rules — these are instructions for the agent, NOT content for the user:
     }
   },
 };
+
+/** The owner's definition with the three descriptions of a locked turn; nothing else differs. */
+function lockedAskSecretDefinition(owner: ToolEntry['definition']): ToolEntry['definition'] {
+  const schema = owner.input_schema as { properties: Record<string, Record<string, unknown>> } & Record<string, unknown>;
+  const props = schema.properties;
+  return {
+    ...owner,
+    description: ASK_SECRET_LOCKED_DESCRIPTION,
+    input_schema: {
+      ...schema,
+      properties: {
+        ...props,
+        action: { ...props['action'], description: ASK_SECRET_LOCKED_ACTION },
+        prompt: { ...props['prompt'], description: ASK_SECRET_LOCKED_PROMPT },
+      },
+    } as ToolEntry['definition']['input_schema'],
+  };
+}
+askSecretTool.lockedDefinition = lockedAskSecretDefinition(askSecretTool.definition);

@@ -63,11 +63,11 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function startedRun(): string {
+function startedRun(targets = 1): string {
   const rule = normalizeJudgeRule({ rule: 'Write a short title.', schema: { title: { type: 'string', maxLength: 40 } } });
   const id = ledger.recordDryRun({
     createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
-    targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', title: `${MARK}-title` } }, after: judgeTemplate(rule) }],
+    targets: ['A', 'B', 'C'].slice(0, targets).map((sku) => ({ key: sku, before: { absent: false, value: { sku, title: `${MARK}-title` } }, after: judgeTemplate(rule) })),
     judge: rule,
   }).id;
   const out = ledger.resumePreview(id, Date.now(), { judgeRuleHash: ledger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 1 });
@@ -146,6 +146,40 @@ describe('bulk_judge through the worker: the language of its outcome (966)', () 
     expect(records).toEqual(['Beurteilung fertig. Der Massenlauf wartet auf deine Prüfung. Beurteilt 0, ungültig 1, ohne Urteil 0 von 1 Zielen.']);
     // The push titles the stage and its end, not the trigger's title (a run on the data store has no host).
     expect(notes).toEqual([`\u2713 Beurteilung fertig\n${records[0]!}`]);
+  });
+});
+
+describe('bulk_judge through the worker: a run that is no longer its own', () => {
+  it('a run replaced while it was judged: stopped, in the sentence of its replacement, not a failure (U-324)', async () => {
+    const id = startedRun(2);
+    model.create = async () => {
+      // A later judged run takes its place while the model answers its first target.
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted', halt_reason = ? WHERE id = ?`).run(BULK_HALT_REASONS.superseded, id);
+      return {
+        id: 'm', type: 'message', role: 'assistant', model: 'claude-haiku-4-5', stop_reason: 'tool_use', stop_sequence: null,
+        content: [{ type: 'tool_use', id: 't', name: 'extract', input: { title: 'Kurzer Titel' } }],
+        usage: { input_tokens: 100, output_tokens: 20 },
+      };
+    };
+    const { records, notes } = await tick(id, [], 'de');
+    const de = 'An seiner Stelle wurde ein anderer Lauf mit Beurteilung gestartet. Dieser hat nichts geschrieben.';
+    expect(records).toEqual([de]);
+    expect(notes).toEqual([`\u23F9 Beurteilung gestoppt\n${de}`]);
+  });
+});
+
+describe('bulk_judge through the worker: a halt that did not take', () => {
+  it('a run the owner discarded while its model failed: told as discarded, not as its own halt', async () => {
+    const id = startedRun();
+    model.create = async () => {
+      ledger.discardRun(id);
+      throw Object.assign(new Error('400 invalid_request'), { status: 400 });
+    };
+    const { records, notes } = await tick(id, [], 'de');
+    const de = 'Du hast diesen Lauf verworfen. lynox hat nichts geschrieben.';
+    expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.discarded);
+    expect(records).toEqual([de]);
+    expect(notes).toEqual([`\u23F9 Beurteilung verworfen\n${de}`]);
   });
 });
 

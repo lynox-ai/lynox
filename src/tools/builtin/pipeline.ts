@@ -25,6 +25,7 @@ import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 import { sameBoundValues, acceptedValueMatcher, type GrantDecision } from '../../core/workflow-grant.js';
 import { escapeHiddenInJson, fixedRunRefusal, hiddenInRunValues, stripHidden } from '../../core/hidden-text.js';
+import { stepIdCollision, templateRefIssue, templateRefStep } from '../../orchestrator/template-refs.js';
 import { isStepIdShape, runStepIds, shownStepId, stepIdIssue, stepRunNames } from '../../orchestrator/step-id.js';
 import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
@@ -476,6 +477,12 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
   const shapeIssue = stepIdIssue(steps);
   if (shapeIssue) return `Error: ${shapeIssue}`;
 
+  // A step id the run's context already uses (`template-refs.ts`): an inline context key, or `params`
+  // beside it. Refused here, by the place in the list the model wrote, before anything is estimated.
+  const inlineContext = input.context ?? {};
+  const collision = stepIdCollision(steps, { ...inlineContext, params: inlineContext }, 'steps', { saved: false });
+  if (collision) return `Error: ${collision}`;
+
   // Validate unique IDs
   const ids = new Set<string>();
   for (const step of steps) {
@@ -645,6 +652,9 @@ export interface RunSavedWorkflowResult {
    *  succeeded; present for every step that recorded an error (incl. on_failure
    *  = 'continue'/'notify' runs that finished 'completed' with errored steps). */
   stepErrors?: Array<{ stepId: string; error?: string | undefined; costUsd: number; reported?: true | undefined }> | undefined;
+  /** The sends its steps refused because a target was not one the owner named, for the run's
+   *  result: a run with no calling conversation has nobody else to tell. */
+  originRefusals?: import('../../core/origin-notices.js').OriginRefusal[] | undefined;
   /** The step whose reported failure (`fail_step`) is `error`: `error` is then the model's text,
    *  and a sink that may not carry it (the escalation thread) names the step instead. A
    *  `stepErrors` entry with `reported` is the same for that entry. */
@@ -659,6 +669,12 @@ export interface RunSavedWorkflowResult {
   /** For a refusal whose `error` names stored text: the same refusal in words lynox wrote alone,
    *  for a sink that may not carry stored text (`FixedTextError`). */
   fixedError?: string | undefined;
+  /** For a refusal because a step refers to the output of a step its run cannot read
+   *  (`templateRefIssue`): that step's position, 1-based, which the owner is told in fixed words. */
+  unresolvedRefStep?: number | undefined;
+  /** For a refusal because a step's id is one a run already uses (`stepIdCollision`): that step's
+   *  position, 1-based, which the owner is told in fixed words. */
+  reservedIdStep?: number | undefined;
 }
 
 /**
@@ -960,6 +976,22 @@ export async function runSavedWorkflow(
   }
 
   const writeNotes = new Set<string>();
+  // The sends its steps refuse for a target the owner did not name: kept for the run's result,
+  // also when the run then throws.
+  const originRefusals: import('../../core/origin-notices.js').OriginRefusal[] = [];
+
+  // A step id the run's context already uses, or a reference no run resolves (`template-refs.ts`),
+  // here before the runner refuses it, so the caller can tell the owner which step and why in fixed
+  // words (`reservedIdStep`, `unresolvedRefStep`) and does not retry a run that cannot start.
+  const runContext = { params: bound.params };
+  const collision = stepIdCollision(steps, runContext, 'steps');
+  if (collision !== null) {
+    return { ok: false, error: `Workflow execution failed: Invalid manifest: ${collision}`, reservedIdStep: templateRefStep(collision) };
+  }
+  const refIssue = templateRefIssue(steps, runContext);
+  if (refIssue !== null) {
+    return { ok: false, error: `Workflow execution failed: Invalid manifest: ${refIssue}`, unresolvedRefStep: templateRefStep(refIssue) };
+  }
 
   try {
     // Honour the workflow's stored failure strategy instead of hardcoding 'stop'
@@ -982,6 +1014,8 @@ export async function runSavedWorkflow(
     // contract rides along only when `decideGrant` passed it, i.e. it came from the
     // grant dialog of the scheduling route while that feature is on, and its stamp
     // still matches.
+    const headlessTaint = headlessRunTaint(runtime?.seed, runParams, runtime?.startedVia);
+    headlessTaint.onOriginRefused = (r) => { originRefusals.push(r); };
     const state = await runManifest(manifest, config, buildRunCtx({
       // A run of a saved workflow depends on the mandates that shaped it (`run-source.ts`).
       source: savedWorkflowSource(planned.id, runHistory ? (id) => runHistory.getWorkflowAuthorship(id) : undefined, runtime?.toolContext?.mandateEnds),
@@ -1006,7 +1040,7 @@ export async function runSavedWorkflow(
       // Headless: no caller to seed from, except what the scheduling session had taken in
       // (`runtime.seed`). The accumulator still carries taint ACROSS steps — a saved workflow
       // whose step 1 reads external content must not land step 2's durable write as active.
-      runTaint: headlessRunTaint(runtime?.seed, runParams, runtime?.startedVia),
+      runTaint: headlessTaint,
       // The claim seam: both are undefined for every caller that holds no claim.
       runId: runtime?.runId,
       hooks: runtime?.hooks,
@@ -1038,10 +1072,14 @@ export async function runSavedWorkflow(
       // The decision's note, or the runner's when it had to drop the contract (an unrecorded run).
       ...(grant.note !== null ? { grantNote: grant.note } : state.grantNote !== undefined ? { grantNote: state.grantNote } : {}),
       ...(writeNotes.size > 0 ? { writeNotes: [...writeNotes] } : {}),
+      ...(originRefusals.length > 0 ? { originRefusals } : {}),
     };
   } catch (err: unknown) {
     // A refusal before the run (validation, the graph, a role) quotes the stored step id and name.
-    return { ok: false, error: `Workflow execution failed: ${stripHidden(getErrorMessage(err))}` };
+    return {
+      ok: false, error: `Workflow execution failed: ${stripHidden(getErrorMessage(err))}`,
+      ...(originRefusals.length > 0 ? { originRefusals } : {}),
+    };
   }
 }
 
@@ -1407,7 +1445,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     // One run's changes: drop a step or change its task. Ids and the step list change only in the
     // stored workflow (`update_workflow_steps`), where they are saved and checked.
     if (input.modifications.some(m => m.action !== 'remove' && m.action !== 'update_task')) {
-      return 'Error: run_workflow changes a run\'s steps with "remove" and "update_task" only. To add or rename a step, edit the workflow with update_workflow_steps.';
+      return 'Error: run_workflow changes a run\'s steps with "remove" and "update_task" only. To add or rename a step, or change what a step reads (set_input_from), edit the workflow with update_workflow_steps.';
     }
     const error = applyModifications(steps, input.modifications);
     if (error) return error;

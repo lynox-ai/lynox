@@ -41,7 +41,9 @@ afterEach(async () => {
   saved.clear();
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   reloadConfig();
-});
+  // The hook shuts down real engines; under load that has taken longer than the default 10 s,
+  // so it gets the same 30 s the tests below get.
+}, 30_000);
 
 function tempDir(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
