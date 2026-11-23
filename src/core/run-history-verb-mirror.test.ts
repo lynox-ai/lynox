@@ -143,6 +143,17 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
     history.close();
   });
 
+  it('getPlannedPipelines lists a definition that is not valid JSON beside the others, with no steps, instead of failing', () => {
+    const { history, engine } = make();
+    history.insertPlannedPipeline({ ...planned({ id: 'wf-a', name: 'A' }), steps: [{ id: 's1', task: 't' }] }, null);
+    history.insertPlannedPipeline(planned({ id: 'wf-b', name: 'B' }), null);
+    engine.getDb().prepare("UPDATE workflows SET definition_json = '{\"steps\": [' WHERE id = 'wf-b'").run();
+    const rows = history.getPlannedPipelines(100);
+    expect(rows.map((w) => [w.id, w.step_count]).sort()).toEqual([['wf-a', 1], ['wf-b', 0]]);
+    expect(rows.find((w) => w.id === 'wf-b')!.manifest_json).toBe('{"steps": [');
+  });
+
+
   it('a write to a CLOSED engine.db THROWS — engine.db is the sole authority, no legacy fallback', () => {
     const { history, engine } = make();
     engine.close(); // every subsequent WorkflowStore op now throws

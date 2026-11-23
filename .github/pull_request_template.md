@@ -93,7 +93,7 @@ fabricated line is worse than none.)
 head: <short SHA>
 gates: <which gates ran>
 review: <n> <model> <round|rounds>, <result>
-security: <origin>, <result>
+security: <origin> (<model>), <result>
 delta: clean on <from>..<to = head>
 mutations: <n> killed, <n> survived
 closes: <none — the only answer in this repo>
@@ -127,13 +127,20 @@ No private path in it: this record is public.
 first half says WHERE the round came from, not what it asked. Three origins,
 and the third is a full answer rather than an admission:
 
-- `security: own round, no findings`
-- `security: leaning on the v1/v2 parity run, no findings` — a round run for
+- `security: own round (opus), no findings`
+- `security: leaning on the v1/v2 parity run (opus), no findings` — a round run for
   another question, which is a different claim and should read as one
-- `security: origin unclear, findings filed privately` — **use this when you do
+- `security: origin unclear (opus), findings filed privately` — **use this when you do
   not know whether the round was yours.** Writing `own round` instead is the lie
   the field exists to prevent; one PR on record carried the gate on a parity
   run whose brief was behavioural equality, and only a question caught it.
+
+**The model in parentheses is required under every origin, and it is `opus` or
+`fable`.** A security round runs on Opus, on Fable when Opus answers 429, never
+on Sonnet; the check refuses `sonnet`, any other name and a missing one. If you
+do not know which model ran the round, run your own on Opus. A branch whose
+merge base predates the model is not held to it; merging main into it brings it
+under the rule.
 
 A `leaning on …` reference carries no comma: the comma separates origin from
 result. The result half is the same grammar as `review:`.
