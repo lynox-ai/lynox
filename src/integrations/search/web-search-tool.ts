@@ -234,7 +234,7 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           // The addresses this search lists, as the provider gave them: a later read of exactly one of
           // them passes the origin check without a question (`readAddress`). Their hosts join the
           // shell's egress set only for a search the owner sent in their own chat, before any
-          // foreign content and with no search the provider ran itself (`ownersCleanBatch`): a
+          // foreign content and with no server tool the provider ran itself (`ownersCleanBatch`): a
           // mandate's query is a third party's choice, an unattended run's or a sub-agent's is not
           // the owner's, and the owner's later shell would reach it.
           agent.searchResultAddresses?.noteResults(
