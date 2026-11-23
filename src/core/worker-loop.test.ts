@@ -2422,7 +2422,11 @@ describe('WorkerLoop', () => {
       ['owner', `\u2717 ${task.title}`, 'high'],
       ['all_mandates', `\u2717 ${task.title}`, 'high'],
     ]);
-    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ audience: 'all_mandates', body: WORKER_NOTICES.en.memberEndForMandates }));
+    const [owner, grants] = vi.mocked(router.notify).mock.calls.map(([m]) => m);
+    expect(owner!.body).toContain(LINE);
+    expect(grants).toEqual(expect.objectContaining({ body: WORKER_NOTICES.en.memberEndForMandates }));
+    expect(grants!.data).toBeUndefined();
+    expect(grants!.followUps).toBeUndefined();
   });
 
   it('a run whose question went unanswered is pushed as failed at high priority, also without member-connection lines', async () => {

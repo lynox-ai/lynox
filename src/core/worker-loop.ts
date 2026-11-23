@@ -2950,6 +2950,10 @@ export class WorkerLoop {
     // Set from every path that fabricates an answer, not just the expiry: an
     // aborted wait and a missing prompt store produce the same fiction.
     let questionWentUnanswered = false;
+    // A teardown that kept the question for the next process (`keepsQuestionForNextProcess`):
+    // the run is not over, its question stays answerable where the owner got it, and the run
+    // tells its real end once the answer re-arms it. Its end here pushes nothing (U-420).
+    let questionKeptForNextProcess = false;
 
     // Wire promptUser through the PROMPT STORE — the same surface the HTTP path
     // uses (`insertAskUser` -> `waitForSettled`). It used to be a bare Promise
@@ -3141,6 +3145,7 @@ export class WorkerLoop {
         // designed — the next process re-arms the run when the answer lands.
         if (keepsQuestionForNextProcess(active)) {
           questionWentUnanswered = true;
+          questionKeptForNextProcess = true;
           return DISMISSED_ANSWER;
         }
 
@@ -3430,11 +3435,13 @@ export class WorkerLoop {
     // Compared as recorded (English); pushed in the owner's language (`said`).
     const memberNotes = currentMemberNotes();
     const memberSaid = currentMemberNotesIn(noticeLanguage(this.engine.config?.language));
-    if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, memberNotes)) {
+    // A run whose question was kept for the next process is not over: no push, not ✗ (nothing
+    // went wrong, a deploy is internal) and not ⏸ (a second notice of a question already asked).
+    if (!questionKeptForNextProcess && this.notificationRouter.hasChannels() && !memberNotesRepeat(task, memberNotes)) {
       // The push leaves the instance: a contained run's result goes out as a fixed sentence, as
       // its error does (above); the recorded run keeps the full text. Only the run's text is
       // replaced: the ceiling's reason and the member-connection lines are lynox's own and say
-      // why the title is ✗ or ⏸, so they go out as before.
+      // why the title is ✗ or ⚠, so they go out as before.
       const resultReduced = errorTextReduced(this.engine.getToolContext().containment, {
         threadId: session.sessionId, bulkRunId: task.bulk_run_id ?? undefined,
       });
@@ -3449,10 +3456,11 @@ export class WorkerLoop {
         // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
         // engine itself cut off is the same false report as the `success` status was.
         //
-        // ⚠ So does a question left unanswered by a shutdown or by its expiry: the run records
-        // `failed`, so its push is a ✗ at `high`, with or without member-connection lines
-        // (U-420), not a ✓ over a run that did not finish. (Left unanswered because the OWNER
-        // stopped the run, it takes the branch below.)
+        // ⚠ So does a question left unanswered by its expiry, an abort or a missing prompt store:
+        // the run records `failed`, so its push is a ✗ at `high`, with or without
+        // member-connection lines (U-420), not a ✓ over a run that did not finish. (Left
+        // unanswered because the OWNER stopped the run, it takes the branch below; kept for the
+        // next process by a shutdown, it pushes nothing, above.)
         //
         // ⛔ A run its owner ended says so, as the catch path does: neither ✓ (it did not
         // finish) nor ✗ at high priority (nothing went wrong). The budget word stays in

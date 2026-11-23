@@ -73,7 +73,8 @@ export interface BulkNotices {
    * The same halt as it is pushed: lead and cause without the way, which the run page shows, so
    * that with the counts it fits the web-push cut (`REMINDER_BODY_MAX`). It goes to the owner's
    * devices; every live grant, whoever planned the run, reads the owner in place of the pointer
-   * (`recordAndNotify`).
+   * (`recordAndNotify`). A run whose ledger row cannot be read is not split: its history keeps the
+   * whole sentence and its push goes to every device.
    */
   productWriteNotAskedPush(access: 'not_asked' | 'not_granted', nothingYet: boolean): string;
   /** A run another loop took over (B9). */
