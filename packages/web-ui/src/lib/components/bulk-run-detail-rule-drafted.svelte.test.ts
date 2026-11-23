@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { readable } from 'svelte/store';
 import { t, getLocale, setLocale } from '../i18n.svelte.js';
 import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
-import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
+import { bulkVisibleText, type BulkRunDetailData, type BulkTarget } from './bulk-runs.js';
 
 // lynox writes a judged run's rule, from the owner's words or from data it read. Where the owner
 // starts the judging and where they approve its values, the page shows the rule and says who wrote
@@ -190,5 +190,180 @@ describe('a judged run that judges again shows its rule as at the start', () => 
 		await render({ ...halted('unavailable'), judgeRule: null });
 		expect(target.textContent).toContain(t('bulk.restart.judge'));
 		expect(target.querySelector('[data-testid="bulk-restart-rule"]')).toBeNull();
+	});
+});
+
+// The agent writes the rule, up to the engine's 4000 characters and possibly from data it read. At
+// each of the three places the rule sits in one box of bounded height that scrolls on its own, so a
+// long rule with many empty lines leaves the sentence under it and the preview or the button after
+// it in the page; a word without spaces breaks inside the box. The whole rule stays in the box. While
+// lines lie below the box's edge, a fade and a button under the box say how many (U-416): a rule
+// cannot hide its real instruction under empty lines from an owner who never scrolls.
+describe('a long rule stays in a bounded box at every place it is shown', () => {
+	const LONG = (`${'W'.repeat(300)}\n` + 'Regel\n\n\n\n\n'.repeat(700)).slice(0, 4000);
+	const longRule = { ...judged.judgeRule!, rule: LONG } as BulkRunDetailData['judgeRule'];
+	const FOLLOWING = Node.DOCUMENT_POSITION_FOLLOWING;
+	const LONG_LINES = bulkVisibleText(LONG).split('\n').length;
+
+	// jsdom lays nothing out, so the layout is given here: the box is 192 pixels high, each rule line
+	// 20 (the fallback line height, as jsdom computes none), stacked from the box's top and moved up
+	// by its scroll. Nine lines are then wholly in view, and the tenth is cut at the edge.
+	const BOX = 192;
+	const LINE = 20;
+	const scrollTops = new WeakMap<Element, number>();
+	// Each line's place in its box, read once: a 4000-character rule has thousands of lines.
+	const lineIndex = new WeakMap<Element, number>();
+	const isBox = (el: Element): boolean => el.getAttribute('data-testid') === 'bulk-rule-box';
+	const content = (el: Element): number => el.querySelectorAll('[data-rule-line]').length * LINE;
+	const rect = (top: number, bottom: number): DOMRect => ({ top, bottom, left: 0, right: 0, x: 0, y: top, width: 0, height: bottom - top, toJSON: () => ({}) }) as DOMRect;
+	const layout: Record<string, PropertyDescriptor> = {
+		scrollHeight: { configurable: true, get(this: HTMLElement) { return isBox(this) ? content(this) : 0; } },
+		clientHeight: { configurable: true, get(this: HTMLElement) { return isBox(this) ? Math.min(BOX, content(this)) : 0; } },
+		scrollTop: {
+			configurable: true,
+			get(this: HTMLElement) { return scrollTops.get(this) ?? 0; },
+			set(this: HTMLElement, v: number) { scrollTops.set(this, Math.max(0, Math.min(v, this.scrollHeight - this.clientHeight))); },
+		},
+		getBoundingClientRect: {
+			configurable: true, writable: true,
+			value(this: HTMLElement): DOMRect {
+				if (isBox(this)) return rect(0, this.clientHeight);
+				const owner = this.closest('[data-testid="bulk-rule-box"]');
+				if (this.hasAttribute('data-rule-line') && owner) {
+					if (!lineIndex.has(this)) owner.querySelectorAll('[data-rule-line]').forEach((l, n) => lineIndex.set(l, n));
+					const i = lineIndex.get(this)!;
+					const top = i * LINE - (owner as HTMLElement).scrollTop;
+					return rect(top, top + LINE);
+				}
+				return rect(0, 0);
+			},
+		},
+		scrollBy: {
+			configurable: true, writable: true,
+			value(this: HTMLElement, o: ScrollToOptions): void {
+				this.scrollTop = this.scrollTop + (o.top ?? 0);
+				this.dispatchEvent(new Event('scroll'));
+			},
+		},
+	};
+	// jsdom defines these on Element.prototype; defined on HTMLElement.prototype here, and deleted
+	// from it afterwards, so jsdom's own come back.
+	beforeEach(() => {
+		for (const [name, d] of Object.entries(layout)) Object.defineProperty(HTMLElement.prototype, name, d);
+	});
+	afterEach(() => {
+		for (const name of Object.keys(layout)) delete (HTMLElement.prototype as unknown as Record<string, unknown>)[name];
+	});
+
+	const readMore = (): HTMLButtonElement | null => target.querySelector('[data-testid="bulk-rule-read-more"]');
+	const moreText = (n: number): string => (n === 1 ? t('bulk.rule_read_more_one') : t('bulk.rule_read_more').replace('{n}', String(n)));
+
+	function boundedBox(place: string): Element {
+		const box = target.querySelector(`[data-testid="${place}"] [data-testid="bulk-rule-box"]`);
+		expect(box, place).not.toBeNull();
+		const cls = box!.className.split(/\s+/);
+		// Bounded height with its own scrolling, and a long word breaks inside the box.
+		expect(cls).toEqual(expect.arrayContaining(['max-h-48', 'overflow-y-auto', '[overflow-wrap:anywhere]', 'whitespace-pre-wrap']));
+		// The scrolling region can be reached and scrolled from the keyboard, and is named.
+		expect(box!.getAttribute('role')).toBe('region');
+		expect(box!.getAttribute('tabindex')).toBe('0');
+		expect(box!.getAttribute('aria-label')).toBe(t('bulk.start.rule'));
+		// The whole rule, every empty line kept.
+		expect(LONG.length).toBe(4000);
+		expect([...box!.querySelectorAll('[data-rule-line]')].map((l) => l.textContent).join('\n')).toBe(bulkVisibleText(LONG));
+		// The lines below the edge are counted, and the fade and the button say so; the button's
+		// name is its visible text, the arrow is not read out.
+		const more = target.querySelector(`[data-testid="${place}"] [data-testid="bulk-rule-read-more"]`);
+		expect(more, `${place} read-more button`).not.toBeNull();
+		expect(more!.textContent).toBe(`${moreText(LONG_LINES - 9)} ↓`);
+		expect(more!.getAttribute('aria-label')).toBeNull();
+		expect(more!.querySelector('[aria-hidden="true"]')?.textContent).toBe('↓');
+		expect(more!.className.split(/\s+/)).toContain('whitespace-nowrap');
+		expect(target.querySelector(`[data-testid="${place}"] [data-testid="bulk-rule-fade"]`)).not.toBeNull();
+		// The sentence that says lynox wrote it comes after the box and its button, inside the same place.
+		const sentence = target.querySelector(`[data-testid="${place}"] [data-testid="bulk-rule-drafted"]`)!;
+		expect(box!.compareDocumentPosition(more!) & FOLLOWING).toBeTruthy();
+		expect(more!.compareDocumentPosition(sentence) & FOLLOWING).toBeTruthy();
+		return box!;
+	}
+	const buttonAfter = (box: Element, label: string): boolean =>
+		[...target.querySelectorAll('button')].some((b) => b.textContent?.trim() === label && (box.compareDocumentPosition(b) & FOLLOWING) !== 0);
+
+	it('where the owner starts the judging, with the start button after it', async () => {
+		await render({ ...atStart, judgeRule: longRule });
+		const box = boundedBox('bulk-start-rule');
+		expect(buttonAfter(box, t('bulk.start.judge'))).toBe(true);
+	});
+
+	it('where the owner approves, with the preview after it', async () => {
+		await render({ ...judged, judgeRule: longRule });
+		const box = boundedBox('bulk-approve-rule');
+		expect(box.compareDocumentPosition(target.querySelector('table')!) & FOLLOWING).toBeTruthy();
+	});
+
+	it('where the owner judges again after a halt, with the button after it', async () => {
+		await render({ ...judged, judgeRule: longRule, phase: 'planned', haltKey: 'unavailable', haltReason: 'unavailable', checksum: null, total: 1, costCapUsd: 1 });
+		const box = boundedBox('bulk-restart-rule');
+		expect(buttonAfter(box, t('bulk.restart.judge'))).toBe(true);
+	});
+
+	it('reads on by the box less one line, counts down, and goes away at the end', async () => {
+		await render({ ...atStart, judgeRule: longRule });
+		const box = target.querySelector<HTMLElement>('[data-testid="bulk-rule-box"]')!;
+		readMore()!.click();
+		// 192 less one line of 20: the tenth line, cut at the edge, now stands whole at the top.
+		expect(box.scrollTop).toBe(BOX - LINE);
+		await vi.waitFor(() => expect(readMore()?.textContent).toBe(`${moreText(LONG_LINES - 18)} ↓`));
+		box.scrollTop = box.scrollHeight;
+		box.dispatchEvent(new Event('scroll'));
+		await vi.waitFor(() => expect(readMore()).toBeNull());
+		expect(target.querySelector('[data-testid="bulk-rule-fade"]')).toBeNull();
+	});
+
+	it('counts again when the lines change height while the box keeps its own, as after a font swap', async () => {
+		// jsdom has none: this one records what it watches and is fired by hand.
+		const watched: Element[] = [];
+		let fire = (): void => {};
+		vi.stubGlobal('ResizeObserver', class {
+			constructor(cb: () => void) { fire = cb; }
+			observe(el: Element): void { watched.push(el); }
+			unobserve(): void {}
+			disconnect(): void {}
+		});
+		// Ten lines: the tenth is cut at the box's edge.
+		await render({ ...atStart, judgeRule: { ...longRule!, rule: Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join('\n') } });
+		const box = target.querySelector('[data-testid="bulk-rule-box"]')!;
+		const lines = box.querySelector('[data-rule-line]')!.parentElement!;
+		expect(watched).toContain(box);
+		expect(watched).toContain(lines);
+		expect(readMore()?.textContent).toBe(`${moreText(1)} ↓`);
+		// The new font wraps every line onto two screen lines; the box stays at its bound.
+		const plain = layout.getBoundingClientRect.value as (this: HTMLElement) => DOMRect;
+		Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
+			configurable: true, writable: true,
+			value(this: HTMLElement): DOMRect {
+				const r = plain.call(this);
+				return this.hasAttribute('data-rule-line') ? rect(r.top * 2, r.top * 2 + 2 * LINE) : r;
+			},
+		});
+		fire();
+		await vi.waitFor(() => expect(readMore()?.textContent).toBe(`${moreText(20 - 9)} ↓`));
+	});
+
+	it('names one hidden line in the singular, and reads in English', async () => {
+		setLocale('en');
+		await render({ ...atStart, judgeRule: { ...longRule!, rule: Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join('\n') } });
+		expect(readMore()?.textContent).toBe('Read 1 more line ↓');
+		unmount(component!);
+		component = undefined;
+		await render({ ...atStart, judgeRule: longRule });
+		expect(readMore()?.textContent).toBe(`Read ${LONG_LINES - 9} more lines ↓`);
+	});
+
+	it('control: a short rule that fits the box has no fade and no button', async () => {
+		await render({ ...atStart });
+		expect(target.querySelector('[data-testid="bulk-start-rule"] [data-testid="bulk-rule-box"]')).not.toBeNull();
+		expect(readMore()).toBeNull();
+		expect(target.querySelector('[data-testid="bulk-rule-fade"]')).toBeNull();
 	});
 });

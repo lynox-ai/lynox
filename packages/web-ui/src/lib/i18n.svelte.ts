@@ -574,6 +574,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.start.rule_drafted': { de: 'Diese Regel hat lynox formuliert. Prüf, ob sie sagt, was du willst, bevor du die Beurteilung startest.', en: 'lynox wrote this rule. Check that it says what you want before you start judging.' },
 	'bulk.restart.rule_drafted': { de: 'Diese Regel hat lynox formuliert. Prüf, ob sie sagt, was du willst, bevor du die Beurteilung fortsetzt.', en: 'lynox wrote this rule. Check that it says what you want before you continue judging.' },
 	'bulk.approve.rule_drafted': { de: 'Diese Regel hat lynox formuliert. Prüf, ob sie sagt, was du willst, bevor du freigibst.', en: 'lynox wrote this rule. Check that it says what you want before you approve.' },
+	'bulk.rule_read_more': { de: '{n} weitere Zeilen lesen', en: 'Read {n} more lines' },
+	'bulk.rule_read_more_one': { de: '1 weitere Zeile lesen', en: 'Read 1 more line' },
 	'bulk.start.fields': { de: 'Felder, die das Modell setzt', en: 'Fields the model sets' },
 	'bulk.start.context_fields': { de: 'Felder, die das Modell nur liest', en: 'Fields the model only reads' },
 	'bulk.start.context_explain': { de: 'Ihre Werte gehen zusammen mit den Feldern oben an {provider}, damit das Modell besser urteilen kann. lynox schreibt sie nie.', en: 'Their values go to {provider} together with the fields above, so the model can judge better. lynox never writes them.' },

@@ -512,6 +512,19 @@ export function bulkMergeAnswer(
  *  (see `visible-text.ts`, which the approval queue shares). */
 export const bulkVisibleText: (text: string) => string = visibleText;
 
+/** How many screen lines of a judged run's rule lie wholly or partly below its box's bottom edge,
+ *  from each rule line's box. A line cut at the edge counts; a long line wrapped over several
+ *  screen lines counts every one it still hides, rounded up. Zero once the end is in view. */
+export function bulkRuleLinesBelow(lineBoxes: readonly { top: number; bottom: number }[], boxBottom: number, lineHeight: number): number {
+	let n = 0;
+	for (const { top, bottom } of lineBoxes) {
+		if (bottom <= boxBottom + 0.5) continue;
+		const hidden = bottom - Math.max(top, boxBottom);
+		n += Math.max(1, Math.ceil((hidden - 0.5) / lineHeight));
+	}
+	return n;
+}
+
 /** At most this many characters of a refused link's domain on the page (U-311). */
 export const BULK_LINK_DOMAIN_SHOWN_MAX = 64;
 /** A refused link's domain as the page names it: visible as text, and cut with „…“ past
