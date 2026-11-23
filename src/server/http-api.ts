@@ -8650,7 +8650,12 @@ export class LynoxHTTPApi {
         let parsed: { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown; parameters?: unknown; mode?: unknown; confirmedAt?: unknown; capabilityContract?: unknown };
         try {
           parsed = JSON.parse(row.manifest_json) as typeof parsed;
-        } catch { continue; } // skip corrupt rows
+        } catch {
+          // An unreadable definition is left out rather than costing the owner the library, and
+          // said on stderr by its id, never its content.
+          console.warn(`[lynox:http] workflow ${row.id} not readable, left out of the library`);
+          continue;
+        }
         if (parsed.template !== true) continue; // app-layer template filter
         // Narrow `parsed.steps` (typed `unknown`) to the InlinePipelineStep
         // subset the card needs (id + task). Drop malformed entries.
