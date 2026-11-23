@@ -37,6 +37,8 @@ const today = (): string => {
 	return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
+/** What the cost endpoint answers: today's rows, an error status, or nothing yet (held). */
+let costAnswer: 'held' | number | Array<{ day: string; cost_usd: number; run_count: number; user_turns: number }>;
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 
@@ -62,9 +64,13 @@ function shown(): { phone: string; phoneName: string; desktop: HTMLAnchorElement
 beforeEach(() => {
 	vi.stubGlobal('ResizeObserver', class { observe(): void {} unobserve(): void {} disconnect(): void {} });
 	vi.stubGlobal('navigator', { onLine: true });
+	costAnswer = [{ day: today(), cost_usd: 0.4, run_count: 1, user_turns: 1 }];
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
 		const url = String(input);
-		if (url.includes('/history/cost/daily')) return json([{ day: today(), cost_usd: 0.4, run_count: 1, user_turns: 1 }]);
+		if (url.includes('/history/cost/daily')) {
+			if (costAnswer === 'held') return new Promise<Response>(() => {});
+			return typeof costAnswer === 'number' ? json({ error: 'x' }, costAnswer) : json(costAnswer);
+		}
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
 		if (url.endsWith('/health')) return json({ status: 'ok', version: '0.0.0', build_sha: null });
 		if (url.endsWith('/providers/status')) return json({ providers: [] });
@@ -89,5 +95,26 @@ describe('the status bar names the period of its cost', () => {
 		// button's spoken summary carries the same words.
 		expect(desktop.hasAttribute('aria-label')).toBe(false);
 		expect(phoneName).toContain(text);
+	});
+
+	it.each([
+		['a day without a row', [] as const],
+		['a row of zero', 'zero'],
+	] as const)('shows a real zero as "heute $0.00" (%s)', async (_what, rows) => {
+		costAnswer = rows === 'zero' ? [{ day: today(), cost_usd: 0, run_count: 0, user_turns: 0 }] : [];
+		await mountIn('de');
+		const { phone, desktop } = shown();
+		expect(phone).toBe('heute $0.00');
+		expect(desktop.textContent?.replace(/\s+/g, ' ').trim()).toBe('heute $0.00');
+	});
+
+	it.each([['not answered yet', 'held'], ['answered with an error', 500]] as const)('shows no figure and no period while the cost is unknown (%s)', async (_what, answer) => {
+		costAnswer = answer;
+		await mountIn('de');
+		const { phone, phoneName, desktop } = shown();
+		expect(phone).toBe('-');
+		expect(desktop.textContent?.replace(/\s+/g, ' ').trim()).toBe('-');
+		expect(phoneName).not.toContain('heute');
+		expect(phoneName).not.toContain('$0');
 	});
 });
