@@ -301,10 +301,11 @@ describe('bash reaches what the owner typed, and after taint only what the engin
     expect(setDuringCall).not.toBe('*');
   });
 
-  it('a host a search listed in this conversation never joins the shell set, before or after taint', async () => {
+  it('under guarded a host a search listed in this conversation never joins the shell set, before or after taint', async () => {
     await configured({ code: 0, out: () => 'ok' });
     const searches = new SearchResultAddresses();
-    searches.noteResults('q', ['https://listed.example/page']);
+    searches.noteResults('pricing', ['https://listed.example/page']);
+    expect(searches.has('https://listed.example/page'), 'the search recorded the address').toBe(true);
     for (const tainted of [false, true]) {
       const withSearch = { ...(withTyped('guarded', ['docs.example'], tainted) as object), searchResultAddresses: searches } as never;
       await bashTool.handler({ command: 'curl -s https://listed.example/page' }, withSearch);
