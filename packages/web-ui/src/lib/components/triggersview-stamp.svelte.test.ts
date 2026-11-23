@@ -106,7 +106,10 @@ describe('a schedule a mandate set up', () => {
 	it('waits: its badge, no next run, no run-now', async () => {
 		await render();
 		expect(q('[data-trigger-held]')).not.toBeNull();
+		// No time line at all: its next_run_at is in the past, so a leak would read "Fällig seit".
+		expect(q('[data-next-run]')).toBeNull();
 		expect(target.textContent).not.toContain('Nächster Lauf');
+		expect(target.textContent).not.toContain('Fällig seit');
 		expect(runNow()).toBeUndefined();
 	});
 

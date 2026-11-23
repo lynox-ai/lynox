@@ -107,6 +107,7 @@ describe('the target\'s words are shown without what would not display as itself
     ['invisible operators and deprecated format characters', '⁡⁢⁣⁤⁪⁯'],
     ['soft hyphen, Mongolian vowel separator, interlinear annotation', '­᠎￹￺￻'],
     ['tag characters', '\u{e0001}\u{e0041}\u{e007f}'],
+    ['lone surrogates', '\udc00\ud800'],
     ['variation selectors and fillers', '️\u{e0100}͏ᅟㅤﾠ'],
   ];
   for (const [what, chars] of hidden) {

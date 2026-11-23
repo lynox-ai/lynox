@@ -78,11 +78,11 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
     // placeholder would overwrite the real document.
     if (containsEvictionMarker(input.content)) {
       throw new Error(
-        'artifact_save refused: `content` contains the engine\'s placeholder for a saved document ' +
+        'artifact_save refused: `content` contains the engine\'s placeholder ' +
         '("[evicted after successful save …]", "[The body of this document was removed …]" or ' +
-        '"[The content of this call was the engine\'s placeholder …]"). The ' +
-        'engine puts it in your context where a document it already saved used to be — it is ' +
-        'not a document. Nothing was saved, and any existing artifact is unchanged. To change an ' +
+        '"[The content of this call was the engine\'s placeholder …]"). The engine leaves it in ' +
+        'your context in place of text it took out of an earlier call; a copy of it is not a ' +
+        'document. Nothing was saved, and any existing artifact is unchanged. To change an ' +
         'artifact, read_file its path and apply edit_file. To create one, write the full document ' +
         'into `content`. If read_file returns this placeholder too, the file itself holds it: ' +
         'artifact_history lists earlier versions, or write the document anew.',
@@ -282,7 +282,7 @@ export const artifactRestoreTool: ToolEntry<ArtifactRestoreInput> = {
         return `v${String(input.version)} of artifact ${input.id} is a link or has more than one name, so it was not read; nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`;
       }
       if (!(err instanceof ArtifactPlaceholderError)) throw err;
-      return `Could not restore — v${String(input.version)} of artifact ${input.id} holds only the engine's placeholder for a saved document, not a document. Nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`;
+      return `Could not restore — v${String(input.version)} of artifact ${input.id} holds only the engine's placeholder, not a document. Nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`;
     }
     if (!restored) {
       return `Could not restore — artifact ${input.id} or version ${String(input.version)} not found. Use artifact_history to see available versions.`;

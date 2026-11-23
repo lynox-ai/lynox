@@ -340,7 +340,7 @@ export function bulkResumeText(
 	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'applied' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries' | 'sentUnknown' | 'resumeSends' | 'conflicts'> & Partial<Pick<BulkRunDetailData, 'consentFields' | 'kind'>>,
 	managed: boolean | null,
 	i18n: BulkI18n,
-): { cause: string; before: string | null; check: string | null; kept: string | null; soFar: string | null; allows: string | null } | null {
+): { cause: string; before: string | null; check: string | null; after: string | null; kept: string | null; soFar: string | null; allows: string | null } | null {
 	const kind = bulkResumeKind(run);
 	if (kind === null) return null;
 	const key = run.haltKey!;
@@ -356,6 +356,8 @@ export function bulkResumeText(
 		: key === 'consecutiveFailures' ? i18n.t(`bulk.halt.consecutiveFailures_${verb}`)
 		: key === 'unrecorded' ? i18n.tf(`bulk.halt.unrecorded_${verb}`, vars)
 		: key === 'maxTargets' && run.maxTargets === 1 ? i18n.t('bulk.halt.maxTargets_one')
+		// Going on by checking: the cause leaves out "continue it here", the way follows the check.
+		: key === 'shopifyWriteOff' && kind === 'check' ? i18n.t('bulk.halt.shopifyWriteOff_check')
 		// "wrote nothing" only where nothing of the run was written or sent.
 		: key === 'consentOutdated' ? i18n.tf(bulkHaltKeyOf(run, run.applied === 0 && run.sentUnknown === 0 ? 'bulk.halt.consentOutdated' : 'bulk.halt.consentOutdated_more'), {
 			field: bulkConsentFields(run.consentFields, i18n), path: `${i18n.t('nav.settings')} → ${i18n.t('settings.apis')}`,
@@ -368,15 +370,24 @@ export function bulkResumeText(
 		: key === 'markupAddedByShop' ? bulkHaltKeyOf(run, 'bulk.halt.markupAddedByShop_before')
 		: null;
 	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
-	if (kind === 'none') return { cause, before, check: null, kept: null, soFar: null, allows: null };
+	if (kind === 'none') return { cause, before, check: null, after: null, kept: null, soFar: null, allows: null };
 	// Nothing to send: no step before writing on applies, and what is left needs a new run.
-	if (kind === 'nothing') return { cause, before: null, check: i18n.tf(`bulk.resume.nothing_left${run.kind === 'undo' ? '_undo' : ''}`, vars), kept: null, soFar: null, allows: null };
-	// Checking sends nothing, so the failures' "before you continue writing" does not apply; a
-	// halt's own step (reconnect the access, switch writing back on) still comes first.
+	if (kind === 'nothing') return { cause, before: null, check: i18n.tf(`bulk.resume.nothing_left${run.kind === 'undo' ? '_undo' : ''}`, vars), after: null, kept: null, soFar: null, allows: null };
+	// The next step is to check, not to continue: checking sends nothing, so the failures' "before
+	// you continue writing" does not apply. What would stop the check too (no access, a host the
+	// instance may not reach, Shopify bulk switched off) comes first and ends with checking; anything
+	// else follows the check.
 	if (kind === 'check') {
 		const check = run.sentUnknown === 1 ? i18n.tf('bulk.resume.check_before', vars)
 			: i18n.tf('bulk.resume.check_before_many', { ...vars, n: String(run.sentUnknown) });
-		return { cause, before: failures ? null : before, check, kept: null, soFar: null, allows: null };
+		const first = key === 'unauthorized' ? 'bulk.halt.unauthorized_before_check'
+			: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_check_${tier}`
+			: key === 'credential' ? 'bulk.halt.credential_before'
+			: null;
+		const then = key === 'unavailable' ? 'bulk.halt.unavailable_before_check'
+			: key === 'markupAddedByShop' ? bulkHaltKeyOf(run, 'bulk.halt.markupAddedByShop_before')
+			: null;
+		return { cause, before: first === null ? null : i18n.tf(first, vars), check, after: then === null ? null : i18n.tf(then, vars), kept: null, soFar: null, allows: null };
 	}
 	// "All the rest" holds only when the approved maximum does not stop the pass first; a run
 	// written on under a new maximum is bounded by that one. With no target confirmed as written,
@@ -384,12 +395,12 @@ export function bulkResumeText(
 	// next try reads first and counts as written.
 	const capped = kind === 'max' || run.resumeTries < open;
 	const kept = i18n.t(`bulk.resume.kept_${verb}${run.applied === 0 ? '_none' : ''}${capped ? '_capped' : ''}`);
-	if (!failures) return { cause, before, check: null, kept, soFar: null, allows: null };
+	if (!failures) return { cause, before, check: null, after: null, kept, soFar: null, allows: null };
 	const f = run.failed;
 	const soFar = run.failedOnce === null
 		? (f === 1 ? i18n.t('bulk.resume.failed_so_far_at_least_one') : i18n.tf('bulk.resume.failed_so_far_at_least', { n: String(f) }))
 		: (run.failedOnce === 1 ? i18n.t('bulk.resume.failed_so_far_one') : i18n.tf('bulk.resume.failed_so_far', { n: String(run.failedOnce) }));
-	return { cause, before, check: null, kept, soFar, allows: bulkResumeAllows(limit, open, i18n, run.kind === 'undo') };
+	return { cause, before, check: null, after: null, kept, soFar, allows: bulkResumeAllows(limit, open, i18n, run.kind === 'undo') };
 }
 
 /** What writing on lets fail before the run stops again. The next pass's failures are bounded
@@ -926,6 +937,68 @@ export function bulkSystemName(targetSystem: string, i18n: BulkI18n): string {
 	const key = `bulk.system.${targetSystem}`;
 	const name = i18n.t(key);
 	return name === key ? targetSystem : name;
+}
+
+/** How a host the planner set stands among the page's own words: boxed as code, like a field
+ *  name the planner set (U-333), so it never reads as part of the sentence. */
+export const BULK_HOST_BOX = 'rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono font-normal text-text';
+
+/** A boxed value (a host, an address) cut where it may wrap: after a dot, a slash or a space, never
+ *  at a hyphen inside a name (U-423, the rule of the run page's headings): `summer-shoes-test.` /
+ *  `myshopify.com`. Each piece keeps the dots, slashes and spaces that end it. */
+export function bulkBoxParts(value: string): string[] {
+	return value.match(/[^./\s]+[./]*\s*|[./\s]+/g) ?? [];
+}
+
+export type BulkTemplatePart = { text: string } | { slot: string };
+
+/** A template sentence split at each of the named placeholders, every other placeholder filled from
+ *  `vars`: the page renders each slot itself, so a value the planner or the owner set stands boxed
+ *  and the sentence around it stays the page's. */
+export function bulkTemplateParts(template: string, slots: readonly string[], vars: Record<string, string>): BulkTemplatePart[] {
+	const parts: BulkTemplatePart[] = [];
+	for (const piece of template.split(new RegExp(`(\\{(?:${slots.join('|')})\\})`))) {
+		const slot = /^\{(\w+)\}$/.exec(piece)?.[1];
+		if (slot !== undefined && slots.includes(slot)) parts.push({ slot });
+		else { const text = fillTemplate(piece, vars); if (text !== '') parts.push({ text }); }
+	}
+	return parts;
+}
+
+/** A text split at every place it names the host as a whole name, which the page boxes: for the
+ *  run page's texts that name it among other words (a halt's cause, what continuing does). The host
+ *  inside a longer name (`api.shop.ch`, `shop.ch.other.example`, `myshop.ch`, `shop.ch_x`, a name in
+ *  another script) stays text, so a
+ *  target's key or a remote's message never gets a box that vouches for part of a foreign name.
+ *  Without a host, the text whole. */
+export function bulkHostSplit(text: string, host: string | null): BulkSentencePart[] {
+	if (host === null || host === '') return [{ text }];
+	const name = host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	// A letter, mark, digit, format character or underscore beside it, or a dot that a browser reads as
+	// a full stop (U+3002, U+FF0E, U+FF61) before a further label, makes it part of a longer name.
+	const part = '\\p{L}\\p{M}\\p{N}\\p{Cf}_';
+	const dot = '.\\u3002\\uFF0E\\uFF61';
+	// A user, a port, an escape or the page's mark for a hidden character beside it (`shop.ch@other`,
+	// `other%2Eshop.ch`, `shop.ch\u27e8U+200B\u27e9other`) makes it part of another address too.
+	const joined = '@%:\\u27E8\\u27E9';
+	const whole = new RegExp(`(?<![${part}${dot}${joined}-])${name}(?![${part}${joined}-]|[${dot}][${part}])`, 'gu');
+	const parts: BulkSentencePart[] = [];
+	let from = 0;
+	for (const m of text.matchAll(whole)) {
+		if (m.index > from) parts.push({ text: text.slice(from, m.index) });
+		parts.push({ slot: true });
+		from = m.index + host.length;
+	}
+	if (from < text.length) parts.push({ text: text.slice(from) });
+	return parts;
+}
+
+/** A run's label in parts: the host of an external run is the slot the page boxes; a system lynox
+ *  names itself is text. */
+export function bulkLabelParts(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n): BulkSentencePart[] {
+	if (!bulkHostOf(run.targetSystem)) return [{ text: bulkLabel(run, i18n) }];
+	const one = run.total === 1 ? '_one' : '';
+	return bulkSentenceParts(i18n.t(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`), 'target', { n: String(run.total) });
 }
 
 /** A run has no title: it is named by its size and where it writes. */
