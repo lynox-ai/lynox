@@ -219,8 +219,10 @@
 				// No answer about today's cost: shown as unknown, not as a zero.
 				todayCost = null;
 			} else {
-				const rows = (await dailyRes.json()) as Array<{ day: string; cost_usd: number; run_count: number; user_turns: number }>;
+				// An answer that is not a list of days says nothing about today: unknown, not the old figure.
+				const rows = (await dailyRes.json().catch(() => null)) as Array<{ day: string; cost_usd: unknown; run_count: number; user_turns: number }> | null;
 				if (stale()) return;
+				if (!Array.isArray(rows)) { todayCost = null; return; }
 				// Match the LOCAL calendar day (the endpoint now buckets by local
 				// day via tzOffsetMin) — not UTC. toISOString() is UTC and would
 				// pick the wrong/empty bucket near the day boundary (the owner's
@@ -228,9 +230,11 @@
 				// local date parts so it lines up with the server's bucket key.
 				const d = new Date();
 				const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-				const todayRow = rows.find(r => r.day === today);
+				const todayRow = rows.find(r => r?.day === today);
 				// No row for today is a day without cost: the endpoint answered, so that is a real zero.
-				todayCost = todayRow === undefined ? 0 : typeof todayRow.cost_usd === 'number' ? todayRow.cost_usd : null;
+				// A figure that is no amount (not a number, not finite, below zero) is unknown, never shown.
+				const cost = todayRow?.cost_usd;
+				todayCost = todayRow === undefined ? 0 : typeof cost === 'number' && Number.isFinite(cost) && cost >= 0 ? cost : null;
 				// Headline "N runs today" = chat turns the user took, not voice
 				// renders or spawned sub-runs (which inflated the count).
 				todayRuns = todayRow?.user_turns ?? 0;

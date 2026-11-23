@@ -38,7 +38,7 @@ const today = (): string => {
 };
 
 /** What the cost endpoint answers: today's rows, an error status, or nothing yet (held). */
-let costAnswer: 'held' | number | Array<{ day: string; cost_usd: number; run_count: number; user_turns: number }>;
+let costAnswer: 'held' | 'not-json' | number | unknown[] | Record<string, unknown>;
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 
@@ -69,6 +69,7 @@ beforeEach(() => {
 		const url = String(input);
 		if (url.includes('/history/cost/daily')) {
 			if (costAnswer === 'held') return new Promise<Response>(() => {});
+			if (costAnswer === 'not-json') return new Response('<html>proxy error</html>', { status: 200 });
 			return typeof costAnswer === 'number' ? json({ error: 'x' }, costAnswer) : json(costAnswer);
 		}
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
@@ -108,7 +109,15 @@ describe('the status bar names the period of its cost', () => {
 		expect(desktop.textContent?.replace(/\s+/g, ' ').trim()).toBe('heute $0.00');
 	});
 
-	it.each([['not answered yet', 'held'], ['answered with an error', 500]] as const)('shows no figure and no period while the cost is unknown (%s)', async (_what, answer) => {
+	it.each([
+		['not answered yet', 'held'],
+		['answered with an error', 500],
+		['answered with no JSON', 'not-json'],
+		['answered with something other than a list', { error: 'x' }],
+		['a figure that is text', [{ day: today(), cost_usd: '0.40', run_count: 1, user_turns: 1 }]],
+		['a figure below zero', [{ day: today(), cost_usd: -5, run_count: 1, user_turns: 1 }]],
+		['a figure out of range', [{ day: today(), cost_usd: 1e309, run_count: 1, user_turns: 1 }]],
+	] as const)('shows no figure and no period while the cost is unknown (%s)', async (_what, answer) => {
 		costAnswer = answer;
 		await mountIn('de');
 		const { phone, phoneName, desktop } = shown();
@@ -116,5 +125,21 @@ describe('the status bar names the period of its cost', () => {
 		expect(desktop.textContent?.replace(/\s+/g, ' ').trim()).toBe('-');
 		expect(phoneName).not.toContain('heute');
 		expect(phoneName).not.toContain('$0');
+	});
+
+	it.each([
+		['an error', 500],
+		['no JSON', 'not-json'],
+		['something other than a list', { error: 'x' }],
+		['a figure below zero', [{ day: today(), cost_usd: -5, run_count: 1, user_turns: 1 }]],
+	] as const)('drops a figure it knew once a later read answers with %s', async (_what, answer) => {
+		await mountIn('de');
+		expect(shown().phone).toBe('heute $0.40');
+		costAnswer = answer;
+		// A run's end reads the cost again (after a short delay that coalesces several ends).
+		window.dispatchEvent(new Event('lynox:run-ended'));
+		await new Promise((r) => setTimeout(r, 450));
+		await settle();
+		expect(shown().phone).toBe('-');
 	});
 });
