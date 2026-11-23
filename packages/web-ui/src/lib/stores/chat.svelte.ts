@@ -3488,11 +3488,15 @@ function fetchChangeset(): Promise<boolean> {
 	return run;
 }
 
+/** How long the review fetch may take. A queued turn waits for it, so one that never answers
+ *  must not hold the queue: after this it counts as no answer. */
+const CHANGESET_FETCH_MS = 8_000;
+
 async function loadChangeset(): Promise<boolean> {
 	if (!sessionId) return false;
 	changesetLoading = true;
 	try {
-		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset`);
+		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset`, { signal: AbortSignal.timeout(CHANGESET_FETCH_MS) });
 		if (!res.ok) return false;
 		const data = (await res.json()) as { hasChanges: boolean; runId?: string; files: ChangesetFileInfo[] };
 		if (data.hasChanges && data.files.length > 0) {
@@ -3512,6 +3516,12 @@ export async function submitChangesetReview(
 	rolledBackFiles?: string[],
 ): Promise<void> {
 	if (!sessionId) return;
+	// The answer is about this thread as it is open now. When another thread is shown by the time
+	// the server answers (or this one was opened again), the review and the queue on screen are
+	// not the ones answered: nothing here clears or drains them.
+	const sid = sessionId;
+	const gen = _resumeGeneration;
+	const stale = (): boolean => sessionId !== sid || _resumeGeneration !== gen;
 	// The server refuses an answer whose run is not the one holding the changes now.
 	const body: Record<string, unknown> = { action, runId: pendingChangesetRunId };
 	if (action === 'partial' && rolledBackFiles) {
@@ -3520,7 +3530,7 @@ export async function submitChangesetReview(
 	let status: number;
 	let res: Response;
 	try {
-		res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset/review`, {
+		res = await fetch(`${getApiBase()}/sessions/${sid}/changeset/review`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify(body),
@@ -3531,8 +3541,10 @@ export async function submitChangesetReview(
 		addToast(t('changeset.review_unsent'), 'error', 5000);
 		return;
 	}
-	pendingChangeset = null;
-	pendingChangesetRunId = null;
+	if (!stale()) {
+		pendingChangeset = null;
+		pendingChangesetRunId = null;
+	}
 	if (status >= 200 && status < 300) {
 		// A rollback leaves a file as it is when it was replaced or linked since the review, or
 		// could not be written. Closing the review without a word would read as all restored.
@@ -3550,7 +3562,7 @@ export async function submitChangesetReview(
 			addToast(tf('changeset.not_restored', { files }), 'error', null);
 		}
 		// The turns queued behind the run that opened the review go now.
-		drainQueueSoon(100);
+		if (!stale()) drainQueueSoon(100);
 		return;
 	}
 	// The answer did nothing. Closing the review silently would read as done: say so, and show
@@ -3558,7 +3570,8 @@ export async function submitChangesetReview(
 	addToast(t(status === 409 ? 'changeset.review_refused' : 'changeset.review_failed'), 'info', 5000);
 	// Only an answer from the server says nothing is pending: a failed fetch leaves no review
 	// shown, and the queued turns would go past the one the server still holds.
-	if (await fetchChangeset()) drainQueueSoon(100);
+	if (stale()) return;
+	if (await fetchChangeset() && !stale()) drainQueueSoon(100);
 }
 
 export function cancelQueue(): void {
@@ -4288,8 +4301,9 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 			// finally drains it — but it never did, so a message typed while a
 			// resumed run streamed sat in the queue forever. Mirror the
 			// normal-path drain at the end of `_runTurn`; a changeset the resumed
-			// run left to review holds it (`drainQueueSoon`).
-			drainQueueSoon(100);
+			// run left to review holds it (`drainQueueSoon`). A thread opened meanwhile has its
+			// own queue and review: not this re-attach's to drain.
+			if (gen === _resumeGeneration) drainQueueSoon(100);
 		}
 		persistChat();
 	}

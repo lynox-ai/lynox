@@ -27,19 +27,31 @@ let holdLaterRuns: Promise<void> | null;
 let reviewStatus: number;
 let changesetFails: boolean;
 let saved: Map<string, string>;
-/** While set, opening thread t1 again waits until it resolves. */
-let holdReopenT1: Promise<void> | null;
+/** Opening a thread again waits until its promise here resolves. */
+let holdReopen: Map<string, Promise<void>>;
+/** While set, the answer to a review waits until it resolves. */
+let holdReview: Promise<void> | null;
+/** A run the server still runs in a thread, for a thread opened again to re-attach to. */
+let liveRunIn: string | null;
 let newSessions: number;
+/** How often the review was asked for. */
+let changesetGets: number;
+/** The signal the review fetch's time limit aborts; the test fires it. */
+let fetchTimeout: AbortController;
 
 const notes = [{ file: 'notes.md', status: 'modified', diff: '-a\n+b' }];
 
 function serve(): void {
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
 		const url = String(input);
-		if (url.endsWith('/changeset/review')) return json({ ok: reviewStatus === 200 }, reviewStatus);
+		if (url.endsWith('/changeset/review')) {
+			if (holdReview) await holdReview;
+			return json({ ok: reviewStatus === 200 }, reviewStatus);
+		}
 		if (url.endsWith('/sessions')) {
 			const body = init?.body ? JSON.parse(String(init.body)) as { threadId?: string } : {};
-			if (body.threadId === 't1' && holdReopenT1) await holdReopenT1;
+			const held = body.threadId ? holdReopen.get(body.threadId) : undefined;
+			if (held) await held;
 			// A thread opened again keeps its id; new chats get t1, then t2.
 			return json({ sessionId: body.threadId ?? (newSessions++ === 0 ? 't1' : 't2') });
 		}
@@ -60,10 +72,26 @@ function serve(): void {
 			});
 			return new Response(stream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 		}
+		if (url.includes('/runs/r-live/stream')) {
+			const enc = new TextEncoder();
+			return new Response(new ReadableStream<Uint8Array>({
+				start(c) { c.enqueue(enc.encode(`event: done\ndata: ${JSON.stringify({ result: 'ok' })}\n\n`)); c.close(); },
+			}), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+		}
 		if (url.endsWith('/changeset')) {
-			if (holdChangeset) await holdChangeset;
+			changesetGets++;
+			if (holdChangeset) {
+				const signal = init?.signal;
+				await Promise.race([holdChangeset, new Promise<never>((_, reject) => {
+					signal?.addEventListener('abort', () => reject(new DOMException('timed out', 'TimeoutError')));
+				})]);
+			}
 			if (changesetFails) return json({ error: 'unavailable' }, 503);
 			return json({ hasChanges: changed.length > 0, runId: 'run-7', files: changed });
+		}
+		if (liveRunIn !== null && url.includes(`/threads/${liveRunIn}/messages`)) {
+			liveRunIn = null; // re-attached once; the reconcile after it sees no live run
+			return json({ messages: [{ role: 'user', content: 'earlier' }], activeRun: { runId: 'r-live', status: 'running', lastPersistedSeq: 0 } });
 		}
 		return json({ messages: [], activeRun: null });
 	}));
@@ -90,13 +118,18 @@ beforeEach(async () => {
 	holdFirstRun = null;
 	holdChangeset = null;
 	holdLaterRuns = null;
-	holdReopenT1 = null;
+	holdReopen = new Map();
+	holdReview = null;
+	liveRunIn = null;
 	newSessions = 0;
+	changesetGets = 0;
+	fetchTimeout = new AbortController();
+	vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => fetchTimeout.signal);
 	reviewStatus = 200;
 	changesetFails = false;
 	serve();
 });
-afterEach(() => { vi.unstubAllGlobals(); });
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 /** A run that streams until released, with a message typed and queued behind it. */
 async function queueBehindRun(): Promise<() => void> {
@@ -214,6 +247,41 @@ describe('a turn queued behind a run waits for the review that run left open', (
 		expect(store.getMessages().find((m) => m.content === 'C')?.queued, 'the other waits behind it').toBe(true);
 	});
 
+	it('a review fetch that never answers stops holding at its time limit, and the queued turn goes as before', async () => {
+		const release = await queueBehindRun();
+		changed = notes;
+		holdChangeset = new Promise<void>(() => {}); // the server never answers
+		release();
+		await settle();
+		await wait(200);
+		await settle();
+		expect(runTasks, 'positive control: held while the fetch runs').toEqual(['edit the notes']);
+		fetchTimeout.abort(); // the time limit
+		await settle();
+		await wait(50);
+		await settle();
+		expect(runTasks, 'sent after the time limit').toEqual(['edit the notes', 'then this']);
+	});
+
+	it('after a review fetch hit its time limit, a later re-send goes', async () => {
+		await store.sendMessage('first');
+		await settle();
+		changed = notes;
+		holdChangeset = new Promise<void>(() => {});
+		await store.sendMessage('edit the notes'); // its review fetch hangs
+		await settle();
+		fetchTimeout.abort();
+		await settle();
+		holdChangeset = null;
+		changed = [];
+		store.getMessages().push({ role: 'user', content: 'sent while offline', failed: true });
+		listeners.online!();
+		await settle();
+		await wait(700); // past the re-send delay
+		await settle();
+		expect(runTasks).toEqual(['first', 'edit the notes', 'sent while offline']);
+	});
+
 	it('with no review the queued turn is sent after the run (control)', async () => {
 		const release = await queueBehindRun();
 		release();
@@ -267,13 +335,85 @@ describe('a turn queued before a reload waits for the review the server holds', 
 		await store.resumeThread('t9');
 		// Back to the first thread; the server holds a review there, and the opening is slow.
 		changed = notes;
-		holdReopenT1 = new Promise<void>(() => {});
+		holdReopen.set('t1', new Promise<void>(() => {}));
 		void store.resumeThread('t1');
 		await settle();
 		expect(store.getQueueLength(), 'positive control: the queue came back with the thread').toBe(1);
 		await wait(200); // past the drain delay, before the review could be asked for
 		await settle();
 		expect(runTasks, 'the earlier drain does not send past the review').toEqual(['edit the notes']);
+	});
+
+	it('an answer to a review that arrives after another thread opened clears neither its review nor sends its turn', async () => {
+		const release = await queueBehindRun(); // t1 leaves a review open
+		changed = notes;
+		release();
+		await settle();
+		await wait(200);
+		await settle();
+		expect(store.getPendingChangeset(), 'positive control: t1 shows its review').not.toBeNull();
+		let answered!: () => void;
+		holdReview = new Promise<void>((r) => { answered = r; });
+		void store.submitChangesetReview('accept'); // the answer is on its way
+		await settle();
+		seed(); // t9 has a turn queued, and the server holds a review there too
+		await store.resumeThread('t9');
+		await settle();
+		await wait(200);
+		await settle();
+		expect(store.getPendingChangeset(), 'positive control: t9 shows its own review').not.toBeNull();
+		answered();
+		await settle();
+		await wait(200);
+		await settle();
+		expect(store.getPendingChangeset(), 't9\'s review stays shown').not.toBeNull();
+		expect(runTasks, 'nothing sent past it').toEqual(['edit the notes']);
+	});
+
+	it('a refused answer that arrives after another thread opened asks nothing and sends nothing there', async () => {
+		const release = await queueBehindRun();
+		changed = notes;
+		release();
+		await settle();
+		await wait(200);
+		await settle();
+		let answered!: () => void;
+		holdReview = new Promise<void>((r) => { answered = r; });
+		reviewStatus = 409;
+		void store.submitChangesetReview('accept');
+		await settle();
+		seed();
+		changed = []; // no review in t9
+		holdReopen.set('t9', new Promise<void>(() => {})); // t9 has not asked for its review yet
+		void store.resumeThread('t9');
+		await settle();
+		const asked = changesetGets;
+		answered();
+		await settle();
+		await wait(200);
+		await settle();
+		expect(changesetGets, 'no review fetched for the thread it did not answer').toBe(asked);
+		expect(runTasks, 'nothing sent in t9').toEqual(['edit the notes']);
+	});
+
+	it('a re-attached run that ends after another thread opened does not drain that thread\'s queue', async () => {
+		liveRunIn = 't1';
+		changed = notes;
+		let answer!: () => void;
+		holdChangeset = new Promise<void>((r) => { answer = r; }); // t1's fetch after its re-attach waits
+		await store.resumeThread('t1');
+		await settle();
+		seed(); // t9 has a turn queued, and its opening is slow
+		holdReopen.set('t9', new Promise<void>(() => {}));
+		void store.resumeThread('t9');
+		await settle();
+		expect(store.getQueueLength(), 'positive control: t9\'s queue is back').toBe(1);
+		changed = [];
+		answer(); // t1's re-attach ends now
+		await settle();
+		await wait(200);
+		await settle();
+		expect(runTasks, 'nothing sent in t9 before it asked for its review').toEqual([]);
 	});
 
 	it('with no review the restored turn is sent (control)', async () => {
