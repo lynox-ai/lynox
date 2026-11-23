@@ -80,17 +80,20 @@ describe('an API profile card says how the profile signs in, and labels its desc
 		expect(chip('Lookalike')).toBe('Anmeldung beim Anbieter');
 	});
 
-	// From 360 px on a chip on two lines does not read as a chip, and on the head's hover and open
-	// surface (bg-bg-muted) a chip of that same surface disappears: it keeps one line there, and its own border.
-	it('the chip keeps one line from 360 px on, wraps rather than being cut below, moves under the name whole, and stands apart from the head', () => {
+	// A chip on two lines does not read as a chip, and on the head's hover and open surface
+	// (bg-bg-muted) a chip of that same surface disappears. The row wraps its items whole at their
+	// one-line width (flex-wrap); the chip is capped at the row (max-w-full), so it wraps its text
+	// only where it is wider than the whole row, and nothing cuts it. jsdom has no layout: the
+	// widths are measured in the browser shots, these pin the classes that make them.
+	it('the chip moves under the name whole, is never cut, and stands apart from the head', () => {
 		const el = card('Shopify acme-store').querySelector<HTMLElement>('[data-testid="api-auth-chip"]')!;
-		expect(el.classList.contains('whitespace-nowrap')).toBe(true);
+		// No forced single line: that is what cut the chip where it was wider than the card.
+		expect(el.classList.contains('whitespace-nowrap')).toBe(false);
 		expect(el.classList.contains('border')).toBe(true);
 		expect(el.classList.contains('bg-bg-muted')).toBe(false);
 		expect(el.classList.contains('bg-bg')).toBe(true);
-		// Narrower than the chip (below 360 px): it wraps at its spaces rather than being cut, and the
-		// head may shrink below the chip, so the card's buttons stay in view.
-		expect(el.classList.contains('max-[360px]:whitespace-normal')).toBe(true);
+		// Capped at the row, never cut, and the head may shrink below the chip, so the card's buttons
+		// stay in view.
 		expect(el.classList.contains('truncate')).toBe(false);
 		expect(el.classList.contains('max-w-full')).toBe(true);
 		expect(el.getAttribute('title')).toBe('Anmeldung über Shopify');

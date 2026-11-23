@@ -183,13 +183,13 @@
 						<button onclick={() => expanded = expanded === profile.id ? null : profile.id}
 							aria-expanded={expanded === profile.id}
 							class="flex-1 min-w-0 px-4 py-3 text-left hover:bg-bg-muted transition-colors">
-							<!-- From 360 px on the chip keeps one line: when the name leaves no room it moves under it whole. Its own
-							     border and surface keep it apart from the head's hover and open surface. Below 360 px
-							     it may wrap at its spaces, still one box under the name and never cut: there the card
-							     is narrower than the chip, and its whole text goes before its form. -->
+							<!-- The row wraps its items whole, at their one-line width: when the name leaves no room
+							     the chip moves under it on one line. Only a chip wider than the whole row wraps its
+							     text, still one box and never cut. Its own border and surface keep it apart from the
+							     head's hover and open surface. -->
 							<div class="flex flex-wrap items-center gap-x-2 gap-y-1" data-testid="api-card-title">
 								<span class="text-sm font-medium">{profile.name}</span>
-								{#if authChipLabel(profile.auth, profile.built_in_provider)}{@const chip = authChipLabel(profile.auth, profile.built_in_provider)!}{@const chipText = chip.values ? tf(chip.key, chip.values) : t(chip.key)}<span class="text-xs whitespace-nowrap max-[360px]:whitespace-normal max-w-full rounded-[var(--radius-sm)] border border-border bg-bg px-1.5 py-0.5 text-text-muted" title={chipText} data-testid="api-auth-chip">{chipText}</span>{/if}
+								{#if authChipLabel(profile.auth, profile.built_in_provider)}{@const chip = authChipLabel(profile.auth, profile.built_in_provider)!}{@const chipText = chip.values ? tf(chip.key, chip.values) : t(chip.key)}<span class="text-xs max-w-full rounded-[var(--radius-sm)] border border-border bg-bg px-1.5 py-0.5 text-text-muted" title={chipText} data-testid="api-auth-chip">{chipText}</span>{/if}
 							</div>
 							<p class="text-xs text-text-subtle mt-1 font-mono">{profile.base_url}</p>
 							{#if connectionLine(profile.oauth_grant)}<p class="text-xs text-text-muted mt-1" data-testid="api-connection">{connectionText(connectionLine(profile.oauth_grant)!)}</p>{/if}
