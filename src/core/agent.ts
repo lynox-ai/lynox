@@ -672,8 +672,8 @@ export class Agent implements IAgent {
   writeAuthor: string | null = null;
   /** See `IAgent.ownerKnown`. Set per run by the session (a trigger's run adds its instruction). */
   ownerKnown?: OwnerKnownReader | undefined;
-  /** See `IAgent.searchResultAddresses`. Its own per agent: a sub-agent starts empty. */
-  readonly searchResultAddresses = new SearchResultAddresses();
+  /** See `IAgent.searchResultAddresses`. The conversation's: the session and a spawning parent pass theirs. */
+  readonly searchResultAddresses: SearchResultAddresses;
   /** See `IAgent.sendOrigin`. Set per run by the session. */
   sendOrigin?: SendOrigin | undefined;
   /** See `IAgent.noticeLanguage`. */
@@ -1785,6 +1785,7 @@ export class Agent implements IAgent {
       costUSD: 0,
     };
     this.toolResultBlobStore = config.toolResultBlobStore;
+    this.searchResultAddresses = config.searchResultAddresses ?? new SearchResultAddresses();
     this.toolCallTracker = config.toolCallTracker;
     this.userTimezone = config.userTimezone;
     this.changesetManager = config.changesetManager;

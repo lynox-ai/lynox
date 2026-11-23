@@ -3856,19 +3856,33 @@ export async function repickSessionModel(tier: string): Promise<
 > {
 	if (!sessionId) return { ok: false, reason: 'no_session' };
 	if (isStreaming) return { ok: false, reason: 'busy' };
+	const sid = sessionId;
+	const repick = (): Promise<Response> => fetch(`${getApiBase()}/sessions/${sid}/model`, {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ tier }),
+	});
 	try {
-		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/model`, {
-			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ tier }),
-		});
+		let res = await repick();
+		// The server no longer holds this chat's session (dropped while idle, or a restart), as on
+		// a page reloaded long after: open it again for this chat, as a run does, and ask once more.
+		if (res.status === 404) {
+			const reopened = await fetch(`${getApiBase()}/sessions`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ threadId: sid }),
+			});
+			if (!reopened.ok || sessionId !== sid) return { ok: false, reason: 'error' };
+			res = await repick();
+		}
 		if (res.ok) {
 			const data = (await res.json()) as { model?: string; modelId?: string };
 			// `model` is the resolved (clamped) TIER; `modelId` is the concrete
 			// model-id. Keep sessionModel a model-id (consistent with the turn_end
 			// frame + the StatusBar tooltip) and sessionTier the tier (drives the
 			// per-thread control). Falling back to the tier only if modelId is absent.
-			if (data.model) {
+			// Only on the chat it was asked for: the user may have switched chats meanwhile.
+			if (data.model && sessionId === sid) {
 				sessionTier = data.model;
 				sessionModel = data.modelId ?? data.model;
 			}
@@ -4431,6 +4445,25 @@ export async function resumeThread(threadId: string): Promise<void> {
  *
  * Safe to call on every ChatView mount — additive, no SSE-lifecycle change.
  */
+/**
+ * After a reload the chat holds its id (kept in this browser) but not its tier: no session was
+ * opened, the transcript was only read back, so nothing set the tier and the model row and picker
+ * stayed hidden. The thread's record says the tier it runs on (`run_tier`: the stored pick held to
+ * today's ceiling as a resume would; not the stored pick as asked). Read
+ * only while the tier is unknown, and kept only if the same chat is still open and nothing set a
+ * tier meanwhile.
+ */
+async function restoreThreadTier(sid: string): Promise<void> {
+	if (sessionTier !== null) return;
+	const res = await fetch(`${getApiBase()}/threads/${encodeURIComponent(sid)}`).catch(() => null);
+	if (!res?.ok) return;
+	const data = (await res.json().catch(() => null)) as { thread?: { run_tier?: unknown } | null } | null;
+	// Checked once the whole answer is in: the user may have switched chats, or a session set the tier.
+	if (sessionId !== sid || sessionTier !== null) return;
+	const tier = data?.thread?.run_tier;
+	if (typeof tier === 'string' && tier !== '') sessionTier = tier;
+}
+
 export async function reconcileThread(): Promise<void> {
 	const tid = sessionId;
 	if (!tid) return;
@@ -4438,6 +4471,7 @@ export async function reconcileThread(): Promise<void> {
 	// run answered in the drop window, a mount), and the run may have contained the chat. Not
 	// every end does: the server's refusal stays the enforcement, this only keeps the switch honest.
 	runEnded(null);
+	void restoreThreadTier(tid);
 	if (isStreaming) return;
 	try {
 		const res = await fetch(`${getApiBase()}/threads/${tid}/messages`);
