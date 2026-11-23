@@ -54,6 +54,8 @@ export interface SpreadMarker {
    *  twenty, and counts the rest apart: a host past the first fifty flagged rows is not lifted, and the
    *  line is then the one place it shows. */
   marked: number;
+  /** The verdicts that add this kind, in plan order: the view can show the table on them alone. */
+  seqs: number[];
 }
 
 export interface OutlierResult {
@@ -76,9 +78,13 @@ export const SPREAD_SHARE = 0.05;
 const REASON_ORDER: OutlierReason[] = ['new_link', 'new_email', 'new_phone', 'new_script', 'rare_value', 'changed_fields', 'length_jump'];
 const MARKER_REASON: Record<MarkerKind, OutlierReason> = { link: 'new_link', email: 'new_email', phone: 'new_phone', script: 'new_script' };
 
-/** A dot written obfuscated — `[.]`, `(.)`, `{.}`, `[dot]`, `(dot)`, ` dot `, ` . ` — read as a dot. Anchored at the
- *  start of the blank before it, so a long run of blanks is read once, not once per blank. */
-const OBFUSCATED_DOT = /(?<!\s)\s*(?:\[\.\]|\(\.\)|\{\.\}|\[dot\]|\(dot\))\s*|(?<!\s)\s+dot\s+(?=[\p{L}\p{N}])|(?<=[\p{L}\p{N}])[ \t]+\.[ \t]+(?=[\p{L}\p{N}])|[\u3002\uFF0E\uFF61]/giu;
+/** A dot written obfuscated — `[.]`, `(.)`, `{.}`, `[dot]`, `(dot)`, ` dot `, ` . `, a full stop of another script
+ *  or a dot that only looks like one — read as a dot. Anchored at the start of the blank before it, so a
+ *  long run of blanks is read once, not once per blank. */
+const OBFUSCATED_DOT = /(?<!\s)\s*(?:\[\.\]|\(\.\)|\{\.\}|\[dot\]|\(dot\))\s*|(?<!\s)\s+dot\s+(?=[\p{L}\p{N}])|(?<=[\p{L}\p{N}])[ \t]+\.[ \t]+(?=[\p{L}\p{N}])|[\u3002\uFF0E\uFF61\uFE52\u2024\uA4F8\u0702]/giu;
+/** Characters a browser shows as nothing: format characters (the soft hyphen, the zero-width ones) and the other
+ *  default-ignorable ones (variation selectors among them). */
+const UNSHOWN_CHARS = /[\p{Default_Ignorable_Code_Point}\p{Cf}]/gu;
 /** Top-level domains that are also words ("Baumwolle.Es ist", "Holz.Co"): written capitalised after a
  *  full stop that lacks its space, they start a sentence, not a host. A host with a scheme needs no
  *  top-level domain at all. */
@@ -265,12 +271,24 @@ function taggedText(text: string): string {
 function decodeReferences(text: string): string {
   return text.replace(/&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|(amp|lt|gt|quot|apos|nbsp));/giu, (whole, dec?: string, hex?: string, name?: string) => {
     const point = dec !== undefined ? Number(dec) : hex !== undefined ? Number.parseInt(hex, 16) : undefined;
-    if (point !== undefined) return point > 0 && point <= 0x10ffff ? String.fromCodePoint(point) : whole;
+    // As a browser does: nothing, half a character or none at all is the replacement character.
+    if (point !== undefined) return point > 0 && point <= 0x10ffff && (point < 0xd800 || point > 0xdfff) ? String.fromCodePoint(point) : '\uFFFD';
     return ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' } as Record<string, string>)[name!.toLowerCase()] ?? whole;
   });
 }
 
 function readMarkers(text: string, out: Map<MarkerKind, Set<string>>): void {
+  // Half a character that stands alone is stored, and shown, as the replacement character: a separator, and
+  // nothing left that could join with another half.
+  const shown = text.replace(/\p{Cs}/gu, '\uFFFD');
+  readText(shown, out);
+  // What a browser shows as nothing may stand beside a dot or inside a name: the text is read once more
+  // without it, and only once. Read with it as well, so a reading it cuts is kept.
+  const bare = shown.replace(UNSHOWN_CHARS, '');
+  if (bare !== shown) readText(bare, out);
+}
+
+function readText(text: string, out: Map<MarkerKind, Set<string>>): void {
   if (text.includes('://')) {
     for (const m of text.matchAll(SCHEME_RE)) {
       const host = asciiHost(m[1]!.replace(/:\d+$/u, ''));
@@ -278,8 +296,8 @@ function readMarkers(text: string, out: Map<MarkerKind, Set<string>>): void {
     }
   }
   // The obfuscated dots need a bracket, a parenthesis, a brace, the word "dot", a dot between blanks or
-  // a full stop of another script.
-  const dotted = /[[({\u3002\uFF0E\uFF61]|dot|\s\./iu.test(text) ? text.replace(OBFUSCATED_DOT, '.') : text;
+  // a full stop of another script or a dot that only looks like one.
+  const dotted = /[[({\u3002\uFF0E\uFF61\uFE52\u2024\uA4F8\u0702]|dot|\s\./iu.test(text) ? text.replace(OBFUSCATED_DOT, '.') : text;
   // A percent escape ("%2F" in a link's query) separates, as the character it stands for mostly does.
   const plain = dotted.includes('%') ? dotted.replace(/%[0-9A-Fa-f]{2}/gu, ' ') : dotted;
   // Every reading of a word adds, none takes away: a sign that only one reading cuts at (an extra @,
@@ -570,7 +588,8 @@ export function judgeOutliers(
       const marks = (h: string): number => (inBefores.get(kind)!.has(h) ? 1 : 0);
       const byCount = (a: [string, number], b: [string, number]): number => (marks(a[0]) === 0 ? a[1] - b[1] : b[1] - a[1]);
       const hosts = [...hostCounts].sort((a, b) => marks(a[0]) - marks(b[0]) || byCount(a, b) || (a[0] < b[0] ? -1 : 1)).map(([h]) => h);
-      spread.push({ kind, count: perTarget.size, hosts, marked: hosts.filter((h) => !inBefores.get(kind)!.has(h)).length });
+      const seqs = [...perTarget.keys()].sort((a, b) => a - b);
+      spread.push({ kind, count: perTarget.size, hosts, marked: hosts.filter((h) => !inBefores.get(kind)!.has(h)).length, seqs });
     }
   }
 

@@ -180,3 +180,36 @@ describe('one call against the registration listener', () => {
     expect(calls).toEqual([]);
   });
 });
+
+describe('what the conversation brought in joins the set', () => {
+  it('joins under guarded only: allow-list keeps the operator\'s list, allow-all and deny-all are unchanged', () => {
+    const provenanceHosts = ['news.example', 'shop.example'];
+    const g = computeShellSet(input({ networkPolicy: 'guarded', provenanceHosts }));
+    expect(g.kind === 'hosts' && g.hosts).toEqual(expect.arrayContaining(provenanceHosts));
+    const l = computeShellSet(input({ networkPolicy: 'allow-list', allowedHosts: new Set(['only.example']), provenanceHosts }));
+    expect(l.kind === 'hosts' && l.hosts).toEqual(['only.example']);
+    expect(computeShellSet(input({ networkPolicy: 'allow-all', provenanceHosts }))).toEqual({ kind: 'all' });
+    expect(computeShellSet(input({ networkPolicy: 'deny-all', provenanceHosts })).kind).toBe('none');
+  });
+
+  it('fills only the room the policy leaves, newest first, and never turns the set into none', () => {
+    const base = computeShellSet(input({ networkPolicy: 'guarded' }));
+    const baseCount = base.kind === 'hosts' ? base.hosts.length : 0;
+    const policy = new Set(Array.from({ length: MAX_SHELL_SET - 1 - baseCount }, (_, i) => `p${String(i)}.example`));
+    const s = computeShellSet(input({ networkPolicy: 'guarded', allowedHosts: policy, provenanceHosts: ['old.example', 'new.example'] }));
+    expect(s.kind).toBe('hosts');
+    if (s.kind !== 'hosts') return;
+    expect(s.hosts).toHaveLength(MAX_SHELL_SET);
+    expect(s.hosts).toContain('new.example');
+    expect(s.hosts).not.toContain('old.example');
+    expect(s.hosts).toContain('p0.example');
+  });
+
+  it('skips what the proxy cannot take, without naming it as a policy entry', () => {
+    const base = computeShellSet(input({ networkPolicy: 'guarded' }));
+    const s = computeShellSet(input({ networkPolicy: 'guarded', provenanceHosts: ['10.0.0.1', '*.wild.example', 'Upper.Example', 'ok.example'] }));
+    if (base.kind !== 'hosts' || s.kind !== 'hosts') throw new Error('expected host sets');
+    expect(s.hosts).toEqual([...base.hosts, 'ok.example'].sort());
+    expect(s.dropped).toEqual(base.dropped);
+  });
+});

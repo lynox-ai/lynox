@@ -83,6 +83,12 @@ export interface HandshakeServerPayload {
    * does not take plaintext refuses such a manifest at `setManifest`.
    */
   acceptsPlainStores?: boolean | undefined;
+  /**
+   * This handshake's session, random and not derived from anything: the source names it when it
+   * ends the session before its manifest (`POST /api/migration/abort`), so a late abort cannot end
+   * a newer attempt's session. Absent on an older destination, which has no abort either.
+   */
+  sessionId?: string | undefined;
 }
 
 export interface HandshakeClientPayload {
@@ -364,9 +370,12 @@ export function generateMigrationToken(): string {
 }
 
 /**
- * Timing-safe comparison of migration tokens.
+ * Timing-safe comparison of migration tokens. Both must be the token's shape, 64 hex characters:
+ * hex decoding stops at the first character that is not hex, so the token with anything appended
+ * would decode to the same bytes.
  */
 export function verifyMigrationToken(provided: string, stored: string): boolean {
+  if (!/^[0-9a-f]{64}$/i.test(provided) || !/^[0-9a-f]{64}$/i.test(stored)) return false;
   const a = Buffer.from(provided, 'hex');
   const b = Buffer.from(stored, 'hex');
   if (a.length !== b.length || a.length !== 32) return false;
