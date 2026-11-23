@@ -246,4 +246,17 @@ describe('a halted undo names its halt as taking back', () => {
 		expect(await render({ phase: 'aborted', haltKey: 'atomicRolledBack', atomic: true, sourceRunId: null })).toContain(sentence);
 		expect(buttonByText(t('bulk.resume.none_undo_link'))).toBeUndefined();
 	});
+
+	it('says an atomic undo whose time ran out starts again later from the page of the run it undoes, linked, never from the chat', async () => {
+		const sentence = t('bulk.halt.atomicTimeRolledBack_undo').replace('{link}', t('bulk.resume.none_undo_link'));
+		const text = await render({ phase: 'aborted', haltKey: 'atomicTimeRolledBack', atomic: true });
+		expect(text).toContain(sentence);
+		expect(text).not.toContain(t('bulk.halt.atomicTimeRolledBack'));
+		buttonByText(t('bulk.resume.none_undo_link'))!.click();
+		expect(opened).toEqual(['src1']);
+		unmount(component!);
+		component = undefined;
+		expect(await render({ phase: 'aborted', haltKey: 'atomicTimeRolledBack', atomic: true, sourceRunId: null })).toContain(sentence);
+		expect(buttonByText(t('bulk.resume.none_undo_link'))).toBeUndefined();
+	});
 });

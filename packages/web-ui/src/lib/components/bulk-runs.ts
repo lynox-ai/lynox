@@ -49,7 +49,7 @@ export function bulkOne(key: string, n: number): string {
 /** The halts an undo reaches whose sentence names the write: an undo has its own (U-335). */
 const BULK_UNDO_HALT_WORDS: ReadonlySet<string> = new Set([
 	'bulk.halt.consentOutdated', 'bulk.halt.consentOutdated_more', 'bulk.halt.contract', 'bulk.halt.markupAddedByShop',
-	'bulk.halt.markupAddedByShop_before', 'bulk.halt.atomicRolledBack', 'bulk.halt.discarded', 'bulk.halt.runUnrecorded',
+	'bulk.halt.markupAddedByShop_before', 'bulk.halt.atomicRolledBack', 'bulk.halt.atomicTimeRolledBack', 'bulk.halt.discarded', 'bulk.halt.runUnrecorded',
 ]);
 
 /** A halt sentence's key in the words of the run's kind: an undo's `_undo` form where it has one. */
@@ -1023,8 +1023,9 @@ export function bulkRolledBackParts(
 	run: Pick<BulkRun, 'phase' | 'haltKey' | 'kind' | 'sourceRunId'>,
 	i18n: Pick<BulkI18n, 't'>,
 ): { before: string; link: string; after: string } | null {
-	if (run.kind !== 'undo' || run.phase !== 'aborted' || run.haltKey !== 'atomicRolledBack' || run.sourceRunId === null) return null;
-	const [before = '', after = ''] = i18n.t('bulk.halt.atomicRolledBack_undo').split('{link}');
+	if (run.kind !== 'undo' || run.phase !== 'aborted' || run.sourceRunId === null) return null;
+	if (run.haltKey !== 'atomicRolledBack' && run.haltKey !== 'atomicTimeRolledBack') return null;
+	const [before = '', after = ''] = i18n.t(`bulk.halt.${run.haltKey}_undo`).split('{link}');
 	return { before, link: i18n.t('bulk.resume.none_undo_link'), after };
 }
 
