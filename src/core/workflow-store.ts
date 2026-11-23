@@ -562,7 +562,10 @@ export class WorkflowStore {
    * (legacy `pipeline_runs.started_at` is reset on each INSERT-OR-REPLACE re-save,
    * which the mirror tracks via `updated_at`), so `ORDER BY updated_at DESC` ==
    * legacy `ORDER BY started_at DESC`. `step_count` is derived from the blob (the
-   * http-api mapper prefers `parsed.steps.length` anyway).
+   * http-api mapper prefers `parsed.steps.length` anyway). A blob that is not valid
+   * JSON counts 0 steps rather than failing the query: SQLite's JSON functions throw
+   * on it, and one unreadable definition would otherwise fail the whole list (the
+   * library skips such a row when it parses the blob).
    */
   listPlanned(limit = 100): Array<{
     id: string; manifest_name: string; manifest_json: string; step_count: number; started_at: string;
@@ -571,7 +574,7 @@ export class WorkflowStore {
       `SELECT id,
               name AS manifest_name,
               definition_json AS manifest_json,
-              COALESCE(json_array_length(definition_json, '$.steps'), 0) AS step_count,
+              CASE WHEN json_valid(definition_json) THEN COALESCE(json_array_length(definition_json, '$.steps'), 0) ELSE 0 END AS step_count,
               updated_at AS started_at
        FROM workflows ORDER BY updated_at DESC LIMIT ?`,
     ).all(limit) as Array<{

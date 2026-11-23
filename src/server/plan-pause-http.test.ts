@@ -514,3 +514,32 @@ describe('the boot sweep, switched off and failing (real engine)', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   }, 180_000);
 });
+
+describe('the workflow library with an unreadable definition (real engine)', () => {
+  it('answers 200 and lists the readable workflows when one stored definition is not valid JSON', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-library-unreadable-'));
+    const { api, base, engine } = await up(dir);
+    try {
+      const { loginSession } = await import('../../packages/web-ui/src/lib/server/auth.js');
+      const owner = loginSession(SECRET, null)?.token;
+      if (owner === undefined) throw new Error('fixture: no cookie');
+      const history = engine.getRunHistory()!;
+      const wf = (id: string, name: string): void => history.insertPlannedPipeline({
+        id, name, goal: 'g', steps: [{ id: 's1', task: 't' }], reasoning: '', estimatedCost: 0,
+        createdAt: '2026-01-01T00:00:00.000Z', template: true,
+      }, null);
+      wf('wf-good', 'Readable');
+      wf('wf-bad', 'Unreadable');
+      engine.getEngineDb()!.getDb().prepare("UPDATE workflows SET definition_json = '{\"steps\": [' WHERE id = 'wf-bad'").run();
+      (api as unknown as Inner).rateCounts.clear();
+      const res = await fetch(`${base}/api/workflows/library`, { headers: { cookie: `lynox_session=${owner}` } });
+      expect(res.status).toBe(200);
+      const ids = ((await res.json()) as { workflows: Array<{ id: string }> }).workflows.map((w) => w.id);
+      expect(ids).toContain('wf-good');
+      expect(ids).not.toContain('wf-bad');
+    } finally {
+      await api.shutdown();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
+});
