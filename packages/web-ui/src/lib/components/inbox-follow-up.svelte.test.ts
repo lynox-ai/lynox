@@ -134,13 +134,20 @@ describe('InboxReadingPane — the notice above the item own mail', () => {
 	it('several, the newest sensitive: the count, no name', async () => {
 		await renderPane(item({ followUps: { ...ONE, count: 3, latestFromName: undefined } }));
 		expect(byTestId('inbox-follow-up-notice-text')?.textContent)
-			.toBe(`3 neue Nachrichten, die neueste · ${date(ONE.latestAt)}. lynox hat den Eintrag nicht neu eingeordnet.`);
+			.toBe(`3 neue Nachrichten im Thread, die neueste gesendet am ${date(ONE.latestAt)}. lynox hat den Eintrag nicht neu eingeordnet.`);
 	});
 
 	it('one sensitive: no name', async () => {
 		await renderPane(item({ followUps: { ...ONE, latestFromName: undefined } }));
 		expect(byTestId('inbox-follow-up-notice-text')?.textContent)
-			.toBe(`Neue Nachricht · ${date(ONE.latestAt)}. lynox hat den Eintrag nicht neu eingeordnet.`);
+			.toBe(`Neue Nachricht im Thread, gesendet am ${date(ONE.latestAt)}. lynox hat den Eintrag nicht neu eingeordnet.`);
+	});
+
+	it('several and one sensitive, EN', async () => {
+		setLocale('en');
+		await renderPane(item({ followUps: { ...ONE, count: 2, latestFromName: undefined } }));
+		expect(byTestId('inbox-follow-up-notice-text')?.textContent)
+			.toBe(`2 new messages in the thread, the latest sent ${date(ONE.latestAt)}. lynox did not sort this entry again.`);
 	});
 
 	it('the jump opens the new mail in the thread history and moves the focus to it', async () => {
@@ -182,11 +189,12 @@ describe('InboxView — the row of an item with follow-ups', () => {
 		expect(target.textContent).toContain('Wieder hier: Eine neue Nachricht in diesem Verlauf hat vertraulichen Inhalt.');
 	});
 
-	it('the open button label and, without a subject, the headline put the line before the first mail words', async () => {
+	it('without a subject, the open button label puts the line before the reason; the visible headline stays the reason', async () => {
 		await renderList([item({ followUps: ONE, subject: '', snippet: undefined })]);
-		const open = target.querySelector<HTMLButtonElement>('button[aria-label^="Öffnen"], button[aria-label*="Kundin fragt"]')!;
+		const open = target.querySelector<HTMLButtonElement>('button[aria-label*="Kundin fragt"]')!;
 		expect(open.getAttribute('aria-label')).toContain('Neue Nachricht im Thread · Kundin fragt nach der Lieferung');
-		expect(open.textContent).toContain('Neue Nachricht im Thread · Kundin fragt nach der Lieferung');
+		expect(open.querySelector('span.truncate')?.textContent).toBe('Kundin fragt nach der Lieferung');
+		expect(byTestId('inbox-follow-up-line')?.textContent).toBe('Neue Nachricht im Thread');
 	});
 
 	it('without a subject, the headline title and the select box label put the line before the reason', async () => {

@@ -22,9 +22,9 @@ export function followUpLine(item: FollowUpCandidate, t: Translate, tf: Translat
 	return count === 1 ? t('inbox.follow_up_one') : tf('inbox.follow_up_many', { count: String(count) });
 }
 
-/** A label that stands for the row (an aria-label hides the row's own text, a title or a headline
- *  that falls back to the reason): the follow-up line comes first, so the label does not speak for
- *  the new mail with the first mail's words. */
+/** A label that stands for the row (an aria-label hides the row's own text; a title that falls
+ *  back to the reason): the follow-up line comes first, so the label does not speak for the new
+ *  mail with the first mail's words. The visible row shows the line once, below the headline. */
 export function withFollowUpLine(item: FollowUpCandidate, label: string, t: Translate, tf: TranslateFill, now: number = Date.now()): string {
 	const line = followUpLine(item, t, tf, now);
 	return line === undefined ? label : `${line} · ${label}`;

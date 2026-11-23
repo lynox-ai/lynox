@@ -730,7 +730,7 @@
 															     snooze in the same Snoozed zone. -->
 															<span class="shrink-0 inline-block w-1.5 h-1.5 rounded-full bg-accent-text" aria-label={t('inbox.reminder_badge_label')} title={t('inbox.reminder_badge_label')}></span>
 														{/if}
-														<span class="truncate">{!item.subject?.trim() && !item.snippet?.trim() ? withFollowUpLine(item, inboxHeadline(item), t, tf) : inboxHeadline(item)}</span>
+														<span class="truncate">{inboxHeadline(item)}</span>
 													</p>
 													<span class="shrink-0 text-[11px] text-text-subtle tabular-nums">
 														{zone === 'snoozed' && item.snoozeUntil
