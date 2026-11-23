@@ -525,12 +525,16 @@
 	// The buttons of the box by line: showing all from over the table removes that line, so the focus goes
 	// back to the button of the same kind in the box.
 	let spreadButtons = $state<(HTMLButtonElement | null)[]>([]);
-	// Showing all from the approval: the focus stays at the approval, where the owner is.
+	// Showing all from the approval: the focus stays at the approval, where the owner is; while its button
+	// cannot be pressed, it goes to the button of that kind in the box.
 	let approveButton = $state<HTMLButtonElement | null>(null);
 	async function showAllAtApproval(): Promise<void> {
+		const kind = spreadKind;
 		spreadShown = null;
 		await tick();
-		approveButton?.focus();
+		if (approveButton !== null && !approveButton.disabled) { approveButton.focus(); return; }
+		const i = (run?.judgeOutliers?.spread ?? []).findIndex((x) => x.kind === kind);
+		if (i >= 0) spreadButtons[i]?.focus();
 	}
 	async function showAllFromTable(): Promise<void> {
 		const kind = spreadKind;
@@ -1033,9 +1037,10 @@
 							{t('bulk.approve.targets_write')}
 						</label>
 					{/if}
-					{#if spreadKind !== null}
-						<!-- The approval is for the whole run, the table may show part of it (U-417). -->
-						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-approve-filtered">{tf('bulk.approve.filtered', { n: String(shownTargets.length), m: String(unfolded.length) })} <button type="button" class="block sm:inline whitespace-nowrap underline text-accent hover:opacity-80" data-testid="bulk-approve-filtered-all" onclick={() => showAllAtApproval()}>{t('bulk.outliers.spread.show_all')}</button></p>
+					{#if spreadKind !== null && shownTargets.length < targets.length}
+						<!-- The approval is for the whole run, the table may show part of it (U-417): of every verdict
+						     of the run, however the table folds the unchanged ones. -->
+						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-approve-filtered">{tf('bulk.approve.filtered', { n: String(shownTargets.length), m: String(targets.length) })} <button type="button" class="block sm:inline whitespace-nowrap underline text-accent hover:opacity-80" data-testid="bulk-approve-filtered-all" onclick={() => showAllAtApproval()}>{t('bulk.outliers.spread.show_all')}</button></p>
 					{/if}
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary} bind:this={approveButton}

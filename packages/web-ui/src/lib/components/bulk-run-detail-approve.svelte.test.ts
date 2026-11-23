@@ -1986,6 +1986,48 @@ describe('verdicts that differ from the rest of the run', () => {
 		expect(target.querySelector('[data-testid="bulk-outlier-filtered"]')).toBeNull();
 	});
 
+	it('counts every verdict of the run at the approval, whether or not the unchanged rows are shown', async () => {
+		const note = (): string | null | undefined => target.querySelector('[data-testid="bulk-approve-filtered"]')?.textContent;
+		run = makeRun({ total: 25, changes: { update: 24, create: 0, delete: 0, unchanged: 1, invalid: 0 }, judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		targets = many(25).map((x) => (x.seq === 9 ? { ...x, change: 'unchanged' as const, diff: { kind: 'none' } as BulkTarget['diff'] } : x));
+		await render();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(note()).toBe(`${tf('bulk.approve.filtered', { n: '3', m: '25' })} ${t('bulk.outliers.spread.show_all')}`);
+		(target.querySelector('[data-testid="bulk-approve-filtered-all"]') as HTMLButtonElement).click();
+		await settle();
+		[...target.querySelectorAll('button')].find((x) => [t('bulk.preview.show_unchanged_one'), t('bulk.preview.show_unchanged_targets_one')].includes(x.textContent?.trim() ?? ''))!.click();
+		await settle();
+		expect(rowNames()).toHaveLength(25);
+		await settle();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(note()).toBe(`${tf('bulk.approve.filtered', { n: '3', m: '25' })} ${t('bulk.outliers.spread.show_all')}`);
+	});
+
+	it('says nothing at the approval when the filtered table shows every verdict', async () => {
+		run = makeRun({ total: 3, changes: changes(3), writeForm: 'unmeasured', judgeOutliers: { decided: 3, measured: false, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [1, 2, 3] }] } });
+		targets = many(3);
+		await render();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(target.querySelector('[data-testid="bulk-approve-filtered"]')).toBeNull();
+	});
+
+	it('puts the focus on the button of the line when the approve button cannot be pressed', async () => {
+		run = makeRun({ total: 25, changes: changes(25), writeForm: 'unmeasured', judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		targets = many(25);
+		await render();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		(target.querySelector('[data-testid="bulk-approve-filtered-all"]') as HTMLButtonElement).click();
+		await settle();
+		expect(document.activeElement).toBe(target.querySelector('[data-testid="bulk-outlier-spread-show"]'));
+	});
+
 	it('offers no button on a line whose verdicts the server does not name, or names none of', async () => {
 		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
 			spread: [{ kind: 'link', count: 20, hosts: ['a.example'] }, { kind: 'email', count: 20, hosts: ['b.example'], seqs: [] }] } });
