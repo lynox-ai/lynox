@@ -91,7 +91,8 @@ export interface BulkRun {
 	haltKey: string | null;
 	costUsd: number;
 	costCapUsd: number | null;
-	judge: { tier: string; unjudged: number } | null;
+	/** `judged`: targets with a verdict, a refused one included; absent on an older engine. */
+	judge: { tier: string; unjudged: number; judged?: number | undefined } | null;
 	/** The form a list run reads, as stored (detail only). */
 	listForm?: string | null | undefined;
 	/** A judged run whose rule decides an HTML field (detail only). */
@@ -1045,17 +1046,21 @@ export function bulkHostSplit(text: string, host: string | null): BulkSentencePa
 }
 
 /** A run's label in parts: the host of an external run is the slot the page boxes; a system lynox
- *  names itself is text. */
-export function bulkLabelParts(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n): BulkSentencePart[] {
-	if (!bulkHostOf(run.targetSystem)) return [{ text: bulkLabel(run, i18n) }];
-	const one = run.total === 1 ? '_one' : '';
-	return bulkSentenceParts(i18n.t(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`), 'target', { n: String(run.total) });
+ *  names itself is text. While its counts are still pending (see bulkCountsPending) the size reads
+ *  "–", as the head's counts do. */
+export function bulkLabelParts(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n, countsPending = false): BulkSentencePart[] {
+	if (!bulkHostOf(run.targetSystem)) return [{ text: bulkLabel(run, i18n, countsPending) }];
+	const one = !countsPending && run.total === 1 ? '_one' : '';
+	const n = countsPending ? i18n.t('bulk.head.counts_pending') : String(run.total);
+	return bulkSentenceParts(i18n.t(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`), 'target', { n });
 }
 
-/** A run has no title: it is named by its size and where it writes. */
-export function bulkLabel(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n): string {
-	const one = run.total === 1 ? '_one' : '';
-	return i18n.tf(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`, { n: String(run.total), target: bulkSystemName(run.targetSystem, i18n) });
+/** A run has no title: it is named by its size and where it writes. While its counts are still
+ *  pending (see bulkCountsPending) the size reads "–", as the head's counts do. */
+export function bulkLabel(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n, countsPending = false): string {
+	const one = !countsPending && run.total === 1 ? '_one' : '';
+	const n = countsPending ? i18n.t('bulk.head.counts_pending') : String(run.total);
+	return i18n.tf(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`, { n, target: bulkSystemName(run.targetSystem, i18n) });
 }
 
 /** The line about targets that held another value than expected when lynox last read them, or
@@ -1092,6 +1097,66 @@ export function bulkEngineWorking(run: Pick<BulkRunDetailData, 'phase' | 'haltKe
 	// Any halt, by its key or by a reason this page does not know (an engine newer than the page).
 	if (run.haltKey !== null || run.haltReason !== null) return false;
 	return run.phase === 'planned' || run.phase === 'approved' || run.phase === 'writing';
+}
+
+/** The step the engine is working on while it moves a run on by itself, for the page's working
+ *  line: reading the list (its first page is set only while the list is still being read),
+ *  reading the targets, judging them (a judged run reads them in the same step), writing, or
+ *  taking a run back (an undo writes too). Null for a run the engine is not working on ({@link bulkEngineWorking}). */
+export type BulkWorkingStep = 'list' | 'read' | 'judge' | 'write' | 'undo';
+
+export function bulkWorkingStep(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'haltReason' | 'listFirstPage' | 'judge' | 'kind'>): BulkWorkingStep | null {
+	if (!bulkEngineWorking(run)) return null;
+	if (run.phase === 'approved' || run.phase === 'writing') return run.kind === 'undo' ? 'undo' : 'write';
+	if (run.listFirstPage !== null) return 'list';
+	return run.judge !== null ? 'judge' : 'read';
+}
+
+/** The working line of a step: its key and the run's numbers it names. Judging counts the
+ *  verdicts out of the targets the judge reads (an engine that does not count them gets the
+ *  line without numbers); writing and taking back count the targets done out of those the run
+ *  plans to write. A target the read turns invalid leaves the judge's count: the targets it
+ *  judges can shrink while it reads them. Reading the list or the targets names no number: the engine does not count it. */
+export function bulkWorkingLine(
+	step: BulkWorkingStep,
+	run: Pick<BulkRun, 'judge' | 'applied' | 'changes'>,
+): { key: string; params: Record<string, string> } {
+	if (step === 'judge') {
+		const judged = run.judge?.judged;
+		if (judged === undefined) return { key: 'bulk.working.judge_open', params: {} };
+		return { key: 'bulk.working.judge', params: { k: String(judged), n: String(judged + (run.judge?.unjudged ?? 0)) } };
+	}
+	if (step === 'write' || step === 'undo') {
+		// Out of every target the run plans to write: `applied` counts each once, one found as
+		// planned too, so it never passes them. An approval or a probe that ends the write earlier
+		// halts the run, and the halt's sentence says why; the line is gone then.
+		return { key: `bulk.working.${step}`, params: { a: String(run.applied), n: String(bulkWriting(run)) } };
+	}
+	return { key: `bulk.working.${step}`, params: {} };
+}
+
+/** Whether the run's size is not known yet: while the list is read, the targets are still being
+ *  found, so the title and the head show a dash instead of a number. */
+export function bulkCountsPending(step: BulkWorkingStep | null): boolean {
+	return step === 'list';
+}
+
+/** Phases before the run writes: planned (reading, judging), previewed, approved. */
+const BULK_BEFORE_WRITE: ReadonlySet<BulkPhase> = new Set(['planned', 'previewed', 'approved']);
+
+/** The head's counts. While the list is read there is nothing to count yet. Until the run has
+ *  begun to write (the probe or the run), only the number of targets stands: a „geschrieben 0 ·
+ *  Konflikte 0 · fehlgeschlagen 0“ before any write reads as a finished run. Once a target is
+ *  written, in conflict or failed, the counts stand whatever the phase. An undo counts what it
+ *  took back. */
+export function bulkHeadCounts(
+	step: BulkWorkingStep | null,
+	run: Pick<BulkRun, 'kind' | 'phase' | 'total' | 'applied' | 'conflicts' | 'failed'>,
+	i18n: BulkI18n,
+): string {
+	if (step === 'list') return i18n.t('bulk.head.counts_pending');
+	if (BULK_BEFORE_WRITE.has(run.phase) && run.applied === 0 && run.conflicts === 0 && run.failed === 0) return String(run.total);
+	return i18n.tf(run.kind === 'undo' ? 'bulk.head.counts_undo' : 'bulk.head.counts', { n: String(run.total), a: String(run.applied), c: String(run.conflicts), f: String(run.failed) });
 }
 
 /** How the page follows a run the engine is moving on: it asks for the run every `BULK_FOLLOW_MS`
