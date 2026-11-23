@@ -1425,8 +1425,9 @@ export interface BulkJudgeOutliers {
 	decided: number;
 	measured: boolean;
 	flagged: { seq: number; reasons: BulkOutlierReason[] }[];
-	/** `marked`: how many of `hosts`, at its start, mark a row; absent counts as none. */
-	spread: { kind: BulkMarkerKind; count: number; hosts: string[]; marked?: number }[];
+	/** `marked`: how many of `hosts`, at its start, mark a row; absent counts as none. `seqs`: the
+	 *  verdicts that add the kind, in plan order; absent, the line offers no way to show them. */
+	spread: { kind: BulkMarkerKind; count: number; hosts: string[]; marked?: number; seqs?: number[] }[];
 }
 
 /** How many flagged verdicts the view lists first; the count line names the rest (U-387). */
@@ -1463,7 +1464,7 @@ export const BULK_SPREAD_UNMARKED_SHOWN = 5;
 export const BULK_SPREAD_MARKED_SHOWN = 20;
 
 /** The lines for a kind of marker many verdicts add (U-387): count, kind and hosts as text,
- *  never as a link, with the way out. The hosts that mark a row come first, up to twenty, the rarest
+ *  never as a link. The way out stands once below them ({@link bulkOutlierSpreadClosing}, U-417). The hosts that mark a row come first, up to twenty, the rarest
  *  first: past the first fifty flagged rows the line is the one place they show. Then up to five of the
  *  others and how many more, and how many more marking hosts there are, in a sentence of its own. */
 export function bulkOutlierSpreadTexts(outliers: BulkJudgeOutliers | null | undefined, i18n: BulkI18n): string[] {
@@ -1485,6 +1486,30 @@ export function bulkOutlierSpreadTexts(outliers: BulkJudgeOutliers | null | unde
 			: '';
 		return i18n.tf(bulkOne(`bulk.outliers.spread.${s.kind}`, s.count), { n, hosts });
 	});
+}
+
+/** The sentence below the lines of {@link bulkOutlierSpreadTexts}, once however many there are (U-417),
+ *  or null for none. */
+export function bulkOutlierSpreadClosing(outliers: BulkJudgeOutliers | null | undefined, i18n: BulkI18n): string | null {
+	return outliers && outliers.spread.length > 0 ? i18n.t('bulk.outliers.spread.closing') : null;
+}
+
+/** The verdicts a run line shows the table on, or null where no kind is chosen or the server named none. */
+export function bulkOutlierSpreadSeqs(outliers: BulkJudgeOutliers | null | undefined, kind: BulkMarkerKind | null): Set<number> | null {
+	if (!outliers || kind === null) return null;
+	const seqs = outliers.spread.find((s) => s.kind === kind)?.seqs;
+	return seqs === undefined ? null : new Set(seqs);
+}
+
+/** The button at the end of a line: the table on that line's verdicts alone, or back to all (U-417). */
+export function bulkOutlierShowText(count: number, shown: boolean, i18n: BulkI18n): string {
+	return shown ? i18n.t('bulk.outliers.spread.show_all') : i18n.tf(bulkOne('bulk.outliers.spread.show', count), { n: String(count) });
+}
+
+/** The line over a table shown on one line's verdicts alone (U-417): without it, a reader in the table
+ *  takes it for the whole run, and the approval is for the whole run. */
+export function bulkOutlierFilteredText(kind: BulkMarkerKind, count: number, i18n: BulkI18n): string {
+	return i18n.tf(bulkOne(`bulk.outliers.filtered.${kind}`, count), { n: String(count) });
 }
 
 /** The line an approval and a probe's confirmation show when targets add hidden characters, or
