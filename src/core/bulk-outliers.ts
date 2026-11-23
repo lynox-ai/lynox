@@ -54,6 +54,8 @@ export interface SpreadMarker {
    *  twenty, and counts the rest apart: a host past the first fifty flagged rows is not lifted, and the
    *  line is then the one place it shows. */
   marked: number;
+  /** The verdicts that add this kind, in plan order: the view can show the table on them alone. */
+  seqs: number[];
 }
 
 export interface OutlierResult {
@@ -570,7 +572,8 @@ export function judgeOutliers(
       const marks = (h: string): number => (inBefores.get(kind)!.has(h) ? 1 : 0);
       const byCount = (a: [string, number], b: [string, number]): number => (marks(a[0]) === 0 ? a[1] - b[1] : b[1] - a[1]);
       const hosts = [...hostCounts].sort((a, b) => marks(a[0]) - marks(b[0]) || byCount(a, b) || (a[0] < b[0] ? -1 : 1)).map(([h]) => h);
-      spread.push({ kind, count: perTarget.size, hosts, marked: hosts.filter((h) => !inBefores.get(kind)!.has(h)).length });
+      const seqs = [...perTarget.keys()].sort((a, b) => a - b);
+      spread.push({ kind, count: perTarget.size, hosts, marked: hosts.filter((h) => !inBefores.get(kind)!.has(h)).length, seqs });
     }
   }
 
