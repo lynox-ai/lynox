@@ -247,14 +247,17 @@ describe('the write lock of a toggle', () => {
   });
 
   // The window the lock is taken for: between the compare and the write. A transaction that only
-  // reads first would let another connection write there, and the compare would have checked a set
-  // that is no longer the run's.
+  // reads first lets another connection write there; in WAL the toggle's own write then fails with
+  // a busy error instead of being refused cleanly. The answer is the lock taken before the compare.
   it('holds another connection off from the compare on, before its own write', async () => {
     const id = await planFiles(three);
     const b = seqOf(id, 'b.txt');
     const c = seqOf(id, 'c.txt');
     const seen = ledger.computeChecksum(id)!;
     const other = new Database(join(dir, 'engine.db'), { timeout: 0 });
+    // A deferred transaction is caught here only in WAL; under a rollback journal its read would
+    // hold the other writer off as well.
+    expect(other.pragma('journal_mode', { simple: true })).toBe('wal');
     let calls = 0;
     let interleaved: boolean | null = null;
     let refusedWith: string | undefined;
@@ -275,6 +278,8 @@ describe('the write lock of a toggle', () => {
     });
     const off = ledger.deselectTarget(id, b, { checksum: seen });
     vi.mocked(ledger.computeChecksum).mockRestore();
+    // The compare and the answer, nothing before the lock: the interleave sat at the compare.
+    expect(calls).toBe(2);
     expect(interleaved).toBe(false);
     expect(refusedWith).toBe('SQLITE_BUSY');
     expect(off).toEqual({ ok: true, checksum: ledger.computeChecksum(id) });
