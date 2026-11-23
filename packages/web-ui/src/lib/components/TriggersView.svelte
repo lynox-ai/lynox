@@ -633,10 +633,11 @@
 								     past — it is not a next run, so it is not labelled as one. It is said
 								     in the consent block below instead, where it is the thing a person
 								     needs: what confirming starts, and when. -->
-								<!-- Nor does a trigger whose run is parked on an open question: it keeps the
-								     moment it parked as next_run_at, and the worker does not start it again
-								     until the question is answered. -->
-								{#if trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.paused !== true && trigger.status !== 'waiting'}
+								<!-- Nor does a trigger the worker will not start: one whose run is parked on an
+								     open question (it keeps the moment it parked as next_run_at until the
+								     question is answered), and one that is completed or stopped (completing a
+								     trigger leaves its next_run_at as it was). -->
+								{#if trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.status !== 'waiting' && trigger.status !== 'completed' && trigger.status !== 'stopped' && trigger.paused !== true}
 									<!-- A trigger the worker could not start keeps its next_run_at, which is then
 									     in the past: it is due since then, not a next run before the last one. -->
 									{@const due = isDue(trigger.next_run_at)}

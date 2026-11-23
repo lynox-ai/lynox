@@ -108,13 +108,16 @@ describe('a next run whose time has passed', () => {
 		expect(t('tasks.due_since')).not.toBe(t('tasks.next_run'));
 	});
 
-	it('is not said of a paused, switched-off or parked plan: it is not due', async () => {
+	it('is not said of a paused, switched-off, parked, completed or stopped plan: it is not due', async () => {
 		const now = Date.now();
 		rows = [
 			{ ...BASE, id: 'paused', title: 'Paused', next_run_at: iso(now - HOUR), paused: true },
 			{ ...BASE, id: 'off', title: 'Off', next_run_at: iso(now - HOUR), enabled: 0 },
 			// Its run waits for an answer to an open question; the worker does not start it.
 			{ ...BASE, id: 'parked', title: 'Parked', next_run_at: iso(now - HOUR), status: 'waiting' },
+			// Completing a trigger leaves its next_run_at; the worker starts neither of these.
+			{ ...BASE, id: 'done', title: 'Done', next_run_at: iso(now - HOUR), status: 'completed' },
+			{ ...BASE, id: 'stopped', title: 'Stopped', next_run_at: iso(now - HOUR), status: 'stopped' },
 			{ ...BASE, id: 'live', title: 'Live', next_run_at: iso(now - HOUR) },
 		];
 		await render('de');
@@ -122,6 +125,8 @@ describe('a next run whose time has passed', () => {
 		expect(target.textContent ?? '').toContain('Live');
 		expect(target.textContent ?? '').toContain('Paused');
 		expect(target.textContent ?? '').toContain('Parked');
+		expect(target.textContent ?? '').toContain('Done');
+		expect(target.textContent ?? '').toContain('Stopped');
 	});
 
 	it('takes a time that cannot be read as not due', async () => {
