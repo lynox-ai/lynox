@@ -2733,9 +2733,12 @@ export class Session {
   private _rebuildAgentKeepingConversation(): void {
     const messages = this.saveMessages();
     const tainted = this.agent?.conversationSawUntrusted ?? false;
+    const searched = this.agent?.heldProviderSearch() ?? false;
     this._createAgent();
     this.loadMessages(messages);
     if (tainted) this.agent?.restoreConversationTaint();
+    // Likewise a search the provider ran, whose blocks the context window may have dropped.
+    if (searched) this.agent?.restoreProviderSearch();
   }
 
   /**

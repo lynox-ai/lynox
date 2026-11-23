@@ -7,6 +7,7 @@
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { fixMarkdownPreprocessing } from './markdown-preprocess.js';
+import { openArtifactPrintWindow } from './artifact-frame-host.js';
 
 /**
  * Inject @page margins + a trusted auto-print script into an HTML document.
@@ -68,7 +69,7 @@ export function injectPrintScaffold(html: string, nonce?: string): string {
   // tag found after the document using the in-body rules, which is why.
   //
   // The rule, the same one `utils/external-links.ts` holds: do not pattern-match
-  // over sanitized HTML. Here the whole document goes to a blob URL, so there
+  // over sanitized HTML. Here the whole document is written as one string, so there
   // are no nodes to mutate — appending is the form that rule takes at this site.
   //
   // ⚠ APPEND HAS ITS OWN PRECONDITION, and saying it has none would repeat the
@@ -111,12 +112,13 @@ function printNonce(): string {
  * The print document as it is opened: a script policy of its own first, then the document with
  * the scaffold, whose script alone carries the policy's nonce.
  *
- * The document opens from a blob: URL, so it runs in the app's origin, and the app's policy
- * allows inline script. Its own `<meta>` policy is enforced on top of that one, so a script runs
- * only when both allow it: the scaffold's does, and nothing the artifact brings does (a
- * `<script>` element or an event handler attribute), whatever got past the sanitizer. Measured
- * in Chrome: the meta lands in `<head>` before a full document or a fragment, and with it only
- * the scaffold runs. Forms send nowhere and plugins load nothing either.
+ * The document is written into the sandboxed print window (`openPrintWindow`), whose header
+ * policy allows inline script. Its own `<meta>` policy is enforced on top of that one, so a
+ * script runs only when both allow it: the scaffold's does, and nothing the artifact brings does
+ * (a `<script>` element or an event handler attribute), whatever got past the sanitizer. The
+ * sandbox already keeps such a script away from the app; this keeps it from running at all.
+ * Measured in Chrome: the meta lands in `<head>` before a full document or a fragment, and with
+ * it only the scaffold runs. Forms send nowhere and plugins load nothing either.
  *
  * After a leading `<!DOCTYPE>`, not before it: an element or text before the doctype makes the
  * parser drop it, and the document renders in quirks mode (measured in Chrome: `BackCompat`),
@@ -131,19 +133,17 @@ export function buildPrintDocument(html: string, nonce: string = printNonce()): 
   return `${doctype}${policy}${doc.slice(doctype.length)}`;
 }
 
-/** Open a built print document in a new window. False if the popup was blocked. */
+/**
+ * Open a built print document in a new window. False if the popup was blocked.
+ *
+ * The window is the artifact frame endpoint, not a blob: URL. A blob document runs in the
+ * app's origin and would be held to the app's page policy, which allows no inline script, so
+ * the scaffold could not print; and anything that slipped past the sanitizer would run next to
+ * the app. The endpoint's own policy sandboxes the window (an opaque origin) and allows the
+ * print dialog; the document arrives by message once the window says it is ready.
+ */
 function openPrintWindow(doc: string): boolean {
-  const blob = new Blob([doc], { type: 'text/html;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const win = window.open(url, '_blank');
-  if (!win) {
-    URL.revokeObjectURL(url);
-    return false;
-  }
-  // The popup owns its blob URL; revoke after a minute so we don't leak even if
-  // the user dismisses the print dialog without closing the window.
-  setTimeout(() => URL.revokeObjectURL(url), 60_000);
-  return true;
+  return openArtifactPrintWindow(doc);
 }
 
 /**
