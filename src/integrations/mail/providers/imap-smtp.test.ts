@@ -466,7 +466,7 @@ describe('ImapSmtpProvider — fetch', () => {
     expect(msg.attachments[0]?.partId).toBe('2');
   });
 
-  it('marks a fetched autoresponder reply as automatic, so the reply tool refuses it', async () => {
+  it('marks a fetched autoresponder reply as automatic in the envelope that the reply refusal reads', async () => {
     probe.fetchOne.mockResolvedValue({ ...makeFetchMessage({ uid: 43 }), headers: Buffer.from('Precedence: auto_reply\r\n\r\n') });
     probe.fetch.mockImplementation(() => asyncIterFrom([
       { ...makeFetchMessage({ uid: 43 }), bodyParts: new Map([['1', Buffer.from('I am away.')]]) } as FetchMessageObject,

@@ -95,8 +95,8 @@ const NO_LOWER_BOUND = '1970-01-01T00:00:00Z';
 /**
  * Envelope fields for list, search and watch. `internetMessageHeaders` is NOT
  * among them: the archived source documents it on the single-message GET only.
- * So an envelope from a collection carries no In-Reply-To and no Auto-Submitted
- * (`isAutoReply` false); `fetch` reads both, and the reply tool's auto-reply
+ * So an envelope from a collection carries no In-Reply-To and none of the
+ * automatic-mail headers (`isAutoReply` false); `fetch` reads them, and the reply tool's auto-reply
  * refusal reads the FETCHED envelope.
  */
 const ENVELOPE_FIELDS = [
