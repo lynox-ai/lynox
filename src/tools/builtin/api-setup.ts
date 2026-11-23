@@ -20,7 +20,7 @@ import { getLynoxDir } from '../../core/config.js';
 import { turnIsLocked } from '../../core/mandate-tool-lock.js';
 import { currentCallSignal, joinCallSignal, noteOwnStopSentence } from '../../core/call-connection.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret, ExchangeFacts } from '../../core/api-store.js';
-import { SaveRefused, accessTokenKey, collectVaultKeys, grantTokenNames, tokenSlotNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
+import { SaveRefused, profileReadHost, accessTokenKey, collectVaultKeys, grantTokenNames, tokenSlotNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
@@ -38,7 +38,7 @@ import { pv, singleLine } from '../../core/prompt-value.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
-import { isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
+import { OWNER_PRINCIPAL, isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
 import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
 import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
 import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
@@ -2272,6 +2272,24 @@ ${draftJson}
       const reserved = reservedAppNameRefusal(profile);
       if (reserved) return `Validation error: ${reserved}`;
       if (!isOwnerPrincipal(agent.principal)) profile.created_by = principalTag(agent.principal);
+      // The owner chose this host in their own chat, in a tool batch that began before any
+      // foreign content: a read from it after foreign content is then not asked about
+      // (`ApiStore.readKnownHosts`). The batch's snapshot, not the turn's: the dispatch counts
+      // this tool's own call as foreign content before the handler runs, so the turn would never
+      // be clean here. Only a save in a batch that began before the conversation's first foreign
+      // content records its host, and an earlier `api_setup` call counts as such content.
+      // Outside a batch nothing is recorded, nor in a conversation holding a search the provider
+      // ran itself: its results reach the model past every dispatch and arm nothing.
+      // Only the owner's interactive run: a trigger's, a workflow's or a task's run carries a run
+      // tag as its author even under the owner's principal, and a sub-agent a run origin of its
+      // own; a workflow made in another conversation could otherwise name a host unattended. The
+      // engine's to write, never the input's, and bound to the host it was saved with.
+      delete profile.owner_clean_host;
+      const ownersOwnChat = isOwnerPrincipal(agent.principal) && agent.writeAuthor === principalTag(OWNER_PRINCIPAL) && agent.sendOrigin === undefined;
+      if (ownersOwnChat && agent.batchStartedTainted?.() === false && agent.heldProviderSearch?.() === false) {
+        const cleanHost = profileReadHost(profile);
+        if (cleanHost !== null) profile.owner_clean_host = cleanHost;
+      }
       // A mandate's oauth2 profile writes its tokens to the pair its id derives. Where that pair
       // already holds a value, the first exchange would write over it, so the id is refused
       // here. Only when the profile becomes oauth2 under this id: a later save of the same
