@@ -17,7 +17,9 @@
 	interface ApiEndpoint { method: string; path: string; description: string; }
 	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; oauth_grant?: OAuthGrantView & { state?: unknown; revoked_at?: unknown };
 		/** Whether this reader's connect start goes through: a mandate's only for a profile it set up. */
-		reader_may_connect?: boolean; }
+		reader_may_connect?: boolean;
+		/** The built-in provider the profile signs in through, by its display name; null for none (`builtInPresetOf`). */
+		built_in_provider?: string | null; }
 
 	// Who connected the profile and with which provider account (`utils/oauth-connection.ts`).
 	function connectionText(line: ConnectionLine): string {
@@ -179,10 +181,11 @@
 				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle overflow-hidden">
 					<div class="flex items-stretch">
 						<button onclick={() => expanded = expanded === profile.id ? null : profile.id}
+							aria-expanded={expanded === profile.id}
 							class="flex-1 px-4 py-3 text-left hover:bg-bg-muted transition-colors">
 							<div class="flex items-center gap-2">
 								<span class="text-sm font-medium">{profile.name}</span>
-								{#if authChipLabel(profile.auth)}{@const chip = authChipLabel(profile.auth)!}<span class="text-xs rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted" data-testid="api-auth-chip">{chip.values ? tf(chip.key, chip.values) : t(chip.key)}</span>{/if}
+								{#if authChipLabel(profile.auth, profile.built_in_provider)}{@const chip = authChipLabel(profile.auth, profile.built_in_provider)!}<span class="text-xs rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted" data-testid="api-auth-chip">{chip.values ? tf(chip.key, chip.values) : t(chip.key)}</span>{/if}
 							</div>
 							<p class="text-xs text-text-subtle mt-1 font-mono">{profile.base_url}</p>
 							{#if connectionLine(profile.oauth_grant)}<p class="text-xs text-text-muted mt-1" data-testid="api-connection">{connectionText(connectionLine(profile.oauth_grant)!)}</p>{/if}

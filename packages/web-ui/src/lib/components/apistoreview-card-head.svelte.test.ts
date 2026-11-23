@@ -25,7 +25,9 @@ let component: Record<string, unknown> | undefined;
 const LONG = 'Shopify Admin API für den Laden acme-store, Produkte und SEO-Texte, gelesen und geschrieben über die verbundene App';
 
 const PROFILES = [
-	{ id: 'shop', name: 'Shopify acme-store', base_url: 'https://acme-store.myshopify.com/admin/api/2025-10', description: 'Shop', auth: { type: 'oauth2', oauth: { preset_id: 'shopify' } } },
+	{ id: 'shop', name: 'Shopify acme-store', base_url: 'https://acme-store.myshopify.com/admin/api/2025-10', description: 'Shop', auth: { type: 'oauth2', oauth: { preset_id: 'shopify' } }, built_in_provider: 'Shopify' },
+	// A preset id the engine does not know: the list names no provider, so the chip names none.
+	{ id: 'look', name: 'Lookalike', base_url: 'https://lookalike.example', description: 'L', auth: { type: 'oauth2', oauth: { preset_id: 'google' } }, built_in_provider: null },
 	{ id: 'own', name: 'Eigene App', base_url: 'https://own.example', description: LONG, auth: { type: 'oauth2' } },
 	{ id: 'crm', name: 'CRM', base_url: 'https://crm.example', description: 'CRM', auth: { type: 'bearer', vault_keys: ['CRM_KEY'] }, endpoints: [{ method: 'GET', path: '/contacts', description: 'list' }] },
 	{ id: 'open', name: 'Open', base_url: 'https://open.example', description: 'Offen', auth: { type: 'none' } },
@@ -75,6 +77,7 @@ describe('an API profile card says how the profile signs in, and labels its desc
 		expect(chip('Shopify acme-store')).toBe('Anmeldung über Shopify');
 		expect(chip('Eigene App')).toBe('Anmeldung beim Anbieter');
 		expect(chip('CRM')).toBe('API-Schlüssel');
+		expect(chip('Lookalike')).toBe('Anmeldung beim Anbieter');
 	});
 
 	it('no sign-in and an unknown type have no chip, and no card shows a raw auth type', () => {
@@ -93,8 +96,10 @@ describe('an API profile card says how the profile signs in, and labels its desc
 	});
 
 	it('the opened card shows the description whole under its label, with or without endpoints', async () => {
+		expect(headButton('Eigene App').getAttribute('aria-expanded')).toBe('false');
 		headButton('Eigene App').click();
 		await settle();
+		expect(headButton('Eigene App').getAttribute('aria-expanded')).toBe('true');
 		expect(card('Eigene App').querySelector('[data-testid="api-description"]')?.textContent?.trim()).toBe(`Beschreibung: ${LONG}`);
 		// Only the opened card.
 		expect(card('Shopify acme-store').querySelector('[data-testid="api-description"]')).toBeNull();
