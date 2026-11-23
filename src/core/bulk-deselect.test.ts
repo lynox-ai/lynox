@@ -9,6 +9,7 @@ import { runBulkEffect, workspaceWriter } from './bulk-apply.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
 import { bulkPlanTool, bulkStatusTool } from '../tools/builtin/bulk.js';
 import type { IAgent } from '../types/index.js';
+import Database from 'better-sqlite3';
 
 /**
  * Taking a target out of a previewed run before approving it (PRD shopify-preset §20.2 item 4):
@@ -179,8 +180,9 @@ describe('the checksum of a run without a deselected target', () => {
 
 describe('the write lock of a toggle', () => {
   // Each checksum decrypts and hashes every target of the run (up to BULK_MAX_TARGETS). A toggle
-  // holds the engine database's write lock for the compare only; the new checksum comes after.
-  it('holds one checksum, the compare, and answers with the checksum of the run as it left it', async () => {
+  // holds the engine database's write lock for the compare and for the checksum it answers with,
+  // so that checksum is the set this toggle made, whoever else writes the database.
+  it('holds two checksums, the compare and the answer, and answers with the checksum of the run as it left it', async () => {
     const id = await planFiles(three);
     const b = seqOf(id, 'b.txt');
     const seen = ledger.computeChecksum(id)!;
@@ -191,14 +193,49 @@ describe('the write lock of a toggle', () => {
       return real(runId);
     });
     const off = ledger.deselectTarget(id, b, { checksum: seen });
-    expect(inLock).toEqual([true, false]);
+    expect(inLock).toEqual([true, true]);
     inLock.length = 0;
     const on = ledger.reselectTarget(id, b, { checksum: (off as { checksum: string }).checksum });
-    expect(inLock).toEqual([true, false]);
+    expect(inLock).toEqual([true, true]);
     spy.mockRestore();
     expect(off).toEqual({ ok: true, checksum: expect.any(String) as unknown as string });
     expect((off as { checksum: string }).checksum).not.toBe(seen);
     expect(on).toEqual({ ok: true, checksum: seen });
+  });
+
+  // Another process writes the same database: its toggle cannot land between this toggle's write
+  // and the checksum it answers with, so the page goes on the set it shows.
+  it('answers with the checksum of the set it made, while another connection tries to toggle in between', async () => {
+    const id = await planFiles(three);
+    const b = seqOf(id, 'b.txt');
+    const c = seqOf(id, 'c.txt');
+    const seen = ledger.computeChecksum(id)!;
+    const other = new Database(join(dir, 'engine.db'), { timeout: 0 });
+    let calls = 0;
+    let interleaved: boolean | null = null;
+    const real = ledger.computeChecksum.bind(ledger);
+    vi.spyOn(ledger, 'computeChecksum').mockImplementation((runId: string) => {
+      calls += 1;
+      // The answer's checksum: the other connection tries to take c out right before it.
+      if (calls === 2) {
+        try {
+          other.prepare('UPDATE bulk_targets SET deselected_at = ? WHERE run_id = ? AND seq = ?').run(new Date().toISOString(), runId, c);
+          interleaved = true;
+        } catch {
+          interleaved = false;
+        }
+      }
+      return real(runId);
+    });
+    const off = ledger.deselectTarget(id, b, { checksum: seen });
+    vi.mocked(ledger.computeChecksum).mockRestore();
+    other.close();
+    // The other write was held off by the lock, so the run is the set this toggle made...
+    expect(interleaved).toBe(false);
+    const preview = ledger.getPreview(id);
+    expect(preview.filter((t) => t.deselected === true).map((t) => t.seq)).toEqual([b]);
+    // ...and the answered checksum is that set's: an approval with it binds what the page shows.
+    expect(off).toEqual({ ok: true, checksum: ledger.computeChecksum(id) });
   });
 
   it('hashes once on a refusal, and only inside the lock', async () => {

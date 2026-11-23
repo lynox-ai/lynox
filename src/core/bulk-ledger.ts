@@ -2374,9 +2374,13 @@ export class BulkLedger {
 
   private setSelected(runId: string, seq: number, selected: boolean, params: { checksum: string; now?: number | undefined }): BulkSelectOutcome {
     const db = this.engineDb.getDb();
-    // Under the write lock only the compare: the checksum the owner saw against the run as it is.
-    // A run holds up to BULK_MAX_TARGETS targets, and each checksum decrypts and hashes all of them.
-    const moved = db.transaction((): BulkSelectOutcome | null => {
+    // Under the write lock: the compare (the checksum the owner saw against the run as it is), the
+    // write, and the checksum of the run as the write left it. The approval is the owner's consent
+    // to a set of targets, so the checksum the page goes on must be the set this write made, also
+    // when another process writes the same database: hashed after the lock, a toggle of that
+    // process could land in between. A run holds up to BULK_MAX_TARGETS targets, and each checksum
+    // decrypts and hashes all of them, so the lock holds two of them.
+    return db.transaction((): BulkSelectOutcome => {
       const run = this.runRow(runId);
       if (!run) return { ok: false, reason: 'not_found' };
       if (run.phase !== 'previewed') return { ok: false, reason: 'wrong_phase' };
@@ -2386,14 +2390,9 @@ export class BulkLedger {
       const changed = selected
         ? db.prepare(`UPDATE bulk_targets SET deselected_at = NULL WHERE run_id = ? AND seq = ? AND change IN ${WRITING_CHANGES} AND deselected_at IS NOT NULL`).run(runId, seq)
         : db.prepare(`UPDATE bulk_targets SET deselected_at = ? WHERE run_id = ? AND seq = ? AND ${WRITING_SQL}`).run(at, runId, seq);
-      return changed.changes === 1 ? null : { ok: false, reason: 'not_writing' };
+      if (changed.changes !== 1) return { ok: false, reason: 'not_writing' };
+      return { ok: true, checksum: this.computeChecksum(runId)! };
     }).immediate();
-    if (moved !== null) return moved;
-    // The new checksum after the commit. This process writes its database through one connection
-    // and this method runs to its end without yielding, so nothing of this process lands between
-    // the commit and this read. Another process that wrote the run meanwhile would move it, and
-    // the approval compares what it presents with the run as it then is (`approve`).
-    return { ok: true, checksum: this.computeChecksum(runId)! };
   }
 
   /**
