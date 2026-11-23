@@ -31,6 +31,11 @@ export const PUBLIC_EXACT: ReadonlySet<string> = new Set([
 	// handler, lives in PUBLIC_EXACT (not PREFIXES) because we want
 	// `/auth/magicfoo` to stay protected.
 	'/auth/magic',
+	// Artifact frame endpoint. A constant bootstrap document under a sandboxing policy: it
+	// reads no state, reflects nothing from the request and carries no user data. Its content
+	// arrives by message from the app window that opened or framed it, so a session adds
+	// nothing to what it can show.
+	'/_artifact-frame',
 ]);
 
 /** Prefixes that never require authentication (with trailing slash enforced). */

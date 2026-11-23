@@ -214,6 +214,27 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     expect(await rename(`a${ZWSP}`, 'x')).toMatch(/^Error: This workflow holds text saved with a character that does not show[^]*rename_step for step #2 \(id outside the allowed form\): step_id "#2"/);
   });
 
+  // A step id a run already uses (`params`), stored before a save refused it: no run of it starts
+  // (`runManifest`), so the edit names the rename that is its way out, and the rename saves.
+  it('names the rename a stored reserved step id needs, and saves it', async () => {
+    storePipeline('wf-1', makePlanned({ steps: [{ id: 'params', task: 'Fetch' }, { id: 'b', task: 'Use {{params.result}}', input_from: ['params'] }] }));
+    const edit = (modifications: unknown[]): Promise<string> =>
+      updateWorkflowTool.handler({ workflow_id: 'wf-1', modifications } as never, makeAgent(history)) as Promise<string>;
+    expect(await edit([{ action: 'update_task', step_id: 'b', value: 'Use it' }])).toBe(
+      'Error: This workflow holds a step id a run already uses for something else ("params", "__proto__" or "constructor"), which a save now refuses. Nothing was saved. Call again with this call\'s modifications and, after them:\n- rename_step for step #1 (a reserved id): step_id "#1", value a new id in the allowed form, for example fetch_orders; the steps that read it follow');
+    expect(await edit([{ action: 'rename_step', step_id: '#1', value: 'fetch' }])).toContain('✓ Updated workflow');
+    _resetPipelineStore();
+    const saved = getPipeline('wf-1', history)!.steps;
+    expect(saved.map((s) => s.id)).toEqual(['fetch', 'b']);
+    expect(saved[1]!.input_from).toEqual(['fetch']);
+    expect(saved[1]!.task).toBe('Use {{fetch.result}}');
+  });
+
+  it('the save refuses a plan with a reserved step id', () => {
+    expect(() => history.insertPlannedPipeline(makePlanned({ steps: [{ id: 'a', task: 'A' }, { id: 'constructor', task: 'B' }] }), null))
+      .toThrow('step #2 (steps[1].id): "params", "__proto__" and "constructor" cannot be step ids');
+  });
+
   // Two ids the model reads alike (review of 1099): the one it can see does not hide the other.
   it('names twin steps by position: a visible id beside one that reads the same, and two hidden twins', async () => {
     const ZWSP = String.fromCodePoint(0x200B);
