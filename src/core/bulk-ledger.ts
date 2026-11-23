@@ -2884,7 +2884,7 @@ export class BulkLedger {
         // Left out, not refused: no grant is minted for it, so its request is refused before it is
         // sent and the apply halts (`contract`). Nothing else changes here — this is also what the
         // approve and resume routes ask whether a run is a Shopify run.
-        if (html.length > 0 && !this.mintsHtml(run, r, after, html, host)) continue;
+        if (html.length > 0 && !this.mintsHtml(run, key, r, after, html, host)) continue;
         writes.push({ form, gid: key, after });
       }
     }
@@ -2904,7 +2904,7 @@ export class BulkLedger {
    * before-image byte for byte — the ledger checked against itself, not a security bound.
    */
   private mintsHtml(
-    run: RunRow, row: { before: string | null; source_seq: number | null }, after: Record<string, unknown>,
+    run: RunRow, key: string, row: { before: string | null; source_seq: number | null }, after: Record<string, unknown>,
     html: readonly string[], host: string,
   ): boolean {
     const fields = html.filter((f) => Object.hasOwn(after, f));
@@ -2918,9 +2918,11 @@ export class BulkLedger {
       if (image === undefined || image.absent || image.value === null || typeof image.value !== 'object') return false;
       const held = image.value as Record<string, unknown>;
       if (!fields.every((f) => Object.hasOwn(held, f) && canonicalJson(held[f]) === canonicalJson(after[f]))) return false;
-      // The planning check once more: the ledger may have changed since `planUndo`
-      // read the chain, and an after-state equal to the source's before-image passes the check above.
-      return !this.restoresShopAddedMarkup(run.source_run_id, row.source_seq, after, fields);
+      // The planning check once more, both terms of it: the ledger may have changed since `planUndo`
+      // read the chain or the marks of other families, and an after-state equal to the source's
+      // before-image passes the check above.
+      return !this.restoresShopAddedMarkup(run.source_run_id, row.source_seq, after, fields)
+        && this.shopMarkedWriteOf(key, after, run.source_run_id) === null;
     }
     const image = row.before === null ? null : this.parsedImage(row.before);
     // A before-image that does not parse: the write is left out, so the apply halts
