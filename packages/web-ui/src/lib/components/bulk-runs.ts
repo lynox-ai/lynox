@@ -118,6 +118,9 @@ export interface BulkRunDetailData extends BulkRun {
 	hiddenAddsTargets?: number | null | undefined;
 	/** Targets with an HTML field too large or too complex to check for hidden characters. */
 	hiddenUncheckedTargets?: number | null | undefined;
+	/** A judged run's verdicts that differ from the rest of it, where the preview can be approved;
+	 *  null elsewhere. A reading order, never a check. */
+	judgeOutliers?: BulkJudgeOutliers | null | undefined;
 	writeFormNote: string | null;
 	writeFormConfirmation: string | null;
 	judgeModel: string | null;
@@ -1411,6 +1414,76 @@ export function bulkHiddenAddsOf(target: Pick<BulkTarget, 'hiddenAdds'>, field: 
 /** Whether the engine counted a target's field as HTML, whose character references are marked too. */
 export function bulkHiddenHtml(target: Pick<BulkTarget, 'hiddenAdds'>, field: string): boolean {
 	return target.hiddenAdds?.find((h) => h.field === field)?.html === true;
+}
+
+/** Why a verdict is listed first (engine `bulk-outliers.ts`). */
+export type BulkOutlierReason = 'changed_fields' | 'length_jump' | 'new_link' | 'new_email' | 'new_phone' | 'new_script' | 'rare_value';
+export type BulkMarkerKind = 'link' | 'email' | 'phone' | 'script';
+
+export interface BulkJudgeOutliers {
+	decided: number;
+	measured: boolean;
+	flagged: { seq: number; reasons: BulkOutlierReason[] }[];
+	/** `marked`: how many of `hosts`, at its start, mark a row; absent counts as none. */
+	spread: { kind: BulkMarkerKind; count: number; hosts: string[]; marked?: number }[];
+}
+
+/** How many flagged verdicts the view lists first; the count line names the rest (U-387). */
+export const BULK_OUTLIERS_FIRST = 50;
+
+/** The targets in the order the approval view lists them: the first {@link BULK_OUTLIERS_FIRST}
+ *  flagged ones in their own order, then every other in its own order (U-387). */
+export function bulkOutlierOrder<T extends { seq: number }>(targets: readonly T[], outliers: BulkJudgeOutliers | null | undefined): T[] {
+	if (!outliers || outliers.flagged.length === 0) return [...targets];
+	const first = new Set(outliers.flagged.slice(0, BULK_OUTLIERS_FIRST).map((f) => f.seq));
+	return [...targets.filter((t) => first.has(t.seq)), ...targets.filter((t) => !first.has(t.seq))];
+}
+
+/** Each flagged target's reasons by its seq, looked up once per row. */
+export function bulkOutlierReasonMap(outliers: BulkJudgeOutliers | null | undefined): Map<number, BulkOutlierReason[]> {
+	return new Map((outliers?.flagged ?? []).map((f) => [f.seq, f.reasons]));
+}
+
+/** The line over the list (U-387): how many verdicts differ, that they come first, and that one
+ *  that does not stand out can still be wrong. Under 20 verdicts: read every one. */
+export function bulkOutlierCountText(outliers: BulkJudgeOutliers | null | undefined, i18n: BulkI18n): string | null {
+	if (!outliers) return null;
+	if (!outliers.measured) return i18n.t('bulk.outliers.small');
+	const n = outliers.flagged.length;
+	if (n === 0) return i18n.t('bulk.outliers.none');
+	if (n > BULK_OUTLIERS_FIRST) return i18n.tf('bulk.outliers.over', { n: String(n), first: String(BULK_OUTLIERS_FIRST) });
+	return i18n.tf(bulkOne('bulk.outliers.count', n), { n: String(n) });
+}
+
+/** How many hosts that mark no row a line names; the rest it counts. */
+export const BULK_SPREAD_UNMARKED_SHOWN = 5;
+/** How many hosts that mark a row a line names; the rest it counts in a sentence of its own: past
+ *  this many, a host planted among throwaway ones hides by their number, not by a fold. */
+export const BULK_SPREAD_MARKED_SHOWN = 20;
+
+/** The lines for a kind of marker many verdicts add (U-387): count, kind and hosts as text,
+ *  never as a link, with the way out. The hosts that mark a row come first, up to twenty, the rarest
+ *  first: past the first fifty flagged rows the line is the one place they show. Then up to five of the
+ *  others and how many more, and how many more marking hosts there are, in a sentence of its own. */
+export function bulkOutlierSpreadTexts(outliers: BulkJudgeOutliers | null | undefined, i18n: BulkI18n): string[] {
+	if (!outliers) return [];
+	return outliers.spread.map((s) => {
+		const n = String(s.count);
+		// A host is not running text: every hidden character in it is shown (`inPlace: false`).
+		const marked = Math.min(Math.max(s.marked ?? 0, 0), s.hosts.length);
+		const others = s.hosts.slice(marked);
+		const shownMarked = Math.min(marked, BULK_SPREAD_MARKED_SHOWN);
+		const listed = [...s.hosts.slice(0, shownMarked), ...others.slice(0, BULK_SPREAD_UNMARKED_SHOWN)].map((h) => visibleText(h, { inPlace: false }));
+		const rest = others.length - Math.min(others.length, BULK_SPREAD_UNMARKED_SHOWN);
+		const markedRest = marked - shownMarked;
+		const hosts = s.kind === 'link' || s.kind === 'email'
+			? (rest > 0
+				? i18n.tf(`bulk.outliers.spread.${s.kind}_hosts_more`, { hosts: listed.join(', '), k: String(rest) })
+				: i18n.tf(`bulk.outliers.spread.${s.kind}_hosts`, { hosts: listed.join(', ') }))
+				+ (markedRest > 0 ? i18n.tf(bulkOne(`bulk.outliers.spread.${s.kind}_marked_more`, markedRest), { m: String(markedRest) }) : '')
+			: '';
+		return i18n.tf(bulkOne(`bulk.outliers.spread.${s.kind}`, s.count), { n, hosts });
+	});
 }
 
 /** The line an approval and a probe's confirmation show when targets add hidden characters, or

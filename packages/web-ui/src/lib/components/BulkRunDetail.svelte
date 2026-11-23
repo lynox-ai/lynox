@@ -15,7 +15,7 @@
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import BulkStartDomains from './BulkStartDomains.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts,
 		type BulkRunDetailData, type BulkTarget, type BulkSentencePart,
 	} from './bulk-runs.js';
 
@@ -528,6 +528,13 @@
 	const hiddenMarked = $derived(run !== null && shownTargets.some((x) => (x.hiddenAdds?.length ?? 0) > 0 && !bulkAfterTakenBack(run!, x)));
 	const hiddenCount = $derived(run ? bulkHiddenCountText(run.hiddenAddsTargets, shopify, view) : null);
 	const uncheckedCount = $derived(run ? bulkUncheckedCountText(run.hiddenUncheckedTargets, shopify, view) : null);
+	// A judged run's verdicts that differ from the rest of it: listed first, each with its reasons, and
+	// a line over the list that says this is a reading order, not a check (U-387).
+	const outliers = $derived(approving ? run?.judgeOutliers ?? null : null);
+	const orderedTargets = $derived(bulkOutlierOrder(shownTargets, outliers));
+	const outlierReasons = $derived(bulkOutlierReasonMap(outliers));
+	const outlierCount = $derived(bulkOutlierCountText(outliers, view));
+	const outlierSpread = $derived(bulkOutlierSpreadTexts(outliers, view));
 
 	const btn = 'rounded-[var(--radius-sm)] px-3 py-1.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed';
 	const btnPrimary = `${btn} bg-accent text-accent-fg hover:opacity-90`;
@@ -661,6 +668,14 @@
 					{#if seoEntity > 0}
 						<p class="text-sm mb-2 rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-seo-entity-count">{seoEntity === 1 ? t('bulk.preview.seo_entity_one') : tf('bulk.preview.seo_entity', { n: String(seoEntity) })}</p>
 					{/if}
+					{#if outlierCount}
+						<p class="text-sm mb-2 rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-outlier-count">{outlierCount}</p>
+					{/if}
+					{#each outlierSpread as line, i (i)}
+						<!-- Hosts as text, never as a link: the warning must not be the click. They come from verdict
+						     text, so a hidden character in one is shown. -->
+						<p class="text-sm mb-2 rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2 [overflow-wrap:anywhere]" data-testid="bulk-outlier-spread">{bulkVisibleText(line)}</p>
+					{/each}
 					{#if hiddenMarked}
 						<p class="text-sm mb-2 text-text-muted" data-testid="bulk-hidden-legend">{t('bulk.hidden.legend')}</p>
 					{/if}
@@ -673,7 +688,7 @@
 								</tr>
 							</thead>
 							<tbody>
-								{#each shownTargets as target (target.seq)}
+								{#each orderedTargets as target (target.seq)}
 									<tr class="border-b border-border align-top {target.deselected ? 'opacity-60' : ''}">
 										<td class="py-1.5 pr-3">
 											{@render targetName(target)}
@@ -686,6 +701,9 @@
 											{#if (target.seoEntityFields?.length ?? 0) > 0}
 												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-seo-entity">{t('bulk.target.seo_entity')}</span>
 											{/if}
+											{#each outlierReasons.get(target.seq) ?? [] as reason (reason)}
+												<span class="ml-1 inline-block whitespace-nowrap rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-outlier">{t(`bulk.outlier.${reason}`)}</span>
+											{/each}
 											{#if bulkRollbackLeft(run, target)}
 												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-rollback-left">{t('bulk.target.not_taken_back')}</span>
 											{/if}
