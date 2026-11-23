@@ -270,3 +270,19 @@ describe('what does not count as dealing with the thread', () => {
     expect(f).toMatchObject({ count: 1, latestAt: '2026-11-04T10:00:00.000Z' });
   });
 });
+
+describe('a snooze after a reply still marks the reply as dealt with', () => {
+  it('replied, then snoozed, then a flagged mail raises: the answered mail is not counted again', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    inbox.updateUserAction(id, 'replied', new Date());
+    inbox.appendAudit({ itemId: id, action: 'replied', actor: 'system', payloadJson: '{}' });
+    inbox.updateUserAction(id, 'snoozed', new Date());
+    await hook()(ACCOUNT.id, envelope({
+      messageId: '<otp@x>', uid: 3, date: new Date(Date.now() + 1_000), subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.',
+    }));
+    expect(inbox.getItem(id)?.userAction).toBeUndefined();
+    const [f] = followUpsOnEveryRoute(id) as Array<Record<string, unknown>>;
+    expect(f).toMatchObject({ count: 1 });
+  });
+});

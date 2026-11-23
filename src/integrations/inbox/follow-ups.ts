@@ -125,8 +125,8 @@ function lastHandledAt(
   // A reply (through lynox, recorded by the system) or an archive (by the owner) dealt with the
   // thread only if a follow-up then opened the item again: an open item whose last reply or archive
   // is followed by nothing had it undone (a bulk undo leaves no audit), and counts from before it.
-  // A raise names the action it ended (`prior_user_action`): one that ended none comes after an
-  // undone action, and a clear of a snooze undoes nothing the owner answered.
+  // A raise names the action it ended (`prior_user_action`, a snooze after a reply included): one
+  // that ended none comes after an undone action. A clear of a snooze undoes nothing answered.
   let pending: Date | undefined;
   for (const a of audit) {
     if (a.action === 'replied' || a.action === 'archived') pending = a.createdAt;
@@ -136,7 +136,7 @@ function lastHandledAt(
       pending = undefined;
     } else if (a.action === 'raised_on_sensitive_follow_up') {
       const prior = payloadOf(a)['prior_user_action'];
-      if (prior === 'replied' || prior === 'archived') later(pending);
+      if (prior !== null && prior !== undefined) later(pending);
       pending = undefined;
     }
   }
