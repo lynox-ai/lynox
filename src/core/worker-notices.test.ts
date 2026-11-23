@@ -44,7 +44,7 @@ function workerSamples(n: WorkerNotices): Record<string, string> {
   return {
     consentManyTitle: n.consentManyTitle(4), consentManyBody: n.consentManyBody, consentOneTitle: n.consentOneTitle,
     consentOneBody: n.consentOneBody('Wochenbericht', true), failed: n.failed('E'), stoppedWith: n.stoppedWith('E'),
-    stopped: n.stopped, memberEndForMandates: n.memberEndForMandates, titleWithNote: n.titleWithNote, chipRunAgain: n.chipRunAgain, chipRetry: n.chipRetry, chipExplain: n.chipExplain,
+    stopped: n.stopped, memberEndForMandates: n.memberEndForMandates, titleWithNote: n.titleWithNote('Wochenbericht'), chipRunAgain: n.chipRunAgain, chipRetry: n.chipRetry, chipExplain: n.chipExplain,
     containedResult: n.containedResult, containedQuestion: n.containedQuestion, containedQuestionInquiry: n.containedQuestionInquiry,
     workflowIncomplete: n.workflowIncomplete('Wochenbericht', 'failed'), errorLabel: n.errorLabel,
     affectedStepsLabel: n.affectedStepsLabel, writesLabel: n.writesLabel, workflowRef: n.workflowRef('r-1', 'w-1'),
@@ -748,7 +748,7 @@ describe('a halt only the owner can resolve, as each reader gets it (bulkHaltFor
 describe('the push title of a bulk run (bulkPushTitle, U-324)', () => {
   it('names the stage, how it ended and the host, in each language, as they are worded', () => {
     const stages = { bulk_preview: ['Vorschau', 'Preview'], bulk_judge: ['Beurteilung', 'Judging'], bulk_apply: ['Massenlauf', 'Bulk run'], bulk_undo: ['Rücknahme', 'Undo'] } as const;
-    const ends = { success: ['fertig', 'done'], halted: ['angehalten', 'halted'], failed: ['fehlgeschlagen', 'failed'], interrupted: ['unterbrochen', 'interrupted'], stopped: ['gestoppt', 'stopped'] } as const;
+    const ends = { success: ['fertig', 'done'], noted: ['fertig, mit Hinweis', 'done, with a note'], halted: ['angehalten', 'halted'], failed: ['fehlgeschlagen', 'failed'], interrupted: ['unterbrochen', 'interrupted'], stopped: ['gestoppt', 'stopped'] } as const;
     for (const [effect, [deStage, enStage]] of Object.entries(stages)) {
       for (const [end, [deEnd, enEnd]] of Object.entries(ends)) {
         const e = effect as keyof typeof stages;

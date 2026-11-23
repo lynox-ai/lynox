@@ -244,7 +244,7 @@ const RUN_END_LOOK = {
   halted: { status: 'halted', mark: '\u23F8', priority: 'normal' },
   /** A run that finished and noted member-connection lines: recorded as halted, so the same
    *  refusal is not pushed again (`memberNotesRepeat`), but nothing waits, so no ⏸ (U-420). Its
-   *  title carries `titleWithNote` after the mark, since ⚠ also marks an interrupted run. */
+   *  title leads with `titleWithNote`, since ⚠ also marks an interrupted run. */
   noted: { status: 'halted', mark: '\u26A0', priority: 'normal' },
   interrupted: { status: 'interrupted', mark: '\u26A0', priority: 'high' },
   /** A run kept from starting because someone it depends on has lost access: no retry, since
@@ -3458,7 +3458,7 @@ export class WorkerLoop {
         // finish) nor ✗ at high priority (nothing went wrong). The budget word stays in
         // the body; the title answers who ended it.
         title: endedByOwner ? `\u23f9 ${task.title}` : budgetCut !== null ? `\u2717 ${task.title}`
-          : memberTold.status === 'halted' ? `${RUN_END_LOOK.noted.mark} ${task.title}${notices.titleWithNote}` : `\u2713 ${task.title}`,
+          : memberTold.status === 'halted' ? `${RUN_END_LOOK.noted.mark} ${notices.titleWithNote(task.title)}` : `\u2713 ${task.title}`,
         body: bodyOf(memberSaid),
         taskId: task.id,
         priority: endedByOwner || budgetCut === null ? 'normal' : 'high',
@@ -3994,10 +3994,10 @@ export class WorkerLoop {
     // owner looks for it.
     if (this.#runSlotOf(task.id)?.event !== undefined) return;
     if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, notes)) {
-      const shownEnd: BulkPushEnd = finishedWithNote ? 'success'
+      const shownEnd: BulkPushEnd = finishedWithNote ? 'noted'
         : told.status === 'failed' && this.#bulkRunHalted(task) ? 'halted'
         : told.status === 'stopped' && this.#bulkRunDiscarded(task) ? 'discarded' : told.status;
-      const title = `${toldLook.mark} ${this.#pushTitleOf(task, shownEnd)}${finishedWithNote ? WORKER_NOTICES[lang].titleWithNote : ''}`;
+      const title = `${toldLook.mark} ${this.#pushTitleOf(task, shownEnd)}`;
       const readers = !byReader ? null : bulkHaltForReaders(haltRow.haltReason, told.result, lang);
       const withLines = notes.length > 0;
       const message = { title, body: told.result, taskId: task.id, priority: toldLook.priority };
@@ -4119,7 +4119,9 @@ export class WorkerLoop {
    */
   #pushTitleOf(task: TriggerRecord, end: BulkPushEnd): string {
     const effect = task.effect;
-    if (effect !== 'bulk_preview' && effect !== 'bulk_judge' && effect !== 'bulk_apply' && effect !== 'bulk_undo') return task.title;
+    if (effect !== 'bulk_preview' && effect !== 'bulk_judge' && effect !== 'bulk_apply' && effect !== 'bulk_undo') {
+      return end === 'noted' ? WORKER_NOTICES[noticeLanguage(this.engine.config?.language)].titleWithNote(task.title) : task.title;
+    }
     // The host is a read of the ledger: a read that fails costs the title its host, never the push.
     let system: string | undefined;
     try {

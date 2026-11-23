@@ -87,8 +87,8 @@ describe('a halted bulk run\'s end, as each reader gets it (U-383)', () => {
       noteMemberConnection('Connection not used: the model\'s line', () => ({ en: 'Connection not used: a note.', de: 'Verbindung nicht genutzt: eine Notiz.' }));
       h.end('Fertig.', undefined, true);
     }).done;
-    const title = `\u26A0 ${bulkPushTitle('bulk_apply', 'success', 'api:acme.myshopify.com', 'de')}${WORKER_NOTICES.de.titleWithNote}`;
-    expect(title).toBe('\u26A0 Massenlauf fertig (mit Hinweis)');
+    const title = `\u26A0 ${bulkPushTitle('bulk_apply', 'noted', 'api:acme.myshopify.com', 'de')}`;
+    expect(title).toBe('\u26A0 Massenlauf fertig, mit Hinweis');
     expect(h.sent.map((m) => [m.audience, m.title, m.priority])).toEqual([['owner', title, 'normal'], ['all_mandates', title, 'normal']]);
     // Still recorded as halted: the repeat check reads it.
     expect(h.recordedNotes).toEqual([['Connection not used: a note.']]);
