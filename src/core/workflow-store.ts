@@ -563,7 +563,7 @@ export class WorkflowStore {
    * which the mirror tracks via `updated_at`), so `ORDER BY updated_at DESC` ==
    * legacy `ORDER BY started_at DESC`. `step_count` is derived from the blob (the
    * http-api mapper prefers `parsed.steps.length` anyway). A blob that is not valid
-   * JSON counts 0 steps rather than failing the query: SQLite's JSON functions throw
+   * JSON counts 0 steps rather than failing the query: `json_array_length` throws
    * on it, and one unreadable definition would otherwise fail the whole list (the
    * library skips such a row when it parses the blob).
    */
