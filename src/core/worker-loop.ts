@@ -3707,11 +3707,14 @@ export class WorkerLoop {
       return;
     }
 
-    // A step refers to the output of a step it does not read: a retry meets the same refusal, so it is
-    // recorded as a failure without one and told in the owner's words (a webhook run's by its event).
-    // The record keeps the full refusal, which says how to repair it (`template-refs.ts`).
-    if (!result.ok && result.unresolvedRefStep !== undefined) {
-      const told = this.#notices().workflowRefUnresolved(result.unresolvedRefStep);
+    // A step refers to the output of a step it does not read, or has an id a run already uses: a retry
+    // meets the same refusal, so it is recorded as a failure without one and told in the owner's words
+    // (a webhook run's by its event). The record keeps the full refusal, which says how to repair it
+    // (`template-refs.ts`).
+    if (!result.ok && (result.unresolvedRefStep !== undefined || result.reservedIdStep !== undefined)) {
+      const told = result.reservedIdStep !== undefined
+        ? this.#notices().workflowStepIdReserved(result.reservedIdStep)
+        : this.#notices().workflowRefUnresolved(result.unresolvedRefStep!);
       endEvent(this.#runSlotOf(task.id), { state: 'failed', reason: told, runId: result.runId });
       this.recordAndNotify(task, result.error ?? told, false, told, { noRetry: true });
       return;
