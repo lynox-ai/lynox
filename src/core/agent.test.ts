@@ -6871,6 +6871,7 @@ describe('a call answered without running keeps its own answer when its result e
     const logged = await sendQuietly(agent);
     expect(tool.handler).not.toHaveBeenCalled();
     expect(seen.find(e => e.toolUseId === 'tu_c')?.contained).toBeDefined();
+    expect(String(modelBlock(agent, 'tu_c')?.content)).toContain('Not run: this chat');
     expectOwnAnswer(agent, 'tu_c', seen, logged, 'bash');
   });
 
