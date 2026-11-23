@@ -427,7 +427,9 @@ describe('a refusal keeps its own answer when its result event throws', () => {
     const tool = sender();
     const { seen, onStream } = throwing();
     const agent = agentOf({ tools: [tool], promptUser: asker('Allow').fn, ownerKnown: owner('anna@firma.ch'), onStream });
-    const { result, logged } = await quietly(() => call(agent, 'mail_send', { to: ['not an address'] }));
+    const outcome = await quietly(() => call(agent, 'mail_send', { to: ['not an address'] })).catch((err: unknown) => err);
+    expect(outcome, 'the stream\'s throw does not become the call\'s outcome').not.toBeInstanceOf(Error);
+    const { result, logged } = outcome as { result: Result; logged: string[] };
     expect(tool.calls).toEqual([]);
     expect(seen).toHaveLength(1);
     expect(result.is_error).toBe(true);
@@ -441,7 +443,9 @@ describe('a refusal keeps its own answer when its result event throws', () => {
     const tool = sender('http_request');
     const { seen, onStream } = throwing();
     const agent = agentOf({ tools: [tool], autonomy: 'autonomous', sendOrigin: { kind: 'workflowRun', name: 'Abgleich' }, onStream });
-    const { result, logged } = await quietly(() => call(agent, 'http_request', { url: 'https://api.evil.example/x' }));
+    const outcome = await quietly(() => call(agent, 'http_request', { url: 'https://api.evil.example/x' })).catch((err: unknown) => err);
+    expect(outcome, 'the stream\'s throw does not become the call\'s outcome').not.toBeInstanceOf(Error);
+    const { result, logged } = outcome as { result: Result; logged: string[] };
     expect(tool.calls).toEqual([]);
     expect(seen).toHaveLength(1);
     expect(result.is_error).toBe(true);
