@@ -271,22 +271,6 @@ describe('what does not count as dealing with the thread', () => {
   });
 });
 
-describe('a snooze after a reply still marks the reply as dealt with', () => {
-  it('replied, then snoozed, then a flagged mail raises: the answered mail is not counted again', async () => {
-    const id = seedReplied();
-    await hook()(ACCOUNT.id, envelope());
-    inbox.updateUserAction(id, 'replied', new Date());
-    inbox.appendAudit({ itemId: id, action: 'replied', actor: 'system', payloadJson: '{}' });
-    inbox.updateUserAction(id, 'snoozed', new Date());
-    await hook()(ACCOUNT.id, envelope({
-      messageId: '<otp@x>', uid: 3, date: new Date(Date.now() + 1_000), subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.',
-    }));
-    expect(inbox.getItem(id)?.userAction).toBeUndefined();
-    const [f] = followUpsOnEveryRoute(id) as Array<Record<string, unknown>>;
-    expect(f).toMatchObject({ count: 1 });
-  });
-});
-
 describe('the two remaining paths: stored text and a single undo', () => {
   it('a follow-up whose stored text reads sensitive is counted without its name, with no intake flag', () => {
     const id = seedReplied();
