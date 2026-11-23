@@ -153,9 +153,11 @@ describe('the status bar names the period of its cost', () => {
 		await mountIn('de');
 		shown().phoneButton.click();
 		await settle();
-		const costTile = [...target.querySelectorAll<HTMLAnchorElement>('a[href="/app/activity"]')].find((a) => a.querySelector('p.text-lg'));
-		expect(costTile, 'the panel opened').toBeDefined();
+		const costTile = target.querySelector<HTMLAnchorElement>('a[data-panel-cost]');
+		expect(costTile, 'the panel opened').not.toBeNull();
 		expect(costTile?.querySelector('p.text-lg')?.textContent?.trim()).toBe(tile);
+		// Unknown is said, as on the bars; a known figure, a real zero included, is named by its text.
+		expect(costTile?.getAttribute('aria-label') ?? null).toBe(tile === '-' ? 'Kosten heute unbekannt' : null);
 	});
 
 	it.each([

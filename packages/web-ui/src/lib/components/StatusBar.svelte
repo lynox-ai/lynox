@@ -627,6 +627,8 @@
 						href="/app/activity"
 						onclick={closePanel}
 						class="bg-bg-muted rounded-[var(--radius-sm)] px-3 py-2 hover:bg-bg hover:text-text transition-colors"
+						data-panel-cost
+						aria-label={todayCost === null ? todayCostSpoken : undefined}
 					>
 						<p class="text-lg font-semibold text-text">{todayCost === null ? '-' : todayCostAmount(todayCost)}</p>
 						<p class="text-xs text-text-subtle">{t('status.cost')}</p>
