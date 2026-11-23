@@ -684,8 +684,8 @@ async function drainQueueNow(due: { sid: string | null; gen: number }): Promise<
 	// The fetch never rejects (`loadChangeset` answers false instead).
 	while (_changesetFetch) await _changesetFetch;
 	if (_drainDue === due) _drainDue = null;
-	// Leaving a thread without opening another (newChat) empties the queue, so the opening says it.
-	if (_resumeGeneration !== due.gen || pendingChangeset || isStreaming || messageQueue.length === 0) return;
+	// A new chat (newChat) leaves the opening as it is: the thread says it.
+	if (sessionId !== due.sid || _resumeGeneration !== due.gen || pendingChangeset || isStreaming || messageQueue.length === 0) return;
 	const next = messageQueue.shift()!;
 	persistChatNow(); // queue shrank — keep the durable copy in sync
 	await _executeRun(next.task, next.files, undefined, next.runOptions, next.id);

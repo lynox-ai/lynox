@@ -29,6 +29,7 @@ let changesetFails: boolean;
 let saved: Map<string, string>;
 /** While set, opening thread t1 again waits until it resolves. */
 let holdReopenT1: Promise<void> | null;
+let newSessions: number;
 
 const notes = [{ file: 'notes.md', status: 'modified', diff: '-a\n+b' }];
 
@@ -37,10 +38,10 @@ function serve(): void {
 		const url = String(input);
 		if (url.endsWith('/changeset/review')) return json({ ok: reviewStatus === 200 }, reviewStatus);
 		if (url.endsWith('/sessions')) {
-			// A thread that is opened again keeps its id; a new chat gets t1.
 			const body = init?.body ? JSON.parse(String(init.body)) as { threadId?: string } : {};
 			if (body.threadId === 't1' && holdReopenT1) await holdReopenT1;
-			return json({ sessionId: body.threadId ?? 't1' });
+			// A thread opened again keeps its id; new chats get t1, then t2.
+			return json({ sessionId: body.threadId ?? (newSessions++ === 0 ? 't1' : 't2') });
 		}
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
 		if (url.endsWith('/run')) {
@@ -90,6 +91,7 @@ beforeEach(async () => {
 	holdChangeset = null;
 	holdLaterRuns = null;
 	holdReopenT1 = null;
+	newSessions = 0;
 	reviewStatus = 200;
 	changesetFails = false;
 	serve();
@@ -182,6 +184,34 @@ describe('a turn queued behind a run waits for the review that run left open', (
 		await settle();
 		expect(runTasks, 'one turn started').toEqual(['edit the notes', 'then this']);
 		expect(store.getMessages().find((m) => m.content === 'sent while offline')?.queued, 'the other waits behind it').toBe(true);
+	});
+
+	it('a drain still waiting from the chat left for a new one does not start a second turn there', async () => {
+		const release = await queueBehindRun(); // in t1
+		changed = notes;
+		let answer!: () => void;
+		holdChangeset = new Promise<void>((r) => { answer = r; });
+		release();
+		await settle(); // t1's drain is due and will wait for t1's review fetch
+		store.newChat();
+		changed = [];
+		let releaseA!: () => void;
+		holdLaterRuns = new Promise<void>((r) => { releaseA = r; });
+		void store.sendMessage('A');
+		await settle();
+		holdLaterRuns = new Promise<void>(() => {}); // the turn after A keeps streaming
+		await store.sendMessage('B');
+		await store.sendMessage('C');
+		expect(store.getQueueLength(), 'positive control: two turns wait in the new chat').toBe(2);
+		releaseA();
+		await settle();
+		await wait(200); // the new chat's drain is due too and waits for the same fetch
+		answer();
+		await settle();
+		await wait(50);
+		await settle();
+		expect(runTasks, 'one turn started in the new chat').toEqual(['edit the notes', 'A', 'B']);
+		expect(store.getMessages().find((m) => m.content === 'C')?.queued, 'the other waits behind it').toBe(true);
 	});
 
 	it('with no review the queued turn is sent after the run (control)', async () => {
