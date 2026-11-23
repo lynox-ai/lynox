@@ -8,6 +8,7 @@
 	import Icon from '../primitives/Icon.svelte';
 	import PresetClientForm from './PresetClientForm.svelte';
 	import { connectionLine, type ConnectionLine, type OAuthGrantView } from '../utils/oauth-connection.js';
+	import { authChipLabel } from '../utils/api-auth-label.js';
 	import { localDay, noticesByProfile, revocationView, type ProviderNotice } from '../utils/provider-revocation.js';
 	import { connectHref } from '../oauth-connect-path.js';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
@@ -181,11 +182,10 @@
 							class="flex-1 px-4 py-3 text-left hover:bg-bg-muted transition-colors">
 							<div class="flex items-center gap-2">
 								<span class="text-sm font-medium">{profile.name}</span>
-								{#if profile.auth}<span class="text-xs rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{profile.auth.type}</span>{/if}
+								{#if authChipLabel(profile.auth)}{@const chip = authChipLabel(profile.auth)!}<span class="text-xs rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted" data-testid="api-auth-chip">{chip.values ? tf(chip.key, chip.values) : t(chip.key)}</span>{/if}
 							</div>
 							<p class="text-xs text-text-subtle mt-1 font-mono">{profile.base_url}</p>
 							{#if connectionLine(profile.oauth_grant)}<p class="text-xs text-text-muted mt-1" data-testid="api-connection">{connectionText(connectionLine(profile.oauth_grant)!)}</p>{/if}
-							{#if profile.description}<p class="text-xs text-text-muted mt-1">{profile.description}</p>{/if}
 						</button>
 						<button onclick={() => manageInChat(profile)}
 							aria-label={t('apis.manage_in_chat')}
@@ -249,6 +249,13 @@
 					{#if onBuiltInProvider(profile) && isOwnerSession()}
 						<div class="border-t border-border px-4 py-3">
 							<PresetClientForm profileId={profile.id} />
+						</div>
+					{/if}
+					<!-- The description is free text the profile was written with, a word or a sentence; under
+					     its label in the opened card, whole and wrapped, not unlabelled in the head. -->
+					{#if expanded === profile.id && profile.description}
+						<div class="border-t border-border px-4 py-3">
+							<p class="text-xs text-text-muted whitespace-normal break-words" data-testid="api-description">{tf('apis.description', { text: profile.description })}</p>
 						</div>
 					{/if}
 					{#if expanded === profile.id && profile.endpoints && profile.endpoints.length > 0}

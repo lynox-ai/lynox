@@ -2137,6 +2137,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	// Tasks into a section).
 	'settings.save': { de: 'Speichern', en: 'Save' },
 	'settings.saving': { de: 'Speichern...', en: 'Saving...' },
+	// The card's chip for how a profile signs in (utils/api-auth-label.ts), and its free description,
+	// shown labelled in the opened card.
+	'apis.auth_signin_via': { de: 'Anmeldung über {provider}', en: 'Sign-in via {provider}' },
+	'apis.auth_signin_provider': { de: 'Anmeldung beim Anbieter', en: 'Sign-in with the provider' },
+	'apis.auth_api_key': { de: 'API-Schlüssel', en: 'API key' },
+	'apis.auth_basic': { de: 'Benutzername und Passwort', en: 'Username and password' },
+	'apis.description': { de: 'Beschreibung: {text}', en: 'Description: {text}' },
 	'settings.saved': { de: 'Gespeichert', en: 'Saved' },
 	// A settings page in a mandate's session (ux U-104): the owner sets these, the mandate sees them.
 	'mail.owner_only_notice': { de: 'Postfächer verbindet nur der Inhaber dieser Instanz. Bitte den Inhaber, das Postfach in den Einstellungen unter „{label}“ zu verbinden.', en: 'Only the owner of this instance connects mailboxes. Ask the owner to connect the mailbox in Settings under “{label}”.' },
