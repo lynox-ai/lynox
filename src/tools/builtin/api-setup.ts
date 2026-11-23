@@ -41,7 +41,7 @@ import type { PromptText } from '../../types/agent.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
-import { isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
+import { OWNER_PRINCIPAL, isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
 import { ownersCleanBatch } from '../../core/owner-clean-batch.js';
 import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
 import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
@@ -1849,8 +1849,12 @@ function releaseDestinations(profile: ApiProfile): { hosts: string[]; withDetail
 function releaseVersionNote(agent: IAgent, apiStore: ApiStore, profile: ApiProfile): string {
   if (!isMandateAuthored(profile)) return '';
   // Only an owner's interactive turn counts as a read the question may name: a workflow or worker
-  // run, or an autonomous turn, reads the profile without anyone being shown it.
-  if (isOwnerPrincipal(agent.principal) && agent.autonomy !== 'autonomous' && agent.promptUser !== undefined) {
+  // run, or an autonomous turn, reads the profile without anyone being shown it. A trigger's,
+  // workflow's or task's run carries its run tag as author under the owner's principal, and a
+  // sub-agent a run origin of its own while it forwards the parent's prompt; neither showed the
+  // owner the profile (the same reading as `ownersCleanBatch`).
+  if (isOwnerPrincipal(agent.principal) && agent.writeAuthor === principalTag(OWNER_PRINCIPAL)
+    && agent.sendOrigin === undefined && agent.autonomy !== 'autonomous' && agent.promptUser !== undefined) {
     apiStore.noteOwnerView(profile.id, bindingOf(profile), new Date());
   }
   const trailId = apiStore.trailIdOf(profile.id);

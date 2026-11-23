@@ -17,7 +17,8 @@ import { EngineDb } from '../../core/engine-db.js';
 import { SecretReleases } from '../../core/secret-releases.js';
 import { bindingOf, releaseBinding, settingsVersion } from '../../core/profile-secret-view.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
-import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
+import { OWNER_PRINCIPAL, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
+import type { SendOrigin } from '../../core/origin-notices.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
@@ -80,9 +81,13 @@ const bearer = (over: Partial<ApiProfile> = {}): ApiProfile => ({
 
 function agentOf(apiStore: ApiStore, v: unknown, opts: {
   principal?: RequestPrincipal; promptUser?: (q: unknown) => Promise<string>; autonomy?: 'autonomous' | 'guided'; userTimezone?: string;
+  writeAuthor?: string | null; sendOrigin?: SendOrigin;
 } = {}): never {
   return {
     principal: opts.principal ?? OWNER_PRINCIPAL,
+    // A session sets the author of its own turns to its principal's tag; a run sets its run tag.
+    writeAuthor: 'writeAuthor' in opts ? opts.writeAuthor : principalTag(opts.principal ?? OWNER_PRINCIPAL),
+    sendOrigin: opts.sendOrigin,
     sessionCounters: { httpRequests: 0 },
     secretStore: v,
     autonomy: opts.autonomy,
@@ -507,6 +512,10 @@ describe('release_secret: the question carries no text a mandate\'s turn wrote',
       ['a workflow or worker run, with no one to prompt', { promptUser: undefined }],
       // A prompt channel present, so only the autonomy decides.
       ['an autonomous turn', { autonomy: 'autonomous' as const, promptUser: async () => 'Deny' }],
+      // A sub-agent forwards its parent's prompt and runs under the owner's principal.
+      ['a sub-agent, which forwards the owner\'s prompt', { sendOrigin: { kind: 'childAgent' } as SendOrigin, promptUser: async () => 'Deny' }],
+      // A trigger's, workflow's or task's run carries its run tag as author, not the owner's.
+      ['a run that is not the owner\'s chat, with a prompt channel', { writeAuthor: 'workflow:run-1', promptUser: async () => 'Deny' }],
     ])('does not count the owner\'s view from %s as a read', async (_label, opts) => {
       const p = plain();
       const { apf, apiStore } = await questionFor(p);
