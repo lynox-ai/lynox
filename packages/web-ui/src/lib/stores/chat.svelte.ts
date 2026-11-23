@@ -659,29 +659,36 @@ let isOffline = $state(typeof navigator !== 'undefined' ? !navigator.onLine : fa
 
 /** The changeset fetch in flight, so a drain that starts meanwhile waits for what it says. */
 let _changesetFetch: Promise<boolean> | null = null;
-/** The thread a drain is due or waiting for: a second one asked for there meanwhile is the
- *  same one. A drain asked for in another thread is its own; the earlier one drops itself. */
-let _drainDueFor: string | null | undefined;
+/** The last changeset fetch got no answer: whether a review is open is not known. */
+let _changesetUnknown = false;
+/** The opening of a thread a drain is due or waiting for. A second drain asked for in the same
+ *  opening is the same one; one asked for after the thread was opened (again) is its own, and
+ *  the earlier one drops itself. */
+let _drainDue: { sid: string | null; gen: number } | null = null;
 
 /**
  * Start the next queued turn after `delayMs`. Every automatic send from the queue goes through
  * here. When the turn would start, an open changeset review holds it, also one whose fetch is
- * still in flight, and so does a running turn; a drain asked for in another thread is dropped.
- * A held turn stays first in the queue; an answered review starts it. One drain at a time, so
+ * still in flight or whose last fetch got no answer (the drain asks again), and so does a
+ * running turn. A drain asked for before the thread was left or opened again is dropped. A
+ * held turn stays first in the queue; an answered review starts it. One drain at a time, so
  * two that wait for the same fetch do not start two turns.
  */
 function drainQueueSoon(delayMs: number): void {
-	if (messageQueue.length === 0 || _drainDueFor === sessionId) return;
-	const sid = sessionId;
-	_drainDueFor = sid;
-	setTimeout(() => { void drainQueueNow(sid); }, delayMs);
+	if (messageQueue.length === 0) return;
+	if (_drainDue && _drainDue.sid === sessionId && _drainDue.gen === _resumeGeneration) return;
+	const due = { sid: sessionId, gen: _resumeGeneration };
+	_drainDue = due;
+	setTimeout(() => { void drainQueueNow(due); }, delayMs);
 }
 
-async function drainQueueNow(sid: string | null): Promise<void> {
+async function drainQueueNow(due: { sid: string | null; gen: number }): Promise<void> {
+	const current = (): boolean => sessionId === due.sid && _resumeGeneration === due.gen;
 	// The fetch never rejects (`loadChangeset` answers false instead).
 	while (_changesetFetch) await _changesetFetch;
-	if (_drainDueFor === sid) _drainDueFor = undefined;
-	if (sessionId !== sid || pendingChangeset || isStreaming || messageQueue.length === 0) return;
+	if (current() && _changesetUnknown && !pendingChangeset) await fetchChangeset();
+	if (_drainDue === due) _drainDue = null;
+	if (!current() || pendingChangeset || _changesetUnknown || isStreaming || messageQueue.length === 0) return;
 	const next = messageQueue.shift()!;
 	persistChatNow(); // queue shrank — keep the durable copy in sync
 	await _executeRun(next.task, next.files, undefined, next.runOptions, next.id);
@@ -3485,18 +3492,27 @@ function fetchChangeset(): Promise<boolean> {
 }
 
 async function loadChangeset(): Promise<boolean> {
-	if (!sessionId) return false;
+	const sid = sessionId;
+	if (!sid) return false;
 	changesetLoading = true;
 	try {
-		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset`);
-		if (!res.ok) return false;
+		const res = await fetch(`${getApiBase()}/sessions/${sid}/changeset`);
+		// The answer is about a thread no longer shown: it says nothing about this one.
+		if (sessionId !== sid) return false;
+		if (!res.ok) { _changesetUnknown = true; return false; }
 		const data = (await res.json()) as { hasChanges: boolean; runId?: string; files: ChangesetFileInfo[] };
+		if (sessionId !== sid) return false;
 		if (data.hasChanges && data.files.length > 0) {
 			pendingChangeset = data.files;
 			pendingChangesetRunId = data.runId ?? null;
 		}
+		_changesetUnknown = false;
 		return true;
-	} catch { return false; /* best-effort — don't block UX */ }
+	} catch {
+		// Best-effort for the screen; a queued turn waits until a fetch answers.
+		if (sessionId === sid) _changesetUnknown = true;
+		return false;
+	}
 	finally { changesetLoading = false; }
 }
 
@@ -3552,9 +3568,10 @@ export async function submitChangesetReview(
 	// The answer did nothing. Closing the review silently would read as done: say so, and show
 	// what is pending now. 409 is the review of an earlier run, or a run in progress.
 	addToast(t(status === 409 ? 'changeset.review_refused' : 'changeset.review_failed'), 'info', 5000);
-	// Only an answer from the server says nothing is pending: a failed fetch leaves no review
-	// shown, and the queued turns would go past the one the server still holds.
-	if (await fetchChangeset()) drainQueueSoon(100);
+	// Only an answer from the server says nothing is pending: after a failed fetch no review is
+	// shown, and the queued turns would go past the one the server still holds. The drain asks.
+	await fetchChangeset();
+	drainQueueSoon(100);
 }
 
 export function cancelQueue(): void {
@@ -3983,6 +4000,7 @@ export function newChat() {
 	pendingSecretPrompt = null;
 	pendingMailConnect = null;
 	pendingChangeset = null;
+	_changesetUnknown = false;
 	changesetLoading = false;
 	skipExtraction = false;
 	threadContained = false;
@@ -4345,6 +4363,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 	pendingSecretPrompt = null;
 	pendingMailConnect = null;
 	pendingChangeset = null;
+	_changesetUnknown = false;
 	changesetLoading = false;
 	skipExtraction = false;
 	threadContained = false;

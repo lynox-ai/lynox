@@ -27,6 +27,8 @@ let holdLaterRuns: Promise<void> | null;
 let reviewStatus: number;
 let changesetFails: boolean;
 let saved: Map<string, string>;
+/** While set, opening thread t1 again waits until it resolves. */
+let holdReopenT1: Promise<void> | null;
 
 const notes = [{ file: 'notes.md', status: 'modified', diff: '-a\n+b' }];
 
@@ -37,6 +39,7 @@ function serve(): void {
 		if (url.endsWith('/sessions')) {
 			// A thread that is opened again keeps its id; a new chat gets t1.
 			const body = init?.body ? JSON.parse(String(init.body)) as { threadId?: string } : {};
+			if (body.threadId === 't1' && holdReopenT1) await holdReopenT1;
 			return json({ sessionId: body.threadId ?? 't1' });
 		}
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
@@ -86,6 +89,7 @@ beforeEach(async () => {
 	holdFirstRun = null;
 	holdChangeset = null;
 	holdLaterRuns = null;
+	holdReopenT1 = null;
 	reviewStatus = 200;
 	changesetFails = false;
 	serve();
@@ -170,13 +174,34 @@ describe('a turn queued behind a run waits for the review that run left open', (
 		listeners.online!();
 		await settle();
 		expect(store.getMessages().find((m) => m.content === 'sent while offline')?.queued, 'positive control: queued for the re-send').toBe(true);
-		await wait(700); // both drains are due and wait for the fetch
+		await wait(700); // the re-send's drain was folded into the one that waits for the fetch
 		changed = []; // the server answers: nothing to review
 		answer();
 		await settle();
 		await wait(50);
 		await settle();
 		expect(runTasks, 'one turn started, the other waits behind it').toEqual(['edit the notes', 'then this']);
+	});
+
+	it('a run whose review fetch got no answer holds the queued turn, and a later drain asks again', async () => {
+		const release = await queueBehindRun();
+		changed = notes;
+		changesetFails = true;
+		release();
+		await settle();
+		await wait(200);
+		await settle();
+		expect(store.getPendingChangeset(), 'positive control: no review could be shown').toBeNull();
+		expect(runTasks, 'nothing sent while it is unknown whether a review is open').toEqual(['edit the notes']);
+		expect(store.getMessages().find((m) => m.content === 'then this')?.queued, 'the turn keeps its place').toBe(true);
+		// The server answers again, and there is nothing to review: the next drain asks and sends it.
+		changesetFails = false;
+		changed = [];
+		await store.sendMessage('more');
+		await settle();
+		await wait(200);
+		await settle();
+		expect(runTasks).toEqual(['edit the notes', 'more', 'then this']);
 	});
 
 	it('with no review the queued turn is sent after the run (control)', async () => {
@@ -207,6 +232,7 @@ describe('a turn queued before a reload waits for the review the server holds', 
 		await settle();
 		expect(store.getPendingChangeset(), 'the review the server holds is shown').not.toBeNull();
 		expect(runTasks, 'nothing sent past it').toEqual([]);
+		expect(store.getMessages().find((m) => m.content === 'typed before reload')?.queued, 'the turn stays queued').toBe(true);
 	});
 
 	it('a re-send due in the thread left behind neither sends there nor stops the restored turn', async () => {
@@ -222,6 +248,22 @@ describe('a turn queued before a reload waits for the review the server holds', 
 		await wait(700); // past both delays
 		await settle();
 		expect(runTasks, 'the restored turn goes, once, and the re-send of the other thread does not').toEqual(['first', 'typed before reload']);
+	});
+
+	it('a drain due before the thread was left and opened again does not go past its review', async () => {
+		const release = await queueBehindRun(); // in t1; a queued turn is saved with the thread
+		release();
+		await settle(); // the run ended: its drain is due in 100 ms
+		await store.resumeThread('t9');
+		// Back to the first thread; the server holds a review there, and the opening is slow.
+		changed = notes;
+		holdReopenT1 = new Promise<void>(() => {});
+		void store.resumeThread('t1');
+		await settle();
+		expect(store.getQueueLength(), 'positive control: the queue came back with the thread').toBe(1);
+		await wait(200); // past the drain delay, before the review could be asked for
+		await settle();
+		expect(runTasks, 'the earlier drain does not send past the review').toEqual(['edit the notes']);
 	});
 
 	it('with no review the restored turn is sent (control)', async () => {
