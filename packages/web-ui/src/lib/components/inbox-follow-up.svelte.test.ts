@@ -187,6 +187,8 @@ describe('InboxView — the row of an item with follow-ups', () => {
 		await renderList([item({ followUps: ONE, classifierVersion: 'sensitive-follow-up' })]);
 		expect(byTestId('inbox-follow-up-line')).toBeNull();
 		expect(target.textContent).toContain('Wieder hier: Eine neue Nachricht in diesem Verlauf hat vertraulichen Inhalt.');
+		const open = target.querySelector<HTMLButtonElement>('button[aria-label*="Lieferung"]')!;
+		expect(open.getAttribute('aria-label')).not.toContain('Neue Nachricht im Thread');
 	});
 
 	it('without a subject, the open button label puts the line before the reason; the visible headline stays the reason', async () => {
