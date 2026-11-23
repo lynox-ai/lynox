@@ -367,15 +367,15 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(((await exportTo()).get('error') as { message: string }).message).toBe(`The target instance refused the migration. It says: "${'x'.repeat(500)}". You can start the migration again in 30 minutes at the latest.`);
   });
 
-  it('keeps the raw answer, named by its step, when the destination gives no usable error text', async () => {
+  it('keeps the raw answer in quotes after the step\'s own sentence when the destination gives no usable error text', async () => {
     setShellIsolationForTest(sidecar);
     for (const error of ['', 42, null]) {
       target.manifestError = error;
-      expect(((await exportTo()).get('error') as { message: string }).message).toBe(`Manifest rejected: ${JSON.stringify(JSON.stringify({ error }))}. You can start the migration again in 30 minutes at the latest.`);
+      expect(((await exportTo()).get('error') as { message: string }).message).toBe(`The target instance refused the migration. It says: ${JSON.stringify(JSON.stringify({ error }))}. You can start the migration again in 30 minutes at the latest.`);
     }
     target.manifestError = undefined;
     target.manifestRaw = 'bad gateway';
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('Manifest rejected: "bad gateway". You can start the migration again in 30 minutes at the latest.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused the migration. It says: "bad gateway". You can start the migration again in 30 minutes at the latest.');
     // No words left to quote, in the error text or the raw answer: said as such, never as empty quotes.
     target.manifestRaw = undefined;
     for (const error of ['\n\t ', '\u202e']) {
@@ -407,7 +407,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.manifestRaw = 'x'.repeat(TARGET_BODY_CAPS.refusal + 1);
     expect(await message()).toBe('The target instance refused the migration. Its answer is over 64 KiB, so lynox did not read it. You can start the migration again in 30 minutes at the latest.');
     target.manifestRaw = 'x'.repeat(TARGET_BODY_CAPS.refusal);
-    expect(await message()).toBe(`Manifest rejected: "${'x'.repeat(500)}…". You can start the migration again in 30 minutes at the latest.`);
+    expect(await message()).toBe(`The target instance refused the migration. It says: "${'x'.repeat(500)}…". You can start the migration again in 30 minutes at the latest.`);
     // The restore's report.
     target.manifestRaw = undefined;
     target.large = { at: 'restore', bytes: TARGET_BODY_CAPS.restore };
@@ -454,7 +454,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.abort = 'real';
     target.failCompletion = true;
     const first = await exportTo();
-    expect((first.get('error') as { message: string }).message).toBe('Handshake completion failed. You can start the migration again now.');
+    expect((first.get('error') as { message: string }).message).toBe('lynox could not finish setting up the connection to the target instance. Nothing was transferred. You can start the migration again now.');
     expect(target.abortCalls).toHaveLength(1);
     expect(target.abortCalls[0]).toMatch(/^[0-9a-f]{32}$/);
     // The same target, at once: its session is gone, so the handshake is not turned away.
@@ -485,7 +485,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
   it('keeps the 30 minutes where the target did not confirm that it ended the session', async () => {
     setShellIsolationForTest(sidecar);
     const message = async (): Promise<string | undefined> => ((await exportTo()).get('error') as { message: string } | undefined)?.message;
-    const later = 'Handshake completion failed. You can start the migration again in 30 minutes at the latest.';
+    const later = 'lynox could not finish setting up the connection to the target instance. Nothing was transferred. You can start the migration again in 30 minutes at the latest.';
     target.failCompletion = true;
     // An older target: no route (404), or no session id in its handshake, so no abort is sent.
     expect(await message()).toBe(later);
@@ -511,7 +511,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.chunkError = undefined;
     // A target whose signature does not check is not asked anything further.
     target.badSignature = true;
-    expect(((await exportTo()).get('error') as { message: string }).message).toMatch(/^Handshake signature invalid/);
+    expect(((await exportTo()).get('error') as { message: string }).message).toMatch(/^lynox could not confirm that it is talking to the target instance/);
     target.badSignature = false;
     target.handshakeRefusal = { error: 'Migration session already active. Finalize or cleanup first.' };
     const refused = (await exportTo()).get('error') as { message: string };
@@ -604,7 +604,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     } finally { spy.mockRestore(); }
     // A handshake whose signature does not check.
     target.badSignature = true;
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('Handshake signature invalid — refusing to derive transfer key. If this happens again, write to support@lynox.ai.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('lynox could not confirm that it is talking to the target instance, so it did not set up the connection. Nothing was transferred. If this happens again, write to support@lynox.ai.');
   });
 
   it('adds the retry sentence to a stop after the handshake that did not word one', async () => {
@@ -653,6 +653,31 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect((events.get('done') as { verification: unknown }).verification).toEqual({ databasesRestored: ['engine.db'], portableDirSkipped: ['workspace/ab c'], secretsImported: 2 });
   });
 
+  it('names what the user can do next with the error: start again now, later, or check the target first', async () => {
+    setShellIsolationForTest(sidecar);
+    const retry = async (): Promise<unknown> => ((await exportTo()).get('error') as { retry?: unknown } | undefined)?.retry;
+    // Refused before the target holds a session: nothing to wait for.
+    target.handshakeRefusal = { error: 'Invalid migration token' };
+    expect(await retry()).toBe('now');
+    target.handshakeRefusal = undefined;
+    // A session may still be held and the target did not end it: wait.
+    target.manifestError = 'no';
+    expect(await retry()).toBe('later');
+    // The target ended it: start again now.
+    target.abort = 'real';
+    expect(await retry()).toBe('now');
+    target.manifestError = undefined;
+    target.abort = undefined;
+    // The restore may have run in part: check the target first.
+    target.restoreError = 'restore refused';
+    expect(await retry()).toBe('check');
+    target.restoreError = undefined;
+    // A sentence that sends the user to support still leaves the target's session held: wait.
+    target.badSignature = true;
+    expect(await retry()).toBe('later');
+    target.badSignature = undefined;
+  });
+
   it('keeps the target\'s words in quotes, so they cannot pose as lynox\'s own sentence', async () => {
     setShellIsolationForTest(sidecar);
     const message = async (): Promise<string | undefined> => ((await exportTo()).get('error') as { message: string } | undefined)?.message;
@@ -676,7 +701,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.manifestStatus = undefined;
     // After the manifest no session can be ended: the target's "now" does not replace lynox's 30 minutes.
     target.chunkError = { at: 0, error: posing };
-    expect(await message()).toBe(`The target instance refused part 1 of the data. It says: ${quoted}. ${AGAIN}`);
+    expect(await message()).toBe(`The target instance refused part 1 of 6 of the data. It says: ${quoted}. ${AGAIN}`);
     target.chunkError = undefined;
   });
 
@@ -686,15 +711,15 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused the migration. It says: "refused gnp.exe nextline". You can start the migration again in 30 minutes at the latest.');
     target.manifestError = undefined;
     target.manifestRaw = 'bad\r\ngateway\u202D';
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('Manifest rejected: "bad  gateway". You can start the migration again in 30 minutes at the latest.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused the migration. It says: "bad  gateway". You can start the migration again in 30 minutes at the latest.');
   });
 
-  it('says which part of the data the destination refused, counted from 1, and that it could not restore', async () => {
+  it('says which part of the data the destination refused, counted from 1 out of all parts, and that it could not restore', async () => {
     setShellIsolationForTest(sidecar);
     target.chunkError = { at: 0, error: 'chunk refused' };
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 1 of the data. It says: "chunk refused". You can start the migration again in 30 minutes at the latest.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 1 of 6 of the data. It says: "chunk refused". You can start the migration again in 30 minutes at the latest.');
     target.chunkError = { at: 2, error: 'chunk refused' };
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 3 of the data. It says: "chunk refused". You can start the migration again in 30 minutes at the latest.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 3 of 6 of the data. It says: "chunk refused". You can start the migration again in 30 minutes at the latest.');
     target.chunkError = undefined;
     target.restoreError = 'restore refused';
     expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance could not restore the data. It says: "restore refused". Check on the target instance whether your data arrived before you migrate again.');
@@ -704,7 +729,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance could not restore the data. It says: "Check on the target instance.". Check on the target instance whether your data arrived before you migrate again.');
     target.chunkError = { at: 0, error: `support@lynox.ai ${'\ud800'.repeat(600)}` };
     target.restoreError = undefined;
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 1 of the data. It says: "support@lynox.ai". You can start the migration again in 30 minutes at the latest.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 1 of 6 of the data. It says: "support@lynox.ai". You can start the migration again in 30 minutes at the latest.');
     target.chunkError = undefined;
     // A refusal before the restore started (here: a missing chunk, 400) keeps the retry sentence.
     target.restoreError = undefined;
@@ -716,7 +741,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     setShellIsolationForTest(sidecar);
     target.failCompletion = true;
     const events = await exportTo();
-    expect((events.get('error') as { message: string }).message).toMatch(/Handshake completion failed/);
+    expect((events.get('error') as { message: string }).message).toMatch(/lynox could not finish setting up the connection to the target instance/);
     expect(derivedKeys).toHaveLength(1);
     expect(derivedKeys[0]!.every(b => b === 0)).toBe(true);
   });
