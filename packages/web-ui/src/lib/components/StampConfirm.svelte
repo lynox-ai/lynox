@@ -8,7 +8,8 @@
 	import { t, tf } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { instructionOf, markHidden, watchOf } from '../utils/trigger-consent.js';
-	import { confirmable, connectionsSentence, hiddenIn, hiddenNote, hidesText, paramsOf, readPreview, shownAs, type StampPreview } from '../utils/stamp-confirm.js';
+	import MarkedLine from './MarkedLine.svelte';
+	import { confirmable, connectionsParts, hiddenIn, hiddenNote, hidesText, paramsOf, readPreview, shownAs, type StampPreview } from '../utils/stamp-confirm.js';
 
 	interface Props {
 		id: string;
@@ -109,7 +110,7 @@
 			return shown !== u || cut ? markHidden(u) : null;
 		} catch { return null; }
 	});
-	const sentence = $derived(preview ? connectionsSentence(preview) : null);
+	const sentence = $derived(preview ? connectionsParts(preview) : null);
 </script>
 
 <div class="mt-2 space-y-1.5 text-xs text-text-muted" data-stamp-confirm={mode}>
@@ -159,7 +160,8 @@
 			<p data-stamp-model><span class="font-medium">{t('stamp.model')}:</span> {markHidden(s.model_tier)}</p>
 		{/if}
 		{#if sentence}
-			<p class="text-text" data-stamp-connections>{sentence}</p>
+			<!-- One connection per line: in a run of boxes, where one ends and the next begins is lost. -->
+			<div class="text-text break-words" data-stamp-connections><MarkedLine text={sentence.lead} />{#if sentence.items.length > 0}<ul class="mt-0.5 list-disc pl-4 space-y-0.5">{#each sentence.items as item, i (i)}<li data-stamp-connection><MarkedLine text={item} /></li>{/each}</ul>{/if}</div>
 		{:else if mode === 'check'}
 			<p data-stamp-none>{t('stamp.none')}</p>
 		{/if}

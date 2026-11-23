@@ -20,8 +20,18 @@ const VALUE_MARK = /[\uE000\uE001]/g;
 export function shownValue(text: string): string {
 	const chars = Array.from(text.replace(/\s+/g, ' ').trim());
 	const cut = chars.length > SHOWN_VALUE_MAX ? `${chars.slice(0, SHOWN_VALUE_MAX - 1).join('')}…` : chars.join('');
-	const shown = visible(cut).replace(VALUE_MARK, (c) => `<U+${c.codePointAt(0)!.toString(16).toUpperCase()}>`);
-	return `${VALUE_OPEN}${shown}${VALUE_CLOSE}`;
+	return setApart(visible(cut));
+}
+
+/**
+ * A value between the two marks the view draws as a value set apart, on one line and not cut, with
+ * a mark inside it printed as its code point: the box alone, with no character marking of its own.
+ * For a sentence that marks characters its own way (the stamp's, by `markHidden`, which its
+ * "marked above" note points at), and where a host is read from its end, which a cut would take.
+ */
+export function setApart(text: string): string {
+	const flat = text.replace(/\s+/g, ' ').trim().replace(VALUE_MARK, (c) => `<U+${c.codePointAt(0)!.toString(16).toUpperCase()}>`);
+	return `${VALUE_OPEN}${flat}${VALUE_CLOSE}`;
 }
 
 /** One piece of a sentence: lynox's words, or a value someone else wrote (`foreign`). */
