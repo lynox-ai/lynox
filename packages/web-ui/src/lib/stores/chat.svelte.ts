@@ -4440,8 +4440,9 @@ export async function resumeThread(threadId: string): Promise<void> {
 async function restoreThreadTier(sid: string): Promise<void> {
 	if (sessionTier !== null) return;
 	const res = await fetch(`${getApiBase()}/threads/${encodeURIComponent(sid)}`).catch(() => null);
-	if (!res?.ok || sessionId !== sid || sessionTier !== null) return;
+	if (!res?.ok) return;
 	const data = (await res.json().catch(() => null)) as { thread?: { model_tier?: unknown } | null } | null;
+	// Checked once the whole answer is in: the user may have switched chats, or a session set the tier.
 	if (sessionId !== sid || sessionTier !== null) return;
 	const tier = data?.thread?.model_tier;
 	if (typeof tier === 'string' && tier !== '') sessionTier = tier;
