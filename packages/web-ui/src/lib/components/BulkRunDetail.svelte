@@ -15,8 +15,8 @@
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import BulkStartDomains from './BulkStartDomains.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked,
-		type BulkRunDetailData, type BulkTarget, type BulkSentencePart,
+		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts,
+		type BulkRunDetailData, type BulkTarget, type BulkSentencePart, type BulkMarkerKind,
 	} from './bulk-runs.js';
 
 	let { runId, onBack, onOpen }: { runId: string; onBack: () => void; onOpen: (id: string) => void } = $props();
@@ -505,6 +505,8 @@
 	}
 	const resumeKind = $derived(run ? bulkResumeKind(run) : null);
 	const resumeText = $derived(run ? bulkResumeText(run, managed, i18n) : null);
+	const resumeWords = $derived(run ? bulkResumeWords(run, i18n) : null);
+	const rolledBack = $derived(run ? bulkRolledBackParts(run, view) : null);
 	const sentUnknownText = $derived(run ? bulkSentUnknownText(run, i18n) : null);
 	const conflictsText = $derived(run ? bulkConflictsText(run, i18n) : null);
 	const shopify = $derived(bulkIsShopifyHost(host));
@@ -512,8 +514,38 @@
 	const skipped = $derived(run && approving ? bulkSkippedHead(run, shopify, view) : { text: null, nothing: false });
 	// Counted over the loaded targets: a preview the owner approves is loaded whole.
 	const seoEntity = $derived(approving ? bulkSeoEntityCount(targets) : 0);
-	const shownTargets = $derived(showUnchanged ? targets : targets.filter((x) => x.change !== 'unchanged'));
-	const foldedUnchanged = $derived(targets.length - shownTargets.length);
+	// The table on one run line's verdicts alone (U-417), for this run only; the line above the table says so.
+	let spreadShown = $state<{ run: string; kind: BulkMarkerKind } | null>(null);
+	const spreadKind = $derived(approving && run !== null && spreadShown?.run === run.id ? spreadShown.kind : null);
+	const spreadSeqs = $derived(bulkOutlierSpreadSeqs(approving ? run?.judgeOutliers : null, spreadKind));
+	const unfolded = $derived(showUnchanged ? targets : targets.filter((x) => x.change !== 'unchanged'));
+	const shownTargets = $derived(spreadSeqs === null ? unfolded : unfolded.filter((x) => spreadSeqs.has(x.seq)));
+	function toggleSpread(kind: BulkMarkerKind): void {
+		if (run === null) return;
+		spreadShown = spreadKind === kind ? null : { run: run.id, kind };
+	}
+	// The buttons of the box by line: showing all from over the table removes that line, so the focus goes
+	// back to the button of the same kind in the box.
+	let spreadButtons = $state<(HTMLButtonElement | null)[]>([]);
+	// Showing all from the approval: the focus stays at the approval, where the owner is; while its button
+	// cannot be pressed, it goes to the button of that kind in the box.
+	let approveButton = $state<HTMLButtonElement | null>(null);
+	async function showAllAtApproval(): Promise<void> {
+		const kind = spreadKind;
+		spreadShown = null;
+		await tick();
+		if (approveButton !== null && !approveButton.disabled) { approveButton.focus(); return; }
+		const i = (run?.judgeOutliers?.spread ?? []).findIndex((x) => x.kind === kind);
+		if (i >= 0) spreadButtons[i]?.focus();
+	}
+	async function showAllFromTable(): Promise<void> {
+		const kind = spreadKind;
+		spreadShown = null;
+		await tick();
+		const i = (run?.judgeOutliers?.spread ?? []).findIndex((x) => x.kind === kind);
+		if (i >= 0) spreadButtons[i]?.focus();
+	}
+	const foldedUnchanged = $derived(targets.length - unfolded.length);
 	const writes = (x: BulkTarget): boolean => x.change === 'update' || x.change === 'create' || x.change === 'delete';
 	// The sentence under a field not checked for hidden characters: the way out only where the owner
 	// can take the target out on this page (U-294).
@@ -533,6 +565,9 @@
 	const outlierReasons = $derived(bulkOutlierReasonMap(outliers));
 	const outlierCount = $derived(bulkOutlierCountText(outliers, view));
 	const outlierSpread = $derived(bulkOutlierSpreadTexts(outliers, view));
+	const outlierSpreadClosing = $derived(bulkOutlierSpreadClosing(outliers, view));
+	// The rows the table shows, not the server's count: the line over the table says what is in it.
+	const spreadCount = $derived(spreadSeqs === null ? 0 : shownTargets.length);
 
 	const btn = 'rounded-[var(--radius-sm)] px-3 py-1.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed';
 	const btnPrimary = `${btn} bg-accent text-accent-fg hover:opacity-90`;
@@ -630,7 +665,8 @@
 				{/if}
 				{#if run.haltReason}
 					<dt class="text-text-subtle">{t(bulkHaltHeadKey(run))}</dt>
-					<dd>{bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, !ownerActs)}</dd>
+					<!-- An atomic undo that rolled back links the run it takes back, where it says to start again (U-335). -->
+					<dd>{#if rolledBack}{rolledBack.before}<button type="button" class="underline text-accent hover:opacity-80" onclick={() => onOpen(run!.sourceRunId!)}>{rolledBack.link}</button>{rolledBack.after}{:else}{bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, !ownerActs)}{/if}</dd>
 				{/if}
 			</dl>
 
@@ -668,14 +704,30 @@
 					{#if outlierCount}
 						<p class="text-sm mb-2 rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-outlier-count">{outlierCount}</p>
 					{/if}
-					{#each outlierSpread as line, i (i)}
-						<!-- Hosts as text, never as a link: the warning must not be the click. They come from verdict
-						     text, so a hidden character in one is shown. -->
-						<p class="text-sm mb-2 rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2 [overflow-wrap:anywhere]" data-testid="bulk-outlier-spread">{bulkVisibleText(line)}</p>
-					{/each}
+					{#if outlierSpread.length > 0 && outliers}
+						<!-- One box: each kind's line, its button to show the table on those verdicts alone, and the way
+						     out once below them (U-417). Hosts as text, never as a link: the warning must not be the
+						     click. They come from verdict text, so a hidden character in one is shown. -->
+						<div class="text-sm mb-2 rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2 space-y-1" data-testid="bulk-outlier-spread-box">
+							{#each outlierSpread as line, i (i)}
+								{@const entry = outliers.spread[i]!}
+								<p class="[overflow-wrap:anywhere]"><span data-testid="bulk-outlier-spread">{bulkVisibleText(line)}</span>{#if entry.seqs !== undefined && entry.seqs.length > 0}<button type="button" class="block sm:inline sm:ml-1 whitespace-nowrap underline text-accent hover:opacity-80" data-testid="bulk-outlier-spread-show" bind:this={spreadButtons[i]} onclick={() => toggleSpread(entry.kind)}>{bulkOutlierShowText(entry.seqs.length, spreadKind === entry.kind, view)}</button>{/if}</p>
+							{/each}
+							{#if outlierSpreadClosing}
+								<p data-testid="bulk-outlier-spread-closing">{outlierSpreadClosing}</p>
+							{/if}
+						</div>
+					{/if}
 					{#if hiddenMarked}
 						<p class="text-sm mb-2 text-text-muted" data-testid="bulk-hidden-legend">{t('bulk.hidden.legend')}</p>
 					{/if}
+					<!-- Said over the table itself: on a phone the box above is out of sight, and a reader in the table
+					     would take it for the whole run, which the approval is for (U-417). -->
+					<div aria-live="polite">
+						{#if spreadKind !== null}
+							<p class="text-sm mb-2 rounded-[var(--radius-sm)] bg-bg-muted border border-border px-3 py-2" data-testid="bulk-outlier-filtered">{bulkOutlierFilteredText(spreadKind, spreadCount, view)} <button type="button" class="block sm:inline whitespace-nowrap underline text-accent hover:opacity-80" data-testid="bulk-outlier-filtered-all" onclick={() => showAllFromTable()}>{t('bulk.outliers.spread.show_all')}</button></p>
+						{/if}
+					</div>
 					<div class="overflow-x-auto">
 						<table class="w-full text-sm">
 							<thead>
@@ -753,7 +805,7 @@
 							</tbody>
 						</table>
 					</div>
-					{#if foldedUnchanged > 0}
+					{#if foldedUnchanged > 0 && spreadKind === null}
 						<button type="button" class="{btnPlain} mt-2" onclick={() => { showUnchanged = true; }}>{tf(shopify ? bulkOne('bulk.preview.show_unchanged', foldedUnchanged) : bulkOne('bulk.preview.show_unchanged_targets', foldedUnchanged), { n: String(foldedUnchanged) })}</button>
 					{/if}
 					{#if targets.length < run.total}
@@ -904,11 +956,13 @@
 					{#if resumeText.before}
 						<p class="text-sm">{resumeText.before}</p>
 					{/if}
+					<!-- The support link stands under the sentence that names support, which comes before the check. -->
 					{#if supportMail}
 						<p class="text-sm"><a href={supportMail} class="{btnPlain} inline-block">{t('bulk.halt.support_mail')}</a></p>
 					{/if}
 					{#if resumeKind === 'none'}
-						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.resume.none')}</p>
+						<!-- An undo starts again from the page of the run it takes back: the words link to it where the run names it. -->
+						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-resume-none">{resumeWords!.none.before}{#if resumeWords!.none.link !== null}{#if run.sourceRunId !== null}<button type="button" class="underline text-accent hover:opacity-80" onclick={() => onOpen(run!.sourceRunId!)}>{resumeWords!.none.link}</button>{:else}{resumeWords!.none.link}{/if}{/if}{resumeWords!.none.after}</p>
 					{:else if resumeKind === 'nothing'}
 						<p class="text-sm">{resumeText.check}</p>
 					{:else}
@@ -930,6 +984,9 @@
 						{#if resumeText.check}
 							<p class="text-sm">{resumeText.check}</p>
 						{/if}
+						{#if resumeText.after}
+							<p class="text-sm">{resumeText.after}</p>
+						{/if}
 						{#if resumeText.kept}
 							<p class="text-sm text-text-muted">{resumeText.kept}</p>
 						{/if}
@@ -937,10 +994,10 @@
 							<p class="text-sm">{resumeText.allows}</p>
 						{/if}
 						{#if resumeKind !== 'check'}
-							<p class="text-sm text-text-muted">{t('bulk.resume.window')}</p>
+							<p class="text-sm text-text-muted">{resumeWords!.window}</p>
 						{/if}
 						<div class="flex flex-wrap gap-2">
-							<button type="button" class={btnPrimary} disabled={busy || (resumeKind === 'max' && bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run)) === null)} onclick={resume}>{t(resumeKind === 'check' ? 'bulk.resume.check' : 'bulk.resume.write')}</button>
+							<button type="button" class={btnPrimary} disabled={busy || (resumeKind === 'max' && bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run)) === null)} onclick={resume}>{resumeKind === 'check' ? t('bulk.resume.check') : resumeWords!.button}</button>
 							<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 						</div>
 					{/if}
@@ -988,8 +1045,13 @@
 							{t('bulk.approve.targets_write')}
 						</label>
 					{/if}
+					{#if spreadKind !== null && shownTargets.length < targets.length}
+						<!-- The approval is for the whole run, the table may show part of it (U-417): of every verdict
+						     of the run, however the table folds the unchanged ones. -->
+						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-approve-filtered">{tf('bulk.approve.filtered', { n: String(shownTargets.length), m: String(targets.length) })} <button type="button" class="block sm:inline whitespace-nowrap underline text-accent hover:opacity-80" data-testid="bulk-approve-filtered-all" onclick={() => showAllAtApproval()}>{t('bulk.outliers.spread.show_all')}</button></p>
+					{/if}
 					<div class="flex flex-wrap gap-2">
-						<button type="button" class={btnPrimary}
+						<button type="button" class={btnPrimary} bind:this={approveButton}
 							disabled={busy || (run.writeForm === 'unmeasured' && !unmeasuredOk)}
 							aria-describedby={run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}
 							onclick={() => approve(host !== null && !run!.probeConfirmed)}>
