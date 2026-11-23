@@ -12900,6 +12900,24 @@ describe('LynoxHTTPApi', () => {
         jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify(body) });
       afterEach(() => { vi.unstubAllEnvs(); });
 
+      it('names the verdicts that differ from the rest of the run only where the preview can be approved', async () => {
+        const id = judgedRun();
+        const outliers = { decided: 25, measured: true, flagged: [{ seq: 3, reasons: ['new_link' as const] }], spread: [] };
+        const spy = vi.spyOn(bulkLedger, 'judgeOutliersOf').mockResolvedValue(outliers);
+        try {
+          // Planned, no verdict yet: nothing is read.
+          const planned = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
+          expect(planned).toMatchObject({ phase: 'planned', judgeOutliers: null });
+          expect(spy).not.toHaveBeenCalled();
+          bulkDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'previewed' WHERE id = ?`).run(id);
+          const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
+          expect(shown).toMatchObject({ phase: 'previewed', judgeOutliers: outliers });
+          expect(spy).toHaveBeenCalledWith(id);
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
       it('shows the owner the rule, its hash and the model, and starts only with both', async () => {
         const id = judgedRun();
         const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
