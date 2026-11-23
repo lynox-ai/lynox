@@ -158,9 +158,9 @@ describe('the sentence of a migration stop', () => {
 		try {
 			setLocale('de');
 			const deTail = '. Es wurde nichts übertragen, und die Daten hier sind unverändert. Eine Migration kann nicht nur einen Teil davon übertragen. Schreib an support@lynox.ai und leg diese Meldung bei.';
-			expect(plain('data_too_large', { parts: 9, maxParts: 8 })).toBe(`Die Daten dieser Instanz passen nicht in eine Migration: Sie brauchen 9 Teile, eine Migration trägt höchstens 8${deTail}`);
-			expect(plain('data_too_large', { bytes: 600 * MiB, maxBytes: 500 * MiB })).toBe(`Die Daten dieser Instanz passen nicht in eine Migration: Sie sind 600 MiB gross, eine Migration trägt höchstens 500 MiB${deTail}`);
-			expect(plain('data_too_large', { parts: 9, maxParts: 8, bytes: 600 * MiB, maxBytes: 500 * MiB })).toBe(`Die Daten dieser Instanz passen nicht in eine Migration: Sie brauchen 9 Teile und sind 600 MiB gross. Eine Migration trägt höchstens 8 Teile und 500 MiB${deTail}`);
+			expect(plain('data_too_large', { parts: 9, maxParts: 8 })).toBe(`Die Daten dieser Instanz passen nicht in eine Migration: Es sind 9 Teile, eine Migration trägt höchstens 8${deTail}`);
+			expect(plain('data_too_large', { bytes: 600 * MiB, maxBytes: 500 * MiB })).toBe(`Die Daten dieser Instanz passen nicht in eine Migration: Es sind 600 MiB, eine Migration trägt höchstens 500 MiB${deTail}`);
+			expect(plain('data_too_large', { parts: 9, maxParts: 8, bytes: 600 * MiB, maxBytes: 500 * MiB })).toBe(`Die Daten dieser Instanz passen nicht in eine Migration: Es sind 9 Teile und 600 MiB. Eine Migration trägt höchstens 8 Teile und 500 MiB${deTail}`);
 			setLocale('en');
 			const enTail = '. Nothing was transferred, and the data here is unchanged. A migration cannot move only part of it. Write to support@lynox.ai and include this message.';
 			expect(plain('data_too_large', { parts: 9, maxParts: 8 })).toBe(`This instance's data does not fit into one migration: it needs 9 parts, and a migration carries at most 8${enTail}`);
