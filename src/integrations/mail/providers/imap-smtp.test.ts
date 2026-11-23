@@ -326,6 +326,28 @@ describe('ImapSmtpProvider — list: automatic mail', () => {
     const query = probe.fetch.mock.calls[0]?.[1] as { headers?: string[] };
     expect(query.headers).toContain('auto-submitted');
   });
+
+  it('marks the autoresponder headers and a folded bounce, and leaves a person with X-Auto-Response-Suppress answerable', async () => {
+    const raw: Record<number, string> = {
+      1: 'X-Autoreply: yes\r\n',
+      2: 'X-Autorespond: office@example.com\r\n',
+      3: 'Precedence: auto_reply\r\n',
+      // Folded, as mail servers write it: report-type on the continuation line.
+      4: 'Content-Type: multipart/report;\r\n\treport-type=delivery-status;\r\n\tboundary="b:1"\r\n',
+      5: 'X-Auto-Response-Suppress: All\r\n',
+    };
+    probe.search.mockResolvedValue([1, 2, 3, 4, 5]);
+    probe.fetch.mockImplementation(() => asyncIterFrom(Object.entries(raw).map(([uid, h]) => ({
+      ...makeFetchMessage({ uid: Number(uid), envelope: { date: new Date(`2026-04-1${uid}T08:00:00Z`), subject: `m${uid}`, messageId: `<m${uid}@example.com>`, from: [{ address: 'a@example.com' }], to: [{ address: 'me@example.com' }], cc: [] } }),
+      headers: Buffer.from(`${h}\r\n`),
+    }))));
+    const byUid = new Map((await new ImapSmtpProvider(ACCOUNT, credResolver).list({ folder: 'INBOX', limit: 10 })).map((e) => [e.uid, e]));
+    for (const uid of [1, 2, 3]) expect(byUid.get(uid), `uid ${String(uid)}`).toMatchObject({ isAutoReply: true, isAutoReplied: true });
+    expect(byUid.get(4), 'a bounce is automatic, not a reply').toMatchObject({ isAutoReply: true, isAutoReplied: false });
+    expect(byUid.get(5), 'a person with X-Auto-Response-Suppress stays answerable').toMatchObject({ isAutoReply: false, isAutoReplied: false });
+    const query = probe.fetch.mock.calls[0]?.[1] as { headers?: string[] };
+    for (const h of ['x-autoreply', 'x-autorespond', 'precedence', 'content-type']) expect(query.headers, h).toContain(h);
+  });
 });
 
 describe('ImapSmtpProvider — list', () => {
@@ -442,6 +464,17 @@ describe('ImapSmtpProvider — fetch', () => {
     expect(msg.attachments).toHaveLength(1);
     expect(msg.attachments[0]?.filename).toBe('report.pdf');
     expect(msg.attachments[0]?.partId).toBe('2');
+  });
+
+  it('marks a fetched autoresponder reply as automatic in the envelope that the reply refusal reads', async () => {
+    probe.fetchOne.mockResolvedValue({ ...makeFetchMessage({ uid: 43 }), headers: Buffer.from('Precedence: auto_reply\r\n\r\n') });
+    probe.fetch.mockImplementation(() => asyncIterFrom([
+      { ...makeFetchMessage({ uid: 43 }), bodyParts: new Map([['1', Buffer.from('I am away.')]]) } as FetchMessageObject,
+    ]));
+    const msg = await new ImapSmtpProvider(ACCOUNT, credResolver).fetch({ uid: 43 });
+    expect(msg.envelope).toMatchObject({ isAutoReply: true, isAutoReplied: true });
+    const query = probe.fetchOne.mock.calls[0]?.[1] as { headers?: string[] };
+    expect(query.headers).toContain('precedence');
   });
 
   it('falls back to text/html stripped to plain when no text/plain part exists', async () => {

@@ -152,7 +152,7 @@ import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
 import { takeOverWorkflow, workflowTakeoverPreview, type WorkflowTakeoverDeps, type WorkflowTakeoverRefusal } from '../core/workflow-takeover.js';
 import { EngineLessRefused } from '../core/engine-less-refusal.js';
-import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, titleIsWorkflowName, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
+import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerFieldsNotCarriedError, TriggerTierUnsupportedError, titleIsWorkflowName, isTriggerModelTierUpdate, triggerTakesModelTier, type BeforeTriggerWrite, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -3254,6 +3254,17 @@ export class LynoxHTTPApi {
       throw err;
     }
     return false;
+  }
+
+  /**
+   * The same mark, for a write `TaskManager` checks first (`update`, `complete`): it calls the
+   * mark with the trigger it is about to write, after its checks, so a change it refuses leaves
+   * the owner's stamp where it was. Undefined for the owner.
+   */
+  private _mandateEditMark(req: IncomingMessage, taskManager: TaskManager): BeforeTriggerWrite | undefined {
+    const principal = this._principalOf(req);
+    if (isOwnerPrincipal(principal)) return undefined;
+    return (trigger) => { taskManager.markEditedBy(trigger.id, principal, true); };
   }
 
   /**
@@ -9734,8 +9745,7 @@ export class LynoxHTTPApi {
       if (hidden !== null) { errorResponse(res, 400, hidden, HIDDEN_CHAR_CODE); return; }
       // The fields a person types; not the ids, which a random-looking id would fail.
       if (refusedMandateKeyIn(this._principalOf(_req), res, [b['title'], b['description'], b['assignee'], b['tags'], b['params']])) return;
-      // Checked here rather than left to `update`, which throws: a thrown error answers
-      // 500, and a refused request must not mark the trigger as a mandate's edit either.
+      // Checked here rather than left to `update`, which throws: a thrown error answers 500.
       if ('modelTier' in b && b['modelTier'] !== undefined && !isTriggerModelTierUpdate(b['modelTier'])) {
         errorResponse(res, 400, 'Invalid modelTier: use fast, balanced or deep, or null to clear it.');
         return;
@@ -9747,7 +9757,7 @@ export class LynoxHTTPApi {
         errorResponse(res, 403, 'modelTier cannot be set on this plan.');
         return;
       }
-      // Refused here as well as in `update`, which throws only after the mark below.
+      // Refused here as well as in `update`, which refuses it before it marks anything.
       if (b['modelTier']) {
         const trigger = taskManager.getTrigger(params['id']!);
         if (trigger && !triggerTakesModelTier(trigger.effect)) {
@@ -9761,9 +9771,9 @@ export class LynoxHTTPApi {
         return;
       }
       if (this._refusePaused(_req, res, taskManager, params['id']!, typeof b['enabled'] === 'boolean' ? 'enable' : 'edit')) return;
-      if (this._markMandateEdit(_req, res, taskManager, params['id']!)) return;
       // Slice B2: cron kill-switch toggle — `{ "enabled": true|false }`.
       if (typeof b['enabled'] === 'boolean') {
+        if (this._markMandateEdit(_req, res, taskManager, params['id']!)) return;
         let found: boolean;
         try {
           found = taskManager.setEnabled(params['id']!, b['enabled']);
@@ -9793,11 +9803,11 @@ export class LynoxHTTPApi {
         const { untrusted: _fromClient, ...edit } = body as Record<string, unknown>;
         const scheduledWorkflow = engine.getRunHistory()?.getTrigger(params['id']!)?.pipeline_id;
         const tokenWords = scheduledWorkflow ? undefined : this._ownerTokenWords(_req);
-        task = taskManager.update(params['id']!, { ...edit, ...(tokenWords !== undefined ? { untrusted: tokenWords } : {}) } as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
+        task = taskManager.update(params['id']!, { ...edit, ...(tokenWords !== undefined ? { untrusted: tokenWords } : {}) } as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req), this._mandateEditMark(_req, taskManager));
       } catch (err: unknown) {
         if (this._answerTodoRefusal(res, err)) return;
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
-        if (err instanceof TriggerTierUnsupportedError || err instanceof InvalidDueDateError) { errorResponse(res, 400, err.message); return; }
+        if (err instanceof TriggerTierUnsupportedError || err instanceof InvalidDueDateError || err instanceof TriggerFieldsNotCarriedError) { errorResponse(res, 400, err.message); return; }
         throw err;
       }
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
@@ -9848,10 +9858,9 @@ export class LynoxHTTPApi {
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       if (this._refusePaused(_req, res, taskManager, params['id']!, 'complete')) return;
-      if (this._markMandateEdit(_req, res, taskManager, params['id']!)) return;
       let task;
       try {
-        task = taskManager.complete(params['id']!, undefined, this._principalOf(_req));
+        task = taskManager.complete(params['id']!, undefined, this._principalOf(_req), this._mandateEditMark(_req, taskManager));
       } catch (err: unknown) {
         if (this._answerTodoRefusal(res, err)) return;
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
@@ -15710,10 +15719,12 @@ export class LynoxHTTPApi {
       // The target refused the manifest itself (4xx): its words say what to change, and the same
       // attempt fails again, so a freed session is not an invitation to try again as it is.
       let manifestRefused = false;
+      // One deadline for the whole transfer, set once the bundle's size is known.
+      let transferTimer: ReturnType<typeof setTimeout> | undefined;
       try {
         const crypto = await import('../core/migration-crypto.js');
         const { MigrationExporter } = await import('../core/migration-export.js');
-        const { TARGET_BODY_CAPS, TARGET_BODY_TIMEOUT_MS, TARGET_REQUEST_TIMEOUTS_MS, TargetAnswerTooSlow, TargetDidNotAnswer, askTarget, capText, isConnectionFailure, discardBody, durationText, readTargetBody, readTargetJson, relayedReport, relayedText } = await import('../core/migration-target-reply.js');
+        const { TARGET_BODY_CAPS, TARGET_BODY_TIMEOUT_MS, TARGET_REQUEST_TIMEOUTS_MS, TargetAnswerTooSlow, TargetDidNotAnswer, TransferOutOfTime, askTarget, capText, transferDeadlineMs, isConnectionFailure, discardBody, durationText, readTargetBody, readTargetJson, relayedReport, relayedText } = await import('../core/migration-target-reply.js');
         // Why an answer of the target could not be used, in the user's words.
         type Why = 'large' | 'format' | 'slow' | 'broken' | 'silent' | 'unreachable';
         const why = (w: Why, cap: number, unread: string, waited: number = TARGET_BODY_TIMEOUT_MS): string =>
@@ -15737,10 +15748,14 @@ export class LynoxHTTPApi {
          * A request to the target with its deadline for the answer to start. Past it, or when the
          * connection fails, the step's own words (`words`); the transport's text never reaches the user.
          */
+        // The whole transfer's deadline (from the manifest on) and the stop it says.
+        let transfer: AbortSignal | undefined;
+        let outOfTime = (): string => '';
         const ask = async (path: string, init: RequestInit, ms: number, words: (w: 'silent' | 'unreachable') => string): Promise<Response> => {
           try {
-            return await askTarget(fetchPinned, `${targetUrl}${path}`, init, ms);
+            return await askTarget(fetchPinned, `${targetUrl}${path}`, init, ms, transfer);
           } catch (err: unknown) {
+            if (err instanceof TransferOutOfTime) throw new Error(outOfTime());
             if (err instanceof TargetDidNotAnswer) throw new Error(words('silent'));
             if (isConnectionFailure(err)) throw new Error(words('unreachable'));
             throw err;
@@ -15851,6 +15866,14 @@ export class LynoxHTTPApi {
           crypto.zeroize(transferKey);
         }
         const { manifest, chunks, skipped: exportSkipped, workspace: exportWorkspace, plain: exportPlain } = exported;
+        // From here one deadline holds for the whole transfer, from the bundle's size, on top of each
+        // request's own: it ends a request still waiting, and no request starts once it has passed.
+        const transferMs = transferDeadlineMs(chunks.reduce((n, c) => n + c.data.length, 0));
+        const transferCtl = new AbortController();
+        transfer = transferCtl.signal;
+        // run-group-starter: cleared in the route's `finally`, or fired once; it only aborts this export's requests and reports no spend.
+        transferTimer = setTimeout(() => transferCtl.abort(), transferMs);
+        outOfTime = () => `The migration took longer than ${durationText(transferMs)}, so lynox stopped it. The target instance has not restored anything. ${AGAIN}`;
         // A refusal from the destination is shown as its own text, which is written for the
         // person migrating; the raw response only when it carries none.
         // `told` says in lynox's words which step failed, followed by the target's own words (its
@@ -15917,8 +15940,11 @@ export class LynoxHTTPApi {
           `The target instance's report on restoring the data could not be read: ${why(w, TARGET_BODY_CAPS.restore, '', TARGET_REQUEST_TIMEOUTS_MS.restore)}. Check on the target instance whether your data arrived before you migrate again.`;
         let rRes: Response;
         try {
-          rRes = await askTarget(fetchPinned, `${targetUrl}/api/migration/restore`, { method: 'POST', headers: migrationHeaders }, TARGET_REQUEST_TIMEOUTS_MS.restore);
+          rRes = await askTarget(fetchPinned, `${targetUrl}/api/migration/restore`, { method: 'POST', headers: migrationHeaders }, TARGET_REQUEST_TIMEOUTS_MS.restore, transfer);
         } catch (err: unknown) {
+          // Not sent: nothing restored, try again later. Sent: the restore may have run.
+          if (err instanceof TransferOutOfTime && !err.asked) throw new Error(outOfTime());
+          if (err instanceof TransferOutOfTime) throw new Error(`The migration took longer than ${durationText(transferMs)}, so lynox stopped waiting for the target instance to restore the data. Check on the target instance whether your data arrived before you migrate again.`);
           if (err instanceof TargetDidNotAnswer) throw new Error(restoreUnknown('silent'));
           if (isConnectionFailure(err)) throw new Error(restoreUnknown('broken'));
           // The network guard refusing the address (it follows no redirects): nothing was sent, so a
@@ -16001,6 +16027,7 @@ export class LynoxHTTPApi {
         const retry = final.endsWith(CHECK_TEXT) ? 'check' : sessionMayBeHeld && !freed ? 'later' : 'now';
         sendEvent('error', { message: final, retry });
       } finally {
+        clearTimeout(transferTimer);
         res.end();
       }
     });

@@ -281,7 +281,7 @@ export function resolveWritablePath(rawPath: string): string {
     if (mapped.kind === 'inside') return mapped.shown;
   }
   if (isWorkspaceActive()) {
-    return validatePath(resolve(rawPath), 'write');
+    return validatePath(rawPath, 'write');
   }
   // CLI/headless (no isolation): artifacts live at ~/.lynox/artifacts/<id>.html,
   // NOT under the workspace dir. Honour an absolute path inside the artifacts

@@ -16,7 +16,7 @@
 	import BulkStartDomains from './BulkStartDomains.svelte';
 	import BulkHost from './BulkHost.svelte';
 	import {
-		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts,
+		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts,
 		type BulkRunDetailData, type BulkTarget, type BulkSentencePart, type BulkMarkerKind,
 	} from './bulk-runs.js';
 
@@ -60,7 +60,7 @@
 		return { ok: res.ok, status: res.status, body };
 	}
 
-	type PostBody = { error?: string; id?: string; code?: string; supersedable?: { id: string; costUsd: number } };
+	type PostBody = { error?: string; id?: string; code?: string; checksum?: string; supersedable?: { id: string; costUsd: number } };
 	function post(path: string, body?: unknown): Promise<{ ok: boolean; status: number; body: PostBody }> {
 		return json(path, {
 			method: 'POST',
@@ -266,18 +266,63 @@
 		});
 	}
 
+	/** After a toggle the run is asked for again — its counts and the checksum the approval
+	 *  presents moved — but of its targets only the toggled one changed: it is marked here instead
+	 *  of every page being loaded again. False where the run is no longer the preview this page
+	 *  shows, could not be read, or is not the run the toggle answered: its checksum differs from
+	 *  the one the toggle returned, so another view moved a target since (even a pair that cancels
+	 *  out, which the counts cannot tell) and another row would be stale. The caller then loads it
+	 *  whole. The toggle's compare-and-set proved the run was the one whose checksum the page holds,
+	 *  and the ledger hashes its answer under the same lock as the write, so a run with the toggle's
+	 *  checksum is that run plus this toggle, whoever else writes the database. */
+	async function afterToggle(id: string, seq: number, deselected: boolean, checksum: string | undefined): Promise<boolean> {
+		const before = run;
+		const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(id)}`);
+		// A refused or failed ask carries no run, so no phase `previewed`.
+		if (id !== runId || run !== before || before === null || r.body.phase !== 'previewed' || r.body.total !== before.total) return false;
+		if (checksum === undefined || r.body.checksum !== checksum) return false;
+		if (r.body.deselected !== before.deselected + (deselected ? 1 : -1)) return false;
+		run = r.body;
+		targets = targets.map((x) => (x.seq === seq ? { ...x, deselected } : x));
+		maxTargets = Math.max(1, bulkWriting(r.body));
+		unmeasuredOk = false;
+		probeOk = false;
+		supersedable = null;
+		return true;
+	}
+
 	/** Take one target out of the write, or put it back, against the checksum this page showed:
-	 *  each moves the checksum, so the page reloads and approves only the run as it now is. */
-	function toggleSelected(target: BulkTarget): Promise<void> {
-		return act(async (id) => {
-			if (!run?.checksum) return t('common.load_failed');
-			const verb = target.deselected ? 'reselect' : 'deselect';
-			const r = await post(`/bulk/runs/${encodeURIComponent(id)}/targets/${target.seq}/${verb}`, { checksum: run.checksum });
-			// The refusals the owner can meet here are worded by their code; the engine's English is the fallback.
-			const code = r.body.code;
-			if (!r.ok && code !== undefined && BULK_DESELECT_REFUSALS.includes(code)) return t(`bulk.deselect.refused.${code}`);
-			return refusalOf(r);
-		});
+	 *  each moves the checksum, so the page approves only the run as it now is. Like every act it is
+	 *  bound to the run it began on: each request names that run, and what comes back after the page
+	 *  moved to another run is not shown there. Unlike them it reloads only the run, not every target. */
+	async function toggleSelected(target: BulkTarget): Promise<void> {
+		if (run === null || run.id !== runId) return;
+		const id = runId;
+		busy = true;
+		actionError = '';
+		try {
+			if (!run.checksum) {
+				actionError = t('common.load_failed');
+			} else {
+				const deselect = target.deselected !== true;
+				const r = await post(`/bulk/runs/${encodeURIComponent(id)}/targets/${target.seq}/${deselect ? 'deselect' : 'reselect'}`, { checksum: run.checksum });
+				if (runId === id) {
+					// The refusals the owner can meet here are worded by their code; the engine's English is the fallback.
+					const code = r.body.code;
+					if (!r.ok && code !== undefined && BULK_DESELECT_REFUSALS.includes(code)) actionError = t(`bulk.deselect.refused.${code}`);
+					else if (!r.ok) actionError = refusalOf(r) ?? t('common.load_failed');
+					else {
+						// A run that could not be read after the toggle is loaded whole, so the page
+						// shows no checksum from before a toggle that went through.
+						const marked = await afterToggle(id, target.seq, deselect, r.body.checksum).catch(() => false);
+						if (!marked && runId === id) await load();
+					}
+				}
+			}
+		} catch {
+			if (runId === id) actionError = t('common.load_failed');
+		}
+		busy = false;
 	}
 
 	/** Discard a run before approving it: the owner's act alone (the route refuses a mandate), after
@@ -510,7 +555,8 @@
 	const resumeText = $derived(run ? bulkResumeText(run, managed, i18n) : null);
 	const resumeWords = $derived(run ? bulkResumeWords(run, i18n) : null);
 	const rolledBack = $derived(run ? bulkRolledBackParts(run, view) : null);
-	const sentUnknownText = $derived(run ? bulkSentUnknownText(run, i18n) : null);
+	const sentUnknownText = $derived(run ? bulkSentUnknownText(run, view) : null);
+	const sentUnknownParts = $derived(run ? bulkSentUnknownParts(run, view) : null);
 	const conflictsText = $derived(run ? bulkConflictsText(run, i18n) : null);
 	const shopify = $derived(bulkIsShopifyHost(host));
 	const approving = $derived(run !== null && run.phase === 'previewed' && run.kind === 'apply');
@@ -702,9 +748,17 @@
 				<p class="text-sm text-text-muted" data-testid="bulk-host-rewrote-count">{run.hostRewrote === 1 ? t('bulk.run.host_rewrote_one') : tf('bulk.run.host_rewrote', { n: String(run.hostRewrote) })}</p>
 			{/if}
 			{#if sentUnknownText}
-				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{sentUnknownText}</p>
+				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-sent-unknown">{#if sentUnknownParts}{sentUnknownParts.before}<button type="button" class="underline text-accent hover:opacity-80" onclick={() => onOpen(run!.sourceRunId!)}>{sentUnknownParts.link}</button>{sentUnknownParts.after}{:else}{sentUnknownText}{/if}</p>
 			{/if}
 
+			{#if approving && ownerActs && run.judgeRule}
+				<!-- What the values were decided by, for the owner who approves them: the rule the start showed (U-335). -->
+				<div data-testid="bulk-approve-rule">
+					<h2 class="text-sm font-medium mb-1">{t('bulk.start.rule')}</h2>
+					<p class="text-sm whitespace-pre-wrap rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">{bulkVisibleText(run.judgeRule.rule)}</p>
+					<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t('bulk.approve.rule_drafted')}</p>
+				</div>
+			{/if}
 			{#if run.kind === 'apply' && targets.length > 0}
 				<div>
 					<h2 class="text-sm font-medium mb-2">{tf('bulk.preview.title', { k: String(targets.length), n: String(run.total) })}</h2>
@@ -860,6 +914,8 @@
 					<div>
 						<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.rule')}</h3>
 						<p class="text-sm whitespace-pre-wrap rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">{bulkVisibleText(run.judgeRule.rule)}</p>
+						<!-- The agent wrote the rule, from the owner's words or from data it read: the owner checks it (U-335). -->
+						<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t('bulk.start.rule_drafted')}</p>
 					</div>
 					<div>
 						<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.fields')}</h3>
