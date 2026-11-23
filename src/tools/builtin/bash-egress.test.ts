@@ -10,6 +10,7 @@ import { CredentialRegistry, type HostSet } from '../../egress-proxy/registry.js
 import { createAdminServer } from '../../egress-proxy/server.js';
 import { credentialFromHeader } from '../../egress-proxy/policy.js';
 import { OwnerKnownTargets } from '../../core/owner-known-targets.js';
+import { SearchResultAddresses } from '../../core/search-result-addresses.js';
 
 /**
  * bash in sidecar mode with the egress proxy (PRD 152 v2 §4.2, W2), against the proxy's own
@@ -298,6 +299,18 @@ describe('bash reaches what the owner typed, and after taint only what the engin
     await configured({ code: 0, out: () => 'ok' });
     await bashTool.handler({ command: 'true' }, withTyped('allow-all', [], null));
     expect(setDuringCall).not.toBe('*');
+  });
+
+  it('a host a search listed in this conversation never joins the shell set, before or after taint', async () => {
+    await configured({ code: 0, out: () => 'ok' });
+    const searches = new SearchResultAddresses();
+    searches.noteResults('q', ['https://listed.example/page']);
+    for (const tainted of [false, true]) {
+      const withSearch = { ...(withTyped('guarded', ['docs.example'], tainted) as object), searchResultAddresses: searches } as never;
+      await bashTool.handler({ command: 'curl -s https://listed.example/page' }, withSearch);
+      expect(registered(), `tainted=${String(tainted)}: the listed host`).not.toContain('listed.example');
+      expect(registered(), `tainted=${String(tainted)}: the typed host, as a control`).toContain('docs.example');
+    }
   });
 
   it('after taint under allow-list the list, under deny-all nothing', async () => {
