@@ -745,6 +745,13 @@ describe('a halt only the owner can resolve, as each reader gets it (bulkHaltFor
   });
 });
 
+describe('the push title of a run that finished with member-connection lines (U-420)', () => {
+  it('leads with the note, as worded, in each language', () => {
+    expect(WORKER_NOTICES.de.titleWithNote('Wochenbericht')).toBe('Mit Hinweis: Wochenbericht');
+    expect(WORKER_NOTICES.en.titleWithNote('Weekly report')).toBe('With a note: Weekly report');
+  });
+});
+
 describe('the push title of a bulk run (bulkPushTitle, U-324)', () => {
   it('names the stage, how it ended and the host, in each language, as they are worded', () => {
     const stages = { bulk_preview: ['Vorschau', 'Preview'], bulk_judge: ['Beurteilung', 'Judging'], bulk_apply: ['Massenlauf', 'Bulk run'], bulk_undo: ['Rücknahme', 'Undo'] } as const;
