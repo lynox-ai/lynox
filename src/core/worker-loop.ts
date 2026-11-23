@@ -524,6 +524,14 @@ export interface ActiveTask {
    */
   tearingDown?: boolean | undefined;
   /**
+   * A teardown kept this run's question for the next process (`keepsQuestionForNextProcess`):
+   * the run is not over, its question stays answerable where the owner got it, and the run
+   * tells its real end once the answer re-arms it. However this process's part then ends,
+   * on the normal end path or in the catch, it pushes nothing (U-420). On the entry, not in the
+   * run's closure, because the catch of `executeTask` reads it too.
+   */
+  questionKept?: boolean | undefined;
+  /**
    * This run's handler polls `controller.signal` itself, so for it the controller IS a
    * stop handle.
    *
@@ -2399,7 +2407,9 @@ export class WorkerLoop {
       // failed" is the wrong offer for a run that did what it was told.
       // A webhook run's failure is told once, by the drain from its event, not here too; a paused
       // plan's stop is told by the tick's notice, once (`plan-pause.ts`).
-      if (!willRetry && entry.event === undefined && entry.endedPaused !== true && this.notificationRouter.hasChannels()) {
+      // Nor a run whose question a teardown kept for the next process: it is not over, and it
+      // tells its real end when the answer re-arms it (`ActiveTask.questionKept`, U-420).
+      if (!willRetry && entry.event === undefined && entry.endedPaused !== true && entry.questionKept !== true && this.notificationRouter.hasChannels()) {
         const stopped = status === 'stopped';
         // The push leaves the instance: a contained run's error goes out as class and status
         // only (`error-egress.ts`). A timeout keeps its text, which lynox wrote itself (above).
@@ -2950,10 +2960,6 @@ export class WorkerLoop {
     // Set from every path that fabricates an answer, not just the expiry: an
     // aborted wait and a missing prompt store produce the same fiction.
     let questionWentUnanswered = false;
-    // A teardown that kept the question for the next process (`keepsQuestionForNextProcess`):
-    // the run is not over, its question stays answerable where the owner got it, and the run
-    // tells its real end once the answer re-arms it. Its end here pushes nothing (U-420).
-    let questionKeptForNextProcess = false;
 
     // Wire promptUser through the PROMPT STORE — the same surface the HTTP path
     // uses (`insertAskUser` -> `waitForSettled`). It used to be a bare Promise
@@ -3145,7 +3151,7 @@ export class WorkerLoop {
         // designed — the next process re-arms the run when the answer lands.
         if (keepsQuestionForNextProcess(active)) {
           questionWentUnanswered = true;
-          questionKeptForNextProcess = true;
+          active!.questionKept = true;
           return DISMISSED_ANSWER;
         }
 
@@ -3437,7 +3443,8 @@ export class WorkerLoop {
     const memberSaid = currentMemberNotesIn(noticeLanguage(this.engine.config?.language));
     // A run whose question was kept for the next process is not over: no push, not ✗ (nothing
     // went wrong, a deploy is internal) and not ⏸ (a second notice of a question already asked).
-    if (!questionKeptForNextProcess && this.notificationRouter.hasChannels() && !memberNotesRepeat(task, memberNotes)) {
+    // The catch of `executeTask` holds back its push on the same mark (`ActiveTask.questionKept`).
+    if (active?.questionKept !== true && this.notificationRouter.hasChannels() && !memberNotesRepeat(task, memberNotes)) {
       // The push leaves the instance: a contained run's result goes out as a fixed sentence, as
       // its error does (above); the recorded run keeps the full text. Only the run's text is
       // replaced: the ceiling's reason and the member-connection lines are lynox's own and say

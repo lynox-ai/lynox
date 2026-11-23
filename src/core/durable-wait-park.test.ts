@@ -67,7 +67,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
    *  only way to tell "read the row back" apart from "compute 24h yourself":
    *  both produce the same instant to the millisecond, so an equality assertion
    *  between them passes either way. A value no clock would produce does not. */
-  function makeHarness(opts?: { doctorExpiry?: string; unreadableRow?: boolean; secretValues?: string[]; maxToolResultChars?: number; question?: string; channels?: boolean }): Harness {
+  function makeHarness(opts?: { doctorExpiry?: string; unreadableRow?: boolean; secretValues?: string[]; maxToolResultChars?: number; question?: string; channels?: boolean; throwAfterAnswer?: boolean }): Harness {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-park-'));
     tmpDirs.push(dir);
     const history = new RunHistory(join(dir, 'history.db'));
@@ -111,9 +111,13 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
           await new Promise(r => setImmediate(r));
           promptId = prompts.getPending(session.sessionId)?.id;
           signalParked();
-          return `answered: ${await answering}`;
+          const answer = await answering;
+          // The agent's continuation after the answer fails: the run ends in the catch.
+          if (opts?.throwAfterAnswer === true) throw new Error('continuation failed');
+          return `answered: ${answer}`;
         })();
-        inFlight.push(turn);
+        // The run gets the failing turn; the teardown drain only waits for it to settle.
+        inFlight.push(opts?.throwAfterAnswer === true ? turn.catch(() => undefined) : turn);
         return turn;
       }),
     };
@@ -879,11 +883,45 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // Where the owner got the question it still stands, and its answer reaches the next process.
     expect(h.prompts.getById(promptId)?.status).toBe('pending');
     expect(h.prompts.getById(promptId)?.trigger_id).toBe('trg-1');
+    expect(h.history.getTrigger('trg-1')?.status, 'the teardown must leave it parked').toBe('waiting');
     expect(h.prompts.answerUser(promptId, 'Acme', OWNER_PRINCIPAL)).toBe(true);
     const next = new WorkerLoop(h.engine, h.router, 60_000);
     await next.tick();
-    expect(h.history.getTrigger('trg-1')?.status).toBe('open');
+    const revived = h.history.getTrigger('trg-1');
+    expect(revived?.status).toBe('open');
+    expect(new Date(revived!.next_run_at!).getTime()).toBeLessThanOrEqual(Date.now());
     next.stop();
+  });
+
+  it('W2-13 — a kept question pushes no end either where the run then fails in its catch', async () => {
+    // The agent goes on after the dismissal and fails: the run records `failed` in the catch,
+    // which for a cron pushes ✗ at high priority — not for a run that is not over.
+    const h = makeHarness({ channels: true, throwAfterAnswer: true });
+    await h.parked;
+    const promptId = h.promptIdOf()!;
+    const notify = vi.mocked(h.router.notify);
+    const before = notify.mock.calls.length;
+
+    h.loop.stop();
+    await waitUntil('the failed run to be recorded',
+      () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
+
+    expect(h.history.getTrigger('trg-1')?.last_run_status).toBe('failed');
+    expect(notify.mock.calls.slice(before)).toEqual([]);
+    expect(h.prompts.getById(promptId)?.status).toBe('pending');
+  });
+
+  it('W2-13 — control: the same failure after an owner\'s stop, which keeps nothing, does push its end', async () => {
+    const h = makeHarness({ channels: true, throwAfterAnswer: true });
+    await h.parked;
+    const notify = vi.mocked(h.router.notify);
+    const before = notify.mock.calls.length;
+
+    h.loop.stopTask('trg-1');
+    await waitUntil('the stopped run to be recorded',
+      () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
+
+    expect(notify.mock.calls.slice(before)).toHaveLength(1);
   });
 
   it('W2-13 — control: the owner\'s stop of the same parked run, which keeps nothing, does push its end', async () => {
