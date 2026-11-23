@@ -93,6 +93,10 @@ vi.mock('./agent.js', () => ({
     this.conversationSawUntrusted = false;
     // @ts-expect-error mock constructor
     this.restoreConversationTaint = vi.fn(function (this: { conversationSawUntrusted: boolean }) { this.conversationSawUntrusted = true; });
+    // @ts-expect-error mock constructor — the provider-search flag a rebuild carries
+    this.heldProviderSearch = vi.fn().mockReturnValue(false);
+    // @ts-expect-error mock constructor
+    this.restoreProviderSearch = vi.fn();
   }),
 }));
 

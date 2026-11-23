@@ -148,6 +148,10 @@ vi.mock('./agent.js', () => {
     this.snapshotComposition = vi.fn().mockReturnValue(undefined);
     // @ts-expect-error mock constructor
     this.loadMessages = mockLoadMessages;
+    // @ts-expect-error mock constructor — the provider-search flag a rebuild carries
+    this.heldProviderSearch = vi.fn().mockReturnValue(false);
+    // @ts-expect-error mock constructor
+    this.restoreProviderSearch = vi.fn();
     // @ts-expect-error mock constructor
     this.setContinuationPrompt = mockSetContinuationPrompt;
     // @ts-expect-error mock constructor
