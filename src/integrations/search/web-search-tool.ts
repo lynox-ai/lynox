@@ -10,49 +10,12 @@ import { rerankSearchResults } from './search-reranker.js';
 import { currentCallSignal, currentCallTargetOrigin } from '../../core/call-connection.js';
 import { delegatedRedirects, httpTarget, outwardReadRecorder } from '../../core/audit-log.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
+import { ownersCleanBatch } from '../../core/owner-clean-batch.js';
 import { turnIsLocked } from '../../core/mandate-tool-lock.js';
-import { hostTargets } from '../../core/send-target.js';
+import { carriesAddress, hostTargets } from '../../core/send-target.js';
 
-/**
- * Whether a read URL carries a query, the part a server receives as data. The fragment never
- * leaves the browser side, so it is not checked. A URL that does not parse counts as carrying
- * one: the check then refuses it as unreadable instead of letting it through.
- */
-type RedirectHook = (nextUrl: string, method: string, headers?: Record<string, string>) => void;
-
-/** A host for a refusal text: the last two labels, the rest elided, so data in a subdomain is not repeated. */
-export function maskedHost(hostname: string): string {
-  const labels = hostname.split('.');
-  return labels.length <= 2 ? hostname : `…${labels.slice(-2).join('.')}`;
-}
-
-/**
- * A read whose address went through the origin check (foreign content before the call, a query in
- * the URL) follows no redirect to another host: the owner was asked about, or knew, the host the
- * model wrote, and a hop would carry the query to one nobody saw. To read the other host, the model
- * writes that address itself, and it goes through the same check. A hop on the same host is
- * followed. Unchecked reads keep `inner` unchanged.
- */
-export function crossHostRedirectGuard(checkedUrl: string, checked: boolean, inner: RedirectHook | undefined): RedirectHook | undefined {
-  if (!checked) return inner;
-  const from = new URL(checkedUrl.trim()).hostname;
-  return (nextUrl, method, headers) => {
-    const to = new URL(nextUrl).hostname;
-    if (to !== from) {
-      const host = maskedHost(to);
-      throw new Error(`Blocked: the page forwards this read to another host (${host}), and lynox did not follow. Nothing was sent to that host. After content from outside in this conversation, a read with a query does not follow a redirect to another host. lynox does not show you the full address, so do not guess it. Tell the user that the page forwards to ${host} and that lynox did not follow it; if they want that page, they can give you its address.`);
-    }
-    inner?.(nextUrl, method, headers);
-  };
-}
-
-export function readUrlHasQuery(url: string): boolean {
-  try {
-    return new URL(url.trim()).search !== '';
-  } catch {
-    return true;
-  }
-}
+export { crossHostRedirectGuard, maskedHost, readHopsGuarded } from '../../core/read-hops.js';
+import { crossHostRedirectGuard, readHopsGuarded } from '../../core/read-hops.js';
 
 interface WebSearchInput {
   action: 'search' | 'read';
@@ -160,13 +123,16 @@ export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSear
     // A read of a page names it, host and path. A search names only that it searched: its
     // text can carry a customer's name, and the trail holds no content.
     outwardRead: (input) => (input.action === 'read' && typeof input.url === 'string' ? httpTarget('GET', input.url) : 'search'),
-    // Once foreign content is in the conversation, a read URL with a query can carry data out:
-    // a page that was read can ask for `https://host/?q=<what the chat holds>`. Such a read goes
-    // through the same origin check as a send. A URL without a query stays a plain read.
-    // A checked read follows no redirect to another host (`crossHostRedirectGuard`). Not covered:
-    // data in the path, in the host name or in userinfo; an open redirect on the same host; and the
-    // same read through `http_request` GET.
-    sendTargetsWhenLatched: (input) => (input.action === 'read' && typeof input.url === 'string' && readUrlHasQuery(input.url) ? hostTargets(input.url) : null),
+    // Once foreign content is in the conversation, a read address can carry data out: a page that
+    // was read can ask for `https://<what the chat holds>.host/<more of it>?q=<and more>`. Such a
+    // read goes through the same origin check as a send, to the host of its address; an address
+    // that carries another one is asked about whatever its host (`readCarriesAddress`). Without a
+    // question it passes when the owner named that host, or when a search in this conversation
+    // listed exactly this address as a result (`readAddress`). A read the check stopped at follows
+    // no redirect to another host (`crossHostRedirectGuard`).
+    sendTargetsWhenLatched: (input) => (input.action === 'read' && typeof input.url === 'string' ? hostTargets(input.url) : null),
+    readCarriesAddress: (input) => input.action === 'read' && typeof input.url === 'string' && carriesAddress(input.url),
+    readAddress: (input) => (input.action === 'read' && typeof input.url === 'string' ? input.url : null),
     definition: {
       name: 'web_research',
       description: `Search the web or read a URL. Provider: ${provider.name}.
@@ -265,6 +231,17 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           // A delegated session gets the results as the engine found them: the pages behind
           // them would be reads whose hosts no row named before they were sent.
           if (isOwnerPrincipal(agent.principal)) results = await enrichResults(results, ctx);
+          // The addresses this search lists, as the provider gave them: a later read of exactly one of
+          // them passes the origin check without a question (`readAddress`). Their hosts join the
+          // shell's egress set only for a search the owner sent in their own chat, before any
+          // foreign content and with no search the provider ran itself (`ownersCleanBatch`): a
+          // mandate's query is a third party's choice, an unattended run's or a sub-agent's is not
+          // the owner's, and the owner's later shell would reach it.
+          agent.searchResultAddresses?.noteResults(
+            input.query,
+            results.map((r) => r.url),
+            ownersCleanBatch(agent),
+          );
           const formatted = formatSearchResults(results);
           if (results.length === 0) return formatted;
           const { wrapUntrustedData } = await import('../../core/data-boundary.js');
@@ -286,8 +263,9 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
         }
         try {
           // `currentCallTargetOrigin()` is set exactly when this call's address went through the origin
-          // check (`sendTargetsWhenLatched` above declared it): then no hop to another host.
-          const onRedirect = crossHostRedirectGuard(input.url, currentCallTargetOrigin() !== undefined, delegatedRedirects(outwardReadRecorder(agent, 'web_research:redirect')));
+          // check (`sendTargetsWhenLatched` above declared it); `readHopsGuarded` says when that holds
+          // its hops to the host.
+          const onRedirect = crossHostRedirectGuard(input.url, readHopsGuarded(currentCallTargetOrigin()), delegatedRedirects(outwardReadRecorder(agent, 'web_research:redirect')));
           const result = await extractContent(input.url, undefined, ctx, onRedirect);
           const parts = [`# ${result.title}`, `Source: ${result.url}`, `Words: ${result.wordCount}`];
           if (result.truncated) parts.push('(Content truncated)');
