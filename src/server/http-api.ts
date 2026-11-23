@@ -3118,14 +3118,13 @@ export class LynoxHTTPApi {
 
   /**
    * The tier a conversation runs on, for a page that reopens it without opening a session (a
-   * reload reads it back instead). Its live session's tier when there is one; otherwise the tier
-   * a session would start on: the stored pick held to today's ceiling, account tier and model
-   * blocklist, as resuming it would. The stored `model_tier` is the pick as asked, before those.
-   * Omitted when no permitted model is left for it.
+   * reload reads it back instead): the stored pick held to today's ceiling, account tier and
+   * model blocklist, through the same function a resume and every turn of a live session use.
+   * The stored `model_tier` is the pick as asked, before those. Not read from a live session:
+   * its tier can stand lower for a moment (a compaction runs on the fast tier), and looking it
+   * up would keep an idle session from being dropped. Omitted when no permitted model is left.
    */
-  private _runTierOf(engine: Engine, thread: { readonly id: string; readonly model_tier: string }): { run_tier?: string } {
-    const live = this.sessionStore.get(thread.id);
-    if (live) return { run_tier: live.getModelTier() };
+  private _runTierOf(engine: Engine, thread: { readonly model_tier: string }): { run_tier?: string } {
     try {
       return { run_tier: sessionInitialTier(engine, normalizeTier(thread.model_tier)) };
     } catch {

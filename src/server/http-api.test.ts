@@ -8880,7 +8880,7 @@ describe('LynoxHTTPApi', () => {
       type EngineRef = { config?: unknown; getUserConfig: () => unknown; getToolContext: () => unknown };
       const engineRef = (): EngineRef => (api as unknown as { engine: EngineRef }).engine;
       const ss = (): { get: (id: string) => unknown } => (api as unknown as { sessionStore: { get: (id: string) => unknown } }).sessionStore;
-      async function runTier(stored: string, userConfig: Record<string, unknown>, live?: string): Promise<unknown> {
+      async function runTier(stored: string, userConfig: Record<string, unknown>, live?: string): Promise<{ status: number; stored?: string; run?: string }> {
         const e = engineRef();
         const origConfig = e.config; const origUc = e.getUserConfig; const origGet = ss().get; const origCtx = e.getToolContext;
         e.config = { model: 'balanced' };
@@ -8894,33 +8894,33 @@ describe('LynoxHTTPApi', () => {
         // a live one only when the case gives it.
         ss().get = (id: string): unknown => (id === TID ? (live !== undefined ? { getModelTier: () => live } : undefined) : origGet.call(ss(), id));
         try {
+          let status = 0;
           let body: { thread: { model_tier?: string; run_tier?: string } } | undefined;
           await withThreadStore({ getThread: (id: string) => (id === TID ? { id: TID, model_tier: stored } : null) }, async () => {
             const res = await jsonFetch(`/api/threads/${TID}`);
-            expect(res.status).toBe(200);
-            body = await res.json() as typeof body;
+            status = res.status;
+            if (status === 200) body = await res.json() as typeof body;
           });
-          expect(body!.thread.model_tier).toBe(stored);
-          return body!.thread.run_tier;
+          return { status, stored: body?.thread.model_tier, run: body?.thread.run_tier };
         } finally {
           e.config = origConfig; e.getUserConfig = origUc; ss().get = origGet; e.getToolContext = origCtx;
         }
       }
 
       it('holds the stored pick to today\'s ceiling, as resuming it would', async () => {
-        expect(await runTier('deep', { max_tier: 'balanced' })).toBe('balanced');
-        expect(await runTier('fast', { max_tier: 'balanced' })).toBe('fast');
-        expect(await runTier('deep', {})).toBe('deep');
+        expect(await runTier('deep', { max_tier: 'balanced' })).toEqual({ status: 200, stored: 'deep', run: 'balanced' });
+        expect(await runTier('fast', { max_tier: 'balanced' })).toEqual({ status: 200, stored: 'fast', run: 'fast' });
+        expect(await runTier('deep', {})).toEqual({ status: 200, stored: 'deep', run: 'deep' });
       });
 
       it('falls back to the fast tier when the pick\'s model is blocked, and says nothing when no model is left', async () => {
         const block = (...tiers: Array<'fast' | 'balanced' | 'deep'>): Record<string, unknown> => ({ blocked_model_ids: tiers.map((t) => getModelId(t, 'anthropic')) });
-        expect(await runTier('deep', block('deep'))).toBe('fast');
-        expect(await runTier('deep', block('deep', 'fast'))).toBeUndefined();
+        expect(await runTier('deep', block('deep'))).toEqual({ status: 200, stored: 'deep', run: 'fast' });
+        expect(await runTier('deep', block('deep', 'fast'))).toEqual({ status: 200, stored: 'deep', run: undefined });
       });
 
-      it('is the live session\'s tier while one runs', async () => {
-        expect(await runTier('deep', { max_tier: 'deep' }, 'fast')).toBe('fast');
+      it('is not the live session\'s tier of the moment (a compaction runs on the fast tier)', async () => {
+        expect(await runTier('deep', { max_tier: 'deep' }, 'fast')).toEqual({ status: 200, stored: 'deep', run: 'deep' });
       });
     });
 

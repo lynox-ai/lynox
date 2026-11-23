@@ -167,8 +167,11 @@ describe('changing the model of a chat whose server session is gone', () => {
 		await settle();
 		sessionGone = true;
 		reopenOk = false;
+		calls = [];
 		expect(await store.repickSessionModel('fast')).toEqual({ ok: false, reason: 'error' });
 		expect(store.getSessionTier()).toBe('deep');
+		// No second change after a failed open.
+		expect(calls).toEqual(['PATCH /sessions/t1/model {"tier":"fast"}', 'POST /sessions {"threadId":"t1"}']);
 	});
 
 	it('leaves the chat open now alone when the change came back for another one', async () => {
