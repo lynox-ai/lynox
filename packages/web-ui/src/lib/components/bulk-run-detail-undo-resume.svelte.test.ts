@@ -274,8 +274,26 @@ describe('an undo with a send left unclear', () => {
 	});
 
 	it('counts several unclear sends in the same words, on a halted undo too', async () => {
-		await render({ sentUnknown: 3 });
+		await render({ sentUnknown: 3, haltKey: 'unavailable', haltReason: 'engine English' });
 		expect(box()).toBe(tf('bulk.sent_unknown.many_undo', { count: '3', link: t('bulk.resume.none_undo_link') }));
+		expect(box()).toContain('Bei 3 Zielen');
+		expect(target.querySelector('[data-testid="bulk-sent-unknown"] button')?.textContent).toBe(t('bulk.resume.none_undo_link'));
+	});
+
+	it('says, while the undo still runs, only that the way on follows once it stops, with no link', async () => {
+		await render({ phase: 'writing', haltKey: null, haltReason: null, sentUnknown: 1 });
+		expect(box()).toBe(t('bulk.sent_unknown.one_undo_running'));
+		expect(box()).not.toContain(t('bulk.resume.none_undo_link'));
+		expect(target.querySelector('[data-testid="bulk-sent-unknown"] button')).toBeNull();
+	});
+
+	it('tells a mandate that only the owner starts the undo again, linked to the run it undoes', async () => {
+		viewer = 'mandate';
+		await render({ phase: 'done', haltKey: null, haltReason: null, sentUnknown: 1 });
+		expect(box()).toBe(t('bulk.sent_unknown.one_undo_mandate').replace('{link}', t('bulk.resume.none_undo_link')));
+		expect(box()).not.toContain('Starte die Rücknahme neu');
+		[...target.querySelectorAll<HTMLButtonElement>('[data-testid="bulk-sent-unknown"] button')].find((b) => b.textContent === t('bulk.resume.none_undo_link'))!.click();
+		expect(opened).toEqual(['src1']);
 	});
 
 	it('says the same without a link where the undo names no run', async () => {

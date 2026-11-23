@@ -510,8 +510,8 @@
 	const resumeText = $derived(run ? bulkResumeText(run, managed, i18n) : null);
 	const resumeWords = $derived(run ? bulkResumeWords(run, i18n) : null);
 	const rolledBack = $derived(run ? bulkRolledBackParts(run, view) : null);
-	const sentUnknownText = $derived(run ? bulkSentUnknownText(run, i18n) : null);
-	const sentUnknownParts = $derived(run ? bulkSentUnknownParts(run, i18n) : null);
+	const sentUnknownText = $derived(run ? bulkSentUnknownText(run, view) : null);
+	const sentUnknownParts = $derived(run ? bulkSentUnknownParts(run, view) : null);
 	const conflictsText = $derived(run ? bulkConflictsText(run, i18n) : null);
 	const shopify = $derived(bulkIsShopifyHost(host));
 	const approving = $derived(run !== null && run.phase === 'previewed' && run.kind === 'apply');

@@ -481,25 +481,43 @@ describe('going on from a run that halted', () => {
 	});
 
 	it('says an undo\'s unclear sends in its own words, the start again from the run it undoes, never the chat', () => {
+		// A stopped undo: halted, or finished.
+		const halted = { phase: 'writing', haltKey: 'unavailable', haltReason: 'unavailable', kind: 'undo' } as const;
+		const done = { phase: 'done', haltKey: null, haltReason: null, kind: 'undo' } as const;
+		const running = { phase: 'writing', haltKey: null, haltReason: null, kind: 'undo' } as const;
 		const one = 'Bei einem Ziel ist offen, ob die Rücknahme beim Anbieter angekommen ist. Die Sendung blieb ohne klare Antwort, und lynox sendet sie nicht noch einmal, sonst könnte sie doppelt ankommen. Starte die Rücknahme neu, auf der Seite des Massenlaufs, den sie zurücknimmt: lynox liest dann jedes Ziel zuerst und sendet nur dorthin, wo die Änderung des Laufs noch steht.';
-		expect(bulkSentUnknownText({ sentUnknown: 1, kind: 'undo' }, DE)).toBe(one);
-		expect(bulkSentUnknownText({ sentUnknown: 3, kind: 'undo' }, DE)).toBe('Bei 3 Zielen ist offen, ob die Rücknahme beim Anbieter angekommen ist. Die Sendungen blieben ohne klare Antwort, und lynox sendet sie nicht noch einmal, sonst könnte sie doppelt ankommen. Starte die Rücknahme neu, auf der Seite des Massenlaufs, den sie zurücknimmt: lynox liest dann jedes Ziel zuerst und sendet nur dorthin, wo die Änderung des Laufs noch steht.');
-		expect(bulkSentUnknownText({ sentUnknown: 3, kind: 'undo' }, EN)).toBe('For 3 targets it is unclear whether the undo reached the provider. The sends got no clear answer, and lynox does not send them again, or it could arrive twice. Start the undo again from the page of the bulk run it undoes: lynox then reads each target first and sends only where the run\'s change is still there.');
-		expect(bulkSentUnknownText({ sentUnknown: 0, kind: 'undo' }, DE)).toBeNull();
+		expect(bulkSentUnknownText({ ...halted, sentUnknown: 1 }, DE)).toBe(one);
+		expect(bulkSentUnknownText({ ...done, sentUnknown: 1 }, DE)).toBe(one);
+		expect(bulkSentUnknownText({ ...halted, sentUnknown: 3 }, DE)).toBe('Bei 3 Zielen ist offen, ob die Rücknahme beim Anbieter angekommen ist. Die Sendungen blieben ohne klare Antwort, und lynox sendet sie nicht noch einmal, sonst könnte sie doppelt ankommen. Starte die Rücknahme neu, auf der Seite des Massenlaufs, den sie zurücknimmt: lynox liest dann jedes Ziel zuerst und sendet nur dorthin, wo die Änderung des Laufs noch steht.');
+		expect(bulkSentUnknownText({ ...halted, sentUnknown: 3 }, EN)).toBe('For 3 targets it is unclear whether the undo reached the provider. The sends got no clear answer, and lynox does not send them again, or it could arrive twice. Start the undo again from the page of the bulk run it undoes: lynox then reads each target first and sends only where the run\'s change is still there.');
+		expect(bulkSentUnknownText({ ...halted, sentUnknown: 0 }, DE)).toBeNull();
+		// A mandate reads that only the owner starts it again, and where.
+		const mandate = bulkMandateI18n(DE);
+		expect(bulkSentUnknownText({ ...halted, sentUnknown: 1 }, mandate)).toBe('Bei einem Ziel ist offen, ob die Rücknahme beim Anbieter angekommen ist. Die Sendung blieb ohne klare Antwort, und lynox sendet sie nicht noch einmal, sonst könnte sie doppelt ankommen. Neu starten kann die Rücknahme nur der Inhaber dieser Instanz, auf der Seite des Massenlaufs, den sie zurücknimmt; bitte den Inhaber darum. lynox liest dann jedes Ziel zuerst und sendet nur dorthin, wo die Änderung des Laufs noch steht.');
+		expect(bulkSentUnknownText({ ...halted, sentUnknown: 3 }, bulkMandateI18n(EN))).toBe('For 3 targets it is unclear whether the undo reached the provider. The sends got no clear answer, and lynox does not send them again, or it could arrive twice. Only the owner of this instance can start the undo again, from the page of the bulk run it undoes; ask the owner to do so. lynox then reads each target first and sends only where the run\'s change is still there.');
+		// An undo that still runs cannot be started again: its sentence says the way on follows, for owner and mandate alike.
+		const runningOne = 'Bei einem Ziel ist offen, ob die Rücknahme beim Anbieter angekommen ist. Die Sendung blieb ohne klare Antwort, und lynox sendet sie nicht noch einmal, sonst könnte sie doppelt ankommen. Sobald diese Rücknahme angehalten oder fertig ist, steht hier, wie es weitergeht.';
+		expect(bulkSentUnknownText({ ...running, sentUnknown: 1 }, DE)).toBe(runningOne);
+		expect(bulkSentUnknownText({ ...running, sentUnknown: 1 }, mandate)).toBe(runningOne);
+		expect(bulkSentUnknownText({ ...running, phase: 'approved', sentUnknown: 1 }, DE)).toBe(runningOne);
+		expect(bulkSentUnknownText({ ...running, sentUnknown: 3 }, EN)).toBe('For 3 targets it is unclear whether the undo reached the provider. The sends got no clear answer, and lynox does not send them again, or it could arrive twice. Once this undo has stopped or finished, this box says how to go on.');
 		// The page links the words to the run the undo takes back, split around them.
-		expect(bulkSentUnknownParts({ sentUnknown: 1, kind: 'undo', sourceRunId: 'src' }, DE)).toEqual({
+		expect(bulkSentUnknownParts({ ...halted, sentUnknown: 1, sourceRunId: 'src' }, DE)).toEqual({
 			before: 'Bei einem Ziel ist offen, ob die Rücknahme beim Anbieter angekommen ist. Die Sendung blieb ohne klare Antwort, und lynox sendet sie nicht noch einmal, sonst könnte sie doppelt ankommen. Starte die Rücknahme neu, auf der ',
 			link: 'Seite des Massenlaufs',
 			after: ', den sie zurücknimmt: lynox liest dann jedes Ziel zuerst und sendet nur dorthin, wo die Änderung des Laufs noch steht.',
 		});
-		expect(bulkSentUnknownParts({ sentUnknown: 3, kind: 'undo', sourceRunId: 'src' }, DE)?.before).toMatch(/^Bei 3 Zielen /);
-		// No parts for a write, for no unclear send, or for an undo that names no run.
-		expect(bulkSentUnknownParts({ sentUnknown: 1, kind: 'apply', sourceRunId: null }, DE)).toBeNull();
-		expect(bulkSentUnknownParts({ sentUnknown: 0, kind: 'undo', sourceRunId: 'src' }, DE)).toBeNull();
-		expect(bulkSentUnknownParts({ sentUnknown: 1, kind: 'undo', sourceRunId: null }, DE)).toBeNull();
-		// A write keeps its words, with the chat.
-		expect(bulkSentUnknownText({ sentUnknown: 1, kind: 'apply' }, DE)).toBe(DE.t('bulk.sent_unknown.one'));
-		expect(bulkSentUnknownText({ sentUnknown: 1, kind: 'apply' }, DE)).toMatch(/im Chat/);
+		expect(bulkSentUnknownParts({ ...done, sentUnknown: 3, sourceRunId: 'src' }, DE)?.before).toMatch(/^Bei 3 Zielen /);
+		expect(bulkSentUnknownParts({ ...halted, sentUnknown: 1, sourceRunId: 'src' }, mandate)?.before).toMatch(/nur der Inhaber dieser Instanz, auf der $/);
+		// No parts for a write, for no unclear send, for an undo that still runs, or for one that names no run.
+		expect(bulkSentUnknownParts({ ...done, kind: 'apply', sentUnknown: 1, sourceRunId: null }, DE)).toBeNull();
+		expect(bulkSentUnknownParts({ ...halted, sentUnknown: 0, sourceRunId: 'src' }, DE)).toBeNull();
+		expect(bulkSentUnknownParts({ ...running, sentUnknown: 1, sourceRunId: 'src' }, DE)).toBeNull();
+		expect(bulkSentUnknownParts({ ...halted, sentUnknown: 1, sourceRunId: null }, DE)).toBeNull();
+		// A write keeps its words, with the chat, and so does a run whose kind is not given.
+		expect(bulkSentUnknownText({ ...done, kind: 'apply', sentUnknown: 1 }, DE)).toBe(DE.t('bulk.sent_unknown.one'));
+		expect(bulkSentUnknownText({ ...done, kind: 'apply', sentUnknown: 1 }, DE)).toMatch(/im Chat/);
+		expect(bulkSentUnknownText({ phase: 'done', haltKey: null, haltReason: null, sentUnknown: 1 }, DE)).toBe(DE.t('bulk.sent_unknown.one'));
 	});
 
 	it('says the same about targets an earlier send left unclear on every halt, a finished run and every size', () => {
@@ -509,11 +527,12 @@ describe('going on from a run that halted', () => {
 			{ phase: 'writing', haltKey: 'consecutiveFailures', total: 20 }, { phase: 'writing', haltKey: 'maxTargets', total: 19 },
 			{ phase: 'writing', haltKey: 'timeBudget', total: 200 }, { phase: 'done', haltKey: null, total: 5 },
 		];
-		for (const s of states) {
-			expect(bulkSentUnknownText({ ...s, sentUnknown: 1 } as Pick<BulkRunDetailData, 'sentUnknown'>, DE), JSON.stringify(s)).toBe(one);
-			expect(bulkSentUnknownText({ ...s, sentUnknown: 3 } as Pick<BulkRunDetailData, 'sentUnknown'>, EN), JSON.stringify(s))
+		for (const s0 of states) {
+			const s = { ...s0, haltReason: s0.haltKey };
+			expect(bulkSentUnknownText({ ...s, sentUnknown: 1 } as Pick<BulkRunDetailData, 'sentUnknown' | 'phase' | 'haltKey' | 'haltReason'>, DE), JSON.stringify(s)).toBe(one);
+			expect(bulkSentUnknownText({ ...s, sentUnknown: 3 } as Pick<BulkRunDetailData, 'sentUnknown' | 'phase' | 'haltKey' | 'haltReason'>, EN), JSON.stringify(s))
 				.toBe('For 3 targets it is unclear whether the change reached the provider. The sends got no clear answer. lynox does not send them again, or changes could arrive twice. Check at the provider. If a change is missing there, ask lynox in the chat to plan the run again.');
-			expect(bulkSentUnknownText({ ...s, sentUnknown: 0 } as Pick<BulkRunDetailData, 'sentUnknown'>, DE), JSON.stringify(s)).toBeNull();
+			expect(bulkSentUnknownText({ ...s, sentUnknown: 0 } as Pick<BulkRunDetailData, 'sentUnknown' | 'phase' | 'haltKey' | 'haltReason'>, DE), JSON.stringify(s)).toBeNull();
 		}
 	});
 
