@@ -1,4 +1,5 @@
 <script lang="ts">
+	import BulkHost from './BulkHost.svelte';
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
@@ -77,11 +78,16 @@
 	const BULK_STAGE_KEYS: Readonly<Record<string, string>> = {
 		bulk_preview: 'triggers.bulk.preview', bulk_judge: 'triggers.bulk.judge', bulk_apply: 'triggers.bulk.apply', bulk_undo: 'triggers.bulk.undo',
 	};
+	// The host is the planner's, so it stands boxed as code beside the stage, never as part of the title.
 	function shownTitle(trigger: Trigger): string {
 		const key = trigger.effect === undefined ? undefined : BULK_STAGE_KEYS[trigger.effect];
-		if (key === undefined) return trigger.title;
+		return key === undefined ? trigger.title : t(key);
+	}
+	const HOST_SEP = ' · ';
+	function shownHost(trigger: Trigger): string | null {
+		if (trigger.effect === undefined || BULK_STAGE_KEYS[trigger.effect] === undefined) return null;
 		const host = trigger.bulk_host ?? null;
-		return host === null || host === '' ? t(key) : `${t(key)} · ${host}`;
+		return host === null || host === '' ? null : host;
 	}
 
 	// How often the list is reloaded while the tab is visible, so a run that started on its
@@ -612,7 +618,7 @@
 							<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
 								<!-- A plan to take over: its title is someone else's value, as in the notice above (`pausedTitleLine`).
 								     A bulk run's trigger is named by its stage and host instead (`shownTitle`); it offers no takeover. -->
-								<p class="text-sm font-medium line-clamp-2 break-words" data-trigger-title>{#if pausedOpen(trigger) && !(trigger.effect ?? '').startsWith('bulk_')}<MarkedLine text={pausedTitleLine(trigger)} mono={false} />{:else}{shownTitle(trigger)}{/if}</p>
+								<p class="text-sm font-medium line-clamp-2 break-words" data-trigger-title>{#if pausedOpen(trigger) && !(trigger.effect ?? '').startsWith('bulk_')}<MarkedLine text={pausedTitleLine(trigger)} mono={false} />{:else}{shownTitle(trigger)}{#if shownHost(trigger) !== null}{HOST_SEP}<BulkHost value={shownHost(trigger) ?? ''} testid="trigger-bulk-host" />{/if}{/if}</p>
 								<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{typeLabel(trigger)}</span>
 								{#if trigger.enabled === 0}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning">{t('triggers.paused')}</span>
