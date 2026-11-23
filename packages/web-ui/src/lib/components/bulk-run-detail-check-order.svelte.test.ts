@@ -113,7 +113,7 @@ describe('going on by checking', () => {
 		run = makeRun({ haltKey: 'shopifyWriteOff', haltReason: 'shopifyWriteOff' });
 		await render();
 		const lines = wayOn();
-		const later = 'Nachprüfen geht schon jetzt. Soll lynox danach weiter in Shopify-Shops schreiben, schreib an support@lynox.ai.';
+		const later = 'Soll lynox in Shopify-Shops nachprüfen und schreiben, schreib an support@lynox.ai. Sobald sie freigeschaltet sind, kannst du nachprüfen.';
 		expect(lines.indexOf(later)).toBeGreaterThan(lines.indexOf(CHECK));
 		expect(lines.indexOf(t('bulk.halt.support_mail'))).toBe(lines.indexOf(later) + 1);
 		expect(lines.filter((l) => l === t('bulk.halt.support_mail'))).toHaveLength(1);

@@ -288,8 +288,8 @@ describe('the approved unchecked-change texts', () => {
 			'Bulk-Änderungen an Shopify-Shops sind auf dieser Instanz nicht freigeschaltet. Der Lauf ist angehalten.',
 			'Bulk changes to Shopify stores are not enabled on this instance. The run is stopped.'));
 		expect(line('bulk.halt.shopifyWriteOff_before_check_managed')).toBe(entry('bulk.halt.shopifyWriteOff_before_check_managed',
-			'Nachprüfen geht schon jetzt. Soll lynox danach weiter in Shopify-Shops schreiben, schreib an support@lynox.ai.',
-			'You can check again now. If lynox should then write on to Shopify stores, write to support@lynox.ai.'));
+			'Soll lynox in Shopify-Shops nachprüfen und schreiben, schreib an support@lynox.ai. Sobald sie freigeschaltet sind, kannst du nachprüfen.',
+			'If lynox should check and write in Shopify stores, write to support@lynox.ai. Once they are enabled, you can check again.'));
 	});
 
 
@@ -740,7 +740,7 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('blocked', unclear), false, DE)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du nachprüfen.');
 		// Writing switched off: checking works now, the way to write on follows it.
 		const off = bulkResumeText(w('shopifyWriteOff', unclear), true, DE);
-		expect([off?.before, off?.after]).toEqual([null, 'Nachprüfen geht schon jetzt. Soll lynox danach weiter in Shopify-Shops schreiben, schreib an support@lynox.ai.']);
+		expect([off?.before, off?.after]).toEqual([null, 'Soll lynox in Shopify-Shops nachprüfen und schreiben, schreib an support@lynox.ai. Sobald sie freigeschaltet sind, kannst du nachprüfen.']);
 		expect(bulkResumeText(w('shopifyWriteOff', unclear), false, DE)?.after).toBe(DE.tf('bulk.halt.shopifyWriteOff_before_selfhost', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
 		expect(bulkResumeText(w('markupAddedByShop', unclear), true, DE)?.after).toBe(DE.tf('bulk.halt.markupAddedByShop_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
 		// A lost access stays first, as before.
