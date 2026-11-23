@@ -277,7 +277,7 @@ describe('the confirmation', () => {
 
 	it('says lynox\'s words before a workflow\'s name in the reader\'s language, on a paused plan and in the list', async () => {
 		const plans = [
-			{ ...PAUSED, id: 'w1', title: 'Scheduled: Wochenbericht', title_workflow: 'Wochenbericht' },
+			{ ...PAUSED, id: 'w1', title: 'Wochenbericht', title_workflow: 'Wochenbericht' },
 			{ ...PAUSED, id: 'w2', title: 'Monatsbericht', title_workflow: 'Monatsbericht', paused: false, paused_who: undefined, paused_ended: undefined },
 			{ ...PAUSED, id: 'f1', title: 'Scheduled: Forged', paused: false, paused_who: undefined, paused_ended: undefined },
 		];

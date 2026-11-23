@@ -11470,9 +11470,9 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
-    it('GET /api/triggers gives a workflow plan the workflow\'s name where its title is that name as the engine wrote it, and no other row the field', async () => {
+    it('GET /api/triggers gives a workflow plan the workflow\'s name where its title is that name as the engine wrote it, and no other row the field: not after a rename, not without a schedule', async () => {
       const plan = (id: string, title: string, over: Record<string, unknown> = {}): Record<string, unknown> =>
-        ({ id, title, effect: 'run_workflow', pipeline_id: 'wf-1', created_by: 'owner', ...over });
+        ({ id, title, effect: 'run_workflow', pipeline_id: 'wf-1', schedule_cron: '0 9 * * 1', created_by: 'owner', ...over });
       const rows = [
         plan('new', 'Report'),
         plan('old', 'Scheduled: Report'),
@@ -11482,9 +11482,14 @@ describe('LynoxHTTPApi', () => {
         // The name of a workflow the plan does not run is not its workflow's name.
         plan('other', 'Report', { pipeline_id: 'wf-2' }),
         plan('gone', 'Scheduled: Gone', { pipeline_id: 'wf-gone' }),
+        // Scheduled as "Report", the workflow renamed since: the title is no longer its name.
+        plan('renamed', 'Report', { pipeline_id: 'wf-3' }),
+        // A workflow plan with no schedule is not "Scheduled".
+        plan('unscheduled', 'Report', { schedule_cron: undefined }),
+        plan('cleared', 'Report', { schedule_cron: '' }),
         { id: 'agent', title: 'Report', effect: 'run_agent', created_by: 'owner' },
       ];
-      const names: Record<string, string> = { 'wf-1': 'Report', 'wf-2': 'Invoices' };
+      const names: Record<string, string> = { 'wf-1': 'Report', 'wf-2': 'Invoices', 'wf-3': 'Monthly report' };
       const history = {
         getWorkflowExact: (id: string) => (names[id] === undefined ? undefined : { id, name: names[id] }),
         workflowStampState: () => 'stamped',
@@ -11499,6 +11504,9 @@ describe('LynoxHTTPApi', () => {
           ['own', 'Monthly', 'absent'],
           ['other', 'Report', 'absent'],
           ['gone', 'Scheduled: Gone', 'absent'],
+          ['renamed', 'Report', 'absent'],
+          ['unscheduled', 'Report', 'absent'],
+          ['cleared', 'Report', 'absent'],
           ['agent', 'Report', 'absent'],
         ]);
       });

@@ -9458,8 +9458,9 @@ export class LynoxHTTPApi {
             ...(isBulk ? { bulk_host: bulkSystem === undefined ? null : externalHostOf(bulkSystem) } : {}),
             // The workflow's name where the title is that name as the engine wrote it (scheduled
             // without a title): the view says "Scheduled: " itself, in the reader's language, and
-            // sets the name apart as a value. Any other title stays whole, the prefix included.
-            ...(workflow !== undefined && titleIsWorkflowName(trigger.title, workflow.name) ? { title_workflow: workflow.name } : {}),
+            // sets the name apart as a value. Any other title stays whole, the prefix included; so
+            // does the title of a plan with no schedule, and one whose workflow was renamed since.
+            ...(workflow !== undefined && (trigger.schedule_cron ?? '') !== '' && titleIsWorkflowName(trigger.title, workflow.name) ? { title_workflow: workflow.name } : {}),
           };
         });
       // What the owner's stamp of each confirmed plan lists, and how each entry stands (B3), for the
