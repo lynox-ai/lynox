@@ -59,7 +59,7 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
       type: 'object' as const,
       properties: {
         title: { type: 'string', description: 'Short descriptive title for the artifact' },
-        content: { type: 'string', description: 'Markdown (for type markdown — preferred default), full HTML (for type html), Mermaid syntax (for type mermaid), SVG markup (for type svg), or the raw file body for a data type (csv/tsv/json/text)' },
+        content: { type: 'string', description: 'Markdown (for type markdown — preferred default), full HTML (for type html; images only as inline SVG or data: URLs, remote image URLs do not load), Mermaid syntax (for type mermaid), SVG markup (for type svg), or the raw file body for a data type (csv/tsv/json/text)' },
         type: { type: 'string', enum: ['markdown', 'html', 'mermaid', 'svg', 'csv', 'tsv', 'json', 'text'], description: 'Artifact type. Default: markdown. Use html only for interactive output (dashboards, prototypes, charts). Use csv/tsv/json/text for data the user will download as a file.' },
         description: { type: 'string', description: 'Optional one-line description' },
         id: { type: 'string', description: 'Existing artifact ID to update. Omit to create new.' },
@@ -68,7 +68,8 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
     },
   },
   detailedGuidance:
-    'markdown renders fast and costs far fewer tokens than hand-written HTML, and the user already gets a polished, shareable view — prefer it for anything prose-shaped. Never wrap raw CSV/TSV/JSON in a markdown or html artifact; emit it as the matching data type so it downloads as a file. When you DO use html (incl. slide decks): make it mobile-ready — fluid %/max-width, never a fixed page-px width — and light unless the user asked for dark. Never embed Web Speech API, TTS, audio controls, or media players in html artifacts — the chat UI already provides audio output.',
+    'markdown renders fast and costs far fewer tokens than hand-written HTML, and the user already gets a polished, shareable view — prefer it for anything prose-shaped. Never wrap raw CSV/TSV/JSON in a markdown or html artifact; emit it as the matching data type so it downloads as a file. When you DO use html (incl. slide decks): make it mobile-ready — fluid %/max-width, never a fixed page-px width — and light unless the user asked for dark. Never embed Web Speech API, TTS, audio controls, or media players in html artifacts — the chat UI already provides audio output. ' +
+    'Images from other web addresses do not load in an html artifact — not in the chat, the gallery or a downloaded copy. Draw them as inline SVG, embed them as a data: URL, or leave them out; if the user asked for a specific image such as their logo, tell them in your reply that it cannot be shown from its web address.',
   handler: async (input: ArtifactSaveInput, agent: IAgent): Promise<string> => {
     const store = agent.toolContext.artifactStore;
     if (!store) return 'Artifact store not available.';
