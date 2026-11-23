@@ -78,7 +78,13 @@ function serve(): void {
 		}
 		if (url.endsWith('/changeset')) {
 			changesetGets++;
-			if (holdChangeset) await holdChangeset;
+			if (holdChangeset) {
+				// A time limit given to this fetch would end it here, as the network would.
+				const signal = init?.signal;
+				await Promise.race([holdChangeset, new Promise<never>((_, reject) => {
+					signal?.addEventListener('abort', () => reject(new DOMException('timed out', 'TimeoutError')));
+				})]);
+			}
 			if (changesetFails) return json({ error: 'unavailable' }, 503);
 			return json({ hasChanges: changed.length > 0, runId: 'run-7', files: changed });
 		}
@@ -351,6 +357,7 @@ describe('a turn queued before a reload waits for the review the server holds', 
 		await settle();
 		await wait(200);
 		await settle();
+		expect(store.getPendingChangeset(), 'positive control: t1 shows its review').not.toBeNull();
 		let answered!: () => void;
 		holdReview = new Promise<void>((r) => { answered = r; });
 		void store.submitChangesetReview('accept');
