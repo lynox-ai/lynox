@@ -514,6 +514,8 @@ describe('release_secret: the question carries no text a mandate\'s turn wrote',
       ['an autonomous turn', { autonomy: 'autonomous' as const, promptUser: async () => 'Deny' }],
       // A sub-agent forwards its parent's prompt and runs under the owner's principal.
       ['a sub-agent, which forwards the owner\'s prompt', { sendOrigin: { kind: 'childAgent' } as SendOrigin, promptUser: async () => 'Deny' }],
+      // The owner's own turn in a thread a helper ran in: the model showing the profile read the helper's content.
+      ['the owner\'s turn in a thread a helper ran in', { sendOrigin: { kind: 'helperThread', helper: 'mandate:helper@example.org' } as SendOrigin, promptUser: async () => 'Deny' }],
       // A trigger's, workflow's or task's run carries its run tag as author, not the owner's.
       ['a run that is not the owner\'s chat, with a prompt channel', { writeAuthor: 'workflow:run-1', promptUser: async () => 'Deny' }],
     ])('does not count the owner\'s view from %s as a read', async (_label, opts) => {
