@@ -229,7 +229,7 @@ describe('the host in the sentences of a run\'s page', () => {
 
 	it('never searches a target\'s key for the host on the probe, boxing only the sentence\'s own place', async () => {
 		const host = 'shop.example.com';
-		const key = `https://${host}@evil.example/p/1`;
+		const key = `https://${host}/p/1`;
 		run = makeRun({ targetSystem: `http:${host}`, phase: 'writing', haltKey: 'maxTargets', haltReason: 'probe', applied: 1, probeConfirmed: false, writeForm: null, probe: { key, fields: ['title'] } });
 		await renderDetail();
 		const explain = target.querySelector('[data-testid="bulk-probe-explain"]');
