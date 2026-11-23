@@ -38,7 +38,7 @@ const today = (): string => {
 };
 
 /** What the cost endpoint answers: today's rows, an error status, or nothing yet (held). */
-let costAnswer: 'held' | 'not-json' | number | unknown[] | Record<string, unknown>;
+let costAnswer: 'held' | 'not-json' | number | readonly unknown[] | Readonly<Record<string, unknown>>;
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 
