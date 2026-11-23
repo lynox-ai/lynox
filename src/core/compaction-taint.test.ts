@@ -222,4 +222,31 @@ describe('a compaction keeps the durable-write gate armed', { timeout: 45_000 },
     expect(result.success).toBe(false);
     expect(s.agent?.conversationSawUntrusted).toBe(true);
   });
+
+  it('carries a search the provider ran across a model switch, though the history no longer shows it', async () => {
+    const { Engine } = await import('./engine.js');
+    const engine = new Engine({
+      model: 'balanced',
+      context: { id: 'search-spec', name: 'search-spec', source: 'cli', workspaceDir: '' },
+    });
+    await engine.init();
+    const session = engine.createSession?.() ?? (engine as unknown as { session: unknown }).session;
+    const s = session as {
+      agent: { heldProviderSearch(): boolean; restoreProviderSearch(): void } | null;
+      loadMessages(m: unknown[]): void;
+      setModel(tier: string): string;
+    };
+    s.loadMessages([
+      { role: 'user', content: 'find the CRM API' },
+      { role: 'assistant', content: 'found it' },
+    ]);
+    const before = s.agent;
+    expect(before?.heldProviderSearch()).toBe(false);
+    before?.restoreProviderSearch();
+
+    s.setModel('deep');
+
+    expect(s.agent).not.toBe(before);
+    expect(s.agent?.heldProviderSearch()).toBe(true);
+  });
 });
