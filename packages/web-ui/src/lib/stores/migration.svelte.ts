@@ -208,6 +208,8 @@ export async function startMigration(): Promise<void> {
 	doneSkipped = [];
 
 	abortController = new AbortController();
+	// Set once the engine has taken the request: from then on it carries on without the browser.
+	let taken = false;
 
 	try {
 		const res = await fetch(`${getApiBase()}/migration/export`, {
@@ -229,6 +231,7 @@ export async function startMigration(): Promise<void> {
 			return;
 		}
 
+		taken = true;
 		// Read SSE stream
 		const reader = res.body?.getReader();
 		if (!reader) {
@@ -268,10 +271,13 @@ export async function startMigration(): Promise<void> {
 			// `cancelMigration` has already said so.
 			if (step === 'transferring') fail('cancelled', { retry: browserRetry('cancelled') });
 		} else if (step === 'transferring') {
-			// A failed fetch or a broken stream: the browser's own text goes to the console only.
+			// The browser's own text goes to the console only. A request that never reached the engine can
+			// be sent again; a stream that broke after the engine took it is a lost connection, and the
+			// engine may still restore the data.
 			if (err instanceof Error) {
 				console.warn('[migration] the request to this instance failed:', err.message);
-				fail('connection_failed', { retry: browserRetry('connection_failed') });
+				if (taken) fail('connection_lost', { retry: browserRetry('connection_lost') });
+				else fail('connection_failed', { retry: browserRetry('connection_failed') });
 			} else {
 				// Not a failure this code can read: what happened on the target is not known.
 				fail('unknown', { retry: 'check' });

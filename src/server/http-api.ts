@@ -15693,7 +15693,7 @@ export class LynoxHTTPApi {
           if (isConnectionFailure(err)) throw restoreUnknown('broken');
           // The network guard refusing the address (it follows no redirects): nothing was sent, so a
           // new attempt can get past it. Anything else: the user checks the target first.
-          const text = homeAsTilde(relayedText(err instanceof Error ? err.message : String(err)).trim());
+          const text = relayedText(homeAsTilde(err instanceof Error ? err.message : String(err))).trim();
           if (text.startsWith('Blocked:')) {
             const reason = text.slice('Blocked:'.length).trim().replace(/[.!?…]+$/, '');
             // The guard's reason is technical: only the English message carries it; the UI says the address is blocked.
@@ -15721,7 +15721,7 @@ export class LynoxHTTPApi {
         });
       } catch (err: unknown) {
         // Every text to the user goes through the same cleaning, the guard's and the exporter's too.
-        const { askTarget, discardBody, readTargetJson, TARGET_BODY_CAPS, TARGET_BODY_TIMEOUT_MS, TARGET_REQUEST_TIMEOUTS_MS, relayedText: clean } = await import('../core/migration-target-reply.js');
+        const { askTarget, discardBody, readTargetJson, TARGET_BODY_CAPS, TARGET_BODY_TIMEOUT_MS, TARGET_REQUEST_TIMEOUTS_MS, relayedText: clean, homeAsTilde: ownHomeAsTilde } = await import('../core/migration-target-reply.js');
         // Stopped before the target took the manifest: end its session, so the next attempt is not
         // turned away. Only a target that confirms it lets the user start again at once; any failure
         // here leaves the stop's own words and the 30 minutes.
@@ -15748,7 +15748,8 @@ export class LynoxHTTPApi {
             process.stderr.write(`[lynox:http] migration: ending the target's session failed (${abortErr instanceof Error ? abortErr.name : 'unknown error'}); a new attempt waits for it to expire\n`);
           }
         }
-        const message = clean(err instanceof Error ? err.message : '', 2000).trim()
+        // This instance's home directory as ~, before the text is cut: a cut must not leave part of it.
+        const message = clean(ownHomeAsTilde(err instanceof Error ? err.message : ''), 2000).trim()
           || `The migration stopped for a reason lynox could not read.${sessionMayBeHeld ? '' : ' Nothing was transferred.'}`;
         // A stop after the handshake that names no next step (a read failing on this instance) gets
         // the retry sentence. A stop that names one (check the target, write to support) does not:

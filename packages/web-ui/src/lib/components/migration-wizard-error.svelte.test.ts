@@ -430,8 +430,8 @@ describe('the migration wizard when this instance does not start the migration',
 });
 
 describe('the migration wizard when the event stream breaks', () => {
-	it('says that this instance cannot be reached, and keeps the browser\'s text out of the card', async () => {
-		exportAnswer = () => new Response(new ReadableStream<Uint8Array>({ start(c) { c.error(new Error('stream broke')); } }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+	it('says that this instance cannot be reached when the request never got there, and keeps the browser\'s text out of the card', async () => {
+		exportAnswer = () => { throw new TypeError('Failed to fetch'); };
 		const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
 		component = mount(MigrationWizard, { target });
 		await settle();
@@ -441,9 +441,25 @@ describe('the migration wizard when the event stream breaks', () => {
 		expect(getStep()).toBe('error');
 		expect(getError()).toBe(t('migration.stop.connection_failed'));
 		expect(text('migration-error-detail')).toBe(t('migration.stop.connection_failed'));
-		expect(target.textContent).not.toContain('stream broke');
+		expect(target.textContent).not.toContain('Failed to fetch');
 		expect(getRetry()).toBe('now');
 		expect(retryButton()?.disabled).toBe(false);
+	});
+
+	it('asks to check the target, with no retry, when the stream breaks after the engine took the request', async () => {
+		exportAnswer = () => new Response(new ReadableStream<Uint8Array>({ start(c) { c.error(new Error('stream broke')); } }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+		const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
+		component = mount(MigrationWizard, { target });
+		await settle();
+		setTarget('https://target.example.com', 'a'.repeat(64));
+		await startMigration();
+		await settle();
+		expect(getStep()).toBe('error');
+		expect(text('migration-error-detail')).toBe(t('migration.stop.connection_lost'));
+		expect(target.textContent).not.toContain('stream broke');
+		expect(getRetry()).toBe('check');
+		expect(text('migration-check-target')).toBe(t('migration.check_target_first'));
+		expect(retryButton()).toBeNull();
 	});
 
 	it('asks to check the target when the stream ends without a result', async () => {

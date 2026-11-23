@@ -166,7 +166,7 @@ vi.mock('../core/network-guard.js', async (original) => {
         if (path === '/api/migration/restore' && target.slow === 'restore') return endless(200);
         if (path === '/api/migration/restore' && target.restoreRaw !== undefined) return new Response(target.restoreRaw, { status: 200 });
         if (path === '/api/migration/restore' && target.restoreBreaks === true) {
-          return Object.defineProperty(new Response('{}', { status: 200 }), 'ok', { get(): boolean { throw new Error('the reply broke'); } });
+          return Object.defineProperty(new Response('{}', { status: 200 }), 'ok', { get(): boolean { throw new Error(`the reply broke at ${homedir()}/.lynox`); } });
         }
         if (path === '/api/migration/handshake' && (init.method ?? 'GET') === 'GET' && target.handshakeRaw !== undefined) return new Response(target.handshakeRaw, { status: 200 });
         if (path === '/api/migration/handshake' && (init.method ?? 'GET') === 'GET' && target.large?.at === 'handshake') return new Response(sized({ ...imp.startHandshake(TOKEN) }, target.large.bytes), { status: 200 });
@@ -792,8 +792,8 @@ describe('the migration export route in sidecar mode (real engine)', () => {
   });
 
   /** The error event's code, params and retry; its English message is checked by the tests above. */
-  async function stopOf(): Promise<{ code?: unknown; params?: Record<string, unknown>; retry?: unknown }> {
-    return ((await exportTo()).get('error') ?? {}) as { code?: unknown; params?: Record<string, unknown>; retry?: unknown };
+  async function stopOf(): Promise<{ code?: unknown; params?: Record<string, unknown>; retry?: unknown; message?: unknown }> {
+    return ((await exportTo()).get('error') ?? {}) as { code?: unknown; params?: Record<string, unknown>; retry?: unknown; message?: unknown };
   }
 
   it('gives each stop a code, its parameters and its retry for the UI\'s own sentence', { timeout: 30_000 }, async () => {
@@ -925,11 +925,18 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     // This instance's home directory shows as ~ in the restore's error text too.
     target.guardText = `cannot read ${homedir()}/.lynox/restore.log`;
     expect(await stopOf()).toMatchObject({ code: 'restore_failed', params: { detail: 'cannot read ~/.lynox/restore.log' } });
+    // The home directory goes before the text is cut, so a cut cannot leave part of it.
+    target.guardText = `${'x'.repeat(490)} ${homedir()}/.lynox/restore.log`;
+    expect(await stopOf()).toMatchObject({ code: 'restore_failed', params: { detail: `${'x'.repeat(490)} ~/.lynox/…` } });
     target.guardText = undefined;
     target.guardBlocksRestore = false;
     // A stop lynox cannot name, once the restore was asked for: it may have run, so check the target first.
     target.restoreBreaks = true;
-    expect(await stopOf()).toMatchObject({ code: 'unknown', retry: 'check' });
+    const unnamed = await stopOf();
+    expect(unnamed).toMatchObject({ code: 'unknown', retry: 'check' });
+    // Its English sentence for the log and the API shows the home directory as ~ as well.
+    expect(unnamed.message).toContain('the reply broke at ~/.lynox');
+    expect(unnamed.message).not.toContain(homedir());
     target.restoreBreaks = undefined;
   });
 
