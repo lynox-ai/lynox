@@ -185,7 +185,8 @@ export interface ChatThreadMessage {
  * mail, as before.
  */
 export function followUpToAnswer(reader: ChatInboxReader, item: InboxItem): ChatThreadMessage | null {
-  // The same rule the inbox list and reading pane count follow-ups by (`follow-ups.ts`).
+  // The rule the inbox list and reading pane start from (`follow-ups.ts`); they also leave out
+  // mail the owner dealt with since, which the chat needs not: it answers the newest one.
   return followUpsOf(reader, item)[0] ?? null;
 }
 

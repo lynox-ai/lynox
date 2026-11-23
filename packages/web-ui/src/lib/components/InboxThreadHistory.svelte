@@ -76,7 +76,7 @@
 					tabindex="-1"
 					bind:this={messageEls[msg.id]}
 					data-thread-message-id={msg.id}
-					class="rounded-[var(--radius-sm)] border bg-bg-subtle text-sm focus:outline-none focus:ring-2 focus:ring-accent {currentMessageId !== undefined && msg.messageId === currentMessageId ? 'border-accent' : 'border-border'}"
+					class="rounded-[var(--radius-sm)] border bg-bg-subtle text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent {currentMessageId !== undefined && msg.messageId === currentMessageId ? 'border-accent' : 'border-border'}"
 				>
 					<!-- Header is a button when there's body/snippet content to reveal,
 						a plain div otherwise. Touch-sized; aria-expanded reflects state. -->

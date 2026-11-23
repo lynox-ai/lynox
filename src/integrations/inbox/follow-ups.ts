@@ -83,7 +83,7 @@ const SENSITIVE_FOLLOW_UP_ACTIONS: ReadonlySet<string> = new Set(['raised_on_sen
  *
  * Dealt with: a reply or archive of the item that a follow-up then ended, or a mail sent into the
  * thread (a reply written outside lynox). A follow-up from before that is answered and not
- * counted; one without a date is counted.
+ * counted; one without a mail date counts by when the inbox stored it.
  */
 export function itemFollowUps<M extends FollowUpMessage & { id: string }>(
   reader: FollowUpReader<M>,
@@ -92,8 +92,10 @@ export function itemFollowUps<M extends FollowUpMessage & { id: string }>(
   if (item.userAction !== undefined) return undefined;
   const audit = reader.listAuditForItem(item.id, item.tenantId);
   const handledAt = lastHandledAt(reader, item, audit);
-  const found = followUpsOf(reader, item).filter((m) =>
-    handledAt === undefined || m.mailDate === undefined || m.mailDate.getTime() > handledAt);
+  const found = followUpsOf(reader, item).filter((m) => {
+    const at = m.mailDate ?? m.fetchedAt;
+    return handledAt === undefined || at === undefined || at.getTime() > handledAt;
+  });
   const latest = found[0];
   if (latest === undefined) return undefined;
   // Sensitive: its stored text reads so, or the intake check flagged it (the inbox may have stored
@@ -123,19 +125,38 @@ function lastHandledAt(
   // A reply (through lynox, recorded by the system) or an archive (by the owner) dealt with the
   // thread only if a follow-up then opened the item again: an open item whose last reply or archive
   // is followed by nothing had it undone (a bulk undo leaves no audit), and counts from before it.
+  // A raise names the action it ended (`prior_user_action`): one that ended none comes after an
+  // undone action, and a clear of a snooze undoes nothing the owner answered.
   let pending: Date | undefined;
   for (const a of audit) {
     if (a.action === 'replied' || a.action === 'archived') pending = a.createdAt;
-    else if (a.action === 'undo') pending = undefined;
-    else if (a.action === 'reopened_on_reply' || a.action === 'raised_on_sensitive_follow_up') {
+    else if (a.action === 'undo' && payloadOf(a)['intent'] !== 'unsnooze') pending = undefined;
+    else if (a.action === 'reopened_on_reply') {
       later(pending);
+      pending = undefined;
+    } else if (a.action === 'raised_on_sensitive_follow_up') {
+      const prior = payloadOf(a)['prior_user_action'];
+      if (prior === 'replied' || prior === 'archived') later(pending);
       pending = undefined;
     }
   }
+  // A sent mail's date is its sender's word: one dated after it was stored (a mail from the
+  // account's own address with a date to come) counts from when it was stored.
   for (const m of reader.listThreadMessages(item.accountId, item.threadKey, { tenantId: item.tenantId, limit: 50 })) {
-    if (m.direction === 'outbound') later(m.mailDate);
+    if (m.direction !== 'outbound') continue;
+    const sent = m.mailDate !== undefined && m.fetchedAt !== undefined && m.mailDate.getTime() > m.fetchedAt.getTime() ? m.fetchedAt : (m.mailDate ?? m.fetchedAt);
+    later(sent);
   }
   return at;
+}
+
+function payloadOf(a: { payloadJson: string }): Record<string, unknown> {
+  try {
+    const p = JSON.parse(a.payloadJson) as unknown;
+    return typeof p === 'object' && p !== null ? p as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
 }
 
 /** The messages the item's audit names as found sensitive by the intake check. */
