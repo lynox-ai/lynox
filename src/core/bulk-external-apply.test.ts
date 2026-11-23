@@ -3189,3 +3189,44 @@ describe('the head counts of an external run', () => {
     }
   });
 });
+
+// An undo's `delete` comes only from a target its source created, and only a local run creates:
+// an external target is read before it can be approved, and a read finds it or refuses it, never
+// as absent. So every entry an undo removes is one a local run confirmed it wrote, and the undo's
+// `changes.delete` counts only those. These tests hold the chain together for the URL form; the
+// Shopify form records its reads through the same `recordRead`, whose type takes no absent image.
+describe('an external run never creates', () => {
+  it('refuses a target the host does not have at its read, rather than planning a create', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = await previewedRun([{ target: url(0), after: { price: '15.00' } }, { target: url('x'), after: { price: '20.00' } }]);
+      const rows = engineDb.getDb().prepare('SELECT seq, change, error FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(runId) as { seq: number; change: string; error: string | null }[];
+      expect(rows).toEqual([{ seq: 0, change: 'update', error: null }, { seq: 1, change: 'invalid', error: 'not_found' }]);
+      expect(ledger.getStatus(runId)!.changes.create).toBe(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it('gives an undo with no entry to remove, also where a send got no clear answer', async () => {
+    const s = shop();
+    s.dropAfter = new Set(['PATCH /products/1']);
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15.00' } }, { target: url(1), after: { price: '20.00' } }]);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter });
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted' WHERE id = ? AND phase = 'writing'`).run(runId);
+      // The undo takes back the written target and the open one: the case is not empty.
+      expect(ledger.countUndoableParts(runId)).toEqual({ written: 1, open: 1 });
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      expect(undo.status.total).toBe(2);
+      expect(undo.status.changes.delete).toBe(0);
+      const changes = engineDb.getDb().prepare('SELECT change FROM bulk_targets WHERE run_id = ?').all(undo.status.id) as { change: string }[];
+      expect(changes.map((c) => c.change)).toEqual(['update', 'update']);
+    } finally {
+      restore();
+    }
+  });
+});
