@@ -1936,8 +1936,17 @@ const shownUrl = (value: string): string => {
   return asRead ? shown : `${shown} (sends to ${url.host})`;
 };
 
-/** Scope tokens as the save question shows them: each withheld on its own, so one cannot hide another. */
-const shownScopes = (tokens: readonly string[]): string => tokens.map(shownValue).join(' ');
+/**
+ * Scope tokens as the save question shows them: each is withheld on its own, so one cannot hide
+ * another. The ones shown are listed; the withheld ones are counted after them.
+ */
+const shownScopes = (tokens: readonly string[]): string => {
+  const shown = tokens.map(singleLine).filter((t) => shownValue(t) === t);
+  const held = tokens.length - shown.length;
+  if (held === 0) return shown.join(' ');
+  const count = `${String(held)} ${held === 1 ? 'value shaped like a credential' : 'values shaped like credentials'} (not shown)`;
+  return shown.length === 0 ? count : `${shown.join(' ')}; plus ${count}`;
+};
 
 export const ordinal = (n: number): string => `${String(n)}${n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th'}`;
 
@@ -2772,7 +2781,7 @@ ${draftJson}
       return withInstanceWrite(agent, { site: 'api_setup#save', kind: () => (prior === undefined ? 'create' : 'change'), store: 'api_profiles', target: () => [['profile', apiStore.trailIdOf(savedId) ?? freshTrailId]], main: ['save'] }, (w) => {
         // No await from here to the save.
         if (JSON.stringify(apiStore.storedProfile(savedId) ?? null) !== priorState) {
-          return `Error: API profile "${savedId}" changed while the question was open, so the answer no longer covers this save. Nothing was saved and no token slot was emptied; read the profile again and ask again if the change is still wanted.`;
+          return `Error: API profile "${savedId}" changed while the question was open (for example, another chat saved it or its token was renewed), so the answer no longer covers this save. Nothing was saved and no stored token was removed. Read the profile again; if the change is still wanted, save it again, and the user is asked again.`;
         }
         if (cleared.length > 0) {
           const refusal = apiStore.saveRefusal(profile);

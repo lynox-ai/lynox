@@ -408,11 +408,22 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     }
   });
 
-  it('a scope shaped like a credential is withheld on its own and hides no other added scope', () => {
-    const junk = 'x'.repeat(48);
-    const text = securityChanges(ownGrant(), ownGrant({ scope: `read write ${junk}` })).map((c) => flattenPrompt(c.text)).join('\n');
-    expect(text).toContain('scopes added: write (a value shaped like a credential, not shown)');
-    expect(text).not.toContain(junk);
+  it('a scope shaped like a credential is withheld on its own and hides no other added scope: the shown ones are listed, the withheld ones counted', () => {
+    const [j1, j2] = ['x'.repeat(48), 'y'.repeat(48)];
+    const text = (scope: string, from = 'read'): string =>
+      securityChanges(ownGrant({ scope: from }), ownGrant({ scope })).map((c) => flattenPrompt(c.text)).join('\n');
+    expect(text(`read write ${j1}`)).toContain('scopes added: write; plus 1 value shaped like a credential (not shown)');
+    expect(text(`read write admin ${j1} ${j2}`)).toContain('scopes added: write admin; plus 2 values shaped like credentials (not shown)');
+    expect(text(`read ${j1}`)).toContain('scopes added: 1 value shaped like a credential (not shown)');
+    expect(text(`read ${j1} ${j2}`)).toContain('scopes added: 2 values shaped like credentials (not shown)');
+    expect(text('read', `read write ${j1}`)).toContain('scopes removed: write; plus 1 value shaped like a credential (not shown)');
+    // Control: nothing withheld, nothing counted.
+    expect(text('read write admin')).toContain('scopes added: write admin');
+    expect(text('read write admin')).not.toContain('plus');
+    for (const all of [`read write ${j1}`, `read ${j1} ${j2}`, `read write admin ${j1} ${j2}`]) {
+      expect(text(all)).not.toContain(j1);
+      expect(text(all)).not.toContain(j2);
+    }
   });
 
   it('a save made while its question was open is not overwritten: the answer no longer covers it', async () => {
@@ -429,7 +440,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     };
     const result = await apiSetupTool.handler({ action: 'update', profile: ownGrant({ scope: 'read write' }) }, agent as never) as string;
     expect(asked).toHaveLength(1);
-    expect(result).toMatch(/^Error: API profile "svc" changed while the question was open/);
+    expect(result).toBe('Error: API profile "svc" changed while the question was open (for example, another chat saved it or its token was renewed), so the answer no longer covers this save. Nothing was saved and no stored token was removed. Read the profile again; if the change is still wanted, save it again, and the user is asked again.');
     expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('none');
   });
 
