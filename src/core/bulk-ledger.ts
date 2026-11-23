@@ -25,6 +25,7 @@ import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
 import { hiddenAddsToCopy, targetHiddenAdds, type FieldHiddenAdds } from './bulk-hidden-adds.js';
+import { judgeOutliers, targetMarkers, type OutlierFieldKind, type OutlierInput, type OutlierResult, type TargetMarkers } from './bulk-outliers.js';
 import { checkMarkup, sameHtmlField, shortcodeRefusalOf, htmlFieldsOfFormName, htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
 import { shopifySavedForm } from './shopify-saved-form.js';
 import { canonicalHtml, htmlEqualIgnoringLayout, withinReadingBounds } from './html-tree.js';
@@ -1070,6 +1071,15 @@ function* rulePairs(
   }
 }
 
+/** How much stored text, in characters, {@link BulkLedger.judgeOutliersOf} decrypts and reads before it
+ *  lets other work run: tens of milliseconds on shop texts. */
+export const OUTLIER_CHUNK = 256 * 1024;
+/** How long, in milliseconds, it reads before it lets other work run whatever the length: a short text
+ *  of deeply nested markup costs the parser far more than its characters say. */
+export const OUTLIER_SLICE_MS = 20;
+/** How many rows {@link BulkLedger.judgeOutliersOf} fetches at once. */
+const OUTLIER_PAGE = 200;
+
 export class BulkLedger {
   /** `mirror`: history.db's copy of the thread containment (`history-markers.ts`), read with engine.db's when a run is planned from a thread. */
   constructor(private readonly engineDb: EngineDb, private readonly mirror: ContainmentMirror | null) {}
@@ -1748,6 +1758,88 @@ export class BulkLedger {
       if (fields.some((f) => f.unread === true)) unchecked++;
     }
     return { adds, unchecked };
+  }
+
+  /**
+   * The verdicts of a judged run that differ from the rest of it (`bulk-outliers.ts`): the order the
+   * approval view lists them in, never a check. Over every target whose verdict is decided, a target the
+   * owner took out included: the rest of the run does not change when the owner takes one out, so the
+   * marks do not move under their hand and the result is computed once per set of verdicts (held in
+   * {@link outlierCache}, keyed by how many are decided; a second caller while it is computed waits for
+   * the same result). The texts are read in parts of about {@link OUTLIER_CHUNK} characters or
+   * {@link OUTLIER_SLICE_MS} milliseconds, whichever comes first, the process
+   * free between them: the route waits for them, not every other request. Reading markup costs the parser
+   * about half a millisecond per kilobyte, so 5000 targets of long HTML descriptions take minutes once.
+   * Null for a run without a rule. The store host and the start domains are what the run may link to,
+   * so they are not new.
+   */
+  judgeOutliersOf(runId: string): Promise<OutlierResult | null> {
+    const run = this.runRow(runId);
+    if (run === undefined || run.judge_rule === null) return Promise.resolve(null);
+    const decided = (this.engineDb.getDb().prepare(
+      `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND judged_at IS NOT NULL`,
+    ).get(runId) as { n: number }).n;
+    const key = `${String(decided)}:${run.judge_rule_hash ?? ''}`;
+    const held = this.outlierCache.get(runId);
+    if (held !== undefined && held.key === key) return held.result;
+    const result = this.computeJudgeOutliers(runId, run);
+    this.outlierCache.delete(runId);
+    this.outlierCache.set(runId, { key, result });
+    // A failed reading is not held: the next caller tries again.
+    result.catch(() => { if (this.outlierCache.get(runId)?.result === result) this.outlierCache.delete(runId); });
+    // A few runs at most are approved at a time; the oldest goes first.
+    if (this.outlierCache.size > 8) this.outlierCache.delete(this.outlierCache.keys().next().value!);
+    return result;
+  }
+
+  /** The verdicts {@link judgeOutliersOf} last computed, per run, with the key they were computed for. */
+  private readonly outlierCache = new Map<string, { key: string; result: Promise<OutlierResult> }>();
+
+  private async computeJudgeOutliers(runId: string, run: RunRow): Promise<OutlierResult> {
+    const kinds: Record<string, OutlierFieldKind> = {};
+    for (const [field, property] of Object.entries(this.judgeRuleOf(run).schema.properties)) {
+      const type = (property as { type?: unknown }).type;
+      kinds[field] = type === 'number' || type === 'integer' ? 'number'
+        : type === 'boolean' ? 'boolean'
+        : Object.hasOwn(property as object, 'enum') ? 'enum' : 'text';
+    }
+    const host = externalHostOf(run.target_system);
+    const own = [...(host === null ? [] : [host]), ...(this.startDomainsOfRow(run) ?? [])];
+    // Read a page of rows at a time, by seq, and each target's markers as it is read: decrypting is part
+    // of the work that must not hold the process, so it is done in the same parts.
+    const page = this.engineDb.getDb().prepare(
+      `SELECT seq, before, after_planned FROM bulk_targets
+       WHERE run_id = ? AND seq > ? AND judged_at IS NOT NULL AND change IN ('update', 'create', 'unchanged')
+       ORDER BY seq LIMIT ${String(OUTLIER_PAGE)}`,
+    );
+    const inputs: OutlierInput[] = [];
+    const markers: TargetMarkers[] = [];
+    let read = 0;
+    let since = performance.now();
+    let after = -1;
+    // run-group-starter: a loop over this call's own pages; it ends when the last page is read and reports no spend.
+    for (;;) {
+      const rows = page.all(runId, after) as { seq: number; before: string | null; after_planned: string | null }[];
+      for (const r of rows) {
+        after = r.seq;
+        if (r.after_planned === null) continue;
+        if (read >= OUTLIER_CHUNK || performance.now() - since >= OUTLIER_SLICE_MS) {
+          read = 0;
+          // run-group-starter: a single yield this call awaits at once; it only resumes this call and reports no spend.
+          await new Promise<void>((resolve) => { setImmediate(resolve); });
+          since = performance.now();
+        }
+        const beforeText = r.before === null ? '' : this.engineDb.dec(r.before);
+        const afterText = this.engineDb.dec(r.after_planned);
+        const before = beforeText === '' ? null : JSON.parse(beforeText) as BeforeImage;
+        const input: OutlierInput = { seq: r.seq, before: before !== null && !before.absent ? before.value : null, after: JSON.parse(afterText) };
+        inputs.push(input);
+        markers.push(targetMarkers(input, own));
+        read += beforeText.length + afterText.length;
+      }
+      if (rows.length < OUTLIER_PAGE) break;
+    }
+    return judgeOutliers(inputs, own, kinds, markers);
   }
 
   private toStatus(row: RunRow): BulkRunStatus {
