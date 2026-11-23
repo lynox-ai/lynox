@@ -89,6 +89,7 @@ vi.mock('./observability.js', () => ({
 
 import { Agent, readForDiffPreview, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS, raceRunAbort, TOOL_ABANDONED_MESSAGE, toolStoppedMessage, TOOL_STOPPED_RESULT_NOTE } from './agent.js';
 import { UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
+import { OwnerKnownTargets } from './owner-known-targets.js';
 import { createStepStreamHandler } from '../orchestrator/runtime-adapter.js';
 import { InputRequiredError } from './input-required.js';
 import { askUserTool } from '../tools/builtin/ask-user.js';
@@ -6468,6 +6469,9 @@ describe('a vault secret reference and the host it is sent to', () => {
       const agent = new Agent({
         name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool],
         secretStore: await vaultStore(), toolContext: boundContext(), promptUser,
+        // The owner named the host: the second GET follows the first one's response (foreign
+        // content), and only the secret question is under test here, not the read check.
+        ownerKnown: OwnerKnownTargets.of({ ownerTexts: () => [`call https://${OTHER}/c`] }),
       });
       await agent.send('go');
     } finally {
@@ -6496,12 +6500,15 @@ describe('a vault secret reference and the host it is sent to', () => {
       const agent = new Agent({
         name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool],
         secretStore: await vaultStore(), toolContext: boundContext(), promptUser,
+        // Both hosts named by the owner, so the second question is the secret one, not the read check.
+        ownerKnown: OwnerKnownTargets.of({ ownerTexts: () => [`call https://${OTHER}/c and https://93.184.216.36/c`] }),
       });
       await agent.send('go');
     } finally {
       restore();
     }
     expect(promptUser).toHaveBeenCalledTimes(2);
+    expect(flattenPrompt(promptUser.mock.calls[1]![0] as string | PromptText)).toContain('SERVICE_TOKEN');
     expect(flattenPrompt(promptUser.mock.calls[1]![0] as string | PromptText)).toContain('93.184.216.36');
   });
 
