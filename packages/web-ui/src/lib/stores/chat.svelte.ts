@@ -3488,15 +3488,13 @@ function fetchChangeset(): Promise<boolean> {
 	return run;
 }
 
-/** How long the review fetch may take. A queued turn waits for it, so one that never answers
- *  must not hold the queue: after this it counts as no answer. */
-const CHANGESET_FETCH_MS = 8_000;
-
 async function loadChangeset(): Promise<boolean> {
 	if (!sessionId) return false;
 	changesetLoading = true;
 	try {
-		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset`, { signal: AbortSignal.timeout(CHANGESET_FETCH_MS) });
+		// No time limit of its own: a slow answer that carries a review must still show it, and a
+		// queued turn waits for it. A fetch the network ends lands in the catch and frees the queue.
+		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset`);
 		if (!res.ok) return false;
 		const data = (await res.json()) as { hasChanges: boolean; runId?: string; files: ChangesetFileInfo[] };
 		if (data.hasChanges && data.files.length > 0) {

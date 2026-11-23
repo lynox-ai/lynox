@@ -36,8 +36,6 @@ let liveRunIn: string | null;
 let newSessions: number;
 /** How often the review was asked for. */
 let changesetGets: number;
-/** The signal the review fetch's time limit aborts; the test fires it. */
-let fetchTimeout: AbortController;
 
 const notes = [{ file: 'notes.md', status: 'modified', diff: '-a\n+b' }];
 
@@ -123,13 +121,12 @@ beforeEach(async () => {
 	liveRunIn = null;
 	newSessions = 0;
 	changesetGets = 0;
-	fetchTimeout = new AbortController();
-	vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => fetchTimeout.signal);
+
 	reviewStatus = 200;
 	changesetFails = false;
 	serve();
 });
-afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(() => { vi.unstubAllGlobals(); });
 
 /** A run that streams until released, with a message typed and queued behind it. */
 async function queueBehindRun(): Promise<() => void> {
@@ -247,40 +244,22 @@ describe('a turn queued behind a run waits for the review that run left open', (
 		expect(store.getMessages().find((m) => m.content === 'C')?.queued, 'the other waits behind it').toBe(true);
 	});
 
-	it('a review fetch that never answers stops holding at its time limit, and the queued turn goes as before', async () => {
+	it('a review answer that comes after more than 8 s still shows the review, and the queued turn holds', async () => {
 		const release = await queueBehindRun();
 		changed = notes;
-		holdChangeset = new Promise<void>(() => {}); // the server never answers
+		let answer!: () => void;
+		holdChangeset = new Promise<void>((r) => { answer = r; });
 		release();
+		await settle();
+		await wait(9_000); // longer than any time limit a fetch here might be given
+		answer();
 		await settle();
 		await wait(200);
 		await settle();
-		expect(runTasks, 'positive control: held while the fetch runs').toEqual(['edit the notes']);
-		fetchTimeout.abort(); // the time limit
-		await settle();
-		await wait(50);
-		await settle();
-		expect(runTasks, 'sent after the time limit').toEqual(['edit the notes', 'then this']);
-	});
-
-	it('after a review fetch hit its time limit, a later re-send goes', async () => {
-		await store.sendMessage('first');
-		await settle();
-		changed = notes;
-		holdChangeset = new Promise<void>(() => {});
-		await store.sendMessage('edit the notes'); // its review fetch hangs
-		await settle();
-		fetchTimeout.abort();
-		await settle();
-		holdChangeset = null;
-		changed = [];
-		store.getMessages().push({ role: 'user', content: 'sent while offline', failed: true });
-		listeners.online!();
-		await settle();
-		await wait(700); // past the re-send delay
-		await settle();
-		expect(runTasks).toEqual(['first', 'edit the notes', 'sent while offline']);
-	});
+		expect(store.getPendingChangeset(), 'the slow review is shown').not.toBeNull();
+		expect(runTasks, 'nothing sent past it').toEqual(['edit the notes']);
+		expect(store.getMessages().find((m) => m.content === 'then this')?.queued, 'the turn keeps its place').toBe(true);
+	}, 20_000);
 
 	it('with no review the queued turn is sent after the run (control)', async () => {
 		const release = await queueBehindRun();
