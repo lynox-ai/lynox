@@ -168,9 +168,10 @@ export async function discardBody(r: Response, timeoutMs: number = TARGET_BODY_T
  * Every character that is not shown as itself: controls (Cc), format characters (Cf: the bidi
  * embeddings, overrides, isolates and marks, the zero-width characters, the invisible operators,
  * the soft hyphen, the interlinear annotation and tag characters), the variation selectors and the
- * fillers that render as nothing.
+ * fillers that render as nothing, and lone surrogates (Cs), which no font shows and which a quoted
+ * form would spell out six characters each.
  */
-const HIDDEN = /[\p{Cc}\p{Cf}\u034F\u115F\u1160\u180B-\u180F\u3164\uFE00-\uFE0F\uFFA0\u{E0100}-\u{E01EF}]/gu;
+const HIDDEN = /[\p{Cc}\p{Cf}\p{Cs}\u034F\u115F\u1160\u180B-\u180F\u3164\uFE00-\uFE0F\uFFA0\u{E0100}-\u{E01EF}]/gu;
 
 /**
  * A text from the target as it is shown to the user: line breaks, tabs and the line and paragraph
