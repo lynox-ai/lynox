@@ -15,7 +15,8 @@
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
-	import { injectArtifactPreview as injectArtifactFit } from '../utils/artifact-frame.js';
+	import { artifactExportDocument, injectArtifactPreview as injectArtifactFit } from '../utils/artifact-frame.js';
+	import { attachArtifactFrame } from '../utils/artifact-frame-host.js';
 	import { saveOrShareBlob } from '../utils/save-blob.js';
 
 	let selected = $state<Artifact | null>(null);
@@ -141,6 +142,12 @@
 		return injectArtifactFit(html);
 	}
 
+	/** The preview frame runs on the sandboxed frame endpoint and gets its document from
+	 *  memory once it is ready (utils/artifact-frame-host.ts). */
+	function artifactFrame(node: HTMLIFrameElement, html: string): void {
+		attachArtifactFrame(node, html);
+	}
+
 	function typeIcon(type: string): string {
 		if (type === 'mermaid') return '◇';
 		if (type === 'svg') return '△';
@@ -174,7 +181,9 @@
 	// behaviour as the inline artifact pill's share, so the two views are coherent.
 	function exportArtifact(a: Artifact) {
 		const filename = `${a.title.replace(/\s+/g, '-').toLowerCase()}.${extensionFor(a.type)}`;
-		void saveOrShareBlob(new Blob([a.content], { type: mimeFor(a.type) }), filename);
+		// An html file keeps the artifact policy, as the chat's download does (artifactExportDocument).
+		const body = a.type === 'html' ? artifactExportDocument(a.content) : a.content;
+		void saveOrShareBlob(new Blob([body], { type: mimeFor(a.type) }), filename);
 	}
 
 	/** Save as PDF via the browser print pipeline — same path as the inline
@@ -313,12 +322,15 @@
 					</div>
 				</div>
 			{:else if selected.type === 'html' || selected.type === 'svg'}
-				<iframe
-					srcdoc={injectArtifactPreview(selected.content)}
-					sandbox="allow-scripts"
-					class="w-full h-full border-none bg-bg-elevated"
-					title={selected.title}
-				></iframe>
+				<!-- A new version gets a new frame: the frame takes its document once. -->
+				{#key `${selected.id}:${selected.version ?? 1}`}
+					<iframe
+						use:artifactFrame={injectArtifactPreview(selected.content)}
+						sandbox="allow-scripts"
+						class="w-full h-full border-none bg-bg-elevated"
+						title={selected.title}
+					></iframe>
+				{/key}
 			{:else if selected.type === 'mermaid'}
 				<div class="p-6 overflow-auto h-full">
 					<MarkdownRenderer content={'```mermaid\n' + selected.content + '\n```'} />

@@ -18,6 +18,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # A build id makes the stack behave like a deployed one: the stale-bundle guard in the
+      # page is live (and must pass the page policy), and the artifact frame endpoint is
+      # served cacheable under it.
+      args:
+        BUILD_SHA: ${BUILD_SHA:-smoke-build}
     restart: "no"
     read_only: true
     ports:
