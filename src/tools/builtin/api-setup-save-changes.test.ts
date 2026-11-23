@@ -395,9 +395,17 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     expect(line('https://\u0430pi.openai.com/v1')).toContain('(sends to xn--pi-6kc.openai.com)');
     // An address the URL parser does not take is said to be none, not shown as if it were one.
     expect(line('api.mistral.ai/v1')).toContain('→ api.mistral.ai/v1 (not an address a request can use)');
-    // Control: an address written as it is read gets no note.
-    expect(line('https://api.mistral.ai/v1')).toContain('→ https://api.mistral.ai/v1');
-    expect(line('https://api.mistral.ai/v1')).not.toContain('sends to');
+    // Host-like text after a `\\`, `?` or `#` is not where the request goes.
+    expect(line('https://api.mistral.ai\\.api.openai.com/v1')).toContain('(sends to api.mistral.ai)');
+    expect(line('https://api.mistral.ai?.api.openai.com')).toContain('(sends to api.mistral.ai)');
+    expect(line('https://api.mistral.ai#@api.openai.com')).toContain('(sends to api.mistral.ai)');
+    // An address with no host says so instead of an empty name.
+    expect(line('mailto:someone@example.com')).toContain('(sends to no host)');
+    // Control: an address written as it is read gets no note, in any letter case or with its port.
+    for (const asRead of ['https://api.mistral.ai/v1', 'HTTPS://API.MISTRAL.AI/v1', 'https://api.mistral.ai:8443/v1', 'https://api.mistral.ai']) {
+      expect(line(asRead), asRead).toContain(`→ ${asRead}`);
+      expect(line(asRead), asRead).not.toContain('(sends to');
+    }
   });
 
   it('a scope shaped like a credential is withheld on its own and hides no other added scope', () => {
@@ -423,5 +431,24 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     expect(asked).toHaveLength(1);
     expect(result).toMatch(/^Error: API profile "svc" changed while the question was open/);
     expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('none');
+  });
+
+  it('a token renewal while the question is open is not a change: the save goes through', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', ownGrant(), 'Allow');
+    const asked: string[] = [];
+    const agent = agentFor(store, asked, 'Allow') as unknown as { promptUser: (q: unknown) => Promise<string> };
+    const answer = agent.promptUser;
+    agent.promptUser = async (q: unknown): Promise<string> => {
+      // The engine records a renewed token's expiry on the stored profile meanwhile.
+      const renewed = structuredClone(stored(store, 'svc')!);
+      renewed.auth!.oauth!.token_expires_at = Date.now() + 3_600_000;
+      expect(store.save(renewed, join(lynoxDir, 'apis')).ok).toBe(true);
+      return answer(q);
+    };
+    const result = await apiSetupTool.handler({ action: 'update', profile: ownGrant({ scope: 'read write' }) }, agent as never) as string;
+    expect(asked).toHaveLength(1);
+    expect(result).not.toMatch(/^(Error|Blocked|Validation)/);
+    expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('read write');
   });
 });

@@ -1907,8 +1907,30 @@ const shownUrl = (value: string): string => {
   try { url = new URL(value); } catch { return `${shownValue(value)} (not an address a request can use)`; }
   const shown = shownValue(value);
   if (shown !== singleLine(value)) return `${url.origin} (the rest is shaped like a credential, not shown)`;
-  return shown.startsWith(`${url.protocol}//${url.host}`) ? shown : `${shown} (sends to ${url.host})`;
+  if (url.host === '') return `${shown} (sends to no host)`;
+  // Written as read only when the host is followed by a path, a port and a path, or nothing: a
+  // `\`, `?` or `#` after it would let more host-like text follow that the request never uses.
+  const lead = `${url.protocol}//${url.host}`;
+  const asRead = shown.toLowerCase().startsWith(lead.toLowerCase()) && /^(?::\d+)?(?:\/|$)/.test(shown.slice(lead.length));
+  return asRead ? shown : `${shown} (sends to ${url.host})`;
 };
+
+/**
+ * A stored profile as its owner configured it, for telling whether a save happened in between:
+ * without what the engine writes on its own (the grant record, a token's expiry), so a token
+ * renewal or a re-minted grant while a question is open does not read as a change, and with the
+ * keys in one order, as a re-save may write them in another.
+ */
+function configStateOf(p: ApiProfile | undefined): string {
+  if (p === undefined) return 'null';
+  const copy = structuredClone(p) as ApiProfile & { oauth_grant?: unknown };
+  delete copy.oauth_grant;
+  if (copy.auth?.oauth) delete copy.auth.oauth.token_expires_at;
+  const sorted = (v: unknown): unknown => Array.isArray(v)
+    ? v.map(sorted)
+    : isPlainRecord(v) ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sorted(v[k])])) : v;
+  return JSON.stringify(sorted(copy));
+}
 
 /** Scope tokens as the save question shows them: each withheld on its own, so one cannot hide another. */
 const shownScopes = (tokens: readonly string[]): string => tokens.map(shownValue).join(' ');
@@ -2383,7 +2405,7 @@ ${draftJson}
       // The stored profile the questions below describe. A save in between (another chat, a token
       // exchange) would be overwritten by this one and the change list would be against a state
       // that is gone, so the save checks it again right before it writes.
-      const priorState = JSON.stringify(prior ?? null);
+      const priorState = configStateOf(prior);
       // A save may not take a profile off the built-in provider it was set up with. A model
       // that wanted a write scope the preset refuses saved over a working read connection as
       // its own OAuth app; connect then refused that, and the user had neither. The answer
@@ -2732,7 +2754,7 @@ ${draftJson}
       const freshTrailId = apiStore.newTrailId();
       return withInstanceWrite(agent, { site: 'api_setup#save', kind: () => (prior === undefined ? 'create' : 'change'), store: 'api_profiles', target: () => [['profile', apiStore.trailIdOf(savedId) ?? freshTrailId]], main: ['save'] }, (w) => {
         // No await from here to the save.
-        if (JSON.stringify(apiStore.storedProfile(savedId) ?? null) !== priorState) {
+        if (configStateOf(apiStore.storedProfile(savedId)) !== priorState) {
           return `Error: API profile "${savedId}" changed while the question was open, so the answer no longer covers this save. Nothing was saved and no token slot was emptied; read the profile again and ask again if the change is still wanted.`;
         }
         if (cleared.length > 0) {
