@@ -18,6 +18,23 @@ import { stripHidden } from './hidden-text.js';
 import { EngineLessRefused } from './engine-less-refusal.js';
 
 /**
+ * The start of the title the engine gave a workflow scheduled without one, before it stored the
+ * workflow's name alone: such plans still carry it. Read only by {@link titleIsWorkflowName}.
+ */
+export const SCHEDULED_TITLE_PREFIX = 'Scheduled: ';
+
+/**
+ * Whether a plan's title is the name of the workflow it runs: as the engine titles a workflow
+ * scheduled without a title (the name alone, or, on plans from before, the prefix and the name).
+ * The view then puts its own words in front of the name in the reader's language. A title that
+ * starts with the prefix but goes on with anything else is not the name, and stays whole.
+ */
+export function titleIsWorkflowName(title: string, workflowName: string): boolean {
+  if (workflowName === '') return false;
+  return title === workflowName || title === `${SCHEDULED_TITLE_PREFIX}${workflowName}`;
+}
+
+/**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
  * {@link TriggerEffect} (what it DOES) from the create-path intent. This is the
  * WRITE-side twin of the engine.db v3 migration remap — the two MUST agree so a
