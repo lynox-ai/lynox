@@ -68,11 +68,17 @@ export interface MeasuredShopifyForm {
 export const MEASURED_SHOPIFY_FORMS: readonly MeasuredShopifyForm[] = [
   {
     form: 'shopify_product',
-    document: 'mutation($id: ID!, $title: String, $seoTitle: String, $seoDescription: String) { productUpdate(product: {id: $id, title: $title, seo: {title: $seoTitle, description: $seoDescription}}) { product { id } userErrors { field message } } }',
+    document: 'mutation($id: ID!, $title: String, $descriptionHtml: String, $seoTitle: String, $seoDescription: String) { productUpdate(product: {id: $id, title: $title, descriptionHtml: $descriptionHtml, seo: {title: $seoTitle, description: $seoDescription}}) { product { id } userErrors { field message } } }',
     apiVersion: '2026-10',
-    variableSets: [['seoDescription', 'seoTitle'], ['title'], ['seoDescription', 'seoTitle', 'title']],
-    measured: '2026-11-14 on a partner development store, API 2026-10: a raw read of every product field after each write; '
-      + 'unsent fields unchanged for each set, with values and with the seo pair cleared (null or ""); an empty title is refused',
+    variableSets: [
+      ['seoDescription', 'seoTitle'], ['title'], ['seoDescription', 'seoTitle', 'title'],
+      ['descriptionHtml'], ['descriptionHtml', 'title'], ['descriptionHtml', 'seoDescription', 'seoTitle'],
+      ['descriptionHtml', 'seoDescription', 'seoTitle', 'title'],
+    ],
+    measured: '2026-11-23 on a partner development store, API 2026-10, with the document naming descriptionHtml: a raw read '
+      + 'of every product field after each write; unsent fields unchanged for each set, with values and with the seo pair '
+      + 'cleared (null or ""); an empty title is refused; a description measured as text that is not empty only: the store '
+      + 'ignores null and an empty one clears it, and a bulk plan refuses both',
   },
 ];
 
@@ -81,7 +87,10 @@ export const MEASURED_SHOPIFY_FORMS: readonly MeasuredShopifyForm[] = [
  * engine's document and API version are the measured ones, and the variables the body sets
  * ({@link shopifyProductWriteVariables}, the same function the body is built from) are exactly a
  * measured set. A title is measured only as text: Shopify refuses an empty one, and clearing it
- * with `null` was not measured.
+ * with `null` was not measured. A description is measured only as text that is not empty:
+ * Shopify answers a `null` one with success and keeps the old description, so the write would
+ * not do what was approved; an empty one clears it, which no measured run sends (a bulk plan
+ * refuses both).
  */
 export function isMeasuredShopifyWrite(form: ShopifyWriteForm, after: Readonly<Record<string, unknown>>): boolean {
   // An image's after-state builds no product variables; the form check below also refuses it.
@@ -93,7 +102,9 @@ export function isMeasuredShopifyWrite(form: ShopifyWriteForm, after: Readonly<R
 export function isMeasuredShopifySend(
   form: ShopifyWriteForm, variables: Readonly<Record<string, string | null>>, document: string, version: string | null,
 ): boolean {
-  if (Object.hasOwn(variables, 'title') && (typeof variables['title'] !== 'string' || variables['title'] === '')) return false;
+  for (const textOnly of ['title', 'descriptionHtml']) {
+    if (Object.hasOwn(variables, textOnly) && (typeof variables[textOnly] !== 'string' || variables[textOnly] === '')) return false;
+  }
   const sent = Object.keys(variables).sort();
   return MEASURED_SHOPIFY_FORMS.some((f) => f.form === form
     && f.document === document

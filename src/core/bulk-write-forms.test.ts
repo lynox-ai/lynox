@@ -104,7 +104,7 @@ describe('measured Shopify write forms', () => {
     // A changed document or another version is a form nobody measured: it must be measured again.
     expect(MEASURED_SHOPIFY_FORMS.map((f) => [f.form, f.document, f.apiVersion])).toEqual([[
       'shopify_product',
-      'mutation($id: ID!, $title: String, $seoTitle: String, $seoDescription: String) { productUpdate(product: {id: $id, title: $title, seo: {title: $seoTitle, description: $seoDescription}}) { product { id } userErrors { field message } } }',
+      'mutation($id: ID!, $title: String, $descriptionHtml: String, $seoTitle: String, $seoDescription: String) { productUpdate(product: {id: $id, title: $title, descriptionHtml: $descriptionHtml, seo: {title: $seoTitle, description: $seoDescription}}) { product { id } userErrors { field message } } }',
       '2026-10',
     ]]);
     expect(doc).toBe(MEASURED_SHOPIFY_FORMS[0]!.document);
@@ -129,12 +129,35 @@ describe('measured Shopify write forms', () => {
     ]) expect(isMeasuredShopifyWrite('shopify_product', after), JSON.stringify(after)).toBe(true);
   });
 
+  // The description sets, each measured on its own: one test per set, so a set dropped from the table fails by name.
+  for (const [name, after] of [
+    ['the description alone', { descriptionHtml: '<p>Neu</p>' }],
+    ['the description with the title', { title: 'Neu', descriptionHtml: '<p>Neu</p>' }],
+    ['the description with the seo pair', { descriptionHtml: '<p>Neu</p>', seo_title: 'T', seo_description: 'D' }],
+    ['the description with the title and the seo pair', { title: 'Neu', descriptionHtml: '<p>Neu</p>', seo_title: 'T', seo_description: null }],
+  ] as const) {
+    it(`holds for ${name}`, () => {
+      expect(isMeasuredShopifyWrite('shopify_product', after)).toBe(true);
+    });
+  }
+
+  it('does not hold for a description that is null or empty, alone or beside measured fields', () => {
+    // The store answers a null description with success and keeps the old one; an empty one clears it.
+    for (const after of [
+      { descriptionHtml: null },
+      { descriptionHtml: '' },
+      { title: 'Neu', descriptionHtml: null },
+      { descriptionHtml: '', seo_title: 'T', seo_description: 'D' },
+    ]) expect(isMeasuredShopifyWrite('shopify_product', after), JSON.stringify(after)).toBe(false);
+  });
+
   it('does not hold for a title cleared, a field the document does not name, one seo field alone, or an image', () => {
     for (const after of [
       { title: null },
       { title: '' },
       { title: '', seo_title: 'T', seo_description: 'D' },
-      { descriptionHtml: '<p>x</p>' },
+      { title: '', descriptionHtml: '<p>x</p>' },
+      { descriptionHtml: '<p>x</p>', seo_title: 'T' },
       { seo_title: 'T' },
       { vendor: 'X' },
       {},
