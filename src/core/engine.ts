@@ -920,7 +920,7 @@ export class Engine {
   /**
    * What the inbox reads through the mail registry. `confirmAutoReply`: an envelope from Graph's
    * watch carries no headers, so for every follow-up from someone else the hook asks for the full
-   * message, whose envelope reads Auto-Submitted. Looked up at call time, so a provider
+   * message, whose envelope reads the automatic-mail headers. Looked up at call time, so a provider
    * added or replaced later is the one asked. No provider: throw, and the hook reopens.
    */
   private _applyInboxMailLookups(bootOpts: Parameters<typeof import('../integrations/inbox/bootstrap.js').bootstrapInbox>[0]): void {

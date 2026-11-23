@@ -293,6 +293,27 @@ describe('follow-up mails in a known thread (part 1b)', () => {
     expect(inbox.getItem(id)!.userAction).toBe('replied');
   });
 
+  it('a copy from another account connected here is our own mail: stored as sent, the item stays replied', async () => {
+    const id = seedReplied();
+    const asked: string[] = [];
+    const h = createInboxClassifierHook({
+      state: inbox, rules: new InboxRulesLoader(inbox), queue, notifier: { notifyNewItem },
+      accounts: {
+        resolve: accounts.resolve,
+        isOwnAddress: (a) => { asked.push(a); return a === 'support@acme.example'; },
+      },
+    });
+    await h(ACCOUNT.id, envelope({ from: [{ address: 'Support@Acme.Example' }], messageId: '<shared@x>' }));
+    expect(asked, 'asked with the lower-cased sender').toEqual(['support@acme.example']);
+    expect(stored('<shared@x>').direction).toBe('outbound');
+    expect(inbox.getItem(id)!.userAction).toBe('replied');
+    expect(notifyNewItem).not.toHaveBeenCalled();
+    // Control: a sender the resolver does not know is a customer, and reopens the item.
+    await h(ACCOUNT.id, envelope({ from: [{ address: 'customer@example.com' }], messageId: '<cust@x>' }));
+    expect(stored('<cust@x>').direction).toBe('inbound');
+    expect(inbox.getItem(id)!.userAction).toBeUndefined();
+  });
+
   it('a message dated exactly at the reply does not open the item', async () => {
     const id = seedReplied();
     await hook()(ACCOUNT.id, envelope({ date: new Date('2026-11-03T09:00:00Z') }));
