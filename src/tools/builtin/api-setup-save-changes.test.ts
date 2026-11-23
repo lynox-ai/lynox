@@ -10,7 +10,7 @@ vi.mock('node:dns/promises', () => ({
 let lynoxDir: string;
 vi.mock('../../core/config.js', () => ({ getLynoxDir: () => lynoxDir }));
 
-import { apiSetupTool, ordinal } from './api-setup.js';
+import { apiSetupTool, ordinal, securityChanges } from './api-setup.js';
 import { ApiStore, type ApiProfile } from '../../core/api-store.js';
 import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
@@ -349,5 +349,79 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     const { result } = await save(store, 'update', { ...ownGrant(), description: 'Another text' }, undefined);
     expect(result).not.toMatch(/^(Error|Blocked|Validation)/);
     expect(stored(store, 'svc')?.description).toBe('Another text');
+  });
+
+  // Every field the question compares, one by one: each is named, a no keeps the stored profile,
+  // and a background run cannot make the change.
+  const own = (edit: (p: ApiProfile) => void): ApiProfile => { const p = ownGrant(); edit(p); return p; };
+  const keyed = (auth: ApiProfile['auth']): ApiProfile => ({ ...keyProfile(), auth });
+  it.each([
+    ['token address', ownGrant(), own((p) => { p.auth!.oauth!.token_url = 'https://api.openai.com/oauth/other'; }), 'svc',
+      '- token address (token_url): https://api.openai.com/oauth/token → https://api.openai.com/oauth/other'],
+    ['token request body', own((p) => { p.auth!.oauth!.body_format = 'form'; }), own((p) => { p.auth!.oauth!.body_format = 'json'; }), 'svc',
+      '- token request body (auth.oauth.body_format): form → json'],
+    ['OAuth client id secret', ownGrant(), own((p) => { p.auth!.oauth!.client_id_key = 'SVC_CID2'; p.auth!.vault_keys = ['SVC_CID2', 'SVC_CSECRET']; }), 'svc',
+      '- secret read for the OAuth client id (oauth.client_id_key): SVC_CID → SVC_CID2'],
+    ['OAuth refresh token secret', own((p) => { p.auth!.oauth!.refresh_token_key = 'SVC_RT'; }), own((p) => { p.auth!.oauth!.refresh_token_key = 'SVC_RT2'; }), 'svc',
+      '- secret read for the OAuth refresh token (oauth.refresh_token_key): SVC_RT → SVC_RT2'],
+    ['header name', keyed({ type: 'header', header_name: 'X-Key', vault_keys: ['KP_KEY_A'] }), keyed({ type: 'header', header_name: 'X-Other', vault_keys: ['KP_KEY_A'] }), 'kp',
+      '- header it is sent in (auth.header_name): X-Key → X-Other'],
+    ['query parameter', keyed({ type: 'query', query_param: 'key', vault_keys: ['KP_KEY_A'] }), keyed({ type: 'query', query_param: 'token', vault_keys: ['KP_KEY_A'] }), 'kp',
+      '- query parameter it is sent in (auth.query_param): key → token'],
+    ['basic auth form', keyed({ type: 'basic', basic_format: 'pre_encoded_b64', vault_keys: ['KP_KEY_A'] }), keyed({ type: 'basic', basic_format: 'user_pass_split', vault_keys: ['KP_KEY_A'] }), 'kp',
+      '- basic auth form (auth.basic_format): pre_encoded_b64 → user_pass_split'],
+    ['password secret', keyed({ type: 'basic', basic_format: 'user_pass_split', vault_keys: ['KP_KEY_A', 'KP_KEY_B'], password_key: 'KP_PASS' }),
+      keyed({ type: 'basic', basic_format: 'user_pass_split', vault_keys: ['KP_KEY_A', 'KP_KEY_B'], password_key: 'KP_PASS2' }), 'kp',
+      '- secret read for the password (password_key): KP_PASS → KP_PASS2'],
+    ['basic password left to vault_keys[1]', keyed({ type: 'basic', basic_format: 'user_pass_split', vault_keys: ['KP_KEY_A', 'KP_KEY_B'], password_key: 'KP_PASS' }),
+      keyed({ type: 'basic', basic_format: 'user_pass_split', vault_keys: ['KP_KEY_A', 'KP_KEY_B'] }), 'kp',
+      '- secret read for the password sent (basic auth): KP_PASS → KP_KEY_B'],
+  ] as const)('%s: the change is named, a no keeps the stored profile, and nobody to ask refuses it', async (_n, first, next, id, line) => {
+    const store = new ApiStore();
+    expect((await save(store, 'create', first, 'Allow')).result).not.toMatch(/^(Error|Blocked|Validation)/);
+    const before = structuredClone(stored(store, id));
+    const denied = await save(store, 'update', next, 'Deny');
+    expect(denied.asked.join('\n')).toContain(line);
+    expect(denied.result).toMatch(/^Blocked: .*declined/);
+    const nobody = await save(store, 'update', next, undefined);
+    expect(nobody.result).toMatch(new RegExp(`^Blocked: profile "${id}" not saved\\. The save changes its scopes`));
+    expect(stored(store, id)).toEqual(before);
+  });
+
+  it('an address read differently than it is written names the host it sends to', () => {
+    const line = (base_url: string): string =>
+      securityChanges(keyProfile(), keyProfile({ base_url })).map((c) => flattenPrompt(c.text)).join('\n');
+    expect(line('https://api.openai.com@api.mistral.ai/v1')).toContain('→ https://api.openai.com@api.mistral.ai/v1 (sends to api.mistral.ai)');
+    expect(line('https://\u0430pi.openai.com/v1')).toContain('(sends to xn--pi-6kc.openai.com)');
+    // An address the URL parser does not take is said to be none, not shown as if it were one.
+    expect(line('api.mistral.ai/v1')).toContain('→ api.mistral.ai/v1 (not an address a request can use)');
+    // Control: an address written as it is read gets no note.
+    expect(line('https://api.mistral.ai/v1')).toContain('→ https://api.mistral.ai/v1');
+    expect(line('https://api.mistral.ai/v1')).not.toContain('sends to');
+  });
+
+  it('a scope shaped like a credential is withheld on its own and hides no other added scope', () => {
+    const junk = 'x'.repeat(48);
+    const text = securityChanges(ownGrant(), ownGrant({ scope: `read write ${junk}` })).map((c) => flattenPrompt(c.text)).join('\n');
+    expect(text).toContain('scopes added: write (a value shaped like a credential, not shown)');
+    expect(text).not.toContain(junk);
+  });
+
+  it('a save made while its question was open is not overwritten: the answer no longer covers it', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', ownGrant(), 'Allow');
+    const asked: string[] = [];
+    const agent = agentFor(store, asked, 'Allow') as unknown as { promptUser: (q: unknown) => Promise<string> };
+    const answer = agent.promptUser;
+    agent.promptUser = async (q: unknown): Promise<string> => {
+      // Another chat narrows the scope while this question is open.
+      const narrowed = ownGrant({ scope: 'none' });
+      expect(store.save(narrowed, join(lynoxDir, 'apis')).ok).toBe(true);
+      return answer(q);
+    };
+    const result = await apiSetupTool.handler({ action: 'update', profile: ownGrant({ scope: 'read write' }) }, agent as never) as string;
+    expect(asked).toHaveLength(1);
+    expect(result).toMatch(/^Error: API profile "svc" changed while the question was open/);
+    expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('none');
   });
 });

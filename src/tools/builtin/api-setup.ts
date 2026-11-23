@@ -1895,12 +1895,23 @@ const shownValue = (value: string): string => {
   return maskSecretPatterns(line, { includeGeneric: true }) === line ? line : '(a value shaped like a credential, not shown)';
 };
 
-/** An address as the save question shows it: its origin stays visible when the rest is withheld. */
+/**
+ * An address as the save question shows it, read the way a request reads it: the host it sends to
+ * is named whenever the written text does not start with it (a user name before an `@`, a host
+ * written in other letters that the URL parser turns into punycode), and the origin stays visible
+ * when the rest is withheld. Text the URL parser does not take is said to be no address, so it
+ * cannot pass for one.
+ */
 const shownUrl = (value: string): string => {
+  let url: URL;
+  try { url = new URL(value); } catch { return `${shownValue(value)} (not an address a request can use)`; }
   const shown = shownValue(value);
-  if (shown === singleLine(value)) return shown;
-  try { return `${new URL(value).origin} (the rest is shaped like a credential, not shown)`; } catch { return shown; }
+  if (shown !== singleLine(value)) return `${url.origin} (the rest is shaped like a credential, not shown)`;
+  return shown.startsWith(`${url.protocol}//${url.host}`) ? shown : `${shown} (sends to ${url.host})`;
 };
+
+/** Scope tokens as the save question shows them: each withheld on its own, so one cannot hide another. */
+const shownScopes = (tokens: readonly string[]): string => tokens.map(shownValue).join(' ');
 
 export const ordinal = (n: number): string => `${String(n)}${n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th'}`;
 
@@ -1969,11 +1980,11 @@ export function securityChanges(prior: ApiProfile | undefined, next: ApiProfile)
   const now = new Set(scopeTokens(next.auth?.oauth?.scope));
   const added = [...now].filter((s) => !was.has(s));
   const removed = [...was].filter((s) => !now.has(s));
-  if (added.length > 0) add(pv`scopes added: ${shownValue(added.join(' '))}`);
+  if (added.length > 0) add(pv`scopes added: ${shownScopes(added)}`);
   if (removed.length > 0) {
     add(now.size === 0
-      ? pv`scopes removed: ${shownValue(removed.join(' '))} (none left: the provider decides which it grants)`
-      : pv`scopes removed: ${shownValue(removed.join(' '))}`, now.size === 0);
+      ? pv`scopes removed: ${shownScopes(removed)} (none left: the provider decides which it grants)`
+      : pv`scopes removed: ${shownScopes(removed)}`, now.size === 0);
   }
   const pp = (p: ApiProfile): Record<string, unknown> =>
     isPlainRecord(p.auth?.oauth?.preset_params) ? p.auth!.oauth!.preset_params as Record<string, unknown> : {};
@@ -2369,6 +2380,10 @@ ${draftJson}
       }
       delete profile.created_by;
       const prior = agent.toolContext?.apiStore?.storedProfile(profile.id);
+      // The stored profile the questions below describe. A save in between (another chat, a token
+      // exchange) would be overwritten by this one and the change list would be against a state
+      // that is gone, so the save checks it again right before it writes.
+      const priorState = JSON.stringify(prior ?? null);
       // A save may not take a profile off the built-in provider it was set up with. A model
       // that wanted a write scope the preset refuses saved over a working read connection as
       // its own OAuth app; connect then refused that, and the user had neither. The answer
@@ -2716,6 +2731,10 @@ ${draftJson}
       // kind only.
       const freshTrailId = apiStore.newTrailId();
       return withInstanceWrite(agent, { site: 'api_setup#save', kind: () => (prior === undefined ? 'create' : 'change'), store: 'api_profiles', target: () => [['profile', apiStore.trailIdOf(savedId) ?? freshTrailId]], main: ['save'] }, (w) => {
+        // No await from here to the save.
+        if (JSON.stringify(apiStore.storedProfile(savedId) ?? null) !== priorState) {
+          return `Error: API profile "${savedId}" changed while the question was open, so the answer no longer covers this save. Nothing was saved and no token slot was emptied; read the profile again and ask again if the change is still wanted.`;
+        }
         if (cleared.length > 0) {
           const refusal = apiStore.saveRefusal(profile);
           if (refusal !== null) return `Error: ${refusal} No token slot was emptied: ${cleared.join(', ')} ${cleared.length === 1 ? 'is' : 'are'} left as ${cleared.length === 1 ? 'it was' : 'they were'}.`;
