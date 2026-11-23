@@ -635,11 +635,13 @@
 								     needs: what confirming starts, and when. -->
 								<!-- Nor does a trigger the worker will not start: one whose run is parked on an
 								     open question (it keeps the moment it parked as next_run_at until the
-								     question is answered), and one that is completed or stopped (completing a
-								     trigger leaves its next_run_at as it was). -->
-								{#if trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.status !== 'waiting' && trigger.status !== 'completed' && trigger.status !== 'stopped' && trigger.paused !== true}
-									<!-- A trigger the worker could not start keeps its next_run_at, which is then
-									     in the past: it is due since then, not a next run before the last one. -->
+								     question is answered), one that is completed or stopped (completing a
+								     trigger leaves its next_run_at as it was), and a failed one without a
+								     schedule. Nor one that is running: its next_run_at moves only once the run
+								     has ended, and the running badge says what happens. -->
+								{#if trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.running !== true && trigger.status !== 'waiting' && trigger.status !== 'completed' && trigger.status !== 'stopped' && !(trigger.status === 'failed' && !trigger.schedule_cron) && trigger.paused !== true}
+									<!-- A next_run_at in the past is due since then (until the worker takes it, or
+									     when it could not start it), not a next run before the last one. -->
 									{@const due = isDue(trigger.next_run_at)}
 									<span data-next-run={due ? 'due' : 'next'}>{due ? t('tasks.due_since') : t('tasks.next_run')}: {fmtDate(trigger.next_run_at)}</span>
 								{/if}

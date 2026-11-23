@@ -108,7 +108,7 @@ describe('a next run whose time has passed', () => {
 		expect(t('tasks.due_since')).not.toBe(t('tasks.next_run'));
 	});
 
-	it('is not said of a paused, switched-off, parked, completed or stopped plan: it is not due', async () => {
+	it('is not said of a plan the worker will not start, nor of a running one', async () => {
 		const now = Date.now();
 		rows = [
 			{ ...BASE, id: 'paused', title: 'Paused', next_run_at: iso(now - HOUR), paused: true },
@@ -118,15 +118,30 @@ describe('a next run whose time has passed', () => {
 			// Completing a trigger leaves its next_run_at; the worker starts neither of these.
 			{ ...BASE, id: 'done', title: 'Done', next_run_at: iso(now - HOUR), status: 'completed' },
 			{ ...BASE, id: 'stopped', title: 'Stopped', next_run_at: iso(now - HOUR), status: 'stopped' },
+			// A failed one-shot is not started again; a failed schedule is.
+			{ ...BASE, id: 'failed-once', title: 'FailedOnce', next_run_at: iso(now - HOUR), status: 'failed' },
+			{ ...BASE, id: 'failed-cron', title: 'FailedCron', next_run_at: iso(now - HOUR), status: 'failed', schedule_cron: '0 9 * * *' },
+			// Its next_run_at moves only once the run has ended.
+			{ ...BASE, id: 'running', title: 'RunningNow', next_run_at: iso(now - HOUR), running: true },
 			{ ...BASE, id: 'live', title: 'Live', next_run_at: iso(now - HOUR) },
 		];
 		await render('de');
-		expect([...target.querySelectorAll<HTMLElement>('[data-next-run]')].map((e) => e.dataset['nextRun'])).toEqual(['due']);
 		expect(target.textContent ?? '').toContain('Live');
 		expect(target.textContent ?? '').toContain('Paused');
 		expect(target.textContent ?? '').toContain('Parked');
 		expect(target.textContent ?? '').toContain('Done');
 		expect(target.textContent ?? '').toContain('Stopped');
+		expect(target.textContent ?? '').toContain('FailedOnce');
+		expect(target.textContent ?? '').toContain('RunningNow');
+		// The two shown are the live plan and the failed schedule, both due.
+		expect([...target.querySelectorAll<HTMLElement>('[data-next-run]')].map((e) => e.dataset['nextRun'])).toEqual(['due', 'due']);
+	});
+
+	it('is due from the very moment of its time', async () => {
+		vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'], now: new Date('2026-11-23T09:00:00.000Z') });
+		rows = [{ ...BASE, id: 'edge', title: 'Edge', next_run_at: '2026-11-23T09:00:00.000Z' }];
+		await render();
+		expect(target.querySelector<HTMLElement>('[data-next-run]')?.dataset['nextRun']).toBe('due');
 	});
 
 	it('takes a time that cannot be read as not due', async () => {
