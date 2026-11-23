@@ -183,9 +183,11 @@
 						<button onclick={() => expanded = expanded === profile.id ? null : profile.id}
 							aria-expanded={expanded === profile.id}
 							class="flex-1 px-4 py-3 text-left hover:bg-bg-muted transition-colors">
-							<div class="flex items-center gap-2">
+							<!-- The chip never wraps: when the name leaves no room it moves under it whole. Its own
+							     border and surface keep it apart from the head's hover and open surface. -->
+							<div class="flex flex-wrap items-center gap-x-2 gap-y-1" data-testid="api-card-title">
 								<span class="text-sm font-medium">{profile.name}</span>
-								{#if authChipLabel(profile.auth, profile.built_in_provider)}{@const chip = authChipLabel(profile.auth, profile.built_in_provider)!}<span class="text-xs rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted" data-testid="api-auth-chip">{chip.values ? tf(chip.key, chip.values) : t(chip.key)}</span>{/if}
+								{#if authChipLabel(profile.auth, profile.built_in_provider)}{@const chip = authChipLabel(profile.auth, profile.built_in_provider)!}<span class="text-xs whitespace-nowrap rounded-[var(--radius-sm)] border border-border bg-bg px-1.5 py-0.5 text-text-muted" data-testid="api-auth-chip">{chip.values ? tf(chip.key, chip.values) : t(chip.key)}</span>{/if}
 							</div>
 							<p class="text-xs text-text-subtle mt-1 font-mono">{profile.base_url}</p>
 							{#if connectionLine(profile.oauth_grant)}<p class="text-xs text-text-muted mt-1" data-testid="api-connection">{connectionText(connectionLine(profile.oauth_grant)!)}</p>{/if}
