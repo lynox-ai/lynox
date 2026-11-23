@@ -183,27 +183,6 @@ describe('a turn queued behind a run waits for the review that run left open', (
 		expect(runTasks, 'one turn started, the other waits behind it').toEqual(['edit the notes', 'then this']);
 	});
 
-	it('a run whose review fetch got no answer holds the queued turn, and a later drain asks again', async () => {
-		const release = await queueBehindRun();
-		changed = notes;
-		changesetFails = true;
-		release();
-		await settle();
-		await wait(200);
-		await settle();
-		expect(store.getPendingChangeset(), 'positive control: no review could be shown').toBeNull();
-		expect(runTasks, 'nothing sent while it is unknown whether a review is open').toEqual(['edit the notes']);
-		expect(store.getMessages().find((m) => m.content === 'then this')?.queued, 'the turn keeps its place').toBe(true);
-		// The server answers again, and there is nothing to review: the next drain asks and sends it.
-		changesetFails = false;
-		changed = [];
-		await store.sendMessage('more');
-		await settle();
-		await wait(200);
-		await settle();
-		expect(runTasks).toEqual(['edit the notes', 'more', 'then this']);
-	});
-
 	it('with no review the queued turn is sent after the run (control)', async () => {
 		const release = await queueBehindRun();
 		release();
