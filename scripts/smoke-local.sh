@@ -121,6 +121,12 @@ docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" down -v --remove-orphans 2>
 step "Build + start stack"
 
 BUILD_ARGS=(-d)
+# A build id per commit (docker-compose.smoke.yml passes it into the image), so a browser that kept
+# the artifact frame endpoint of an earlier smoke build does not reuse it under the same id.
+if [[ -z "${BUILD_SHA:-}" ]]; then
+  BUILD_SHA="smoke-$(git -C "$CORE_DIR" rev-parse --short=12 HEAD 2>/dev/null || date +%s)"
+  export BUILD_SHA
+fi
 if ! $NO_BUILD; then
   BUILD_ARGS+=(--build)
 fi
