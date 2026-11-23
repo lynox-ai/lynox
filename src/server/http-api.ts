@@ -8,6 +8,7 @@
 
 import { recipientConfirmDigest, recipientsConfirmable } from '../core/recipient-confirm.js';
 import { errorText, errorTextReduced, processErrorText } from '../core/error-egress.js';
+import { jsonFault } from '../core/json-fault.js';
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
@@ -77,7 +78,7 @@ import { resolveProviderApiKey, mayFallBackToStoredKey, PROVIDER_KEY_SLOTS } fro
 import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, providerIdentity, type ProviderIdentity, mainChatTierLabels, mainChatTierLabelsFromTierSet } from '../core/llm/catalog.js';
 import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
-import type { Session } from '../core/session.js';
+import { sessionInitialTier, type Session } from '../core/session.js';
 import { RunAbortedError, TOOL_AUDIT_INPUT_MAX_CHARS } from '../core/agent.js';
 import { StreamIncompleteError } from '../core/stream-incomplete.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
@@ -3208,6 +3209,24 @@ export class LynoxHTTPApi {
     return row ? [row] : [];
   }
 
+  /**
+   * The tier a conversation runs on, for a page that reopens it without opening a session (a
+   * reload reads it back instead): the stored pick held to today's ceiling, account tier and
+   * model blocklist, through the same function a resume and every turn of a live session use.
+   * The stored `model_tier` is the pick as asked, before those. Not read from a live session:
+   * its tier can stand lower for a moment (a compaction runs on the fast tier), and looking it
+   * up would keep an idle session from being dropped. Omitted when no permitted model is left.
+   * A new thread stores the tier it opened on, already held to the ceiling of that day, so after
+   * the ceiling is raised this says the lower tier until the user picks one again.
+   */
+  private _runTierOf(engine: Engine, thread: { readonly model_tier: string }): { run_tier?: string } {
+    try {
+      return { run_tier: sessionInitialTier(engine, normalizeTier(thread.model_tier)) };
+    } catch {
+      return {};
+    }
+  }
+
   /** The thread row an `own` check reads for a session id (session id = thread id). */
   private _threadRow(id: string): { readonly created_by: string | null } | undefined {
     return this.engine?.getThreadStore()?.getThread(id);
@@ -4212,6 +4231,11 @@ export class LynoxHTTPApi {
       const isMigrationEndpoint = pathname.startsWith('/api/migration/') && pathname !== '/api/migration/preview';
       if (isMigrationEndpoint && typeof migrationToken === 'string' && migrationToken.length === 64) {
         const storedToken = process.env['LYNOX_MIGRATION_TOKEN'];
+        if (storedToken && !/^[0-9a-f]{64}$/i.test(storedToken)) {
+          // Provisioned wrong: this instance's fault, said as such rather than as a wrong token.
+          errorResponse(res, 500, 'Migration token has invalid format');
+          return;
+        }
         if (storedToken) {
           const { verifyMigrationToken } = await import('../core/migration-crypto.js');
           if (verifyMigrationToken(migrationToken, storedToken)) {
@@ -6553,7 +6577,7 @@ export class LynoxHTTPApi {
       // 404 — mutating a nonexistent thread IS an error.
       if (!thread) { jsonResponse(res, 200, { thread: null, threadMissing: true }); return; }
       const states = containedThreadStates(engine.getToolContext().containment, [thread.id]);
-      jsonResponse(res, 200, { thread: { ...thread, ...containedFields(states, thread.id) } });
+      jsonResponse(res, 200, { thread: { ...thread, ...containedFields(states, thread.id), ...this._runTierOf(engine, thread) } });
     }, readsThread((p) => ({ thread: p['id'] ?? '' }))));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/threads/:id', async (_req, res, params, body) => {
@@ -6686,17 +6710,42 @@ export class LynoxHTTPApi {
         });
         return;
       }
-      threadStore.deleteThread(id);
+      // The chat's runs stay as rows, because they are the cost ledger, but the content they hold
+      // when the chat is deleted goes with it: prompts, answers, tool inputs and outputs, step
+      // results, the questions asked in it, and what the runs it spawned and the workflows it
+      // started wrote. A run or workflow still going when the chat is deleted can write more after
+      // this; that is not reached here. The blanking, the delete and the captured wire_snapshots
+      // share one transaction in history.db, so a failure leaves the chat and its runs as they
+      // were, and deleting again does all of it.
+      const runHistory = engine.getRunHistory();
+      let workflows: readonly string[] = [];
+      try {
+        if (runHistory) {
+          const { blankRunHistoryRows } = await import('../core/connection-erasure.js');
+          runHistory.getDb().transaction(() => {
+            workflows = blankRunHistoryRows(runHistory.getDb(), { threadIds: [id] }).pipelineIds;
+            threadStore.deleteThread(id);
+            runHistory.deleteWireSnapshotsForThread(id);
+          })();
+        } else {
+          threadStore.deleteThread(id);
+        }
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:thread-delete] Not deleted, removing the chat and the content of its runs failed for thread ${id.slice(0, 8)}: ${errorText(err, errorTextReduced(engine.getToolContext().containment, { threadId: id }))}\n`);
+        jsonResponse(res, 500, { error: 'The chat was not deleted: removing it and the content of its runs ran into an error.' });
+        return;
+      }
       // A run still waiting on a question in this chat could only be answered here. Its question
       // is withdrawn now, so the run ends with that reason instead of waiting out the TTL. After
       // the delete: a delete that answered 500 above leaves the chat, and its questions with it.
-      try { engine.getPromptStore()?.withdrawForDeletedThread(id); } catch (err: unknown) {
-        process.stderr.write(`[lynox:thread-delete] withdrawing the questions of deleted thread ${id.slice(0, 8)} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      // A step of a workflow the chat started asks under the workflow's id; its question was just
+      // blanked, so it is withdrawn too, before anything can read it: no await since the commit.
+      const promptStore = engine.getPromptStore();
+      for (const session of [id, ...workflows]) {
+        try { promptStore?.withdrawForDeletedThread(session); } catch (err: unknown) {
+          process.stderr.write(`[lynox:thread-delete] withdrawing the questions of deleted thread ${id.slice(0, 8)} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
       }
-      // Extended debug capture: drop the thread's captured wire_snapshots too (the
-      // runs stay — they are the cost ledger). Without this the redacted-but-personal
-      // snapshots outlive their deleted thread with no other prune path.
-      engine.getRunHistory()?.deleteWireSnapshotsForThread(params['id']!);
       jsonResponse(res, 200, { ok: true });
     }, OWN));
 
@@ -12325,6 +12374,13 @@ export class LynoxHTTPApi {
           await google.setTokens(tokens);
           jsonResponse(res, 200, { ok: true, scopes: tokens.scopes });
         } catch (err: unknown) {
+          if (err instanceof SyntaxError) {
+            // The claim answer carries the tokens: the log names the position, never the text around
+            // it, and the owner gets a code the page words for them.
+            process.stderr.write(`[lynox:google] the claim answer is ${jsonFault(err)}\n`);
+            jsonResponse(res, 500, { error: 'Google could not be connected', code: 'google_claim_invalid' });
+            return;
+          }
           const msg = err instanceof Error ? err.message : String(err);
           errorResponse(res, 500, msg);
         }
@@ -15644,6 +15700,13 @@ export class LynoxHTTPApi {
       // From the first handshake request on, the target may hold a session: a stop says when to
       // try again (the catch below adds it where a step did not), unless it asks to check the target.
       let sessionMayBeHeld = false;
+      // The target's session as its handshake named it, and whether it has taken the manifest: a
+      // stop before that ends the session (the target holds it 30 minutes otherwise).
+      let targetSession: string | null = null;
+      let manifestAccepted = false;
+      // The target refused the manifest itself (4xx): its words say what to change, and the same
+      // attempt fails again, so a freed session is not an invitation to try again as it is.
+      let manifestRefused = false;
       try {
         const crypto = await import('../core/migration-crypto.js');
         const { MigrationExporter } = await import('../core/migration-export.js');
@@ -15663,6 +15726,8 @@ export class LynoxHTTPApi {
         // a new attempt away until then; every stop from here says when to try again, except where
         // the user has to check the target first.
         const AGAIN = 'You can start the migration again in 30 minutes at the latest.';
+        // Said where the target's answer leaves no words to quote once the hidden characters are gone.
+        const NO_REASON = 'The target instance gave no readable reason.';
         const handshakeFailed = (w: Why): string =>
           `lynox could not set up the connection to the target instance: ${why(w, TARGET_BODY_CAPS.handshake, ', so lynox did not read it', TARGET_REQUEST_TIMEOUTS_MS.handshake)}. Nothing was transferred. ${AGAIN}`;
         /**
@@ -15705,10 +15770,11 @@ export class LynoxHTTPApi {
           }
           // The target's own words, cleaned and cut; a refusal here starts no session on it.
           const said = typeof refused?.error === 'string' ? refused.error : errText;
+          // Quoted, so the target's words cannot run on into lynox's own sentence.
           const words = relayedText(said).trim();
           throw new Error(words === ''
-            ? 'The target instance did not accept the migration. Nothing was transferred.'
-            : `The target instance did not accept the migration. It says: ${words}${/[.!?…]$/.test(words) ? '' : '.'} Nothing was transferred.`);
+            ? `The target instance did not accept the migration. ${NO_REASON} Nothing was transferred.`
+            : `The target instance did not accept the migration. It says: ${JSON.stringify(words)}. Nothing was transferred.`);
         }
         // The target answered the handshake: from here it holds a session (a refusal above starts none).
         sessionMayBeHeld = true;
@@ -15732,6 +15798,10 @@ export class LynoxHTTPApi {
           // Not passing: it fails the same way on every attempt (a wrong token or a foreign key).
           throw new Error('Handshake signature invalid — refusing to derive transfer key. If this happens again, write to support@lynox.ai.');
         }
+        // Only a target whose signature checks is asked to end its session later. An older target
+        // names no session; it has no abort either, and holds the session 30 minutes.
+        const named = field('sessionId');
+        if (typeof named === 'string' && /^[0-9a-f]{32}$/.test(named)) targetSession = named;
 
         // Client key agreement
         const clientKp = crypto.generateEphemeralKeypair();
@@ -15783,6 +15853,8 @@ export class LynoxHTTPApi {
         // `step` names the step for a diagnosis (the raw answer); `told` says it to the user, followed
         // by the target's own words when it gave any, cut at 500 characters with a mark that it was.
         // The answer is read up to its cap, and the target's words lose control and bidi characters.
+        // They stand in quotes (inner quotes escaped), so they cannot run on into lynox's own sentence
+        // or pose as it; lynox's sentence always comes last.
         // `then` is what the user can do next: try again later, or, once the restore ran, check the target.
         const refusal = async (r: Response, step: string, told: string, then: string = AGAIN): Promise<Error> => {
           let text: string | null;
@@ -15793,8 +15865,12 @@ export class LynoxHTTPApi {
           if (text === null) return new Error(`${told} Its answer is over ${capText(TARGET_BODY_CAPS.refusal)}, so lynox did not read it. ${then}`);
           let message: unknown;
           try { message = (JSON.parse(text) as { error?: unknown }).error; } catch { /* not JSON */ }
-          if (typeof message !== 'string' || message === '') return new Error(`${step}: ${relayedText(text)} ${then}`);
-          return new Error(`${told} It says: ${relayedText(message)} ${then}`);
+          if (typeof message !== 'string' || message === '') {
+            const raw = relayedText(text).trim();
+            return new Error(raw === '' ? `${told} ${NO_REASON} ${then}` : `${step}: ${JSON.stringify(raw)}. ${then}`);
+          }
+          const words = relayedText(message).trim();
+          return new Error(words === '' ? `${told} ${NO_REASON} ${then}` : `${told} It says: ${JSON.stringify(words)}. ${then}`);
         };
 
         // 4. Send manifest
@@ -15804,7 +15880,12 @@ export class LynoxHTTPApi {
           headers: migrationHeaders,
           body: JSON.stringify(manifest),
         }, TARGET_REQUEST_TIMEOUTS_MS.manifest, (w) => `${w === 'silent' ? `The target instance did not answer within ${durationText(TARGET_REQUEST_TIMEOUTS_MS.manifest)}.` : 'lynox could not reach the target instance.'} lynox stopped before sending your data. ${AGAIN}`);
-        if (!mRes.ok) throw await refusal(mRes, 'Manifest rejected', 'The target instance refused the migration.');
+        if (!mRes.ok) {
+          // A refusal of the manifest itself (4xx), not the target failing or busy (5xx, 429).
+          manifestRefused = mRes.status >= 400 && mRes.status < 500 && mRes.status !== 429;
+          throw await refusal(mRes, 'Manifest rejected', 'The target instance refused the migration.');
+        }
+        manifestAccepted = true;
         await discardBody(mRes);
 
         // 5. Send chunks
@@ -15863,15 +15944,53 @@ export class LynoxHTTPApi {
         });
       } catch (err: unknown) {
         // Every text to the user goes through the same cleaning, the guard's and the exporter's too.
-        const { relayedText: clean } = await import('../core/migration-target-reply.js');
+        const { askTarget, discardBody, readTargetJson, TARGET_BODY_CAPS, TARGET_BODY_TIMEOUT_MS, TARGET_REQUEST_TIMEOUTS_MS, relayedText: clean } = await import('../core/migration-target-reply.js');
+        // Stopped before the target took the manifest: end its session, so the next attempt is not
+        // turned away. Only a target that confirms it lets the user start again at once; any failure
+        // here leaves the stop's own words and the 30 minutes.
+        let freed = false;
+        if (targetSession !== null && !manifestAccepted) {
+          try {
+            const aRes = await askTarget(fetchPinned, `${targetUrl}/api/migration/abort`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Migration-Token': migrationToken },
+              body: JSON.stringify({ sessionId: targetSession }),
+            }, TARGET_REQUEST_TIMEOUTS_MS.handshake);
+            let unfreed: string | null = null;
+            if (aRes.ok) {
+              const told = await readTargetJson(aRes, TARGET_BODY_CAPS.handshake, () => 'unreadable', TARGET_BODY_TIMEOUT_MS) as { aborted?: unknown } | null;
+              freed = told?.aborted === true;
+              if (!freed) unfreed = 'the target did not confirm it';
+            } else {
+              await discardBody(aRes);
+              unfreed = `the target answered ${String(aRes.status)}`;
+            }
+            if (unfreed !== null) process.stderr.write(`[lynox:http] migration: the target's session was not ended (${unfreed}); a new attempt waits for it to expire\n`);
+          } catch (abortErr: unknown) {
+            // The stop's own words stand. Only the error's kind: its text may carry the target's address.
+            process.stderr.write(`[lynox:http] migration: ending the target's session failed (${abortErr instanceof Error ? abortErr.name : 'unknown error'}); a new attempt waits for it to expire\n`);
+          }
+        }
         const message = clean(err instanceof Error ? err.message : '', 2000).trim()
           || `The migration stopped for a reason lynox could not read.${sessionMayBeHeld ? '' : ' Nothing was transferred.'}`;
         // A stop after the handshake that names no next step (a read failing on this instance) gets
         // the retry sentence. A stop that names one (check the target, write to support) does not:
         // there the same attempt fails again, and the sentence would send the user round in a loop.
+        // Once the target has ended the session, the user can start again now.
         const AGAIN_TEXT = 'You can start the migration again in 30 minutes at the latest.';
+        const NOW_TEXT = 'You can start the migration again now.';
         const said = message.includes(AGAIN_TEXT) || message.includes('Check on the target instance') || message.includes('support@lynox.ai');
-        sendEvent('error', { message: sessionMayBeHeld && !said ? `${message}${/[.!?…]$/.test(message) ? '' : '.'} ${AGAIN_TEXT}` : message });
+        const shown = sessionMayBeHeld && !said ? `${message}${/[.!?…]$/.test(message) ? '' : '.'} ${AGAIN_TEXT}` : message;
+        // Once the target has ended the session nothing holds a new attempt. After a refused manifest
+        // the target's words stand alone; elsewhere the user can start again now.
+        const unheld = (): string => {
+          if (!shown.endsWith(AGAIN_TEXT)) return shown;
+          const before = shown.slice(0, -AGAIN_TEXT.length);
+          if (!manifestRefused) return `${before}${NOW_TEXT}`;
+          const bare = before.trim();
+          return `${bare}${/[.!?…]$/.test(bare) ? '' : '.'}`;
+        };
+        sendEvent('error', { message: freed ? unheld() : shown });
       } finally {
         res.end();
       }
@@ -15884,8 +16003,7 @@ export class LynoxHTTPApi {
         return;
       }
 
-      const token = req.headers['x-migration-token'];
-      if (!token || typeof token !== 'string') {
+      if (typeof req.headers['x-migration-token'] !== 'string' || req.headers['x-migration-token'] === '') {
         errorResponse(res, 401, 'Missing X-Migration-Token header');
         return;
       }
@@ -15897,27 +16015,8 @@ export class LynoxHTTPApi {
           return;
         }
 
-        // Validate migration token
-        const storedToken = process.env['LYNOX_MIGRATION_TOKEN'];
-        if (!storedToken) {
-          errorResponse(res, 403, 'No migration token configured for this instance');
-          return;
-        }
-
-        const { verifyMigrationToken } = await import('../core/migration-crypto.js');
-        if (!verifyMigrationToken(token, storedToken)) {
-          errorResponse(res, 403, 'Invalid migration token');
-          return;
-        }
-
-        // Belt-and-braces: verifyMigrationToken already enforces the 64-hex-char
-        // shape (it parses both sides as hex Buffers and length-checks them), but
-        // re-assert here so a future change that loosens that check can't slip a
-        // low-entropy stored token straight into deriveSigningKey.
-        if (!/^[0-9a-f]{64}$/i.test(storedToken)) {
-          errorResponse(res, 500, 'Migration token has invalid format');
-          return;
-        }
+        const storedToken = await this._checkMigrationToken(req, res);
+        if (storedToken === null) return;
 
         const payload = importer.startHandshake(storedToken);
         jsonResponse(res, 200, payload);
@@ -16076,11 +16175,64 @@ export class LynoxHTTPApi {
       }
       jsonResponse(res, 200, { cancelled: true });
     });
+
+    // The source ends the session it started, before its manifest: it stopped before sending its
+    // data, and a new attempt should not wait 30 minutes. Only with the migration token and the
+    // session id from that handshake; a session with its manifest is never ended here.
+    this.addStatic('admin', 'POST /api/migration/abort', async (req, res, _params, body) => {
+      if (!readEnvAlias('LYNOX_BILLING_TIER')) {
+        errorResponse(res, 404, 'Migration import only available on managed instances');
+        return;
+      }
+      if (typeof req.headers['x-migration-token'] !== 'string' || req.headers['x-migration-token'] === '') {
+        errorResponse(res, 401, 'Missing X-Migration-Token header');
+        return;
+      }
+      if (await this._checkMigrationToken(req, res) === null) return;
+      const sessionId = (body as { sessionId?: unknown } | null)?.sessionId;
+      if (typeof sessionId !== 'string' || !/^[0-9a-f]{32}$/.test(sessionId)) {
+        errorResponse(res, 400, 'Missing session id');
+        return;
+      }
+      // From here synchronous: the check and the cleanup run in one tick, so no manifest can land between them.
+      const outcome = this._migrationImporter?.abortBeforeManifest(sessionId) ?? 'none';
+      if (outcome === 'in-transfer') {
+        errorResponse(res, 409, 'The migration is already transferring data.', 'migration_in_transfer');
+        return;
+      }
+      jsonResponse(res, 200, { aborted: outcome === 'aborted' });
+    });
   }
 
   // ── Migration helpers ──────────────────────────────────────────────────────
 
   private _migrationImporter: import('../core/migration-import.js').MigrationImporter | null = null;
+
+  /**
+   * The migration token check every route that acts on it runs: the header against the stored
+   * token, in constant time. The stored token when it passes; otherwise the answer is sent and null.
+   */
+  private async _checkMigrationToken(req: IncomingMessage, res: ServerResponse): Promise<string | null> {
+    const token = req.headers['x-migration-token'];
+    const storedToken = process.env['LYNOX_MIGRATION_TOKEN'];
+    if (!storedToken) {
+      errorResponse(res, 403, 'No migration token configured for this instance');
+      return null;
+    }
+    // The stored token's shape first: a token provisioned wrong is this instance's fault, and says so
+    // instead of looking like a wrong token. It also keeps a low-entropy stored token away from
+    // deriveSigningKey, whatever verifyMigrationToken checks.
+    if (!/^[0-9a-f]{64}$/i.test(storedToken)) {
+      errorResponse(res, 500, 'Migration token has invalid format');
+      return null;
+    }
+    const { verifyMigrationToken } = await import('../core/migration-crypto.js');
+    if (typeof token !== 'string' || !verifyMigrationToken(token, storedToken)) {
+      errorResponse(res, 403, 'Invalid migration token');
+      return null;
+    }
+    return storedToken;
+  }
   /** Set once a migration restore has closed the engine: the process answers 503 until it restarts. */
   private _restoring = false;
 

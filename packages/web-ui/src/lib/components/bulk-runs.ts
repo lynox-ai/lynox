@@ -340,7 +340,7 @@ export function bulkResumeText(
 	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'applied' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries' | 'sentUnknown' | 'resumeSends' | 'conflicts'> & Partial<Pick<BulkRunDetailData, 'consentFields' | 'kind'>>,
 	managed: boolean | null,
 	i18n: BulkI18n,
-): { cause: string; before: string | null; check: string | null; kept: string | null; soFar: string | null; allows: string | null } | null {
+): { cause: string; before: string | null; check: string | null; after: string | null; kept: string | null; soFar: string | null; allows: string | null } | null {
 	const kind = bulkResumeKind(run);
 	if (kind === null) return null;
 	const key = run.haltKey!;
@@ -356,6 +356,8 @@ export function bulkResumeText(
 		: key === 'consecutiveFailures' ? i18n.t(`bulk.halt.consecutiveFailures_${verb}`)
 		: key === 'unrecorded' ? i18n.tf(`bulk.halt.unrecorded_${verb}`, vars)
 		: key === 'maxTargets' && run.maxTargets === 1 ? i18n.t('bulk.halt.maxTargets_one')
+		// Going on by checking: the cause leaves out "continue it here", the way follows the check.
+		: key === 'shopifyWriteOff' && kind === 'check' ? i18n.t('bulk.halt.shopifyWriteOff_check')
 		// "wrote nothing" only where nothing of the run was written or sent.
 		: key === 'consentOutdated' ? i18n.tf(bulkHaltKeyOf(run, run.applied === 0 && run.sentUnknown === 0 ? 'bulk.halt.consentOutdated' : 'bulk.halt.consentOutdated_more'), {
 			field: bulkConsentFields(run.consentFields, i18n), path: `${i18n.t('nav.settings')} → ${i18n.t('settings.apis')}`,
@@ -368,15 +370,24 @@ export function bulkResumeText(
 		: key === 'markupAddedByShop' ? bulkHaltKeyOf(run, 'bulk.halt.markupAddedByShop_before')
 		: null;
 	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
-	if (kind === 'none') return { cause, before, check: null, kept: null, soFar: null, allows: null };
+	if (kind === 'none') return { cause, before, check: null, after: null, kept: null, soFar: null, allows: null };
 	// Nothing to send: no step before writing on applies, and what is left needs a new run.
-	if (kind === 'nothing') return { cause, before: null, check: i18n.tf(`bulk.resume.nothing_left${run.kind === 'undo' ? '_undo' : ''}`, vars), kept: null, soFar: null, allows: null };
-	// Checking sends nothing, so the failures' "before you continue writing" does not apply; a
-	// halt's own step (reconnect the access, switch writing back on) still comes first.
+	if (kind === 'nothing') return { cause, before: null, check: i18n.tf(`bulk.resume.nothing_left${run.kind === 'undo' ? '_undo' : ''}`, vars), after: null, kept: null, soFar: null, allows: null };
+	// The next step is to check, not to continue: checking sends nothing, so the failures' "before
+	// you continue writing" does not apply. What would stop the check too (no access, a host the
+	// instance may not reach, Shopify bulk switched off) comes first and ends with checking; anything
+	// else follows the check.
 	if (kind === 'check') {
 		const check = run.sentUnknown === 1 ? i18n.tf('bulk.resume.check_before', vars)
 			: i18n.tf('bulk.resume.check_before_many', { ...vars, n: String(run.sentUnknown) });
-		return { cause, before: failures ? null : before, check, kept: null, soFar: null, allows: null };
+		const first = key === 'unauthorized' ? 'bulk.halt.unauthorized_before_check'
+			: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_check_${tier}`
+			: key === 'credential' ? 'bulk.halt.credential_before'
+			: null;
+		const then = key === 'unavailable' ? 'bulk.halt.unavailable_before_check'
+			: key === 'markupAddedByShop' ? bulkHaltKeyOf(run, 'bulk.halt.markupAddedByShop_before')
+			: null;
+		return { cause, before: first === null ? null : i18n.tf(first, vars), check, after: then === null ? null : i18n.tf(then, vars), kept: null, soFar: null, allows: null };
 	}
 	// "All the rest" holds only when the approved maximum does not stop the pass first; a run
 	// written on under a new maximum is bounded by that one. With no target confirmed as written,
@@ -384,12 +395,12 @@ export function bulkResumeText(
 	// next try reads first and counts as written.
 	const capped = kind === 'max' || run.resumeTries < open;
 	const kept = i18n.t(`bulk.resume.kept_${verb}${run.applied === 0 ? '_none' : ''}${capped ? '_capped' : ''}`);
-	if (!failures) return { cause, before, check: null, kept, soFar: null, allows: null };
+	if (!failures) return { cause, before, check: null, after: null, kept, soFar: null, allows: null };
 	const f = run.failed;
 	const soFar = run.failedOnce === null
 		? (f === 1 ? i18n.t('bulk.resume.failed_so_far_at_least_one') : i18n.tf('bulk.resume.failed_so_far_at_least', { n: String(f) }))
 		: (run.failedOnce === 1 ? i18n.t('bulk.resume.failed_so_far_one') : i18n.tf('bulk.resume.failed_so_far', { n: String(run.failedOnce) }));
-	return { cause, before, check: null, kept, soFar, allows: bulkResumeAllows(limit, open, i18n, run.kind === 'undo') };
+	return { cause, before, check: null, after: null, kept, soFar, allows: bulkResumeAllows(limit, open, i18n, run.kind === 'undo') };
 }
 
 /** What writing on lets fail before the run stops again. The next pass's failures are bounded
