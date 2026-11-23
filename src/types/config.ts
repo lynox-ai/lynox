@@ -99,6 +99,18 @@ export interface AgentConfig {
    * A spawned child carries its parent's.
    */
   principal?:          import('../core/request-principal.js').RequestPrincipal | undefined;
+  /** Who this agent's writes are recorded as (`IAgent.writeAuthor`). Absent: unknown. */
+  writeAuthor?:        string | null | undefined;
+  /** Which send targets the owner named (`IAgent.ownerKnown`). Absent: none, every target is foreign. */
+  ownerKnown?:         import('../core/owner-known-targets.js').OwnerKnownReader | undefined;
+  /** Where a target this agent sends to comes from when the owner did not name it (`IAgent.sendOrigin`). */
+  sendOrigin?:         import('../core/origin-notices.js').SendOrigin | undefined;
+  /** The language of the questions this agent asks in its own words. Absent: the engine's default. */
+  noticeLanguage?:     import('../core/notice-language.js').NoticeLanguage | undefined;
+  /** The thread's record that the conversation read content from outside (`IAgent.conversationLatch`). */
+  conversationLatch?:  import('../core/conversation-latch.js').ConversationLatch | undefined;
+  /** Told of every send this agent refused in a run nobody watches (`IAgent.onOriginRefused`). */
+  onOriginRefused?:    ((refusal: import('../core/origin-notices.js').OriginRefusal) => void) | undefined;
   /**
    * A workflow step's own `fail_step` tool (runtime-adapter.ts, `createFailStepTool`), when this
    * agent runs a step. Matched by IDENTITY of this entry, never by its name: it passes the
@@ -209,6 +221,8 @@ export interface AgentConfig {
    * issues the call. Undefined for ad-hoc Agents built outside a Session.
    */
   toolResultBlobStore?: import('../core/tool-result-blob-store.js').ToolResultBlobStore | undefined;
+  /** The conversation's search results; the session and a spawning parent pass theirs. */
+  searchResultAddresses?: import('../core/search-result-addresses.js').SearchResultAddresses | undefined;
   /**
    * Eager-persist hook fired at every stable point in the agent loop (after
    * assistant message, after tool_results). Lets the Session checkpoint

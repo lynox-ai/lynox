@@ -187,9 +187,12 @@ export function templateText(template: unknown): string {
   return visible(typeof template === 'string' ? template : JSON.stringify(template, null, 2));
 }
 
-/** Whether the library offers the owner the stamp of this workflow. */
-export function offersStamp(wf: { awaitsStamp?: boolean | undefined }, viewer: string | undefined): boolean {
-  return wf.awaitsStamp === true && viewer === 'owner';
+/**
+ * Whether the library offers the owner the stamp of this workflow. Not where its person's access
+ * ended: the takeover stamps it as well, and is the one thing offered there.
+ */
+export function offersStamp(wf: { awaitsStamp?: boolean | undefined; runs_as?: { ended: boolean } | null | undefined }, viewer: string | undefined): boolean {
+  return wf.awaitsStamp === true && viewer === 'owner' && wf.runs_as?.ended !== true;
 }
 
 export type ConfirmOutcome =

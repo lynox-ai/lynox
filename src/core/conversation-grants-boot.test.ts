@@ -53,7 +53,7 @@ describe('Engine boot — the conversation grant set', () => {
       const store = new ThreadStore(before.getDb());
       store.createThread('old-thread');
       store.appendMessages('old-thread', [{ role: 'user', content: 'hello' }], 0);
-      before.getDb().exec('DROP TABLE conversation_grants; DELETE FROM schema_version WHERE version > 66; ALTER TABLE run_tool_calls DROP COLUMN api_cost_source; DROP INDEX idx_pipeline_runs_started_by; ALTER TABLE pipeline_runs DROP COLUMN started_by_run_id; ALTER TABLE run_tool_calls DROP COLUMN api_cost_usd; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
+      before.getDb().exec('DROP TABLE conversation_grants; DELETE FROM schema_version WHERE version > 66; ALTER TABLE thread_messages DROP COLUMN author; ALTER TABLE run_tool_calls DROP COLUMN api_cost_source; DROP INDEX idx_pipeline_runs_started_by; ALTER TABLE pipeline_runs DROP COLUMN started_by_run_id; ALTER TABLE run_tool_calls DROP COLUMN api_cost_usd; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by; ALTER TABLE run_tool_calls DROP COLUMN is_error; ALTER TABLE run_tool_calls DROP COLUMN contract_state; ALTER TABLE run_tool_calls DROP COLUMN contract_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_grant_id; ALTER TABLE run_tool_calls DROP COLUMN lift_entry; ALTER TABLE run_tool_calls DROP COLUMN filing; ALTER TABLE run_tool_calls DROP COLUMN approval_id;');
       before.close();
     });
     const history = engine.getRunHistory();
@@ -81,6 +81,19 @@ describe('Engine boot — the conversation grant set', () => {
     expect(renewed?.members()).toEqual([UNKNOWN_GRANT, 'g-after-boot']);
     session._recreateAgent();
     expect(agentOf().conversationGrants).toBe(renewed);
+  });
+
+  it('every agent of a conversation, a rebuilt one included, shares one record of what its searches listed; another conversation has its own', async () => {
+    const engine = await boot();
+    const session = engine.createSession({ sessionId: 'search-thread' });
+    const agentOf = (): Agent => (session as unknown as { agent: Agent }).agent;
+    const searches = agentOf().searchResultAddresses;
+    searches.noteResults('q', ['https://news.example/a'], true);
+    session._recreateAgent();
+    expect(agentOf().searchResultAddresses).toBe(searches);
+    expect(agentOf().searchResultAddresses.cleanHosts()).toEqual(['news.example']);
+    const other = engine.createSession({ sessionId: 'other-thread' });
+    expect((other as unknown as { agent: Agent }).agent.searchResultAddresses.cleanHosts()).toEqual([]);
   });
 
   it('a new thread starts with an empty set', async () => {

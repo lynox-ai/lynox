@@ -40,7 +40,7 @@ import { calculateCost } from './pricing.js';
 import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
 import { openPendingRunGroup, RUN_GROUP_ID_FORMAT, settleRunGroup } from './run-group.js';
 import { channels } from './observability.js';
-import { detectInjectionAttempt } from './data-boundary.js';
+import { containsUntrustedMarker, detectInjectionAttempt } from './data-boundary.js';
 import { ToolCallTracker } from './output-guard.js';
 import { workspaceChangeset, type ChangesetManager } from './changeset.js';
 import {
@@ -65,7 +65,7 @@ import {
   modelIdentityContext,
   proactiveDeepGuidance,
   providerFamilyLabel,
-  withCurrentTimePrefix, languageOverrideSuffix } from './prompts.js';
+  withCurrentTimePrefix, languageOverrideSuffix, lockedTurnPrompt } from './prompts.js';
 import type { TierModelInfo } from './prompts.js';
 import { isFeatureEnabled } from './features.js';
 import { opensLoadedApprovalDraft, stripLoadedContext } from './chat-context.js';
@@ -73,6 +73,7 @@ import { approvalChatTitle } from './approval-chat-title.js';
 import { noticeLanguage, type NoticeLanguage } from './notice-language.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { capSecretsListing, setupHistorySubscriptions } from './engine-init.js';
+import { ReadOutsideUnrecordedError } from './thread-store.js';
 import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker, capStopNote } from './eager-persist.js';
 import { buildDisplayNoteContent } from './render-projection.js';
 import { buildPostCompactionMessages } from './compaction-messages.js';
@@ -90,9 +91,13 @@ import type { DataStore } from './data-store.js';
 import { pv } from './prompt-value.js';
 import type { BatchIndex } from './batch-index.js';
 import type { PluginManager } from './plugins.js';
-import { OWNER_PRINCIPAL, principalTag } from './request-principal.js';
+import { MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, principalTag, runAuthorTag } from './request-principal.js';
+import { OwnerKnownTargets } from './owner-known-targets.js';
+import { ConversationLatch } from './conversation-latch.js';
 import type { RequestPrincipal } from './request-principal.js';
+import { turnIsLocked } from './mandate-tool-lock.js';
 import { ConversationGrants } from './conversation-grants.js';
+import { SearchResultAddresses } from './search-result-addresses.js';
 
 /** Context-usage % at which auto-compaction fires as a LAST-RESORT safety net.
  *  The primary path is user-triggered "prepare & compact" from COMPACT_PREPARE_PERCENT
@@ -202,6 +207,20 @@ export interface RunOptions {
    *  this undefined → `runs.trigger_origin` NULL). A SEPARATE dimension from
    *  `run_type`; observability only, never gates money. */
   triggerOrigin?: string | undefined;
+  /** The trigger this run is a run of, for the author its typed turn is recorded with
+   *  (`runAuthorTag`): a trigger's turn is never recorded as the owner's. */
+  triggerId?: string | undefined;
+  /** The words the person typed in this turn, apart from anything the route put around them in
+   *  the same message (a loaded mail or run as context, an uploaded file). Recorded with the
+   *  turn (`ThreadStore.ownerTypedTexts`); only these words of an owner's turn ever make a send
+   *  target count as one the owner named. Absent: the turn has no typed words anyone relies on. */
+  typedText?: string | undefined;
+  /** The instruction of the trigger whose run this is, when it counts as the owner's words
+   *  (`ownerInstructionCounts`): its targets are owner-known for this run only. */
+  ownerInstruction?: string | undefined;
+  /** Where a target this run sends to comes from when the owner did not name it (a trigger's,
+   *  a workflow's run). Absent: from a helper's thread, or the agent's taint. */
+  sendOrigin?: import('./origin-notices.js').SendOrigin | undefined;
   /** Who started this run (PRD customer-granted-operator-access D1, §3.13): a mandate's run
    *  gets the mandate's tool lock. ABSENT MEANS "THE SAME AS BEFORE", never "the owner": the
    *  compaction summary run this session starts on its own passes none, and must not lift
@@ -254,6 +273,34 @@ export function threadHoldsForeignTurns(
   }
   if (row === undefined) return false;
   return !(row.created_by === null || row.created_by === principalTag(OWNER_PRINCIPAL));
+}
+
+/** Whether a user turn's own text carries the wrapped-untrusted marker (an upload), as the agent
+ *  reads it when the turn arrives (`Agent._contentHoldsUntrustedMarker`). */
+function userContentHoldsMarker(content: unknown): boolean {
+  if (typeof content === 'string') return containsUntrustedMarker(content);
+  if (!Array.isArray(content)) return false;
+  return content.some((block: unknown) => typeof block === 'object' && block !== null
+    && (block as { type?: unknown }).type === 'text'
+    && typeof (block as { text?: unknown }).text === 'string'
+    && containsUntrustedMarker((block as { text: string }).text));
+}
+
+/**
+ * Who the helper is whose turns may be in this thread, as the thread's row names its creator: the
+ * address of a mandate's tag. Undefined when the row names no mandate or cannot be read.
+ */
+export function helperOfThread(
+  store: Pick<import('./thread-store.js').ThreadStore, 'getThread'> | null,
+  threadId: string,
+): string | undefined {
+  if (store === null) return undefined;
+  try {
+    const tag = store.getThread(threadId)?.created_by ?? null;
+    return tag !== null && tag.startsWith(MANDATE_TAG_PREFIX) ? tag.slice(MANDATE_TAG_PREFIX.length) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export interface SessionOptions {
@@ -421,6 +468,9 @@ export class Session {
    * library's default; the engine's own places name theirs (principal-sites.test.ts).
    */
   private _principal: RequestPrincipal = OWNER_PRINCIPAL;
+  /** The tag this session's current (or last) run writes with (`runAuthorTag`). Null before the
+   *  first run: nothing is written as anyone's then. */
+  private _runAuthor: string | null = null;
   /** A run of someone other than the owner happened in this session, or its thread's row named
    *  another creator when it opened (PRD B6, see `_run`). Never reset. */
   private _foreignRunHere = false;
@@ -449,6 +499,17 @@ export class Session {
   /** The grants this conversation took data from (`ConversationGrants`). Held here, not on the
    *  agent: a rebuilt agent gets the same object. Built on first use from the thread's rows. */
   private _conversationGrants: ConversationGrants | undefined;
+  /** Which send targets the owner named in this conversation (`OwnerKnownTargets`), built on
+   *  first use; a run adds its trigger's instruction to a copy (`_runOwnerKnown`). */
+  private _ownerKnownBase: OwnerKnownTargets | undefined;
+  /** The thread's record that this conversation read outside content (`ConversationLatch`). */
+  private _conversationLatch: ConversationLatch | undefined;
+  /** This run's trigger instruction, when it counts as the owner's (`RunOptions.ownerInstruction`). */
+  private _runOwnerInstruction: string | undefined;
+  /** Where this run's targets come from when the owner did not name them (`RunOptions.sendOrigin`). */
+  private _runSendOrigin: import('./origin-notices.js').SendOrigin | undefined;
+  /** The sends the current (or last) run refused because the owner did not name the target. */
+  private readonly _originRefusals: import('./origin-notices.js').OriginRefusal[] = [];
   private _userWaitMs = 0;
   private _runToolNames = new Set<string>();
   private _retrievedMemoryIds: string[] = [];
@@ -506,6 +567,7 @@ export class Session {
    * state in tools/builtin/http.ts and tools/builtin/fs.ts and grew
    * (or, in the Set/Map's case, leaked) for the lifetime of the process.
    */
+  private readonly _searchResultAddresses = new SearchResultAddresses();
   private readonly _sessionCounters: import('../types/agent.js').SessionCounters = {
     httpRequests: 0,
     writeBytes: 0,
@@ -862,6 +924,16 @@ export class Session {
     // Sticky for this session: someone other than the owner has run here (B6 below). Not left to
     // the thread row alone, which depends on the route refusing a mandate on another's thread.
     if (this._principal.kind !== 'owner') this._foreignRunHere = true;
+    // Who this run writes as, set before any rebuild like the principal. An internal run
+    // (compaction) keeps the author of the run it serves.
+    if (runOptions?.internal !== true) this._runAuthor = runAuthorTag(this._principal, runOptions);
+    // What a send in this run counts as owner-known beyond the conversation, and where a target
+    // that is not comes from: this run's own, never an earlier run's. An internal run keeps them.
+    if (runOptions?.internal !== true) {
+      this._runOwnerInstruction = runOptions?.ownerInstruction;
+      this._runSendOrigin = runOptions?.sendOrigin;
+      this._originRefusals.length = 0;
+    }
     if (runOptions?.internal !== true) this._stopBeforeSend = false;
     // Before anything that could rebuild the agent below, like the principal: every rebuild
     // of this run marks its agent by what this run's client said, never by an earlier run.
@@ -1157,7 +1229,10 @@ export class Session {
     const effectivePrompt = (this.agentOverrides.systemPromptSuffix
       ? snapshotBase + this.agentOverrides.systemPromptSuffix
       : snapshotBase) + runIdentityContext + this._proactiveDeepSuffix(runBaseProvider) + currentDateContext();
-    const promptHash = hashPrompt(effectivePrompt);
+    // A locked turn is sent the prompt with its key-collecting parts swapped (`Agent`, U-185):
+    // the hash records that one, the one actually sent.
+    const sentPrompt = turnIsLocked(this._principal) ? lockedTurnPrompt(effectivePrompt) : effectivePrompt;
+    const promptHash = hashPrompt(sentPrompt);
 
     // Record run start
     const runHistory = this.engine.getRunHistory();
@@ -1178,7 +1253,7 @@ export class Session {
           ...(runOptions?.triggerOrigin ? { triggerOrigin: runOptions.triggerOrigin } : {}),
         });
         // Snapshot prompt if this hash is new
-        runHistory.insertPromptSnapshot(promptHash, 'default', effectivePrompt);
+        runHistory.insertPromptSnapshot(promptHash, 'default', sentPrompt);
       } catch {
         this.currentRunId = null;
       }
@@ -1209,6 +1284,11 @@ export class Session {
     // mandate's run reuses. `_createAgent` also builds every new agent with it, which is
     // what carries it across a rebuild in the middle of this run.
     this.agent.principal = this._principal;
+    // Who this run's writes are recorded as, on the agent that will send, for the same reason.
+    this.agent.writeAuthor = this._runAuthor;
+    // Which targets this run counts as owner-known, and where one that is not comes from.
+    this.agent.ownerKnown = this._runOwnerKnown();
+    this.agent.sendOrigin = this._runSendOrigin;
 
     const usageBefore = { ...this.usage };
 
@@ -1299,6 +1379,10 @@ export class Session {
     // internal runs (compaction summary) so a system prompt never shows as a
     // user message.
     let userTurnPrePersisted = false;
+    let readOutsideUnrecorded: ReadOutsideUnrecordedError | undefined;
+    // A turn that carries outside content itself (an upload) arms the thread's record of outside
+    // reads, which is written with the turn or the turn is not written (`ConversationLatch`).
+    if (runOptions?.internal !== true && userContentHoldsMarker(userContent)) this._latch().set();
     if (threadStore && runOptions?.internal !== true) {
       try {
         const totalBefore = threadStore.getMessageCount(this.sessionId);
@@ -1307,11 +1391,15 @@ export class Session {
           [{ role: 'user', content: userContent as BetaMessageParam['content'] }],
           runStartSeq,
           { message_count: totalBefore + 1 },
+          this._runAuthor ?? undefined,
+          runOptions?.typedText,
         );
         userTurnPrePersisted = true;
-      } catch {
+      } catch (err) {
         // Fire-and-forget — eager-persist still covers the happy path; never
-        // block the run on a persistence hiccup.
+        // block the run on a persistence hiccup. Except the record of outside reads: a turn that
+        // carries a read is not stored without it, and does not run (`ReadOutsideUnrecordedError`).
+        if (err instanceof ReadOutsideUnrecordedError) readOutsideUnrecorded = err;
       }
     }
 
@@ -1323,6 +1411,14 @@ export class Session {
     // Only the owner's turn: a mandate's own turns are bounded by its tool lock, not by this.
     if (this._principal.kind === 'owner' && (this._foreignRunHere || threadHoldsForeignTurns(threadStore, this.sessionId))) {
       this.agent.restoreConversationTaint();
+      // A target the owner did not name here may come from the helper's turns.
+      const helper = helperOfThread(threadStore, this.sessionId);
+      // Kept on the session for the run, so an agent rebuilt mid-run (a model switch, a compaction)
+      // gets it too (`_createAgent`).
+      if (this._runSendOrigin === undefined && helper !== undefined) {
+        this._runSendOrigin = { kind: 'helperThread', helper };
+        this.agent.sendOrigin = this._runSendOrigin;
+      }
     }
 
     // ⛔ CAPTURED BEFORE THE SEND, and the stop is read off THIS object rather than
@@ -1346,6 +1442,7 @@ export class Session {
       // Stopped before the agent could hear it: ends the turn as a stop, before the provider,
       // through the same recording as a stop the agent heard.
       if (runOptions?.internal !== true && this._stopBeforeSend) throw new RunAbortedError();
+      if (readOutsideUnrecorded !== undefined) throw readOutsideUnrecorded;
       sentToAgent = true;
       const result = await runAgent.send(
         userContent,
@@ -1575,7 +1672,11 @@ export class Session {
             );
             threadStore.updateThread(this.sessionId, { message_count: before + 1 });
           }
-        } catch { /* fire-and-forget */ }
+        } catch (err) {
+          // Fire-and-forget, except a turn whose record of outside reads could not be written:
+          // its messages were not stored, and it ends with the error.
+          if (err instanceof ReadOutsideUnrecordedError) throw err;
+        }
       }
 
       // Auto-confirm retrieved memories on success
@@ -1903,6 +2004,41 @@ export class Session {
 
   /** This conversation's grant set, built on first use: from the thread's recorded rows when
    *  there is a history, else in memory only. */
+  /** The sends the last run refused because the owner did not name the target, in order. */
+  getOriginRefusals(): readonly import('./origin-notices.js').OriginRefusal[] {
+    return [...this._originRefusals];
+  }
+
+  /** The conversation's owner-known targets, built on first use from the engine's stores. */
+  private _ownerKnownSet(): OwnerKnownTargets {
+    if (this._ownerKnownBase === undefined) {
+      const threadStore = this.engine.getThreadStore();
+      const crm = this.engine.getCRM();
+      const mail = this.engine.getMailStateDb();
+      const threadId = this.sessionId;
+      this._ownerKnownBase = OwnerKnownTargets.of({
+        ...(threadStore ? { ownerTexts: () => threadStore.ownerTypedTexts(threadId) } : {}),
+        ...(crm ? { contactOrigin: (address: string) => crm.contactOrigin(address) } : {}),
+        ...(mail ? { sentToOwnerKnown: (address: string) => mail.isOwnerKnownRecipient(address) } : {}),
+      });
+    }
+    return this._ownerKnownBase;
+  }
+
+  /** What this run counts as owner-known: the conversation's, and its trigger's instruction. */
+  private _runOwnerKnown(): OwnerKnownTargets {
+    return this._ownerKnownSet().withInstruction(this._runOwnerInstruction);
+  }
+
+  /** The thread's record that this conversation read outside content, built on first use. */
+  private _latch(): ConversationLatch {
+    if (this._conversationLatch === undefined) {
+      const threadStore = this.engine.getThreadStore();
+      this._conversationLatch = threadStore ? ConversationLatch.forThread(this.sessionId, threadStore) : ConversationLatch.detached();
+    }
+    return this._conversationLatch;
+  }
+
   private _grantSet(): ConversationGrants {
     if (this._conversationGrants === undefined) {
       const runHistory = this.engine.getRunHistory();
@@ -2599,9 +2735,12 @@ export class Session {
   private _rebuildAgentKeepingConversation(): void {
     const messages = this.saveMessages();
     const tainted = this.agent?.conversationSawUntrusted ?? false;
+    const searched = this.agent?.heldProviderSearch() ?? false;
     this._createAgent();
     this.loadMessages(messages);
     if (tainted) this.agent?.restoreConversationTaint();
+    // Likewise a search the provider ran, whose blocks the context window may have dropped.
+    if (searched) this.agent?.restoreProviderSearch();
   }
 
   /**
@@ -2832,10 +2971,18 @@ export class Session {
     this.agent = new Agent({
       conversationGrants: this._grantSet(),
       conversationRoot: true,
+      // The same objects for every agent of this conversation, a rebuilt one included.
+      ownerKnown: this._runOwnerKnown(),
+      sendOrigin: this._runSendOrigin,
+      noticeLanguage: noticeLanguage(this.engine.config.language),
+      conversationLatch: this._latch(),
+      onOriginRefused: (refusal) => { this._originRefusals.push(refusal); },
       // Every agent this session builds is built for the principal of the run in flight, or
       // of the last run: a rebuild in the middle of a mandate's run (compaction, a tier
       // override, a registry change) must not hand the model the tools the lock withholds.
       principal: this._principal,
+      // Who the rebuilt agent writes as: the run in flight's author, as the principal above.
+      writeAuthor: this._runAuthor,
       // ⛔ CARRIED ACROSS THE REBUILD. Without this line every rebuild mints a fresh,
       // empty scope and orphans whatever is registered — a later `abort()` then reaches
       // nothing. `_createAgent` is reached from the ctor, `addTool` and every rebuild that
@@ -2964,6 +3111,8 @@ export class Session {
       changesetReviewedAfterRun: this._changesetManager !== null && this._runShowsReview,
       toolContext,
       sessionCounters: this._sessionCounters,
+      // The same record of what this conversation's searches listed, for every agent built for it.
+      searchResultAddresses: this._searchResultAddresses,
       // Phase 2: same blob-store reference across every Agent recreation so
       // `recall_tool_result` resolves handles minted by a prior `compact()`.
       toolResultBlobStore: this._toolResultBlobStore,

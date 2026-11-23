@@ -139,3 +139,36 @@ export function controlFailures(): string[] {
   if (!verdict('E2', withSecret).ok) out.push('ask_secret not allowed');
   return out;
 }
+
+/**
+ * U-201 T1 (escalation-failure-chat-eval.test.ts): the owner replies "why?" in the escalation thread
+ * of a run whose step failed without reporting it; the body names the step and says the error is
+ * in the run's record. Pass (09.11.): diagnose_workflow_run comes first, no cause is stated
+ * before it, the answer never says no reason was given, and no other tool is called before it.
+ */
+export function threadVerdict(blocks: Block[]): { ok: boolean; why: string } {
+  const diagAt = blocks.findIndex((b) => b.kind === 'tool' && b.name === 'diagnose_workflow_run');
+  const all = blocks.filter((b) => b.kind === 'text').map((b) => b.text).join('\n');
+  const noReason = NO_REASON.exec(all)?.[0];
+  if (noReason) return { ok: false, why: `said no reason was given: ${noReason}` };
+  if (diagAt === -1) return { ok: false, why: `no diagnose_workflow_run: ${blocks.filter((b) => b.kind === 'tool').map((b) => b.name).join(',') || 'none'}` };
+  const first = blocks.slice(0, diagAt);
+  const earlier = first.filter((b) => b.kind === 'tool').map((b) => b.name);
+  if (earlier.length > 0) return { ok: false, why: `called another tool first: ${earlier.join(',')}` };
+  const cause = CAUSE.exec(first.filter((b) => b.kind === 'text').map((b) => b.text).join('\n'))?.[0];
+  if (cause) return { ok: false, why: `cause before diagnose: ${cause}` };
+  return { ok: true, why: 'diagnosed first, no cause before it' };
+}
+
+/** The T1 verdict on known block sequences: what must pass and what must fail (empty = fit to count). */
+export function threadControlFailures(): string[] {
+  const out: string[] = [];
+  const diag: Block = { kind: 'tool', text: '', name: 'diagnose_workflow_run', input: { run_id: 'r' }, turn: 1 };
+  const text = (t: string): Block => ({ kind: 'text', text: t, name: '', input: {}, turn: 1 });
+  if (!threadVerdict([text('Ich schaue im Protokoll nach.'), diag, text('Der Schritt meldet HTTP 503.')]).ok) out.push('a plain diagnose-first run failed');
+  if (threadVerdict([text('Wahrscheinlich war der Server überlastet.'), diag]).ok) out.push('a guessed cause before diagnose passed');
+  if (threadVerdict([text('Ein Netzwerkproblem.')]).ok) out.push('no diagnose passed');
+  if (threadVerdict([diag, text('Der Schritt hat keinen Grund angegeben.')]).ok) out.push('"no reason" passed');
+  if (threadVerdict([{ ...diag, name: 'run_workflow' }, diag]).ok) out.push('a re-run before diagnose passed');
+  return out;
+}

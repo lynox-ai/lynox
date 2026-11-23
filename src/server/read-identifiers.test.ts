@@ -22,6 +22,8 @@ import { LynoxHTTPApi, READ_IDENTIFIERS } from './http-api.js';
  * - the scan must find exactly the `user` GET routes of the real table.
  */
 const NOT_IDENTIFYING = new Set([
+  // The version of the consent text a connect page showed: a digest of a fixed text, the same for everyone.
+  'shown_consent',
   // Paging, ordering and windows (`before`: the access log's cursor, a row id of the log itself).
   'limit', 'offset', 'before', 'since', 'fromSeq', 'days', 'dateFrom', 'dateTo', 'tzOffsetMin', 'window',
   // Filters over a list: what kind, not which one.
