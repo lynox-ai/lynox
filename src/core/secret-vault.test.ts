@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import Database from 'better-sqlite3';
-import { SecretVault, estimateKeyEntropy } from './secret-vault.js';
+import { SecretVault, VaultKeyMismatchError, estimateKeyEntropy } from './secret-vault.js';
 
 const TEST_KEY = 'test-master-key-for-vault-testing-1234';
 
@@ -331,26 +331,22 @@ describe('SecretVault', () => {
   // === Encryption ===
 
   describe('encryption', () => {
-    it('wrong key cannot decrypt', () => {
+    it('wrong key does not open the vault', () => {
       const vault1 = createVault('correct-key-1234567890ab');
       vault1.set('SECRET', 'top-secret-value-xyz');
       vault1.close();
 
-      const vault2 = createVault('wrong-key-0987654321cd');
-      expect(vault2.get('SECRET')).toBeNull(); // Decryption fails silently
-      vault2.close();
+      // The key check refuses it before any read (secret-vault-key-check.test.ts).
+      expect(() => createVault('wrong-key-0987654321cd')).toThrow(VaultKeyMismatchError);
     });
 
-    it('wrong key returns empty from getAll', () => {
+    it('wrong key does not open a vault with several entries', () => {
       const vault1 = createVault('key-alpha-1234567890');
       vault1.set('A', 'value-alpha-1234567');
       vault1.set('B', 'value-beta-12345678');
       vault1.close();
 
-      const vault2 = createVault('key-beta-0987654321');
-      const all = vault2.getAll();
-      expect(all.size).toBe(0); // All entries fail decryption
-      vault2.close();
+      expect(() => createVault('key-beta-0987654321')).toThrow(VaultKeyMismatchError);
     });
 
     it('each value has unique IV', () => {
@@ -509,12 +505,10 @@ describe('SecretVault', () => {
       vaultAlice.set('SECRET', 'alice-private-data-123');
       vaultAlice.close();
 
-      const vaultBob = new SecretVault({
+      expect(() => new SecretVault({
         path: join(tmpDir, 'alice-vault.db'),
         masterKey: keyBob,
-      });
-      expect(vaultBob.get('SECRET')).toBeNull(); // Cannot decrypt
-      vaultBob.close();
+      })).toThrow(VaultKeyMismatchError);
     });
   });
 
@@ -603,14 +597,11 @@ describe('SecretVault', () => {
       expect(vault2.get('SECRET_B')).toBe('value-b-rotation-test');
       vault2.close();
 
-      // Verify old key cannot decrypt
-      const vault3 = new SecretVault({ path: dbPath, masterKey: oldKey });
-      expect(vault3.get('SECRET_A')).toBeNull();
-      expect(vault3.get('SECRET_B')).toBeNull();
-      vault3.close();
+      // Verify the old key no longer opens it
+      expect(() => new SecretVault({ path: dbPath, masterKey: oldKey })).toThrow(VaultKeyMismatchError);
     });
 
-    it('throws on wrong current key', () => {
+    it('throws on wrong current key and leaves the vault as it was', () => {
       const dbPath = join(tmpDir, 'vault.db');
       const realKey = 'real-key-for-wrong-key-test-12345';
       const wrongKey = 'wrong-key-for-wrong-key-test-67890';
@@ -620,7 +611,10 @@ describe('SecretVault', () => {
       vault.close();
 
       expect(() => SecretVault.rotateVault(dbPath, wrongKey, 'new-key-1234567890ab'))
-        .toThrow('Cannot decrypt');
+        .toThrow(VaultKeyMismatchError);
+      const again = new SecretVault({ path: dbPath, masterKey: realKey });
+      expect(again.get('DATA')).toBe('important-secret-value-1234');
+      again.close();
     });
 
     it('handles empty vault', () => {

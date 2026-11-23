@@ -19,7 +19,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SecretVault } from '../secret-vault.js';
+import { SecretVault, VaultKeyMismatchError } from '../secret-vault.js';
 import { SecretStore } from '../secret-store.js';
 
 describe('VAULT_SLOT_BY_PROVIDER', () => {
@@ -386,7 +386,8 @@ describe('migrateLegacyEndpointKey — a real vault opened with a foreign key', 
     const stamp = readUnder(keyA, MARKER);
     expect(stamp).not.toBeNull();
 
-    expect(boot(keyB, 'http://localhost:11434/v1')).toBeNull();   // wrong key
+    // A wrong key does not open the vault at all (its key check), so nothing runs under it.
+    expect(() => boot(keyB, 'http://localhost:11434/v1')).toThrow(VaultKeyMismatchError);
     expect(readUnder(keyA, MARKER)).toBe(stamp);
 
     // Back on the vault's key, after a switch to Ollama: the marker still reads,
@@ -395,30 +396,33 @@ describe('migrateLegacyEndpointKey — a real vault opened with a foreign key', 
     expect(readUnder(keyA, 'OLLAMA_API_KEY')).toBeNull();
   });
 
-  it('decides on the first boot even under a foreign key, and later carries nothing', () => {
+  it('a boot under a foreign key is refused before the migration and stamps nothing', () => {
     // The carry is only safe on the first boot, while `api_base_url` still names the
-    // endpoint the key was used with. A foreign key cannot read the legacy key, so that
-    // boot carries nothing; a later boot, perhaps after a switch, must not try again.
+    // endpoint the key was used with. A foreign key no longer opens the vault, so its boot
+    // never reaches the migration: the first boot under the vault's own key decides.
     const seed = new SecretVault({ path: dbPath, masterKey: keyA });
     seed.set('MISTRAL_API_KEY', 'mistral-secret');
     seed.close();
 
-    expect(boot(keyB, 'https://api.mistral.ai/v1')).toBeNull();
-    expect(boot(keyA, 'http://localhost:11434/v1')).toBeNull();   // switched to Ollama
+    expect(() => boot(keyB, 'https://api.mistral.ai/v1')).toThrow(VaultKeyMismatchError);
+    expect(readUnder(keyA, MARKER)).toBeNull();
+    expect(boot(keyA, 'https://api.mistral.ai/v1')).toBeNull();
+    expect(readUnder(keyA, MARKER)).not.toBeNull();
+    expect(boot(keyA, 'http://localhost:11434/v1')).toBeNull();   // switched to Ollama later
     expect(readUnder(keyA, 'OLLAMA_API_KEY')).toBeNull();
   });
 
-  it('does not carry later even when the endpoint stayed the same (the price of the rule)', () => {
-    // The other side of the test above: a vLLM user whose first boot had the wrong key
-    // is back on the vault's key with the same endpoint. A second run would be right
-    // here, but it cannot be told from the case above, so the key is entered again.
+  it('a refused boot under a foreign key does not cost the carry on the same endpoint', () => {
+    // A vLLM user whose first boot had the wrong key is back on the vault's key with the
+    // same endpoint. Before the key check the foreign boot stamped the marker and the key had
+    // to be entered again; now that boot is refused, and the first real boot carries it.
     const seed = new SecretVault({ path: dbPath, masterKey: keyA });
     seed.set('MISTRAL_API_KEY', 'my-vllm-key');
     seed.close();
 
-    expect(boot(keyB, 'http://localhost:8000/v1')).toBeNull();
-    expect(boot(keyA, 'http://localhost:8000/v1')).toBeNull();
-    expect(readUnder(keyA, 'VLLM_API_KEY')).toBeNull();
+    expect(() => boot(keyB, 'http://localhost:8000/v1')).toThrow(VaultKeyMismatchError);
+    boot(keyA, 'http://localhost:8000/v1');
+    expect(readUnder(keyA, 'VLLM_API_KEY')).toBe('my-vllm-key');
   });
 
   it('takes only the vault row as the marker, not a value injected through the env', () => {

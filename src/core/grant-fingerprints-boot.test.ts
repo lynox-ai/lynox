@@ -6,6 +6,7 @@ import type { LynoxConfig } from '../types/index.js';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
 import { EngineDb } from './engine-db.js';
+import { SecretVault } from './secret-vault.js';
 import { GrantLedger } from './grant-ledger.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
 
@@ -93,7 +94,10 @@ describe('Engine boot — the credential comparison runs, and mints only for a c
     expect(g4.fingerprints).toEqual({ SHOP_KEY: keyed('shop-key-two-0000') });
     expect(reasonOf(g4.grant_id!)).toBe('baseline');
 
-    // Boot 5: another vault key. Every fingerprint differs; the boot mints once, as a rekey.
+    // Boot 5: another vault key. Every fingerprint differs; the boot mints once, as a rekey. The
+    // vault is re-keyed first, as a key change does it: a key the vault was not written with
+    // stops the start (`VaultKeyMismatchError`).
+    SecretVault.rotateVault(join(dir, 'vault.db'), 'test-vault-key-for-boot-0000000000', 'test-vault-key-for-boot-1111111111');
     setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-1111111111');
     reloadConfig();
     const fifth = await boot();

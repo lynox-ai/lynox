@@ -4,7 +4,7 @@ import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import Database from 'better-sqlite3';
-import { SecretVault } from './secret-vault.js';
+import { SecretVault, VaultKeyMismatchError } from './secret-vault.js';
 import { MigrationExporter } from './migration-export.js';
 import { MigrationImporter } from './migration-import.js';
 import {
@@ -596,17 +596,8 @@ describe('migration E2E', () => {
       expect(dstVault.get('SENSITIVE_KEY')).toBe('super-secret-value-12345');
       dstVault.close();
 
-      // Secret is NOT readable with source key (different PBKDF2 salt)
-      // Suppress expected stderr warning about decryption failure
-      const origWrite = process.stderr.write;
-      process.stderr.write = (() => true) as typeof process.stderr.write;
-      try {
-        const wrongVault = new SecretVault({ path: join(dstDir, 'vault.db'), masterKey: SRC_VAULT_KEY });
-        expect(wrongVault.get('SENSITIVE_KEY')).toBeNull();
-        wrongVault.close();
-      } finally {
-        process.stderr.write = origWrite;
-      }
+      // The source key does not open the destination vault (different PBKDF2 salt): its key check refuses it
+      expect(() => new SecretVault({ path: join(dstDir, 'vault.db'), masterKey: SRC_VAULT_KEY })).toThrow(VaultKeyMismatchError);
 
       importer.cleanup();
     });
