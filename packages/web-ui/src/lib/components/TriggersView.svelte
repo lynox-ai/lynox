@@ -516,6 +516,12 @@
 		}
 	}
 
+	/** Whether a run's time has passed, as the list is drawn (it reloads on its own while open). */
+	function isDue(iso: string): boolean {
+		const at = new Date(iso).getTime();
+		return Number.isFinite(at) && at <= Date.now();
+	}
+
 	function fmtDate(iso: string): string {
 		return new Date(iso).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 	}
@@ -542,9 +548,12 @@
 		interrupted: 'text-warning',
 	};
 	// Colour alone does not tell these apart from the rest (and not at all to a reader
-	// who does not see colour), so they also carry a word. `stopped` and `halted` share
-	// the muted colour, which makes the word the only thing that separates them.
-	const runStatusWord: Record<string, 'tasks.run_halted' | 'tasks.run_interrupted' | 'tasks.run_stopped'> = {
+	// who does not see colour), so every run that did not succeed carries a word. `stopped`
+	// and `halted` share the muted colour, which makes the word the only thing that
+	// separates them; `failed` and `timeout` share the danger colour.
+	const runStatusWord: Record<string, 'tasks.run_failed' | 'tasks.run_timeout' | 'tasks.run_halted' | 'tasks.run_interrupted' | 'tasks.run_stopped'> = {
+		failed: 'tasks.run_failed',
+		timeout: 'tasks.run_timeout',
 		halted: 'tasks.run_halted',
 		interrupted: 'tasks.run_interrupted',
 		stopped: 'tasks.run_stopped',
@@ -625,7 +634,10 @@
 								     in the consent block below instead, where it is the thing a person
 								     needs: what confirming starts, and when. -->
 								{#if trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.paused !== true}
-									<span>{t('tasks.next_run')}: {fmtDate(trigger.next_run_at)}</span>
+									<!-- A trigger the worker could not start keeps its next_run_at, which is then
+									     in the past: it is due since then, not a next run before the last one. -->
+									{@const due = isDue(trigger.next_run_at)}
+									<span data-next-run={due ? 'due' : 'next'}>{t(due ? 'tasks.due_since' : 'tasks.next_run')}: {fmtDate(trigger.next_run_at)}</span>
 								{/if}
 								{#if trigger.last_run_at}
 									<span class={runStatusColor[trigger.last_run_status ?? ''] ?? ''} data-run-status={trigger.last_run_status}>{t('tasks.last_run')}: {fmtDate(trigger.last_run_at)}{#if Object.hasOwn(runStatusWord, trigger.last_run_status ?? '')}&nbsp;· {t(runStatusWord[trigger.last_run_status ?? '']!)}{/if}</span>
