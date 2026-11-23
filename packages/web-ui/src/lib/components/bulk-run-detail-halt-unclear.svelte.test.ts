@@ -217,10 +217,15 @@ describe('the step to check the targets with an error', () => {
 	it('stands only where the preview marks a target with a failure', async () => {
 		const step = t('bulk.halt.failures_before_write');
 		run = halted(1, 0);
-		allTargets = [field(0, 'write_failed'), field(1), field(2)];
+		// A target recorded as applied shows no error, whatever a loop that lost its claim left on it.
+		allTargets = [{ ...field(0, 'write_failed'), written: true, applied: true }, field(1), field(2)];
 		await render();
-		// A target with a diff shows the diff, not its error: nothing below is marked.
 		expect(shown()).not.toContain(step);
+		unmount(component!);
+		// A target with a diff shows its error under the diff, and is marked.
+		allTargets = [{ ...field(0, 'write_failed'), written: true, applied: false }, field(1), field(2)];
+		await render();
+		expect(shown()).toContain(step);
 		unmount(component!);
 		allTargets = [unread(0, 'write_failed'), field(1), field(2)];
 		await render();
