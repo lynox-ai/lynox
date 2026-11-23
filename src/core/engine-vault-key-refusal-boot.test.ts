@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LynoxConfig } from '../types/index.js';
@@ -60,6 +60,24 @@ describe('Engine boot — a vault key that does not open the vault', () => {
     } finally {
       a.close();
     }
+  });
+
+  it('stops before the stores open when the foreign key comes from vault.key, which the boot reads first', async () => {
+    // A self-hosted key lives in <data>/vault.key, not in the environment: the check has to run
+    // after the boot has read it, or it sees no key and lets both stores open under the foreign one.
+    const d = prepare();
+    vi.stubEnv('LYNOX_VAULT_KEY', '');
+    writeFileSync(join(d, 'vault.key'), KEY_B + '\n', { mode: 0o600 });
+    _resetVaultKeySource();
+    reloadConfig();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      await expect(new Engine({} as LynoxConfig).init()).rejects.toThrow(VaultKeyMismatchError);
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(existsSync(join(d, 'history.db')), 'history.db was not opened').toBe(false);
+    expect(existsSync(join(d, 'engine.db')), 'engine.db was not opened').toBe(false);
   });
 
   it('CONTROL: under the vault\'s own key the same boot opens the stores', async () => {
