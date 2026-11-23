@@ -404,12 +404,14 @@ export function bulkShowsTargetError(target: Pick<BulkTarget, 'error' | 'change'
 /** The sentence a preview row shows for a target's error. A code this page does not know reads
  *  as a neutral sentence, never as the code itself. A failed write or a redirect says the change
  *  did not arrive only where the engine says no send to the target is unclear; an engine that
- *  does not say gets the sentence that leaves it open, which claims less. */
-export function bulkTargetErrorText(target: Pick<BulkTarget, 'error' | 'sendUnclear'>, i18n: Pick<BulkI18n, 't'>): string {
+ *  does not say gets the sentence that leaves it open, which claims less. A local run (no host)
+ *  has no provider to check: its open failed write points to the target itself. A local writer
+ *  never hears a refusal, so a write that failed there is always open. */
+export function bulkTargetErrorText(target: Pick<BulkTarget, 'error' | 'sendUnclear'>, local: boolean, i18n: Pick<BulkI18n, 't'>): string {
 	const error = target.error ?? '';
 	if (!BULK_TARGET_ERROR_CODES.has(error)) return i18n.t('bulk.target_error.other');
-	const settled = BULK_TARGET_ERROR_SENT.has(error) && target.sendUnclear === false;
-	return i18n.t(`bulk.target_error.${error}${settled ? '_not_arrived' : ''}`);
+	if (BULK_TARGET_ERROR_SENT.has(error) && target.sendUnclear === false) return i18n.t(`bulk.target_error.${error}_not_arrived`);
+	return i18n.t(`bulk.target_error.${error}${local && error === 'write_failed' ? '_local' : ''}`);
 }
 
 /** What writing on lets fail before the run stops again. The next pass's failures are bounded

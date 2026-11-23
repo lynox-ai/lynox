@@ -159,8 +159,10 @@ const SENTENCES: Record<string, { de: string; en: string }> = {
 // Where the engine says no send to the target is unclear: the change did not arrive.
 const NOT_ARRIVED: Record<string, { de: string; en: string }> = {
 	write_failed: { de: 'Das Schreiben dieses Ziels ist gescheitert. Die Änderung ist nicht angekommen.', en: 'Writing this target failed. The change did not arrive.' },
-	redirect: { de: 'Der Anbieter hat mit einer Weiterleitung geantwortet. lynox folgt keiner Weiterleitung und hat die Änderung nicht gesendet.', en: 'The provider answered with a redirect. lynox never follows one and did not send the change.' },
+	redirect: { de: 'Der Anbieter hat mit einer Weiterleitung geantwortet. lynox folgt keiner Weiterleitung. Die Änderung ist nicht angekommen.', en: 'The provider answered with a redirect. lynox never follows one. The change did not arrive.' },
 };
+// A failed write on a local run, where no send is ever refused: it points to the target, not to a provider.
+const LOCAL_WRITE_FAILED = { de: 'Beim Schreiben dieses Ziels kam ein Fehler zurück. Ob die Änderung trotzdem gespeichert ist, ist offen. Sieh im Ziel nach.', en: 'Writing this target returned an error. Whether the change was saved anyway is unclear. Check the target.' };
 const OTHER = { de: 'Bei diesem Ziel ist etwas schiefgegangen.', en: 'Something went wrong with this target.' };
 const WRITE_CODES = ['write_failed', 'path_changed', 'redirect', 'secret', 'conflict', 'sent_unknown'] as const;
 
@@ -204,11 +206,12 @@ describe('the error of a target, in the preview', () => {
 		for (const lang of ['de', 'en'] as const) {
 			setLocale(lang);
 			const said = [
-				...Object.keys(SENTENCES).map((c) => bulkTargetErrorText({ error: c }, i18n)),
-				...Object.keys(NOT_ARRIVED).map((c) => bulkTargetErrorText({ error: c, sendUnclear: false }, i18n)),
+				...Object.keys(SENTENCES).map((c) => bulkTargetErrorText({ error: c }, false, i18n)),
+				...Object.keys(NOT_ARRIVED).map((c) => bulkTargetErrorText({ error: c, sendUnclear: false }, false, i18n)),
+				bulkTargetErrorText({ error: 'write_failed' }, true, i18n),
 			];
 			expect(new Set(said).size).toBe(said.length);
-			expect(said).not.toContain(bulkTargetErrorText({ error: 'quota_exceeded' }, i18n));
+			expect(said).not.toContain(bulkTargetErrorText({ error: 'quota_exceeded' }, false, i18n));
 			expect(said.every((s) => !s.startsWith('bulk.'))).toBe(true);
 		}
 	});
@@ -243,6 +246,20 @@ describe('the error of a target, in the preview', () => {
 				expect(errorTexts()).toEqual([NOT_ARRIVED[code]![lang], SENTENCES[code]![lang], NOT_ARRIVED[code]![lang], SENTENCES[code]![lang]]);
 			});
 		}
+	}
+
+	for (const lang of ['de', 'en'] as const) {
+		it(`says a failed write on a local run as open in ${lang}, pointing to the target, not to a provider`, async () => {
+			setLocale(lang);
+			run = { ...writeRun([
+				{ ...unread(0, 'write_failed'), sendUnclear: true },
+				unread(1, 'write_failed'),
+				{ ...unread(2, 'write_failed'), sendUnclear: false },
+				unread(3, 'path_changed'),
+			]), targetSystem: 'data_store' };
+			await render();
+			expect(errorTexts()).toEqual([LOCAL_WRITE_FAILED[lang], LOCAL_WRITE_FAILED[lang], NOT_ARRIVED['write_failed']![lang], SENTENCES['path_changed']![lang]]);
+		});
 	}
 
 	it('says the other codes the same whether or not a send to the target is unclear', async () => {

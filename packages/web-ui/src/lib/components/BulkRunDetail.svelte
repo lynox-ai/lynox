@@ -725,7 +725,7 @@
 {/each}</pre>
 											{/if}
 											{#if bulkShowsTargetError(target)}
-												<div class="text-text-subtle" data-testid="bulk-target-error">{bulkTargetErrorText(target, view)}</div>
+												<div class="text-text-subtle" data-testid="bulk-target-error">{bulkTargetErrorText(target, host === null, view)}</div>
 											{/if}
 											{@render markupList(target, false)}
 											{#if target.change === 'invalid' && target.error}
