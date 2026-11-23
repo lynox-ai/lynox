@@ -29,8 +29,11 @@ export interface StampPreview {
 	};
 	/** The address of the mandate the plan acts for; null when it acts for none. */
 	by: string | null;
-	/** For a workflow schedule: its name, and whether it is confirmed. Null for any other. */
-	workflow: { name: string | null; confirmed: boolean } | null;
+	/**
+	 * For a workflow schedule: its name, whether it is confirmed, and whether the person it runs for
+	 * lost access (absent from an older engine: not ended). Null for any other.
+	 */
+	workflow: { name: string | null; confirmed: boolean; ended?: boolean } | null;
 	connections: { id: string; profile: string; provider: string; account: string | null }[];
 }
 
@@ -52,7 +55,7 @@ export function readPreview(raw: unknown): StampPreview | null {
 		if (!strOrNull(s[k])) return null;
 	}
 	const w = raw['workflow'];
-	if (w !== null && !(isObj(w) && strOrNull(w['name']) && typeof w['confirmed'] === 'boolean')) return null;
+	if (w !== null && !(isObj(w) && strOrNull(w['name']) && typeof w['confirmed'] === 'boolean' && (w['ended'] === undefined || typeof w['ended'] === 'boolean'))) return null;
 	const c = raw['connections'];
 	if (!Array.isArray(c) || !c.every((e) => isObj(e) && typeof e['id'] === 'string' && typeof e['profile'] === 'string' && typeof e['provider'] === 'string' && strOrNull(e['account']))) return null;
 	return raw as unknown as StampPreview;
