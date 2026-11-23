@@ -10919,7 +10919,7 @@ export class LynoxHTTPApi {
           return;
         }
         if (!(err instanceof ArtifactPlaceholderError)) throw err;
-        errorResponse(res, 422, 'This is the placeholder the assistant keeps for an already saved document, not the document. Nothing was saved.', 'artifact_placeholder');
+        errorResponse(res, 422, 'This is only the assistant\'s placeholder, not a document. Nothing was saved.', 'artifact_placeholder');
         return;
       }
       jsonResponse(res, 201, artifact);
