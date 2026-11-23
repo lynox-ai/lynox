@@ -402,7 +402,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     // An address with no host says so instead of an empty name.
     expect(line('mailto:someone@example.com')).toContain('(sends to no host)');
     // Control: an address written as it is read gets no note, in any letter case or with its port.
-    for (const asRead of ['https://api.mistral.ai/v1', 'HTTPS://API.MISTRAL.AI/v1', 'https://api.mistral.ai:8443/v1', 'https://api.mistral.ai']) {
+    for (const asRead of ['https://api.mistral.ai/v1', 'HTTPS://API.MISTRAL.AI/v1', 'https://api.mistral.ai:8443/v1', 'https://api.mistral.ai:443/v1', 'https://api.mistral.ai']) {
       expect(line(asRead), asRead).toContain(`→ ${asRead}`);
       expect(line(asRead), asRead).not.toContain('(sends to');
     }
@@ -433,22 +433,58 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('none');
   });
 
-  it('a token renewal while the question is open is not a change: the save goes through', async () => {
-    const store = new ApiStore();
-    await save(store, 'create', ownGrant(), 'Allow');
+  // The questions describe the stored profile as it was, grant record included: anything written
+  // to it while they are open makes the save another act, so it is refused and asked again.
+  const whileOpen = (store: ApiStore, at: number, write: () => void): { agent: never; asked: string[] } => {
     const asked: string[] = [];
     const agent = agentFor(store, asked, 'Allow') as unknown as { promptUser: (q: unknown) => Promise<string> };
     const answer = agent.promptUser;
-    agent.promptUser = async (q: unknown): Promise<string> => {
-      // The engine records a renewed token's expiry on the stored profile meanwhile.
+    let n = 0;
+    agent.promptUser = async (q: unknown): Promise<string> => { n += 1; if (n === at) write(); return answer(q); };
+    return { agent: agent as never, asked };
+  };
+
+  it('a token renewal while the question is open refuses the save and keeps the renewal', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', ownGrant(), 'Allow');
+    const due = Date.now() + 3_600_000;
+    const { agent, asked } = whileOpen(store, 1, () => {
       const renewed = structuredClone(stored(store, 'svc')!);
-      renewed.auth!.oauth!.token_expires_at = Date.now() + 3_600_000;
+      renewed.auth!.oauth!.token_expires_at = due;
       expect(store.save(renewed, join(lynoxDir, 'apis')).ok).toBe(true);
-      return answer(q);
-    };
-    const result = await apiSetupTool.handler({ action: 'update', profile: ownGrant({ scope: 'read write' }) }, agent as never) as string;
+    });
+    const result = await apiSetupTool.handler({ action: 'update', profile: ownGrant({ scope: 'read write' }) }, agent) as string;
     expect(asked).toHaveLength(1);
-    expect(result).not.toMatch(/^(Error|Blocked|Validation)/);
-    expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('read write');
+    expect(result).toMatch(/^Error: API profile "svc" changed while the question was open/);
+    expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('read');
+    expect(stored(store, 'svc')?.auth?.oauth?.token_expires_at).toBe(due);
+  });
+
+  it('a mandate connection made while the question is open refuses the owner\'s save', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', ownGrant(), 'Allow');
+    const { agent } = whileOpen(store, 1, () => {
+      const cur = stored(store, 'svc')!;
+      expect(store.save({ ...cur, oauth_grant: { ...cur.oauth_grant, connected_by: 'mandate:m@example.org', connected_mandate_id: 'M-1' } } as ApiProfile, join(lynoxDir, 'apis')).ok).toBe(true);
+    });
+    (agent as unknown as { toolContext: Record<string, unknown> }).toolContext.mandateEnds = { isLive: (id: string) => id === 'M-1' };
+    const result = await apiSetupTool.handler({ action: 'update', profile: ownGrant({ scope: 'read write' }) }, agent) as string;
+    expect(result).toMatch(/^Error: API profile "svc" changed while the question was open/);
+    expect(stored(store, 'svc')?.oauth_grant?.connected_by).toBe('mandate:m@example.org');
+    expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('read');
+  });
+
+  it('a grant record written during the binding question is not rolled back: the save is refused', async () => {
+    const store = new ApiStore();
+    await save(store, 'create', keyProfile(), 'Allow');
+    const { agent, asked } = whileOpen(store, 2, () => {
+      const cur = stored(store, 'kp')!;
+      expect(store.save({ ...cur, oauth_grant: { ...cur.oauth_grant, connected_by: 'owner', state: 'revoked', revoked_at: '2026-11-23T00:00:00.000Z', written: [{ name: 'KP_TOKEN', fp: 'abc' }] } } as ApiProfile, join(lynoxDir, 'apis')).ok).toBe(true);
+    });
+    const result = await apiSetupTool.handler({ action: 'update', profile: keyProfile({ key: 'KP_KEY_B' }) }, agent) as string;
+    expect(asked).toHaveLength(2);
+    expect(result).toMatch(/^Error: API profile "kp" changed while the question was open/);
+    expect(stored(store, 'kp')?.oauth_grant?.state).toBe('revoked');
+    expect(stored(store, 'kp')?.auth?.vault_keys).toEqual(['KP_KEY_A']);
   });
 });
