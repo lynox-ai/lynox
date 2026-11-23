@@ -137,6 +137,23 @@ describe('bootstrapInbox — wiring', () => {
     expect(runtime.inboxLabelOf('acct-1', 't-unknown')).toBeNull();
   });
 
+  it('takes a follow-up from any account connected here, also one connected after the start, for our own mail', async () => {
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
+    const id = runtime.state.insertItem({
+      accountId: 'acct-1', channel: 'email', threadKey: 'imap:t1', bucket: 'requires_user', confidence: 0.9,
+      reasonDe: 'r', classifiedAt: new Date('2026-05-01'), classifierVersion: 'v', messageId: '<m1@x>',
+    });
+    runtime.state.updateUserAction(id, 'replied');
+    const later = new Date(Date.now() + 60_000);
+    mail.upsertAccount({ ...ACCOUNT, id: 'acct-2', address: 'support@acme.example', isDefault: false });
+    await runtime.hook(ACCOUNT.id, envelope({ from: [{ address: 'Support@Acme.Example' }], messageId: '<m2@x>', date: later }));
+    expect(runtime.state.getItem(id)!.userAction, 'a copy from the shared address').toBe('replied');
+    await runtime.hook(ACCOUNT.id, envelope({ from: [{ address: 'mustermann@example.com' }], messageId: '<m3@x>', date: later }));
+    expect(runtime.state.getItem(id)!.userAction, 'a customer reopens').toBeUndefined();
+    await runtime.shutdown();
+  });
+
   it('the rule proposer files waiting rules in its tenant, at most ten per account, and the runtime does not apply them', () => {
     const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
     const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client, tenantId: 't-9' });

@@ -311,30 +311,32 @@ export function refusalText(code: string, opts: { workflow: string | null; manag
 	}
 }
 
-/** The engine's start of a title it derives from a workflow's name (`SCHEDULED_TITLE_PREFIX`), kept equal by a test. */
-export const SCHEDULED_TITLE_PREFIX = 'Scheduled: ';
-
-/** Who set a plan up and changed it, as the trigger list carries it (tags: `owner`, `mandate:<address>`). */
-export interface PlanAuthorship {
+/**
+ * A plan's title as the trigger list carries it. `title_workflow`: the workflow's name, where the
+ * engine titled the plan with that name (scheduled without a title); the list sets it only then.
+ */
+export interface PlanTitle {
 	title: string;
-	created_by?: string | undefined;
-	edited_by?: string | undefined;
-	mandate_editor?: string | undefined;
+	title_workflow?: string | undefined;
+}
+
+/** A plan's title for a list line: lynox's words in the reader's language before a workflow's name. */
+export function planTitle(plan: PlanTitle): string {
+	const name = plan.title_workflow;
+	return name !== undefined ? tf('triggers.scheduled_title', { workflow: name }) : plan.title;
 }
 
 /**
  * The title of a plan with a takeover to give, as a line with the value set apart. The title is
  * someone else's value on every such plan: even one the owner set up runs a workflow a person with
- * access made or changed, and its title may be that workflow's name, put there by lynox's agent or
- * by the engine. Only where the owner alone set up and changed the plan does a title that starts
- * with the engine's prefix keep that prefix outside the box. The engine writes it when a workflow
- * is scheduled without a title, and the owner may have typed it into a title of their own; either
- * way only the constant stands outside, and the rest is the value. On any other plan the whole
- * title is the value, so a person with access cannot borrow lynox's words. Sentences that name
- * plans (`planList`, the dialog's lines) keep every title whole in its box.
+ * access made or changed. Where the engine titled the plan with its workflow's name, lynox's words
+ * stand outside and the name is the value; any other title is the value whole, a title that starts
+ * with "Scheduled: " included, so a person with access cannot borrow lynox's words. Whether the
+ * title is the name is the list's to say (`title_workflow`), never read from the title's text.
+ * Sentences that name plans (`planList`, the dialog's lines) keep every title whole in its box.
  */
-export function pausedTitleLine(plan: PlanAuthorship): string {
-	const ownerOnly = plan.created_by === 'owner' && (plan.edited_by ?? 'owner') === 'owner' && (plan.mandate_editor ?? '') === '';
-	if (ownerOnly && plan.title.startsWith(SCHEDULED_TITLE_PREFIX)) return SCHEDULED_TITLE_PREFIX + shownValue(plan.title.slice(SCHEDULED_TITLE_PREFIX.length));
+export function pausedTitleLine(plan: PlanTitle): string {
+	const name = plan.title_workflow;
+	if (name !== undefined) return tf('triggers.scheduled_title', { workflow: shownValue(name) });
 	return shownValue(plan.title);
 }

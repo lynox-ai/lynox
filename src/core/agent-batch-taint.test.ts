@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { ToolEntry } from '../types/index.js';
 
-// `batchStartedTainted`: what a search's result hosts are judged by before they join the shell's
-// egress set. It answers for the batch the running call belongs to, and `true` outside one.
+// `batchStartedTainted`: what decides whether a shell call gets the set it may reach after foreign
+// content (src/shell-sidecar/egress.ts). It answers for the batch the running call belongs to, and `true` outside one.
 
 vi.mock('@anthropic-ai/sdk', () => {
   class MockAnthropic {
