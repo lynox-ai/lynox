@@ -75,6 +75,41 @@ describe('engine env secrets: the masked value set', () => {
     expect(maskEngineEnvSecrets(`n ${nested}`)).not.toContain(nested);
   });
 
+  it('masks the credential of every profile, and every value of a credential list', () => {
+    const fastLeaf = 'zQ7fastleafPq9Lm2Xv4';
+    const deepLeaf = 'zQ7deepleafPq9Lm2Xv4';
+    const first = 'zQ7firstitemPq9Lm2Xv4';
+    const second = 'zQ7seconditemPq9Lm2Xv4';
+    const text = `${fastLeaf} ${deepLeaf} ${first} ${second}`;
+    for (const v of [fastLeaf, deepLeaf, first, second]) expect(maskEngineEnvSecrets(text), 'control').toContain(v);
+    vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+      fast: { model_id: 'example-model-name-2026', api_key: fastLeaf },
+      deep: { model_id: 'example-model-name-2026', api_key: deepLeaf, credentials: [first, second] },
+    }));
+    const out = maskEngineEnvSecrets(text);
+    for (const v of [fastLeaf, deepLeaf, first, second]) expect(out, `${v} is masked`).not.toContain(v);
+  });
+
+  it.each(['client_secret', 'access_token', 'password', 'API_KEY', 'Token'])(
+    'masks a value held under a property named %s',
+    (prop) => {
+      const leaf = `zQ7prop${prop.length}leafPq9Lm2Xv4`;
+      expect(maskEngineEnvSecrets(`p ${leaf}`), 'control').toContain(leaf);
+      vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({ fast: { model_id: 'example-model-name-2026', [prop]: leaf } }));
+      expect(maskEngineEnvSecrets(`p ${leaf}`)).not.toContain(leaf);
+    },
+  );
+
+  it('masks a value of eight characters and leaves one of seven', () => {
+    const eight = 'Qx7mP2zK';
+    const seven = 'Qx7mP2z';
+    expect(maskEngineEnvSecrets(`v ${eight} w`), 'control').toBe(`v ${eight} w`);
+    vi.stubEnv('LYNOX_VAULT_KEY', eight);
+    expect(maskEngineEnvSecrets(`v ${eight} w`)).toBe('v *** w');
+    vi.stubEnv('LYNOX_VAULT_KEY', seven);
+    expect(maskEngineEnvSecrets(`v ${seven} w`), 'under the floor').toBe(`v ${seven} w`);
+  });
+
   it('masks a value that overlaps itself in every occurrence', () => {
     // The value starts as it ends (`XYZ`), so its second occurrence begins inside the first.
     const value = 'XYZXYZQXYZ';
