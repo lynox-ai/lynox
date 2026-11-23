@@ -19,7 +19,8 @@ const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLI
 vi.mock('$app/stores', () => ({ page: readable({ url: new URL('http://localhost/app/artifacts') }) }));
 vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
 const shared: Blob[] = [];
-vi.mock('../utils/save-blob.js', () => ({ saveOrShareBlob: vi.fn(async (blob: Blob) => { shared.push(blob); }) }));
+const sharedNames: string[] = [];
+vi.mock('../utils/save-blob.js', () => ({ saveOrShareBlob: vi.fn(async (blob: Blob, name: string) => { shared.push(blob); sharedNames.push(name); }) }));
 vi.mock('./MarkdownRenderer.svelte', () => ({
 	default: (anchor: Comment) => { anchor.before(document.createElement('div')); },
 }));
@@ -28,18 +29,21 @@ const META = {
 	id: 'cccccccc',
 	title: 'Deck',
 	description: '',
-	type: 'html',
 	createdAt: '2026-10-09T19:34:00.000Z',
 	updatedAt: '2026-10-09T19:34:00.000Z',
 	threadId: 't',
 };
 
 let version = 1;
+let artifactType = 'html';
+let artifactContent: string | null = null;
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 
 beforeEach(() => {
 	version = 1;
+	artifactType = 'html';
+	artifactContent = null;
 	vi.spyOn(HTMLIFrameElement.prototype, 'contentWindow', 'get').mockImplementation(function (this: HTMLIFrameElement) {
 		return windowOf(this);
 	});
@@ -48,8 +52,8 @@ beforeEach(() => {
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 		const u = String(url);
 		const body = u.endsWith('/artifacts')
-			? { artifacts: [{ ...META, version }] }
-			: { ...META, version, content: `<p>version-${version}</p>` };
+			? { artifacts: [{ ...META, type: artifactType, version }] }
+			: { ...META, type: artifactType, version, content: artifactContent ?? `<p>version-${version}</p>` };
 		return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 	}));
 });
@@ -129,6 +133,56 @@ describe('the gallery preview frame', () => {
 		const file = await shared[0]!.text();
 		expect(file).toContain('<p>version-1</p>');
 		expect(file).toMatch(/<meta http-equiv="Content-Security-Policy" content="[^"]*img-src data: blob:/);
+	});
+
+	it('exports an svg artifact as an svg file without its remote image and keeps the drawing', async () => {
+		shared.length = 0;
+		sharedNames.length = 0;
+		artifactType = 'svg';
+		artifactContent = '<svg xmlns="http://www.w3.org/2000/svg"><circle id="dot" r="4"/><image href="https://elsewhere.example/x.png" width="9" height="9"/></svg>';
+		await openDeck();
+		const share = [...target.querySelectorAll('button')].find((b) => /share|teilen/i.test(b.textContent ?? ''));
+		share!.click();
+		await settle();
+		expect(shared).toHaveLength(1);
+		expect(shared[0]!.type).toBe('image/svg+xml');
+		expect(sharedNames).toEqual(['deck.svg']);
+		const file = await shared[0]!.text();
+		expect(file).toContain('<circle id="dot" r="4"/>');
+		expect(file).not.toContain('elsewhere.example');
+	});
+
+	it('exports an svg artifact that is not well-formed as a well-formed svg file without its remote image', async () => {
+		shared.length = 0;
+		sharedNames.length = 0;
+		artifactType = 'svg';
+		artifactContent = '<svg viewBox="0 0 9 9"><circle r="2"><image href="https://elsewhere.example/x.png"/><g></svg>';
+		await openDeck();
+		const share = [...target.querySelectorAll('button')].find((b) => /share|teilen/i.test(b.textContent ?? ''));
+		share!.click();
+		await settle();
+		expect(shared).toHaveLength(1);
+		expect(shared[0]!.type).toBe('image/svg+xml');
+		const file = await shared[0]!.text();
+		const doc = new DOMParser().parseFromString(file, 'image/svg+xml');
+		expect(doc.getElementsByTagName('parsererror')).toHaveLength(0);
+		expect(doc.querySelector('circle')?.getAttribute('r')).toBe('2');
+		expect(file).not.toContain('elsewhere.example');
+	});
+
+	it('exports an svg artifact with no svg in it as plain text', async () => {
+		shared.length = 0;
+		sharedNames.length = 0;
+		artifactType = 'svg';
+		artifactContent = '<p>no drawing</p><img src="https://elsewhere.example/x.png">';
+		await openDeck();
+		const share = [...target.querySelectorAll('button')].find((b) => /share|teilen/i.test(b.textContent ?? ''));
+		share!.click();
+		await settle();
+		expect(shared).toHaveLength(1);
+		expect(shared[0]!.type).toBe('text/plain');
+		expect(sharedNames).toEqual(['deck.txt']);
+		expect(await shared[0]!.text()).toBe(artifactContent);
 	});
 
 	it('loads the endpoint with no srcdoc and is sent the artifact when its own window is ready', async () => {
