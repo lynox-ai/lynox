@@ -487,7 +487,13 @@ function measureStaticPrefixTokens(): number {
 // way to repair a stored step whose `{{<id>.result}}` reference names a step missing from its
 // `input_from`, which the save and every run now refuse. The field's text is one short phrase; how
 // to repair a reference stays in the refusals.
-const STATIC_PREFIX_BUDGET = 24075;
+// 2026-11-21: +21 (24075 → 24096, both measured with the budget set to 1, the base at c1b060ba;
+// artifact.ts is the only file of the prefix that differs) — `artifact_save`'s `content` says,
+// at its html part, that images load only as inline SVG or data: URLs. The artifact policy
+// refuses every remote image, and `detailedGuidance` reaches the model only after its first
+// call, so without this the first html artifact would be written with images that never load.
+// The full rule, the ways around it and what to tell the user stay in `detailedGuidance`.
+const STATIC_PREFIX_BUDGET = 24096;
 
 /**
  * How far ABOVE the measurement the budget may sit before the ratchet is a
