@@ -1,5 +1,5 @@
 import { isToolSoftFailure } from '../../core/tool-soft-failure.js';
-import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
+import { OWNER_PRINCIPAL, principalTag } from '../../core/request-principal.js';
 import { describe, it, expect, vi } from 'vitest';
 import { createWebSearchTool } from './web-search-tool.js';
 import type { SearchProvider, SearchResult } from './search-provider.js';
@@ -7,6 +7,7 @@ import * as reranker from './search-reranker.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { runInCallSlot } from '../../core/call-connection.js';
 import type { IAgent, SessionCounters } from '../../types/index.js';
+import { SearchResultAddresses } from '../../core/search-result-addresses.js';
 
 function makeCounters(): SessionCounters {
   return {
@@ -632,5 +633,58 @@ describe('API-setup reminder in a locked turn', () => {
     expect(owner).toContain(OWNER_LINE);
     expect(locked).toContain(LOCKED_LINE);
     expect(locked).not.toContain('ask_secret');
+  });
+});
+
+describe('search results feed the shell only from a search sent untainted', () => {
+  // The owner's own chat, in a batch that began before foreign content, with no search the
+  // provider ran itself: each case below changes one of these.
+  async function searchWith(over: Record<string, unknown> = {}): Promise<SearchResultAddresses> {
+    const searches = new SearchResultAddresses();
+    const tool = createWebSearchTool(mockProvider([{ title: 'A', url: 'https://news.example/a', snippet: 's' }]));
+    const agent = {
+      principal: OWNER_PRINCIPAL,
+      writeAuthor: principalTag(OWNER_PRINCIPAL),
+      searchResultAddresses: searches,
+      batchStartedTainted: () => false,
+      heldProviderSearch: () => false,
+      ...over,
+    };
+    await tool.handler({ action: 'search', query: 'q' }, agent as never);
+    return searches;
+  }
+
+  it('a search sent before foreign content adds its result hosts', async () => {
+    expect((await searchWith()).cleanHosts()).toEqual(['news.example']);
+  });
+
+  it('a search sent after foreign content, or by an agent that cannot say, adds the addresses but no host', async () => {
+    for (const over of [{ batchStartedTainted: () => true }, { batchStartedTainted: undefined }]) {
+      const s = await searchWith(over);
+      expect(s.has('https://news.example/a')).toBe(true);
+      expect(s.cleanHosts()).toEqual([]);
+    }
+  });
+
+  it('a mandate\'s search adds the addresses but no host, even sent untainted', async () => {
+    const s = await searchWith({ principal: { kind: 'mandate', email: 'helfer@firma.example', mandateId: 'm-1' } });
+    expect(s.has('https://news.example/a')).toBe(true);
+    expect(s.cleanHosts()).toEqual([]);
+  });
+
+  it('a search in a conversation holding a search the provider ran itself adds the addresses but no host', async () => {
+    for (const over of [{ heldProviderSearch: () => true }, { heldProviderSearch: undefined }]) {
+      const s = await searchWith(over);
+      expect(s.has('https://news.example/a')).toBe(true);
+      expect(s.cleanHosts()).toEqual([]);
+    }
+  });
+
+  it('a search of a run under the owner (a trigger\'s, a workflow\'s) or of a sub-agent adds the addresses but no host', async () => {
+    for (const over of [{ writeAuthor: 'run:trigger-1' }, { writeAuthor: undefined }, { sendOrigin: { kind: 'workflowRun', name: 'report' } }]) {
+      const s = await searchWith(over);
+      expect(s.has('https://news.example/a')).toBe(true);
+      expect(s.cleanHosts()).toEqual([]);
+    }
   });
 });

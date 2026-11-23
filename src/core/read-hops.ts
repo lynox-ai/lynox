@@ -1,7 +1,7 @@
 // === Read hops ===
 //
 // How a read that the origin check held treats its redirects, for every tool that reads a page or a
-// URL (`web_research` read, `http_request` GET and HEAD).
+// URL (`web_research` read, `http_request` GET and HEAD, `api_setup` bootstrap).
 
 import type { CallTargetOrigin } from './call-connection.js';
 
