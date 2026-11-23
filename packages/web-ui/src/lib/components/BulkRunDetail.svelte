@@ -272,8 +272,8 @@
 	 *  the one the toggle returned, so another view moved a target since (even a pair that cancels
 	 *  out, which the counts cannot tell) and another row would be stale. The caller then loads it
 	 *  whole. The toggle's compare-and-set proved the run was the one whose checksum the page holds,
-	 *  so a run with the toggle's checksum is that run plus this toggle — as long as this one engine
-	 *  process writes the run, which the ledger's checksum after the commit assumes too. */
+	 *  and the ledger hashes its answer under the same lock as the write, so a run with the toggle's
+	 *  checksum is that run plus this toggle, whoever else writes the database. */
 	async function afterToggle(id: string, seq: number, deselected: boolean, checksum: string | undefined): Promise<boolean> {
 		const before = run;
 		const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(id)}`);

@@ -213,6 +213,7 @@ describe('the write lock of a toggle', () => {
     const other = new Database(join(dir, 'engine.db'), { timeout: 0 });
     let calls = 0;
     let interleaved: boolean | null = null;
+    let refusedWith: string | undefined;
     const real = ledger.computeChecksum.bind(ledger);
     vi.spyOn(ledger, 'computeChecksum').mockImplementation((runId: string) => {
       calls += 1;
@@ -221,21 +222,28 @@ describe('the write lock of a toggle', () => {
         try {
           other.prepare('UPDATE bulk_targets SET deselected_at = ? WHERE run_id = ? AND seq = ?').run(new Date().toISOString(), runId, c);
           interleaved = true;
-        } catch {
+        } catch (e) {
           interleaved = false;
+          refusedWith = (e as { code?: string }).code;
         }
       }
       return real(runId);
     });
     const off = ledger.deselectTarget(id, b, { checksum: seen });
     vi.mocked(ledger.computeChecksum).mockRestore();
-    other.close();
-    // The other write was held off by the lock, so the run is the set this toggle made...
+    // The other write was held off by the lock, and by the lock only...
     expect(interleaved).toBe(false);
+    expect(refusedWith).toBe('SQLITE_BUSY');
     const preview = ledger.getPreview(id);
     expect(preview.filter((t) => t.deselected === true).map((t) => t.seq)).toEqual([b]);
     // ...and the answered checksum is that set's: an approval with it binds what the page shows.
+    const answered = (off as { checksum: string }).checksum;
     expect(off).toEqual({ ok: true, checksum: ledger.computeChecksum(id) });
+    // Control: outside the lock the same connection does write that row, so the refusal above was
+    // the lock's, not a wrong file or table; and the run then moves off the answered checksum.
+    expect(other.prepare('UPDATE bulk_targets SET deselected_at = ? WHERE run_id = ? AND seq = ?').run(new Date().toISOString(), id, c).changes).toBe(1);
+    other.close();
+    expect(ledger.computeChecksum(id)).not.toBe(answered);
   });
 
   it('hashes once on a refusal, and only inside the lock', async () => {
