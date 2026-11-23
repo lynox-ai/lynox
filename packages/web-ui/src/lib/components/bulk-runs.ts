@@ -899,6 +899,65 @@ export function bulkSystemName(targetSystem: string, i18n: BulkI18n): string {
 	return name === key ? targetSystem : name;
 }
 
+/** How a host the planner set stands among the page's own words: boxed as code, like a field
+ *  name the planner set (U-333), so it never reads as part of the sentence. */
+export const BULK_HOST_BOX = 'rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono font-normal text-text';
+
+/** A boxed value (a host, an address) cut where it may wrap: after a dot, a slash or a space, never
+ *  at a hyphen inside a name (U-423, the rule of the run page's headings): `summer-shoes-test.` /
+ *  `myshopify.com`. Each piece keeps the dots, slashes and spaces that end it. */
+export function bulkBoxParts(value: string): string[] {
+	return value.match(/[^./\s]+[./]*\s*|[./\s]+/g) ?? [];
+}
+
+export type BulkTemplatePart = { text: string } | { slot: string };
+
+/** A template sentence split at each of the named placeholders, every other placeholder filled from
+ *  `vars`: the page renders each slot itself, so a value the planner or the owner set stands boxed
+ *  and the sentence around it stays the page's. */
+export function bulkTemplateParts(template: string, slots: readonly string[], vars: Record<string, string>): BulkTemplatePart[] {
+	const parts: BulkTemplatePart[] = [];
+	for (const piece of template.split(new RegExp(`(\\{(?:${slots.join('|')})\\})`))) {
+		const slot = /^\{(\w+)\}$/.exec(piece)?.[1];
+		if (slot !== undefined && slots.includes(slot)) parts.push({ slot });
+		else { const text = fillTemplate(piece, vars); if (text !== '') parts.push({ text }); }
+	}
+	return parts;
+}
+
+/** A text split at every place it names the host as a whole name, which the page boxes: for the
+ *  run page's texts that name it among other words (a halt's cause, what continuing does). The host
+ *  inside a longer name (`api.shop.ch`, `shop.ch.other.example`, `myshop.ch`, `shop.ch_x`, a name in
+ *  another script) stays text, so a
+ *  target's key or a remote's message never gets a box that vouches for part of a foreign name.
+ *  Without a host, the text whole. */
+export function bulkHostSplit(text: string, host: string | null): BulkSentencePart[] {
+	if (host === null || host === '') return [{ text }];
+	const name = host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	// A letter, mark, digit, format character or underscore beside it, or a dot that a browser reads as
+	// a full stop (U+3002, U+FF0E, U+FF61) before a further label, makes it part of a longer name.
+	const part = '\\p{L}\\p{M}\\p{N}\\p{Cf}_';
+	const dot = '.\\u3002\\uFF0E\\uFF61';
+	const whole = new RegExp(`(?<![${part}${dot}-])${name}(?![${part}-]|[${dot}][${part}])`, 'gu');
+	const parts: BulkSentencePart[] = [];
+	let from = 0;
+	for (const m of text.matchAll(whole)) {
+		if (m.index > from) parts.push({ text: text.slice(from, m.index) });
+		parts.push({ slot: true });
+		from = m.index + host.length;
+	}
+	if (from < text.length) parts.push({ text: text.slice(from) });
+	return parts;
+}
+
+/** A run's label in parts: the host of an external run is the slot the page boxes; a system lynox
+ *  names itself is text. */
+export function bulkLabelParts(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n): BulkSentencePart[] {
+	if (bulkHostOf(run.targetSystem) === null) return [{ text: bulkLabel(run, i18n) }];
+	const one = run.total === 1 ? '_one' : '';
+	return bulkSentenceParts(i18n.t(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`), 'target', { n: String(run.total) });
+}
+
 /** A run has no title: it is named by its size and where it writes. */
 export function bulkLabel(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n): string {
 	const one = run.total === 1 ? '_one' : '';
