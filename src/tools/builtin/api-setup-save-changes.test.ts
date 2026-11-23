@@ -443,7 +443,7 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     };
     const result = await apiSetupTool.handler({ action: 'update', profile: ownGrant({ scope: 'read write' }) }, agent as never) as string;
     expect(asked).toHaveLength(1);
-    expect(result).toBe('Error: API profile "svc" changed while the question was open (for example, another chat saved it or its token was renewed), so the answer no longer covers this save. Nothing was saved and no stored token was removed. Read the profile again; if the change is still wanted, save it again, and the user is asked again.');
+    expect(result).toBe('Error: API profile "svc" changed while the question was open (for example, another chat saved it or its token was renewed), so the answer no longer covers this save. Nothing was saved and no stored token was removed. Read the profile again; if the change is still wanted, save it again; if it still needs their acceptance, the user is asked again.');
     expect(stored(store, 'svc')?.auth?.oauth?.scope).toBe('none');
   });
 
