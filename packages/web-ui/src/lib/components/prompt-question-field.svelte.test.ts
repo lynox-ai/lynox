@@ -165,6 +165,38 @@ describe('a confirmation\'s question field at little height', () => {
 		expect(by?.top).toBe(fieldHeights.client - LINE);
 	});
 
+	it('scrolls on by the fade\'s height where the fade is taller than a line', async () => {
+		const realOffset = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight');
+		Object.defineProperty(HTMLElement.prototype, 'offsetHeight', { configurable: true, get(this: HTMLElement) { return this.hasAttribute('data-prompt-fade') ? 32 : 0; } });
+		try {
+			await show('⚠ Command: delete files (cannot be undone) — "', fourteen);
+			let by: ScrollToOptions | undefined;
+			field().scrollBy = ((o: ScrollToOptions) => { by = o; }) as HTMLElement['scrollBy'];
+			readMore()!.click();
+			// A line under the fade, never wholly seen, stands whole at the top afterwards.
+			expect(by?.top).toBe(fieldHeights.client - 32);
+		} finally {
+			if (realOffset) Object.defineProperty(HTMLElement.prototype, 'offsetHeight', realOffset);
+			else delete (HTMLElement.prototype as { offsetHeight?: unknown }).offsetHeight;
+		}
+	});
+
+	it('watches each line too, so a field held at its full height still re-measures when its lines change size', async () => {
+		const watched: Element[] = [];
+		(globalThis as { ResizeObserver?: unknown }).ResizeObserver = class { observe(el: Element): void { watched.push(el); } unobserve(): void {} disconnect(): void {} };
+		await show('⚠ Command: delete files (cannot be undone) — "', fourteen);
+		const lines = [...host.querySelectorAll('[data-prompt-line]')];
+		expect(lines).toHaveLength(14);
+		for (const line of lines) expect(watched).toContain(line);
+		expect(watched).toContain(field());
+	});
+
+	it('gives an empty line a break of its own, so it keeps its height and copies as one line', async () => {
+		await show('⚠ Command: write a file — "', ['a', '', '', 'b']);
+		const lines = [...host.querySelectorAll<HTMLElement>('[data-prompt-line]')];
+		expect(lines.map((l) => [l.textContent, l.querySelectorAll('br').length])).toEqual([['a', 0], ['', 1], ['', 1], ['b', 0]]);
+	});
+
 	it('puts the hint on its own row under the field, where it covers no line', async () => {
 		await show('⚠ Command: delete files (cannot be undone) — "', fourteen);
 		const wrapper = field().parentElement!;

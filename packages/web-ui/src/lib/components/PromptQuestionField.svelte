@@ -16,6 +16,7 @@
 	let { head, lines, tooLow = $bindable(false) }: Props = $props();
 
 	let field = $state<HTMLElement | null>(null);
+	let fade = $state<HTMLElement | null>(null);
 	/** Lines of the value not wholly in view below the field's edge. */
 	let below = $state(0);
 
@@ -48,6 +49,9 @@
 		const stack = el.closest<HTMLElement>('[data-chat-stack]');
 		const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => schedule());
 		ro?.observe(el);
+		// A field held at its full height does not change size when only its lines do (the font
+		// arriving, say), so each line is watched too.
+		for (const line of el.querySelectorAll<HTMLElement>('[data-prompt-line]')) ro?.observe(line);
 		if (stack) ro?.observe(stack);
 		window.addEventListener('resize', schedule);
 		return () => {
@@ -58,12 +62,14 @@
 		};
 	});
 
-	/** On by the field's height less one line: the line cut at the edge stands whole at the top after. */
+	/** On by the field's height less one line, or less the fade where it is taller: the line cut at the
+	 *  edge, and any line under the fade, stands whole at the top after. */
 	function readOn(): void {
 		const el = field;
 		if (!el) return;
 		const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 22;
-		el.scrollBy({ top: Math.max(lineHeight, el.clientHeight - lineHeight), behavior: scrollBehaviorForMotion(prefersReducedMotion()) });
+		const overlap = Math.max(lineHeight, fade?.offsetHeight ?? 0);
+		el.scrollBy({ top: Math.max(lineHeight, el.clientHeight - overlap), behavior: scrollBehaviorForMotion(prefersReducedMotion()) });
 	}
 </script>
 
@@ -76,9 +82,9 @@
 		<div data-prompt-head class="shrink-0 whitespace-pre-wrap [overflow-wrap:anywhere]">{#each head as seg, i (i)}{#if seg.kind === 'value'}<span data-prompt-value class="text-text">{seg.text}</span>{:else}{seg.text}{/if}{/each}</div>
 	{/if}
 	<div class="relative flex min-h-0 flex-1 flex-col">
-		<pre data-prompt-field bind:this={field} onscroll={schedule} class="min-h-0 flex-1 max-h-64 overflow-y-auto scrollbar-thin whitespace-pre-wrap font-sans [overflow-wrap:anywhere]">{#each lines as line, i (i)}<span data-prompt-line class="block min-h-[1lh]">{line}</span>{/each}</pre>
+		<pre data-prompt-field bind:this={field} onscroll={schedule} class="min-h-0 flex-1 max-h-64 overflow-y-auto scrollbar-thin whitespace-pre-wrap font-sans [overflow-wrap:anywhere]">{#each lines as line, i (i)}<span data-prompt-line class="block">{#if line === ''}<br />{:else}{line}{/if}</span>{/each}</pre>
 		{#if below > 0}
-			<div data-prompt-fade class="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-bg-subtle to-transparent"></div>
+			<div data-prompt-fade bind:this={fade} class="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-bg-subtle to-transparent"></div>
 		{/if}
 	</div>
 	{#if below > 0}
