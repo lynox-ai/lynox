@@ -1,4 +1,5 @@
 <script lang="ts">
+	import BulkHost from './BulkHost.svelte';
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
@@ -8,7 +9,7 @@
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { escalationNotice } from '../utils/trigger-escalation.js';
 	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
-	import { endedNotices, pausedTitleLine, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
+	import { endedNotices, pausedTitleLine, planTitle, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
 	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
 	import StampConfirm from './StampConfirm.svelte';
@@ -67,21 +68,30 @@
 		paused_ended?: PausedEnded[];
 		// A bulk run's trigger: the host its run works on, or null where it has none (`GET /api/triggers`).
 		bulk_host?: string | null;
+		// The workflow's name, where the plan's title is that name as the engine wrote it
+		// (`GET /api/triggers`): the list puts lynox's words before it (`planTitle`).
+		title_workflow?: string;
 		// From before its creator was recorded, nobody else's hand in it: it sends to none of the
 		// recipients it names until the owner confirms them (`GET /api/triggers`, owner only).
 		recipients_unconfirmed?: boolean;
 	}
 
 	// A bulk run's trigger is titled with its run id, which the model reads; the list names it by
-	// its stage and host instead (U-324). Every other trigger by its title.
+	// its stage and host instead (U-324). Every other trigger by its title, a workflow's name
+	// after lynox's words where the engine titled the plan with it (`planTitle`).
 	const BULK_STAGE_KEYS: Readonly<Record<string, string>> = {
 		bulk_preview: 'triggers.bulk.preview', bulk_judge: 'triggers.bulk.judge', bulk_apply: 'triggers.bulk.apply', bulk_undo: 'triggers.bulk.undo',
 	};
+	// The host is the planner's, so it stands boxed as code beside the stage, never as part of the title.
 	function shownTitle(trigger: Trigger): string {
 		const key = trigger.effect === undefined ? undefined : BULK_STAGE_KEYS[trigger.effect];
-		if (key === undefined) return trigger.title;
+		return key === undefined ? planTitle(trigger) : t(key);
+	}
+	const HOST_SEP = ' · ';
+	function shownHost(trigger: Trigger): string | null {
+		if (trigger.effect === undefined || BULK_STAGE_KEYS[trigger.effect] === undefined) return null;
 		const host = trigger.bulk_host ?? null;
-		return host === null || host === '' ? t(key) : `${t(key)} · ${host}`;
+		return host === null || host === '' ? null : host;
 	}
 
 	// How often the list is reloaded while the tab is visible, so a run that started on its
@@ -519,6 +529,12 @@
 		}
 	}
 
+	/** Whether a run's time has passed, as the list is drawn (it reloads on its own while open). */
+	function isDue(iso: string): boolean {
+		const at = new Date(iso).getTime();
+		return Number.isFinite(at) && at <= Date.now();
+	}
+
 	function fmtDate(iso: string): string {
 		return new Date(iso).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 	}
@@ -545,9 +561,12 @@
 		interrupted: 'text-warning',
 	};
 	// Colour alone does not tell these apart from the rest (and not at all to a reader
-	// who does not see colour), so they also carry a word. `stopped` and `halted` share
-	// the muted colour, which makes the word the only thing that separates them.
-	const runStatusWord: Record<string, 'tasks.run_halted' | 'tasks.run_interrupted' | 'tasks.run_stopped'> = {
+	// who does not see colour), so every run that did not succeed carries a word. `stopped`
+	// and `halted` share the muted colour, which makes the word the only thing that
+	// separates them; `failed` and `timeout` share the danger colour.
+	const runStatusWord: Record<string, 'tasks.run_failed' | 'tasks.run_timeout' | 'tasks.run_halted' | 'tasks.run_interrupted' | 'tasks.run_stopped'> = {
+		failed: 'tasks.run_failed',
+		timeout: 'tasks.run_timeout',
 		halted: 'tasks.run_halted',
 		interrupted: 'tasks.run_interrupted',
 		stopped: 'tasks.run_stopped',
@@ -603,7 +622,7 @@
 							<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
 								<!-- A plan to take over: its title is someone else's value, as in the notice above (`pausedTitleLine`).
 								     A bulk run's trigger is named by its stage and host instead (`shownTitle`); it offers no takeover. -->
-								<p class="text-sm font-medium line-clamp-2 break-words" data-trigger-title>{#if pausedOpen(trigger) && !(trigger.effect ?? '').startsWith('bulk_')}<MarkedLine text={pausedTitleLine(trigger)} mono={false} />{:else}{shownTitle(trigger)}{/if}</p>
+								<p class="text-sm font-medium line-clamp-2 break-words" data-trigger-title>{#if pausedOpen(trigger) && !(trigger.effect ?? '').startsWith('bulk_')}<MarkedLine text={pausedTitleLine(trigger)} mono={false} />{:else}{shownTitle(trigger)}{#if shownHost(trigger) !== null}{HOST_SEP}<BulkHost value={shownHost(trigger) ?? ''} testid="trigger-bulk-host" />{/if}{/if}</p>
 								<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{typeLabel(trigger)}</span>
 								{#if trigger.enabled === 0}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning">{t('triggers.paused')}</span>
@@ -629,8 +648,17 @@
 								     past — it is not a next run, so it is not labelled as one. It is said
 								     in the consent block below instead, where it is the thing a person
 								     needs: what confirming starts, and when. -->
-								{#if trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.paused !== true}
-									<span>{t('tasks.next_run')}: {fmtDate(trigger.next_run_at)}</span>
+								<!-- Nor does a trigger the worker will not start: one whose run is parked on an
+								     open question (it keeps the moment it parked as next_run_at until the
+								     question is answered), one that is completed or stopped (completing a
+								     trigger leaves its next_run_at as it was), and a failed one without a
+								     schedule. Nor one that is running: its next_run_at moves only once the run
+								     has ended, and the running badge says what happens. -->
+								{#if trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.running !== true && trigger.status !== 'waiting' && trigger.status !== 'completed' && trigger.status !== 'stopped' && !(trigger.status === 'failed' && !trigger.schedule_cron) && trigger.paused !== true}
+									<!-- A next_run_at in the past is due since then (until the worker takes it, or
+									     when it could not start it), not a next run before the last one. -->
+									{@const due = isDue(trigger.next_run_at)}
+									<span data-next-run={due ? 'due' : 'next'}>{due ? t('tasks.due_since') : t('tasks.next_run')}: {fmtDate(trigger.next_run_at)}</span>
 								{/if}
 								{#if trigger.last_run_at}
 									<span class={runStatusColor[trigger.last_run_status ?? ''] ?? ''} data-run-status={trigger.last_run_status}>{t('tasks.last_run')}: {fmtDate(trigger.last_run_at)}{#if Object.hasOwn(runStatusWord, trigger.last_run_status ?? '')}&nbsp;· {t(runStatusWord[trigger.last_run_status ?? '']!)}{/if}</span>

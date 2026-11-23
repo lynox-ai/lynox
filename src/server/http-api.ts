@@ -152,7 +152,7 @@ import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
 import { takeOverWorkflow, workflowTakeoverPreview, type WorkflowTakeoverDeps, type WorkflowTakeoverRefusal } from '../core/workflow-takeover.js';
 import { EngineLessRefused } from '../core/engine-less-refusal.js';
-import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, SCHEDULED_TITLE_PREFIX, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
+import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, titleIsWorkflowName, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -607,7 +607,6 @@ const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 120;
 const RATE_MAX_LOOPBACK = 600; // Higher limit for Web UI proxy on same host
 const PROMPT_TIMEOUT_MS = 24 * 60 * 60_000; // 24 hours — prompts persist in SQLite, survive reconnects
-const ORPHAN_PROMPT_WATCHDOG_MS = 10 * 60_000; // 10 min — orphaned-stream + pending-prompt slot free guard
 /** Run wall-clock: max wall-time a run may spend ACTIVELY COMPUTING. Human
  *  think-time on a pending prompt is paused out of this budget (#77), so this
  *  is a compute-only ceiling, not elapsed-time. Overridable for tests/ops via
@@ -1998,14 +1997,14 @@ export class LynoxHTTPApi {
   private webUiHandler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | null = null;
   private readonly sessionStore = new SessionStore();
   // Pending prompts now stored in PromptStore (SQLite) — no in-memory Maps
-  // Per-session run tracking. `streamAlive=false` after the SSE connection
-  // closes; if a pending prompt is then blocking the previous run, a fresh
-  // /run can take it over instead of 409-looping forever (Bug 3).
+  // Per-session run tracking. `streamAlive=false` after the SSE connection closes; a fresh /run
+  // can then take the run over once its engine has been silent past the stale window, unless the
+  // run waits on its own question (that one waits for its answer, a stop, or its TTL).
   /** `parked` says whether the run waits on a question it asked itself. The thread's one open
-   *  question can be a scheduled run's instead, asked beside a working chat run; reading it by
-   *  thread alone took that run over and let the scheduled run's question lapse. A slot without
-   *  `parked` is read by the thread's question, as before. */
-  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: (reason: PromptClosedReason) => void; lastEventAt: number; parked?: () => boolean }>();
+   *  question can be a scheduled run's instead, asked beside a working chat run. `streamGone`
+   *  says whether the run's own stream has dropped. A slot without them is read as not parked,
+   *  with `streamAlive` as its stream. */
+  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: (reason: PromptClosedReason) => void; lastEventAt: number; parked?: () => boolean; streamGone?: () => boolean }>();
   /**
    * True while `DELETE /api/data` stops the running chat runs and wipes the stores.
    * `/run` refuses while it is set, checked right before it takes a slot with no
@@ -2474,6 +2473,9 @@ export class LynoxHTTPApi {
     // still the mutation the boot test fails on.
     this.clientErrorResolver = (): SecretStoreLike | null => this.engine?.getSecretStore() ?? null;
     setClientErrorSecretStore(this.clientErrorResolver);
+    // Push before the loop: the loop's first tick runs at once, and a question it escalates
+    // before the push channel is registered is recorded as "no channel" although push works.
+    await this._initPushChannel();
     this.engine.startWorkerLoop();
     // Claim the hand-run minter at once, in the same turn the loop is started: whoever
     // claims it first holds it, and nothing else may (hand-run-door.ts). Claimed on first
@@ -2482,7 +2484,6 @@ export class LynoxHTTPApi {
     const workerLoop = this.engine.getWorkerLoop();
     if (workerLoop) this.#handRunMinterFor(workerLoop);
     this._registerRoutes();
-    await this._initPushChannel();
     await this._tryLoadWebUiHandler();
   }
 
@@ -4962,26 +4963,22 @@ export class LynoxHTTPApi {
       // or a later file that fails) writes nothing into the knowledge store.
       const deferredIngests: Array<() => void> = [];
 
-      // Stale-run takeover. A previous /run whose SSE stream has closed +
-      // one of these holds → hand control to the new request:
-      //   (a) parked on a pending prompt (Bug 3 — original case)
-      //   (b) silent for >STALE_RUN_SILENCE_MS (cat 2026-05-19 — run stuck on
-      //       a hanging http_request, no SSE activity, no pending prompt,
-      //       session locked for 30 min until the engine's hard run cap).
-      // Without (b), a hung tool call locks the session forever from the
-      // client's perspective — every /run retry gets 409 until the 30-min
-      // streamTimeout fires server-side.
+      // Stale-run takeover. A previous /run whose SSE stream has closed and whose engine has
+      // been silent for >STALE_RUN_SILENCE_MS (cat 2026-05-19 — run stuck on a hanging
+      // http_request, no SSE activity, session locked for 30 min until the engine's hard run
+      // cap) is handed over to the new request. Without it, a hung tool call locks the session
+      // from the client's perspective — every /run retry gets 409 until the 30-min
+      // streamTimeout fires server-side. A run waiting on its OWN question is not taken over:
+      // it is silent by design, its question waits for an answer (or a stop, or its TTL), and
+      // a new message gets the 409 the chat shows as blocked by that question.
       const STALE_RUN_SILENCE_MS = 60_000;
-      const promptStoreEarly = this.engine?.getPromptStore();
       const existingSlot = this.runningSessions.get(sessionId);
-      if (existingSlot && !existingSlot.streamAlive) {
-        // Only a run parked on its OWN question: a scheduled run's question in this thread does
-        // not make a working run stuck.
-        const hasPrompt = (existingSlot.parked?.() ?? true) && !!promptStoreEarly?.getPending(sessionId);
-        const stale = Date.now() - existingSlot.lastEventAt > STALE_RUN_SILENCE_MS;
-        if (hasPrompt || stale) {
-          // Taking over ends the parked run and lets its question lapse: only that run's
-          // principal (or the owner) may, even in the mandate's own conversation (§3.13 E7).
+      if (existingSlot && (!existingSlot.streamAlive || existingSlot.streamGone?.() === true)) {
+        // A scheduled run's question in this thread is not the run's: it does not hold it back.
+        const stale = existingSlot.parked?.() !== true && Date.now() - existingSlot.lastEventAt > STALE_RUN_SILENCE_MS;
+        if (stale) {
+          // Taking over ends the run: only that run's principal (or the owner) may, even in the
+          // mandate's own conversation (§3.13 E7).
           if (this._refuseUnlessOwns(req, res, 'take over a run of this conversation', () => [this._lastRunRow(session)])) return;
           existingSlot.takeover('run_taken_over');
           // Wait for the previous handler's `finally` to clear the slot.
@@ -5466,6 +5463,9 @@ export class LynoxHTTPApi {
       // `undefined` = no live timer (paused, fired, or not yet armed). Kept in
       // sync with wallClockBudget.paused; the guards below never touch a stale id.
       let streamTimeout: ReturnType<typeof setTimeout> | undefined;
+      /** The wall-clock ran out. Not the same as `aborted`: a dropped stream sets that too, and a
+       *  run answered after its stream dropped must get its compute budget back. */
+      let wallClockFired = false;
 
       // ── Per-run identity + resumable event buffer ──
       // `runId` identifies this run to the client-queryable registry
@@ -5488,6 +5488,10 @@ export class LynoxHTTPApi {
       // wire without a single test or type failing.
       session.onStream = async (event: EmittedStreamEvent) => {
         const seq = runBuffer?.append(event);
+        // Every engine event counts as activity, also once the stream is gone: a run that
+        // keeps working headless is not stale. Only an engine silent for the stale window is.
+        const live = this.runningSessions.get(sessionId);
+        if (live && live.takeover === takeover) live.lastEventAt = Date.now();
         if (aborted) return;
         const data = JSON.stringify(event);
         const idLine = seq !== undefined ? `id: ${seq}\n` : '';
@@ -5762,6 +5766,7 @@ export class LynoxHTTPApi {
       // The abort action is factored out so the INITIAL arm and every
       // pause/resume re-arm reuse the EXACT same teardown — no drift.
       const fireWallClockAbort = (): void => {
+        wallClockFired = true;
         aborted = true;
         clearInterval(keepaliveTimer);
         sessionAbortController.abort();
@@ -5783,57 +5788,45 @@ export class LynoxHTTPApi {
         wallClockBudget.pause(Date.now());
       };
       // RESUME at prompt-settle: re-arm with the remaining (compute-only)
-      // budget. Skips re-arming if the run was already aborted (a disconnect set
-      // `aborted` while parked → the run either finishes headless with no
-      // wall-clock, matching the prior disconnect-drops-the-timer behavior, or a
-      // takeover is about to throw RunAbortedError). Skips if a timer is somehow
-      // already live so it never stacks two timers.
+      // budget, also after the stream dropped while parked: a run answered then
+      // works on headless and keeps its ceiling. Skips once the wall-clock itself
+      // has fired, and if a timer is somehow already live so it never stacks two.
       const resumeWallClock = (): void => {
-        if (aborted || streamTimeout !== undefined) return;
+        // The answer is activity too: a run that waited long for it is not silent from here on,
+        // and a new message must not take it over before its next engine event.
+        const live = this.runningSessions.get(sessionId);
+        if (live && live.takeover === takeover) live.lastEventAt = Date.now();
+        if (wallClockFired || streamTimeout !== undefined) return;
         armWallClock();
       };
       armWallClock();
 
-      req.on('close', () => {
+      // The connection going away, seen on the RESPONSE. The router has read the body before this
+      // handler runs, so the request stream has ended and closed already: a `close` listener on it
+      // registered here never fires, and a dropped stream went unnoticed (the run kept writing, a
+      // hung run could never be taken over). The response closes when its socket does; once it
+      // has ended, that close is the normal end of the run, not a drop.
+      const onStreamDropped = (): void => {
+        if (res.writableEnded || aborted) return;
         clearInterval(keepaliveTimer);
         // Stop writing to the dead socket — `onStream` no-ops while `aborted`
         // (L1875), so the run can keep computing without write-after-close. We
         // do NOT clear `streamTimeout` here: it stays armed as the headless
         // wall-clock backstop below (the prompt branch drops it explicitly).
         aborted = true;
-        // Mark this run's stream as dead so a fresh /run on the same session
-        // can take it over if the agent is parked on a pending prompt.
+        // Mark this run's stream as dead: a fresh /run on the same session may then take it over
+        // once its engine has gone silent (never while it waits on its own question).
         const slot = this.runningSessions.get(sessionId);
-        if (slot) slot.streamAlive = false;
-        // Orphan watchdog (armed in BOTH branches). 10 min after the stream
-        // dies, if the run is parked on a still-pending prompt that nobody
-        // reconnected to answer, free the slot. Pre-1.5.0 such a slot could sit
-        // `streamAlive=false` up to PROMPT_TTL (24h), pinning a runningSessions
-        // entry + open SQLite handles until the prompt expired.
-        //
-        // The `getPending` guard is what makes this safe to arm unconditionally:
-        // it fires takeover ONLY for a genuinely stuck, dead-stream prompt —
-        // never against a headless run that is productively computing (no
-        // pending prompt) or whose prompt was already answered via reconnect
-        // (getPending now empty). This also bounds the prompt-fires-AFTER-a
-        // -headless-disconnect case at 10 min; the close-time
-        // `hasActivePendingPrompt` snapshot alone would leave it to the 30-min
-        // streamTimeout.
-        setTimeout(() => {
-          const liveSlot = this.runningSessions.get(sessionId);
-          if (liveSlot && !liveSlot.streamAlive && promptStore?.getPending(sessionId)) {
-            liveSlot.takeover('run_stopped');
-          }
-        }, ORPHAN_PROMPT_WATCHDOG_MS);
+        if (slot && slot.takeover === takeover) slot.streamAlive = false;
         if (hasActivePendingPrompt) {
           // Already parked on a prompt at close → the wall-clock is already
           // PAUSED (pauseWallClock cleared it at prompt-start), so there is
           // normally no live timer here. The guarded clearTimeout is defense in
-          // depth against any race where it was re-armed; the orphan watchdog
-          // above bounds the wait. The user can reconnect and answer (the loop
-          // keeps polling SQLite) — resumeWallClock then no-ops because `aborted`
-          // is now set, matching the prior disconnect-drops-the-timer behavior.
-          if (streamTimeout !== undefined) clearTimeout(streamTimeout);
+          // depth against any race where it was re-armed. The question waits for
+          // its answer (or a stop, or its TTL): the user can reconnect and answer
+          // (the loop keeps polling SQLite) — resumeWallClock then re-arms the
+          // remaining budget.
+          if (streamTimeout !== undefined) { clearTimeout(streamTimeout); streamTimeout = undefined; }
         }
         // else: RUNNING with no prompt → Tier-1 disconnect≠abort. Do NOT abort
         // the session; let it finish headless. Eager-persist keeps the
@@ -5844,11 +5837,12 @@ export class LynoxHTTPApi {
         // armed as the wall-clock backstop (it aborts the session + ends res),
         // so a hung headless run can't leak; the finally clears it on natural
         // completion. PRD-RUN-RESILIENCE D2.
-      });
+      };
+      res.on('close', onStreamDropped);
 
       // Run
-      // Takeover hook: a future /run for this session can call this to free
-      // the slot when our SSE stream is dead and we're stuck on a prompt.
+      // Takeover hook: stop, thread or data deletion, a mandate's end, and a /run that finds this
+      // run's stream gone and its engine silent call this to end the run and free the slot.
       const takeover = (reason: PromptClosedReason): void => {
         // Unwind BEFORE the bookkeeping. `waitForSettled` resolves on the signal
         // alone, so aborting first means a throw from the prompt store (closed
@@ -5864,7 +5858,11 @@ export class LynoxHTTPApi {
         const pending = promptStore?.getPending(sessionId);
         if (pending) promptStore?.expirePrompt(pending.id, reason);
       };
-      this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now(), parked: () => hasActivePendingPrompt });
+      this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now(), parked: () => hasActivePendingPrompt, streamGone: () => aborted });
+      // A client that left while this request was still being set up (a file being read, a
+      // takeover draining) closed the response before anyone listened: its close is past, so
+      // the drop is taken now, once the slot it marks exists.
+      if (res.destroyed) onStreamDropped();
       try {
         // Reserve a concurrency slot + register the abort handle so the run can
         // be aborted by id from any connection (DELETE /api/runs/:runId) —
@@ -9510,6 +9508,11 @@ export class LynoxHTTPApi {
             recipients_unconfirmed: isOwnerPrincipal(principal) && recipientsConfirmable(trigger)
               && (trigger.effect === undefined || trigger.effect === null || trigger.effect === 'run_agent' || trigger.effect === 'run_workflow'),
             ...(isBulk ? { bulk_host: bulkSystem === undefined ? null : externalHostOf(bulkSystem) } : {}),
+            // The workflow's name where the title is that name as the engine wrote it (scheduled
+            // without a title): the view says "Scheduled: " itself, in the reader's language, and
+            // sets the name apart as a value. Any other title stays whole, the prefix included; so
+            // does the title of a plan with no schedule, and one whose workflow was renamed since.
+            ...(workflow !== undefined && (trigger.schedule_cron ?? '') !== '' && titleIsWorkflowName(trigger.title, workflow.name) ? { title_workflow: workflow.name } : {}),
           };
         });
       // What the owner's stamp of each confirmed plan lists, and how each entry stands (B3), for the
@@ -9638,7 +9641,7 @@ export class LynoxHTTPApi {
             const accepted = acceptWorkflowGrant(planned, {
               method: g['method'], host: g['host'], paths: g['paths'], params: rawParams, cron: scheduleCron,
               afterUntrusted: g['afterUntrusted'], checksum: g['checksum'], name: g['name'],
-              title: title ?? `${SCHEDULED_TITLE_PREFIX}${planned.name}`,
+              title: title ?? planned.name,
             }, this._authOrigin.get(_req) ?? 'unknown', { history, taskManager, hasher: engineDb });
             if (!accepted.ok) { errorResponse(res, accepted.status, accepted.error); return; }
             forgetPipeline(planned.id);
@@ -9674,7 +9677,7 @@ export class LynoxHTTPApi {
           }
           forgetPipeline(planned.id);
           const task = taskManager.createPipelineTask({
-            title: title ?? `${SCHEDULED_TITLE_PREFIX}${planned.name}`,
+            title: title ?? planned.name,
             pipelineId: planned.id,
             scheduleCron,
             pipelineParams: JSON.stringify(bound.params),
@@ -10919,7 +10922,7 @@ export class LynoxHTTPApi {
           return;
         }
         if (!(err instanceof ArtifactPlaceholderError)) throw err;
-        errorResponse(res, 422, 'This is the placeholder the assistant keeps for an already saved document, not the document. Nothing was saved.', 'artifact_placeholder');
+        errorResponse(res, 422, 'This is only the assistant\'s placeholder, not a document. Nothing was saved.', 'artifact_placeholder');
         return;
       }
       jsonResponse(res, 201, artifact);

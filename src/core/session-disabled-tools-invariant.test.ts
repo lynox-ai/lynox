@@ -259,6 +259,9 @@ vi.mock('./task-manager.js', () => ({
     this.list = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
     this.getWeekSummary = vi.fn().mockReturnValue({ overdue: [], dueToday: [], dueThisWeek: [], inProgress: [] });
+    // Called by Engine.init() when engine.db does not open and run history does.
+    // @ts-expect-error mock constructor
+    this.refuseTaskChangesWithoutStore = vi.fn();
   }),
   setPipelineModeLookup: vi.fn(),
 }));

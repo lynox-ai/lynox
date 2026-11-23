@@ -88,12 +88,12 @@ describe('Engine boot — the conversation grant set', () => {
     const session = engine.createSession({ sessionId: 'search-thread' });
     const agentOf = (): Agent => (session as unknown as { agent: Agent }).agent;
     const searches = agentOf().searchResultAddresses;
-    searches.noteResults('q', ['https://news.example/a'], true);
+    searches.noteResults('q', ['https://news.example/a']);
     session._recreateAgent();
     expect(agentOf().searchResultAddresses).toBe(searches);
-    expect(agentOf().searchResultAddresses.cleanHosts()).toEqual(['news.example']);
+    expect(agentOf().searchResultAddresses.has('https://news.example/a')).toBe(true);
     const other = engine.createSession({ sessionId: 'other-thread' });
-    expect((other as unknown as { agent: Agent }).agent.searchResultAddresses.cleanHosts()).toEqual([]);
+    expect((other as unknown as { agent: Agent }).agent.searchResultAddresses.has('https://news.example/a')).toBe(false);
   });
 
   it('a new thread starts with an empty set', async () => {
