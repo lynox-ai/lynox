@@ -12893,6 +12893,24 @@ describe('LynoxHTTPApi', () => {
         jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify(body) });
       afterEach(() => { vi.unstubAllEnvs(); });
 
+      it('names the verdicts that differ from the rest of the run only where the preview can be approved', async () => {
+        const id = judgedRun();
+        const outliers = { decided: 25, measured: true, flagged: [{ seq: 3, reasons: ['new_link' as const] }], spread: [] };
+        const spy = vi.spyOn(bulkLedger, 'judgeOutliersOf').mockResolvedValue(outliers);
+        try {
+          // Planned, no verdict yet: nothing is read.
+          const planned = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
+          expect(planned).toMatchObject({ phase: 'planned', judgeOutliers: null });
+          expect(spy).not.toHaveBeenCalled();
+          bulkDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'previewed' WHERE id = ?`).run(id);
+          const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
+          expect(shown).toMatchObject({ phase: 'previewed', judgeOutliers: outliers });
+          expect(spy).toHaveBeenCalledWith(id);
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
       it('shows the owner the rule, its hash and the model, and starts only with both', async () => {
         const id = judgedRun();
         const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
@@ -13853,6 +13871,10 @@ describe('LynoxHTTPApi', () => {
         // No engine.db here, so no paused plan whose takeover covers it: none counted.
         expect(body.workflows.find((w) => w.id === 'wf-m')?.runs_as).toEqual({ person: 'eva@kanzlei.example', ended: true, covered_by_takeover: 0 });
         expect(body.workflows.find((w) => w.id === 'wf-o')).not.toHaveProperty('runs_as');
+        // A mark without a grant id: whose access it was cannot be told, and the answer says so.
+        mockHistoryGetWorkflowAuthorship.mockImplementation((id: string) => (id === 'wf-m' ? { ...mandateMade, createdMandateId: null } : undefined));
+        const undetermined = await (await jsonFetch('/api/workflows/library')).json() as { workflows: Array<{ id: string; runs_as?: unknown }> };
+        expect(undetermined.workflows.find((w) => w.id === 'wf-m')?.runs_as).toEqual({ person: 'eva@kanzlei.example', ended: true, undetermined: true, covered_by_takeover: 0 });
         mockHistoryGetWorkflowAuthorship.mockReset();
         mockHistoryGetPlannedPipelines.mockReturnValue([]);
       });
@@ -22625,7 +22647,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         mockConfirmTrigger.mockClear();
         const shown = await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json() as { expect: string; connections: unknown[]; workflow: unknown; subject: Record<string, unknown> };
         expect(shown.connections).toHaveLength(1);
-        expect([shown.workflow, shown.subject['pipeline_id'], shown.subject['wf']]).toEqual([{ name: 'W', confirmed: true }, 'wf-eva', WF]);
+        expect([shown.workflow, shown.subject['pipeline_id'], shown.subject['wf']]).toEqual([{ name: 'W', confirmed: true, ended: false }, 'wf-eva', WF]);
         // The workflow was confirmed again since the preview: the list shown went with the
         // earlier confirmation, so it does not confirm this one.
         mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W', confirmedAt: '2026-10-09T00:00:00.000Z' } : undefined));
@@ -22641,7 +22663,39 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         // A workflow nobody confirmed: the preview says so, and the view offers no confirm (a
         // confirmed schedule on it is switched off by its first run).
         mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W' } : undefined));
-        expect(((await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json()) as { workflow: unknown }).workflow).toEqual({ name: 'W', confirmed: false });
+        expect(((await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json()) as { workflow: unknown }).workflow).toEqual({ name: 'W', confirmed: false, ended: false });
+      } finally {
+        ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
+        mockGetPipeline.mockReset();
+      }
+    });
+
+    it('says whether the workflow a schedule runs is one whose person\'s access ended: not where it lives, not where it was taken over', async () => {
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const saved = { h: ref['getRunHistory'], a: ref['getApiStore'], e: ref['getMandateEnds'] };
+      const MID = 'M-EVA';
+      const AT = '2026-10-01 00:00:00';
+      mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W', confirmedAt: '2026-10-07T00:00:00.000Z' } : undefined));
+      const trigger = { id: 'task-1', effect: 'run_workflow', pipeline_id: 'wf-eva', title: 'Report', description: 'Weekly', created_by: 'owner', created_at: '2026-10-01T00:00:00.000Z' };
+      const eva = { createdBy: 'mandate:eva@kanzlei.example', createdMandateId: MID, createdAt: AT, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null };
+      let authorship: Record<string, unknown> = eva;
+      let live = false;
+      ref['getRunHistory'] = () => ({ getTrigger: (id: string) => (id === 'task-1' ? trigger : undefined), getPlannedPipeline: () => undefined, getWorkflowAuthorship: () => authorship });
+      ref['getApiStore'] = () => ({ knownProfiles: () => [] });
+      ref['getMandateEnds'] = () => ({ isLive: (id: string) => live && id === MID, record: (): void => {} });
+      const shownWorkflow = async (): Promise<unknown> => ((await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json()) as { workflow: unknown }).workflow;
+      try {
+        expect(await shownWorkflow()).toEqual({ name: 'W', confirmed: true, ended: true });
+        live = true;
+        expect(await shownWorkflow()).toEqual({ name: 'W', confirmed: true, ended: false });
+        live = false;
+        authorship = { ...eva, coveredCreatedBy: eva.createdBy, coveredCreatedId: MID, coveredCreatedAt: AT };
+        expect(await shownWorkflow()).toEqual({ name: 'W', confirmed: true, ended: false });
+        // No store of ends: no access can be shown to last, so the person counts as ended.
+        authorship = eva;
+        live = true;
+        ref['getMandateEnds'] = () => undefined;
+        expect(await shownWorkflow()).toEqual({ name: 'W', confirmed: true, ended: true });
       } finally {
         ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
         mockGetPipeline.mockReset();
@@ -23200,7 +23254,7 @@ describe('mandate stance of every user route', () => {
 
     it('refuses a mandate at an owner-only GET when it comes as HEAD, which runs the GET handler', async () => {
       const closed = users().filter(r => r.method === 'GET' && r.stance?.kind === 'owner-only');
-      expect(closed.map(name).sort()).toEqual(['GET /api/access-trail', 'GET /api/api-profiles/stance-probe/client', 'GET /api/connections/records', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview', 'GET /api/triggers/stance-probe/confirm-recipients-preview', 'GET /api/triggers/stance-probe/takeover-preview', 'GET /api/workflows/stance-probe/stamp-preview']);
+      expect(closed.map(name).sort()).toEqual(['GET /api/access-trail', 'GET /api/api-profiles/stance-probe/client', 'GET /api/connections/records', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview', 'GET /api/triggers/stance-probe/confirm-recipients-preview', 'GET /api/triggers/stance-probe/takeover-preview', 'GET /api/workflows/stance-probe/stamp-preview', 'GET /api/workflows/stance-probe/takeover-preview']);
       api.setPrincipalResolverForTesting(() => MANDATE);
       for (const r of closed) {
         const res = await jsonFetch(concrete(r.path), { method: 'HEAD' });
