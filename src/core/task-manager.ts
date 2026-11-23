@@ -18,6 +18,12 @@ import { stripHidden } from './hidden-text.js';
 import { EngineLessRefused } from './engine-less-refusal.js';
 
 /**
+ * The start of a plan's title when a workflow is scheduled without one: lynox's words, then the
+ * workflow's name. The web-ui keeps a copy (`utils/plan-takeover.ts`); a test holds the two equal.
+ */
+export const SCHEDULED_TITLE_PREFIX = 'Scheduled: ';
+
+/**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
  * {@link TriggerEffect} (what it DOES) from the create-path intent. This is the
  * WRITE-side twin of the engine.db v3 migration remap — the two MUST agree so a

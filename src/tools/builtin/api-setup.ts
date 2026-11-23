@@ -18,7 +18,9 @@ import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import { turnIsLocked } from '../../core/mandate-tool-lock.js';
-import { currentCallSignal, joinCallSignal, noteOwnStopSentence } from '../../core/call-connection.js';
+import { currentCallSignal, currentCallTargetOrigin, joinCallSignal, noteOwnStopSentence } from '../../core/call-connection.js';
+import { CROSS_HOST_REFUSAL, crossHostRedirectGuard, readHopsGuarded } from '../../core/read-hops.js';
+import { carriesAddress, hostTargets } from '../../core/send-target.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret, ExchangeFacts } from '../../core/api-store.js';
 import { SaveRefused, profileReadHost, accessTokenKey, collectVaultKeys, grantTokenNames, tokenSlotNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
@@ -38,7 +40,8 @@ import { pv, singleLine } from '../../core/prompt-value.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
-import { OWNER_PRINCIPAL, isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
+import { isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
+import { ownersCleanBatch } from '../../core/owner-clean-batch.js';
 import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
 import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
 import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
@@ -701,11 +704,25 @@ function fetchForDiscovery(url: string, signal: AbortSignal, agent: IAgent): Ret
   // that parses: both checks answer yes for one that does not, and that one fails as unparsable.
   if (URL.canParse(url) && isGraphqlEndpoint(url) && graphqlUrlWrites(url)) return Promise.reject(new DiscoveryOverrideRefused('graphql'));
   const delegated = delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect'));
+  // A read the origin check held follows no redirect to another host (`readHopsGuarded`). That holds
+  // for the page the call named and for each same-host section read after it: the check asked about,
+  // or knew, that one host.
   return fetchWithValidatedRedirects(url, { signal }, { surface: 'discovery' }, agent.toolContext,
-    undefined, undefined, undefined, (nextUrl, method, headers) => {
-      if (sendsWrite(method, headers, nextUrl)) throw new DiscoveryOverrideRefused('hop');
+    undefined, undefined, undefined, crossHostRedirectGuard(url, readHopsGuarded(currentCallTargetOrigin()), (nextUrl, method, headers) => {
+      if (sendsWrite(method, headers ?? {}, nextUrl)) throw new DiscoveryOverrideRefused('hop');
       delegated?.(nextUrl, method, headers);
-    });
+    }));
+}
+
+/**
+ * The address a `bootstrap` reads first: the docs page when one is given, else the spec, as the
+ * handler picks. Its target, whether it carries another address and whether a search listed it are
+ * all read from this one value, so the check and the read cannot name different pages.
+ */
+function bootstrapUrl(input: ApiSetupInput): string | null {
+  if (input.action !== 'bootstrap') return null;
+  const url = input.docs_url || input.openapi_url;
+  return typeof url === 'string' && url !== '' ? url : null;
 }
 
 function fetchFailureForModel(err: unknown): string {
@@ -713,6 +730,10 @@ function fetchFailureForModel(err: unknown): string {
   // (`DelegatedHopRefused`) does not reach here: the same reading refuses the hop first.
   if (err instanceof DiscoveryOverrideRefused) return err.message;
   const message = err instanceof Error ? err.message : '';
+  // A hop to another host after an origin check: the first request was sent, and the text says
+  // what the model may tell the user (`crossHostRedirectGuard`). It names a host only when the
+  // name is plain, so it is passed on as it is.
+  if (message.startsWith(CROSS_HOST_REFUSAL)) return message;
   if (message.startsWith('Blocked:')) {
     for (const [pattern, said] of GUARD_REFUSALS) if (pattern.test(message)) return `blocked: ${said}`;
     // A hop the redirect handling refused (a GraphQL mutation in its address): the first request
@@ -1900,10 +1921,21 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
   // `bootstrap` reads the page it is given, the docs page before the spec as the handler does.
   // The sub-pages a docs page links to are read later, each recorded as it is read.
   outwardRead: (input) => {
-    if (input.action !== 'bootstrap') return null;
-    const url = input.docs_url || input.openapi_url;
-    return typeof url === 'string' && url !== '' ? httpTarget('GET', url) : null;
+    const url = bootstrapUrl(input);
+    return url === null ? null : httpTarget('GET', url);
   },
+  // After content from outside, the page `bootstrap` reads goes through the origin check as a
+  // read: its address can carry data the model put there. The model chose the address, so it is
+  // checked like `http_request`'s GET. A page a search listed needs no question (`readAddress`).
+  sendTargetsWhenLatched: (input) => {
+    const url = bootstrapUrl(input);
+    return url === null ? null : hostTargets(url);
+  },
+  readCarriesAddress: (input) => {
+    const url = bootstrapUrl(input);
+    return url !== null && carriesAddress(url);
+  },
+  readAddress: (input) => bootstrapUrl(input),
   // `delete` removes a profile and the tokens its sign-in stored. Under `autonomous` the guard
   // raises `[BLOCKED]`, which no contract lifts: refused without a prompt
   // channel, a generic question with one. Interactively the handler asks its own question,
@@ -2060,6 +2092,9 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
         // all"... is not valid JSON"), which is remote-authored text: say only that it is
         // not JSON. The fetch's own failures go through `fetchFailureForModel`.
         const msg = err instanceof SyntaxError ? 'the body is not valid JSON' : fetchFailureForModel(err);
+        // A hop the origin check held is not a spec to look for elsewhere: its text says what to
+        // tell the user, and the frame below would send the model looking for another address.
+        if (msg.startsWith(CROSS_HOST_REFUSAL)) return `Error: ${msg}`;
         return `Error: could not parse OpenAPI spec from ${input.openapi_url} — ${msg}. If the docs site serves HTML, find the raw .json spec URL (often at /openapi.json or /swagger.json).`;
       }
 
@@ -2285,8 +2320,7 @@ ${draftJson}
       // own; a workflow made in another conversation could otherwise name a host unattended. The
       // engine's to write, never the input's, and bound to the host it was saved with.
       delete profile.owner_clean_host;
-      const ownersOwnChat = isOwnerPrincipal(agent.principal) && agent.writeAuthor === principalTag(OWNER_PRINCIPAL) && agent.sendOrigin === undefined;
-      if (ownersOwnChat && agent.batchStartedTainted?.() === false && agent.heldProviderSearch?.() === false) {
+      if (ownersCleanBatch(agent)) {
         const cleanHost = profileReadHost(profile);
         if (cleanHost !== null) profile.owner_clean_host = cleanHost;
       }

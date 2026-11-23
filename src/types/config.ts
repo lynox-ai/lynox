@@ -221,6 +221,8 @@ export interface AgentConfig {
    * issues the call. Undefined for ad-hoc Agents built outside a Session.
    */
   toolResultBlobStore?: import('../core/tool-result-blob-store.js').ToolResultBlobStore | undefined;
+  /** The conversation's search results; the session and a spawning parent pass theirs. */
+  searchResultAddresses?: import('../core/search-result-addresses.js').SearchResultAddresses | undefined;
   /**
    * Eager-persist hook fired at every stable point in the agent loop (after
    * assistant message, after tool_results). Lets the Session checkpoint
