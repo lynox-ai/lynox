@@ -186,6 +186,35 @@ describe('toolCallLabel', () => {
       }
     });
 
+    it('shows a file name whole, and of a name longer than a line can show its end with the extension', () => {
+      const long = `${'n'.repeat(120)}.xlsx`;
+      for (const [tool, input] of [
+        ['edit_file', { path: `/w/${long}` }],
+        ['read_file', { path: `/w/${long}` }],
+        ['write_file', { path: `/w/${long}` }],
+        ['media_process', { input: `/w/${long}` }],
+        ['google_drive', { action: 'upload', file_name: long }],
+        ['bulk_plan', { target_system: 'workspace', source_file: `/w/${long}` }],
+      ] as const) {
+        expect(subject(tool, input)).toBe(long);
+      }
+      const huge = `${'n'.repeat(2_000_000)}.csv`;
+      for (const [tool, input] of [
+        ['edit_file', { path: `/w/${huge}` }],
+        ['media_process', { input: huge }],
+        ['google_drive', { action: 'upload', file_name: huge }],
+        ['bulk_plan', { target_system: 'workspace', source_file: huge }],
+      ] as const) {
+        const out = subject(tool, input) ?? '';
+        expect(out.startsWith('…')).toBe(true);
+        expect(out.endsWith('.csv')).toBe(true);
+        expect(out.length).toBeLessThanOrEqual(200);
+      }
+      // A piece of an emoji at the clip goes; a pile of marks keeps its base.
+      expect(subject('edit_file', { path: `/w/${'😀'.repeat(150)}.md` })).toBe(`…${'😀'.repeat(98)}.md`);
+      expect(subject('edit_file', { path: `/w/a${'\u0301'.repeat(60)}.md` })).toBe('a.md');
+    });
+
     it('keeps 50 chars whole and cuts from 51 on, ending in an ellipsis', () => {
       expect(subject('remember', { text: 'r'.repeat(50) })).toBe('r'.repeat(50));
       expect(subject('remember', { text: 'r'.repeat(51) })).toBe(`${'r'.repeat(49)}…`);
