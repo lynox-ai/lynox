@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { OWNER_PRINCIPAL, type RequestPrincipal, principalFromTag } from './request-principal.js';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
-import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, InvalidDueDateError, admittedTriggerTier, TriggerFieldsNotCarriedError, WebhookTriggerScheduleError, SCHEDULED_TITLE_PREFIX } from './task-manager.js';
+import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, InvalidDueDateError, admittedTriggerTier, TriggerFieldsNotCarriedError, WebhookTriggerScheduleError, SCHEDULED_TITLE_PREFIX, titleIsWorkflowName } from './task-manager.js';
 import { TriggerStore } from './trigger-store.js';
 import { stampFromRow } from './plan-stamp.js';
 import { runAsHandRun } from './hand-run-door.js';
@@ -1519,11 +1519,19 @@ describe.each([false, true])('a mandate\'s own to-dos (subject graph %s)', (grap
   });
 });
 
-describe('SCHEDULED_TITLE_PREFIX', () => {
-  it('is the same string the web-ui keeps outside the box on an owner\'s derived title', () => {
-    const ui = readFileSync(join(import.meta.dirname, '../../packages/web-ui/src/lib/utils/plan-takeover.ts'), 'utf8');
-    const copy = /export const SCHEDULED_TITLE_PREFIX = '([^']*)';/.exec(ui);
-    expect(copy, 'the web-ui copy').not.toBeNull();
-    expect(copy![1]).toBe(SCHEDULED_TITLE_PREFIX);
+describe('titleIsWorkflowName', () => {
+  it('holds for the name alone and for the prefix with the name, and for nothing else', () => {
+    expect(titleIsWorkflowName('Report', 'Report')).toBe(true);
+    expect(titleIsWorkflowName(`${SCHEDULED_TITLE_PREFIX}Report`, 'Report')).toBe(true);
+    expect(SCHEDULED_TITLE_PREFIX).toBe('Scheduled: ');
+    // A title that starts with the prefix and goes on with anything but the name stays whole.
+    expect(titleIsWorkflowName('Scheduled: Report now', 'Report')).toBe(false);
+    expect(titleIsWorkflowName('Scheduled: Other', 'Report')).toBe(false);
+    expect(titleIsWorkflowName('Scheduled:Report', 'Report')).toBe(false);
+    expect(titleIsWorkflowName('Report ', 'Report')).toBe(false);
+    expect(titleIsWorkflowName('Monthly', 'Report')).toBe(false);
+    // A nameless workflow names nothing: neither an empty title nor the bare prefix is its name.
+    expect(titleIsWorkflowName('', '')).toBe(false);
+    expect(titleIsWorkflowName(SCHEDULED_TITLE_PREFIX, '')).toBe(false);
   });
 });

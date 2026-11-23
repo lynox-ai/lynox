@@ -206,11 +206,15 @@ export type {
 export {
 	listInboxRules,
 	createInboxRule,
+	confirmInboxRule,
 	deleteInboxRule,
+	isRulePending,
 } from './api/inbox-rules.js';
 export type {
 	InboxRule,
 	CreateRuleBody,
+	CreateRuleResult,
+	CreateRuleRefusal,
 	InboxRuleMatcherKind,
 	InboxRuleAction,
 	InboxRuleSource,

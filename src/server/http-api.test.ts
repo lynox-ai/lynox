@@ -279,6 +279,8 @@ vi.mock('../core/engine.js', () => ({
     this.init = vi.fn().mockReturnValue(Promise.resolve(this));
     this.startWorkerLoop = vi.fn();
     this.getWorkerLoop = vi.fn().mockReturnValue(null);
+    // The push channel registers here at boot; the order against startWorkerLoop is tested.
+    this.getNotificationRouter = vi.fn().mockReturnValue({ register: vi.fn() });
     this.shutdown = vi.fn().mockResolvedValue(undefined);
     this.createSession = vi.fn().mockReturnValue(mockSessionInstance);
     this.getMailStateDb = vi.fn().mockReturnValue(null);
@@ -917,6 +919,27 @@ describe('LynoxHTTPApi', () => {
         const fixtureStructure = dropOptional(structure(fixture) as Record<string, unknown>);
         if (fixtureStructure['build_sha'] === 'string') fixtureStructure['build_sha'] = 'null|string';
         expect(liveStructure, `live /health diverges from fixtures/${name}`).toEqual(fixtureStructure);
+      }
+    });
+  });
+
+  describe('boot order: push before the worker loop', () => {
+    // The loop ticks as soon as it starts. A scheduled question it escalates before the push
+    // channel is registered finds no channel at all and is recorded as `no_channel`, on an
+    // instance where push works.
+    // Its own instance: the shared one booted before beforeEach cleared every mock's calls.
+    it('registers the push channel with the router before it starts the worker loop', async () => {
+      const own = new LynoxHTTPApi();
+      try {
+        await own.init();
+        const engine = (own as unknown as { engine: { startWorkerLoop: ReturnType<typeof vi.fn>; getNotificationRouter: ReturnType<typeof vi.fn> } }).engine;
+        const router = engine.getNotificationRouter.mock.results[0]?.value as { register: ReturnType<typeof vi.fn> } | undefined;
+        expect(router, 'the boot must have asked for the router').toBeDefined();
+        expect(router!.register).toHaveBeenCalledTimes(1);
+        expect(engine.startWorkerLoop).toHaveBeenCalledTimes(1);
+        expect(router!.register.mock.invocationCallOrder[0]!).toBeLessThan(engine.startWorkerLoop.mock.invocationCallOrder[0]!);
+      } finally {
+        await own.shutdown();
       }
     });
   });
@@ -2125,6 +2148,16 @@ describe('LynoxHTTPApi', () => {
       }));
     });
 
+    it('titles a plan scheduled without a title with the workflow\'s name alone, and keeps a title it is given', async () => {
+      storeWf();
+      const body = (over: Record<string, unknown> = {}): string => JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 1 * *', params: { month: '2026-06' }, ...over });
+      expect((await jsonFetch('/api/tasks', { method: 'POST', body: body() })).status).toBe(201);
+      // No words of lynox's in the stored title: the view says "Scheduled: " in the reader's language.
+      expect(mockTaskCreatePipeline.mock.calls[0]![0]).toHaveProperty('title', 'Report');
+      expect((await jsonFetch('/api/tasks', { method: 'POST', body: body({ title: 'Scheduled: Monthly' }) })).status).toBe(201);
+      expect(mockTaskCreatePipeline.mock.calls[1]![0]).toHaveProperty('title', 'Scheduled: Monthly');
+    });
+
     it('lets a mandate schedule only its own workflows and the owner\'s', async () => {
       storeWf();
       const ref = (api as unknown as { engine: { getRunHistory: () => Record<string, unknown> } }).engine;
@@ -2347,7 +2380,7 @@ describe('LynoxHTTPApi', () => {
           });
         });
 
-        it('the acceptance schedules and writes the grant with the schedule\'s id and the request\'s auth origin', async () => {
+        it('the acceptance schedules, titled with the workflow\'s name alone, and writes the grant with the schedule\'s id and the request\'s auth origin', async () => {
           await withGrantServices(async () => {
             const res = await ownerSessionFetch('/api/tasks', {
               method: 'POST',
@@ -2361,6 +2394,7 @@ describe('LynoxHTTPApi', () => {
             }), expect.objectContaining({
               triggerId: 'sched-1', name: 'Ada', binding: 'unkeyed', by: expect.any(String), grantId,
             }), expect.any(String), expect.objectContaining({ id: 'wf-sched' }));
+            expect(mockTaskCreatePipeline).toHaveBeenCalledWith(expect.objectContaining({ title: 'Report', pipelineId: 'wf-sched' }));
             expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled(); // the grant write carries the confirm
             expect(mockForgetPipeline).toHaveBeenCalledWith('wf-sched');
           });
@@ -3768,7 +3802,7 @@ describe('LynoxHTTPApi', () => {
     // /run can proceed. Simulated here by injecting the stuck slot
     // directly — replicates the post-disconnect server state without
     // depending on undici's abort-to-server-close timing.
-    it('takes over a stale run parked on a pending prompt', async () => {
+    it('does not take over a run with a dead stream that waits on its own question', async () => {
       const Database = (await import('better-sqlite3')).default;
       const db = new Database(':memory:');
       db.prepare(`CREATE TABLE pending_prompts (
@@ -3820,6 +3854,9 @@ describe('LynoxHTTPApi', () => {
         const drainDelay = 60; // ms — emulates the previous run's finally
         runningSessions.set('stale-1', {
           streamAlive: false,
+          // Waiting on its own question, silent for far longer than the stale window.
+          parked: () => true,
+          lastEventAt: Date.now() - 11 * 60_000,
           takeover: () => {
             takeoverCalls++;
             // The real takeover expires the prompt and aborts the previous
@@ -3830,19 +3867,18 @@ describe('LynoxHTTPApi', () => {
           },
         });
 
-        mockSessionRun.mockResolvedValueOnce('second response');
         const res = await jsonFetch('/api/sessions/stale-1/run', {
           method: 'POST',
           body: JSON.stringify({ task: 'second', protocol: 1 }),
         });
 
-        expect(takeoverCalls).toBe(1);
-        expect(res.status).toBe(200);
-        const text = await res.text();
-        expect(text).toContain('event: done');
-        // The takeover must have freed the prompt slot in SQLite so the
-        // new run could insert its own prompt without a UNIQUE conflict.
-        expect(realPromptStore.getPending('stale-1')).toBeUndefined();
+        // The question waits for its answer (or a stop): the new message gets the 409 the chat
+        // shows as blocked by that question, and the question stays open.
+        expect(res.status).toBe(409);
+        await res.text();
+        expect(takeoverCalls).toBe(0);
+        expect(realPromptStore.getPending('stale-1')?.id).toBe(promptId);
+        runningSessions.delete('stale-1');
       } finally {
         engineRef.getPromptStore = originalGetPromptStore;
         runningSessions.delete('stale-1');
@@ -4131,18 +4167,21 @@ describe('LynoxHTTPApi', () => {
     // live on the Session, and the case that needs reclaiming most is the one
     // where the Session is already gone — a thread deleted while its run was
     // parked. Behind the guard, the backstop would be unreachable exactly there.
-    it('a new message that takes over a parked run with a dead stream closes its question as taken over', async () => {
+    it('a new message does not take over a run parked on its question with a dead stream', async () => {
       repayRateWindow();
       await withParkedRun('takeover-parked-1', async ({ prompts, slots, promptId }) => {
-        (slots.get('takeover-parked-1') as { streamAlive: boolean }).streamAlive = false;
-        mockSessionRun.mockResolvedValueOnce('second response');
+        const slot = slots.get('takeover-parked-1') as { streamAlive: boolean; lastEventAt: number };
+        slot.streamAlive = false;
+        slot.lastEventAt = Date.now() - 11 * 60_000;
         const next = await jsonFetch('/api/sessions/takeover-parked-1/run', {
           method: 'POST',
           body: JSON.stringify({ task: 'something else', protocol: 1 }),
         });
-        expect(next.status).toBe(200);
+        expect(next.status).toBe(409);
         await next.text();
-        expect(prompts.getById(promptId)?.closed_reason).toBe('run_taken_over');
+        expect(prompts.getById(promptId)?.status).toBe('pending');
+        // Stopped, as the user would, so the parked run ends.
+        await jsonFetch('/api/sessions/takeover-parked-1/abort', { method: 'POST' }).then((r) => r.text());
       }, { signalled: true });
     });
 
@@ -4226,8 +4265,8 @@ describe('LynoxHTTPApi', () => {
       }
     }
 
-    // The stream is marked dead by hand, as in the takeover test above: the server does not see
-    // the connection close on this route today, so no test can drop it for real.
+    // The stream is marked dead by hand, so the engine's silence is the only thing these tests
+    // vary; the real drop of the connection is tested with the drop tests further down.
     // Only the question is ruled out as a reason. That a run silent past the stale window is still
     // taken over, with the scheduled question left open, is read from the code, not tested here.
     it('a scheduled question does not let a second message take over a working run', async () => {
@@ -4253,6 +4292,400 @@ describe('LynoxHTTPApi', () => {
         expect(abortRes.status).toBe(200);
         await expectSlotReclaimed(slots, 'abort-beside-1');
         expect(prompts.getById(questionId)?.status).toBe('pending');
+      });
+    });
+
+    /** An in-memory prompt store with the real schema, for runs that share one thread. */
+    async function promptDb(): Promise<{ db: import('better-sqlite3').Database; store: import('../core/prompt-store.js').PromptStore }> {
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(':memory:');
+      db.prepare(`CREATE TABLE pending_prompts (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
+        question TEXT NOT NULL,
+        options_json TEXT,
+        questions_json TEXT,
+        segments_json TEXT,
+        partial_answers_json TEXT,
+        secret_name TEXT,
+        secret_key_type TEXT,
+        answer TEXT,
+        answer_saved INTEGER,
+        answer_error TEXT,
+        multi_select INTEGER,
+        payload_json TEXT,
+        origin_json TEXT,
+        trigger_id TEXT,
+        created_by TEXT,
+        hand_run INTEGER NOT NULL DEFAULT 0,
+        mandate_id TEXT,
+        answered_by TEXT,
+        answered_mandate_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        answered_at TEXT,
+        closed_reason TEXT, expires_at TEXT NOT NULL
+      )`).run();
+      db.prepare(`CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status)`).run();
+      db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
+      const { PromptStore } = await import('../core/prompt-store.js');
+      return { db, store: new PromptStore(db) };
+    }
+
+    // A run whose client goes away for real: the socket is destroyed, not a flag set by hand.
+    // `question` picks what the thread holds while the run is live: nothing, the run's own
+    // question (it parks on it), or a scheduled run's question asked before (the run works on).
+    async function withDroppableRun(
+      sid: string,
+      question: 'none' | 'own' | 'own-then-work' | 'scheduled',
+      body: (ctx: {
+        prompts: {
+          getPending: (s: string) => { id: string } | undefined;
+          getById: (id: string) => { status: string; closed_reason: string | null } | undefined;
+          answerUser: (id: string, answer: string, by: RequestPrincipal) => boolean;
+        };
+        slots: Map<string, unknown>;
+        /** Destroys the client's socket and waits until the server has marked the stream dead. */
+        drop: () => Promise<void>;
+        questionId: string | undefined;
+      }) => Promise<void>,
+    ): Promise<void> {
+      const { db, store: realPromptStore } = await promptDb();
+
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const originalGetPromptStore = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => realPromptStore;
+      const internals = api as unknown as { runningSessions: Map<string, unknown> };
+      const slots = internals.runningSessions;
+      let finishWork!: () => void;
+      const work = new Promise<void>((r) => { finishWork = r; });
+      try {
+        const scheduled = question === 'scheduled'
+          ? realPromptStore.insertAskUser(sid, 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1')
+          : undefined;
+        mockSessionRun.mockImplementationOnce(async () => {
+          if (question === 'own' || question === 'own-then-work') {
+            const promptUser = mockSessionInstance.promptUser as (q: string, o?: string[]) => Promise<string>;
+            const answer = await promptUser('Which repo did you mean?', ['lynox', 'other']);
+            if (question === 'own') return `settled:${answer}`;
+          }
+          await work;
+          return 'done';
+        });
+        // A working run stops on `session.abort()`, as the real agent loop does.
+        mockSessionAbort.mockImplementation(() => { finishWork(); });
+        const http = await import('node:http');
+        const url = new URL(`${baseUrl}/api/sessions/${sid}/run`);
+        let settled!: () => void;
+        const closed = new Promise<void>((r) => { settled = r; });
+        const raw = http.request({
+          hostname: url.hostname, port: url.port, path: url.pathname, method: 'POST',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        });
+        raw.on('response', (r) => { r.on('data', () => undefined); r.on('error', () => undefined); r.on('close', settled); });
+        raw.on('error', () => settled());
+        raw.on('close', settled);
+        raw.end(JSON.stringify({ task: 'sort the invoices', protocol: 1 }));
+        const asks = question === 'own' || question === 'own-then-work';
+        for (let i = 0; i < 400 && !(slots.has(sid) && (!asks || realPromptStore.getPending(sid))); i++) {
+          await new Promise<void>((r) => setTimeout(r, 5));
+        }
+        expect(slots.has(sid), 'positive control: the run holds its slot').toBe(true);
+        const questionId = scheduled ?? realPromptStore.getPending(sid)?.id;
+        if (question !== 'none') expect(questionId, 'positive control: a question is open in the thread').toBeDefined();
+        const drop = async (): Promise<void> => {
+          raw.destroy();
+          for (let i = 0; i < 400 && (slots.get(sid) as { streamAlive?: boolean } | undefined)?.streamAlive !== false; i++) {
+            await new Promise<void>((r) => setTimeout(r, 5));
+          }
+          expect((slots.get(sid) as { streamAlive?: boolean } | undefined)?.streamAlive, 'the server saw the stream drop').toBe(false);
+        };
+        try {
+          await body({ prompts: realPromptStore, slots, drop, questionId });
+        } finally {
+          finishWork();
+          raw.destroy();
+          await closed;
+          if (slots.has(sid)) {
+            await jsonFetch(`/api/sessions/${sid}/abort`, { method: 'POST' }).then((r) => r.text()).catch(() => undefined);
+          }
+          await expectSlotReclaimed(slots, sid);
+        }
+      } finally {
+        mockSessionAbort.mockImplementation(() => undefined);
+        engineRef.getPromptStore = originalGetPromptStore;
+        db.close();
+      }
+    }
+
+    /** A `/run` over a raw socket, so `destroy()` is a real drop. */
+    async function rawRun(sid: string): Promise<{ destroy: () => void; closed: Promise<void> }> {
+      const http = await import('node:http');
+      const url = new URL(`${baseUrl}/api/sessions/${sid}/run`);
+      let settled!: () => void;
+      const closed = new Promise<void>((r) => { settled = r; });
+      const raw = http.request({
+        hostname: url.hostname, port: url.port, path: url.pathname, method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      });
+      raw.on('response', (r) => { r.on('data', () => undefined); r.on('error', () => undefined); r.on('close', settled); });
+      raw.on('error', () => settled());
+      raw.on('close', settled);
+      raw.end(JSON.stringify({ task: 'go on', protocol: 1 }));
+      return { destroy: () => { raw.destroy(); }, closed };
+    }
+
+    async function until(cond: () => boolean, tries = 400): Promise<void> {
+      for (let i = 0; i < tries && !cond(); i++) await new Promise<void>((r) => setTimeout(r, 5));
+    }
+
+    // A client can leave before the handler listens for it: here while its /run waits for the
+    // run it takes over to unwind. The response is closed by then; the drop still counts.
+    it('notices a client that left while its run was still being set up', async () => {
+      repayRateWindow();
+      const sid = 'drop-early-1';
+      const { db, store } = await promptDb();
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const originalGetPromptStore = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => store;
+      const internals = api as unknown as { runningSessions: Map<string, { streamAlive: boolean }> };
+      const slots = internals.runningSessions;
+      const runs: Array<{ destroy: () => void; closed: Promise<void> }> = [];
+      let finishB!: () => void;
+      const workB = new Promise<void>((r) => { finishB = r; });
+      try {
+        // Run A works, its client drops, and its engine goes silent; taken over, it takes a while
+        // to unwind (the session is one mock: its `abort()` ends A after 300 ms).
+        let finishA!: () => void;
+        const workA = new Promise<void>((r) => { finishA = r; });
+        mockSessionRun.mockImplementationOnce(async () => { await workA; return 'a'; });
+        mockSessionAbort.mockImplementation(() => { setTimeout(() => finishA(), 300); });
+        runs.push(await rawRun(sid));
+        await until(() => slots.has(sid));
+        runs[0]!.destroy();
+        await until(() => slots.get(sid)?.streamAlive === false);
+        expect(slots.get(sid)?.streamAlive, 'positive control: A\'s drop was seen').toBe(false);
+        (slots.get(sid) as unknown as { lastEventAt: number }).lastEventAt = Date.now() - 61_000;
+        const slotA = slots.get(sid);
+        // Run B takes A over and waits for it; B's client leaves during that wait. B works until
+        // the test ends.
+        mockSessionRun.mockImplementationOnce(async () => { await workB; return 'b'; });
+        runs.push(await rawRun(sid));
+        await new Promise<void>((r) => setTimeout(r, 100));
+        expect(slots.get(sid), 'precondition: A still holds the slot, B waits for it').toBe(slotA);
+        runs[1]!.destroy();
+        await until(() => slots.has(sid) && slots.get(sid) !== slotA, 400);
+        expect(slots.has(sid) && slots.get(sid) !== slotA, 'B holds the slot').toBe(true);
+        expect(slots.get(sid)?.streamAlive).toBe(false);
+      } finally {
+        finishB();
+        mockSessionAbort.mockImplementation(() => undefined);
+        if (slots.has(sid)) await jsonFetch(`/api/sessions/${sid}/abort`, { method: 'POST' }).then((r) => r.text()).catch(() => undefined);
+        await expectSlotReclaimed(slots as Map<string, unknown>, sid).catch(() => undefined);
+        for (const r of runs) { r.destroy(); await r.closed; }
+        engineRef.getPromptStore = originalGetPromptStore;
+        db.close();
+      }
+    });
+
+    /** Gives the next runs a real run buffer, so their resumable stream can be followed. */
+    async function withRunBuffers(body: (runIdOf: () => string | undefined) => Promise<void>): Promise<void> {
+      const { RunBufferManager } = await import('../core/run-buffer.js');
+      const mgr = new RunBufferManager();
+      let last: string | undefined;
+      const create = mgr.create.bind(mgr);
+      mgr.create = (runId: string, cap?: number) => { last = runId; return create(runId, cap); };
+      const engineRef = (api as unknown as { engine: { getRunBufferManager: () => unknown } }).engine;
+      const orig = engineRef.getRunBufferManager;
+      engineRef.getRunBufferManager = (): unknown => mgr;
+      try { await body(() => last); } finally { engineRef.getRunBufferManager = orig; }
+    }
+
+    /** Follows a run on its resumable stream over a raw socket; `leave()` is a real close. */
+    async function follow(runId: string): Promise<{ leave: () => Promise<void> }> {
+      // The run has done something: a stream with nothing to replay sends no bytes, not even
+      // its headers, until its first heartbeat.
+      await (mockSessionInstance.onStream as (e: unknown) => Promise<void>)({ type: 'text', text: 'working', agent: 'main' });
+      const http = await import('node:http');
+      const url = new URL(`${baseUrl}/api/runs/${runId}/stream`);
+      let settled!: () => void;
+      const closed = new Promise<void>((r) => { settled = r; });
+      let leaveRaw: () => void = () => undefined;
+      const status = await new Promise<number>((resolve) => {
+        const raw = http.get({ hostname: url.hostname, port: url.port, path: url.pathname, headers: authHeaders() }, (r) => {
+          r.on('data', () => undefined); r.on('error', () => undefined); r.on('close', settled);
+          resolve(r.statusCode ?? 0);
+        });
+        raw.on('error', () => { settled(); resolve(0); });
+        leaveRaw = () => { raw.destroy(); };
+      });
+      expect(status, 'positive control: the run can be followed').toBe(200);
+      return { leave: async () => { leaveRaw(); await closed; await new Promise<void>((r) => setTimeout(r, 20)); } };
+    }
+
+    it('gives a run answered after its stream dropped its compute budget back', async () => {
+      repayRateWindow();
+      const prev = process.env['LYNOX_RUN_WALL_CLOCK_MS'];
+      process.env['LYNOX_RUN_WALL_CLOCK_MS'] = '400';
+      try {
+        await withDroppableRun('wall-after-drop-1', 'own-then-work', async ({ prompts, slots, drop, questionId }) => {
+          await drop();
+          // Parked: the budget is paused, so the run waits however long the answer takes.
+          await new Promise<void>((r) => setTimeout(r, 600));
+          expect(slots.has('wall-after-drop-1')).toBe(true);
+          expect(prompts.answerUser(questionId!, 'lynox', OWNER_PRINCIPAL)).toBe(true);
+          // Answered, the run works on headless: its budget runs again and ends it.
+          await expectSlotReclaimed(slots, 'wall-after-drop-1');
+          expect(mockSessionAbort).toHaveBeenCalled();
+        });
+      } finally {
+        if (prev === undefined) delete process.env['LYNOX_RUN_WALL_CLOCK_MS'];
+        else process.env['LYNOX_RUN_WALL_CLOCK_MS'] = prev;
+      }
+    });
+
+    it('takes over a silent engine even while a reader follows the run', async () => {
+      repayRateWindow();
+      await withRunBuffers(async (runIdOf) => {
+        await withDroppableRun('stale-followed-1', 'none', async ({ slots, drop }) => {
+          await drop();
+          const reader = await follow(runIdOf()!);
+          (slots.get('stale-followed-1') as { lastEventAt: number }).lastEventAt = Date.now() - 61_000;
+          mockSessionRun.mockResolvedValueOnce('second response');
+          const next = await jsonFetch('/api/sessions/stale-followed-1/run', {
+            method: 'POST',
+            body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+          });
+          expect(next.status).toBe(200);
+          await next.text();
+          expect(mockSessionAbort).toHaveBeenCalled();
+          await reader.leave();
+        });
+      });
+    });
+
+    it('does not hand a followed run\'s question to a new message', async () => {
+      repayRateWindow();
+      await withRunBuffers(async (runIdOf) => {
+        await withDroppableRun('followed-question-1', 'own', async ({ prompts, slots, drop, questionId }) => {
+          await drop();
+          const reader = await follow(runIdOf()!);
+          // Long past the stale window: a run waiting on its question emits nothing, by design.
+          (slots.get('followed-question-1') as { lastEventAt: number }).lastEventAt = Date.now() - 61_000;
+          const next = await jsonFetch('/api/sessions/followed-question-1/run', {
+            method: 'POST',
+            body: JSON.stringify({ task: 'something else', protocol: 1 }),
+          });
+          expect(next.status).toBe(409);
+          await next.text();
+          expect(prompts.getById(questionId!)?.status).toBe('pending');
+          await reader.leave();
+        });
+      });
+    });
+
+    it('does not take over a run that works on headless, only one whose engine has gone silent', async () => {
+      repayRateWindow();
+      await withDroppableRun('stale-working-1', 'none', async ({ slots, drop }) => {
+        await drop();
+        const slot = slots.get('stale-working-1') as { lastEventAt: number };
+        slot.lastEventAt = Date.now() - 61_000;
+        // The engine keeps producing events after the drop.
+        const onStream = mockSessionInstance.onStream as (e: unknown) => Promise<void>;
+        await onStream({ type: 'text', text: 'still working', agent: 'main' });
+        const next = await jsonFetch('/api/sessions/stale-working-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'and then?', protocol: 1 }),
+        });
+        expect(next.status).toBe(409);
+        await next.text();
+        expect(mockSessionAbort).not.toHaveBeenCalled();
+      });
+    });
+
+    it('takes over a dropped run whose engine has been silent past the stale window', async () => {
+      repayRateWindow();
+      await withDroppableRun('stale-silent-1', 'none', async ({ slots, drop }) => {
+        await drop();
+        (slots.get('stale-silent-1') as { lastEventAt: number }).lastEventAt = Date.now() - 61_000;
+        mockSessionRun.mockResolvedValueOnce('second response');
+        const next = await jsonFetch('/api/sessions/stale-silent-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+        });
+        expect(next.status).toBe(200);
+        await next.text();
+        expect(mockSessionAbort).toHaveBeenCalled();
+      });
+    });
+
+    it('notices a dropped stream on a working run, and lets the run work on', async () => {
+      repayRateWindow();
+      await withDroppableRun('drop-working-1', 'none', async ({ slots, drop }) => {
+        await drop();
+        expect(slots.has('drop-working-1')).toBe(true);
+        expect(mockSessionAbort).not.toHaveBeenCalled();
+      });
+    });
+
+    // A phone locked while the run asks: its stream drops for real, nobody follows, and the
+    // question waits however long that takes. Nothing ends the run but an answer or a stop.
+    it('keeps a run\'s own question after its stream dropped, with nobody following', async () => {
+      repayRateWindow();
+      await withDroppableRun('drop-own-1', 'own', async ({ prompts, slots, drop, questionId }) => {
+        await drop();
+        // Long past the stale window (a run waiting on its question emits nothing).
+        (slots.get('drop-own-1') as { lastEventAt: number }).lastEventAt = Date.now() - 11 * 60_000;
+        await new Promise<void>((r) => setTimeout(r, 300));
+        expect(slots.has('drop-own-1')).toBe(true);
+        expect(prompts.getById(questionId!)?.status).toBe('pending');
+        expect(mockSessionAbort).not.toHaveBeenCalled();
+      });
+    });
+
+    it('does not let a new message take over a run that was just answered after its stream dropped', async () => {
+      repayRateWindow();
+      await withDroppableRun('answered-late-1', 'own-then-work', async ({ prompts, slots, drop, questionId }) => {
+        await drop();
+        // The answer comes long after the drop: the run was silent all that time, waiting.
+        (slots.get('answered-late-1') as { lastEventAt: number }).lastEventAt = Date.now() - 11 * 60_000;
+        expect(prompts.answerUser(questionId!, 'lynox', OWNER_PRINCIPAL)).toBe(true);
+        await until(() => (slots.get('answered-late-1') as { parked?: () => boolean } | undefined)?.parked?.() === false);
+        const next = await jsonFetch('/api/sessions/answered-late-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'and then?', protocol: 1 }),
+        });
+        expect(next.status).toBe(409);
+        await next.text();
+        expect(mockSessionAbort).not.toHaveBeenCalled();
+      });
+    });
+
+    it('answers a second device\'s message with 409 while the run waits on its own question', async () => {
+      repayRateWindow();
+      await withDroppableRun('drop-own-2', 'own', async ({ prompts, slots, drop, questionId }) => {
+        await drop();
+        (slots.get('drop-own-2') as { lastEventAt: number }).lastEventAt = Date.now() - 11 * 60_000;
+        const next = await jsonFetch('/api/sessions/drop-own-2/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'something else', protocol: 1 }),
+        });
+        expect(next.status).toBe(409);
+        await next.text();
+        expect(prompts.getById(questionId!)?.status).toBe('pending');
+        expect(mockSessionAbort).not.toHaveBeenCalled();
+      });
+    });
+
+    it('keeps a run working beside a scheduled question through a drop', async () => {
+      repayRateWindow();
+      await withDroppableRun('drop-beside-1', 'scheduled', async ({ prompts, slots, drop, questionId }) => {
+        await drop();
+        await new Promise<void>((r) => setTimeout(r, 300));
+        expect(slots.has('drop-beside-1')).toBe(true);
+        expect(mockSessionAbort).not.toHaveBeenCalled();
+        expect(prompts.getById(questionId!)?.status).toBe('pending');
       });
     });
 
@@ -4502,18 +4935,10 @@ describe('LynoxHTTPApi', () => {
         runningSessions: Map<string, { streamAlive: boolean }>;
       }).runningSessions;
 
-      // Drive the disconnect by emitting 'close' on the server-side request
-      // object directly, captured via the server's 'request' event. This
-      // exercises the REAL production close handler deterministically — undici/
-      // raw-socket close timing against this server is non-deterministic (the
-      // same reason the stale-run takeover test above injects state directly).
+      // The client drops its socket for real. This test used to emit 'close' on the server's
+      // request object instead, which passed while a real drop was never noticed: the router
+      // reads the body first, and the request had closed long before the handler listened.
       const http = await import('node:http');
-      const server = (api as unknown as { server: import('node:http').Server }).server;
-      let serverReq: import('node:http').IncomingMessage | undefined;
-      const captureReq = (req: import('node:http').IncomingMessage): void => {
-        if (req.url?.includes('/sessions/disc-noprompt/run')) serverReq = req;
-      };
-      server.on('request', captureReq);
 
       const url = new URL(`${baseUrl}/api/sessions/disc-noprompt/run`);
       const clientReq = http.request({
@@ -4526,23 +4951,23 @@ describe('LynoxHTTPApi', () => {
       clientReq.end(JSON.stringify({ task: 'long-running', protocol: 1 }));
 
       try {
-        // Wait until the run is registered server-side (handler reached the
-        // point past req.on('close') registration).
+        // Wait until the run is registered server-side.
         for (let i = 0; i < 200; i++) {
-          if (runningSessions.has('disc-noprompt') && serverReq) break;
+          if (runningSessions.has('disc-noprompt')) break;
           await new Promise<void>((r) => setTimeout(r, 10));
         }
         expect(runningSessions.has('disc-noprompt')).toBe(true);
-        expect(serverReq).toBeDefined();
 
-        // Client disconnects mid-run → fire the server's close handler.
-        serverReq!.emit('close');
+        // Client disconnects mid-run; the server notices on its own.
+        clientReq.destroy();
+        for (let i = 0; i < 200 && runningSessions.get('disc-noprompt')?.streamAlive !== false; i++) {
+          await new Promise<void>((r) => setTimeout(r, 10));
+        }
 
         const slot = runningSessions.get('disc-noprompt');
         expect(slot?.streamAlive).toBe(false);            // close handler ran...
         expect(mockSessionAbort).not.toHaveBeenCalled();  // ...but did NOT abort.
       } finally {
-        server.off('request', captureReq);
         clientReq.destroy();
         // Release the headless run so the handler's finally cleans up the slot.
         release();
@@ -11527,6 +11952,48 @@ describe('LynoxHTTPApi', () => {
         const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
         expect(triggers.map((t) => [t.id, Object.hasOwn(t, 'bulk_host') ? t['bulk_host'] : 'absent'])).toEqual([
           ['bulk-ext', 'demo-shop.myshopify.com'], ['bulk-store', null], ['bulk-gone', null], ['bulk-bad', null], ['trg-agent', 'absent'],
+        ]);
+      });
+    });
+
+    it('GET /api/triggers gives a workflow plan the workflow\'s name where its title is that name as the engine wrote it, and no other row the field: not after a rename, not without a schedule', async () => {
+      const plan = (id: string, title: string, over: Record<string, unknown> = {}): Record<string, unknown> =>
+        ({ id, title, effect: 'run_workflow', pipeline_id: 'wf-1', schedule_cron: '0 9 * * 1', created_by: 'owner', ...over });
+      const rows = [
+        plan('new', 'Report'),
+        plan('old', 'Scheduled: Report'),
+        // A title that only starts with lynox's words is someone's text: it stays whole.
+        plan('forged', 'Scheduled: Report, approved by the owner'),
+        plan('own', 'Monthly'),
+        // The name of a workflow the plan does not run is not its workflow's name.
+        plan('other', 'Report', { pipeline_id: 'wf-2' }),
+        plan('gone', 'Scheduled: Gone', { pipeline_id: 'wf-gone' }),
+        // Scheduled as "Report", the workflow renamed since: the title is no longer its name.
+        plan('renamed', 'Report', { pipeline_id: 'wf-3' }),
+        // A workflow plan with no schedule is not "Scheduled".
+        plan('unscheduled', 'Report', { schedule_cron: undefined }),
+        plan('cleared', 'Report', { schedule_cron: '' }),
+        { id: 'agent', title: 'Report', effect: 'run_agent', created_by: 'owner' },
+      ];
+      const names: Record<string, string> = { 'wf-1': 'Report', 'wf-2': 'Invoices', 'wf-3': 'Monthly report' };
+      const history = {
+        getWorkflowExact: (id: string) => (names[id] === undefined ? undefined : { id, name: names[id] }),
+        workflowStampState: () => 'stamped',
+        getTriggerStampConnections: () => undefined,
+      };
+      await withEngine({ getTaskManager: () => ({ listTriggers: () => rows }), getWorkerLoop: () => null, getRunHistory: () => history }, async () => {
+        const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+        expect(triggers.map((t) => [t.id, t['title'], Object.hasOwn(t, 'title_workflow') ? t['title_workflow'] : 'absent'])).toEqual([
+          ['new', 'Report', 'Report'],
+          ['old', 'Scheduled: Report', 'Report'],
+          ['forged', 'Scheduled: Report, approved by the owner', 'absent'],
+          ['own', 'Monthly', 'absent'],
+          ['other', 'Report', 'absent'],
+          ['gone', 'Scheduled: Gone', 'absent'],
+          ['renamed', 'Report', 'absent'],
+          ['unscheduled', 'Report', 'absent'],
+          ['cleared', 'Report', 'absent'],
+          ['agent', 'Report', 'absent'],
         ]);
       });
     });

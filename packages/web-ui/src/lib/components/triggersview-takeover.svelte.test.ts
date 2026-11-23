@@ -235,35 +235,33 @@ describe('the confirmation', () => {
 		expect(titleBox('Monatsabschluss')).toBeNull();
 	});
 
-	it('sets every paused title apart, and keeps the engine\'s prefix outside only on the owner\'s own plan', async () => {
-		const owner = { created_by: 'owner', edited_by: undefined, mandate_editor: undefined };
+	it('sets every paused title apart, and puts lynox\'s words before it only where the list says it is the workflow\'s name', async () => {
 		const ida = 'mandate:ida@treuhand-mueller-partner.ch';
 		rows = [
 			// The owner's plan may run a workflow someone else named, and carry that name: boxed too.
-			{ ...PAUSED, ...owner, id: 'o1', title: 'Owner plan' },
-			{ ...PAUSED, ...owner, id: 'o2', title: 'Scheduled: Forged', edited_by: 'owner' },
-			{ ...PAUSED, ...owner, id: 'o3', title: 'Scheduled: Never changed' },
-			{ ...PAUSED, ...owner, id: 'e1', title: 'Scheduled: Edited only', edited_by: ida },
-			{ ...PAUSED, id: 'm1', title: 'Scheduled: Mandate made' },
-			{ ...PAUSED, ...owner, id: 'm2', title: 'Scheduled: Mandate last', edited_by: ida, mandate_editor: ida },
-			{ ...PAUSED, ...owner, id: 'm3', title: 'Scheduled: Mandate before', edited_by: 'owner', mandate_editor: ida },
-			{ ...PAUSED, ...owner, id: 'u1', title: 'Scheduled: Unknown', created_by: undefined },
+			{ ...PAUSED, created_by: 'owner', id: 'o1', title: 'Owner plan' },
+			// Titled with its workflow's name by the engine, now (the name alone) and before (prefixed).
+			{ ...PAUSED, id: 'w1', title: 'Wochenbericht', title_workflow: 'Wochenbericht', edited_by: ida },
+			{ ...PAUSED, created_by: 'owner', id: 'w2', title: 'Scheduled: Monatsbericht', title_workflow: 'Monatsbericht' },
+			// A title that starts with the prefix is whole in its box, the owner's own plan's too:
+			// only the list says a title is the workflow's name, never the title's text.
+			{ ...PAUSED, created_by: 'owner', id: 'f1', title: 'Scheduled: Forged' },
+			{ ...PAUSED, id: 'f2', title: 'Scheduled: Mandate made', created_by: ida },
 		];
 		await render();
 		const title = (t: string): Element | undefined => [...target.querySelectorAll('p.font-medium')].find((e) => e.textContent?.trim() === t);
 		const boxed: Array<[string, string]> = [
 			['Owner plan', 'Owner plan'],
-			['Scheduled: Forged', 'Forged'],
-			['Scheduled: Never changed', 'Never changed'],
-			['Scheduled: Edited only', 'Scheduled: Edited only'],
+			['Geplant: Wochenbericht', 'Wochenbericht'],
+			['Geplant: Monatsbericht', 'Monatsbericht'],
+			['Scheduled: Forged', 'Scheduled: Forged'],
 			['Scheduled: Mandate made', 'Scheduled: Mandate made'],
-			['Scheduled: Mandate last', 'Scheduled: Mandate last'],
-			['Scheduled: Mandate before', 'Scheduled: Mandate before'],
-			['Scheduled: Unknown', 'Scheduled: Unknown'],
 		];
 		for (const [line, value] of boxed) {
 			const box = title(line)?.querySelector('bdi[data-foreign-value]');
 			expect(box?.textContent, line).toBe(value);
+			// One box per line: lynox's words stand outside it.
+			expect(title(line)!.querySelectorAll('bdi[data-foreign-value]').length, line).toBe(1);
 			// A grey box in the list's font: the title keeps its width.
 			expect(box!.classList.contains('bg-bg-muted'), line).toBe(true);
 			expect(box!.classList.contains('font-mono'), line).toBe(false);
@@ -275,6 +273,27 @@ describe('the confirmation', () => {
 			expect(box!.classList.contains('border'), line).toBe(true);
 			expect(box!.classList.contains('border-text-subtle'), line).toBe(true);
 		}
+	});
+
+	it('says lynox\'s words before a workflow\'s name in the reader\'s language, on a paused plan and in the list', async () => {
+		const plans = [
+			{ ...PAUSED, id: 'w1', title: 'Wochenbericht', title_workflow: 'Wochenbericht' },
+			{ ...PAUSED, id: 'w2', title: 'Monatsbericht', title_workflow: 'Monatsbericht', paused: false, paused_who: undefined, paused_ended: undefined },
+			{ ...PAUSED, id: 'f1', title: 'Scheduled: Forged', paused: false, paused_who: undefined, paused_ended: undefined },
+		];
+		const lines = (): string[] => [...target.querySelectorAll('p[data-trigger-title]')].map((e) => (e.textContent ?? '').trim());
+		rows = plans;
+		await render();
+		expect(lines()).toEqual(['Geplant: Wochenbericht', 'Geplant: Monatsbericht', 'Scheduled: Forged']);
+		unmount(component!);
+		target.replaceChildren();
+		setLocale('en');
+		await render();
+		expect(lines()).toEqual(['Scheduled: Wochenbericht', 'Scheduled: Monatsbericht', 'Scheduled: Forged']);
+		// In English as in German, only the paused plan's name is boxed, and only the name.
+		const box = [...target.querySelectorAll('p[data-trigger-title]')][0]!.querySelector('bdi[data-foreign-value]');
+		expect(box?.textContent).toBe('Wochenbericht');
+		expect([...target.querySelectorAll('p[data-trigger-title]')].slice(1).every((e) => e.querySelector('bdi[data-foreign-value]') === null)).toBe(true);
 	});
 
 	it('sets every value someone else wrote apart, wherever a sentence of the plan takeover names it', async () => {

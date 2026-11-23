@@ -745,8 +745,12 @@ export interface LynoxUserConfig {
    * inside. It does NOT gate: the LLM provider call (separate client), push
    * notifications, error reporting, IMAP/SMTP mail, voice transcribe/TTS, or
    * a shell command outside sidecar mode (in sidecar mode with the egress
-   * proxy, a shell command reaches only the exact host names this policy lets
-   * http_request reach; src/shell-sidecar/egress.ts) — each is its own
+   * proxy, a shell command reaches only what src/shell-sidecar/egress.ts
+   * registers: under allow-all and no policy every host, until a tool round
+   * starts after the conversation took in foreign content; then, and under
+   * guarded, exact host names this policy names plus hosts the owner typed,
+   * and under guarded before that round a connected API's host;
+   * under allow-list the list; under deny-all none) — each is its own
    * separately-configured egress surface. A cross-integration air-gap is a separate control.
    *
    * ⚠ What that costs you if you have already set 'deny-all': a connected
