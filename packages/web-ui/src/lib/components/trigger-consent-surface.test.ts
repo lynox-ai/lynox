@@ -162,7 +162,7 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		const next = ifBlockAround("t('tasks.next_run')");
 		// The whole condition, not `toContain`: an `|| true` appended to it leaves the
 		// expected text in place and puts the date back on a waiting trigger.
-		expect(next.cond).toBe('trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.paused !== true');
+		expect(next.cond).toBe("trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.running !== true && trigger.status !== 'waiting' && trigger.status !== 'completed' && trigger.status !== 'stopped' && !(trigger.status === 'failed' && !trigger.schedule_cron) && trigger.paused !== true");
 		const run = ifBlockAround('runNow(trigger)');
 		// Nor at a completed plan that keeps its pause (ux U-179): the refusal names no way out there.
 		expect(run.cond).toBe('!held(trigger) && !pausedDone(trigger)');

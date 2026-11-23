@@ -201,6 +201,16 @@ describe('a start on an instance the platform hosts', () => {
     expect(() => ensureVaultKey()).toThrow(MANAGED_VAULT_KEY_REFUSAL);
   });
 
+  it('refuses a key of blanks or one with a blank in it, which the entrypoint lets through as set', () => {
+    managedDir();
+    for (const key of [' '.repeat(64), KEY64.slice(0, 63) + ' ', KEY64.slice(0, 32) + '\t' + KEY64.slice(33)]) {
+      _resetVaultKeySource();
+      vi.stubEnv('LYNOX_VAULT_KEY', key);
+      vi.stubEnv('LYNOX_VAULT_KEY_SOURCE', 'env');
+      expect(() => ensureVaultKey(), JSON.stringify(key)).toThrow(MANAGED_VAULT_KEY_REFUSAL);
+    }
+  });
+
   it('refuses a key the entrypoint read from the volume or generated, or one it cannot explain', () => {
     managedDir();
     vi.stubEnv('LYNOX_VAULT_KEY', KEY64);

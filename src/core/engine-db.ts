@@ -1631,6 +1631,11 @@ const MIGRATIONS: string[] = [
      done INTEGER NOT NULL DEFAULT 0
    );
    INSERT OR IGNORE INTO workflow_stamp_marker (id, done) VALUES (1, 0);`,
+  // v70: a grant's rows by grant, named or not (`AuditLog.mandatePrincipalOf`). The revoke row
+  // looks its person up once per revoked grant, also for a grant that never acted here; without
+  // this, a grant with no named row walks the whole trail.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (70);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_mandate ON audit_log(mandate_id, id);`,
 ];
 
 export interface EngineDbOptions {

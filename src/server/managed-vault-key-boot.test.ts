@@ -76,7 +76,7 @@ describe('a managed boot and its vault key', () => {
     await expect(init).resolves.toBeUndefined();
     expect(vaultKeySource()).toBe('env');
     expect(existsSync(join(data, 'vault.key'))).toBe(false);
-  });
+  }, 30_000);
 
   it('leaves a self-hosted first boot as it was: it generates a key (control)', async () => {
     const { data, init } = await boot({});

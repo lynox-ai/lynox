@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorkerLoop } from './worker-loop.js';
 import { RunHistory } from './run-history.js';
-import { PromptStore } from './prompt-store.js';
+import { PromptStore, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import { ThreadStore } from './thread-store.js';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
@@ -420,6 +420,45 @@ describe('a scheduled workflow that asks its owner', () => {
     // The owner is told, with what happened — not that a question expired.
     expect(h.escalationBodies).toHaveLength(1);
     expect(h.escalationBodies[0]).toContain(`Error: ${WORKFLOW_QUESTION_NOT_ASKED_ERROR}`);
+  });
+
+  it('a blocked question (a send to a target the owner did not name) ends the run failed as not asked, and the record names the target', async () => {
+    const h = makeHarness();
+    let answer: string | undefined;
+    wf.step = async (opts) => {
+      answer = await opts.parentPrompt!.parentAskUserPrompt!('Send mail: …', ['Allow', 'Deny'], { blocked: true });
+      // The step's send check reports the refusal (`onOriginRefused`), which the runner hands back.
+      const refusal = { targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } };
+      return { ...runnerResult(opts, []), originRefusals: [refusal] };
+    };
+    void h.loop.tick();
+    await waitUntil('the run to end', () => h.records.length > 0);
+    expect(answer).toBe(UNATTENDED_BLOCK_ANSWER);
+    // Ended, visibly, and not completed: no step goes on without the answer.
+    expect(wf.calls[0]!.questionWait?.unansweredBecause).toBe('not_asked');
+    expect(h.records[0]![2]).toBe('failed');
+    expect(h.records[0]![1]).toContain('The trigger "Weekly offer" did not send to "x@evil.example"');
+    expect(h.prompts.getPending(wf.calls[0]!.runId!)).toBeUndefined();
+  });
+
+  it('a run that throws after a step refused a send records the refusal before the error', async () => {
+    const h = makeHarness();
+    const refusal = { targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } };
+    wf.step = async () => ({ ok: false, error: 'Workflow execution failed: step two threw', originRefusals: [refusal] });
+    void h.loop.tick();
+    await waitUntil('the run to end', () => h.records.length > 0);
+    expect(h.records[0]![2]).toBe('failed');
+    expect(h.records[0]![1]).toMatch(/^The trigger "Weekly offer" did not send to "x@evil\.example": .*\n\n.*step two threw/s);
+  });
+
+  it('CONTROL: a run that throws without a refused send records only the error', async () => {
+    const h = makeHarness();
+    wf.step = async () => ({ ok: false, error: 'Workflow execution failed: step two threw' });
+    void h.loop.tick();
+    await waitUntil('the run to end', () => h.records.length > 0);
+    expect(h.records[0]![2]).toBe('failed');
+    expect(h.records[0]![1]).toContain('step two threw');
+    expect(h.records[0]![1]).not.toContain('did not send');
   });
 
   it('a shutdown during the wait records nothing, escalates nothing, and keeps the lease', async () => {

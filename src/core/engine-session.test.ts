@@ -148,6 +148,10 @@ vi.mock('./agent.js', () => {
     this.snapshotComposition = vi.fn().mockReturnValue(undefined);
     // @ts-expect-error mock constructor
     this.loadMessages = mockLoadMessages;
+    // @ts-expect-error mock constructor — the provider-search flag a rebuild carries
+    this.heldProviderSearch = vi.fn().mockReturnValue(false);
+    // @ts-expect-error mock constructor
+    this.restoreProviderSearch = vi.fn();
     // @ts-expect-error mock constructor
     this.setContinuationPrompt = mockSetContinuationPrompt;
     // @ts-expect-error mock constructor
@@ -350,6 +354,9 @@ vi.mock('./task-manager.js', () => ({
     this.list = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
     this.getWeekSummary = vi.fn().mockReturnValue({ overdue: [], dueToday: [], dueThisWeek: [], inProgress: [] });
+    // Called by Engine.init() when engine.db does not open and run history does (see the test that boots without it).
+    // @ts-expect-error mock constructor
+    this.refuseTaskChangesWithoutStore = vi.fn();
   }),
   setPipelineModeLookup: vi.fn(),
 }));
@@ -496,7 +503,7 @@ import { APPROVAL_DRAFT_UNAVAILABLE, closeLoadedContext } from './chat-context.j
 import { approvalChatTitle } from './approval-chat-title.js';
 import { ChangesetManager } from './changeset.js';
 import { setTenantWorkspace } from './workspace.js';
-import { mkdtempSync as mkdtempForWorkspace, rmSync as rmForWorkspace } from 'node:fs';
+import { mkdtempSync as mkdtempForWorkspace, rmSync as rmForWorkspace, writeFileSync as writeFileForWorkspace } from 'node:fs';
 import { tmpdir as tmpdirForWorkspace } from 'node:os';
 import { join as joinForWorkspace } from 'node:path';
 import { _resetVaultKeySource } from './vault-key-source.js';
@@ -765,6 +772,25 @@ describe('Engine + Session (Orchestrator)', () => {
         (inst) => (((inst as { getBriefingSummary?: { mock?: { calls: unknown[] } } }).getBriefingSummary?.mock?.calls.length) ?? 0) > 0,
       );
       expect(summaryCalled, 'Engine must call TaskManager.getBriefingSummary for the task overview (L2a lift)').toBe(true);
+    });
+
+    it('boots without engine.db and tells the task manager to refuse changes', async () => {
+      // A data dir that is a plain file: engine.db cannot be created under it, so init() runs
+      // the branch where engineDb is null.
+      const dir = mkdtempForWorkspace(joinForWorkspace(tmpdirForWorkspace(), 'lynox-no-engine-db-'));
+      const notADir = joinForWorkspace(dir, 'data-dir-is-a-file');
+      writeFileForWorkspace(notADir, '');
+      vi.stubEnv('LYNOX_DATA_DIR', notADir);
+      try {
+        const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+        await expect(engine.init(), 'init() must not throw when engine.db is missing').resolves.toBe(engine);
+        expect((engine as unknown as { engineDb: unknown }).engineDb).toBeNull();
+        const tm = (engine as unknown as { _taskManager: { refuseTaskChangesWithoutStore: ReturnType<typeof vi.fn> } })._taskManager;
+        expect(tm.refuseTaskChangesWithoutStore).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.unstubAllEnvs();
+        rmForWorkspace(dir, { recursive: true, force: true });
+      }
     });
 
     it('recomputes the task overview per Session (B2) — not frozen at engine boot', async () => {

@@ -4,6 +4,11 @@
 
 ### Upgrade notes
 
+- Managed instances now sign the Google connect start token in the
+  provider-bound v2 format. A control plane that does not accept v2 yet answers
+  every Connect with `bad_signature`, so the control plane has to be updated
+  before the engine. Self-hosted instances are unaffected: the brokered connect
+  only exists on managed hosting.
 - `docker-compose.yml` and the compose file the installer writes no longer pin
   `platform: linux/amd64`. ARM and Apple Silicon hosts get the native arm64 image
   after `docker compose pull && docker compose up -d` instead of the amd64 image
@@ -22,6 +27,14 @@
   from the release that carries #2207 on; a tab opened before the upgrade gets
   "confirm failed" until it is reloaded. An API client that confirms schedules
   reads the preview first.
+- In sidecar mode with the egress proxy, a `bash` call whose tool round started after
+  the conversation read outside content (a web page, a search, a mail, a
+  previous `bash` call) no longer reaches every host under `allow-all` or no
+  policy. Its proxy credential then names the built-in provider hosts, the
+  operator's `network_allowed_hosts` and the hosts the owner typed in the thread; under
+  `guarded` a connected API's host is left out. `allow-list` and `deny-all` are
+  unchanged. A command that needs another host after that reaches it once the
+  owner names the host in the chat.
 
 ## 2.18.0 — 2026-11-17
 

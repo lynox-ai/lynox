@@ -21,7 +21,7 @@ function freshDb(): Database.Database {
     );
     CREATE TABLE thread_messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT NOT NULL, seq INTEGER NOT NULL,
-      role TEXT NOT NULL, content_json TEXT NOT NULL, usage_json TEXT, display_only INTEGER NOT NULL DEFAULT 0,
+      role TEXT NOT NULL, content_json TEXT NOT NULL, usage_json TEXT, display_only INTEGER NOT NULL DEFAULT 0, author TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
