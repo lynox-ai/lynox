@@ -1788,6 +1788,8 @@ async function executeThinker(
     // Share the parent's Session counters so one conversation accumulates
     // a single http/write budget across the main agent + all sub-agents.
     sessionCounters: parentAgent.sessionCounters,
+    // One conversation, one record of what its searches listed (`SearchResultAddresses`).
+    searchResultAddresses: parentAgent.searchResultAddresses,
     // Share the recall blob store so a sub-agent's `recall_tool_result` can
     // resolve handles minted by the parent conversation's last compaction.
     toolResultBlobStore: parentAgent.toolResultBlobStore,
@@ -1855,6 +1857,9 @@ async function executeThinker(
     // customer-granted-operator-access §3.13 E5) — again on top of the filtered list. After both
     // spreads for the same reason as the scope: no key a source gains later can rebind it.
     principal: parentAgent.principal,
+    // And who the parent writes as: a child of a trigger's run writes as that trigger, never
+    // as the owner. Unknown when the parent has none.
+    writeAuthor: parentAgent.writeAuthor ?? null,
     // T2-X1 part 4: pass the pre-minted runId so the constructor stamps it
     // onto the child and the child's downstream code (memory writes, tool-call
     // recording) can attribute work to this run.
@@ -1871,6 +1876,18 @@ async function executeThinker(
     recordToolCall: parentAgent.recordToolCall,
     // The root's set, by reference: what the child fetches is in it before the parent writes.
     conversationGrants: parentAgent.conversationGrants,
+    // The parent's owner-known targets, by reference and read-only: the child's task, written by
+    // the parent's model, and what the child reads add nothing. And the conversation's record of
+    // outside reads, which the child sets under the same thread.
+    ownerKnown: parentAgent.ownerKnown,
+    conversationLatch: parentAgent.conversationLatch,
+    noticeLanguage: parentAgent.noticeLanguage,
+    onOriginRefused: parentAgent.onOriginRefused,
+    // A target the child was not given by the owner comes from the run the parent is (a
+    // trigger's, a workflow's), or else from the subtask itself.
+    sendOrigin: parentAgent.sendOrigin?.kind === 'triggerRun' || parentAgent.sendOrigin?.kind === 'workflowRun'
+      ? parentAgent.sendOrigin
+      : { kind: 'childAgent' },
   };
 
   // Single try wraps both `new Agent(...)` AND `send(...)` so the runs-row

@@ -398,6 +398,34 @@ export interface IAgent {
   recordToolCall?: ToolCallRecorder | undefined;
   /** The conversation's grant set — read by `spawn_agent` so a child adds to its root's set. */
   readonly conversationGrants?: ConversationGrants | undefined;
+  /** Who this agent's writes are recorded as (`RowStamp.writtenBy`): the run's author tag
+   *  (`runAuthorTag`), a workflow's (`workflowAuthorTag`), or a parent's for a sub-agent. Null or
+   *  absent is unknown. Never `owner` in a trigger's or a workflow's run. */
+  readonly writeAuthor?: string | null | undefined;
+  /** Which send targets the owner named, read-only: a check before a send asks it, nothing adds
+   *  to it. A sub-agent and a workflow step get their conversation's, by reference. Absent: every
+   *  target is foreign. */
+  readonly ownerKnown?: import('../core/owner-known-targets.js').OwnerKnownReader | undefined;
+  /** The page addresses searches in this agent's conversation listed as results, as the provider
+   *  gave them (`web_research` search adds to it, nothing else does). The origin check reads it for
+   *  a read after foreign content (`ToolEntry.readAddress`). A sub-agent and a workflow step share their
+   *  conversation's, by reference. Absent: none. */
+  readonly searchResultAddresses?: import('../core/search-result-addresses.js').SearchResultAddresses | undefined;
+  /** See `Agent.batchStartedTainted`. */
+  batchStartedTainted?(): boolean;
+  /** See `Agent.heldProviderSearch`. */
+  heldProviderSearch?(): boolean;
+  /** Where a target the owner did not name comes from in this agent's run, as far as the run
+   *  knows it (a trigger's, a workflow's, a sub-agent, a helper's thread). Absent: read from the
+   *  agent's taint (`readContent`), else unknown. */
+  readonly sendOrigin?: import('../core/origin-notices.js').SendOrigin | undefined;
+  /** The language of the questions the agent asks in its own words. */
+  readonly noticeLanguage?: import('../core/notice-language.js').NoticeLanguage | undefined;
+  /** The thread's persisted record that the conversation read content from outside. */
+  readonly conversationLatch?: import('../core/conversation-latch.js').ConversationLatch | undefined;
+  /** Told of every send refused in a run nobody watches because the owner did not name the target,
+   *  so the run's result can say so. A sub-agent tells its parent's. */
+  readonly onOriginRefused?: ((refusal: import('../core/origin-notices.js').OriginRefusal) => void) | undefined;
   /** Wave 1.2: has this run seen wrapped untrusted content? Read by the memory tools
    *  (`sourceUntrusted` evidence) and by spawn to propagate a child's taint to a parent
    *  that shares its Memory. */

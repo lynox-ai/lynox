@@ -1,4 +1,5 @@
 <script lang="ts">
+	import BulkHost from './BulkHost.svelte';
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
@@ -8,10 +9,12 @@
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { escalationNotice } from '../utils/trigger-escalation.js';
 	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
-	import { endedNotices, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
+	import { endedNotices, pausedTitleLine, planTitle, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
 	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
 	import StampConfirm from './StampConfirm.svelte';
+	import MarkedLine from './MarkedLine.svelte';
+	import RecipientConfirm from './RecipientConfirm.svelte';
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
@@ -43,6 +46,8 @@
 		// schedule a mandate set up or last changed waits for the owner's stamp (`awaitsOwnerStamp`).
 		created_by?: string;
 		edited_by?: string;
+		// The last mandate that changed the trigger, kept after the owner changes it again.
+		mandate_editor?: string;
 		// What the owner's stamp of a confirmed plan lists, entry by entry (owner only; B3).
 		stamp_listed?: StampListed | null;
 		// Whether the last escalation of this trigger (a failed scheduled run, a watch
@@ -61,6 +66,32 @@
 		paused_who?: string[];
 		// How and when each of those accesses ended, for the owner only: the notices above the list.
 		paused_ended?: PausedEnded[];
+		// A bulk run's trigger: the host its run works on, or null where it has none (`GET /api/triggers`).
+		bulk_host?: string | null;
+		// The workflow's name, where the plan's title is that name as the engine wrote it
+		// (`GET /api/triggers`): the list puts lynox's words before it (`planTitle`).
+		title_workflow?: string;
+		// From before its creator was recorded, nobody else's hand in it: it sends to none of the
+		// recipients it names until the owner confirms them (`GET /api/triggers`, owner only).
+		recipients_unconfirmed?: boolean;
+	}
+
+	// A bulk run's trigger is titled with its run id, which the model reads; the list names it by
+	// its stage and host instead (U-324). Every other trigger by its title, a workflow's name
+	// after lynox's words where the engine titled the plan with it (`planTitle`).
+	const BULK_STAGE_KEYS: Readonly<Record<string, string>> = {
+		bulk_preview: 'triggers.bulk.preview', bulk_judge: 'triggers.bulk.judge', bulk_apply: 'triggers.bulk.apply', bulk_undo: 'triggers.bulk.undo',
+	};
+	// The host is the planner's, so it stands boxed as code beside the stage, never as part of the title.
+	function shownTitle(trigger: Trigger): string {
+		const key = trigger.effect === undefined ? undefined : BULK_STAGE_KEYS[trigger.effect];
+		return key === undefined ? planTitle(trigger) : t(key);
+	}
+	const HOST_SEP = ' · ';
+	function shownHost(trigger: Trigger): string | null {
+		if (trigger.effect === undefined || BULK_STAGE_KEYS[trigger.effect] === undefined) return null;
+		const host = trigger.bulk_host ?? null;
+		return host === null || host === '' ? null : host;
 	}
 
 	// How often the list is reloaded while the tab is visible, so a run that started on its
@@ -180,6 +211,8 @@
 	// "Check connections": a confirmed schedule whose run can use a connection, opened on demand,
 	// so the preview is not asked for on every refresh (ux U-058, ii-c-min).
 	let checking = $state<Record<string, boolean>>({});
+	// "Confirm recipients" opened per row.
+	let confirmingRecipients = $state<Record<string, boolean>>({});
 	function offersCheck(trigger: Trigger): boolean {
 		// Not once a member's access ended: the gate refuses the run whatever is listed, so allowing a
 		// connection there changes nothing, and the ended note already names the way out.
@@ -496,6 +529,12 @@
 		}
 	}
 
+	/** Whether a run's time has passed, as the list is drawn (it reloads on its own while open). */
+	function isDue(iso: string): boolean {
+		const at = new Date(iso).getTime();
+		return Number.isFinite(at) && at <= Date.now();
+	}
+
 	function fmtDate(iso: string): string {
 		return new Date(iso).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 	}
@@ -522,9 +561,12 @@
 		interrupted: 'text-warning',
 	};
 	// Colour alone does not tell these apart from the rest (and not at all to a reader
-	// who does not see colour), so they also carry a word. `stopped` and `halted` share
-	// the muted colour, which makes the word the only thing that separates them.
-	const runStatusWord: Record<string, 'tasks.run_halted' | 'tasks.run_interrupted' | 'tasks.run_stopped'> = {
+	// who does not see colour), so every run that did not succeed carries a word. `stopped`
+	// and `halted` share the muted colour, which makes the word the only thing that
+	// separates them; `failed` and `timeout` share the danger colour.
+	const runStatusWord: Record<string, 'tasks.run_failed' | 'tasks.run_timeout' | 'tasks.run_halted' | 'tasks.run_interrupted' | 'tasks.run_stopped'> = {
+		failed: 'tasks.run_failed',
+		timeout: 'tasks.run_timeout',
 		halted: 'tasks.run_halted',
 		interrupted: 'tasks.run_interrupted',
 		stopped: 'tasks.run_stopped',
@@ -558,7 +600,7 @@
 	     shortens the name to fit). The owner's only — a helper's list carries no `paused_ended`. -->
 	{#if viewer === 'owner'}
 		{#each endedNotices(triggers.filter(pausedOpen), endDayOf) as notice}
-			<div class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-3 text-sm text-text mb-4 break-words" data-paused-notice>{notice}</div>
+			<div class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-3 text-sm text-text mb-4 break-words" data-paused-notice><MarkedLine text={notice} /></div>
 		{/each}
 	{/if}
 
@@ -578,7 +620,9 @@
 							<!-- Wrapping, so the badges move to their own line on a narrow card instead
 							     of squeezing the title: the badges are `shrink-0` and the title clamps. -->
 							<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-								<p class="text-sm font-medium line-clamp-2 break-words">{trigger.title}</p>
+								<!-- A plan to take over: its title is someone else's value, as in the notice above (`pausedTitleLine`).
+								     A bulk run's trigger is named by its stage and host instead (`shownTitle`); it offers no takeover. -->
+								<p class="text-sm font-medium line-clamp-2 break-words" data-trigger-title>{#if pausedOpen(trigger) && !(trigger.effect ?? '').startsWith('bulk_')}<MarkedLine text={pausedTitleLine(trigger)} mono={false} />{:else}{shownTitle(trigger)}{#if shownHost(trigger) !== null}{HOST_SEP}<BulkHost value={shownHost(trigger) ?? ''} testid="trigger-bulk-host" />{/if}{/if}</p>
 								<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{typeLabel(trigger)}</span>
 								{#if trigger.enabled === 0}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning">{t('triggers.paused')}</span>
@@ -604,8 +648,17 @@
 								     past — it is not a next run, so it is not labelled as one. It is said
 								     in the consent block below instead, where it is the thing a person
 								     needs: what confirming starts, and when. -->
-								{#if trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.paused !== true}
-									<span>{t('tasks.next_run')}: {fmtDate(trigger.next_run_at)}</span>
+								<!-- Nor does a trigger the worker will not start: one whose run is parked on an
+								     open question (it keeps the moment it parked as next_run_at until the
+								     question is answered), one that is completed or stopped (completing a
+								     trigger leaves its next_run_at as it was), and a failed one without a
+								     schedule. Nor one that is running: its next_run_at moves only once the run
+								     has ended, and the running badge says what happens. -->
+								{#if trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.running !== true && trigger.status !== 'waiting' && trigger.status !== 'completed' && trigger.status !== 'stopped' && !(trigger.status === 'failed' && !trigger.schedule_cron) && trigger.paused !== true}
+									<!-- A next_run_at in the past is due since then (until the worker takes it, or
+									     when it could not start it), not a next run before the last one. -->
+									{@const due = isDue(trigger.next_run_at)}
+									<span data-next-run={due ? 'due' : 'next'}>{due ? t('tasks.due_since') : t('tasks.next_run')}: {fmtDate(trigger.next_run_at)}</span>
 								{/if}
 								{#if trigger.last_run_at}
 									<span class={runStatusColor[trigger.last_run_status ?? ''] ?? ''} data-run-status={trigger.last_run_status}>{t('tasks.last_run')}: {fmtDate(trigger.last_run_at)}{#if Object.hasOwn(runStatusWord, trigger.last_run_status ?? '')}&nbsp;· {t(runStatusWord[trigger.last_run_status ?? '']!)}{/if}</span>
@@ -662,13 +715,26 @@
 								{@const note = listedNote(listed, pausedOpen(trigger))}
 								<div class="mt-2 text-xs text-text-muted" data-stamp-listed>
 									<span class="font-medium">{t('stamp.listed_heading')}:</span>
-									<ul class="mt-0.5">
+									<ul class="mt-0.5 list-disc pl-4 space-y-0.5">
 										{#each listed.entries as entry}
-											<li data-stamp-entry={entry.state}>{listedLine(entry)}</li>
+											<li class="break-words" data-stamp-entry={entry.state}><MarkedLine text={listedLine(entry)} /></li>
 										{/each}
 									</ul>
 									{#if note}
 										<p class="mt-0.5 text-warning" data-stamp-note>{note}</p>
+									{/if}
+								</div>
+							{/if}
+							{#if ownerActs && trigger.recipients_unconfirmed === true}
+								<!-- The engine does not count this trigger's instruction as the owner's, so its run
+								     sends to none of the recipients it names. The hint leads to the button; the
+								     button opens the instruction to confirm. -->
+								<div class="mt-2 text-xs" data-recipients-unconfirmed>
+									<p class="text-warning">{t('recipients.unconfirmed_hint')}</p>
+									{#if confirmingRecipients[trigger.id]}
+										<RecipientConfirm id={trigger.id} onconfirmed={() => { confirmingRecipients[trigger.id] = false; void loadTriggers(true); }} onclose={() => (confirmingRecipients[trigger.id] = false)} />
+									{:else}
+										<button onclick={() => (confirmingRecipients[trigger.id] = true)} class="mt-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1 text-xs text-text-muted hover:text-text" data-recipients-open>{t('recipients.button')}</button>
 									{/if}
 								</div>
 							{/if}
@@ -731,14 +797,14 @@
 	>
 		<div class="w-full max-w-md max-h-[85vh] overflow-y-auto rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg">
 			<h2 id="takeover-title" class="text-sm font-medium mb-1">{t('takeover.title')}</h2>
-			<p class="text-xs text-text-subtle mb-3 break-words">{takeoverFor.title}</p>
+			<p class="text-xs text-text-subtle mb-3 break-words" data-takeover-subtitle><MarkedLine text={pausedTitleLine(takeoverFor)} mono={false} /></p>
 			{#if takeoverNote !== ''}
-				<p class="text-xs text-warning mb-3" role="status" data-takeover-note>{takeoverNote}</p>
+				<p class="text-xs text-warning mb-3" role="status" data-takeover-note><MarkedLine text={takeoverNote} /></p>
 			{/if}
 			{#if takeoverPreview !== null}
 				<ul class="space-y-2 text-xs text-text-muted" data-takeover-lines>
 					{#each takeoverLines(takeoverPreview, dayOf) as line}
-						<li class="break-words" data-takeover-line={line.kind}>{line.text}</li>
+						<li class="break-words" data-takeover-line={line.kind}><MarkedLine text={line.text} /></li>
 					{/each}
 				</ul>
 			{:else if takeoverNote === ''}

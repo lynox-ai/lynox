@@ -482,7 +482,18 @@ function measureStaticPrefixTokens(): number {
 // main d33659095, the only file that differs) — `update_workflow_steps` gains `rename_step` and a
 // `goal` field: the way out for a workflow stored with a step id or goal the save now refuses, and
 // `#2` names a step by its position. The rules for a new id stay in the refusals, not the schema.
-const STATIC_PREFIX_BUDGET = 24061;
+// 2026-11-17: +14 (24061 → 24075, both measured the same run, the base with update-workflow.ts of
+// main 9d9c96b42, the only file that differs) — `update_workflow_steps` gains `set_input_from`, the
+// way to repair a stored step whose `{{<id>.result}}` reference names a step missing from its
+// `input_from`, which the save and every run now refuse. The field's text is one short phrase; how
+// to repair a reference stays in the refusals.
+// 2026-11-21: +21 (24075 → 24096, both measured with the budget set to 1, the base at c1b060ba;
+// artifact.ts is the only file of the prefix that differs) — `artifact_save`'s `content` says,
+// at its html part, that images load only as inline SVG or data: URLs. The artifact policy
+// refuses every remote image, and `detailedGuidance` reaches the model only after its first
+// call, so without this the first html artifact would be written with images that never load.
+// The full rule, the ways around it and what to tell the user stay in `detailedGuidance`.
+const STATIC_PREFIX_BUDGET = 24096;
 
 /**
  * How far ABOVE the measurement the budget may sit before the ratchet is a

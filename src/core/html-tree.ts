@@ -309,7 +309,7 @@ function storeLayoutBreak(parent: HtmlParent, nodes: readonly HtmlChild[], i: nu
 // element ['E', namespace, name, attrs sorted, children], text ['T', value], comment ['C', data].
 type NormNode = readonly ['E', string, string, readonly (readonly [string, string, string, string])[], readonly NormNode[]] | readonly ['T', string] | readonly ['C', string];
 
-function normChildren(parent: HtmlParent, keepWs: boolean, parentIsBlock: boolean, shown = false): NormNode[] {
+function normChildren(parent: HtmlParent, keepWs: boolean, parentIsBlock: boolean, shown = false, loose = false): NormNode[] {
   const { nodes } = childrenOf(parent);
   const out: NormNode[] = [];
   nodes.forEach((node, i) => {
@@ -317,8 +317,9 @@ function normChildren(parent: HtmlParent, keepWs: boolean, parentIsBlock: boolea
       const attrs = attrsOf(node)
         .map((a) => [a.namespace ?? '', a.prefix ?? '', a.name, a.value] as const)
         .sort((x, y) => (x[0] + '\u0000' + x[1] + '\u0000' + x[2] < y[0] + '\u0000' + y[1] + '\u0000' + y[2] ? -1 : 1));
-      out.push(['E', node.namespaceURI as string, node.tagName, attrs, normChildren(node, keepWs || keepsWhitespace(node), isBlock(node), shown || stylesWhitespace(node))]);
+      out.push(['E', node.namespaceURI as string, node.tagName, attrs, normChildren(node, keepWs || keepsWhitespace(node), isBlock(node), shown || stylesWhitespace(node), loose)]);
     } else if (defaultTreeAdapter.isTextNode(node)) {
+      if (loose && ASCII_WS_ONLY.test(node.value)) return;
       if (keepWs) { out.push(['T', node.value]); return; }
       if (ASCII_WS_ONLY.test(node.value)) {
         // Dropped only between two block boundaries: a block element, or the start or end of a
@@ -366,4 +367,15 @@ export function normalizeHtml(value: string): string {
 
 export function htmlEqual(a: string, b: string): boolean {
   return normalizeHtml(a) === normalizeHtml(b);
+}
+
+/**
+ * {@link htmlEqual} with every text node of ASCII white space alone dropped, wherever it stands: a
+ * store that saves a value again may lay it out with a line break more or less (at a `li`, between
+ * cells) than {@link storeLayoutBreak} knows. Looser, so only where looser is the safe direction:
+ * finding a value a write left marked. Never to decide that a write may go ahead.
+ */
+export function htmlEqualIgnoringLayout(a: string, b: string): boolean {
+  const loose = (v: string): string => JSON.stringify(normChildren(parseHtmlFragment(v), false, true, false, true));
+  return loose(a) === loose(b);
 }

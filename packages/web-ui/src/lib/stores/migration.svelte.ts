@@ -61,11 +61,39 @@ let doneWorkspace = $state<unknown>(undefined);
 let doneSkipped = $state<readonly string[]>([]);
 let targetUrl = $state('');
 let migrationToken = $state('');
+/**
+ * What the user can do after an error, as the engine says it (`retry` on its `error` event):
+ * start again now, wait until the target releases its session, or check the target first.
+ */
+export type MigrationRetry = 'now' | 'later' | 'check';
+let retry = $state<MigrationRetry>('now');
+/** When the error came (ms); with `later` the target holds its session for at most 30 minutes from then. */
+let errorAt = $state(0);
+/** The step the error came from, so the step marks stay where it happened. */
+let errorStep = $state<MigrationStep>('preview');
+/** The error text is the engine's own sentence (English, with the target's words), not the UI's. */
+let errorFromEngine = $state(false);
 let abortController: AbortController | null = null;
 
 // ── Getters ──
 
 export function getStep(): MigrationStep { return step; }
+export function getRetry(): MigrationRetry { return retry; }
+export function getErrorAt(): number { return errorAt; }
+export function getErrorStep(): MigrationStep { return errorStep; }
+export function getErrorFromEngine(): boolean { return errorFromEngine; }
+
+/** The longest a target holds an unfinished session (the engine's sentence says "30 minutes at the latest"). */
+export const MIGRATION_HOLD_MS = 30 * 60 * 1000;
+
+function fail(message: string, from: { engine: boolean; retry?: MigrationRetry }): void {
+	if (step !== 'error') errorStep = step;
+	error = message;
+	errorFromEngine = from.engine;
+	retry = from.retry ?? 'now';
+	errorAt = Date.now();
+	step = 'error';
+}
 export function getPreview(): MigrationPreview | null { return preview; }
 export function getLoading(): boolean { return loading; }
 export function getError(): string { return error; }
@@ -116,15 +144,13 @@ export function setTarget(url: string, token: string): void {
  */
 export async function startMigration(): Promise<void> {
 	if (!targetUrl || !migrationToken) {
-		error = t('migration.error_missing_target');
-		step = 'error';
+		fail(t('migration.error_missing_target'), { engine: false });
 		return;
 	}
 
 	// Validate before sending
 	if (!isValidTargetUrl(targetUrl)) {
-		error = t('migration.error_invalid_url');
-		step = 'error';
+		fail(t('migration.error_invalid_url'), { engine: false });
 		return;
 	}
 
@@ -179,17 +205,16 @@ export async function startMigration(): Promise<void> {
 			}
 		}
 
-		if (step === 'transferring') {
-			error = t('migration.error_incomplete');
-			step = 'error';
-		}
+		if (step === 'transferring') fail(t('migration.error_incomplete'), { engine: false });
 	} catch (err: unknown) {
 		if ((err as Error).name === 'AbortError') {
-			error = t('migration.cancelled');
-		} else {
-			error = err instanceof Error ? err.message : t('migration.error_unknown');
+			// `cancelMigration` has already said so.
+			if (step === 'transferring') fail(t('migration.cancelled'), { engine: false });
+		} else if (step === 'transferring') {
+			// A refused request carries the engine's own text; a failed fetch (TypeError) the browser's.
+			if (err instanceof Error) fail(err.message, { engine: err.name !== 'TypeError' });
+			else fail(t('migration.error_unknown'), { engine: false });
 		}
-		if (step === 'transferring' || step === 'error') step = 'error';
 	} finally {
 		abortController = null;
 	}
@@ -197,8 +222,7 @@ export async function startMigration(): Promise<void> {
 
 export function cancelMigration(): void {
 	abortController?.abort();
-	step = 'error';
-	error = t('migration.cancelled');
+	fail(t('migration.cancelled'), { engine: false });
 	progress = null;
 }
 
@@ -207,6 +231,10 @@ export function reset(): void {
 	preview = null;
 	loading = false;
 	error = '';
+	retry = 'now';
+	errorAt = 0;
+	errorFromEngine = false;
+	errorStep = 'preview';
 	progress = null;
 	verification = null;
 	doneWorkspace = undefined;
@@ -260,23 +288,25 @@ function handleSSEEvent(event: string, data: Record<string, unknown>): void {
 				step = 'done';
 				// A green "completed successfully" alone would be read and dismissed while the workspace
 				// files stayed behind (ux U-046).
-				const omitted = migrationWorkspaceNotice(result, false);
+				const omitted = migrationWorkspaceNotice(result);
 				if (omitted) addToast(t(omitted.toast), 'info', 8000);
 				// Files the export could not carry: not the green toast either (row 1033, ux U-056).
 				else if (doneSkipped.length === 1) addToast(t('migration.success_skipped_one'), 'info', 8000);
 				else if (doneSkipped.length > 1) addToast(tf('migration.success_skipped_many', { n: String(doneSkipped.length) }), 'info', 8000);
 				else addToast(t('migration.success'), 'success', 5000);
 			} else {
-				error = t('migration.error_restore');
-				step = 'error';
+				fail(t('migration.error_restore'), { engine: false });
 			}
 			break;
 		}
 
-		case 'error':
-			error = String(data['message'] ?? t('migration.error_unknown'));
-			step = 'error';
-			addToast(error, 'error', 5000);
+		case 'error': {
+			// Shown once, in the wizard's error card: no toast on top of it.
+			const said = data['retry'];
+			const next: MigrationRetry = said === 'later' || said === 'check' ? said : 'now';
+			if (typeof data['message'] === 'string') fail(data['message'], { engine: true, retry: next });
+			else fail(t('migration.error_unknown'), { engine: false, retry: next });
 			break;
+		}
 	}
 }
