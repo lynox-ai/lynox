@@ -168,6 +168,14 @@ describe('acceptClaim — the grant handed over by the control plane', () => {
 });
 
 describe('refresh through the control plane', () => {
+  it('names a malformed control-plane answer, never quotes it', async () => {
+    const frag = ['zq', 'Vx81Lm'].join('');
+    const auth = new MicrosoftAuth({ vault: expiringGrant() });
+    mockFetch.mockResolvedValueOnce(new Response(`${frag}abcdef`, { status: 200 }));
+    const err = await auth.getAccessToken().then(() => null, (e: unknown) => e as Error);
+    expect(err?.message).toBe('Token refresh failed: the answer is not valid JSON');
+  });
+
   it('posts the handle to the Microsoft refresh route and replaces the rotated handle', async () => {
     const vault = expiringGrant();
     const changes: MicrosoftTokenChange[] = [];

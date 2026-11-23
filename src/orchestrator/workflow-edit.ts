@@ -1,7 +1,8 @@
 import type { InlinePipelineStep } from '../types/pipeline.js';
 import { findHiddenInName, stripHiddenInName } from '../core/hidden-text.js';
-import { isStepIdShape, stepIdRefusal, stepRunIds } from './step-id.js';
+import { isReservedStepId, isStepIdShape, reservedStepIdRefusal, stepIdRefusal, stepRunIds } from './step-id.js';
 import { fieldReferencing } from './template-refs.js';
+import { replacePlaceholders, splitLeadingSpace } from './placeholders.js';
 
 /**
  * A single step-level edit to a workflow's step list. The vocabulary is shared
@@ -25,11 +26,12 @@ export interface StepModification {
   after?: string | undefined;
 }
 
-/** Why `id` cannot be a new step's id, or null: an id outside the shape (`step-id.ts`). The shape
+/** Why `id` cannot be a new step's id, or null: an id outside the shape, or a reserved one (`step-id.ts`). The shape
  *  also keeps out what a reference could not name: a dot or a brace (`{{<id>.result}}` is cut at each
  *  dot and ends at `}`) and a leading `#`, which names a step by its position. */
 function newIdProblem(id: string, action: 'add_step' | 'rename_step'): string | null {
-  return isStepIdShape(id) ? null : `Error: ${action}: ${stepIdRefusal('the new id', { refs: false })}`;
+  if (!isStepIdShape(id)) return `Error: ${action}: ${stepIdRefusal('the new id', { refs: false })}`;
+  return isReservedStepId(id) ? `Error: ${action}: ${reservedStepIdRefusal('the new id', { refs: false })}` : null;
 }
 
 /** A step id as a refusal quotes it: as it reads, escaped, and short. */
@@ -116,7 +118,8 @@ function ambiguousText(steps: readonly InlinePipelineStep[], id: string, what: s
 
 /** `text` with every `{{<from>…}}` reference to a step's output pointed at `to`. */
 function renamedRefs(text: string, from: string, to: string): string {
-  return text.replace(/\{\{(\s*)([^}]+)\}\}/g, (match: string, ws: string, path: string) => {
+  return replacePlaceholders(text, (match: string, inner: string) => {
+    const [ws, path] = splitLeadingSpace(inner);
     // As `resolveTaskTemplate` reads a path: trimmed, the step id up to the first dot.
     if (path.trimEnd() !== from && !path.startsWith(`${from}.`)) return match;
     return `{{${ws}${to}${path.slice(from.length)}}}`;
@@ -310,12 +313,16 @@ export function applyModifications(steps: InlinePipelineStep[], modifications: S
       const which = was === undefined ? `the step this edit adds ("${s.id}")`
         : isStepIdShape(was.id) ? `step "${was.id}"` : `step #${String(was.at)} (its position before this edit)`;
       // An input template cannot be edited, so keeping the step it reads is the way that loses nothing;
-      // removing the reader too is named last, and only with the user's word.
+      // removing the reader too is named last, and only with the user's word. Changing the template is
+      // not offered: this tool cannot, and a step added here runs a task, which is another kind of step.
+      // The field path stays out of the text, because the model passes it on to the user.
       if (field !== 'task') {
         const renamedToo = was !== undefined && was.id !== s.id && isStepIdShape(was.id)
           ? ` This edit also renames ${which}: if you remove it, name it by its new id.` : '';
-        return `Error: remove: ${which} reads the output of a step this edit removes, in its ${field}, and its input template cannot be edited. `
-          + `Keep the step it reads, or remove ${which} too only if the user wants it gone.${renamedToo}`;
+        return `Error: remove: ${which} reads the output of a step this edit removes, in its input template. `
+          + `Two ways fit this request: keep the step it reads, or remove ${which} too, only if the user wants it gone. `
+          + `No edit this tool can make lets ${which} stop reading it: do not offer to change ${which} or its template, not even as an option. `
+          + `When you tell the user, name the place in words (for example: in the template of the step that reads it), not as a field path.${renamedToo}`;
       }
       const fix = `Change that reference in the same edit (update_task), or remove ${which} too.`;
       // A step this edit renames is named by its old id, which no longer finds it after the rename: an

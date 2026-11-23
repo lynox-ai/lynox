@@ -14,9 +14,10 @@
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import BulkStartDomains from './BulkStartDomains.svelte';
+	import BulkHost from './BulkHost.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked,
-		type BulkRunDetailData, type BulkTarget,
+		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts,
+		type BulkRunDetailData, type BulkTarget, type BulkSentencePart, type BulkMarkerKind,
 	} from './bulk-runs.js';
 
 	let { runId, onBack, onOpen }: { runId: string; onBack: () => void; onOpen: (id: string) => void } = $props();
@@ -59,7 +60,7 @@
 		return { ok: res.ok, status: res.status, body };
 	}
 
-	type PostBody = { error?: string; id?: string; code?: string; supersedable?: { id: string; costUsd: number } };
+	type PostBody = { error?: string; id?: string; code?: string; checksum?: string; supersedable?: { id: string; costUsd: number } };
 	function post(path: string, body?: unknown): Promise<{ ok: boolean; status: number; body: PostBody }> {
 		return json(path, {
 			method: 'POST',
@@ -265,18 +266,63 @@
 		});
 	}
 
+	/** After a toggle the run is asked for again — its counts and the checksum the approval
+	 *  presents moved — but of its targets only the toggled one changed: it is marked here instead
+	 *  of every page being loaded again. False where the run is no longer the preview this page
+	 *  shows, could not be read, or is not the run the toggle answered: its checksum differs from
+	 *  the one the toggle returned, so another view moved a target since (even a pair that cancels
+	 *  out, which the counts cannot tell) and another row would be stale. The caller then loads it
+	 *  whole. The toggle's compare-and-set proved the run was the one whose checksum the page holds,
+	 *  and the ledger hashes its answer under the same lock as the write, so a run with the toggle's
+	 *  checksum is that run plus this toggle, whoever else writes the database. */
+	async function afterToggle(id: string, seq: number, deselected: boolean, checksum: string | undefined): Promise<boolean> {
+		const before = run;
+		const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(id)}`);
+		// A refused or failed ask carries no run, so no phase `previewed`.
+		if (id !== runId || run !== before || before === null || r.body.phase !== 'previewed' || r.body.total !== before.total) return false;
+		if (checksum === undefined || r.body.checksum !== checksum) return false;
+		if (r.body.deselected !== before.deselected + (deselected ? 1 : -1)) return false;
+		run = r.body;
+		targets = targets.map((x) => (x.seq === seq ? { ...x, deselected } : x));
+		maxTargets = Math.max(1, bulkWriting(r.body));
+		unmeasuredOk = false;
+		probeOk = false;
+		supersedable = null;
+		return true;
+	}
+
 	/** Take one target out of the write, or put it back, against the checksum this page showed:
-	 *  each moves the checksum, so the page reloads and approves only the run as it now is. */
-	function toggleSelected(target: BulkTarget): Promise<void> {
-		return act(async (id) => {
-			if (!run?.checksum) return t('common.load_failed');
-			const verb = target.deselected ? 'reselect' : 'deselect';
-			const r = await post(`/bulk/runs/${encodeURIComponent(id)}/targets/${target.seq}/${verb}`, { checksum: run.checksum });
-			// The refusals the owner can meet here are worded by their code; the engine's English is the fallback.
-			const code = r.body.code;
-			if (!r.ok && code !== undefined && BULK_DESELECT_REFUSALS.includes(code)) return t(`bulk.deselect.refused.${code}`);
-			return refusalOf(r);
-		});
+	 *  each moves the checksum, so the page approves only the run as it now is. Like every act it is
+	 *  bound to the run it began on: each request names that run, and what comes back after the page
+	 *  moved to another run is not shown there. Unlike them it reloads only the run, not every target. */
+	async function toggleSelected(target: BulkTarget): Promise<void> {
+		if (run === null || run.id !== runId) return;
+		const id = runId;
+		busy = true;
+		actionError = '';
+		try {
+			if (!run.checksum) {
+				actionError = t('common.load_failed');
+			} else {
+				const deselect = target.deselected !== true;
+				const r = await post(`/bulk/runs/${encodeURIComponent(id)}/targets/${target.seq}/${deselect ? 'deselect' : 'reselect'}`, { checksum: run.checksum });
+				if (runId === id) {
+					// The refusals the owner can meet here are worded by their code; the engine's English is the fallback.
+					const code = r.body.code;
+					if (!r.ok && code !== undefined && BULK_DESELECT_REFUSALS.includes(code)) actionError = t(`bulk.deselect.refused.${code}`);
+					else if (!r.ok) actionError = refusalOf(r) ?? t('common.load_failed');
+					else {
+						// A run that could not be read after the toggle is loaded whole, so the page
+						// shows no checksum from before a toggle that went through.
+						const marked = await afterToggle(id, target.seq, deselect, r.body.checksum).catch(() => false);
+						if (!marked && runId === id) await load();
+					}
+				}
+			}
+		} catch {
+			if (runId === id) actionError = t('common.load_failed');
+		}
+		busy = false;
 	}
 
 	/** Discard a run before approving it: the owner's act alone (the route refuses a mandate), after
@@ -456,7 +502,9 @@
 			.catch(() => { managed = null; });
 	});
 
-	const host = $derived(run ? bulkHostOf(run.targetSystem) : null);
+	// Between two sentences of the probe's confirmation.
+	const SENTENCE_GAP = ' ';
+	const host = $derived(run ? bulkHostOf(run.targetSystem) || null : null);
 	const atProbe = $derived(run !== null && bulkAtProbe(run));
 	const step = $derived(run ? bulkStep(run) : 'planned');
 	const steps = $derived(run ? bulkSteps(run) : BULK_STEPS);
@@ -476,6 +524,9 @@
 	const startKind = $derived(run ? bulkStartKind(run) : null);
 	// The start button's label, from the same source as the button itself: the halt sentence names it.
 	const startButton = $derived(run ? bulkStartButtonKey(run, startKind, supersedable !== null) : null);
+	// Why the judged start is disabled, as a line under its buttons (U-333); the button points to it.
+	// Not while a start is under way: it empties the cost field before the page shows the started run.
+	const startHint = $derived(busy ? null : bulkStartHintKey(capInput, startDomainsValid));
 	const supportMail = $derived(run ? bulkSupportMailto(run, managed, i18n) : null);
 	// Every act on this page is the owner's (the routes refuse a mandate), so its buttons show only
 	// once the server said the session is the owner's: a mandate does not see them even while the
@@ -502,15 +553,48 @@
 	}
 	const resumeKind = $derived(run ? bulkResumeKind(run) : null);
 	const resumeText = $derived(run ? bulkResumeText(run, managed, i18n) : null);
-	const sentUnknownText = $derived(run ? bulkSentUnknownText(run, i18n) : null);
+	const resumeWords = $derived(run ? bulkResumeWords(run, i18n) : null);
+	const rolledBack = $derived(run ? bulkRolledBackParts(run, view) : null);
+	const sentUnknownText = $derived(run ? bulkSentUnknownText(run, view) : null);
+	const sentUnknownParts = $derived(run ? bulkSentUnknownParts(run, view) : null);
 	const conflictsText = $derived(run ? bulkConflictsText(run, i18n) : null);
 	const shopify = $derived(bulkIsShopifyHost(host));
 	const approving = $derived(run !== null && run.phase === 'previewed' && run.kind === 'apply');
 	const skipped = $derived(run && approving ? bulkSkippedHead(run, shopify, view) : { text: null, nothing: false });
 	// Counted over the loaded targets: a preview the owner approves is loaded whole.
 	const seoEntity = $derived(approving ? bulkSeoEntityCount(targets) : 0);
-	const shownTargets = $derived(showUnchanged ? targets : targets.filter((x) => x.change !== 'unchanged'));
-	const foldedUnchanged = $derived(targets.length - shownTargets.length);
+	// The table on one run line's verdicts alone (U-417), for this run only; the line above the table says so.
+	let spreadShown = $state<{ run: string; kind: BulkMarkerKind } | null>(null);
+	const spreadKind = $derived(approving && run !== null && spreadShown?.run === run.id ? spreadShown.kind : null);
+	const spreadSeqs = $derived(bulkOutlierSpreadSeqs(approving ? run?.judgeOutliers : null, spreadKind));
+	const unfolded = $derived(showUnchanged ? targets : targets.filter((x) => x.change !== 'unchanged'));
+	const shownTargets = $derived(spreadSeqs === null ? unfolded : unfolded.filter((x) => spreadSeqs.has(x.seq)));
+	function toggleSpread(kind: BulkMarkerKind): void {
+		if (run === null) return;
+		spreadShown = spreadKind === kind ? null : { run: run.id, kind };
+	}
+	// The buttons of the box by line: showing all from over the table removes that line, so the focus goes
+	// back to the button of the same kind in the box.
+	let spreadButtons = $state<(HTMLButtonElement | null)[]>([]);
+	// Showing all from the approval: the focus stays at the approval, where the owner is; while its button
+	// cannot be pressed, it goes to the button of that kind in the box.
+	let approveButton = $state<HTMLButtonElement | null>(null);
+	async function showAllAtApproval(): Promise<void> {
+		const kind = spreadKind;
+		spreadShown = null;
+		await tick();
+		if (approveButton !== null && !approveButton.disabled) { approveButton.focus(); return; }
+		const i = (run?.judgeOutliers?.spread ?? []).findIndex((x) => x.kind === kind);
+		if (i >= 0) spreadButtons[i]?.focus();
+	}
+	async function showAllFromTable(): Promise<void> {
+		const kind = spreadKind;
+		spreadShown = null;
+		await tick();
+		const i = (run?.judgeOutliers?.spread ?? []).findIndex((x) => x.kind === kind);
+		if (i >= 0) spreadButtons[i]?.focus();
+	}
+	const foldedUnchanged = $derived(targets.length - unfolded.length);
 	const writes = (x: BulkTarget): boolean => x.change === 'update' || x.change === 'create' || x.change === 'delete';
 	// The sentence under a field not checked for hidden characters: the way out only where the owner
 	// can take the target out on this page (U-294).
@@ -523,6 +607,16 @@
 	const hiddenMarked = $derived(run !== null && shownTargets.some((x) => (x.hiddenAdds?.length ?? 0) > 0 && !bulkAfterTakenBack(run!, x)));
 	const hiddenCount = $derived(run ? bulkHiddenCountText(run.hiddenAddsTargets, shopify, view) : null);
 	const uncheckedCount = $derived(run ? bulkUncheckedCountText(run.hiddenUncheckedTargets, shopify, view) : null);
+	// A judged run's verdicts that differ from the rest of it: listed first, each with its reasons, and
+	// a line over the list that says this is a reading order, not a check (U-387).
+	const outliers = $derived(approving ? run?.judgeOutliers ?? null : null);
+	const orderedTargets = $derived(bulkOutlierOrder(shownTargets, outliers));
+	const outlierReasons = $derived(bulkOutlierReasonMap(outliers));
+	const outlierCount = $derived(bulkOutlierCountText(outliers, view));
+	const outlierSpread = $derived(bulkOutlierSpreadTexts(outliers, view));
+	const outlierSpreadClosing = $derived(bulkOutlierSpreadClosing(outliers, view));
+	// The rows the table shows, not the server's count: the line over the table says what is in it.
+	const spreadCount = $derived(spreadSeqs === null ? 0 : shownTargets.length);
 
 	const btn = 'rounded-[var(--radius-sm)] px-3 py-1.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed';
 	const btnPrimary = `${btn} bg-accent text-accent-fg hover:opacity-90`;
@@ -542,6 +636,20 @@
 		<button type="button" class={btnPlain} disabled={busy} onclick={planUndo}>{t('bulk.undo.prepare')}</button>
 	</div>
 {/snippet}
+
+<!-- A field's name (U-333): the host's readable name where lynox has one, as its own word; else the
+     name the planner set, in a value box, so it does not read as a word of lynox's. -->
+{#snippet fieldName(field: string)}{@const key = bulkFieldLabelKey(host, field)}{#if key !== null}{t(key)}{:else}<bdi class="rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono text-text" data-testid="bulk-field-own-name">{bulkVisibleText(field)}</bdi>{/if}{/snippet}
+{#snippet fieldNames(fields: readonly string[])}{#each fields as f, i (i)}{i > 0 ? ', ' : ''}{@render fieldName(f)}{/each}{/snippet}
+<!-- The host the planner set, boxed as code wherever it stands among the page's words. -->
+{#snippet hostBox()}<BulkHost value={host ?? ''} />{/snippet}
+<!-- A text of the page that names the host among its words: the host boxed wherever it stands. -->
+{#snippet hostText(text: string)}{#each bulkHostSplit(text, host) as part, i (i)}{#if 'slot' in part}{@render hostBox()}{:else}{part.text}{/if}{/each}{/snippet}
+{#snippet sentence(parts: BulkSentencePart[], fields: readonly string[])}{#each parts as part, i (i)}{#if 'slot' in part}{@render fieldNames(fields)}{:else}{part.text}{/if}{/each}{/snippet}
+<!-- A sentence of the page split at its placeholders: the host boxed, the target's name and the field
+     names as the page shows them. Text the page did not write (a target's key) is never searched for
+     the host, so it cannot get a box that vouches for part of another name. -->
+{#snippet placed(key: string, fields: readonly string[] = [])}{#each bulkTemplateParts(t(key), ['provider', 'host', 'target', 'field'], {}) as part, i (i)}{#if 'text' in part}{part.text}{:else if part.slot === 'target'}{probeLabel}{:else if part.slot === 'field'}{@render fieldNames(fields)}{:else if host !== null}{@render hostBox()}{:else}{provider}{/if}{/each}{/snippet}
 
 <!-- A target's new value with a mark behind each hidden character it adds where text may carry
      one: the word in the text, the kind and code point only in the label. -->
@@ -565,7 +673,7 @@
 	{#each target.markupChanges ?? [] as change (change.field)}
 		{@const list = bulkMarkupList(change, undo, shopify ? bulkFieldNamesText(host, [change.field], t) : bulkVisibleText(change.field), view)}
 		<div class="mt-1 text-xs [overflow-wrap:anywhere]" data-testid="bulk-markup">
-			{#if list.head}<div class="text-text-subtle">{list.head}</div>{/if}
+			{#if list.head}<div class="text-text-subtle" data-testid="bulk-markup-head">{@render sentence(bulkSentenceParts(view.t('bulk.markup.head'), 'field', {}), [change.field])}</div>{/if}
 			{#if list.restoresNote}<p class={list.restoresActive ? 'text-warning' : 'text-text-subtle'} data-testid="bulk-markup-restores-note">{list.restoresNote}</p>{/if}
 			<ul class="space-y-0.5">
 				{#each list.lines as markupLine, i (i)}
@@ -587,7 +695,7 @@
 		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger">{error || t('common.load_failed')}</div>
 	{:else}
 		<section class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 space-y-4">
-			<h1 class="text-lg font-medium">{bulkLabel(run, i18n)}</h1>
+			<h1 class="text-lg font-medium">{#each bulkLabelParts(run, i18n) as part, i (i)}{#if 'slot' in part}{@render hostBox()}{:else}{part.text}{/if}{/each}</h1>
 
 			<ol class="flex flex-wrap gap-1.5 text-[11px]">
 				{#each steps as s (s)}
@@ -605,7 +713,7 @@
 
 			<dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
 				<dt class="text-text-subtle">{t('bulk.head.target')}</dt>
-				<dd>{provider}{run.writeMethod ? ` · ${run.writeMethod}` : ''}</dd>
+				<dd>{#if host !== null}{@render hostBox()}{:else}{provider}{/if}{run.writeMethod ? ` · ${run.writeMethod}` : ''}</dd>
 				<dt class="text-text-subtle">{t('bulk.head.targets')}</dt>
 				<dd>{tf('bulk.head.counts', { n: String(run.total), a: String(run.applied), c: String(run.conflicts), f: String(run.failed) })}</dd>
 				{#if run.costUsd > 0 || run.costCapUsd !== null}
@@ -614,7 +722,10 @@
 				{/if}
 				{#if run.haltReason}
 					<dt class="text-text-subtle">{t(bulkHaltHeadKey(run))}</dt>
-					<dd>{bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, !ownerActs)}</dd>
+					<!-- The engine's own words for a halt (its reason, when the page has no sentence for it) stay text. -->
+					{@const cause = bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, !ownerActs)}
+					<!-- An atomic undo that rolled back links the run it takes back, where it says to start again (U-335). -->
+					<dd data-testid="bulk-halt-cause">{#if rolledBack}{rolledBack.before}<button type="button" class="underline text-accent hover:opacity-80" onclick={() => onOpen(run!.sourceRunId!)}>{rolledBack.link}</button>{rolledBack.after}{:else if cause === run.haltReason}{cause}{:else}{@render hostText(cause)}{/if}</dd>
 				{/if}
 			</dl>
 
@@ -637,9 +748,17 @@
 				<p class="text-sm text-text-muted" data-testid="bulk-host-rewrote-count">{run.hostRewrote === 1 ? t('bulk.run.host_rewrote_one') : tf('bulk.run.host_rewrote', { n: String(run.hostRewrote) })}</p>
 			{/if}
 			{#if sentUnknownText}
-				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{sentUnknownText}</p>
+				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-sent-unknown">{#if sentUnknownParts}{sentUnknownParts.before}<button type="button" class="underline text-accent hover:opacity-80" onclick={() => onOpen(run!.sourceRunId!)}>{sentUnknownParts.link}</button>{sentUnknownParts.after}{:else}{sentUnknownText}{/if}</p>
 			{/if}
 
+			{#if approving && ownerActs && run.judgeRule}
+				<!-- What the values were decided by, for the owner who approves them: the rule the start showed (U-335). -->
+				<div data-testid="bulk-approve-rule">
+					<h2 class="text-sm font-medium mb-1">{t('bulk.start.rule')}</h2>
+					<p class="text-sm whitespace-pre-wrap rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">{bulkVisibleText(run.judgeRule.rule)}</p>
+					<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t('bulk.approve.rule_drafted')}</p>
+				</div>
+			{/if}
 			{#if run.kind === 'apply' && targets.length > 0}
 				<div>
 					<h2 class="text-sm font-medium mb-2">{tf('bulk.preview.title', { k: String(targets.length), n: String(run.total) })}</h2>
@@ -649,9 +768,33 @@
 					{#if seoEntity > 0}
 						<p class="text-sm mb-2 rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-seo-entity-count">{seoEntity === 1 ? t('bulk.preview.seo_entity_one') : tf('bulk.preview.seo_entity', { n: String(seoEntity) })}</p>
 					{/if}
+					{#if outlierCount}
+						<p class="text-sm mb-2 rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-outlier-count">{outlierCount}</p>
+					{/if}
+					{#if outlierSpread.length > 0 && outliers}
+						<!-- One box: each kind's line, its button to show the table on those verdicts alone, and the way
+						     out once below them (U-417). Hosts as text, never as a link: the warning must not be the
+						     click. They come from verdict text, so a hidden character in one is shown. -->
+						<div class="text-sm mb-2 rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2 space-y-1" data-testid="bulk-outlier-spread-box">
+							{#each outlierSpread as line, i (i)}
+								{@const entry = outliers.spread[i]!}
+								<p class="[overflow-wrap:anywhere]"><span data-testid="bulk-outlier-spread">{bulkVisibleText(line)}</span>{#if entry.seqs !== undefined && entry.seqs.length > 0}<button type="button" class="block sm:inline sm:ml-1 whitespace-nowrap underline text-accent hover:opacity-80" data-testid="bulk-outlier-spread-show" bind:this={spreadButtons[i]} onclick={() => toggleSpread(entry.kind)}>{bulkOutlierShowText(entry.seqs.length, spreadKind === entry.kind, view)}</button>{/if}</p>
+							{/each}
+							{#if outlierSpreadClosing}
+								<p data-testid="bulk-outlier-spread-closing">{outlierSpreadClosing}</p>
+							{/if}
+						</div>
+					{/if}
 					{#if hiddenMarked}
 						<p class="text-sm mb-2 text-text-muted" data-testid="bulk-hidden-legend">{t('bulk.hidden.legend')}</p>
 					{/if}
+					<!-- Said over the table itself: on a phone the box above is out of sight, and a reader in the table
+					     would take it for the whole run, which the approval is for (U-417). -->
+					<div aria-live="polite">
+						{#if spreadKind !== null}
+							<p class="text-sm mb-2 rounded-[var(--radius-sm)] bg-bg-muted border border-border px-3 py-2" data-testid="bulk-outlier-filtered">{bulkOutlierFilteredText(spreadKind, spreadCount, view)} <button type="button" class="block sm:inline whitespace-nowrap underline text-accent hover:opacity-80" data-testid="bulk-outlier-filtered-all" onclick={() => showAllFromTable()}>{t('bulk.outliers.spread.show_all')}</button></p>
+						{/if}
+					</div>
 					<div class="overflow-x-auto">
 						<table class="w-full text-sm">
 							<thead>
@@ -661,7 +804,7 @@
 								</tr>
 							</thead>
 							<tbody>
-								{#each shownTargets as target (target.seq)}
+								{#each orderedTargets as target (target.seq)}
 									<tr class="border-b border-border align-top {target.deselected ? 'opacity-60' : ''}">
 										<td class="py-1.5 pr-3">
 											{@render targetName(target)}
@@ -674,6 +817,9 @@
 											{#if (target.seoEntityFields?.length ?? 0) > 0}
 												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-seo-entity">{t('bulk.target.seo_entity')}</span>
 											{/if}
+											{#each outlierReasons.get(target.seq) ?? [] as reason (reason)}
+												<span class="ml-1 inline-block whitespace-nowrap rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-outlier">{t(`bulk.outlier.${reason}`)}</span>
+											{/each}
 											{#if bulkRollbackLeft(run, target)}
 												<span class="ml-1 inline-block rounded-full bg-warning/15 border border-warning/40 px-1.5 text-[11px] text-warning" data-testid="bulk-rollback-left">{t('bulk.target.not_taken_back')}</span>
 											{/if}
@@ -683,7 +829,7 @@
 												{#each target.diff.fields as f (f.field)}
 													<!-- A long value without spaces (HTML, a URL) breaks inside the cell instead of running past it. -->
 													<div class="[overflow-wrap:anywhere]">
-														<span class="text-text-subtle" data-testid="bulk-field-name">{bulkFieldNamesText(host, [f.field], t)}:</span>
+														<span class="text-text-subtle" data-testid="bulk-field-name">{@render fieldName(f.field)}:</span>
 														{#if bulkValueText(f.before) === ''}<span class="text-text-subtle">{t('bulk.preview.empty_value')}</span>{:else}<del class="text-danger">{bulkValueText(f.before)}</del>{/if}
 														→ <ins class="{bulkAfterTakenBack(run, target) ? 'text-text-subtle' : 'text-success'} no-underline" data-testid="bulk-after">{#if bulkHiddenAddsOf(target, f.field).length > 0}{@render markedValue(bulkRawText(f.after), bulkHiddenAddsOf(target, f.field), bulkHiddenHtml(target, f.field), bulkAfterTakenBack(run, target))}{:else}{bulkValueText(f.after)}{/if}</ins>
 														{#if bulkHiddenUnchecked(target, f.field)}
@@ -701,10 +847,10 @@
 											{/if}
 											{@render markupList(target, false)}
 											{#if target.change === 'invalid' && target.error}
-												<p class="text-sm">{bulkInvalidText(target.error, shopify, managed, view, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store', listForm: run.listForm, judgesHtml: run.judgesHtml, markedDate: target.shopMarkedAt ? markedDateText(target.shopMarkedAt) : null, startDomains: ownerActs && bulkTakesStartDomains(run), linkDomain: target.linkDomain })}</p>
+												<p class="text-sm" data-testid="bulk-invalid-text">{#if target.error === 'secret_in_context' && target.contextField !== undefined}{@render sentence(bulkSentenceParts(view.t(bulkSecretInContextKey(shopify, run.targetSystem === 'data_store')), 'field', {}), [target.contextField])}{:else}{bulkInvalidText(target.error, shopify, managed, view, { field: target.contextField, host, dataStore: run.targetSystem === 'data_store', listForm: run.listForm, judgesHtml: run.judgesHtml, markedDate: target.shopMarkedAt ? markedDateText(target.shopMarkedAt) : null, startDomains: ownerActs && bulkTakesStartDomains(run), linkDomain: target.linkDomain })}{/if}</p>
 												{#if target.error === 'shortcode_changed' && target.refusedValues}
 													{#each target.refusedValues as { field, value, codePoints } (field)}
-														{#if target.refusedValues.length > 1}<div class="mt-1 text-xs text-text-subtle" data-testid="bulk-refused-field">{bulkFieldNamesText(host, [field], t)}:</div>{/if}
+														{#if target.refusedValues.length > 1}<div class="mt-1 text-xs text-text-subtle" data-testid="bulk-refused-field">{@render fieldName(field)}:</div>{/if}
 														<BulkRefusedValue {value} codePoints={codePoints ?? []} />
 													{/each}
 												{/if}
@@ -718,7 +864,7 @@
 												</div>
 											{/if}
 											{#if target.sentUnchanged && target.sentUnchanged.length > 0}
-												<div class="text-xs text-text-subtle">{tf('bulk.preview.sent_unchanged', { fields: bulkFieldNamesText(host, target.sentUnchanged, t) })}</div>
+												<div class="text-xs text-text-subtle" data-testid="bulk-sent-unchanged">{@render sentence(bulkSentenceParts(t('bulk.preview.sent_unchanged'), 'fields', {}), target.sentUnchanged)}</div>
 											{/if}
 										</td>
 									</tr>
@@ -726,7 +872,7 @@
 							</tbody>
 						</table>
 					</div>
-					{#if foldedUnchanged > 0}
+					{#if foldedUnchanged > 0 && spreadKind === null}
 						<button type="button" class="{btnPlain} mt-2" onclick={() => { showUnchanged = true; }}>{tf(shopify ? bulkOne('bulk.preview.show_unchanged', foldedUnchanged) : bulkOne('bulk.preview.show_unchanged_targets', foldedUnchanged), { n: String(foldedUnchanged) })}</button>
 					{/if}
 					{#if targets.length < run.total}
@@ -741,7 +887,7 @@
 				<!-- Whose session it is is not known yet: no act is offered. -->
 			{:else if startKind === 'read'}
 				<div class="space-y-3 border-t border-border pt-4">
-					<p class="text-sm">{tf('bulk.start.read_explain', { provider })}</p>
+					<p class="text-sm" data-testid="bulk-read-explain">{@render placed('bulk.start.read_explain')}</p>
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary} disabled={busy} onclick={() => start()}>{t(startButton ?? 'bulk.start.read')}</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
@@ -749,7 +895,9 @@
 				</div>
 			{:else if startKind === 'list' && run.listFirstPage}
 				<div class="space-y-3 border-t border-border pt-4">
-					<p class="text-sm">{tf('bulk.start.list_explain', { provider, address: bulkVisibleText(run.listFirstPage) })}</p>
+					<!-- Split at the places of the host and the address, not at the host's name: the address may hold the
+					     host too, and is a whole value in its own box (U-423). -->
+					<p class="text-sm" data-testid="bulk-list-explain">{#each bulkTemplateParts(t('bulk.start.list_explain'), ['provider', 'address'], {}) as part, i (i)}{#if 'text' in part}{part.text}{:else if part.slot === 'address'}<BulkHost value={bulkVisibleText(run.listFirstPage)} testid="bulk-list-address" />{:else if host !== null}{@render hostBox()}{:else}{provider}{/if}{/each}</p>
 					{#if listFilterText}{@render filterLineOf(listFilterText)}{/if}{#if listStatusText}<p class="text-sm">{listStatusText}</p>{/if}
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary} disabled={busy} onclick={() => start()}>{t(startButton ?? 'bulk.start.list')}</button>
@@ -766,12 +914,15 @@
 					<div>
 						<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.rule')}</h3>
 						<p class="text-sm whitespace-pre-wrap rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">{bulkVisibleText(run.judgeRule.rule)}</p>
+						<!-- The agent wrote the rule, from the owner's words or from data it read: the owner checks it (U-335). -->
+						<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t('bulk.start.rule_drafted')}</p>
 					</div>
 					<div>
 						<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.fields')}</h3>
 						<ul class="text-sm space-y-0.5">
 							{#each Object.entries(run.judgeRule.schema.properties) as [field, shape] (field)}
-								<li><code class="text-xs">{bulkVisibleText(field)}</code> <span class="text-xs text-text-subtle break-all">{bulkValueText(shape)}</span></li>
+								{@const shapeText = bulkFieldShapeText(shape, i18n)}
+								<li data-testid="bulk-start-field">{@render fieldName(field)}{#if shapeText !== null}: <span class="text-text-subtle [overflow-wrap:anywhere]">{shapeText}{#each bulkFieldChoices(shape) ?? [] as choice, i (i)}{i === 0 ? ' ' : ', '}<bdi class="rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono text-text" data-testid="bulk-field-choice">"{bulkVisibleText(choice)}"</bdi>{/each}</span>{/if}</li>
 							{/each}
 						</ul>
 					</div>
@@ -781,7 +932,7 @@
 							<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.context_fields')}</h3>
 							<ul class="text-sm space-y-0.5">
 								{#each run.judgeRule.context as field (field)}
-									<li>{#if shopify}{bulkFieldNamesText(host, [field], t)}{:else}<code class="text-xs">{bulkVisibleText(field)}</code>{/if}</li>
+									<li>{@render fieldName(field)}</li>
 								{/each}
 							</ul>
 							<p class="text-xs text-text-muted mt-1">{tf('bulk.start.context_explain', { provider: bulkJudgeProviderName(run.judgeServedBy.provider) })}</p>
@@ -807,21 +958,24 @@
 						<div class="space-y-2 text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
 							<p>{tf('bulk.start.supersede', { cost: formatCost(supersedable.costUsd) })}</p>
 							<div class="flex flex-wrap gap-2">
-								<button type="button" class={btnPrimary} disabled={busy || bulkCostCap(capInput) === null || !startDomainsValid} onclick={() => start(supersedable!.id)}>{t(startButton ?? 'bulk.start.supersede_yes')}</button>
+								<button type="button" class={btnPrimary} disabled={busy || bulkCostCap(capInput) === null || !startDomainsValid} aria-describedby={startHint === null ? undefined : 'bulk-start-hint'} onclick={() => start(supersedable!.id)}>{t(startButton ?? 'bulk.start.supersede_yes')}</button>
 								<button type="button" class={btnPlain} onclick={() => { supersedable = null; }}>{t('bulk.not_now')}</button>
 							</div>
 						</div>
 					{:else}
 						<div class="flex flex-wrap gap-2">
-							<button type="button" class={btnPrimary} disabled={busy || bulkCostCap(capInput) === null || !startDomainsValid} onclick={() => start()}>{t(startButton ?? 'bulk.start.judge')}</button>
+							<button type="button" class={btnPrimary} disabled={busy || bulkCostCap(capInput) === null || !startDomainsValid} aria-describedby={startHint === null ? undefined : 'bulk-start-hint'} onclick={() => start()}>{t(startButton ?? 'bulk.start.judge')}</button>
 							<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 						</div>
+					{/if}
+					{#if startHint !== null}
+						<p id="bulk-start-hint" class="text-sm text-text-muted" data-testid="bulk-start-hint">{t(startHint)}</p>
 					{/if}
 				</div>
 			{:else if restartKind !== null}
 				<div class="space-y-3 border-t border-border pt-4">
 					{#if haltText?.before}
-						<p class="text-sm">{haltText.before}</p>
+						<p class="text-sm">{@render hostText(haltText.before)}</p>
 					{/if}
 					{#if supportMail}
 						<p class="text-sm"><a href={supportMail} class="{btnPlain} inline-block">{t('bulk.halt.support_mail')}</a></p>
@@ -871,18 +1025,20 @@
 			{:else if resumeKind !== null && resumeText}
 				<div class="space-y-3 border-t border-border pt-4">
 					{#if resumeText.before}
-						<p class="text-sm">{resumeText.before}</p>
+						<p class="text-sm">{@render hostText(resumeText.before)}</p>
 					{/if}
+					<!-- The support link stands under the sentence that names support, which comes before the check. -->
 					{#if supportMail}
 						<p class="text-sm"><a href={supportMail} class="{btnPlain} inline-block">{t('bulk.halt.support_mail')}</a></p>
 					{/if}
 					{#if resumeKind === 'none'}
-						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.resume.none')}</p>
+						<!-- An undo starts again from the page of the run it takes back: the words link to it where the run names it. -->
+						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-resume-none">{resumeWords!.none.before}{#if resumeWords!.none.link !== null}{#if run.sourceRunId !== null}<button type="button" class="underline text-accent hover:opacity-80" onclick={() => onOpen(run!.sourceRunId!)}>{resumeWords!.none.link}</button>{:else}{resumeWords!.none.link}{/if}{/if}{resumeWords!.none.after}</p>
 					{:else if resumeKind === 'nothing'}
-						<p class="text-sm">{resumeText.check}</p>
+						<p class="text-sm">{@render hostText(resumeText.check ?? '')}</p>
 					{:else}
 						{#if resumeText.soFar}
-							<p class="text-sm">{resumeText.soFar}</p>
+							<p class="text-sm">{@render hostText(resumeText.soFar)}</p>
 						{/if}
 						{#if resumeKind === 'max'}
 							<div class="text-sm space-y-1">
@@ -897,19 +1053,22 @@
 							</div>
 						{/if}
 						{#if resumeText.check}
-							<p class="text-sm">{resumeText.check}</p>
+							<p class="text-sm">{@render hostText(resumeText.check)}</p>
+						{/if}
+						{#if resumeText.after}
+							<p class="text-sm">{@render hostText(resumeText.after)}</p>
 						{/if}
 						{#if resumeText.kept}
-							<p class="text-sm text-text-muted">{resumeText.kept}</p>
+							<p class="text-sm text-text-muted">{@render hostText(resumeText.kept)}</p>
 						{/if}
 						{#if resumeText.allows}
-							<p class="text-sm">{resumeText.allows}</p>
+							<p class="text-sm">{@render hostText(resumeText.allows)}</p>
 						{/if}
 						{#if resumeKind !== 'check'}
-							<p class="text-sm text-text-muted">{t('bulk.resume.window')}</p>
+							<p class="text-sm text-text-muted">{resumeWords!.window}</p>
 						{/if}
 						<div class="flex flex-wrap gap-2">
-							<button type="button" class={btnPrimary} disabled={busy || (resumeKind === 'max' && bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run)) === null)} onclick={resume}>{t(resumeKind === 'check' ? 'bulk.resume.check' : 'bulk.resume.write')}</button>
+							<button type="button" class={btnPrimary} disabled={busy || (resumeKind === 'max' && bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run)) === null)} onclick={resume}>{resumeKind === 'check' ? t('bulk.resume.check') : resumeWords!.button}</button>
 							<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 						</div>
 					{/if}
@@ -957,8 +1116,13 @@
 							{t('bulk.approve.targets_write')}
 						</label>
 					{/if}
+					{#if spreadKind !== null && shownTargets.length < targets.length}
+						<!-- The approval is for the whole run, the table may show part of it (U-417): of every verdict
+						     of the run, however the table folds the unchanged ones. -->
+						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-approve-filtered">{tf('bulk.approve.filtered', { n: String(shownTargets.length), m: String(targets.length) })} <button type="button" class="block sm:inline whitespace-nowrap underline text-accent hover:opacity-80" data-testid="bulk-approve-filtered-all" onclick={() => showAllAtApproval()}>{t('bulk.outliers.spread.show_all')}</button></p>
+					{/if}
 					<div class="flex flex-wrap gap-2">
-						<button type="button" class={btnPrimary}
+						<button type="button" class={btnPrimary} bind:this={approveButton}
 							disabled={busy || (run.writeForm === 'unmeasured' && !unmeasuredOk)}
 							aria-describedby={run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}
 							onclick={() => approve(host !== null && !run!.probeConfirmed)}>
@@ -974,9 +1138,7 @@
 			{:else if atProbe && run.probe}
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.probe.title')}</h2>
-					<p class="text-sm">{run.probe.fields.length > 0
-						? tf(run.probe.found === true ? 'bulk.probe.explain_found' : 'bulk.probe.explain', { target: probeLabel, provider, field: bulkFieldNamesText(host, run.probe.fields, t) })
-						: tf(run.probe.found === true ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_whole', { target: probeLabel, provider })}</p>
+					<p class="text-sm" data-testid="bulk-probe-explain">{#if run.probe.fields.length > 0}{@render placed(run.probe.found === true ? 'bulk.probe.explain_found' : 'bulk.probe.explain', run.probe.fields)}{:else}{@render placed(run.probe.found === true ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_whole')}{/if}</p>
 					{#if hiddenCount}
 						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-hidden-count">{hiddenCount}</p>
 					{/if}
@@ -988,7 +1150,7 @@
 					{/if}
 					<label class="flex gap-2 items-start text-sm">
 						<input type="checkbox" bind:checked={probeOk} class="mt-1" />
-						<span>{tf(run.probe.fields.length > 0 ? 'bulk.probe.confirm' : 'bulk.probe.confirm_whole', { provider })}{run.writeForm === 'measured' ? ` ${tf('bulk.probe.confirm_measured', { provider })}` : ''}</span>
+						<span data-testid="bulk-probe-confirm">{@render placed(run.probe.fields.length > 0 ? 'bulk.probe.confirm' : 'bulk.probe.confirm_whole')}{#if run.writeForm === 'measured'}{SENTENCE_GAP}{@render placed('bulk.probe.confirm_measured')}{/if}</span>
 					</label>
 					<label class="flex items-center gap-2 text-sm">
 						{t('bulk.probe.in_total')}

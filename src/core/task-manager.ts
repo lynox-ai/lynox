@@ -9,13 +9,30 @@ import { readEnvAlias } from './env.js';
 import { cpSuppliesLLMKey } from '../contract/vocab.js';
 import { compose, renderFence } from '../core/data-boundary.js';
 import { isHandRunOf } from './hand-run-door.js';
-import { isMandateTag, isOwnerPrincipal, ownedBy, type RequestPrincipal } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, ownedBy, principalTag, type RequestPrincipal } from './request-principal.js';
 import { MAPPING_MAX_ENTRIES, mintRouteToken, parseWebhookSpec, type WebhookVerifierKind } from './webhook-verifiers.js';
 import { encodeStamp } from './plan-stamp.js';
 import type { StampEntry } from './plan-run-context.js';
 import { PAUSED_MODEL_TEXT, isPaused } from './plan-pause.js';
 import { stripHidden } from './hidden-text.js';
 import { EngineLessRefused } from './engine-less-refusal.js';
+
+/**
+ * The start of the title the engine gave a workflow scheduled without one, before it stored the
+ * workflow's name alone: such plans still carry it. Read only by {@link titleIsWorkflowName}.
+ */
+export const SCHEDULED_TITLE_PREFIX = 'Scheduled: ';
+
+/**
+ * Whether a plan's title is the name of the workflow it runs: as the engine titles a workflow
+ * scheduled without a title (the name alone, or, on plans from before, the prefix and the name).
+ * The view then puts its own words in front of the name in the reader's language. A title that
+ * starts with the prefix but goes on with anything else is not the name, and stays whole.
+ */
+export function titleIsWorkflowName(title: string, workflowName: string): boolean {
+  if (workflowName === '') return false;
+  return title === workflowName || title === `${SCHEDULED_TITLE_PREFIX}${workflowName}`;
+}
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -399,7 +416,7 @@ export class TaskManager {
       dueDate: params.dueDate ? params.dueDate.slice(0, 10) : undefined,
       tags: params.tags ? JSON.stringify(params.tags) : undefined,
       parentTaskId: params.parentTaskId,
-      ...(isMandateTag(params.createdBy) ? { createdBy: params.createdBy } : {}),
+      ...(isMandateTag(params.createdBy) || params.createdBy === principalTag(OWNER_PRINCIPAL) ? { createdBy: params.createdBy } : {}),
     });
 
     return this.history.getTask(id)!;
@@ -946,6 +963,14 @@ export class TaskManager {
     // refused attempt must not leave a mark that would hold the owner's approved run.
     refuseBulkTrigger(trigger);
     return this.history.markTriggerEditedBy(trigger.id, editor, clearStamp);
+  }
+
+  /** A run's change of a trigger under the owner's principal: see `TriggerStore.markEditedByRun`. */
+  markEditedByRun(id: string, runTag: string): boolean {
+    const trigger = this.history.getTrigger(id);
+    if (!trigger) return false;
+    refuseBulkTrigger(trigger);
+    return this.history.markTriggerEditedByRun(trigger.id, runTag);
   }
 
   /** Create a watch/monitor AGENT-TRIGGER → source='watch', effect='run_agent', assignee='lynox', computes next_run_at from interval. */

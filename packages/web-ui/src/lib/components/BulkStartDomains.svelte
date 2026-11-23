@@ -8,6 +8,8 @@
 <script lang="ts">
 	import { t, tf } from '../i18n.svelte.js';
 	import { readStartDomainLines } from './bulk-start-domains.js';
+	import { bulkTemplateParts } from './bulk-runs.js';
+	import BulkHost from './BulkHost.svelte';
 
 	let {
 		storeHost,
@@ -28,6 +30,9 @@
 		valid = r.badLines.length === 0 && !r.tooMany;
 	}
 </script>
+
+<!-- A sentence naming the store's host and the allowed domains: each one boxed at its place (U-423). -->
+{#snippet storeSentence(key: string)}{#each bulkTemplateParts(t(key), ['store', 'list'], {}) as part, i (i)}{#if 'text' in part}{part.text}{:else if part.slot === 'store'}<BulkHost value={storeHost} />{:else}{#each domains as d, j (j)}{j > 0 ? ', ' : ''}<BulkHost value={d} testid="bulk-start-domain" />{/each}{/if}{/each}{/snippet}
 
 <div class="text-sm space-y-1" data-testid="bulk-start-domains">
 	{#if editable}
@@ -53,10 +58,10 @@
 				<p>{t('bulk.start_domains.invalid')}</p>
 			</div>
 		{/if}
-		<p class="text-text-muted">{tf('bulk.start_domains.explain', { store: storeHost })}</p>
+		<p class="text-text-muted">{@render storeSentence('bulk.start_domains.explain')}</p>
 	{:else if domains.length === 0}
-		<p>{tf('bulk.start_domains.none', { store: storeHost })}</p>
+		<p>{@render storeSentence('bulk.start_domains.none')}</p>
 	{:else}
-		<p>{tf('bulk.start_domains.shown', { list: domains.join(', '), store: storeHost })}</p>
+		<p>{@render storeSentence('bulk.start_domains.shown')}</p>
 	{/if}
 </div>

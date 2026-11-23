@@ -57,26 +57,64 @@ export function durationText(ms: number): string {
 }
 
 /**
+ * The whole transfer to the target ran past its deadline (`transferDeadlineMs`). `asked`: the
+ * request had gone out when it did (the target may have acted on it), or the deadline had passed
+ * before it, and it was not sent.
+ */
+export class TransferOutOfTime extends Error {
+  constructor(readonly asked: boolean) {
+    super('the migration ran past its deadline as a whole');
+    this.name = 'TransferOutOfTime';
+  }
+}
+
+/**
+ * How long the whole transfer (manifest, every part, the restore) may take, from the bundle's
+ * size: a fixed allowance for the target's own steps (the restore alone may take 15 minutes) and
+ * the time the bundle takes at 128 KiB/s (about 1 Mbit/s), rounded up to whole minutes. A
+ * migration over a link at least that fast is not cut; a slower one can be, although each part
+ * alone would pass its own deadline. A target that answers each step just inside its own deadline
+ * cannot hold the export, and the bundle in this instance's memory, for hours.
+ */
+export const TRANSFER_DEADLINE = { allowanceMs: 20 * 60_000, bytesPerSecond: 128 * 1024 } as const;
+export function transferDeadlineMs(bundleBytes: number): number {
+  const ms = TRANSFER_DEADLINE.allowanceMs + (Math.max(0, bundleBytes) / TRANSFER_DEADLINE.bytesPerSecond) * 1000;
+  return Math.ceil(ms / 60_000) * 60_000;
+}
+
+/**
  * `fetchFn` with a deadline for the answer to start: past it the request is aborted and
  * `TargetDidNotAnswer` thrown. The deadline ends once the headers are in, so it does not cut a
- * body that `readTargetBody` is still reading under its own.
+ * body that `readTargetBody` is still reading under its own. `overall`, when given, ends the
+ * request too, with `TransferOutOfTime`.
+ * The request is raced against both, so they hold also while the transport has not taken the
+ * signal yet, as during the network guard's name lookup (which the guard itself ends after 5 s),
+ * and for a `fetchFn` that ignores the signal.
  */
 export async function askTarget(
   fetchFn: (url: string, init: RequestInit) => Promise<Response>,
   url: string,
   init: RequestInit,
   timeoutMs: number,
+  overall?: AbortSignal,
 ): Promise<Response> {
+  if (overall?.aborted === true) throw new TransferOutOfTime(false);
   const ctl = new AbortController();
+  let stop: (err: Error) => void = () => {};
+  const stopped = new Promise<never>((_, reject) => { stop = reject; });
+  const end = (err: Error): void => { ctl.abort(err); stop(err); };
   // run-group-starter: cleared in this call's `finally`, or fired once; it only aborts this request and reports no spend.
-  const timer = setTimeout(() => ctl.abort(new TargetDidNotAnswer(timeoutMs)), timeoutMs);
+  const timer = setTimeout(() => end(new TargetDidNotAnswer(timeoutMs)), timeoutMs);
+  const onOverall = (): void => end(new TransferOutOfTime(true));
+  overall?.addEventListener('abort', onOverall, { once: true });
   try {
-    return await fetchFn(url, { ...init, signal: ctl.signal });
+    return await Promise.race([fetchFn(url, { ...init, signal: ctl.signal }), stopped]);
   } catch (err: unknown) {
-    if (ctl.signal.aborted) throw new TargetDidNotAnswer(timeoutMs);
+    if (ctl.signal.aborted) throw ctl.signal.reason instanceof Error ? ctl.signal.reason : new TargetDidNotAnswer(timeoutMs);
     throw err;
   } finally {
     clearTimeout(timer);
+    overall?.removeEventListener('abort', onOverall);
   }
 }
 
@@ -168,9 +206,10 @@ export async function discardBody(r: Response, timeoutMs: number = TARGET_BODY_T
  * Every character that is not shown as itself: controls (Cc), format characters (Cf: the bidi
  * embeddings, overrides, isolates and marks, the zero-width characters, the invisible operators,
  * the soft hyphen, the interlinear annotation and tag characters), the variation selectors and the
- * fillers that render as nothing.
+ * fillers that render as nothing, and lone surrogates (Cs), which no font shows and which a quoted
+ * form would spell out six characters each.
  */
-const HIDDEN = /[\p{Cc}\p{Cf}\u034F\u115F\u1160\u180B-\u180F\u3164\uFE00-\uFE0F\uFFA0\u{E0100}-\u{E01EF}]/gu;
+const HIDDEN = /[\p{Cc}\p{Cf}\p{Cs}\u034F\u115F\u1160\u180B-\u180F\u3164\uFE00-\uFE0F\uFFA0\u{E0100}-\u{E01EF}]/gu;
 
 /**
  * A text from the target as it is shown to the user: line breaks, tabs and the line and paragraph

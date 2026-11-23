@@ -158,7 +158,7 @@ export const MANDATE_INSIDE_WRITERS: ReadonlySet<string> = new Set([
  */
 export const MANDATE_INSIDE_NON_WRITERS: Readonly<Record<string, string>> = Object.freeze({
   ask_user: 'asks a question; the prompt row is the question, not an entry',
-  ask_secret: 'refuses a mandate before any dialog; only the owner stores a secret',
+  ask_secret: 'opens no dialog for a mandate and stores nothing; it returns how a key gets stored, by the owner alone',
   suggest_follow_ups: 'shows suggestions, writes nothing',
   recall_tool_result: 'reads a stored tool result',
   http_request: 'writes outside the instance, recorded by the outward trail; a due renewal runs api_setup fetch_token, which records its own pair',
@@ -217,4 +217,14 @@ const MANDATE_TURN_TOOLS: ReadonlySet<string> = new Set(
  */
 export function toolLockFor(principal: RequestPrincipal): ReadonlySet<string> | null {
   return principal.kind === 'owner' ? null : MANDATE_TURN_TOOLS;
+}
+
+/**
+ * Whether a turn is locked, for a text that differs there: a locked turn gets no text written
+ * for the owner (one that sends it to collect a key with `ask_secret`, which stores nothing
+ * there). Asked of the turn's principal like the lock; an agent that names no principal gets the
+ * locked text, as `ask_secret` refuses it.
+ */
+export function turnIsLocked(principal: RequestPrincipal | undefined): boolean {
+  return principal === undefined || toolLockFor(principal) !== null;
 }
