@@ -417,6 +417,9 @@ describe('api_setup: a save names what it changes, and a refused change is not s
     expect(text(`read ${j1}`)).toContain('scopes added: 1 value shaped like a credential (not shown)');
     expect(text(`read ${j1} ${j2}`)).toContain('scopes added: 2 values shaped like credentials (not shown)');
     expect(text('read', `read write ${j1}`)).toContain('scopes removed: write; plus 1 value shaped like a credential (not shown)');
+    // A scope with a control character in it is shown on one line, not counted as withheld.
+    expect(text('read a\x01b')).toContain('scopes added: a b');
+    expect(text('read a\x01b')).not.toContain('plus');
     // Control: nothing withheld, nothing counted.
     expect(text('read write admin')).toContain('scopes added: write admin');
     expect(text('read write admin')).not.toContain('plus');
