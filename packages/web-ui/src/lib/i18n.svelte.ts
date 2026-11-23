@@ -1396,6 +1396,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'status.runs_active': { de: 'Läufe', en: 'runs' },
 	'status.entities': { de: 'Entities', en: 'Entities' },
 	'status.today': { de: 'heute', en: 'today' },
+	'status.today_cost_unknown': { de: 'Kosten heute unbekannt', en: "Today's cost unknown" },
 	'status.runs': { de: 'Runs', en: 'runs' },
 	'chat.context_auto_compact_imminent': { de: 'Auto-Komprimierung steht an', en: 'auto-compaction imminent' },
 	'chat.compact_now': { de: 'Zusammenfassen & komprimieren', en: 'Summarize & compact' },
