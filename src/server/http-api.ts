@@ -78,7 +78,7 @@ import { resolveProviderApiKey, mayFallBackToStoredKey, PROVIDER_KEY_SLOTS } fro
 import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, providerIdentity, type ProviderIdentity, mainChatTierLabels, mainChatTierLabelsFromTierSet } from '../core/llm/catalog.js';
 import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
-import type { Session } from '../core/session.js';
+import { sessionInitialTier, type Session } from '../core/session.js';
 import { RunAbortedError, TOOL_AUDIT_INPUT_MAX_CHARS } from '../core/agent.js';
 import { StreamIncompleteError } from '../core/stream-incomplete.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
@@ -3207,6 +3207,24 @@ export class LynoxHTTPApi {
     if (live) return [this._lastRunRow(live)];
     const row = this.engine?.getRunRegistry()?.getByThread(sessionId);
     return row ? [row] : [];
+  }
+
+  /**
+   * The tier a conversation runs on, for a page that reopens it without opening a session (a
+   * reload reads it back instead): the stored pick held to today's ceiling, account tier and
+   * model blocklist, through the same function a resume and every turn of a live session use.
+   * The stored `model_tier` is the pick as asked, before those. Not read from a live session:
+   * its tier can stand lower for a moment (a compaction runs on the fast tier), and looking it
+   * up would keep an idle session from being dropped. Omitted when no permitted model is left.
+   * A new thread stores the tier it opened on, already held to the ceiling of that day, so after
+   * the ceiling is raised this says the lower tier until the user picks one again.
+   */
+  private _runTierOf(engine: Engine, thread: { readonly model_tier: string }): { run_tier?: string } {
+    try {
+      return { run_tier: sessionInitialTier(engine, normalizeTier(thread.model_tier)) };
+    } catch {
+      return {};
+    }
   }
 
   /** The thread row an `own` check reads for a session id (session id = thread id). */
@@ -6559,7 +6577,7 @@ export class LynoxHTTPApi {
       // 404 — mutating a nonexistent thread IS an error.
       if (!thread) { jsonResponse(res, 200, { thread: null, threadMissing: true }); return; }
       const states = containedThreadStates(engine.getToolContext().containment, [thread.id]);
-      jsonResponse(res, 200, { thread: { ...thread, ...containedFields(states, thread.id) } });
+      jsonResponse(res, 200, { thread: { ...thread, ...containedFields(states, thread.id), ...this._runTierOf(engine, thread) } });
     }, readsThread((p) => ({ thread: p['id'] ?? '' }))));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/threads/:id', async (_req, res, params, body) => {
