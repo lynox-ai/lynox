@@ -404,3 +404,50 @@ describe('bash: no target to compare, a sentence on the network question once ou
     expect(ask.asked[1]!.question).not.toContain('already read outside content');
   });
 });
+
+describe('a refusal keeps its own answer when its result event throws', () => {
+  const throwing = () => {
+    const seen: string[] = [];
+    const onStream = async (e: { type: string; result?: string }): Promise<void> => {
+      if (e.type === 'tool_result') { seen.push(e.result ?? ''); throw new Error('stream gone'); }
+    };
+    return { seen, onStream };
+  };
+  const quietly = async (run: () => Promise<Result>): Promise<{ result: Result; logged: string[] }> => {
+    const logged: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => { logged.push(String(chunk)); return true; });
+    try {
+      return { result: await run(), logged: logged.filter(l => l.includes('could not be delivered')) };
+    } finally {
+      spy.mockRestore();
+    }
+  };
+
+  it('a target that cannot be read: the call is refused with its own text, not the stream\'s error', async () => {
+    const tool = sender();
+    const { seen, onStream } = throwing();
+    const agent = agentOf({ tools: [tool], promptUser: asker('Allow').fn, ownerKnown: owner('anna@firma.ch'), onStream });
+    const { result, logged } = await quietly(() => call(agent, 'mail_send', { to: ['not an address'] }));
+    expect(tool.calls).toEqual([]);
+    expect(seen).toHaveLength(1);
+    expect(result.is_error).toBe(true);
+    expect(String(result.content)).toContain(seen[0]!);
+    expect(String(result.content)).toContain('Not sent: lynox could not read the recipient of this send');
+    expect(String(result.content)).not.toContain('stream gone');
+    expect(logged).toEqual(['[lynox:agent] a mail_send call has settled, but its result event could not be delivered (Error)\n']);
+  });
+
+  it('a run nobody can be asked in: the call is refused with its own text, not the stream\'s error', async () => {
+    const tool = sender('http_request');
+    const { seen, onStream } = throwing();
+    const agent = agentOf({ tools: [tool], autonomy: 'autonomous', sendOrigin: { kind: 'workflowRun', name: 'Abgleich' }, onStream });
+    const { result, logged } = await quietly(() => call(agent, 'http_request', { url: 'https://api.evil.example/x' }));
+    expect(tool.calls).toEqual([]);
+    expect(seen).toHaveLength(1);
+    expect(result.is_error).toBe(true);
+    expect(String(result.content)).toContain(seen[0]!);
+    expect(String(result.content)).toContain('Not sent: the owner did not name "api.evil.example"; it came from the workflow "Abgleich".');
+    expect(String(result.content)).not.toContain('stream gone');
+    expect(logged).toEqual(['[lynox:agent] a http_request call has settled, but its result event could not be delivered (Error)\n']);
+  });
+});

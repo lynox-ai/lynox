@@ -5180,9 +5180,7 @@ export class Agent implements IAgent {
       try { this.onOriginRefused?.({ targets: { values: [], unreadable: true }, noun: unreadNoun, origin: this.originOfTargets() }); } catch { /* the refusal stands */ }
       if (guardRefuses) return {};
       const text = originUnreadable(unreadNoun);
-      if (this.onStream) {
-        await this.onStream({ type: 'tool_result', name: tc.name, result: text, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
-      }
+      await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: text, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
       return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(text), is_error: true } };
     }
     if (targets.length === 0) return { origin: { known: [], allKnown: false } };
@@ -5210,9 +5208,7 @@ export class Agent implements IAgent {
 
     const refuse = async (text: string): Promise<{ refusal: BetaToolResultBlockParam }> => {
       // Streamed like every other refusal: the owner of a run nobody watches learns of it only there.
-      if (this.onStream) {
-        await this.onStream({ type: 'tool_result', name: tc.name, result: text, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
-      }
+      await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: text, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
       return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(text), is_error: true } };
     };
     const refuseUnattended = (): Promise<{ refusal: BetaToolResultBlockParam }> => {
