@@ -39,6 +39,8 @@ const today = (): string => {
 
 /** What the cost endpoint answers: today's rows, an error status, or nothing yet (held). */
 let costAnswer: 'held' | 'not-json' | number | readonly unknown[] | Readonly<Record<string, unknown>>;
+/** A proxy page on every route: the providers' body is not JSON, which throws before the cost is read. */
+let providersBroken = false;
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 
@@ -53,18 +55,19 @@ async function mountIn(locale: 'de' | 'en'): Promise<void> {
 }
 
 /** The phone bar's button (it opens the status panel) and the desktop bar's link to the activity page. */
-function shown(): { phone: string; phoneName: string; desktop: HTMLAnchorElement } {
+function shown(): { phone: string; phoneName: string; desktop: HTMLAnchorElement; phoneButton: HTMLButtonElement } {
 	const desktop = target.querySelector<HTMLAnchorElement>('a[href="/app/activity"]');
-	const phoneButton = target.querySelector<HTMLButtonElement>('div.md\\:hidden button, button[aria-label*="$"]');
+	const phoneButton = target.querySelector<HTMLButtonElement>('div.md\\:hidden button, button[aria-label*="$"], button[aria-label*="Kosten heute unbekannt"]');
 	if (!desktop || !phoneButton) throw new Error('status bar parts not found');
 	const amount = phoneButton.querySelector('span.shrink-0.whitespace-nowrap');
-	return { phone: (amount?.textContent ?? '').replace(/\s+/g, ' ').trim(), phoneName: phoneButton.getAttribute('aria-label') ?? '', desktop };
+	return { phone: (amount?.textContent ?? '').replace(/\s+/g, ' ').trim(), phoneName: phoneButton.getAttribute('aria-label') ?? '', desktop, phoneButton };
 }
 
 beforeEach(() => {
 	vi.stubGlobal('ResizeObserver', class { observe(): void {} unobserve(): void {} disconnect(): void {} });
 	vi.stubGlobal('navigator', { onLine: true });
 	costAnswer = [{ day: today(), cost_usd: 0.4, run_count: 1, user_turns: 1 }];
+	providersBroken = false;
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
 		const url = String(input);
 		if (url.includes('/history/cost/daily')) {
@@ -74,7 +77,7 @@ beforeEach(() => {
 		}
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
 		if (url.endsWith('/health')) return json({ status: 'ok', version: '0.0.0', build_sha: null });
-		if (url.endsWith('/providers/status')) return json({ providers: [] });
+		if (url.endsWith('/providers/status')) return providersBroken ? new Response('<html>maintenance</html>', { status: 200 }) : json({ providers: [] });
 		return json({}, 404);
 	}));
 });
@@ -107,6 +110,9 @@ describe('the status bar names the period of its cost', () => {
 		const { phone, desktop } = shown();
 		expect(phone).toBe('heute $0.00');
 		expect(desktop.textContent?.replace(/\s+/g, ' ').trim()).toBe('heute $0.00');
+		// A real zero is known: no label, never "unknown"; the name is the visible text.
+		expect(desktop.hasAttribute('aria-label')).toBe(false);
+		expect(shown().phoneName).not.toContain('unbekannt');
 	});
 
 	it.each([
@@ -117,14 +123,39 @@ describe('the status bar names the period of its cost', () => {
 		['a figure that is text', [{ day: today(), cost_usd: '0.40', run_count: 1, user_turns: 1 }]],
 		['a figure below zero', [{ day: today(), cost_usd: -5, run_count: 1, user_turns: 1 }]],
 		['a figure the answer leaves empty (null)', [{ day: today(), cost_usd: null, run_count: 1, user_turns: 1 }]],
-	] as const)('shows no figure and no period while the cost is unknown (%s)', async (_what, answer) => {
+	] as const)('shows no figure while the cost is unknown, and says so to a screen reader (%s)', async (_what, answer) => {
 		costAnswer = answer;
 		await mountIn('de');
 		const { phone, phoneName, desktop } = shown();
 		expect(phone).toBe('-');
 		expect(desktop.textContent?.replace(/\s+/g, ' ').trim()).toBe('-');
-		expect(phoneName).not.toContain('heute');
+		// A bare "-" is not spoken: both say that today's cost is unknown, and show no amount.
+		expect(desktop.getAttribute('aria-label')).toBe('Kosten heute unbekannt');
+		expect(phoneName.endsWith('· Kosten heute unbekannt')).toBe(true);
 		expect(phoneName).not.toContain('$0');
+	});
+
+	it('drops a figure it knew once another part of the same read throws', async () => {
+		await mountIn('de');
+		expect(shown().phone).toBe('heute $0.40');
+		providersBroken = true;
+		window.dispatchEvent(new Event('lynox:run-ended'));
+		await new Promise((r) => setTimeout(r, 450));
+		await settle();
+		expect(shown().phone).toBe('-');
+	});
+
+	it.each([
+		['a real zero', [] as const, '$0.00'],
+		['an unknown cost', 'held', '-'],
+	] as const)('the status panel shows %s as "%s"', async (_what, answer, tile) => {
+		costAnswer = answer;
+		await mountIn('de');
+		shown().phoneButton.click();
+		await settle();
+		const costTile = [...target.querySelectorAll<HTMLAnchorElement>('a[href="/app/activity"]')].find((a) => a.querySelector('p.text-lg'));
+		expect(costTile, 'the panel opened').toBeDefined();
+		expect(costTile?.querySelector('p.text-lg')?.textContent?.trim()).toBe(tile);
 	});
 
 	it.each([

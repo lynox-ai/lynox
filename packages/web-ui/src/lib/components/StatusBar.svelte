@@ -66,8 +66,14 @@
 	/** Today's cost as the cost endpoint last said it; null while unknown (not read yet, or the read
 	 *  failed). A zero is shown only when the endpoint said zero, never for "do not know". */
 	let todayCost = $state<number | null>(null);
+	/** A known amount; a real zero reads "$0.00" (`formatCost` gives "-" for 0, which is the unknown sign here). */
+	function todayCostAmount(cost: number): string {
+		return cost === 0 ? '$0.00' : formatCost(cost);
+	}
 	/** The footer's figure: the period named with it, `$0.00` for a real zero; `-` alone while unknown. */
-	const todayCostShown = $derived(todayCost === null ? '-' : `${t('status.today')} ${todayCost === 0 ? '$0.00' : formatCost(todayCost)}`);
+	const todayCostShown = $derived(todayCost === null ? '-' : `${t('status.today')} ${todayCostAmount(todayCost)}`);
+	/** What a screen reader says for the cost: the visible text, or, while unknown, that it is unknown (a bare "-" is not spoken). */
+	const todayCostSpoken = $derived(todayCost === null ? t('status.today_cost_unknown') : todayCostShown);
 	let todayRuns = $state(0);
 	let panelOpen = $state(false);
 
@@ -239,7 +245,11 @@
 				// renders or spawned sub-runs (which inflated the count).
 				todayRuns = todayRow?.user_turns ?? 0;
 			}
-		} catch { /* silent */ }
+		} catch {
+			// An earlier section threw (a body that is not JSON) before the cost was read: the
+			// figure from the last good poll is no longer known, so it is not shown as today's.
+			if (!stale()) todayCost = null;
+		}
 	}
 
 	async function loadPanelData() {
@@ -434,7 +444,7 @@
 	<button
 		onclick={togglePanel}
 		class="flex items-center gap-1.5 text-[11px] font-mono text-text-subtle hover:text-text transition-colors min-w-0"
-		aria-label="{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'} · {providerName} · {apiStatusLabel()} · {todayCostShown}"
+		aria-label="{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'} · {providerName} · {apiStatusLabel()} · {todayCostSpoken}"
 		title="{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'} · {providerName} · {apiStatusLabel()}{apiStatusTooltip ? ` — ${apiStatusTooltip}` : ''}"
 	>
 		<span class="inline-block h-1.5 w-1.5 rounded-full shrink-0 {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
@@ -496,7 +506,7 @@
 	     from the legacy hub cost-limits route to /app/activity. Edit-limits
 	     SSoT now lives in /app/settings/workspace/limits (P3-PR-X). -->
 	<!-- The period is named, as on the phone bar; the link's name is its visible text. -->
-	<a href="/app/activity" class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0 whitespace-nowrap" title={todayCostShown}>
+	<a href="/app/activity" class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0 whitespace-nowrap" aria-label={todayCost === null ? todayCostSpoken : undefined}>
 		{todayCostShown}
 	</a>
 
@@ -618,7 +628,7 @@
 						onclick={closePanel}
 						class="bg-bg-muted rounded-[var(--radius-sm)] px-3 py-2 hover:bg-bg hover:text-text transition-colors"
 					>
-						<p class="text-lg font-semibold text-text">{formatCost(todayCost)}</p>
+						<p class="text-lg font-semibold text-text">{todayCost === null ? '-' : todayCostAmount(todayCost)}</p>
 						<p class="text-xs text-text-subtle">{t('status.cost')}</p>
 					</a>
 					<a
