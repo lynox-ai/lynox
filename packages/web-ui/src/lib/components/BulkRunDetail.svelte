@@ -1000,7 +1000,7 @@
 							<p class="text-sm">{@render hostText(resumeText.check)}</p>
 						{/if}
 						{#if resumeText.after}
-							<p class="text-sm">{resumeText.after}</p>
+							<p class="text-sm">{@render hostText(resumeText.after)}</p>
 						{/if}
 						{#if resumeText.kept}
 							<p class="text-sm text-text-muted">{@render hostText(resumeText.kept)}</p>

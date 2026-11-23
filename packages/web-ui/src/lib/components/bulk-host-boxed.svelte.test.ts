@@ -214,6 +214,14 @@ describe('the host in the sentences of a run\'s page', () => {
 		expect(unboxedText(target)).not.toContain(HOST);
 	});
 
+	it('boxes the host in what to do after checking a run whose writes are not known', async () => {
+		run = ext({ phase: 'writing', haltKey: 'unavailable', haltReason: 'host did not answer', applied: 1, sentUnknown: 1, resumeOpen: 0, resumeTries: 0 });
+		await renderDetail();
+		const after = [...target.querySelectorAll('p')].find((p) => p.textContent === tf('bulk.halt.unavailable_before_check', { provider: HOST })) ?? null;
+		expect(hostBoxes(after)).toEqual([HOST]);
+		expect(unboxedText(target)).not.toContain(HOST);
+	});
+
 	it('boxes the host only where a text names it whole, never inside a longer name', async () => {
 		const { bulkHostSplit } = await import('./bulk-runs.js');
 		expect(bulkHostSplit('bei shop.ch, nicht api.shop.ch, shop.ch.other.example, myshop.ch oder shop.chx; an shop.ch. Ende', 'shop.ch')).toEqual([
