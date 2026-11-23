@@ -9,7 +9,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 type Store = typeof import('./chat.svelte.js');
 
 vi.mock('./toast.svelte.js', () => ({ addToast: () => 1 }));
-vi.mock('./threads.svelte.js', () => ({ loadThreads: async () => {} }));
+vi.mock('./threads.svelte.js', () => ({ loadThreads: async () => {}, getRunStatus: () => undefined }));
 
 const json = (body: unknown, status = 200): Response =>
 	new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });

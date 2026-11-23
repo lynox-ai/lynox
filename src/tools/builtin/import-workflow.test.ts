@@ -255,6 +255,13 @@ describe('import_workflow', () => {
     expect(history.getPlannedPipelines()).toHaveLength(0); // nothing persisted
   });
 
+  it('rejects a workflow with a reserved step id, by position', async () => {
+    const reserved = makePlanned({ parameters: [], steps: [{ id: 'params', task: 'A' }] });
+    const out = await importWorkflowTool.handler({ block: asBlock(reserved) }, makeAgent(history));
+    expect(out).toContain('step #1 (steps[0].id): "params", "__proto__" and "constructor" cannot be step ids');
+    expect(history.getPlannedPipelines()).toHaveLength(0);
+  });
+
   it('rejects a block exported from a newer lynox (fail-loud version negotiation)', async () => {
     const portable = toPortableWorkflow(makePlanned());
     const newer = { ...portable, content_schema_version: CURRENT_PIPELINE_SCHEMA_VERSION + 1 };
