@@ -3424,11 +3424,13 @@ export class WorkerLoop {
     }
 
     // A refused member connection is told as `#recordRun` recorded it: its lines under the
-    // result and ⏸ instead of ✓, and not again for a run that halted on the same lines.
+    // result and, for a run that finished, the note's title instead of ✓, and not again for a run
+    // that halted on the same lines. A run whose question went unanswered did not finish, so it
+    // does not read as finished with a note.
     // Compared as recorded (English); pushed in the owner's language (`said`).
     const memberNotes = currentMemberNotes();
     const memberSaid = currentMemberNotesIn(noticeLanguage(this.engine.config?.language));
-    const memberTold = withMemberNotes(truncatedResult, endedByOwner || budgetCut !== null ? 'other' : 'success', memberSaid);
+    const memberTold = withMemberNotes(truncatedResult, endedByOwner || budgetCut !== null || questionWentUnanswered ? 'other' : 'success', memberSaid);
     if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, memberNotes)) {
       // The push leaves the instance: a contained run's result goes out as a fixed sentence, as
       // its error does (above); the recorded run keeps the full text. Only the run's text is

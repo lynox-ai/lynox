@@ -2397,6 +2397,34 @@ describe('WorkerLoop', () => {
     loop.stop();
   });
 
+  // A run whose question went unanswered did not finish: recorded failed, so its push does not
+  // read as finished with a note.
+  it('a run whose question went unanswered and that met a member\'s connection is not titled as finished with a note', async () => {
+    const { noteMemberConnection } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession('All done.');
+    vi.mocked(session.run).mockImplementation(async () => {
+      noteMemberConnection(LINE);
+      await session.promptUser!('Approve this?', ['Yes', 'No']);
+      return 'All done.';
+    });
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000);
+
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, expect.any(String), 'failed', { memberNotes: [LINE] });
+    const titles = vi.mocked(router.notify).mock.calls.map(([m]) => m.title);
+    expect(titles.length).toBeGreaterThan(0);
+    for (const t of titles) {
+      expect(t).not.toContain(WORKER_NOTICES.en.titleWithNote(task.title));
+      expect(t.startsWith('\u23F8')).toBe(false);
+    }
+  });
+
   it('a run ended through recordAndNotify (a workflow\'s end) is told with its line, ⚠ and the note in the title to the owner, as a fixed sentence to every grant, once', async () => {
     const { noteMemberConnection, runCollectingMemberNotes } = await import('./member-connection-notes.js');
     const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
