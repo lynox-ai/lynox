@@ -87,6 +87,13 @@ describe('an API profile card says how the profile signs in, and labels its desc
 		expect(el.classList.contains('whitespace-nowrap')).toBe(true);
 		expect(el.classList.contains('border')).toBe(true);
 		expect(el.classList.contains('bg-bg-muted')).toBe(false);
+		expect(el.classList.contains('bg-bg')).toBe(true);
+		// Narrower than the chip (320 px): an ellipsis with the whole text in its title, and the head
+		// may shrink below the chip, so the card's buttons stay in view.
+		expect(el.classList.contains('truncate')).toBe(true);
+		expect(el.classList.contains('max-w-full')).toBe(true);
+		expect(el.getAttribute('title')).toBe('Anmeldung über Shopify');
+		expect(headButton('Shopify acme-store').classList.contains('min-w-0')).toBe(true);
 		expect(card('Shopify acme-store').querySelector('[data-testid="api-card-title"]')!.classList.contains('flex-wrap')).toBe(true);
 	});
 

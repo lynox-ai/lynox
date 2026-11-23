@@ -182,12 +182,14 @@
 					<div class="flex items-stretch">
 						<button onclick={() => expanded = expanded === profile.id ? null : profile.id}
 							aria-expanded={expanded === profile.id}
-							class="flex-1 px-4 py-3 text-left hover:bg-bg-muted transition-colors">
+							class="flex-1 min-w-0 px-4 py-3 text-left hover:bg-bg-muted transition-colors">
 							<!-- The chip never wraps: when the name leaves no room it moves under it whole. Its own
-							     border and surface keep it apart from the head's hover and open surface. -->
+							     border and surface keep it apart from the head's hover and open surface. Only where
+							     the card is narrower than the chip itself (320 px) does it end in an ellipsis, its
+							     whole text in its title, rather than push the card's buttons out of view. -->
 							<div class="flex flex-wrap items-center gap-x-2 gap-y-1" data-testid="api-card-title">
 								<span class="text-sm font-medium">{profile.name}</span>
-								{#if authChipLabel(profile.auth, profile.built_in_provider)}{@const chip = authChipLabel(profile.auth, profile.built_in_provider)!}<span class="text-xs whitespace-nowrap rounded-[var(--radius-sm)] border border-border bg-bg px-1.5 py-0.5 text-text-muted" data-testid="api-auth-chip">{chip.values ? tf(chip.key, chip.values) : t(chip.key)}</span>{/if}
+								{#if authChipLabel(profile.auth, profile.built_in_provider)}{@const chip = authChipLabel(profile.auth, profile.built_in_provider)!}{@const chipText = chip.values ? tf(chip.key, chip.values) : t(chip.key)}<span class="text-xs whitespace-nowrap max-w-full truncate rounded-[var(--radius-sm)] border border-border bg-bg px-1.5 py-0.5 text-text-muted" title={chipText} data-testid="api-auth-chip">{chipText}</span>{/if}
 							</div>
 							<p class="text-xs text-text-subtle mt-1 font-mono">{profile.base_url}</p>
 							{#if connectionLine(profile.oauth_grant)}<p class="text-xs text-text-muted mt-1" data-testid="api-connection">{connectionText(connectionLine(profile.oauth_grant)!)}</p>{/if}
