@@ -14,7 +14,7 @@ import { pv, joinPrompts } from '../../core/prompt-value.js';
 import { DISMISSED, PLAN_NOT_ANSWERED } from './ask-user.js';
 import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 import { currentCallSignal } from '../../core/call-connection.js';
-import { STEP_ID_MAX } from '../../orchestrator/step-id.js';
+import { RESERVED_STEP_IDS, STEP_ID_MAX } from '../../orchestrator/step-id.js';
 
 // Config accessed via agent.toolContext.userConfig
 
@@ -69,7 +69,8 @@ function truncateSlug(slug: string, maxLen: number): string {
 /** Convert agent-assigned plan phases to pipeline steps with dependency graph */
 export function phasesToPipelineSteps(phases: PlanPhase[]): InlinePipelineStep[] {
   // Build per-index ID mapping (supports duplicate phase names)
-  const usedIds = new Set<string>();
+  // A reserved id (`step-id.ts`) counts as taken: a phase named "Params" becomes `params-2`.
+  const usedIds = new Set<string>(RESERVED_STEP_IDS);
   const ids: string[] = [];
 
   for (const phase of phases) {

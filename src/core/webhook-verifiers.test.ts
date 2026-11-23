@@ -142,6 +142,42 @@ describe('mappedValueOutsideTaskText keeps a mapped value to task text', () => {
     expect(mappedValueOutsideTaskText([call({ url: '{{params[0].result}}' })], [])).toContain('uses "{{params[0].result}}"');
   });
 
+  // The resolver substitutes in each string on its own, so the check reads each on its own too:
+  // a `{{` left open in one string must not run on into the next and hide what is there.
+  it('reads each string on its own, so one left open does not hide a reference in the next', () => {
+    const step = { id: 'fetch', task: 'Fetch it', tool: 'http_request', input_from: ['s1'], input_template: { a: '{{params.note', b: '{{s1.result}}' } };
+    expect(mappedValueOutsideTaskText([step], ['subject'])).toContain('uses "{{s1.result}}" outside its task text');
+    const mappedNext = { ...step, input_template: { a: '{{params.month', b: '{{params.note}}' } };
+    expect(mappedValueOutsideTaskText([mappedNext], ['note'])).toContain('uses the event value "note"');
+    // A key is read on its own as well: here the open `{{` in the value before it would swallow it.
+    expect(mappedValueOutsideTaskText([call({ a: '{{params.month', '{{params.note}}': 'x' })], ['note'])).toContain('uses the event value "note"');
+  });
+
+  // JSON escapes a line break; the resolver reads the path raw and trims its ends, so the
+  // check reads it raw too and resolves `{{params.note\n}}` to the mapped `note`, as the run would.
+  it('reads a path with a line break at its end as the resolver does', () => {
+    expect(mappedValueOutsideTaskText([call({ u: '{{params.note\n}}' })], ['note'])).toContain('uses the event value "note"');
+  });
+
+  it('visits each string once, however deep the template nests', () => {
+    // Copying every string below each level costs depth × strings: seconds at this size.
+    let nested: unknown[] = Array.from({ length: 50 }, (_, i) => `leaf ${String(i)}`);
+    for (let d = 0; d < 1_500; d++) nested = [...Array.from({ length: 50 }, (_, i) => `v${String(d)}-${String(i)}`), nested];
+    const t0 = performance.now();
+    expect(mappedValueOutsideTaskText([call({ deep: nested })], ['note'])).toBeNull();
+    expect(performance.now() - t0).toBeLessThan(500);
+  });
+
+  it('quotes a placeholder in a refusal with its line breaks and quotes escaped', () => {
+    const out = mappedValueOutsideTaskText([call({ u: '{{s1\n"x".result}}' })], []);
+    expect(out).toContain('uses "{{s1\\n\\"x\\".result}}" outside its task text');
+    expect(out).not.toContain('\n"x"');
+    // Characters JSON leaves as they are but a reader does not see as text are escaped too.
+    const hidden = mappedValueOutsideTaskText([call({ u: '{{s1\u2028\u202E.result}}' })], []);
+    expect(hidden).toContain('uses "{{s1\\u2028\\u202E.result}}"');
+    expect(hidden).not.toMatch(/[\u2028\u202E]/);
+  });
+
   it('lets a mapped value through in task text, and an unmapped one anywhere', () => {
     expect(mappedValueOutsideTaskText([{ id: 's', task: 'Answer {{params.note}}' }], ['note'])).toBeNull();
     expect(mappedValueOutsideTaskText([call({ url: '{{params.month}}' })], ['note'])).toBeNull();
