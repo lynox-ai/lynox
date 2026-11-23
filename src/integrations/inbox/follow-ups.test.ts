@@ -286,3 +286,32 @@ describe('a snooze after a reply still marks the reply as dealt with', () => {
     expect(f).toMatchObject({ count: 1 });
   });
 });
+
+describe('the two remaining paths: stored text and a single undo', () => {
+  it('a follow-up whose stored text reads sensitive is counted without its name, with no intake flag', () => {
+    const id = seedReplied();
+    inbox.updateUserAction(id, null, null);
+    inbox.insertThreadMessage({
+      accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<stored-otp@x>', fromAddress: 'kunde@example.com', fromName: 'Kundin Muster',
+      subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.', direction: 'inbound', autoReply: false,
+      mailDate: new Date('2026-11-04T09:00:00Z'),
+    });
+    expect(inbox.listAuditForItem(id).some((a) => a.action === 'sensitive_follow_up_kept_open' || a.action === 'raised_on_sensitive_follow_up')).toBe(false);
+    const [f] = followUpsOnEveryRoute(id) as Array<Record<string, unknown>>;
+    expect(f).toMatchObject({ count: 1 });
+    expect(f?.['latestFromName']).toBeUndefined();
+  });
+
+  it('a reply the owner undid does not mark the mail before it as answered', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    // Replied, undone, then marked replied again without an audit (a bulk mark), and a new mail reopens.
+    inbox.updateUserAction(id, 'replied', new Date());
+    inbox.appendAudit({ itemId: id, action: 'replied', actor: 'user', payloadJson: '{}' });
+    inbox.appendAudit({ itemId: id, action: 'undo', actor: 'user', payloadJson: JSON.stringify({ reverted_at: new Date().toISOString() }) });
+    await hook()(ACCOUNT.id, envelope({ messageId: '<follow2@x>', uid: 3, date: new Date(Date.now() + 1_000) }));
+    expect(inbox.getItem(id)?.userAction).toBeUndefined();
+    const [f] = followUpsOnEveryRoute(id) as Array<Record<string, unknown>>;
+    expect(f).toMatchObject({ count: 2 });
+  });
+});
