@@ -8880,6 +8880,7 @@ describe('LynoxHTTPApi', () => {
       type EngineRef = { config?: unknown; getUserConfig: () => unknown; getToolContext: () => unknown };
       const engineRef = (): EngineRef => (api as unknown as { engine: EngineRef }).engine;
       const ss = (): { get: (id: string) => unknown } => (api as unknown as { sessionStore: { get: (id: string) => unknown } }).sessionStore;
+      let liveLookups = 0;
       async function runTier(stored: string, userConfig: Record<string, unknown>, live?: string): Promise<{ status: number; stored?: string; run?: string }> {
         const e = engineRef();
         const origConfig = e.config; const origUc = e.getUserConfig; const origGet = ss().get; const origCtx = e.getToolContext;
@@ -8892,7 +8893,12 @@ describe('LynoxHTTPApi', () => {
         e.getUserConfig = (): unknown => userConfig;
         // This file's session store answers every id with a stand-in session; this conversation has
         // a live one only when the case gives it.
-        ss().get = (id: string): unknown => (id === TID ? (live !== undefined ? { getModelTier: () => live } : undefined) : origGet.call(ss(), id));
+        liveLookups = 0;
+        ss().get = (id: string): unknown => {
+          if (id !== TID) return origGet.call(ss(), id);
+          liveLookups++;
+          return live !== undefined ? { getModelTier: () => live } : undefined;
+        };
         try {
           let status = 0;
           let body: { thread: { model_tier?: string; run_tier?: string } } | undefined;
@@ -8921,6 +8927,8 @@ describe('LynoxHTTPApi', () => {
 
       it('is not the live session\'s tier of the moment (a compaction runs on the fast tier)', async () => {
         expect(await runTier('deep', { max_tier: 'deep' }, 'fast')).toEqual({ status: 200, stored: 'deep', run: 'deep' });
+        // Not even looked up: a lookup marks the session used and keeps it from being dropped.
+        expect(liveLookups).toBe(0);
       });
     });
 

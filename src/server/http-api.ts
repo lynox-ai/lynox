@@ -3123,6 +3123,8 @@ export class LynoxHTTPApi {
    * The stored `model_tier` is the pick as asked, before those. Not read from a live session:
    * its tier can stand lower for a moment (a compaction runs on the fast tier), and looking it
    * up would keep an idle session from being dropped. Omitted when no permitted model is left.
+   * A new thread stores the tier it opened on, already held to the ceiling of that day, so after
+   * the ceiling is raised this says the lower tier until the user picks one again.
    */
   private _runTierOf(engine: Engine, thread: { readonly model_tier: string }): { run_tier?: string } {
     try {

@@ -4448,8 +4448,8 @@ export async function resumeThread(threadId: string): Promise<void> {
 /**
  * After a reload the chat holds its id (kept in this browser) but not its tier: no session was
  * opened, the transcript was only read back, so nothing set the tier and the model row and picker
- * stayed hidden. The thread's record says the tier it runs on (`run_tier`: its live session's, or
- * the stored pick held to today's ceiling as a resume would; not the stored pick as asked). Read
+ * stayed hidden. The thread's record says the tier it runs on (`run_tier`: the stored pick held to
+ * today's ceiling as a resume would; not the stored pick as asked). Read
  * only while the tier is unknown, and kept only if the same chat is still open and nothing set a
  * tier meanwhile.
  */
