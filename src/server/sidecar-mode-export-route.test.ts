@@ -75,6 +75,8 @@ const target: {
   lastPartBodyLagMs?: number | undefined;
   /** Answer the restore with this raw body and 200. */
   restoreRaw?: string | undefined;
+  /** Answer the restore with a reply that breaks when the route reads its status. */
+  restoreBreaks?: boolean | undefined;
   /** Answer this step with a refusal whose body breaks off mid-way. */
   broken?: 'handshake-refusal' | 'manifest' | undefined;
   /** Refuse the handshake with 400 and this body. */
@@ -163,6 +165,9 @@ vi.mock('../core/network-guard.js', async (original) => {
         if (path === '/api/migration/manifest' && target.slow === 'manifest') return endless(422);
         if (path === '/api/migration/restore' && target.slow === 'restore') return endless(200);
         if (path === '/api/migration/restore' && target.restoreRaw !== undefined) return new Response(target.restoreRaw, { status: 200 });
+        if (path === '/api/migration/restore' && target.restoreBreaks === true) {
+          return Object.defineProperty(new Response('{}', { status: 200 }), 'ok', { get(): boolean { throw new Error('the reply broke'); } });
+        }
         if (path === '/api/migration/handshake' && (init.method ?? 'GET') === 'GET' && target.handshakeRaw !== undefined) return new Response(target.handshakeRaw, { status: 200 });
         if (path === '/api/migration/handshake' && (init.method ?? 'GET') === 'GET' && target.large?.at === 'handshake') return new Response(sized({ ...imp.startHandshake(TOKEN) }, target.large.bytes), { status: 200 });
         if (path === '/api/migration/handshake' && (init.method ?? 'GET') === 'GET' && target.large?.at === 'handshake-refusal') return new Response('x'.repeat(target.large.bytes), { status: 503 });
@@ -284,6 +289,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.lastPartBodyLagMs = undefined;
     transferDeadline.ms = 60_000;
     target.restoreRaw = undefined;
+    target.restoreBreaks = undefined;
     target.silent = undefined;
     target.okBodies = [];
     target.handshakeRefusal = undefined;
@@ -921,6 +927,10 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(await stopOf()).toMatchObject({ code: 'restore_failed', params: { detail: 'cannot read ~/.lynox/restore.log' } });
     target.guardText = undefined;
     target.guardBlocksRestore = false;
+    // A stop lynox cannot name, once the restore was asked for: it may have run, so check the target first.
+    target.restoreBreaks = true;
+    expect(await stopOf()).toMatchObject({ code: 'unknown', retry: 'check' });
+    target.restoreBreaks = undefined;
   });
 
   it('says how long the migration may take with the deadline\'s stops, in milliseconds for the UI to word', { timeout: 30_000 }, async () => {
