@@ -1852,7 +1852,10 @@ function releaseVersionNote(agent: IAgent, apiStore: ApiStore, profile: ApiProfi
   // run, or an autonomous turn, reads the profile without anyone being shown it. A trigger's,
   // workflow's or task's run carries its run tag as author under the owner's principal, and a
   // sub-agent a run origin of its own while it forwards the parent's prompt; neither showed the
-  // owner the profile (the same reading as `ownersCleanBatch`).
+  // owner the profile (the same reading as `ownersCleanBatch`). Nor does the owner's turn in a
+  // thread a helper ran in (`helperThread`): the model that shows the owner the profile there has
+  // read the helper's content, so its view is no read the question may vouch for. The question
+  // then keeps saying the settings changed, which is the safe side.
   if (isOwnerPrincipal(agent.principal) && agent.writeAuthor === principalTag(OWNER_PRINCIPAL)
     && agent.sendOrigin === undefined && agent.autonomy !== 'autonomous' && agent.promptUser !== undefined) {
     apiStore.noteOwnerView(profile.id, bindingOf(profile), new Date());
