@@ -272,6 +272,27 @@ describe('the approved unchecked-change texts', () => {
 	};
 	const entry = (key: string, de: string, en: string): string => `'${key}': { de: ${JSON.stringify(de).replace(/^"|"$/g, "'")}, en: ${JSON.stringify(en).replace(/^"|"$/g, "'")} },`;
 
+	it('holds the five check-case sentences word for word', () => {
+		expect(line('bulk.halt.unauthorized_before_check')).toBe(entry('bulk.halt.unauthorized_before_check',
+			'Öffne Einstellungen → APIs und tippe beim Profil für {provider} auf das Chat-Symbol, um den Zugang neu zu verbinden. Danach kannst du nachprüfen.',
+			'Open Settings → APIs and tap the chat icon next to the profile for {provider} to reconnect the access. Then you can check again.'));
+		expect(line('bulk.halt.blocked_before_check_managed')).toBe(entry('bulk.halt.blocked_before_check_managed',
+			'Soll lynox {host} erreichen, schreib an support@lynox.ai. Danach kannst du nachprüfen.',
+			'If lynox should reach {host}, write to support@lynox.ai. Then you can check again.'));
+		// The English sentence holds an escaped apostrophe, which `entry` would escape twice.
+		expect(line('bulk.halt.blocked_before_check_selfhost')).toBe(`'bulk.halt.blocked_before_check_selfhost': { de: 'Trag {host} in der Konfiguration deiner Instanz ein. Danach kannst du nachprüfen.', en: 'Add {host} to your instance\\'s configuration. Then you can check again.' },`);
+		expect(line('bulk.halt.unavailable_before_check')).toBe(entry('bulk.halt.unavailable_before_check',
+			'Hält das Nachprüfen gleich wieder an, ist {provider} noch nicht erreichbar; versuch es später noch einmal.',
+			'If checking halts again right away, {provider} is not reachable yet; try again later.'));
+		expect(line('bulk.halt.shopifyWriteOff_check')).toBe(entry('bulk.halt.shopifyWriteOff_check',
+			'Bulk-Änderungen an Shopify-Shops sind auf dieser Instanz nicht freigeschaltet. Der Lauf ist angehalten.',
+			'Bulk changes to Shopify stores are not enabled on this instance. The run is stopped.'));
+		expect(line('bulk.halt.shopifyWriteOff_before_check_managed')).toBe(entry('bulk.halt.shopifyWriteOff_before_check_managed',
+			'Soll lynox in Shopify-Shops nachprüfen und schreiben, schreib an support@lynox.ai. Sobald Bulk-Änderungen freigeschaltet sind, kannst du nachprüfen.',
+			'If lynox should check and write in Shopify stores, write to support@lynox.ai. Once bulk changes are enabled, you can check again.'));
+	});
+
+
 	it('holds the note', () => {
 		expect(line('bulk.approve.unmeasured_note')).toBe(entry('bulk.approve.unmeasured_note',
 			'lynox hat diese Art Änderung bei diesem Anbieter nicht geprüft. Beim Anbieter kann sie zusätzlich etwas auslösen, etwa E-Mails an deine Kunden, eine Zahlung oder eine Rechnung. Deshalb schreibt lynox zuerst nur ein Ziel. Schau es dir dort an, bevor du den Rest freigibst.',
@@ -705,6 +726,49 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeKind(w('checksum', unclear))).toBe('none');
 	});
 
+	it('puts the step to check first where an earlier send is unclear, and says nowhere to continue', () => {
+		const unclear = { probeConfirmed: false, maxTargets: 1, applied: 0, sentUnknown: 1, resumeOpen: 3, resumeTries: 1, resumeSends: 0 };
+		const check = 'Nachprüfen liest bei shop.example.invalid nach, ob die Änderung da ist; geschickt wird dabei nichts.';
+		// (a) Not reachable: the check comes first, the hint about another halt after it.
+		const a = bulkResumeText(w('unavailable', unclear), true, DE);
+		expect([a?.before, a?.check, a?.after]).toEqual([null, check, 'Hält das Nachprüfen gleich wieder an, ist shop.example.invalid noch nicht erreichbar; versuch es später noch einmal.']);
+		// (b) No access: reconnecting comes first, as the check needs it too, and ends with checking.
+		const b = bulkResumeText(w('unauthorized', unclear), true, DE);
+		expect([b?.before, b?.check, b?.after]).toEqual(['Öffne Einstellungen → APIs und tippe beim Profil für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden. Danach kannst du nachprüfen.', check, null]);
+		// (c) A blocked host: allowing it comes first, managed and self-hosted.
+		expect(bulkResumeText(w('blocked', unclear), true, DE)?.before).toBe('Soll lynox shop.example.invalid erreichen, schreib an support@lynox.ai. Danach kannst du nachprüfen.');
+		expect(bulkResumeText(w('blocked', unclear), false, DE)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du nachprüfen.');
+		// Writing switched off stops the check too: enabling it comes first, managed and self-hosted.
+		const off = bulkResumeText(w('shopifyWriteOff', unclear), true, DE);
+		expect([off?.before, off?.after]).toEqual(['Soll lynox in Shopify-Shops nachprüfen und schreiben, schreib an support@lynox.ai. Sobald Bulk-Änderungen freigeschaltet sind, kannst du nachprüfen.', null]);
+		const offSelf = bulkResumeText(w('shopifyWriteOff', unclear), false, DE);
+		expect([offSelf?.before, offSelf?.after]).toEqual(['Du schaltest Bulk-Änderungen in der Konfiguration deiner Instanz frei (`LYNOX_FEATURE_SHOPIFY_BULK_READ`). Danach kannst du nachprüfen.', null]);
+		expect(bulkResumeText(w('shopifyWriteOff', unclear), false, EN)?.before).toBe('You enable bulk changes in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`). Then you can check again.');
+		expect(bulkResumeText(w('markupAddedByShop', unclear), true, DE)?.after).toBe(DE.tf('bulk.halt.markupAddedByShop_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
+		// An undo that reaches the check after markup the store added reads the undo's words, cause and step after.
+		const undoMarkup = bulkResumeText(w('markupAddedByShop', { ...unclear, kind: 'undo' }), true, DE);
+		expect(undoMarkup?.after).toBe(DE.tf('bulk.halt.markupAddedByShop_before_undo', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
+		expect(undoMarkup?.cause).toBe(DE.tf('bulk.halt.markupAddedByShop_undo', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
+		expect(undoMarkup?.check).toBe(check);
+		// A lost access stays first, as before.
+		expect(bulkResumeText(w('credential', unclear), true, DE)?.before).toBe(DE.tf('bulk.halt.credential_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
+		// No sentence around the check names continuing as the next step, for any halt that can come
+		// to it; a way to write on later (Shopify markup) may follow the check.
+		for (const key of ['unavailable', 'unauthorized', 'blocked', 'shopifyWriteOff', 'markupAddedByShop', 'credential', 'failureRate', 'consecutiveFailures', 'maxTargets']) {
+			for (const managed of [true, false]) {
+				const text = bulkResumeText(w(key, unclear), managed, DE);
+				expect(bulkResumeKind(w(key, unclear)), key).toBe('check');
+				expect([text?.cause, text?.before, text?.check, text?.after].join(' '), `${key} ${String(managed)}`).not.toMatch(/fortsetzen/);
+				const en = bulkResumeText(w(key, unclear), managed, EN);
+				expect([en?.cause, en?.before, en?.check, en?.after].join(' '), `${key} ${String(managed)} en`).not.toMatch(/can continue\.|continue it/);
+				expect(text?.check, key).toBe(check);
+			}
+		}
+		// Written on without an unclear send, the sentences stay as they were.
+		expect(bulkResumeText(w('unavailable', { ...unclear, sentUnknown: 0 }), true, DE)?.before).toBe(DE.tf('bulk.halt.unavailable_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
+		expect(bulkResumeText(w('unavailable', { ...unclear, sentUnknown: 0 }), true, DE)?.after).toBeNull();
+	});
+
 	it('says a conflict looked different than expected at the last read, one or several, and nothing at none', () => {
 		// True after an unclear send, for an undo, after a later resume and for a local run alike.
 		expect(bulkConflictsText({ conflicts: 1 }, DE)).toBe('Ein Ziel stand beim letzten Nachsehen anders da als erwartet; lynox hat es so gelassen.');
@@ -769,7 +833,7 @@ describe('going on from a run that halted', () => {
 		const none = { applied: 0, sentUnknown: 0 };
 		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, DE)).toEqual({
 			cause: 'lynox hat nichts geschrieben. Diese Shopify-Verbindung erlaubt lynox noch nicht, die Beschreibung zu ändern. Verbinde Shopify neu (Einstellungen → APIs).',
-			before: null, check: null, kept: null, soFar: null, allows: null,
+			before: null, check: null, after: null, kept: null, soFar: null, allows: null,
 		});
 		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, EN)?.cause)
 			.toBe('lynox wrote nothing. This Shopify connection does not yet let lynox change the description. Reconnect Shopify (Settings → APIs).');
@@ -819,9 +883,9 @@ describe('going on from a run that halted', () => {
 			cause: 'Bulk-Änderungen an Shopify-Shops sind auf dieser Instanz nicht freigeschaltet. Der Lauf ist angehalten. Sobald sie wieder freigeschaltet sind, kannst du ihn hier fortsetzen.',
 			before: 'Soll lynox in Shopify-Shops schreiben, schreib an support@lynox.ai. Danach kannst du fortsetzen.',
 		});
-		expect(bulkResumeText(w('shopifyWriteOff'), false, EN)?.before).toBe('You enable them in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`).');
+		expect(bulkResumeText(w('shopifyWriteOff'), false, EN)?.before).toBe('You enable bulk changes in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`).');
 		// No way on past a changed run: no promise of what writing on keeps.
-		expect(bulkResumeText(w('checksum'), true, DE)).toEqual({ cause: 'Der Lauf hat sich seit deiner Freigabe geändert.', before: null, check: null, kept: null, soFar: null, allows: null });
+		expect(bulkResumeText(w('checksum'), true, DE)).toEqual({ cause: 'Der Lauf hat sich seit deiner Freigabe geändert.', before: null, check: null, after: null, kept: null, soFar: null, allows: null });
 	});
 
 	it('says all the rest is tried only when the maximum does not stop the pass first', () => {
