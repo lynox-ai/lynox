@@ -3430,7 +3430,6 @@ export class WorkerLoop {
     // Compared as recorded (English); pushed in the owner's language (`said`).
     const memberNotes = currentMemberNotes();
     const memberSaid = currentMemberNotesIn(noticeLanguage(this.engine.config?.language));
-    const memberTold = withMemberNotes(truncatedResult, endedByOwner || budgetCut !== null || questionWentUnanswered ? 'other' : 'success', memberSaid);
     if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, memberNotes)) {
       // The push leaves the instance: a contained run's result goes out as a fixed sentence, as
       // its error does (above); the recorded run keeps the full text. Only the run's text is
@@ -3459,7 +3458,7 @@ export class WorkerLoop {
         // finish) nor ✗ at high priority (nothing went wrong). The budget word stays in
         // the body; the title answers who ended it.
         title: endedByOwner ? `\u23f9 ${task.title}` : budgetCut !== null || questionWentUnanswered ? `\u2717 ${task.title}`
-          : memberTold.status === 'halted' ? `${RUN_END_LOOK.noted.mark} ${notices.titleWithNote(task.title)}` : `\u2713 ${task.title}`,
+          : memberSaid.length > 0 ? `${RUN_END_LOOK.noted.mark} ${notices.titleWithNote(task.title)}` : `\u2713 ${task.title}`,
         body: bodyOf(memberSaid),
         taskId: task.id,
         priority: endedByOwner || (budgetCut === null && !questionWentUnanswered) ? 'normal' : 'high',

@@ -66,15 +66,14 @@ export interface BulkNotices {
    * A Shopify product run halted because its connection did not ask for, or was not granted,
    * `write_products` (`shopifyProductWriteAccess`), the way on included; the apply step's result.
    * The run history, which a mandate reads too, keeps only its fact (`bulkHaltForReaders`); the
-   * way stands on the run page. A run whose planning grant is not known keeps it whole
-   * (`recordAndNotify`). `nothingYet` as above.
+   * way stands on the run page. `nothingYet` as above.
    */
   productWriteNotAsked(access: 'not_asked' | 'not_granted', nothingYet: boolean): string;
   /**
    * The same halt as it is pushed: lead and cause without the way, which the run page shows, so
    * that with the counts it fits the web-push cut (`REMINDER_BODY_MAX`). It goes to the owner's
-   * devices; the mandate that planned the run reads the owner in place of the pointer. A run whose
-   * planning grant is not known pushes it to every device, as before (`recordAndNotify`).
+   * devices; every live grant, whoever planned the run, reads the owner in place of the pointer
+   * (`recordAndNotify`).
    */
   productWriteNotAskedPush(access: 'not_asked' | 'not_granted', nothingYet: boolean): string;
   /** A run another loop took over (B9). */
@@ -469,8 +468,8 @@ export function bulkPushTitle(effect: BulkTriggerEffect, end: BulkPushEnd, targe
  * A halt's sentence as each reader gets it, for the halts whose way on only the owner can take
  * (reconnect, fix the profile, switch writing on, continue): the owner's push keeps the sentence
  * with its way; the run's history (`record`), which a mandate reads too, keeps only the fact; the
- * push to the mandate that planned the run (`mandate`) gets the fact and that only the owner can
- * resolve it (U-383). Null for every other halt, whose sentence holds for any reader.
+ * push to every live grant (`mandate`), whoever planned the run, gets the fact and that only the
+ * owner can resolve it (U-383). Null for every other halt, whose sentence holds for any reader.
  */
 export interface BulkHaltReaders {
   readonly record: string;
