@@ -60,7 +60,7 @@
 		return { ok: res.ok, status: res.status, body };
 	}
 
-	type PostBody = { error?: string; id?: string; code?: string; supersedable?: { id: string; costUsd: number } };
+	type PostBody = { error?: string; id?: string; code?: string; checksum?: string; supersedable?: { id: string; costUsd: number } };
 	function post(path: string, body?: unknown): Promise<{ ok: boolean; status: number; body: PostBody }> {
 		return json(path, {
 			method: 'POST',
@@ -266,18 +266,63 @@
 		});
 	}
 
+	/** After a toggle the run is asked for again — its counts and the checksum the approval
+	 *  presents moved — but of its targets only the toggled one changed: it is marked here instead
+	 *  of every page being loaded again. False where the run is no longer the preview this page
+	 *  shows, could not be read, or is not the run the toggle answered: its checksum differs from
+	 *  the one the toggle returned, so another view moved a target since (even a pair that cancels
+	 *  out, which the counts cannot tell) and another row would be stale. The caller then loads it
+	 *  whole. The toggle's compare-and-set proved the run was the one whose checksum the page holds,
+	 *  and the ledger hashes its answer under the same lock as the write, so a run with the toggle's
+	 *  checksum is that run plus this toggle, whoever else writes the database. */
+	async function afterToggle(id: string, seq: number, deselected: boolean, checksum: string | undefined): Promise<boolean> {
+		const before = run;
+		const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(id)}`);
+		// A refused or failed ask carries no run, so no phase `previewed`.
+		if (id !== runId || run !== before || before === null || r.body.phase !== 'previewed' || r.body.total !== before.total) return false;
+		if (checksum === undefined || r.body.checksum !== checksum) return false;
+		if (r.body.deselected !== before.deselected + (deselected ? 1 : -1)) return false;
+		run = r.body;
+		targets = targets.map((x) => (x.seq === seq ? { ...x, deselected } : x));
+		maxTargets = Math.max(1, bulkWriting(r.body));
+		unmeasuredOk = false;
+		probeOk = false;
+		supersedable = null;
+		return true;
+	}
+
 	/** Take one target out of the write, or put it back, against the checksum this page showed:
-	 *  each moves the checksum, so the page reloads and approves only the run as it now is. */
-	function toggleSelected(target: BulkTarget): Promise<void> {
-		return act(async (id) => {
-			if (!run?.checksum) return t('common.load_failed');
-			const verb = target.deselected ? 'reselect' : 'deselect';
-			const r = await post(`/bulk/runs/${encodeURIComponent(id)}/targets/${target.seq}/${verb}`, { checksum: run.checksum });
-			// The refusals the owner can meet here are worded by their code; the engine's English is the fallback.
-			const code = r.body.code;
-			if (!r.ok && code !== undefined && BULK_DESELECT_REFUSALS.includes(code)) return t(`bulk.deselect.refused.${code}`);
-			return refusalOf(r);
-		});
+	 *  each moves the checksum, so the page approves only the run as it now is. Like every act it is
+	 *  bound to the run it began on: each request names that run, and what comes back after the page
+	 *  moved to another run is not shown there. Unlike them it reloads only the run, not every target. */
+	async function toggleSelected(target: BulkTarget): Promise<void> {
+		if (run === null || run.id !== runId) return;
+		const id = runId;
+		busy = true;
+		actionError = '';
+		try {
+			if (!run.checksum) {
+				actionError = t('common.load_failed');
+			} else {
+				const deselect = target.deselected !== true;
+				const r = await post(`/bulk/runs/${encodeURIComponent(id)}/targets/${target.seq}/${deselect ? 'deselect' : 'reselect'}`, { checksum: run.checksum });
+				if (runId === id) {
+					// The refusals the owner can meet here are worded by their code; the engine's English is the fallback.
+					const code = r.body.code;
+					if (!r.ok && code !== undefined && BULK_DESELECT_REFUSALS.includes(code)) actionError = t(`bulk.deselect.refused.${code}`);
+					else if (!r.ok) actionError = refusalOf(r) ?? t('common.load_failed');
+					else {
+						// A run that could not be read after the toggle is loaded whole, so the page
+						// shows no checksum from before a toggle that went through.
+						const marked = await afterToggle(id, target.seq, deselect, r.body.checksum).catch(() => false);
+						if (!marked && runId === id) await load();
+					}
+				}
+			}
+		} catch {
+			if (runId === id) actionError = t('common.load_failed');
+		}
+		busy = false;
 	}
 
 	/** Discard a run before approving it: the owner's act alone (the route refuses a mandate), after

@@ -2466,6 +2466,12 @@ export class BulkLedger {
 
   private setSelected(runId: string, seq: number, selected: boolean, params: { checksum: string; now?: number | undefined }): BulkSelectOutcome {
     const db = this.engineDb.getDb();
+    // Under the write lock: the compare (the checksum the owner saw against the run as it is), the
+    // write, and the checksum of the run as the write left it. The approval is the owner's consent
+    // to a set of targets, so the checksum the page goes on must be the set this write made, also
+    // when another process writes the same database: hashed after the lock, a toggle of that
+    // process could land in between. A run holds up to BULK_MAX_TARGETS targets, and each checksum
+    // decrypts and hashes all of them, so the lock holds two of them.
     return db.transaction((): BulkSelectOutcome => {
       const run = this.runRow(runId);
       if (!run) return { ok: false, reason: 'not_found' };
@@ -2473,10 +2479,10 @@ export class BulkLedger {
       if (run.kind === 'undo' && run.atomic === 1) return { ok: false, reason: 'atomic_undo' };
       if (params.checksum !== this.computeChecksum(runId)) return { ok: false, reason: 'checksum' };
       const at = new Date(params.now ?? Date.now()).toISOString();
-      const moved = selected
+      const changed = selected
         ? db.prepare(`UPDATE bulk_targets SET deselected_at = NULL WHERE run_id = ? AND seq = ? AND change IN ${WRITING_CHANGES} AND deselected_at IS NOT NULL`).run(runId, seq)
         : db.prepare(`UPDATE bulk_targets SET deselected_at = ? WHERE run_id = ? AND seq = ? AND ${WRITING_SQL}`).run(at, runId, seq);
-      if (moved.changes !== 1) return { ok: false, reason: 'not_writing' };
+      if (changed.changes !== 1) return { ok: false, reason: 'not_writing' };
       return { ok: true, checksum: this.computeChecksum(runId)! };
     }).immediate();
   }
