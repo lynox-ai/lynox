@@ -108,17 +108,20 @@ describe('a next run whose time has passed', () => {
 		expect(t('tasks.due_since')).not.toBe(t('tasks.next_run'));
 	});
 
-	it('is not said of a paused or switched-off plan: it is not due', async () => {
+	it('is not said of a paused, switched-off or parked plan: it is not due', async () => {
 		const now = Date.now();
 		rows = [
 			{ ...BASE, id: 'paused', title: 'Paused', next_run_at: iso(now - HOUR), paused: true },
 			{ ...BASE, id: 'off', title: 'Off', next_run_at: iso(now - HOUR), enabled: 0 },
+			// Its run waits for an answer to an open question; the worker does not start it.
+			{ ...BASE, id: 'parked', title: 'Parked', next_run_at: iso(now - HOUR), status: 'waiting' },
 			{ ...BASE, id: 'live', title: 'Live', next_run_at: iso(now - HOUR) },
 		];
 		await render('de');
 		expect([...target.querySelectorAll<HTMLElement>('[data-next-run]')].map((e) => e.dataset['nextRun'])).toEqual(['due']);
 		expect(target.textContent ?? '').toContain('Live');
 		expect(target.textContent ?? '').toContain('Paused');
+		expect(target.textContent ?? '').toContain('Parked');
 	});
 
 	it('takes a time that cannot be read as not due', async () => {

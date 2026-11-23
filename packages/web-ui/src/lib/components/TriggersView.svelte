@@ -633,11 +633,14 @@
 								     past — it is not a next run, so it is not labelled as one. It is said
 								     in the consent block below instead, where it is the thing a person
 								     needs: what confirming starts, and when. -->
-								{#if trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.paused !== true}
+								<!-- Nor does a trigger whose run is parked on an open question: it keeps the
+								     moment it parked as next_run_at, and the worker does not start it again
+								     until the question is answered. -->
+								{#if trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.paused !== true && trigger.status !== 'waiting'}
 									<!-- A trigger the worker could not start keeps its next_run_at, which is then
 									     in the past: it is due since then, not a next run before the last one. -->
 									{@const due = isDue(trigger.next_run_at)}
-									<span data-next-run={due ? 'due' : 'next'}>{t(due ? 'tasks.due_since' : 'tasks.next_run')}: {fmtDate(trigger.next_run_at)}</span>
+									<span data-next-run={due ? 'due' : 'next'}>{due ? t('tasks.due_since') : t('tasks.next_run')}: {fmtDate(trigger.next_run_at)}</span>
 								{/if}
 								{#if trigger.last_run_at}
 									<span class={runStatusColor[trigger.last_run_status ?? ''] ?? ''} data-run-status={trigger.last_run_status}>{t('tasks.last_run')}: {fmtDate(trigger.last_run_at)}{#if Object.hasOwn(runStatusWord, trigger.last_run_status ?? '')}&nbsp;· {t(runStatusWord[trigger.last_run_status ?? '']!)}{/if}</span>
