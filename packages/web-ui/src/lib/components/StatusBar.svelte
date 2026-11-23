@@ -422,7 +422,7 @@
 	<button
 		onclick={togglePanel}
 		class="flex items-center gap-1.5 text-[11px] font-mono text-text-subtle hover:text-text transition-colors min-w-0"
-		aria-label="{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'} · {providerName} · {apiStatusLabel()} · {formatCost(todayCost)}"
+		aria-label="{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'} · {providerName} · {apiStatusLabel()} · {t('status.today')} {formatCost(todayCost)}"
 		title="{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'} · {providerName} · {apiStatusLabel()}{apiStatusTooltip ? ` — ${apiStatusTooltip}` : ''}"
 	>
 		<span class="inline-block h-1.5 w-1.5 rounded-full shrink-0 {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
@@ -430,7 +430,8 @@
 		<span class="inline-block h-1.5 w-1.5 rounded-full shrink-0 {apiStatusClass()}"></span>
 		<span class="truncate">{providerName}</span>
 		<span class="text-border shrink-0">|</span>
-		<span class="shrink-0">{formatCost(todayCost)}</span>
+		<!-- The period is named: next to a monthly cap note, a bare amount reads as the month's. -->
+		<span class="shrink-0 whitespace-nowrap">{t('status.today')} {formatCost(todayCost)}</span>
 	</button>
 	{@render voiceAutoSendBtn()}
 	{@render autoSpeakBtn()}
@@ -482,8 +483,9 @@
 	     Per PRD-IA-CONSOLIDATION-V2 Phase 2 P2-PR-B the click target moves
 	     from the legacy hub cost-limits route to /app/activity. Edit-limits
 	     SSoT now lives in /app/settings/workspace/limits (P3-PR-X). -->
-	<a href="/app/activity" class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0" aria-label="{formatCost(todayCost)} · {t('status.today')}" title="{formatCost(todayCost)} · {t('status.today')}">
-		{formatCost(todayCost)}
+	<!-- The period is named, as on the phone bar; the link's name is its visible text. -->
+	<a href="/app/activity" class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0 whitespace-nowrap" title="{t('status.today')} {formatCost(todayCost)}">
+		{t('status.today')} {formatCost(todayCost)}
 	</a>
 
 	<span class="text-border">|</span>
