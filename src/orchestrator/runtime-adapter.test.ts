@@ -2084,7 +2084,7 @@ describe('RunTaint — cross-step untrusted inheritance', () => {
   });
 
   it('a step shares the calling conversation\'s record of what its searches listed', async () => {
-    const searches = { has: () => false, cleanHosts: () => [] };
+    const searches = { has: () => false };
     await runInline(newRunTaint({ searchResultAddresses: searches } as unknown as Parameters<typeof newRunTaint>[0]));
     const config = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
     expect(config['searchResultAddresses']).toBe(searches);
