@@ -13,8 +13,8 @@ export interface CleanBatchReader {
 /**
  * Whether the running call is the owner's own, in their interactive chat, in a tool batch that
  * began before any foreign content, in a conversation without a search the provider ran itself.
- * Only then may a call record something a later step trusts without asking (a host saved with an
- * API profile, the hosts a search listed for the shell).
+ * Only then may a call record something a later step trusts without asking: the host saved with an
+ * API profile (`owner_clean_host`).
  *
  * - Owner's own chat: a trigger's, a workflow's or a task's run carries a run tag as its author
  *   even under the owner's principal, and a sub-agent a run origin of its own; a run made in

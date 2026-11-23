@@ -657,6 +657,40 @@ let _offlineProbeInFlight = false;
 let _userStopEpoch = -1;
 let isOffline = $state(typeof navigator !== 'undefined' ? !navigator.onLine : false);
 
+/** The changeset fetch in flight, so a drain that starts meanwhile waits for what it says. */
+let _changesetFetch: Promise<boolean> | null = null;
+/** The opening of a thread a drain is due or waiting for. A second drain asked for in the same
+ *  opening is the same one; one asked for after the thread was opened (again) is its own, and
+ *  the earlier one drops itself. */
+let _drainDue: { sid: string | null; gen: number } | null = null;
+
+/**
+ * Start the next queued turn after `delayMs`. Every automatic send from the queue goes through
+ * here. When the turn would start, an open changeset review holds it, also one whose fetch is
+ * still in flight, and so does a running turn. A drain asked for before the thread was left or
+ * opened again is dropped.
+ * A held turn stays first in the queue; an answered review starts it. One drain at a time, so
+ * two that wait for the same fetch do not start two turns.
+ */
+function drainQueueSoon(delayMs: number): void {
+	if (messageQueue.length === 0) return;
+	if (_drainDue && _drainDue.sid === sessionId && _drainDue.gen === _resumeGeneration) return;
+	const due = { sid: sessionId, gen: _resumeGeneration };
+	_drainDue = due;
+	setTimeout(() => { void drainQueueNow(due); }, delayMs);
+}
+
+async function drainQueueNow(due: { sid: string | null; gen: number }): Promise<void> {
+	// The fetch never rejects (`loadChangeset` answers false instead).
+	while (_changesetFetch) await _changesetFetch;
+	if (_drainDue === due) _drainDue = null;
+	// A new chat (newChat) leaves the opening as it is: the thread says it.
+	if (sessionId !== due.sid || _resumeGeneration !== due.gen || pendingChangeset || isStreaming || messageQueue.length === 0) return;
+	const next = messageQueue.shift()!;
+	persistChatNow(); // queue shrank — keep the durable copy in sync
+	await _executeRun(next.task, next.files, undefined, next.runOptions, next.id);
+}
+
 /** Queue a failed user turn for another send. Extracted so the confirmed and
  *  the offline-verified paths below re-fire through exactly one place. */
 function refireFailedTurn(msg: ChatMessage): void {
@@ -671,13 +705,8 @@ function refireFailedTurn(msg: ChatMessage): void {
 	msg.queueId = newQueueId();
 	messageQueue.push({ id: msg.queueId, task: msg.content });
 	chatError = null;
-	// Small delay to let network stabilize
-	setTimeout(() => {
-		if (messageQueue.length > 0) {
-			const next = messageQueue.shift()!;
-			void _executeRun(next.task, next.files, undefined, next.runOptions, next.id);
-		}
-	}, 500);
+	// Small delay to let network stabilize. A review can open in it: the drain checks again.
+	drainQueueSoon(500);
 }
 
 // Offline detection + auto-retry on reconnect
@@ -1477,11 +1506,7 @@ function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[]
 	// The turns queued behind this one still get their go, once there is a connection to try:
 	// a turn started offline returns without sending and would be dropped from the queue.
 	const online = typeof navigator === 'undefined' || navigator.onLine;
-	if (online && !pendingChangeset && messageQueue.length > 0) {
-		const next = messageQueue.shift()!;
-		persistChatNow();
-		setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
-	}
+	if (online) drainQueueSoon(100);
 }
 
 /** The same user turn in another copy of a thread's list: same text, sent at the same time. */
@@ -2200,13 +2225,9 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 		setTimeout(() => { void loadThreads(); }, 6000);
 	}
 
-	// Process queue: send next queued message
-	if (messageQueue.length > 0) {
-		const next = messageQueue.shift()!;
-		persistChatNow(); // queue shrank — keep the durable copy in sync
-		// Small delay so the UI updates before next run starts
-		setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
-	}
+	// Process queue: send next queued message. Small delay so the UI updates before the next
+	// run starts; a review this run left open holds it (`drainQueueSoon`).
+	drainQueueSoon(100);
 }
 
 /**
@@ -3459,19 +3480,29 @@ export async function compactNow(): Promise<{ ok: boolean; error?: string }> {
 	}
 }
 
-async function fetchChangeset(): Promise<void> {
-	if (!sessionId) return;
+/** Ask the server for the open review; true when it answered (with or without one). */
+function fetchChangeset(): Promise<boolean> {
+	const run = loadChangeset();
+	_changesetFetch = run;
+	void run.finally(() => { if (_changesetFetch === run) _changesetFetch = null; });
+	return run;
+}
+
+async function loadChangeset(): Promise<boolean> {
+	if (!sessionId) return false;
 	changesetLoading = true;
 	try {
+		// No time limit of its own: a slow answer that carries a review must still show it, and a
+		// queued turn waits for it. A fetch the network ends lands in the catch and frees the queue.
 		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset`);
-		if (res.ok) {
-			const data = (await res.json()) as { hasChanges: boolean; runId?: string; files: ChangesetFileInfo[] };
-			if (data.hasChanges && data.files.length > 0) {
-				pendingChangeset = data.files;
-				pendingChangesetRunId = data.runId ?? null;
-			}
+		if (!res.ok) return false;
+		const data = (await res.json()) as { hasChanges: boolean; runId?: string; files: ChangesetFileInfo[] };
+		if (data.hasChanges && data.files.length > 0) {
+			pendingChangeset = data.files;
+			pendingChangesetRunId = data.runId ?? null;
 		}
-	} catch { /* best-effort — don't block UX */ }
+		return true;
+	} catch { return false; /* best-effort — don't block UX */ }
 	finally { changesetLoading = false; }
 }
 
@@ -3483,6 +3514,12 @@ export async function submitChangesetReview(
 	rolledBackFiles?: string[],
 ): Promise<void> {
 	if (!sessionId) return;
+	// The answer is about this thread as it is open now. When another thread is shown by the time
+	// the server answers (or this one was opened again), the review and the queue on screen are
+	// not the ones answered: nothing here clears or drains them.
+	const sid = sessionId;
+	const gen = _resumeGeneration;
+	const stale = (): boolean => sessionId !== sid || _resumeGeneration !== gen;
 	// The server refuses an answer whose run is not the one holding the changes now.
 	const body: Record<string, unknown> = { action, runId: pendingChangesetRunId };
 	if (action === 'partial' && rolledBackFiles) {
@@ -3491,7 +3528,7 @@ export async function submitChangesetReview(
 	let status: number;
 	let res: Response;
 	try {
-		res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset/review`, {
+		res = await fetch(`${getApiBase()}/sessions/${sid}/changeset/review`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify(body),
@@ -3502,8 +3539,10 @@ export async function submitChangesetReview(
 		addToast(t('changeset.review_unsent'), 'error', 5000);
 		return;
 	}
-	pendingChangeset = null;
-	pendingChangesetRunId = null;
+	if (!stale()) {
+		pendingChangeset = null;
+		pendingChangesetRunId = null;
+	}
 	if (status >= 200 && status < 300) {
 		// A rollback leaves a file as it is when it was replaced or linked since the review, or
 		// could not be written. Closing the review without a word would read as all restored.
@@ -3520,12 +3559,17 @@ export async function submitChangesetReview(
 				: shown;
 			addToast(tf('changeset.not_restored', { files }), 'error', null);
 		}
+		// The turns queued behind the run that opened the review go now.
+		if (!stale()) drainQueueSoon(100);
 		return;
 	}
 	// The answer did nothing. Closing the review silently would read as done: say so, and show
 	// what is pending now. 409 is the review of an earlier run, or a run in progress.
 	addToast(t(status === 409 ? 'changeset.review_refused' : 'changeset.review_failed'), 'info', 5000);
-	await fetchChangeset();
+	// Only an answer from the server says nothing is pending: a failed fetch leaves no review
+	// shown, and the queued turns would go past the one the server still holds.
+	if (stale()) return;
+	if (await fetchChangeset() && !stale()) drainQueueSoon(100);
 }
 
 export function cancelQueue(): void {
@@ -4268,14 +4312,10 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 			// comment above ("the queued turn drains after it") assumes THIS
 			// finally drains it — but it never did, so a message typed while a
 			// resumed run streamed sat in the queue forever. Mirror the
-			// normal-path drain in _executeRun's finally; skip if the resumed
-			// run left a changeset to review (sendMessage's guard is bypassed
-			// because we call _executeRun directly).
-			if (!pendingChangeset && messageQueue.length > 0) {
-				const next = messageQueue.shift()!;
-				persistChatNow(); // queue shrank — keep the durable copy in sync
-				setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
-			}
+			// normal-path drain at the end of `_runTurn`; a changeset the resumed
+			// run left to review holds it (`drainQueueSoon`). A thread opened meanwhile has its
+			// own queue and review: not this re-attach's to drain.
+			if (gen === _resumeGeneration) drainQueueSoon(100);
 		}
 		persistChat();
 	}
@@ -4604,10 +4644,10 @@ export async function resumeThread(threadId: string): Promise<void> {
 		// streamed, then carried across a reload. Only when this resume is still
 		// current, the thread is idle, there's no pending prompt blocking, and
 		// we're not re-attaching to a live run (the queued turn drains after it).
-		if (gen === _resumeGeneration && !isStreaming && !reattaching && !pendingChangeset && messageQueue.length > 0) {
-			const next = messageQueue.shift()!;
-			persistChatNow();
-			setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
+		// A review the server holds was not shown before the reload: it is asked for first, and
+		// the turn waits for it. Without an answer the turn stays queued.
+		if (gen === _resumeGeneration && !isStreaming && !reattaching && messageQueue.length > 0) {
+			void fetchChangeset().then((answered) => { if (answered && gen === _resumeGeneration) drainQueueSoon(100); });
 		}
 		// The chip that announced any queued write in this thread is client-only and did not
 		// survive the reload, so ask the server what is still waiting HERE.
