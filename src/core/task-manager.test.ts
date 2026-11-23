@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
-import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, InvalidDueDateError, admittedTriggerTier } from './task-manager.js';
+import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, InvalidDueDateError, admittedTriggerTier, SCHEDULED_TITLE_PREFIX, titleIsWorkflowName } from './task-manager.js';
 import { TriggerStore } from './trigger-store.js';
 import { stampFromRow } from './plan-stamp.js';
 import { runAsHandRun } from './hand-run-door.js';
@@ -1287,9 +1287,11 @@ describe.each([false, true])('a mandate\'s own to-dos (subject graph %s)', (grap
     expect(tm.getTask(a)!.created_by).toBe(TAG);
   });
 
-  it('the owner\'s creating request records no creator, as before', () => {
+  it('the owner\'s creating request records the owner; one that names nobody records nobody', () => {
     const id = tm.create({ title: 'by the owner', createdBy: 'owner' }).id;
-    expect(createdBy(id)).toEqual({ legacy: null, mirror: null });
+    expect(createdBy(id)).toEqual({ legacy: 'owner', mirror: 'owner' });
+    const none = tm.create({ title: 'by nobody named' }).id;
+    expect(createdBy(none)).toEqual({ legacy: null, mirror: null });
   });
 
   describe('update', () => {
@@ -1473,5 +1475,22 @@ describe.each([false, true])('a mandate\'s own to-dos (subject graph %s)', (grap
       expect(tm.deleteTodo('nope', M)).toBe(false);
       expect(tm.deleteTodo('nope', OTHER)).toBe(false);
     });
+  });
+});
+
+describe('titleIsWorkflowName', () => {
+  it('holds for the name alone and for the prefix with the name, and for nothing else', () => {
+    expect(titleIsWorkflowName('Report', 'Report')).toBe(true);
+    expect(titleIsWorkflowName(`${SCHEDULED_TITLE_PREFIX}Report`, 'Report')).toBe(true);
+    expect(SCHEDULED_TITLE_PREFIX).toBe('Scheduled: ');
+    // A title that starts with the prefix and goes on with anything but the name stays whole.
+    expect(titleIsWorkflowName('Scheduled: Report now', 'Report')).toBe(false);
+    expect(titleIsWorkflowName('Scheduled: Other', 'Report')).toBe(false);
+    expect(titleIsWorkflowName('Scheduled:Report', 'Report')).toBe(false);
+    expect(titleIsWorkflowName('Report ', 'Report')).toBe(false);
+    expect(titleIsWorkflowName('Monthly', 'Report')).toBe(false);
+    // A nameless workflow names nothing: neither an empty title nor the bare prefix is its name.
+    expect(titleIsWorkflowName('', '')).toBe(false);
+    expect(titleIsWorkflowName(SCHEDULED_TITLE_PREFIX, '')).toBe(false);
   });
 });

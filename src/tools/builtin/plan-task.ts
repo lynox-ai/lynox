@@ -8,12 +8,13 @@ import { recordSessionCost } from '../../core/session-budget.js';
 import { storePipeline, getPipeline } from './pipeline.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
+import { turnIsLocked } from '../../core/mandate-tool-lock.js';
 import type { PromptText } from '../../types/index.js';
 import { pv, joinPrompts } from '../../core/prompt-value.js';
 import { DISMISSED, PLAN_NOT_ANSWERED } from './ask-user.js';
 import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 import { currentCallSignal } from '../../core/call-connection.js';
-import { STEP_ID_MAX } from '../../orchestrator/step-id.js';
+import { RESERVED_STEP_IDS, STEP_ID_MAX } from '../../orchestrator/step-id.js';
 
 // Config accessed via agent.toolContext.userConfig
 
@@ -68,7 +69,8 @@ function truncateSlug(slug: string, maxLen: number): string {
 /** Convert agent-assigned plan phases to pipeline steps with dependency graph */
 export function phasesToPipelineSteps(phases: PlanPhase[]): InlinePipelineStep[] {
   // Build per-index ID mapping (supports duplicate phase names)
-  const usedIds = new Set<string>();
+  // A reserved id (`step-id.ts`) counts as taken: a phase named "Params" becomes `params-2`.
+  const usedIds = new Set<string>(RESERVED_STEP_IDS);
   const ids: string[] = [];
 
   for (const phase of phases) {
@@ -233,7 +235,7 @@ function convertToPipeline(summary: string, phases: PlanPhase[], by: IAgent, his
 
   // Save-time gate. plan_task is the canonical save path for pipelines today;
   // future Workflows-editor save endpoints should call this gate too.
-  assertPlannedPipelineIsValid(planned);
+  assertPlannedPipelineIsValid(planned, turnIsLocked(by.principal));
 
   // Persist to pipeline_runs FIRST, then the in-memory store. plan_task is
   // decoupled from run (D4) — the returned workflow_id must survive an engine
