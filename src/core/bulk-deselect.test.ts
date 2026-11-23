@@ -246,6 +246,44 @@ describe('the write lock of a toggle', () => {
     expect(ledger.computeChecksum(id)).not.toBe(answered);
   });
 
+  // The window the lock is taken for: between the compare and the write. A transaction that only
+  // reads first would let another connection write there, and the compare would have checked a set
+  // that is no longer the run's.
+  it('holds another connection off from the compare on, before its own write', async () => {
+    const id = await planFiles(three);
+    const b = seqOf(id, 'b.txt');
+    const c = seqOf(id, 'c.txt');
+    const seen = ledger.computeChecksum(id)!;
+    const other = new Database(join(dir, 'engine.db'), { timeout: 0 });
+    let calls = 0;
+    let interleaved: boolean | null = null;
+    let refusedWith: string | undefined;
+    const real = ledger.computeChecksum.bind(ledger);
+    vi.spyOn(ledger, 'computeChecksum').mockImplementation((runId: string) => {
+      calls += 1;
+      // The compare's checksum: the other connection tries to take c out right before it.
+      if (calls === 1) {
+        try {
+          other.prepare('UPDATE bulk_targets SET deselected_at = ? WHERE run_id = ? AND seq = ?').run(new Date().toISOString(), runId, c);
+          interleaved = true;
+        } catch (e) {
+          interleaved = false;
+          refusedWith = (e as { code?: string }).code;
+        }
+      }
+      return real(runId);
+    });
+    const off = ledger.deselectTarget(id, b, { checksum: seen });
+    vi.mocked(ledger.computeChecksum).mockRestore();
+    expect(interleaved).toBe(false);
+    expect(refusedWith).toBe('SQLITE_BUSY');
+    expect(off).toEqual({ ok: true, checksum: ledger.computeChecksum(id) });
+    expect(ledger.getPreview(id).filter((t) => t.deselected === true).map((t) => t.seq)).toEqual([b]);
+    // Control: after the lock the same write goes through.
+    expect(other.prepare('UPDATE bulk_targets SET deselected_at = ? WHERE run_id = ? AND seq = ?').run(new Date().toISOString(), id, c).changes).toBe(1);
+    other.close();
+  });
+
   it('hashes once on a refusal, and only inside the lock', async () => {
     const id = await planFiles(three);
     const inLock: boolean[] = [];
