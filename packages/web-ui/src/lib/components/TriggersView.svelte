@@ -8,7 +8,7 @@
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { escalationNotice } from '../utils/trigger-escalation.js';
 	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
-	import { endedNotices, pausedTitleLine, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
+	import { endedNotices, pausedTitleLine, planTitle, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
 	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
 	import StampConfirm from './StampConfirm.svelte';
@@ -67,19 +67,23 @@
 		paused_ended?: PausedEnded[];
 		// A bulk run's trigger: the host its run works on, or null where it has none (`GET /api/triggers`).
 		bulk_host?: string | null;
+		// The workflow's name, where the plan's title is that name as the engine wrote it
+		// (`GET /api/triggers`): the list puts lynox's words before it (`planTitle`).
+		title_workflow?: string;
 		// From before its creator was recorded, nobody else's hand in it: it sends to none of the
 		// recipients it names until the owner confirms them (`GET /api/triggers`, owner only).
 		recipients_unconfirmed?: boolean;
 	}
 
 	// A bulk run's trigger is titled with its run id, which the model reads; the list names it by
-	// its stage and host instead (U-324). Every other trigger by its title.
+	// its stage and host instead (U-324). Every other trigger by its title, a workflow's name
+	// after lynox's words where the engine titled the plan with it (`planTitle`).
 	const BULK_STAGE_KEYS: Readonly<Record<string, string>> = {
 		bulk_preview: 'triggers.bulk.preview', bulk_judge: 'triggers.bulk.judge', bulk_apply: 'triggers.bulk.apply', bulk_undo: 'triggers.bulk.undo',
 	};
 	function shownTitle(trigger: Trigger): string {
 		const key = trigger.effect === undefined ? undefined : BULK_STAGE_KEYS[trigger.effect];
-		if (key === undefined) return trigger.title;
+		if (key === undefined) return planTitle(trigger);
 		const host = trigger.bulk_host ?? null;
 		return host === null || host === '' ? t(key) : `${t(key)} · ${host}`;
 	}

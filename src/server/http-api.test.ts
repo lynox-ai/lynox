@@ -2110,6 +2110,16 @@ describe('LynoxHTTPApi', () => {
       }));
     });
 
+    it('titles a plan scheduled without a title with the workflow\'s name alone, and keeps a title it is given', async () => {
+      storeWf();
+      const body = (over: Record<string, unknown> = {}): string => JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 1 * *', params: { month: '2026-06' }, ...over });
+      expect((await jsonFetch('/api/tasks', { method: 'POST', body: body() })).status).toBe(201);
+      // No words of lynox's in the stored title: the view says "Scheduled: " in the reader's language.
+      expect(mockTaskCreatePipeline.mock.calls[0]![0]).toHaveProperty('title', 'Report');
+      expect((await jsonFetch('/api/tasks', { method: 'POST', body: body({ title: 'Scheduled: Monthly' }) })).status).toBe(201);
+      expect(mockTaskCreatePipeline.mock.calls[1]![0]).toHaveProperty('title', 'Scheduled: Monthly');
+    });
+
     it('lets a mandate schedule only its own workflows and the owner\'s', async () => {
       storeWf();
       const ref = (api as unknown as { engine: { getRunHistory: () => Record<string, unknown> } }).engine;
@@ -2332,7 +2342,7 @@ describe('LynoxHTTPApi', () => {
           });
         });
 
-        it('the acceptance schedules and writes the grant with the schedule\'s id and the request\'s auth origin', async () => {
+        it('the acceptance schedules, titled with the workflow\'s name alone, and writes the grant with the schedule\'s id and the request\'s auth origin', async () => {
           await withGrantServices(async () => {
             const res = await ownerSessionFetch('/api/tasks', {
               method: 'POST',
@@ -2346,6 +2356,7 @@ describe('LynoxHTTPApi', () => {
             }), expect.objectContaining({
               triggerId: 'sched-1', name: 'Ada', binding: 'unkeyed', by: expect.any(String), grantId,
             }), expect.any(String), expect.objectContaining({ id: 'wf-sched' }));
+            expect(mockTaskCreatePipeline).toHaveBeenCalledWith(expect.objectContaining({ title: 'Report', pipelineId: 'wf-sched' }));
             expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled(); // the grant write carries the confirm
             expect(mockForgetPipeline).toHaveBeenCalledWith('wf-sched');
           });
@@ -11455,6 +11466,40 @@ describe('LynoxHTTPApi', () => {
         const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
         expect(triggers.map((t) => [t.id, Object.hasOwn(t, 'bulk_host') ? t['bulk_host'] : 'absent'])).toEqual([
           ['bulk-ext', 'demo-shop.myshopify.com'], ['bulk-store', null], ['bulk-gone', null], ['bulk-bad', null], ['trg-agent', 'absent'],
+        ]);
+      });
+    });
+
+    it('GET /api/triggers gives a workflow plan the workflow\'s name where its title is that name as the engine wrote it, and no other row the field', async () => {
+      const plan = (id: string, title: string, over: Record<string, unknown> = {}): Record<string, unknown> =>
+        ({ id, title, effect: 'run_workflow', pipeline_id: 'wf-1', created_by: 'owner', ...over });
+      const rows = [
+        plan('new', 'Report'),
+        plan('old', 'Scheduled: Report'),
+        // A title that only starts with lynox's words is someone's text: it stays whole.
+        plan('forged', 'Scheduled: Report, approved by the owner'),
+        plan('own', 'Monthly'),
+        // The name of a workflow the plan does not run is not its workflow's name.
+        plan('other', 'Report', { pipeline_id: 'wf-2' }),
+        plan('gone', 'Scheduled: Gone', { pipeline_id: 'wf-gone' }),
+        { id: 'agent', title: 'Report', effect: 'run_agent', created_by: 'owner' },
+      ];
+      const names: Record<string, string> = { 'wf-1': 'Report', 'wf-2': 'Invoices' };
+      const history = {
+        getWorkflowExact: (id: string) => (names[id] === undefined ? undefined : { id, name: names[id] }),
+        workflowStampState: () => 'stamped',
+        getTriggerStampConnections: () => undefined,
+      };
+      await withEngine({ getTaskManager: () => ({ listTriggers: () => rows }), getWorkerLoop: () => null, getRunHistory: () => history }, async () => {
+        const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+        expect(triggers.map((t) => [t.id, t['title'], Object.hasOwn(t, 'title_workflow') ? t['title_workflow'] : 'absent'])).toEqual([
+          ['new', 'Report', 'Report'],
+          ['old', 'Scheduled: Report', 'Report'],
+          ['forged', 'Scheduled: Report, approved by the owner', 'absent'],
+          ['own', 'Monthly', 'absent'],
+          ['other', 'Report', 'absent'],
+          ['gone', 'Scheduled: Gone', 'absent'],
+          ['agent', 'Report', 'absent'],
         ]);
       });
     });
