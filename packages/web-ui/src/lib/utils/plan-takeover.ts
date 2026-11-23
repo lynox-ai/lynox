@@ -1,4 +1,57 @@
 import { t, tf } from '../i18n.svelte.js';
+import { visible } from './workflow-stamp.js';
+
+/** How many characters of a value someone else wrote a sentence shows, the cut one included. */
+export const SHOWN_VALUE_MAX = 80;
+
+/** Where a value someone else wrote starts and ends inside a sentence of lynox's (Private Use). */
+export const VALUE_OPEN = '\uE000';
+export const VALUE_CLOSE = '\uE001';
+const VALUE_MARK = /[\uE000\uE001]/g;
+
+/**
+ * A value someone else wrote (a plan's title, a name, an account) as a sentence of lynox's shows
+ * it: on one line, cut to {@link SHOWN_VALUE_MAX} characters, with the characters that change how
+ * text reads without being seen printed as their code point (`visible`), and between the two
+ * marks the view draws as a value set apart ({@link segments}). A mark inside the value is printed
+ * as its code point too, so a value can neither close its own marks nor open new ones: whatever
+ * it says, it cannot read as lynox's own words.
+ */
+export function shownValue(text: string): string {
+	const chars = Array.from(text.replace(/\s+/g, ' ').trim());
+	const cut = chars.length > SHOWN_VALUE_MAX ? `${chars.slice(0, SHOWN_VALUE_MAX - 1).join('')}…` : chars.join('');
+	const shown = visible(cut).replace(VALUE_MARK, (c) => `<U+${c.codePointAt(0)!.toString(16).toUpperCase()}>`);
+	return `${VALUE_OPEN}${shown}${VALUE_CLOSE}`;
+}
+
+/** One piece of a sentence: lynox's words, or a value someone else wrote (`foreign`). */
+export interface Segment { text: string; foreign: boolean }
+
+/**
+ * A sentence split at the marks {@link shownValue} sets. A mark without its partner is dropped and
+ * what follows it stays lynox's text: only a whole pair sets a value apart.
+ */
+export function segments(line: string): Segment[] {
+	const out: Segment[] = [];
+	const push = (text: string, foreign: boolean): void => {
+		const clean = text.replace(VALUE_MARK, '');
+		if (clean !== '' || foreign) out.push({ text: clean, foreign });
+	};
+	const pair = /\uE000([^\uE000\uE001]*)\uE001/g;
+	let at = 0;
+	for (let m = pair.exec(line); m !== null; m = pair.exec(line)) {
+		push(line.slice(at, m.index), false);
+		push(m[1]!, true);
+		at = m.index + m[0].length;
+	}
+	push(line.slice(at), false);
+	return out;
+}
+
+/** A sentence as plain text, without its marks: for a label, a title or a log. */
+export function plainText(line: string): string {
+	return segments(line).map((s) => s.text).join('');
+}
 
 /**
  * The owner's takeover of a paused plan, as the Triggers view shows it: the lines of the
@@ -65,8 +118,9 @@ export function nameOfTag(tag: string): string {
 
 /** At most five plans by name, the rest as "and {n} more" (U-037 Nachtrag 2). */
 export function planList(titles: readonly string[]): string {
-	if (titles.length <= 5) return titles.join(', ');
-	return tf('takeover.plans_more', { plans: titles.slice(0, 5).join(', '), n: String(titles.length - 5) });
+	const shown = titles.map(shownValue);
+	if (shown.length <= 5) return shown.join(', ');
+	return tf('takeover.plans_more', { plans: shown.slice(0, 5).join(', '), n: String(shown.length - 5) });
 }
 
 /**
@@ -77,8 +131,8 @@ function roleLines(m: TakeoverMember, workflow: string | null, saidByF2: Takeove
 	return m.roles.filter((role) => role !== saidByF2).map((role) => ({
 		kind: 'role' as const,
 		text: role === 'created' || role === 'edited'
-			? tf(`takeover.role.${role}`, { name: m.name })
-			: tf(`takeover.role.${role}`, { name: m.name, workflow: workflow ?? '' }),
+			? tf(`takeover.role.${role}`, { name: shownValue(m.name) })
+			: tf(`takeover.role.${role}`, { name: shownValue(m.name), workflow: workflow === null ? '' : shownValue(workflow) }),
 	}));
 }
 
@@ -96,7 +150,7 @@ function f2Line(p: TakeoverPreview): { line: TakeoverLine; by: TakeoverMember; r
 	if (by === undefined) return null;
 	const role = marked !== undefined && from !== null ? from.role : by.roles.includes('workflow-edited') ? 'workflow-edited' : 'workflow-created';
 	const changed = role === 'workflow-edited';
-	const vars = { workflow: p.workflow.name, name: by.name };
+	const vars = { workflow: shownValue(p.workflow.name), name: shownValue(by.name) };
 	const head = tf(changed ? 'takeover.f2.changed' : 'takeover.f2.created', vars);
 	const text = p.alsoReleased.length === 0 ? head : `${head} ${tf('takeover.f2.released', { plans: planList(p.alsoReleased.map((r) => r.title)) })}`;
 	return { line: { kind: 'f2', text }, by, role };
@@ -107,9 +161,9 @@ function f2Line(p: TakeoverPreview): { line: TakeoverLine; by: TakeoverMember; r
  * Only a change of whom a plan runs for is said (N3); a plan that will not run again by itself is
  * left out of what is shown (N7) — the digest still holds it.
  */
-function memberChangeLines(p: TakeoverPreview): TakeoverLine[] {
+export function memberChangeLines(changes: readonly TakeoverMemberChange[]): TakeoverLine[] {
 	const groups = new Map<string, { before: string; after: string | null; titles: string[] }>();
-	for (const c of p.memberChanges) {
+	for (const c of changes) {
 		if (c.runsNoMore || c.before === null || c.before === c.after) continue;
 		const key = `${c.before}\u0000${c.after ?? ''}`;
 		const g = groups.get(key) ?? { before: c.before, after: c.after, titles: [] };
@@ -118,10 +172,11 @@ function memberChangeLines(p: TakeoverPreview): TakeoverLine[] {
 	}
 	return [...groups.values()].map((g) => {
 		const one = g.titles.length === 1;
-		const before = nameOfTag(g.before);
+		const before = shownValue(nameOfTag(g.before));
+		const plan = shownValue(g.titles[0]!);
 		const text = g.after === null
-			? (one ? tf('takeover.change.owner_one', { plan: g.titles[0]!, before }) : tf('takeover.change.owner_many', { plans: planList(g.titles), before }))
-			: (one ? tf('takeover.change.member_one', { plan: g.titles[0]!, before, after: nameOfTag(g.after) }) : tf('takeover.change.member_many', { plans: planList(g.titles), before, after: nameOfTag(g.after) }));
+			? (one ? tf('takeover.change.owner_one', { plan, before }) : tf('takeover.change.owner_many', { plans: planList(g.titles), before }))
+			: (one ? tf('takeover.change.member_one', { plan, before, after: shownValue(nameOfTag(g.after)) }) : tf('takeover.change.member_many', { plans: planList(g.titles), before, after: shownValue(nameOfTag(g.after)) }));
 		return { kind: 'member_change' as const, text };
 	});
 }
@@ -135,9 +190,9 @@ function connectionLines(p: TakeoverPreview): TakeoverLine[] {
 	return p.connections.map((c) => ({
 		kind: 'connection' as const,
 		text: tf('takeover.connection', {
-			name: c.by ?? t('takeover.connection_someone'),
-			provider: c.provider,
-			account: c.account !== null && c.account !== '' && c.account.toLowerCase() !== c.by?.toLowerCase() ? ` (${c.account})` : '',
+			name: c.by !== null ? shownValue(c.by) : t('takeover.connection_someone'),
+			provider: shownValue(c.provider),
+			account: c.account !== null && c.account !== '' && c.account.toLowerCase() !== c.by?.toLowerCase() ? ` (${shownValue(c.account)})` : '',
 		}),
 	}));
 }
@@ -152,7 +207,7 @@ function runsAsLine(p: TakeoverPreview): TakeoverLine {
 	const changed = member?.roles.includes('workflow-edited') === true;
 	return {
 		kind: 'runs_as_member',
-		text: tf(changed ? 'takeover.runs_as_member.changed' : 'takeover.runs_as_member.created', { name, workflow: p.workflow?.name ?? '' }),
+		text: tf(changed ? 'takeover.runs_as_member.changed' : 'takeover.runs_as_member.created', { name: shownValue(name), workflow: p.workflow === null ? '' : shownValue(p.workflow.name) }),
 	};
 }
 
@@ -181,7 +236,7 @@ export function takeoverLines(p: TakeoverPreview, formatDate: (iso: string) => s
 		}
 	}
 	if (f2 !== null) lines.push(f2.line);
-	lines.push(...memberChangeLines(p));
+	lines.push(...memberChangeLines(p.memberChanges));
 	lines.push(...connectionLines(p));
 	lines.push(runsAsLine(p));
 	lines.push(...scheduleLines(p, formatDate));
@@ -216,7 +271,7 @@ export function endedNotices(plans: ReadonlyArray<{ title: string; paused_ended?
 	// One plan is named by its title: the notice stands above the whole list, not at the plan (ux).
 	return [...byAccess.values()].map(({ ended, titles }) => {
 		const form = titles.length === 1 ? 'one' : 'many';
-		const text = tf(`takeover.notice.${ended.reason}_${form}`, { name: ended.email, date: formatDate(ended.ends_at), count: String(titles.length), plan: titles[0] ?? '' });
+		const text = tf(`takeover.notice.${ended.reason}_${form}`, { name: shownValue(ended.email), date: formatDate(ended.ends_at), count: String(titles.length), plan: titles[0] === undefined ? '' : shownValue(titles[0]) });
 		return ended.reason === 'expired' && !ended.warned ? `${text} ${t('takeover.notice.no_advance')}` : text;
 	});
 }
@@ -232,7 +287,7 @@ export type TakeoverRefusal = (typeof TAKEOVER_REFUSAL_CODES)[number];
 export function refusalText(code: string, opts: { workflow: string | null; managed: boolean; fallback: string }): string {
 	switch (code) {
 		case 'unreadable':
-			return opts.workflow !== null && opts.workflow !== '' ? tf('takeover.refused.unreadable_named', { workflow: opts.workflow }) : t('takeover.refused.unreadable');
+			return opts.workflow !== null && opts.workflow !== '' ? tf('takeover.refused.unreadable_named', { workflow: shownValue(opts.workflow) }) : t('takeover.refused.unreadable');
 		case 'prompts':
 		case 'unrecorded':
 			return opts.managed ? `${t(`takeover.refused.${code}`)} ${t('takeover.refused.support')}` : t(`takeover.refused.${code}`);
@@ -244,4 +299,32 @@ export function refusalText(code: string, opts: { workflow: string | null; manag
 		default:
 			return opts.fallback;
 	}
+}
+
+/** The engine's start of a title it derives from a workflow's name (`SCHEDULED_TITLE_PREFIX`), kept equal by a test. */
+export const SCHEDULED_TITLE_PREFIX = 'Scheduled: ';
+
+/** Who set a plan up and changed it, as the trigger list carries it (tags: `owner`, `mandate:<address>`). */
+export interface PlanAuthorship {
+	title: string;
+	created_by?: string | undefined;
+	edited_by?: string | undefined;
+	mandate_editor?: string | undefined;
+}
+
+/**
+ * The title of a plan with a takeover to give, as a line with the value set apart. The title is
+ * someone else's value on every such plan: even one the owner set up runs a workflow a person with
+ * access made or changed, and its title may be that workflow's name, put there by lynox's agent or
+ * by the engine. Only where the owner alone set up and changed the plan does a title that starts
+ * with the engine's prefix keep that prefix outside the box. The engine writes it when a workflow
+ * is scheduled without a title, and the owner may have typed it into a title of their own; either
+ * way only the constant stands outside, and the rest is the value. On any other plan the whole
+ * title is the value, so a person with access cannot borrow lynox's words. Sentences that name
+ * plans (`planList`, the dialog's lines) keep every title whole in its box.
+ */
+export function pausedTitleLine(plan: PlanAuthorship): string {
+	const ownerOnly = plan.created_by === 'owner' && (plan.edited_by ?? 'owner') === 'owner' && (plan.mandate_editor ?? '') === '';
+	if (ownerOnly && plan.title.startsWith(SCHEDULED_TITLE_PREFIX)) return SCHEDULED_TITLE_PREFIX + shownValue(plan.title.slice(SCHEDULED_TITLE_PREFIX.length));
+	return shownValue(plan.title);
 }

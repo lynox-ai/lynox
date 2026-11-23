@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { OWNER_PRINCIPAL, type RequestPrincipal, principalFromTag } from './request-principal.js';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
-import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, InvalidDueDateError, admittedTriggerTier } from './task-manager.js';
+import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, InvalidDueDateError, admittedTriggerTier, SCHEDULED_TITLE_PREFIX } from './task-manager.js';
 import { TriggerStore } from './trigger-store.js';
 import { stampFromRow } from './plan-stamp.js';
 import { runAsHandRun } from './hand-run-door.js';
@@ -1287,9 +1287,11 @@ describe.each([false, true])('a mandate\'s own to-dos (subject graph %s)', (grap
     expect(tm.getTask(a)!.created_by).toBe(TAG);
   });
 
-  it('the owner\'s creating request records no creator, as before', () => {
+  it('the owner\'s creating request records the owner; one that names nobody records nobody', () => {
     const id = tm.create({ title: 'by the owner', createdBy: 'owner' }).id;
-    expect(createdBy(id)).toEqual({ legacy: null, mirror: null });
+    expect(createdBy(id)).toEqual({ legacy: 'owner', mirror: 'owner' });
+    const none = tm.create({ title: 'by nobody named' }).id;
+    expect(createdBy(none)).toEqual({ legacy: null, mirror: null });
   });
 
   describe('update', () => {
@@ -1473,5 +1475,14 @@ describe.each([false, true])('a mandate\'s own to-dos (subject graph %s)', (grap
       expect(tm.deleteTodo('nope', M)).toBe(false);
       expect(tm.deleteTodo('nope', OTHER)).toBe(false);
     });
+  });
+});
+
+describe('SCHEDULED_TITLE_PREFIX', () => {
+  it('is the same string the web-ui keeps outside the box on an owner\'s derived title', () => {
+    const ui = readFileSync(join(import.meta.dirname, '../../packages/web-ui/src/lib/utils/plan-takeover.ts'), 'utf8');
+    const copy = /export const SCHEDULED_TITLE_PREFIX = '([^']*)';/.exec(ui);
+    expect(copy, 'the web-ui copy').not.toBeNull();
+    expect(copy![1]).toBe(SCHEDULED_TITLE_PREFIX);
   });
 });

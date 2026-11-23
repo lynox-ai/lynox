@@ -8,10 +8,12 @@
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { escalationNotice } from '../utils/trigger-escalation.js';
 	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
-	import { endedNotices, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
+	import { endedNotices, pausedTitleLine, refusalText, takeoverLines, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
 	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
 	import StampConfirm from './StampConfirm.svelte';
+	import MarkedLine from './MarkedLine.svelte';
+	import RecipientConfirm from './RecipientConfirm.svelte';
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
@@ -43,6 +45,8 @@
 		// schedule a mandate set up or last changed waits for the owner's stamp (`awaitsOwnerStamp`).
 		created_by?: string;
 		edited_by?: string;
+		// The last mandate that changed the trigger, kept after the owner changes it again.
+		mandate_editor?: string;
 		// What the owner's stamp of a confirmed plan lists, entry by entry (owner only; B3).
 		stamp_listed?: StampListed | null;
 		// Whether the last escalation of this trigger (a failed scheduled run, a watch
@@ -61,6 +65,23 @@
 		paused_who?: string[];
 		// How and when each of those accesses ended, for the owner only: the notices above the list.
 		paused_ended?: PausedEnded[];
+		// A bulk run's trigger: the host its run works on, or null where it has none (`GET /api/triggers`).
+		bulk_host?: string | null;
+		// From before its creator was recorded, nobody else's hand in it: it sends to none of the
+		// recipients it names until the owner confirms them (`GET /api/triggers`, owner only).
+		recipients_unconfirmed?: boolean;
+	}
+
+	// A bulk run's trigger is titled with its run id, which the model reads; the list names it by
+	// its stage and host instead (U-324). Every other trigger by its title.
+	const BULK_STAGE_KEYS: Readonly<Record<string, string>> = {
+		bulk_preview: 'triggers.bulk.preview', bulk_judge: 'triggers.bulk.judge', bulk_apply: 'triggers.bulk.apply', bulk_undo: 'triggers.bulk.undo',
+	};
+	function shownTitle(trigger: Trigger): string {
+		const key = trigger.effect === undefined ? undefined : BULK_STAGE_KEYS[trigger.effect];
+		if (key === undefined) return trigger.title;
+		const host = trigger.bulk_host ?? null;
+		return host === null || host === '' ? t(key) : `${t(key)} · ${host}`;
 	}
 
 	// How often the list is reloaded while the tab is visible, so a run that started on its
@@ -180,6 +201,8 @@
 	// "Check connections": a confirmed schedule whose run can use a connection, opened on demand,
 	// so the preview is not asked for on every refresh (ux U-058, ii-c-min).
 	let checking = $state<Record<string, boolean>>({});
+	// "Confirm recipients" opened per row.
+	let confirmingRecipients = $state<Record<string, boolean>>({});
 	function offersCheck(trigger: Trigger): boolean {
 		// Not once a member's access ended: the gate refuses the run whatever is listed, so allowing a
 		// connection there changes nothing, and the ended note already names the way out.
@@ -558,7 +581,7 @@
 	     shortens the name to fit). The owner's only — a helper's list carries no `paused_ended`. -->
 	{#if viewer === 'owner'}
 		{#each endedNotices(triggers.filter(pausedOpen), endDayOf) as notice}
-			<div class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-3 text-sm text-text mb-4 break-words" data-paused-notice>{notice}</div>
+			<div class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-3 text-sm text-text mb-4 break-words" data-paused-notice><MarkedLine text={notice} /></div>
 		{/each}
 	{/if}
 
@@ -578,7 +601,9 @@
 							<!-- Wrapping, so the badges move to their own line on a narrow card instead
 							     of squeezing the title: the badges are `shrink-0` and the title clamps. -->
 							<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-								<p class="text-sm font-medium line-clamp-2 break-words">{trigger.title}</p>
+								<!-- A plan to take over: its title is someone else's value, as in the notice above (`pausedTitleLine`).
+								     A bulk run's trigger is named by its stage and host instead (`shownTitle`); it offers no takeover. -->
+								<p class="text-sm font-medium line-clamp-2 break-words" data-trigger-title>{#if pausedOpen(trigger) && !(trigger.effect ?? '').startsWith('bulk_')}<MarkedLine text={pausedTitleLine(trigger)} mono={false} />{:else}{shownTitle(trigger)}{/if}</p>
 								<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{typeLabel(trigger)}</span>
 								{#if trigger.enabled === 0}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning">{t('triggers.paused')}</span>
@@ -672,6 +697,19 @@
 									{/if}
 								</div>
 							{/if}
+							{#if ownerActs && trigger.recipients_unconfirmed === true}
+								<!-- The engine does not count this trigger's instruction as the owner's, so its run
+								     sends to none of the recipients it names. The hint leads to the button; the
+								     button opens the instruction to confirm. -->
+								<div class="mt-2 text-xs" data-recipients-unconfirmed>
+									<p class="text-warning">{t('recipients.unconfirmed_hint')}</p>
+									{#if confirmingRecipients[trigger.id]}
+										<RecipientConfirm id={trigger.id} onconfirmed={() => { confirmingRecipients[trigger.id] = false; void loadTriggers(true); }} onclose={() => (confirmingRecipients[trigger.id] = false)} />
+									{:else}
+										<button onclick={() => (confirmingRecipients[trigger.id] = true)} class="mt-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1 text-xs text-text-muted hover:text-text" data-recipients-open>{t('recipients.button')}</button>
+									{/if}
+								</div>
+							{/if}
 							{#if checking[trigger.id] && offersCheck(trigger)}
 								<StampConfirm id={trigger.id} mode="check" cronText={cronToHuman} onstamped={() => void stamped(trigger)} onclose={() => (checking[trigger.id] = false)} />
 							{/if}
@@ -731,14 +769,14 @@
 	>
 		<div class="w-full max-w-md max-h-[85vh] overflow-y-auto rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg">
 			<h2 id="takeover-title" class="text-sm font-medium mb-1">{t('takeover.title')}</h2>
-			<p class="text-xs text-text-subtle mb-3 break-words">{takeoverFor.title}</p>
+			<p class="text-xs text-text-subtle mb-3 break-words" data-takeover-subtitle><MarkedLine text={pausedTitleLine(takeoverFor)} mono={false} /></p>
 			{#if takeoverNote !== ''}
-				<p class="text-xs text-warning mb-3" role="status" data-takeover-note>{takeoverNote}</p>
+				<p class="text-xs text-warning mb-3" role="status" data-takeover-note><MarkedLine text={takeoverNote} /></p>
 			{/if}
 			{#if takeoverPreview !== null}
 				<ul class="space-y-2 text-xs text-text-muted" data-takeover-lines>
 					{#each takeoverLines(takeoverPreview, dayOf) as line}
-						<li class="break-words" data-takeover-line={line.kind}>{line.text}</li>
+						<li class="break-words" data-takeover-line={line.kind}><MarkedLine text={line.text} /></li>
 					{/each}
 				</ul>
 			{:else if takeoverNote === ''}
