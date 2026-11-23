@@ -299,3 +299,19 @@ describe('the two remaining paths: stored text and a single undo', () => {
     expect(f).toMatchObject({ count: 2 });
   });
 });
+
+describe('an archive undone without an audit stays undone when a later action precedes a raise', () => {
+  it('archive, undo in bulk, snooze, then a flagged mail raises: the mail before the archive still counts', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    // Archived and undone in bulk: the bulk undo leaves the archive audit and writes none of its own.
+    inbox.appendAudit({ itemId: id, action: 'archived', actor: 'user', payloadJson: '{}' });
+    inbox.updateUserAction(id, 'snoozed', new Date());
+    await hook()(ACCOUNT.id, envelope({
+      messageId: '<otp@x>', uid: 3, date: new Date(Date.now() + 1_000), subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.',
+    }));
+    expect(inbox.getItem(id)?.userAction).toBeUndefined();
+    const [f] = followUpsOnEveryRoute(id) as Array<Record<string, unknown>>;
+    expect(f).toMatchObject({ count: 2 });
+  });
+});
