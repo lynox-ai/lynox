@@ -8,6 +8,7 @@
 
 import { recipientConfirmDigest, recipientsConfirmable } from '../core/recipient-confirm.js';
 import { errorText, errorTextReduced, processErrorText } from '../core/error-egress.js';
+import { jsonFault } from '../core/json-fault.js';
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
@@ -77,7 +78,7 @@ import { resolveProviderApiKey, mayFallBackToStoredKey, PROVIDER_KEY_SLOTS } fro
 import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, providerIdentity, type ProviderIdentity, mainChatTierLabels, mainChatTierLabelsFromTierSet } from '../core/llm/catalog.js';
 import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
-import type { Session } from '../core/session.js';
+import { sessionInitialTier, type Session } from '../core/session.js';
 import { RunAbortedError, TOOL_AUDIT_INPUT_MAX_CHARS } from '../core/agent.js';
 import { StreamIncompleteError } from '../core/stream-incomplete.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
@@ -149,8 +150,9 @@ import { WebhookReceiver, isCanonicalRequestPath, webhookRouteToken } from './we
 import { requestLogUrl } from './request-log-url.js';
 import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
+import { takeOverWorkflow, workflowTakeoverPreview, type WorkflowTakeoverDeps, type WorkflowTakeoverRefusal } from '../core/workflow-takeover.js';
 import { EngineLessRefused } from '../core/engine-less-refusal.js';
-import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
+import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, SCHEDULED_TITLE_PREFIX, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -317,6 +319,71 @@ export const TAKEOVER_REFUSALS: Record<TakeoverRefusal | 'changed' | 'prompts' |
   changed: { status: 409, message: 'The plan changed while you were looking at it. Look at it again, then take it over. The plan stays paused.' },
   prompts: { status: 503, message: "lynox cannot close the plan's open questions right now, so it did not take the plan over. It stays paused. Try again in a few minutes." },
   unrecorded: { status: 503, message: 'The takeover cannot be recorded in the instance log right now, so lynox did not take the plan over; it stays paused. Try again in a few minutes.' },
+};
+
+/**
+ * What a workflow's stamp binds beside its steps (`workflowStampDigest`), as the stamp and the
+ * takeover previews show it: its mode, failure strategy, limits, contract and parameters with
+ * their defaults. `planned` is read with its defaults filled (`withWorkflowDefaults`).
+ */
+function stampShown(planned: PlannedPipeline): {
+  mode: PlannedPipeline['mode']; onFailure: NonNullable<PlannedPipeline['on_failure']>; limits: PlannedPipeline['limits'] | null;
+  contract: string[] | null; parameters: Array<{ name: string; required: boolean; default: unknown }>;
+} {
+  const contract = planned.capabilityContract;
+  return {
+    mode: planned.mode,
+    onFailure: planned.on_failure ?? 'stop',
+    limits: planned.limits ?? null,
+    // What the contract lets the run write, as the grant's preview words it.
+    contract: contract === undefined ? null : contract.hostPatterns.flatMap((h) => contract.pathPatterns.flatMap((p) => contract.httpMethods.map((m) => `${m} https://${h}${p}`))),
+    parameters: (planned.parameters ?? []).map((p) => ({ name: p.name, required: p.defaultValue === undefined || p.defaultValue === null, default: p.defaultValue ?? null })),
+  };
+}
+
+/**
+ * Each step of a workflow as it runs, as the stamp and the takeover previews show it: a captured
+ * step's literal call beside its task, and the tools it gets, worked out the way the runtime does
+ * (a step that names none gets the pool). `secret:` references stay names; no value is resolved
+ * here. A role can widen the tools and change the model at run time: it is shown by name, with
+ * what it grants (a role is built in, `roles.ts`, not stored).
+ */
+async function stepsShown(planned: PlannedPipeline) {
+  const { inlineStepToolNames } = await import('../orchestrator/runtime-adapter.js');
+  const { getRole } = await import('../core/roles.js');
+  const roleGrantOf = (name: string | undefined): { model: string; effort: string; allowTools: string[] | null; denyTools: string[] | null; readOnly: boolean } | null => {
+    const r = name === undefined ? undefined : getRole(name);
+    return r === undefined ? null : { model: r.model, effort: r.effort, allowTools: r.allowTools ? [...r.allowTools] : null, denyTools: r.denyTools ? [...r.denyTools] : null, readOnly: r.readOnly === true };
+  };
+  return (Array.isArray(planned.steps) ? planned.steps : []).map((st) => ({
+    id: st.id,
+    task: st.task,
+    tool: st.tool ?? null,
+    inputTemplate: st.tool !== undefined ? st.input_template ?? null : null,
+    tools: [...inlineStepToolNames(st)],
+    model: st.model ?? null,
+    role: st.role ?? null,
+    roleGrant: roleGrantOf(st.role),
+    effort: st.effort ?? null,
+    thinking: st.thinking ?? null,
+    timeoutMs: st.timeout_ms ?? null,
+    inputFrom: st.input_from ?? null,
+  }));
+}
+
+/**
+ * How the workflow takeover's refusals are answered. Plain placeholders: the texts the library
+ * shows are its own, by code.
+ */
+export const WORKFLOW_TAKEOVER_REFUSALS: Record<WorkflowTakeoverRefusal | 'changed' | 'prompts' | 'unrecorded' | 'stamp_refused', { readonly status: number; readonly message: string }> = {
+  unreadable: { status: 409, message: 'The workflow cannot be read, so it cannot be taken over.' },
+  nothing_to_take_over: { status: 409, message: 'This workflow does not need to be taken over.' },
+  mandate_live: { status: 409, message: 'Someone who set up or changed this workflow still has access, so it cannot be taken over.' },
+  running: { status: 409, message: 'A run of a plan on this workflow has not finished yet. Try again in a few minutes.' },
+  changed: { status: 409, message: 'The workflow changed while you were looking at it. Look at it again, then take it over.' },
+  prompts: { status: 503, message: 'The open questions of its plans cannot be closed right now, so the workflow was not taken over. Try again in a few minutes.' },
+  unrecorded: { status: 503, message: 'The takeover cannot be recorded in the instance log right now, so the workflow was not taken over. Try again in a few minutes.' },
+  stamp_refused: { status: 409, message: 'The steps of this workflow could not be stamped as shown, so it was not taken over. Look at it again, then take it over.' },
 };
 
 /**
@@ -2573,6 +2640,15 @@ export class LynoxHTTPApi {
   }
 
   /**
+   * Whether the person a workflow runs for, its last uncovered mandate mark, has lost access: the
+   * one reading the library's `runs_as.ended`, the trigger list's `ended_on` and the plan's stamp
+   * preview share. No such person (the owner's, or taken over): false.
+   */
+  private _workflowAuthorEnded(author: RequestPrincipal | undefined): boolean {
+    return author !== undefined && principalHasEnded(author, (id) => this._mandateLive(id));
+  }
+
+  /**
    * What the takeover reads and writes, or null with a 503 when engine.db is not there. The
    * prompt store may be missing; the takeover then refuses, since it could not close the questions.
    */
@@ -2595,6 +2671,22 @@ export class LynoxHTTPApi {
       audit: engine.getAuditLog(),
       prompts: engine.getPromptStore(),
     };
+  }
+
+  /**
+   * What the workflow takeover reads and writes (`workflow-takeover.ts`): the plan takeover's, the
+   * workflow store on the same engine.db, whose hash the stamp is taken with, and the connections.
+   * Null with a 503 when engine.db is not there, or the store of access ends: without it every
+   * person would read as ended, and a workflow a live person shaped could be taken over.
+   */
+  #workflowTakeoverDeps(res: ServerResponse): WorkflowTakeoverDeps | null {
+    const deps = this.#takeoverDepsIfReady();
+    const engineDb = this.engine?.getEngineDb() ?? null;
+    if (deps === null || engineDb === null || (this.engine?.getMandateEnds() ?? null) === null) {
+      errorResponse(res, 503, 'Taking over a workflow is not available on this instance right now.');
+      return null;
+    }
+    return { ...deps, workflows: new WorkflowStore(engineDb), hasher: engineDb, profiles: this.engine?.getApiStore() ?? null };
   }
 
   /** The plan's exact id from a path that may carry a prefix; null with the answer sent when it names none or more than one. */
@@ -2628,14 +2720,15 @@ export class LynoxHTTPApi {
   async #stampPlanOf(trigger: TriggerRecord): Promise<{
     listed: { wf: string | null; entries: readonly StampEntry[] } | null;
     by: string | null;
-    workflow: { name: string | null; confirmed: boolean } | null;
+    workflow: { name: string | null; confirmed: boolean; ended: boolean } | null;
   }> {
     const engine = this.engine;
     const apiStore = engine?.getApiStore();
     if (!engine || !apiStore || !stampUsesConnections(trigger.effect)) return { listed: null, by: null, workflow: null };
     const plan = await planOfTrigger(trigger, engine.getRunHistory() ?? null);
     const workflow = trigger.effect === 'run_workflow'
-      ? { name: plan.workflowName, confirmed: !plan.unreadable && plan.workflowConfirmedAt !== null }
+      // `ended` is shown only: the view then names the workflow's takeover as the way on.
+      ? { name: plan.workflowName, confirmed: !plan.unreadable && plan.workflowConfirmedAt !== null, ended: this._workflowAuthorEnded(plan.workflowMember) }
       : null;
     if (plan.unreadable || plan.of === undefined) return { listed: null, by: null, workflow };
     return {
@@ -2670,7 +2763,7 @@ export class LynoxHTTPApi {
     const isLive = (id: string): boolean => ends?.isLive(id) ?? false;
     const anyEnded = plan.members.some((m) => principalHasEnded(m, isLive));
     const wf = plan.workflowMember;
-    const endedOn = !anyEnded ? null : wf === undefined ? 'plan' : principalHasEnded(wf, isLive) ? 'workflow' : 'workflow_other';
+    const endedOn = !anyEnded ? null : wf === undefined ? 'plan' : this._workflowAuthorEnded(wf) ? 'workflow' : 'workflow_other';
     return { ...shown, ended: shown.ended || endedOn !== null, ended_on: endedOn };
   }
 
@@ -3114,6 +3207,24 @@ export class LynoxHTTPApi {
     if (live) return [this._lastRunRow(live)];
     const row = this.engine?.getRunRegistry()?.getByThread(sessionId);
     return row ? [row] : [];
+  }
+
+  /**
+   * The tier a conversation runs on, for a page that reopens it without opening a session (a
+   * reload reads it back instead): the stored pick held to today's ceiling, account tier and
+   * model blocklist, through the same function a resume and every turn of a live session use.
+   * The stored `model_tier` is the pick as asked, before those. Not read from a live session:
+   * its tier can stand lower for a moment (a compaction runs on the fast tier), and looking it
+   * up would keep an idle session from being dropped. Omitted when no permitted model is left.
+   * A new thread stores the tier it opened on, already held to the ceiling of that day, so after
+   * the ceiling is raised this says the lower tier until the user picks one again.
+   */
+  private _runTierOf(engine: Engine, thread: { readonly model_tier: string }): { run_tier?: string } {
+    try {
+      return { run_tier: sessionInitialTier(engine, normalizeTier(thread.model_tier)) };
+    } catch {
+      return {};
+    }
   }
 
   /** The thread row an `own` check reads for a session id (session id = thread id). */
@@ -4120,6 +4231,11 @@ export class LynoxHTTPApi {
       const isMigrationEndpoint = pathname.startsWith('/api/migration/') && pathname !== '/api/migration/preview';
       if (isMigrationEndpoint && typeof migrationToken === 'string' && migrationToken.length === 64) {
         const storedToken = process.env['LYNOX_MIGRATION_TOKEN'];
+        if (storedToken && !/^[0-9a-f]{64}$/i.test(storedToken)) {
+          // Provisioned wrong: this instance's fault, said as such rather than as a wrong token.
+          errorResponse(res, 500, 'Migration token has invalid format');
+          return;
+        }
         if (storedToken) {
           const { verifyMigrationToken } = await import('../core/migration-crypto.js');
           if (verifyMigrationToken(migrationToken, storedToken)) {
@@ -6461,7 +6577,7 @@ export class LynoxHTTPApi {
       // 404 — mutating a nonexistent thread IS an error.
       if (!thread) { jsonResponse(res, 200, { thread: null, threadMissing: true }); return; }
       const states = containedThreadStates(engine.getToolContext().containment, [thread.id]);
-      jsonResponse(res, 200, { thread: { ...thread, ...containedFields(states, thread.id) } });
+      jsonResponse(res, 200, { thread: { ...thread, ...containedFields(states, thread.id), ...this._runTierOf(engine, thread) } });
     }, readsThread((p) => ({ thread: p['id'] ?? '' }))));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/threads/:id', async (_req, res, params, body) => {
@@ -6594,17 +6710,42 @@ export class LynoxHTTPApi {
         });
         return;
       }
-      threadStore.deleteThread(id);
+      // The chat's runs stay as rows, because they are the cost ledger, but the content they hold
+      // when the chat is deleted goes with it: prompts, answers, tool inputs and outputs, step
+      // results, the questions asked in it, and what the runs it spawned and the workflows it
+      // started wrote. A run or workflow still going when the chat is deleted can write more after
+      // this; that is not reached here. The blanking, the delete and the captured wire_snapshots
+      // share one transaction in history.db, so a failure leaves the chat and its runs as they
+      // were, and deleting again does all of it.
+      const runHistory = engine.getRunHistory();
+      let workflows: readonly string[] = [];
+      try {
+        if (runHistory) {
+          const { blankRunHistoryRows } = await import('../core/connection-erasure.js');
+          runHistory.getDb().transaction(() => {
+            workflows = blankRunHistoryRows(runHistory.getDb(), { threadIds: [id] }).pipelineIds;
+            threadStore.deleteThread(id);
+            runHistory.deleteWireSnapshotsForThread(id);
+          })();
+        } else {
+          threadStore.deleteThread(id);
+        }
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:thread-delete] Not deleted, removing the chat and the content of its runs failed for thread ${id.slice(0, 8)}: ${errorText(err, errorTextReduced(engine.getToolContext().containment, { threadId: id }))}\n`);
+        jsonResponse(res, 500, { error: 'The chat was not deleted: removing it and the content of its runs ran into an error.' });
+        return;
+      }
       // A run still waiting on a question in this chat could only be answered here. Its question
       // is withdrawn now, so the run ends with that reason instead of waiting out the TTL. After
       // the delete: a delete that answered 500 above leaves the chat, and its questions with it.
-      try { engine.getPromptStore()?.withdrawForDeletedThread(id); } catch (err: unknown) {
-        process.stderr.write(`[lynox:thread-delete] withdrawing the questions of deleted thread ${id.slice(0, 8)} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      // A step of a workflow the chat started asks under the workflow's id; its question was just
+      // blanked, so it is withdrawn too, before anything can read it: no await since the commit.
+      const promptStore = engine.getPromptStore();
+      for (const session of [id, ...workflows]) {
+        try { promptStore?.withdrawForDeletedThread(session); } catch (err: unknown) {
+          process.stderr.write(`[lynox:thread-delete] withdrawing the questions of deleted thread ${id.slice(0, 8)} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
       }
-      // Extended debug capture: drop the thread's captured wire_snapshots too (the
-      // runs stay — they are the cost ledger). Without this the redacted-but-personal
-      // snapshots outlive their deleted thread with no other prune path.
-      engine.getRunHistory()?.deleteWireSnapshotsForThread(params['id']!);
       jsonResponse(res, 200, { ok: true });
     }, OWN));
 
@@ -8628,7 +8769,7 @@ export class LynoxHTTPApi {
       // library agrees with the schedule handler on cron-eligibility (otherwise a
       // legacy autonomous workflow with no stored mode hides its Schedule button).
       const { inferPipelineMode, stepsThatAsk } = await import('../orchestrator/human-in-the-loop.js');
-      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string; mode?: string; schedulable: boolean; askingSteps: string[]; confirmedAt?: string; capabilityContract?: unknown; runs_as?: { person: string; ended: boolean; covered_by_takeover?: number }; schedule_refusal?: WorkflowScheduleRefusalKind; awaitsStamp: boolean }> = [];
+      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string; mode?: string; schedulable: boolean; askingSteps: string[]; confirmedAt?: string; capabilityContract?: unknown; runs_as?: { person: string; ended: boolean; undetermined?: true; covered_by_takeover?: number }; schedule_refusal?: WorkflowScheduleRefusalKind; awaitsStamp: boolean }> = [];
       // Whom the Run button runs each one as, for the owner only: a mandate's email is not another
       // mandate's to read (1055, ux U-063). Absent for the owner's own workflows.
       const viewer = this._principalOf(req);
@@ -8654,7 +8795,12 @@ export class LynoxHTTPApi {
         let parsed: { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown; parameters?: unknown; mode?: unknown; confirmedAt?: unknown; capabilityContract?: unknown };
         try {
           parsed = JSON.parse(row.manifest_json) as typeof parsed;
-        } catch { continue; } // skip corrupt rows
+        } catch {
+          // An unreadable definition is left out rather than costing the owner the library, and
+          // said on stderr by its id, never its content.
+          console.warn(`[lynox:http] workflow ${row.id} not readable, left out of the library`);
+          continue;
+        }
         if (parsed.template !== true) continue; // app-layer template filter
         // Narrow `parsed.steps` (typed `unknown`) to the InlinePipelineStep
         // subset the card needs (id + task). Drop malformed entries.
@@ -8716,8 +8862,10 @@ export class LynoxHTTPApi {
             }
             const runAs = workflowRunsAs(authorshipOrNone(() => history.getWorkflowAuthorship(row.id)));
             if (runAs.kind !== 'mandate') return {};
-            const ended = principalHasEnded(runAs, (id) => this._mandateLive(id));
-            return { runs_as: { person: runAs.email, ended, ...(ended ? { covered_by_takeover: coveredCount(row.id) } : {}) } };
+            const ended = this._workflowAuthorEnded(runAs);
+            // A mark without a grant id cannot tell whose access it was: the view names no one then.
+            const undetermined = runAs.mandateId === undefined ? { undetermined: true as const } : {};
+            return { runs_as: { person: runAs.email, ended, ...undetermined, ...(ended ? { covered_by_takeover: coveredCount(row.id) } : {}) } };
           })(),
         });
       }
@@ -9214,45 +9362,15 @@ export class LynoxHTTPApi {
       const planned = history.getWorkflowExact(params['id']!);
       const expect = planned === undefined ? null : history.workflowStampDigest(planned);
       if (planned === undefined || expect === null) { errorResponse(res, 404, 'Workflow not found'); return; }
-      const { inlineStepToolNames } = await import('../orchestrator/runtime-adapter.js');
-      const { getRole } = await import('../core/roles.js');
-      const roleGrantOf = (name: string | undefined): { model: string; effort: string; allowTools: string[] | null; denyTools: string[] | null; readOnly: boolean } | null => {
-        const r = name === undefined ? undefined : getRole(name);
-        return r === undefined ? null : { model: r.model, effort: r.effort, allowTools: r.allowTools ? [...r.allowTools] : null, denyTools: r.denyTools ? [...r.denyTools] : null, readOnly: r.readOnly === true };
-      };
       const state = history.workflowStampState(planned);
       const shaped = history.workflowMandateShaped(planned.id);
-      const contract = planned.capabilityContract;
       jsonResponse(res, 200, {
         expect,
         stampedAt: state === 'holds' ? planned.confirmedAt ?? null : null,
         changedBy: shaped ? 'mandate' : 'owner',
         awaitsStamp: state === 'awaits_owner_stamp',
-        mode: planned.mode,
-        onFailure: planned.on_failure ?? 'stop',
-        limits: planned.limits ?? null,
-        // What the contract lets the run write, as the grant's preview words it.
-        contract: contract === undefined ? null : contract.hostPatterns.flatMap((h) => contract.pathPatterns.flatMap((p) => contract.httpMethods.map((m) => `${m} https://${h}${p}`))),
-        parameters: (planned.parameters ?? []).map((p) => ({ name: p.name, required: p.defaultValue === undefined || p.defaultValue === null, default: p.defaultValue ?? null })),
-        // Each step as it runs: a captured step's literal call beside its task, and the tools it
-        // gets, worked out the way the runtime does (a step that names none gets the pool).
-        // `secret:` references stay names; no value is resolved here.
-        // A role can widen the tools and change the model at run time: it is shown by name.
-        steps: (Array.isArray(planned.steps) ? planned.steps : []).map((st) => ({
-          id: st.id,
-          task: st.task,
-          tool: st.tool ?? null,
-          inputTemplate: st.tool !== undefined ? st.input_template ?? null : null,
-          tools: [...inlineStepToolNames(st)],
-          model: st.model ?? null,
-          role: st.role ?? null,
-          // A role is built in (`roles.ts`), not stored: what it grants is shown beside its name.
-          roleGrant: roleGrantOf(st.role),
-          effort: st.effort ?? null,
-          thinking: st.thinking ?? null,
-          timeoutMs: st.timeout_ms ?? null,
-          inputFrom: st.input_from ?? null,
-        })),
+        ...stampShown(planned),
+        steps: await stepsShown(planned),
       });
     }, ownerOnly('see what stamping a workflow would confirm')));
 
@@ -9280,6 +9398,50 @@ export class LynoxHTTPApi {
         .filter((t) => t.pipeline_id === id && t.enabled === 0 && (t.last_run_result ?? '').startsWith(workflowAwaitsStampResult(id))).length;
       jsonResponse(res, 200, { stampedAt: now?.confirmedAt ?? null, awaitsStamp: false, stillOff });
     }, ownerOnly('stamp a workflow')));
+
+    // The owner's takeover of a workflow a mandate set up or changed, once that mandate's access
+    // ended (`workflow-takeover.ts`): the preview shows the steps as the stamp preview does, whose
+    // marks are covered, what moves on the other plans, and the connections a run as the owner no
+    // longer uses, with the digest the takeover is held to. Its own routes: the stamp's `expect`
+    // never covers a mark. Not held to the plan pause: a workflow is taken over without a plan.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/workflows/:id/takeover-preview', async (_req, res, params) => {
+      const deps = this.#workflowTakeoverDeps(res);
+      if (deps === null) return;
+      const out = workflowTakeoverPreview(deps, params['id']!);
+      if (out.kind === 'not_found') { errorResponse(res, 404, 'Workflow not found'); return; }
+      if (out.kind === 'refused') { jsonResponse(res, 200, { refusal: out.refusal, message: WORKFLOW_TAKEOVER_REFUSALS[out.refusal].message }); return; }
+      const { planned, foreignConnectionSteps, ...preview } = out.preview;
+      const marked = new Map(foreignConnectionSteps.map((f) => [f.step, f.profileId] as const));
+      // A step whose literal call goes to a profile some mandate connected is marked, whoever it was,
+      // with the profile, so the view can name the person where a connection below is that profile.
+      const steps = (await stepsShown(planned)).map((st) => ({ ...st, foreignConnection: marked.has(st.id), connectionProfile: marked.get(st.id) ?? null }));
+      // Everything the stamp binds beside the steps, as the stamp preview shows it: the takeover stamps it too.
+      jsonResponse(res, 200, { ...preview, ...stampShown(planned), steps, refusal: null });
+    }, ownerOnly('see what taking over a workflow would do')));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/takeover', async (_req, res, params, body) => {
+      // The digest from the preview is required: the takeover is the owner's consent to what the
+      // preview showed, and nothing else.
+      const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
+        ? (body as { expect: string }).expect : undefined;
+      if (expected === undefined) { errorResponse(res, 400, '"expect" is required: take the workflow over from its preview.', 'expect_required'); return; }
+      const deps = this.#workflowTakeoverDeps(res);
+      if (deps === null) return;
+      const out = takeOverWorkflow(deps, params['id']!, expected);
+      if (out.kind === 'not_found') { errorResponse(res, 404, 'Workflow not found'); return; }
+      if (out.kind === 'refused') {
+        const r = WORKFLOW_TAKEOVER_REFUSALS[out.refusal];
+        errorResponse(res, r.status, r.message, out.refusal);
+        return;
+      }
+      // The cached definition carries the old stamp: a run after this must read the new one.
+      const { forgetPipeline } = await import('../tools/builtin/pipeline.js');
+      forgetPipeline(out.id);
+      // As after the stamp: schedules the wait switched off stay off, counted for the page.
+      const stillOff = (engine.getTaskManager()?.listTriggers?.() ?? [])
+        .filter((t) => t.pipeline_id === out.id && t.enabled === 0 && (t.last_run_result ?? '').startsWith(workflowAwaitsStampResult(out.id))).length;
+      jsonResponse(res, 200, { takenOver: true, runsAs: out.runsAs, stillOff });
+    }, ownerOnly('take over a workflow')));
 
     // ── Tasks ──
     this.addStatic('user', 'GET /api/tasks', async (req, res) => {
@@ -9476,7 +9638,7 @@ export class LynoxHTTPApi {
             const accepted = acceptWorkflowGrant(planned, {
               method: g['method'], host: g['host'], paths: g['paths'], params: rawParams, cron: scheduleCron,
               afterUntrusted: g['afterUntrusted'], checksum: g['checksum'], name: g['name'],
-              title: title ?? `Scheduled: ${planned.name}`,
+              title: title ?? `${SCHEDULED_TITLE_PREFIX}${planned.name}`,
             }, this._authOrigin.get(_req) ?? 'unknown', { history, taskManager, hasher: engineDb });
             if (!accepted.ok) { errorResponse(res, accepted.status, accepted.error); return; }
             forgetPipeline(planned.id);
@@ -9512,7 +9674,7 @@ export class LynoxHTTPApi {
           }
           forgetPipeline(planned.id);
           const task = taskManager.createPipelineTask({
-            title: title ?? `Scheduled: ${planned.name}`,
+            title: title ?? `${SCHEDULED_TITLE_PREFIX}${planned.name}`,
             pipelineId: planned.id,
             scheduleCron,
             pipelineParams: JSON.stringify(bound.params),
@@ -10201,6 +10363,7 @@ export class LynoxHTTPApi {
       // A list still to be read is started against what the owner sees here: the address its
       // first page is read at, and the checksum over its source and read contract (PRD bulk-loop §3.2).
       const listRun = status.list?.state === 'pending' ? ledger.getListRun(params['id']!) : null;
+      const judgeOutliers = status.phase === 'previewed' ? await ledger.judgeOutliersOf(params['id']!) : null;
       jsonResponse(res, 200, {
         ...withBinding(status),
         checksum: actionable ? ledger.computeChecksum(params['id']!) : null,
@@ -10212,6 +10375,9 @@ export class LynoxHTTPApi {
           const hidden = actionable ? ledger.hiddenCounts(params['id']!) : null;
           return { hiddenAddsTargets: hidden?.adds ?? null, hiddenUncheckedTargets: hidden?.unchecked ?? null };
         })(),
+        // A judged run's verdicts that differ from the rest of it, listed first in the approval view:
+        // a reading order, never a check (`bulk-outliers.ts`). Only where the run can be approved.
+        judgeOutliers,
         // A Shopify list has no page address: what is read is the store's GraphQL endpoint, with
         // the engine's own documents. It stands here so the owner sees where the read goes. A stored
         // source with no address to build (a form without a spec, a filter holding a list) shows its
@@ -12208,6 +12374,13 @@ export class LynoxHTTPApi {
           await google.setTokens(tokens);
           jsonResponse(res, 200, { ok: true, scopes: tokens.scopes });
         } catch (err: unknown) {
+          if (err instanceof SyntaxError) {
+            // The claim answer carries the tokens: the log names the position, never the text around
+            // it, and the owner gets a code the page words for them.
+            process.stderr.write(`[lynox:google] the claim answer is ${jsonFault(err)}\n`);
+            jsonResponse(res, 500, { error: 'Google could not be connected', code: 'google_claim_invalid' });
+            return;
+          }
           const msg = err instanceof Error ? err.message : String(err);
           errorResponse(res, 500, msg);
         }
@@ -15527,6 +15700,13 @@ export class LynoxHTTPApi {
       // From the first handshake request on, the target may hold a session: a stop says when to
       // try again (the catch below adds it where a step did not), unless it asks to check the target.
       let sessionMayBeHeld = false;
+      // The target's session as its handshake named it, and whether it has taken the manifest: a
+      // stop before that ends the session (the target holds it 30 minutes otherwise).
+      let targetSession: string | null = null;
+      let manifestAccepted = false;
+      // The target refused the manifest itself (4xx): its words say what to change, and the same
+      // attempt fails again, so a freed session is not an invitation to try again as it is.
+      let manifestRefused = false;
       try {
         const crypto = await import('../core/migration-crypto.js');
         const { MigrationExporter } = await import('../core/migration-export.js');
@@ -15546,6 +15726,8 @@ export class LynoxHTTPApi {
         // a new attempt away until then; every stop from here says when to try again, except where
         // the user has to check the target first.
         const AGAIN = 'You can start the migration again in 30 minutes at the latest.';
+        // Said where the target's answer leaves no words to quote once the hidden characters are gone.
+        const NO_REASON = 'The target instance gave no readable reason.';
         const handshakeFailed = (w: Why): string =>
           `lynox could not set up the connection to the target instance: ${why(w, TARGET_BODY_CAPS.handshake, ', so lynox did not read it', TARGET_REQUEST_TIMEOUTS_MS.handshake)}. Nothing was transferred. ${AGAIN}`;
         /**
@@ -15588,10 +15770,11 @@ export class LynoxHTTPApi {
           }
           // The target's own words, cleaned and cut; a refusal here starts no session on it.
           const said = typeof refused?.error === 'string' ? refused.error : errText;
+          // Quoted, so the target's words cannot run on into lynox's own sentence.
           const words = relayedText(said).trim();
           throw new Error(words === ''
-            ? 'The target instance did not accept the migration. Nothing was transferred.'
-            : `The target instance did not accept the migration. It says: ${words}${/[.!?…]$/.test(words) ? '' : '.'} Nothing was transferred.`);
+            ? `The target instance did not accept the migration. ${NO_REASON} Nothing was transferred.`
+            : `The target instance did not accept the migration. It says: ${JSON.stringify(words)}. Nothing was transferred.`);
         }
         // The target answered the handshake: from here it holds a session (a refusal above starts none).
         sessionMayBeHeld = true;
@@ -15615,6 +15798,10 @@ export class LynoxHTTPApi {
           // Not passing: it fails the same way on every attempt (a wrong token or a foreign key).
           throw new Error('Handshake signature invalid — refusing to derive transfer key. If this happens again, write to support@lynox.ai.');
         }
+        // Only a target whose signature checks is asked to end its session later. An older target
+        // names no session; it has no abort either, and holds the session 30 minutes.
+        const named = field('sessionId');
+        if (typeof named === 'string' && /^[0-9a-f]{32}$/.test(named)) targetSession = named;
 
         // Client key agreement
         const clientKp = crypto.generateEphemeralKeypair();
@@ -15666,6 +15853,8 @@ export class LynoxHTTPApi {
         // `step` names the step for a diagnosis (the raw answer); `told` says it to the user, followed
         // by the target's own words when it gave any, cut at 500 characters with a mark that it was.
         // The answer is read up to its cap, and the target's words lose control and bidi characters.
+        // They stand in quotes (inner quotes escaped), so they cannot run on into lynox's own sentence
+        // or pose as it; lynox's sentence always comes last.
         // `then` is what the user can do next: try again later, or, once the restore ran, check the target.
         const refusal = async (r: Response, step: string, told: string, then: string = AGAIN): Promise<Error> => {
           let text: string | null;
@@ -15676,8 +15865,12 @@ export class LynoxHTTPApi {
           if (text === null) return new Error(`${told} Its answer is over ${capText(TARGET_BODY_CAPS.refusal)}, so lynox did not read it. ${then}`);
           let message: unknown;
           try { message = (JSON.parse(text) as { error?: unknown }).error; } catch { /* not JSON */ }
-          if (typeof message !== 'string' || message === '') return new Error(`${step}: ${relayedText(text)} ${then}`);
-          return new Error(`${told} It says: ${relayedText(message)} ${then}`);
+          if (typeof message !== 'string' || message === '') {
+            const raw = relayedText(text).trim();
+            return new Error(raw === '' ? `${told} ${NO_REASON} ${then}` : `${step}: ${JSON.stringify(raw)}. ${then}`);
+          }
+          const words = relayedText(message).trim();
+          return new Error(words === '' ? `${told} ${NO_REASON} ${then}` : `${told} It says: ${JSON.stringify(words)}. ${then}`);
         };
 
         // 4. Send manifest
@@ -15687,7 +15880,12 @@ export class LynoxHTTPApi {
           headers: migrationHeaders,
           body: JSON.stringify(manifest),
         }, TARGET_REQUEST_TIMEOUTS_MS.manifest, (w) => `${w === 'silent' ? `The target instance did not answer within ${durationText(TARGET_REQUEST_TIMEOUTS_MS.manifest)}.` : 'lynox could not reach the target instance.'} lynox stopped before sending your data. ${AGAIN}`);
-        if (!mRes.ok) throw await refusal(mRes, 'Manifest rejected', 'The target instance refused the migration.');
+        if (!mRes.ok) {
+          // A refusal of the manifest itself (4xx), not the target failing or busy (5xx, 429).
+          manifestRefused = mRes.status >= 400 && mRes.status < 500 && mRes.status !== 429;
+          throw await refusal(mRes, 'Manifest rejected', 'The target instance refused the migration.');
+        }
+        manifestAccepted = true;
         await discardBody(mRes);
 
         // 5. Send chunks
@@ -15746,15 +15944,53 @@ export class LynoxHTTPApi {
         });
       } catch (err: unknown) {
         // Every text to the user goes through the same cleaning, the guard's and the exporter's too.
-        const { relayedText: clean } = await import('../core/migration-target-reply.js');
+        const { askTarget, discardBody, readTargetJson, TARGET_BODY_CAPS, TARGET_BODY_TIMEOUT_MS, TARGET_REQUEST_TIMEOUTS_MS, relayedText: clean } = await import('../core/migration-target-reply.js');
+        // Stopped before the target took the manifest: end its session, so the next attempt is not
+        // turned away. Only a target that confirms it lets the user start again at once; any failure
+        // here leaves the stop's own words and the 30 minutes.
+        let freed = false;
+        if (targetSession !== null && !manifestAccepted) {
+          try {
+            const aRes = await askTarget(fetchPinned, `${targetUrl}/api/migration/abort`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Migration-Token': migrationToken },
+              body: JSON.stringify({ sessionId: targetSession }),
+            }, TARGET_REQUEST_TIMEOUTS_MS.handshake);
+            let unfreed: string | null = null;
+            if (aRes.ok) {
+              const told = await readTargetJson(aRes, TARGET_BODY_CAPS.handshake, () => 'unreadable', TARGET_BODY_TIMEOUT_MS) as { aborted?: unknown } | null;
+              freed = told?.aborted === true;
+              if (!freed) unfreed = 'the target did not confirm it';
+            } else {
+              await discardBody(aRes);
+              unfreed = `the target answered ${String(aRes.status)}`;
+            }
+            if (unfreed !== null) process.stderr.write(`[lynox:http] migration: the target's session was not ended (${unfreed}); a new attempt waits for it to expire\n`);
+          } catch (abortErr: unknown) {
+            // The stop's own words stand. Only the error's kind: its text may carry the target's address.
+            process.stderr.write(`[lynox:http] migration: ending the target's session failed (${abortErr instanceof Error ? abortErr.name : 'unknown error'}); a new attempt waits for it to expire\n`);
+          }
+        }
         const message = clean(err instanceof Error ? err.message : '', 2000).trim()
           || `The migration stopped for a reason lynox could not read.${sessionMayBeHeld ? '' : ' Nothing was transferred.'}`;
         // A stop after the handshake that names no next step (a read failing on this instance) gets
         // the retry sentence. A stop that names one (check the target, write to support) does not:
         // there the same attempt fails again, and the sentence would send the user round in a loop.
+        // Once the target has ended the session, the user can start again now.
         const AGAIN_TEXT = 'You can start the migration again in 30 minutes at the latest.';
+        const NOW_TEXT = 'You can start the migration again now.';
         const said = message.includes(AGAIN_TEXT) || message.includes('Check on the target instance') || message.includes('support@lynox.ai');
-        sendEvent('error', { message: sessionMayBeHeld && !said ? `${message}${/[.!?…]$/.test(message) ? '' : '.'} ${AGAIN_TEXT}` : message });
+        const shown = sessionMayBeHeld && !said ? `${message}${/[.!?…]$/.test(message) ? '' : '.'} ${AGAIN_TEXT}` : message;
+        // Once the target has ended the session nothing holds a new attempt. After a refused manifest
+        // the target's words stand alone; elsewhere the user can start again now.
+        const unheld = (): string => {
+          if (!shown.endsWith(AGAIN_TEXT)) return shown;
+          const before = shown.slice(0, -AGAIN_TEXT.length);
+          if (!manifestRefused) return `${before}${NOW_TEXT}`;
+          const bare = before.trim();
+          return `${bare}${/[.!?…]$/.test(bare) ? '' : '.'}`;
+        };
+        sendEvent('error', { message: freed ? unheld() : shown });
       } finally {
         res.end();
       }
@@ -15767,8 +16003,7 @@ export class LynoxHTTPApi {
         return;
       }
 
-      const token = req.headers['x-migration-token'];
-      if (!token || typeof token !== 'string') {
+      if (typeof req.headers['x-migration-token'] !== 'string' || req.headers['x-migration-token'] === '') {
         errorResponse(res, 401, 'Missing X-Migration-Token header');
         return;
       }
@@ -15780,27 +16015,8 @@ export class LynoxHTTPApi {
           return;
         }
 
-        // Validate migration token
-        const storedToken = process.env['LYNOX_MIGRATION_TOKEN'];
-        if (!storedToken) {
-          errorResponse(res, 403, 'No migration token configured for this instance');
-          return;
-        }
-
-        const { verifyMigrationToken } = await import('../core/migration-crypto.js');
-        if (!verifyMigrationToken(token, storedToken)) {
-          errorResponse(res, 403, 'Invalid migration token');
-          return;
-        }
-
-        // Belt-and-braces: verifyMigrationToken already enforces the 64-hex-char
-        // shape (it parses both sides as hex Buffers and length-checks them), but
-        // re-assert here so a future change that loosens that check can't slip a
-        // low-entropy stored token straight into deriveSigningKey.
-        if (!/^[0-9a-f]{64}$/i.test(storedToken)) {
-          errorResponse(res, 500, 'Migration token has invalid format');
-          return;
-        }
+        const storedToken = await this._checkMigrationToken(req, res);
+        if (storedToken === null) return;
 
         const payload = importer.startHandshake(storedToken);
         jsonResponse(res, 200, payload);
@@ -15959,11 +16175,64 @@ export class LynoxHTTPApi {
       }
       jsonResponse(res, 200, { cancelled: true });
     });
+
+    // The source ends the session it started, before its manifest: it stopped before sending its
+    // data, and a new attempt should not wait 30 minutes. Only with the migration token and the
+    // session id from that handshake; a session with its manifest is never ended here.
+    this.addStatic('admin', 'POST /api/migration/abort', async (req, res, _params, body) => {
+      if (!readEnvAlias('LYNOX_BILLING_TIER')) {
+        errorResponse(res, 404, 'Migration import only available on managed instances');
+        return;
+      }
+      if (typeof req.headers['x-migration-token'] !== 'string' || req.headers['x-migration-token'] === '') {
+        errorResponse(res, 401, 'Missing X-Migration-Token header');
+        return;
+      }
+      if (await this._checkMigrationToken(req, res) === null) return;
+      const sessionId = (body as { sessionId?: unknown } | null)?.sessionId;
+      if (typeof sessionId !== 'string' || !/^[0-9a-f]{32}$/.test(sessionId)) {
+        errorResponse(res, 400, 'Missing session id');
+        return;
+      }
+      // From here synchronous: the check and the cleanup run in one tick, so no manifest can land between them.
+      const outcome = this._migrationImporter?.abortBeforeManifest(sessionId) ?? 'none';
+      if (outcome === 'in-transfer') {
+        errorResponse(res, 409, 'The migration is already transferring data.', 'migration_in_transfer');
+        return;
+      }
+      jsonResponse(res, 200, { aborted: outcome === 'aborted' });
+    });
   }
 
   // ── Migration helpers ──────────────────────────────────────────────────────
 
   private _migrationImporter: import('../core/migration-import.js').MigrationImporter | null = null;
+
+  /**
+   * The migration token check every route that acts on it runs: the header against the stored
+   * token, in constant time. The stored token when it passes; otherwise the answer is sent and null.
+   */
+  private async _checkMigrationToken(req: IncomingMessage, res: ServerResponse): Promise<string | null> {
+    const token = req.headers['x-migration-token'];
+    const storedToken = process.env['LYNOX_MIGRATION_TOKEN'];
+    if (!storedToken) {
+      errorResponse(res, 403, 'No migration token configured for this instance');
+      return null;
+    }
+    // The stored token's shape first: a token provisioned wrong is this instance's fault, and says so
+    // instead of looking like a wrong token. It also keeps a low-entropy stored token away from
+    // deriveSigningKey, whatever verifyMigrationToken checks.
+    if (!/^[0-9a-f]{64}$/i.test(storedToken)) {
+      errorResponse(res, 500, 'Migration token has invalid format');
+      return null;
+    }
+    const { verifyMigrationToken } = await import('../core/migration-crypto.js');
+    if (typeof token !== 'string' || !verifyMigrationToken(token, storedToken)) {
+      errorResponse(res, 403, 'Invalid migration token');
+      return null;
+    }
+    return storedToken;
+  }
   /** Set once a migration restore has closed the engine: the process answers 503 until it restarts. */
   private _restoring = false;
 
