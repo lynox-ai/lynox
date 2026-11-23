@@ -684,7 +684,8 @@ async function drainQueueNow(due: { sid: string | null; gen: number }): Promise<
 	// The fetch never rejects (`loadChangeset` answers false instead).
 	while (_changesetFetch) await _changesetFetch;
 	if (_drainDue === due) _drainDue = null;
-	if (sessionId !== due.sid || _resumeGeneration !== due.gen || pendingChangeset || isStreaming || messageQueue.length === 0) return;
+	// Leaving a thread without opening another (newChat) empties the queue, so the opening says it.
+	if (_resumeGeneration !== due.gen || pendingChangeset || isStreaming || messageQueue.length === 0) return;
 	const next = messageQueue.shift()!;
 	persistChatNow(); // queue shrank — keep the durable copy in sync
 	await _executeRun(next.task, next.files, undefined, next.runOptions, next.id);
@@ -4286,7 +4287,7 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 			// comment above ("the queued turn drains after it") assumes THIS
 			// finally drains it — but it never did, so a message typed while a
 			// resumed run streamed sat in the queue forever. Mirror the
-			// normal-path drain in _executeRun's finally; a changeset the resumed
+			// normal-path drain at the end of `_runTurn`; a changeset the resumed
 			// run left to review holds it (`drainQueueSoon`).
 			drainQueueSoon(100);
 		}

@@ -161,7 +161,7 @@ describe('a turn queued behind a run waits for the review that run left open', (
 		expect(store.getMessages().find((m) => m.content === 'then this')?.queued, 'the turn keeps its place').toBe(true);
 	});
 
-	it('two drains that wait for the same fetch start one turn, not two', async () => {
+	it('a re-send asked for while the end-of-run drain waits for the fetch starts no second turn, and waits behind', async () => {
 		const release = await queueBehindRun();
 		changed = notes; // the run announces changes, so their fetch starts
 		let answer!: () => void;
@@ -180,7 +180,8 @@ describe('a turn queued behind a run waits for the review that run left open', (
 		await settle();
 		await wait(50);
 		await settle();
-		expect(runTasks, 'one turn started, the other waits behind it').toEqual(['edit the notes', 'then this']);
+		expect(runTasks, 'one turn started').toEqual(['edit the notes', 'then this']);
+		expect(store.getMessages().find((m) => m.content === 'sent while offline')?.queued, 'the other waits behind it').toBe(true);
 	});
 
 	it('with no review the queued turn is sent after the run (control)', async () => {
