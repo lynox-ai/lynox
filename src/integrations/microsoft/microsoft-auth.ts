@@ -10,6 +10,7 @@ import {
   type MicrosoftRefreshFailureKind,
 } from '../../core/oauth-refresh-failure.js';
 import { MICROSOFT_OAUTH_TOKENS_KEY } from './vault-keys.js';
+import { tokenAnswer } from '../../core/oauth-token-answer.js';
 
 /**
  * A Microsoft 365 mailbox grant, held by the engine and refreshed through the
@@ -404,7 +405,7 @@ export class MicrosoftAuth {
       throw new Error(`Token refresh failed: ${response.status}.${message}`);
     }
 
-    const json: unknown = await response.json();
+    const json = await tokenAnswer(response, 'Token refresh failed');
     this.assertStillCurrent(grant);
     const body = validateControlPlaneRefresh(json, MICROSOFT_REFRESH_REMEDY.transient);
     // Microsoft rotates the refresh token on every refresh. A handle that is
