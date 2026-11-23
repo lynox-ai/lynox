@@ -96,4 +96,17 @@ describe('the schedules list names a bulk run\'s trigger by stage and host', () 
 			"'triggers.bulk.undo': { de: 'Rücknahme', en: 'Undo' },",
 		]) expect(src).toContain(line);
 	});
+
+	it('keeps a paused bulk trigger named by its stage, while a paused plan shows its title set apart', async () => {
+		rows = [
+			{ ...BASE, id: `bulk-${RUN_ID}`, title: `Bulk run ${RUN_ID}`, effect: 'bulk_apply', bulk_host: 'api.bexio.com', paused: true },
+			{ ...BASE, id: 'w', title: 'Wochenreport', effect: 'run_agent', source: 'cron', paused: true },
+		];
+		await render();
+		const [bulk, plan] = [...target.querySelectorAll('[data-trigger-title]')];
+		expect(bulk?.textContent?.trim()).toBe(`${t('triggers.bulk.apply')} · api.bexio.com`);
+		expect(bulk?.querySelector('[data-foreign-value]')).toBeNull();
+		expect(plan?.querySelector('[data-foreign-value]')?.textContent).toBe('Wochenreport');
+		expect(target.textContent ?? '').not.toContain(RUN_ID);
+	});
 });
