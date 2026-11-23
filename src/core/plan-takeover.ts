@@ -29,7 +29,7 @@ import {
 import type { StampEntry } from './plan-run-context.js';
 import { stampExpect, stampFromRow } from './plan-stamp.js';
 import {
-  MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, isMandateTag, planAuthorshipOf, principalHasEnded, principalTag,
+  MANDATE_TAG_PREFIX, OWNER_PRINCIPAL, isMandateTag, planAuthorshipOf, planMandate, principalHasEnded, principalTag,
   type RequestPrincipal,
 } from './request-principal.js';
 import {
@@ -43,6 +43,9 @@ import type { TriggerRecord } from '../types/index.js';
 export type { TakeoverMemberChange, TakeoverPrompts, TakeoverSchedule, TakeoverWorkflowView } from './takeover-core.js';
 
 const isWorkflowRole = (r: PauseRole): boolean => r === 'workflow-created' || r === 'workflow-edited';
+
+/** Whether the preview shows the plan's workflow: it has a mandate mark not yet covered (`workflowOfPreview`). */
+const workflowShown = (wf: WorkflowRow | undefined): boolean => wf !== undefined && planMandate(planAuthorshipOf(wf)) !== undefined;
 
 /** The digest's own domain, so a stamp digest (`stampExpect`) never passes for a takeover's. */
 export const TAKEOVER_DIGEST_PREFIX = 'lynox:plan-takeover:v1';
@@ -124,7 +127,10 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
   let roles: ReturnType<typeof rowPlanMembers>['roles'];
   try {
     wf = trigger.effect === 'run_workflow' && row.target_workflow_id ? workflowRowOf(db, row.target_workflow_id) : undefined;
-    roles = rowPlanMembers(row, () => wf).roles;
+    const read = rowPlanMembers(row, () => wf).roles;
+    // A workflow with no mandate mark left to take over (none, or every one covered) is not shown
+    // (`workflowOfPreview` is null), so no member is said to have created or changed it.
+    roles = workflowShown(wf) ? read : (m) => read(m).filter((r) => !isWorkflowRole(r));
   } catch {
     return 'unreadable';
   }
@@ -151,8 +157,9 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
     // The workflow roles are read here, where the workflow reads — on the same grant only — and
     // added to the pause's, which stay: so F2 says the workflow moves, and a member who changed it
     // after a pause that knew only its creation is said to have changed it.
-    const added = roles(principal).filter((r) => isWorkflowRole(r) && !e.roles.includes(r));
-    return { name: e.email, roles: [...e.roles, ...added], ended, reason: ended ? e.reason : null };
+    const kept = workflowShown(wf) ? e.roles : e.roles.filter((r) => !isWorkflowRole(r));
+    const added = roles(principal).filter((r) => isWorkflowRole(r) && !kept.includes(r));
+    return { name: e.email, roles: [...kept, ...added], ended, reason: ended ? e.reason : null };
   });
   const coveredMarks: Array<{ tag: string | undefined; id: string | undefined }> = [
     { tag: trigger.created_by, id: trigger.created_mandate_id }, { tag: trigger.mandate_editor, id: trigger.mandate_editor_id },

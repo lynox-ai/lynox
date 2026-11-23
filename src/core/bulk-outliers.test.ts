@@ -108,19 +108,24 @@ describe('judgeOutliers', () => {
   it('names a link that most verdicts add on a line for the run, and still flags each verdict whose host no before text holds', () => {
     const inputs = run(200, (t) => withAfter(t, { description: `${(t.after as Record<string, string>)['description']} Lieferant: https://feed-partner.example.biz/p` }));
     const result = judgeOutliers(inputs, OWN, KINDS);
-    expect(result.spread).toEqual([{ kind: 'link', count: 200, hosts: ['feed-partner.example.biz'], marked: 1 }]);
+    expect(result.spread).toEqual([{ kind: 'link', count: 200, hosts: ['feed-partner.example.biz'], marked: 1, seqs: Array.from({ length: 200 }, (_, i) => i + 1) }]);
     expect(result.flagged).toHaveLength(200);
     expect(result.flagged.every((f) => f.reasons.includes('new_link'))).toBe(true);
   });
 
-  it('names a link many verdicts add for the run without flagging each, when before texts of the run already hold it', () => {
+  it('names the verdicts that add a kind in plan order when they come in another order', () => {
+    const inputs = run(200, (t) => (t.seq >= 20 && t.seq < 40 ? withAfter(t, { description: `${(t.after as Record<string, string>)['description']} Lieferant: https://feed-partner.example.biz/p` }) : t)).reverse();
+    expect(judgeOutliers(inputs, OWN, KINDS).spread[0]!.seqs).toEqual(Array.from({ length: 20 }, (_, i) => i + 20));
+  });
+
+  it('names a link many verdicts add for the run, with the verdicts that add it in plan order, without flagging each, when before texts of the run already hold it', () => {
     const inputs = run(200, (t) => {
       if (t.seq <= 5) return { ...t, before: { ...(t.before as object), description: `${(t.before as Record<string, string>)['description']} Siehe tee-wissen.example.org` } };
       if (t.seq <= 40) return withAfter(t, { description: `${(t.after as Record<string, string>)['description']} Mehr: tee-wissen.example.org` });
       return t;
     });
     const result = judgeOutliers(inputs, OWN, KINDS);
-    expect(result.spread).toEqual([{ kind: 'link', count: 35, hosts: ['tee-wissen.example.org'], marked: 0 }]);
+    expect(result.spread).toEqual([{ kind: 'link', count: 35, hosts: ['tee-wissen.example.org'], marked: 0, seqs: Array.from({ length: 35 }, (_, i) => i + 6) }]);
     expect(result.flagged).toEqual([]);
   });
 
@@ -366,6 +371,69 @@ describe('markersOf against every form an earlier reading caught', () => {
     });
     expect(missed).toEqual([]);
     expect(MARKERS_ONCE_READ.length).toBe(136);
+  });
+});
+
+describe('markersOf on a dot a browser shows, written otherwise', () => {
+  // Beside the dot or for it: a character a browser shows as nothing, one that only looks like a dot, or a
+  // reference to either. Each in plain text and in a paragraph.
+  const FORMS = [
+    'evil\u200b.com', 'evil.\u200bcom', 'evil.\u00adcom', 'evil\u2060.com', 'evil.\ufeffcom', 'evil.\u200ecom', 'evil\u202e.com',
+    'evil.&shy;com', 'evil&#8203;.com', 'evil.&ZeroWidthSpace;com', 'evil&#x200B;.com', 'evil&#46com', 'evil&#00000000046;com',
+    'evil&period;com', '<!-- a > b --> evil&#46;com', '<span title="a>b">x</span> evil&#46;com', 'evil\ufe52com', 'evil\u2024com',
+    'evil\ufe0f.com', 'evil.\u034fcom', 'evil\u180b.com', 'evil\udb40\udd00.com', 'evil\ua4f8com', 'evil\u0702com',
+  ];
+
+  it('reads the host in each form, in plain text and in a paragraph', () => {
+    const missed = FORMS.flatMap((form) => [`Mehr bei ${form} heute`, `<p>Mehr bei ${form} heute</p>`])
+      .filter((text) => !markersOf(text).get('link')!.has('evil.com'));
+    expect(missed).toEqual([]);
+  });
+
+  it('reads an address whose domain carries such a form', () => {
+    expect([...markersOf('Schreib an info@evil\u200b.com').get('email')!]).toEqual(['evil.com']);
+    expect([...markersOf('Schreib an info@evil&shy;.com').get('email')!]).toEqual(['evil.com']);
+  });
+
+  it('keeps the reading a character a browser shows as nothing cuts', () => {
+    expect(markersOf('ev\u200dil.com').get('link')).toEqual(new Set(['il.com', 'evil.com']));
+  });
+
+  it('reads a text with such a character as it reads the text a browser shows, a host where the shown text has one', () => {
+    const pairs: [string, string][] = [
+      ['inkl.\u00adbio', 'inkl.bio'], ['ca.\u200bshop', 'ca.shop'],
+      ['\u0646\u0647\u0627\u064a\u0629.\u200f\u0628\u062f\u0627\u064a\u0629', '\u0646\u0647\u0627\u064a\u0629.\u0628\u062f\u0627\u064a\u0629'],
+    ];
+    for (const [written, shown] of pairs) {
+      expect(markersOf(written).get('link')).toEqual(markersOf(shown).get('link'));
+      expect(markersOf(shown).get('link')!.size).toBe(1);
+    }
+  });
+
+  it('reads a text with thousands of halves of a character around a hidden one without failing, and finds no host in it', () => {
+    const raw = `Gruentee ${'\udb40'.repeat(12000)}${'\udc20'.repeat(12000)}`;
+    const referenced = `<p>Gruentee ${'&#xDB40;'.repeat(12000)}${'&#xDC20;'.repeat(12000)}</p>`;
+    for (const text of [raw, referenced]) expect(markersOf(text).get('link')).toEqual(new Set());
+  });
+
+  it('reads half a character, written or as a reference, as the replacement character a browser shows: a separator, the same each way', () => {
+    const forms = ['Mehr: Q\ud800evil\u200b.com', 'Mehr: Q&#xD800;evil\u200b.com', 'Mehr: Q\ufffdevil\u200b.com'];
+    for (const text of forms) expect(markersOf(text).get('link')).toEqual(new Set(['evil.com']));
+    for (const text of ['evil&#xD800;.com', 'evil&#xDC20;.com', 'evil&#0;.com', 'evil&#1114112;.com', 'evil\ufffd.com']) {
+      expect(markersOf(`Mehr bei ${text}`).get('link')).toEqual(new Set());
+    }
+  });
+
+  it('does not join two halves of a character around a hidden one into a letter, where a browser shows two replacement characters', () => {
+    expect(markersOf('Mehr bei evil\ud840\u200b\udc00.com').get('link')).toEqual(new Set());
+    expect(markersOf('<p>Mehr bei evil\ud840&#8203;\udc00.com</p>').get('link')).toEqual(new Set());
+  });
+
+  it('flags no verdict of 200 whose words carry soft hyphens and joiners where a text breaks or joins them', () => {
+    const inputs = run(200, (t) => withAfter(t, {
+      description: `Unser Grün\u00adtee ist mild und aus\u00adgewogen. Bio\u200d-Qualität, Ei\u00adche.\u00adDesign, Kl.\u200bGr. M. Dose 12\u2060x\u20608 cm. Im Tee\u00adshop-Angebot, Bio\u200binfo auf der Dose.`,
+    }));
+    expect(judgeOutliers(inputs, OWN, KINDS).flagged).toEqual([]);
   });
 });
 
