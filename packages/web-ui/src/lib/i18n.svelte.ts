@@ -2814,6 +2814,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.connecting': { de: 'Verbinden...', en: 'Connecting...' },
 	'integrations.google_managed_desc': { de: 'Verbinde dein Google-Konto mit einem Klick — wir kümmern uns um den Rest.', en: 'Connect your Google account with one click — we handle the rest.' },
 	'integrations.google_connected_managed': { de: 'Google Workspace verbunden!', en: 'Google Workspace connected!' },
+	'integrations.google_claim_invalid': { de: 'Google liess sich gerade nicht verbinden. Versuch es später noch einmal; bleibt es so, schreib an support@lynox.ai.', en: "Google couldn't be connected right now. Try again later; if it keeps happening, write to support@lynox.ai." },
 	'integrations.google_oauth_unavailable': { de: 'Google-Verbindung konnte nicht hergestellt werden.', en: 'Could not establish Google connection.' },
 	'integrations.google_oauth_cancelled': { de: 'Google-Verbindung abgebrochen. Es wurde nichts geändert.', en: 'Google connection cancelled. Nothing was changed.' },
 	'integrations.google_oauth_link_stale': { de: 'Der Verbindungslink war abgelaufen oder schon benutzt. Bitte verbinde Google erneut.', en: 'The connection link had expired or was already used. Please connect Google again.' },

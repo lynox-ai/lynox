@@ -445,9 +445,9 @@ export async function claimManagedGoogleTokens(claimNonce: string): Promise<Mana
 			addToast(t('integrations.google_connected_managed'), 'success');
 			await loadGoogleStatus();
 		} else {
-			const data = (await res.json().catch(() => ({}))) as { error?: string; claim_kept?: unknown };
+			const data = (await res.json().catch(() => ({}))) as { error?: string; code?: unknown; claim_kept?: unknown };
 			if (data.claim_kept === true) outcome = 'kept';
-			addToast(data.error ?? t('common.error'), 'error');
+			addToast(data.code === 'google_claim_invalid' ? t('integrations.google_claim_invalid') : (data.error ?? t('common.error')), 'error');
 		}
 	} catch {
 		addToast(t('common.error'), 'error');
