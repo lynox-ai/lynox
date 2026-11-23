@@ -27,6 +27,7 @@ import { OAUTH_PRESETS, presetClientKeys, presetScopeRequest } from './oauth-pre
 import { isShopifyAdminUrl } from './shopify-host.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { MANDATE_TAG_PREFIX, isMandateTag } from './request-principal.js';
+import { normalizeHostName, normalizeHostTarget } from './send-target.js';
 import { credentialBearing, credentialHosts, slotConflicts, slotNames, type SlotConflict } from './profile-secret-view.js';
 import { processErrorText, reducedErrorText } from './error-egress.js';
 import { engineLessSentence, type EngineLessReader } from './engine-less-refusal.js';
@@ -256,6 +257,14 @@ export interface ApiProfile {
    * from the input; the owner's save removes it, and says so.
    */
   created_by?: string | undefined;
+  /**
+   * The host of `base_url` when the owner saved this profile in a turn that had taken in no
+   * foreign content (`api_setup`). Written by the engine only, like `created_by`: a value in the
+   * input is dropped, and an `api_setup` create or update in any other turn removes it. Saves that
+   * keep the stored profile's `base_url` (refine, a token save, the OAuth callback) keep it. Read by `readKnownHosts`: the owner
+   * chose this host, so a read from it after foreign content is not asked about.
+   */
+  owner_clean_host?: string | undefined;
   auth?: ApiAuth | undefined;
   rate_limit?: ApiRateLimit | undefined;
   description: string;
@@ -911,6 +920,11 @@ function notRegisteredAtBoot(c: SlotConflict, x: string, y: string): string {
   }
   const loser = c.loser === 'x' ? x : y;
   return `${c.why} So profile "${loser}" is not registered and cannot be used. ${kept} To use it again, store its credential under a name of its own, point the profile at that name, then save the corrected profile with api_setup update.`;
+}
+
+/** A profile's `base_url` host in the form a read's target carries, or `null`. */
+export function profileReadHost(profile: Pick<ApiProfile, 'base_url'>): string | null {
+  return typeof profile.base_url === 'string' ? normalizeHostTarget(profile.base_url)?.value ?? null : null;
 }
 
 /** The hostname a profile maps to, or `null` for a `base_url` that does not parse. */
@@ -3208,6 +3222,38 @@ export class ApiStore {
    * server-side only after an out-of-band human confirmation at profile save
    * (see api_setup + endpoint-allowlist.CustomEndpointAck), never from agent input.
    */
+  /**
+   * The hosts a read may reach after foreign content without a question, because the owner chose
+   * them for a connected API: the exact host of a profile's `base_url` (no subdomain, no suffix),
+   * when the owner accepted that host at a save (`custom_endpoint_ack.hosts`) or saved the profile
+   * in their own chat, in a tool batch that began before any foreign content and in a conversation
+   * without a search the provider ran itself (`owner_clean_host`, bound to the host it was saved
+   * with). A
+   * profile a mandate wrote never counts, nor does a listed sub-processor host on its own. For
+   * reads only: a send's targets never consult this.
+   */
+  readKnownHosts(): Set<string> {
+    const hosts = new Set<string>();
+    for (const profile of this.profiles.values()) {
+      const host = profileReadHost(profile);
+      if (host === null || isMandateAuthored(profile)) continue;
+      const ack = profile.custom_endpoint_ack;
+      const accepted = ack?.accepted === true && Array.isArray(ack.hosts) && ack.hosts.some((h) => normalizeHostName(String(h)) === host);
+      if (accepted || profile.owner_clean_host === host) hosts.add(host);
+    }
+    return hosts;
+  }
+
+  /** The `base_url` host of every profile, counted for reads or not: what a question may point at. */
+  profileHosts(): Set<string> {
+    const hosts = new Set<string>();
+    for (const profile of this.profiles.values()) {
+      const host = profileReadHost(profile);
+      if (host !== null) hosts.add(host);
+    }
+    return hosts;
+  }
+
   getAcceptedEgressHosts(): Set<string> {
     const hosts = new Set<string>();
     for (const profile of this.profiles.values()) {
