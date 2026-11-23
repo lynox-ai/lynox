@@ -14,8 +14,9 @@
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import BulkStartDomains from './BulkStartDomains.svelte';
+	import BulkHost from './BulkHost.svelte';
 	import {
-		BULK_STEPS, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked,
+		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts,
 		type BulkRunDetailData, type BulkTarget, type BulkSentencePart, type BulkMarkerKind,
 	} from './bulk-runs.js';
 
@@ -456,7 +457,9 @@
 			.catch(() => { managed = null; });
 	});
 
-	const host = $derived(run ? bulkHostOf(run.targetSystem) : null);
+	// Between two sentences of the probe's confirmation.
+	const SENTENCE_GAP = ' ';
+	const host = $derived(run ? bulkHostOf(run.targetSystem) || null : null);
 	const atProbe = $derived(run !== null && bulkAtProbe(run));
 	const step = $derived(run ? bulkStep(run) : 'planned');
 	const steps = $derived(run ? bulkSteps(run) : BULK_STEPS);
@@ -505,6 +508,8 @@
 	}
 	const resumeKind = $derived(run ? bulkResumeKind(run) : null);
 	const resumeText = $derived(run ? bulkResumeText(run, managed, i18n) : null);
+	const resumeWords = $derived(run ? bulkResumeWords(run, i18n) : null);
+	const rolledBack = $derived(run ? bulkRolledBackParts(run, view) : null);
 	const sentUnknownText = $derived(run ? bulkSentUnknownText(run, i18n) : null);
 	const conflictsText = $derived(run ? bulkConflictsText(run, i18n) : null);
 	const shopify = $derived(bulkIsShopifyHost(host));
@@ -590,7 +595,15 @@
      name the planner set, in a value box, so it does not read as a word of lynox's. -->
 {#snippet fieldName(field: string)}{@const key = bulkFieldLabelKey(host, field)}{#if key !== null}{t(key)}{:else}<bdi class="rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono text-text" data-testid="bulk-field-own-name">{bulkVisibleText(field)}</bdi>{/if}{/snippet}
 {#snippet fieldNames(fields: readonly string[])}{#each fields as f, i (i)}{i > 0 ? ', ' : ''}{@render fieldName(f)}{/each}{/snippet}
+<!-- The host the planner set, boxed as code wherever it stands among the page's words. -->
+{#snippet hostBox()}<BulkHost value={host ?? ''} />{/snippet}
+<!-- A text of the page that names the host among its words: the host boxed wherever it stands. -->
+{#snippet hostText(text: string)}{#each bulkHostSplit(text, host) as part, i (i)}{#if 'slot' in part}{@render hostBox()}{:else}{part.text}{/if}{/each}{/snippet}
 {#snippet sentence(parts: BulkSentencePart[], fields: readonly string[])}{#each parts as part, i (i)}{#if 'slot' in part}{@render fieldNames(fields)}{:else}{part.text}{/if}{/each}{/snippet}
+<!-- A sentence of the page split at its placeholders: the host boxed, the target's name and the field
+     names as the page shows them. Text the page did not write (a target's key) is never searched for
+     the host, so it cannot get a box that vouches for part of another name. -->
+{#snippet placed(key: string, fields: readonly string[] = [])}{#each bulkTemplateParts(t(key), ['provider', 'host', 'target', 'field'], {}) as part, i (i)}{#if 'text' in part}{part.text}{:else if part.slot === 'target'}{probeLabel}{:else if part.slot === 'field'}{@render fieldNames(fields)}{:else if host !== null}{@render hostBox()}{:else}{provider}{/if}{/each}{/snippet}
 
 <!-- A target's new value with a mark behind each hidden character it adds where text may carry
      one: the word in the text, the kind and code point only in the label. -->
@@ -636,7 +649,7 @@
 		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger">{error || t('common.load_failed')}</div>
 	{:else}
 		<section class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 space-y-4">
-			<h1 class="text-lg font-medium">{bulkLabel(run, i18n)}</h1>
+			<h1 class="text-lg font-medium">{#each bulkLabelParts(run, i18n) as part, i (i)}{#if 'slot' in part}{@render hostBox()}{:else}{part.text}{/if}{/each}</h1>
 
 			<ol class="flex flex-wrap gap-1.5 text-[11px]">
 				{#each steps as s (s)}
@@ -654,7 +667,7 @@
 
 			<dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
 				<dt class="text-text-subtle">{t('bulk.head.target')}</dt>
-				<dd>{provider}{run.writeMethod ? ` · ${run.writeMethod}` : ''}</dd>
+				<dd>{#if host !== null}{@render hostBox()}{:else}{provider}{/if}{run.writeMethod ? ` · ${run.writeMethod}` : ''}</dd>
 				<dt class="text-text-subtle">{t('bulk.head.targets')}</dt>
 				<dd>{tf('bulk.head.counts', { n: String(run.total), a: String(run.applied), c: String(run.conflicts), f: String(run.failed) })}</dd>
 				{#if run.costUsd > 0 || run.costCapUsd !== null}
@@ -663,7 +676,10 @@
 				{/if}
 				{#if run.haltReason}
 					<dt class="text-text-subtle">{t(bulkHaltHeadKey(run))}</dt>
-					<dd>{bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, !ownerActs)}</dd>
+					<!-- The engine's own words for a halt (its reason, when the page has no sentence for it) stay text. -->
+					{@const cause = bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, !ownerActs)}
+					<!-- An atomic undo that rolled back links the run it takes back, where it says to start again (U-335). -->
+					<dd data-testid="bulk-halt-cause">{#if rolledBack}{rolledBack.before}<button type="button" class="underline text-accent hover:opacity-80" onclick={() => onOpen(run!.sourceRunId!)}>{rolledBack.link}</button>{rolledBack.after}{:else if cause === run.haltReason}{cause}{:else}{@render hostText(cause)}{/if}</dd>
 				{/if}
 			</dl>
 
@@ -817,7 +833,7 @@
 				<!-- Whose session it is is not known yet: no act is offered. -->
 			{:else if startKind === 'read'}
 				<div class="space-y-3 border-t border-border pt-4">
-					<p class="text-sm">{tf('bulk.start.read_explain', { provider })}</p>
+					<p class="text-sm" data-testid="bulk-read-explain">{@render placed('bulk.start.read_explain')}</p>
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary} disabled={busy} onclick={() => start()}>{t(startButton ?? 'bulk.start.read')}</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
@@ -825,7 +841,9 @@
 				</div>
 			{:else if startKind === 'list' && run.listFirstPage}
 				<div class="space-y-3 border-t border-border pt-4">
-					<p class="text-sm">{tf('bulk.start.list_explain', { provider, address: bulkVisibleText(run.listFirstPage) })}</p>
+					<!-- Split at the places of the host and the address, not at the host's name: the address may hold the
+					     host too, and is a whole value in its own box (U-423). -->
+					<p class="text-sm" data-testid="bulk-list-explain">{#each bulkTemplateParts(t('bulk.start.list_explain'), ['provider', 'address'], {}) as part, i (i)}{#if 'text' in part}{part.text}{:else if part.slot === 'address'}<BulkHost value={bulkVisibleText(run.listFirstPage)} testid="bulk-list-address" />{:else if host !== null}{@render hostBox()}{:else}{provider}{/if}{/each}</p>
 					{#if listFilterText}{@render filterLineOf(listFilterText)}{/if}{#if listStatusText}<p class="text-sm">{listStatusText}</p>{/if}
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary} disabled={busy} onclick={() => start()}>{t(startButton ?? 'bulk.start.list')}</button>
@@ -901,7 +919,7 @@
 			{:else if restartKind !== null}
 				<div class="space-y-3 border-t border-border pt-4">
 					{#if haltText?.before}
-						<p class="text-sm">{haltText.before}</p>
+						<p class="text-sm">{@render hostText(haltText.before)}</p>
 					{/if}
 					{#if supportMail}
 						<p class="text-sm"><a href={supportMail} class="{btnPlain} inline-block">{t('bulk.halt.support_mail')}</a></p>
@@ -951,18 +969,20 @@
 			{:else if resumeKind !== null && resumeText}
 				<div class="space-y-3 border-t border-border pt-4">
 					{#if resumeText.before}
-						<p class="text-sm">{resumeText.before}</p>
+						<p class="text-sm">{@render hostText(resumeText.before)}</p>
 					{/if}
+					<!-- The support link stands under the sentence that names support, which comes before the check. -->
 					{#if supportMail}
 						<p class="text-sm"><a href={supportMail} class="{btnPlain} inline-block">{t('bulk.halt.support_mail')}</a></p>
 					{/if}
 					{#if resumeKind === 'none'}
-						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.resume.none')}</p>
+						<!-- An undo starts again from the page of the run it takes back: the words link to it where the run names it. -->
+						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-resume-none">{resumeWords!.none.before}{#if resumeWords!.none.link !== null}{#if run.sourceRunId !== null}<button type="button" class="underline text-accent hover:opacity-80" onclick={() => onOpen(run!.sourceRunId!)}>{resumeWords!.none.link}</button>{:else}{resumeWords!.none.link}{/if}{/if}{resumeWords!.none.after}</p>
 					{:else if resumeKind === 'nothing'}
-						<p class="text-sm">{resumeText.check}</p>
+						<p class="text-sm">{@render hostText(resumeText.check ?? '')}</p>
 					{:else}
 						{#if resumeText.soFar}
-							<p class="text-sm">{resumeText.soFar}</p>
+							<p class="text-sm">{@render hostText(resumeText.soFar)}</p>
 						{/if}
 						{#if resumeKind === 'max'}
 							<div class="text-sm space-y-1">
@@ -977,19 +997,22 @@
 							</div>
 						{/if}
 						{#if resumeText.check}
-							<p class="text-sm">{resumeText.check}</p>
+							<p class="text-sm">{@render hostText(resumeText.check)}</p>
+						{/if}
+						{#if resumeText.after}
+							<p class="text-sm">{@render hostText(resumeText.after)}</p>
 						{/if}
 						{#if resumeText.kept}
-							<p class="text-sm text-text-muted">{resumeText.kept}</p>
+							<p class="text-sm text-text-muted">{@render hostText(resumeText.kept)}</p>
 						{/if}
 						{#if resumeText.allows}
-							<p class="text-sm">{resumeText.allows}</p>
+							<p class="text-sm">{@render hostText(resumeText.allows)}</p>
 						{/if}
 						{#if resumeKind !== 'check'}
-							<p class="text-sm text-text-muted">{t('bulk.resume.window')}</p>
+							<p class="text-sm text-text-muted">{resumeWords!.window}</p>
 						{/if}
 						<div class="flex flex-wrap gap-2">
-							<button type="button" class={btnPrimary} disabled={busy || (resumeKind === 'max' && bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run)) === null)} onclick={resume}>{t(resumeKind === 'check' ? 'bulk.resume.check' : 'bulk.resume.write')}</button>
+							<button type="button" class={btnPrimary} disabled={busy || (resumeKind === 'max' && bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run)) === null)} onclick={resume}>{resumeKind === 'check' ? t('bulk.resume.check') : resumeWords!.button}</button>
 							<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 						</div>
 					{/if}
@@ -1059,7 +1082,7 @@
 			{:else if atProbe && run.probe}
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.probe.title')}</h2>
-					<p class="text-sm" data-testid="bulk-probe-explain">{#if run.probe.fields.length > 0}{@render sentence(bulkSentenceParts(t(run.probe.found === true ? 'bulk.probe.explain_found' : 'bulk.probe.explain'), 'field', { target: probeLabel, provider }), run.probe.fields)}{:else}{tf(run.probe.found === true ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_whole', { target: probeLabel, provider })}{/if}</p>
+					<p class="text-sm" data-testid="bulk-probe-explain">{#if run.probe.fields.length > 0}{@render placed(run.probe.found === true ? 'bulk.probe.explain_found' : 'bulk.probe.explain', run.probe.fields)}{:else}{@render placed(run.probe.found === true ? 'bulk.probe.explain_found_whole' : 'bulk.probe.explain_whole')}{/if}</p>
 					{#if hiddenCount}
 						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-hidden-count">{hiddenCount}</p>
 					{/if}
@@ -1071,7 +1094,7 @@
 					{/if}
 					<label class="flex gap-2 items-start text-sm">
 						<input type="checkbox" bind:checked={probeOk} class="mt-1" />
-						<span>{tf(run.probe.fields.length > 0 ? 'bulk.probe.confirm' : 'bulk.probe.confirm_whole', { provider })}{run.writeForm === 'measured' ? ` ${tf('bulk.probe.confirm_measured', { provider })}` : ''}</span>
+						<span data-testid="bulk-probe-confirm">{@render placed(run.probe.fields.length > 0 ? 'bulk.probe.confirm' : 'bulk.probe.confirm_whole')}{#if run.writeForm === 'measured'}{SENTENCE_GAP}{@render placed('bulk.probe.confirm_measured')}{/if}</span>
 					</label>
 					<label class="flex items-center gap-2 text-sm">
 						{t('bulk.probe.in_total')}

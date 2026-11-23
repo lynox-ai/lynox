@@ -18,10 +18,21 @@ import { stripHidden } from './hidden-text.js';
 import { EngineLessRefused } from './engine-less-refusal.js';
 
 /**
- * The start of a plan's title when a workflow is scheduled without one: lynox's words, then the
- * workflow's name. The web-ui keeps a copy (`utils/plan-takeover.ts`); a test holds the two equal.
+ * The start of the title the engine gave a workflow scheduled without one, before it stored the
+ * workflow's name alone: such plans still carry it. Read only by {@link titleIsWorkflowName}.
  */
 export const SCHEDULED_TITLE_PREFIX = 'Scheduled: ';
+
+/**
+ * Whether a plan's title is the name of the workflow it runs: as the engine titles a workflow
+ * scheduled without a title (the name alone, or, on plans from before, the prefix and the name).
+ * The view then puts its own words in front of the name in the reader's language. A title that
+ * starts with the prefix but goes on with anything else is not the name, and stays whole.
+ */
+export function titleIsWorkflowName(title: string, workflowName: string): boolean {
+  if (workflowName === '') return false;
+  return title === workflowName || title === `${SCHEDULED_TITLE_PREFIX}${workflowName}`;
+}
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
