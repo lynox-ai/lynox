@@ -79,11 +79,30 @@ function graphemes(text: string): string[] {
 }
 
 /**
+ * How much of a text is looked at before it is cut: a few code units per character the line can
+ * show. A model can write a subject of megabytes (a heredoc, a stored note); splitting all of it
+ * into characters on every render would stall the chat.
+ */
+const SUBJECT_UNITS_MAX = SUBJECT_MAX * 4;
+
+/**
+ * The longest one character may be, in code units. Longer is a base with a pile of combining
+ * marks, which draws over the rows around it; it keeps its base. The longest emoji sequences
+ * (a family, a couple with skin tones) stay below it.
+ */
+const CHAR_UNITS_MAX = 24;
+
+/**
  * `text` trimmed, at most {@link SUBJECT_MAX} characters, ending in „…“ when it was cut.
  * Counted by what a reader sees as one character, so a cut does not split an emoji or a flag.
  */
 function cut(text: string): string {
-  const chars = graphemes(text.trim());
+  const trimmed = text.trim();
+  const clipped = trimmed.length > SUBJECT_UNITS_MAX;
+  const chars = graphemes(clipped ? trimmed.slice(0, SUBJECT_UNITS_MAX) : trimmed)
+    .map((char) => (char.length > CHAR_UNITS_MAX ? String.fromCodePoint(char.codePointAt(0) ?? 0x20) : char));
+  // Clipped by code units, the last character may be a piece of one: it goes, and the cut shows.
+  if (clipped) return `${chars.slice(0, Math.min(chars.length - 1, SUBJECT_MAX - 1)).join('')}…`;
   return chars.length > SUBJECT_MAX ? `${chars.slice(0, SUBJECT_MAX - 1).join('')}…` : chars.join('');
 }
 
@@ -114,8 +133,9 @@ const INBOX_ZONE_KEYS: Readonly<Record<string, string>> = {
 
 function inboxReadSubject(input: Record<string, unknown> | undefined, t: Translator): string {
   if (input?.['action'] === 'item') return '';
-  const key = INBOX_ZONE_KEYS[strOrEmpty(input?.['bucket'])];
-  return key ? t(key) : '';
+  const bucket = strOrEmpty(input?.['bucket']);
+  // Own keys only: a bucket named `constructor` or `__proto__` is no zone.
+  return Object.hasOwn(INBOX_ZONE_KEYS, bucket) ? t(INBOX_ZONE_KEYS[bucket] ?? '') : '';
 }
 
 /** Where a bulk run works: the API host, the collection, or the file it reads its list from. */

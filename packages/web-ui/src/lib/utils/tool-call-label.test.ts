@@ -157,7 +157,34 @@ describe('toolCallLabel', () => {
   });
 
   describe('subjects', () => {
+    /** No subject is longer than 50 characters of at most 24 code units each, plus the ellipsis. */
+    const SUBJECT_UNITS_BOUND = 50 * 24 + 1;
     const subject = (tool: string, input: unknown): string | undefined => toolCallLabel(tool, input, tk)?.subject;
+
+    it('looks at only the head of a very long text, so megabytes do not stall the line', () => {
+      const huge = 'h'.repeat(2_000_000);
+      const started = performance.now();
+      expect(subject('bash', { command: huge })).toBe(`${'h'.repeat(49)}…`);
+      expect(subject('memory_store', { content: huge })).toBe(`${'h'.repeat(49)}…`);
+      // Splitting two megabytes into characters takes seconds; the head takes nothing.
+      expect(performance.now() - started).toBeLessThan(250);
+      // Short characters clipped by code units still end in the ellipsis, and a piece of an emoji at the clip goes.
+      expect(subject('remember', { text: `${'é'.repeat(30)}${'😀'.repeat(200)}` })).toBe(`${'é'.repeat(30)}${'😀'.repeat(19)}…`);
+      expect(subject('remember', { text: `${'😀'.repeat(150)}` })).toBe(`${'😀'.repeat(49)}…`);
+    });
+
+    it('keeps a character to its base when combining marks pile up on it, so it cannot draw over other rows', () => {
+      const zalgo = `a${'\u0301'.repeat(100_000)}`;
+      expect(subject('bash', { command: zalgo })).toBe('…');
+      expect(subject('bash', { command: `ok ${`a${'\u0301'.repeat(40)}`} done` })).toBe('ok a done');
+      // A few marks are a real character and stay.
+      expect(subject('bash', { command: `e${'\u0301\u0323'} x` })).toBe(`e${'\u0301\u0323'} x`);
+      // The longest emoji sequences stay whole.
+      expect(subject('remember', { text: '👩🏽‍❤️‍💋‍👨🏻 ok' })).toBe('👩🏽‍❤️‍💋‍👨🏻 ok');
+      for (const out of [subject('bash', { command: zalgo.repeat(3) }), subject('spawn_agent', { task: zalgo })]) {
+        expect(out?.length ?? 0).toBeLessThanOrEqual(SUBJECT_UNITS_BOUND);
+      }
+    });
 
     it('keeps 50 chars whole and cuts from 51 on, ending in an ellipsis', () => {
       expect(subject('remember', { text: 'r'.repeat(50) })).toBe('r'.repeat(50));
@@ -218,6 +245,9 @@ describe('toolCallLabel', () => {
       expect(subject('inbox_read', { action: 'list', bucket: 'draft_ready' })).toBe('inbox.zone_drafted');
       expect(subject('inbox_read', { action: 'list', bucket: 'auto_handled' })).toBe('inbox.zone_handled');
       expect(subject('inbox_read', { action: 'list', bucket: 'other' })).toBe('');
+      for (const bucket of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+        expect(subject('inbox_read', { action: 'list', bucket })).toBe('');
+      }
       expect(subject('inbox_read', { action: 'item', bucket: 'requires_user', id: 'i1' })).toBe('');
       expect(subject('inbox_read', { action: 'counts' })).toBe('');
     });
