@@ -886,6 +886,10 @@ export interface RunOptions {
 	/** The text is what the user typed or dictated in the composer. Client-only, never sent:
 	 *  it marks the message `typed` (see `ChatMessage.typed`). */
 	typed?: boolean;
+	/** The text is the composer's, and the composer was empty when the person started it: no
+	 *  prefill, no retry, no follow-up chip, nothing the app put there. Only then the run carries
+	 *  the text as `typed`, which the engine may count as words the owner wrote. */
+	composedFromEmpty?: boolean;
 }
 
 /**
@@ -1521,6 +1525,9 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	}
 	if (runOptions?.effort) payload['effort'] = runOptions.effort;
 	if (runOptions?.thinking) payload['thinking'] = runOptions.thinking;
+	// Only a message the person wrote from an empty composer says what was typed; everything else
+	// (a prefill, a retry, a chip, a view's own message) sends none.
+	if (runOptions?.composedFromEmpty === true && runOptions.typed === true) payload['typed'] = task;
 	if (runOptions?.context) payload['context'] = runOptions.context;
 	// The first run of a chat opened with "Plan in a new chat" carries where it came from: the
 	// engine turns that into a fixed sentence pointing at a bulk run, and reads nothing by it.
@@ -2716,6 +2723,9 @@ export async function replyPermission(answer: string): Promise<void> {
 	pendingPermission = null;
 	// The prompt is gone from the screen either way; an answer that did not arrive is said aloud.
 	const sid = sessionId;
+	// Without the question's id the answer is not sent: the server would take it for whatever
+	// question is open by then, so the open one is brought back to be answered by name.
+	if (!promptId) { await reportReply(sid, 'id_required', null); return; }
 	await reportReply(sid, await postReplyWithRetry(`${getApiBase()}/sessions/${sid}/reply`, { answer, promptId }), draftable);
 }
 
@@ -2754,6 +2764,22 @@ async function reportReply(sid: string, outcome: ReplyOutcome, answer: string | 
 		const returned = answer !== null && composerDraft !== null && composerDraft(answer);
 		chatError = t(returned ? 'chat.mandate_key_input_returned' : 'chat.mandate_key_input');
 		chatErrorDetail = null;
+		return;
+	}
+	if (outcome === 'id_required') {
+		// Nothing was answered. The open question comes back with its id, to be answered again on
+		// purpose: sending the same answer to it unasked could approve what the person never saw.
+		if (sessionId !== sid) return;
+		let saidNoneOpen = false;
+		await checkPendingPrompt((nothingOpen) => { saidNoneOpen = nothingOpen; });
+		if (sessionId !== sid) return;
+		// The answer does not go back into the message field: which question is open now is not
+		// known to match the one answered (a mail to send, say), and one keystroke would answer it.
+		// "Nothing is open" only when the server said so; a failed check says nothing either way.
+		const none = saidNoneOpen;
+		chatError = t(none ? 'chat.reply_needs_question_none' : 'chat.reply_needs_question');
+		chatErrorDetail = null;
+		unmatchedAnswerCount++;
 		return;
 	}
 	if (outcome === 'settled' || sessionId !== sid) return;
@@ -2803,8 +2829,9 @@ export async function postTabProgress(promptId: string, partial: (string | null)
 /** How a reply ended: `lost` when the server could not be reached or failed twice, `closed` when
  *  it answered 410 (a closed question, with the reason the server gave, or null), `key_refused`
  *  when it refused the answer as carrying a key (422 `mandate_key_input`), and `settled` for
- *  every other final word. */
-type ReplyOutcome = 'settled' | 'lost' | 'key_refused' | { readonly closed: ClosedCode | null };
+ *  every other final word except `id_required`: the answer went without the question's id
+ *  (409 `prompt_id_required`), so nothing was answered. */
+type ReplyOutcome = 'settled' | 'lost' | 'key_refused' | 'id_required' | { readonly closed: ClosedCode | null };
 
 /** POST a reply with a single retry on a network error or 5xx. The server is idempotent for
  *  repeat promptIds (returns 200 with `idempotent: true`), so retrying is safe. Never rejects. */
@@ -2826,6 +2853,12 @@ async function postReplyWithRetry(url: string, body: Record<string, unknown>): P
 				let detail: string | null = null;
 				try { detail = await res.text(); } catch { /* no body */ }
 				if (isKeyInputRefusal(422, detail)) return 'key_refused';
+			}
+			// Sent without the question's id: nothing was answered, the open question waits.
+			if (res.status === 409) {
+				let code: unknown;
+				try { code = ((await res.clone().json()) as { code?: unknown } | null)?.code; } catch { /* no body */ }
+				if (code === 'prompt_id_required') return 'id_required';
 			}
 			// 5xx → retry once
 			if (res.status >= 500) {
@@ -3051,7 +3084,7 @@ export type PendingCard = 'question' | 'decision' | 'other' | null;
  * Check the server for a pending prompt that survived a disconnect/refresh.
  * Restores pendingPermission or pendingSecretPrompt so the UI re-shows it, and says which card.
  */
-export async function checkPendingPrompt(): Promise<PendingCard> {
+export async function checkPendingPrompt(onAnswered?: (nothingOpen: boolean) => void): Promise<PendingCard> {
 	const sid = sessionId;
 	if (!sid) return null;
 	let card: PendingCard = null;
@@ -3063,6 +3096,8 @@ export async function checkPendingPrompt(): Promise<PendingCard> {
 		// The chat may have changed while the request ran: the card belongs to the chat it was
 		// asked for, and set now it would show in another one.
 		if (sessionId !== sid) return null;
+		// This call got the server's word on what is open; a failed one knows nothing about it.
+		onAnswered?.(data['pending'] === false);
 		if (!data['pending']) return null;
 
 		const promptType = data['promptType'] as string;
@@ -3486,6 +3521,12 @@ export function getRunStartedAt(): number | null {
 export function getRunPromptCount(): number {
 	return runPromptCount;
 }
+/** Bumped each time an answer named no question: the chat moves focus to the sentence then. */
+let unmatchedAnswerCount = $state(0);
+export function getUnmatchedAnswerCount(): number {
+	return unmatchedAnswerCount;
+}
+
 export function getChatError() {
 	return chatError;
 }
@@ -3815,19 +3856,33 @@ export async function repickSessionModel(tier: string): Promise<
 > {
 	if (!sessionId) return { ok: false, reason: 'no_session' };
 	if (isStreaming) return { ok: false, reason: 'busy' };
+	const sid = sessionId;
+	const repick = (): Promise<Response> => fetch(`${getApiBase()}/sessions/${sid}/model`, {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ tier }),
+	});
 	try {
-		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/model`, {
-			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ tier }),
-		});
+		let res = await repick();
+		// The server no longer holds this chat's session (dropped while idle, or a restart), as on
+		// a page reloaded long after: open it again for this chat, as a run does, and ask once more.
+		if (res.status === 404) {
+			const reopened = await fetch(`${getApiBase()}/sessions`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ threadId: sid }),
+			});
+			if (!reopened.ok || sessionId !== sid) return { ok: false, reason: 'error' };
+			res = await repick();
+		}
 		if (res.ok) {
 			const data = (await res.json()) as { model?: string; modelId?: string };
 			// `model` is the resolved (clamped) TIER; `modelId` is the concrete
 			// model-id. Keep sessionModel a model-id (consistent with the turn_end
 			// frame + the StatusBar tooltip) and sessionTier the tier (drives the
 			// per-thread control). Falling back to the tier only if modelId is absent.
-			if (data.model) {
+			// Only on the chat it was asked for: the user may have switched chats meanwhile.
+			if (data.model && sessionId === sid) {
 				sessionTier = data.model;
 				sessionModel = data.modelId ?? data.model;
 			}
@@ -4390,6 +4445,25 @@ export async function resumeThread(threadId: string): Promise<void> {
  *
  * Safe to call on every ChatView mount — additive, no SSE-lifecycle change.
  */
+/**
+ * After a reload the chat holds its id (kept in this browser) but not its tier: no session was
+ * opened, the transcript was only read back, so nothing set the tier and the model row and picker
+ * stayed hidden. The thread's record says the tier it runs on (`run_tier`: the stored pick held to
+ * today's ceiling as a resume would; not the stored pick as asked). Read
+ * only while the tier is unknown, and kept only if the same chat is still open and nothing set a
+ * tier meanwhile.
+ */
+async function restoreThreadTier(sid: string): Promise<void> {
+	if (sessionTier !== null) return;
+	const res = await fetch(`${getApiBase()}/threads/${encodeURIComponent(sid)}`).catch(() => null);
+	if (!res?.ok) return;
+	const data = (await res.json().catch(() => null)) as { thread?: { run_tier?: unknown } | null } | null;
+	// Checked once the whole answer is in: the user may have switched chats, or a session set the tier.
+	if (sessionId !== sid || sessionTier !== null) return;
+	const tier = data?.thread?.run_tier;
+	if (typeof tier === 'string' && tier !== '') sessionTier = tier;
+}
+
 export async function reconcileThread(): Promise<void> {
 	const tid = sessionId;
 	if (!tid) return;
@@ -4397,6 +4471,7 @@ export async function reconcileThread(): Promise<void> {
 	// run answered in the drop window, a mount), and the run may have contained the chat. Not
 	// every end does: the server's refusal stays the enforcement, this only keeps the switch honest.
 	runEnded(null);
+	void restoreThreadTier(tid);
 	if (isStreaming) return;
 	try {
 		const res = await fetch(`${getApiBase()}/threads/${tid}/messages`);
