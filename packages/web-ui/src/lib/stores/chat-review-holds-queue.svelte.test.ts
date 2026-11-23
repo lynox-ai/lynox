@@ -78,12 +78,7 @@ function serve(): void {
 		}
 		if (url.endsWith('/changeset')) {
 			changesetGets++;
-			if (holdChangeset) {
-				const signal = init?.signal;
-				await Promise.race([holdChangeset, new Promise<never>((_, reject) => {
-					signal?.addEventListener('abort', () => reject(new DOMException('timed out', 'TimeoutError')));
-				})]);
-			}
+			if (holdChangeset) await holdChangeset;
 			if (changesetFails) return json({ error: 'unavailable' }, 503);
 			return json({ hasChanges: changed.length > 0, runId: 'run-7', files: changed });
 		}
@@ -251,7 +246,7 @@ describe('a turn queued behind a run waits for the review that run left open', (
 		holdChangeset = new Promise<void>((r) => { answer = r; });
 		release();
 		await settle();
-		await wait(9_000); // longer than any time limit a fetch here might be given
+		await wait(9_000); // past a time limit of 8 s or less, were the fetch given one
 		answer();
 		await settle();
 		await wait(200);
@@ -347,6 +342,29 @@ describe('a turn queued before a reload waits for the review the server holds', 
 		await settle();
 		expect(store.getPendingChangeset(), 't9\'s review stays shown').not.toBeNull();
 		expect(runTasks, 'nothing sent past it').toEqual(['edit the notes']);
+	});
+
+	it('an accepted answer that arrives before the thread opened since asked for its review sends nothing there', async () => {
+		const release = await queueBehindRun();
+		changed = notes;
+		release();
+		await settle();
+		await wait(200);
+		await settle();
+		let answered!: () => void;
+		holdReview = new Promise<void>((r) => { answered = r; });
+		void store.submitChangesetReview('accept');
+		await settle();
+		seed();
+		holdReopen.set('t9', new Promise<void>(() => {})); // t9 has not asked for its review yet
+		void store.resumeThread('t9');
+		await settle();
+		expect(store.getQueueLength(), 'positive control: t9\'s queue is back').toBe(1);
+		answered();
+		await settle();
+		await wait(200);
+		await settle();
+		expect(runTasks, 'nothing sent in t9').toEqual(['edit the notes']);
 	});
 
 	it('a refused answer that arrives after another thread opened asks nothing and sends nothing there', async () => {
