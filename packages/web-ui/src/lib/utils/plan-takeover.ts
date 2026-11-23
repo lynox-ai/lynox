@@ -334,12 +334,19 @@ export function planTitle(plan: PlanTitle): string {
 	return name !== undefined ? tf('triggers.scheduled_title', { workflow: name }) : plan.title;
 }
 
+/** Who set a plan up and changed it, as the trigger list carries it (tags: `owner`, `mandate:<address>`). */
+export interface PlanAuthorship {
+	created_by?: string | undefined;
+	edited_by?: string | undefined;
+	mandate_editor?: string | undefined;
+}
+
 /**
  * Whether a person with access set the plan up or changed it, now or before the owner's last
  * change (`mandate_editor`): its title may then be that person's words, and the owner's plan list
  * sets it apart ({@link pausedTitleLine}) on the plan's card, not only where a takeover is offered.
  */
-export function writtenByMember(plan: Omit<PlanAuthorship, 'title'>): boolean {
+export function writtenByMember(plan: PlanAuthorship): boolean {
 	return [plan.created_by, plan.edited_by, plan.mandate_editor].some((tag) => (tag ?? '').startsWith('mandate:'));
 }
 

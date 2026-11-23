@@ -41,6 +41,8 @@ let countReads = 0;
 const posts: unknown[] = [];
 const before = getLocale();
 
+// A plan the owner alone set up and changed.
+const OWN = { created_by: 'owner', edited_by: 'owner', mandate_editor: undefined } as const;
 const PAUSED = {
 	id: 'p1', title: 'Wochenreport', status: 'open', effect: 'run_agent', source: 'cron', confirmed_at: '2026-10-01T00:00:00.000Z',
 	created_by: 'mandate:ida@treuhand-mueller-partner.ch',
@@ -284,22 +286,26 @@ describe('the confirmation', () => {
 	it('says lynox\'s words before a workflow\'s name in the reader\'s language, on a paused plan and in the list', async () => {
 		const plans = [
 			{ ...PAUSED, id: 'w1', title: 'Wochenbericht', title_workflow: 'Wochenbericht' },
-			{ ...PAUSED, id: 'w2', title: 'Monatsbericht', title_workflow: 'Monatsbericht', paused: false, paused_who: undefined, paused_ended: undefined },
-			{ ...PAUSED, id: 'f1', title: 'Scheduled: Forged', paused: false, paused_who: undefined, paused_ended: undefined },
+			{ ...PAUSED, ...OWN, id: 'w2', title: 'Monatsbericht', title_workflow: 'Monatsbericht', paused: false, paused_who: undefined, paused_ended: undefined },
+			{ ...PAUSED, ...OWN, id: 'f1', title: 'Scheduled: Forged', paused: false, paused_who: undefined, paused_ended: undefined },
+			// Not paused, but a person with access set it up: the owner's list sets its title apart too.
+			{ ...PAUSED, id: 'm1', title: 'Quartal', title_workflow: 'Quartal', paused: false, paused_who: undefined, paused_ended: undefined },
+			{ ...PAUSED, id: 'm2', title: 'Scheduled: Forged too', paused: false, paused_who: undefined, paused_ended: undefined },
 		];
 		const lines = (): string[] => [...target.querySelectorAll('p[data-trigger-title]')].map((e) => (e.textContent ?? '').trim());
 		rows = plans;
 		await render();
-		expect(lines()).toEqual(['Geplant: Wochenbericht', 'Geplant: Monatsbericht', 'Scheduled: Forged']);
+		expect(lines()).toEqual(['Geplant: Wochenbericht', 'Geplant: Monatsbericht', 'Scheduled: Forged', 'Geplant: Quartal', 'Scheduled: Forged too']);
 		unmount(component!);
 		target.replaceChildren();
 		setLocale('en');
 		await render();
-		expect(lines()).toEqual(['Scheduled: Wochenbericht', 'Scheduled: Monatsbericht', 'Scheduled: Forged']);
-		// In English as in German, only the paused plan's name is boxed, and only the name.
-		const box = [...target.querySelectorAll('p[data-trigger-title]')][0]!.querySelector('bdi[data-foreign-value]');
-		expect(box?.textContent).toBe('Wochenbericht');
-		expect([...target.querySelectorAll('p[data-trigger-title]')].slice(1).every((e) => e.querySelector('bdi[data-foreign-value]') === null)).toBe(true);
+		expect(lines()).toEqual(['Scheduled: Wochenbericht', 'Scheduled: Monatsbericht', 'Scheduled: Forged', 'Scheduled: Quartal', 'Scheduled: Forged too']);
+		// In English as in German: on the paused plan and on a plan a person with access set up, the
+		// workflow's name is boxed and lynox's words stand outside; a title that only starts with
+		// them is boxed whole. The owner's own plans in the list show no box.
+		const boxes = [...target.querySelectorAll('p[data-trigger-title]')].map((e) => [...e.querySelectorAll('bdi[data-foreign-value]')].map((b) => b.textContent));
+		expect(boxes).toEqual([['Wochenbericht'], [], [], ['Quartal'], ['Scheduled: Forged too']]);
 	});
 
 	it('sets every value someone else wrote apart, wherever a sentence of the plan takeover names it', async () => {
