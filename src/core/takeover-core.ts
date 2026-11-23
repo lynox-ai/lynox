@@ -4,8 +4,9 @@
  * commit — one immediate engine.db transaction that reads the state again, refuses when the digest
  * the owner was shown moved, writes, and records the audit row, or rolls all of it back.
  *
- * The plan takeover (`plan-takeover.ts`) is built on it. A rule changed here changes every takeover
- * at once: there is one rule for covering a mark, not one per entry point.
+ * The plan takeover (`plan-takeover.ts`) and the workflow takeover (`workflow-takeover.ts`) are
+ * built on it. A rule changed here changes every takeover at once: there is one rule for covering
+ * a mark, not one per entry point.
  */
 import type Database from 'better-sqlite3';
 import type { AuditLog } from './audit-log.js';
@@ -290,8 +291,8 @@ export type Decided<P, E> = { readonly ok: P } | { readonly stop: E };
  * The commit every takeover shares, against the digest the owner was shown (`expect`):
  *
  * 1. `decide` reads the state; a stop answers at once, a moved digest is `changed`. Without an
- *    audit log nothing can be recorded (`unrecorded`); without the prompts nothing can be settled
- *    (`prompts`).
+ *    audit log nothing can be recorded (`unrecorded`); without the prompt store the plans
+ *    `promptsOf` names cannot be settled (`prompts`) — when it names none, no store is needed.
  * 2. The prompts of every plan `promptsOf` names are settled and detached in history.db, before
  *    engine.db is written: a different file, so not in the same transaction. If the transaction
  *    then refuses, those plans stay paused with their questions ended.
@@ -310,10 +311,12 @@ export function commitTakeover<P extends { readonly expect: string }, E, R>(
   if ('stop' in first) return first.stop;
   if (first.ok.expect !== expect) return { kind: 'refused', refusal: 'changed' };
   if (deps.audit === null) return { kind: 'refused', refusal: 'unrecorded' };
-  if (deps.prompts === null) return { kind: 'refused', refusal: 'prompts' };
+  // Without the prompt store nothing can be settled: refused only when there is something to settle.
+  const toSettle = promptsOf(first.ok);
+  if (toSettle.length > 0 && deps.prompts === null) return { kind: 'refused', refusal: 'prompts' };
   const prompts = deps.prompts;
   try {
-    for (const id of promptsOf(first.ok)) clearPrompts(prompts, id);
+    if (prompts !== null) for (const id of toSettle) clearPrompts(prompts, id);
   } catch {
     return { kind: 'refused', refusal: 'prompts' };
   }

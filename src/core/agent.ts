@@ -672,8 +672,8 @@ export class Agent implements IAgent {
   writeAuthor: string | null = null;
   /** See `IAgent.ownerKnown`. Set per run by the session (a trigger's run adds its instruction). */
   ownerKnown?: OwnerKnownReader | undefined;
-  /** See `IAgent.searchResultAddresses`. Its own per agent: a sub-agent starts empty. */
-  readonly searchResultAddresses = new SearchResultAddresses();
+  /** See `IAgent.searchResultAddresses`. The conversation's: the session and a spawning parent pass theirs. */
+  readonly searchResultAddresses: SearchResultAddresses;
   /** See `IAgent.sendOrigin`. Set per run by the session. */
   sendOrigin?: SendOrigin | undefined;
   /** See `IAgent.noticeLanguage`. */
@@ -1229,18 +1229,22 @@ export class Agent implements IAgent {
     return { contract: this._contractOfCall(tc), ...(grant !== undefined ? { grant } : {}), ...(filed !== undefined ? { filed } : {}), ...(apiCost !== undefined ? { apiCost } : {}) };
   }
 
-  /** Deliver the result event of a call that has settled and is already in the ledger. A throw
-   *  from delivering it (a step's stream handler, a closed response) is not the call's outcome:
+  /** Deliver the result event of a call that has settled: run and in the ledger, or answered
+   *  without running (a refusal, a repeated call, a gate that needs input). A throw from
+   *  delivering it (a step's stream handler, a closed response) is not the call's outcome:
    *  caught here, it cannot make the call's own `catch` record the call a second time, emit a
-   *  second result for it, tell the model a call that worked had failed, or keep a call that
-   *  needs input from ending the run. The caller builds the event from facts the ledger write
-   *  above it has already read. Only the error's kind is logged: its text is the stream's. */
+   *  second result for it, hand the model the stream's error in place of the call's own text,
+   *  or keep a call that needs input from ending the run. Every `tool_result` event the agent
+   *  emits goes through here. Only the error's kind is logged: its text is the stream's. */
   private async _emitSettledResult(toolName: string, event: Parameters<EmittingStreamHandler>[0]): Promise<void> {
     if (!this.onStream) return;
     try {
       await this.onStream(event);
     } catch (emitErr: unknown) {
-      process.stderr.write(`[lynox:agent] a ${toolName} call was recorded, but its result event could not be delivered (${emitErr instanceof Error ? emitErr.name : 'unknown error'})\n`);
+      // The name can be one the model made up (a repeated or contained call is answered before the
+      // tool is looked up), so only a tool name's own characters reach the log line.
+      const shown = toolName.slice(0, 64).replace(/[^A-Za-z0-9_.:-]/g, '?');
+      process.stderr.write(`[lynox:agent] a ${shown} call has settled, but its result event could not be delivered (${emitErr instanceof Error ? emitErr.name : 'unknown error'})\n`);
     }
   }
 
@@ -1781,6 +1785,7 @@ export class Agent implements IAgent {
       costUSD: 0,
     };
     this.toolResultBlobStore = config.toolResultBlobStore;
+    this.searchResultAddresses = config.searchResultAddresses ?? new SearchResultAddresses();
     this.toolCallTracker = config.toolCallTracker;
     this.userTimezone = config.userTimezone;
     this.changesetManager = config.changesetManager;
@@ -4848,7 +4853,7 @@ export class Agent implements IAgent {
       if (this._needsInputStreamed.has(needsInput.reason)) throw needsInput.reason;
       const masked = this._maskedNeedsInput(needsInput.reason);
       if (this.onStream) {
-        await this.onStream({ type: 'tool_result', name: toExecute[askedAt]!.name, result: masked.message, agent: this.name, toolUseId: toExecute[askedAt]!.id, isError: true, contract: this._contractOfCall(toExecute[askedAt]!) });
+        await this._emitSettledResult(toExecute[askedAt]!.name, { type: 'tool_result', name: toExecute[askedAt]!.name, result: masked.message, agent: this.name, toolUseId: toExecute[askedAt]!.id, isError: true, contract: this._contractOfCall(toExecute[askedAt]!) });
       }
       throw masked;
     }
@@ -4935,7 +4940,7 @@ export class Agent implements IAgent {
     const skip = this._repeatGuard.check(guardKey);
     if (skip) {
       if (this.onStream) {
-        await this.onStream({ type: 'tool_result', name: tc.name, result: skip.escalatedResult, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
+        await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: skip.escalatedResult, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
       }
       return { type: 'tool_result', tool_use_id: tc.id, content: skip.escalatedResult, is_error: true };
     }
@@ -5255,9 +5260,7 @@ export class Agent implements IAgent {
       try { this.onOriginRefused?.({ targets: { values: [], unreadable: true }, noun: unreadNoun, origin: this.originOfTargets() }); } catch { /* the refusal stands */ }
       if (guardRefuses) return {};
       const text = originUnreadable(unreadNoun);
-      if (this.onStream) {
-        await this.onStream({ type: 'tool_result', name: tc.name, result: text, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
-      }
+      await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: text, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
       return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(text), is_error: true } };
     }
     if (targets.length === 0) return { origin: { known: [], allKnown: false } };
@@ -5285,9 +5288,7 @@ export class Agent implements IAgent {
 
     const refuse = async (text: string): Promise<{ refusal: BetaToolResultBlockParam }> => {
       // Streamed like every other refusal: the owner of a run nobody watches learns of it only there.
-      if (this.onStream) {
-        await this.onStream({ type: 'tool_result', name: tc.name, result: text, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
-      }
+      await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: text, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
       return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(text), is_error: true } };
     };
     const refuseUnattended = (): Promise<{ refusal: BetaToolResultBlockParam }> => {
@@ -5351,7 +5352,7 @@ export class Agent implements IAgent {
     if (containedRefusal !== null) {
       // Streamed with its reason, so the chat's view can offer the way out under it.
       if (this.onStream) {
-        await this.onStream({ type: 'tool_result', name: tc.name, result: containedRefusal.text, agent: this.name, toolUseId: tc.id, isError: true, contained: containedRefusal.reason });
+        await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: containedRefusal.text, agent: this.name, toolUseId: tc.id, isError: true, contained: containedRefusal.reason });
       }
       return {
         type: 'tool_result',
@@ -5492,7 +5493,7 @@ export class Agent implements IAgent {
           // Streamed like the non-interactive refusal below: the owner of a run nobody watches
           // learns of it only through the record.
           if (this.onStream) {
-            await this.onStream({ type: 'tool_result', name: tc.name, result: refusal, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
+            await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: refusal, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
           }
           return { type: 'tool_result', tool_use_id: tc.id, content: refusal, is_error: true };
         }
@@ -5514,7 +5515,7 @@ export class Agent implements IAgent {
         // headless run's owner learns of a refused write only through it (the step itself
         // still completes). Same shape as the escalated-skip result above.
         if (this.onStream) {
-          await this.onStream({ type: 'tool_result', name: tc.name, result: refusal, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
+          await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: refusal, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
         }
         return {
           type: 'tool_result',

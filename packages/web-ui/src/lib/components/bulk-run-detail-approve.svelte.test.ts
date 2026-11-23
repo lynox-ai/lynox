@@ -1974,6 +1974,201 @@ describe('verdicts that differ from the rest of the run', () => {
 		expect(spread()[0]).toContain('⟨U+200C⟩');
 	});
 
+	it('states the way out once below two run lines, in the same box as the lines', async () => {
+		const closing = (): string[] => [...target.querySelectorAll('[data-testid="bulk-outlier-spread-closing"]')].map((e) => e.textContent ?? '');
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 20, hosts: ['a.example'] }, { kind: 'email', count: 20, hosts: ['b.example'] }] } });
+		targets = many(25);
+		await render();
+		expect(spread()).toHaveLength(2);
+		for (const line of spread()) expect(line).not.toContain(t('bulk.outliers.spread.closing'));
+		expect(closing()).toEqual([t('bulk.outliers.spread.closing')]);
+		const box = target.querySelector('[data-testid="bulk-outlier-spread-box"]')!;
+		expect(box.querySelectorAll('[data-testid="bulk-outlier-spread"]')).toHaveLength(2);
+		expect(box.querySelector('[data-testid="bulk-outlier-spread-closing"]')).not.toBeNull();
+	});
+
+	it('states the way out once below a single run line too', async () => {
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'phone', count: 20, hosts: [] }] } });
+		targets = many(25);
+		await render();
+		expect(spread()).toEqual([tf('bulk.outliers.spread.phone', { n: '20', hosts: '' })]);
+		expect([...target.querySelectorAll('[data-testid="bulk-outlier-spread-closing"]')].map((e) => e.textContent)).toEqual([t('bulk.outliers.spread.closing')]);
+	});
+
+	it('shows the table on the verdicts of one line alone, says so over the table, and shows all again from the line or from over the table', async () => {
+		const filtered = (): string | null | undefined => target.querySelector('[data-testid="bulk-outlier-filtered"]')?.textContent;
+		const shows = (): string[] => [...target.querySelectorAll('[data-testid="bulk-outlier-spread-show"]')].map((e) => e.textContent ?? '');
+		const seqsShown = (): number[] => rowNames().map((r) => Number(/(\d+)/.exec(r)?.[1]));
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }, { kind: 'email', count: 1, hosts: ['b.example'], seqs: [2] }] } });
+		targets = many(25);
+		await render();
+		expect(shows()).toEqual([tf('bulk.outliers.spread.show', { n: '3' }), t('bulk.outliers.spread.show_one')]);
+		expect(filtered()).toBeUndefined();
+		expect(seqsShown()).toHaveLength(25);
+
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(seqsShown()).toEqual([3, 5, 7]);
+		expect(filtered()).toBe(`${tf('bulk.outliers.filtered.link', { n: '3' })} ${t('bulk.outliers.spread.show_all')}`);
+		expect(shows()).toEqual([t('bulk.outliers.spread.show_all'), t('bulk.outliers.spread.show_one')]);
+		// Over the table, not below it.
+		const line = target.querySelector('[data-testid="bulk-outlier-filtered"]')!;
+		expect(line.compareDocumentPosition(target.querySelector('table')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+		// Another line's button changes the kind shown.
+		buttonByText(t('bulk.outliers.spread.show_one'))!.click();
+		await settle();
+		expect(seqsShown()).toEqual([2]);
+		expect(filtered()).toBe(`${t('bulk.outliers.filtered.email_one')} ${t('bulk.outliers.spread.show_all')}`);
+
+		// From over the table: all again, and the focus on the button of that kind in the box.
+		(target.querySelector('[data-testid="bulk-outlier-filtered-all"]') as HTMLButtonElement).click();
+		await settle();
+		expect(seqsShown()).toHaveLength(25);
+		expect(filtered()).toBeUndefined();
+		expect(document.activeElement).toBe(target.querySelectorAll('[data-testid="bulk-outlier-spread-show"]')[1]);
+
+		// From the line itself: the same button shows all again.
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(seqsShown()).toEqual([3, 5, 7]);
+		(target.querySelectorAll('[data-testid="bulk-outlier-spread-show"]')[0] as HTMLButtonElement).click();
+		await settle();
+		expect(seqsShown()).toHaveLength(25);
+		expect(filtered()).toBeUndefined();
+	});
+
+	it('says at the approval, while the table is filtered, that the approval covers every verdict, and shows all from there', async () => {
+		const note = (): string | null | undefined => target.querySelector('[data-testid="bulk-approve-filtered"]')?.textContent;
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		targets = many(25);
+		await render();
+		expect(note()).toBeUndefined();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(note()).toBe(`${tf('bulk.approve.filtered', { n: '3', m: '25' })} ${t('bulk.outliers.spread.show_all')}`);
+		const approveButton = buttonByText(t('bulk.approve.write_one')) ?? buttonByText(t('bulk.approve.approve'));
+		(target.querySelector('[data-testid="bulk-approve-filtered-all"]') as HTMLButtonElement).click();
+		await settle();
+		expect(note()).toBeUndefined();
+		expect(rowNames()).toHaveLength(25);
+		expect(document.activeElement).toBe(approveButton);
+	});
+
+	it('counts the rows the filtered table shows, leaves out the unchanged rows and their button, and offers that button again after', async () => {
+		const unchangedButton = (): HTMLButtonElement | undefined => [...target.querySelectorAll('button')]
+			.find((b) => [tf('bulk.preview.show_unchanged_one', { n: '1' }), tf('bulk.preview.show_unchanged_targets_one', { n: '1' })].includes(b.textContent?.trim() ?? ''));
+		run = makeRun({ total: 25, changes: { update: 24, create: 0, delete: 0, unchanged: 1, invalid: 0 }, judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		targets = many(25).map((x) => (x.seq === 7 ? { ...x, change: 'unchanged' as const, diff: { kind: 'none' } as BulkTarget['diff'] } : x));
+		await render();
+		expect(unchangedButton()).toBeDefined();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(rowNames()).toHaveLength(2);
+		expect(target.querySelector('[data-testid="bulk-outlier-filtered"]')?.textContent).toBe(`${tf('bulk.outliers.filtered.link', { n: '2' })} ${t('bulk.outliers.spread.show_all')}`);
+		expect(unchangedButton()).toBeUndefined();
+		(target.querySelector('[data-testid="bulk-outlier-filtered-all"]') as HTMLButtonElement).click();
+		await settle();
+		expect(unchangedButton()).toBeDefined();
+	});
+
+	it('drops the filter once the run is no longer one to approve', async () => {
+		const judgedRun = (id: string, phase: BulkRunDetailData['phase']) => makeRun({ id, phase, total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		run = judgedRun('r1', 'previewed');
+		runsById['r2'] = judgedRun('r2', 'previewed');
+		targets = many(25);
+		const { default: BulkRunDetail } = await import('./BulkRunDetail.svelte');
+		const props = $state({ runId: 'r1', onBack: () => {}, onOpen: () => {} });
+		component = mount(BulkRunDetail, { target, props });
+		await settle();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(target.querySelector('[data-testid="bulk-outlier-filtered"]')).not.toBeNull();
+		props.runId = 'r2';
+		await settle();
+		runsById['r1'] = judgedRun('r1', 'approved');
+		props.runId = 'r1';
+		await settle();
+		expect(target.querySelector('[data-testid="bulk-outlier-filtered"]')).toBeNull();
+	});
+
+	it('counts every verdict of the run at the approval, whether or not the unchanged rows are shown', async () => {
+		const note = (): string | null | undefined => target.querySelector('[data-testid="bulk-approve-filtered"]')?.textContent;
+		run = makeRun({ total: 25, changes: { update: 24, create: 0, delete: 0, unchanged: 1, invalid: 0 }, judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		targets = many(25).map((x) => (x.seq === 9 ? { ...x, change: 'unchanged' as const, diff: { kind: 'none' } as BulkTarget['diff'] } : x));
+		await render();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(note()).toBe(`${tf('bulk.approve.filtered', { n: '3', m: '25' })} ${t('bulk.outliers.spread.show_all')}`);
+		(target.querySelector('[data-testid="bulk-approve-filtered-all"]') as HTMLButtonElement).click();
+		await settle();
+		[...target.querySelectorAll('button')].find((x) => [t('bulk.preview.show_unchanged_one'), t('bulk.preview.show_unchanged_targets_one')].includes(x.textContent?.trim() ?? ''))!.click();
+		await settle();
+		expect(rowNames()).toHaveLength(25);
+		await settle();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(note()).toBe(`${tf('bulk.approve.filtered', { n: '3', m: '25' })} ${t('bulk.outliers.spread.show_all')}`);
+	});
+
+	it('says nothing at the approval when the filtered table shows every verdict', async () => {
+		run = makeRun({ total: 3, changes: changes(3), writeForm: 'unmeasured', judgeOutliers: { decided: 3, measured: false, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [1, 2, 3] }] } });
+		targets = many(3);
+		await render();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(target.querySelector('[data-testid="bulk-approve-filtered"]')).toBeNull();
+	});
+
+	it('puts the focus on the button of the line when the approve button cannot be pressed', async () => {
+		run = makeRun({ total: 25, changes: changes(25), writeForm: 'unmeasured', judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		targets = many(25);
+		await render();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		(target.querySelector('[data-testid="bulk-approve-filtered-all"]') as HTMLButtonElement).click();
+		await settle();
+		expect(document.activeElement).toBe(target.querySelector('[data-testid="bulk-outlier-spread-show"]'));
+	});
+
+	it('offers no button on a line whose verdicts the server does not name, or names none of', async () => {
+		run = makeRun({ total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 20, hosts: ['a.example'] }, { kind: 'email', count: 20, hosts: ['b.example'], seqs: [] }] } });
+		targets = many(25);
+		await render();
+		expect(spread()).toHaveLength(2);
+		expect(target.querySelector('[data-testid="bulk-outlier-spread-show"]')).toBeNull();
+	});
+
+	it('shows the table of another run whole, without the line over it, after filtering this one', async () => {
+		const judgedRun = (id: string) => makeRun({ id, total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, flagged: [],
+			spread: [{ kind: 'link', count: 3, hosts: ['a.example'], seqs: [3, 5, 7] }] } });
+		run = judgedRun('r1');
+		runsById['r2'] = judgedRun('r2');
+		targets = many(25);
+		const { default: BulkRunDetail } = await import('./BulkRunDetail.svelte');
+		const props = $state({ runId: 'r1', onBack: () => {}, onOpen: () => {} });
+		component = mount(BulkRunDetail, { target, props });
+		await settle();
+		buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))!.click();
+		await settle();
+		expect(rowNames()).toHaveLength(3);
+		props.runId = 'r2';
+		await settle();
+		expect(target.querySelector('[data-testid="bulk-outlier-filtered"]')).toBeNull();
+		expect(rowNames()).toHaveLength(25);
+		expect(buttonByText(tf('bulk.outliers.spread.show', { n: '3' }))).toBeDefined();
+	});
+
 	it('shows no line and no mark where the run is not one to approve', async () => {
 		run = makeRun({ phase: 'approved', total: 25, changes: changes(25), judgeOutliers: { decided: 25, measured: true, spread: [], flagged: [{ seq: 7, reasons: ['new_link'] }] } });
 		targets = many(25);

@@ -8,11 +8,11 @@ import { evictSavedArtifactBodies, EVICTION_MIN_CHARS } from './artifact-evictio
 import { artifactRestoreTool } from '../tools/builtin/artifact.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 
-// The store refuses content that holds only the engine's placeholder for an already saved
-// document, by the same test as the "lost on save" mark, whichever way the save comes:
-// artifact_save checked it before, the gallery route and a restore did not. A restore of a
-// version like that is refused the same way, and artifact_restore says so. A larger document
-// that quotes the placeholder is still a document, and is saved and restored.
+// The store refuses content that holds only the engine's placeholder, not a document, by the same
+// test as the "lost on save" mark, whichever way the save comes: artifact_save checked it before,
+// the gallery route and a restore did not. A restore of a version like that is refused the same
+// way, and artifact_restore says so. A larger document that quotes the placeholder is still a
+// document, and is saved and restored.
 
 // The two forms a model can copy: the note the real eviction appends, built rather than typed,
 // and the in-field form older threads still carry.
@@ -53,6 +53,8 @@ describe('ArtifactStore.save refuses the placeholder', () => {
   it('as a new artifact: nothing is stored', () => {
     for (const [form, placeholder] of placeholders()) {
       expect(() => store.save({ title: 'Pitch', content: placeholder }), form).toThrow(ArtifactPlaceholderError);
+      expect(() => store.save({ title: 'Pitch', content: placeholder }), form)
+        .toThrow("The content holds only the engine's placeholder, not a document. Nothing was saved.");
       expect(store.list(), form).toEqual([]);
     }
   });
@@ -103,7 +105,7 @@ describe('a restore of a version that holds the placeholder', () => {
 
   it('is answered by artifact_restore with what happened and what to do', async () => {
     const id = withStoredV1(placeholders()[0]![1]);
-    expect(await restore(id, 1)).toBe(`Could not restore — v1 of artifact ${id} holds only the engine's placeholder for a saved document, not a document. Nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`);
+    expect(await restore(id, 1)).toBe(`Could not restore — v1 of artifact ${id} holds only the engine's placeholder, not a document. Nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`);
     expect(store.get(id)?.version).toBe(2);
   });
 
