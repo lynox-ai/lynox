@@ -519,6 +519,12 @@
 		}
 	}
 
+	/** Whether a run's time has passed, as the list is drawn (it reloads on its own while open). */
+	function isDue(iso: string): boolean {
+		const at = new Date(iso).getTime();
+		return Number.isFinite(at) && at <= Date.now();
+	}
+
 	function fmtDate(iso: string): string {
 		return new Date(iso).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 	}
@@ -545,9 +551,12 @@
 		interrupted: 'text-warning',
 	};
 	// Colour alone does not tell these apart from the rest (and not at all to a reader
-	// who does not see colour), so they also carry a word. `stopped` and `halted` share
-	// the muted colour, which makes the word the only thing that separates them.
-	const runStatusWord: Record<string, 'tasks.run_halted' | 'tasks.run_interrupted' | 'tasks.run_stopped'> = {
+	// who does not see colour), so every run that did not succeed carries a word. `stopped`
+	// and `halted` share the muted colour, which makes the word the only thing that
+	// separates them; `failed` and `timeout` share the danger colour.
+	const runStatusWord: Record<string, 'tasks.run_failed' | 'tasks.run_timeout' | 'tasks.run_halted' | 'tasks.run_interrupted' | 'tasks.run_stopped'> = {
+		failed: 'tasks.run_failed',
+		timeout: 'tasks.run_timeout',
 		halted: 'tasks.run_halted',
 		interrupted: 'tasks.run_interrupted',
 		stopped: 'tasks.run_stopped',
@@ -629,8 +638,17 @@
 								     past — it is not a next run, so it is not labelled as one. It is said
 								     in the consent block below instead, where it is the thing a person
 								     needs: what confirming starts, and when. -->
-								{#if trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.paused !== true}
-									<span>{t('tasks.next_run')}: {fmtDate(trigger.next_run_at)}</span>
+								<!-- Nor does a trigger the worker will not start: one whose run is parked on an
+								     open question (it keeps the moment it parked as next_run_at until the
+								     question is answered), one that is completed or stopped (completing a
+								     trigger leaves its next_run_at as it was), and a failed one without a
+								     schedule. Nor one that is running: its next_run_at moves only once the run
+								     has ended, and the running badge says what happens. -->
+								{#if trigger.next_run_at && trigger.enabled !== 0 && !held(trigger) && trigger.running !== true && trigger.status !== 'waiting' && trigger.status !== 'completed' && trigger.status !== 'stopped' && !(trigger.status === 'failed' && !trigger.schedule_cron) && trigger.paused !== true}
+									<!-- A next_run_at in the past is due since then (until the worker takes it, or
+									     when it could not start it), not a next run before the last one. -->
+									{@const due = isDue(trigger.next_run_at)}
+									<span data-next-run={due ? 'due' : 'next'}>{due ? t('tasks.due_since') : t('tasks.next_run')}: {fmtDate(trigger.next_run_at)}</span>
 								{/if}
 								{#if trigger.last_run_at}
 									<span class={runStatusColor[trigger.last_run_status ?? ''] ?? ''} data-run-status={trigger.last_run_status}>{t('tasks.last_run')}: {fmtDate(trigger.last_run_at)}{#if Object.hasOwn(runStatusWord, trigger.last_run_status ?? '')}&nbsp;· {t(runStatusWord[trigger.last_run_status ?? '']!)}{/if}</span>
