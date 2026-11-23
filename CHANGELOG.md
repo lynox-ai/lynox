@@ -27,6 +27,14 @@
   from the release that carries #2207 on; a tab opened before the upgrade gets
   "confirm failed" until it is reloaded. An API client that confirms schedules
   reads the preview first.
+- In sidecar mode with the egress proxy, a `bash` call whose tool round started after
+  the conversation read outside content (a web page, a search, a mail, a
+  previous `bash` call) no longer reaches every host under `allow-all` or no
+  policy. Its proxy credential then names the built-in provider hosts, the
+  operator's `network_allowed_hosts` and the hosts the owner typed in the thread; under
+  `guarded` a connected API's host is left out. `allow-list` and `deny-all` are
+  unchanged. A command that needs another host after that reaches it once the
+  owner names the host in the chat.
 
 ## 2.18.0 — 2026-11-17
 

@@ -25,6 +25,7 @@ export const BULK_MANDATE_KEYS: ReadonlySet<string> = new Set([
 	// Only the owner approves: a mandate reads that the owner can still approve the rest.
 	'bulk.invalid.html_too_long', 'bulk.invalid.html_too_long_woocommerce',
 	'bulk.halt.consentOutdated', 'bulk.halt.consentOutdated_more',
+	'bulk.halt.consentOutdated_undo', 'bulk.halt.consentOutdated_more_undo', 'bulk.halt.discarded_undo',
 	'bulk.invalid.before_has_shop_markup', 'bulk.invalid.before_has_shop_markup_undated',
 ]);
 
@@ -43,6 +44,17 @@ export function bulkMandateI18n(i18n: BulkI18n): BulkI18n {
  *  Only for the keys that have a worded singular. */
 export function bulkOne(key: string, n: number): string {
 	return n === 1 ? `${key}_one` : key;
+}
+
+/** The halts an undo reaches whose sentence names the write: an undo has its own (U-335). */
+const BULK_UNDO_HALT_WORDS: ReadonlySet<string> = new Set([
+	'bulk.halt.consentOutdated', 'bulk.halt.consentOutdated_more', 'bulk.halt.contract', 'bulk.halt.markupAddedByShop',
+	'bulk.halt.markupAddedByShop_before', 'bulk.halt.atomicRolledBack', 'bulk.halt.atomicTimeRolledBack', 'bulk.halt.discarded', 'bulk.halt.runUnrecorded',
+]);
+
+/** A halt sentence's key in the words of the run's kind: an undo's `_undo` form where it has one. */
+export function bulkHaltKeyOf(run: { kind?: 'apply' | 'undo' | undefined }, key: string): string {
+	return run.kind === 'undo' && BULK_UNDO_HALT_WORDS.has(key) ? `${key}_undo` : key;
 }
 
 export type BulkPhase = 'planned' | 'previewed' | 'approved' | 'writing' | 'done' | 'aborted' | 'undone';
@@ -106,6 +118,9 @@ export interface BulkRunDetailData extends BulkRun {
 	hiddenAddsTargets?: number | null | undefined;
 	/** Targets with an HTML field too large or too complex to check for hidden characters. */
 	hiddenUncheckedTargets?: number | null | undefined;
+	/** A judged run's verdicts that differ from the rest of it, where the preview can be approved;
+	 *  null elsewhere. A reading order, never a check. */
+	judgeOutliers?: BulkJudgeOutliers | null | undefined;
 	writeFormNote: string | null;
 	writeFormConfirmation: string | null;
 	judgeModel: string | null;
@@ -152,29 +167,48 @@ export function bulkTakesStartDomains(run: Pick<BulkRunDetailData, 'judge' | 'li
 	return run.judge !== null && (run.list ?? null) !== null && bulkHostOf(run.targetSystem) !== null;
 }
 
-/** The word over a halted run's cause. An owner's stop is a stop, not a halt: „angehalten“ is
- *  the word of a run that ended where its approval, a failure or a limit told it to. */
-export function bulkHaltHeadKey(run: Pick<BulkRun, 'haltKey'>): 'bulk.head.stopped' | 'bulk.head.halted' | 'bulk.head.discarded' {
+/** The word over a halted run's cause: it says whether the run can go on from there (U-342). An
+ *  owner's stop is a stop, not a halt: „angehalten“ is the word of a run that stopped where its
+ *  approval, a failure or a limit told it to and can be continued. An aborted run cannot: one
+ *  lynox ended reads „abgebrochen“, or „ersetzt“ where a newer run took its place; one the owner
+ *  stopped reads „gestoppt“ as any owner's stop. */
+export function bulkHaltHeadKey(run: Pick<BulkRun, 'haltKey'> & Partial<Pick<BulkRun, 'phase'>>): 'bulk.head.stopped' | 'bulk.head.halted' | 'bulk.head.discarded' | 'bulk.head.aborted' | 'bulk.head.replaced' {
 	// A discarded run reads "Discarded" next to the sentence and the chip that say so (U-324).
 	if (run.haltKey === 'discarded') return 'bulk.head.discarded';
-	return run.haltKey === 'stoppedByOwner' ? 'bulk.head.stopped' : 'bulk.head.halted';
+	if (bulkOwnerStopped(run)) return 'bulk.head.stopped';
+	if (run.phase === 'aborted') return run.haltKey === 'superseded' ? 'bulk.head.replaced' : 'bulk.head.aborted';
+	return 'bulk.head.halted';
 }
 
-/** A run's phase as the list names it: a run the owner discarded before approving it reads
- *  "discarded", not "aborted" (U-324); every other run by its phase. */
+/** A run's phase as the list names it. An aborted run reads who or what ended it, as the run page's
+ *  head does (U-342): one the owner discarded before approving it „verworfen“ (U-324), one the
+ *  owner stopped and lynox rolled back „gestoppt“, one a newer run replaced „ersetzt“, and one
+ *  lynox ended „abgebrochen“. Every other run by its phase. */
 export function bulkPhaseKey(run: Pick<BulkRun, 'phase' | 'haltKey'>): string {
-	return run.phase === 'aborted' && run.haltKey === 'discarded' ? 'bulk.phase.discarded' : `bulk.phase.${run.phase}`;
+	if (run.phase === 'aborted') {
+		if (run.haltKey === 'discarded') return 'bulk.phase.discarded';
+		if (bulkOwnerStopped(run)) return 'bulk.phase.stopped';
+		if (run.haltKey === 'superseded') return 'bulk.phase.replaced';
+	}
+	return `bulk.phase.${run.phase}`;
 }
 
-/** A run's phase carries the halted or stopped suffix in the list; a discarded one does not, since
- *  its phase already says why it ended. */
+/** A run's phase carries the halted or stopped suffix in the list. An aborted one does not: its
+ *  phase already says how it ended, and „angehalten“ would say it can go on (U-342). */
 export function bulkPhaseHasSuffix(run: Pick<BulkRun, 'phase' | 'haltKey' | 'haltReason'>): boolean {
-	return run.haltReason !== null && !(run.phase === 'aborted' && run.haltKey === 'discarded');
+	return run.haltReason !== null && run.phase !== 'aborted';
 }
 
 /** The same distinction for the suffix on a run's phase in the list. */
 export function bulkHaltSuffixKey(run: Pick<BulkRun, 'haltKey'>): 'bulk.stopped_suffix' | 'bulk.halted_suffix' {
-	return run.haltKey === 'stoppedByOwner' ? 'bulk.stopped_suffix' : 'bulk.halted_suffix';
+	return bulkOwnerStopped(run) ? 'bulk.stopped_suffix' : 'bulk.halted_suffix';
+}
+
+/** The halts an owner's stop ends in: the same act reads the same with or without the atomic
+ *  rollback after it, on the run page and in the list (U-342). */
+const BULK_OWNER_STOPS = new Set(['stoppedByOwner', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete']);
+function bulkOwnerStopped(run: Pick<BulkRun, 'haltKey'>): boolean {
+	return run.haltKey !== null && BULK_OWNER_STOPS.has(run.haltKey);
 }
 
 /** The start a waiting run takes: read its targets, read its list, start its judging — or none,
@@ -322,10 +356,10 @@ export function bulkResumeKind(
  *  what the owner can do first, and for a halt on failures how many failed so far and what the
  *  next pass may still fail. Every count comes from the engine: the page computes none of them. */
 export function bulkResumeText(
-	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'applied' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries' | 'sentUnknown' | 'resumeSends' | 'conflicts'> & Partial<Pick<BulkRunDetailData, 'consentFields'>>,
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'applied' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries' | 'sentUnknown' | 'resumeSends' | 'conflicts'> & Partial<Pick<BulkRunDetailData, 'consentFields' | 'kind'>>,
 	managed: boolean | null,
 	i18n: BulkI18n,
-): { cause: string; before: string | null; check: string | null; kept: string | null; soFar: string | null; allows: string | null } | null {
+): { cause: string; before: string | null; check: string | null; after: string | null; kept: string | null; soFar: string | null; allows: string | null } | null {
 	const kind = bulkResumeKind(run);
 	if (kind === null) return null;
 	const key = run.haltKey!;
@@ -335,62 +369,90 @@ export function bulkResumeText(
 	const limit = run.failureLimit;
 	const open = run.resumeOpen;
 	const failures = key === 'failureRate' || key === 'consecutiveFailures';
-	const cause = key === 'failureRate' ? (limit === 0 ? i18n.t('bulk.halt.failureRate_write0') : i18n.tf('bulk.halt.failureRate_write', { limit: String(limit) }))
-		: key === 'consecutiveFailures' ? i18n.t('bulk.halt.consecutiveFailures_write')
-		: key === 'unrecorded' ? i18n.tf('bulk.halt.unrecorded_write', vars)
+	// An undo takes its targets back: its own words wherever the sentence names the write (U-335).
+	const verb = run.kind === 'undo' ? 'undo' : 'write';
+	const cause = key === 'failureRate' ? (limit === 0 ? i18n.t(`bulk.halt.failureRate_${verb}0`) : i18n.tf(`bulk.halt.failureRate_${verb}`, { limit: String(limit) }))
+		: key === 'consecutiveFailures' ? i18n.t(`bulk.halt.consecutiveFailures_${verb}`)
+		: key === 'unrecorded' ? i18n.tf(`bulk.halt.unrecorded_${verb}`, vars)
 		: key === 'maxTargets' && run.maxTargets === 1 ? i18n.t('bulk.halt.maxTargets_one')
+		// Going on by checking: the cause leaves out "continue it here", the way follows the check.
+		: key === 'shopifyWriteOff' && kind === 'check' ? i18n.t('bulk.halt.shopifyWriteOff_check')
 		// "wrote nothing" only where nothing of the run was written or sent.
-		: key === 'consentOutdated' ? i18n.tf(run.applied === 0 && run.sentUnknown === 0 ? 'bulk.halt.consentOutdated' : 'bulk.halt.consentOutdated_more', {
+		: key === 'consentOutdated' ? i18n.tf(bulkHaltKeyOf(run, run.applied === 0 && run.sentUnknown === 0 ? 'bulk.halt.consentOutdated' : 'bulk.halt.consentOutdated_more'), {
 			field: bulkConsentFields(run.consentFields, i18n), path: `${i18n.t('nav.settings')} → ${i18n.t('settings.apis')}`,
 		})
-		: i18n.tf(`bulk.halt.${key}`, vars);
-	const beforeKey = failures ? 'bulk.halt.failures_before_write'
+		: i18n.tf(bulkHaltKeyOf(run, `bulk.halt.${key}`), vars);
+	const beforeKey = failures ? `bulk.halt.failures_before_${verb}`
 		: key === 'credential' ? 'bulk.halt.credential_before'
 		: key === 'unauthorized' || key === 'unavailable' ? `bulk.halt.${key}_before`
 		: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_${tier}`
-		: key === 'markupAddedByShop' ? 'bulk.halt.markupAddedByShop_before'
+		: key === 'markupAddedByShop' ? bulkHaltKeyOf(run, 'bulk.halt.markupAddedByShop_before')
 		: null;
 	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
-	if (kind === 'none') return { cause, before, check: null, kept: null, soFar: null, allows: null };
+	if (kind === 'none') return { cause, before, check: null, after: null, kept: null, soFar: null, allows: null };
 	// Nothing to send: no step before writing on applies, and what is left needs a new run.
-	if (kind === 'nothing') return { cause, before: null, check: i18n.tf('bulk.resume.nothing_left', vars), kept: null, soFar: null, allows: null };
-	// Checking sends nothing, so the failures' "before you continue writing" does not apply; a
-	// halt's own step (reconnect the access, switch writing back on) still comes first.
+	if (kind === 'nothing') return { cause, before: null, check: i18n.tf(`bulk.resume.nothing_left${run.kind === 'undo' ? '_undo' : ''}`, vars), after: null, kept: null, soFar: null, allows: null };
+	// The next step is to check, not to continue: checking sends nothing, so the failures' "before
+	// you continue writing" does not apply. What would stop the check too (no access, a host the
+	// instance may not reach, Shopify bulk switched off) comes first and ends with checking; anything
+	// else follows the check.
 	if (kind === 'check') {
 		const check = run.sentUnknown === 1 ? i18n.tf('bulk.resume.check_before', vars)
 			: i18n.tf('bulk.resume.check_before_many', { ...vars, n: String(run.sentUnknown) });
-		return { cause, before: failures ? null : before, check, kept: null, soFar: null, allows: null };
+		const first = key === 'unauthorized' ? 'bulk.halt.unauthorized_before_check'
+			: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_check_${tier}`
+			: key === 'credential' ? 'bulk.halt.credential_before'
+			: null;
+		const then = key === 'unavailable' ? 'bulk.halt.unavailable_before_check'
+			: key === 'markupAddedByShop' ? bulkHaltKeyOf(run, 'bulk.halt.markupAddedByShop_before')
+			: null;
+		return { cause, before: first === null ? null : i18n.tf(first, vars), check, after: then === null ? null : i18n.tf(then, vars), kept: null, soFar: null, allows: null };
 	}
 	// "All the rest" holds only when the approved maximum does not stop the pass first; a run
 	// written on under a new maximum is bounded by that one. With no target confirmed as written,
 	// nothing is said to stay: a write sent and failed may still have reached its target, which the
 	// next try reads first and counts as written.
 	const capped = kind === 'max' || run.resumeTries < open;
-	const kept = i18n.t(run.applied === 0
-		? (capped ? 'bulk.resume.kept_write_none_capped' : 'bulk.resume.kept_write_none')
-		: (capped ? 'bulk.resume.kept_write_capped' : 'bulk.resume.kept_write'));
-	if (!failures) return { cause, before, check: null, kept, soFar: null, allows: null };
+	const kept = i18n.t(`bulk.resume.kept_${verb}${run.applied === 0 ? '_none' : ''}${capped ? '_capped' : ''}`);
+	if (!failures) return { cause, before, check: null, after: null, kept, soFar: null, allows: null };
 	const f = run.failed;
 	const soFar = run.failedOnce === null
 		? (f === 1 ? i18n.t('bulk.resume.failed_so_far_at_least_one') : i18n.tf('bulk.resume.failed_so_far_at_least', { n: String(f) }))
 		: (run.failedOnce === 1 ? i18n.t('bulk.resume.failed_so_far_one') : i18n.tf('bulk.resume.failed_so_far', { n: String(run.failedOnce) }));
-	return { cause, before, check: null, kept, soFar, allows: bulkResumeAllows(limit, open, i18n) };
+	return { cause, before, check: null, after: null, kept, soFar, allows: bulkResumeAllows(limit, open, i18n, run.kind === 'undo') };
 }
 
 /** What writing on lets fail before the run stops again. The next pass's failures are bounded
  *  by the open targets, not by the approved maximum: a target can fail before it is sent to.
  *  Null with nothing open: writing on then only ends the run. */
-function bulkResumeAllows(limit: number, open: number, i18n: BulkI18n): string | null {
+function bulkResumeAllows(limit: number, open: number, i18n: BulkI18n, undo: boolean): string | null {
 	if (open === 0) return null;
+	// An undo's sentence says "continuing", not "writing on" (U-335).
+	const k = (key: string): string => `bulk.resume.${key}${undo ? '_undo' : ''}`;
 	if (limit < open) {
-		if (limit === 0) return i18n.t('bulk.resume.allows_again_zero');
-		if (limit === 1) return i18n.t('bulk.resume.allows_again_one');
+		if (limit === 0) return i18n.t(k('allows_again_zero'));
+		if (limit === 1) return i18n.t(k('allows_again_one'));
 		// Up to two, three in a row cannot come first: the third failure passes the limit too.
-		if (limit === 2) return i18n.tf('bulk.resume.allows_again_few', { limit: String(limit) });
-		return i18n.tf('bulk.resume.allows_again', { limit: String(limit) });
+		if (limit === 2) return i18n.tf(k('allows_again_few'), { limit: String(limit) });
+		return i18n.tf(k('allows_again'), { limit: String(limit) });
 	}
-	if (open >= 3) return i18n.t('bulk.resume.allows_only_consecutive');
-	return open === 1 ? i18n.t('bulk.resume.allows_no_failure_stop_one') : i18n.tf('bulk.resume.allows_no_failure_stop', { open: String(open) });
+	if (open >= 3) return i18n.t(k('allows_only_consecutive'));
+	return open === 1 ? i18n.t(k('allows_no_failure_stop_one')) : i18n.tf(k('allows_no_failure_stop'), { open: String(open) });
+}
+
+/** The words of a halted run's resume that do not depend on why it halted: its button, the
+ *  sentence that continuing approves it again, and the sentence where continuing does not help,
+ *  split around the link to the run an undo takes back. An undo has its own (U-335): it takes
+ *  targets back, and it is started again only from the page of the run it undoes. */
+export function bulkResumeWords(run: Pick<BulkRun, 'kind' | 'haltKey'>, i18n: Pick<BulkI18n, 't'>): {
+	button: string; window: string; none: { before: string; link: string | null; after: string };
+} {
+	if (run.kind !== 'undo') {
+		return { button: i18n.t('bulk.resume.write'), window: i18n.t('bulk.resume.window'), none: { before: i18n.t('bulk.resume.none'), link: null, after: '' } };
+	}
+	// A halt that names its own step first (reconnect the store) is followed by starting again "afterwards" (U-335).
+	const [before = '', after = ''] = i18n.t(run.haltKey === 'consentOutdated' ? 'bulk.resume.none_undo_after' : 'bulk.resume.none_undo').split('{link}');
+	return { button: i18n.t('bulk.resume.write_undo'), window: i18n.t('bulk.resume.window_undo'), none: { before, link: i18n.t('bulk.resume.none_undo_link'), after } };
 }
 
 /** The maximum a run halted at its maximum writes on with, or null: a whole number above the
@@ -896,6 +958,68 @@ export function bulkSystemName(targetSystem: string, i18n: BulkI18n): string {
 	return name === key ? targetSystem : name;
 }
 
+/** How a host the planner set stands among the page's own words: boxed as code, like a field
+ *  name the planner set (U-333), so it never reads as part of the sentence. */
+export const BULK_HOST_BOX = 'rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono font-normal text-text';
+
+/** A boxed value (a host, an address) cut where it may wrap: after a dot, a slash or a space, never
+ *  at a hyphen inside a name (U-423, the rule of the run page's headings): `summer-shoes-test.` /
+ *  `myshopify.com`. Each piece keeps the dots, slashes and spaces that end it. */
+export function bulkBoxParts(value: string): string[] {
+	return value.match(/[^./\s]+[./]*\s*|[./\s]+/g) ?? [];
+}
+
+export type BulkTemplatePart = { text: string } | { slot: string };
+
+/** A template sentence split at each of the named placeholders, every other placeholder filled from
+ *  `vars`: the page renders each slot itself, so a value the planner or the owner set stands boxed
+ *  and the sentence around it stays the page's. */
+export function bulkTemplateParts(template: string, slots: readonly string[], vars: Record<string, string>): BulkTemplatePart[] {
+	const parts: BulkTemplatePart[] = [];
+	for (const piece of template.split(new RegExp(`(\\{(?:${slots.join('|')})\\})`))) {
+		const slot = /^\{(\w+)\}$/.exec(piece)?.[1];
+		if (slot !== undefined && slots.includes(slot)) parts.push({ slot });
+		else { const text = fillTemplate(piece, vars); if (text !== '') parts.push({ text }); }
+	}
+	return parts;
+}
+
+/** A text split at every place it names the host as a whole name, which the page boxes: for the
+ *  run page's texts that name it among other words (a halt's cause, what continuing does). The host
+ *  inside a longer name (`api.shop.ch`, `shop.ch.other.example`, `myshop.ch`, `shop.ch_x`, a name in
+ *  another script) stays text, so a
+ *  target's key or a remote's message never gets a box that vouches for part of a foreign name.
+ *  Without a host, the text whole. */
+export function bulkHostSplit(text: string, host: string | null): BulkSentencePart[] {
+	if (host === null || host === '') return [{ text }];
+	const name = host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	// A letter, mark, digit, format character or underscore beside it, or a dot that a browser reads as
+	// a full stop (U+3002, U+FF0E, U+FF61) before a further label, makes it part of a longer name.
+	const part = '\\p{L}\\p{M}\\p{N}\\p{Cf}_';
+	const dot = '.\\u3002\\uFF0E\\uFF61';
+	// A user, a port, an escape or the page's mark for a hidden character beside it (`shop.ch@other`,
+	// `other%2Eshop.ch`, `shop.ch\u27e8U+200B\u27e9other`) makes it part of another address too.
+	const joined = '@%:\\u27E8\\u27E9';
+	const whole = new RegExp(`(?<![${part}${dot}${joined}-])${name}(?![${part}${joined}-]|[${dot}][${part}])`, 'gu');
+	const parts: BulkSentencePart[] = [];
+	let from = 0;
+	for (const m of text.matchAll(whole)) {
+		if (m.index > from) parts.push({ text: text.slice(from, m.index) });
+		parts.push({ slot: true });
+		from = m.index + host.length;
+	}
+	if (from < text.length) parts.push({ text: text.slice(from) });
+	return parts;
+}
+
+/** A run's label in parts: the host of an external run is the slot the page boxes; a system lynox
+ *  names itself is text. */
+export function bulkLabelParts(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n): BulkSentencePart[] {
+	if (!bulkHostOf(run.targetSystem)) return [{ text: bulkLabel(run, i18n) }];
+	const one = run.total === 1 ? '_one' : '';
+	return bulkSentenceParts(i18n.t(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`), 'target', { n: String(run.total) });
+}
+
 /** A run has no title: it is named by its size and where it writes. */
 export function bulkLabel(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n): string {
 	const one = run.total === 1 ? '_one' : '';
@@ -975,12 +1099,26 @@ const BULK_ROLLBACK_INCOMPLETE = new Set(['atomicRollbackIncomplete', 'atomicSto
 /** The page's own sentence for an atomic run that rolled back, and whether the rollback left
  *  targets to mark. Null for any other run: it keeps the other sentences or the engine's reason.
  *  A rolled-back run offers no way on: it is aborted, so neither writing on nor an undo applies. */
-export function bulkRollbackText(run: Pick<BulkRun, 'phase' | 'haltKey'>, i18n: BulkI18n): { cause: string; incomplete: boolean } | null {
+export function bulkRollbackText(run: Pick<BulkRun, 'phase' | 'haltKey'> & Partial<Pick<BulkRun, 'kind'>>, i18n: BulkI18n): { cause: string; incomplete: boolean } | null {
 	const key = run.haltKey;
 	if (run.phase !== 'aborted' || key === null) return null;
 	const incomplete = BULK_ROLLBACK_INCOMPLETE.has(key);
 	if (!incomplete && !BULK_ROLLED_BACK.has(key)) return null;
-	return { cause: i18n.t(`bulk.halt.${key}`), incomplete };
+	// An undo's names the run it takes back: the page links those words ({@link bulkRolledBackParts}).
+	return { cause: i18n.tf(bulkHaltKeyOf(run, `bulk.halt.${key}`), { link: i18n.t('bulk.resume.none_undo_link') }), incomplete };
+}
+
+/** An atomic undo that rolled back says to start it again from the page of the run it undoes:
+ *  its sentence split around the words the page links to that run. Null for any other run, and
+ *  for an undo that names no run (its sentence then stands as {@link bulkRollbackText} words it). */
+export function bulkRolledBackParts(
+	run: Pick<BulkRun, 'phase' | 'haltKey' | 'kind' | 'sourceRunId'>,
+	i18n: Pick<BulkI18n, 't'>,
+): { before: string; link: string; after: string } | null {
+	if (run.kind !== 'undo' || run.phase !== 'aborted' || run.sourceRunId === null) return null;
+	if (run.haltKey !== 'atomicRolledBack' && run.haltKey !== 'atomicTimeRolledBack') return null;
+	const [before = '', after = ''] = i18n.t(`bulk.halt.${run.haltKey}_undo`).split('{link}');
+	return { before, link: i18n.t('bulk.resume.none_undo_link'), after };
 }
 
 /** The halts that end an unapproved run before it wrote anything: another judged run took its
@@ -1007,7 +1145,7 @@ export function bulkStartButtonKey(
  *  `startButton`: the label of the start button the page shows ({@link bulkStartButtonKey}),
  *  null when it shows none. Null on any other halt. */
 export function bulkStateText(
-	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'listFirstPage' | 'judge' | 'judgeServedBy' | 'judgeOwnKey'>,
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'listFirstPage' | 'judge' | 'judgeServedBy' | 'judgeOwnKey'> & Partial<Pick<BulkRunDetailData, 'kind'>>,
 	startButton: string | null,
 	i18n: BulkI18n,
 ): { cause: string; step: string | null } | null {
@@ -1024,7 +1162,7 @@ export function bulkStateText(
 		// The probe panel stands only where the server offers a probe confirming can file.
 		return { cause: i18n.t('bulk.halt.probeRequired'), step: i18n.t(bulkAtProbe(run) ? 'bulk.halt.probeRequired_confirm' : 'bulk.halt.probeRequired_replan') };
 	}
-	if (run.phase === 'aborted' && BULK_ENDED_UNAPPROVED.has(key)) return { cause: i18n.t(`bulk.halt.${key}`), step: null };
+	if (run.phase === 'aborted' && BULK_ENDED_UNAPPROVED.has(key)) return { cause: i18n.t(bulkHaltKeyOf(run, `bulk.halt.${key}`)), step: null };
 	return null;
 }
 
@@ -1097,7 +1235,8 @@ export function bulkSeoEntityCount(targets: readonly Pick<BulkTarget, 'seoEntity
 export const BULK_STEPS = ['planned', 'preview', 'approval', 'probe', 'run', 'done'] as const;
 export type BulkStepName = (typeof BULK_STEPS)[number];
 
-type BulkStepRun = Pick<BulkRunDetailData, 'probe' | 'haltReason' | 'phase' | 'targetSystem' | 'probeConfirmed' | 'probeOwn' | 'changes'>;
+type BulkStepRun = Pick<BulkRunDetailData, 'probe' | 'haltReason' | 'phase' | 'targetSystem' | 'probeConfirmed' | 'probeOwn' | 'changes'>
+	& Partial<Pick<BulkRunDetailData, 'haltKey' | 'applied' | 'conflicts' | 'failed' | 'sentUnknown'>>;
 
 /** Whether the run has a probe step: two or more targets to write (counted as the write counts
  *  them), and its probe does not hold yet or it confirmed one of its own. A run at its probe is
@@ -1113,14 +1252,29 @@ export function bulkSteps(run: BulkStepRun): readonly BulkStepName[] {
 	return bulkHasProbeStep(run) ? BULK_STEPS : BULK_STEPS.filter((s) => s !== 'probe');
 }
 
-/** Which of {@link BULK_STEPS} the run is at. A run without a probe step writes its one target
- *  under "run", though the engine may hold it there as at a probe. */
-export function bulkStep(run: BulkStepRun): BulkStepName {
+/** Which of {@link BULK_STEPS} the run is at, or null where the page cannot know. A run without
+ *  a probe step writes its one target under "run", though the engine may hold it there as at a
+ *  probe. The chip marks the step the run stands at, not how it ended (U-342): an approved run
+ *  that halted before it sent anything still stands at its approval; an aborted run stands where
+ *  it was writing; a run that ended before its approval may never have been previewed, so no
+ *  step is marked, except a discarded one, whose last step reads „verworfen“. */
+export function bulkStep(run: BulkStepRun): BulkStepName | null {
 	if (run.phase === 'planned') return 'planned';
 	if (run.phase === 'previewed') return 'approval';
 	if (bulkAtProbe(run) && bulkHasProbeStep(run)) return 'probe';
+	if (run.phase === 'approved' && run.haltReason !== null && bulkSentNothing(run)) return 'approval';
 	if (run.phase === 'approved' || run.phase === 'writing') return 'run';
+	if (run.phase === 'aborted') {
+		if (run.haltKey === 'discarded') return 'done';
+		return run.haltKey !== null && run.haltKey !== undefined && BULK_ENDED_UNAPPROVED.has(run.haltKey) ? null : 'run';
+	}
 	return 'done';
+}
+
+/** Whether the run has sent nothing yet: nothing written, in conflict, failed or sent unknown. A
+ *  count the page was not given does not count as none: the run then stands at its run. */
+function bulkSentNothing(run: BulkStepRun): boolean {
+	return [run.applied, run.conflicts, run.failed, run.sentUnknown].every((n) => n === 0);
 }
 
 /** The i18n key of a step's chip. An undone run's last step reads as the list reads its phase
@@ -1369,6 +1523,101 @@ export function bulkHiddenAddsOf(target: Pick<BulkTarget, 'hiddenAdds'>, field: 
 /** Whether the engine counted a target's field as HTML, whose character references are marked too. */
 export function bulkHiddenHtml(target: Pick<BulkTarget, 'hiddenAdds'>, field: string): boolean {
 	return target.hiddenAdds?.find((h) => h.field === field)?.html === true;
+}
+
+/** Why a verdict is listed first (engine `bulk-outliers.ts`). */
+export type BulkOutlierReason = 'changed_fields' | 'length_jump' | 'new_link' | 'new_email' | 'new_phone' | 'new_script' | 'rare_value';
+export type BulkMarkerKind = 'link' | 'email' | 'phone' | 'script';
+
+export interface BulkJudgeOutliers {
+	decided: number;
+	measured: boolean;
+	flagged: { seq: number; reasons: BulkOutlierReason[] }[];
+	/** `marked`: how many of `hosts`, at its start, mark a row; absent counts as none. `seqs`: the
+	 *  verdicts that add the kind, in plan order; absent, the line offers no way to show them. */
+	spread: { kind: BulkMarkerKind; count: number; hosts: string[]; marked?: number; seqs?: number[] }[];
+}
+
+/** How many flagged verdicts the view lists first; the count line names the rest (U-387). */
+export const BULK_OUTLIERS_FIRST = 50;
+
+/** The targets in the order the approval view lists them: the first {@link BULK_OUTLIERS_FIRST}
+ *  flagged ones in their own order, then every other in its own order (U-387). */
+export function bulkOutlierOrder<T extends { seq: number }>(targets: readonly T[], outliers: BulkJudgeOutliers | null | undefined): T[] {
+	if (!outliers || outliers.flagged.length === 0) return [...targets];
+	const first = new Set(outliers.flagged.slice(0, BULK_OUTLIERS_FIRST).map((f) => f.seq));
+	return [...targets.filter((t) => first.has(t.seq)), ...targets.filter((t) => !first.has(t.seq))];
+}
+
+/** Each flagged target's reasons by its seq, looked up once per row. */
+export function bulkOutlierReasonMap(outliers: BulkJudgeOutliers | null | undefined): Map<number, BulkOutlierReason[]> {
+	return new Map((outliers?.flagged ?? []).map((f) => [f.seq, f.reasons]));
+}
+
+/** The line over the list (U-387): how many verdicts differ, that they come first, and that one
+ *  that does not stand out can still be wrong. Under 20 verdicts: read every one. */
+export function bulkOutlierCountText(outliers: BulkJudgeOutliers | null | undefined, i18n: BulkI18n): string | null {
+	if (!outliers) return null;
+	if (!outliers.measured) return i18n.t('bulk.outliers.small');
+	const n = outliers.flagged.length;
+	if (n === 0) return i18n.t('bulk.outliers.none');
+	if (n > BULK_OUTLIERS_FIRST) return i18n.tf('bulk.outliers.over', { n: String(n), first: String(BULK_OUTLIERS_FIRST) });
+	return i18n.tf(bulkOne('bulk.outliers.count', n), { n: String(n) });
+}
+
+/** How many hosts that mark no row a line names; the rest it counts. */
+export const BULK_SPREAD_UNMARKED_SHOWN = 5;
+/** How many hosts that mark a row a line names; the rest it counts in a sentence of its own: past
+ *  this many, a host planted among throwaway ones hides by their number, not by a fold. */
+export const BULK_SPREAD_MARKED_SHOWN = 20;
+
+/** The lines for a kind of marker many verdicts add (U-387): count, kind and hosts as text,
+ *  never as a link. The way out stands once below them ({@link bulkOutlierSpreadClosing}, U-417). The hosts that mark a row come first, up to twenty, the rarest
+ *  first: past the first fifty flagged rows the line is the one place they show. Then up to five of the
+ *  others and how many more, and how many more marking hosts there are, in a sentence of its own. */
+export function bulkOutlierSpreadTexts(outliers: BulkJudgeOutliers | null | undefined, i18n: BulkI18n): string[] {
+	if (!outliers) return [];
+	return outliers.spread.map((s) => {
+		const n = String(s.count);
+		// A host is not running text: every hidden character in it is shown (`inPlace: false`).
+		const marked = Math.min(Math.max(s.marked ?? 0, 0), s.hosts.length);
+		const others = s.hosts.slice(marked);
+		const shownMarked = Math.min(marked, BULK_SPREAD_MARKED_SHOWN);
+		const listed = [...s.hosts.slice(0, shownMarked), ...others.slice(0, BULK_SPREAD_UNMARKED_SHOWN)].map((h) => visibleText(h, { inPlace: false }));
+		const rest = others.length - Math.min(others.length, BULK_SPREAD_UNMARKED_SHOWN);
+		const markedRest = marked - shownMarked;
+		const hosts = s.kind === 'link' || s.kind === 'email'
+			? (rest > 0
+				? i18n.tf(`bulk.outliers.spread.${s.kind}_hosts_more`, { hosts: listed.join(', '), k: String(rest) })
+				: i18n.tf(`bulk.outliers.spread.${s.kind}_hosts`, { hosts: listed.join(', ') }))
+				+ (markedRest > 0 ? i18n.tf(bulkOne(`bulk.outliers.spread.${s.kind}_marked_more`, markedRest), { m: String(markedRest) }) : '')
+			: '';
+		return i18n.tf(bulkOne(`bulk.outliers.spread.${s.kind}`, s.count), { n, hosts });
+	});
+}
+
+/** The sentence below the lines of {@link bulkOutlierSpreadTexts}, once however many there are (U-417),
+ *  or null for none. */
+export function bulkOutlierSpreadClosing(outliers: BulkJudgeOutliers | null | undefined, i18n: BulkI18n): string | null {
+	return outliers && outliers.spread.length > 0 ? i18n.t('bulk.outliers.spread.closing') : null;
+}
+
+/** The verdicts a run line shows the table on, or null where no kind is chosen or the server named none. */
+export function bulkOutlierSpreadSeqs(outliers: BulkJudgeOutliers | null | undefined, kind: BulkMarkerKind | null): Set<number> | null {
+	if (!outliers || kind === null) return null;
+	const seqs = outliers.spread.find((s) => s.kind === kind)?.seqs;
+	return seqs === undefined ? null : new Set(seqs);
+}
+
+/** The button at the end of a line: the table on that line's verdicts alone, or back to all (U-417). */
+export function bulkOutlierShowText(count: number, shown: boolean, i18n: BulkI18n): string {
+	return shown ? i18n.t('bulk.outliers.spread.show_all') : i18n.tf(bulkOne('bulk.outliers.spread.show', count), { n: String(count) });
+}
+
+/** The line over a table shown on one line's verdicts alone (U-417): without it, a reader in the table
+ *  takes it for the whole run, and the approval is for the whole run. */
+export function bulkOutlierFilteredText(kind: BulkMarkerKind, count: number, i18n: BulkI18n): string {
+	return i18n.tf(bulkOne(`bulk.outliers.filtered.${kind}`, count), { n: String(count) });
 }
 
 /** The line an approval and a probe's confirmation show when targets add hidden characters, or
