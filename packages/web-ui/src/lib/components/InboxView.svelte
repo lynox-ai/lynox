@@ -710,7 +710,7 @@
 													<Checkbox
 														checked={isSelectedForBulk(item.id)}
 														onclick={(e) => toggleBulkSelection(item.id, visibleIds, e.shiftKey)}
-														ariaLabel={`Auswählen: ${withFollowUpLine(item, item.subject || item.reasonDe, t, tf)}`}
+														ariaLabel={`Auswählen: ${withFollowUpLine(item, item.subject?.trim() || item.reasonDe, t, tf)}`}
 													/>
 												</div>
 											{/if}
@@ -721,10 +721,10 @@
 													selectedItemId = item.id;
 													void openItem(item.id);
 												}}
-												aria-label={`${t('inbox.reading_open')}: ${withFollowUpLine(item, item.subject || item.reasonDe, t, tf)}`}
+												aria-label={`${t('inbox.reading_open')}: ${withFollowUpLine(item, item.subject?.trim() || item.reasonDe, t, tf)}`}
 											>
 												<div class="flex items-baseline justify-between gap-2 mb-0.5">
-													<p class="text-sm font-medium text-text leading-snug truncate flex items-center gap-1.5" title={item.subject ? item.subject : withFollowUpLine(item, item.reasonDe, t, tf)}>
+													<p class="text-sm font-medium text-text leading-snug truncate flex items-center gap-1.5" title={item.subject?.trim() ? item.subject : withFollowUpLine(item, item.reasonDe, t, tf)}>
 														{#if zone === 'snoozed' && item.notifyOnUnsnooze === true}
 															<!-- Reminder badge — distinguishes "remind me at X" from silent
 															     snooze in the same Snoozed zone. -->

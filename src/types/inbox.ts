@@ -35,6 +35,8 @@ export type InboxAuditAction =
   | 'unsnoozed_on_reply'
   | 'reopened_on_reply'
   | 'raised_on_sensitive_follow_up'
+  /** A flagged follow-up on an item already open in "requires you": nothing raised, the flag noted. */
+  | 'sensitive_follow_up_kept_open'
   | 'rule_applied'
   | 'generation_requested';
 

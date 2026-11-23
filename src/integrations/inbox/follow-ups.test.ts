@@ -112,7 +112,7 @@ describe('what is not counted, and when the name is left out', () => {
     const id = seedReplied();
     await hook()(ACCOUNT.id, envelope());
     inbox.insertThreadMessage({ accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<ooo@x>', fromAddress: 'kunde@example.com', fromName: 'Kundin Muster', subject: 'Abwesend', direction: 'inbound', autoReply: true, mailDate: new Date('2026-11-06T08:00:00Z') });
-    inbox.insertThreadMessage({ accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<own@x>', fromAddress: ACCOUNT.address, subject: 'Re: Lieferung', direction: 'outbound', autoReply: false, mailDate: new Date('2026-11-06T09:00:00Z') });
+    inbox.insertThreadMessage({ accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<own@x>', fromAddress: ACCOUNT.address, subject: 'Re: Lieferung', direction: 'outbound', autoReply: false, mailDate: new Date('2026-11-04T08:30:00Z') });
     inbox.insertThreadMessage({ accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<old@x>', fromAddress: 'kunde@example.com', subject: 'Frühere', direction: 'inbound', autoReply: false, mailDate: new Date('2026-11-02T08:00:00Z') });
     const [f] = followUpsOnEveryRoute(id) as Array<Record<string, unknown>>;
     expect(f).toMatchObject({ count: 1, latestAt: '2026-11-04T09:00:00.000Z' });
@@ -131,5 +131,88 @@ describe('what is not counted, and when the name is left out', () => {
       expect(f, mode).toMatchObject({ count: 1 });
       expect(f?.['latestFromName'], mode).toBeUndefined();
     }
+  });
+});
+
+describe('a sensitive follow-up on an item already open in "requires you"', () => {
+  it('is counted without its sender name in every mode, and the flag is noted in the audit', async () => {
+    const otp = { subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' };
+    for (const mode of ['allow', 'skip', 'mask'] as const) {
+      mail.close();
+      mail = new MailStateDb({ path: ':memory:' });
+      mail.upsertAccount(ACCOUNT);
+      inbox = new InboxStateDb(mail.getConnection());
+      const id = seedReplied();
+      inbox.updateUserAction(id, null, null);
+      await hook(mode)(ACCOUNT.id, envelope({ ...otp, messageId: `<otp-${mode}@x>` }));
+      expect(inbox.getItem(id)?.classifierVersion, mode).toBe('v1');
+      const [f] = followUpsOnEveryRoute(id) as Array<Record<string, unknown>>;
+      expect(f, mode).toMatchObject({ count: 1 });
+      expect(f?.['latestFromName'], mode).toBeUndefined();
+      const noted = inbox.listAuditForItem(id).filter((a) => a.action === 'sensitive_follow_up_kept_open');
+      expect(noted.map((a) => (JSON.parse(a.payloadJson) as { message_id: string }).message_id), mode).toEqual([`<otp-${mode}@x>`]);
+    }
+  });
+
+  it('a clean follow-up on an open item notes nothing and keeps the name', async () => {
+    const id = seedReplied();
+    inbox.updateUserAction(id, null, null);
+    await hook('skip')(ACCOUNT.id, envelope());
+    expect(inbox.listAuditForItem(id).some((a) => a.action === 'sensitive_follow_up_kept_open')).toBe(false);
+    const [f] = followUpsOnEveryRoute(id) as Array<Record<string, unknown>>;
+    expect(f).toMatchObject({ count: 1, latestFromName: 'Kundin Muster' });
+  });
+});
+
+describe('only mail since the owner last dealt with the thread is counted', () => {
+  it('a follow-up the owner answered is not counted once the next one opens the item again', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    inbox.updateUserAction(id, 'replied', new Date('2026-11-04T12:00:00Z'));
+    inbox.appendAudit({ itemId: id, action: 'replied', actor: 'system', payloadJson: '{}', createdAt: new Date('2026-11-04T12:00:00Z') });
+    await hook()(ACCOUNT.id, envelope({ messageId: '<follow2@x>', uid: 3, date: new Date('2026-11-05T10:00:00Z') }));
+    const [f] = followUpsOnEveryRoute(id) as Array<Record<string, unknown>>;
+    expect(f).toMatchObject({ count: 1, latestAt: '2026-11-05T10:00:00.000Z' });
+  });
+
+  it('a follow-up from before an archive is not counted when a flagged mail raises the item', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    inbox.updateUserAction(id, 'archived', new Date('2026-11-04T12:00:00Z'));
+    inbox.appendAudit({ itemId: id, action: 'archived', actor: 'user', payloadJson: '{}', createdAt: new Date('2026-11-04T12:00:00Z') });
+    await hook()(ACCOUNT.id, envelope({
+      messageId: '<otp@x>', uid: 3, date: new Date('2026-11-05T10:00:00Z'), subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.',
+    }));
+    expect(inbox.getItem(id)?.userAction).toBeUndefined();
+    const [f] = followUpsOnEveryRoute(id) as Array<Record<string, unknown>>;
+    expect(f).toMatchObject({ count: 1, latestAt: '2026-11-05T10:00:00.000Z' });
+  });
+
+  it('an archive the owner undid does not hide the mail before it', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    // Archived after the reopen (the audit is written at the time of the action), then undone.
+    inbox.appendAudit({ itemId: id, action: 'archived', actor: 'user', payloadJson: '{}', createdAt: new Date(Date.now() + 60_000) });
+    inbox.updateUserAction(id, null, null);
+    const [f] = followUpsOnEveryRoute(id) as Array<Record<string, unknown>>;
+    expect(f).toMatchObject({ count: 1, latestAt: '2026-11-04T09:00:00.000Z' });
+  });
+
+  it('a mail sent into the thread after a follow-up answers it', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    inbox.insertThreadMessage({ accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<sent@x>', fromAddress: ACCOUNT.address, subject: 'Re: Lieferung', direction: 'outbound', mailDate: new Date('2026-11-04T11:00:00Z') });
+    expect(followUpsOnEveryRoute(id)).toEqual([undefined, undefined, undefined]);
+  });
+
+  it('a follow-up without a mail date says when the inbox stored it', async () => {
+    const id = seedReplied();
+    inbox.updateUserAction(id, null, null);
+    inbox.insertThreadMessage({
+      accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<nodate@x>', fromAddress: 'kunde@example.com', fromName: 'Kundin Muster',
+      subject: 'Re: Lieferung', direction: 'inbound', autoReply: false, fetchedAt: new Date('2026-11-06T07:00:00Z'),
+    });
+    const [f] = followUpsOnEveryRoute(id) as Array<Record<string, unknown>>;
+    expect(f).toMatchObject({ count: 1, latestAt: '2026-11-06T07:00:00.000Z' });
   });
 });

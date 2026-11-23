@@ -240,6 +240,18 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
         });
         return 'raised';
       }
+      if (raises) {
+        // Already open in "requires you": nothing to raise, but the inbox notes that the check
+        // flagged this message, since its stored text may be dropped or masked and no longer tell.
+        opts.state.appendAudit({
+          tenantId: existing.tenantId,
+          itemId: existing.id,
+          action: 'sensitive_follow_up_kept_open',
+          actor: 'system',
+          payloadJson: JSON.stringify({ trigger: 'inbound_mail', message_id: messageId, follow_up_sensitive_categories: sensitive.categories }),
+        });
+        return 'none';
+      }
       if (!opens) return 'none';
       if (!opts.state.reopenReplied(existing.id, existing.tenantId, fields.mailDate ?? new Date())) return 'none';
       opts.state.appendAudit({

@@ -189,6 +189,19 @@ describe('InboxView — the row of an item with follow-ups', () => {
 		expect(open.textContent).toContain('Neue Nachricht im Thread · Kundin fragt nach der Lieferung');
 	});
 
+	it('without a subject, the headline title and the select box label put the line before the reason', async () => {
+		await renderList([item({ followUps: ONE, subject: '  ', snippet: undefined })]);
+		expect(target.querySelector('p[title]')?.getAttribute('title')).toBe('Neue Nachricht im Thread · Kundin fragt nach der Lieferung');
+		const select = target.querySelector('[aria-label^="Auswählen: "]');
+		expect(select?.getAttribute('aria-label')).toBe('Auswählen: Neue Nachricht im Thread · Kundin fragt nach der Lieferung');
+	});
+
+	it('without follow-ups, title and labels stay as they were', async () => {
+		await renderList([item({ subject: '', snippet: undefined })]);
+		expect(target.querySelector('p[title]')?.getAttribute('title')).toBe('Kundin fragt nach der Lieferung');
+		expect(target.querySelector('[aria-label^="Auswählen: "]')?.getAttribute('aria-label')).toBe('Auswählen: Kundin fragt nach der Lieferung');
+	});
+
 	it('with a subject, the open button label still names the new mail first', async () => {
 		await renderList([item({ followUps: ONE })]);
 		const open = [...target.querySelectorAll<HTMLButtonElement>('button[aria-label]')].find((b) => b.getAttribute('aria-label')?.includes('Lieferung'))!;
