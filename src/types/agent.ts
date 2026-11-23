@@ -414,6 +414,8 @@ export interface IAgent {
   readonly searchResultAddresses?: import('../core/search-result-addresses.js').SearchResultAddresses | undefined;
   /** See `Agent.batchStartedTainted`. */
   batchStartedTainted?(): boolean;
+  /** See `Agent.heldProviderSearch`. */
+  heldProviderSearch?(): boolean;
   /** Where a target the owner did not name comes from in this agent's run, as far as the run
    *  knows it (a trigger's, a workflow's, a sub-agent, a helper's thread). Absent: read from the
    *  agent's taint (`readContent`), else unknown. */

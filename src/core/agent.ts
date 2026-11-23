@@ -470,6 +470,14 @@ export function providerSearchAdmitted(ctx: ToolContext | undefined): boolean {
   return policy === undefined || policy === 'allow-all' || policy === 'guarded';
 }
 
+/** Whether message content carries a search the provider ran itself: its call or its results. */
+function holdsProviderSearch(content: unknown): boolean {
+  return Array.isArray(content) && content.some((b: unknown) => {
+    const type = (b as { type?: unknown } | null)?.type;
+    return type === 'server_tool_use' || type === 'web_search_tool_result';
+  });
+}
+
 /** Whether a `bash` command matches a rule for sending data out (`SENDS_OR_KEEPS_BASH`). */
 function bashMaySend(input: unknown): boolean {
   const command = (input as { command?: unknown } | null)?.command;
@@ -1130,6 +1138,11 @@ export class Agent implements IAgent {
   private _conversationSawUntrusted = false;
   /** The taint state when the current tool batch started; read by the secret gate. */
   private _taintBeforeBatch: boolean | undefined;
+  /** Whether this conversation holds a search the provider ran itself (`web_search_20250305`):
+   *  its results reach the model inside the response, past every tool dispatch. Set when such a
+   *  response arrives, re-derived from the history on a load, cleared on `reset`, and carried
+   *  across a rebuild of the agent (`restoreProviderSearch`). */
+  private _providerSearchSeen = false;
   /** The current tool batch as an identity, a fresh object per batch (`approvalBatch`). */
   private _batch: object | undefined;
   /** Per call of the current tool batch (by its `tool_use` block): how many calls of the batch
@@ -1158,15 +1171,6 @@ export class Agent implements IAgent {
    * consent gate inside `http_request` — run inside a batch and so see the same snapshot.
    * Outside a batch the fallback is the state right now, which can only refuse more.
    */
-  /**
-   * Whether the batch the running call belongs to started after the conversation had taken in
-   * foreign content. Every call runs inside a batch (`_executeOne` is reached only from there);
-   * read outside one it answers `true`, the side that grants less.
-   */
-  batchStartedTainted(): boolean {
-    return this._taintBeforeBatch ?? true;
-  }
-
   governingContract(): GoverningContract {
     const contract = this.capabilityContract;
     if (contract === undefined) return { contract: undefined, withheld: 'none' };
@@ -1174,6 +1178,25 @@ export class Agent implements IAgent {
     const taintedBefore = this._taintBeforeBatch ?? (this._sawUntrustedData || this._conversationSawUntrusted);
     return taintedBefore ? { contract: undefined, withheld: 'untrusted' } : { contract, withheld: null };
   }
+
+  /**
+   * Whether the batch the running call belongs to started after the conversation had taken in
+   * foreign content. Every dispatched call runs inside a batch (`_executeOne` is reached only
+   * from there); a handler called directly, or anything read outside a batch, gets `true`, the
+   * side that grants less.
+   */
+  batchStartedTainted(): boolean {
+    return this._taintBeforeBatch ?? true;
+  }
+
+  /** Whether this conversation holds a search the provider ran itself (see `_providerSearchSeen`). */
+  heldProviderSearch(): boolean {
+    return this._providerSearchSeen;
+  }
+
+  /** Re-arms {@link heldProviderSearch} on an agent rebuilt for the same conversation, whose
+   *  history may no longer hold the search blocks (the context window drops old turns). */
+  restoreProviderSearch(): void { this._providerSearchSeen = true; }
 
   /**
    * Where a call stands toward the contract, for its row (`CallContract`). Taken once, when the
@@ -1786,6 +1809,7 @@ export class Agent implements IAgent {
     this._lastRealAtMsgCount = 0;
     // DK.1 F5: a fresh conversation has ingested nothing untrusted yet.
     this._conversationSawUntrusted = false;
+    this._providerSearchSeen = false;
     // Replaced, never cleared: a sub-agent still holding the old set keeps adding to it.
     this.conversationGrants = this.conversationGrants?.renewed();
   }
@@ -1900,6 +1924,7 @@ export class Agent implements IAgent {
     // summarized the read away: either one is enough. A record that cannot be read counts as set.
     if (this._contextHoldsUntrustedMarker() || this.conversationLatch?.isSet() === true) this._armConversationLatch();
     else this._conversationSawUntrusted = false;
+    this._providerSearchSeen = this.messages.some((m) => holdsProviderSearch(m.content));
     // A user turn is written to the thread before `send()` sees its marker, so a crash between
     // the two leaves an upload's text in the thread and nothing in the set. The resume puts it
     // there. Only user turns' own text: a tool result's member entered the set before its
@@ -3045,6 +3070,7 @@ export class Agent implements IAgent {
       // thinking before max_tokens) strips to an empty array. Anthropic rejects
       // an assistant message with empty content and that would break the very
       // next request — substitute a minimal placeholder so history stays valid.
+      if (holdsProviderSearch(response.content)) this._providerSearchSeen = true;
       this.messages.push({
         role: 'assistant',
         content: contentForHistory.length > 0
@@ -4759,10 +4785,6 @@ export class Agent implements IAgent {
       (b) => this.tools.find((t) => t.definition.name === b.name)?.endsTurn !== true,
     ).length;
 
-    // What the conversation had taken in before this batch. The calls below run concurrently and
-    // each arms the latch for its own tool as it starts, so a per-call read would count a
-    // sibling's dispatch as content already taken in (the secret gate asks about the past).
-    this._taintBeforeBatch = this._sawUntrustedData || this._conversationSawUntrusted;
     this._batch = {};
 
     // A step's own fail_step has the last word in the response that calls it: it runs ALONE, and
@@ -4798,10 +4820,19 @@ export class Agent implements IAgent {
     // call's late state in the agent's next run. Its waits on a human still end on a
     // stop, because the prompt itself is withdrawn (`PromptMeta.signal`, see `promptUser`).
     const raceSignal = this._abandonsCallsOnAbort ? this.abortController?.signal : undefined;
-    const settled = await Promise.allSettled(
-      toExecute.map(tc => (raceSignal ? raceRunAbort(this._executeOne(tc), raceSignal) : this._executeOne(tc))),
-    );
-    this._taintBeforeBatch = undefined;
+    // What the conversation had taken in before this batch. The calls below run concurrently and
+    // each arms the latch for its own tool as it starts, so a per-call read would count a
+    // sibling's dispatch as content already taken in (the secret gate asks about the past).
+    // Cleared in `finally`, so no reader after the batch can find this batch's answer.
+    this._taintBeforeBatch = this._sawUntrustedData || this._conversationSawUntrusted;
+    let settled: PromiseSettledResult<BetaToolResultBlockParam>[];
+    try {
+      settled = await Promise.allSettled(
+        toExecute.map(tc => (raceSignal ? raceRunAbort(this._executeOne(tc), raceSignal) : this._executeOne(tc))),
+      );
+    } finally {
+      this._taintBeforeBatch = undefined;
+    }
     this._batch = undefined;
     this._batchTwins = undefined;
 
