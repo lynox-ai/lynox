@@ -288,8 +288,8 @@ describe('the approved unchecked-change texts', () => {
 			'Bulk-Änderungen an Shopify-Shops sind auf dieser Instanz nicht freigeschaltet. Der Lauf ist angehalten.',
 			'Bulk changes to Shopify stores are not enabled on this instance. The run is stopped.'));
 		expect(line('bulk.halt.shopifyWriteOff_before_check_managed')).toBe(entry('bulk.halt.shopifyWriteOff_before_check_managed',
-			'Soll lynox in Shopify-Shops nachprüfen und schreiben, schreib an support@lynox.ai. Sobald sie freigeschaltet sind, kannst du nachprüfen.',
-			'If lynox should check and write in Shopify stores, write to support@lynox.ai. Once they are enabled, you can check again.'));
+			'Soll lynox in Shopify-Shops nachprüfen und schreiben, schreib an support@lynox.ai. Sobald Bulk-Änderungen freigeschaltet sind, kannst du nachprüfen.',
+			'If lynox should check and write in Shopify stores, write to support@lynox.ai. Once bulk changes are enabled, you can check again.'));
 	});
 
 
@@ -738,10 +738,12 @@ describe('going on from a run that halted', () => {
 		// (c) A blocked host: allowing it comes first, managed and self-hosted.
 		expect(bulkResumeText(w('blocked', unclear), true, DE)?.before).toBe('Soll lynox shop.example.invalid erreichen, schreib an support@lynox.ai. Danach kannst du nachprüfen.');
 		expect(bulkResumeText(w('blocked', unclear), false, DE)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du nachprüfen.');
-		// Writing switched off: checking works now, the way to write on follows it.
+		// Writing switched off stops the check too: enabling it comes first, managed and self-hosted.
 		const off = bulkResumeText(w('shopifyWriteOff', unclear), true, DE);
-		expect([off?.before, off?.after]).toEqual([null, 'Soll lynox in Shopify-Shops nachprüfen und schreiben, schreib an support@lynox.ai. Sobald sie freigeschaltet sind, kannst du nachprüfen.']);
-		expect(bulkResumeText(w('shopifyWriteOff', unclear), false, DE)?.after).toBe(DE.tf('bulk.halt.shopifyWriteOff_before_selfhost', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
+		expect([off?.before, off?.after]).toEqual(['Soll lynox in Shopify-Shops nachprüfen und schreiben, schreib an support@lynox.ai. Sobald Bulk-Änderungen freigeschaltet sind, kannst du nachprüfen.', null]);
+		const offSelf = bulkResumeText(w('shopifyWriteOff', unclear), false, DE);
+		expect([offSelf?.before, offSelf?.after]).toEqual(['Du schaltest sie in der Konfiguration deiner Instanz frei (`LYNOX_FEATURE_SHOPIFY_BULK_READ`). Danach kannst du nachprüfen.', null]);
+		expect(bulkResumeText(w('shopifyWriteOff', unclear), false, EN)?.before).toBe('You enable them in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`). Then you can check again.');
 		expect(bulkResumeText(w('markupAddedByShop', unclear), true, DE)?.after).toBe(DE.tf('bulk.halt.markupAddedByShop_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
 		// A lost access stays first, as before.
 		expect(bulkResumeText(w('credential', unclear), true, DE)?.before).toBe(DE.tf('bulk.halt.credential_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));

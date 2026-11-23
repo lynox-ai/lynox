@@ -361,16 +361,16 @@ export function bulkResumeText(
 	if (kind === 'nothing') return { cause, before: null, check: i18n.tf('bulk.resume.nothing_left', vars), after: null, kept: null, soFar: null, allows: null };
 	// The next step is to check, not to continue: checking sends nothing, so the failures' "before
 	// you continue writing" does not apply. What would stop the check too (no access, a host the
-	// instance may not reach) comes first and ends with checking; anything else follows the check.
+	// instance may not reach, Shopify bulk switched off) comes first and ends with checking; anything
+	// else follows the check.
 	if (kind === 'check') {
 		const check = run.sentUnknown === 1 ? i18n.tf('bulk.resume.check_before', vars)
 			: i18n.tf('bulk.resume.check_before_many', { ...vars, n: String(run.sentUnknown) });
 		const first = key === 'unauthorized' ? 'bulk.halt.unauthorized_before_check'
-			: key === 'blocked' ? `bulk.halt.blocked_before_check_${tier}`
+			: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_check_${tier}`
 			: key === 'credential' ? 'bulk.halt.credential_before'
 			: null;
 		const then = key === 'unavailable' ? 'bulk.halt.unavailable_before_check'
-			: key === 'shopifyWriteOff' ? (tier === 'managed' ? 'bulk.halt.shopifyWriteOff_before_check_managed' : 'bulk.halt.shopifyWriteOff_before_selfhost')
 			: key === 'markupAddedByShop' ? 'bulk.halt.markupAddedByShop_before'
 			: null;
 		return { cause, before: first === null ? null : i18n.tf(first, vars), check, after: then === null ? null : i18n.tf(then, vars), kept: null, soFar: null, allows: null };

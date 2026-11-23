@@ -109,13 +109,15 @@ describe('going on by checking', () => {
 		expect(lines.indexOf(CHECK)).toBeGreaterThan(lines.indexOf(mail));
 	});
 
-	it('writing switched off: says the check first, then how to write on, with the support link under that', async () => {
+	it('writing switched off: says to ask support first, with the link under it, then the check', async () => {
 		run = makeRun({ haltKey: 'shopifyWriteOff', haltReason: 'shopifyWriteOff' });
 		await render();
 		const lines = wayOn();
-		const later = 'Soll lynox in Shopify-Shops nachprüfen und schreiben, schreib an support@lynox.ai. Sobald sie freigeschaltet sind, kannst du nachprüfen.';
-		expect(lines.indexOf(later)).toBeGreaterThan(lines.indexOf(CHECK));
-		expect(lines.indexOf(t('bulk.halt.support_mail'))).toBe(lines.indexOf(later) + 1);
+		const ask = 'Soll lynox in Shopify-Shops nachprüfen und schreiben, schreib an support@lynox.ai. Sobald Bulk-Änderungen freigeschaltet sind, kannst du nachprüfen.';
+		expect(lines.indexOf(ask)).toBeGreaterThanOrEqual(0);
+		expect(lines.indexOf(CHECK)).toBeGreaterThanOrEqual(0);
+		expect(lines.indexOf(t('bulk.halt.support_mail'))).toBe(lines.indexOf(ask) + 1);
+		expect(lines.indexOf(CHECK)).toBeGreaterThan(lines.indexOf(t('bulk.halt.support_mail')));
 		expect(lines.filter((l) => l === t('bulk.halt.support_mail'))).toHaveLength(1);
 	});
 
