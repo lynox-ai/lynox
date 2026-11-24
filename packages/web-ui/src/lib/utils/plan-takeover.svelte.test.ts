@@ -426,6 +426,9 @@ describe('Run now\'s toast: whose access ended, where no box can be drawn', () =
 		expect(pausedWhoText([])).toBe('');
 		expect(pausedWhoText(['   '])).toBe('');
 	});
+	it('leaves out a blank name beside a real one, so the list has no empty place', () => {
+		expect(pausedWhoText(['ida@example.invalid', '  ', 'max@example.invalid'])).toBe('ida@example.invalid, max@example.invalid');
+	});
 	it('CONTROL: a plain address stays as it is', () => {
 		expect(pausedWhoText(['ida@example.invalid'])).toBe('ida@example.invalid');
 	});
