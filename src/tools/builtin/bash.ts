@@ -192,6 +192,9 @@ async function runInSidecarWithEgress(socketPath: string, input: BashInput, env:
       allowedHosts: ctx.allowedHosts,
       allowedWildcards: ctx.allowedWildcards,
       ackHosts: resolveGuardedAckHosts(ctx),
+      typedHosts: agent.ownerKnown?.typedHosts?.() ?? [],
+      // An agent that cannot say counts as tainted: the side that reaches less.
+      tainted: agent.batchStartedTainted?.() ?? true,
     },
     timeoutMs: input.timeout_ms,
     run: agent.currentRunId,
