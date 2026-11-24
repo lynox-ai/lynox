@@ -12,7 +12,7 @@ import { accessTokenKey, hasRevokedGrant, readersRefreshSlot, recordedWrites, re
 import type { ApiProfile } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
-import { OAUTH_PRESETS, PRESET_ID_PATTERN, builtInPresetOf, connectCallText, isPresetClientSecretName, presetClientSecretGuidance, presetNotFollowed, presetParamsForModel, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
+import { OAUTH_PRESETS, PRESET_ID_PATTERN, builtInPresetOf, retiredPresetIdOf, connectCallText, isPresetClientSecretName, presetClientSecretGuidance, presetNotFollowed, presetParamsForModel, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
@@ -1274,15 +1274,17 @@ export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IA
  *
  * Two marks, either suffices: `oauth_grant.origin === 'callback'` (only the callback
  * writes it; an incoming value is discarded on create and update) and a BUILT-IN preset
- * (`builtInPresetOf`: an oauth2 profile whose `auth.oauth.preset_id` the register knows): the built-in presets are
+ * (`builtInPresetOf`: an oauth2 profile whose `auth.oauth.preset_id` the register knows, or `retiredPresetIdOf`:
+ * one this engine once shipped): the built-in presets are
  * authorization-code flows, and the preset also marks a profile that re-entered the store
  * without its grant record (a JSON in the apis directory). A preset whose provider issues
  * app tokens would be refused here too, so adding one means revisiting this.
  *
- * ⚠ Known presets only. A profile may be saved naming a provider this engine does not have
- * (the save only notes it), and `connect` refuses such a profile — so reading any
- * `preset_id` as a user's consent would refuse an app-only profile's exchange and send it
- * to a `connect` that cannot run.
+ * ⚠ Known presets only, and the ones this engine once shipped (`retiredPresetIdOf`): a
+ * provider removed from the register leaves profiles whose grant a user gave through it.
+ * A profile may be saved naming a provider this engine never had (the save only notes it),
+ * and `connect` refuses such a profile — so reading any `preset_id` as a user's consent
+ * would refuse an app-only profile's exchange and send it to a `connect` that cannot run.
  *
  * ⚠ NOT "has an `oauth_grant`": `fetch_token` writes one after every successful exchange,
  * app-only profiles included (`written`, `connected_by`), and the renewal on attach runs the
@@ -1337,12 +1339,21 @@ export function presetDelegatedReminder(profile: ApiProfile, preset: OAuthPreset
   return `\n\n**[Agent reminder: OAuth2 401, and fetch_token is the wrong move here]**\nThis URL maps to api_profile "${profile.id}". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do not call api_setup fetch_token for it as the profile stands, and change nothing on the profile beyond the step below. ${DELEGATED_RENEWAL_WAYS[kind](profile.id)}${afterConnect} The engine has written the details to its log.`;
 }
 
+/**
+ * The 401 reminder of a profile set up through a provider this engine no longer has
+ * (`retiredPresetIdOf`): nothing renews its token here, and nothing on the profile changes that.
+ * Only the profile id is named; the store pins its shape.
+ */
+export function retiredProviderReminder(profileId: string): string {
+  return `\n\n**[Agent reminder: OAuth2 401, and this connection cannot be renewed here]**\nThis URL maps to api_profile "${profileId}". It was set up through a built-in provider this engine no longer has, so no token is requested for it: do not call api_setup fetch_token or connect for it, and do not edit the profile to make a renewal pass. Tell the user. Another way of signing in to the same API replaces this connection, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
+}
+
 export function oauthGrantIsUserDelegated(profile: {
   auth?: { type?: string | undefined; oauth?: { preset_id?: string | undefined } | undefined } | undefined;
   oauth_grant?: { origin?: 'callback' | undefined } | undefined;
 }): boolean {
   if (profile.oauth_grant?.origin === 'callback') return true;
-  return builtInPresetOf(profile) !== undefined;
+  return builtInPresetOf(profile) !== undefined || retiredPresetIdOf(profile) !== undefined;
 }
 
 /**
@@ -1631,7 +1642,7 @@ export type DeclinedFact =
        *  user's authorization issues — the reason the gate refuses it (`oauthGrantIsUserDelegated`).
        *  `none`: neither. */
       readonly consent: 'callback' | 'preset' | 'none';
-      /** The built-in provider's id, set only with `preset`; it is one of the register's own ids. */
+      /** The built-in provider's id, set only with `preset`; it is one of the register's own ids or a retired one. */
       readonly preset: string | undefined;
     }
   | { readonly kind: 'grant'; readonly named: string | undefined; readonly runnable: boolean }
@@ -1655,12 +1666,13 @@ export function declinedFacts(
   const rawSlot: unknown = profile.auth?.oauth?.refresh_token_key;
   const slot = typeof rawSlot === 'string' ? rawSlot : derived;
   const state = profile.oauth_grant?.state;
-  const preset = builtInPresetOf(profile);
+  // A provider this engine once shipped refuses for the same reason as one it has.
+  const presetId = builtInPresetOf(profile)?.id ?? retiredPresetIdOf(profile);
   return [
     profile.oauth_grant?.origin === 'callback'
       ? { kind: 'consent', consent: 'callback', preset: undefined }
-      : preset !== undefined
-        ? { kind: 'consent', consent: 'preset', preset: preset.id }
+      : presetId !== undefined
+        ? { kind: 'consent', consent: 'preset', preset: presetId }
         : { kind: 'consent', consent: 'none', preset: undefined },
     { kind: 'grant', named, runnable: named === undefined || named === 'refresh_token' || named === 'client_credentials' },
     { kind: 'slot', slot, derived, diverges: slot !== derived },
@@ -4374,7 +4386,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           // A built-in provider's profile counts without a token_url: it derives its endpoint from
           // the provider and usually stores none, and it is exactly the profile the delegated
           // reminder below is for. The managed reminder stays with a configured token_url.
-          if (matchedProfile?.auth?.type === 'oauth2' && (matchedProfile.auth.oauth?.token_url || builtInPresetOf(matchedProfile) !== undefined)) {
+          if (matchedProfile?.auth?.type === 'oauth2' && (matchedProfile.auth.oauth?.token_url || builtInPresetOf(matchedProfile) !== undefined || retiredPresetIdOf(matchedProfile) !== undefined)) {
             // Which of two reminders, and the split is load-bearing. The text
             // below the `else` has been here since the 2026-05-18 Shopify
             // failure and is right for an app-only profile. For a profile a USER
@@ -4428,10 +4440,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // field's value reaches the text. Keep it that way.
             const swapPreset = builtInPresetOf(matchedProfile);
             const wouldSwap = oauthFetchTokenWouldSwapDelegatedAccess(matchedProfile, mpHeld);
+            // A provider this engine once shipped: fetch_token refuses every exchange for it, so
+            // neither reminder below would name a way that works.
             // A built-in provider's profile is told the way fetch_token would name, so the two
             // never disagree; the profile may need the update that way names. A profile with no
             // token_url that would not swap gets no reminder: there is nothing to renew it with.
-            wrapped += wouldSwap && swapPreset !== undefined
+            wrapped += retiredPresetIdOf(matchedProfile) !== undefined
+              ? retiredProviderReminder(matchedProfile.id)
+              : wouldSwap && swapPreset !== undefined
               ? presetDelegatedReminder(matchedProfile, swapPreset, toolContext.apiStore) + oauth401DelegatedHeaderHint(matchedProfile)
               : !wouldSwap && !matchedProfile.auth.oauth?.token_url ? ''
               : oauth401Reminder(matchedProfile, wouldSwap);
