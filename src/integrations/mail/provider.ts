@@ -50,10 +50,19 @@ export interface MailEnvelope {
   messageId: string | undefined;
   /** Folder this envelope was fetched from (e.g. 'INBOX'). */
   folder: string;
-  /** Thread grouping key — In-Reply-To/References-derived, may equal messageId. */
+  /**
+   * Thread grouping key: the provider's own thread id (Gmail thread, Graph conversation, an IMAP
+   * server's thread id). Without one it equals messageId (or is unset), and the inbox finds the
+   * thread through inReplyTo and references instead.
+   */
   threadKey: string | undefined;
   /** In-Reply-To header — the immediate parent message-id, if this is a reply. */
   inReplyTo: string | undefined;
+  /**
+   * Message-IDs from the References header, oldest first, as far as the provider reads them
+   * (IMAP only; at most the newest few, see the provider). Sender-supplied, like inReplyTo.
+   */
+  references?: readonly string[] | undefined;
   from: MailAddress[];
   to: MailAddress[];
   cc: MailAddress[];
