@@ -4297,7 +4297,7 @@ export async function retryInterruptedRun(): Promise<void> {
  * events until the user answers) never leaves an empty bubble.
  */
 /**
- * After a re-attach that streamed nothing to its end: the turns queued in this opening go once
+ * After a re-attach that found its run already ended: the turns queued in this opening go once
  * the review is asked for. Only an answer from the server says no review holds them; an open one
  * holds them in the drain. The run a turn was queued behind drains nothing here: the thread was
  * opened again since.
@@ -4325,7 +4325,6 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 	try {
 		res = await fetch(`${getApiBase()}/runs/${runId}/stream?since=${since}`);
 	} catch {
-		drainAfterReattach(gen);
 		return; // network drop — nav poll still reflects the run; user can reload
 	}
 	// Refused (register 1112): the live part is not this reader's; say so, the transcript stays.
@@ -4435,8 +4434,6 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 			// run left to review holds it (`drainQueueSoon`). A thread opened meanwhile has its
 			// own queue and review: not this re-attach's to drain.
 			if (gen === _resumeGeneration) drainQueueSoon(100);
-		} else if (!completedNormally && streamEpoch === myEpoch) {
-			drainAfterReattach(gen);
 		}
 		persistChat();
 	}

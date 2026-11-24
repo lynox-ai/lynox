@@ -33,8 +33,8 @@ let holdReopen: Map<string, Promise<void>>;
 let holdReview: Promise<void> | null;
 /** A run the server still runs in a thread, for a thread opened again to re-attach to. */
 let liveRunIn: string | null;
-/** How the stream of the run re-attached to ends: as usual, not found, unreachable, or cut off. */
-let liveStream: 'done' | 'gone' | 'unreachable' | 'cut';
+/** How the stream of the run re-attached to answers: as usual, or not found (the run had ended). */
+let liveStream: 'done' | 'gone';
 /** The transcript the server gives with the live run; long enough, the chat takes it and re-attaches. */
 let liveTranscript: Array<{ role: string; content: string }>;
 /** How often the live run's stream was asked for. */
@@ -79,11 +79,6 @@ function serve(): void {
 		if (url.includes('/runs/r-live/stream')) {
 			liveStreamGets++;
 			if (liveStream === 'gone') return json({ error: 'not found' }, 404);
-			if (liveStream === 'unreachable') throw new TypeError('Failed to fetch');
-			if (liveStream === 'cut') {
-				return new Response(new ReadableStream<Uint8Array>({ start(c) { c.error(new TypeError('network error')); } }),
-					{ status: 200, headers: { 'Content-Type': 'text/event-stream' } });
-			}
 			const enc = new TextEncoder();
 			return new Response(new ReadableStream<Uint8Array>({
 				start(c) { c.enqueue(enc.encode(`event: done\ndata: ${JSON.stringify({ result: 'ok' })}\n\n`)); c.close(); },
@@ -491,8 +486,8 @@ describe('a turn queued before a reload waits for the review the server holds', 
 		expect(runTasks, 'the queued turn waits for the new chat\'s own run').toEqual(['edit the notes', 'in the new chat']);
 	});
 
-	describe('a turn queued behind a run, when its thread is opened again and the run re-attached to ends early', () => {
-		const reopenWhileRunning = async (stream: 'gone' | 'unreachable' | 'cut'): Promise<() => void> => {
+	describe('a turn queued behind a run, when its thread is opened again and the run had ended by the re-attach', () => {
+		const reopenWhileRunning = async (stream: 'gone'): Promise<() => void> => {
 			const release = await queueBehindRun(); // t1's run streams on, a turn queued behind it
 			liveRunIn = 't1';
 			liveStream = stream;
@@ -505,16 +500,14 @@ describe('a turn queued before a reload waits for the review the server holds', 
 			return release;
 		};
 
-		for (const [stream, how] of [['gone', 'was not found any more'], ['unreachable', 'could not be reached'], ['cut', 'was cut off']] as const) {
-			it(`the queued turn is sent when the stream ${how} and no review holds it`, async () => {
-				const release = await reopenWhileRunning(stream);
-				release(); // the run from before the opening ends: it drains nothing here
-				await settle();
-				await wait(200);
-				await settle();
-				expect(runTasks, 'the turn goes once').toEqual(['edit the notes', 'then this']);
-			});
-		}
+		it('the queued turn is sent when the run had ended by then and no review holds it', async () => {
+			const release = await reopenWhileRunning('gone');
+			release(); // the run from before the opening ends: it drains nothing here
+			await settle();
+			await wait(200);
+			await settle();
+			expect(runTasks, 'the turn goes once').toEqual(['edit the notes', 'then this']);
+		});
 
 		it('the queued turn is not sent when the review cannot be read', async () => {
 			changesetFails = true;
