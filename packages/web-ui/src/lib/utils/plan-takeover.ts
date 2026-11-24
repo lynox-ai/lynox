@@ -35,6 +35,15 @@ export function setApart(text: string): string {
 }
 
 /**
+ * Whose access ended, for a line that cannot draw a box (Run now's toast): the addresses people
+ * with access chose, each with its hidden characters printed instead of read, its whitespace
+ * folded, joined by commas. Empty when the list names no one.
+ */
+export function pausedWhoText(names: readonly string[] | undefined): string {
+	return (names ?? []).map((name) => visible(name.replace(/\s+/g, ' ').trim())).filter((name) => name !== '').join(', ');
+}
+
+/**
  * {@link shownValue} without the cut: for a heading where the owner confirms which item they act on,
  * so a long name is read to its end and two names that share a beginning stay apart.
  */
@@ -249,17 +258,19 @@ export function takeoverLines(p: TakeoverPreview, formatDate: (iso: string) => s
 	// a copy from the pause: the same role under two accesses is one sentence, said once.
 	const said = new Set<string>();
 	// A person's roles on the workflow over all of their accesses; none for the person F2 names,
-	// also under their other access.
+	// also under their other access. A person is who the owner reads: two names that differ only in
+	// whitespace or a hidden character are shown alike, so they are one person here too.
+	const person = (name: string): string => shownValue(name);
 	const workflowRoles = new Map<string, Set<WorkflowRole>>();
 	for (const m of p.members) {
-		const roles = workflowRoles.get(m.name) ?? new Set<WorkflowRole>();
-		if (f2 === null || f2.by.name !== m.name) {
+		const roles = workflowRoles.get(person(m.name)) ?? new Set<WorkflowRole>();
+		if (f2 === null || person(f2.by.name) !== person(m.name)) {
 			for (const role of m.roles) if (role === 'workflow-created' || role === 'workflow-edited') roles.add(role);
 		}
-		workflowRoles.set(m.name, roles);
+		workflowRoles.set(person(m.name), roles);
 	}
 	for (const m of p.members) {
-		for (const line of roleLines(m, p.workflow?.name ?? null, workflowRoles.get(m.name) ?? new Set())) {
+		for (const line of roleLines(m, p.workflow?.name ?? null, workflowRoles.get(person(m.name)) ?? new Set())) {
 			if (said.has(line.text)) continue;
 			said.add(line.text);
 			lines.push(line);

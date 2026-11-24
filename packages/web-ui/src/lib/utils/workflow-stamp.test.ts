@@ -173,6 +173,27 @@ describe('visible — what changes how text reads is printed, not applied', () =
   it('applies to the recorded call', () => {
     expect(templateText({ url: 'https://a\u202Eb/' })).toContain('<U+202E>');
   });
+
+  it('prints every format character and the blanks that render as empty space, one real character of each kind', () => {
+    // Built from code points, so the source holds no raw invisible character.
+    const c = (cp: number): string => String.fromCodePoint(cp);
+    const cases: Array<[string, number]> = [
+      ['soft hyphen (Cf)', 0x00ad],
+      ['Arabic number sign (Cf)', 0x0600],
+      ['invisible times (Cf)', 0x2062],
+      ['musical format control (Cf, astral)', 0x1d173],
+      ['interlinear annotation anchor (Cf)', 0xfff9],
+      ['Braille pattern blank', 0x2800],
+      ['halfwidth Hangul filler', 0xffa0],
+      ['Hangul choseong filler', 0x115f],
+    ];
+    for (const [what, cp] of cases) {
+      const tag = `<U+${cp.toString(16).toUpperCase().padStart(4, '0')}>`;
+      expect(visible(`a${c(cp)}b`), what).toBe(`a${tag}b`);
+    }
+    // CONTROL: visible letters, a space, a no-break space and an emoji stay as they are.
+    expect(visible(`a b${c(0x00a0)}c ${c(0x1f600)}`)).toBe(`a b${c(0x00a0)}c ${c(0x1f600)}`);
+  });
 });
 
 describe('modeKey, onFailureKey — a sentence for each value the engine knows, none guessed', () => {

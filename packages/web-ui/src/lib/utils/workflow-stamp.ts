@@ -165,8 +165,13 @@ export function parseStampPreview(body: unknown): StampPreview | null {
  */
 // Tag characters (U+E0000–E007F) are invisible when rendered but read by a model: text hidden in a
 // harmless task. Variation selectors (U+FE00–FE0F, U+E0100–E01EF) can carry data the same way.
+// Every format character (`\p{Cf}`: the soft hyphen, the Arabic letter mark, the invisible
+// operators, the musical format controls and the rest of the class) reads as nothing or as
+// something else, so the whole class is printed, not a list of its members. Blanks that render as
+// empty space without being space are printed too: the Braille pattern blank (U+2800), the Hangul
+// fillers (U+115F, U+1160, U+3164, U+FFA0) and the combining grapheme joiner (U+034F).
 // Whole code points (`u`), so the astral ranges match.
-const HIDDEN = /[\u034F\u061C\u115F\u1160\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\u3164\uFE00-\uFE0F\uFEFF\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
+const HIDDEN = /[\p{Cf}\u034F\u115F\u1160\u180E\u2800\u3164\uFE00-\uFE0F\uFFA0\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
 export function visible(text: string): string {
   return text.replace(HIDDEN, (c) => `<U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}>`);
 }

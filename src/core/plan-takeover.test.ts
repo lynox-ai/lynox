@@ -577,7 +577,7 @@ describe('the workflow’s side', () => {
       ended(b, 'h@x.ch');
       pause(b, 'p', 'h@x.ch');
       take(b, 'p');
-      b.workflows.upsertCopy({ id: 'w-copy', name: 'W copy', definitionJson: '{"steps":[]}' }, { kind: 'mandate', email: 'm2@x.ch', mandateId: 'g-m2@x.ch' }, 'w');
+      b.workflows.upsertCopy({ id: 'w-copy', name: 'W copy', definitionJson: '{"steps":[]}', isTemplate: false }, { kind: 'mandate', email: 'm2@x.ch', mandateId: 'g-m2@x.ch' }, 'w');
       expect([from, planMandate(planAuthorshipOfWorkflow(b.workflows.authorship('w-copy')!))?.principal.email]).toEqual([from, 'm2@x.ch']);
     }
   });
@@ -612,6 +612,20 @@ describe('after the workflow was taken over on its own, a plan takeover names no
     setup(b);
     b.db.prepare(`UPDATE workflows SET ${COVER_FROM_MARKS} WHERE id = 'w'`).run(nowS());
     expect(rolesShown(b)).toEqual([null, [['e@x.ch', ['edited']], ['c@x.ch', ['created']]]]);
+  });
+
+  it('with the workflow covered and changed again by another member, the covered creator is not said to have created it', () => {
+    const b = box();
+    setup(b);
+    b.db.prepare(`UPDATE workflows SET ${COVER_FROM_MARKS} WHERE id = 'w'`).run(nowS());
+    // A change after the takeover: the editor mark is new and uncovered, the creator mark stays covered.
+    editor(b, 'workflows', 'w', 'd@x.ch', 'g-d@x.ch', '2026-03-01 10:00:00');
+    renewed(b, 'd@x.ch');
+    const shown = rolesShown(b) as [unknown, Array<[string, string[]]>];
+    const roles = new Map(shown[1]);
+    expect(roles.get('c@x.ch')).toEqual(['created']);
+    expect(roles.get('e@x.ch')).toEqual(['edited']);
+    expect(roles.get('d@x.ch')).toEqual(['workflow-edited']);
   });
 });
 
@@ -1022,7 +1036,7 @@ describe('no other write touches the cover', () => {
     const tasks = new TaskManager(b.history);
     tasks.complete('p');
     tasks.reopen('p');
-    b.workflows.upsertCopy({ id: 'w-copy', name: 'W copy', definitionJson: '{"steps":[]}' }, { kind: 'owner' }, 'w');
+    b.workflows.upsertCopy({ id: 'w-copy', name: 'W copy', definitionJson: '{"steps":[]}', isTemplate: false }, { kind: 'owner' }, 'w');
     expect(cover()).toEqual(before);
     expect(memberOf(b, 'p')).toBeUndefined();
   });

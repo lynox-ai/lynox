@@ -19,7 +19,7 @@ import type Database from 'better-sqlite3';
 import type { NotificationMessage } from './notification-router.js';
 import type { NoticeLanguage } from './notice-language.js';
 import type { RequestPrincipal } from './request-principal.js';
-import { MANDATE_TAG_PREFIX, planMandate, planMembers } from './request-principal.js';
+import { MANDATE_TAG_PREFIX, creatorCovered, editorCovered, planAuthorshipOf, planMandate, planMembers } from './request-principal.js';
 import { processErrorText } from './error-egress.js';
 
 /**
@@ -170,13 +170,32 @@ export function consentLetsThrough(row: Pick<PausePlanRow, 'effect' | 'confirmed
   return !(unstamped && (row.edited_by ?? row.created_by ?? '').startsWith(MANDATE_TAG_PREFIX));
 }
 
-/** The roles a member has on one side of the plan, from that side's columns. */
-function rolesOn(a: WorkflowAuthorRow, member: Extract<RequestPrincipal, { kind: 'mandate' }>, side: 'trigger' | 'workflow'): PauseRole[] {
+/**
+ * The roles a member has on one side of the plan, from that side's columns. A mark the owner took
+ * over (`covered_*`) is the owner's now, as {@link planMandate} reads it, so it gives its member no
+ * role: after a takeover and a later change by someone else, the one who made it is not said to
+ * have made it.
+ */
+export function rolesOn(a: WorkflowAuthorRow, member: Extract<RequestPrincipal, { kind: 'mandate' }>, side: 'trigger' | 'workflow'): PauseRole[] {
   const tag = `${MANDATE_TAG_PREFIX}${member.email}`;
   const roles: PauseRole[] = [];
-  if (a.created_by === tag && a.created_mandate_id === (member.mandateId ?? null)) roles.push(side === 'trigger' ? 'created' : 'workflow-created');
-  if (a.mandate_editor === tag && a.mandate_editor_id === (member.mandateId ?? null)) roles.push(side === 'trigger' ? 'edited' : 'workflow-edited');
+  const authorship = planAuthorshipOf(a);
+  if (a.created_by === tag && a.created_mandate_id === (member.mandateId ?? null) && !creatorCovered(authorship)) roles.push(side === 'trigger' ? 'created' : 'workflow-created');
+  if (a.mandate_editor === tag && a.mandate_editor_id === (member.mandateId ?? null) && !editorCovered(authorship)) roles.push(side === 'trigger' ? 'edited' : 'workflow-edited');
   return roles;
+}
+
+/** The roles a pause recorded that a side's marks still carry: a mark taken over since gives none. */
+export function rolesStillMarked(roles: readonly PauseRole[], trigger: WorkflowAuthorRow, workflow: WorkflowAuthorRow | undefined): PauseRole[] {
+  const t = planAuthorshipOf(trigger);
+  const w = workflow === undefined ? undefined : planAuthorshipOf(workflow);
+  return roles.filter((r) => {
+    if (r === 'created') return !creatorCovered(t);
+    if (r === 'edited') return !editorCovered(t);
+    if (r === 'workflow-created') return w === undefined || !creatorCovered(w);
+    if (r === 'workflow-edited') return w === undefined || !editorCovered(w);
+    return true;
+  });
 }
 
 /** A plan's members, read synchronously from its row and its workflow's row by exact id. */

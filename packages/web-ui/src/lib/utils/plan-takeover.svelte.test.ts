@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
-import { takeoverLines as markedLines, refusalText as markedRefusal, endedNotices as markedNotices, planList, plainText, segments, shownValue, nameOfTag, type TakeoverPreview, type TakeoverMember } from './plan-takeover.js';
+import { takeoverLines as markedLines, refusalText as markedRefusal, endedNotices as markedNotices, pausedWhoText, planList, plainText, segments, shownValue, nameOfTag, type TakeoverPreview, type TakeoverMember } from './plan-takeover.js';
 import { setLocale, getLocale } from '../i18n.svelte.js';
 
 const before = getLocale();
@@ -92,6 +92,16 @@ describe('F2: the workflow is taken over with the plan', () => {
 		expect(takeoverLines(p, fmt).find((l) => l.kind === 'f2')?.text).toBe(
 			'Dieser Plan nutzt den Workflow „Rechnungen“, den ida@x.ch geändert hat. Übernimmst du den Plan, übernimmst du auch den Workflow. Dann laufen auch diese Pläne wieder: A, B.',
 		);
+	});
+	it('a person is who the owner reads: names that differ only in whitespace or a hidden mark are one person', () => {
+		// Built from a code point, so the source holds no raw invisible character.
+		const zw = String.fromCodePoint(0x200b);
+		const spaced = { name: ' ida@x.ch ', roles: ['workflow-edited'] as TakeoverMember['roles'], ended: false, reason: null };
+		const zwsp = { name: `ida@x.ch${zw}`, roles: ['workflow-edited'] as TakeoverMember['roles'], ended: false, reason: null };
+		// Whitespace folds away in what the owner reads: F2's person, so no second workflow line.
+		expect(kinds(preview({ members: [wfMember(['workflow-edited']), spaced], workflow: wf })).filter((k) => k === 'role' || k === 'f2')).toEqual(['f2']);
+		// A hidden character is printed, so the owner reads a different name: that one is a person of its own.
+		expect(kinds(preview({ members: [wfMember(['workflow-edited']), zwsp], workflow: wf })).filter((k) => k === 'role' || k === 'f2')).toEqual(['role', 'f2']);
 	});
 	it('the role F2 says is not said again for the same person\'s other access', () => {
 		// Paused for two accesses of one person, the second renewed: both entries carry the copy of the role.
@@ -374,9 +384,9 @@ describe('the refusals at the button', () => {
 describe('the notices above the plans, with the full address', () => {
 	const end = (email: string, reason: 'expired' | 'revoked', warned = false) => ({ email, reason, ends_at: '2026-10-31T00:00:00.000Z', warned });
 	it('one per ended access, counted over the paused plans', () => {
-		const plans = [{ title: 'A', paused_ended: [end('ida@treuhand-mueller-partner.ch', 'expired')] }, { title: 'B', paused_ended: [end('ida@treuhand-mueller-partner.ch', 'expired'), end('bo@x.ch', 'revoked')] }, { title: 'C' }];
+		const plans = [{ title: 'A', paused_ended: [end('ida@example.invalid', 'expired')] }, { title: 'B', paused_ended: [end('ida@example.invalid', 'expired'), end('bo@x.ch', 'revoked')] }, { title: 'C' }];
 		expect(endedNotices(plans, fmt)).toEqual([
-			'Für ida@treuhand-mueller-partner.ch war ein Zugang bis zum [2026-10-31] eingetragen. Seitdem sind 2 Pläne pausiert, an denen ida@treuhand-mueller-partner.ch etwas angelegt oder geändert hat. Übernimm jeden Plan, der weiterlaufen soll. Das gilt auch, wenn der Zugang inzwischen verlängert wurde: Die Pläne laufen erst wieder, wenn du sie übernimmst. Eine Vorwarnung gab es nicht.',
+			'Für ida@example.invalid war ein Zugang bis zum [2026-10-31] eingetragen. Seitdem sind 2 Pläne pausiert, an denen ida@example.invalid etwas angelegt oder geändert hat. Übernimm jeden Plan, der weiterlaufen soll. Das gilt auch, wenn der Zugang inzwischen verlängert wurde: Die Pläne laufen erst wieder, wenn du sie übernimmst. Eine Vorwarnung gab es nicht.',
 			'Der Zugang von bo@x.ch wurde widerrufen. Am Plan „B“ hat bo@x.ch etwas angelegt oder geändert, er ist darum pausiert. Übernimm ihn, wenn er weiterlaufen soll.',
 		]);
 	});
@@ -395,5 +405,22 @@ describe('the marks around a value someone else wrote', () => {
 		expect(segments('a b c')).toEqual([{ text: 'a b c', foreign: false }]);
 		expect(segments('a b c')).toEqual([{ text: 'a b c', foreign: false }]);
 		expect(plainText(`x ${shownValue('y')} z`)).toBe('x y z');
+	});
+});
+
+describe('Run now\'s toast: whose access ended, where no box can be drawn', () => {
+	// Built from code points, so the source holds no raw invisible character.
+	const c = (cp: number): string => String.fromCodePoint(cp);
+	it('prints each name\'s hidden characters instead of reading them, and folds its whitespace', () => {
+		expect(pausedWhoText([`ida${c(0x202e)}moc.example.invalid`, `  max@example.invalid${c(0x00ad)} `]))
+			.toBe('ida<U+202E>moc.example.invalid, max@example.invalid<U+00AD>');
+	});
+	it('names no one for an empty or missing list, so the toast says it without a name', () => {
+		expect(pausedWhoText(undefined)).toBe('');
+		expect(pausedWhoText([])).toBe('');
+		expect(pausedWhoText(['   '])).toBe('');
+	});
+	it('CONTROL: a plain address stays as it is', () => {
+		expect(pausedWhoText(['ida@example.invalid'])).toBe('ida@example.invalid');
 	});
 });
