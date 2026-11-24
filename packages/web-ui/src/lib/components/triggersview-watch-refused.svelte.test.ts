@@ -150,11 +150,14 @@ describe('a watch the network policy keeps from its page', () => {
 		const card = [...target.querySelectorAll<HTMLElement>('[data-trigger-title]')].find((e) => e.textContent === 'Beides')!.closest<HTMLElement>('.group')!;
 		expect(card.querySelector('[data-trigger-paused]')!.textContent).toBe('Pausiert · Übernahme nötig');
 		expect(card.querySelector('[data-blocked-reason]')!.textContent).toBe('Liest die Seite nicht: Diese Instanz liest keine Webseiten. Ändern kann das der Betreiber der Instanz.');
+		// Run now is left out for both reasons; the pause switch only because the plan waits for its
+		// takeover (a blocked watch that is not paused keeps it, see above). The view hides what would
+		// read nothing; what stops the read is the policy check on the server, not this row.
 		expect(card.querySelector('[data-trigger-run-now]')).toBeNull();
 		expect(card.querySelector('[data-trigger-toggle]')).toBeNull();
-		expect(card.querySelector('[data-trigger-takeover]')).not.toBeNull();
+		expect(card.querySelector('[data-trigger-takeover]')!.textContent!.trim()).toBe('Übernehmen');
 		expect([...card.querySelectorAll('button')].map((b) => b.getAttribute('aria-label') ?? b.textContent!.trim()))
-			.toEqual(['Im Chat verwalten', 'Löschen', card.querySelector('[data-trigger-takeover]')!.textContent!.trim()]);
+			.toEqual(['Im Chat verwalten', 'Löschen', 'Übernehmen']);
 	});
 
 	it('CONTROL: a watch whose page is read offers run now', async () => {
