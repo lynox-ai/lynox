@@ -1882,6 +1882,8 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 		held.queued = false;
 		held.failed = true;
 		persistChatNow();
+		// The messages behind it do not wait on it: each is sent and, held the same way, failed the same way.
+		drainQueueSoon(100);
 	};
 
 	if (res.status === 409 && await reviewPendingIn(res)) {
@@ -2311,8 +2313,10 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	}
 
 	// Process queue: send next queued message. Small delay so the UI updates before the next
-	// run starts; a review this run left open holds it (`drainQueueSoon`).
-	drainQueueSoon(100);
+	// run starts; a review this run left open holds it (`drainQueueSoon`). Only the queue of the
+	// thread this run ran in, as it was opened then: a thread shown since has its own queue and
+	// review, and its opening drains them.
+	if (sessionId === sid && _resumeGeneration === turnGen) drainQueueSoon(100);
 }
 
 /**

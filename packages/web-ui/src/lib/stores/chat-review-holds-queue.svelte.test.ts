@@ -420,6 +420,61 @@ describe('a turn queued before a reload waits for the review the server holds', 
 		expect(runTasks, 'nothing sent in t9 before it asked for its review').toEqual([]);
 	});
 
+	it('a run that ends after another thread opened does not drain that thread\'s queue', async () => {
+		let release!: () => void;
+		holdFirstRun = new Promise<void>((r) => { release = r; });
+		void store.sendMessage('edit the notes'); // t1's run streams on
+		await settle();
+		seed(); // t9 has a turn queued; its review cannot be read, so its opening keeps the turn waiting
+		changesetFails = true;
+		await store.resumeThread('t9');
+		await settle();
+		await wait(200);
+		await settle();
+		expect(store.getQueueLength(), 'positive control: t9\'s turn waits').toBe(1);
+		expect(runTasks, 'positive control: the opening sent nothing').toEqual(['edit the notes']);
+		release(); // t1's run ends now
+		await settle();
+		await wait(200);
+		await settle();
+		expect(runTasks, 'the turn t9 keeps waiting is not sent').toEqual(['edit the notes']);
+		expect(store.getMessages().find((m) => m.content === 'typed before reload')?.queued).toBe(true);
+	});
+
+	it('a run that ends after its thread was opened again does not send the turn that opening keeps waiting', async () => {
+		const release = await queueBehindRun(); // t1's run streams on, a turn queued behind it
+		changesetFails = true; // the review cannot be read, so the opening keeps the turn waiting
+		await store.resumeThread('t1');
+		await settle();
+		await wait(200);
+		await settle();
+		expect(store.getQueueLength(), 'positive control: the turn waits').toBe(1);
+		expect(runTasks, 'positive control: the opening sent nothing').toEqual(['edit the notes']);
+		release(); // the run from before the opening ends now
+		await settle();
+		await wait(200);
+		await settle();
+		expect(runTasks, 'the waiting turn is not sent').toEqual(['edit the notes']);
+	});
+
+	it('a run that ends after a new chat was started does not drain the new chat\'s queue', async () => {
+		let release!: () => void;
+		holdFirstRun = new Promise<void>((r) => { release = r; });
+		void store.sendMessage('edit the notes'); // t1's run streams on
+		await settle();
+		store.newChat();
+		holdLaterRuns = new Promise<void>(() => {}); // the new chat's run streams on
+		void store.sendMessage('in the new chat');
+		await settle();
+		await store.sendMessage('queued in the new chat');
+		expect(store.getQueueLength(), 'positive control: the new chat has a turn queued').toBe(1);
+		release(); // t1's run ends now
+		await settle();
+		await wait(200);
+		await settle();
+		expect(runTasks, 'the queued turn waits for the new chat\'s own run').toEqual(['edit the notes', 'in the new chat']);
+	});
+
 	it('with no review the restored turn is sent (control)', async () => {
 		seed();
 		await store.resumeThread('t9');
