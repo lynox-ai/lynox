@@ -128,9 +128,15 @@ export function stripHiddenInName(name: string): string {
   return Array.from(name).filter((_, i) => !drop.has(i)).join('');
 }
 
-/** The refusal the model reads when a write carries a hidden character; the caller adds its own `Error:` prefix. */
-export function hiddenCharRefusal(what: string, hit: HiddenChar): string {
-  return `refused to save this ${what} — ${hit.path} contains a character that renders as nothing (${hit.codePoint}). Nothing was saved. `
+/**
+ * The refusal the model reads when a write carries a hidden character; the caller adds its own `Error:` prefix.
+ * `steps: true` for a workflow's step list: a place in it is named first as every other text names a
+ * step to the model, counted from 1 (`step #3`), then by its path, counted from 0 (`steps[2].task`) (U-316).
+ */
+export function hiddenCharRefusal(what: string, hit: HiddenChar, { steps = false }: { steps?: boolean } = {}): string {
+  const at = steps ? /^steps\[(\d+)\]/.exec(hit.path) : null;
+  const where = at ? `step #${String(Number(at[1]) + 1)} (${hit.path})` : hit.path;
+  return `refused to save this ${what} — ${where} contains a character that renders as nothing (${hit.codePoint}). Nothing was saved. `
     + 'Characters like this can carry instructions that no one can see. Write the text again in your own words, '
     + `without copying it from another plan or workflow, and call this tool again: until that call succeeds, the ${what} does not exist.`;
 }
