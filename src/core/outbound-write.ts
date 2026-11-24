@@ -1044,6 +1044,7 @@ function escapedLiteralHides(text: string, mask: (text: string) => string, seen:
 function escapedLiterals(text: string): string[] {
   const out: string[] = [];
   let from = 0;
+  // run-group-starter: a synchronous scan over a string; it starts nothing that outlives the call.
   for (;;) {
     const start = text.indexOf('"', from);
     if (start < 0) return out;
