@@ -186,13 +186,21 @@ describe('visible — what changes how text reads is printed, not applied', () =
       ['Braille pattern blank', 0x2800],
       ['halfwidth Hangul filler', 0xffa0],
       ['Hangul choseong filler', 0x115f],
+      ['Mongolian free variation selector (default-ignorable)', 0x180b],
+      ['Khmer inherent vowel (default-ignorable)', 0x17b4],
+      ['unassigned default-ignorable', 0xfff0],
+      ['noncharacter', 0xfdd0],
+      ['line separator', 0x2028],
+      ['C0 control', 0x0001],
+      ['C1 control (next line)', 0x0085],
     ];
     for (const [what, cp] of cases) {
       const tag = `<U+${cp.toString(16).toUpperCase().padStart(4, '0')}>`;
       expect(visible(`a${c(cp)}b`), what).toBe(`a${tag}b`);
     }
-    // CONTROL: visible letters, a space, a no-break space and an emoji stay as they are.
-    expect(visible(`a b${c(0x00a0)}c ${c(0x1f600)}`)).toBe(`a b${c(0x00a0)}c ${c(0x1f600)}`);
+    // CONTROL: visible letters, a space, a no-break space, an emoji, and the tab and line breaks of
+    // a multi-line text stay as they are.
+    expect(visible(`a b${c(0x00a0)}c ${c(0x1f600)}\td\r\ne`)).toBe(`a b${c(0x00a0)}c ${c(0x1f600)}\td\r\ne`);
   });
 });
 

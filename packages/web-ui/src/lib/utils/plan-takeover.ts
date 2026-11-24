@@ -258,9 +258,10 @@ export function takeoverLines(p: TakeoverPreview, formatDate: (iso: string) => s
 	// a copy from the pause: the same role under two accesses is one sentence, said once.
 	const said = new Set<string>();
 	// A person's roles on the workflow over all of their accesses; none for the person F2 names,
-	// also under their other access. A person is who the owner reads: two names that differ only in
-	// whitespace or a hidden character are shown alike, so they are one person here too.
-	const person = (name: string): string => shownValue(name);
+	// also under their other access. A person is who the owner reads, uncut: two names that differ
+	// only in whitespace read alike, so they are one person here too, and a hidden character is
+	// printed, so a name that carries one is a person of its own.
+	const person = (name: string): string => visible(name.replace(/\s+/g, ' ').trim());
 	const workflowRoles = new Map<string, Set<WorkflowRole>>();
 	for (const m of p.members) {
 		const roles = workflowRoles.get(person(m.name)) ?? new Set<WorkflowRole>();

@@ -176,7 +176,7 @@ export function consentLetsThrough(row: Pick<PausePlanRow, 'effect' | 'confirmed
  * role: after a takeover and a later change by someone else, the one who made it is not said to
  * have made it.
  */
-export function rolesOn(a: WorkflowAuthorRow, member: Extract<RequestPrincipal, { kind: 'mandate' }>, side: 'trigger' | 'workflow'): PauseRole[] {
+function rolesOn(a: WorkflowAuthorRow, member: Extract<RequestPrincipal, { kind: 'mandate' }>, side: 'trigger' | 'workflow'): PauseRole[] {
   const tag = `${MANDATE_TAG_PREFIX}${member.email}`;
   const roles: PauseRole[] = [];
   const authorship = planAuthorshipOf(a);
@@ -185,15 +185,28 @@ export function rolesOn(a: WorkflowAuthorRow, member: Extract<RequestPrincipal, 
   return roles;
 }
 
-/** The roles a pause recorded that a side's marks still carry: a mark taken over since gives none. */
-export function rolesStillMarked(roles: readonly PauseRole[], trigger: WorkflowAuthorRow, workflow: WorkflowAuthorRow | undefined): PauseRole[] {
-  const t = planAuthorshipOf(trigger);
-  const w = workflow === undefined ? undefined : planAuthorshipOf(workflow);
+/**
+ * The roles a pause recorded for a member, without those whose mark the owner has taken over since.
+ * A creation is one mark that never moves, so once a side's creator mark is covered no recorded
+ * creation of it holds. A change moves on with each edit: asked of the member's own change
+ * (`covered_edited_*` names it), not of the side's present one, since a side changed again after
+ * its takeover carries a new, uncovered mark, and the change taken over is still the owner's.
+ */
+export function rolesStillMarked(
+  roles: readonly PauseRole[],
+  member: { readonly email: string; readonly mandateId?: string | undefined },
+  trigger: WorkflowAuthorRow,
+  workflow: WorkflowAuthorRow | undefined,
+): PauseRole[] {
+  const tag = `${MANDATE_TAG_PREFIX}${member.email}`;
+  const id = member.mandateId ?? null;
+  const creationTakenOver = (a: WorkflowAuthorRow | undefined): boolean => a !== undefined && creatorCovered(planAuthorshipOf(a));
+  const changeTakenOver = (a: WorkflowAuthorRow | undefined): boolean => a !== undefined && a.covered_edited_by === tag && a.covered_edited_id === id;
   return roles.filter((r) => {
-    if (r === 'created') return !creatorCovered(t);
-    if (r === 'edited') return !editorCovered(t);
-    if (r === 'workflow-created') return w === undefined || !creatorCovered(w);
-    if (r === 'workflow-edited') return w === undefined || !editorCovered(w);
+    if (r === 'created') return !creationTakenOver(trigger);
+    if (r === 'edited') return !changeTakenOver(trigger);
+    if (r === 'workflow-created') return !creationTakenOver(workflow);
+    if (r === 'workflow-edited') return !changeTakenOver(workflow);
     return true;
   });
 }
