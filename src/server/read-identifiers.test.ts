@@ -28,6 +28,8 @@ const NOT_IDENTIFYING = new Set([
   'limit', 'offset', 'before', 'since', 'fromSeq', 'days', 'dateFrom', 'dateTo', 'tzOffsetMin', 'window',
   // Filters over a list: what kind, not which one.
   'status', 'type', 'stage', 'bucket', 'model', 'includeArchived', 'snoozedOnly', 'hidden', 'reveal', 'view',
+  // A bulk run's targets: only the ones its plan changes, a flag.
+  'changed',
   // How much of each listed item to send: the backup list's per-file entries.
   'files',
   // Free text: content, never logged.
