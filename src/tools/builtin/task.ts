@@ -12,6 +12,7 @@ import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/ins
 import { TriggerFieldsNotCarriedError, WATCH_OVERRIDE_REFUSAL, watchPolicyRefusal, type BeforeTriggerWrite } from '../../core/task-manager.js';
 import { readAddressWrites } from '../../core/outbound-write.js';
 import { carriesAddress, hostTargets } from '../../core/send-target.js';
+import type { HostPolicyContext } from '../../core/network-guard.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
 
@@ -344,6 +345,19 @@ function watchedUrl(input: TaskCreateInput): string | null {
   return input.watch_url ? input.watch_url : null;
 }
 
+/**
+ * Why no watch is created on `url`, as the call's error, or `null`. A watch only reads its page,
+ * unattended and again and again: an address a server may run as a write (`?_method=DELETE`, a
+ * GraphQL mutation) would send that write on every check, and a page the network policy forbids
+ * is not watched only to fail on every poll.
+ */
+function watchRefusal(url: string, ctx: HostPolicyContext): string | null {
+  if (readAddressWrites(url)) return `Error: watch_url ${WATCH_OVERRIDE_REFUSAL} No watch was created. Pass the address of the page without the override or the mutation.`;
+  const refusedBy = watchPolicyRefusal(url, ctx);
+  if (refusedBy !== null) return `Error: watch_url not watched: ${refusedBy.why} No watch was created.${refusedBy.wayOut === '' ? '' : ` ${refusedBy.wayOut}`}`;
+  return null;
+}
+
 export const taskCreateTool: ToolEntry<TaskCreateInput> = {
   undo: 'compensatable',
   // After content from outside, the page a watch reads goes through the origin check as a read: the
@@ -352,6 +366,12 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
   // every check. It is checked like `http_request`'s GET, once, when the watch is created; its
   // question says how often the page is read, and that the yes does not confirm the watch
   // (`watchEveryMinutes`). A page a search listed needs no question (`readAddress`).
+  // A watch the handler would refuse (`watchRefusal`) is refused before that question: a yes to
+  // it could not create the watch.
+  refusesUnasked: (input, ctx) => {
+    const url = watchedUrl(input);
+    return url === null ? null : watchRefusal(url, ctx);
+  },
   sendTargetsWhenLatched: (input) => {
     const url = watchedUrl(input);
     return url === null ? null : hostTargets(url);
@@ -600,12 +620,10 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
       }
 
       if (input.watch_url) {
-        // A watch only reads its page, unattended and again and again: an address a server may
-        // run as a write (`?_method=DELETE`, a GraphQL mutation) would send that write on every check.
-        if (readAddressWrites(input.watch_url)) return `Error: watch_url ${WATCH_OVERRIDE_REFUSAL} No watch was created. Pass the address of the page without the override or the mutation.`;
-        // A watch the policy forbids is not created only to fail on every poll.
-        const refusedBy = watchPolicyRefusal(input.watch_url, agent.toolContext);
-        if (refusedBy !== null) return `Error: watch_url not watched: ${refusedBy.why} No watch was created.${refusedBy.wayOut === '' ? '' : ` ${refusedBy.wayOut}`}`;
+        // Read before anyone is asked too (`refusesUnasked`); checked here again for a call that
+        // reaches the handler another way.
+        const refused = watchRefusal(input.watch_url, agent.toolContext);
+        if (refused !== null) return refused;
         // Floor the interval at 5 min: the JSON-schema `minimum` is only advisory
         // for an LLM-supplied arg, so clamp defensively to bound fetch + LLM spend.
         const intervalMinutes = Math.max(5, input.watch_interval_minutes ?? 60);

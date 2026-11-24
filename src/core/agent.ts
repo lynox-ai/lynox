@@ -475,6 +475,9 @@ export function providerSearchAdmitted(ctx: ToolContext | undefined): boolean {
  *  tool of the turn that ran it ({@link holdsProviderSearch}). */
 const PROVIDER_SEARCH_TOOL = 'web_search' as const;
 
+/** A tool's `refusesUnasked` threw: the call is refused, and the text names no detail of the throw. */
+export const REFUSES_UNASKED_UNREADABLE = 'Error: not run: lynox could not check this call before running it, so nothing was done. Trying it again may work.';
+
 /** Whether message content carries a server tool the provider ran itself, its call or its result:
  *  the web search, and any server tool offered later, which may reach outside content too. All but
  *  the lazy tools' tool search, which searches the request's own tool definitions and fetches
@@ -5523,6 +5526,20 @@ export class Agent implements IAgent {
     // A call the guard refuses below without asking anyone (a run with no prompt) keeps the guard's
     // refusal, which names the write; it is refused either way.
     const guardRefusesUnasked = effectiveSignal !== null && !filingCall && !this.promptUser;
+    // A call its handler would refuse anyway is refused before either question: a yes could not
+    // change the outcome (`ToolEntry.refusesUnasked`). It only refuses; `null` changes nothing.
+    if (tool.refusesUnasked !== undefined) {
+      let unasked: string | null;
+      try {
+        unasked = tool.refusesUnasked(tc.input, this.toolContext);
+      } catch {
+        unasked = REFUSES_UNASKED_UNREADABLE;
+      }
+      if (unasked !== null) {
+        await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: unasked, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
+        return { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(unasked), is_error: true };
+      }
+    }
     const originCheck = await this._checkSendOrigin(tc, tool, filingCall, guardRefusesUnasked, taintedBeforeThisCall);
     if ('refusal' in originCheck) return originCheck.refusal;
     if (effectiveSignal && !filingCall) {

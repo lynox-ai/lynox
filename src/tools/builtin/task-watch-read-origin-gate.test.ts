@@ -15,7 +15,7 @@ vi.mock('@anthropic-ai/sdk', () => {
 });
 vi.mock('../../core/stream.js', () => ({ StreamProcessor: vi.fn() }));
 
-import { Agent } from '../../core/agent.js';
+import { Agent, REFUSES_UNASKED_UNREADABLE } from '../../core/agent.js';
 import { OwnerKnownTargets } from '../../core/owner-known-targets.js';
 import { ConversationLatch } from '../../core/conversation-latch.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
@@ -145,6 +145,44 @@ describe('a watch task_create sets up after foreign content', () => {
     await call(agent, { title: 'Watch', watch_url: EVIL });
     expect(ask.asked).toEqual([]);
     expect(tool.created).toEqual([EVIL]);
+  });
+
+  const withPolicy = (agent: Agent, networkPolicy: 'allow-list' | 'deny-all'): Agent => {
+    Object.assign(agent.toolContext, { networkPolicy, allowedHosts: new Set(['listed.example']), allowedWildcards: [] });
+    return agent;
+  };
+
+  it('a watch the network policy refuses is refused without a question, with the refusal the handler gives', async () => {
+    const tool = taskCreate();
+    const ask = asker('Allow');
+    const outside = await call(withPolicy(agentOf(tool, ask.fn), 'allow-list'), { title: 'Watch', watch_url: EVIL });
+    expect(ask.asked).toEqual([]);
+    expect(outside.is_error).toBe(true);
+    expect(String(outside.content)).toContain("Error: watch_url not watched: its host collect.evil.example is not in this instance's network allow-list. No watch was created. The operator can add the host to the allow-list (network_policy).");
+    const denied = await call(withPolicy(agentOf(tool, ask.fn), 'deny-all'), { title: 'Watch', watch_url: 'https://listed.example/p' });
+    expect(ask.asked).toEqual([]);
+    expect(String(denied.content)).toContain("Error: watch_url not watched: this instance's network_policy is deny-all, so lynox reads no web page. No watch was created. Only the operator can change network_policy.");
+    expect(tool.created).toEqual([]);
+  });
+
+  it('CONTROL: a watch on a host the allow-list holds is still asked about after foreign content', async () => {
+    const tool = taskCreate();
+    const ask = asker('Deny');
+    await call(withPolicy(agentOf(tool, ask.fn), 'allow-list'), { title: 'Watch', watch_url: 'https://listed.example/d/secret' });
+    expect(ask.asked).toHaveLength(1);
+    expect(ask.asked[0]).toMatch(/^Watch the page on "listed\.example"\? /);
+    expect(tool.created).toEqual([]);
+  });
+
+  it('a check before the question that throws refuses the call with a fixed text, asks nothing and runs nothing', async () => {
+    const tool = { ...taskCreate(), refusesUnasked: () => { throw new Error('policy store at /secret/path is gone'); } } as unknown as ToolEntry & { created: string[] };
+    const ask = asker('Allow');
+    const result = await call(agentOf(tool, ask.fn), { title: 'Watch', watch_url: 'https://listed.example/p' });
+    expect(result.is_error).toBe(true);
+    expect(String(result.content)).toContain(REFUSES_UNASKED_UNREADABLE);
+    expect(String(result.content)).not.toContain('/secret/path');
+    expect(ask.asked).toEqual([]);
+    expect(tool.created).toEqual([]);
   });
 
   it('CONTROL: a call the handler does not turn into a watch is not asked about (a schedule or a workflow comes first)', async () => {
