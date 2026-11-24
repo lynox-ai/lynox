@@ -1,13 +1,18 @@
 <script lang="ts">
+	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
+	import StampPreviewBody from './StampPreviewBody.svelte';
+	import WorkflowTakeoverDialog from './WorkflowTakeoverDialog.svelte';
+	import MarkedLine from './MarkedLine.svelte';
+	import { shownValue, shownWhole } from '../utils/plan-takeover.js';
 	import { attemptKey, clearAttemptKey, clearAllAttemptKeys, attemptIsOver } from '../utils/run-attempt-key.js';
 	import { composeRunNotice, refusalBanner } from '../utils/run-notice.js';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
-	import { awaitsLineKey, awaitsStampRefusal, confirmOutcome, offersStamp, stillOffLine, parseStampPreview, stepHeading, templateText, timeoutText, visible, type StampPreview } from '../utils/workflow-stamp.js';
+	import { awaitsLineKey, awaitsStampRefusal, confirmOutcome, offersStamp, stillOffLine, parseStampPreview, stampChanges, visible, type StampChanges, type StampPreview } from '../utils/workflow-stamp.js';
 
 	// The card actions show on hover only where there is room beside the name AND a pointer that
 	// hovers. Below `md` they sit under the name and stay visible, and on a device without hover
@@ -58,7 +63,8 @@
 		awaitsStamp?: boolean;
 		// Whom Run runs it as, when that is a person the owner let in (1055): the email, and whether
 		// their access ended, which refuses the run. Sent to the owner only; absent for the owner's own.
-		runs_as?: { person: string; ended: boolean; covered_by_takeover?: number };
+		/** `undetermined`: the mark carries no grant id, so whose access it was cannot be told. */
+		runs_as?: { person: string; ended: boolean; undetermined?: boolean; covered_by_takeover?: number };
 		// Sent to a mandate for a workflow it may not schedule as it is (UX-058, ux U-085): another
 		// person's, or one whose author lynox cannot read. Never whose it is.
 		schedule_refusal?: 'foreign' | 'unreadable';
@@ -197,23 +203,82 @@
 	// offers no Run for it (the engine refuses one), and its schedule names the asking steps.
 	// A workflow whose mandate's access ended runs for no one (the run is refused, 1055), so it is not
 	// run, scheduled or changed from here; renaming and deleting stay (UX-053, ux U-079).
+	// Its name is set apart too: `runs_as` is the mandate that made or last changed it, and a change
+	// is not recorded by field, so the name may be that person's (a renamed workflow counts the same).
 	function accessEnded(wf: SavedWorkflow): boolean {
 		return wf.runs_as?.ended === true;
 	}
 
 	// The sentence under an ended workflow's buttons: with paused plans whose takeover moves the
-	// workflow to the owner, the way through them (U-079 (b), U-119); otherwise a new workflow (a).
+	// workflow to the owner, the way through them; otherwise the workflow's own
+	// takeover, whose button stands beside it.
 	function endedNote(wf: SavedWorkflow): string {
-		const person = wf.runs_as?.person ?? '';
-		const unnamed = person === '' ? '_unnamed' : '';
+		// A mark whose person cannot be told is not named by the address it carries.
+		const raw = wf.runs_as?.undetermined === true ? '' : wf.runs_as?.person ?? '';
+		const unnamed = raw === '' ? '_unnamed' : '';
+		const person = raw === '' ? '' : shownValue(raw);
 		const paused = wf.runs_as?.covered_by_takeover ?? 0;
 		if (paused > 0) {
 			return tf(`workflow_library.ended_note_paused_${paused === 1 ? 'one' : 'other'}${unnamed}`, {
-				person, n: String(paused), tab: t('hub.automation.triggers'), button: t('takeover.button'),
+				person, n: String(paused), tab: t('hub.automation.triggers'), button: t('takeover.button'), review: t('workflow_library.stamp.review'),
 			});
 		}
-		return tf(`workflow_library.ended_note${unnamed}`, { person });
+		return tf(`workflow_library.takeover.note${unnamed}`, { person });
 	}
+
+	// The workflow's own takeover: offered wherever its person's access ended, which is exactly where
+	// the engine allows it (the library's `ended` and the takeover read the same mark and end).
+	let takeoverWf = $state<SavedWorkflow | null>(null);
+	// The button that opened it: focus goes back there when the dialog closes, or to the same
+	// workflow's button where the list was drawn again; with none on the page, to the library's
+	// heading (a card has no focusable head).
+	let takeoverOpener: HTMLElement | null = null;
+	let libraryHeading = $state<HTMLElement | null>(null);
+
+	function focusAfterTakeover(opener: HTMLElement | null): void {
+		const id = opener?.dataset['takeoverFor'];
+		const again = opener?.isConnected === true
+			? opener
+			: [...document.querySelectorAll<HTMLElement>('[data-testid="takeover-open"]')].find((b) => id !== undefined && b.dataset['takeoverFor'] === id);
+		if (again !== undefined) again.focus();
+		else libraryHeading?.focus();
+	}
+
+	function openTakeover(wf: SavedWorkflow, opener: HTMLElement): void {
+		takeoverOpener = opener;
+		takeoverWf = wf;
+	}
+
+	function closeTakeover(): void {
+		takeoverWf = null;
+		const opener = takeoverOpener;
+		takeoverOpener = null;
+		focusAfterTakeover(opener);
+	}
+
+	async function takenOver(stillOff: unknown): Promise<void> {
+		takeoverWf = null;
+		const opener = takeoverOpener;
+		takeoverOpener = null;
+		error = '';
+		const once = stillOffLine(stillOff);
+		stampOnceLine = once ? tf(once.key, { n: String(once.n) }) : '';
+		await loadWorkflows();
+		notice = t('workflow_library.takeover.done');
+		refocus = { opener };
+	}
+
+	// After the takeover, once the list loaded again is on screen: focus goes where
+	// `focusAfterTakeover` says, but only if nothing took it meanwhile (it fell to the page when the
+	// dialog closed), so a dialog or field opened during the reload keeps it.
+	let refocus = $state<{ opener: HTMLElement | null } | null>(null);
+	$effect(() => {
+		const r = refocus;
+		if (r === null) return;
+		refocus = null;
+		const at = document.activeElement;
+		if (at === null || at === document.body) focusAfterTakeover(r.opener);
+	});
 
 	// The schedule refusals the engine names by code, in the reader's language (ux U-085, U-119).
 	const SCHEDULE_REFUSALS: Record<string, string> = {
@@ -374,6 +439,9 @@
 	// Why the view is open beyond the button: the steps changed under it, or a schedule was refused
 	// because the workflow waits for this stamp.
 	let stampLine = $state<'steps_changed' | 'awaits_at_schedule' | null>(null);
+	// After `steps_changed`: what differs from the version shown before, marked in the steps.
+	let stampChangesShown = $state<StampChanges | null>(null);
+	let stampDialog = $state<HTMLElement | null>(null);
 	// A schedule dialog the refusal interrupted, reopened as it was once the stamp holds.
 	let stampResumesSchedule = $state<SavedWorkflow | null>(null);
 	// Bumped by every load, so a late answer for an earlier opening writes nothing.
@@ -395,6 +463,7 @@
 		const generation = ++stampGeneration;
 		stampLoading = true;
 		stampPreview = null;
+		stampChangesShown = null;
 		try {
 			const res = await fetch(`${getApiBase()}/workflows/${encodeURIComponent(wf.id)}/stamp-preview`);
 			const body = res.ok ? await res.json().catch(() => null) : null;
@@ -451,7 +520,16 @@
 			if (outcome.kind === 'changed') {
 				// The line says the new version is shown below, so it goes up only once it is.
 				stampLine = null;
-				if (await loadStampPreview(wf) && opening === stampOpening) stampLine = 'steps_changed';
+				if (await loadStampPreview(wf) && opening === stampOpening && stampPreview !== null) {
+					stampLine = 'steps_changed';
+					stampChangesShown = stampChanges(shown, stampPreview);
+					// Brought into sight and focused: the changed part is what the owner has to read again.
+					// The line above, which says why, may scroll out of sight then (it carries role=status).
+					await tick();
+					const mark = stampDialog?.querySelector<HTMLElement>('[data-stamp-changed]');
+					mark?.focus();
+					mark?.scrollIntoView?.({ block: 'nearest' });
+				}
 				return;
 			}
 			if (outcome.kind === 'failed') { error = t(outcome.key); return; }
@@ -572,11 +650,18 @@
 				// workflow from the chat, rather than the engine's sentence.
 				// Named, because the message stands above the list, apart from the workflow's card.
 				const name = workflows.find((w) => w.id === id)?.name ?? id;
-				error = msg?.code === 'author_ended'
-					? (typeof msg.runs_as === 'string' && msg.runs_as !== ''
-						? tf('workflow_library.author_ended', { person: msg.runs_as, name })
-						: tf('workflow_library.author_ended_unnamed', { name }))
-					: msg?.error ?? t('workflow_library.run_failed');
+				if (msg?.code === 'author_ended') {
+					// The way out is the workflow's takeover, whose button the list shows once it reads the
+					// end: read it again, then say where the button is.
+					notice = '';
+					await loadWorkflows();
+					const undetermined = workflows.find((w) => w.id === id)?.runs_as?.undetermined === true;
+					error = typeof msg.runs_as === 'string' && msg.runs_as !== '' && !undetermined
+						? tf('workflow_library.takeover.author_ended', { person: shownValue(msg.runs_as), name: shownValue(name) })
+						: tf('workflow_library.takeover.author_ended_unnamed', { name: shownValue(name) });
+					return;
+				}
+				error = msg?.error ?? t('workflow_library.run_failed');
 				notice = '';
 				return;
 			}
@@ -677,10 +762,10 @@
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
-	<h1 class="text-xl font-light tracking-tight mb-4">{t('workflow_library.title')}</h1>
+	<h1 bind:this={libraryHeading} tabindex="-1" class="text-xl font-light tracking-tight mb-4">{t('workflow_library.title')}</h1>
 
 	{#if error}
-		<div data-page-error class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
+		<div data-page-error class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4"><MarkedLine text={error} /></div>
 	{/if}
 	{#if notice}
 		<div class="rounded-[var(--radius-md)] bg-success/10 border border-success/20 px-4 py-3 text-sm text-success mb-4">{notice}</div>
@@ -708,7 +793,9 @@
 									class="w-full min-h-11 md:[@media(hover:hover)]:min-h-0 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[16px] md:text-sm focus:border-accent focus:outline-none"
 								/>
 							{:else}
-								<p class="text-sm font-medium line-clamp-2 break-words">{wf.name}</p>
+								<!-- A workflow a person with access made or last changed (`runs_as`, sent to the owner only):
+								     its name may be that person's, so it is set apart, as in the sentence below it. -->
+								<p class="text-sm font-medium line-clamp-2 break-words" data-workflow-title>{#if accessEnded(wf) || wf.runs_as}<MarkedLine text={shownValue(wf.name)} mono={false} />{:else}{wf.name}{/if}</p>
 								{#if wf.description}
 									<p class="text-xs text-text-subtle mt-1 line-clamp-2 break-words">{wf.description}</p>
 								{/if}
@@ -738,11 +825,13 @@
 									{#if wf.runs_as && accessEnded(wf)}
 										<span data-testid="access-ended-badge" class="inline-flex items-center gap-1 rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-1.5 text-warning break-all">
 											<Icon name="warning" size="xs" />
-											{wf.runs_as.person === '' ? t('workflow_library.access_ended_unnamed') : tf('workflow_library.access_ended', { person: wf.runs_as.person })}
+											<!-- Without the address: the sentence below names the person, set apart. -->
+											{t('workflow_library.access_ended_unnamed')}
 										</span>
 									{:else if wf.runs_as}
 										<span data-testid="runs-as-badge" class="inline-flex items-center gap-1 rounded-[var(--radius-sm)] border border-border bg-bg px-1.5 break-all">
-											{tf('workflow_library.runs_as', { person: wf.runs_as.person })}
+											<!-- One flex item: the sentence's own space keeps the box from "als". -->
+											<span><MarkedLine text={tf('workflow_library.runs_as', { person: shownValue(wf.runs_as.person) })} /></span>
 										</span>
 									{/if}
 								</div>
@@ -764,6 +853,18 @@
 								<button onclick={() => void saveRename(wf.id)} class="inline-flex items-center rounded-[var(--radius-sm)] border border-success/30 bg-success/10 {actionSize} text-success hover:bg-success/20 transition-colors">{t('workflow_library.save')}</button>
 								<button onclick={cancelRename} class="inline-flex items-center rounded-[var(--radius-sm)] border border-border bg-bg-muted {actionSize} text-text-muted hover:bg-bg transition-colors">{t('workflow_library.cancel')}</button>
 							{:else}
+								{#if accessEnded(wf) && ownerActs}
+									<!-- Always visible, not on hover: it is the one way this workflow runs again. -->
+									<button
+										data-testid="takeover-open"
+										data-takeover-for={wf.id}
+										onclick={(e) => openTakeover(wf, e.currentTarget)}
+										class="flex items-center gap-1 rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 {actionSize} text-warning hover:bg-warning/20 transition-colors"
+									>
+										<Icon name="warning" size="xs" />
+										{t('workflow_library.takeover.button')}
+									</button>
+								{/if}
 								{#if offersStamp(wf, viewer)}
 									<!-- Always visible, not on hover: it is the one thing this workflow waits for. -->
 									<button
@@ -818,7 +919,7 @@
 					</div>
 					<!-- Why a button above is off, in the open, not in a tooltip (ux U-079, U-119). -->
 					{#if accessEnded(wf)}
-						<p data-library-note="ended" class="mt-2 text-xs text-warning break-words">{endedNote(wf)}</p>
+						<p data-library-note="ended" class="mt-2 text-xs text-warning break-words"><MarkedLine text={endedNote(wf)} /></p>
 					{:else if wf.schedule_refusal !== undefined && (wf.schedulable ?? wf.mode === 'autonomous')}
 						<p data-library-note={wf.schedule_refusal} class="mt-2 text-xs text-text-muted break-words">{t(`workflow_library.${wf.schedule_refusal}_note`)}</p>
 					{/if}
@@ -841,7 +942,7 @@
 		aria-label={t('workflow_library.params_title')}
 	>
 		<div class="w-full max-w-md rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg">
-			<h2 class="text-sm font-medium mb-1">{paramModalWf.name}</h2>
+			<h2 class="text-sm font-medium mb-1 break-words" data-params-title>{#if paramModalWf.runs_as}<MarkedLine text={shownWhole(paramModalWf.name)} mono={false} />{:else}{paramModalWf.name}{/if}</h2>
 			<p class="text-xs text-text-subtle mb-4">{t('workflow_library.params_hint')}</p>
 			<div class="space-y-3">
 				{#each paramModalWf.parameters ?? [] as param (param.name)}
@@ -885,7 +986,7 @@
 		aria-label={t('workflow_library.schedule_title')}
 	>
 		<div class="w-full max-w-md rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
-			<h2 class="text-sm font-medium mb-1">{t('workflow_library.schedule_title')}: {scheduleModalWf.name}</h2>
+			<h2 class="text-sm font-medium mb-1 break-words" data-schedule-title>{#if scheduleModalWf.runs_as}<MarkedLine text={`${t('workflow_library.schedule_title')}: ${shownWhole(scheduleModalWf.name)}`} mono={false} />{:else}{t('workflow_library.schedule_title')}: {scheduleModalWf.name}{/if}</h2>
 			<!-- "unattended" is false for a workflow that asks its owner while it runs. -->
 			<p class="text-xs text-text-subtle mb-4">{t(asksOwner(scheduleModalWf) ? 'workflow_library.schedule_hint_asks' : 'workflow_library.schedule_hint')}</p>
 
@@ -1048,9 +1149,11 @@
 		aria-modal="true"
 		aria-label={t('workflow_library.stamp.review')}
 		data-testid="stamp-dialog"
+		bind:this={stampDialog}
 	>
 		<div class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
-			<h2 class="text-sm font-medium mb-1 break-words">{t('workflow_library.stamp.review')}: {visible(stampWf.name)}</h2>
+			<!-- Where the owner approves the steps: a name a person with access gave is set apart, whole. -->
+			<h2 class="text-sm font-medium mb-1 break-words" data-stamp-review-title>{#if stampWf.runs_as}<MarkedLine text={`${t('workflow_library.stamp.review')}: ${shownWhole(stampWf.name)}`} mono={false} />{:else}{t('workflow_library.stamp.review')}: {visible(stampWf.name)}{/if}</h2>
 			{#if stampLine === 'steps_changed'}
 				<p bind:this={stampChangedLine} role="status" data-testid="stamp-line" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t('workflow_library.stamp.refused.steps_changed')}</p>
 			{:else if stampLine === 'awaits_at_schedule' && stampPreview}
@@ -1062,7 +1165,7 @@
 			{/if}
 			<!-- The schedule's line for a preview that did not load already says it did not load. -->
 			{#if error && !(stampLine === 'awaits_at_schedule' && !stampPreview && !stampLoading)}
-				<p class="rounded-[var(--radius-sm)] bg-danger/10 border border-danger/20 px-3 py-2 text-xs text-danger mb-3">{error}</p>
+				<p class="rounded-[var(--radius-sm)] bg-danger/10 border border-danger/20 px-3 py-2 text-xs text-danger mb-3"><MarkedLine text={error} /></p>
 			{/if}
 			<!-- "This is what runs" only above something that runs: without a preview it introduces nothing. -->
 			{#if stampPreview}
@@ -1072,98 +1175,7 @@
 			{#if stampLoading}
 				<p class="text-text-subtle text-sm">{t('common.loading')}</p>
 			{:else if stampPreview}
-				{@const p = stampPreview}
-				<dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs mb-3">
-					{#if p.mode}<dt class="text-text-subtle">{t('workflow_library.stamp.mode')}</dt><dd class="font-mono break-all">{visible(p.mode)}</dd>{/if}
-					{#if p.onFailure}<dt class="text-text-subtle">{t('workflow_library.stamp.on_failure')}</dt><dd class="font-mono break-all">{visible(p.onFailure)}</dd>{/if}
-					{#if p.limits !== null}<dt class="text-text-subtle">{t('workflow_library.stamp.limits')}</dt><dd class="font-mono whitespace-pre-wrap break-all">{templateText(p.limits)}</dd>{/if}
-				</dl>
-
-				{#if p.parameters.length > 0}
-					<p class="text-[10px] uppercase tracking-widest text-text-subtle mb-1">{t('workflow_library.params_title')}</p>
-					<ul class="mb-3 space-y-0.5 text-xs font-mono">
-						{#each p.parameters as param, i (i)}
-							<li class="break-all"><bdi>{visible(param.name)}</bdi>{param.required ? ' *' : ''}{param.default !== null ? ` = ${templateText(param.default)}` : ''}</li>
-						{/each}
-					</ul>
-				{/if}
-
-				{#if p.contract !== null && p.contract.length > 0}
-					<div class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 p-3 mb-3 text-xs">
-						<p class="font-medium mb-1 flex items-center gap-1"><Icon name="warning" size="xs" />{t('workflow_library.schedule_contract_title')}</p>
-						<ul class="space-y-0.5 text-text-subtle font-mono">
-							<!-- Keyed by position: a cross product can list the same tuple twice. -->
-							{#each p.contract as line, i (i)}
-								<li class="break-all">{visible(line)}</li>
-							{/each}
-						</ul>
-					</div>
-				{/if}
-
-				<div class="space-y-2">
-					{#if p.steps.length === 0}
-						<p data-testid="stamp-no-steps" class="text-xs text-text-subtle">{t('workflow_library.stamp.no_steps')}</p>
-					{/if}
-					{#each p.steps as step, i (i)}
-						{@const h = stepHeading(step)}
-						<div data-testid="stamp-step" class="rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-3 py-2 text-xs">
-							<p class="font-mono text-text-subtle break-all">{h.id}</p>
-							<p class="font-medium mt-0.5 break-words">{h.head}</p>
-							<!-- Everything that decides what the step does is printed, never folded away: a
-							     harmless task text can sit beside a recorded call to another host. -->
-							{#if step.tool}
-								<p class="text-[10px] uppercase tracking-widest text-text-subtle mt-2 mb-0.5">{t('workflow_library.stamp.call')}</p>
-								<p class="font-mono break-all">{visible(step.tool)}</p>
-								{#if templateText(step.inputTemplate) !== ''}
-									<pre class="mt-1 overflow-hidden whitespace-pre-wrap break-all rounded border border-border bg-bg px-2 py-1 font-mono">{templateText(step.inputTemplate)}</pre>
-								{/if}
-							{/if}
-							<p class="text-[10px] uppercase tracking-widest text-text-subtle mt-2 mb-0.5">{t('workflow.task')}</p>
-							<p class="whitespace-pre-wrap break-words">{visible(step.task)}</p>
-							{#if step.role}
-								<!-- First: a role can change the tools and the model below at run time. -->
-								{#if step.roleGrant}
-									{@const g = step.roleGrant}
-									<!-- What the role sets, under one heading: no line claims to be what the run takes. -->
-									<p class="mt-2" data-testid="stamp-role"><span class="text-text-subtle">{t('workflow_library.stamp.role_heading')}</span> <span class="font-mono break-all">{visible(step.role)}</span>{#if g.readOnly} <span class="ml-1 rounded-[var(--radius-sm)] border border-border px-1 text-text-subtle">{t('workflow_library.stamp.role_read_only')}</span>{/if}</p>
-									<div data-testid="stamp-role-grant" class="ml-3">
-										<!-- The step's own value wins at run time; the role's applies only where the step sets none. -->
-										{#if g.model && !step.model}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.model')}:</span> <span class="font-mono break-all">{visible(g.model)}</span></p>{/if}
-										{#if g.effort && !step.effort}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.effort')}:</span> <span class="font-mono">{g.effort}</span></p>{/if}
-										{#if g.allowTools !== null}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_allows')}:</span> {#if g.allowTools.length === 0}<span>{t('workflow_library.stamp.no_tools')}</span>{:else}<span class="font-mono break-all">{visible(g.allowTools.join(', '))}</span>{/if}</p>{/if}
-										{#if g.denyTools !== null}<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.role_blocks')}:</span> {#if g.denyTools.length === 0}<span>{t('workflow_library.stamp.no_tools')}</span>{:else}<span class="font-mono break-all">{visible(g.denyTools.join(', '))}</span>{/if}</p>{/if}
-										{#if g.readOnly && g.allowTools !== null && g.allowTools.length > 0}<p class="mt-1 text-text-subtle" data-testid="stamp-role-read-only-allows">{t('workflow_library.stamp.role_read_only_allows')}</p>{/if}
-									</div>
-									<p class="mt-1 text-text-subtle" data-testid="stamp-role-hint">{t('workflow_library.stamp.role_hint')}</p>
-								{:else}
-									<p class="mt-2" data-testid="stamp-role"><span class="text-text-subtle">{t('workflow_library.stamp.role')}:</span> <span class="font-mono break-all">{visible(step.role)}</span></p>
-									<!-- A role the engine does not know: the step stops at run time, so no hint on how its tools are worked out. -->
-									<p class="mt-1 text-warning" data-testid="stamp-role-unknown">{t('workflow_library.stamp.role_unknown')}</p>
-								{/if}
-							{/if}
-							{#if step.tools.length > 0}
-								<p class="mt-2"><span class="text-text-subtle">{t('workflow_library.stamp.tools')}:</span> <span class="font-mono break-all">{visible(step.tools.join(', '))}</span></p>
-							{/if}
-							{#if step.model}
-								<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.model')}:</span> <span class="font-mono break-all">{visible(step.model)}</span></p>
-							{:else if !step.roleGrant?.model && !(step.role && !step.roleGrant)}
-								<!-- Neither the step nor its role names a model: the engine runs it on fast. An unknown role stops the step, so no model is claimed. -->
-								<p class="mt-1" data-testid="stamp-model-default"><span class="text-text-subtle">{t('workflow_library.stamp.model')}:</span> <span class="font-mono">{t('workflow_library.stamp.model_default')}</span></p>
-							{/if}
-							{#if step.effort}
-								<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.effort')}:</span> <span class="font-mono">{step.effort}</span></p>
-							{/if}
-							{#if step.thinking}
-								<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.thinking')}:</span> <span class="font-mono">{step.thinking}</span></p>
-							{/if}
-							<!-- No limit set means the engine's default, which is a limit all the same. -->
-							<p class="mt-1"><span class="text-text-subtle">{t('workflow_library.stamp.timeout')}:</span> <span class="font-mono">{step.timeoutMs === null ? t('workflow_library.stamp.timeout_default') : step.timeoutMs === 0 ? t('workflow_library.stamp.timeout_zero') : timeoutText(step.timeoutMs)}</span></p>
-							{#if step.inputFrom.length > 0}
-								<p class="mt-1"><span class="text-text-subtle">{t('workflow.depends_on')}:</span> <span class="font-mono break-all">{visible(step.inputFrom.join(', '))}</span></p>
-							{/if}
-						</div>
-					{/each}
-				</div>
+				<StampPreviewBody preview={stampPreview} changes={stampChangesShown} />
 			{/if}
 
 			<div class="flex items-center justify-end gap-2 mt-5">
@@ -1182,4 +1194,8 @@
 			</div>
 		</div>
 	</div>
+{/if}
+
+{#if takeoverWf}
+	<WorkflowTakeoverDialog workflow={takeoverWf} onclose={closeTakeover} ondone={(stillOff) => void takenOver(stillOff)} onstale={() => void loadWorkflows()} />
 {/if}

@@ -349,6 +349,7 @@ describe('a planned halt is not a failure', () => {
     expect(out.notes).toHaveLength(1);
     expect(out.notes[0]!.priority).toBe('normal');
     expect(out.notes[0]!.title.startsWith('\u23F8 ')).toBe(true);
+    expect(out.notes[0]!.title).toBe('\u23F8 Bulk run halted');
   });
 
   it('a failure halt is still recorded `failed` and announced with ✗ at high priority', async () => {
@@ -360,6 +361,26 @@ describe('a planned halt is not a failure', () => {
     expect(out.notes).toHaveLength(1);
     expect(out.notes[0]!.priority).toBe('high');
     expect(out.notes[0]!.title.startsWith('\u2717 ')).toBe(true);
+    // It halted and can be continued: the title says so, the mark says it was a failure (U-324).
+    expect(out.notes[0]!.title).toBe('\u2717 Bulk run halted');
+  });
+
+  it('a run refused because it is already halted is titled halted too, read from its ledger', async () => {
+    const { runId, initial } = recordMemoryRun(4);
+    approve(runId);
+    ledger.halt(runId, BULK_HALT_REASONS.consecutiveFailures);
+    const out = await tickMemoryRun(runId, memory(initial).writer);
+    expect(out.status).toBe('failed');
+    expect(out.notes.map((n) => n.title)).toEqual(['\u2717 Bulk run halted']);
+  });
+
+  it('a run that ended before it was approved is titled failed, though it holds a reason: nothing waits to go on', async () => {
+    const { runId, initial } = recordMemoryRun(4);
+    approve(runId);
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted', halt_reason = ? WHERE id = ?`).run(BULK_HALT_REASONS.superseded, runId);
+    const out = await tickMemoryRun(runId, memory(initial).writer);
+    expect(out.status).toBe('failed');
+    expect(out.notes.map((n) => n.title)).toEqual(['\u2717 Bulk run failed']);
   });
 });
 
@@ -867,7 +888,8 @@ describe('the owner stops a running write — between targets, never inside one'
     expect(out.records).toHaveLength(1);
     expect(out.records[0]![2]).toBe('stopped');
     expect(out.records[0]![1]).toContain('4 applied');
-    expect(out.records[0]![1]).toContain(BULK_HALT_REASONS.stoppedByOwner);
+    // Said as a sentence, not the reason the run stores (that stays in the ledger, above).
+    expect(out.records[0]![1]).toContain('Stopped manually.');
     expect(out.notified, 'the owner asked; nobody is notified of it').toBe(0);
   });
 
@@ -1825,7 +1847,7 @@ describe('data-store runs', () => {
     approve(runId);
     const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: () => null, notices: BULK_NOTICES.de });
     expect(out.status).toBe('refused');
-    expect(out.summary).toMatch(/^Massenlauf angehalten: Zielsystem nicht erreichbar oder Fehler in lynox\. .* von 1 Zielen\.$/);
+    expect(out.summary).toMatch(/^Zielsystem nicht erreichbar oder Fehler in lynox\. .* von 1 Zielen\.$/);
   });
 });
 
@@ -2177,7 +2199,7 @@ describe('a write told to a German owner', () => {
     engineDb.getDb().prepare('UPDATE bulk_targets SET after_planned = ? WHERE run_id = ? AND seq = 0')
       .run(engineDb.enc(JSON.stringify('evil')), runId);
     const out = await runBulkEffect(runId, 'bulk_apply', de(memory(initial).writer));
-    expect(out.summary).toBe('Massenlauf angehalten: Der Lauf hat sich seit der Freigabe geändert. 0 geschrieben, von 3 Zielen.');
+    expect(out.summary).toBe('Der Lauf hat sich seit der Freigabe geändert. 0 geschrieben, von 3 Zielen.');
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.checksum);
   });
 
@@ -2186,7 +2208,7 @@ describe('a write told to a German owner', () => {
     approve(runId);
     vi.spyOn(ledger, 'isWriteSwitchedOff').mockReturnValue(true);
     const out = await runBulkEffect(runId, 'bulk_apply', de(memory(initial).writer));
-    expect(out.summary).toBe('Massenlauf angehalten: Schreiben in Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet. Ist es wieder an, lässt sich der Lauf fortsetzen. 0 geschrieben, von 3 Zielen.');
+    expect(out.summary).toBe('Schreiben in Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet. Ist es wieder an, lässt sich der Lauf fortsetzen. 0 geschrieben, von 3 Zielen.');
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.shopifyWriteOff);
   });
 
@@ -2195,7 +2217,7 @@ describe('a write told to a German owner', () => {
     approve(runId);
     const unwritable: BulkRunTrail = { begin: () => { throw new Error('SQLITE_FULL'); }, end: () => { /* none */ } };
     const out = await runBulkEffect(runId, 'bulk_apply', { ...de(memory(initial).writer), trailFor: () => unwritable });
-    expect(out.summary).toBe('Massenlauf angehalten: Der Lauf liess sich nicht im Protokoll der Instanz festhalten; nichts gelesen, nichts geschrieben. 0 geschrieben, von 2 Zielen.');
+    expect(out.summary).toBe('Der Lauf liess sich nicht im Protokoll der Instanz festhalten; nichts gelesen, nichts geschrieben. 0 geschrieben, von 2 Zielen.');
   });
 
   it('tells each end of an atomic run in German: failed, out of time, stopped', async () => {
@@ -2218,5 +2240,52 @@ describe('a write told to a German owner', () => {
     const stopAfterOne: TargetWriter = { read: (k) => inner.read(k), write: async (k, a) => { const r = await inner.write(k, a); controller.abort(); return r; } };
     const out = await runBulkEffect(stopped.runId, 'bulk_apply', { ...de(stopAfterOne), signal: controller.signal, ownerStopped: () => true });
     expect(out.summary).toMatch(/^Massenlauf \(ganz oder gar nicht\) gestoppt und zurückgenommen\. /);
+  });
+});
+
+describe('the head counts after a write', () => {
+  const none = { deselected: 0, invalid: 0, unchanged: 0, takenBack: 0, written: 0, conflict: 0, unclear: 0, failed: 0, settled: 0, open: 0 };
+  const sum = (h: Record<string, number>): number => Object.values(h).reduce((a, b) => a + b, 0);
+
+  it('an atomic rollback: the written targets and the failed one are taken back, the rest not written, and the halt keeps the cause', async () => {
+    const { runId, initial } = recordMemoryRun(10, { atomic: true });
+    approve(runId);
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(memory(initial, new Set(['k006'])).writer))).status).toBe('aborted');
+    const s = ledger.getStatus(runId)!;
+    expect(s.heads).toEqual({ ...none, takenBack: 6, settled: 1, open: 3 });
+    expect(sum(s.heads)).toBe(s.total);
+    // The target counts with the ones taken back; why the run stopped is the halt's to say.
+    expect(s.haltReason).toBe(BULK_HALT_REASONS.atomicRolledBack);
+  });
+
+  it('an atomic rollback settles a send a dead loop never recorded, apart from the written ones', async () => {
+    const { runId, initial } = recordMemoryRun(4, { atomic: true });
+    approve(runId);
+    ledger.markSent(runId, 3);
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(memory({ ...initial, k003: 'w3' }, new Set(['k002'])).writer))).status).toBe('aborted');
+    const s = ledger.getStatus(runId)!;
+    expect(s.heads).toEqual({ ...none, takenBack: 2, settled: 2 });
+    expect(s.undone).toBe(2);
+  });
+
+  it('a run with a target taken out, a conflict and a failure counts each once', async () => {
+    const { runId, initial } = recordMemoryRun(5);
+    expect(ledger.deselectTarget(runId, 0, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+    approve(runId);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(memory({ ...initial, k002: 'someone else' }, new Set(['k004'])).writer));
+    const s = ledger.getStatus(runId)!;
+    expect(s.heads).toEqual({ ...none, deselected: 1, written: 2, conflict: 1, failed: 1 });
+    expect(sum(s.heads)).toBe(s.total);
+  });
+
+  it('a target two loops raced on, written by one and found in conflict by the other, counts as written', async () => {
+    const { runId, initial } = recordMemoryRun(3);
+    approve(runId);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(memory(initial).writer));
+    // The losing loop's conflict lands after the write was recorded; the write is not undone by it.
+    engineDb.getDb().prepare(`UPDATE bulk_targets SET error = 'conflict' WHERE run_id = ? AND seq = 1`).run(runId);
+    const s = ledger.getStatus(runId)!;
+    expect([s.applied, s.conflicts]).toEqual([3, 1]);
+    expect(s.heads).toEqual({ ...none, written: 3 });
   });
 });

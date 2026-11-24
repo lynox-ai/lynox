@@ -110,10 +110,27 @@ const CLEARANCE_UNCONFIRMED: ReadonlySet<ExactClearanceRefusal> = new Set([
  * one to ask again, since the engine cannot tell it from a passing fault of the control plane.
  */
 export function clearanceRefusalText(reason: ExactClearanceRefusal, held: ExactClearanceRefusal | null = null): string {
+  return CLEARANCE_TEXTS[clearanceRefusalCause(reason, held)];
+}
+
+/** What a clearance the control plane did not give comes to: the three causes the texts name. */
+export type ClearanceRefusalCause = 'unconfirmed' | 'not_set_up' | 'not_cleared';
+
+const CLEARANCE_TEXTS: Readonly<Record<ClearanceRefusalCause, string>> = {
+  unconfirmed: SHOPIFY_UNCONFIRMED,
+  not_set_up: SHOPIFY_NOT_SET_UP,
+  not_cleared: SHOPIFY_NOT_CLEARED,
+};
+
+/**
+ * The cause behind {@link clearanceRefusalText}, for a caller that words it itself (the connect
+ * callback's page). The same rules: `reason` decides, never the time.
+ */
+export function clearanceRefusalCause(reason: ExactClearanceRefusal, held: ExactClearanceRefusal | null = null): ClearanceRefusalCause {
   const cause = reason === 'backoff' ? held : reason;
-  if (cause === null || cause === 'backoff') return SHOPIFY_UNCONFIRMED;
-  if (cause === 'not_provisioned' || cause === 'marker_unwritable') return SHOPIFY_NOT_SET_UP;
-  return CLEARANCE_UNCONFIRMED.has(cause) ? SHOPIFY_UNCONFIRMED : SHOPIFY_NOT_CLEARED;
+  if (cause === null || cause === 'backoff') return 'unconfirmed';
+  if (cause === 'not_provisioned' || cause === 'marker_unwritable') return 'not_set_up';
+  return CLEARANCE_UNCONFIRMED.has(cause) ? 'unconfirmed' : 'not_cleared';
 }
 
 /**

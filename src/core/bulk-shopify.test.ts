@@ -1697,6 +1697,28 @@ describe('applying a Shopify run', () => {
     expect(ledger.shopifyApplyOf(undo)!.reads).toEqual([gid(10)]);
   });
 
+  it('mints no undo whose description a write of another family kept marked, recorded after planning', async () => {
+    const held = '<p>1</p><script>theirs()</script>';
+    const { id, undo } = await undoOf(held);
+    const db = engineDb.getDb();
+    // A run of its own family, on the same store and list form as the undo's source.
+    db.exec('CREATE TEMP TABLE other_run AS SELECT * FROM bulk_runs WHERE 0');
+    db.prepare('INSERT INTO other_run SELECT * FROM bulk_runs WHERE id = ?').run(id);
+    db.exec(`UPDATE other_run SET id = 'other-family', source_run_id = NULL; INSERT INTO bulk_runs SELECT * FROM other_run; DROP TABLE other_run`);
+    const mark = db.prepare(`INSERT INTO bulk_targets (run_id, seq, target_key, change, applied_at, result, after_planned, after_actual, shop_added_markup)
+      VALUES ('other-family', ?, ?, 'update', '2026-11-01T00:00:00.000Z', ?, ?, ?, 1)`);
+    const sent = engineDb.enc(JSON.stringify({ descriptionHtml: '<p>2</p>' }));
+    // On another product, and on this one with another value: neither is this undo's after-state.
+    mark.run(0, engineDb.enc(gid(11)), engineDb.enc('written'), sent, engineDb.enc(JSON.stringify({ value: { descriptionHtml: held }, estimated: false })));
+    mark.run(1, engineDb.enc(gid(10)), engineDb.enc('written'), sent, engineDb.enc(JSON.stringify({ value: { descriptionHtml: '<p>2</p><script>theirs()</script>' }, estimated: false })));
+    expect(ledger.shopifyApplyOf(undo)!.writes.map((w) => w.gid)).toEqual([gid(10)]);
+    // No link to the undo's family: its chain check alone passes it.
+    db.prepare(`UPDATE bulk_targets SET after_actual = ? WHERE run_id = 'other-family' AND seq = 1`)
+      .run(engineDb.enc(JSON.stringify({ value: { descriptionHtml: held }, estimated: false })));
+    expect(ledger.shopifyApplyOf(undo)!.writes).toEqual([]);
+    expect(ledger.shopifyApplyOf(undo)!.reads).toEqual([gid(10)]);
+  });
+
   it('leaves out, without throwing, a write whose stored before-image or after-state does not parse', async () => {
     const held = '<p>1</p>';
     const { id, undo } = await undoOf(held);
@@ -2033,6 +2055,30 @@ describe('applying a Shopify run', () => {
       expect(ledger.getPreview(undo)[0]).toMatchObject({ written: true, shopAddedMarkup: true });
     });
 
+    // A new run, of another family, reads the marked description as the product's state.
+    it('leaves a product out of a new run whose description is what an earlier write left marked, reformatted too', async () => {
+      fill(1);
+      const id = await previewedWith({ descriptionHtml: '<p>Neu</p>' });
+      approvedOne(id);
+      keepsWithMarkup(SCRIPT);
+      expect((await applyLive(id)).status).toBe('halted');
+      expect(ledger.getPreview(id)[0]).toMatchObject({ written: true, shopAddedMarkup: true });
+      const row = (runId: string): { change: string; error: string | null } =>
+        engineDb.getDb().prepare('SELECT change, error FROM bulk_targets WHERE run_id = ? AND seq = 0').get(runId) as { change: string; error: string | null };
+      for (const kept of [`<p>Neu</p>${SCRIPT}`, `<P>Neu</P>${SCRIPT.replace('<script>', '<SCRIPT >')}`]) {
+        s.products.get(10)!['descriptionHtml'] = kept;
+        const next = await previewedWith({ descriptionHtml: '<p>Neuer</p>' });
+        expect(ledger.getRunForApply(next)).toMatchObject({ kind: 'apply' });
+        expect(row(next)).toEqual({ change: 'invalid', error: 'before_has_shop_markup' });
+        expect(stored(next, 'before')).toEqual({ absent: false, value: expect.objectContaining({ descriptionHtml: kept }) });
+        expect(ledger.shopifyApplyOf(next)!.writes).toEqual([]);
+      }
+      // The owner changed the text since: the product is no longer what the store added to.
+      s.products.get(10)!['descriptionHtml'] = `<p>Neu, vom Inhaber</p>${SCRIPT}`;
+      const owned = await previewedWith({ descriptionHtml: '<p>Neuer</p>' });
+      expect(row(owned)).toEqual({ change: 'update', error: null });
+    });
+
     it('stores a planner\'s description in its canonical form, and the write sends exactly those bytes (#19)', async () => {
       fill(1);
       const raw = '<p>a<br/>b</p>';
@@ -2329,6 +2375,20 @@ describe('a judged Shopify run', () => {
     };
     return box;
   }
+
+  it('passes on that its read found the run no longer its own, so the worker can say why', async () => {
+    fill(2);
+    vi.stubEnv(FLAG, '1');
+    try {
+      const id = await judgedRun();
+      expect(ledger.listUnread(id).length).toBeGreaterThan(0);
+      const read = { status: 'halted' as const, gone: true as const, summary: 'Bulk preview stopped.' };
+      const out = await runBulkJudge(id, { ...judgeDeps(id).deps, readTargets: async () => read });
+      expect(out).toMatchObject({ status: 'halted', gone: true });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 
   // PRD shopify-preset §21.2 item 5 (N6): the canonical form re-escapes text and can be longer than
   // the raw verdict the schema bounded; it is what is stored and sent, so it is bounded again.
