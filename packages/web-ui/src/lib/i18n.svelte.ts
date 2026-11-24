@@ -2067,9 +2067,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'access_trail.kind_step': { de: 'Schritt', en: 'Step' },
 	'access_trail.kind_read': { de: 'Lesezugriff', en: 'Read access' },
 	// Reads on routes the person's web UI polls by itself, grouped (access-trail-fold.ts; ux U-047).
-	'access_trail.polls_legend': { de: 'Statusabfragen (laufende Arbeit, Aufgaben, Kosten, Anbieter) stehen zusammengefasst. Die meisten macht die Oberfläche von selbst. Aufklappen zeigt jede einzeln.', en: 'Status requests (running work, tasks, costs, providers) are grouped. The interface makes most of them by itself. Expand to see each one.' },
+	'access_trail.polls_legend': { de: 'Statusabfragen (laufende Arbeit, Aufgaben, Kosten, Anbieter) stehen zusammengefasst. Die meisten macht die Oberfläche von selbst. Aufklappen zeigt jede einzeln. Nach 30 Tagen bleibt von laufender Arbeit und Anbietern eine Zeile je Tag.', en: 'Status requests (running work, tasks, costs, providers) are grouped. The interface makes most of them by itself. Expand to see each one. After 30 days, running work and providers keep one line per day.' },
 	'access_trail.polls_many': { de: '{n} Statusabfragen ({span})', en: '{n} status requests ({span})' },
 	'access_trail.polls_one': { de: 'Eine Statusabfrage ({time})', en: 'One status request ({time})' },
+	'access_trail.poll_day': { de: '{n} Abfragen, die letzte am {time}', en: '{n} requests, the last on {time}' },
+	'access_trail.poll_day_one': { de: '1 Abfrage am {time}', en: '1 request on {time}' },
 	'access_trail.kind_event': { de: 'Ereignis', en: 'Event' },
 	'access_trail.refused': { de: 'Versuch (verweigert)', en: 'Attempt (refused)' },
 	'access_trail.refused_reveal_vault_key': { de: 'Versuch, den Tresorschlüssel anzuzeigen (verweigert)', en: 'Attempt to reveal the vault key (refused)' },
