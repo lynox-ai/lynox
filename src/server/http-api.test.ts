@@ -24608,7 +24608,7 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       expect(readFileSync(file, 'utf-8')).toBe('after');
     });
 
-    it('the review is answered by who made it, not by who ran last: a mandate whose later run failed cannot answer the owner\'s review', async () => {
+    it('the review is answered by who made it, not by who ran last: a mandate that ran last cannot answer the owner\'s review', async () => {
       const { file } = review(OWNER_PRINCIPAL, { lastRun: MANDATE });
       asMandate();
       expect(await card(), 'no card either').toMatchObject({ hasChanges: false });
