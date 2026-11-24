@@ -298,7 +298,12 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     const snoozed = item?.snoozeUntil !== undefined && item.snoozeUntil.getTime() > Date.now();
     // The push names the item's own sender and subject, so its own mail's flag counts as well.
     const flagged = sensitive.isSensitive || itemCategories.length > 0;
-    if (item && !snoozed) void opts.notifier.notifyNewItem(item, { flagged });
+    // A follow-up from someone other than the item's sender is announced under its own sender.
+    const otherSender = fields.fromAddress !== undefined && fields.fromAddress !== ''
+      && fields.fromAddress.toLowerCase() !== existing.fromAddress.toLowerCase();
+    const notifyOpts: import('./notifier.js').InboxNotifyOptions = { flagged };
+    if (otherSender) notifyOpts.sender = { address: fields.fromAddress ?? '', name: fields.fromName };
+    if (item && !snoozed) void opts.notifier.notifyNewItem(item, notifyOpts);
   };
 
   // The item a mail without a provider thread answers: the first of its parent Message-IDs
