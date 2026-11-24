@@ -36,6 +36,7 @@ import { bindShopifyCallback, shopifyCallbackRefusalLine, type VerifiedStoreCall
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import { connectNoteFor, noteButton, noteLang, noteText, noteTitle, type ConnectNote, type NoteLang } from './connect-note.js';
 import type { StorePass } from '../core/store-pass.js';
+import type { StoreExchangeRefusal } from '../tools/builtin/http.js';
 import { accessTokenKey, lapsedSlots, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { ApiProfile, OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
@@ -46,7 +47,7 @@ import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
 import { builtInPresetOf } from '../core/oauth-presets.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
-import { OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_RESULT_TEXTS, connectedText, connectedWithMoreText, engineLessPageText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthBack, type OAuthLang, type OAuthText } from './oauth-pages.js';
+import { OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_RESULT_TEXTS, connectedText, connectedWithMoreText, engineLessPageText, exchangeRefusedText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthBack, type OAuthLang, type OAuthText } from './oauth-pages.js';
 import { Engine } from '../core/engine.js';
 import type { KnowledgeEntry, KnowledgeStatus } from '../types/memory.js';
 import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
@@ -12997,9 +12998,12 @@ export class LynoxHTTPApi {
       // A store's exchange goes out only under its own pass (PRD Appendix B4), minted over the
       // body as it is sent. Without one, `exchangeToken` refuses it as before.
       let exchangePass: StorePass | undefined;
+      let exchangeRefused: StoreExchangeRefusal | undefined;
       if (storeCallback !== undefined) {
         const { storeExchangePassFor } = await import('../tools/builtin/http.js');
-        exchangePass = await storeExchangePassFor(storeCallback, endpoints.tokenUrl, serializeTokenBody(exchangeParams, bodyFormat), engine.getToolContext());
+        const got = await storeExchangePassFor(storeCallback, endpoints.tokenUrl, serializeTokenBody(exchangeParams, bodyFormat), engine.getToolContext());
+        if (typeof got === 'string') exchangeRefused = got;
+        else exchangePass = got;
       }
       const exchanged = await exchangeToken({
         endpoint: vetting,
@@ -13013,7 +13017,11 @@ export class LynoxHTTPApi {
         // error body is the one place a client secret has been seen echoed back.
         // Nor is the exchange's own message: a redirect the loop refused says "Write possibly
         // landed" for the model, and here nothing landed that the person would have to check.
-        sendOAuthHtml(res, 502, OAUTH_RESULT_TEXTS.exchangeFailed, 'apis');
+        // An exchange to a store without a pass was not sent (`exchangeToken` refuses it before
+        // sending): the page names why there was no pass, since starting again changes nothing
+        // for most causes. Only then: any other failure is not the pass's.
+        const unsentForPass = !exchanged.ok && exchanged.unsentForPass === true;
+        sendOAuthHtml(res, 502, unsentForPass ? exchangeRefusedText(exchangeRefused) : OAUTH_RESULT_TEXTS.exchangeFailed, 'apis');
         return;
       }
 
