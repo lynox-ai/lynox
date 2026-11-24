@@ -106,16 +106,30 @@ describe('a reply on an IMAP server without thread ids', () => {
     expect(threadIds()).toContain('<reply@x>');
   });
 
-  it('joins through a later message of the thread, such as the reply the owner sent', async () => {
+  it('joins through a later message the thread store holds for the item', async () => {
     const id = seed();
     inbox.insertThreadMessage({
-      accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<sent@acme>', fromAddress: ACCOUNT.address,
-      subject: 'Re: Offerte', direction: 'outbound', inboxItemId: id,
+      accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<second@x>', fromAddress: 'kunde@example.com',
+      subject: 'Re: Offerte', direction: 'inbound', inboxItemId: id,
     });
-    const env = reply({ inReplyTo: '<sent@acme>', references: ['<sent@acme>'] });
+    const env = reply({ inReplyTo: '<second@x>', references: ['<second@x>'] });
     expect(await hook()(ACCOUNT.id, env)).toBe('duplicate');
     expect(queued).toBe(0);
     expect(threadIds()).toContain('<reply@x>');
+  });
+
+  it('joins through the item itself when the thread store does not hold its first mail', async () => {
+    const id = inbox.insertItem({
+      accountId: ACCOUNT.id, channel: 'email', threadKey: THREAD, bucket: 'requires_user', confidence: 0.9,
+      reasonDe: 'Kundin will eine Offerte', classifiedAt: new Date('2026-11-23T08:00:00Z'),
+      classifierVersion: 'v1', messageId: '<first@x>', subject: 'Offerte', fromAddress: 'kunde@example.com',
+    });
+    inbox.updateUserAction(id, 'replied', new Date('2026-11-23T09:00:00Z'));
+    expect(inbox.listThreadMessages(ACCOUNT.id, THREAD)).toEqual([]);
+    expect(await hook()(ACCOUNT.id, reply())).toBe('duplicate');
+    expect(queued).toBe(0);
+    expect(inbox.getItem(id)!.userAction).toBeUndefined();
+    expect(threadIds()).toEqual(['<reply@x>']);
   });
 
   it('a reply naming a mail of another account becomes an item of its own and leaves that item alone', async () => {
