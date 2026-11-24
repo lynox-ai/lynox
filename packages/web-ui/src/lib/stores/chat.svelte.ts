@@ -4296,6 +4296,17 @@ export async function retryInterruptedRun(): Promise<void> {
  * already-finished run (404 / immediate `done`) or an awaiting-input run (no
  * events until the user answers) never leaves an empty bubble.
  */
+/**
+ * After a re-attach that streamed nothing to its end: the turns queued in this opening go once
+ * the review is asked for. Only an answer from the server says no review holds them; an open one
+ * holds them in the drain. The run a turn was queued behind drains nothing here: the thread was
+ * opened again since.
+ */
+function drainAfterReattach(gen: number): void {
+	if (gen !== _resumeGeneration) return;
+	void fetchChangeset().then((answered) => { if (answered && gen === _resumeGeneration) drainQueueSoon(100); });
+}
+
 async function reattachRun(threadId: string, runId: string, since: number, gen: number): Promise<void> {
 	// userIdx for handleSSEEvent's error path = the last user message.
 	let userIdx = -1;
@@ -4314,6 +4325,7 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 	try {
 		res = await fetch(`${getApiBase()}/runs/${runId}/stream?since=${since}`);
 	} catch {
+		drainAfterReattach(gen);
 		return; // network drop — nav poll still reflects the run; user can reload
 	}
 	// Refused (register 1112): the live part is not this reader's; say so, the transcript stays.
@@ -4322,7 +4334,7 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 	// 404 = the run completed between the transcript read and this re-attach
 	// (benign race) — the transcript already has it; nothing to stream. It may have contained
 	// the chat after the thread was read, so read again.
-	if (!res.ok || !res.body) { runEnded(null); signalRunEnded(); return; }
+	if (!res.ok || !res.body) { runEnded(null); signalRunEnded(); drainAfterReattach(gen); return; }
 	if (gen !== _resumeGeneration) { try { await res.body.cancel(); } catch { /* */ } return; }
 
 	const myEpoch = ++streamEpoch;
@@ -4423,6 +4435,8 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 			// run left to review holds it (`drainQueueSoon`). A thread opened meanwhile has its
 			// own queue and review: not this re-attach's to drain.
 			if (gen === _resumeGeneration) drainQueueSoon(100);
+		} else if (!completedNormally && streamEpoch === myEpoch) {
+			drainAfterReattach(gen);
 		}
 		persistChat();
 	}
