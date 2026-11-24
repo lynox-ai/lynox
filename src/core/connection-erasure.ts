@@ -657,6 +657,24 @@ const ROWS_OF: Readonly<Record<string, string>> = {
  * checkpoint: the blanking holds, but old values may remain in the file until the next scrub.
  */
 export function blankRunHistoryContent(historyDb: Database.Database, scope: FallbackScope): { readonly rows: number; readonly scrub: 'done' | 'failed' } {
+  const { rows } = blankRunHistoryRows(historyDb, scope);
+  try {
+    scrubFreedPages(historyDb);
+    return { rows, scrub: 'done' };
+  } catch {
+    return { rows, scrub: 'failed' };
+  }
+}
+
+/**
+ * The blanking of {@link blankRunHistoryContent} without the scrub, in one transaction that joins
+ * the caller's when there is one: deleting a chat blanks its runs and deletes the chat together.
+ * The scrub rewrites the whole file and is left out on purpose, as for every other routine delete:
+ * the connection runs with `secure_delete` on, which overwrites what it frees, but older page
+ * images can stay in the WAL until a later checkpoint. Returns the number of rows changed and the
+ * workflows reached, whose questions a caller may have to close.
+ */
+export function blankRunHistoryRows(historyDb: Database.Database, scope: FallbackScope): { readonly rows: number; readonly pipelineIds: readonly string[] } {
   const byThread = 'threadIds' in scope;
   // A bound that does not read as a time would compare as text and reach nothing, which would
   // then be reported as a clean run.
@@ -665,7 +683,7 @@ export function blankRunHistoryContent(historyDb: Database.Database, scope: Fall
   }
   const threads = byThread ? [...scope.threadIds] : [];
   const marks = (n: number): string => Array.from({ length: n }, () => '?').join(',');
-  const rows = historyDb.transaction(() => {
+  return historyDb.transaction(() => {
     historyDb.exec('CREATE TEMP TABLE IF NOT EXISTS erase_runs (id TEXT PRIMARY KEY); DELETE FROM erase_runs;'
       + ' CREATE TEMP TABLE IF NOT EXISTS erase_pipelines (id TEXT PRIMARY KEY); DELETE FROM erase_pipelines;');
     // The scope's own runs and workflows, then everything they reach until nothing new is found:
@@ -706,15 +724,10 @@ export function blankRunHistoryContent(historyDb: Database.Database, scope: Fall
       }
       changed += historyDb.prepare(`UPDATE "${table}" SET ${set} WHERE ${where}`).run({ marker: FALLBACK_MARKER, ...params }).changes;
     }
+    const pipelineIds = (historyDb.prepare('SELECT id FROM erase_pipelines').all() as Array<{ id: string }>).map((r) => r.id);
     historyDb.exec('DELETE FROM erase_runs; DELETE FROM erase_pipelines;');
-    return changed;
+    return { rows: changed, pipelineIds };
   })();
-  try {
-    scrubFreedPages(historyDb);
-    return { rows, scrub: 'done' };
-  } catch {
-    return { rows, scrub: 'failed' };
-  }
 }
 
 /**

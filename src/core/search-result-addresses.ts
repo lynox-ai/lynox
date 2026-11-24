@@ -12,8 +12,14 @@
 // Only the result entries count, never text: a page or a result list can repeat what the model
 // sent (a search query, a read's own address), and an address that came back that way would be the
 // model's own input. For the same reason an entry whose address holds the query, or that the query
-// holds, is left out. Nothing else adds to the set, and it lives as long as the agent: a reloaded
-// thread starts empty, which asks more, not less.
+// holds, is left out. Nothing else adds to the set. It belongs to the conversation: every agent the
+// session builds for it, a rebuilt one included, and every sub-agent it spawns share one holder, so a
+// child reads what its parent's searches listed (a listed address is the provider's either way). A
+// reloaded thread starts empty, which asks more, not less.
+//
+// The HOSTS of those results do not join the shell's egress set. A search arms the conversation's
+// latch when it is dispatched, before its results exist, so every batch after it starts tainted, and
+// a shell call whose batch started tainted takes no search's hosts (src/shell-sidecar/egress.ts).
 
 /**
  * An address as it is fetched: the WHATWG form `new URL()` gives, the one the request is built from.

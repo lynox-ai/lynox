@@ -114,6 +114,8 @@ export interface RunTaint {
    *  nothing, and its task and what it reads never count. Absent for a run with no calling
    *  conversation: then only a reviewed contract's hosts are owner-known, for its own run. */
   ownerKnown?: import('../core/owner-known-targets.js').OwnerKnownReader | undefined;
+  /** The calling conversation's record of what its searches listed, by reference. */
+  searchResults?: import('../core/search-result-addresses.js').SearchResultAddresses | undefined;
   /** The calling conversation's record that it read outside content, by reference. */
   latch?: import('../core/conversation-latch.js').ConversationLatch | undefined;
   /** The language of the steps' own questions: the calling conversation's. */
@@ -133,6 +135,7 @@ export interface TaintPeer {
 export function newRunTaint(caller?: (UntrustedSignals & {
   readonly conversationGrants?: ConversationGrants | undefined;
   readonly ownerKnown?: import('../core/owner-known-targets.js').OwnerKnownReader | undefined;
+  readonly searchResultAddresses?: import('../core/search-result-addresses.js').SearchResultAddresses | undefined;
   readonly conversationLatch?: import('../core/conversation-latch.js').ConversationLatch | undefined;
   readonly noticeLanguage?: import('../core/notice-language.js').NoticeLanguage | undefined;
   readonly onOriginRefused?: ((refusal: import('../core/origin-notices.js').OriginRefusal) => void) | undefined;
@@ -140,6 +143,7 @@ export function newRunTaint(caller?: (UntrustedSignals & {
   const taint: RunTaint = { seeded: caller ? describeTurnUntrusted(caller) : 'none', earned: 'none' };
   if (caller?.conversationGrants !== undefined) taint.grants = caller.conversationGrants;
   if (caller?.ownerKnown !== undefined) taint.ownerKnown = caller.ownerKnown;
+  if (caller?.searchResultAddresses !== undefined) taint.searchResults = caller.searchResultAddresses;
   if (caller?.conversationLatch !== undefined) taint.latch = caller.conversationLatch;
   if (caller?.noticeLanguage !== undefined) taint.noticeLanguage = caller.noticeLanguage;
   if (caller?.onOriginRefused !== undefined) taint.onOriginRefused = caller.onOriginRefused;
@@ -156,6 +160,7 @@ export function runGrantSet(taint: RunTaint | undefined): ConversationGrants | u
  *  where a target it was not given comes from (the workflow, when its name is known). */
 function stepOriginConfig(runTaint: RunTaint | undefined, parentPrompt: SubAgentPromptHandles | undefined): {
   ownerKnown?: import('../core/owner-known-targets.js').OwnerKnownReader;
+  searchResultAddresses?: import('../core/search-result-addresses.js').SearchResultAddresses;
   conversationLatch?: import('../core/conversation-latch.js').ConversationLatch;
   noticeLanguage?: import('../core/notice-language.js').NoticeLanguage;
   sendOrigin?: import('../core/origin-notices.js').SendOrigin;
@@ -164,6 +169,7 @@ function stepOriginConfig(runTaint: RunTaint | undefined, parentPrompt: SubAgent
   const name = parentPrompt?.workflowName;
   return {
     ...(runTaint?.ownerKnown !== undefined ? { ownerKnown: runTaint.ownerKnown } : {}),
+    ...(runTaint?.searchResults !== undefined ? { searchResultAddresses: runTaint.searchResults } : {}),
     ...(runTaint?.latch !== undefined ? { conversationLatch: runTaint.latch } : {}),
     ...(runTaint?.noticeLanguage !== undefined ? { noticeLanguage: runTaint.noticeLanguage } : {}),
     ...(runTaint?.onOriginRefused !== undefined ? { onOriginRefused: runTaint.onOriginRefused } : {}),

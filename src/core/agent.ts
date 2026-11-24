@@ -78,14 +78,15 @@ import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns, maskEngineEnvSecrets } from './secret-store.js';
 import { UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { OwnerKnownReader, OwnerKnownVerdict } from './owner-known-targets.js';
+import { policyNamesHost } from './network-guard.js';
 import { SearchResultAddresses } from './search-result-addresses.js';
 import type { ConversationLatch } from './conversation-latch.js';
 import type { NoticeLanguage } from './notice-language.js';
 import { noticeLanguage } from './notice-language.js';
-import { normalizeHostName, normalizeMailTarget, type SendTarget } from './send-target.js';
+import { carriesAddress, normalizeHostName, normalizeMailTarget, type SendTarget } from './send-target.js';
 import {
   originAsk, originCarriedAsk, originCarriedDenied, originCarriedMandate, originCarriedUnattended, originBashAfterForeign, originDenied, originLookupFailedHead, originLookupFailedMandate, originLookupFailedUnattended,
-  originRefusedMandate, originRefusedUnattended, originUnreadable, watchEveryMinutes, type OriginRefusal, type OriginTargets, type SendOrigin, type TargetNoun,
+  originRefusedMandate, originRefusedUnattended, originTokenUrlAsk, originTokenUrlRefused, originTokenUrlUnreadable, originUnreadable, watchEveryMinutes, type OriginRefusal, type OriginTargets, type SendOrigin, type TargetNoun,
 } from './origin-notices.js';
 import type { CallTargetOrigin } from './call-connection.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
@@ -97,9 +98,9 @@ import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene
 import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS, DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES } from './tool-result-blob-store.js';
 import { openSync, closeSync, constants, fstatSync } from 'node:fs';
 import { toWorkspaceRel, workspaceBase } from './workspace-rel.js';
+import { resolveToolPath } from './workspace.js';
 import { FILE_TOOL_READ_CAP_BYTES, isReadLimit, openRead, readFdCapped } from './workspace-fd.js';
 import { oversizeWayOut, resolveWritablePath } from '../tools/builtin/fs.js';
-import { resolve } from 'node:path';
 import type {
   BetaMessageParam,
   BetaTool,
@@ -470,6 +471,23 @@ export function providerSearchAdmitted(ctx: ToolContext | undefined): boolean {
   return policy === undefined || policy === 'allow-all' || policy === 'guarded';
 }
 
+/** The name the provider's web search is offered under, and counted under as an external-content
+ *  tool of the turn that ran it ({@link holdsProviderSearch}). */
+const PROVIDER_SEARCH_TOOL = 'web_search' as const;
+
+/** Whether message content carries a server tool the provider ran itself, its call or its result:
+ *  the web search, and any server tool offered later, which may reach outside content too. All but
+ *  the lazy tools' tool search, which searches the request's own tool definitions and fetches
+ *  nothing. A client tool's `tool_result` is not one. */
+function holdsProviderSearch(content: unknown): boolean {
+  return Array.isArray(content) && content.some((b: unknown) => {
+    const block = b as { type?: unknown; name?: unknown } | null;
+    const type = block?.type;
+    if (type === 'server_tool_use') return !(typeof block?.name === 'string' && block.name.startsWith('tool_search_tool_'));
+    return typeof type === 'string' && type.endsWith('_tool_result') && !type.startsWith('tool_search_tool_');
+  });
+}
+
 /** Whether a `bash` command matches a rule for sending data out (`SENDS_OR_KEEPS_BASH`). */
 function bashMaySend(input: unknown): boolean {
   const command = (input as { command?: unknown } | null)?.command;
@@ -664,8 +682,8 @@ export class Agent implements IAgent {
   writeAuthor: string | null = null;
   /** See `IAgent.ownerKnown`. Set per run by the session (a trigger's run adds its instruction). */
   ownerKnown?: OwnerKnownReader | undefined;
-  /** See `IAgent.searchResultAddresses`. Its own per agent: a sub-agent starts empty. */
-  readonly searchResultAddresses = new SearchResultAddresses();
+  /** See `IAgent.searchResultAddresses`. The conversation's: the session and a spawning parent pass theirs. */
+  readonly searchResultAddresses: SearchResultAddresses;
   /** See `IAgent.sendOrigin`. Set per run by the session. */
   sendOrigin?: SendOrigin | undefined;
   /** See `IAgent.noticeLanguage`. */
@@ -1120,8 +1138,8 @@ export class Agent implements IAgent {
   /** Whether this run has seen wrapped untrusted content (Wave 1.2). */
   get sawUntrustedData(): boolean { return this._sawUntrustedData; }
   /** DK.1 F5: sticky over the CONVERSATION (not reset per run) — set once this conversation
-   *  has ingested untrusted content (a wrapped marker OR an {@link Agent.EXTERNAL_CONTENT_TOOLS}
-   *  read). The per-run latch resets each turn, but an injected instruction ("on your NEXT
+   *  has ingested untrusted content (a wrapped marker, an {@link Agent.EXTERNAL_CONTENT_TOOLS}
+   *  read, OR a server tool the provider ran itself, such as its web search). The per-run latch resets each turn, but an injected instruction ("on your NEXT
    *  reply, remember(pin:true) …") persists in context, so a clean-latch turn could still be
    *  executing it. A durable-write gate ORs this in → such a deferred `remember` routes to
    *  pending_review, not active+pinned. Reset only on a fresh conversation (`reset`) or
@@ -1130,6 +1148,12 @@ export class Agent implements IAgent {
   private _conversationSawUntrusted = false;
   /** The taint state when the current tool batch started; read by the secret gate. */
   private _taintBeforeBatch: boolean | undefined;
+  /** Whether this conversation holds a server tool the provider ran itself, such as its web
+   *  search (`web_search_20250305`; any but the lazy tools' tool search, {@link holdsProviderSearch}):
+   *  its results reach the model inside the response, past every tool dispatch. Set when such a
+   *  response arrives, re-derived from the history on a load, cleared on `reset`, and carried
+   *  across a rebuild of the agent (`restoreProviderSearch`). */
+  private _providerSearchSeen = false;
   /** The current tool batch as an identity, a fresh object per batch (`approvalBatch`). */
   private _batch: object | undefined;
   /** Per call of the current tool batch (by its `tool_use` block): how many calls of the batch
@@ -1167,6 +1191,25 @@ export class Agent implements IAgent {
   }
 
   /**
+   * Whether the batch the running call belongs to started after the conversation had taken in
+   * foreign content. Every dispatched call runs inside a batch (`_executeOne` is reached only
+   * from there); a handler called directly, or anything read outside a batch, gets `true`, the
+   * side that grants less.
+   */
+  batchStartedTainted(): boolean {
+    return this._taintBeforeBatch ?? true;
+  }
+
+  /** Whether this conversation holds a server tool the provider ran itself (see `_providerSearchSeen`). */
+  heldProviderSearch(): boolean {
+    return this._providerSearchSeen;
+  }
+
+  /** Re-arms {@link heldProviderSearch} on an agent rebuilt for the same conversation, whose
+   *  history may no longer hold the server tool's blocks (the context window drops old turns). */
+  restoreProviderSearch(): void { this._providerSearchSeen = true; }
+
+  /**
    * Where a call stands toward the contract, for its row (`CallContract`). Taken once, when the
    * call enters `_executeOne`, from {@link governingContract} — the same reading the danger
    * check and the consent gate in `http_request` decide under, `liftsAfterUntrusted` included.
@@ -1197,18 +1240,22 @@ export class Agent implements IAgent {
     return { contract: this._contractOfCall(tc), ...(grant !== undefined ? { grant } : {}), ...(filed !== undefined ? { filed } : {}), ...(apiCost !== undefined ? { apiCost } : {}) };
   }
 
-  /** Deliver the result event of a call that has settled and is already in the ledger. A throw
-   *  from delivering it (a step's stream handler, a closed response) is not the call's outcome:
+  /** Deliver the result event of a call that has settled: run and in the ledger, or answered
+   *  without running (a refusal, a repeated call, a gate that needs input). A throw from
+   *  delivering it (a step's stream handler, a closed response) is not the call's outcome:
    *  caught here, it cannot make the call's own `catch` record the call a second time, emit a
-   *  second result for it, tell the model a call that worked had failed, or keep a call that
-   *  needs input from ending the run. The caller builds the event from facts the ledger write
-   *  above it has already read. Only the error's kind is logged: its text is the stream's. */
+   *  second result for it, hand the model the stream's error in place of the call's own text,
+   *  or keep a call that needs input from ending the run. Every `tool_result` event the agent
+   *  emits goes through here. Only the error's kind is logged: its text is the stream's. */
   private async _emitSettledResult(toolName: string, event: Parameters<EmittingStreamHandler>[0]): Promise<void> {
     if (!this.onStream) return;
     try {
       await this.onStream(event);
     } catch (emitErr: unknown) {
-      process.stderr.write(`[lynox:agent] a ${toolName} call was recorded, but its result event could not be delivered (${emitErr instanceof Error ? emitErr.name : 'unknown error'})\n`);
+      // The name can be one the model made up (a repeated or contained call is answered before the
+      // tool is looked up), so only a tool name's own characters reach the log line.
+      const shown = toolName.slice(0, 64).replace(/[^A-Za-z0-9_.:-]/g, '?');
+      process.stderr.write(`[lynox:agent] a ${shown} call has settled, but its result event could not be delivered (${emitErr instanceof Error ? emitErr.name : 'unknown error'})\n`);
     }
   }
 
@@ -1279,6 +1326,9 @@ export class Agent implements IAgent {
     // Direct ingest
     'bash', 'http_request', 'read_file', 'batch_files', 'media_process', 'api_setup',
     'web_research', 'mail_read', 'mail_search', 'mail_triage',
+    // The provider's own web search (`PROVIDER_SEARCH_TOOL`): never dispatched, counted when an
+    // answer carries any server tool the provider ran. Written out: the list is read as text.
+    'web_search',
     'google_docs', 'google_drive', 'google_sheets',
     // `calendar_read` returns SUMMARY/LOCATION text chosen by whoever sent the invitation —
     // an ingest channel that needs no compromise, only the operator's address. It wraps its
@@ -1749,6 +1799,7 @@ export class Agent implements IAgent {
       costUSD: 0,
     };
     this.toolResultBlobStore = config.toolResultBlobStore;
+    this.searchResultAddresses = config.searchResultAddresses ?? new SearchResultAddresses();
     this.toolCallTracker = config.toolCallTracker;
     this.userTimezone = config.userTimezone;
     this.changesetManager = config.changesetManager;
@@ -1776,6 +1827,7 @@ export class Agent implements IAgent {
     this._lastRealAtMsgCount = 0;
     // DK.1 F5: a fresh conversation has ingested nothing untrusted yet.
     this._conversationSawUntrusted = false;
+    this._providerSearchSeen = false;
     // Replaced, never cleared: a sub-agent still holding the old set keeps adding to it.
     this.conversationGrants = this.conversationGrants?.renewed();
   }
@@ -1887,8 +1939,10 @@ export class Agent implements IAgent {
     // DK.1 F5: re-derive the sticky conversation taint from the rehydrated history — a thread
     // whose context still carries a wrapped-untrusted marker keeps its durable-write gate armed.
     // And from the thread's record of it (`ConversationLatch`), which outlives a compaction that
-    // summarized the read away: either one is enough. A record that cannot be read counts as set.
-    if (this._contextHoldsUntrustedMarker() || this.conversationLatch?.isSet() === true) this._armConversationLatch();
+    // summarized the read away, and from a server tool the provider ran (its web search), whose
+    // blocks the history still holds: any one is enough. A record that cannot be read counts as set.
+    this._providerSearchSeen = this.messages.some((m) => holdsProviderSearch(m.content));
+    if (this._contextHoldsUntrustedMarker() || this.conversationLatch?.isSet() === true || this._providerSearchSeen) this._armConversationLatch();
     else this._conversationSawUntrusted = false;
     // A user turn is written to the thread before `send()` sees its marker, so a crash between
     // the two leaves an upload's text in the thread and nothing in the set. The resume puts it
@@ -1897,6 +1951,8 @@ export class Agent implements IAgent {
     if (this.conversationRoot && this.messages.some(m => m.role === 'user' && Agent._contentHoldsUntrustedMarker(m.content))) {
       this.conversationGrants?.add(UNKNOWN_GRANT);
     }
+    // Likewise a provider server tool in a thread written before such a tool added to the set.
+    if (this.conversationRoot && this._providerSearchSeen) this.conversationGrants?.add(UNKNOWN_GRANT);
   }
 
   abort(): void {
@@ -3031,6 +3087,18 @@ export class Agent implements IAgent {
       const contentForHistory = response.content.filter(
         (b): b is Exclude<typeof b, { type: 'thinking' }> => b.type !== 'thinking',
       ) as BetaContentBlockParam[];
+      // A server tool the provider ran (its web search) reaches the model inside this answer,
+      // past every tool dispatch: content from outside, taken in now, counted as an
+      // external-content tool of this turn under the web search's name, whichever server tool it
+      // was. Counted before the
+      // answer is written, so a checkpoint and every call this answer makes see it. Any agent
+      // that gets the tool: its rows, too, may hold what the tool returned.
+      if (holdsProviderSearch(response.content)) {
+        this._providerSearchSeen = true;
+        this._turnToolNames.add(PROVIDER_SEARCH_TOOL);
+        this._armConversationLatch();
+        this.conversationGrants?.add(UNKNOWN_GRANT);
+      }
       // A thinking-only response (entire output budget spent on extended
       // thinking before max_tokens) strips to an empty array. Anthropic rejects
       // an assistant message with empty content and that would break the very
@@ -4749,10 +4817,6 @@ export class Agent implements IAgent {
       (b) => this.tools.find((t) => t.definition.name === b.name)?.endsTurn !== true,
     ).length;
 
-    // What the conversation had taken in before this batch. The calls below run concurrently and
-    // each arms the latch for its own tool as it starts, so a per-call read would count a
-    // sibling's dispatch as content already taken in (the secret gate asks about the past).
-    this._taintBeforeBatch = this._sawUntrustedData || this._conversationSawUntrusted;
     this._batch = {};
 
     // A step's own fail_step has the last word in the response that calls it: it runs ALONE, and
@@ -4788,10 +4852,19 @@ export class Agent implements IAgent {
     // call's late state in the agent's next run. Its waits on a human still end on a
     // stop, because the prompt itself is withdrawn (`PromptMeta.signal`, see `promptUser`).
     const raceSignal = this._abandonsCallsOnAbort ? this.abortController?.signal : undefined;
-    const settled = await Promise.allSettled(
-      toExecute.map(tc => (raceSignal ? raceRunAbort(this._executeOne(tc), raceSignal) : this._executeOne(tc))),
-    );
-    this._taintBeforeBatch = undefined;
+    // What the conversation had taken in before this batch. The calls below run concurrently and
+    // each arms the latch for its own tool as it starts, so a per-call read would count a
+    // sibling's dispatch as content already taken in (the secret gate asks about the past).
+    // Cleared in `finally`, so no reader after the batch can find this batch's answer.
+    this._taintBeforeBatch = this._sawUntrustedData || this._conversationSawUntrusted;
+    let settled: PromiseSettledResult<BetaToolResultBlockParam>[];
+    try {
+      settled = await Promise.allSettled(
+        toExecute.map(tc => (raceSignal ? raceRunAbort(this._executeOne(tc), raceSignal) : this._executeOne(tc))),
+      );
+    } finally {
+      this._taintBeforeBatch = undefined;
+    }
     this._batch = undefined;
     this._batchTwins = undefined;
 
@@ -4808,7 +4881,7 @@ export class Agent implements IAgent {
       if (this._needsInputStreamed.has(needsInput.reason)) throw needsInput.reason;
       const masked = this._maskedNeedsInput(needsInput.reason);
       if (this.onStream) {
-        await this.onStream({ type: 'tool_result', name: toExecute[askedAt]!.name, result: masked.message, agent: this.name, toolUseId: toExecute[askedAt]!.id, isError: true, contract: this._contractOfCall(toExecute[askedAt]!) });
+        await this._emitSettledResult(toExecute[askedAt]!.name, { type: 'tool_result', name: toExecute[askedAt]!.name, result: masked.message, agent: this.name, toolUseId: toExecute[askedAt]!.id, isError: true, contract: this._contractOfCall(toExecute[askedAt]!) });
       }
       throw masked;
     }
@@ -4895,7 +4968,7 @@ export class Agent implements IAgent {
     const skip = this._repeatGuard.check(guardKey);
     if (skip) {
       if (this.onStream) {
-        await this.onStream({ type: 'tool_result', name: tc.name, result: skip.escalatedResult, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
+        await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: skip.escalatedResult, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
       }
       return { type: 'tool_result', tool_use_id: tc.id, content: skip.escalatedResult, is_error: true };
     }
@@ -5122,6 +5195,9 @@ export class Agent implements IAgent {
     // A read only: the host of a connected API the owner chose (`ApiStore.readKnownHosts`). A send
     // never asks this, so a profile cannot make a send's target known.
     if (asRead && target.kind === 'host' && this._readKnownHosts().has(target.value)) return 'known';
+    // A read only: a host the policy itself names, its baseline and the operator's floor. A send to
+    // one the owner did not name keeps asking.
+    if (asRead && target.kind === 'host' && this._policyNamesHost(target.value)) return 'known';
     if (target.kind === 'host') {
       // Only a reviewed contract: a person was shown the hosts and accepted them. Only while it
       // governs this call (not withheld after outside content), and only a host written out in
@@ -5130,6 +5206,13 @@ export class Agent implements IAgent {
       if (contract?.origin === 'reviewed' && contract.hostPatterns.some((p) => normalizeHostName(p) === target.value)) return 'known';
     }
     return this.ownerKnown?.known(target) ?? 'foreign';
+  }
+
+  /** {@link policyNamesHost} for this agent's policy. A context that does not carry the
+   *  instance's policy (`isPolicyUnread`) names nothing (fail-closed, as `providerSearchAdmitted`). */
+  private _policyNamesHost(host: string): boolean {
+    const tc = this.toolContext;
+    return tc !== undefined && !isPolicyUnread(tc) && policyNamesHost(host, tc);
   }
 
   /** {@link ApiStore.readKnownHosts}, or none when no store can answer: the read is then asked about. */
@@ -5189,17 +5272,35 @@ export class Agent implements IAgent {
     // Checked as a read: the latch made the address a target. Its question and refusals say "read".
     let asRead = false;
     let carried = false;
+    // Checked as a save: the address is where a profile the call saves later posts a client's
+    // credentials (`ToolEntry.credentialAddress`). Not a read: neither a search's result nor a
+    // connected API's host makes it known. Its question and refusals say "save".
+    let saveAddress: string | null = null;
+    let saving = false;
     try {
       targets = tool.sendTargets !== undefined ? tool.sendTargets(tc.input) : null;
       if (targets === null && whenLatched !== undefined) {
-        // An address a search in this conversation listed as a result was chosen by the provider,
-        // not written by the model (what it can still carry: `SearchResultAddresses`).
-        asRead = true;
-        const address = tool.readAddress?.(tc.input) ?? null;
-        if (address !== null && this.searchResultAddresses.has(address)) return {};
-        // An address that carries another one is asked about whatever its host: a service that
-        // fetches it sends the read on to an address nobody here can name for sure.
-        carried = tool.readCarriesAddress?.(tc.input) === true;
+        // A declaration that throws names a save whose address cannot be read: refused as one.
+        try {
+          saveAddress = tool.credentialAddress?.(tc.input) ?? null;
+        } catch (err) {
+          saving = true;
+          throw err;
+        }
+        saving = saveAddress !== null;
+        if (saveAddress !== null) {
+          // An address that carries another one is asked about whatever its host, as for a read.
+          carried = carriesAddress(saveAddress);
+        } else {
+          // An address a search in this conversation listed as a result was chosen by the provider,
+          // not written by the model (what it can still carry: `SearchResultAddresses`).
+          asRead = true;
+          const address = tool.readAddress?.(tc.input) ?? null;
+          if (address !== null && this.searchResultAddresses.has(address)) return {};
+          // An address that carries another one is asked about whatever its host: a service that
+          // fetches it sends the read on to an address nobody here can name for sure.
+          carried = tool.readCarriesAddress?.(tc.input) === true;
+        }
         targets = whenLatched(tc.input);
       }
     } catch {
@@ -5211,13 +5312,11 @@ export class Agent implements IAgent {
     // empty one, a recipient field that yields none) refuses the whole call, in every session and
     // without a question: a yes to a target nobody can see would hold for anything.
     if (targetsUnread) {
-      const unreadNoun: TargetNoun = asRead || tc.name === 'web_research' ? 'page' : tc.name === 'http_request' ? 'host' : 'mail';
+      const unreadNoun: TargetNoun = saving ? 'tokenUrl' : asRead || tc.name === 'web_research' ? 'page' : tc.name === 'http_request' ? 'host' : 'mail';
       try { this.onOriginRefused?.({ targets: { values: [], unreadable: true }, noun: unreadNoun, origin: this.originOfTargets() }); } catch { /* the refusal stands */ }
       if (guardRefuses) return {};
-      const text = originUnreadable(unreadNoun);
-      if (this.onStream) {
-        await this.onStream({ type: 'tool_result', name: tc.name, result: text, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
-      }
+      const text = saving ? originTokenUrlUnreadable() : originUnreadable(unreadNoun);
+      await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: text, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
       return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(text), is_error: true } };
     }
     if (targets.length === 0) return { origin: { known: [], allKnown: false } };
@@ -5229,7 +5328,7 @@ export class Agent implements IAgent {
     const lookupFailed = foreign.some((v) => v.verdict === 'unreadable');
     const shownTargets = foreign.map((v) => v.target.value);
     const shown: OriginTargets = { values: shownTargets, unreadable: false };
-    const noun: TargetNoun = asRead || tc.name === 'web_research' ? 'page' : foreign[0]!.target.kind === 'host' ? 'host' : 'mail';
+    const noun: TargetNoun = saving ? 'tokenUrl' : asRead || tc.name === 'web_research' ? 'page' : foreign[0]!.target.kind === 'host' ? 'host' : 'mail';
     // A source that could not be read leaves where the target comes from unchecked: every report of
     // it (the run's result, the approval card, the question, the model texts) says it is not known,
     // never the origin it would have had.
@@ -5245,18 +5344,18 @@ export class Agent implements IAgent {
 
     const refuse = async (text: string): Promise<{ refusal: BetaToolResultBlockParam }> => {
       // Streamed like every other refusal: the owner of a run nobody watches learns of it only there.
-      if (this.onStream) {
-        await this.onStream({ type: 'tool_result', name: tc.name, result: text, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
-      }
+      await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: text, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
       return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(text), is_error: true } };
     };
     const refuseUnattended = (): Promise<{ refusal: BetaToolResultBlockParam }> => {
       try { this.onOriginRefused?.({ targets: shown, noun, origin }); } catch { /* the refusal stands */ }
+      if (saving) return refuse(originTokenUrlRefused('unattended', shown, origin, carried, lookupFailed));
       return refuse(carried ? originCarriedUnattended(shown) : lookupFailed ? originLookupFailedUnattended(shown, noun) : originRefusedUnattended(shown, origin, noun));
     };
     // Someone the owner let in answers this session's questions themselves: asking them would
     // protect nothing. A target the owner named goes out as it would for the owner.
     if (this.principal.kind !== 'owner') {
+      if (saving) return refuse(originTokenUrlRefused('mandate', shown, origin, carried, lookupFailed));
       return refuse(carried ? originCarriedMandate(shown) : lookupFailed ? originLookupFailedMandate(shown, noun) : originRefusedMandate(shown, origin, noun));
     }
     if (!this.promptUser) return refuseUnattended();
@@ -5266,11 +5365,13 @@ export class Agent implements IAgent {
     // A host a stored profile names but that does not count for reads: the question says how it would.
     const profileHosts = asRead ? this._profileHosts() : new Set<string>();
     const connected = shownTargets.filter((h) => profileHosts.has(h));
-    const question = carried ? originCarriedAsk(shown, lang, watchEveryMinutes(tc.name, tc.input)) : originAsk(tc.name, tc.input, noun, shown, origin, lang, connected, lookupFailed);
+    const question = saveAddress !== null ? originTokenUrlAsk(shown, saveAddress, lang, carried, lookupFailed)
+      : carried ? originCarriedAsk(shown, lang, watchEveryMinutes(tc.name, tc.input)) : originAsk(tc.name, tc.input, noun, shown, origin, lang, connected, lookupFailed);
     const answer = await this.promptUser(question, ['Allow', 'Deny', '\x00'], { blocked: true });
     if (answer === UNATTENDED_BLOCK_ANSWER) return refuseUnattended();
     if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-      const denied = carried ? originCarriedDenied(shown) : lookupFailed ? `${originLookupFailedHead(shown)} ${originDenied(shown, origin, noun)}` : originDenied(shown, origin, noun);
+      const denied = saving ? originTokenUrlRefused('denied', shown, origin, carried, lookupFailed)
+        : carried ? originCarriedDenied(shown) : lookupFailed ? `${originLookupFailedHead(shown)} ${originDenied(shown, origin, noun)}` : originDenied(shown, origin, noun);
       return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(denied), is_error: true } };
     }
     return { origin: passed };
@@ -5311,7 +5412,7 @@ export class Agent implements IAgent {
     if (containedRefusal !== null) {
       // Streamed with its reason, so the chat's view can offer the way out under it.
       if (this.onStream) {
-        await this.onStream({ type: 'tool_result', name: tc.name, result: containedRefusal.text, agent: this.name, toolUseId: tc.id, isError: true, contained: containedRefusal.reason });
+        await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: containedRefusal.text, agent: this.name, toolUseId: tc.id, isError: true, contained: containedRefusal.reason });
       }
       return {
         type: 'tool_result',
@@ -5452,7 +5553,7 @@ export class Agent implements IAgent {
           // Streamed like the non-interactive refusal below: the owner of a run nobody watches
           // learns of it only through the record.
           if (this.onStream) {
-            await this.onStream({ type: 'tool_result', name: tc.name, result: refusal, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
+            await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: refusal, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
           }
           return { type: 'tool_result', tool_use_id: tc.id, content: refusal, is_error: true };
         }
@@ -5474,7 +5575,7 @@ export class Agent implements IAgent {
         // headless run's owner learns of a refused write only through it (the step itself
         // still completes). Same shape as the escalated-skip result above.
         if (this.onStream) {
-          await this.onStream({ type: 'tool_result', name: tc.name, result: refusal, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
+          await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: refusal, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
         }
         return {
           type: 'tool_result',
@@ -5648,7 +5749,7 @@ export class Agent implements IAgent {
     // a prompt the user may take a while to answer.
     if (mutatesFile && this.changesetManager?.active) {
       const reviewed = (tc.input as Record<string, unknown>)[REVIEWED_PATH_FIELD];
-      if (typeof reviewed === 'string' && reviewed && this.changesetManager.backupBeforeWrite(resolve(reviewed)) === false) {
+      if (typeof reviewed === 'string' && reviewed && this.changesetManager.backupBeforeWrite(resolveToolPath(reviewed)) === false) {
         // Nothing could be saved for the review: the write would be in neither the review nor
         // the rollback, and nothing would say so.
         const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
@@ -5773,7 +5874,7 @@ export class Agent implements IAgent {
       // Which file the write left at the path: a rollback deletes a new file only while it is still this one.
       if (mutatesFile && this.changesetManager?.active) {
         const written = (tc.input as Record<string, unknown>)[REVIEWED_PATH_FIELD];
-        if (typeof written === 'string' && written) this.changesetManager.recordWritten?.(resolve(written));
+        if (typeof written === 'string' && written) this.changesetManager.recordWritten?.(resolveToolPath(written));
       }
 
       // Without a store (a headless workflow step) the engine's own env secrets are still

@@ -54,6 +54,8 @@ export class ApiProfileUnlinkError extends Error {
 // `loadFromDirectory`) — that's what makes the `unregister` path safe to
 // hand the id into `join(apisDir, …)`.
 const PROFILE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+/** The shape of an opaque profile id (`newApiTrailId`): reserved for new profile ids, see `_admit`. */
+export const OPAQUE_PROFILE_ID_SHAPE = /^apf_[0-9a-f]{16}$/;
 
 /** The auth types a briefing line may name; anything else a stored profile holds is left out. */
 const BRIEFING_AUTH_TYPES: ReadonlySet<string> = new Set(['none', 'basic', 'bearer', 'header', 'query', 'oauth2']);
@@ -1613,6 +1615,29 @@ export class ApiStore {
     return this.connStore?.trailIdOf(id);
   }
 
+  /** The `id` of the profile with the opaque id `trailId`; undefined without engine.db or once it is deleted. */
+  idOfTrailId(trailId: string): string | undefined {
+    return this.connStore?.slugOfTrailId(trailId);
+  }
+
+  /**
+   * What the owner last saw of a profile a mandate wrote, by `view`: the digest of its
+   * release-bound settings (`bindingOf`) and when. The release question compares it with the
+   * settings it asks about, so a save between the view and the question is named there. Kept in
+   * memory only: after a restart the question says nothing about a view, and names the way to one.
+   */
+  private readonly ownerViews = new Map<string, { binding: string; at: Date }>();
+
+  /** Record that the owner viewed profile `id` with release-bound settings `binding`. */
+  noteOwnerView(id: string, binding: string, at: Date): void {
+    this.ownerViews.set(id, { binding, at });
+  }
+
+  /** The owner's last view of profile `id`, or undefined when the owner has not viewed it. */
+  ownerViewOf(id: string): { binding: string; at: Date } | undefined {
+    return this.ownerViews.get(id);
+  }
+
   /** A fresh opaque id for a save to pass as `SaveOptions.trailId`; undefined without engine.db. */
   newTrailId(): string | undefined {
     return this.connStore === null ? undefined : newApiTrailId();
@@ -2514,6 +2539,12 @@ export class ApiStore {
       // hand the id directly to `join(apisDir, …)` without a second check.
       return `invalid id (must match ${PROFILE_ID_PATTERN.source})`;
     }
+    // The shape of an opaque profile id is reserved for new ids: the owner's release question names
+    // a profile by it, and an id spelled the same would be another profile under that name. Only a
+    // save is refused; a stored profile that already has such an id still loads.
+    if (mode === 'save' && OPAQUE_PROFILE_ID_SHAPE.test(profile.id) && !this.profiles.has(profile.id)) {
+      return 'invalid id: "apf_" followed by 16 hex digits is the shape of an opaque profile id and is reserved';
+    }
     // A stored entry that could not be read holds every name it carries: weighed before anything
     // else that measures names, in both modes, since none of those checks can see it.
     const unreadableRefusal = this._unreadableRefusal(profile, mode);
@@ -3226,8 +3257,10 @@ export class ApiStore {
    * The hosts a read may reach after foreign content without a question, because the owner chose
    * them for a connected API: the exact host of a profile's `base_url` (no subdomain, no suffix),
    * when the owner accepted that host at a save (`custom_endpoint_ack.hosts`) or saved the profile
-   * in a turn free of foreign content (`owner_clean_host`, bound to the host it was saved with). A
-   * profile a mandate wrote never counts, nor does a listed sub-processor host on its own. For
+   * in their own chat, in a tool batch that began before any foreign content and in a conversation
+   * without a server tool the provider ran itself, such as its web search (`owner_clean_host`,
+   * bound to the host it was saved with). A profile a mandate wrote never counts, nor does a
+   * listed sub-processor host on its own. For
    * reads only: a send's targets never consult this.
    */
   readKnownHosts(): Set<string> {
