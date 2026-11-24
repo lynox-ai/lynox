@@ -484,9 +484,13 @@ async function runRefresh(profileId: string, trigger: 'due' | 'unauthorized', ct
     setSecret(accessKey, access);
     if (rotated !== null) setSecret(refreshKey, rotated);
   } catch {
-    // The vault may hold the new access token beside the old binding, and the store spent the
-    // refresh token: the connection is over. Marked ended, so the owner's hint says so.
-    return writeFailed(profileId, ctx, plan, trigger, 'writing the new tokens to the vault failed; connect the store again');
+    // The vault may hold the new access token beside the old binding. Where the store rotated, it
+    // spent the refresh token: the connection is over, and is marked ended so the owner's hint says
+    // so. Where it did not rotate, the refresh token it holds still stands: nothing is marked.
+    const why = 'writing the new tokens to the vault failed; connect the store again';
+    if (rotated !== null) return writeFailed(profileId, ctx, plan, trigger, why);
+    outcomeLine(profileId, 'dead', trigger, why);
+    return 'dead';
   }
   const liveRefresh = rotated ?? plan.presented.refresh;
   const writes: WrittenSecret[] = [{ name: accessKey, fp: tokenFingerprint(access) }];
@@ -551,7 +555,8 @@ function sameScopes(a: readonly string[], b: readonly string[]): boolean {
  * The store rotated the tokens but writing them failed: the refresh token it spent cannot be used
  * again, so the connection is over whether or not marking it ended works. The binding is taken away
  * and the grant marked `refresh-dead` as in {@link endConnection}; if even that save fails, the
- * outcome is still `dead` and the line says the mark is missing.
+ * outcome is still `dead` and the line says the mark is missing. A binding that is no longer the one
+ * the refresh began with is left as it is, and the line says so.
  */
 async function writeFailed(
   profileId: string,
@@ -560,32 +565,35 @@ async function writeFailed(
   trigger: 'due' | 'unauthorized',
   why: string,
 ): Promise<StoreRefreshOutcome> {
-  const marked = await markEnded(profileId, ctx, plan);
-  outcomeLine(profileId, 'dead', trigger, marked ? why : `${why}; the connection could not be marked ended`);
+  const mark = await markEnded(profileId, ctx, plan);
+  const said = mark === 'ended' ? why
+    : mark === 'left' ? `${why}; the connection was left as it is (bound again meanwhile)`
+    : `${why}; the connection could not be marked ended`;
+  outcomeLine(profileId, 'dead', trigger, said);
   return 'dead';
 }
 
 /**
  * Take the binding away and mark the grant `refresh-dead`, if the binding is still the one the
- * refresh began with. Whether it did: a connect that saved meanwhile, or a save that failed, leaves
- * the profile as it is.
+ * refresh began with: `ended`. A binding that is no longer that one (a connect, or a save that went
+ * through after all) is left as it is: `left`. A save that failed, or no store: `failed`.
  */
-async function markEnded(profileId: string, ctx: StoreRefreshContext, plan: StoreRefreshPlan): Promise<boolean> {
+async function markEnded(profileId: string, ctx: StoreRefreshContext, plan: StoreRefreshPlan): Promise<'ended' | 'left' | 'failed'> {
   const apiStore = ctx.toolContext.apiStore;
-  if (!apiStore) return false;
+  if (!apiStore) return 'failed';
   try {
     const { getLynoxDir } = await importConfig();
     // Read after the import, with nothing between this and the save: a connect that saved
     // meanwhile carries its own binding, which stays.
     const now = apiStore.get(profileId);
-    if (now?.oauth_grant === undefined || now.oauth_grant.store_binding !== plan.presented.binding) return false;
+    if (now?.oauth_grant === undefined || now.oauth_grant.store_binding !== plan.presented.binding) return 'left';
     const { store_binding: _gone, ...rest } = now.oauth_grant;
     // A revocation stays one: saving it as anything else would lift it (`ApiStore.save`).
     const grant: OAuthGrantRecord = { ...rest, state: rest.state === 'revoked' ? 'revoked' : 'refresh-dead' };
-    return apiStore.save({ ...now, oauth_grant: grant } as ApiProfile, join(getLynoxDir(), 'apis'), { actor: ctx.principal }).ok;
+    return apiStore.save({ ...now, oauth_grant: grant } as ApiProfile, join(getLynoxDir(), 'apis'), { actor: ctx.principal }).ok ? 'ended' : 'failed';
   } catch {
     // The binding stays; the store refuses the spent token itself, and the next refresh ends here again.
-    return false;
+    return 'failed';
   }
 }
 
@@ -610,7 +618,7 @@ async function endConnection(
 ): Promise<StoreRefreshOutcome> {
   // Whether this ended the connection. A connect that saved meanwhile, or a save that failed,
   // leaves it as it is: then nothing says to connect again.
-  const ended = await markEnded(profileId, ctx, plan);
+  const ended = (await markEnded(profileId, ctx, plan)) === 'ended';
   const said = invalidGrantSaid ? `${why} (invalid_grant)` : why;
   if (!ended) {
     outcomeLine(profileId, outcome, trigger, `${said}; the connection was left as it is (connected again meanwhile, or not saved)`);

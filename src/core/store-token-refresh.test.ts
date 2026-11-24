@@ -367,6 +367,37 @@ describe('the refresh of an expiring store connection', () => {
     expect(lines().some((l) => l.includes('could not be marked ended'))).toBe(false);
   });
 
+  it('an answer that rotated nothing, whose access write throws, is not marked ended: the refresh token the vault holds still stands', async () => {
+    const { refresh_token: _r, ...noRotation } = RENEWED;
+    hold.answer = async () => answer(noRotation);
+    const c = ctx();
+    const failing = { resolve: c.secretStore.resolve, set: () => { throw new Error('vault is full'); } } as never;
+    expect(await refreshStoreToken(ID, 'due', { ...c, secretStore: failing })).toBe('dead');
+    expect(vault.get(refreshTokenKey(ID))).toBe('rt-old');
+    expect(profile().oauth_grant?.store_binding).toBe(bind(ID, ORIGIN, 'at-old'));
+    expect(profile().oauth_grant?.state).toBe('connected');
+    expect(lines().filter((l) => l.includes('outcome=dead (due): writing the new tokens to the vault failed; connect the store again'))).toHaveLength(1);
+    expect(lines().some((l) => l.includes('marked ended') || l.includes('left as it is'))).toBe(false);
+  });
+
+  it('a save that throws after it went through leaves the new binding as it is, and the line says so, not that a mark is missing', async () => {
+    const realSave = store.save.bind(store);
+    const save = vi.spyOn(store, 'save').mockImplementation((p, dir, opts) => {
+      const r = realSave(p, dir, opts);
+      if (opts?.exchange !== undefined) throw new Error('a follow-up after the save failed');
+      return r;
+    });
+    try {
+      expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
+    } finally {
+      save.mockRestore();
+    }
+    expect(profile().oauth_grant?.store_binding).toBe(bind(ID, ORIGIN, 'at-new'));
+    expect(profile().oauth_grant?.state).not.toBe('refresh-dead');
+    expect(lines().filter((l) => l.includes('could not be saved; connect the store again; the connection was left as it is (bound again meanwhile)'))).toHaveLength(1);
+    expect(lines().some((l) => l.includes('could not be marked ended'))).toBe(false);
+  });
+
   it('a write failure whose ending cannot be saved either is still dead, and its line says the mark is missing', async () => {
     const save = vi.spyOn(store, 'save').mockImplementation(() => ({ ok: false }) as never);
     try {
