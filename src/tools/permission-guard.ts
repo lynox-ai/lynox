@@ -328,7 +328,7 @@ export const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
  * that spells it (`cat terraform/main.tf`) matches too. Under `block` that is a block; under
  * `ask`, a run with no one to ask refuses it unless a contract lifts it.
  *
- * - `block`: every command the rule matches also matches CRITICAL_BASH, so it is `[${system(T.blocked)}]`.
+ * - `block`: every command the rule matches also matches CRITICAL_BASH, so it is `[BLOCKED]` (in the warning that decides; a German prompt shows `[GESPERRT]`).
  *   A block cannot be lifted by a capability contract. Where the run has a
  *   question channel, it is put to a person; without one it is refused.
  * - `ask`: the command talks to another system (a remote host, a cloud account, a cluster, a
