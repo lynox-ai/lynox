@@ -24,7 +24,7 @@ const clean = (el: HTMLElement): string => el.innerHTML.replace(/<!---->/g, '');
 const BOX = 'rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 box-decoration-clone';
 
 describe('one value in its box, broken by the value rule', () => {
-	it('keeps a value with a hyphen as one piece, and breaks a longer one only after a dot or @', async () => {
+	it('cuts pieces that end after a dot or @, never at a hyphen', async () => {
 		const pieces = async (v: string): Promise<string[]> => [...(await draw('value', shownValue(v))).querySelectorAll('bdi[data-foreign-value] > span')].map((s) => s.textContent ?? '');
 		expect(await pieces('acme-store')).toEqual(['acme-store']);
 		expect(await pieces('buero@kunden-crm.example')).toEqual(['buero@', 'kunden-crm.', 'example']);
@@ -35,7 +35,7 @@ describe('one value in its box, broken by the value rule', () => {
 		const el = await draw('value', shownValue('acme-store.myshopify.com'));
 		const boxes = el.querySelectorAll('bdi[data-foreign-value]');
 		expect(boxes.length).toBe(1);
-		expect(boxes[0]!.getAttribute('class')).toBe(`${BOX} font-mono`);
+		expect(boxes[0]!.getAttribute('class')).toBe(`${BOX} font-mono inline-block max-w-full`);
 		expect(boxes[0]!.textContent).toBe('acme-store.myshopify.com');
 		expect(boxes[0]!.querySelectorAll('wbr').length).toBe(2);
 	});
@@ -47,6 +47,14 @@ describe('one value in its box, broken by the value rule', () => {
 		expect(pieces.some((p) => p.includes(rlo))).toBe(false);
 		expect(pieces.filter((p) => p.includes('<U+202E>')).length).toBe(1);
 		expect(valueSegments('a<U+202E>b', 'account')).toEqual(['a<U+202E>b']);
+	});
+
+	it('reads left to right, so a value led by a right-to-left letter keeps its pieces in order', async () => {
+		const aleph = String.fromCharCode(0x05d0);
+		const el = await draw('value', shownValue(`${aleph}@com.paypal.attacker.io`));
+		const box = el.querySelector<HTMLElement>('bdi[data-foreign-value]')!;
+		expect(box.getAttribute('dir')).toBe('ltr');
+		expect([...box.querySelectorAll(':scope > span')].map((s) => s.textContent)).toEqual([`${aleph}@`, 'com.', 'paypal.', 'attacker.', 'io']);
 	});
 
 	it('anything but exactly one marked value is drawn by MarkedLine as it is', async () => {
