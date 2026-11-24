@@ -5528,20 +5528,16 @@ export class Agent implements IAgent {
     const guardRefusesUnasked = effectiveSignal !== null && !filingCall && !this.promptUser;
     // A call its handler would refuse anyway is refused before either question: a yes could not
     // change the outcome (`ToolEntry.refusesUnasked`). It only refuses; `null` changes nothing.
-    // Only where someone would be asked: a run with no one to ask keeps the checks below in their
-    // order, so a call it refuses for where its target comes from is refused and recorded as that.
-    if (tool.refusesUnasked !== undefined && this.promptUser !== undefined) {
-      let unasked: unknown;
+    if (tool.refusesUnasked !== undefined) {
+      let unasked: string | null;
       try {
         unasked = tool.refusesUnasked(tc.input, this.toolContext);
       } catch {
         unasked = REFUSES_UNASKED_UNREADABLE;
       }
       if (unasked !== null) {
-        // Anything but a text to show (an empty one, a value an untyped tool returned) refuses too.
-        const text = typeof unasked === 'string' && unasked !== '' ? unasked : REFUSES_UNASKED_UNREADABLE;
-        await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: text, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
-        return { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(text), is_error: true };
+        await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: unasked, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
+        return { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(unasked), is_error: true };
       }
     }
     const originCheck = await this._checkSendOrigin(tc, tool, filingCall, guardRefusesUnasked, taintedBeforeThisCall);

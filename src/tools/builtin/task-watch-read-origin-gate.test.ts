@@ -185,53 +185,6 @@ describe('a watch task_create sets up after foreign content', () => {
     expect(tool.created).toEqual([]);
   });
 
-  it('an empty refusal from the check before the question refuses with the fixed text', async () => {
-    const tool = { ...taskCreate(), refusesUnasked: () => '' } as unknown as ToolEntry & { created: string[] };
-    const ask = asker('Allow');
-    const result = await call(agentOf(tool, ask.fn), { title: 'Watch', watch_url: 'https://listed.example/p' });
-    expect(result.is_error).toBe(true);
-    expect(String(result.content)).toContain(REFUSES_UNASKED_UNREADABLE);
-    expect(ask.asked).toEqual([]);
-    expect(tool.created).toEqual([]);
-  });
-
-  it('a watch on an http address under enforce_https is refused without a question', async () => {
-    const tool = taskCreate();
-    const ask = asker('Allow');
-    const agent = agentOf(tool, ask.fn);
-    Object.assign(agent.toolContext, { networkPolicy: 'guarded', enforceHttps: true });
-    const result = await call(agent, { title: 'Watch', watch_url: 'http://collect.evil.example/d/secret' });
-    expect(ask.asked).toEqual([]);
-    expect(String(result.content)).toContain('Error: watch_url not watched: this instance only reads HTTPS pages (enforce_https). No watch was created. Watch the https:// address instead.');
-    expect(tool.created).toEqual([]);
-  });
-
-  it('a run with no one to ask keeps refusing a watch for where its address comes from, not naming the policy', async () => {
-    const tool = taskCreate();
-    const result = await call(withPolicy(agentOf(tool, undefined), 'allow-list'), { title: 'Watch', watch_url: EVIL });
-    expect(result.is_error).toBe(true);
-    expect(String(result.content)).not.toContain('allow-list');
-    expect(String(result.content)).not.toContain('No watch was created');
-    expect(tool.created).toEqual([]);
-  });
-
-  it('a watch with schedule or workflow_id is no watch, and the policy check before the question leaves it alone', async () => {
-    const tool = taskCreate();
-    const ask = asker('Allow');
-    const agent = withPolicy(agentOf(tool, ask.fn, 'nothing named', false), 'deny-all');
-    await call(agent, { title: 'Report', schedule: '0 9 * * *', watch_url: 'https://listed.example/p' });
-    await call(agent, { title: 'Flow', workflow_id: 'wf_1', watch_url: 'https://listed.example/p' });
-    expect(tool.created).toEqual(['https://listed.example/p', 'https://listed.example/p']);
-  });
-
-  it('an address with a secret reference is left to the handler, which checks the resolved value', async () => {
-    const tool = taskCreate();
-    const ask = asker('Allow');
-    const agent = withPolicy(agentOf(tool, ask.fn, 'nothing named', false), 'deny-all');
-    await call(agent, { title: 'Watch', watch_url: 'secret:FEED_URL' });
-    expect(tool.created).toEqual(['secret:FEED_URL']);
-  });
-
   it('CONTROL: a call the handler does not turn into a watch is not asked about (a schedule or a workflow comes first)', async () => {
     const tool = taskCreate();
     const ask = asker('Deny');

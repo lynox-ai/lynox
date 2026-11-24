@@ -13,7 +13,6 @@ import { TriggerFieldsNotCarriedError, WATCH_OVERRIDE_REFUSAL, watchPolicyRefusa
 import { readAddressWrites } from '../../core/outbound-write.js';
 import { carriesAddress, hostTargets } from '../../core/send-target.js';
 import type { HostPolicyContext } from '../../core/network-guard.js';
-import { extractSecretRefNames } from '../../core/secret-store.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
 
@@ -369,10 +368,9 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
   // (`watchEveryMinutes`). A page a search listed needs no question (`readAddress`).
   // A watch the handler would refuse (`watchRefusal`) is refused before that question: a yes to
   // it could not create the watch.
-  // An address with a `secret:` reference is checked by the handler alone, which sees the value.
   refusesUnasked: (input, ctx) => {
     const url = watchedUrl(input);
-    return url === null || extractSecretRefNames(url).length > 0 ? null : watchRefusal(url, ctx);
+    return url === null ? null : watchRefusal(url, ctx);
   },
   sendTargetsWhenLatched: (input) => {
     const url = watchedUrl(input);
@@ -622,9 +620,8 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
       }
 
       if (input.watch_url) {
-        // Read before anyone is asked too (`refusesUnasked`), but on the address as the model wrote
-        // it: here it is checked again after `secret:` references were resolved, and for a run with
-        // no one to ask, which that check does not read.
+        // Read before anyone is asked too (`refusesUnasked`); checked here again for a call that
+        // reaches the handler another way.
         const refused = watchRefusal(input.watch_url, agent.toolContext);
         if (refused !== null) return refused;
         // Floor the interval at 5 min: the JSON-schema `minimum` is only advisory
