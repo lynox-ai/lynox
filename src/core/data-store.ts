@@ -60,10 +60,14 @@ const VISIBLE_META_COLUMNS = ['_id', '_created_at', '_updated_at'] as const;
  * `_written_untrusted`, `'1'` once any write to the row came from a turn that had read
  * content from outside, and never cleared by a later write. NULL is a row from before the
  * columns existed, and a NULL `_written_by` is unknown, never the owner. The store writes
- * all of them itself; no user column may take their names. No read method but the export
+ * all of them itself; no user column may take their names. `_written_at` is a stamp unique to the
+ * write that set `_written_by` ({@link writeStamp}). A trigger on every collection table
+ * ({@link writerTriggerSql}) clears it on any UPDATE that does not set a new one: a write that
+ * does not stamp (an older binary after a downgrade, a subject repoint, any path added later)
+ * leaves the row with no known writer ({@link DataStore.sourceOfRow}). No read method but the export
  * and {@link DataStore.sourceOfRow} returns them, and no filter may name them.
  */
-export const SOURCE_COLUMNS = ['_source_grants', '_source_run_id', '_written_by', '_written_untrusted'] as const;
+export const SOURCE_COLUMNS = ['_source_grants', '_source_run_id', '_written_by', '_written_untrusted', '_written_at'] as const;
 /** Every column the store writes itself. No user column may take one of these names. */
 export const SYSTEM_COLUMNS: ReadonlySet<string> = new Set<string>([...VISIBLE_META_COLUMNS, ...SOURCE_COLUMNS]);
 
@@ -98,10 +102,32 @@ export function rowStampOf(agent: Pick<IAgent, 'conversationGrants' | 'currentRu
   };
 }
 
-/** The bound values of a stamp, in {@link SOURCE_COLUMNS} order. Read before any write starts, so a missing stamp throws. */
+/** The bound values of a stamp, in {@link SOURCE_COLUMNS} order up to `_written_at`, which the
+ *  writer binds from {@link writeStamp}. Read before any write starts, so a missing stamp throws. */
 function stampValues(stamp: RowStamp): [string, string | null, string | null, string | null] {
   const grants = stamp.grants === null ? [UNKNOWN_GRANT] : [...new Set(stamp.grants)].sort();
   return [JSON.stringify(grants), stamp.runId, stamp.writtenBy ?? null, stamp.untrusted === true ? '1' : null];
+}
+
+let writeCounter = 0;
+/** A `_written_at` no earlier write carried: the time and a per-process count. Two writes in the
+ *  same millisecond must still differ, or the trigger would read the second as not stamping. */
+function writeStamp(now: string): string {
+  writeCounter = (writeCounter + 1) % 1_000_000_000;
+  return `${now}#${process.pid}.${writeCounter}`;
+}
+
+/**
+ * The trigger that clears a row's writer stamp on every UPDATE that did not set a new one. It is
+ * in the database file, so a binary that does not know the stamp columns runs it too. The table
+ * name comes from COLLECTION_NAME_RE-checked metadata.
+ *
+ * A write that replaces a whole row (`REPLACE`, `INSERT OR REPLACE`) stamps the new row itself.
+ */
+function writerTriggerSql(tableName: string): string {
+  return `CREATE TRIGGER IF NOT EXISTS "${tableName}__writer_unknown" AFTER UPDATE ON "${tableName}" FOR EACH ROW `
+    + `WHEN NEW."_written_at" IS OLD."_written_at" AND NEW."_written_at" IS NOT NULL `
+    + `BEGIN UPDATE "${tableName}" SET "_written_at" = NULL WHERE "_id" = NEW."_id"; END`;
 }
 
 /**
@@ -111,7 +137,7 @@ function stampValues(stamp: RowStamp): [string, string | null, string | null, st
  */
 function writtenBySet(tableName: string): string {
   return `"_written_by" = excluded."_written_by", "_written_untrusted" = CASE WHEN "${tableName}"."_written_untrusted" = '1' `
-    + `OR excluded."_written_untrusted" = '1' THEN '1' ELSE NULL END`;
+    + `OR excluded."_written_untrusted" = '1' THEN '1' ELSE NULL END, "_written_at" = excluded."_written_at"`;
 }
 
 /** Where a row came from, as {@link DataStore.sourceOfRow} reads it. */
@@ -430,6 +456,10 @@ export class DataStore {
             this._addSourceColumn(tableName, col);
             added = true;
           }
+          if (!this._hasWriterTrigger(tableName)) {
+            this.db.exec(writerTriggerSql(tableName));
+            added = true;
+          }
           return added ? 'migrated' : 'present';
         }).immediate();
         if (outcome === 'missing') { missing.push(name); continue; }
@@ -457,10 +487,15 @@ export class DataStore {
     const cols = this.db.prepare('SELECT name FROM pragma_table_info(?)').all(`ds_${collection}`) as Array<{ name: string }>;
     if (cols.length === 0) throw new Error(`Table "${collection}" is listed but has no data.`);
     const have = new Set(cols.map(c => c.name));
-    if (!SOURCE_COLUMNS.every(c => have.has(c))) {
+    if (!SOURCE_COLUMNS.every(c => have.has(c)) || !this._hasWriterTrigger(`ds_${collection}`)) {
       throw new Error(`Table "${collection}" has not been migrated to record where its rows come from, so nothing can be written to it. Restart lynox to migrate it.`);
     }
     this._sourceReady.add(collection);
+  }
+
+  /** Whether the table carries the trigger that clears a writer stamp ({@link writerTriggerSql}). */
+  private _hasWriterTrigger(tableName: string): boolean {
+    return this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?").get(`${tableName}__writer_unknown`) !== undefined;
   }
 
   /** The columns every row read returns: the visible system columns and the user columns, never {@link SOURCE_COLUMNS}. */
@@ -584,6 +619,7 @@ export class DataStore {
     // Build transaction
     const transaction = this.db.transaction(() => {
       this.db.exec(`CREATE TABLE "${tableName}" (${colDefs.join(', ')})`);
+      this.db.exec(writerTriggerSql(tableName));
 
       // Create unique constraint for composite unique key
       if (uniqueKey && uniqueKey.length > 0) {
@@ -698,7 +734,7 @@ export class DataStore {
         const record = records[i]!;
         try {
           // Validate and coerce values
-          const values: unknown[] = [now, now, ...stampCells];
+          const values: unknown[] = [now, now, ...stampCells, writeStamp(now)];
           for (const col of userCols) {
             const val = record[col];
             if (val === undefined || val === null) {
@@ -795,7 +831,7 @@ export class DataStore {
         }
         outcome = 'inserted';
       }
-      this.db.prepare(sql).run(now, now, ...stampCells, ...values);
+      this.db.prepare(sql).run(now, now, ...stampCells, writeStamp(now), ...values);
       // One row in or none: the count moves by the probe's answer, no table scan per write.
       // Unlike insertRecords this does not re-derive the count, so drift left by another
       // path stays until the next insertRecords/deleteRecords recount.
@@ -929,8 +965,11 @@ export class DataStore {
     if (!columns.some(c => c.name === keyColumn) || !VALID_COLUMN_NAME_RE.test(keyColumn)) return null;
     this._assertSourceColumns(collection);
     const rows = this.db.prepare(
-      `SELECT "_written_by" AS w, "_written_untrusted" AS u, "_source_grants" AS g FROM "ds_${collection}" WHERE "${keyColumn}" = ?`,
-    ).all(value) as Array<{ w: string | null; u: string | null; g: string | null }>;
+      `SELECT "_written_by" AS w, "_written_untrusted" AS u, "_source_grants" AS g, "_written_at" AS wa FROM "ds_${collection}" WHERE "${keyColumn}" = ?`,
+    ).all(value) as Array<{ w: string | null; u: string | null; g: string | null; wa: string | null }>;
+    // A writer is named only while the stamp of the write that named it stands: any UPDATE that
+    // did not stamp cleared it (the trigger), and a row from before the stamp has none.
+    for (const row of rows) if (row.wa === null) row.w = null;
     if (rows.length === 0) return null;
     const grants = new Set<string>();
     for (const row of rows) {

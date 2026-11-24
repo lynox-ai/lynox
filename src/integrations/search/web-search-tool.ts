@@ -7,9 +7,14 @@ import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { recordSessionCost } from '../../core/session-budget.js';
 import { rerankSearchResults } from './search-reranker.js';
-import { currentCallSignal } from '../../core/call-connection.js';
+import { currentCallSignal, currentCallTargetOrigin } from '../../core/call-connection.js';
 import { delegatedRedirects, httpTarget, outwardReadRecorder } from '../../core/audit-log.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
+import { turnIsLocked } from '../../core/mandate-tool-lock.js';
+import { carriesAddress, hostTargets } from '../../core/send-target.js';
+
+export { crossHostRedirectGuard, maskedHost, readHopsGuarded } from '../../core/read-hops.js';
+import { crossHostRedirectGuard, readHopsGuarded } from '../../core/read-hops.js';
 
 interface WebSearchInput {
   action: 'search' | 'read';
@@ -96,17 +101,37 @@ function looksLikeApiSetupResearch(query?: string, url?: string): boolean {
  *  treats it as system guidance, not page content. Kept short — the system
  *  prompt already has the full HARD RULES; this is the just-in-time
  *  pointer the model sees right next to the docs it's about to act on. */
+const API_SETUP_REMINDER_STORE_LINE = '- Hold `ask_secret` until the user explicitly signals readiness ("done", "have the token"). Don\'t open the secret prompt mid-walkthrough.';
 const API_SETUP_AGENT_REMINDER = `
 **Agent reminder (auto-injected because this looks like API-setup research):**
 - Match the user's stated use case to the scopes/permissions in these docs. Don't default to read-only — if the user said "optimize", "update", "sync", "post", "manage", they need \`write_*\` scopes too. Cite the exact scope names from the docs you just read.
 - Don't recommend any scope / endpoint / UI path you didn't see in these results. If the docs are incomplete, do another web_research call before guiding the user.
-- Hold \`ask_secret\` until the user explicitly signals readiness ("done", "have the token"). Don't open the secret prompt mid-walkthrough.`;
+${API_SETUP_REMINDER_STORE_LINE}`;
+
+/** The reminder a locked turn (a mandate's) gets: no key is entered there (U-185). */
+const API_SETUP_AGENT_REMINDER_LOCKED = API_SETUP_AGENT_REMINDER.replace(API_SETUP_REMINDER_STORE_LINE,
+  '- In this session no key is entered: when the walkthrough reaches the credential, tell the user that the owner of this instance has to store it.');
+
+/** The reminder for this turn: the locked one in a locked turn. */
+function apiSetupReminder(agent: IAgent): string {
+  return turnIsLocked(agent.principal) ? API_SETUP_AGENT_REMINDER_LOCKED : API_SETUP_AGENT_REMINDER;
+}
 
 export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSearchInput> {
   return {
     // A read of a page names it, host and path. A search names only that it searched: its
     // text can carry a customer's name, and the trail holds no content.
     outwardRead: (input) => (input.action === 'read' && typeof input.url === 'string' ? httpTarget('GET', input.url) : 'search'),
+    // Once foreign content is in the conversation, a read address can carry data out: a page that
+    // was read can ask for `https://<what the chat holds>.host/<more of it>?q=<and more>`. Such a
+    // read goes through the same origin check as a send, to the host of its address; an address
+    // that carries another one is asked about whatever its host (`readCarriesAddress`). Without a
+    // question it passes when the owner named that host, or when a search in this conversation
+    // listed exactly this address as a result (`readAddress`). A read the check stopped at follows
+    // no redirect to another host (`crossHostRedirectGuard`).
+    sendTargetsWhenLatched: (input) => (input.action === 'read' && typeof input.url === 'string' ? hostTargets(input.url) : null),
+    readCarriesAddress: (input) => input.action === 'read' && typeof input.url === 'string' && carriesAddress(input.url),
+    readAddress: (input) => (input.action === 'read' && typeof input.url === 'string' ? input.url : null),
     definition: {
       name: 'web_research',
       description: `Search the web or read a URL. Provider: ${provider.name}.
@@ -205,12 +230,15 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           // A delegated session gets the results as the engine found them: the pages behind
           // them would be reads whose hosts no row named before they were sent.
           if (isOwnerPrincipal(agent.principal)) results = await enrichResults(results, ctx);
+          // The addresses this search lists, as the provider gave them: a later read of exactly one of
+          // them passes the origin check without a question (`readAddress`).
+          agent.searchResultAddresses?.noteResults(input.query, results.map((r) => r.url));
           const formatted = formatSearchResults(results);
           if (results.length === 0) return formatted;
           const { wrapUntrustedData } = await import('../../core/data-boundary.js');
           const wrapped = wrapUntrustedData(formatted, 'web_search');
           return looksLikeApiSetupResearch(input.query, undefined)
-            ? wrapped + '\n' + API_SETUP_AGENT_REMINDER
+            ? wrapped + '\n' + apiSetupReminder(agent)
             : wrapped;
         } catch (err: unknown) {
           // Returned, not thrown, so the agent reads it and adapts — unchanged.
@@ -225,14 +253,18 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           throw new ToolSoftFailure('Error: "url" is required for action "read".', 'missing url');
         }
         try {
-          const result = await extractContent(input.url, undefined, ctx, delegatedRedirects(outwardReadRecorder(agent, 'web_research:redirect')));
+          // `currentCallTargetOrigin()` is set exactly when this call's address went through the origin
+          // check (`sendTargetsWhenLatched` above declared it); `readHopsGuarded` says when that holds
+          // its hops to the host.
+          const onRedirect = crossHostRedirectGuard(input.url, readHopsGuarded(currentCallTargetOrigin()), delegatedRedirects(outwardReadRecorder(agent, 'web_research:redirect')));
+          const result = await extractContent(input.url, undefined, ctx, onRedirect);
           const parts = [`# ${result.title}`, `Source: ${result.url}`, `Words: ${result.wordCount}`];
           if (result.truncated) parts.push('(Content truncated)');
           parts.push('', result.content);
           const { wrapUntrustedData } = await import('../../core/data-boundary.js');
           const wrapped = wrapUntrustedData(parts.join('\n'), 'web_page');
           return looksLikeApiSetupResearch(undefined, input.url)
-            ? wrapped + '\n' + API_SETUP_AGENT_REMINDER
+            ? wrapped + '\n' + apiSetupReminder(agent)
             : wrapped;
         } catch (err: unknown) {
           // The single biggest source of the false green: ~35 of 63 reads in one

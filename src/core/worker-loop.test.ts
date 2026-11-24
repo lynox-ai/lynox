@@ -306,7 +306,7 @@ describe('WorkerLoop', () => {
     );
     expect(session.run).toHaveBeenCalledWith(
       runTurn('Task: Daily Report\n\nGenerate the daily report'),
-      { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL },
+      { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), setUpBy: { kind: 'unknown' }, predatesRecord: true } },
     );
   });
 
@@ -349,7 +349,7 @@ describe('WorkerLoop', () => {
 
     expect(session.run).toHaveBeenCalledWith(
       runTurn('Task: Daily Report\n\nGenerate the daily report'),
-      { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL },
+      { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), setUpBy: { kind: 'unknown' }, predatesRecord: true } },
     );
   });
 
@@ -1989,6 +1989,17 @@ describe('WorkerLoop', () => {
       expect(call?.[1], 'a reader must be able to tell the two apart').not.toContain('cost ceiling');
     });
 
+    it('a capped run\'s push carries a send it refused, after the stop and before the run\'s text', async () => {
+      const tm = makeTaskManager([makeTask()]);
+      const session = sessionStoppedAt({ cause: 'iteration_cap', pendingToolCount: 3 });
+      (session as unknown as { getOriginRefusals: () => unknown[] }).getOriginRefusals = () => [{ targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } }];
+      const router = makeNotificationRouter();
+      await new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+      const msg = (router.notify as unknown as { mock: { calls: Array<[NotificationMessage]> } }).mock.calls[0]?.[0];
+      expect(msg?.body).toMatch(/^[^\n]*turn limit[\s\S]*\n\nThe trigger "Daily Report" did not send to "x@evil\.example"[^\n]*\n\nPartial findings so far\.$/);
+    });
+
     it('leaves a true end of turn alone', async () => {
       // The other side of the condition. `end_turn` is what the agent reports when it
       // finished by itself — including when the cost guard tripped on a turn that had no
@@ -2102,6 +2113,125 @@ describe('WorkerLoop', () => {
   });
 
   // ---- 4. successful task → recordTaskRun('success') + notify ----
+
+  it('the owner\'s own trigger passes its instruction as owner-known, and no origin', async () => {
+    const task = makeTask({ created_by: 'owner', created_untrusted: 'none' });
+    const tm = makeTaskManager([task]);
+    const session = makeSession('ok');
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(session.run).toHaveBeenCalledWith(expect.any(String), {
+      triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, ownerInstruction: `${task.title}\n${task.description}`,
+    });
+  });
+
+  it('the owner\'s trigger rewritten after outside content passes no instruction, and names the trigger as the origin', async () => {
+    const task = makeTask({ created_by: 'owner', created_untrusted: 'marker' });
+    const tm = makeTaskManager([task]);
+    const session = makeSession('ok');
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    const opts = vi.mocked(session.run).mock.calls[0]![1] as Record<string, unknown>;
+    expect(opts['ownerInstruction']).toBeUndefined();
+    expect(opts['sendOrigin']).toEqual({ kind: 'triggerRun', name: task.title, setUpBy: { kind: 'owner' } });
+  });
+
+  it('a send the run refused is said in the recorded result, with the target, its origin and the way through the chat', async () => {
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession('Bericht erstellt.');
+    (session as unknown as { getOriginRefusals: () => unknown[] }).getOriginRefusals = () => [{ targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } }];
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    const recorded = vi.mocked(tm.recordTaskRun).mock.calls[0]![1];
+    expect(recorded).toMatch(/^The trigger "Daily Report" did not send to "x@evil\.example": you did not name this recipient; it comes from content lynox read\. A run without you cannot ask\. If it should go out anyway, ask lynox in the chat, and lynox will ask you\.\n\nBericht erstellt\.$/);
+  });
+
+  it('the push at the end of the run carries the refused send before the run\'s text', async () => {
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession('Bericht erstellt.');
+    (session as unknown as { getOriginRefusals: () => unknown[] }).getOriginRefusals = () => [{ targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } }];
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(router.notify).toHaveBeenCalledTimes(1);
+    const body = (vi.mocked(router.notify).mock.calls[0]![0] as { body: string }).body;
+    expect(body).toMatch(/^The trigger "Daily Report" did not send to "x@evil\.example": you did not name this recipient; it comes from content lynox read\. A run without you cannot ask\. If it should go out anyway, ask lynox in the chat, and lynox will ask you\.\n\nBericht erstellt\.$/);
+  });
+
+  it('a send the run tried again shows its refusal once; another target gets its own line', async () => {
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession('Bericht erstellt.');
+    const x = { targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } };
+    const y = { targets: { values: ['y@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } };
+    (session as unknown as { getOriginRefusals: () => unknown[] }).getOriginRefusals = () => [x, { ...x }, y];
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    const recorded = String(vi.mocked(tm.recordTaskRun).mock.calls[0]![1]);
+    expect(recorded.match(/did not send to "x@evil\.example"/g)).toHaveLength(1);
+    expect(recorded.match(/did not send to "y@evil\.example"/g)).toHaveLength(1);
+  });
+
+  it('a run that fails after a refused send still says the refusal in its recorded result, before the error', async () => {
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession(new Error('provider down'));
+    (session as unknown as { getOriginRefusals: () => unknown[] }).getOriginRefusals = () => [{ targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } }];
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    const recorded = vi.mocked(tm.recordTaskRun).mock.calls[0]![1];
+    expect(recorded).toMatch(/^The trigger "Daily Report" did not send to "x@evil\.example": .* ask lynox in the chat, and lynox will ask you\.\n\n.*provider down/s);
+  });
+
+  it('a run that times out after a refused send records the refusal before the timeout, as a timeout', async () => {
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession(Object.assign(new Error('deadline'), { name: 'TimeoutError' }));
+    (session as unknown as { getOriginRefusals: () => unknown[] }).getOriginRefusals = () => [{ targets: { values: ['x@evil.example'], unreadable: false }, noun: 'mail', origin: { kind: 'readContent' } }];
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    const [, recorded, status] = vi.mocked(tm.recordTaskRun).mock.calls[0]!;
+    expect(status).toBe('timeout');
+    expect(recorded).toMatch(/^The trigger "Daily Report" did not send to "x@evil\.example": .*\n\nTask timed out after/s);
+  });
+
+  it.each([
+    ['a failure', new Error('provider down'), 'failed', 'provider down'],
+    ['a timeout', Object.assign(new Error('deadline'), { name: 'TimeoutError' }), 'timeout', 'Task timed out after'],
+  ] as const)('a refusal list that throws while %s is recorded leaves the run\'s own error and status', async (_w, err, status, text) => {
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession(err);
+    (session as unknown as { getOriginRefusals: () => unknown[] }).getOriginRefusals = () => { throw new Error('refusal list unreadable'); };
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    const [, recorded, recordedStatus] = vi.mocked(tm.recordTaskRun).mock.calls[0]!;
+    expect(recordedStatus).toBe(status);
+    expect(recorded).toContain(text);
+    expect(recorded).not.toContain('refusal list unreadable');
+  });
+
+  it('CONTROL: a run that fails without a refused send records only the error', async () => {
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession(new Error('provider down'));
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    const recorded = vi.mocked(tm.recordTaskRun).mock.calls[0]![1];
+    expect(recorded).toContain('provider down');
+    expect(recorded).not.toContain('did not send to');
+  });
 
   it('records success and sends notification on successful task', async () => {
     const task = makeTask();
@@ -2739,7 +2869,7 @@ describe('WorkerLoop', () => {
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL });
+    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), setUpBy: { kind: 'unknown' }, predatesRecord: true } });
   });
 
   it('does not duplicate the title when description equals title', async () => {
@@ -2756,7 +2886,7 @@ describe('WorkerLoop', () => {
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL });
+    expect(session.run).toHaveBeenCalledWith(runTurn('Task: Daily Report'), { triggerOrigin: 'cron', triggerId: 'task-1', principal: OWNER_PRINCIPAL, sendOrigin: { kind: 'triggerRun', name: expect.stringContaining('Daily Report'), setUpBy: { kind: 'unknown' }, predatesRecord: true } });
   });
 
   // ---- 13. resolveTaskInput resolves pending input ----
@@ -3241,6 +3371,53 @@ describe('WorkerLoop', () => {
     await (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> }).executePipeline(task, ...NO_STOP());
     expect(event.outcome).toMatchObject({ state: 'failed', reason: WORKER_NOTICES.de.workflowRefUnresolved(2) });
     expect(router.notify).not.toHaveBeenCalled();
+  });
+
+  it('executePipeline records a step with a reserved id as a failure without a retry and tells the owner to rename it', async () => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'pipe-task-reserved', pipeline_id: 'pipeline-reserved', effect: 'run_workflow' });
+    // Saved before a save refused it: the first step is named `params`.
+    const planned = JSON.stringify({
+      id: 'pipeline-reserved', name: 'Weekly report', goal: 'report',
+      steps: [{ id: 'params', task: 'fetch' }, { id: 's2', task: 'sum {{params.result}}', input_from: ['params'] }],
+      reasoning: 'plan', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z',
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      confirmedAt: '2026-06-24T00:00:00.000Z', parameters: [],
+    });
+    const tm = makeTaskManager();
+    const engine = {
+      getTaskManager: vi.fn(() => tm),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
+      getSecretStore: vi.fn(() => null),
+      getContext: vi.fn(() => null),
+      getHooks: vi.fn(() => []),
+      getToolContext: vi.fn(() => ({ tools: [] })),
+      getMemory: vi.fn(() => null),
+      getRunHistory: vi.fn(() => ({
+        workflowStampState: STAMPED_IF_CONFIRMED,
+        getPlannedPipeline: vi.fn(() => ({ id: 'pipeline-reserved', manifest_json: planned })),
+        insertPipelineRun: vi.fn(),
+        insertPipelineStepResult: vi.fn(),
+      })),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
+      config: { language: 'de' },
+    } as unknown as Engine;
+    const router = makeNotificationRouter(true);
+    const loop = new WorkerLoop(engine, router, 60_000);
+    const { _resetPipelineStore } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+
+    await expect((loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> })
+      .executePipeline(task, ...NO_STOP())).resolves.toBeUndefined();
+    // The record keeps the full refusal with its repair; no retry, which would meet the same refusal.
+    expect(tm.recordTaskRun).toHaveBeenCalledWith('pipe-task-reserved', expect.stringContaining('step #1 (steps[0].id): "params", "__proto__" and "constructor" cannot be step ids'), 'failed', { noRetry: true });
+    expect(router.notify).toHaveBeenCalledTimes(1);
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ body: WORKER_NOTICES.de.workflowStepIdReserved(1) }));
+    // No retry offer: the cause stays until the step changes.
+    expect((router.notify as ReturnType<typeof vi.fn>).mock.calls[0]![0]).not.toHaveProperty('followUps');
+    expect(WORKER_NOTICES.de.workflowStepIdReserved(1)).toBe('Schritt 1 dieses Workflows trägt einen Namen, den lynox für etwas anderes braucht. Darum lief der Workflow nicht, und er läuft erst wieder, wenn der Schritt anders heisst oder entfernt ist. Bitte lynox im Chat, diesen Schritt umzubenennen.');
+    expect(WORKER_NOTICES.en.workflowStepIdReserved(1)).toBe('Step 1 of this workflow has a name lynox uses for something else, so the workflow did not run, and it will not run until that step is renamed or removed. Ask lynox in a chat to rename that step.');
   });
 
   it('executePipeline refuses a parameter name with a hidden character with the name\'s own fixed text', async () => {

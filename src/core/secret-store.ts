@@ -4,6 +4,7 @@ import type { SecretScope, SecretStoreLike, LynoxUserConfig } from '../types/ind
 import { channels } from './observability.js';
 import type { SecretVault } from './secret-vault.js';
 import { PROVIDER_KEY_SLOTS } from './llm/provider-keys.js';
+import { LLM_CATALOG } from './llm/catalog.js';
 import { isPresetClientSecretName } from './oauth-presets.js';
 import { ENV_REGISTRY } from '../contract/env-registry.js';
 
@@ -690,7 +691,7 @@ export function maskSecretsAndPatterns(
 ): string {
   // `suffix`: whether this span alone could show its last four. A merged span shows them only
   // if every span in it could, since the union's last four may belong to a short one.
-  const spans: Array<{ start: number; end: number; suffix: boolean }> = [];
+  const spans: MaskSpan[] = [];
 
   const patterns = opts?.includeGeneric === true ? SECRET_PATTERNS : SECRET_PATTERNS.slice(0, -1);
   for (const pattern of patterns) {
@@ -700,6 +701,17 @@ export function maskSecretsAndPatterns(
     }
   }
 
+  // A loop, not a spread: a long text can hold more matches than a call takes arguments.
+  for (const span of valueSpans(text, values)) spans.push(span);
+  return maskSpans(text, spans);
+}
+
+/** A stretch of a text to mask, and whether its mask may show its last four characters. */
+interface MaskSpan { start: number; end: number; suffix: boolean }
+
+/** Every occurrence of every value in `text`, as spans over the text as given. */
+function valueSpans(text: string, values: readonly string[]): MaskSpan[] {
+  const spans: MaskSpan[] = [];
   for (const value of values) {
     // Single characters would match everywhere; the store applies the same floor.
     if (value.length < 2) continue;
@@ -708,14 +720,23 @@ export function maskSecretsAndPatterns(
       const at = text.indexOf(value, from);
       if (at === -1) break;
       spans.push({ start: at, end: at + value.length, suffix: value.length >= MASK_SUFFIX_MIN_LENGTH });
-      from = at + value.length;
+      // One step on, not past the match: a value that overlaps itself (`XYZXYZ` in `XYZXYZXYZ`)
+      // is found again, and the merge joins the spans.
+      from = at + 1;
     }
   }
+  return spans;
+}
 
+/**
+ * Mask `spans` of `text`, all found over the text as given: overlapping and touching spans merge
+ * into one mask first, so two values that overlap leave no part of either in clear.
+ */
+function maskSpans(text: string, spans: MaskSpan[]): string {
   if (spans.length === 0) return text;
 
   spans.sort((a, b) => a.start - b.start || a.end - b.end);
-  const merged: Array<{ start: number; end: number; suffix: boolean }> = [];
+  const merged: MaskSpan[] = [];
   for (const span of spans) {
     const last = merged[merged.length - 1];
     // `<=`, not `<`: touching spans merge into one mask. That is presentation, because the
@@ -732,7 +753,9 @@ export function maskSecretsAndPatterns(
   for (const span of merged) {
     out += text.slice(cursor, span.start);
     const matched = text.slice(span.start, span.end);
-    out += span.suffix ? maskValue(matched) : '***';
+    const mask = span.suffix ? maskValue(matched) : '***';
+    // A value made of the mask's own characters (`***`) would stand in its own mask.
+    out += mask.includes(matched) ? '[redacted]' : mask;
     cursor = span.end;
   }
   return out + text.slice(cursor);
@@ -772,12 +795,77 @@ const MIN_ENV_SECRET_LENGTH = 8;
  */
 function engineEnvSecretValues(): string[] {
   const values: string[] = [];
+  const add = (value: string | undefined): void => {
+    if (value && value.length >= MIN_ENV_SECRET_LENGTH) values.push(value);
+  };
   for (const row of ENV_REGISTRY) {
     if (!row.secret || ENV_SECRETS_NOT_MASKED.has(row.name)) continue;
     const value = process.env[row.name];
-    if (value && value.length >= MIN_ENV_SECRET_LENGTH) values.push(value);
+    add(value);
+    // A JSON value is masked whole, and a credential inside it on its own as well: a run can
+    // print one key of the object without the rest.
+    if (row.valueKind === 'json' && value) for (const leaf of credentialLeavesOfJson(value)) add(leaf);
   }
+  // Provider keys a self-hosted engine reads from its environment by slot name, which the
+  // registry does not list (they are the owner's, not the platform's).
+  for (const name of [...PROVIDER_KEY_SLOTS, ...ENV_PROVIDER_KEYS_OUTSIDE_SLOTS]) {
+    if (!OPTIONAL_CREDENTIAL_SLOTS.has(name)) add(process.env[name]);
+  }
+  for (const value of processSecrets) add(value);
   return values;
+}
+
+/**
+ * Slots of local servers that take a key without needing one (`credential_optional`): operators
+ * set a placeholder there (`lm-studio`, `not-needed`), and masking it would hide the word, and
+ * refuse every text holding it, wherever it appears.
+ */
+const OPTIONAL_CREDENTIAL_SLOTS: ReadonlySet<string> = new Set(
+  LLM_CATALOG.filter((e) => e.credential_optional === true && typeof e.vault_slot === 'string').map((e) => e.vault_slot as string),
+);
+
+/** Environment keys an engine reads as provider credentials beside {@link PROVIDER_KEY_SLOTS}. */
+const ENV_PROVIDER_KEYS_OUTSIDE_SLOTS: readonly string[] = Object.freeze(['LYNOX_INBOX_MISTRAL_API_KEY']);
+
+/** A property name under which a JSON env value keeps a credential. */
+const CREDENTIAL_PROPERTY = /key|secret|token|password|credential/i;
+
+/**
+ * The string values of `json` held under a credential-named property ({@link CREDENTIAL_PROPERTY}),
+ * at any depth. Only those: a model id or a base URL in the same object is no secret, and masking
+ * it would hide it in every text that names it. Not JSON: none.
+ */
+function credentialLeavesOfJson(json: string): string[] {
+  let parsed: unknown;
+  try { parsed = JSON.parse(json); } catch { return []; }
+  const out: string[] = [];
+  // The top level's property names are names the operator chose (a profile, a tier) and decide
+  // nothing: a profile named `monkey` or `token-saver` must not make its model id and base URL
+  // credentials. Below it, a credential-named property makes everything under it one, nested
+  // objects and arrays included.
+  const walk = (v: unknown, underCredential: boolean, topLevel: boolean): void => {
+    if (typeof v === 'string') { if (underCredential) out.push(v); return; }
+    if (Array.isArray(v)) { for (const x of v) walk(x, underCredential, topLevel); return; }
+    if (v !== null && typeof v === 'object') {
+      for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+        walk(x, underCredential || (!topLevel && CREDENTIAL_PROPERTY.test(k)), false);
+      }
+    }
+  };
+  walk(parsed, false, true);
+  return out;
+}
+
+/**
+ * Credentials the process holds that come from neither the environment nor the vault (the web
+ * push private key, read from its own file). Mask-only, like the env values: registered once by
+ * the code that loads them, never listed or resolved.
+ */
+const processSecrets = new Set<string>();
+
+/** Mask `value` wherever the engine's own env secrets are masked. */
+export function registerProcessSecret(value: string): void {
+  if (value.length >= MIN_ENV_SECRET_LENGTH) processSecrets.add(value);
 }
 
 /**
@@ -851,29 +939,12 @@ function maskMatch(match: string): string {
 }
 
 /**
- * Replace every value in `values` that occurs in `text` with its mask. Longest first: a
- * shorter value inside a longer one would otherwise be replaced first, and the rest of the
- * longer one would no longer match and stay in clear.
+ * Replace every value in `values` that occurs in `text` with its mask. Every occurrence is found
+ * over the text as given and the spans merge ({@link maskSpans}): a value inside or overlapping
+ * another is masked together with it, and no rest of either stays in clear.
  */
 function maskValuesIn(text: string, values: readonly string[]): string {
-  let result = text;
-  for (const value of [...values].sort((a, b) => b.length - a.length)) {
-    if (value.length < 2) continue;
-    let masked = maskValue(value);
-    // Guard against a degenerate mask that CONTAINS the raw value (a value made
-    // of the mask's own '*' chars, like "***" → "***"): it
-    // would both loop forever below AND leak the secret through its own
-    // replacement. Fall back to a fixed token that cannot embed the value.
-    if (masked.includes(value)) masked = '[redacted]';
-    // Single global pass — split+join replaces every (non-overlapping)
-    // occurrence at once (literal replacement, no regex special-char issues).
-    // The previous `while (result.includes(...))` loop re-scanned the output
-    // and hung whenever the mask re-introduced the pattern.
-    if (result.includes(value)) {
-      result = result.split(value).join(masked);
-    }
-  }
-  return result;
+  return maskSpans(text, valueSpans(text, values));
 }
 
 export class SecretStore implements SecretStoreLike {

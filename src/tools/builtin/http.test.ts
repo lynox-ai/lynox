@@ -1448,7 +1448,7 @@ describe('httpRequestTool', () => {
             };
             const store = { getByHostname: () => profile, getHostConflict: () => undefined, unreadableHolds: () => false, knownProfiles: () => [profile], get: () => { throw new Error('store unavailable'); } };
             const headers: Record<string, string> = {};
-            const attach = attachStoredCredential('https://api.shop.example/v1/orders', headers, write, {
+            const attach = attachStoredCredential('https://api.shop.example/v1/orders', headers, write, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
               apiStore: store as never, secretStore: { resolve: () => 'shop-value' } as never, principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store as never),
             }, { bulkRunId: 'run-1' });
             if (outcome === 'rejects') await expect(attach).rejects.toThrow(/store unavailable/);
@@ -2308,6 +2308,88 @@ describe('httpRequestTool', () => {
       expect(fetchMock).toHaveBeenCalledWith('http://example.com', expect.objectContaining({
         method: 'GET',
       }));
+    });
+  });
+
+  // A GET the origin check held after foreign content (the read declares its host only once
+  // latched) follows no redirect to another host, like a page read, owner-named hosts included: the
+  // hop would carry the address on to a host nobody named.
+  describe('a GET the origin check held, and its redirects', () => {
+    const held = { known: [], allKnown: false } as const;
+    const named = { known: ['api.example.test'], allKnown: true } as const;
+    const outcome = (p: Promise<unknown>): Promise<string> => p.then((r) => String(r), (e: unknown) => String(e instanceof Error ? e.message : e));
+
+    it('a held GET does not follow a redirect to another host, and fetches nothing there', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://collect.other.test/d' } }))
+        .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await outcome(runInCallSlot({ targetOrigin: held }, () => handler({ url: 'https://api.example.test/start' }, makeAgent())));
+      expect(lastPinnedInputs.length).toBe(1);
+      expect(out).toContain('forwards this read to another host');
+    });
+
+    it('a GET of a host the owner named, without a query, is held too', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://files.other.test/1' } }))
+        .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await outcome(runInCallSlot({ targetOrigin: named }, () => handler({ url: 'https://api.example.test/download/1' }, makeAgent())));
+      expect(lastPinnedInputs.length).toBe(1);
+      expect(out).toContain('forwards this read to another host');
+    });
+
+    it('CONTROL: a GET the origin check did not stop at follows a redirect to another host, as before', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://files.other.test/1' } }))
+        .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      await outcome(handler({ url: 'https://api.example.test/download/1' }, makeAgent()));
+      expect(lastPinnedInputs.length).toBe(2);
+    });
+
+    it('a GET of a named host WITH a query is held, as a page read with a query is', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://collect.other.test/d' } }))
+        .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await outcome(runInCallSlot({ targetOrigin: named }, () => handler({ url: 'https://api.example.test/r?to=x' }, makeAgent())));
+      expect(lastPinnedInputs.length).toBe(1);
+      expect(out).toContain('forwards this read to another host');
+    });
+    it('a write in a held call keeps its own redirect rules: the read hold does not apply to it', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://collect.other.test/d' } }))
+        .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await outcome(runInCallSlot({ targetOrigin: held }, () => handler({ url: 'https://api.example.test/items', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }, makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow') }))));
+      // The write went out: the read hold did not stop it before its first request.
+      expect(lastPinnedInputs[0]?.method).toBe('POST');
+      expect(out).not.toContain('forwards this read to another host');
+    });
+  });
+
+  describe('what a GET declares for the origin check', () => {
+    it('a read declares its host only once latched; a write declares it always, and never twice', () => {
+      expect(httpRequestTool.sendTargets?.({ url: 'https://a.test/p' })).toBeNull();
+      expect(httpRequestTool.sendTargetsWhenLatched?.({ url: 'https://a.test/p' })).toEqual([{ kind: 'host', value: 'a.test' }]);
+      expect(httpRequestTool.sendTargetsWhenLatched?.({ url: 'https://a.test/p', method: 'HEAD' })).toEqual([{ kind: 'host', value: 'a.test' }]);
+      expect(httpRequestTool.sendTargets?.({ url: 'https://a.test/p', method: 'POST', body: '{}' })).toEqual([{ kind: 'host', value: 'a.test' }]);
+      expect(httpRequestTool.sendTargetsWhenLatched?.({ url: 'https://a.test/p', method: 'POST', body: '{}' })).toBeNull();
+    });
+
+    it('names its address for the search check only when nothing else of it can carry data', () => {
+      expect(httpRequestTool.readAddress?.({ url: 'https://a.test/p' })).toBe('https://a.test/p');
+      expect(httpRequestTool.readAddress?.({ url: 'https://a.test/p', headers: { 'X-D': 'x' } })).toBeNull();
+      expect(httpRequestTool.readAddress?.({ url: 'https://a.test/p', body: 'x' })).toBeNull();
+      expect(httpRequestTool.readAddress?.({ url: 'https://a.test/p', method: 'POST', body: '' })).toBeNull();
+      // CONTROL: an empty headers object is no header.
+      expect(httpRequestTool.readAddress?.({ url: 'https://a.test/p', headers: {} })).toBe('https://a.test/p');
     });
   });
 
@@ -10112,7 +10194,7 @@ describe('requests to a Shopify store are refused', () => {
       };
       const store = { getByHostname: () => profile, getHostConflict: () => undefined, unreadableHolds: () => false, knownProfiles: () => [profile], get: () => profile };
       const headers: Record<string, string> = {};
-      const attached = await attachStoredCredential(url, headers, false, {
+      const attached = await attachStoredCredential(url, headers, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
         apiStore: store as never, secretStore: { resolve: () => 'store-value' } as never, principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store as never),
       }, { bulkRunId: 'run-1' });
       return { attached, headers };
