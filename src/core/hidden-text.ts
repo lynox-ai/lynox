@@ -15,7 +15,9 @@
 import { hiddenCharIndexes } from './hidden-chars.js';
 
 export interface HiddenChar {
-  /** Where in the value: `title`, `steps[2].task`, `params.list`; a key reads as `a key in params`. */
+  /** Where in the value: `title`, `steps[2].task`, `parameters[0].description`; a key outside
+   *  the known field names by its position, `params.(field 2)`; a key with the character itself
+   *  reads as `a key in params`. */
   path: string;
   /** The character as `U+XXXX`. */
   codePoint: string;
@@ -26,9 +28,22 @@ function codePointAt(text: string, index: number): string {
   return `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`;
 }
 
+/**
+ * Field names a refusal may quote below the top level: those of the shapes the callers pass (a
+ * workflow's parameter, a plan's phase, a step). Any other key is stored or typed text (a parameter
+ * key, a value's own object) and is named by its position, since the refusal reaches the model.
+ * Top-level keys are the caller's own literals.
+ */
+const KNOWN_FIELDS: ReadonlySet<string> = new Set([
+  'name', 'description', 'type', 'defaultValue', 'source',
+  'steps', 'model', 'tools', 'thinking', 'effort', 'verification', 'depends_on', 'assignee', 'task',
+]);
+
 /** The first hidden character in any string of `value` (strings, arrays and plain objects,
  *  depth-first, keys as well as values), or `null`. A key is a name, not running text, so it
- *  takes none of the places real text may carry one. */
+ *  takes none of the places real text may carry one. The path quotes the top-level keys by
+ *  their text, so pass an object whose top-level keys are the caller's own literals; a key
+ *  below the top level outside the known field names is named by its position. */
 export function findHiddenChar(value: unknown, path = ''): HiddenChar | null {
   if (typeof value === 'string') {
     const at = hiddenCharIndexes(value);
@@ -42,10 +57,11 @@ export function findHiddenChar(value: unknown, path = ''): HiddenChar | null {
     return null;
   }
   if (value !== null && typeof value === 'object') {
-    for (const [k, v] of Object.entries(value)) {
+    for (const [n, [k, v]] of Object.entries(value).entries()) {
       const inKey = hiddenCharIndexes(k, { inPlace: false });
       if (inKey.length > 0) return { path: path === '' ? 'a key' : `a key in ${path}`, codePoint: codePointAt(k, inKey[0]!) };
-      const hit = findHiddenChar(v, path === '' ? k : `${path}.${k}`);
+      const shown = path === '' || KNOWN_FIELDS.has(k) ? k : `(field ${String(n + 1)})`;
+      const hit = findHiddenChar(v, path === '' ? shown : `${path}.${shown}`);
       if (hit) return hit;
     }
   }

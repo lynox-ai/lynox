@@ -681,6 +681,40 @@ export function builtInPresetOf(
 }
 
 /**
+ * Provider ids this engine once shipped in the register and no longer has. A profile set up
+ * through one of them stays what it was: a user's authorization through a built-in provider.
+ * Without this list, removing a provider from the register would turn its profiles into
+ * profiles of no provider, and the two checks that keep a user's grant from being replaced
+ * (the save that may not take a profile off its provider, and the renewal that may not swap
+ * the grant for an app-level token) would let them through.
+ *
+ * An id that was never shipped is not here, on purpose: a profile may be saved naming a
+ * provider this engine does not have, and such a profile must stay editable and keep its
+ * app-level exchange. Removing an entry from {@link REGISTER_ENTRIES} means adding its id
+ * here; a test pins the ids ever shipped and fails when one is in neither place.
+ *
+ * When an id goes in here, check two things this list does not cover: `isPresetClientSecretName`
+ * no longer protects that provider's app-secret names, and the profile's `token_url` and
+ * `base_url` stay editable (fetch_token exchanges nothing for such a profile today).
+ */
+export const RETIRED_PRESET_IDS: readonly string[] = Object.freeze<string[]>([]);
+
+/**
+ * The retired provider a profile was set up through: its `auth.oauth.preset_id`, when
+ * `auth.type` is oauth2 and the id is one of {@link RETIRED_PRESET_IDS}. Undefined otherwise.
+ * Asked next to {@link builtInPresetOf} wherever a provider binds a profile; it does not read
+ * the register, so a provider still in the register is answered there and not here.
+ */
+export function retiredPresetIdOf(
+  profile: { readonly auth?: { readonly type?: string | undefined; readonly oauth?: { readonly preset_id?: string | undefined } | undefined } | undefined },
+  retired: readonly string[] = RETIRED_PRESET_IDS,
+): string | undefined {
+  if (profile.auth?.type !== 'oauth2') return undefined;
+  const presetId: unknown = profile.auth.oauth?.preset_id;
+  return typeof presetId === 'string' && retired.includes(presetId) ? presetId : undefined;
+}
+
+/**
  * The built-in provider whose API host a profile points at, when the profile does not go
  * through it: anything but `auth.type` oauth2 with that provider's `preset_id`. Undefined when
  * no provider claims the host, or when the profile follows the one that does. Asked where a
