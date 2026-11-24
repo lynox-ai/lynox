@@ -103,6 +103,12 @@ describe('F2: the workflow is taken over with the plan', () => {
 		// A hidden character is printed, so the owner reads a different name: that one is a person of its own.
 		expect(kinds(preview({ members: [wfMember(['workflow-edited']), zwsp], workflow: wf })).filter((k) => k === 'role' || k === 'f2')).toEqual(['role', 'f2']);
 	});
+	it('two long names alike up to the cut are still two people', () => {
+		const stem = `${'a'.repeat(90)}`;
+		const other = { name: `${stem}-b@example.invalid`, roles: ['workflow-edited'] as TakeoverMember['roles'], ended: false, reason: null };
+		// F2 names the first; the second, whose address differs only past the cut, keeps its own line.
+		expect(kinds(preview({ members: [wfMember(['workflow-edited'], `${stem}-a@example.invalid`), other], workflow: wf })).filter((k) => k === 'role' || k === 'f2')).toEqual(['role', 'f2']);
+	});
 	it('the role F2 says is not said again for the same person\'s other access', () => {
 		// Paused for two accesses of one person, the second renewed: both entries carry the copy of the role.
 		const p = preview({ members: [wfMember(['workflow-edited']), { name: 'ida@x.ch', roles: ['workflow-edited'], ended: false, reason: null }], workflow: wf });

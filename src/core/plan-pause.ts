@@ -128,10 +128,12 @@ export interface PausePlanRow {
   readonly covered_edited_by: string | null;
   readonly covered_edited_id: string | null;
   readonly covered_edited_at: string | null;
+  /** When the owner last took this side over (unix seconds); a later change does not clear it. */
+  readonly covered_at?: number | null;
 }
 
 /** The covered marks of a side (`plan-takeover.ts`), read with its authorship. */
-export const COVER_COLS = 'covered_created_by, covered_created_id, covered_created_at, covered_edited_by, covered_edited_id, covered_edited_at';
+export const COVER_COLS = 'covered_created_by, covered_created_id, covered_created_at, covered_edited_by, covered_edited_id, covered_edited_at, covered_at';
 
 export const PAUSE_PLAN_COLS = `id, effect, status, confirmed_at, created_by, edited_by, created_mandate_id, created_at,
   mandate_editor, mandate_editor_id, mandate_edited_at, target_workflow_id, paused_at, ${COVER_COLS}`;
@@ -150,6 +152,8 @@ export interface WorkflowAuthorRow {
   covered_edited_by: string | null;
   covered_edited_id: string | null;
   covered_edited_at: string | null;
+  /** When the owner last took this side over (unix seconds); a later change does not clear it. */
+  covered_at?: number | null;
 }
 
 /** A workflow's authorship by its exact id: never the prefix match of `getPipeline`. Throws when it cannot be read. */
@@ -186,22 +190,24 @@ function rolesOn(a: WorkflowAuthorRow, member: Extract<RequestPrincipal, { kind:
 }
 
 /**
- * The roles a pause recorded for a member, without those whose mark the owner has taken over since.
+ * The roles a pause recorded for a member, without those the owner has taken over since.
  * A creation is one mark that never moves, so once a side's creator mark is covered no recorded
- * creation of it holds. A change moves on with each edit: asked of the member's own change
- * (`covered_edited_*` names it), not of the side's present one, since a side changed again after
- * its takeover carries a new, uncovered mark, and the change taken over is still the owner's.
+ * creation of it holds. A change moves on with each edit, and each edit clears the cover of the
+ * one before (`CLEAR_EDITOR_COVER_SQL`), so a change is asked of the side's takeover time instead:
+ * a side the owner took over at or after the pause (`covered_at`, which an edit leaves standing)
+ * made every change the pause recorded on it the owner's. A change made after that takeover is
+ * read fresh from the marks, not from the pause. Both times are the process clock in unix seconds
+ * (`paused_at` from `writePause`, `covered_at` from the takeover's `now`), so they compare.
  */
 export function rolesStillMarked(
   roles: readonly PauseRole[],
-  member: { readonly email: string; readonly mandateId?: string | undefined },
   trigger: WorkflowAuthorRow,
   workflow: WorkflowAuthorRow | undefined,
+  pausedAt: number | null,
 ): PauseRole[] {
-  const tag = `${MANDATE_TAG_PREFIX}${member.email}`;
-  const id = member.mandateId ?? null;
   const creationTakenOver = (a: WorkflowAuthorRow | undefined): boolean => a !== undefined && creatorCovered(planAuthorshipOf(a));
-  const changeTakenOver = (a: WorkflowAuthorRow | undefined): boolean => a !== undefined && a.covered_edited_by === tag && a.covered_edited_id === id;
+  const changeTakenOver = (a: WorkflowAuthorRow | undefined): boolean =>
+    a !== undefined && pausedAt !== null && typeof a.covered_at === 'number' && a.covered_at >= pausedAt;
   return roles.filter((r) => {
     if (r === 'created') return !creationTakenOver(trigger);
     if (r === 'edited') return !changeTakenOver(trigger);

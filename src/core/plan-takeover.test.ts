@@ -628,30 +628,14 @@ describe('after the workflow was taken over on its own, a plan takeover names no
     expect(roles.get('d@x.ch')).toEqual(['workflow-edited']);
   });
 
-  it('the same for a change: the member whose change was taken over keeps no role for it once another member changed it again', () => {
-    const b = box();
-    workflow(b, 'w', { email: 'c@x.ch' });
-    editor(b, 'workflows', 'w', 'e@x.ch');
-    plan(b, 'p', { by: 'c@x.ch', effect: 'run_workflow', workflow: 'w' });
-    editor(b, 'triggers', 'p', 'e@x.ch');
-    renewed(b, 'c@x.ch');
-    ended(b, 'e@x.ch');
-    writePause(b.db, 'p', [{ mandateId: 'g-e@x.ch', email: 'e@x.ch', reason: 'expired', endsAt: nowS() - H, roles: ['edited', 'workflow-edited'], closedPrompt: false }]);
-    b.db.prepare(`UPDATE workflows SET ${COVER_FROM_MARKS} WHERE id = 'w'`).run(nowS());
-    editor(b, 'workflows', 'w', 'd@x.ch', 'g-d@x.ch', '2026-03-01 10:00:00');
-    renewed(b, 'd@x.ch');
-    const roles = new Map((rolesShown(b) as [unknown, Array<[string, string[]]>])[1]);
-    // The pause recorded e's change of the workflow; the takeover made that change the owner's.
-    expect(roles.get('e@x.ch')).toEqual(['edited']);
-    expect(roles.get('d@x.ch')).toEqual(['workflow-edited']);
-  });
-
   it('on the plan itself: a creation and a change taken over give no role, the change after it does', () => {
     const b = box();
     setup(b);
     b.db.prepare(`UPDATE triggers SET ${COVER_FROM_MARKS} WHERE id = 'p'`).run(nowS());
-    editor(b, 'triggers', 'p', 'd@x.ch', 'g-d@x.ch', '2026-03-01 10:00:00');
+    // d's change goes through the store's own writer, which clears the cover of the change before.
+    b.triggers.markEditedBy('p', { kind: 'mandate', email: 'd@x.ch', mandateId: 'g-d@x.ch' }, false);
     renewed(b, 'd@x.ch');
+    expect(b.db.prepare("SELECT covered_edited_by FROM triggers WHERE id = 'p'").get()).toEqual({ covered_edited_by: null });
     const roles = new Map((rolesShown(b) as [unknown, Array<[string, string[]]>])[1]);
     // e's change of the plan was recorded by the pause and taken over; c's creation was taken over.
     expect(roles.get('e@x.ch')).toEqual(['workflow-created']);

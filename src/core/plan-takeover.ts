@@ -158,7 +158,7 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
     // added to the pause's, which stay: so F2 says the workflow moves, and a member who changed it
     // after a pause that knew only its creation is said to have changed it.
     // A role the pause recorded on a mark the owner has taken over since is no longer that member's.
-    const marked = rolesStillMarked(e.roles, e, row, wf);
+    const marked = rolesStillMarked(e.roles, row, wf, row.paused_at);
     const kept = workflowShown(wf) ? marked : marked.filter((r) => !isWorkflowRole(r));
     const added = roles(principal).filter((r) => isWorkflowRole(r) && !kept.includes(r));
     return { name: e.email, roles: [...kept, ...added], ended, reason: ended ? e.reason : null };
