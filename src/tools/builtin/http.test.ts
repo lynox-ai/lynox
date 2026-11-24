@@ -4307,6 +4307,7 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', override);
       const second: CallSlot = { targetOrigin: held };
       const again = await runInCallSlot(second, () => handler({ url: 'https://api.dataforseo.com/v3/keywords' }, costAgent(store, [])).then(String, (e: unknown) => String(e)));
+      expect(override).toHaveBeenCalledTimes(1);
       expect(again).toContain(CROSS_HOST_REFUSAL);
       expect(second.apiCost).toEqual({ usd: 0.001, source: 'profile' });
 
