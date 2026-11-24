@@ -95,9 +95,11 @@ export function segments(line: string): Segment[] {
 		out.push(...valuePieces(line.slice(at, m.index)));
 		const pieces = valuePieces(m[1]!);
 		const n = pieces.filter((p) => p.foreign).length;
-		// Only a fold with a title in it is one: marks around text that names no plan (a raw error
-		// that reached a sentence) stay inline, so nothing can hide behind "and 0 more".
-		if (n > 0) out.push({ text: '', foreign: false, more: { n, pieces } });
+		// Only what `planList` folds is a fold: titles in their boxes and the commas between them.
+		// Marks around anything else (a raw error that reached a sentence) stay inline, so none of
+		// lynox's words, and no sentence without a title, can hide behind "and {n} more".
+		const listOnly = pieces.every((p) => p.foreign || p.text === ', ');
+		if (n > 0 && listOnly) out.push({ text: '', foreign: false, more: { n, pieces } });
 		else out.push(...pieces);
 		at = m.index + m[0].length;
 	}

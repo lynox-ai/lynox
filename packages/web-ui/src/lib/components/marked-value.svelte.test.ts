@@ -97,6 +97,22 @@ describe('a folded list of plans in a sentence', () => {
 		expect(boxes[5]!.getAttribute('tabindex')).toBe('-1');
 		expect(boxes[5]!.getAttribute('class')).toContain('focus-visible:ring-2');
 	});
+	it('new text starts folded again and takes no focus', async () => {
+		const { default: View } = await import('./MarkedLine.svelte');
+		const el = document.createElement('div');
+		document.body.appendChild(el);
+		const props = $state({ text: planList(titles) });
+		mounted.push({ c: mount(View, { target: el, props }), el });
+		flushSync();
+		(el.querySelector('button[data-testid="plans-more"]') as HTMLButtonElement).click();
+		flushSync();
+		expect(el.querySelector('button')).toBeNull();
+		(document.activeElement as HTMLElement).blur();
+		props.text = planList([...titles, 'P8']);
+		flushSync();
+		expect(el.querySelector('button[data-testid="plans-more"]')!.textContent).toBe(tf('takeover.plans_more', { n: '3' }));
+		expect(document.activeElement).toBe(document.body);
+	});
 	it('the button shows its focus', async () => {
 		const el = await draw('line', planList(titles));
 		expect(el.querySelector('button[data-testid="plans-more"]')!.getAttribute('class')).toContain('focus-visible:ring-2');
