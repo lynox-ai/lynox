@@ -205,11 +205,11 @@ describe('T-4 or T-5: whom the plan runs for afterwards', () => {
 		const k = kinds(stays(['workflow-created']));
 		expect([k.includes('runs_as_owner'), k.includes('runs_as_member')]).toEqual([false, true]);
 		expect(takeoverLines(stays(['workflow-created']), fmt).find((l) => l.kind === 'runs_as_member')?.text).toBe(
-			'Den Workflow „Rechnungen“ hat bo@x.ch angelegt, und bo@x.ch hat weiter Zugang. Darum läuft der Plan danach unter dem Namen von bo@x.ch, nicht unter deinem. Endet dieser Zugang, pausiert der Plan wieder, und du kannst ihn dann noch einmal übernehmen.',
+			'Den Workflow Rechnungen hat bo@x.ch angelegt, und bo@x.ch hat weiter Zugang. Darum läuft der Plan danach unter dem Namen von bo@x.ch, nicht unter deinem. Endet dieser Zugang, pausiert der Plan wieder, und du kannst ihn dann noch einmal übernehmen.',
 		);
 		setLocale('en');
 		expect(takeoverLines(stays(['workflow-created', 'workflow-edited']), fmt).find((l) => l.kind === 'runs_as_member')?.text).toBe(
-			'bo@x.ch changed the workflow “Rechnungen” and still has access. So after you take over, the plan runs under bo@x.ch\'s name, not yours. If that access ends, the plan pauses again, and you can take it over once more.',
+			'bo@x.ch changed the workflow Rechnungen and still has access. So after you take over, the plan runs under bo@x.ch\'s name, not yours. If that access ends, the plan pauses again, and you can take it over once more.',
 		);
 	});
 });
@@ -223,7 +223,7 @@ describe('one person under two grants (1029)', () => {
 			workflow: { id: 'w', name: 'Rechnungen', takenOver: false },
 		});
 		expect(takeoverLines(p, fmt).find((l) => l.kind === 'runs_as_member')?.text).toBe(
-			'Den Workflow „Rechnungen“ hat ida@x.ch geändert, und ida@x.ch hat weiter Zugang. Darum läuft der Plan danach unter dem Namen von ida@x.ch, nicht unter deinem. Endet dieser Zugang, pausiert der Plan wieder, und du kannst ihn dann noch einmal übernehmen.',
+			'Den Workflow Rechnungen hat ida@x.ch geändert, und ida@x.ch hat weiter Zugang. Darum läuft der Plan danach unter dem Namen von ida@x.ch, nicht unter deinem. Endet dieser Zugang, pausiert der Plan wieder, und du kannst ihn dann noch einmal übernehmen.',
 		);
 		expect(takeoverLines(p, fmt).filter((l) => l.kind === 'role').map((l) => l.text)).toEqual(['Angelegt von ida@x.ch', 'Nutzt den Workflow „Rechnungen“, den ida@x.ch geändert hat']);
 	});
@@ -233,7 +233,7 @@ describe('one person under two grants (1029)', () => {
 			runsAs: 'mandate:ida@x.ch',
 			workflow: { id: 'w', name: 'Rechnungen', takenOver: false },
 		});
-		expect(takeoverLines(p, fmt).find((l) => l.kind === 'runs_as_member')?.text.startsWith('Den Workflow „Rechnungen“ hat ida@x.ch angelegt,')).toBe(true);
+		expect(takeoverLines(p, fmt).find((l) => l.kind === 'runs_as_member')?.text.startsWith('Den Workflow Rechnungen hat ida@x.ch angelegt,')).toBe(true);
 	});
 	it('the same role under both grants is said once', () => {
 		// The ended grant's roles are the copy the pause took; the live grant changed the workflow again.
@@ -314,7 +314,7 @@ describe('the refusals at the button', () => {
 		expect(refusalText('bulk', opts)).toBe('Einen Massenlauf musst du nicht übernehmen: Ihn hat kein Helfer eingerichtet.');
 	});
 	it('unreadable names the workflow when the preview had one', () => {
-		expect(refusalText('unreadable', { ...opts, workflow: 'Rechnungen' })).toBe('lynox kann nicht lesen, wer den Workflow „Rechnungen“ eingerichtet hat, und kann den Plan darum nicht übernehmen. Du kannst ihn abschliessen oder löschen. Der Plan bleibt pausiert.');
+		expect(refusalText('unreadable', { ...opts, workflow: 'Rechnungen' })).toBe('lynox kann nicht lesen, wer den Workflow Rechnungen eingerichtet hat, und kann den Plan darum nicht übernehmen. Du kannst ihn abschliessen oder löschen. Der Plan bleibt pausiert.');
 		expect(refusalText('unreadable', opts)).toBe('lynox kann nicht lesen, wer den Workflow dieses Plans eingerichtet hat, und kann den Plan darum nicht übernehmen. Du kannst ihn abschliessen oder löschen. Der Plan bleibt pausiert.');
 	});
 	it('a lasting failure points to support only on a managed instance', () => {

@@ -94,7 +94,7 @@ describe('a run refused because that person\'s access ended', () => {
 		expect(target.querySelector('[data-testid="takeover-open"]')).toBeNull();
 		await pressRun();
 		const text = target.textContent ?? '';
-		expect(text).toContain('eva@kanzlei.example hat den Workflow „Monthly report“ angelegt oder zuletzt geändert, und der Zugang dieser Person ist beendet. Er läuft erst wieder, wenn du ihn übernimmst: hier mit „Workflow übernehmen“.');
+		expect(text).toContain('eva@kanzlei.example hat den Workflow Monthly report angelegt oder zuletzt geändert, und der Zugang dieser Person ist beendet. Er läuft erst wieder, wenn du ihn übernimmst: hier mit „Workflow übernehmen“.');
 		expect(text).not.toContain('auch nicht als Kopie');
 		expect(text).not.toContain('engine sentence');
 		expect(target.querySelector('[data-testid="takeover-open"]')?.textContent?.trim()).toBe('Workflow übernehmen');
@@ -103,7 +103,7 @@ describe('a run refused because that person\'s access ended', () => {
 	it('without a name says "a person with access"', async () => {
 		await open(WF, { status: 403, body: { error: 'engine sentence', code: 'author_ended', runs_as: null } });
 		await pressRun();
-		expect(target.textContent ?? '').toContain('Eine Person mit Zugang hat den Workflow „Monthly report“ angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Er läuft erst wieder, wenn du ihn übernimmst: hier mit „Workflow übernehmen“.');
+		expect(target.textContent ?? '').toContain('Eine Person mit Zugang hat den Workflow Monthly report angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Er läuft erst wieder, wenn du ihn übernimmst: hier mit „Workflow übernehmen“.');
 	});
 
 	it('CONTROL: another refusal still shows the engine\'s sentence', async () => {

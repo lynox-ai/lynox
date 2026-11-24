@@ -753,17 +753,17 @@ describe('the library\'s own sentences', () => {
 		const run = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Ausführen');
 		run!.click();
 		await settle();
-		expect(target.querySelector('[data-page-error]')?.textContent).toBe('Eine Person mit Zugang hat den Workflow „Undetermined“ angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Er läuft erst wieder, wenn du ihn übernimmst: hier mit „Workflow übernehmen“.');
+		expect(target.querySelector('[data-page-error]')?.textContent).toBe('Eine Person mit Zugang hat den Workflow Undetermined angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Er läuft erst wieder, wenn du ihn übernimmst: hier mit „Workflow übernehmen“.');
 		expect(target.querySelector('[data-library-note="ended"]')?.textContent).toBe('Eine Person mit Zugang hat diesen Workflow angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Er läuft erst wieder, wenn du ihn übernimmst.');
 		expect(target.querySelector('[data-testid="access-ended-badge"]')?.textContent?.trim()).toBe('Zugang beendet');
 		expect(target.textContent).not.toContain('extern@kanzlei.example');
 	});
 
-	it('sets the title apart on a card with a takeover to give, and on no other card', async () => {
+	it('sets the title apart on a card a person with access made, ended or not, and not on the owner\'s own', async () => {
 		await open([ENDED, { ...base('wf-l', 'Live one'), runs_as: { person: JAN, ended: false } }, base('wf-o', 'Own one')]);
 		const titleBox = (name: string): string | null | undefined => card(name).querySelector('p')?.querySelector('bdi[data-foreign-value]')?.textContent;
 		expect(titleBox('Ended one')).toBe('Ended one');
-		expect(titleBox('Live one')).toBeUndefined();
+		expect(titleBox('Live one')).toBe('Live one');
 		expect(titleBox('Own one')).toBeUndefined();
 	});
 
