@@ -42,6 +42,8 @@ function channelFromAccountId(_accountId: string): InboxChannel {
  */
 export interface AccountResolver {
   resolve(accountId: string): { address: string; displayName: string; authType?: MailAuthType | undefined } | null;
+  /** Whether a (lower-cased) address belongs to any mail account connected on this instance. */
+  isOwnAddress?(address: string): boolean;
 }
 
 /**
@@ -129,16 +131,18 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
    * thread message after the same sensitive check a first mail gets: without its text on `skip`,
    * masked on `mask`. A `replied` item opens again for it, unless it is an automatic reply; the
    * bucket stays, and no rule or classifier runs. A message the check flags raises the item to
-   * "requires you" instead, open and not snoozed, and pushes. Without a Message-ID, or when the message is
-   * stored already, nothing happens. Only Gmail and Graph have threads: on IMAP the thread key is the
-   * Message-ID, so only a redelivered mail comes here, and it is stored already.
+   * "requires you" instead, open and not snoozed, and pushes. A snooze set to wake on a reply wakes
+   * for the messages that may reopen an item: not for an automatic reply, our own mail or a message
+   * older than the owner's reply. Without a Message-ID, or when the message is stored already,
+   * nothing happens, so a redelivered mail wakes nothing either. Only Gmail and Graph have threads:
+   * on IMAP the thread key is the Message-ID, so only a redelivered mail comes here, and it is
+   * stored already.
    */
   const recordFollowUp = async (
     existing: InboxItem,
     env: MailEnvelope,
     mode: SensitiveMode,
     account: { address: string; authType?: MailAuthType | undefined },
-    wokeForThis: boolean,
   ): Promise<void> => {
     const messageId = env.messageId;
     if (messageId === undefined || messageId.length === 0) return;
@@ -155,8 +159,10 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       snippet = masked.snippet;
     }
     // Our own mail coming back into the thread (a copy of the reply) is no new customer message:
-    // it is stored as sent, so neither reopening nor "Reply in chat" takes it.
-    const own = (fields.fromAddress ?? '').toLowerCase() === account.address.toLowerCase();
+    // it is stored as sent, so neither reopening nor "Reply in chat" takes it. Own is this account's
+    // address or that of any other account connected here (a reply sent from the shared address).
+    const from = (fields.fromAddress ?? '').toLowerCase();
+    const own = from === account.address.toLowerCase() || opts.accounts.isOwnAddress?.(from) === true;
     // Whether it is an automatic reply, stored with the message for "Reply in chat": true, false
     // (checked, not one), or undefined (not known). The envelope says it, except where it carries
     // no headers; there the message is fetched once. That fetch throwing leaves it unknown.
@@ -202,22 +208,41 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     // Otherwise only a `replied` item opens; `reopenReplied` checks that again in its UPDATE.
     // An unknown answer reopens (see `confirmAutoReply`): only a known automatic reply does not.
     const opens = existing.userAction === 'replied' && autoReply !== true && !own && !beforeUserAction;
+    // A snooze the owner set to wake on a reply wakes for a message that may reopen an item.
+    const mayWake = autoReply !== true && !own && !beforeUserAction;
     // What the check found in the item's own mail, before this message.
     const itemCategories = opts.state.sensitiveCategoriesAtIngest(existing);
     const outcome = opts.state.runInTransaction((): 'raised' | 'reopened' | 'none' => {
       opts.state.insertThreadMessage(input);
+      // Whether the item sleeps with wake-on-reply is read here, inside the write, not from the row
+      // read before the auto-reply check above: the owner may have snoozed it again since, or another
+      // message woken it. The wake and its audit commit with the message they are for. One clock for
+      // the whole write, so the wake and the raise below judge the snooze at the same moment.
+      const now = Date.now();
+      const asleep = mayWake ? opts.state.getItem(existing.id, existing.tenantId) : undefined;
+      const wakes = asleep !== undefined && asleep !== null && asleep.unsnoozeOnReply
+        && asleep.snoozeUntil !== undefined && asleep.snoozeUntil.getTime() > now;
+      if (wakes) {
+        // A message that raises the item below clears the snooze with the raise; cleared here first,
+        // an item already in "requires you" would look open to the raise and stay where it was.
+        if (!raises) opts.state.setSnooze(existing.id, null, null, true, false, existing.tenantId);
+        opts.state.appendAudit({
+          tenantId: existing.tenantId,
+          itemId: existing.id,
+          action: 'unsnoozed_on_reply',
+          actor: 'system',
+          payloadJson: JSON.stringify({ trigger: 'inbound_mail', message_id: messageId }),
+        });
+      }
       // Decided on the row as it is now, inside the write, so two flagged messages arriving together
-      // raise it once. An item open in "requires you" stays as it is, unless this mail woke it from
-      // a snooze a moment ago (`unsnooze_on_reply` above) and nothing has raised or reopened it since
-      // (both set `classified_at`): then it was out of view before, and this mail is what shows it.
+      // raise it once. An item open in "requires you" stays as it is. One this mail wakes is still
+      // snoozed here, so out of view, and this mail is what shows it.
       const current = raises ? opts.state.getItem(existing.id, existing.tenantId) : undefined;
       const openNow = current !== undefined && current !== null && current.bucket === 'requires_user'
         && current.userAction === undefined
-        && !(current.snoozeUntil !== undefined && current.snoozeUntil.getTime() > Date.now());
-      const wokeAndUntouched = wokeForThis && current !== undefined && current !== null
-        && current.classifiedAt.getTime() === existing.classifiedAt.getTime();
-      if (raises && (!openNow || wokeAndUntouched)) {
-        opts.state.raiseToRequiresUser(existing.id, existing.tenantId, fields.mailDate ?? new Date());
+        && !(current.snoozeUntil !== undefined && current.snoozeUntil.getTime() > now);
+      if (raises && !openNow) {
+        opts.state.raiseToRequiresUser(existing.id, existing.tenantId, fields.mailDate ?? new Date(now), new Date(now));
         opts.state.appendAudit({
           tenantId: existing.tenantId,
           itemId: existing.id,
@@ -239,6 +264,18 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           }),
         });
         return 'raised';
+      }
+      if (raises) {
+        // Already open in "requires you": nothing to raise, but the inbox notes that the check
+        // flagged this message, since its stored text may be dropped or masked and no longer tell.
+        opts.state.appendAudit({
+          tenantId: existing.tenantId,
+          itemId: existing.id,
+          action: 'sensitive_follow_up_kept_open',
+          actor: 'system',
+          payloadJson: JSON.stringify({ trigger: 'inbound_mail', message_id: messageId, follow_up_sensitive_categories: sensitive.categories }),
+        });
+        return 'none';
       }
       if (!opens) return 'none';
       if (!opts.state.reopenReplied(existing.id, existing.tenantId, fields.mailDate ?? new Date())) return 'none';
@@ -280,32 +317,12 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     const subject = env.subject;
     const threadKey = resolveThreadKey(env);
 
-    // 1. Skip duplicate work — Phase 1a always inserts on miss; re-classify on
-    //    new replies is Phase 3+. Before short-circuiting, run the
-    //    auto-unsnooze-on-reply check: if the existing item is snoozed AND
-    //    the user opted into unsnooze-on-reply when snoozing, a new mail in
-    //    the same thread is the signal to wake it up. Without this the flag
-    //    that the schema, the API, and the UI all support was a dead feature
-    //    — set, stored, never read (audit K-SR-01).
+    // 1. A mail in a thread the inbox already holds is a follow-up, not a new item. If the item is
+    //    snoozed and the owner chose to wake it on a reply, `recordFollowUp` wakes it for a message
+    //    that may reopen an item.
     const existing = opts.state.findItemByThread(accountId, threadKey);
     if (existing) {
-      const snoozeUntilMs = existing.snoozeUntil?.getTime();
-      const stillSnoozed = snoozeUntilMs !== undefined && snoozeUntilMs > Date.now();
-      if (stillSnoozed && existing.unsnoozeOnReply) {
-        // Snooze clear + audit must commit together — if the audit insert
-        // throws the snooze should still be live, and vice versa.
-        opts.state.runInTransaction(() => {
-          opts.state.setSnooze(existing.id, null, null);
-          opts.state.appendAudit({
-            tenantId: opts.tenantId,
-            itemId: existing.id,
-            action: 'unsnoozed_on_reply',
-            actor: 'system',
-            payloadJson: JSON.stringify({ trigger: 'inbound_mail' }),
-          });
-        });
-      }
-      await recordFollowUp(existing, env, sensitiveMode, account, stillSnoozed && existing.unsnoozeOnReply);
+      await recordFollowUp(existing, env, sensitiveMode, account);
       return 'duplicate';
     }
 
@@ -392,6 +409,10 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           reasonDe: reasonForCategories(sensitive.categories),
           classifiedAt: new Date(),
           classifierVersion: 'sensitive-prefilter',
+          // The item names the rule it was not filed by, with the rule's name as it is now.
+          ...(withheldRule
+            ? { ruleWithheld: { id: withheldRule.id, name: withheldRule.name, reason: 'rule_withheld_sensitive' as const } }
+            : {}),
           ...envelopeFields,
         },
         {
@@ -402,7 +423,13 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
             sensitive_categories: sensitive.categories,
             sensitive_mode: withheldRule ? sensitiveMode : 'skip',
             skipped_llm: true,
-            ...(withheldRule ? { rule_withheld: withheldRule.id } : {}),
+            ...(withheldRule
+              ? {
+                  rule_withheld: withheldRule.id,
+                  fail_reason: 'rule_withheld_sensitive',
+                  ...(withheldRule.name !== undefined ? { rule_name: withheldRule.name } : {}),
+                }
+              : {}),
           }),
         },
       );

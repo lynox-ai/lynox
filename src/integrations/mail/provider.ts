@@ -71,16 +71,17 @@ export interface MailEnvelope {
   /** Total RFC822 size in bytes, if reported. */
   sizeBytes: number | undefined;
   /**
-   * True if Auto-Submitted header indicates this is an auto-generated or
-   * auto-replied message. The agent must NEVER auto-reply to such messages
+   * True if the headers mark a machine-sent message: Auto-Submitted other than `no`,
+   * X-Autoreply, X-Autorespond, `Precedence: auto_reply`, or a delivery status report
+   * (`automaticMail` in automatic-mail.ts). The agent must NEVER auto-reply to such messages
    * to prevent reply loops with autoresponders.
    */
   isAutoReply: boolean;
   /**
-   * True when Auto-Submitted is `auto-replied` (RFC 3834: a reply to a message, such as an
-   * out-of-office note), as opposed to `auto-generated` mail (a dunning letter, a shop notice).
-   * False when the header is absent — on Microsoft 365's watch envelope, which carries no headers,
-   * always.
+   * True for an automatic reply to a message (RFC 3834 `auto-replied`, or one of the
+   * autoresponder headers above), such as an out-of-office note, as opposed to `auto-generated`
+   * mail (a dunning letter, a shop notice) or a bounce. False when the headers are absent — on
+   * Microsoft 365's watch envelope, which carries no headers, always.
    */
   isAutoReplied?: boolean | undefined;
 }
@@ -467,6 +468,10 @@ export type MailErrorCode =
   | 'rate_limited'
   | 'timeout'
   | 'unsupported'
+  // The session was lost between two steps of one read (the mailbox was deselected, or the
+  // server said BYE), so the read never ran. Not `connection_failed`, whose owner text says
+  // the server could not be reached, and not `not_found`: nothing is known about the mail.
+  | 'connection_dropped'
   | 'unknown';
 
 export class MailError extends Error {
