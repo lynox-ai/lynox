@@ -625,11 +625,12 @@ export function graphqlWriteAnswer(answer: ExternalRead): ExternalRead {
  * 408 or 499 to a write not, see `readResponse`), or an address refused before it was
  * reached. Not a 5xx, a timeout or a broken connection,
  * after which the host may have acted, and not a redirect: a host may apply a write and
- * answer with a redirect to the result.
+ * answer with a redirect to the result. Not a refusal at the attach either (no credential, a
+ * store's own cause, a reconnect): that request was never sent, so there is no send to answer.
  */
 export function refusedAnswer(answer: ExternalRead): boolean {
   switch (answer.kind) {
-    case 'unauthorized': case 'not_found': case 'retry_after': case 'refused': case 'blocked': case 'store_refused':
+    case 'unauthorized': case 'not_found': case 'retry_after': case 'refused': case 'blocked':
       return true;
     default:
       return false;

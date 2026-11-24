@@ -8,7 +8,7 @@ import {
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, SAID_WORKFLOW_ID_MAX, WEBHOOK_ASKS_RESULT, WORKER_NOTICES, eventModeRefusedReason, inQuotes, firstRunUnconfirmedReason,
   type WorkerNotices,
 } from './worker-notices.js';
-import { BULK_NOTICES, bulkPushTitle, type BulkNotices } from './bulk-notices.js';
+import { BULK_NOTICES, BULK_STORE_REACH_REFUSALS, bulkPushTitle, type BulkNotices } from './bulk-notices.js';
 import { BULK_HALT_REASONS } from './bulk-ledger.js';
 import { ACCESS_ENDED_RESULT, PLAN_ENDED_RESULT } from './plan-pause.js';
 import { EVENT_STOPPED, OWN_FAILURE_REASONS, REMINDER_BODY_MAX } from './worker-loop.js';
@@ -282,7 +282,29 @@ describe('the notice tables', () => {
       expect([k, BULK_NOTICES.en.halted('apply', BULK_HALT_REASONS[k])]).toEqual([k, own.en]);
     }
     // The reasons whose German push is the page's sentence word for word: the comparison above ran on them.
-    expect(shared).toEqual(['listNotAList', 'listUnreadable', 'listNoProgress', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'containmentUnwritable', 'shopifyNoApiVersion', 'discarded']);
+    expect(shared).toEqual(['listNotAList', 'listUnreadable', 'listNoProgress', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'shopifySelfHosted', 'shopifyNoApiVersion', 'discarded']);
+  });
+
+  it('says a store\'s own cause in the push and the start check with the run page\'s words (U-232)', () => {
+    const i18n = readFileSync(join(process.cwd(), 'packages/web-ui/src/lib/i18n.svelte.ts'), 'utf8');
+    const page = new Map<string, { de: string; en: string }>();
+    for (const m of i18n.matchAll(/'(bulk\.(?:halt|reach\.approve)\.[A-Za-z_]+)': \{ de: '((?:[^'\\]|\\.)*)', en: '((?:[^'\\]|\\.)*)' \}/g)) {
+      page.set(m[1]!, { de: m[2]!.replace(/\\'/g, "'"), en: m[3]!.replace(/\\'/g, "'") });
+    }
+    const causes = ['shopifySelfHosted', 'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable', 'shopifyNoApiVersion'] as const;
+    for (const k of causes) {
+      const cause = page.get(`bulk.halt.${k}`)!;
+      const before = page.get(`bulk.halt.${k}_before`);
+      // The push leads to the page, so it leaves out "here" and the address the page links (U-105 cut).
+      const push = (lang: 'de' | 'en'): string => `${cause[lang]}${before === undefined ? '' : ` ${before[lang]}`}`
+        .replace(lang === 'de' ? ' hier fortsetzen' : ' continue the run here', lang === 'de' ? ' fortsetzen' : ' continue the run')
+        .replace(lang === 'de' ? ' den Lauf hier fortsetzen' : ' here in a few minutes', lang === 'de' ? ' den Lauf fortsetzen' : ' in a few minutes')
+        .replace(/ \(support@lynox\.ai\)\. /, '. ');
+      expect([k, BULK_NOTICES.de.halted('apply', BULK_HALT_REASONS[k])]).toEqual([k, push('de')]);
+      expect([k, BULK_NOTICES.en.halted('apply', BULK_HALT_REASONS[k])]).toEqual([k, push('en')]);
+      expect([k, BULK_STORE_REACH_REFUSALS.approve[k]]).toEqual([k, page.get(`bulk.reach.approve.${k}`)!.en]);
+      expect([k, BULK_STORE_REACH_REFUSALS.resume[k]]).toEqual([k, cause.en]);
+    }
   });
 
   it('says each bulk lead and each worker sentence in German as ux wrote it', () => {

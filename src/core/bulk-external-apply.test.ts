@@ -30,7 +30,7 @@ import { BulkLedger, BULK_HALT_REASONS, resourceKindOf, type BulkRunForApply } f
 import type { StoreAttachRefusal } from './shopify-host.js';
 import type { AttachedConnection } from './bulk-connection.js';
 import {
-  BulkHostBudget, externalClient, externalWriter, mintBulkContract, parseBulkContract, planExternal, writeMethodOf,
+  BulkHostBudget, externalClient, externalWriter, mintBulkContract, parseBulkContract, planExternal, refusedAnswer, writeMethodOf,
   type BulkWriteMethod, type ExternalClient,
 } from './bulk-external.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
@@ -782,6 +782,12 @@ describe('applying an external run', () => {
       expect(s.requests.length).toBe(before);
     } finally {
       restore();
+    }
+  });
+
+  it('answers no send for a refusal at the attach, which sent nothing', () => {
+    for (const unsent of [{ kind: 'store_refused', reason: 'shopifyNotCleared' }, { kind: 'reconnect', why: 'ended' }, { kind: 'no_credential' }] as const) {
+      expect([unsent.kind, refusedAnswer(unsent)]).toEqual([unsent.kind, false]);
     }
   });
 

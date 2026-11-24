@@ -7,7 +7,7 @@ import {
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
 	bulkSentenceParts, bulkSecretInContextKey,
-	bulkRestartNoneNote,
+	bulkRestartNoneNote, bulkReachRefusalKey,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -1053,6 +1053,47 @@ describe('going on from a run that halted', () => {
 				bulkHaltCause(any(haltKey, { phase, haltReason: engine, probe: haltKey === 'probeRequired' ? PROBE : null }), true, 'Ziele lesen', DE));
 			expect(said.some((x) => x !== engine && !/bulk\.|\{/.test(x)), haltKey).toBe(true);
 		}
+	});
+
+	it('says a store\'s own cause with the page\'s sentence in every phase, and promises going on only where the page offers it (U-232)', () => {
+		const causes = ['shopifySelfHosted', 'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable', 'shopifyNoApiVersion'];
+		const goingOn = ['shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable'];
+		for (const [lang, i, t] of [['de', DE, de], ['en', EN, en]] as const) {
+			for (const k of causes) {
+				const engine = BULK_HALT_REASONS[k as keyof typeof BULK_HALT_REASONS];
+				// Every phase, exactly the page's cause: never the engine's reason, and no promise in it.
+				for (const phase of ['planned', 'approved', 'writing', 'aborted'] as const) {
+					expect([lang, k, phase, bulkHaltCause(any(k, { phase, haltReason: engine }), true, null, i)]).toEqual([lang, k, phase, t[`bulk.halt.${k}`]]);
+				}
+				const ways = goingOn.includes(k);
+				// A planned run with its restart button: the promise as its step; without one, none.
+				expect([lang, k, bulkHaltText(any(k, { phase: 'planned' }), true, i)?.before ?? null]).toEqual([lang, k, ways ? t[`bulk.halt.${k}_before`] : null]);
+				expect([lang, k, bulkHaltText(any(k, { phase: 'planned', judge: { rule: 'r' } as never, judgeServedBy: null }), true, i)?.before ?? null]).toEqual([lang, k, null]);
+				if (!ways) {
+					// No way on: no sentence offers writing on, so the page offers none.
+					expect([k, bulkResumeKind(w(k))]).toEqual([k, null]);
+					continue;
+				}
+				// A write run: the promise with writing on, and its own form with checking.
+				expect([lang, k, bulkResumeText(w(k), true, i)?.before]).toEqual([lang, k, t[`bulk.halt.${k}_before`]]);
+				expect([lang, k, bulkResumeText(w(k, { sentUnknown: 1, resumeSends: 0 }), true, i)?.before]).toEqual([lang, k, t[`bulk.halt.${k}_before_check`]]);
+				// A mandate sees no step: it reads that the owner can go on, only where the owner is offered it.
+				const mandate = bulkMandateI18n(i);
+				expect([lang, k, bulkHaltCause(any(k, { haltReason: engine }), true, null, mandate, true)]).toEqual([lang, k, `${t[`bulk.halt.${k}`]} ${t[`bulk.halt.${k}_before_mandate`]}`]);
+				expect([lang, k, bulkHaltCause(any(k, { phase: 'planned', judge: { rule: 'r' } as never, judgeServedBy: null }), true, null, mandate, true)]).toEqual([lang, k, t[`bulk.halt.${k}`]]);
+				expect([lang, k, bulkHaltCause(any(k, { resumeOpen: 2, resumeTries: 2, resumeSends: 0, sentUnknown: 0, conflicts: 2 }), true, null, mandate, true)]).toEqual([lang, k, t[`bulk.halt.${k}`]]);
+			}
+		}
+	});
+
+	it('says a start check\'s refusal on a store\'s own cause by its code, approving and writing on (U-232)', () => {
+		for (const k of ['shopifySelfHosted', 'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable', 'shopifyNoApiVersion']) {
+			expect([k, bulkReachRefusalKey(`reach_approve_${k}`)]).toEqual([k, `bulk.reach.approve.${k}`]);
+			expect([k, bulkReachRefusalKey(`reach_resume_${k}`)]).toEqual([k, `bulk.halt.${k}`]);
+			for (const lang of [de, en]) expect([k, typeof lang[`bulk.reach.approve.${k}`]]).toEqual([k, 'string']);
+		}
+		// Any other code, or a cause that is not a store's, keeps the engine's sentence.
+		for (const code of ['reach_approve_credential', 'reach_later_shopifyNotCleared', 'planner_unknown', 'reach_approve_constructor']) expect([code, bulkReachRefusalKey(code)]).toEqual([code, null]);
 	});
 
 	it('words the five halts that had only the engine\'s reason, in both languages', () => {

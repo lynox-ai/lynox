@@ -13425,19 +13425,23 @@ describe('LynoxHTTPApi', () => {
       const { ApiStore } = await import('../core/api-store.js');
       mockGetApiStore.mockReturnValue(new ApiStore());
       const refused = await approve();
-      expect(((await refused.json()) as { error: string }).error).toBe('lynox reaches Shopify stores only on an instance run by lynox. You run this instance yourself.');
+      const refusedBody = (await refused.json()) as { error: string; code?: string };
+      expect(refusedBody).toMatchObject({ error: 'lynox reaches Shopify stores only on instances that lynox runs. This instance is self-hosted, so this run cannot start here.', code: 'reach_approve_shopifySelfHosted' });
       expect(refused.status).toBe(409);
       // With a control plane but without the parts a store pass needs, it is one lynox has to set up.
-      // (Set and removed by hand: `vi.unstubAllEnvs` would also drop this file's own stubs.)
+      // (Set and put back by hand: `vi.unstubAllEnvs` would also drop this file's own stubs.)
+      const before = { url: process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'], id: process.env['LYNOX_MANAGED_INSTANCE_ID'] };
       process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.example.invalid';
       process.env['LYNOX_MANAGED_INSTANCE_ID'] = 'inst-1';
       try {
         const notSetUp = await approve();
-        expect(((await notSetUp.json()) as { error: string }).error).toBe('Shopify is not set up on your instance. lynox has to fix this, not you; resuming helps only after that.');
+        expect(await notSetUp.json()).toMatchObject({ error: 'Shopify is not set up on this instance. Only lynox can set it up (support@lynox.ai); after that you can approve the run.', code: 'reach_approve_shopifyNotSetUp' });
         expect(notSetUp.status).toBe(409);
       } finally {
-        delete process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
-        delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
+        if (before.url === undefined) delete process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+        else process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = before.url;
+        if (before.id === undefined) delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
+        else process.env['LYNOX_MANAGED_INSTANCE_ID'] = before.id;
         mockGetApiStore.mockReturnValue(null);
       }
 
