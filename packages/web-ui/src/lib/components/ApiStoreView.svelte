@@ -7,6 +7,8 @@
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import Icon from '../primitives/Icon.svelte';
 	import PresetClientForm from './PresetClientForm.svelte';
+	import MarkedLine from './MarkedLine.svelte';
+	import { shownValue, shownWhole } from '../utils/plan-takeover.js';
 	import { connectionLine, type ConnectionLine, type OAuthGrantView } from '../utils/oauth-connection.js';
 	import { localDay, noticesByProfile, revocationView, type ProviderNotice } from '../utils/provider-revocation.js';
 	import { connectHref } from '../oauth-connect-path.js';
@@ -14,17 +16,38 @@
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 
 	interface ApiEndpoint { method: string; path: string; description: string; }
-	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; oauth_grant?: OAuthGrantView & { state?: unknown; revoked_at?: unknown };
+	interface ApiProfile { id: string; name: string; base_url: string; description: string; /** Who set it up (`owner` or `mandate:<address>`). */ created_by?: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; oauth_grant?: OAuthGrantView & { state?: unknown; revoked_at?: unknown };
 		/** Whether this reader's connect start goes through: a mandate's only for a profile it set up. */
 		reader_may_connect?: boolean; }
 
-	// Who connected the profile and with which provider account (`utils/oauth-connection.ts`).
+	// A profile a person with access set up, in the owner's view: its name is that person's words.
+	function setUpByMember(profile: ApiProfile): boolean {
+		return isOwnerSession() && (profile.created_by ?? '').startsWith('mandate:');
+	}
+
+	// The hostname of a profile's web address, or '' when it is not one. Only http(s), and only the
+	// characters a host name or an IPv6 literal is made of: an opaque host (`foo://…`) keeps case and
+	// punctuation, and a special one still keeps quotes, so neither reaches the dialog. Length is
+	// bounded, so the question after it stays in view.
+	const HOST = /^(?:[a-z0-9-]{1,63}\.)*[a-z0-9-]{1,63}\.?$|^\[[0-9a-f:.]+\]$/;
+	function hostOf(url: string): string {
+		try {
+			const u = new URL(url);
+			if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+			return u.hostname.length <= 253 && HOST.test(u.hostname) ? u.hostname : '';
+		} catch {
+			return '';
+		}
+	}
+
+	// Who connected the profile and with which provider account (`utils/oauth-connection.ts`). A
+	// person's address and an account's label are someone else's values, set apart (`MarkedLine`).
 	function connectionText(line: ConnectionLine): string {
 		const who = line.by.kind === 'you' ? t('apis.connected_by_you')
 			: line.by.kind === 'owner' ? t('apis.connected_by_owner')
-			: tf('apis.connected_by', { who: line.by.kind === 'helper' ? line.by.address : line.by.tag });
+			: tf('apis.connected_by', { who: shownValue(line.by.kind === 'helper' ? line.by.address : line.by.tag) });
 		const account = line.withheld ? t('apis.account_withheld')
-			: line.account === null ? t('apis.account_unknown') : tf('apis.account', { account: line.account });
+			: line.account === null ? t('apis.account_unknown') : tf('apis.account', { account: shownValue(line.account) });
 		return `${who} · ${account}`;
 	}
 
@@ -88,7 +111,11 @@
 	async function deleteProfile(profile: ApiProfile) {
 		// Native confirm keeps the surface small; matches the rest of the
 		// destructive-action UX in this app (HistoryView, ArtifactsView).
-		const msg = t('apis.delete_confirm').replace('{name}', profile.name);
+		// A native dialog cannot set a value apart: a name a person with access gave stays out of it.
+		// The host of its address names it instead, when it is a plain host name (`hostOf`).
+		const host = setUpByMember(profile) ? hostOf(profile.base_url) : '';
+		const msg = !setUpByMember(profile) ? tf('apis.delete_confirm', { name: profile.name })
+			: host !== '' ? tf('apis.delete_confirm_host', { host }) : t('apis.delete_confirm_unnamed');
 		if (!confirm(msg)) return;
 		deleting = profile.id;
 		error = '';
@@ -180,12 +207,12 @@
 						<button onclick={() => expanded = expanded === profile.id ? null : profile.id}
 							class="flex-1 px-4 py-3 text-left hover:bg-bg-muted transition-colors">
 							<div class="flex items-center gap-2">
-								<span class="text-sm font-medium">{profile.name}</span>
+								<span class="text-sm font-medium break-words" data-profile-name>{#if setUpByMember(profile)}<MarkedLine text={shownWhole(profile.name)} mono={false} />{:else}{profile.name}{/if}</span>
 								{#if profile.auth}<span class="text-xs rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{profile.auth.type}</span>{/if}
 							</div>
 							<p class="text-xs text-text-subtle mt-1 font-mono">{profile.base_url}</p>
-							{#if connectionLine(profile.oauth_grant)}<p class="text-xs text-text-muted mt-1" data-testid="api-connection">{connectionText(connectionLine(profile.oauth_grant)!)}</p>{/if}
-							{#if profile.description}<p class="text-xs text-text-muted mt-1">{profile.description}</p>{/if}
+							{#if connectionLine(profile.oauth_grant)}<p class="text-xs text-text-muted mt-1" data-testid="api-connection"><MarkedLine text={connectionText(connectionLine(profile.oauth_grant)!)} /></p>{/if}
+							{#if profile.description}<p class="text-xs text-text-muted mt-1" data-profile-description>{#if setUpByMember(profile)}<MarkedLine text={shownWhole(profile.description)} mono={false} />{:else}{profile.description}{/if}</p>{/if}
 						</button>
 						<button onclick={() => manageInChat(profile)}
 							aria-label={t('apis.manage_in_chat')}

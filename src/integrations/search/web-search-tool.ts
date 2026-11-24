@@ -10,7 +10,6 @@ import { rerankSearchResults } from './search-reranker.js';
 import { currentCallSignal, currentCallTargetOrigin } from '../../core/call-connection.js';
 import { delegatedRedirects, httpTarget, outwardReadRecorder } from '../../core/audit-log.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
-import { ownersCleanBatch } from '../../core/owner-clean-batch.js';
 import { turnIsLocked } from '../../core/mandate-tool-lock.js';
 import { carriesAddress, hostTargets } from '../../core/send-target.js';
 
@@ -232,16 +231,8 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           // them would be reads whose hosts no row named before they were sent.
           if (isOwnerPrincipal(agent.principal)) results = await enrichResults(results, ctx);
           // The addresses this search lists, as the provider gave them: a later read of exactly one of
-          // them passes the origin check without a question (`readAddress`). Their hosts join the
-          // shell's egress set only for a search the owner sent in their own chat, before any
-          // foreign content and with no server tool the provider ran itself (`ownersCleanBatch`): a
-          // mandate's query is a third party's choice, an unattended run's or a sub-agent's is not
-          // the owner's, and the owner's later shell would reach it.
-          agent.searchResultAddresses?.noteResults(
-            input.query,
-            results.map((r) => r.url),
-            ownersCleanBatch(agent),
-          );
+          // them passes the origin check without a question (`readAddress`).
+          agent.searchResultAddresses?.noteResults(input.query, results.map((r) => r.url));
           const formatted = formatSearchResults(results);
           if (results.length === 0) return formatted;
           const { wrapUntrustedData } = await import('../../core/data-boundary.js');

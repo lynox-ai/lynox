@@ -9,7 +9,6 @@ import { isToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { CredentialRegistry, type HostSet } from '../../egress-proxy/registry.js';
 import { createAdminServer } from '../../egress-proxy/server.js';
 import { credentialFromHeader } from '../../egress-proxy/policy.js';
-import { SearchResultAddresses } from '../../core/search-result-addresses.js';
 import { OwnerKnownTargets } from '../../core/owner-known-targets.js';
 
 /**
@@ -83,8 +82,12 @@ let socketPath = '';
 
 function agent(policy: 'allow-all' | 'guarded' | 'allow-list' | 'deny-all' | undefined, opts: {
   hosts?: string[]; wildcards?: string[]; acks?: string[]; envVars?: Record<string, string>;
+  /** The call's batch started after foreign content; `null` for an agent that cannot say. */
+  tainted?: boolean | null;
 } = {}): never {
+  const tainted = opts.tainted === undefined ? false : opts.tainted;
   return {
+    ...(tainted === null ? {} : { batchStartedTainted: () => tainted }),
     toolContext: {
       shellIsolation: { kind: 'sidecar', socket: socketPath, root: {} },
       networkPolicy: policy,
@@ -254,33 +257,54 @@ describe('bash with the egress proxy', () => {
   });
 });
 
-describe('bash reaches what this conversation brought in (152 W2b)', () => {
-  function withProvenance(policy: 'guarded' | 'allow-list' | 'allow-all', typed: string[]): { a: never; searches: SearchResultAddresses } {
-    const searches = new SearchResultAddresses();
-    const a = { ...(agent(policy, policy === 'allow-list' ? { hosts: ['only.example'] } : {}) as object), searchResultAddresses: searches, ownerKnown: OwnerKnownTargets.of({ ownerTexts: () => typed }) } as never;
-    return { a, searches };
+describe('bash reaches what the owner typed, and after taint only what the engine reads unasked (152 W2b, W3)', () => {
+  function withTyped(policy: 'guarded' | 'allow-list' | 'allow-all' | 'deny-all', typed: string[], tainted: boolean | null = false, acks: string[] = []): never {
+    return { ...(agent(policy, { ...(policy === 'allow-list' ? { hosts: ['only.example'] } : {}), acks, tainted }) as object), ownerKnown: OwnerKnownTargets.of({ ownerTexts: () => typed }) } as never;
   }
+  const registered = (): string[] => [...(setDuringCall as ReadonlySet<string>)];
 
-  it('under guarded: a host an untainted search listed and a host the owner typed join; a tainted search\'s host does not', async () => {
+  it('under guarded a host the owner typed joins', async () => {
     await configured({ code: 0, out: () => 'ok' });
-    const { a, searches } = withProvenance('guarded', ['bitte lies https://shop.example/preise']);
-    searches.noteResults('preise', ['https://news.example/artikel'], true);
-    searches.noteResults('preise', ['https://planted.example/x'], false);
-    await bashTool.handler({ command: 'curl -s https://news.example/artikel' }, a);
-    const set = [...(setDuringCall as ReadonlySet<string>)];
-    expect(set).toContain('news.example');
-    expect(set).toContain('shop.example');
-    expect(set).not.toContain('planted.example');
+    await bashTool.handler({ command: 'curl -s https://shop.example/preise' }, withTyped('guarded', ['bitte lies https://shop.example/preise']));
+    expect(registered()).toContain('shop.example');
   });
 
-  it('under allow-list the operator\'s list stays the boundary; under allow-all the set stays every host', async () => {
+  it('before taint: allow-list stays the list, allow-all stays every host', async () => {
     await configured({ code: 0, out: () => 'ok' });
-    const l = withProvenance('allow-list', ['docs.example']);
-    l.searches.noteResults('q', ['https://news.example/'], true);
-    await bashTool.handler({ command: 'true' }, l.a);
-    expect([...(setDuringCall as ReadonlySet<string>)].sort()).toEqual(['only.example']);
-    const all = withProvenance('allow-all', ['docs.example']);
-    await bashTool.handler({ command: 'true' }, all.a);
+    await bashTool.handler({ command: 'true' }, withTyped('allow-list', ['docs.example']));
+    expect(registered().sort()).toEqual(['only.example']);
+    await bashTool.handler({ command: 'true' }, withTyped('allow-all', ['docs.example']));
     expect(setDuringCall).toBe('*');
+  });
+
+  it('after taint under allow-all: not every host, but the baseline and the typed host', async () => {
+    await configured({ code: 0, out: () => 'ok' });
+    await bashTool.handler({ command: 'true' }, withTyped('allow-all', ['docs.example'], true));
+    expect(setDuringCall).not.toBe('*');
+    expect(registered()).toContain('docs.example');
+    expect(registered()).toContain('api.anthropic.com');
+  });
+
+  it('after taint under guarded a connected API\'s host is left out, the typed host stays', async () => {
+    await configured({ code: 0, out: () => 'ok' });
+    await bashTool.handler({ command: 'true' }, withTyped('guarded', ['docs.example'], false, ['api.vendor.example']));
+    expect(registered()).toContain('api.vendor.example');
+    await bashTool.handler({ command: 'true' }, withTyped('guarded', ['docs.example'], true, ['api.vendor.example']));
+    expect(registered()).not.toContain('api.vendor.example');
+    expect(registered()).toContain('docs.example');
+  });
+
+  it('an agent that cannot say whether its batch started tainted gets the tainted set', async () => {
+    await configured({ code: 0, out: () => 'ok' });
+    await bashTool.handler({ command: 'true' }, withTyped('allow-all', [], null));
+    expect(setDuringCall).not.toBe('*');
+  });
+
+  it('after taint under allow-list the list, under deny-all nothing', async () => {
+    await configured({ code: 0, out: () => 'ok' });
+    await bashTool.handler({ command: 'true' }, withTyped('allow-list', ['docs.example'], true));
+    expect(registered().sort()).toEqual(['only.example']);
+    await bashTool.handler({ command: 'true' }, withTyped('deny-all', ['docs.example'], true));
+    expect(setDuringCall).toBeNull();
   });
 });

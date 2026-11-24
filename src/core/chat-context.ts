@@ -569,15 +569,27 @@ export function resolveChatContext(
     for (const id of ref.ids.slice(0, MAX_BATCH_ITEMS)) {
       const item = inboxState.getItem(id);
       if (!item) continue;
-      const fromAddr = oneLine(item.fromAddress, MAX_NAME_CHARS);
-      const from = item.fromName
-        ? `${oneLine(item.fromName, MAX_NAME_CHARS)} <${fromAddr}>`
+      // As in the single 'mail' kind: a follow-up in the thread is what a reply answers, so its
+      // sender, subject, text and Message-ID take the place of the first mail's. It was not judged
+      // by the check the item's own mail passed, so it is checked here, on the snippet shown and on
+      // the body, which a writer may store masked differently.
+      const followUp = followUpToAnswer(inboxState, item);
+      const mail = followUp ?? item;
+      const followUpBody = followUp?.bodyMd ?? '';
+      const text = followUp ? (followUp.snippet || followUpBody) : (item.snippet ?? '');
+      const withheld = followUp
+        ? detectSensitiveContent({ subject: '', body: [followUp.subject, followUp.fromName ?? '', followUpBody, text].join('\n') }).categories
+        : [];
+      const hidden = withheld.length > 0;
+      const fromAddr = oneLine(mail.fromAddress, MAX_NAME_CHARS);
+      const from = mail.fromName && !hidden
+        ? `${oneLine(mail.fromName, MAX_NAME_CHARS)} <${fromAddr}>`
         : fromAddr;
       const acct = oneLine(item.accountId, MAX_NAME_CHARS);
-      const uidRow = item.messageId
-        ? inboxState.getUidByMessageId(item.accountId, item.messageId)
+      const uidRow = mail.messageId
+        ? inboxState.getUidByMessageId(item.accountId, mail.messageId)
         : null;
-      const msgId = item.messageId ? oneLine(item.messageId, MAX_NAME_CHARS) : '';
+      const msgId = mail.messageId ? oneLine(mail.messageId, MAX_NAME_CHARS) : '';
       // Operational header — engine-generated, NOT sender-controlled, so it stays
       // in the trusted framing above the wrapped block. Same split as
       // `envelope.ts:83`, which calls it "Operational header — agent framing, NOT
@@ -587,12 +599,18 @@ export function resolveChatContext(
           `${uidRow.folder && uidRow.folder !== 'INBOX' ? ` (folder "${oneLine(uidRow.folder, MAX_FOLDER_CHARS)}")` : ''}`
         : `account "${acct}" — locate via mail_search` +
           `${msgId ? ` (by the Message-ID below)` : ''}`;
-      const subject = oneLine(item.subject, MAX_NAME_CHARS);
-      const snippet = oneLine(item.snippet ?? '', MAX_MAIL_SNIPPET_CHARS);
+      const subject = hidden ? '' : oneLine(mail.subject, MAX_NAME_CHARS);
+      const snippet = hidden ? '' : oneLine(text, MAX_MAIL_SNIPPET_CHARS);
+      const which = followUp ? ' — a follow-up to the mail the inbox took in' : '';
+      const absent = hidden
+        ? ` — sender name, subject and snippet withheld: sensitive content (${[...new Set(withheld)].join(', ')})`
+        : followUp && text.length === 0
+          ? `${missingFieldNote({ from, subject })} — the inbox stored no text of it`
+          : missingFieldNote({ from, subject, snippet });
       lines.push(
         // Absence rides on the locator line — engine framing, same reason as the
         // single 'mail' kind: a placeholder inside the block is forgeable.
-        `${lines.length + 1}. ${locator}${missingFieldNote({ from, subject, snippet })}\n` +
+        `${lines.length + 1}. ${locator}${which}${absent}\n` +
         wrapChannelMessage({
           source: `mail:${acct}:inbox:${item.id}`,
           fields: {

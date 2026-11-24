@@ -304,9 +304,11 @@ export interface BulkRunStatus {
    *  with a judge; null when none was set. */
   costCapUsd: number | null;
   /** A run whose after-states a model decides (`bulk_judge`, PRD bulk-loop §3.1): its tier and
-   *  how many targets have no verdict yet. Null on every other run. Counts only — the rule's
-   *  text is the owner's, shown by the owner's route, never in a status. */
-  judge: { tier: ModelTier; unjudged: number } | null;
+   *  how many targets have no verdict yet, and how many have one (refused by the judge included,
+   *  so `judged + unjudged` is what the judge has read or still reads; a target its read step
+   *  turns invalid leaves both). Null on every other run. Counts only — the
+   *  rule's text is the owner's, shown by the owner's route, never in a status. */
+  judge: { tier: ModelTier; unjudged: number; judged: number } | null;
   /** The link domains the owner allowed at the start of a judged run, besides the store's own
    *  (PRD shopify-preset §20.2 item 5, S20-4); null where none were given. */
   startDomains: string[] | null;
@@ -1904,6 +1906,9 @@ export class BulkLedger {
         unjudged: (db.prepare(
           `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND change != 'invalid' AND judged_at IS NULL`,
         ).get(row.id) as { n: number }).n,
+        judged: (db.prepare(
+          'SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND judged_at IS NOT NULL',
+        ).get(row.id) as { n: number }).n,
       },
     };
   }
@@ -2466,6 +2471,12 @@ export class BulkLedger {
 
   private setSelected(runId: string, seq: number, selected: boolean, params: { checksum: string; now?: number | undefined }): BulkSelectOutcome {
     const db = this.engineDb.getDb();
+    // Under the write lock: the compare (the checksum the owner saw against the run as it is), the
+    // write, and the checksum of the run as the write left it. The approval is the owner's consent
+    // to a set of targets, so the checksum the page goes on must be the set this write made, also
+    // when another process writes the same database: hashed after the lock, a toggle of that
+    // process could land in between. A run holds up to BULK_MAX_TARGETS targets, and each checksum
+    // decrypts and hashes all of them, so the lock holds two of them.
     return db.transaction((): BulkSelectOutcome => {
       const run = this.runRow(runId);
       if (!run) return { ok: false, reason: 'not_found' };
@@ -2473,10 +2484,10 @@ export class BulkLedger {
       if (run.kind === 'undo' && run.atomic === 1) return { ok: false, reason: 'atomic_undo' };
       if (params.checksum !== this.computeChecksum(runId)) return { ok: false, reason: 'checksum' };
       const at = new Date(params.now ?? Date.now()).toISOString();
-      const moved = selected
+      const changed = selected
         ? db.prepare(`UPDATE bulk_targets SET deselected_at = NULL WHERE run_id = ? AND seq = ? AND change IN ${WRITING_CHANGES} AND deselected_at IS NOT NULL`).run(runId, seq)
         : db.prepare(`UPDATE bulk_targets SET deselected_at = ? WHERE run_id = ? AND seq = ? AND ${WRITING_SQL}`).run(at, runId, seq);
-      if (moved.changes !== 1) return { ok: false, reason: 'not_writing' };
+      if (changed.changes !== 1) return { ok: false, reason: 'not_writing' };
       return { ok: true, checksum: this.computeChecksum(runId)! };
     }).immediate();
   }
@@ -2884,7 +2895,7 @@ export class BulkLedger {
         // Left out, not refused: no grant is minted for it, so its request is refused before it is
         // sent and the apply halts (`contract`). Nothing else changes here — this is also what the
         // approve and resume routes ask whether a run is a Shopify run.
-        if (html.length > 0 && !this.mintsHtml(run, r, after, html, host)) continue;
+        if (html.length > 0 && !this.mintsHtml(run, key, r, after, html, host)) continue;
         writes.push({ form, gid: key, after });
       }
     }
@@ -2904,7 +2915,7 @@ export class BulkLedger {
    * before-image byte for byte — the ledger checked against itself, not a security bound.
    */
   private mintsHtml(
-    run: RunRow, row: { before: string | null; source_seq: number | null }, after: Record<string, unknown>,
+    run: RunRow, key: string, row: { before: string | null; source_seq: number | null }, after: Record<string, unknown>,
     html: readonly string[], host: string,
   ): boolean {
     const fields = html.filter((f) => Object.hasOwn(after, f));
@@ -2918,9 +2929,11 @@ export class BulkLedger {
       if (image === undefined || image.absent || image.value === null || typeof image.value !== 'object') return false;
       const held = image.value as Record<string, unknown>;
       if (!fields.every((f) => Object.hasOwn(held, f) && canonicalJson(held[f]) === canonicalJson(after[f]))) return false;
-      // The planning check once more: the ledger may have changed since `planUndo`
-      // read the chain, and an after-state equal to the source's before-image passes the check above.
-      return !this.restoresShopAddedMarkup(run.source_run_id, row.source_seq, after, fields);
+      // The planning check once more, both terms of it: the ledger may have changed since `planUndo`
+      // read the chain or the marks of other families, and an after-state equal to the source's
+      // before-image passes the check above.
+      return !this.restoresShopAddedMarkup(run.source_run_id, row.source_seq, after, fields)
+        && this.shopMarkedWriteOf(key, after, run.source_run_id) === null;
     }
     const image = row.before === null ? null : this.parsedImage(row.before);
     // A before-image that does not parse: the write is left out, so the apply halts
