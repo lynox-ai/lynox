@@ -1399,6 +1399,12 @@ const translations: Record<string, Record<Locale, string>> = {
 	// text the owner is told while an erasure a revocation started is pending; dates without a time.
 	'apis.reconnect': { de: 'Erneut verbinden', en: 'Reconnect' },
 	'apis.access_ended': { de: 'lynox konnte den Zugang zu diesem Shop nicht erneuern.', en: 'lynox could not renew its access to this store.' },
+	// Before a store's access runs out (utils/store-access-end.ts, U-391): the owner reads both sentences, a mandate the first.
+	'apis.access_ends_on': { de: 'Der Zugang von lynox zu diesem Shop läuft am {date} ab.', en: "lynox's access to this store runs out on {date}." },
+	'apis.access_ends_way': { de: 'Verbinde ihn vorher neu, damit Läufe und Abfragen weiterlaufen.', en: 'Reconnect it before then so runs and requests keep going.' },
+	// The owner's banner in the shell, one line per store (StoreAccessBanner, U-391); {host} is shown in a box.
+	'store_access.banner_soon': { de: 'Der Zugang von lynox zum Shop {host} läuft am {date} ab. Verbinde den Shop vorher neu, damit Läufe und Abfragen weiterlaufen.', en: "lynox's access to the store {host} runs out on {date}. Reconnect the store before then so runs and requests keep going." },
+	'store_access.banner_ended': { de: 'lynox konnte den Zugang zum Shop {host} nicht erneuern. Läufe und Abfragen an den Shop gehen erst wieder, wenn du ihn neu verbindest.', en: 'lynox could not renew its access to the store {host}. Runs and requests to the store only work again once you reconnect it.' },
 	'apis.revoked_on': { de: 'Vom Anbieter widerrufen am {date}', en: 'Revoked by the provider on {date}' },
 	// The long texts sit in a closed <details> below the dates and the way out.
 	'apis.erasure_details': { de: 'Was gelöscht wird und was bleibt', en: 'What is deleted and what stays' },
@@ -2543,6 +2549,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'secrets.use_llm_page':         { de: 'Dieser Key gehört in die LLM-Provider-Seite, nicht hierher.',           en: 'This key belongs on the LLM provider page, not here.' },
 	'secrets.managed_blocked':      { de: 'Dieser Name wird automatisch verwaltet (Mail, OAuth, Engine-interne). Wähle einen anderen Namen für deinen Integrations-Schlüssel.', en: 'This name is platform-managed (mail, OAuth, engine internals). Pick a different name for your integration key.' },
 	'secrets.preset_client_use_form': { de: 'Das ist das Client-Secret einer eingebauten Verbindung. Du trägst es im App-Zugang des Profils ein (Einstellungen → APIs), nicht hier.', en: 'This is the client secret of a built-in provider. Enter it under “App credentials” in its profile (Settings → APIs), not here.' },
+	'secrets.retired_preset_client': { de: 'Dieser Name gehört zu einer eingebauten Verbindung, die lynox nicht mehr anbietet, und lässt sich hier nicht speichern. Wähl für ein eigenes Profil einen anderen Namen.', en: 'This name belongs to a built-in provider lynox no longer offers, so it can\'t be saved here. For a profile of your own, choose another name.' },
 	'secrets.managed_notice_title': { de: 'Managed-Hosting',                                                       en: 'Managed hosting' },
 	'secrets.managed_notice_body':  { de: 'Du kannst hier Schlüssel für deine eigenen Integrationen hinterlegen (Stripe, DataForSEO, Hetzner, …). Mail-Konten, OAuth-Tokens und Engine-interne Einstellungen werden automatisch vom Plan verwaltet — diese werden hier abgewiesen.', en: 'Add keys for your own integrations here (Stripe, DataForSEO, Hetzner, …). Mail accounts, OAuth tokens and engine-internal settings are managed by your plan automatically — those names are rejected.' },
 	'secrets.no_admin':             { de: 'Keine Admin-Berechtigung — Key-Liste nicht verfügbar.',                 en: 'No admin permission — key list unavailable.' },
@@ -2562,6 +2569,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'tasks.run_failed': { de: 'fehlgeschlagen', en: 'failed' },
 	'tasks.run_timeout': { de: 'nach dem Zeitlimit abgebrochen', en: 'cut off at the time limit' },
 	'tasks.due_since': { de: 'Fällig seit', en: 'Due since' },
+	'triggers.blocked_reason.watch_allow_list': { de: 'Liest die Seite nicht: Der Host {host} steht nicht in der Netzwerk-Liste dieser Instanz. Aufnehmen kann ihn der Betreiber der Instanz.', en: "Not reading the page: the host {host} is not in this instance's network allow-list. The instance operator can add it." },
+	'triggers.blocked_reason.watch_deny_all': { de: 'Liest die Seite nicht: Diese Instanz liest keine Webseiten. Ändern kann das der Betreiber der Instanz.', en: 'Not reading the page: this instance reads no web pages. The instance operator can change that.' },
+	'triggers.blocked_reason.watch_https': { de: 'Liest die Seite nicht: Diese Instanz liest nur https-Seiten. Bitte lynox im Chat, die Beobachtung auf die https-Adresse umzustellen.', en: 'Not reading the page: this instance only reads https pages. Ask lynox in the chat to switch the watch to the https address.' },
 	'tasks.run_halted': { de: 'wie vorgesehen angehalten, wartet auf dich', en: 'halted as planned, waiting for you' },
 	'tasks.run_interrupted': { de: 'unterbrochen, nicht fortgesetzt', en: 'interrupted, not resumed' },
 	'tasks.run_stopped': { de: 'gestoppt, bevor er fertig war', en: 'stopped before it finished' },

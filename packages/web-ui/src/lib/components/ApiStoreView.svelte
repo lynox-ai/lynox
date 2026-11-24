@@ -8,11 +8,15 @@
 	import Icon from '../primitives/Icon.svelte';
 	import PresetClientForm from './PresetClientForm.svelte';
 	import MarkedLine from './MarkedLine.svelte';
-	import { shownValue, shownWhole } from '../utils/plan-takeover.js';
+	import MarkedValue from './MarkedValue.svelte';
+	import { plainText, shownValue, shownWhole } from '../utils/plan-takeover.js';
 	import { connectionLine, type ConnectionLine, type OAuthGrantView } from '../utils/oauth-connection.js';
 	import { authChipLabel } from '../utils/api-auth-label.js';
-	import { localDay, noticesByProfile, revocationView, type ProviderNotice } from '../utils/provider-revocation.js';
+	import { noticesByProfile, revocationView, type ProviderNotice } from '../utils/provider-revocation.js';
 	import { connectHref } from '../oauth-connect-path.js';
+	import { longDay, storeAccessShown, type StoreAccessEnd, type StoreAccessShown } from '../utils/store-access-end.js';
+	import { placeholderParts } from '../utils/value-breaks.js';
+	import WholeValue from './WholeValue.svelte';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 
@@ -20,6 +24,8 @@
 	interface ApiProfile { id: string; name: string; base_url: string; description: string; /** Who set it up (`owner` or `mandate:<address>`). */ created_by?: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; oauth_grant?: OAuthGrantView & { state?: unknown; revoked_at?: unknown };
 		/** Whether this reader's connect start goes through: a mandate's only for a profile it set up. */
 		reader_may_connect?: boolean;
+		/** A store whose access runs out soon, has, or whose refresh ended (`storeAccessEnd` in the engine). */
+		store_access_ends?: StoreAccessEnd;
 		/** The built-in provider the profile signs in through, by its display name; null for none (`builtInPresetOf`). */
 		built_in_provider?: string | null; }
 
@@ -45,13 +51,15 @@
 
 	// Who connected the profile and with which provider account (`utils/oauth-connection.ts`). A
 	// person's address and an account's label are someone else's values, set apart (`MarkedLine`).
-	function connectionText(line: ConnectionLine): string {
+	// The account goes in its own box, kept whole while it fits a line (U-391): `acme-store` does
+	// not break at its hyphen.
+	function connectionParts(line: ConnectionLine): { lead: string; account: string | null; after: string } {
 		const who = line.by.kind === 'you' ? t('apis.connected_by_you')
 			: line.by.kind === 'owner' ? t('apis.connected_by_owner')
 			: tf('apis.connected_by', { who: shownValue(line.by.kind === 'helper' ? line.by.address : line.by.tag) });
-		const account = line.withheld ? t('apis.account_withheld')
-			: line.account === null ? t('apis.account_unknown') : tf('apis.account', { account: shownValue(line.account) });
-		return `${who} · ${account}`;
+		if (line.withheld || line.account === null) return { lead: `${who} · ${t(line.withheld ? 'apis.account_withheld' : 'apis.account_unknown')}`, account: null, after: '' };
+		const parts = placeholderParts(tf('apis.account', { account: '{account}' }), '{account}');
+		return { lead: `${who} · ${parts.before}`, account: shownValue(line.account), after: parts.after };
 	}
 
 	// A profile on a built-in provider gets its app credentials through its own form, not the chat.
@@ -82,6 +90,20 @@
 	// The time the notices are read against, moved on each minute: a hold or a deadline that passes
 	// while the page is open takes the way out and the dates away without a reload.
 	let now = $state(new Date());
+
+	/**
+	 * A store's access end on its row (U-391), before and after it, unless the revocation view says
+	 * what to do instead (`revoked`, or `ended` for a refresh that ended). Beside any other view (an
+	 * erasure that stands) the line shows too; its own "Reconnect" only where that view shows none.
+	 */
+	function accessLine(profile: ApiProfile): { access: StoreAccessShown; button: boolean } | null {
+		const access = storeAccessShown(profile, now, getLocale());
+		if (access === null) return null;
+		const view = revocationView(profile.oauth_grant, notices.get(profile.id), now);
+		if (view?.kind === 'revoked' || view?.kind === 'ended') return null;
+		const viewButton = view?.kind === 'connectedAgain' || (view?.kind === 'reconnected' && view.avertable);
+		return { access, button: !viewButton };
+	}
 	$effect(() => {
 		const timer = setInterval(() => { now = new Date(); }, 60_000);
 		return () => clearInterval(timer);
@@ -218,8 +240,13 @@
 								<span class="text-sm font-medium break-words" data-profile-name>{#if setUpByMember(profile)}<MarkedLine text={shownWhole(profile.name)} mono={false} />{:else}{profile.name}{/if}</span>
 								{#if authChipLabel(profile.auth, profile.built_in_provider)}{@const chip = authChipLabel(profile.auth, profile.built_in_provider)!}{@const chipText = chip.values ? tf(chip.key, chip.values) : t(chip.key)}<span class="text-xs max-w-full rounded-[var(--radius-sm)] border border-border bg-bg px-1.5 py-0.5 text-text-muted" title={chipText} data-testid="api-auth-chip">{chipText}</span>{/if}
 							</div>
-							<p class="text-xs text-text-subtle mt-1 font-mono">{profile.base_url}</p>
-							{#if connectionLine(profile.oauth_grant)}<p class="text-xs text-text-muted mt-1" data-testid="api-connection"><MarkedLine text={connectionText(connectionLine(profile.oauth_grant)!)} /></p>{/if}
+							<!-- The address is the profile's own value: its invisible characters printed as their code
+							     point (`shownWhole`), kept whole between its dots and slashes. -->
+							<p class="text-xs text-text-subtle mt-1 font-mono"><WholeValue value={plainText(shownWhole(profile.base_url))} kind="url" testid="api-base-url" /></p>
+							{#if connectionLine(profile.oauth_grant)}
+								{@const conn = connectionParts(connectionLine(profile.oauth_grant)!)}
+								<p class="text-xs text-text-muted mt-1" data-testid="api-connection"><MarkedLine text={conn.lead} />{#if conn.account !== null}<MarkedValue text={conn.account} testid="api-connection-account" />{/if}{conn.after}</p>
+							{/if}
 						</button>
 						<button onclick={() => manageInChat(profile)}
 							aria-label={t('apis.manage_in_chat')}
@@ -241,13 +268,13 @@
 						<div class="border-t border-border px-4 py-3 space-y-2 text-xs text-text-muted" data-testid="api-revoked">
 							{#if view.kind === 'revoked' || view.kind === 'pending'}
 								{@const since = view.kind === 'revoked' ? view.revokedAt : view.notice.revokedAt}
-								{#if since}<p>{tf('apis.revoked_on', { date: localDay(since, getLocale()) })}</p>{/if}
+								{#if since}<p>{tf('apis.revoked_on', { date: longDay(since, getLocale()) })}</p>{/if}
 							{:else if view.kind === 'ended'}
 								<p data-testid="api-access-ended">{t('apis.access_ended')}</p>
 							{/if}
 							<!-- First the dates and the way out with its button; the long text below, closed. -->
 							{#if view.notice}
-								<p data-testid="api-erasure-window">{tf('apis.erasure_window', { earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) })}</p>
+								<p data-testid="api-erasure-window">{tf('apis.erasure_window', { earliest: longDay(view.notice.holdUntil, getLocale()), latest: longDay(view.notice.deadline, getLocale()) })}</p>
 								{#if view.kind === 'revoked' && view.avertable}
 									<p data-testid="api-erasure-avert">{t('apis.erasure_notice_avert')}</p>
 								{:else if view.kind === 'reconnected' && view.avertable}
@@ -268,7 +295,7 @@
 								{/if}
 							{/if}
 							{#if view.notice && view.kind !== 'pending'}
-								{@const dates = { revoked: localDay(view.notice.revokedAt, getLocale()), earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) }}
+								{@const dates = { revoked: longDay(view.notice.revokedAt, getLocale()), earliest: longDay(view.notice.holdUntil, getLocale()), latest: longDay(view.notice.deadline, getLocale()) }}
 								<details data-testid="api-erasure-details">
 									<summary class="cursor-pointer text-text-subtle hover:text-text">{t('apis.erasure_details')}</summary>
 									{#if view.kind === 'revoked'}
@@ -279,6 +306,26 @@
 										<p class="mt-2" data-testid="api-erasure-connected-again">{tf('apis.erasure_connected_again_notice', dates)}</p>
 									{/if}
 								</details>
+							{/if}
+						</div>
+					{/if}
+					<!-- A store's access end (U-391), as `accessLine` has it. -->
+					{#if accessLine(profile)}
+						{@const line = accessLine(profile)!}
+						{@const access = line.access}
+						<div class="border-t border-border px-4 py-3 space-y-2 text-xs text-text-muted" data-testid="api-access-ends">
+							{#if access.kind === 'soon'}
+								<p data-testid="api-access-ends-text">{isOwnerSession() ? `${tf('apis.access_ends_on', { date: access.date })} ${t('apis.access_ends_way')}` : tf('apis.access_ends_on', { date: access.date })}</p>
+							{:else}
+								<p data-testid="api-access-ended">{t('apis.access_ended')}</p>
+							{/if}
+							{#if !line.button}
+								<!-- The revocation view above already offers the way. -->
+							{:else if access.mayConnect}
+								<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
+									class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
+							{:else}
+								<p data-testid="api-reconnect-not-yours">{t('apis.reconnect_not_yours')}</p>
 							{/if}
 						</div>
 					{/if}

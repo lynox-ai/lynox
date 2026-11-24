@@ -20,7 +20,7 @@ const json = (body: unknown, status = 200): Response =>
 const settle = async (): Promise<void> => { for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0)); };
 
 const QUESTION = { pending: true, promptType: 'ask_user', question: 'Which list, A or B?', options: ['A', 'B'], promptId: 'p1' };
-const DECISION = { pending: true, promptType: 'ask_user', question: '⚠ mail_send needs your OK', options: ['Allow', 'Deny', '\x00'], promptId: 'p2' };
+const DECISION = { pending: true, promptType: 'ask_user', question: '⚠ New email needs your OK', options: ['Allow', 'Deny', '\x00'], promptId: 'p2' };
 const SCHEDULED = { runs: [{ runId: 'sq1', threadId: 't1', status: 'awaiting_input', lastPersistedSeq: 0, attachable: false }] };
 const NOTHING = { runs: [] };
 
@@ -280,14 +280,14 @@ describe('the reconnect after a turn failed offline', () => {
 	it('with a question waiting: not dropped, not sent — still failed, the card back', async () => {
 		await questionWaits(DECISION);
 		// The transcript ends on the question: read alone, "answered", which dropped the message.
-		threadMessages = { messages: [{ role: 'user', content: 'first' }, { role: 'assistant', content: '⚠ mail_send needs your OK' }], activeRun: null };
+		threadMessages = { messages: [{ role: 'user', content: 'first' }, { role: 'assistant', content: '⚠ New email needs your OK' }], activeRun: null };
 		store.getMessages().push({ role: 'user', content: 'offline turn', failed: true, failedOffline: true });
 		listeners.online!();
 		await new Promise((r) => setTimeout(r, 700));
 		await settle();
 		expect(runPosts()).toBe(1);
 		expect(failedOne('offline turn').map((m) => [m.failed, m.failedOffline])).toEqual([[true, true]]);
-		expect(store.getPendingPermission()?.question).toBe('⚠ mail_send needs your OK');
+		expect(store.getPendingPermission()?.question).toBe('⚠ New email needs your OK');
 		expect(toastKeys()).toEqual(['chat.question_waiting_decision']);
 		expect(toasts[0]!.ms).toBeGreaterThanOrEqual(8000);
 	});
@@ -298,7 +298,7 @@ describe('the reconnect after a turn failed offline', () => {
 		// say which, so the message stays failed rather than being cleared as answered.
 		threadMessages = { messages: [
 			{ role: 'user', content: '[Now: 2026-11-05T15:00:00.000Z]\n\nja' },
-			{ role: 'assistant', content: '⚠ mail_send needs your OK' },
+			{ role: 'assistant', content: '⚠ New email needs your OK' },
 		], activeRun: null };
 		store.getMessages().push({ role: 'user', content: 'ja', failed: true, failedOffline: true });
 		listeners.online!();
@@ -324,7 +324,7 @@ describe('the reconnect after a turn failed offline', () => {
 		expect(runPosts()).toBe(1);
 		expect(store.getMessages().filter((m) => m.role === 'user' && m.failed === true)).toEqual([]);
 		// The question still waits: its card is back and said, as when the message is held.
-		expect(store.getPendingPermission()?.question).toBe('⚠ mail_send needs your OK');
+		expect(store.getPendingPermission()?.question).toBe('⚠ New email needs your OK');
 		expect(toastKeys()).toEqual(['chat.question_waiting_decision']);
 	});
 
@@ -377,7 +377,7 @@ describe('the reconnect after a turn failed offline', () => {
 	it('with nothing waiting and the same transcript: cleared as answered, as before', async () => {
 		await questionWaits(DECISION);
 		active = NOTHING;
-		threadMessages = { messages: [{ role: 'user', content: 'first' }, { role: 'assistant', content: '⚠ mail_send needs your OK' }], activeRun: null };
+		threadMessages = { messages: [{ role: 'user', content: 'first' }, { role: 'assistant', content: '⚠ New email needs your OK' }], activeRun: null };
 		store.getMessages().push({ role: 'user', content: 'offline turn', failed: true, failedOffline: true });
 		listeners.online!();
 		await new Promise((r) => setTimeout(r, 700));

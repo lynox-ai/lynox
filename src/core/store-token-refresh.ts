@@ -131,13 +131,10 @@ export function claimStoreReconnectHints(
 ): { title: string; body: string; priority: 'normal' }[] {
   const out: { title: string; body: string; priority: 'normal' }[] = [];
   for (const profile of apiStore.getAll()) {
-    if (!storeRefreshApplies(profile)) continue;
+    const due = storeReconnectDue(profile, now);
     const grant = profile.oauth_grant;
-    const until = grant?.refresh_expires_at;
-    const host = presetStoreHost(profile);
-    if (grant === undefined || typeof until !== 'number' || host === null) continue;
-    if (typeof grant.store_binding !== 'string' || grant.state === 'revoked') continue;
-    if (until - now > STORE_RECONNECT_HINT_MS || grant.reconnect_hint_for === until) continue;
+    if (due === null || grant === undefined || grant.reconnect_hint_for === due.until) continue;
+    const { host, until } = due;
     let claimed = false;
     try {
       claimed = apiStore.save({ ...profile, oauth_grant: { ...grant, reconnect_hint_for: until } }, apisDir).ok;
@@ -149,6 +146,48 @@ export function claimStoreReconnectHints(
   }
   return out;
 }
+
+/**
+ * The store whose refresh token runs out within {@link STORE_RECONNECT_HINT_MS} of `now`, or has,
+ * with its host and the end: the store the owner is told about, by push once
+ * ({@link claimStoreReconnectHints}) and in the app for as long as it holds. Null for any other
+ * profile: not a store whose tokens expire, no known end, no host the engine derives, no store
+ * binding, or a revoked grant.
+ */
+export function storeReconnectDue(profile: ApiProfile, now: number = Date.now()): { host: string; until: number } | null {
+  if (!storeRefreshApplies(profile)) return null;
+  const grant = profile.oauth_grant;
+  const until = grant?.refresh_expires_at;
+  const host = presetStoreHost(profile);
+  // An end no date can hold (a file edited by hand) is no end: the list that shows it must not throw.
+  if (grant === undefined || typeof until !== 'number' || !Number.isFinite(until) || Math.abs(until) > MAX_DATE_MS || host === null) return null;
+  if (typeof grant.store_binding !== 'string' || grant.state === 'revoked') return null;
+  if (until - now > STORE_RECONNECT_HINT_MS) return null;
+  return { host, until };
+}
+
+/**
+ * What the app tells of a store's access ({@link storeReconnectDue} for the push): the store and its
+ * end within the hint's window, and also a connection whose refresh ended (`refresh-dead`, which
+ * drops the store binding), until the store is connected again. `ended` once the end passed or the
+ * refresh ended; `until` null when the end is not known. Null for a revoked grant or any other profile.
+ */
+export function storeAccessEnd(profile: ApiProfile, now: number = Date.now()): { host: string; until: number | null; ended: boolean } | null {
+  const grant = profile.oauth_grant;
+  // Only a store refresh ends a connection this way, and only a store has a host the engine derives.
+  if (grant?.state === 'refresh-dead') {
+    const host = presetStoreHost(profile);
+    if (host === null) return null;
+    const until = grant.refresh_expires_at;
+    const known = typeof until === 'number' && Number.isFinite(until) && Math.abs(until) <= MAX_DATE_MS;
+    return { host, until: known ? until : null, ended: true };
+  }
+  const due = storeReconnectDue(profile, now);
+  return due === null ? null : { host: due.host, until: due.until, ended: due.until <= now };
+}
+
+/** The largest time a `Date` holds, in milliseconds either side of the epoch. */
+const MAX_DATE_MS = 8.64e15;
 
 const MONTHS_DE = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
 const MONTHS_EN = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];

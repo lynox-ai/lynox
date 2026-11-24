@@ -30,8 +30,8 @@ import { shapeRequestForModel } from '../core/llm-wire-rules.js';
 import {
   exchangeToken, serializeTokenBody, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
-import { beginStoreConnect, endStoreConnect } from '../core/store-token-refresh.js';
-import { codeExchangeExtraParams, consentNoticeVersion, derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
+import { beginStoreConnect, endStoreConnect, storeAccessEnd } from '../core/store-token-refresh.js';
+import { codeExchangeExtraParams, consentNoticeVersion, derivePresetEndpoints, isPresetClientSecretName, isRetiredPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
 import { bindShopifyCallback, shopifyCallbackRefusalLine, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import { connectNoteFor, noteButton, noteLang, noteText, noteTitle, type ConnectNote, type NoteLang } from './connect-note.js';
@@ -157,7 +157,7 @@ import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
 import { takeOverWorkflow, workflowTakeoverPreview, type WorkflowTakeoverDeps, type WorkflowTakeoverRefusal } from '../core/workflow-takeover.js';
 import { EngineLessRefused } from '../core/engine-less-refusal.js';
-import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerFieldsNotCarriedError, TriggerTierUnsupportedError, titleIsWorkflowName, isTriggerModelTierUpdate, triggerTakesModelTier, type BeforeTriggerWrite, type TaskManager } from '../core/task-manager.js';
+import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerFieldsNotCarriedError, TriggerTierUnsupportedError, titleIsWorkflowName, isTriggerModelTierUpdate, triggerTakesModelTier, type BeforeTriggerWrite, type TaskManager, watchRefusedNow, type BlockedReason } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -7784,6 +7784,12 @@ export class LynoxHTTPApi {
       // which is what the model was told it never needs. The client id is not refused: it is
       // not a secret, and removing either stays possible below.
       if (isPresetClientSecretName(name)) {
+        // A provider lynox no longer offers has no connection form, so its refusal has a code of
+        // its own: the settings views would otherwise send the owner to that form.
+        if (isRetiredPresetClientSecretName(name)) {
+          errorResponse(res, 403, `"${name}" belongs to a built-in provider lynox no longer offers, so it can't be saved here. For a profile of your own, choose another name.`, 'retired_preset_client_secret');
+          return;
+        }
         errorResponse(res, 403, `"${name}" is the client secret of a built-in provider. It is entered in the connection form of the profile under Settings → API Profiles, not here.`, 'preset_client_secret');
         return;
       }
@@ -9553,6 +9559,15 @@ export class LynoxHTTPApi {
         ? taskManager.listTriggers({ paused: true })
         : taskManager.listTriggers(status ? { status } : undefined);
       const bulkLedgerForList = engine.getBulkLedger() ?? engine.getBulkLedgerSwitchedOff?.() ?? null;
+      const policyContext = engine.getToolContext();
+      const refusedWatch = (trigger: TriggerRecord): { blocked_reason: BlockedReason } | null => {
+        try {
+          const refused = watchRefusedNow(trigger, policyContext);
+          return refused === null ? null : { blocked_reason: refused };
+        } catch {
+          return null;
+        }
+      };
       const triggers = rows
         .map((trigger) => {
           const starter = loop?.runningStarterTag(trigger.id);
@@ -9587,6 +9602,9 @@ export class LynoxHTTPApi {
             // sets the name apart as a value. Any other title stays whole, the prefix included; so
             // does the title of a plan with no schedule, and one whose workflow was renamed since.
             ...(workflow !== undefined && (trigger.schedule_cron ?? '') !== '' && titleIsWorkflowName(trigger.title, workflow.name) ? { title_workflow: workflow.name } : {}),
+            // A watch the instance's network_policy keeps from its page, and why, as the poll would
+            // refuse it now: the view says so, with the way out (U-392).
+            ...(refusedWatch(trigger) ?? {}),
           };
         });
       // What the owner's stamp of each confirmed plan lists, and how each entry stands (B3), for the
@@ -14155,11 +14173,27 @@ export class LynoxHTTPApi {
       // connection somebody else made. `importWaiting`: the files the import of the earlier
       // profiles waits on, for the owner to repair or delete. `reader_may_connect`: whether this
       // reader's connect start goes through (`mayStartConnect`), so the page offers the link only there.
+      // `store_access_ends`: a store whose access runs out within the hint's window, has run out, or
+      // whose refresh ended, until it is connected again (`storeAccessEnd`): the host the engine
+      // derives, whether it ended, and the end when known; so an owner without web push sees it in
+      // the app before the end.
       // `built_in_provider`: the display name of the built-in provider the profile signs in through
       // (`builtInPresetOf`), or null. The stored `preset_id` is only checked for its form, so an id
       // this engine does not know must not be shown as a provider sign-in.
       const reader = this._principalOf(req);
-      jsonResponse(res, 200, { profiles: store.getAll().map((p) => ({ ...profileForReader(p, reader), reader_may_connect: mayStartConnect(reader, p), built_in_provider: builtInPresetOf(p)?.label ?? null })), importWaiting: store.importWaitsOn() });
+      const now = Date.now();
+      jsonResponse(res, 200, {
+        profiles: store.getAll().map((p) => {
+          const end = storeAccessEnd(p, now);
+          return {
+            ...profileForReader(p, reader),
+            reader_may_connect: mayStartConnect(reader, p),
+            built_in_provider: builtInPresetOf(p)?.label ?? null,
+            ...(end === null ? {} : { store_access_ends: { host: end.host, ended: end.ended, ...(end.until === null ? {} : { at: new Date(end.until).toISOString() }) } }),
+          };
+        }),
+        importWaiting: store.importWaitsOn(),
+      });
     }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id', async (req, res, params) => {
