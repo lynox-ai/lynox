@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { pinnedModelOf } from '../../core/profile-pair.js';
+import { dialogToolWord } from '../tool-words.js';
 import type { CostSnapshot, ToolEntry, SpawnSpec, IAgent, ModelTier, EmittingStreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent, PromptMeta, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
 import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, modelIdIsDeepBand, isBlockedModelId, profileNamed } from '../../types/index.js';
 import { estimateFirstTurnUSD, hasKnownPricing } from '../../core/pricing.js';
@@ -1787,6 +1788,8 @@ async function executeThinker(
     // Share the parent's Session counters so one conversation accumulates
     // a single http/write budget across the main agent + all sub-agents.
     sessionCounters: parentAgent.sessionCounters,
+    // One conversation, one record of what its searches listed (`SearchResultAddresses`).
+    searchResultAddresses: parentAgent.searchResultAddresses,
     // Share the recall blob store so a sub-agent's `recall_tool_result` can
     // resolve handles minted by the parent conversation's last compaction.
     toolResultBlobStore: parentAgent.toolResultBlobStore,
@@ -1873,6 +1876,18 @@ async function executeThinker(
     recordToolCall: parentAgent.recordToolCall,
     // The root's set, by reference: what the child fetches is in it before the parent writes.
     conversationGrants: parentAgent.conversationGrants,
+    // The parent's owner-known targets, by reference and read-only: the child's task, written by
+    // the parent's model, and what the child reads add nothing. And the conversation's record of
+    // outside reads, which the child sets under the same thread.
+    ownerKnown: parentAgent.ownerKnown,
+    conversationLatch: parentAgent.conversationLatch,
+    noticeLanguage: parentAgent.noticeLanguage,
+    onOriginRefused: parentAgent.onOriginRefused,
+    // A target the child was not given by the owner comes from the run the parent is (a
+    // trigger's, a workflow's), or else from the subtask itself.
+    sendOrigin: parentAgent.sendOrigin?.kind === 'triggerRun' || parentAgent.sendOrigin?.kind === 'workflowRun'
+      ? parentAgent.sendOrigin
+      : { kind: 'childAgent' },
   };
 
   // Single try wraps both `new Agent(...)` AND `send(...)` so the runs-row
@@ -2970,7 +2985,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         : `A model profile pins a specific endpoint and cannot be substituted down — allow only if you want this run on that model.`;
       return {
         message:
-          `⚠ spawn_agent: ${childWord} on ${tierWord}. ` +
+          `⚠ ${dialogToolWord('spawn_agent')}: ${childWord} on ${tierWord}. ` +
           `Estimated cost ~$${costUsd.toFixed(2)} against this session. ` +
           `Provider: ${providerList}. ${tail}`,
         tier: resolvedTier,

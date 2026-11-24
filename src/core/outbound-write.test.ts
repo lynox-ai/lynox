@@ -1080,6 +1080,13 @@ describe('a secret inside JSON text inside a value', () => {
     expect(bodyForQuestion(`value=${encodeURIComponent(plainInner)}`, mask, FORM)).toEqual({ text: 'value = {"token":"***cret"}', escapedSecret: false });
   });
 
+  it('JSON text percent-encoded as a form value, with a `&` inside one of its strings, is read whole: as text it is not shown, in a form the body counts as sending the secret', () => {
+    // Decoded first, the `&` would cut the JSON text in two; read from the value side of the pair, split before it is decoded, it parses.
+    const withAmp = `{"a":"p&q","token":"\\u0068${STORED.slice(1)}"}`;
+    expect(bodyForQuestion(`value=${encodeURIComponent(withAmp)}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion(`value=${encodeURIComponent(withAmp)}&n=1`, mask, FORM)).toEqual({ text: 'value = ***\nn = 1', escapedSecret: true });
+  });
+
   it('JSON text as a form value in a body sent as text, unencoded or encoded, is not shown', () => {
     expect(bodyForQuestion(`value=${escaped}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
     expect(bodyForQuestion(`value=${encodeURIComponent(escaped)}`, mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });

@@ -9,6 +9,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
 	import { presetProviderLabel } from '../utils/preset-provider-label.js';
+	import WholeValue from './WholeValue.svelte';
 
 	let { profileId }: { profileId: string } = $props();
 
@@ -120,7 +121,7 @@
 
 		<div>
 			<p class="text-xs text-text-muted mb-1">{tf('integrations.preset_client_redirect_label', { provider })}</p>
-			<p class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-xs font-mono text-text-muted select-all break-all">{client.redirect_uri}</p>
+			<p class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-xs font-mono text-text-muted select-all"><WholeValue value={client.redirect_uri} kind="url" testid="preset-redirect-uri" /></p>
 		</div>
 
 		<label class="block">
