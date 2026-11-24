@@ -15852,26 +15852,15 @@ export class LynoxHTTPApi {
         const AGAIN = 'You can start the migration again in 30 minutes at the latest.';
         // Said where the target's answer leaves no words to quote once the hidden characters are gone.
         const NO_REASON = 'The target instance gave no readable reason.';
-        // Whether the last connection failure came before any connection stood (refused, no such name,
-        // no route, the connect timing out): only then can the request not have reached the target.
-        // Any other code, a reset or a closed socket included, may come after it was sent.
-        let neverConnected = false;
-        const NOT_CONNECTED = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'UND_ERR_CONNECT_TIMEOUT']);
-        const connectionNeverMade = (err: unknown): boolean => {
-          const code = (e: unknown): unknown => (e !== null && typeof e === 'object' ? (e as { code?: unknown }).code : undefined);
-          const own = code(err);
-          const cause = code((err as { cause?: unknown } | null)?.cause);
-          return (typeof own === 'string' && NOT_CONNECTED.has(own)) || (typeof cause === 'string' && NOT_CONNECTED.has(cause));
-        };
         // The Web UI names the group a failed handshake falls in (`code`); the fine cause goes to the log.
         const handshakeGroup = (w: Why): MigrationStopCode =>
           w === 'unsent' ? 'handshake_blocked' : w === 'large' || w === 'format' ? 'handshake_not_lynox' : 'handshake_unreachable';
-        // A handshake request may have reached the target and started a session there unless the
-        // guard kept it in or the connection was never made (`neverConnected`). A connection that
-        // broke once it stood, no answer in time, or a failure after the request went out all may
-        // have: those wait, in the sentence and in the retry.
+        // A handshake request that got no answer in time, or failed after it went out, may have
+        // reached the target and started a session there; those wait, in the sentence and in the
+        // retry. One the guard kept in cannot have. A connection failure is taken as not reached:
+        // a reset after sending may have reached it, and a retry then meets the target's own wait.
         const handshakeFailed = (w: Why, code: MigrationStopCode = handshakeGroup(w)): MigrationStop => {
-          if (w === 'silent' || w === 'failed' || (w === 'unreachable' && !neverConnected)) sessionMayBeHeld = true;
+          if (w === 'silent' || w === 'failed') sessionMayBeHeld = true;
           return new MigrationStop(code, `lynox could not set up the connection to the target instance: ${why(w, TARGET_BODY_CAPS.handshake, ', so lynox did not read it', TARGET_REQUEST_TIMEOUTS_MS.handshake)}. Nothing was transferred.${sessionMayBeHeld ? ` ${AGAIN}` : ''}`, {}, w);
         };
         // The whole transfer's deadline (from the manifest on) and the stop it says.
@@ -15885,16 +15874,12 @@ export class LynoxHTTPApi {
          * never reaches the user.
          */
         const ask = async (path: string, init: RequestInit, ms: number, words: (w: 'silent' | 'unreachable' | 'unsent' | 'failed') => MigrationStop): Promise<Response> => {
-          neverConnected = false;
           try {
             return await askTarget(fetchPinned, `${targetUrl}${path}`, init, ms, transfer);
           } catch (err: unknown) {
             if (err instanceof TransferOutOfTime) throw outOfTime();
             if (err instanceof TargetDidNotAnswer) throw words('silent');
-            if (isConnectionFailure(err)) {
-              neverConnected = connectionNeverMade(err);
-              throw words('unreachable');
-            }
+            if (isConnectionFailure(err)) throw words('unreachable');
             // Refused before anything was sent: the guard, which also turns a name that does not
             // resolve (in time) into its refusal.
             const unsent = err instanceof Error && err.message.startsWith('Blocked:');

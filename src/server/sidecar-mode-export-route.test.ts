@@ -49,8 +49,6 @@ const target: {
   unreachable?: 'handshake' | 'completion' | 'manifest' | 'chunk' | undefined;
   /** Fail this request as a connection that broke after it was sent would (ECONNRESET). */
   reset?: 'handshake' | 'completion' | undefined;
-  /** Fail this request as fetch does on a refused connection: its own text, the code on its cause. */
-  refusedByCause?: 'handshake' | undefined;
   /** Answer the handshake with a server key that does not parse. */
   badKey?: boolean;
   /** Answer the handshake with a signature that does not check. */
@@ -133,9 +131,6 @@ vi.mock('../core/network-guard.js', async (original) => {
       }
       if (target.reset !== undefined && target.reset === step) {
         throw Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
-      }
-      if (target.refusedByCause !== undefined && target.refusedByCause === step) {
-        throw new TypeError('fetch failed', { cause: Object.assign(new Error('connect ECONNREFUSED 203.0.113.7:443'), { code: 'ECONNREFUSED' }) });
       }
       if (target.otherCurve && step === 'handshake') {
         const p = target.importer!.startHandshake(TOKEN);
@@ -307,7 +302,6 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.restoreStatus = undefined;
     target.unreachable = undefined;
     target.reset = undefined;
-    target.refusedByCause = undefined;
     target.badKey = false;
     target.badSignature = false;
     target.otherCurve = false;
@@ -657,31 +651,31 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     }
   });
 
-  it('waits only where a handshake request may have reached the target: in the sentence, in the retry and in the abort', { timeout: 30_000 }, async () => {
+  it('waits where the first handshake request got no answer in time or failed after it went out: in the sentence, in the retry and in the abort', { timeout: 30_000 }, async () => {
     setShellIsolationForTest(sidecar);
     const WAIT = 'You can start the migration again in 30 minutes at the latest.';
     type Stop = { code?: unknown; retry?: unknown; message?: string };
-    type Cause = 'guardBlocks' | 'unreachable' | 'refusedByCause' | 'reset' | 'silent' | 'oddStatus';
+    type Cause = 'guardBlocks' | 'unreachable' | 'reset' | 'silent' | 'oddStatus';
     const stopAt = async (cause: Cause, step: 'handshake' | 'completion'): Promise<Stop> => {
-      target.guardBlocks = undefined; target.unreachable = undefined; target.refusedByCause = undefined; target.reset = undefined; target.silent = undefined; target.oddStatus = undefined;
+      target.guardBlocks = undefined; target.unreachable = undefined; target.reset = undefined; target.silent = undefined; target.oddStatus = undefined;
       target.abortCalls = [];
       // The target ends a session it was asked to end, so an abort that went out shows here.
       target.abort = 'real';
       (target as Record<Cause, unknown>)[cause] = step;
       try { return ((await exportTo()).get('error') ?? {}) as Stop; } finally { (target as Record<Cause, unknown>)[cause] = undefined; }
     };
-    // The first request: kept in by the guard, or the connection refused (on the error or on its
-    // cause, as fetch reports it) — it cannot have reached the target.
-    for (const cause of ['guardBlocks', 'unreachable', 'refusedByCause'] as const) {
+    // The first request: kept in by the guard, or a connection failure — refused, or reset after the
+    // request was sent. A connection failure is taken as not reached; a reset may have reached the
+    // target, and a retry then meets the target's own wait (this pins today's behaviour for it).
+    for (const cause of ['guardBlocks', 'unreachable', 'reset'] as const) {
       const stop = await stopAt(cause, 'handshake');
       expect(stop.message?.endsWith('Nothing was transferred.'), cause).toBe(true);
       expect(stop.message, cause).not.toContain(WAIT);
       expect(stop.retry, cause).toBe(cause === 'guardBlocks' ? 'none' : 'now');
       expect(target.abortCalls, cause).toEqual([]);
     }
-    // The first request: the connection broke once it stood, no answer in time, or failed after it
-    // went out — the target may hold a session.
-    for (const cause of ['reset', 'silent', 'oddStatus'] as const) {
+    // The first request: no answer in time, or failed after it went out — the target may hold a session.
+    for (const cause of ['silent', 'oddStatus'] as const) {
       const stop = await stopAt(cause, 'handshake');
       expect(stop.message?.endsWith(WAIT), cause).toBe(true);
       expect(stop.retry, cause).toBe('later');

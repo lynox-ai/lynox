@@ -137,9 +137,9 @@ function unreadable(params: MigrationErrorParams): MigrationErrorView {
 }
 
 /**
- * The i18n key of the sentence for `code` with `retry`. A handshake that got no usable answer where the
- * target may still hold an attempt (`later`) says why lynox waits; the same code with `now` did not
- * reach the target, and its sentence asks to check the address.
+ * The i18n key of the sentence for `code` with `retry`. A connection setup that did not complete where
+ * the target may still hold an attempt (`later`) says why lynox waits; the same code with `now` asks to
+ * check the address.
  */
 export function migrationStopSentenceKey(code: string, retry = ''): string {
 	return code === 'handshake_unreachable' && retry === 'later' ? 'migration.stop.handshake_no_answer' : migrationStopKey(code);

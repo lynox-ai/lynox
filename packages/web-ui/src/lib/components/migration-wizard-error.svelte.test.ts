@@ -169,7 +169,7 @@ describe('the migration wizard after an error', () => {
 		expect(q('migration-check-target')).toBeNull();
 	});
 
-	it('says why it waits when a handshake got no usable answer and the target may hold an attempt', async () => {
+	it('says why it waits when the connection setup did not complete and the target may hold an attempt', async () => {
 		vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
 		vi.setSystemTime(new Date('2026-11-18T13:05:00Z'));
 		await failWith({ code: 'handshake_unreachable', params: {}, retry: 'later' });
@@ -180,7 +180,7 @@ describe('the migration wizard after an error', () => {
 		expect(retryButton()?.disabled).toBe(true);
 	});
 
-	it('asks to check the address when the handshake did not reach the target, and lets it be tried now', async () => {
+	it('asks to check the address when the target cannot hold an attempt, and lets it be tried now', async () => {
 		await failWith({ code: 'handshake_unreachable', params: {}, retry: 'now' });
 		expect(text('migration-error-detail')).toBe(t('migration.stop.handshake_unreachable'));
 		expect(getError()).toBe(t('migration.stop.handshake_unreachable'));
