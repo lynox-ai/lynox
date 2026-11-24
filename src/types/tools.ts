@@ -211,11 +211,14 @@ export interface ToolEntry<TInput = unknown> {
   /**
    * A refusal the handler would give for this call anyway, read before anyone is asked about it:
    * the call ends with this text as its error and nobody answers a question that cannot change
-   * the outcome. `null` means nothing: every check after it (where the targets come from, the
-   * guard's question) runs exactly as without this field. It can only refuse; no return value
-   * skips a question or lets a call through. A throw refuses the call with a fixed text, never
-   * the exception's message, and nothing runs. The text is the tool's own wording, written by its
-   * code, never a value of the input taken as a whole.
+   * the outcome. Read only in a session where someone would be asked. `null` means nothing: every
+   * check after it (where the targets come from, the guard's question) runs exactly as without
+   * this field. It can only refuse; no return value skips a question or lets a call through. A
+   * throw, an empty text or anything but a text refuses the call with a fixed text, never the
+   * exception's message, and nothing runs. It reads the input as the model wrote it, before
+   * `secret:` references are resolved: where the handler would see another value, it returns
+   * `null`. The text is the tool's own wording, written by its code, never a value of the input
+   * taken as a whole.
    */
   refusesUnasked?: ((input: TInput, ctx: HostPolicyContext) => string | null) | undefined;
   /**
