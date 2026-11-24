@@ -1662,11 +1662,13 @@ export class BulkLedger {
 
   /**
    * The owner's view of a run: per target the before-image, the planned after-state and
-   * their diff, in plan order. Its one caller is the human-facing route
+   * their diff, in plan order; with `changed`, only the targets the plan changes (every one
+   * but `unchanged`), so a page can name what a run wrote without loading what it left alone.
+   * Its one caller is the human-facing route
    * `GET /api/bulk/runs/:id/targets`. NEVER wire this to a model-facing tool (see the
    * module comment).
    */
-  getPreview(runId: string, opts: { offset?: number | undefined; limit?: number | undefined } = {}): PreviewTarget[] {
+  getPreview(runId: string, opts: { offset?: number | undefined; limit?: number | undefined; changed?: boolean | undefined } = {}): PreviewTarget[] {
     const rows = this.engineDb.getDb().prepare(
       // `written` is the rollback's own set (`listAppliedDesc`) without the `undone_at` test, and
       // a target sent to and never recorded (`listSentUnrecordedDesc`) while the rollback has not
@@ -1675,7 +1677,7 @@ export class BulkLedger {
          (((applied_at IS NOT NULL AND found_unsent = 0) OR (applied_at IS NULL AND write_sent = 1 AND undone_at IS NULL)) AND ${WRITING_SQL}) AS written,
          undone_at IS NOT NULL AS undone,
          shop_added_markup, host_rewrote, context_secret_field, link_domain
-       FROM bulk_targets WHERE run_id = ? ORDER BY seq LIMIT ? OFFSET ?`,
+       FROM bulk_targets WHERE run_id = ?${opts.changed === true ? " AND change != 'unchanged'" : ''} ORDER BY seq LIMIT ? OFFSET ?`,
     ).all(runId, Math.max(1, Math.min(opts.limit ?? 500, 500)), Math.max(0, opts.offset ?? 0)) as {
       seq: number; target_key: string; change: BulkChange; undo: UndoKind | null;
       before: string | null; after_planned: string | null; error: string | null; judged_at: string | null;

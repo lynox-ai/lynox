@@ -13281,6 +13281,23 @@ describe('LynoxHTTPApi', () => {
       expect((await jsonFetch('/api/bulk/runs/nope')).status).toBe(404);
     });
 
+    it('serves only the changed targets with changed=1, and every target otherwise', async () => {
+      const id = bulkLedger.recordDryRun({
+        createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'mem',
+        targets: [
+          { key: 'k0', before: { absent: false, value: 'v0' }, after: 'v0' },
+          { key: 'k1', before: { absent: false, value: 'v1' }, after: 'w1' },
+          { key: 'k2', before: { absent: false, value: 'v2' }, after: 'v2' },
+        ],
+      }).id;
+      const keys = async (q: string): Promise<string[]> =>
+        ((await (await jsonFetch(`/api/bulk/runs/${id}/targets?${q}`)).json()) as { targets: { key: string }[] }).targets.map((x) => x.key);
+      expect(await keys('offset=0&limit=6&changed=1')).toEqual(['k1']);
+      expect(await keys('offset=0&limit=6')).toEqual(['k0', 'k1', 'k2']);
+      // Only `1` asks for it: any other value serves every target.
+      expect(await keys('offset=0&limit=6&changed=true')).toEqual(['k0', 'k1', 'k2']);
+    });
+
     it('approves only with the current checksum, once, and arms the bulk_apply trigger', async () => {
       const id = planRun();
       expect((await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: '{}' })).status).toBe(400);

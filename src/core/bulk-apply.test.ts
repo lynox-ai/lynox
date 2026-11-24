@@ -686,6 +686,22 @@ describe('the owner view', () => {
     expect(ledger.getPreview(runId, { limit: 5000 })).toHaveLength(500);
     expect(ledger.getPreview(runId, { offset: 500 })).toHaveLength(1);
   });
+
+  it('serves only the targets the plan changes when asked, in plan order, paged among them', () => {
+    // Eight targets, two of them changed late in the plan: the page that names what a run wrote
+    // finds them without loading the unchanged ones before them.
+    const targets: PlannedTarget[] = Array.from({ length: 8 }, (_, i) => {
+      const key = `k${String(i)}`;
+      return { key, before: { absent: false, value: `v${String(i)}` }, after: i === 5 || i === 7 ? `w${String(i)}` : `v${String(i)}` };
+    });
+    const { id } = ledger.recordDryRun({ createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'mem', targets });
+    expect(ledger.getStatus(id)!.changes).toMatchObject({ update: 2, unchanged: 6 });
+    expect(ledger.getPreview(id, { changed: true }).map((t) => [t.key, t.change])).toEqual([['k5', 'update'], ['k7', 'update']]);
+    expect(ledger.getPreview(id, { changed: true, offset: 1, limit: 1 }).map((t) => t.key)).toEqual(['k7']);
+    // Control: without it, every target in plan order.
+    expect(ledger.getPreview(id).map((t) => t.key)).toEqual(['k0', 'k1', 'k2', 'k3', 'k4', 'k5', 'k6', 'k7']);
+    expect(ledger.getPreview(id, { changed: false, limit: 2 }).map((t) => t.key)).toEqual(['k0', 'k1']);
+  });
 });
 
 describe('the claim predicate (BulkLedger.claimTarget)', () => {

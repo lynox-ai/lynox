@@ -39,6 +39,10 @@
 	let unmeasuredOk = $state(false);
 	// Unchanged targets fold away: the owner checks what is written and what lynox leaves out.
 	let showUnchanged = $state(false);
+	// A run not loaded whole that leaves targets unchanged opens on the targets its plan changes,
+	// so what it writes is on the page however late in the run it comes (U-437). The unchanged
+	// ones and the rest load on the owner's ask.
+	let changedOnly = $state(false);
 	let probeOk = $state(false);
 	let maxTargets = $state(1);
 	// The spend limit of a judged start, as the owner types it; no default (there is no estimate).
@@ -71,8 +75,8 @@
 
 	/** A page of the run's targets. A failed fetch throws: an empty page would read as a run
 	 *  with fewer targets than the approval covers. */
-	async function loadTargets(id: string, offset: number, limit: number): Promise<BulkTarget[]> {
-		const r = await json<{ targets?: BulkTarget[] }>(`/bulk/runs/${encodeURIComponent(id)}/targets?offset=${offset}&limit=${limit}`);
+	async function loadTargets(id: string, offset: number, limit: number, changed = false): Promise<BulkTarget[]> {
+		const r = await json<{ targets?: BulkTarget[] }>(`/bulk/runs/${encodeURIComponent(id)}/targets?offset=${offset}&limit=${limit}${changed ? '&changed=1' : ''}`);
 		if (!r.ok || !Array.isArray(r.body.targets)) throw new Error('targets');
 		return r.body.targets;
 	}
@@ -199,7 +203,14 @@
 				// So does one with a field that could not be checked for them: its sentence stands under it.
 				|| (r.body.hiddenUncheckedTargets ?? 0) > 0;
 			// Every page is asked for the run this load opened, never for one the page has moved to since.
-			const shown = whole ? await loadFrom(id, 0, r.body.total) : await loadTargets(id, 0, FIRST_PAGE);
+			let firstChanged = !whole && r.body.changes.unchanged > 0;
+			let shown = whole ? await loadFrom(id, 0, r.body.total) : await loadTargets(id, 0, FIRST_PAGE, firstChanged);
+			// A run whose plan changes nothing opens on its first page as before: its unchanged
+			// targets are what there is to show.
+			if (firstChanged && shown.length === 0 && !left()) {
+				firstChanged = false;
+				shown = await loadTargets(id, 0, FIRST_PAGE);
+			}
 			// A short page ends the loading early: fewer targets than the run's count are not the whole.
 			if (left()) return false;
 			if (whole && shown.length !== r.body.total) { if (!quiet) error = t('common.load_failed'); loading = false; return false; }
@@ -211,6 +222,7 @@
 			if (r.body.id !== run?.id) { startDomains = []; startDomainsValid = true; actionError = ''; }
 			run = r.body;
 			targets = shown;
+			changedOnly = firstChanged;
 			creates = deleted;
 			// A follow ask runs only while the engine works, when the page offers the owner no input.
 			maxTargets = Math.max(1, bulkWriting(run));
@@ -237,9 +249,12 @@
 		const shown = targets;
 		const left = (): boolean => runId !== id || targets !== shown;
 		try {
-			const more = await loadFrom(id, targets.length, run.total);
+			// A page that holds only the changed targets loads the run whole, in plan order.
+			const whole = changedOnly;
+			const more = await loadFrom(id, whole ? 0 : targets.length, run.total);
 			if (left()) return;
-			targets = [...targets, ...more];
+			targets = whole ? more : [...targets, ...more];
+			changedOnly = false;
 		} catch {
 			if (left()) return;
 			actionError = t('common.load_failed');
@@ -625,7 +640,12 @@
 		const i = (run?.judgeOutliers?.spread ?? []).findIndex((x) => x.kind === kind);
 		if (i >= 0) spreadButtons[i]?.focus();
 	}
-	const foldedUnchanged = $derived(targets.length - unfolded.length);
+	// The unchanged targets the run holds, as its counts say, while only the changed ones are loaded.
+	const foldedUnchanged = $derived(changedOnly && run !== null ? run.changes.unchanged : targets.length - unfolded.length);
+	async function showUnchangedTargets(): Promise<void> {
+		if (changedOnly) await showMore();
+		showUnchanged = true;
+	}
 	const writes = (x: BulkTarget): boolean => x.change === 'update' || x.change === 'create' || x.change === 'delete';
 	// The sentence under a field not checked for hidden characters: the way out only where the owner
 	// can take the target out on this page (U-294).
@@ -909,7 +929,7 @@
 						</table>
 					</div>
 					{#if foldedUnchanged > 0 && spreadKind === null}
-						<button type="button" class="{btnPlain} mt-2" onclick={() => { showUnchanged = true; }}>{tf(shopify ? bulkOne('bulk.preview.show_unchanged', foldedUnchanged) : bulkOne('bulk.preview.show_unchanged_targets', foldedUnchanged), { n: String(foldedUnchanged) })}</button>
+						<button type="button" class="{btnPlain} mt-2" onclick={showUnchangedTargets}>{tf(shopify ? bulkOne('bulk.preview.show_unchanged', foldedUnchanged) : bulkOne('bulk.preview.show_unchanged_targets', foldedUnchanged), { n: String(foldedUnchanged) })}</button>
 					{/if}
 					{#if targets.length < run.total}
 						<button type="button" class="{btnPlain} mt-2" onclick={showMore}>{tf('bulk.preview.show_all', { n: String(run.total) })}</button>
@@ -1202,7 +1222,7 @@
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.undo.approve_title')}</h2>
 					<!-- The targets that get a value back; the entries the source created are listed apart. -->
-					<p class="text-sm">{tf('bulk.undo.approve_explain', { n: String(run.changes.update + run.changes.create) })}</p>
+					<p class="text-sm">{tf(bulkOne('bulk.undo.approve_explain', run.changes.update + run.changes.create), { n: String(run.changes.update + run.changes.create) })}</p>
 					{#each targets.filter((x) => (x.markupChanges?.length ?? 0) > 0) as target (target.seq)}
 						<div class="text-sm" data-testid="bulk-undo-markup">
 							{@render targetName(target)}

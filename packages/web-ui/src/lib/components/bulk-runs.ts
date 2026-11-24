@@ -185,11 +185,13 @@ export function bulkTakesStartDomains(run: Pick<BulkRunDetailData, 'judge' | 'li
  *  approval, a failure or a limit told it to and can be continued. An aborted run cannot: one
  *  lynox ended reads „abgebrochen“, or „ersetzt“ where a newer run took its place; one the owner
  *  stopped reads „gestoppt“ as any owner's stop. */
-export function bulkHaltHeadKey(run: Pick<BulkRun, 'haltKey'> & Partial<Pick<BulkRun, 'phase'>>): 'bulk.head.stopped' | 'bulk.head.halted' | 'bulk.head.discarded' | 'bulk.head.aborted' | 'bulk.head.replaced' {
+export function bulkHaltHeadKey(run: Pick<BulkRun, 'haltKey'> & Partial<Pick<BulkRun, 'phase'>>): 'bulk.head.stopped' | 'bulk.head.halted' | 'bulk.head.discarded' | 'bulk.head.aborted' | 'bulk.head.replaced' | 'bulk.head.next' {
 	// A discarded run reads "Discarded" next to the sentence and the chip that say so (U-324).
 	if (run.haltKey === 'discarded') return 'bulk.head.discarded';
 	if (bulkOwnerStopped(run)) return 'bulk.head.stopped';
 	if (run.phase === 'aborted') return run.haltKey === 'superseded' ? 'bulk.head.replaced' : 'bulk.head.aborted';
+	// A run that waits for its start has not halted: its sentence names the next step (U-437).
+	if (run.phase === 'planned' && (run.haltKey === 'awaitingStart' || run.haltKey === 'listed')) return 'bulk.head.next';
 	return 'bulk.head.halted';
 }
 

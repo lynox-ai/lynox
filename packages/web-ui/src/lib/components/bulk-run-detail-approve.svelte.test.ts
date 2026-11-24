@@ -103,11 +103,12 @@ beforeEach(() => {
 		gets.push(u);
 		// The owner's session: the page offers its acts only once the server says so.
 		if (u.endsWith('/config')) return reply({ managed: true, viewer: viewerOf });
-		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
+		// `changed=1`: the page asks for the targets the plan changes first (U-437).
+		const page = /\/targets\?offset=(\d+)&limit=(\d+)(&changed=1)?$/.exec(u);
 		const pageOf = /\/bulk\/runs\/([^/?]+)\/targets\?/.exec(u)?.[1];
 		if (page && pageOf !== undefined && holds[`${pageOf}/targets`] !== undefined) await holds[`${pageOf}/targets`];
 		if (page && pageOf !== undefined && failIds[`${pageOf}/targets`] === 'throw') throw new Error('network');
-		if (page) return reply({ targets: targets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
+		if (page) return reply({ targets: (page[3] ? targets.filter((x) => x.change !== 'unchanged') : targets).slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		const id = /\/bulk\/runs\/([^/?]+)$/.exec(u)?.[1];
 		// A held run answers once, for the first load that asks; a later load of it goes through.
 		if (id !== undefined && holds[id] !== undefined) { const h = holds[id]; delete holds[id]; await h; }

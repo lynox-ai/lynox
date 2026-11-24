@@ -381,6 +381,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.head.counts': { de: '{n} · geschrieben {a} · Konflikte {c} · fehlgeschlagen {f}', en: '{n} · written {a} · conflicts {c} · failed {f}' },
 	'bulk.head.cost': { de: 'KI-Kosten', en: 'AI cost' },
 	'bulk.head.halted': { de: 'Angehalten', en: 'Halted' },
+	'bulk.head.next': { de: 'Nächster Schritt', en: 'Next step' },
 	'bulk.head.stopped': { de: 'Gestoppt', en: 'Stopped' },
 	'bulk.head.discarded': { de: 'Verworfen', en: 'Discarded' },
 	// An aborted run cannot be continued; a superseded one has a newer run in its place (U-342).
@@ -901,6 +902,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.undone.open': { de: 'Zur Rücknahme', en: 'Go to the undo run' },
 	'bulk.undo.prepare': { de: 'Rücknahme vorbereiten', en: 'Prepare the undo' },
 	'bulk.undo.approve_title': { de: 'Rücknahme freigeben', en: 'Approve the undo' },
+	'bulk.undo.approve_explain_one': { de: '1 Ziel bekommt seinen Wert von vorher zurück. Hat es seither jemand geändert, bleibt es, wie es ist.', en: '1 target gets its previous value back. If someone has changed it since then, it stays as it is.' },
 	'bulk.undo.approve_explain': { de: '{n} Ziele bekommen ihren Wert von vorher zurück. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.', en: '{n} targets get their previous value back. Targets that someone has changed since then stay as they are.' },
 	'bulk.undo.creates': { de: 'Der ursprüngliche Lauf hat {k} Einträge neu angelegt. Die Rücknahme löscht sie, ausser jemand hat sie seither geändert:', en: 'The original run created {k} new entries. The undo deletes them unless someone has changed them since:' },
 	'bulk.undo.approve': { de: 'Rücknahme freigeben', en: 'Approve the undo' },
