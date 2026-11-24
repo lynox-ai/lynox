@@ -15856,12 +15856,13 @@ export class LynoxHTTPApi {
         const handshakeGroup = (w: Why): MigrationStopCode =>
           w === 'unsent' ? 'handshake_blocked' : w === 'large' || w === 'format' ? 'handshake_not_lynox' : 'handshake_unreachable';
         // A handshake request that got no answer in time, or failed after it went out, may have
-        // reached the target and started a session there; those wait, in the sentence and in the
-        // retry. One the guard kept in cannot have. A connection failure is taken as not reached:
-        // a reset after sending may have reached it, and a retry then meets the target's own wait.
+        // reached the target and started a session there; those wait, in the sentence (the catch
+        // below adds it wherever a session may be held) and in the retry. One the guard kept in
+        // cannot have. A connection failure is taken as not reached: a reset after sending may have
+        // reached it, and a retry then meets the target's own wait.
         const handshakeFailed = (w: Why, code: MigrationStopCode = handshakeGroup(w)): MigrationStop => {
           if (w === 'silent' || w === 'failed') sessionMayBeHeld = true;
-          return new MigrationStop(code, `lynox could not set up the connection to the target instance: ${why(w, TARGET_BODY_CAPS.handshake, ', so lynox did not read it', TARGET_REQUEST_TIMEOUTS_MS.handshake)}. Nothing was transferred.${sessionMayBeHeld ? ` ${AGAIN}` : ''}`, {}, w);
+          return new MigrationStop(code, `lynox could not set up the connection to the target instance: ${why(w, TARGET_BODY_CAPS.handshake, ', so lynox did not read it', TARGET_REQUEST_TIMEOUTS_MS.handshake)}. Nothing was transferred.`, {}, w);
         };
         // The whole transfer's deadline (from the manifest on) and the stop it says.
         let transfer: AbortSignal | undefined;
