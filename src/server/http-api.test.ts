@@ -24494,17 +24494,16 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
     };
     const send = (extra: Record<string, unknown> = {}, id = OWN): Promise<Response> =>
       jsonFetch(`/api/sessions/${id}/run`, { method: 'POST', body: JSON.stringify({ task: 'next', shows_changeset_review: true, ...extra }) });
-    const expectHeld = async (res: Response): Promise<void> => {
-      expect(res.status).toBe(409);
-      expect(await res.json()).toMatchObject({ code: 'review_pending', runId: 'run-held' });
-      expect(mockSessionRun).not.toHaveBeenCalled();
-    };
-    const expectRan = async (res: Response): Promise<void> => {
-      expect(res.status).toBe(200);
-      await res.text();
-      expect(mockSessionRun).toHaveBeenCalledTimes(1);
+    /** What a `/run` answer came to, for one assert in the test itself: its status, its code,
+     *  the review it names, and how many runs started. */
+    const outcome = async (res: Response): Promise<{ status: number; code: unknown; runId: unknown; runs: number }> => {
+      const body = (await res.json().catch(() => null)) as { code?: unknown; runId?: unknown } | null;
+      const runs = mockSessionRun.mock.calls.length;
       mockSessionRun.mockClear();
+      return { status: res.status, code: body?.code, runId: body?.runId, runs };
     };
+    const HELD = { status: 409, code: 'review_pending', runId: 'run-held', runs: 0 };
+    const RAN = { status: 200, code: undefined, runId: undefined, runs: 1 };
     const card = async (id = OWN): Promise<{ hasChanges: boolean; runId?: string }> =>
       (await (await jsonFetch(`/api/sessions/${id}/changeset`)).json()) as { hasChanges: boolean; runId?: string };
     const answer = (action: string, id = OWN): Promise<Response> =>
@@ -24512,31 +24511,31 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
 
     it('holds the owner\'s message while the owner\'s shown review has changes, and names the review', async () => {
       review(OWNER_PRINCIPAL);
-      await expectHeld(await send());
+      expect(await outcome(await send())).toEqual(HELD);
       expect(await card()).toMatchObject({ hasChanges: true, runId: 'run-held' });
     });
 
     it('does not hold a request that does not say it shows the review (bot, API, worker)', async () => {
       review(OWNER_PRINCIPAL);
-      await expectRan(await send({ shows_changeset_review: undefined }));
-      await expectRan(await send({ shows_changeset_review: 'true' }));
+      expect(await outcome(await send({ shows_changeset_review: undefined }))).toEqual(RAN);
+      expect(await outcome(await send({ shows_changeset_review: 'true' }))).toEqual(RAN);
     });
 
     it('does not hold for a review whose run did not show it', async () => {
       review(OWNER_PRINCIPAL, { shown: false });
-      await expectRan(await send());
+      expect(await outcome(await send())).toEqual(RAN);
     });
 
     it('does not hold a mandate on the owner\'s review, and gives it no card, even when the mandate ran last', async () => {
       review(OWNER_PRINCIPAL, { lastRun: MANDATE });
       asMandate();
       expect(await card()).toEqual({ hasChanges: false, files: [] });
-      await expectRan(await send());
+      expect(await outcome(await send())).toEqual(RAN);
     });
 
     it('holds the owner on a mandate\'s review, which the owner sees and may answer', async () => {
       review(MANDATE);
-      await expectHeld(await send());
+      expect(await outcome(await send())).toEqual(HELD);
       expect(await card()).toMatchObject({ hasChanges: true, runId: 'run-held' });
       expect((await answer('accept')).status).toBe(200);
     });
@@ -24545,7 +24544,7 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       review(MANDATE);
       asMandate();
       expect(await card()).toMatchObject({ hasChanges: true });
-      await expectHeld(await send());
+      expect(await outcome(await send())).toEqual(HELD);
     });
 
     it('never holds the control plane, and gives it no card, even on a review tagged as its own', async () => {
@@ -24562,7 +24561,7 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       const { csm } = review(OWNER_PRINCIPAL, { change: 'delete' });
       expect(csm.isEmpty(), 'the review still holds the deleted file').toBe(false);
       expect(await card()).toMatchObject({ hasChanges: false });
-      await expectRan(await send());
+      expect(await outcome(await send())).toEqual(RAN);
     });
 
     it('answers a running session with the plain busy refusal, not the review', async () => {
@@ -24577,7 +24576,7 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       review(OWNER_PRINCIPAL);
       const takeover = vi.fn(() => { running().delete(OWN); });
       running().set(OWN, { streamAlive: false, lastEventAt: 0, takeover });
-      await expectHeld(await send());
+      expect(await outcome(await send())).toEqual(HELD);
       expect(takeover).toHaveBeenCalled();
     });
 
@@ -24588,7 +24587,7 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       setTenantWorkspace(area);
       try {
         const big = `id,amount\n${'1,42.00\n'.repeat(3_000)}`;
-        await expectHeld(await send({ files: [{ name: 'buchungen.csv', type: 'text/csv', data: Buffer.from(big).toString('base64') }] }));
+        expect(await outcome(await send({ files: [{ name: 'buchungen.csv', type: 'text/csv', data: Buffer.from(big).toString('base64') }] }))).toEqual(HELD);
         expect(readdirSync(area)).toEqual([]);
       } finally {
         clearTenantWorkspace();
@@ -24597,9 +24596,9 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
 
     it('answering the review ends the hold', async () => {
       review(OWNER_PRINCIPAL);
-      await expectHeld(await send());
+      expect(await outcome(await send())).toEqual(HELD);
       expect((await answer('accept')).status).toBe(200);
-      await expectRan(await send());
+      expect(await outcome(await send())).toEqual(RAN);
     });
 
     it('the review route still checks the conversation: a mandate cannot answer its own review in the owner\'s conversation', async () => {
@@ -24627,7 +24626,27 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       expect(readFileSync(file, 'utf-8'), 'the changed file is restored').toBe('before');
       expect(readFileSync(made, 'utf-8')).toBe('by someone else');
       expect(csm.isEmpty()).toBe(true);
-      await expectRan(await send());
+      expect(await outcome(await send())).toEqual(RAN);
+    });
+
+    it('when the changes cannot be read, a file the rollback left is named even without a backup to show', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
+      vi.spyOn(csm, 'getChanges').mockImplementation(() => { throw new Error('unreadable'); });
+      vi.spyOn(csm, 'rollbackAll').mockReturnValue([file]);
+      vi.spyOn(csm, 'hasOriginal').mockReturnValue(false);
+      const res = await answer('rollback');
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { notRestored: string[] }).notRestored, 'maybe shown on the card: never left out').toEqual(['a.txt']);
+    });
+
+    it('control: with the changes read, a file not shown and without a backup is left out of the answer, as before', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
+      vi.spyOn(csm, 'getChanges').mockReturnValue([]);
+      vi.spyOn(csm, 'rollbackAll').mockReturnValue([file]);
+      vi.spyOn(csm, 'hasOriginal').mockReturnValue(false);
+      const res = await answer('rollback');
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { notRestored: string[] }).notRestored).toEqual([]);
     });
 
     it('when the changes cannot be read, an accept answers as accepted without a count, and the hold ends', async () => {
@@ -24638,7 +24657,7 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       expect(await res.json()).toMatchObject({ ok: true, accepted: null });
       expect(readFileSync(file, 'utf-8')).toBe('after');
       expect(csm.isEmpty()).toBe(true);
-      await expectRan(await send());
+      expect(await outcome(await send())).toEqual(RAN);
     });
 
     it('a mandate answering where there is no review gets "nothing to review", not a refusal', async () => {
@@ -24646,6 +24665,7 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       asMandate();
       const res = await answer('accept');
       expect(res.status).toBe(400);
+      expect(((await res.json()) as { error?: string }).error).toBe('No changeset to review');
     });
 
     it('a throw after a finished rollback is not reported as one that stopped partway', async () => {
@@ -24666,7 +24686,7 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       expect(res.status).toBe(500);
       expect(((await res.json()) as { code?: string }).code).toBe('rollback_aborted');
       expect(csm.isEmpty()).toBe(true);
-      await expectRan(await send());
+      expect(await outcome(await send())).toEqual(RAN);
     });
   });
 

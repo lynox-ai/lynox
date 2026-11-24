@@ -188,6 +188,25 @@ describe('a turn queued before a reload, when the session is gone', () => {
 	});
 });
 
+describe('files a rollback left', () => {
+	it.each([
+		['without a count, says the reason is unknown', null, 'changeset.not_restored_unknown'],
+		['with a count, gives the usual reasons', 1, 'changeset.not_restored'],
+	] as const)('%s', async (_name, rolledBack, key) => {
+		runAnswers = ['held'];
+		card = notes;
+		await store.sendMessage('next step');
+		await settle();
+		expect(store.getPendingChangeset(), 'positive control: the review is shown').not.toBeNull();
+		const { t, tf } = await import('../i18n.svelte.js');
+		reviewAnswer = { status: 200, body: { ok: true, accepted: 0, rolledBack, notRestored: ['notes.md'] } };
+		await store.submitChangesetReview('rollback');
+		await settle();
+		expect(t(key), 'positive control: the key has a text').not.toBe(key);
+		expect(toasts).toContainEqual([tf(key, { files: 'notes.md' }), 'error', null]);
+	});
+});
+
 describe('a rollback the server could not do', () => {
 	const openReview = async (): Promise<void> => {
 		runAnswers = ['held'];

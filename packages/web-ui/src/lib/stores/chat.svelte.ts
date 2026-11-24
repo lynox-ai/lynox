@@ -3633,10 +3633,15 @@ export async function submitChangesetReview(
 	if (status >= 200 && status < 300) {
 		// A rollback leaves a file as it is when it was replaced or linked since the review, or
 		// could not be written. Closing the review without a word would read as all restored.
-		const notRestored = await res.json().then(
-			(j: unknown) => (j as { notRestored?: unknown } | null)?.notRestored,
-			() => undefined,
+		const answer = await res.json().then(
+			(j: unknown) => j as { notRestored?: unknown; rolledBack?: unknown } | null,
+			() => null,
 		);
+		const notRestored = answer?.notRestored;
+		// No count (`rolledBack: null`): the server could not read the changes and rolled back
+		// from the backups alone, so it does not know why a file stayed. The usual reason would
+		// be a guess; this answer says the reason is unknown.
+		const reasonUnknown = answer?.rolledBack === null;
 		const names = Array.isArray(notRestored) ? notRestored.filter((f): f is string => typeof f === 'string') : [];
 		if (names.length > 0) {
 			// The person has to act on this list: it stays until they close it, and names at most five.
@@ -3644,7 +3649,7 @@ export async function submitChangesetReview(
 			const files = names.length > NOT_RESTORED_SHOWN
 				? tf('changeset.not_restored_more', { files: shown, n: String(names.length - NOT_RESTORED_SHOWN) })
 				: shown;
-			addToast(tf('changeset.not_restored', { files }), 'error', null);
+			addToast(tf(reasonUnknown ? 'changeset.not_restored_unknown' : 'changeset.not_restored', { files }), 'error', null);
 		}
 		// The turns queued behind the run that opened the review go now.
 		if (!stale()) drainQueueSoon(100);
