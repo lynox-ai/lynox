@@ -109,7 +109,8 @@ export interface TrailEvent {
  * The routes the web UI polls by itself, without the person doing anything, by the action
  * `_recordedMandateRead` writes for them (`GET <route template>`). A helper's open tab leaves about
  * 23 reads a minute on them (row 1034), and the owner's view groups them so the person's own steps stay
- * findable. The trail itself keeps every row (D15).
+ * findable. Grouping here changes no row (D15). After 30 days, only the reads of `FOLDED_POLLS`
+ * (audit-retention.ts) are folded into one row per day; the others on this list stay single rows.
  *
  * Decided here, from the route the engine dispatched, never from a mark the client sends. Listed
  * are only routes without a path parameter, whose answer holds no session's messages (the task list

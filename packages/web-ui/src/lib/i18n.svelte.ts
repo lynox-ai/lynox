@@ -2028,7 +2028,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'access_trail.polls_legend': { de: 'Statusabfragen (laufende Arbeit, Aufgaben, Kosten, Anbieter) stehen zusammengefasst. Die meisten macht die Oberfläche von selbst. Aufklappen zeigt jede einzeln.', en: 'Status requests (running work, tasks, costs, providers) are grouped. The interface makes most of them by itself. Expand to see each one.' },
 	'access_trail.polls_many': { de: '{n} Statusabfragen ({span})', en: '{n} status requests ({span})' },
 	'access_trail.polls_one': { de: 'Eine Statusabfrage ({time})', en: 'One status request ({time})' },
-	'access_trail.poll_day': { de: '{n} Abfragen an diesem Tag, die letzte {time}', en: '{n} requests that day, the last {time}' },
+	'access_trail.poll_day': { de: '{n} Abfragen, die letzte {time}', en: '{n} requests, the last {time}' },
 	'access_trail.kind_event': { de: 'Ereignis', en: 'Event' },
 	'access_trail.refused': { de: 'Versuch (verweigert)', en: 'Attempt (refused)' },
 	'access_trail.refused_reveal_vault_key': { de: 'Versuch, den Tresorschlüssel anzuzeigen (verweigert)', en: 'Attempt to reveal the vault key (refused)' },
