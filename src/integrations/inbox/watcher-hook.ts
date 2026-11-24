@@ -25,6 +25,7 @@ import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxQueuePayload } from './runner.js';
 import { analyzeSensitiveContent, reasonForCategories, type SensitiveMode } from './sensitive-content.js';
 import { envelopeToItemInputFields, type InboxStateDb, type ThreadMessageInput } from './state.js';
+import { sanitisePushText } from './notifier.js';
 
 /**
  * Channel discriminator. Currently only `email` ships — other channels
@@ -298,7 +299,26 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     const snoozed = item?.snoozeUntil !== undefined && item.snoozeUntil.getTime() > Date.now();
     // The push names the item's own sender and subject, so its own mail's flag counts as well.
     const flagged = sensitive.isSensitive || itemCategories.length > 0;
-    if (item && !snoozed) void opts.notifier.notifyNewItem(item, { flagged });
+    // A follow-up from someone other than the item's sender is announced under its own sender. When
+    // its name reads, as pushed, like the item sender's name or address, the push shows its address
+    // instead: that name alone would read as the item's sender.
+    const otherSender = fields.fromAddress !== undefined && fields.fromAddress !== ''
+      && fields.fromAddress.toLowerCase() !== existing.fromAddress.toLowerCase();
+    const notifyOpts: import('./notifier.js').InboxNotifyOptions = { flagged };
+    if (otherSender) {
+      // Compared as read: one Unicode form, without characters that show nothing (a soft hyphen).
+      // Folded both before the push's length cut (padding cannot push the name past it) and after
+      // it (the label as shown); a match either way, or a name that reads as nothing, shows the
+      // address.
+      const fold = (x: string): string => x.normalize('NFKC').replace(/\p{Default_Ignorable_Code_Point}/gu, '').toLowerCase();
+      const readings = (x: string | undefined): string[] =>
+        [sanitisePushText(fold(x ?? ''), 80), fold(sanitisePushText(x ?? '', 80))];
+      const own = readings(fields.fromName);
+      const theirs = [...readings(existing.fromName), ...readings(existing.fromAddress)];
+      const showAddress = own.includes('') || own.some((r) => theirs.includes(r));
+      notifyOpts.sender = { address: fields.fromAddress ?? '', name: showAddress ? undefined : fields.fromName };
+    }
+    if (item && !snoozed) void opts.notifier.notifyNewItem(item, notifyOpts);
   };
 
   // The item a mail without a provider thread answers: the first of its parent Message-IDs

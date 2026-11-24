@@ -166,7 +166,8 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		const run = ifBlockAround('runNow(trigger)');
 		// Nor at a completed plan that keeps its pause (U-179): the refusal names no way out there.
 		// Nor at a plan that waits for its takeover (U-410): the takeover is the way out.
-		expect(run.cond).toBe('!held(trigger) && !pausedDone(trigger) && !pausedOpen(trigger)');
+		// Nor at a watch the policy keeps from its page (U-392): the run would read nothing.
+		expect(run.cond).toBe('!held(trigger) && !pausedDone(trigger) && !pausedOpen(trigger) && !trigger.blocked_reason');
 		expect(run.body.trim().startsWith('<button onclick={() => runNow(trigger)}')).toBe(true);
 	});
 

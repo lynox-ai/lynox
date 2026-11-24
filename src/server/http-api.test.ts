@@ -250,6 +250,14 @@ vi.mock('../tools/builtin/http.js', async (importActual) => {
   };
 });
 
+// A Shopify preset without the API version lynox writes to: the store's endpoint is the real one
+// unless a test switches it off.
+const noApiVersion = vi.hoisted(() => ({ on: false }));
+vi.mock('../core/shopify-graphql.js', async (importActual) => {
+  const actual = await importActual<typeof import('../core/shopify-graphql.js')>();
+  return { ...actual, shopifyGraphqlEndpoint: (host: string) => (noApiVersion.on ? null : actual.shopifyGraphqlEndpoint(host)) };
+});
+
 const mockExchangeToken = vi.fn();
 vi.mock('../core/oauth-token-exchange.js', async (importActual) => ({
   ...(await importActual<typeof import('../core/oauth-token-exchange.js')>()),
@@ -13456,9 +13464,44 @@ describe('LynoxHTTPApi', () => {
       expect(bulkLedger.finishPreview(id)).toBe(true);
       const approve = (): Promise<Response> => jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id), unmeasuredConfirmed: true, maxTargets: 1 }) });
 
+      // The store's own cause, as the run page says it, not a missing credential: this process has
+      // no control plane, so it is a self-hosted one.
+      const { ApiStore } = await import('../core/api-store.js');
+      mockGetApiStore.mockReturnValue(new ApiStore());
       const refused = await approve();
-      expect(((await refused.json()) as { error: string }).error).toMatch(/stored credential for this run's host cannot be attached/);
+      const refusedBody = (await refused.json()) as { error: string; code?: string };
+      expect(refusedBody).toMatchObject({ error: 'lynox reaches Shopify stores only on instances that lynox runs. This instance is self-hosted, so this run cannot start here.', code: 'reach_approve_shopifySelfHosted' });
       expect(refused.status).toBe(409);
+      // The resume route checks the reach before the run's phase, and says it with the resuming
+      // sentence, not the approving one.
+      const resumed = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }) });
+      expect(await resumed.json()).toMatchObject({ error: 'lynox reaches Shopify stores only on instances that lynox runs. This instance is self-hosted, so the run cannot go on here.', code: 'reach_resume_shopifySelfHosted' });
+      expect(resumed.status).toBe(409);
+      // A store whose preset pins no API version has no endpoint: a setting of lynox's, not the store's.
+      noApiVersion.on = true;
+      try {
+        const noVersion = await approve();
+        expect(await noVersion.json()).toMatchObject({ error: 'A setting for Shopify is missing in lynox. Only lynox can fix it (support@lynox.ai); until then the run cannot be approved.', code: 'reach_approve_shopifyNoApiVersion' });
+        expect(noVersion.status).toBe(409);
+      } finally {
+        noApiVersion.on = false;
+      }
+      // With a control plane but without the parts a store pass needs, it is one lynox has to set up.
+      // (Set and put back by hand: `vi.unstubAllEnvs` would also drop this file's own stubs.)
+      const before = { url: process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'], id: process.env['LYNOX_MANAGED_INSTANCE_ID'] };
+      process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.example.invalid';
+      process.env['LYNOX_MANAGED_INSTANCE_ID'] = 'inst-1';
+      try {
+        const notSetUp = await approve();
+        expect(await notSetUp.json()).toMatchObject({ error: 'Shopify is not set up on this instance. Only lynox can set it up (support@lynox.ai); after that you can approve the run.', code: 'reach_approve_shopifyNotSetUp' });
+        expect(notSetUp.status).toBe(409);
+      } finally {
+        if (before.url === undefined) delete process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+        else process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = before.url;
+        if (before.id === undefined) delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
+        else process.env['LYNOX_MANAGED_INSTANCE_ID'] = before.id;
+        mockGetApiStore.mockReturnValue(null);
+      }
 
       // Not the network policy: a GID read as an address would be refused there. The store's
       // credential needs a store pass, which the S5 measurement exercises (PRD shopify-preset §16.10).

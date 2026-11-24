@@ -27,9 +27,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { BulkLedger, BULK_HALT_REASONS, resourceKindOf, type BulkRunForApply } from './bulk-ledger.js';
+import type { StoreAttachRefusal } from './shopify-host.js';
 import type { AttachedConnection } from './bulk-connection.js';
 import {
-  BulkHostBudget, externalClient, externalWriter, mintBulkContract, parseBulkContract, planExternal, writeMethodOf,
+  BulkHostBudget, externalClient, externalWriter, mintBulkContract, parseBulkContract, planExternal, refusedAnswer, writeMethodOf,
   type BulkWriteMethod, type ExternalClient,
 } from './bulk-external.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
@@ -120,13 +121,20 @@ function serve(s: Shop): () => void {
 
 const url = (i: number | string): string => `https://${HOST}/products/${String(i)}`;
 
-function client(opts: { attach?: boolean; methods?: string[]; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean; connection?: (url: string, method: string) => AttachedConnection | null; renew?: (url: string) => Promise<'renewed' | 'not-run' | 'dead' | 'client-misnamed'>; reconnect?: 'ended' | 'client-misnamed' } = {}): ExternalClient {
+function client(opts: { attach?: boolean; refuse?: StoreAttachRefusal; methods?: string[]; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean; connection?: (url: string, method: string) => AttachedConnection | null; renew?: (url: string) => Promise<'renewed' | 'not-run' | 'dead' | 'client-misnamed'>; reconnect?: 'ended' | 'client-misnamed' } = {}): ExternalClient {
   return externalClient({
     contract: opts.contract ?? mintBulkContract(HOST, [0, 1, 2, 3, 'x'].map(url)),
     hostPolicy: createToolContext({}),
     ackHosts: undefined,
     attach: async (u, headers, method, out) => {
       opts.methods?.push(method);
+      if (opts.refuse !== undefined) {
+        if (out) {
+          out.refusal = opts.refuse;
+          if (opts.reconnect !== undefined) out.reconnect = opts.reconnect;
+        }
+        return null;
+      }
       if (opts.attach === false) {
         if (opts.reconnect !== undefined && out !== undefined) out.reconnect = opts.reconnect;
         return null;
@@ -772,6 +780,46 @@ describe('applying an external run', () => {
       expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(noCred) })).status).toBe('halted');
       expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.credential);
       expect(s.requests.length).toBe(before);
+    } finally {
+      restore();
+    }
+  });
+
+  it('answers no send for a refusal at the attach, which sent nothing', () => {
+    for (const unsent of [{ kind: 'store_refused', reason: 'shopifyNotCleared' }, { kind: 'reconnect', why: 'ended' }, { kind: 'no_credential' }] as const) {
+      expect([unsent.kind, refusedAnswer(unsent)]).toEqual([unsent.kind, false]);
+    }
+  });
+
+  it('a reconnect goes before a store\'s own cause, and either before a missing credential', async () => {
+    // The attach gives at most one of the two; were it ever to give both, connecting again is
+    // what the run asks for. Nothing is sent either way.
+    const s = shop();
+    const restore = serve(s);
+    try {
+      expect(await client({ refuse: 'shopifyNotCleared', reconnect: 'ended' }).write(url(0), 'PATCH', { price: '13.00' })).toEqual({ kind: 'reconnect', why: 'ended' });
+      expect(await client({ refuse: 'shopifyNotCleared' }).write(url(0), 'PATCH', { price: '13.00' })).toEqual({ kind: 'store_refused', reason: 'shopifyNotCleared' });
+      expect(await client({ attach: false }).write(url(0), 'PATCH', { price: '13.00' })).toEqual({ kind: 'no_credential' });
+      expect(s.requests).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('halts on the store\'s own cause, not on a missing credential, leaving the targets unwritten and pending', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      for (const cause of ['shopifySelfHosted', 'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable'] as const) {
+        engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted'`).run();
+        const c = client({ refuse: cause });
+        const runId = await approvedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), client());
+        const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+        expect(out.status, cause).toBe('halted');
+        expect(ledger.getStatus(runId), cause).toMatchObject({ haltReason: BULK_HALT_REASONS[cause], applied: 0, failed: 0 });
+        expect(ledger.listPending(runId), cause).toEqual([0, 1]);
+      }
+      expect(s.requests.filter((r) => r.method === 'PATCH')).toEqual([]);
     } finally {
       restore();
     }

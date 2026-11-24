@@ -39,6 +39,7 @@ import { OWNER_PRINCIPAL } from './request-principal.js';
 import { hasRevokedGrant } from './api-store.js';
 import { isStorePass, storePassBodyRefusal } from './store-pass.js';
 import { serializeTokenBody } from './oauth-token-exchange.js';
+import type { StoreAttachRefusal } from './shopify-host.js';
 import {
   beginStoreConnect, endStoreConnect, refreshStoreToken, resetStoreRefreshForTests, claimStoreReconnectHints, storeReconnectDue, storeAccessEnd, STORE_RECONNECT_HINT_MS,
   STORE_REFRESH_WINDOW_MS, storeRefreshPassFor, type StoreRefreshContext,
@@ -552,11 +553,12 @@ describe('the refresh of an expiring store connection', () => {
   });
 
   /** The attach a bulk run makes, with what it hands back. */
-  const bulkAttach = async (): Promise<{ attached: unknown; out: { reconnect?: string | undefined } }> => {
+  const bulkAttach = async (): Promise<{ attached: unknown; out: { reconnect?: string | undefined; refusal?: string | undefined } }> => {
     const { attachStoredCredential } = await import('../tools/builtin/http.js');
     const { bindingsAsMigrated } = await import('../../tests/helpers/vault-bindings.js');
     const c = ctx();
-    const out: { reconnect?: 'ended' | 'client-misnamed' | undefined } = {};
+    // Both answers of the attach: a reconnect never comes with a store's own cause beside it.
+    const out: { reconnect?: 'ended' | 'client-misnamed' | undefined; refusal?: StoreAttachRefusal | undefined } = {};
     const attached = await attachStoredCredential(`${ORIGIN}/admin/api/2025-10/shop.json`, {}, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
       apiStore: store, secretStore: c.secretStore, principal: OWNER_PRINCIPAL, mandateEnds: null, secretReleases: null,
       exactClearance: c.toolContext.exactClearance, storeBindingDigest: bind,
@@ -572,6 +574,7 @@ describe('the refresh of an expiring store connection', () => {
     const { attached, out } = await bulkAttach();
     expect(attached).toBeNull();
     expect(out.reconnect).toBe('ended');
+    expect(out.refusal).toBeUndefined();
   });
 
   it('a connection a refresh ended without a revocation (another scope) is refused with the same reason', async () => {
@@ -581,6 +584,7 @@ describe('the refresh of an expiring store connection', () => {
     const { attached, out } = await bulkAttach();
     expect(attached).toBeNull();
     expect(out.reconnect).toBe('ended');
+    expect(out.refusal).toBeUndefined();
   });
 
   it('a client under other names is refused with its own reason', async () => {
@@ -589,6 +593,7 @@ describe('the refresh of an expiring store connection', () => {
     const { attached, out } = await bulkAttach();
     expect(attached).toBeNull();
     expect(out.reconnect).toBe('client-misnamed');
+    expect(out.refusal).toBeUndefined();
   });
 
   it('a grant revoked before (the vault still holds the refused token) is refused with the same reason', async () => {
@@ -597,6 +602,7 @@ describe('the refresh of an expiring store connection', () => {
     const { attached, out } = await bulkAttach();
     expect(attached).toBeNull();
     expect(out.reconnect).toBe('ended');
+    expect(out.refusal).toBeUndefined();
   });
 
   it('a store that never had an expiring connection gives no such reason', async () => {

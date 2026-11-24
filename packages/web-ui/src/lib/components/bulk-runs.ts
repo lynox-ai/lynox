@@ -245,9 +245,20 @@ const BULK_RESTART_AS_IS = new Set([
 	'unavailable', 'timeBudget', 'consecutiveFailures', 'stoppedByOwner', 'listUnreadable', 'credential', 'unauthorized',
 	'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'costCap', 'unrecorded', 'listReadFailed', 'shopInactive',
 	'storeAccessEnded', 'storeClientMisnamed',
+	// A store's own cause: going on helps once it is gone (lynox fixed it, or a few minutes passed).
+	'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable',
 ]);
 /** Halts a restart would meet again on the same targets: the run has to be planned again. */
-const BULK_RESTART_NONE = new Set(['contract', 'listFormWithdrawn', 'listFilterWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff']);
+const BULK_RESTART_NONE = new Set(['contract', 'listFormWithdrawn', 'listFilterWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff', 'shopifySelfHosted', 'shopifyNoApiVersion']);
+
+/** The note beside a run no restart moves on: plan it again, as a rule. Not for a self-hosted
+ *  instance, which no plan reaches a store from, and none for a missing setting of lynox's, whose
+ *  own sentence already says that going on does not help (U-232). */
+export function bulkRestartNoneNote(haltKey: string | null): 'bulk.restart.none' | 'bulk.restart.none_self_hosted' | null {
+	if (haltKey === 'shopifySelfHosted') return 'bulk.restart.none_self_hosted';
+	if (haltKey === 'shopifyNoApiVersion') return null;
+	return 'bulk.restart.none';
+}
 
 /** How a planned run that halted on a failure goes on: read on, read its list on, judge on, judge
  *  on under a higher spend limit — or not at all (`none`, `no_judge`, `judge_own_key`). Null for a
@@ -276,7 +287,19 @@ const BULK_BEFORE_PROMISES_GOING_ON: ReadonlySet<string> = new Set([
 	'bulk.halt.blocked_before_managed', 'bulk.halt.blocked_before_selfhost', 'bulk.halt.creditRefused_before',
 	'bulk.halt.spendLimit_before_managed', 'bulk.halt.spendLimit_before_selfhost', 'bulk.halt.consecutiveFailures_before',
 	'bulk.halt.storeAccessEnded_before', 'bulk.halt.storeClientMisnamed_before',
+	'bulk.halt.shopifyNotSetUp_before', 'bulk.halt.shopifyUnconfirmed_before', 'bulk.halt.shopifyNotCleared_before',
+	'bulk.halt.containmentUnwritable_before',
 ]);
+
+/** A store's own causes that going on moves past once they are gone (U-232): the cause says only
+ *  what happened, the step that promises going on stands where the page offers it, and a mandate
+ *  reads that the owner can go on (`_before_mandate`). */
+const BULK_STORE_CAUSES_GOING_ON: ReadonlySet<string> = new Set([
+	'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable',
+]);
+/** A store's own causes no going on gets past: the page says the cause in every phase and offers
+ *  nothing to go on with. */
+const BULK_STORE_CAUSES_NO_WAY_ON: ReadonlySet<string> = new Set(['shopifySelfHosted', 'shopifyNoApiVersion']);
 
 /** The page's own sentences for a planned run's halt: why it halted, and what the owner can do
  *  first. `managed`: whether this instance is a managed one; unknown reads as managed, the
@@ -320,6 +343,7 @@ const BULK_RESUME_WRITE = new Set([
 	'runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked',
 	'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff', 'markupAddedByShop',
 	'storeAccessEnded', 'storeClientMisnamed',
+	'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable',
 ]);
 /** Halts writing on would not get past: the run has changed since it was approved (the engine
  *  refuses), or a target lies outside what it may write (it would halt there again). */
@@ -405,6 +429,7 @@ export function bulkResumeText(
 		: key === 'markupAddedByShop' ? bulkHaltKeyOf(run, 'bulk.halt.markupAddedByShop_before')
 		// Writing on meets the same refusal until the store is connected again or its profile fixed.
 		: key === 'storeAccessEnded' || key === 'storeClientMisnamed' ? `bulk.halt.${key}_before`
+		: BULK_STORE_CAUSES_GOING_ON.has(key) ? `bulk.halt.${key}_before`
 		: null;
 	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
 	if (kind === 'none') return { cause, before, check: null, after: null, kept: null, soFar: null, allows: null };
@@ -422,6 +447,8 @@ export function bulkResumeText(
 			: key === 'credential' ? 'bulk.halt.credential_before'
 			// A store whose access ended or whose profile names its app wrongly cannot be read either.
 			: key === 'storeAccessEnded' || key === 'storeClientMisnamed' ? `bulk.halt.${key}_before_check`
+			// A store refusing for its own cause refuses the check too, until the cause is gone.
+			: BULK_STORE_CAUSES_GOING_ON.has(key) ? `bulk.halt.${key}_before_check`
 			: null;
 		const then = key === 'unavailable' ? 'bulk.halt.unavailable_before_check'
 			: key === 'markupAddedByShop' ? bulkHaltKeyOf(run, 'bulk.halt.markupAddedByShop_before')
@@ -1335,12 +1362,40 @@ export function bulkHaltCause(
 	mandate = false,
 ): string {
 	if (bulkAtProbe(run) && run.haltKey === 'maxTargets') return i18n.t('bulk.halted_after_probe');
-	const own = bulkHaltText(run, managed, i18n)?.cause ?? bulkResumeText(run, managed, i18n)?.cause ?? bulkRollbackText(run, i18n)?.cause;
-	if (own !== undefined) return own;
+	const own = bulkHaltText(run, managed, i18n)?.cause ?? bulkResumeText(run, managed, i18n)?.cause ?? bulkRollbackText(run, i18n)?.cause
+		// A store's own cause has the page's sentence in every phase, never the engine's reason.
+		?? (run.haltKey !== null && (BULK_STORE_CAUSES_NO_WAY_ON.has(run.haltKey) || BULK_STORE_CAUSES_GOING_ON.has(run.haltKey)) ? i18n.t(`bulk.halt.${run.haltKey}`) : undefined);
+	if (own !== undefined) {
+		// A mandate sees no step to go on with: it reads that the owner can, where the page offers the owner that.
+		const key = run.haltKey;
+		if (mandate && key !== null && BULK_STORE_CAUSES_GOING_ON.has(key) && bulkOwnerGoesOn(run)) return `${own} ${i18n.t(`bulk.halt.${key}_before_mandate`)}`;
+		return own;
+	}
 	if (mandate && bulkWaitsForStart(run)) return i18n.t('bulk.halt.wait_owner_only');
 	const state = bulkStateText(run, startButton, i18n);
 	if (state !== null) return state.step === null || mandate ? state.cause : `${state.cause} ${state.step}`;
 	return run.haltReason ?? '';
+}
+
+/** The page's sentence for a start check's refusal on a store's own cause (the engine's code
+ *  `reach_approve_<cause>` or `reach_resume_<cause>`, U-232): approving says to approve again once
+ *  the cause is gone, writing on says the halt's cause. Null for any other code. */
+export function bulkReachRefusalKey(code: string): string | null {
+	const m = /^reach_(approve|resume)_([A-Za-z]+)$/.exec(code);
+	if (m === null || !(BULK_STORE_CAUSES_GOING_ON.has(m[2]!) || BULK_STORE_CAUSES_NO_WAY_ON.has(m[2]!))) return null;
+	return m[1] === 'approve' ? `bulk.reach.approve.${m[2]!}` : `bulk.halt.${m[2]!}`;
+}
+
+/** Whether the page offers the owner to continue the run from this halt: a restart for a planned
+ *  run, writing on for one that wrote. Not checking: that is not continuing the run, and the
+ *  mandate's sentence says the owner can continue it. */
+function bulkOwnerGoesOn(run: Parameters<typeof bulkHaltText>[0] & Parameters<typeof bulkResumeText>[0]): boolean {
+	if (run.phase === 'planned') {
+		const restart = bulkRestartKind(run);
+		return restart !== null && !BULK_NO_RESTART_BUTTON.has(restart);
+	}
+	const resume = bulkResumeKind(run);
+	return resume === 'write' || resume === 'max';
 }
 
 /** The address the support halts point to. */

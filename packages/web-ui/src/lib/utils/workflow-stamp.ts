@@ -165,8 +165,15 @@ export function parseStampPreview(body: unknown): StampPreview | null {
  */
 // Tag characters (U+E0000–E007F) are invisible when rendered but read by a model: text hidden in a
 // harmless task. Variation selectors (U+FE00–FE0F, U+E0100–E01EF) can carry data the same way.
-// Whole code points (`u`), so the astral ranges match.
-const HIDDEN = /[\u034F\u061C\u115F\u1160\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\u3164\uFE00-\uFE0F\uFEFF\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
+// Every format character (`\p{Cf}`: the soft hyphen, the Arabic letter mark, the invisible
+// operators and the rest of the class) and every default-ignorable code point (the Hangul and
+// Mongolian fillers and variation selectors, the combining grapheme joiner, the unassigned
+// ignorables) reads as nothing or as something else, so the whole classes are printed, not a list
+// of their members; the class `hidden-chars.ts` uses, without its exceptions for emoji and letters.
+// So are noncharacters, the line and paragraph separators, the Braille pattern blank (U+2800) and
+// the control characters other than tab, line feed and carriage return, which a multi-line task
+// text keeps as written. Whole code points (`u`), so the astral ranges match.
+const HIDDEN = /[\p{Cf}\p{Default_Ignorable_Code_Point}\p{Noncharacter_Code_Point}\p{Zl}\p{Zp}\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u2800]/gu;
 export function visible(text: string): string {
   return text.replace(HIDDEN, (c) => `<U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}>`);
 }
