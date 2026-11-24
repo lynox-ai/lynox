@@ -126,41 +126,42 @@ describe('with the switch off, the exchange is refused as before', () => {
 });
 
 describe('each condition refuses alone, and names its cause', () => {
-  const refuses = async (why: string, c: ToolContext, callback = CALLBACK, url = TOKEN_URL): Promise<void> => {
-    expect(await storeExchangePassFor(callback, url, BODY, c)).toBe(why);
-    expect(cpCalls).toBe(0);
+  // The cause the exchange gets, and whether the control plane was asked for it.
+  const causeOf = async (c: ToolContext, callback = CALLBACK, url = TOKEN_URL): Promise<{ cause: unknown; asked: number }> => {
+    const cause = await storeExchangePassFor(callback, url, BODY, c);
+    return { cause, asked: cpCalls };
   };
 
   it.each([
     ['no control-plane env', 'LYNOX_MANAGED_INSTANCE_ID'],
   ])('%s: self-hosted', async (_l, unset) => {
     vi.stubEnv(unset, '');
-    await refuses('self_hosted', ctx());
+    expect(await causeOf(ctx())).toEqual({ cause: 'self_hosted', asked: 0 });
   });
 
   it('no control-plane env and no clearance: self-hosted, not a part missing', async () => {
     vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', '');
-    await refuses('self_hosted', ctx({ clearance: null, digest: false }));
+    expect(await causeOf(ctx({ clearance: null, digest: false }))).toEqual({ cause: 'self_hosted', asked: 0 });
   });
 
   it('a process not in sidecar mode, even with a socket in its env', async () => {
     // The mode is the object built at boot; the env is not asked again here.
     vi.stubEnv('LYNOX_SHELL_EXEC_SOCKET', '/run/lynox/shell.sock');
-    await refuses('not_set_up', ctx({ local: true }));
+    expect(await causeOf(ctx({ local: true }))).toEqual({ cause: 'not_set_up', asked: 0 });
   });
 
-  it('no clearance in the tool context', async () => { await refuses('not_set_up', ctx({ clearance: null })); });
-  it('no store binding in the tool context', async () => { await refuses('not_set_up', ctx({ digest: false })); });
+  it('no clearance in the tool context', async () => { expect(await causeOf(ctx({ clearance: null }))).toEqual({ cause: 'not_set_up', asked: 0 }); });
+  it('no store binding in the tool context', async () => { expect(await causeOf(ctx({ digest: false }))).toEqual({ cause: 'not_set_up', asked: 0 }); });
 
   it('the profile on the host is another one than the callback\'s', async () => {
-    await refuses('not_this_store', ctx(), { profileId: 'shop-other', origin: ORIGIN });
+    expect(await causeOf(ctx(), { profileId: 'shop-other', origin: ORIGIN })).toEqual({ cause: 'not_this_store', asked: 0 });
   });
-  it('no profile on the host', async () => { await refuses('not_this_store', ctx({ profiles: [] })); });
-  it('the profile is not the store preset\'s', async () => { await refuses('not_this_store', ctx({ profiles: [shopProfile({ preset: 'github' })] })); });
-  it('the profile\'s own parameter derives another store', async () => { await refuses('not_this_store', ctx({ profiles: [shopProfile({ shop: 'other' })] })); });
+  it('no profile on the host', async () => { expect(await causeOf(ctx({ profiles: [] }))).toEqual({ cause: 'not_this_store', asked: 0 }); });
+  it('the profile is not the store preset\'s', async () => { expect(await causeOf(ctx({ profiles: [shopProfile({ preset: 'github' })] }))).toEqual({ cause: 'not_this_store', asked: 0 }); });
+  it('the profile\'s own parameter derives another store', async () => { expect(await causeOf(ctx({ profiles: [shopProfile({ shop: 'other' })] }))).toEqual({ cause: 'not_this_store', asked: 0 }); });
 
   it('the callback signed for another store', async () => {
-    await refuses('not_this_store', ctx(), { profileId: 'shop-acme', origin: 'https://other.myshopify.com' });
+    expect(await causeOf(ctx(), { profileId: 'shop-acme', origin: 'https://other.myshopify.com' })).toEqual({ cause: 'not_this_store', asked: 0 });
   });
 
   it.each([
@@ -170,7 +171,7 @@ describe('each condition refuses alone, and names its cause', () => {
     `${ORIGIN}/admin/api/2025-10/shop.json`,
     'http://acme.myshopify.com/admin/oauth/access_token',
   ])('the token URL is not the store\'s token endpoint: %s', async (url) => {
-    await refuses('not_this_store', ctx(), CALLBACK, url);
+    expect(await causeOf(ctx(), CALLBACK, url)).toEqual({ cause: 'not_this_store', asked: 0 });
   });
 
   it('a refusal of the control plane that still holds (6a): no new call, still a refusal', async () => {
