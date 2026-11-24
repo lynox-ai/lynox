@@ -29,7 +29,8 @@ import { shapeRequestForModel } from '../core/llm-wire-rules.js';
 import {
   exchangeToken, serializeTokenBody, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
-import { consentNoticeVersion, derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
+import { beginStoreConnect, endStoreConnect } from '../core/store-token-refresh.js';
+import { codeExchangeExtraParams, consentNoticeVersion, derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
 import { bindShopifyCallback, shopifyCallbackRefusalLine, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import { connectNoteFor, noteButton, noteLang, noteText, noteTitle, type ConnectNote, type NoteLang } from './connect-note.js';
@@ -230,6 +231,9 @@ const readsThread = (thread: ThreadNamer): MandateStance => ({ kind: 'reads', th
 const ownerOnly = (what: string): MandateStance => ({ kind: 'owner-only', what });
 /** Rows one page of the access trail reads at most. */
 const ACCESS_TRAIL_MAX_ROWS = 500;
+
+/** A store's connect callback that holds its profile against a refresh, by request, until the route returns. */
+const storeConnectOf = new WeakMap<IncomingMessage, string>();
 /** A mandate may; the handler marks the act. */
 const MARK: MandateStance = { kind: 'mark' };
 /** A mandate may act on what it set up or last changed itself; the handler checks it. */
@@ -10326,7 +10330,7 @@ export class LynoxHTTPApi {
       }
       const apiStore = engine.getApiStore();
       const secretStore = engine.getSecretStore();
-      if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, /* the run's first writing key: a write */ true, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: ctx.mandateEnds, secretReleases: ctx.secretReleases, exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest, containment: ctx.containment, vaultNameBindings: ctx.vaultNameBindings }, { bulkRunId: runId }))) {
+      if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, /* the run's first writing key: a write */ true, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: ctx.mandateEnds, secretReleases: ctx.secretReleases, exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest, containment: ctx.containment, vaultNameBindings: ctx.vaultNameBindings, hostPolicy: ctx }, { bulkRunId: runId }))) {
         return 'The stored credential for this run\'s host cannot be attached. Check the API connection for the host, then try again.';
       }
       return null;
@@ -12568,10 +12572,10 @@ export class LynoxHTTPApi {
       // The version of the customer text this start shows, and the confirmation below is checked
       // against: the callback records it as the text the connection was confirmed under.
       const consentVersion = decision.consent ? consentNoticeVersion(decision.consent) : undefined;
-      const signed = signProfileOAuthState(
+      const by = principal.kind === 'mandate' ? { tag: principalTag(principal), mandateId: principal.mandateId } : { tag: 'owner' };
+      const signWith = (who: typeof by & { display?: string }): string | null => signProfileOAuthState(
         {
-          state, profileId: id, verifier,
-          by: principal.kind === 'mandate' ? { tag: principalTag(principal), mandateId: principal.mandateId } : { tag: 'owner' },
+          state, profileId: id, verifier, by: who,
           // What the link asks for, from the same decision the confirmation is checked against
           // below (`shown_scopes`) and the link is built from: the callback records it as asked.
           asked: decision.scopes,
@@ -12580,12 +12584,18 @@ export class LynoxHTTPApi {
         httpSecret,
         Math.floor(Date.now() / 1000),
       );
+      // The mandate's name goes along, so the callback's trail rows carry it (PRD §7(c)). A name
+      // the format cannot carry (too long once encoded) does not stop the start: it is signed
+      // without one, and those two rows name the person by address, as before the name was carried.
+      const signed = (principal.kind === 'mandate' && principal.display !== undefined
+        ? signWith({ ...by, display: principal.display }) : null) ?? signWith(by);
       if (!signed) {
         // `decideConnect` has already established the secret and the profile, and
         // the id it saw is the id signed here. What still lands here is a value the
         // format cannot carry: a mandate address whose encoding exceeds what the
         // reader accepts, a list of asked scopes the format refuses, or a whole value
-        // longer than a browser keeps (`PROFILE_OAUTH_STATE_MAX_LEN`). Refused before
+        // longer than a browser keeps (`PROFILE_OAUTH_STATE_MAX_LEN`), each without the
+        // mandate's name, which is dropped first. Refused before
         // the user is sent anywhere, and never asserted, because this is the one place
         // where a wrong value would mint a cookie that verifies as a DIFFERENT one.
         sendOAuthHtml(res, 500, OAUTH_RESULT_TEXTS.startFailed, 'apis');
@@ -12779,7 +12789,10 @@ export class LynoxHTTPApi {
       // Who reads the client pair: the session that started the connection, with the grant it
       // signed into the cookie. A release of the owner's name counts for that grant only.
       const tagged = principalFromTag(by.tag);
-      const reader: RequestPrincipal = tagged.kind === 'mandate' ? { ...tagged, mandateId: by.mandateId } : tagged;
+      // The name the start signed in, as every other row of this person carries it.
+      const reader: RequestPrincipal = tagged.kind === 'mandate'
+        ? { ...tagged, mandateId: by.mandateId, ...(by.display === undefined ? {} : { display: by.display }) }
+        : tagged;
       const readCtx = { principal: reader, ends: engine.getMandateEnds(), releases: engine.getSecretReleases() };
       // Asked twice: here, before anything goes to the provider, and again just before the
       // tokens are stored, because the exchange is an await and the profile, the mandate and
@@ -12884,13 +12897,34 @@ export class LynoxHTTPApi {
         return;
       }
 
-      const exchangeParams = authorizationCodeParams({
-        code: exchangeCode,
-        redirectUri: profileOAuthRedirectUri(),
-        clientId,
-        clientSecret,
-        verifier: signed.verifier,
-      });
+      // A store's connect and a refresh of the same connection never run at once (the store says
+      // not to): while a refresh runs the connect is refused, and from here until the route
+      // returns no refresh starts (`store-token-refresh.ts`).
+      if (storeCallback !== undefined) {
+        if (!beginStoreConnect(signed.profileId)) {
+          sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.refreshRunning, 'apis');
+          return;
+        }
+        storeConnectOf.set(req, signed.profileId);
+      }
+      // The preset's ask for an expiring token goes into the body before it is serialised, so a
+      // store's exchange pass covers it. A profile that already holds a token without an expiry
+      // keeps the exchange it was connected with.
+      const exchangeParams = {
+        ...authorizationCodeParams({
+          code: exchangeCode,
+          redirectUri: profileOAuthRedirectUri(),
+          clientId,
+          clientSecret,
+          verifier: signed.verifier,
+        }),
+        ...codeExchangeExtraParams(preset, {
+          hasAccessToken: secretStore.holds(accessTokenKey(profile.id)),
+          // From what the engine itself keeps, never from a field the profile carries (a model may
+          // write `token_expires_at`): a grant with a refresh end, or a refresh token in its slot.
+          expiringHeld: profile.oauth_grant?.refresh_expires_at !== undefined || secretStore.holds(refreshTokenKey(profile.id)),
+        }),
+      };
       const bodyFormat = preset ? presetTokenBodyFormat(preset, oauth.body_format) : oauth.body_format ?? 'form';
       // A store's exchange goes out only under its own pass (PRD Appendix B4), minted over the
       // body as it is sent. Without one, `exchangeToken` refuses it as before.
@@ -12915,7 +12949,7 @@ export class LynoxHTTPApi {
         return;
       }
 
-      let parsed: { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown; scope?: unknown; id_token?: unknown };
+      let parsed: { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown; refresh_token_expires_in?: unknown; scope?: unknown; id_token?: unknown };
       try {
         parsed = JSON.parse(exchanged.text) as typeof parsed;
       } catch {
@@ -13152,6 +13186,10 @@ export class LynoxHTTPApi {
             const binding = engine.getEngineDb()?.storeBindingDigest(signed.profileId, storeCallback.origin, accessToken) ?? null;
             if (binding !== null) grantNext.store_binding = binding;
             else storeBindingFailed = true;
+            // When the refresh token of an expiring connection runs out, for the hint before it does.
+            const refreshExpiry = tokenExpiryFrom(parsed.refresh_token_expires_in);
+            if (refreshToken !== null && refreshExpiry !== 'unknown') grantNext.refresh_expires_at = refreshExpiry;
+            else delete grantNext.refresh_expires_at;
           }
           // This exchange's client and refresh token are the stamp, the same one
           // `fetch_token` writes after a good exchange. An exchange that returned
@@ -13222,6 +13260,11 @@ export class LynoxHTTPApi {
         await profileOAuthCallback(req, res, params, body);
       } finally {
         this.profileGrantsPending--;
+        const connecting = storeConnectOf.get(req);
+        if (connecting !== undefined) {
+          storeConnectOf.delete(req);
+          endStoreConnect(connecting);
+        }
       }
     }, free('a GET is answered before the dispatcher, where no stance applies; a HEAD reaches the dispatcher and this stance. Either way it completes only the connect its signed state cookie names, and that cookie is set only by /api/oauth/connect/:id (for a mandate only by the POST from the note page), where a mandate connects only a profile it set up'));
 

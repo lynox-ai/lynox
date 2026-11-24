@@ -258,6 +258,13 @@ export interface OAuthPreset {
    */
   readonly tokenBodyFormat?: 'form' | 'json';
   /**
+   * A parameter the code exchange adds to ask the provider for a token that expires and comes with
+   * a refresh token. Absent: none. Shopify takes `expiring=1` and requires it of every app created
+   * from 2026-12-01; an older app takes it as an opt-in. Whether the token expires is read from the
+   * answer, never from this field. Read through {@link codeExchangeExtraParams}.
+   */
+  readonly expiringParam?: { readonly name: string; readonly value: string };
+  /**
    * A check the callback runs on the provider's redirect before it exchanges the code, on top
    * of the state cookie every preset already has. Absent: none. `shopify-hmac` is
    * {@link ./oauth-callback-hmac.ts}.
@@ -297,6 +304,22 @@ export function presetTokenHeaderName(preset: OAuthPreset): string | undefined {
  */
 export function presetTokenBodyFormat(preset: OAuthPreset, profileFormat: 'form' | 'json' | undefined): 'form' | 'json' {
   return preset.tokenBodyFormat ?? profileFormat ?? 'form';
+}
+
+/**
+ * What the code exchange adds to the standard parameters for this preset: the ask for an expiring
+ * token, unless the profile already holds a connection whose token does not expire. That
+ * connection keeps the exchange it was made with, also when it is connected again; moving it to
+ * expiring tokens is a step of its own, not a side effect of a reconnect.
+ */
+export function codeExchangeExtraParams(
+  preset: OAuthPreset | undefined,
+  held: { readonly hasAccessToken: boolean; readonly expiringHeld: boolean },
+): Record<string, string> {
+  const ask = preset?.expiringParam;
+  if (ask === undefined) return {};
+  if (held.hasAccessToken && !held.expiringHeld) return {};
+  return { [ask.name]: ask.value };
 }
 
 /**
@@ -400,8 +423,9 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze<OAuthPreset[]>([
     // An app the merchant creates in their store's organisation, authorised through lynox's
     // connect link (PRD shopify-preset, revision 9). Paths, comma-separated scopes, the token
     // header and the form-encoded exchange from shopify.dev's authorization-code grant and
-    // access-scopes pages, read 2026-10-09 and 2026-10-18. No `expiring`: the token does not
-    // expire, so there is no refresh.
+    // access-scopes pages, read 2026-10-09 and 2026-10-18. `expiring=1` from shopify.dev's
+    // changelog of 2026-11-19: an app created from 2026-12-01 gets only expiring offline tokens
+    // (one hour, with a refresh token for 90 days); an older one may opt in.
     id: 'shopify',
     label: 'Shopify',
     host: { kind: 'template', param: 'shop', template: '{shop}.myshopify.com' },
@@ -410,6 +434,7 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze<OAuthPreset[]>([
     apiPathPrefix: '/admin/',
     authorizePath: '/admin/oauth/authorize',
     tokenPath: '/admin/oauth/access_token',
+    expiringParam: { name: 'expiring', value: '1' },
     // The store's subdomain, as Shopify names it: lower-case letters, digits and hyphens, not
     // starting with a hyphen, at most 63 of them (one DNS label). Shopify itself admits upper
     // case; the boundary does not.

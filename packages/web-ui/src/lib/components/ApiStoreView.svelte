@@ -242,6 +242,8 @@
 							{#if view.kind === 'revoked' || view.kind === 'pending'}
 								{@const since = view.kind === 'revoked' ? view.revokedAt : view.notice.revokedAt}
 								{#if since}<p>{tf('apis.revoked_on', { date: localDay(since, getLocale()) })}</p>{/if}
+							{:else if view.kind === 'ended'}
+								<p data-testid="api-access-ended">{t('apis.access_ended')}</p>
 							{/if}
 							<!-- First the dates and the way out with its button; the long text below, closed. -->
 							{#if view.notice}
@@ -254,7 +256,7 @@
 									<p data-testid="api-erasure-avert">{t('apis.erasure_connected_again_avert')}</p>
 								{/if}
 							{/if}
-							{#if view.kind === 'revoked' || view.kind === 'connectedAgain' || (view.kind === 'reconnected' && view.avertable)}
+							{#if view.kind === 'revoked' || view.kind === 'ended' || view.kind === 'connectedAgain' || (view.kind === 'reconnected' && view.avertable)}
 								{#if profile.reader_may_connect !== false}
 									<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
 									<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"

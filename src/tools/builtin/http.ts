@@ -4,6 +4,7 @@ import { urlScanForms } from '../../core/url-scan-forms.js';
 import { shellIsolation } from '../../core/shell-isolation.js';
 import { applyShape } from '../../core/api-shape.js';
 import type { ResponseShape } from '../../core/api-store.js';
+import type { StoreRefreshOutcome } from '../../core/store-token-refresh.js';
 import { accessTokenKey, hasRevokedGrant, readersRefreshSlot, recordedWrites, refreshTokenKey } from '../../core/api-store.js';
 // Not from `types/index.js`: `ApiProfile` is one of the exported types that
 // does not live in the barrel, which `CLAUDE.md` says to look for rather than
@@ -1079,6 +1080,19 @@ interface AttachedAuth {
    * refuses the store without it.
    */
   pass?: StorePass | undefined;
+  /**
+   * For a request to a store whose token expires: renews this profile's token once, after the
+   * store answered 401 to it (`store-token-refresh.ts`), with the vault view this attach read it
+   * through. True when a new token is stored. Absent for any other request.
+   */
+  renew?: (() => Promise<StoreRefreshOutcome>) | undefined;
+  /**
+   * With a refusal of a store connection whose token expires: why only connecting the store again
+   * helps. `ended`: the store refused the refresh, or the refresh ended the connection;
+   * `client-misnamed`: the app's client is not under the provider's vault names. A bulk run halts
+   * on it with a reason of its own.
+   */
+  reconnect?: 'ended' | 'client-misnamed' | undefined;
   /**
    * The profile whose credential filled {@link slot}: set with it and only with it. For an
    * oauth2 profile it is read after the renewal, in the same synchronous stretch as the token
@@ -2451,7 +2465,7 @@ async function attachEngineManagedAuth(
           refreshTokenKey(profile.id),
           profile.oauth_grant?.revoked_at,
           OAUTH_PRESETS.get(profile.auth?.oauth?.preset_id ?? '') !== undefined,
-        ) };
+        ), reconnect: attachPreset?.expiringParam !== undefined && attachPreset.apiOnDerivedHost === true ? 'ended' : undefined };
       }
     }
     // Profile drives — the agent should NOT have to remember which vault key holds
@@ -2495,11 +2509,21 @@ async function attachEngineManagedAuth(
     // `secretAccess` audit event in the real store, so the swap buys three vault
     // reads of a credential on a request that was never going to be sent.
     const expiresAt = profile.auth?.oauth?.token_expires_at;
-    // A store preset's token is never renewed here (B3): only the callback mints it, and it
-    // binds it to the store there. A renewal would replace a bound token with an unbound one.
-    // Asked before the refresh slot is read, so a store connection costs no vault read for it.
+    // A store preset's token is never renewed by the exchange below (B3): only the callback mints
+    // it, and it binds it to the store there. A store whose tokens expire is refreshed in the
+    // engine instead (`store-token-refresh.ts`), under a pass that only a connection whose binding
+    // holds gets, and the refresh binds the new token again. Asked before the refresh slot is
+    // read, so a store connection costs no vault read for the exchange's checks.
     if (attachPreset?.apiOnDerivedHost === true && typeof expiresAt === 'number' && Date.now() >= expiresAt - OAUTH_REFRESH_BUFFER_MS) {
-      process.stderr.write(`[lynox:http] oauth token renewal skipped for profile "${profile.id}": a store connection is renewed by connecting it again\n`);
+      if (attachPreset.expiringParam !== undefined && toolContext !== undefined) {
+        const { refreshStoreToken, storeClientMisnamedText } = await import('../../core/store-token-refresh.js');
+        const outcome = await refreshStoreToken(profile.id, 'due', { toolContext: { ...toolContext, apiStore }, secretStore, principal: agent.principal, runId: agent.currentRunId });
+        // Named, not silent: a token that cannot be renewed for this reason would fail on its own
+        // within minutes, with nothing to say why.
+        if (outcome === 'client-misnamed') return { refusal: `Error: ${storeClientMisnamedText(profile.id, false)}`, reconnect: 'client-misnamed' };
+      } else {
+        process.stderr.write(`[lynox:http] oauth token renewal skipped for profile "${profile.id}": a store connection is renewed by connecting it again\n`);
+      }
     } else if (typeof expiresAt === 'number' && Date.now() >= expiresAt - OAUTH_REFRESH_BUFFER_MS) {
       // Asked HERE rather than inside the renewal because only this scope can
       // answer the second argument: whether the vault actually holds a refresh
@@ -2578,10 +2602,14 @@ async function attachEngineManagedAuth(
       // Step 7: the token in the slot is the one the callback bound to this profile and store.
       const storeHost = presetStoreHost(profile);
       const origin = storeHost === null ? null : `https://${storeHost}`;
-      const bound = profile.oauth_grant?.store_binding;
+      // From the profile as read after the refresh above, with the token: a refresh binds its new
+      // token in the same save, and the profile this attach began with still holds the old binding.
+      const bound = held.oauth_grant?.store_binding;
       const digest = origin === null ? null : toolContext?.storeBindingDigest?.(profile.id, origin, resolved) ?? null;
       if (origin === null || typeof bound !== 'string' || digest === null || !digestsEqual(digest, bound)) {
-        return { refusal: `Error: the Shopify store connection of api_profile "${profile.id}" is not the one this engine connected, so nothing was sent to the store. Connect it again with api_setup action "connect".` };
+        // An expiring connection whose binding a refresh took away ended there: a bulk run says so.
+        const ended = typeof bound !== 'string' && attachPreset?.expiringParam !== undefined && (held.oauth_grant?.state === 'refresh-dead' || typeof held.auth?.oauth?.token_expires_at === 'number');
+        return { refusal: `Error: the Shopify store connection of api_profile "${profile.id}" is not the one this engine connected, so nothing was sent to the store. Connect it again with api_setup action "connect".`, reconnect: ended ? 'ended' : undefined };
       }
       // Step 6b, the containment and the pass: after every refusal above, so a request refused
       // there records nothing and contains nothing (`mintStorePassFor`). The pass's own checks
@@ -2589,7 +2617,13 @@ async function attachEngineManagedAuth(
       // they refuse has contained the chat without anything sent, the safe direction.
       const minted = await mintStorePassFor(toolContext!, container, { kind: 'api', connectionId: profile.id }, origin, oauthSlot, oauthValue);
       if ('refusal' in minted) return { refusal: `Error: ${minted.refusal}` };
-      return { ...put(oauthSlot, oauthValue), pass: minted.pass };
+      const renew = attachPreset?.expiringParam !== undefined && toolContext !== undefined
+        ? async (): Promise<StoreRefreshOutcome> => {
+          const { refreshStoreToken } = await import('../../core/store-token-refresh.js');
+          return refreshStoreToken(profile.id, 'unauthorized', { toolContext: { ...toolContext, apiStore }, secretStore, principal: agent.principal, runId: agent.currentRunId });
+        }
+        : undefined;
+      return { ...put(oauthSlot, oauthValue), pass: minted.pass, renew };
     }
     return put(oauthSlot, oauthValue);
   }
@@ -4320,6 +4354,23 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         wrapped += `\n\n**[Agent reminder — the engine did not attach this profile's credential]**\n${auth.hint({ crossOriginRedirect })}\nUntil then the request goes out with only the headers you set yourself.`;
       }
 
+      // A store whose token expires answers 401 once the hour is up: the engine refreshes it here,
+      // at most once a minute per store, and says so outside the wrap. The request is not sent
+      // again by the engine; the model sends it once more, and a second 401 stays a 401.
+      let storeRenewed = false;
+      if (response.status === 401 && auth.renew !== undefined) {
+        const renewal = await auth.renew();
+        if (renewal === 'renewed') {
+          storeRenewed = true;
+          wrapped += '\n\n**[Engine note — the store\'s access was renewed]**\nThe access token for this store had expired and the engine has renewed it. Send the same request once more; nothing was changed by the request above.';
+        } else if (renewal === 'client-misnamed') {
+          // Named, and in place of the reminder below: connecting again would not fix it.
+          storeRenewed = true;
+          const { storeClientMisnamedText } = await import('../../core/store-token-refresh.js');
+          wrapped += `\n\n**[Engine note — the store's access could not be renewed]**\nThe ${storeClientMisnamedText(auth.profile?.id ?? '', true)}`;
+        }
+      }
+
       // OAuth2 401-hint: append OUTSIDE the untrusted_data wrap so the
       // agent treats it as system guidance, not external response data.
       // Fires when an http_request hits 401 against an URL matched by an
@@ -4327,7 +4378,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // set, or a built-in provider's profile — the 2026-05-18 Shopify failure mode: stale vault
       // access_token + agent ping-ponged the user through "re-paste from
       // admin UI" instead of calling `api_setup fetch_token`.
-      if (response.status === 401 && toolContext?.apiStore) {
+      // Not after a renewal: the note above already says what to do, and this reminder would
+      // say the opposite (connect again, or fetch a token).
+      if (response.status === 401 && toolContext?.apiStore && !storeRenewed) {
         try {
           const reqHostname = new URL(input.url).hostname;
           const matchedProfile = toolContext.apiStore.getByHostname(reqHostname);
@@ -4608,12 +4661,15 @@ export async function attachStoredCredential(
     /** The process's shell mode; a store gets a pass only in sidecar mode. Defaults to the
      *  process's own object (`shell-isolation.ts`), never to "local". */
     shellIsolation?: ToolContext['shellIsolation'] | undefined;
+    /** The instance's network policy. Required: a store refresh this attach starts goes out under
+     *  it, and an attach built by hand without it would send that refresh unchecked. */
+    hostPolicy: Pick<ToolContext, 'networkPolicy' | 'allowedHosts' | 'allowedWildcards' | 'enforceHttps'>;
   },
   /** The bulk run this request is for. The agent below is built by hand and has no thread, so
    *  the run is the container a request to a store is contained under (`core/containment.ts`). */
   container: { bulkRunId: string },
   /** Receives the store pass minted for this request, which the caller hands to its send. */
-  out?: { pass?: StorePass | undefined } | undefined,
+  out?: { pass?: StorePass | undefined; renew?: (() => Promise<StoreRefreshOutcome>) | undefined; reconnect?: 'ended' | 'client-misnamed' | undefined } | undefined,
 ): Promise<ApiProfile | null> {
   const auth = await attachEngineManagedAuth(
     url,
@@ -4624,13 +4680,19 @@ export async function attachStoredCredential(
       containment: stores.containment ?? null,
       vaultNameBindings: stores.vaultNameBindings,
       shellIsolation: stores.shellIsolation ?? shellIsolation(),
+      networkPolicy: stores.hostPolicy.networkPolicy, allowedHosts: stores.hostPolicy.allowedHosts,
+      allowedWildcards: stores.hostPolicy.allowedWildcards, enforceHttps: stores.hostPolicy.enforceHttps,
       // A bulk run is not a chat: nothing of a thread is written for it.
       threadStore: null,
-    } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases' | 'exactClearance' | 'storeBindingDigest' | 'containment' | 'threadStore' | 'vaultNameBindings' | 'shellIsolation'> as ToolContext,
+    } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases' | 'exactClearance' | 'storeBindingDigest' | 'containment' | 'threadStore' | 'vaultNameBindings' | 'shellIsolation' | 'networkPolicy' | 'allowedHosts' | 'allowedWildcards' | 'enforceHttps'> as ToolContext,
     { secretStore: stores.secretStore, principal: stores.principal } as Pick<import('../../types/index.js').IAgent, 'secretStore' | 'principal'> as import('../../types/index.js').IAgent,
     write,
     { bulkRunId: container.bulkRunId },
   );
-  if (out !== undefined && auth.refusal === undefined) out.pass = auth.pass;
+  if (out !== undefined && auth.refusal === undefined) {
+    out.pass = auth.pass;
+    out.renew = auth.renew;
+  }
+  if (out !== undefined && auth.refusal !== undefined) out.reconnect = auth.reconnect;
   return auth.slot !== undefined && auth.refusal === undefined ? auth.profile ?? null : null;
 }
