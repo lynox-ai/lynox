@@ -176,7 +176,7 @@
 		<span class="text-xs text-text-subtle tabular-nums">{when(e.at)}</span>
 		<span class="text-text-muted">{kindText(e)}</span>
 		{#if !isRevoke(e)}<span class="font-mono text-xs break-all">{e.action}{#if e.target} · {e.target}{/if}</span>{/if}
-		{#if e.kind === 'event' && e.count !== undefined}<span class="text-xs text-text-muted" data-poll-day>{tf('access_trail.poll_day', { n: String(e.count), time: when(e.until ?? e.at) })}</span>{/if}
+		{#if e.kind === 'event' && e.count !== undefined}<span class="text-xs text-text-muted" data-poll-day>{e.count === 1 ? tf('access_trail.poll_day_one', { time: when(e.at) }) : tf('access_trail.poll_day', { n: String(e.count), time: when(e.until ?? e.at) })}</span>{/if}
 		{#if e.kind === 'step'}
 			<span class="text-xs" data-status>{statusText(e.status)}</span>
 			{#if e.note !== undefined}<span class="text-xs text-text-muted" data-note>{noteText(e)}</span>{/if}

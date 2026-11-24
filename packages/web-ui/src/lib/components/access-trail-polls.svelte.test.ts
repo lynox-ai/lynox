@@ -120,6 +120,15 @@ describe('reads on the routes the interface polls by itself', () => {
 		expect(t('access_trail.poll_day')).not.toBe('access_trail.poll_day');
 	});
 
+	it('says a day row of one read in its own form', async () => {
+		const day = { id: `d${String(nextId++)}`, kind: 'event', action: 'GET /api/runs/active', target: null, phase: 'read', at: ago(60 * 24 * 40), until: ago(60 * 24 * 40), count: 1, person: IDA, auto: true };
+		await render([day]);
+		const [line] = [...target.querySelectorAll('li[data-entry-kind="polls"] details [data-poll-day]')];
+		expect(line!.textContent!.startsWith(tf('access_trail.poll_day_one', { time: 'X' }).split('X')[0]!)).toBe(true);
+		expect(line!.textContent!.startsWith(tf('access_trail.poll_day', { n: '1', time: 'X' }).split('X')[0]!)).toBe(false);
+		expect(t('access_trail.poll_day_one')).not.toBe('access_trail.poll_day_one');
+	});
+
 	it('opens a group to every read in it', async () => {
 		await render([poll(1), poll(2), poll(3)]);
 		const lines = [...target.querySelectorAll('li[data-entry-kind="polls"] details [data-entry-kind="event"]')];
@@ -161,21 +170,25 @@ describe('reads on the routes the interface polls by itself', () => {
 	});
 });
 
-describe('the texts, as ux wrote them (U-047)', () => {
+describe('the texts, as decided (U-047, U-440)', () => {
 	it('DE and EN', () => {
 		const before = getLocale();
 		try {
 			setLocale('de');
-			expect([t('access_trail.polls_legend'), t('access_trail.polls_many'), t('access_trail.polls_one')]).toEqual([
-				'Statusabfragen (laufende Arbeit, Aufgaben, Kosten, Anbieter) stehen zusammengefasst. Die meisten macht die Oberfläche von selbst. Aufklappen zeigt jede einzeln.',
+			expect([t('access_trail.polls_legend'), t('access_trail.polls_many'), t('access_trail.polls_one'), t('access_trail.poll_day'), t('access_trail.poll_day_one')]).toEqual([
+				'Statusabfragen (laufende Arbeit, Aufgaben, Kosten, Anbieter) stehen zusammengefasst. Die meisten macht die Oberfläche von selbst. Aufklappen zeigt jede einzeln. Nach 30 Tagen bleibt von laufender Arbeit und Anbietern eine Zeile je Tag.',
 				'{n} Statusabfragen ({span})',
 				'Eine Statusabfrage ({time})',
+				'{n} Abfragen, die letzte am {time}',
+				'1 Abfrage am {time}',
 			]);
 			setLocale('en');
-			expect([t('access_trail.polls_legend'), t('access_trail.polls_many'), t('access_trail.polls_one')]).toEqual([
-				'Status requests (running work, tasks, costs, providers) are grouped. The interface makes most of them by itself. Expand to see each one.',
+			expect([t('access_trail.polls_legend'), t('access_trail.polls_many'), t('access_trail.polls_one'), t('access_trail.poll_day'), t('access_trail.poll_day_one')]).toEqual([
+				'Status requests (running work, tasks, costs, providers) are grouped. The interface makes most of them by itself. Expand to see each one. After 30 days, running work and providers keep one line per day.',
 				'{n} status requests ({span})',
 				'One status request ({time})',
+				'{n} requests, the last on {time}',
+				'1 request on {time}',
 			]);
 		} finally {
 			setLocale(before);
