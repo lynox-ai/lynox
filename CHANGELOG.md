@@ -40,12 +40,10 @@
   conversation, in a contact they wrote, or as a recipient of an earlier send
   to owner-named recipients) now asks the owner first; a send filed for
   approval names where the target came from on its card. A session of someone
-  the owner let in is refused, and so is a run nobody watches: a scheduled or
-  triggered run that sends to such a target stops that send and says so in its
-  result. Approving a send does not make its recipient owner-named. Contacts,
-  earlier sends and conversation text from before the update do not count as
-  owner-named either: a send to such a recipient asks until the owner names it
-  again, and a scheduled or triggered run's send to one stops. A trigger
+  the owner let in is refused. Approving a send does not make its recipient
+  owner-named. Contacts, earlier sends and conversation text from before the
+  update do not count as owner-named either: a send to such a recipient asks
+  until the owner names it again. A trigger
   from before its creator was recorded counts as the owner's only once the
   owner confirms its recipients in the Triggers view. Once the
   conversation has read outside content, a `web_research` read whose URL has a
