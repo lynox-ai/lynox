@@ -2121,7 +2121,7 @@ describe('mail_reply in three steps', () => {
   it('prepare refuses an auto-generated original before any consent', async () => {
     provider.fetch.mockResolvedValue(makeMessage({ ...envelope(91, { messageId: '<o91@x>' }), isAutoReply: true }, 'Out of office.'));
     const prepared = await prepareReply(registry, undefined, { uid: 91, body: 'Thanks.' });
-    expect(prepared.ok ? '' : prepared.message).toContain('Auto-Submitted header');
+    expect(prepared.ok ? '' : prepared.message).toContain('was sent automatically');
     expect(provider.send).not.toHaveBeenCalled();
   });
 
