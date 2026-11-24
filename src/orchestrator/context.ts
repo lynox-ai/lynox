@@ -16,7 +16,9 @@ export function buildStepContext(
   outputs: Map<string, AgentOutput>,
   contextLimit = DEFAULT_CONTEXT_LIMIT,
 ): Record<string, unknown> {
-  const ctx: Record<string, unknown> = { ...globalContext };
+  // Without a prototype: a step id is a key here, and on a plain object `__proto__` would set the
+  // prototype instead of holding the step's output.
+  const ctx: Record<string, unknown> = Object.assign(Object.create(null) as Record<string, unknown>, globalContext);
   for (const fromId of step.input_from ?? []) {
     const out = outputs.get(fromId);
     if (out === undefined) {
@@ -61,8 +63,8 @@ export function resolveTaskTemplate(
   return replacePlaceholders(task, (_match: string, rawPath: string) => {
     const path = rawPath.trim();
     const value = getByPath(context, path);
-    // A function is not a value: `getByPath` walks the prototype, so `{{params.toString}}`
-    // finds one, and `JSON.stringify` of it is `undefined`, which the boundary cannot wrap.
+    // A function is not a value, and `JSON.stringify` of one is `undefined`, which the boundary
+    // cannot wrap. `getByPath` reads own properties only, so this holds only a value that is one.
     if (value === undefined || typeof value === 'function') return `{{${path}}}`;
     const str = typeof value === 'string' ? value : JSON.stringify(value);
     // Workflow parameter values are caller/external-supplied (untrusted) → ALWAYS

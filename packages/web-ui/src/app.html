@@ -27,8 +27,9 @@
 			so the data-theme attribute is set before first paint. Strict
 			allowlist on the localStorage value (defense-in-depth against any
 			vector that writes lyx-theme from outside our setTheme API).
+			The nonce is required: the page policy runs no inline script without it.
 		-->
-		<script>
+		<script nonce="%sveltekit.nonce%">
 			(function () {
 				try {
 					var stored = null;
@@ -54,7 +55,7 @@
 			hooks.server.ts; in dev / non-CI builds it stays as the literal
 			string and the script no-ops.
 		-->
-		<script>
+		<script nonce="%sveltekit.nonce%">
 			(function () {
 				var bundleSha = '__LYNOX_BUILD_SHA__';
 				if (!bundleSha || bundleSha.indexOf('__LYNOX_') === 0) return;
