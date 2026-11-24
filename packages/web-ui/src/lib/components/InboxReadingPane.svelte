@@ -258,7 +258,8 @@
 							<span class="text-text-muted break-words [overflow-wrap:anywhere] min-w-0">
 								{#if full.item.fromName}
 									{full.item.fromName}
-									<span class="text-text-subtle">&lt;<WholeValue value={full.item.fromAddress} kind="account" testid="inbox-reading-from-address" />&gt;</span>
+									<!-- The brackets ride on the first and last piece, so a line never ends on a lone "<". -->
+									<span class="text-text-subtle"><WholeValue value={`<${full.item.fromAddress}>`} kind="account" testid="inbox-reading-from-address" /></span>
 								{:else}
 									<WholeValue value={full.item.fromAddress} kind="account" testid="inbox-reading-from-address" />
 								{/if}

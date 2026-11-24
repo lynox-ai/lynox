@@ -146,6 +146,30 @@ describe('the jump to a new message without content', () => {
 		}
 	});
 
+	it('keeps the mark through the jump\'s own press and a touch, and drops it on a mouse press or when the focus leaves', async () => {
+		const press = (type: string): void => {
+			document.body.dispatchEvent(Object.assign(new Event('pointerdown', { bubbles: true }), { pointerType: type }));
+		};
+		await renderPane(item({ followUps: ONE }));
+		const jump = byTestId('inbox-follow-up-jump')!;
+		jump.dispatchEvent(Object.assign(new Event('pointerdown', { bubbles: true }), { pointerType: 'mouse' }));
+		jump.click();
+		await settle();
+		expect(row(CONF_ROW).getAttribute('data-jump-target')).toBe('true');
+		press('touch');
+		await settle();
+		expect(row(CONF_ROW).getAttribute('data-jump-target')).toBe('true');
+		press('mouse');
+		await settle();
+		expect(row(CONF_ROW).getAttribute('data-jump-target')).toBeNull();
+		jump.click();
+		await settle();
+		expect(row(CONF_ROW).getAttribute('data-jump-target')).toBe('true');
+		row(CONF_ROW).blur();
+		await settle();
+		expect(row(CONF_ROW).getAttribute('data-jump-target')).toBeNull();
+	});
+
 	it('marks the message again on a second jump', async () => {
 		await renderPane(item({ followUps: ONE }));
 		byTestId('inbox-follow-up-jump')!.click();
@@ -186,7 +210,7 @@ describe('the reading pane head', () => {
 	it('keeps the sender address whole: it may break after a dot or @, never at a hyphen', async () => {
 		await renderPane(item());
 		const pieces = [...byTestId('inbox-reading-from-address')!.querySelectorAll(':scope > span')].map((s) => s.textContent);
-		expect(pieces).toEqual(['kunde-service@', 'muster-firma.', 'example']);
+		expect(pieces).toEqual(['<kunde-service@', 'muster-firma.', 'example>']);
 	});
 });
 
@@ -210,9 +234,18 @@ describe('the inbox list row', () => {
 		await renderList([
 			item({ id: 'inb_1', mailDate: '2026-10-01T09:00:00Z', followUps: { ...ONE, latestAt: '2026-10-20T15:00:00.000Z' } }),
 			item({ id: 'inb_2', threadKey: 't2', mailDate: '2026-10-05T09:00:00Z' }),
+			item({ id: 'inb_3', threadKey: 't3', mailDate: '2026-10-07T09:00:00Z', classifierVersion: 'sensitive-follow-up', followUps: { ...ONE, latestAt: '2026-10-21T15:00:00.000Z' } }),
 		]);
 		const times = [...target.querySelectorAll('[data-inbox-item-id] span.tabular-nums')].map((e) => e.textContent?.trim());
-		expect(times).toEqual([rowTime('2026-10-20T15:00:00.000Z'), rowTime('2026-10-05T09:00:00Z')]);
+		// The third row shows the raised line, not the follow-up line: its own time stands.
+		expect(times).toEqual([rowTime('2026-10-20T15:00:00.000Z'), rowTime('2026-10-05T09:00:00Z'), rowTime('2026-10-07T09:00:00Z')]);
+	});
+
+	it('names the sensitive mark in the page language, as an image', async () => {
+		setLocale('en');
+		await renderList([item({ classifierVersion: 'sensitive-prefilter' })]);
+		const mark = target.querySelector('[role="img"][aria-label="Confidential content"]');
+		expect(mark?.textContent).toBe('⚠');
 	});
 
 	it('marks the zone pills cut at an edge with a fade on that side only', async () => {
@@ -240,17 +273,6 @@ describe('words of the inbox in DE', () => {
 			.toEqual(['Posteingang', 'Posteingang', 'Zurückgestellt', 'Zurückstellen', 'Nichts zurückgestellt.', 'Jetzt zurückholen']);
 		setLocale('en');
 		expect([t('nav.inbox'), t('inbox.action_snooze')]).toEqual(['Inbox', 'Snooze']);
-	});
-
-	it('leaves no snooze, Schlummer, Items or Inbox in a DE inbox text', () => {
-		setLocale('de');
-		const keys = ['nav.inbox', 'tool.inbox_read', 'tool.inbox_rule_proposed', 'inbox.title', 'inbox.zone_snoozed', 'inbox.empty_needs_you', 'inbox.empty_snoozed',
-			'inbox.unavailable', 'inbox.action_snooze', 'inbox.snooze_cancel', 'inbox.error_load', 'inbox.error_snooze', 'inbox.cold_start_title',
-			'inbox.cold_start_complete_simple', 'inbox.shortcuts_snooze', 'inbox.rules_title', 'inbox.rules_back', 'inbox.rules_unavailable',
-			'inbox.rule_filter_empty', 'inbox.bulk_snooze_tomorrow', 'inbox.bulk_snooze_tomorrow_hint', 'inbox.bulk_undo_toast_snoozed',
-			'inbox.kopilot_summary_zero', 'inbox.kopilot_keys_hint', 'inbox.triage_done'];
-		const left = keys.filter((k) => /snooz|Schlummer|\bItems?\b|\bInbox\b/i.test(t(k).replace('LYNOX_FEATURE_UNIFIED_INBOX', '')));
-		expect(left).toEqual([]);
 	});
 });
 

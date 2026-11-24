@@ -124,8 +124,11 @@
 	$effect(() => {
 		const row = mobileZoneRow;
 		if (row === null || typeof ResizeObserver === 'undefined') return;
+		// The row's own box and its content: a badge that appears later widens the pills without
+		// resizing the row.
 		const ro = new ResizeObserver(() => updateZoneRowCut());
 		ro.observe(row);
+		for (const child of row.children) ro.observe(child);
 		return () => ro.disconnect();
 	});
 
@@ -779,7 +782,7 @@
 													<span class="shrink-0">{channelLabel(item.channel)}</span>
 													{#if item.classifierVersion === 'sensitive-prefilter' || isRaisedOpen(item)}
 														<span aria-hidden="true">·</span>
-														<span class="shrink-0 text-warning" aria-label={t('inbox.sensitive_mark')}>⚠</span>
+														<span class="shrink-0 text-warning" role="img" aria-label={t('inbox.sensitive_mark')}>⚠</span>
 													{/if}
 												</div>
 												{#if isRaisedOpen(item)}

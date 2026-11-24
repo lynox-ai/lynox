@@ -43,12 +43,17 @@
 		});
 	});
 
-	// The mark goes with the next click. Listened to from the jump on, so the click that made the
-	// jump (already handled when the listener is added) does not clear it.
+	// The mark goes with the next mouse or pen click. Listened to from the jump on, so the click
+	// that made the jump (already handled when the listener is added) does not clear it. A touch
+	// does not clear it: on a phone the first touch is often the scroll toward the message; a tap
+	// elsewhere moves the focus and so clears it on blur.
 	$effect(() => {
 		if (jumpedTo === undefined || typeof document === 'undefined') return;
-		const clear = (): void => { jumpedTo = undefined; };
-		document.addEventListener('pointerdown', clear, { once: true, capture: true });
+		const clear = (e: PointerEvent): void => {
+			if (e.pointerType === 'touch') return;
+			jumpedTo = undefined;
+		};
+		document.addEventListener('pointerdown', clear, { capture: true });
 		return () => document.removeEventListener('pointerdown', clear, { capture: true });
 	});
 

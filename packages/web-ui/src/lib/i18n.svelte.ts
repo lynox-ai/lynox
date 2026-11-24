@@ -3443,7 +3443,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'inbox.cold_start_trigger_button': { de: 'Letzte Mails einlesen', en: 'Backfill recent mail' },
 	'inbox.cold_start_trigger_busy': { de: 'Wird gestartet…', en: 'Starting…' },
 	'inbox.cold_start_trigger_hint': {
-		de: 'Liest die letzten Threads aus deinen verbundenen Mailkonten und klassifiziert sie für die Inbox.',
+		de: 'Liest die letzten Threads aus deinen verbundenen Mailkonten und ordnet sie für den Posteingang ein.',
 		en: 'Pulls recent threads from your connected mail accounts and classifies them for the inbox.',
 	},
 	'inbox.cold_start_trigger_scheduled': { de: 'Aufbau gestartet — Fortschritt erscheint gleich.', en: 'Backfill scheduled — progress will appear shortly.' },
@@ -3639,7 +3639,7 @@ const translations: Record<string, Record<Locale, string>> = {
 		en: 'Snippet only — full body not cached.',
 	},
 	'inbox.reclassify_banner_text': {
-		de: '{count} Items haben Status geändert',
+		de: '{count} Nachrichten haben den Status geändert',
 		en: '{count} items changed status',
 	},
 	'inbox.reclassify_banner_refresh': { de: 'Liste aktualisieren', en: 'Refresh list' },

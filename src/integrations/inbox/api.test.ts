@@ -299,9 +299,12 @@ describe('handleGetItemThread', () => {
     add('<flagged-masked@x>', { snippet: 'IBAN [redacted]' });
     add('<sent@x>', { direction: 'outbound' });
     add('<subject-reads@x>', { subject: 'Bitte überweisen auf CH9300762011623852957' });
-    for (const id of ['<flagged@x>', '<flagged-masked@x>', '<sent@x>']) {
+    add('<kept-open@x>');
+    add('<flagged-body@x>', { bodyMd: 'Text da' });
+    for (const id of ['<flagged@x>', '<flagged-masked@x>', '<sent@x>', '<flagged-body@x>']) {
       state.appendAudit({ itemId, action: 'raised_on_sensitive_follow_up', actor: 'system', payloadJson: JSON.stringify({ message_id: id }) });
     }
+    state.appendAudit({ itemId, action: 'sensitive_follow_up_kept_open', actor: 'system', payloadJson: JSON.stringify({ message_id: '<kept-open@x>' }) });
     const body = handleGetItemThread(deps, itemId).body as { messages: ReadonlyArray<{ messageId: string; confidential?: boolean }> };
     const marked = Object.fromEntries(body.messages.map((m) => [m.messageId, m.confidential === true]));
     expect(marked).toEqual({
@@ -310,6 +313,8 @@ describe('handleGetItemThread', () => {
       '<flagged-masked@x>': false,
       '<sent@x>': false,
       '<subject-reads@x>': true,
+      '<kept-open@x>': true,
+      '<flagged-body@x>': false,
     });
   });
 

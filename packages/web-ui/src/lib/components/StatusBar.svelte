@@ -70,7 +70,7 @@
 	function todayCostAmount(cost: number): string {
 		return formatUsdIn(cost, getLocale() === 'de' ? 'de' : 'en');
 	}
-	/** The footer's figure: the period named with it, `$0.00` for a real zero; `-` alone while unknown. */
+	/** The footer's figure: the period named with it, a real zero as zero (EN `$0.00`, DE `0,00 $`); `-` alone while unknown. */
 	const todayCostShown = $derived(todayCost === null ? '-' : `${t('status.today')} ${todayCostAmount(todayCost)}`);
 	/** What a screen reader says for the cost: the visible text, or, while unknown, that it is unknown (a bare "-" is not spoken). */
 	const todayCostSpoken = $derived(todayCost === null ? t('status.today_cost_unknown') : todayCostShown);
