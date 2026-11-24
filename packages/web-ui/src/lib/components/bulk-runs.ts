@@ -83,6 +83,9 @@ export interface BulkRun {
 	/** Targets not written because an earlier send reached them without a clear answer; the
 	 *  engine does not send to them again. */
 	sentUnknown: number;
+	/** The run's list as the engine counts it; null for a run without one. Absent from an engine
+	 *  older than the field, which reads as no list. The runs list carries it too, from the run's own row. */
+	list?: { state: string } | null;
 	/** Written targets the store kept with markup lynox did not send. Optional: an older engine sends none. */
 	shopAddedMarkup?: number | undefined;
 	/** Written targets whose store kept a description otherwise than sent, without outside markup: counted, not halted. */
@@ -165,9 +168,6 @@ export interface BulkRunDetailData extends BulkRun {
 	judgeServedBy: { provider: string; label: string } | null;
 	/** An instance with its own model key: the engine refuses every start of a judged run there. */
 	judgeOwnKey: boolean;
-	/** The run's list as the engine counts it; null for a run without one. Absent from an engine
-	 *  older than the field, which reads as no list. */
-	list?: { state: string } | null;
 	/** The link domains the owner allowed at the start of a judged list run, besides the store's
 	 *  own (PRD shopify-preset §20.2 item 5); null or absent where none were given. */
 	startDomains?: string[] | null;
@@ -1110,6 +1110,14 @@ export function bulkEngineWorking(run: Pick<BulkRunDetailData, 'phase' | 'haltKe
 	// Any halt, by its key or by a reason this page does not know (an engine newer than the page).
 	if (run.haltKey !== null || run.haltReason !== null) return false;
 	return run.phase === 'planned' || run.phase === 'approved' || run.phase === 'writing';
+}
+
+/** Whether the engine is reading the run's list now, by what the runs list knows of a run: the
+ *  same step as the page's {@link bulkWorkingStep} `list`, while the list is still to be read and
+ *  no halt stands (a list is read before the run can be approved, so no phase needs naming). The
+ *  list's title and count then read „–“ as the page's do: nothing is counted yet. */
+export function bulkReadsList(run: Pick<BulkRun, 'phase' | 'haltKey' | 'haltReason' | 'list'>): boolean {
+	return bulkEngineWorking(run) && run.list?.state === 'pending';
 }
 
 /** The step the engine is working on while it moves a run on by itself, for the page's working
