@@ -8,6 +8,7 @@ import type { ModelTier } from './models.js';
 import type { UntrustedCause } from '../core/untrusted-signals.js';
 import type { CallApiCost, CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 import type { ContainedRefusalReason } from '../core/containment.js';
+import type { SendTarget } from '../core/send-target.js';
 
 export type ToolHandler<TInput = unknown> =
   (input: TInput, agent: IAgent) => Promise<string>;
@@ -44,6 +45,13 @@ export interface WarningPayload {
 
 export interface ToolEntry<TInput = unknown> {
   definition: BetaTool;
+  /**
+   * The definition a locked turn (a mandate's, `toolLockFor`) sends instead of `definition`,
+   * for a tool whose own text is written for the owner. The name and the input schema's
+   * properties stay those of `definition`: only descriptions differ, so a call the model makes
+   * reaches the same handler with the same input.
+   */
+  lockedDefinition?: BetaTool | undefined;
   handler:    ToolHandler<TInput>;
   /**
    * When true, the tool handles its own user confirmation via
@@ -171,6 +179,52 @@ export interface ToolEntry<TInput = unknown> {
    */
   storedMailRead?: ((input: TInput) => string | null) | undefined;
   /**
+   * Where a call SENDS to, as the person would name it: each mail address and each host the
+   * call delivers to, normalized (`send-target.ts`), or `null` for a call that sends to no
+   * target the model chose (a read). Read from the input as the model wrote it, before any
+   * secret is resolved. A declaration that throws means the targets are unknown, and unknown
+   * counts as foreign. A tool reads its targets with the same parser its handler sends with,
+   * so the list checked is the list sent. An empty list is no assurance: it says the input
+   * names no target, not that the call sends to none (a reply without an override still goes
+   * to the mail's sender). A reader never treats `[]` as owner-known.
+   */
+  sendTargets?: ((input: TInput) => readonly SendTarget[] | null) | undefined;
+  /**
+   * Like `sendTargets`, but read only while the conversation latch is set: once something from
+   * outside the owner's own words is in the conversation. For a call that is a plain read on a
+   * clean conversation and can carry data out only after foreign content arrived: its address
+   * can hold what the conversation holds, in the path, the host name or the query. Same contract
+   * as `sendTargets`. Read only when `sendTargets` is absent or returns `null` for the call (a
+   * tool whose writes declare targets and whose reads do not).
+   */
+  sendTargetsWhenLatched?: ((input: TInput) => readonly SendTarget[] | null) | undefined;
+  /**
+   * The address a read fetches, exactly as the input names it, when nothing else of the call can
+   * carry data (no body, no header the model set); otherwise `null`. While the latch is set, a
+   * call whose address a search in this conversation listed as a result
+   * (`IAgent.searchResultAddresses`) passes the origin check without a question: the provider
+   * wrote that address, not the model (which results come back still depends on the query; see
+   * `SearchResultAddresses`).
+   */
+  readAddress?: ((input: TInput) => string | null) | undefined;
+  /**
+   * Whether a read's address carries another address (`carriesAddress`). While the latch is set,
+   * such a read is asked about whatever its host, unless a search listed its exact address.
+   */
+  readCarriesAddress?: ((input: TInput) => boolean) | undefined;
+  /**
+   * The address a call SAVES for later credentialed sends, exactly as the input names it: the
+   * token endpoint a profile the call saves will post a client ID and client secret to (`api_setup`
+   * create/update). Otherwise `null`. Where it is not `null`, the target `sendTargetsWhenLatched`
+   * declares for the call is checked as that save, not as a read: no exception for an address a
+   * search listed or for the host of a connected API, an address that carries another address
+   * (`carriesAddress`) is asked about whatever its host, and the question and the refusals say
+   * "save". `sendTargetsWhenLatched` must declare this address's host for the same input.
+   * Throws for an address that is set but cannot be read (not text): the call is then refused as
+   * an unreadable save, never let through.
+   */
+  credentialAddress?: ((input: TInput) => string | null) | undefined;
+  /**
    * When true, calling this tool ENDS the agent's turn: after the tool_result
    * is appended and checkpointed, the loop returns the turn's text instead of
    * looping back to the model. Use for terminal tools whose whole job is a
@@ -196,6 +250,11 @@ export interface ToolEntry<TInput = unknown> {
    * stacks with a later tool-availability classifier.
    */
   detailedGuidance?: string | undefined;
+  /**
+   * The guidance a locked turn gets instead of `detailedGuidance`, for a tool whose guidance is
+   * written for the owner. `''` sends none. Left out, a locked turn gets `detailedGuidance`.
+   */
+  lockedGuidance?: string | undefined;
   /**
    * What reversing this tool's effect takes — the declaration half of the undo
    * contract (PRD bulk-changes-reversible §1.4). A SEPARATE axis from

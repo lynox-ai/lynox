@@ -14,6 +14,7 @@ const CALLER = /(?:[Aa]piStore(?:\(\))?[!?)]?|(?<![.\w])store)\.getAll\(\)/g;
 const EXPECTED: Record<string, { count: number; why: string }> = {
   'src/tools/builtin/api-setup.ts': { count: 2, why: 'the list action and the note on waiting connections show usable profiles' },
   'src/server/http-api.ts': { count: 1, why: 'the profiles route lists usable profiles' },
+  'src/core/store-token-refresh.ts': { count: 1, why: 'the reconnect hint reads usable store profiles\' refresh expiry; no name or slot question' },
   'src/core/transcribe/session-context.ts': { count: 1, why: 'profile names as transcription hints' },
 };
 

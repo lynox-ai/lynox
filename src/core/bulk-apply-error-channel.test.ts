@@ -68,7 +68,8 @@ it.each([
   }
   // Positive control: the write did fail, and its record says so.
   expect(records.join('\n')).toContain(fixed);
-  expect(notes).toEqual([`\u2717 Apply\n${pushed}`]);
+  // Titled by stage and end in the owner's language; a run on the data store has no host (U-324).
+  expect(notes).toEqual([`\u2717 ${language === 'de' ? 'Massenlauf fehlgeschlagen' : 'Bulk run failed'}\n${pushed}`]);
   expect(captured.some((e) => e.message === 'bulk_apply failed: Error')).toBe(true);
   for (const text of [...records, ...notes, ...captured.map((e) => `${e.message} ${String(e.stack)}`)]) {
     expect(text).not.toContain(MARK);
