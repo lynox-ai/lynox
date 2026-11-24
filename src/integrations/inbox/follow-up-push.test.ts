@@ -75,10 +75,12 @@ describe('the push for an item a follow-up opened again', () => {
     expect(opts?.sender).toEqual({ address: 'kollege@example.com', name: 'Kollege' });
   });
 
-  it('shows the address of a follow-up that carries the item sender\'s name from another address', async () => {
-    const opts = await reopenWith(followUp({ address: 'fremd@example.net', name: ' kundin' }));
-    expect(opts?.sender).toEqual({ address: 'fremd@example.net', name: undefined });
-  });
+  for (const name of ['KUNDIN', 'Kundin<', '<Kundin>', 'Kundin\u0085', 'kunde@example.com']) {
+    it(`shows the address of a follow-up from another address whose name reads as the item's sender (${JSON.stringify(name)})`, async () => {
+      const opts = await reopenWith(followUp({ address: 'fremd@example.net', name }));
+      expect(opts?.sender).toEqual({ address: 'fremd@example.net', name: undefined });
+    });
+  }
 
   it('pushes the fixed text, naming nobody, for a flagged follow-up from someone else', async () => {
     const sent: NotificationMessage[] = [];

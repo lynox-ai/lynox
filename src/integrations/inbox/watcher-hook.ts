@@ -25,6 +25,7 @@ import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxQueuePayload } from './runner.js';
 import { analyzeSensitiveContent, reasonForCategories, type SensitiveMode } from './sensitive-content.js';
 import { envelopeToItemInputFields, type InboxStateDb, type ThreadMessageInput } from './state.js';
+import { sanitisePushText } from './notifier.js';
 
 /**
  * Channel discriminator. Currently only `email` ships — other channels
@@ -299,13 +300,15 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     // The push names the item's own sender and subject, so its own mail's flag counts as well.
     const flagged = sensitive.isSensitive || itemCategories.length > 0;
     // A follow-up from someone other than the item's sender is announced under its own sender. When
-    // it carries the item sender's name from another address, the push shows the address instead:
-    // a name alone would read as the item's sender.
+    // its name reads, as pushed, like the item sender's name or address, the push shows its address
+    // instead: that name alone would read as the item's sender.
     const otherSender = fields.fromAddress !== undefined && fields.fromAddress !== ''
       && fields.fromAddress.toLowerCase() !== existing.fromAddress.toLowerCase();
     const notifyOpts: import('./notifier.js').InboxNotifyOptions = { flagged };
     if (otherSender) {
-      const sameName = (fields.fromName ?? '').trim().toLowerCase() === (existing.fromName ?? '').trim().toLowerCase();
+      const asPushed = (x: string | undefined): string => sanitisePushText(x ?? '', 80).toLowerCase();
+      const name = asPushed(fields.fromName);
+      const sameName = name === asPushed(existing.fromName) || name === asPushed(existing.fromAddress);
       notifyOpts.sender = { address: fields.fromAddress ?? '', name: sameName ? undefined : fields.fromName };
     }
     if (item && !snoozed) void opts.notifier.notifyNewItem(item, notifyOpts);
