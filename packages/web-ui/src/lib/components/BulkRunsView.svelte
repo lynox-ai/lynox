@@ -18,7 +18,7 @@
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import ViewerUnavailableNotice from './settings-readonly/ViewerUnavailableNotice.svelte';
 	import BulkHost from './BulkHost.svelte';
-	import { bulkHaltSuffixKey, bulkHostOf, bulkLabelParts, bulkPhaseHasSuffix, bulkPhaseKey, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkMerge, type BulkRun } from './bulk-runs.js';
+	import { bulkHaltSuffixKey, bulkHostOf, bulkLabelParts, bulkReadsList, bulkPhaseHasSuffix, bulkPhaseKey, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkMerge, type BulkRun } from './bulk-runs.js';
 
 	let runs = $state<BulkRun[]>([]);
 	let merges = $state<BulkMerge[]>([]);
@@ -144,7 +144,7 @@
 							{#each runs as run (run.id)}
 								<tr class="border-b border-border hover:bg-bg-muted cursor-pointer" onclick={() => openRun(run.id)}>
 									<td class="py-2 pr-3">
-										<button type="button" class="text-left hover:underline" onclick={(e) => { e.stopPropagation(); openRun(run.id); }}>{#each bulkLabelParts(run, i18n) as part, i (i)}{#if 'slot' in part}{@render system(run)}{:else}{part.text}{/if}{/each}</button>
+										<button type="button" class="text-left hover:underline" onclick={(e) => { e.stopPropagation(); openRun(run.id); }}>{#each bulkLabelParts(run, i18n, bulkReadsList(run)) as part, i (i)}{#if 'slot' in part}{@render system(run)}{:else}{part.text}{/if}{/each}</button>
 										<div class="text-xs text-text-subtle">{when(run.createdAt)}<span class="sm:hidden">{SYSTEM_SEP}{@render system(run)}</span></div>
 									</td>
 									<td class="py-2 pr-3 hidden sm:table-cell">{@render system(run)}</td>
@@ -156,7 +156,7 @@
 											<span class="{chipClass} whitespace-nowrap bg-warning/15 text-warning">{t('bulk.unmeasured_chip')}</span>
 										{/if}
 									</td>
-									<td class="py-2 pr-3 hidden sm:table-cell font-mono text-xs">{run.applied}/{run.total}</td>
+									<td class="py-2 pr-3 hidden sm:table-cell font-mono text-xs" data-testid="bulk-run-count">{bulkReadsList(run) ? t('bulk.head.counts_pending') : `${run.applied}/${run.total}`}</td>
 									<td class="py-2 hidden sm:table-cell font-mono text-xs">{formatCost(run.costUsd)}</td>
 								</tr>
 							{/each}
