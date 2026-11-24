@@ -3543,7 +3543,9 @@ export class Engine {
     if (db === undefined) return;
     try {
       sweepAuditLog(db, Date.now(), (day, err) => {
-        process.stderr.write(`[lynox] audit log fold of ${day} failed (${err instanceof Error ? err.message : String(err)}) — that day's polls stay single rows\n`);
+        // A fixed tag an operator can grep for: while days stay unfolded, polls are kept single
+        // past the 30 days the privacy notice names. An alert on it is tracked separately.
+        process.stderr.write(`[lynox] AUDIT_FOLD_REFUSED day=${day} (${err instanceof Error ? err.message : String(err)}) — that day's polls stay single rows\n`);
       });
     } catch (err) {
       process.stderr.write(`[lynox] audit log retention sweep failed (${err instanceof Error ? err.message : String(err)}) — old trail rows are NOT being removed\n`);

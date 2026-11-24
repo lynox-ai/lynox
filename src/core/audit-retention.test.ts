@@ -17,6 +17,9 @@ const ACTIVE = 'GET /api/runs/active';
 /** On the interface-poll list, but also opened on purpose (the Tasks view): never folded. */
 const TASK_LIST = 'GET /api/tasks';
 
+/** A sweep in these tests that must not refuse a day: a refusal fails the test. */
+const noFail = (day: string, err: unknown): void => { throw new Error(`day ${day} refused: ${String(err)}`); };
+
 const quiet: TrailSources = {
   runStatus: () => undefined,
   questionOfRun: () => false,
@@ -60,15 +63,15 @@ describe('the actor trail keeps what it holds for a set time', () => {
       read(ben, PROVIDERS, '2026-10-20T10:00:00.000Z');
       read(ana, PROVIDERS, '2026-10-20T17:45:00.000Z');
       read(ana, ACTIVE, '2026-10-20T17:45:01.000Z');
-      const firstTasks = all().find((r) => r.action === PROVIDERS && r.actor_email === ana.email)!.id;
+      const firstProviders = all().find((r) => r.action === PROVIDERS && r.actor_email === ana.email)!.id;
 
-      expect(sweepAuditLog(engine.getDb(), NOW)).toEqual({ folded: 6, dayRows: 3, deleted: 0 });
+      expect(sweepAuditLog(engine.getDb(), NOW, noFail)).toEqual({ folded: 6, dayRows: 3, deleted: 0 });
 
       const rows = all();
       expect(rows).toHaveLength(3);
-      const anaTasks = rows.find((r) => r.action === PROVIDERS && r.actor_email === ana.email)!;
-      expect(anaTasks).toMatchObject({
-        id: firstTasks, ts: '2026-10-20T08:00:00.000Z', poll_last: '2026-10-20T17:45:00.000Z', poll_count: 3,
+      const anaProviders = rows.find((r) => r.action === PROVIDERS && r.actor_email === ana.email)!;
+      expect(anaProviders).toMatchObject({
+        id: firstProviders, ts: '2026-10-20T08:00:00.000Z', poll_last: '2026-10-20T17:45:00.000Z', poll_count: 3,
         phase: 'read', actor_kind: 'mandate', actor_display: 'Ana', mandate_id: 'm-ana', target: null,
       });
       expect(rows.find((r) => r.action === ACTIVE)).toMatchObject({ poll_count: 2, ts: '2026-10-20T08:00:01.000Z', poll_last: '2026-10-20T17:45:01.000Z' });
@@ -81,7 +84,7 @@ describe('the actor trail keeps what it holds for a set time', () => {
       read(ana, PROVIDERS, '2026-10-25T00:00:00.000Z');
       read(ana, PROVIDERS, '2026-10-25T12:00:00.000Z');
 
-      expect(sweepAuditLog(engine.getDb(), NOW)).toEqual({ folded: 2, dayRows: 1, deleted: 0 });
+      expect(sweepAuditLog(engine.getDb(), NOW, noFail)).toEqual({ folded: 2, dayRows: 1, deleted: 0 });
       const rows = all();
       expect(rows.map((r) => [r.ts, r.poll_count])).toEqual([
         ['2026-10-24T23:59:59.000Z', 2],
@@ -109,7 +112,7 @@ describe('the actor trail keeps what it holds for a set time', () => {
       log.record({ principal: ana, action: PROVIDERS, target: '/api/tasks', phase: 'refused', correlationId: newCorrelationId(), at: '2026-10-20T08:20:00.000Z' });
       const before = all();
 
-      expect(sweepAuditLog(engine.getDb(), NOW)).toEqual({ folded: 0, dayRows: 0, deleted: 0 });
+      expect(sweepAuditLog(engine.getDb(), NOW, noFail)).toEqual({ folded: 0, dayRows: 0, deleted: 0 });
       expect(all()).toEqual(before);
     });
 
@@ -118,7 +121,7 @@ describe('the actor trail keeps what it holds for a set time', () => {
       read({ ...ana, display: 'Ana B.' }, PROVIDERS, '2026-10-20T09:00:00.000Z');
       read(ana, PROVIDERS, '2026-10-20T10:00:00.000Z');
 
-      sweepAuditLog(engine.getDb(), NOW);
+      sweepAuditLog(engine.getDb(), NOW, noFail);
       expect(all().map((r) => [r.actor_display, r.poll_count])).toEqual([['Ana', 2], ['Ana B.', 1]]);
     });
 
@@ -126,7 +129,7 @@ describe('the actor trail keeps what it holds for a set time', () => {
       const anon: RequestPrincipal = { kind: 'mandate', email: 'anon@example.invalid' };
       read(anon, PROVIDERS, '2026-10-20T08:00:00.000Z');
       read(anon, PROVIDERS, '2026-10-20T09:00:00.000Z');
-      expect(sweepAuditLog(engine.getDb(), NOW)).toEqual({ folded: 2, dayRows: 1, deleted: 0 });
+      expect(sweepAuditLog(engine.getDb(), NOW, noFail)).toEqual({ folded: 2, dayRows: 1, deleted: 0 });
       expect(all()).toEqual([expect.objectContaining({ actor_email: 'anon@example.invalid', actor_display: null, mandate_id: null, poll_count: 2 })]);
     });
 
@@ -140,20 +143,20 @@ describe('the actor trail keeps what it holds for a set time', () => {
         read(ana, route, at);
         read(ana, route, at.replace('T08', 'T09'));
       }
-      expect(sweepAuditLog(engine.getDb(), NOW)).toEqual({ folded: 2 * FOLD_DAYS_PER_SWEEP, dayRows: FOLD_DAYS_PER_SWEEP, deleted: 0 });
+      expect(sweepAuditLog(engine.getDb(), NOW, noFail)).toEqual({ folded: 2 * FOLD_DAYS_PER_SWEEP, dayRows: FOLD_DAYS_PER_SWEEP, deleted: 0 });
       const folded = all().filter((r) => r.poll_count !== null).map((r) => r.ts.slice(0, 10));
       expect(folded).toEqual(Array.from({ length: FOLD_DAYS_PER_SWEEP }, (_, d) => new Date(Date.parse('2026-09-01T00:00:00.000Z') + d * DAY).toISOString().slice(0, 10)));
-      expect(sweepAuditLog(engine.getDb(), NOW)).toEqual({ folded: 4, dayRows: 2, deleted: 0 });
+      expect(sweepAuditLog(engine.getDb(), NOW, noFail)).toEqual({ folded: 4, dayRows: 2, deleted: 0 });
       expect(all().every((r) => r.poll_count === 2)).toBe(true);
     });
 
     it('does not fold a day row again', () => {
       read(ana, PROVIDERS, '2026-10-20T08:00:00.000Z');
       read(ana, PROVIDERS, '2026-10-20T09:00:00.000Z');
-      sweepAuditLog(engine.getDb(), NOW);
+      sweepAuditLog(engine.getDb(), NOW, noFail);
       const once = all();
 
-      expect(sweepAuditLog(engine.getDb(), NOW + DAY)).toEqual({ folded: 0, dayRows: 0, deleted: 0 });
+      expect(sweepAuditLog(engine.getDb(), NOW + DAY, noFail)).toEqual({ folded: 0, dayRows: 0, deleted: 0 });
       expect(all()).toEqual(once);
     });
 
@@ -162,7 +165,7 @@ describe('the actor trail keeps what it holds for a set time', () => {
       step(ana, '2026-10-20T08:30:00.000Z');
       read(ana, PROVIDERS, '2026-10-20T09:00:00.000Z');
       read(ana, PROVIDERS, '2026-11-20T09:00:00.000Z');
-      sweepAuditLog(engine.getDb(), NOW);
+      sweepAuditLog(engine.getDb(), NOW, noFail);
 
       const page = readTrailPage(engine.getDb(), { limit: 50 });
       expect(page.rows.map((r) => [r.phase, r.poll_count ?? null])).toEqual([['read', 2], ['attempt', null], ['done', null], ['read', null]]);
@@ -186,7 +189,7 @@ describe('the actor trail keeps what it holds for a set time', () => {
       read(ana, 'GET /api/inbox/items', old);
       read(ana, 'GET /api/inbox/items', young);
 
-      expect(sweepAuditLog(engine.getDb(), NOW)).toEqual({ folded: 0, dayRows: 0, deleted: 3 });
+      expect(sweepAuditLog(engine.getDb(), NOW, noFail)).toEqual({ folded: 0, dayRows: 0, deleted: 3 });
       const rows = all();
       expect(rows.map((r) => r.ts)).toEqual([young, new Date(NOW).toISOString()]);
       const mark = rows[1]!;
@@ -200,7 +203,7 @@ describe('the actor trail keeps what it holds for a set time', () => {
 
     it('writes no row when nothing was deleted', () => {
       read(ana, 'GET /api/inbox/items', new Date(NOW - DAY).toISOString());
-      expect(sweepAuditLog(engine.getDb(), NOW).deleted).toBe(0);
+      expect(sweepAuditLog(engine.getDb(), NOW, noFail).deleted).toBe(0);
       expect(all()).toHaveLength(1);
     });
 
@@ -208,54 +211,56 @@ describe('the actor trail keeps what it holds for a set time', () => {
       read(ana, PROVIDERS, '2025-11-24T08:00:00.000Z');
       read(ana, PROVIDERS, '2025-11-24T20:00:00.000Z');
       // Folded on day 31, as the hourly sweep does.
-      sweepAuditLog(engine.getDb(), Date.parse('2025-12-26T00:00:00.000Z'));
+      sweepAuditLog(engine.getDb(), Date.parse('2025-12-26T00:00:00.000Z'), noFail);
       const at = Date.parse('2025-11-24T08:00:00.000Z') + AUDIT_RETENTION_MS + DAY / 2; // first read past, last not
-      expect(sweepAuditLog(engine.getDb(), at).deleted).toBe(0);
+      expect(sweepAuditLog(engine.getDb(), at, noFail).deleted).toBe(0);
       expect(all().map((r) => r.poll_count)).toEqual([2]);
 
       const later = Date.parse('2025-11-24T20:00:00.000Z') + AUDIT_RETENTION_MS + 1000;
-      expect(sweepAuditLog(engine.getDb(), later).deleted).toBe(1);
+      expect(sweepAuditLog(engine.getDb(), later, noFail).deleted).toBe(1);
       expect(all().map((r) => r.action)).toEqual([RETENTION_ACTION]);
     });
 
     it('deletes its own row by the same rule, and leaves no new one for it', () => {
       read(ana, 'GET /api/inbox/items', new Date(NOW - AUDIT_RETENTION_MS - DAY).toISOString());
-      sweepAuditLog(engine.getDb(), NOW);
+      sweepAuditLog(engine.getDb(), NOW, noFail);
       expect(all().map((r) => r.action)).toEqual([RETENTION_ACTION]);
 
       const next = NOW + AUDIT_RETENTION_MS + 1000;
-      expect(sweepAuditLog(engine.getDb(), next).deleted).toBe(1);
+      expect(sweepAuditLog(engine.getDb(), next, noFail).deleted).toBe(1);
       expect(all()).toEqual([]);
     });
 
     it('leaves a row when a person\'s row goes with its own rows', () => {
       read(ana, 'GET /api/inbox/items', new Date(NOW - AUDIT_RETENTION_MS - DAY).toISOString());
-      sweepAuditLog(engine.getDb(), NOW);
+      sweepAuditLog(engine.getDb(), NOW, noFail);
       const later = new Date(NOW + 10 * DAY).toISOString();
       read(ana, 'GET /api/inbox/items', later);
-      expect(sweepAuditLog(engine.getDb(), NOW + 10 * DAY + AUDIT_RETENTION_MS + 1000).deleted).toBe(2);
+      expect(sweepAuditLog(engine.getDb(), NOW + 10 * DAY + AUDIT_RETENTION_MS + 1000, noFail).deleted).toBe(2);
       expect(all()).toEqual([expect.objectContaining({ action: RETENTION_ACTION, target: `2 rows, ${new Date(NOW).toISOString()}..${later}` })]);
     });
   });
 
-  it('leaves a refused day as it was, reports it, and still deletes and folds the other days', () => {
+  it('leaves a refused day as it was, reports it, deletes, and folds the days before and after it', () => {
     const expired = new Date(NOW - AUDIT_RETENTION_MS - DAY).toISOString();
     read(ana, 'GET /api/inbox/items', expired);
+    read(ana, PROVIDERS, '2026-10-18T08:00:00.000Z');
     read(ana, PROVIDERS, '2026-10-19T08:00:00.000Z');
-    read(ana, PROVIDERS, '2026-10-19T09:00:00.000Z');
+    read(ana, ACTIVE, '2026-10-19T09:00:01.000Z');
     read(ana, PROVIDERS, '2026-10-20T08:00:00.000Z');
-    read(ana, ACTIVE, '2026-10-20T09:00:01.000Z');
-    const refusedDay = all().filter((r) => r.ts.startsWith('2026-10-20'));
-    engine.getDb().exec("CREATE TRIGGER refuse_day_rows BEFORE INSERT ON audit_log WHEN NEW.poll_count IS NOT NULL AND NEW.ts LIKE '2026-10-20%' BEGIN SELECT RAISE(ABORT, 'refused'); END;");
+    read(ana, PROVIDERS, '2026-10-20T09:00:00.000Z');
+    const refusedDay = all().filter((r) => r.ts.startsWith('2026-10-19'));
+    engine.getDb().exec("CREATE TRIGGER refuse_day_rows BEFORE INSERT ON audit_log WHEN NEW.poll_count IS NOT NULL AND NEW.ts LIKE '2026-10-19%' BEGIN SELECT RAISE(ABORT, 'refused'); END;");
     const failed: Array<[string, string]> = [];
 
     expect(sweepAuditLog(engine.getDb(), NOW, (day, err) => { failed.push([day, err instanceof Error ? err.message : String(err)]); }))
-      .toEqual({ folded: 2, dayRows: 1, deleted: 1 });
-    expect(failed).toEqual([['2026-10-20', 'refused']]);
+      .toEqual({ folded: 3, dayRows: 2, deleted: 1 });
+    expect(failed).toEqual([['2026-10-19', 'refused']]);
     const rows = all();
     expect(rows.some((r) => r.ts === expired)).toBe(false);
-    expect(rows.filter((r) => r.ts.startsWith('2026-10-19'))).toEqual([expect.objectContaining({ poll_count: 2 })]);
-    expect(rows.filter((r) => r.ts.startsWith('2026-10-20'))).toEqual(refusedDay);
+    expect(rows.filter((r) => r.ts.startsWith('2026-10-18'))).toEqual([expect.objectContaining({ poll_count: 1 })]);
+    expect(rows.filter((r) => r.ts.startsWith('2026-10-19'))).toEqual(refusedDay);
+    expect(rows.filter((r) => r.ts.startsWith('2026-10-20'))).toEqual([expect.objectContaining({ poll_count: 2 })]);
   });
 
   it('applies nothing when the delete is refused', () => {
@@ -264,7 +269,7 @@ describe('the actor trail keeps what it holds for a set time', () => {
     const before = all();
     engine.getDb().exec("CREATE TRIGGER refuse_marks BEFORE INSERT ON audit_log WHEN NEW.actor_kind = 'retention' BEGIN SELECT RAISE(ABORT, 'refused'); END;");
 
-    expect(() => sweepAuditLog(engine.getDb(), NOW)).toThrow('refused');
+    expect(() => sweepAuditLog(engine.getDb(), NOW, noFail)).toThrow('refused');
     expect(all()).toEqual(before);
   });
 });

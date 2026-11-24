@@ -19,7 +19,8 @@
  *
  * Known edges, accepted: at the 365-day boundary a run whose first rows are deleted shows in the
  * owner's view with what is left of it; a person whose name changed within a folded day keeps one
- * day row per name.
+ * day row per name; when the database refuses the oldest seven foldable days on every sweep, no
+ * later day is folded until those are deleted (each refusal is reported).
  */
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
@@ -87,8 +88,8 @@ const FOLDABLE = `phase = 'read' AND poll_count IS NULL AND action IN (${POLL_IN
  */
 export function sweepAuditLog(
   db: Database.Database,
-  now: number = Date.now(),
-  onDayFailed: (day: string, err: unknown) => void = () => {},
+  now: number,
+  onDayFailed: (day: string, err: unknown) => void,
 ): AuditSweepResult {
   const deleted = db.transaction(() => deleteExpired(db, new Date(now - AUDIT_RETENTION_MS).toISOString(), now))();
   // A day before this one has ended more than 30 days ago, so no poll of it can still arrive.
