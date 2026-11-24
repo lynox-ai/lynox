@@ -26,6 +26,8 @@ export const BULK_MANDATE_KEYS: ReadonlySet<string> = new Set([
 	'bulk.invalid.html_too_long', 'bulk.invalid.html_too_long_woocommerce',
 	'bulk.halt.consentOutdated', 'bulk.halt.consentOutdated_more',
 	'bulk.halt.consentOutdated_undo', 'bulk.halt.consentOutdated_more_undo', 'bulk.halt.discarded_undo',
+	// Only the owner starts an undo again: a mandate reads that the owner does it, and where.
+	'bulk.sent_unknown.one_undo', 'bulk.sent_unknown.many_undo',
 	'bulk.invalid.before_has_shop_markup', 'bulk.invalid.before_has_shop_markup_undated',
 ]);
 
@@ -73,6 +75,9 @@ export interface BulkRun {
 	/** Targets not written because an earlier send reached them without a clear answer; the
 	 *  engine does not send to them again. */
 	sentUnknown: number;
+	/** The run's list as the engine counts it; null for a run without one. Absent from an engine
+	 *  older than the field, which reads as no list. The runs list carries it too, from the run's own row. */
+	list?: { state: string } | null;
 	/** Written targets the store kept with markup lynox did not send. Optional: an older engine sends none. */
 	shopAddedMarkup?: number | undefined;
 	/** Written targets whose store kept a description otherwise than sent, without outside markup: counted, not halted. */
@@ -89,7 +94,8 @@ export interface BulkRun {
 	haltKey: string | null;
 	costUsd: number;
 	costCapUsd: number | null;
-	judge: { tier: string; unjudged: number } | null;
+	/** `judged`: targets with a verdict, a refused one included; absent on an older engine. */
+	judge: { tier: string; unjudged: number; judged?: number | undefined } | null;
 	/** The form a list run reads, as stored (detail only). */
 	listForm?: string | null | undefined;
 	/** A judged run whose rule decides an HTML field (detail only). */
@@ -152,9 +158,6 @@ export interface BulkRunDetailData extends BulkRun {
 	judgeServedBy: { provider: string; label: string } | null;
 	/** An instance with its own model key: the engine refuses every start of a judged run there. */
 	judgeOwnKey: boolean;
-	/** The run's list as the engine counts it; null for a run without one. Absent from an engine
-	 *  older than the field, which reads as no list. */
-	list?: { state: string } | null;
 	/** The link domains the owner allowed at the start of a judged list run, besides the store's
 	 *  own (PRD shopify-preset §20.2 item 5); null or absent where none were given. */
 	startDomains?: string[] | null;
@@ -167,29 +170,48 @@ export function bulkTakesStartDomains(run: Pick<BulkRunDetailData, 'judge' | 'li
 	return run.judge !== null && (run.list ?? null) !== null && bulkHostOf(run.targetSystem) !== null;
 }
 
-/** The word over a halted run's cause. An owner's stop is a stop, not a halt: „angehalten“ is
- *  the word of a run that ended where its approval, a failure or a limit told it to. */
-export function bulkHaltHeadKey(run: Pick<BulkRun, 'haltKey'>): 'bulk.head.stopped' | 'bulk.head.halted' | 'bulk.head.discarded' {
+/** The word over a halted run's cause: it says whether the run can go on from there (U-342). An
+ *  owner's stop is a stop, not a halt: „angehalten“ is the word of a run that stopped where its
+ *  approval, a failure or a limit told it to and can be continued. An aborted run cannot: one
+ *  lynox ended reads „abgebrochen“, or „ersetzt“ where a newer run took its place; one the owner
+ *  stopped reads „gestoppt“ as any owner's stop. */
+export function bulkHaltHeadKey(run: Pick<BulkRun, 'haltKey'> & Partial<Pick<BulkRun, 'phase'>>): 'bulk.head.stopped' | 'bulk.head.halted' | 'bulk.head.discarded' | 'bulk.head.aborted' | 'bulk.head.replaced' {
 	// A discarded run reads "Discarded" next to the sentence and the chip that say so (U-324).
 	if (run.haltKey === 'discarded') return 'bulk.head.discarded';
-	return run.haltKey === 'stoppedByOwner' ? 'bulk.head.stopped' : 'bulk.head.halted';
+	if (bulkOwnerStopped(run)) return 'bulk.head.stopped';
+	if (run.phase === 'aborted') return run.haltKey === 'superseded' ? 'bulk.head.replaced' : 'bulk.head.aborted';
+	return 'bulk.head.halted';
 }
 
-/** A run's phase as the list names it: a run the owner discarded before approving it reads
- *  "discarded", not "aborted" (U-324); every other run by its phase. */
+/** A run's phase as the list names it. An aborted run reads who or what ended it, as the run page's
+ *  head does (U-342): one the owner discarded before approving it „verworfen“ (U-324), one the
+ *  owner stopped and lynox rolled back „gestoppt“, one a newer run replaced „ersetzt“, and one
+ *  lynox ended „abgebrochen“. Every other run by its phase. */
 export function bulkPhaseKey(run: Pick<BulkRun, 'phase' | 'haltKey'>): string {
-	return run.phase === 'aborted' && run.haltKey === 'discarded' ? 'bulk.phase.discarded' : `bulk.phase.${run.phase}`;
+	if (run.phase === 'aborted') {
+		if (run.haltKey === 'discarded') return 'bulk.phase.discarded';
+		if (bulkOwnerStopped(run)) return 'bulk.phase.stopped';
+		if (run.haltKey === 'superseded') return 'bulk.phase.replaced';
+	}
+	return `bulk.phase.${run.phase}`;
 }
 
-/** A run's phase carries the halted or stopped suffix in the list; a discarded one does not, since
- *  its phase already says why it ended. */
+/** A run's phase carries the halted or stopped suffix in the list. An aborted one does not: its
+ *  phase already says how it ended, and „angehalten“ would say it can go on (U-342). */
 export function bulkPhaseHasSuffix(run: Pick<BulkRun, 'phase' | 'haltKey' | 'haltReason'>): boolean {
-	return run.haltReason !== null && !(run.phase === 'aborted' && run.haltKey === 'discarded');
+	return run.haltReason !== null && run.phase !== 'aborted';
 }
 
 /** The same distinction for the suffix on a run's phase in the list. */
 export function bulkHaltSuffixKey(run: Pick<BulkRun, 'haltKey'>): 'bulk.stopped_suffix' | 'bulk.halted_suffix' {
-	return run.haltKey === 'stoppedByOwner' ? 'bulk.stopped_suffix' : 'bulk.halted_suffix';
+	return bulkOwnerStopped(run) ? 'bulk.stopped_suffix' : 'bulk.halted_suffix';
+}
+
+/** The halts an owner's stop ends in: the same act reads the same with or without the atomic
+ *  rollback after it, on the run page and in the list (U-342). */
+const BULK_OWNER_STOPS = new Set(['stoppedByOwner', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete']);
+function bulkOwnerStopped(run: Pick<BulkRun, 'haltKey'>): boolean {
+	return run.haltKey !== null && BULK_OWNER_STOPS.has(run.haltKey);
 }
 
 /** The start a waiting run takes: read its targets, read its list, start its judging — or none,
@@ -444,12 +466,42 @@ export function bulkResumeMax(input: unknown, current: number | null, all: numbe
 	return n;
 }
 
+/** The run fields that decide what the page says about unclear sends. */
+type BulkSentUnknownRun = Pick<BulkRunDetailData, 'sentUnknown' | 'phase' | 'haltKey' | 'haltReason'> & Partial<Pick<BulkRun, 'kind'>>;
+
+/** The key of the sentence about unclear sends: a write's, an undo's while it still runs (it
+ *  cannot be started again then, so the sentence only says that the way on follows once it
+ *  stops), or a stopped undo's, which says to start it again from the run it undoes. */
+function bulkSentUnknownKey(run: BulkSentUnknownRun): string {
+	const n = run.sentUnknown === 1 ? 'one' : 'many';
+	if (run.kind !== 'undo') return `bulk.sent_unknown.${n}`;
+	return `bulk.sent_unknown.${n}_undo${bulkEngineWorking(run) ? '_running' : ''}`;
+}
+
 /** What the page says about the targets an earlier send reached without a clear answer, or
- *  null when there are none. It hangs on their number alone: the same on every halt, on a
- *  finished run, and for every run size. */
-export function bulkSentUnknownText(run: Pick<BulkRun, 'sentUnknown'>, i18n: BulkI18n): string | null {
+ *  null when there are none. It hangs on their number and on the kind of run alone: the same on
+ *  every halt, on a finished run, and for every run size. A write sends the owner to the chat to
+ *  plan it again; an undo is not planned there. A stopped undo says to start it again from the
+ *  run it undoes, whose new pass reads each target first and sends only where the change still
+ *  stands; a mandate reads that the owner does that (`view`, {@link bulkMandateI18n}). An undo
+ *  that still runs says only that the way on follows once it stops: starting it again is refused
+ *  while it runs. The link words stand unlinked here; {@link bulkSentUnknownParts} links them. */
+export function bulkSentUnknownText(run: BulkSentUnknownRun, i18n: BulkI18n): string | null {
 	if (run.sentUnknown <= 0) return null;
-	return run.sentUnknown === 1 ? i18n.t('bulk.sent_unknown.one') : i18n.tf('bulk.sent_unknown.many', { count: String(run.sentUnknown) });
+	return i18n.tf(bulkSentUnknownKey(run), { count: String(run.sentUnknown), link: i18n.t('bulk.resume.none_undo_link') });
+}
+
+/** A stopped undo's sentence about unclear sends, split around the words the page links to the
+ *  run it undoes. Null for a write, for no unclear send, for an undo that still runs (its sentence
+ *  names no page), and for an undo that names no run (its sentence then stands as
+ *  {@link bulkSentUnknownText} words it). */
+export function bulkSentUnknownParts(
+	run: BulkSentUnknownRun & Pick<BulkRun, 'sourceRunId'>,
+	i18n: BulkI18n,
+): { before: string; link: string; after: string } | null {
+	if (run.kind !== 'undo' || run.sentUnknown <= 0 || run.sourceRunId === null || bulkEngineWorking(run)) return null;
+	const [before = '', after = ''] = i18n.tf(bulkSentUnknownKey(run), { count: String(run.sentUnknown) }).split('{link}');
+	return { before, link: i18n.t('bulk.resume.none_undo_link'), after };
 }
 
 /** Whether `/api/config` says this is a managed instance: its config carries `managed` (the
@@ -994,17 +1046,21 @@ export function bulkHostSplit(text: string, host: string | null): BulkSentencePa
 }
 
 /** A run's label in parts: the host of an external run is the slot the page boxes; a system lynox
- *  names itself is text. */
-export function bulkLabelParts(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n): BulkSentencePart[] {
-	if (!bulkHostOf(run.targetSystem)) return [{ text: bulkLabel(run, i18n) }];
-	const one = run.total === 1 ? '_one' : '';
-	return bulkSentenceParts(i18n.t(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`), 'target', { n: String(run.total) });
+ *  names itself is text. While its counts are still pending (see bulkCountsPending) the size reads
+ *  "–", as the head's counts do. */
+export function bulkLabelParts(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n, countsPending = false): BulkSentencePart[] {
+	if (!bulkHostOf(run.targetSystem)) return [{ text: bulkLabel(run, i18n, countsPending) }];
+	const one = !countsPending && run.total === 1 ? '_one' : '';
+	const n = countsPending ? i18n.t('bulk.head.counts_pending') : String(run.total);
+	return bulkSentenceParts(i18n.t(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`), 'target', { n });
 }
 
-/** A run has no title: it is named by its size and where it writes. */
-export function bulkLabel(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n): string {
-	const one = run.total === 1 ? '_one' : '';
-	return i18n.tf(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`, { n: String(run.total), target: bulkSystemName(run.targetSystem, i18n) });
+/** A run has no title: it is named by its size and where it writes. While its counts are still
+ *  pending (see bulkCountsPending) the size reads "–", as the head's counts do. */
+export function bulkLabel(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>, i18n: BulkI18n, countsPending = false): string {
+	const one = !countsPending && run.total === 1 ? '_one' : '';
+	const n = countsPending ? i18n.t('bulk.head.counts_pending') : String(run.total);
+	return i18n.tf(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`, { n, target: bulkSystemName(run.targetSystem, i18n) });
 }
 
 /** The line about targets that held another value than expected when lynox last read them, or
@@ -1041,6 +1097,74 @@ export function bulkEngineWorking(run: Pick<BulkRunDetailData, 'phase' | 'haltKe
 	// Any halt, by its key or by a reason this page does not know (an engine newer than the page).
 	if (run.haltKey !== null || run.haltReason !== null) return false;
 	return run.phase === 'planned' || run.phase === 'approved' || run.phase === 'writing';
+}
+
+/** Whether the engine is reading the run's list now, by what the runs list knows of a run: the
+ *  same step as the page's {@link bulkWorkingStep} `list`, while the list is still to be read and
+ *  no halt stands (a list is read before the run can be approved, so no phase needs naming). The
+ *  list's title and count then read „–“ as the page's do: nothing is counted yet. */
+export function bulkReadsList(run: Pick<BulkRun, 'phase' | 'haltKey' | 'haltReason' | 'list'>): boolean {
+	return bulkEngineWorking(run) && run.list?.state === 'pending';
+}
+
+/** The step the engine is working on while it moves a run on by itself, for the page's working
+ *  line: reading the list (its first page is set only while the list is still being read),
+ *  reading the targets, judging them (a judged run reads them in the same step), writing, or
+ *  taking a run back (an undo writes too). Null for a run the engine is not working on ({@link bulkEngineWorking}). */
+export type BulkWorkingStep = 'list' | 'read' | 'judge' | 'write' | 'undo';
+
+export function bulkWorkingStep(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'haltReason' | 'listFirstPage' | 'judge' | 'kind'>): BulkWorkingStep | null {
+	if (!bulkEngineWorking(run)) return null;
+	if (run.phase === 'approved' || run.phase === 'writing') return run.kind === 'undo' ? 'undo' : 'write';
+	if (run.listFirstPage !== null) return 'list';
+	return run.judge !== null ? 'judge' : 'read';
+}
+
+/** The working line of a step: its key and the run's numbers it names. Judging counts the
+ *  verdicts out of the targets the judge reads (an engine that does not count them gets the
+ *  line without numbers); writing and taking back count the targets done out of those the run
+ *  plans to write. A target the read turns invalid leaves the judge's count: the targets it
+ *  judges can shrink while it reads them. Reading the list or the targets names no number: the engine does not count it. */
+export function bulkWorkingLine(
+	step: BulkWorkingStep,
+	run: Pick<BulkRun, 'judge' | 'applied' | 'changes'>,
+): { key: string; params: Record<string, string> } {
+	if (step === 'judge') {
+		const judged = run.judge?.judged;
+		if (judged === undefined) return { key: 'bulk.working.judge_open', params: {} };
+		return { key: 'bulk.working.judge', params: { k: String(judged), n: String(judged + (run.judge?.unjudged ?? 0)) } };
+	}
+	if (step === 'write' || step === 'undo') {
+		// Out of every target the run plans to write: `applied` counts each once, one found as
+		// planned too, so it never passes them. An approval or a probe that ends the write earlier
+		// halts the run, and the halt's sentence says why; the line is gone then.
+		return { key: `bulk.working.${step}`, params: { a: String(run.applied), n: String(bulkWriting(run)) } };
+	}
+	return { key: `bulk.working.${step}`, params: {} };
+}
+
+/** Whether the run's size is not known yet: while the list is read, the targets are still being
+ *  found, so the title and the head show a dash instead of a number. */
+export function bulkCountsPending(step: BulkWorkingStep | null): boolean {
+	return step === 'list';
+}
+
+/** Phases before the run writes: planned (reading, judging), previewed, approved. */
+const BULK_BEFORE_WRITE: ReadonlySet<BulkPhase> = new Set(['planned', 'previewed', 'approved']);
+
+/** The head's counts. While the list is read there is nothing to count yet. Until the run has
+ *  begun to write (the probe or the run), only the number of targets stands: a „geschrieben 0 ·
+ *  Konflikte 0 · fehlgeschlagen 0“ before any write reads as a finished run. Once a target is
+ *  written, in conflict or failed, the counts stand whatever the phase. An undo counts what it
+ *  took back. */
+export function bulkHeadCounts(
+	step: BulkWorkingStep | null,
+	run: Pick<BulkRun, 'kind' | 'phase' | 'total' | 'applied' | 'conflicts' | 'failed'>,
+	i18n: BulkI18n,
+): string {
+	if (step === 'list') return i18n.t('bulk.head.counts_pending');
+	if (BULK_BEFORE_WRITE.has(run.phase) && run.applied === 0 && run.conflicts === 0 && run.failed === 0) return String(run.total);
+	return i18n.tf(run.kind === 'undo' ? 'bulk.head.counts_undo' : 'bulk.head.counts', { n: String(run.total), a: String(run.applied), c: String(run.conflicts), f: String(run.failed) });
 }
 
 /** How the page follows a run the engine is moving on: it asks for the run every `BULK_FOLLOW_MS`
@@ -1216,7 +1340,8 @@ export function bulkSeoEntityCount(targets: readonly Pick<BulkTarget, 'seoEntity
 export const BULK_STEPS = ['planned', 'preview', 'approval', 'probe', 'run', 'done'] as const;
 export type BulkStepName = (typeof BULK_STEPS)[number];
 
-type BulkStepRun = Pick<BulkRunDetailData, 'probe' | 'haltReason' | 'phase' | 'targetSystem' | 'probeConfirmed' | 'probeOwn' | 'changes'>;
+type BulkStepRun = Pick<BulkRunDetailData, 'probe' | 'haltReason' | 'phase' | 'targetSystem' | 'probeConfirmed' | 'probeOwn' | 'changes'>
+	& Partial<Pick<BulkRunDetailData, 'haltKey' | 'applied' | 'conflicts' | 'failed' | 'sentUnknown'>>;
 
 /** Whether the run has a probe step: two or more targets to write (counted as the write counts
  *  them), and its probe does not hold yet or it confirmed one of its own. A run at its probe is
@@ -1232,14 +1357,29 @@ export function bulkSteps(run: BulkStepRun): readonly BulkStepName[] {
 	return bulkHasProbeStep(run) ? BULK_STEPS : BULK_STEPS.filter((s) => s !== 'probe');
 }
 
-/** Which of {@link BULK_STEPS} the run is at. A run without a probe step writes its one target
- *  under "run", though the engine may hold it there as at a probe. */
-export function bulkStep(run: BulkStepRun): BulkStepName {
+/** Which of {@link BULK_STEPS} the run is at, or null where the page cannot know. A run without
+ *  a probe step writes its one target under "run", though the engine may hold it there as at a
+ *  probe. The chip marks the step the run stands at, not how it ended (U-342): an approved run
+ *  that halted before it sent anything still stands at its approval; an aborted run stands where
+ *  it was writing; a run that ended before its approval may never have been previewed, so no
+ *  step is marked, except a discarded one, whose last step reads „verworfen“. */
+export function bulkStep(run: BulkStepRun): BulkStepName | null {
 	if (run.phase === 'planned') return 'planned';
 	if (run.phase === 'previewed') return 'approval';
 	if (bulkAtProbe(run) && bulkHasProbeStep(run)) return 'probe';
+	if (run.phase === 'approved' && run.haltReason !== null && bulkSentNothing(run)) return 'approval';
 	if (run.phase === 'approved' || run.phase === 'writing') return 'run';
+	if (run.phase === 'aborted') {
+		if (run.haltKey === 'discarded') return 'done';
+		return run.haltKey !== null && run.haltKey !== undefined && BULK_ENDED_UNAPPROVED.has(run.haltKey) ? null : 'run';
+	}
 	return 'done';
+}
+
+/** Whether the run has sent nothing yet: nothing written, in conflict, failed or sent unknown. A
+ *  count the page was not given does not count as none: the run then stands at its run. */
+function bulkSentNothing(run: BulkStepRun): boolean {
+	return [run.applied, run.conflicts, run.failed, run.sentUnknown].every((n) => n === 0);
 }
 
 /** The i18n key of a step's chip. An undone run's last step reads as the list reads its phase
