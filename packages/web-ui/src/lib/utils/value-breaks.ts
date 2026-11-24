@@ -5,11 +5,16 @@
  * each piece whole while it fits on a line, with a `<wbr>` between them (`WholeValue`); only a piece
  * longer than a line (a long id in a path) breaks inside, anywhere.
  */
-export type ValueKind = 'host' | 'url';
+export type ValueKind = 'host' | 'url' | 'account';
 
-/** The value in pieces that each end where a break may fall: `acme-store.` / `myshopify.` / `com`. */
+/**
+ * The value in pieces that each end where a break may fall: `acme-store.` / `myshopify.` / `com`. An
+ * account (a provider's label: a shop, an address) also after `@` and `/`: `buero@` / `kunden-crm.` /
+ * `example`. A character printed as its code point (`<U+202E>`) holds none of these, so it stays in
+ * one piece.
+ */
 export function valueSegments(value: string, kind: ValueKind): string[] {
-	return value.split(kind === 'host' ? /(?<=\.)/ : /(?<=[./])(?!\/)/);
+	return value.split(kind === 'host' ? /(?<=\.)/ : kind === 'account' ? /(?<=[.@/])/ : /(?<=[./])(?!\/)/);
 }
 
 /** A sentence split at a placeholder, with its other placeholders filled: the value goes between the parts. */

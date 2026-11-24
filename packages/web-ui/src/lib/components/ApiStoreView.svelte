@@ -8,6 +8,7 @@
 	import Icon from '../primitives/Icon.svelte';
 	import PresetClientForm from './PresetClientForm.svelte';
 	import MarkedLine from './MarkedLine.svelte';
+	import MarkedValue from './MarkedValue.svelte';
 	import { plainText, shownValue, shownWhole } from '../utils/plan-takeover.js';
 	import { connectionLine, type ConnectionLine, type OAuthGrantView } from '../utils/oauth-connection.js';
 	import { authChipLabel } from '../utils/api-auth-label.js';
@@ -244,7 +245,7 @@
 							<p class="text-xs text-text-subtle mt-1 font-mono"><WholeValue value={plainText(shownWhole(profile.base_url))} kind="url" testid="api-base-url" /></p>
 							{#if connectionLine(profile.oauth_grant)}
 								{@const conn = connectionParts(connectionLine(profile.oauth_grant)!)}
-								<p class="text-xs text-text-muted mt-1" data-testid="api-connection"><MarkedLine text={conn.lead} />{#if conn.account !== null}<span class="inline-block max-w-full" data-testid="api-connection-account"><MarkedLine text={conn.account} /></span>{/if}{conn.after}</p>
+								<p class="text-xs text-text-muted mt-1" data-testid="api-connection"><MarkedLine text={conn.lead} />{#if conn.account !== null}<MarkedValue text={conn.account} testid="api-connection-account" />{/if}{conn.after}</p>
 							{/if}
 						</button>
 						<button onclick={() => manageInChat(profile)}
