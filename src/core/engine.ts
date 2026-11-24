@@ -3533,15 +3533,18 @@ export class Engine {
   }
 
   /**
-   * Fold the trail's old polls and delete what is past its time (`sweepAuditLog`). Best-effort: a
-   * failed sweep must not stop the engine, and it is reported rather than swallowed. Nothing is
-   * changed then; the next hour tries again.
+   * Delete what is past its time and fold the trail's old polls (`sweepAuditLog`). Best-effort: a
+   * failed step must not stop the engine, and it is reported rather than swallowed. A refused delete
+   * applies nothing; a refused day is left as it was while the other days fold. The next hour tries
+   * again.
    */
   private _sweepAuditLog(): void {
     const db = this.engineDb?.getDb();
     if (db === undefined) return;
     try {
-      sweepAuditLog(db);
+      sweepAuditLog(db, Date.now(), (day, err) => {
+        process.stderr.write(`[lynox] audit log fold of ${day} failed (${err instanceof Error ? err.message : String(err)}) — that day's polls stay single rows\n`);
+      });
     } catch (err) {
       process.stderr.write(`[lynox] audit log retention sweep failed (${err instanceof Error ? err.message : String(err)}) — old trail rows are NOT being removed\n`);
     }

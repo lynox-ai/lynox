@@ -12,7 +12,7 @@ const NOW = Date.parse('2026-11-24T12:00:00.000Z');
 const DAY = 24 * 60 * 60_000;
 const ana: RequestPrincipal = { kind: 'mandate', email: 'ana@example.invalid', mandateId: 'm-ana', display: 'Ana' };
 const ben: RequestPrincipal = { kind: 'mandate', email: 'ben@example.invalid', mandateId: 'm-ben', display: 'Ben' };
-const TASKS = 'GET /api/providers/status';
+const PROVIDERS = 'GET /api/providers/status';
 const ACTIVE = 'GET /api/runs/active';
 /** On the interface-poll list, but also opened on purpose (the Tasks view): never folded. */
 const TASK_LIST = 'GET /api/tasks';
@@ -54,19 +54,19 @@ describe('the actor trail keeps what it holds for a set time', () => {
 
   describe('polls are folded into one row per person, route and day once the day is 30 days past', () => {
     it('folds each person\'s polls of a route into a day row with the count, the first and the last time', () => {
-      read(ana, TASKS, '2026-10-20T08:00:00.000Z');
+      read(ana, PROVIDERS, '2026-10-20T08:00:00.000Z');
       read(ana, ACTIVE, '2026-10-20T08:00:01.000Z');
-      read(ana, TASKS, '2026-10-20T09:30:00.000Z');
-      read(ben, TASKS, '2026-10-20T10:00:00.000Z');
-      read(ana, TASKS, '2026-10-20T17:45:00.000Z');
+      read(ana, PROVIDERS, '2026-10-20T09:30:00.000Z');
+      read(ben, PROVIDERS, '2026-10-20T10:00:00.000Z');
+      read(ana, PROVIDERS, '2026-10-20T17:45:00.000Z');
       read(ana, ACTIVE, '2026-10-20T17:45:01.000Z');
-      const firstTasks = all().find((r) => r.action === TASKS && r.actor_email === ana.email)!.id;
+      const firstTasks = all().find((r) => r.action === PROVIDERS && r.actor_email === ana.email)!.id;
 
       expect(sweepAuditLog(engine.getDb(), NOW)).toEqual({ folded: 6, dayRows: 3, deleted: 0 });
 
       const rows = all();
       expect(rows).toHaveLength(3);
-      const anaTasks = rows.find((r) => r.action === TASKS && r.actor_email === ana.email)!;
+      const anaTasks = rows.find((r) => r.action === PROVIDERS && r.actor_email === ana.email)!;
       expect(anaTasks).toMatchObject({
         id: firstTasks, ts: '2026-10-20T08:00:00.000Z', poll_last: '2026-10-20T17:45:00.000Z', poll_count: 3,
         phase: 'read', actor_kind: 'mandate', actor_display: 'Ana', mandate_id: 'm-ana', target: null,
@@ -76,10 +76,10 @@ describe('the actor trail keeps what it holds for a set time', () => {
     });
 
     it('folds a day only once it is entirely more than 30 days past', () => {
-      read(ana, TASKS, '2026-10-24T23:59:59.000Z');
-      read(ana, TASKS, '2026-10-24T23:59:59.500Z');
-      read(ana, TASKS, '2026-10-25T00:00:00.000Z');
-      read(ana, TASKS, '2026-10-25T12:00:00.000Z');
+      read(ana, PROVIDERS, '2026-10-24T23:59:59.000Z');
+      read(ana, PROVIDERS, '2026-10-24T23:59:59.500Z');
+      read(ana, PROVIDERS, '2026-10-25T00:00:00.000Z');
+      read(ana, PROVIDERS, '2026-10-25T12:00:00.000Z');
 
       expect(sweepAuditLog(engine.getDb(), NOW)).toEqual({ folded: 2, dayRows: 1, deleted: 0 });
       const rows = all();
@@ -106,7 +106,7 @@ describe('the actor trail keeps what it holds for a set time', () => {
       read(ana, 'GET /api/history/cost/daily', '2026-10-20T08:09:00.000Z');
       step(ana, '2026-10-20T08:10:00.000Z');
       // A route on the poll list, but not a read: never folded.
-      log.record({ principal: ana, action: TASKS, target: '/api/tasks', phase: 'refused', correlationId: newCorrelationId(), at: '2026-10-20T08:20:00.000Z' });
+      log.record({ principal: ana, action: PROVIDERS, target: '/api/tasks', phase: 'refused', correlationId: newCorrelationId(), at: '2026-10-20T08:20:00.000Z' });
       const before = all();
 
       expect(sweepAuditLog(engine.getDb(), NOW)).toEqual({ folded: 0, dayRows: 0, deleted: 0 });
@@ -114,9 +114,9 @@ describe('the actor trail keeps what it holds for a set time', () => {
     });
 
     it('keeps two rows when the person\'s name changed during the day', () => {
-      read(ana, TASKS, '2026-10-20T08:00:00.000Z');
-      read({ ...ana, display: 'Ana B.' }, TASKS, '2026-10-20T09:00:00.000Z');
-      read(ana, TASKS, '2026-10-20T10:00:00.000Z');
+      read(ana, PROVIDERS, '2026-10-20T08:00:00.000Z');
+      read({ ...ana, display: 'Ana B.' }, PROVIDERS, '2026-10-20T09:00:00.000Z');
+      read(ana, PROVIDERS, '2026-10-20T10:00:00.000Z');
 
       sweepAuditLog(engine.getDb(), NOW);
       expect(all().map((r) => [r.actor_display, r.poll_count])).toEqual([['Ana', 2], ['Ana B.', 1]]);
@@ -124,18 +124,21 @@ describe('the actor trail keeps what it holds for a set time', () => {
 
     it('folds a group whose person has no name and no grant, and keeps them unnamed', () => {
       const anon: RequestPrincipal = { kind: 'mandate', email: 'anon@example.invalid' };
-      read(anon, TASKS, '2026-10-20T08:00:00.000Z');
-      read(anon, TASKS, '2026-10-20T09:00:00.000Z');
+      read(anon, PROVIDERS, '2026-10-20T08:00:00.000Z');
+      read(anon, PROVIDERS, '2026-10-20T09:00:00.000Z');
       expect(sweepAuditLog(engine.getDb(), NOW)).toEqual({ folded: 2, dayRows: 1, deleted: 0 });
       expect(all()).toEqual([expect.objectContaining({ actor_email: 'anon@example.invalid', actor_display: null, mandate_id: null, poll_count: 2 })]);
     });
 
     it('folds the oldest days first and at most a set number per sweep; the next sweep goes on', () => {
       const days = FOLD_DAYS_PER_SWEEP + 2;
+      // The newer days on the route an index on (action, ts) lists first, so only the order by day
+      // puts the oldest first.
       for (let d = 0; d < days; d++) {
         const at = new Date(Date.parse('2026-09-01T08:00:00.000Z') + d * DAY).toISOString();
-        read(ana, TASKS, at);
-        read(ana, TASKS, at.replace('T08', 'T09'));
+        const route = d < 2 ? ACTIVE : PROVIDERS;
+        read(ana, route, at);
+        read(ana, route, at.replace('T08', 'T09'));
       }
       expect(sweepAuditLog(engine.getDb(), NOW)).toEqual({ folded: 2 * FOLD_DAYS_PER_SWEEP, dayRows: FOLD_DAYS_PER_SWEEP, deleted: 0 });
       const folded = all().filter((r) => r.poll_count !== null).map((r) => r.ts.slice(0, 10));
@@ -145,8 +148,8 @@ describe('the actor trail keeps what it holds for a set time', () => {
     });
 
     it('does not fold a day row again', () => {
-      read(ana, TASKS, '2026-10-20T08:00:00.000Z');
-      read(ana, TASKS, '2026-10-20T09:00:00.000Z');
+      read(ana, PROVIDERS, '2026-10-20T08:00:00.000Z');
+      read(ana, PROVIDERS, '2026-10-20T09:00:00.000Z');
       sweepAuditLog(engine.getDb(), NOW);
       const once = all();
 
@@ -155,10 +158,10 @@ describe('the actor trail keeps what it holds for a set time', () => {
     });
 
     it('leaves the trail\'s order and shows the day row as one grouped read with its count', () => {
-      read(ana, TASKS, '2026-10-20T08:00:00.000Z');
+      read(ana, PROVIDERS, '2026-10-20T08:00:00.000Z');
       step(ana, '2026-10-20T08:30:00.000Z');
-      read(ana, TASKS, '2026-10-20T09:00:00.000Z');
-      read(ana, TASKS, '2026-11-20T09:00:00.000Z');
+      read(ana, PROVIDERS, '2026-10-20T09:00:00.000Z');
+      read(ana, PROVIDERS, '2026-11-20T09:00:00.000Z');
       sweepAuditLog(engine.getDb(), NOW);
 
       const page = readTrailPage(engine.getDb(), { limit: 50 });
@@ -202,8 +205,8 @@ describe('the actor trail keeps what it holds for a set time', () => {
     });
 
     it('keeps a day row until its last read is 365 days old', () => {
-      read(ana, TASKS, '2025-11-24T08:00:00.000Z');
-      read(ana, TASKS, '2025-11-24T20:00:00.000Z');
+      read(ana, PROVIDERS, '2025-11-24T08:00:00.000Z');
+      read(ana, PROVIDERS, '2025-11-24T20:00:00.000Z');
       // Folded on day 31, as the hourly sweep does.
       sweepAuditLog(engine.getDb(), Date.parse('2025-12-26T00:00:00.000Z'));
       const at = Date.parse('2025-11-24T08:00:00.000Z') + AUDIT_RETENTION_MS + DAY / 2; // first read past, last not
@@ -235,12 +238,31 @@ describe('the actor trail keeps what it holds for a set time', () => {
     });
   });
 
-  it('changes nothing of a day when its day row is refused', () => {
-    read(ana, TASKS, '2026-10-20T08:00:00.000Z');
-    read(ana, TASKS, '2026-10-20T09:00:00.000Z');
+  it('leaves a refused day as it was, reports it, and still deletes and folds the other days', () => {
+    const expired = new Date(NOW - AUDIT_RETENTION_MS - DAY).toISOString();
+    read(ana, 'GET /api/inbox/items', expired);
+    read(ana, PROVIDERS, '2026-10-19T08:00:00.000Z');
+    read(ana, PROVIDERS, '2026-10-19T09:00:00.000Z');
+    read(ana, PROVIDERS, '2026-10-20T08:00:00.000Z');
     read(ana, ACTIVE, '2026-10-20T09:00:01.000Z');
+    const refusedDay = all().filter((r) => r.ts.startsWith('2026-10-20'));
+    engine.getDb().exec("CREATE TRIGGER refuse_day_rows BEFORE INSERT ON audit_log WHEN NEW.poll_count IS NOT NULL AND NEW.ts LIKE '2026-10-20%' BEGIN SELECT RAISE(ABORT, 'refused'); END;");
+    const failed: Array<[string, string]> = [];
+
+    expect(sweepAuditLog(engine.getDb(), NOW, (day, err) => { failed.push([day, err instanceof Error ? err.message : String(err)]); }))
+      .toEqual({ folded: 2, dayRows: 1, deleted: 1 });
+    expect(failed).toEqual([['2026-10-20', 'refused']]);
+    const rows = all();
+    expect(rows.some((r) => r.ts === expired)).toBe(false);
+    expect(rows.filter((r) => r.ts.startsWith('2026-10-19'))).toEqual([expect.objectContaining({ poll_count: 2 })]);
+    expect(rows.filter((r) => r.ts.startsWith('2026-10-20'))).toEqual(refusedDay);
+  });
+
+  it('applies nothing when the delete is refused', () => {
+    read(ana, 'GET /api/inbox/items', new Date(NOW - AUDIT_RETENTION_MS - DAY).toISOString());
+    read(ana, PROVIDERS, '2026-10-19T08:00:00.000Z');
     const before = all();
-    engine.getDb().exec("CREATE TRIGGER refuse_day_rows BEFORE INSERT ON audit_log WHEN NEW.poll_count IS NOT NULL BEGIN SELECT RAISE(ABORT, 'refused'); END;");
+    engine.getDb().exec("CREATE TRIGGER refuse_marks BEFORE INSERT ON audit_log WHEN NEW.actor_kind = 'retention' BEGIN SELECT RAISE(ABORT, 'refused'); END;");
 
     expect(() => sweepAuditLog(engine.getDb(), NOW)).toThrow('refused');
     expect(all()).toEqual(before);

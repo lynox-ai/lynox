@@ -6,8 +6,9 @@
  *   after the last read it stands for.
  * - Reads on the routes in `FOLDED_POLLS` are folded once their day (UTC) is more than 30 days
  *   past: one row per person, route and day, with the first read's time (`ts`), the last read's
- *   time (`poll_last`) and how many reads it stands for (`poll_count`). No poll is deleted without
- *   such a row. Every other read, a read the person made themselves among them, stays a single row.
+ *   time (`poll_last`) and how many reads it stands for (`poll_count`). Before its day row, no poll
+ *   is deleted but by the 365-day rule, and then it counts in the retention row like any row.
+ *   Every other read, a read the person made themselves among them, stays a single row.
  * - A sweep that deletes rows leaves one row of its own (`audit:retention`): the time span of what
  *   it deleted and how many rows, nothing of their content. That row is deleted by the same rule,
  *   and deleting only such rows leaves no new one.
@@ -81,9 +82,14 @@ const FOLDABLE = `phase = 'read' AND poll_count IS NULL AND action IN (${POLL_IN
 /**
  * Delete what is past its time, then fold the polls of up to `FOLD_DAYS_PER_SWEEP` past days, oldest
  * first; the rest follows on the next sweeps. Each day is its own transaction, and so is the delete.
- * Throws when the database refuses; the step that threw is then not applied.
+ * A day the database refuses is left as it was and reported through `onDayFailed`; the days after it
+ * are still folded. A refused delete throws, and nothing of the sweep is applied then.
  */
-export function sweepAuditLog(db: Database.Database, now: number = Date.now()): AuditSweepResult {
+export function sweepAuditLog(
+  db: Database.Database,
+  now: number = Date.now(),
+  onDayFailed: (day: string, err: unknown) => void = () => {},
+): AuditSweepResult {
   const deleted = db.transaction(() => deleteExpired(db, new Date(now - AUDIT_RETENTION_MS).toISOString(), now))();
   // A day before this one has ended more than 30 days ago, so no poll of it can still arrive.
   const foldBeforeDay = new Date(now - POLL_FOLD_AFTER_MS).toISOString().slice(0, 10);
@@ -93,9 +99,13 @@ export function sweepAuditLog(db: Database.Database, now: number = Date.now()): 
   let folded = 0;
   let dayRows = 0;
   for (const { day } of days) {
-    const r = db.transaction(() => foldDay(db, day))();
-    folded += r.folded;
-    dayRows += r.dayRows;
+    try {
+      const r = db.transaction(() => foldDay(db, day))();
+      folded += r.folded;
+      dayRows += r.dayRows;
+    } catch (err) {
+      onDayFailed(day, err);
+    }
   }
   return { folded, dayRows, deleted };
 }
