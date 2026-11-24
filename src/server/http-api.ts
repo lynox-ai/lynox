@@ -6,7 +6,9 @@
  *
  */
 
+import { recipientConfirmDigest, recipientsConfirmable } from '../core/recipient-confirm.js';
 import { errorText, errorTextReduced, processErrorText } from '../core/error-egress.js';
+import { jsonFault } from '../core/json-fault.js';
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
@@ -56,6 +58,7 @@ import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js
 import { openRunGroup } from '../core/run-group.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
+import type { UntrustedCause } from '../core/untrusted-signals.js';
 import { getLynoxDir, loadConfig, describePinForDisplay, admitBackgroundModel, poolEndpointFor, POOL_ANTHROPIC_ENDPOINT, POOL_MISTRAL_ENDPOINTS } from '../core/config.js';
 import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
@@ -75,7 +78,7 @@ import { resolveProviderApiKey, mayFallBackToStoredKey, PROVIDER_KEY_SLOTS } fro
 import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, providerIdentity, type ProviderIdentity, mainChatTierLabels, mainChatTierLabelsFromTierSet } from '../core/llm/catalog.js';
 import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
-import type { Session } from '../core/session.js';
+import { sessionInitialTier, type Session } from '../core/session.js';
 import { RunAbortedError, TOOL_AUDIT_INPUT_MAX_CHARS } from '../core/agent.js';
 import { StreamIncompleteError } from '../core/stream-incomplete.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
@@ -135,7 +138,7 @@ import { awaitsOwnQuestion } from './own-question.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
-import { BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson } from '../core/bulk-ledger.js';
+import { BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson, externalHostOf } from '../core/bulk-ledger.js';
 import { BULK_LIST_NOTE, hasListPageUrl, isShopifyListSource, listPageUrl, shopifyListFiltersOf } from '../core/bulk-list.js';
 import { shopifyGraphqlEndpoint } from '../core/shopify-graphql.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../core/bulk-write-forms.js';
@@ -148,8 +151,9 @@ import { WebhookReceiver, isCanonicalRequestPath, webhookRouteToken } from './we
 import { requestLogUrl } from './request-log-url.js';
 import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
+import { takeOverWorkflow, workflowTakeoverPreview, type WorkflowTakeoverDeps, type WorkflowTakeoverRefusal } from '../core/workflow-takeover.js';
 import { EngineLessRefused } from '../core/engine-less-refusal.js';
-import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
+import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerFieldsNotCarriedError, TriggerTierUnsupportedError, titleIsWorkflowName, isTriggerModelTierUpdate, triggerTakesModelTier, type BeforeTriggerWrite, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -316,6 +320,71 @@ export const TAKEOVER_REFUSALS: Record<TakeoverRefusal | 'changed' | 'prompts' |
   changed: { status: 409, message: 'The plan changed while you were looking at it. Look at it again, then take it over. The plan stays paused.' },
   prompts: { status: 503, message: "lynox cannot close the plan's open questions right now, so it did not take the plan over. It stays paused. Try again in a few minutes." },
   unrecorded: { status: 503, message: 'The takeover cannot be recorded in the instance log right now, so lynox did not take the plan over; it stays paused. Try again in a few minutes.' },
+};
+
+/**
+ * What a workflow's stamp binds beside its steps (`workflowStampDigest`), as the stamp and the
+ * takeover previews show it: its mode, failure strategy, limits, contract and parameters with
+ * their defaults. `planned` is read with its defaults filled (`withWorkflowDefaults`).
+ */
+function stampShown(planned: PlannedPipeline): {
+  mode: PlannedPipeline['mode']; onFailure: NonNullable<PlannedPipeline['on_failure']>; limits: PlannedPipeline['limits'] | null;
+  contract: string[] | null; parameters: Array<{ name: string; required: boolean; default: unknown }>;
+} {
+  const contract = planned.capabilityContract;
+  return {
+    mode: planned.mode,
+    onFailure: planned.on_failure ?? 'stop',
+    limits: planned.limits ?? null,
+    // What the contract lets the run write, as the grant's preview words it.
+    contract: contract === undefined ? null : contract.hostPatterns.flatMap((h) => contract.pathPatterns.flatMap((p) => contract.httpMethods.map((m) => `${m} https://${h}${p}`))),
+    parameters: (planned.parameters ?? []).map((p) => ({ name: p.name, required: p.defaultValue === undefined || p.defaultValue === null, default: p.defaultValue ?? null })),
+  };
+}
+
+/**
+ * Each step of a workflow as it runs, as the stamp and the takeover previews show it: a captured
+ * step's literal call beside its task, and the tools it gets, worked out the way the runtime does
+ * (a step that names none gets the pool). `secret:` references stay names; no value is resolved
+ * here. A role can widen the tools and change the model at run time: it is shown by name, with
+ * what it grants (a role is built in, `roles.ts`, not stored).
+ */
+async function stepsShown(planned: PlannedPipeline) {
+  const { inlineStepToolNames } = await import('../orchestrator/runtime-adapter.js');
+  const { getRole } = await import('../core/roles.js');
+  const roleGrantOf = (name: string | undefined): { model: string; effort: string; allowTools: string[] | null; denyTools: string[] | null; readOnly: boolean } | null => {
+    const r = name === undefined ? undefined : getRole(name);
+    return r === undefined ? null : { model: r.model, effort: r.effort, allowTools: r.allowTools ? [...r.allowTools] : null, denyTools: r.denyTools ? [...r.denyTools] : null, readOnly: r.readOnly === true };
+  };
+  return (Array.isArray(planned.steps) ? planned.steps : []).map((st) => ({
+    id: st.id,
+    task: st.task,
+    tool: st.tool ?? null,
+    inputTemplate: st.tool !== undefined ? st.input_template ?? null : null,
+    tools: [...inlineStepToolNames(st)],
+    model: st.model ?? null,
+    role: st.role ?? null,
+    roleGrant: roleGrantOf(st.role),
+    effort: st.effort ?? null,
+    thinking: st.thinking ?? null,
+    timeoutMs: st.timeout_ms ?? null,
+    inputFrom: st.input_from ?? null,
+  }));
+}
+
+/**
+ * How the workflow takeover's refusals are answered. Plain placeholders: the texts the library
+ * shows are its own, by code.
+ */
+export const WORKFLOW_TAKEOVER_REFUSALS: Record<WorkflowTakeoverRefusal | 'changed' | 'prompts' | 'unrecorded' | 'stamp_refused', { readonly status: number; readonly message: string }> = {
+  unreadable: { status: 409, message: 'The workflow cannot be read, so it cannot be taken over.' },
+  nothing_to_take_over: { status: 409, message: 'This workflow does not need to be taken over.' },
+  mandate_live: { status: 409, message: 'Someone who set up or changed this workflow still has access, so it cannot be taken over.' },
+  running: { status: 409, message: 'A run of a plan on this workflow has not finished yet. Try again in a few minutes.' },
+  changed: { status: 409, message: 'The workflow changed while you were looking at it. Look at it again, then take it over.' },
+  prompts: { status: 503, message: 'The open questions of its plans cannot be closed right now, so the workflow was not taken over. Try again in a few minutes.' },
+  unrecorded: { status: 503, message: 'The takeover cannot be recorded in the instance log right now, so the workflow was not taken over. Try again in a few minutes.' },
+  stamp_refused: { status: 409, message: 'The steps of this workflow could not be stamped as shown, so it was not taken over. Look at it again, then take it over.' },
 };
 
 /**
@@ -539,7 +608,6 @@ const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 120;
 const RATE_MAX_LOOPBACK = 600; // Higher limit for Web UI proxy on same host
 const PROMPT_TIMEOUT_MS = 24 * 60 * 60_000; // 24 hours — prompts persist in SQLite, survive reconnects
-const ORPHAN_PROMPT_WATCHDOG_MS = 10 * 60_000; // 10 min — orphaned-stream + pending-prompt slot free guard
 /** Run wall-clock: max wall-time a run may spend ACTIVELY COMPUTING. Human
  *  think-time on a pending prompt is paused out of this budget (#77), so this
  *  is a compute-only ceiling, not elapsed-time. Overridable for tests/ops via
@@ -1911,6 +1979,18 @@ const ERASURE_MANY_UNKNOWN = 20;
 
 // ── Server Class ─────────────────────────────────────────────────────────────
 
+/** Longer than any message a person types into the composer: such a `typed` is not recorded. */
+export const TYPED_TEXT_MAX = 20_000;
+
+/**
+ * The run's typed text from a request: the client's `typed` field, only when it is a non-empty
+ * string found word for word in the request's task, cleaned like the task. Anything else: none.
+ */
+export function typedOf(typed: unknown, taskText: string): { typedText: string } | undefined {
+  if (typeof typed !== 'string' || typed.trim() === '' || typed.length > TYPED_TEXT_MAX || !taskText.includes(typed)) return undefined;
+  return { typedText: withoutTypedCredentials(stripUntrustedSeparators(typed)) };
+}
+
 export class LynoxHTTPApi {
   private engine: Engine | null = null;
   private clientErrorResolver: (() => SecretStoreLike | null) | null = null;
@@ -1918,14 +1998,14 @@ export class LynoxHTTPApi {
   private webUiHandler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | null = null;
   private readonly sessionStore = new SessionStore();
   // Pending prompts now stored in PromptStore (SQLite) — no in-memory Maps
-  // Per-session run tracking. `streamAlive=false` after the SSE connection
-  // closes; if a pending prompt is then blocking the previous run, a fresh
-  // /run can take it over instead of 409-looping forever (Bug 3).
+  // Per-session run tracking. `streamAlive=false` after the SSE connection closes; a fresh /run
+  // can then take the run over once its engine has been silent past the stale window, unless the
+  // run waits on its own question (that one waits for its answer, a stop, or its TTL).
   /** `parked` says whether the run waits on a question it asked itself. The thread's one open
-   *  question can be a scheduled run's instead, asked beside a working chat run; reading it by
-   *  thread alone took that run over and let the scheduled run's question lapse. A slot without
-   *  `parked` is read by the thread's question, as before. */
-  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: (reason: PromptClosedReason) => void; lastEventAt: number; parked?: () => boolean }>();
+   *  question can be a scheduled run's instead, asked beside a working chat run. `streamGone`
+   *  says whether the run's own stream has dropped. A slot without them is read as not parked,
+   *  with `streamAlive` as its stream. */
+  private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: (reason: PromptClosedReason) => void; lastEventAt: number; parked?: () => boolean; streamGone?: () => boolean }>();
   /**
    * True while `DELETE /api/data` stops the running chat runs and wipes the stores.
    * `/run` refuses while it is set, checked right before it takes a slot with no
@@ -2394,6 +2474,9 @@ export class LynoxHTTPApi {
     // still the mutation the boot test fails on.
     this.clientErrorResolver = (): SecretStoreLike | null => this.engine?.getSecretStore() ?? null;
     setClientErrorSecretStore(this.clientErrorResolver);
+    // Push before the loop: the loop's first tick runs at once, and a question it escalates
+    // before the push channel is registered is recorded as "no channel" although push works.
+    await this._initPushChannel();
     this.engine.startWorkerLoop();
     // Claim the hand-run minter at once, in the same turn the loop is started: whoever
     // claims it first holds it, and nothing else may (hand-run-door.ts). Claimed on first
@@ -2402,7 +2485,6 @@ export class LynoxHTTPApi {
     const workerLoop = this.engine.getWorkerLoop();
     if (workerLoop) this.#handRunMinterFor(workerLoop);
     this._registerRoutes();
-    await this._initPushChannel();
     await this._tryLoadWebUiHandler();
   }
 
@@ -2560,6 +2642,15 @@ export class LynoxHTTPApi {
   }
 
   /**
+   * Whether the person a workflow runs for, its last uncovered mandate mark, has lost access: the
+   * one reading the library's `runs_as.ended`, the trigger list's `ended_on` and the plan's stamp
+   * preview share. No such person (the owner's, or taken over): false.
+   */
+  private _workflowAuthorEnded(author: RequestPrincipal | undefined): boolean {
+    return author !== undefined && principalHasEnded(author, (id) => this._mandateLive(id));
+  }
+
+  /**
    * What the takeover reads and writes, or null with a 503 when engine.db is not there. The
    * prompt store may be missing; the takeover then refuses, since it could not close the questions.
    */
@@ -2582,6 +2673,22 @@ export class LynoxHTTPApi {
       audit: engine.getAuditLog(),
       prompts: engine.getPromptStore(),
     };
+  }
+
+  /**
+   * What the workflow takeover reads and writes (`workflow-takeover.ts`): the plan takeover's, the
+   * workflow store on the same engine.db, whose hash the stamp is taken with, and the connections.
+   * Null with a 503 when engine.db is not there, or the store of access ends: without it every
+   * person would read as ended, and a workflow a live person shaped could be taken over.
+   */
+  #workflowTakeoverDeps(res: ServerResponse): WorkflowTakeoverDeps | null {
+    const deps = this.#takeoverDepsIfReady();
+    const engineDb = this.engine?.getEngineDb() ?? null;
+    if (deps === null || engineDb === null || (this.engine?.getMandateEnds() ?? null) === null) {
+      errorResponse(res, 503, 'Taking over a workflow is not available on this instance right now.');
+      return null;
+    }
+    return { ...deps, workflows: new WorkflowStore(engineDb), hasher: engineDb, profiles: this.engine?.getApiStore() ?? null };
   }
 
   /** The plan's exact id from a path that may carry a prefix; null with the answer sent when it names none or more than one. */
@@ -2615,14 +2722,15 @@ export class LynoxHTTPApi {
   async #stampPlanOf(trigger: TriggerRecord): Promise<{
     listed: { wf: string | null; entries: readonly StampEntry[] } | null;
     by: string | null;
-    workflow: { name: string | null; confirmed: boolean } | null;
+    workflow: { name: string | null; confirmed: boolean; ended: boolean } | null;
   }> {
     const engine = this.engine;
     const apiStore = engine?.getApiStore();
     if (!engine || !apiStore || !stampUsesConnections(trigger.effect)) return { listed: null, by: null, workflow: null };
     const plan = await planOfTrigger(trigger, engine.getRunHistory() ?? null);
     const workflow = trigger.effect === 'run_workflow'
-      ? { name: plan.workflowName, confirmed: !plan.unreadable && plan.workflowConfirmedAt !== null }
+      // `ended` is shown only: the view then names the workflow's takeover as the way on.
+      ? { name: plan.workflowName, confirmed: !plan.unreadable && plan.workflowConfirmedAt !== null, ended: this._workflowAuthorEnded(plan.workflowMember) }
       : null;
     if (plan.unreadable || plan.of === undefined) return { listed: null, by: null, workflow };
     return {
@@ -2657,7 +2765,7 @@ export class LynoxHTTPApi {
     const isLive = (id: string): boolean => ends?.isLive(id) ?? false;
     const anyEnded = plan.members.some((m) => principalHasEnded(m, isLive));
     const wf = plan.workflowMember;
-    const endedOn = !anyEnded ? null : wf === undefined ? 'plan' : principalHasEnded(wf, isLive) ? 'workflow' : 'workflow_other';
+    const endedOn = !anyEnded ? null : wf === undefined ? 'plan' : this._workflowAuthorEnded(wf) ? 'workflow' : 'workflow_other';
     return { ...shown, ended: shown.ended || endedOn !== null, ended_on: endedOn };
   }
 
@@ -2898,6 +3006,20 @@ export class LynoxHTTPApi {
     return !secret ? 'no-secret' : (this._authOrigin.get(req) ?? '').startsWith('cookie:') ? 'cookie' : 'none';
   }
 
+  /**
+   * The mark a trigger's instruction gets when the owner's token, not the owner's browser
+   * session, wrote it (`created_untrusted`), or undefined when the words count as the owner's.
+   * The same line `typed` draws: a token's client (a script, an integration) passes on text it
+   * did not have typed, so the targets it names must not be owner-known in the trigger's run
+   * (`ownerInstructionCounts`). Stored as the cause a webhook event's content gets, content that
+   * reached the engine from outside: every reader takes it as not clean. A mandate's write is
+   * marked by its own rules, so only the owner's principal is looked at here.
+   */
+  private _ownerTokenWords(req: IncomingMessage): UntrustedCause | undefined {
+    if (!isOwnerPrincipal(this._principalOf(req))) return undefined;
+    return this._ambientOf(req, process.env['LYNOX_HTTP_SECRET']) === 'none' ? 'external-tool' : undefined;
+  }
+
   /** The route a request matches, as registered (`/api/x/:id`), or null for none. */
   private _routeTemplateOf(method: string, pathname: string): string | null {
     return this._matchRoute(method, pathname)?.path ?? null;
@@ -2989,7 +3111,8 @@ export class LynoxHTTPApi {
   /**
    * E2 (§3.13): a mandate answers only a question its own run asked. Every question the route
    * could answer is checked — the one named by id and the one pending on the session, which a
-   * body without an id answers — so no request reaches a question the check did not see. Both are
+   * body without an id answers on the secret and mailbox routes (`/reply` refuses one) — so no
+   * request reaches a question the check did not see. Both are
    * checked even when an id is given, which refuses more than that request could reach. The question
    * of a scheduled run carries the owner, or the mandate its stamped plan acts for (`planOf`),
    * which then answers it as its own run's question (N1). With no question at all the route
@@ -3088,6 +3211,24 @@ export class LynoxHTTPApi {
     return row ? [row] : [];
   }
 
+  /**
+   * The tier a conversation runs on, for a page that reopens it without opening a session (a
+   * reload reads it back instead): the stored pick held to today's ceiling, account tier and
+   * model blocklist, through the same function a resume and every turn of a live session use.
+   * The stored `model_tier` is the pick as asked, before those. Not read from a live session:
+   * its tier can stand lower for a moment (a compaction runs on the fast tier), and looking it
+   * up would keep an idle session from being dropped. Omitted when no permitted model is left.
+   * A new thread stores the tier it opened on, already held to the ceiling of that day, so after
+   * the ceiling is raised this says the lower tier until the user picks one again.
+   */
+  private _runTierOf(engine: Engine, thread: { readonly model_tier: string }): { run_tier?: string } {
+    try {
+      return { run_tier: sessionInitialTier(engine, normalizeTier(thread.model_tier)) };
+    } catch {
+      return {};
+    }
+  }
+
   /** The thread row an `own` check reads for a session id (session id = thread id). */
   private _threadRow(id: string): { readonly created_by: string | null } | undefined {
     return this.engine?.getThreadStore()?.getThread(id);
@@ -3114,6 +3255,17 @@ export class LynoxHTTPApi {
       throw err;
     }
     return false;
+  }
+
+  /**
+   * The same mark, for a write `TaskManager` checks first (`update`, `complete`): it calls the
+   * mark with the trigger it is about to write, after its checks, so a change it refuses leaves
+   * the owner's stamp where it was. Undefined for the owner.
+   */
+  private _mandateEditMark(req: IncomingMessage, taskManager: TaskManager): BeforeTriggerWrite | undefined {
+    const principal = this._principalOf(req);
+    if (isOwnerPrincipal(principal)) return undefined;
+    return (trigger) => { taskManager.markEditedBy(trigger.id, principal, true); };
   }
 
   /**
@@ -4823,26 +4975,22 @@ export class LynoxHTTPApi {
       // or a later file that fails) writes nothing into the knowledge store.
       const deferredIngests: Array<() => void> = [];
 
-      // Stale-run takeover. A previous /run whose SSE stream has closed +
-      // one of these holds → hand control to the new request:
-      //   (a) parked on a pending prompt (Bug 3 — original case)
-      //   (b) silent for >STALE_RUN_SILENCE_MS (cat 2026-05-19 — run stuck on
-      //       a hanging http_request, no SSE activity, no pending prompt,
-      //       session locked for 30 min until the engine's hard run cap).
-      // Without (b), a hung tool call locks the session forever from the
-      // client's perspective — every /run retry gets 409 until the 30-min
-      // streamTimeout fires server-side.
+      // Stale-run takeover. A previous /run whose SSE stream has closed and whose engine has
+      // been silent for >STALE_RUN_SILENCE_MS (cat 2026-05-19 — run stuck on a hanging
+      // http_request, no SSE activity, session locked for 30 min until the engine's hard run
+      // cap) is handed over to the new request. Without it, a hung tool call locks the session
+      // from the client's perspective — every /run retry gets 409 until the 30-min
+      // streamTimeout fires server-side. A run waiting on its OWN question is not taken over:
+      // it is silent by design, its question waits for an answer (or a stop, or its TTL), and
+      // a new message gets the 409 the chat shows as blocked by that question.
       const STALE_RUN_SILENCE_MS = 60_000;
-      const promptStoreEarly = this.engine?.getPromptStore();
       const existingSlot = this.runningSessions.get(sessionId);
-      if (existingSlot && !existingSlot.streamAlive) {
-        // Only a run parked on its OWN question: a scheduled run's question in this thread does
-        // not make a working run stuck.
-        const hasPrompt = (existingSlot.parked?.() ?? true) && !!promptStoreEarly?.getPending(sessionId);
-        const stale = Date.now() - existingSlot.lastEventAt > STALE_RUN_SILENCE_MS;
-        if (hasPrompt || stale) {
-          // Taking over ends the parked run and lets its question lapse: only that run's
-          // principal (or the owner) may, even in the mandate's own conversation (§3.13 E7).
+      if (existingSlot && (!existingSlot.streamAlive || existingSlot.streamGone?.() === true)) {
+        // A scheduled run's question in this thread is not the run's: it does not hold it back.
+        const stale = existingSlot.parked?.() !== true && Date.now() - existingSlot.lastEventAt > STALE_RUN_SILENCE_MS;
+        if (stale) {
+          // Taking over ends the run: only that run's principal (or the owner) may, even in the
+          // mandate's own conversation (§3.13 E7).
           if (this._refuseUnlessOwns(req, res, 'take over a run of this conversation', () => [this._lastRunRow(session)])) return;
           existingSlot.takeover('run_taken_over');
           // Wait for the previous handler's `finally` to clear the slot.
@@ -5028,6 +5176,15 @@ export class LynoxHTTPApi {
         principal: this._principalOf(req),
         // Said by the client that will show the review (the web UI), for this run only.
         showsChangesetReview: b?.['shows_changeset_review'] === true,
+        // Only what the person typed, kept apart from the loaded context and the files above:
+        // the boundary is this string, not a sentinel in the composed message, which loaded
+        // content could carry itself. Never derived from `task`: a task can be a prefill (a
+        // mail's subject, a chip, a retry), which the person did not write. The client sends
+        // `typed` only for a message started from an empty composer, and it counts only when it
+        // stands in this request's task word for word. Only from the owner's browser session, as
+        // "Confirm recipients" takes it: a token's client (a script, an integration) passes on
+        // text it did not have typed, and it must not make an address in it the owner's.
+        ...(this._ambientOf(req, process.env['LYNOX_HTTP_SECRET']) !== 'none' ? (typedOf(b?.['typed'], taskText) ?? {}) : {}),
       };
       // Every question this run asks carries who runs it (§3.13 E2): taken from the request
       // that started the run, never read later from the session, whose principal moves on
@@ -5318,6 +5475,9 @@ export class LynoxHTTPApi {
       // `undefined` = no live timer (paused, fired, or not yet armed). Kept in
       // sync with wallClockBudget.paused; the guards below never touch a stale id.
       let streamTimeout: ReturnType<typeof setTimeout> | undefined;
+      /** The wall-clock ran out. Not the same as `aborted`: a dropped stream sets that too, and a
+       *  run answered after its stream dropped must get its compute budget back. */
+      let wallClockFired = false;
 
       // ── Per-run identity + resumable event buffer ──
       // `runId` identifies this run to the client-queryable registry
@@ -5340,6 +5500,10 @@ export class LynoxHTTPApi {
       // wire without a single test or type failing.
       session.onStream = async (event: EmittedStreamEvent) => {
         const seq = runBuffer?.append(event);
+        // Every engine event counts as activity, also once the stream is gone: a run that
+        // keeps working headless is not stale. Only an engine silent for the stale window is.
+        const live = this.runningSessions.get(sessionId);
+        if (live && live.takeover === takeover) live.lastEventAt = Date.now();
         if (aborted) return;
         const data = JSON.stringify(event);
         const idLine = seq !== undefined ? `id: ${seq}\n` : '';
@@ -5614,6 +5778,7 @@ export class LynoxHTTPApi {
       // The abort action is factored out so the INITIAL arm and every
       // pause/resume re-arm reuse the EXACT same teardown — no drift.
       const fireWallClockAbort = (): void => {
+        wallClockFired = true;
         aborted = true;
         clearInterval(keepaliveTimer);
         sessionAbortController.abort();
@@ -5635,57 +5800,45 @@ export class LynoxHTTPApi {
         wallClockBudget.pause(Date.now());
       };
       // RESUME at prompt-settle: re-arm with the remaining (compute-only)
-      // budget. Skips re-arming if the run was already aborted (a disconnect set
-      // `aborted` while parked → the run either finishes headless with no
-      // wall-clock, matching the prior disconnect-drops-the-timer behavior, or a
-      // takeover is about to throw RunAbortedError). Skips if a timer is somehow
-      // already live so it never stacks two timers.
+      // budget, also after the stream dropped while parked: a run answered then
+      // works on headless and keeps its ceiling. Skips once the wall-clock itself
+      // has fired, and if a timer is somehow already live so it never stacks two.
       const resumeWallClock = (): void => {
-        if (aborted || streamTimeout !== undefined) return;
+        // The answer is activity too: a run that waited long for it is not silent from here on,
+        // and a new message must not take it over before its next engine event.
+        const live = this.runningSessions.get(sessionId);
+        if (live && live.takeover === takeover) live.lastEventAt = Date.now();
+        if (wallClockFired || streamTimeout !== undefined) return;
         armWallClock();
       };
       armWallClock();
 
-      req.on('close', () => {
+      // The connection going away, seen on the RESPONSE. The router has read the body before this
+      // handler runs, so the request stream has ended and closed already: a `close` listener on it
+      // registered here never fires, and a dropped stream went unnoticed (the run kept writing, a
+      // hung run could never be taken over). The response closes when its socket does; once it
+      // has ended, that close is the normal end of the run, not a drop.
+      const onStreamDropped = (): void => {
+        if (res.writableEnded || aborted) return;
         clearInterval(keepaliveTimer);
         // Stop writing to the dead socket — `onStream` no-ops while `aborted`
         // (L1875), so the run can keep computing without write-after-close. We
         // do NOT clear `streamTimeout` here: it stays armed as the headless
         // wall-clock backstop below (the prompt branch drops it explicitly).
         aborted = true;
-        // Mark this run's stream as dead so a fresh /run on the same session
-        // can take it over if the agent is parked on a pending prompt.
+        // Mark this run's stream as dead: a fresh /run on the same session may then take it over
+        // once its engine has gone silent (never while it waits on its own question).
         const slot = this.runningSessions.get(sessionId);
-        if (slot) slot.streamAlive = false;
-        // Orphan watchdog (armed in BOTH branches). 10 min after the stream
-        // dies, if the run is parked on a still-pending prompt that nobody
-        // reconnected to answer, free the slot. Pre-1.5.0 such a slot could sit
-        // `streamAlive=false` up to PROMPT_TTL (24h), pinning a runningSessions
-        // entry + open SQLite handles until the prompt expired.
-        //
-        // The `getPending` guard is what makes this safe to arm unconditionally:
-        // it fires takeover ONLY for a genuinely stuck, dead-stream prompt —
-        // never against a headless run that is productively computing (no
-        // pending prompt) or whose prompt was already answered via reconnect
-        // (getPending now empty). This also bounds the prompt-fires-AFTER-a
-        // -headless-disconnect case at 10 min; the close-time
-        // `hasActivePendingPrompt` snapshot alone would leave it to the 30-min
-        // streamTimeout.
-        setTimeout(() => {
-          const liveSlot = this.runningSessions.get(sessionId);
-          if (liveSlot && !liveSlot.streamAlive && promptStore?.getPending(sessionId)) {
-            liveSlot.takeover('run_stopped');
-          }
-        }, ORPHAN_PROMPT_WATCHDOG_MS);
+        if (slot && slot.takeover === takeover) slot.streamAlive = false;
         if (hasActivePendingPrompt) {
           // Already parked on a prompt at close → the wall-clock is already
           // PAUSED (pauseWallClock cleared it at prompt-start), so there is
           // normally no live timer here. The guarded clearTimeout is defense in
-          // depth against any race where it was re-armed; the orphan watchdog
-          // above bounds the wait. The user can reconnect and answer (the loop
-          // keeps polling SQLite) — resumeWallClock then no-ops because `aborted`
-          // is now set, matching the prior disconnect-drops-the-timer behavior.
-          if (streamTimeout !== undefined) clearTimeout(streamTimeout);
+          // depth against any race where it was re-armed. The question waits for
+          // its answer (or a stop, or its TTL): the user can reconnect and answer
+          // (the loop keeps polling SQLite) — resumeWallClock then re-arms the
+          // remaining budget.
+          if (streamTimeout !== undefined) { clearTimeout(streamTimeout); streamTimeout = undefined; }
         }
         // else: RUNNING with no prompt → Tier-1 disconnect≠abort. Do NOT abort
         // the session; let it finish headless. Eager-persist keeps the
@@ -5696,11 +5849,12 @@ export class LynoxHTTPApi {
         // armed as the wall-clock backstop (it aborts the session + ends res),
         // so a hung headless run can't leak; the finally clears it on natural
         // completion. PRD-RUN-RESILIENCE D2.
-      });
+      };
+      res.on('close', onStreamDropped);
 
       // Run
-      // Takeover hook: a future /run for this session can call this to free
-      // the slot when our SSE stream is dead and we're stuck on a prompt.
+      // Takeover hook: stop, thread or data deletion, a mandate's end, and a /run that finds this
+      // run's stream gone and its engine silent call this to end the run and free the slot.
       const takeover = (reason: PromptClosedReason): void => {
         // Unwind BEFORE the bookkeeping. `waitForSettled` resolves on the signal
         // alone, so aborting first means a throw from the prompt store (closed
@@ -5716,7 +5870,11 @@ export class LynoxHTTPApi {
         const pending = promptStore?.getPending(sessionId);
         if (pending) promptStore?.expirePrompt(pending.id, reason);
       };
-      this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now(), parked: () => hasActivePendingPrompt });
+      this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now(), parked: () => hasActivePendingPrompt, streamGone: () => aborted });
+      // A client that left while this request was still being set up (a file being read, a
+      // takeover draining) closed the response before anyone listened: its close is past, so
+      // the drop is taken now, once the slot it marks exists.
+      if (res.destroyed) onStreamDropped();
       try {
         // Reserve a concurrency slot + register the abort handle so the run can
         // be aborted by id from any connection (DELETE /api/runs/:runId) —
@@ -6062,13 +6220,13 @@ export class LynoxHTTPApi {
         return;
       }
 
-      // Only a body without a promptId answers the session's open question (legacy clients).
+      // Without a promptId nothing is answered: the open question may not be the one the answer
+      // was meant for (the one the client saw closed, and another opened in its place). The
+      // question carries its id in the `prompt` event and in `/pending-prompt`; nothing is recorded.
       const pending = ps.getPending(params['id']!);
       if (pending && pending.prompt_type === 'ask_user' && !pending.questions_json) {
-        if (!this._answerRecorded(_req, res, by, pending.id)) return;
-        let answered: boolean;
-        try { answered = ps.answerUser(pending.id, answer, by); } catch (err) { if (keyInputRefused(res, err)) return; throw err; }
-        if (answered) { jsonResponse(res, 200, { ok: true }); return; }
+        errorResponse(res, 409, 'A question is open: answer it with its promptId.', 'prompt_id_required');
+        return;
       }
 
       errorResponse(res, 404, 'No pending prompt');
@@ -6429,7 +6587,7 @@ export class LynoxHTTPApi {
       // 404 — mutating a nonexistent thread IS an error.
       if (!thread) { jsonResponse(res, 200, { thread: null, threadMissing: true }); return; }
       const states = containedThreadStates(engine.getToolContext().containment, [thread.id]);
-      jsonResponse(res, 200, { thread: { ...thread, ...containedFields(states, thread.id) } });
+      jsonResponse(res, 200, { thread: { ...thread, ...containedFields(states, thread.id), ...this._runTierOf(engine, thread) } });
     }, readsThread((p) => ({ thread: p['id'] ?? '' }))));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/threads/:id', async (_req, res, params, body) => {
@@ -6562,17 +6720,42 @@ export class LynoxHTTPApi {
         });
         return;
       }
-      threadStore.deleteThread(id);
+      // The chat's runs stay as rows, because they are the cost ledger, but the content they hold
+      // when the chat is deleted goes with it: prompts, answers, tool inputs and outputs, step
+      // results, the questions asked in it, and what the runs it spawned and the workflows it
+      // started wrote. A run or workflow still going when the chat is deleted can write more after
+      // this; that is not reached here. The blanking, the delete and the captured wire_snapshots
+      // share one transaction in history.db, so a failure leaves the chat and its runs as they
+      // were, and deleting again does all of it.
+      const runHistory = engine.getRunHistory();
+      let workflows: readonly string[] = [];
+      try {
+        if (runHistory) {
+          const { blankRunHistoryRows } = await import('../core/connection-erasure.js');
+          runHistory.getDb().transaction(() => {
+            workflows = blankRunHistoryRows(runHistory.getDb(), { threadIds: [id] }).pipelineIds;
+            threadStore.deleteThread(id);
+            runHistory.deleteWireSnapshotsForThread(id);
+          })();
+        } else {
+          threadStore.deleteThread(id);
+        }
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:thread-delete] Not deleted, removing the chat and the content of its runs failed for thread ${id.slice(0, 8)}: ${errorText(err, errorTextReduced(engine.getToolContext().containment, { threadId: id }))}\n`);
+        jsonResponse(res, 500, { error: 'The chat was not deleted: removing it and the content of its runs ran into an error.' });
+        return;
+      }
       // A run still waiting on a question in this chat could only be answered here. Its question
       // is withdrawn now, so the run ends with that reason instead of waiting out the TTL. After
       // the delete: a delete that answered 500 above leaves the chat, and its questions with it.
-      try { engine.getPromptStore()?.withdrawForDeletedThread(id); } catch (err: unknown) {
-        process.stderr.write(`[lynox:thread-delete] withdrawing the questions of deleted thread ${id.slice(0, 8)} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      // A step of a workflow the chat started asks under the workflow's id; its question was just
+      // blanked, so it is withdrawn too, before anything can read it: no await since the commit.
+      const promptStore = engine.getPromptStore();
+      for (const session of [id, ...workflows]) {
+        try { promptStore?.withdrawForDeletedThread(session); } catch (err: unknown) {
+          process.stderr.write(`[lynox:thread-delete] withdrawing the questions of deleted thread ${id.slice(0, 8)} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
       }
-      // Extended debug capture: drop the thread's captured wire_snapshots too (the
-      // runs stay — they are the cost ledger). Without this the redacted-but-personal
-      // snapshots outlive their deleted thread with no other prune path.
-      engine.getRunHistory()?.deleteWireSnapshotsForThread(params['id']!);
       jsonResponse(res, 200, { ok: true });
     }, OWN));
 
@@ -8596,7 +8779,7 @@ export class LynoxHTTPApi {
       // library agrees with the schedule handler on cron-eligibility (otherwise a
       // legacy autonomous workflow with no stored mode hides its Schedule button).
       const { inferPipelineMode, stepsThatAsk } = await import('../orchestrator/human-in-the-loop.js');
-      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string; mode?: string; schedulable: boolean; askingSteps: string[]; confirmedAt?: string; capabilityContract?: unknown; runs_as?: { person: string; ended: boolean; covered_by_takeover?: number }; schedule_refusal?: WorkflowScheduleRefusalKind; awaitsStamp: boolean }> = [];
+      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string; mode?: string; schedulable: boolean; askingSteps: string[]; confirmedAt?: string; capabilityContract?: unknown; runs_as?: { person: string; ended: boolean; undetermined?: true; covered_by_takeover?: number }; schedule_refusal?: WorkflowScheduleRefusalKind; awaitsStamp: boolean }> = [];
       // Whom the Run button runs each one as, for the owner only: a mandate's email is not another
       // mandate's to read (1055, ux U-063). Absent for the owner's own workflows.
       const viewer = this._principalOf(req);
@@ -8622,7 +8805,12 @@ export class LynoxHTTPApi {
         let parsed: { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown; parameters?: unknown; mode?: unknown; confirmedAt?: unknown; capabilityContract?: unknown };
         try {
           parsed = JSON.parse(row.manifest_json) as typeof parsed;
-        } catch { continue; } // skip corrupt rows
+        } catch {
+          // An unreadable definition is left out rather than costing the owner the library, and
+          // said on stderr by its id, never its content.
+          console.warn(`[lynox:http] workflow ${row.id} not readable, left out of the library`);
+          continue;
+        }
         if (parsed.template !== true) continue; // app-layer template filter
         // Narrow `parsed.steps` (typed `unknown`) to the InlinePipelineStep
         // subset the card needs (id + task). Drop malformed entries.
@@ -8684,8 +8872,10 @@ export class LynoxHTTPApi {
             }
             const runAs = workflowRunsAs(authorshipOrNone(() => history.getWorkflowAuthorship(row.id)));
             if (runAs.kind !== 'mandate') return {};
-            const ended = principalHasEnded(runAs, (id) => this._mandateLive(id));
-            return { runs_as: { person: runAs.email, ended, ...(ended ? { covered_by_takeover: coveredCount(row.id) } : {}) } };
+            const ended = this._workflowAuthorEnded(runAs);
+            // A mark without a grant id cannot tell whose access it was: the view names no one then.
+            const undetermined = runAs.mandateId === undefined ? { undetermined: true as const } : {};
+            return { runs_as: { person: runAs.email, ended, ...undetermined, ...(ended ? { covered_by_takeover: coveredCount(row.id) } : {}) } };
           })(),
         });
       }
@@ -9182,45 +9372,15 @@ export class LynoxHTTPApi {
       const planned = history.getWorkflowExact(params['id']!);
       const expect = planned === undefined ? null : history.workflowStampDigest(planned);
       if (planned === undefined || expect === null) { errorResponse(res, 404, 'Workflow not found'); return; }
-      const { inlineStepToolNames } = await import('../orchestrator/runtime-adapter.js');
-      const { getRole } = await import('../core/roles.js');
-      const roleGrantOf = (name: string | undefined): { model: string; effort: string; allowTools: string[] | null; denyTools: string[] | null; readOnly: boolean } | null => {
-        const r = name === undefined ? undefined : getRole(name);
-        return r === undefined ? null : { model: r.model, effort: r.effort, allowTools: r.allowTools ? [...r.allowTools] : null, denyTools: r.denyTools ? [...r.denyTools] : null, readOnly: r.readOnly === true };
-      };
       const state = history.workflowStampState(planned);
       const shaped = history.workflowMandateShaped(planned.id);
-      const contract = planned.capabilityContract;
       jsonResponse(res, 200, {
         expect,
         stampedAt: state === 'holds' ? planned.confirmedAt ?? null : null,
         changedBy: shaped ? 'mandate' : 'owner',
         awaitsStamp: state === 'awaits_owner_stamp',
-        mode: planned.mode,
-        onFailure: planned.on_failure ?? 'stop',
-        limits: planned.limits ?? null,
-        // What the contract lets the run write, as the grant's preview words it.
-        contract: contract === undefined ? null : contract.hostPatterns.flatMap((h) => contract.pathPatterns.flatMap((p) => contract.httpMethods.map((m) => `${m} https://${h}${p}`))),
-        parameters: (planned.parameters ?? []).map((p) => ({ name: p.name, required: p.defaultValue === undefined || p.defaultValue === null, default: p.defaultValue ?? null })),
-        // Each step as it runs: a captured step's literal call beside its task, and the tools it
-        // gets, worked out the way the runtime does (a step that names none gets the pool).
-        // `secret:` references stay names; no value is resolved here.
-        // A role can widen the tools and change the model at run time: it is shown by name.
-        steps: (Array.isArray(planned.steps) ? planned.steps : []).map((st) => ({
-          id: st.id,
-          task: st.task,
-          tool: st.tool ?? null,
-          inputTemplate: st.tool !== undefined ? st.input_template ?? null : null,
-          tools: [...inlineStepToolNames(st)],
-          model: st.model ?? null,
-          role: st.role ?? null,
-          // A role is built in (`roles.ts`), not stored: what it grants is shown beside its name.
-          roleGrant: roleGrantOf(st.role),
-          effort: st.effort ?? null,
-          thinking: st.thinking ?? null,
-          timeoutMs: st.timeout_ms ?? null,
-          inputFrom: st.input_from ?? null,
-        })),
+        ...stampShown(planned),
+        steps: await stepsShown(planned),
       });
     }, ownerOnly('see what stamping a workflow would confirm')));
 
@@ -9248,6 +9408,50 @@ export class LynoxHTTPApi {
         .filter((t) => t.pipeline_id === id && t.enabled === 0 && (t.last_run_result ?? '').startsWith(workflowAwaitsStampResult(id))).length;
       jsonResponse(res, 200, { stampedAt: now?.confirmedAt ?? null, awaitsStamp: false, stillOff });
     }, ownerOnly('stamp a workflow')));
+
+    // The owner's takeover of a workflow a mandate set up or changed, once that mandate's access
+    // ended (`workflow-takeover.ts`): the preview shows the steps as the stamp preview does, whose
+    // marks are covered, what moves on the other plans, and the connections a run as the owner no
+    // longer uses, with the digest the takeover is held to. Its own routes: the stamp's `expect`
+    // never covers a mark. Not held to the plan pause: a workflow is taken over without a plan.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/workflows/:id/takeover-preview', async (_req, res, params) => {
+      const deps = this.#workflowTakeoverDeps(res);
+      if (deps === null) return;
+      const out = workflowTakeoverPreview(deps, params['id']!);
+      if (out.kind === 'not_found') { errorResponse(res, 404, 'Workflow not found'); return; }
+      if (out.kind === 'refused') { jsonResponse(res, 200, { refusal: out.refusal, message: WORKFLOW_TAKEOVER_REFUSALS[out.refusal].message }); return; }
+      const { planned, foreignConnectionSteps, ...preview } = out.preview;
+      const marked = new Map(foreignConnectionSteps.map((f) => [f.step, f.profileId] as const));
+      // A step whose literal call goes to a profile some mandate connected is marked, whoever it was,
+      // with the profile, so the view can name the person where a connection below is that profile.
+      const steps = (await stepsShown(planned)).map((st) => ({ ...st, foreignConnection: marked.has(st.id), connectionProfile: marked.get(st.id) ?? null }));
+      // Everything the stamp binds beside the steps, as the stamp preview shows it: the takeover stamps it too.
+      jsonResponse(res, 200, { ...preview, ...stampShown(planned), steps, refusal: null });
+    }, ownerOnly('see what taking over a workflow would do')));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/takeover', async (_req, res, params, body) => {
+      // The digest from the preview is required: the takeover is the owner's consent to what the
+      // preview showed, and nothing else.
+      const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
+        ? (body as { expect: string }).expect : undefined;
+      if (expected === undefined) { errorResponse(res, 400, '"expect" is required: take the workflow over from its preview.', 'expect_required'); return; }
+      const deps = this.#workflowTakeoverDeps(res);
+      if (deps === null) return;
+      const out = takeOverWorkflow(deps, params['id']!, expected);
+      if (out.kind === 'not_found') { errorResponse(res, 404, 'Workflow not found'); return; }
+      if (out.kind === 'refused') {
+        const r = WORKFLOW_TAKEOVER_REFUSALS[out.refusal];
+        errorResponse(res, r.status, r.message, out.refusal);
+        return;
+      }
+      // The cached definition carries the old stamp: a run after this must read the new one.
+      const { forgetPipeline } = await import('../tools/builtin/pipeline.js');
+      forgetPipeline(out.id);
+      // As after the stamp: schedules the wait switched off stay off, counted for the page.
+      const stillOff = (engine.getTaskManager()?.listTriggers?.() ?? [])
+        .filter((t) => t.pipeline_id === out.id && t.enabled === 0 && (t.last_run_result ?? '').startsWith(workflowAwaitsStampResult(out.id))).length;
+      jsonResponse(res, 200, { takenOver: true, runsAs: out.runsAs, stillOff });
+    }, ownerOnly('take over a workflow')));
 
     // ── Tasks ──
     this.addStatic('user', 'GET /api/tasks', async (req, res) => {
@@ -9286,6 +9490,7 @@ export class LynoxHTTPApi {
       const rows = pausedFilter
         ? taskManager.listTriggers({ paused: true })
         : taskManager.listTriggers(status ? { status } : undefined);
+      const bulkLedgerForList = engine.getBulkLedger() ?? engine.getBulkLedgerSwitchedOff?.() ?? null;
       const triggers = rows
         .map((trigger) => {
           const starter = loop?.runningStarterTag(trigger.id);
@@ -9294,11 +9499,32 @@ export class LynoxHTTPApi {
           // not run (a webhook's is switched off), and the view says so instead of a next run.
           // The same state the run refusal reads (`workflow-stamp.ts`).
           const workflow = trigger.effect === 'run_workflow' && trigger.pipeline_id ? history?.getWorkflowExact(trigger.pipeline_id) : undefined;
+          // A bulk run's trigger is titled with its run id, for the model; the view names it by its
+          // stage and the host it works on instead (U-324). Null: no host (the data store,
+          // workspace files) or no run any more.
+          // One row whose run cannot be read must not cost the owner the whole list: it shows no host.
+          // A row stored without an effect is no bulk row, and does not cost the list either.
+          const isBulk = typeof trigger.effect === 'string' && trigger.effect.startsWith('bulk_');
+          let bulkSystem: string | undefined;
+          if (isBulk && trigger.bulk_run_id !== undefined) {
+            try { bulkSystem = bulkLedgerForList?.getRunForApply(trigger.bulk_run_id)?.targetSystem; } catch { bulkSystem = undefined; }
+          }
           return {
             ...triggerForRoute(trigger, principal),
             running: visible,
             stoppable: visible && loop?.runningStoppable(trigger.id) === true,
             workflow_awaits_stamp: workflow !== undefined && history?.workflowStampState(workflow) === 'awaits_owner_stamp',
+            // A trigger from before its creator was recorded sends to nobody its instruction names
+            // until the owner confirms its recipients; the view offers that to the owner only, and
+            // only for a trigger whose run can send (an agent's or a workflow's run, not a reminder).
+            recipients_unconfirmed: isOwnerPrincipal(principal) && recipientsConfirmable(trigger)
+              && (trigger.effect === undefined || trigger.effect === null || trigger.effect === 'run_agent' || trigger.effect === 'run_workflow'),
+            ...(isBulk ? { bulk_host: bulkSystem === undefined ? null : externalHostOf(bulkSystem) } : {}),
+            // The workflow's name where the title is that name as the engine wrote it (scheduled
+            // without a title): the view says "Scheduled: " itself, in the reader's language, and
+            // sets the name apart as a value. Any other title stays whole, the prefix included; so
+            // does the title of a plan with no schedule, and one whose workflow was renamed since.
+            ...(workflow !== undefined && (trigger.schedule_cron ?? '') !== '' && titleIsWorkflowName(trigger.title, workflow.name) ? { title_workflow: workflow.name } : {}),
           };
         });
       // What the owner's stamp of each confirmed plan lists, and how each entry stands (B3), for the
@@ -9413,6 +9639,12 @@ export class LynoxHTTPApi {
           if (this._refuseUnlessOwner(_req, res, 'grant a workflow unattended writes')) return;
           const { workflowGrantEnabled, acceptWorkflowGrant } = await import('../core/workflow-grant.js');
           if (!workflowGrantEnabled()) { errorResponse(res, 403, 'Granting a workflow unattended writes is not enabled on this instance.'); return; }
+          // A grant makes the contract's hosts count as named by the owner, so it is given in the
+          // owner's browser session only, as recipients are confirmed: never with a token.
+          if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+            errorResponse(res, 403, 'Unattended writes are granted only in the owner\'s browser session, not with a token.', 'session_only');
+            return;
+          }
           if (typeof rawGrant !== 'object' || rawGrant === null || Array.isArray(rawGrant)) { errorResponse(res, 400, 'Invalid "grant".'); return; }
           const g = rawGrant as Record<string, unknown>;
           const engineDb = engine.getEngineDb();
@@ -9421,7 +9653,7 @@ export class LynoxHTTPApi {
             const accepted = acceptWorkflowGrant(planned, {
               method: g['method'], host: g['host'], paths: g['paths'], params: rawParams, cron: scheduleCron,
               afterUntrusted: g['afterUntrusted'], checksum: g['checksum'], name: g['name'],
-              title: title ?? `Scheduled: ${planned.name}`,
+              title: title ?? planned.name,
             }, this._authOrigin.get(_req) ?? 'unknown', { history, taskManager, hasher: engineDb });
             if (!accepted.ok) { errorResponse(res, accepted.status, accepted.error); return; }
             forgetPipeline(planned.id);
@@ -9457,7 +9689,7 @@ export class LynoxHTTPApi {
           }
           forgetPipeline(planned.id);
           const task = taskManager.createPipelineTask({
-            title: title ?? `Scheduled: ${planned.name}`,
+            title: title ?? planned.name,
             pipelineId: planned.id,
             scheduleCron,
             pipelineParams: JSON.stringify(bound.params),
@@ -9487,9 +9719,12 @@ export class LynoxHTTPApi {
         // non-run_agent effects.
         // Only the owner's request stamps; a mandate's trigger lands unconfirmed, like one
         // the agent tool creates.
+        // The stamp below is the same either way; only whose words the instruction counts as differs.
+        const tokenWords = this._ownerTokenWords(_req);
         const baseParams = {
           title, description, assignee, dueDate, createdBy, createdMandateId,
           ...(byOwner ? { confirmedAt: new Date().toISOString(), confirmedBy: createdBy } : {}),
+          ...(tokenWords !== undefined ? { createdUntrusted: tokenWords } : {}),
         };
         const task = scheduleCron
           ? taskManager.createScheduled({ ...baseParams, scheduleCron })
@@ -9511,8 +9746,7 @@ export class LynoxHTTPApi {
       if (hidden !== null) { errorResponse(res, 400, hidden, HIDDEN_CHAR_CODE); return; }
       // The fields a person types; not the ids, which a random-looking id would fail.
       if (refusedMandateKeyIn(this._principalOf(_req), res, [b['title'], b['description'], b['assignee'], b['tags'], b['params']])) return;
-      // Checked here rather than left to `update`, which throws: a thrown error answers
-      // 500, and a refused request must not mark the trigger as a mandate's edit either.
+      // Checked here rather than left to `update`, which throws: a thrown error answers 500.
       if ('modelTier' in b && b['modelTier'] !== undefined && !isTriggerModelTierUpdate(b['modelTier'])) {
         errorResponse(res, 400, 'Invalid modelTier: use fast, balanced or deep, or null to clear it.');
         return;
@@ -9524,7 +9758,7 @@ export class LynoxHTTPApi {
         errorResponse(res, 403, 'modelTier cannot be set on this plan.');
         return;
       }
-      // Refused here as well as in `update`, which throws only after the mark below.
+      // Refused here as well as in `update`, which refuses it before it marks anything.
       if (b['modelTier']) {
         const trigger = taskManager.getTrigger(params['id']!);
         if (trigger && !triggerTakesModelTier(trigger.effect)) {
@@ -9538,9 +9772,9 @@ export class LynoxHTTPApi {
         return;
       }
       if (this._refusePaused(_req, res, taskManager, params['id']!, typeof b['enabled'] === 'boolean' ? 'enable' : 'edit')) return;
-      if (this._markMandateEdit(_req, res, taskManager, params['id']!)) return;
       // Slice B2: cron kill-switch toggle — `{ "enabled": true|false }`.
       if (typeof b['enabled'] === 'boolean') {
+        if (this._markMandateEdit(_req, res, taskManager, params['id']!)) return;
         let found: boolean;
         try {
           found = taskManager.setEnabled(params['id']!, b['enabled']);
@@ -9562,12 +9796,19 @@ export class LynoxHTTPApi {
       try {
         // `untrusted` is what the agent's turn had taken in (task_update reads it off the agent); a
         // request does not get to say it, so it is dropped here rather than stored as sent.
+        // An owner's token that rewrites the instruction marks it, as a creation does
+        // (`_ownerTokenWords`). The store reads the mark only with a title or description edit, and
+        // only adds it: a schedule change marks nothing, and the owner's browser session clears none.
+        // A workflow's schedule is not marked, as at its creation: its instruction is the stamped
+        // steps, not its title, and a mark would start every run of it as after outside content.
         const { untrusted: _fromClient, ...edit } = body as Record<string, unknown>;
-        task = taskManager.update(params['id']!, edit as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
+        const scheduledWorkflow = engine.getRunHistory()?.getTrigger(params['id']!)?.pipeline_id;
+        const tokenWords = scheduledWorkflow ? undefined : this._ownerTokenWords(_req);
+        task = taskManager.update(params['id']!, { ...edit, ...(tokenWords !== undefined ? { untrusted: tokenWords } : {}) } as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req), this._mandateEditMark(_req, taskManager));
       } catch (err: unknown) {
         if (this._answerTodoRefusal(res, err)) return;
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
-        if (err instanceof TriggerTierUnsupportedError || err instanceof InvalidDueDateError) { errorResponse(res, 400, err.message); return; }
+        if (err instanceof TriggerTierUnsupportedError || err instanceof InvalidDueDateError || err instanceof TriggerFieldsNotCarriedError) { errorResponse(res, 400, err.message); return; }
         throw err;
       }
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
@@ -9618,10 +9859,9 @@ export class LynoxHTTPApi {
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       if (this._refusePaused(_req, res, taskManager, params['id']!, 'complete')) return;
-      if (this._markMandateEdit(_req, res, taskManager, params['id']!)) return;
       let task;
       try {
-        task = taskManager.complete(params['id']!, undefined, this._principalOf(_req));
+        task = taskManager.complete(params['id']!, undefined, this._principalOf(_req), this._mandateEditMark(_req, taskManager));
       } catch (err: unknown) {
         if (this._answerTodoRefusal(res, err)) return;
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
@@ -9764,7 +10004,13 @@ export class LynoxHTTPApi {
     }, ownerOnly('see what a schedule would be confirmed with')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/confirm', async (_req, res, params, body) => {
-      // Only the owner stamps (§3.12 point 2).
+      // Only the owner stamps (§3.12 point 2), and only in their browser session, as recipients
+      // are confirmed: a token, the owner's included, could otherwise stamp a schedule a run it
+      // started had just written, and that schedule would then run as the owner's instruction.
+      if (this._ambientOf(_req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+        errorResponse(res, 403, 'A schedule is confirmed only in the owner\'s browser session, not with a token.', 'session_only');
+        return;
+      }
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       if (this._refusePaused(_req, res, taskManager, params['id']!, 'confirm')) return;
@@ -9845,6 +10091,41 @@ export class LynoxHTTPApi {
       }
       jsonResponse(res, 200, { ...triggerForRoute(out.trigger, this._principalOf(_req)), runsAs: out.runsAs });
     }, ownerOnly('take over a plan')));
+
+    // "Confirm recipients" (`recipient-confirm.ts`): the owner, in a browser session, makes a
+    // trigger from before its creator was recorded count as their own. The preview shows the
+    // instruction and its digest; the confirmation sends the digest back and records the owner
+    // as the trigger's creator, and nothing else. A token is refused, the owner's included: a
+    // script or a tool must never be able to make an instruction the owner's.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/triggers/:id/confirm-recipients-preview', async (_req, res, params) => {
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'Run history')) return;
+      const t = history.getTrigger(params['id']!);
+      if (!t) { errorResponse(res, 404, 'Trigger not found'); return; }
+      if (!recipientsConfirmable(t)) { errorResponse(res, 409, 'This trigger has no recipients to confirm.', 'not_confirmable'); return; }
+      jsonResponse(res, 200, {
+        title: t.title, description: t.description ?? '', effect: t.effect ?? null,
+        pipeline_id: t.pipeline_id ?? null, params: t.pipeline_params ?? null, watch_config: t.watch_config ?? null,
+        expect: recipientConfirmDigest(t),
+      });
+    }, ownerOnly('confirm a trigger\'s recipients')));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/triggers/:id/confirm-recipients', async (req, res, params, body) => {
+      if (this._ambientOf(req, process.env['LYNOX_HTTP_SECRET']) === 'none') {
+        errorResponse(res, 403, 'Recipients are confirmed only in the owner\'s browser session, not with a token.', 'session_only');
+        return;
+      }
+      const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
+        ? (body as { expect: string }).expect : undefined;
+      if (expected === undefined) { errorResponse(res, 400, '"expect" is required: confirm from the preview.', 'expect_required'); return; }
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'Run history')) return;
+      const out = history.confirmTriggerRecipients(params['id']!, expected);
+      if (out === 'not_found') { errorResponse(res, 404, 'Trigger not found'); return; }
+      if (out === 'changed') { errorResponse(res, 409, 'Nothing confirmed: the trigger has changed in the meantime.', 'changed'); return; }
+      if (out === 'not_confirmable') { errorResponse(res, 409, 'This trigger has no recipients to confirm.', 'not_confirmable'); return; }
+      jsonResponse(res, 200, { confirmed: true });
+    }, ownerOnly('confirm a trigger\'s recipients')));
 
     // Run a trigger immediately, off-schedule (the Triggers-home "Run now"
     // control). Delegates to the WorkerLoop so the manual run goes through the
@@ -10095,6 +10376,7 @@ export class LynoxHTTPApi {
       // A list still to be read is started against what the owner sees here: the address its
       // first page is read at, and the checksum over its source and read contract (PRD bulk-loop §3.2).
       const listRun = status.list?.state === 'pending' ? ledger.getListRun(params['id']!) : null;
+      const judgeOutliers = status.phase === 'previewed' ? await ledger.judgeOutliersOf(params['id']!) : null;
       jsonResponse(res, 200, {
         ...withBinding(status),
         checksum: actionable ? ledger.computeChecksum(params['id']!) : null,
@@ -10106,6 +10388,9 @@ export class LynoxHTTPApi {
           const hidden = actionable ? ledger.hiddenCounts(params['id']!) : null;
           return { hiddenAddsTargets: hidden?.adds ?? null, hiddenUncheckedTargets: hidden?.unchecked ?? null };
         })(),
+        // A judged run's verdicts that differ from the rest of it, listed first in the approval view:
+        // a reading order, never a check (`bulk-outliers.ts`). Only where the run can be approved.
+        judgeOutliers,
         // A Shopify list has no page address: what is read is the store's GraphQL endpoint, with
         // the engine's own documents. It stands here so the owner sees where the read goes. A stored
         // source with no address to build (a form without a spec, a filter holding a list) shows its
@@ -10344,6 +10629,20 @@ export class LynoxHTTPApi {
       if (!out.ok) { refuseOut(res, out); return; }
       jsonResponse(res, 200, withBinding(out.status));
     }, ownerOnly('approve a bulk run')));
+
+    // Discarding a run before its approval: the owner's act, like the approval it forgoes. A
+    // mandate asks the owner (U-324). Nothing was written, so nothing is told: the owner did it.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/discard', async (_req, res, params) => {
+      const ledger = bulkLedger(res);
+      if (!ledger) return;
+      const id = params['id']!;
+      if (ledger.getStatus(id) === null) { errorResponse(res, 404, 'No bulk run with this id.', 'not_found'); return; }
+      if (!ledger.discardRun(id)) {
+        errorResponse(res, 409, 'Only a run that is not yet approved can be discarded; an approved run is stopped instead.', 'not_discardable');
+        return;
+      }
+      jsonResponse(res, 200, withBinding(ledger.getStatus(id)!));
+    }, ownerOnly('discard a bulk run')));
 
     // Taking one target out of a previewed run before approving it, or putting it back (PRD
     // shopify-preset §20.2 item 4). An owner's act like the approval it changes; the checksum is
@@ -10633,7 +10932,7 @@ export class LynoxHTTPApi {
           return;
         }
         if (!(err instanceof ArtifactPlaceholderError)) throw err;
-        errorResponse(res, 422, 'This is the placeholder the assistant keeps for an already saved document, not the document. Nothing was saved.', 'artifact_placeholder');
+        errorResponse(res, 422, 'This is only the assistant\'s placeholder, not a document. Nothing was saved.', 'artifact_placeholder');
         return;
       }
       jsonResponse(res, 201, artifact);
@@ -12012,7 +12311,7 @@ export class LynoxHTTPApi {
         return;
       }
 
-      const token = mintBrokerStartToken(instanceId, httpSecret);
+      const token = mintBrokerStartToken('google', instanceId, httpSecret);
       const url =
         `${controlPlaneUrl}/oauth/google/start` +
         `?instance_id=${encodeURIComponent(instanceId)}` +
@@ -12088,6 +12387,13 @@ export class LynoxHTTPApi {
           await google.setTokens(tokens);
           jsonResponse(res, 200, { ok: true, scopes: tokens.scopes });
         } catch (err: unknown) {
+          if (err instanceof SyntaxError) {
+            // The claim answer carries the tokens: the log names the position, never the text around
+            // it, and the owner gets a code the page words for them.
+            process.stderr.write(`[lynox:google] the claim answer is ${jsonFault(err)}\n`);
+            jsonResponse(res, 500, { error: 'Google could not be connected', code: 'google_claim_invalid' });
+            return;
+          }
           const msg = err instanceof Error ? err.message : String(err);
           errorResponse(res, 500, msg);
         }

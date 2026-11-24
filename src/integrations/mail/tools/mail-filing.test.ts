@@ -161,7 +161,7 @@ describe('mail_reply in a marked call', () => {
     provider.fetch.mockResolvedValue({ envelope: envelope(42, { isAutoReply: true }), text: 'Out of office.', html: undefined, attachments: [], inReplyTo: undefined, references: undefined });
     const { agent, filed } = filingAgent();
     const out = await marked(() => createMailReplyTool(registry).handler({ uid: 42, body: 'Hi' }, agent));
-    expect(out).toMatch(/^mail_reply blocked: original message has Auto-Submitted header/);
+    expect(out).toMatch(/^mail_reply blocked: original message was sent automatically/);
     expect(filed).toEqual([]);
   });
 
