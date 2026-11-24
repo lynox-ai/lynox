@@ -236,6 +236,23 @@ describe('the language comes from the session', () => {
     expect(en[0]).toContain('This save changes:\n- scopes added: write');
   });
 
+  it('a German session reads the sentence before a host outside the listed sub-processors in German, the acceptance itself as given', async () => {
+    const run = async (language: DialogLanguage | undefined): Promise<string[]> => {
+      const asked: string[] = [];
+      await apiSetupTool.handler({ action: 'create', profile: keyProfile({ base_url: 'https://api.acme-crm.example/v1' }) }, agentFor(language, asked));
+      return asked;
+    };
+    const de = (await run('de')).filter((q) => q.includes('Speichern'));
+    expect(de).toHaveLength(1);
+    expect(de[0]).toContain('lynox sendet Daten an Hosts ausserhalb der aufgeführten Unterauftragsverarbeiter von lynox:\n\nCustom endpoint outside lynox\'s listed sub-processors: api.acme-crm.example.');
+    rmSync(dir, { recursive: true, force: true });
+    dir = mkdtempSync(join(tmpdir(), 'api-setup-de-'));
+    store = new ApiStore(join(dir, 'apis'));
+    const en = (await run(undefined)).filter((q) => q.includes('saving'));
+    expect(en).toHaveLength(1);
+    expect(en[0]).toContain('This engine will send data to host(s) outside lynox\'s listed sub-processors:\n\nCustom endpoint outside lynox\'s listed sub-processors: api.acme-crm.example.');
+  });
+
   it('is handed to the list of changes from the session, never from the profile or the model', () => {
     const src = readFileSync(join(process.cwd(), 'src/tools/builtin/api-setup.ts'), 'utf8');
     expect(src.match(/securityChanges\(/g)?.length).toBe(2);
