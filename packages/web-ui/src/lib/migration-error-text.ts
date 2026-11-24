@@ -137,17 +137,27 @@ function unreadable(params: MigrationErrorParams): MigrationErrorView {
 }
 
 /**
- * The sentence for `code` filled from `params`, and the box under it. `reason` is the answer's own
- * text of a start this instance turned down without a code.
+ * The i18n key of the sentence for `code` with `retry`. A handshake that got no usable answer where the
+ * target may still hold an attempt (`later`) says why lynox waits; the same code with `now` did not
+ * reach the target, and its sentence asks to check the address.
  */
-export function migrationErrorView(code: string, params: MigrationErrorParams = {}, reason = ''): MigrationErrorView {
+export function migrationStopSentenceKey(code: string, retry = ''): string {
+	return code === 'handshake_unreachable' && retry === 'later' ? 'migration.stop.handshake_no_answer' : migrationStopKey(code);
+}
+
+/**
+ * The sentence for `code` filled from `params`, and the box under it. `reason` is the answer's own
+ * text of a start this instance turned down without a code; `retry` picks the sentence where one code
+ * has two (see `migrationStopSentenceKey`).
+ */
+export function migrationErrorView(code: string, params: MigrationErrorParams = {}, reason = '', retry = ''): MigrationErrorView {
 	if (code === 'start_refused') {
 		return { segments: [text(t('migration.error_not_started'))], box: reason === '' ? null : { label: t('migration.error_reason'), value: reason } };
 	}
 	// A code this UI does not know says nothing certain about what was sent.
 	if (!knownMigrationCode(code)) return unreadable({});
 	if (code === 'unknown') return unreadable(params);
-	const template = t(migrationStopKey(code));
+	const template = t(migrationStopSentenceKey(code, retry));
 	const vars: Record<string, MigrationErrorSegment> = {};
 	switch (code) {
 		case 'start_not_public':
