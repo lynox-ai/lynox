@@ -259,8 +259,8 @@ describe('a profile in the API store', () => {
 		// A member's marks cannot close its box or open another: they show as their code points, inside the one box.
 		const memberWithMarks = `${MARK.plan}${String.fromCharCode(0xe001)} ok ${String.fromCharCode(0xe000)}x`;
 		await store([
-			{ ...P, id: 'p0', name: 'CRM', description: MARK.workflow, created_by: `mandate:${MARK.helper}` },
-			{ ...P, id: 'p1', name: 'Eigenes', description: MARK.own, created_by: 'owner' },
+			{ ...P, id: 'p0', name: 'CRM', description: MARK.workflow, created_by: `mandate:${MARK.helper}`, auth: { type: 'bearer' } },
+			{ ...P, id: 'p1', name: 'Eigenes', description: MARK.own, created_by: 'owner', auth: { type: 'basic' } },
 			{ ...P, id: 'p2', name: 'Eigenes 2', description: ownWithMarks, created_by: 'owner' },
 			{ ...P, id: 'p3', name: 'CRM 2', description: memberWithMarks, created_by: `mandate:${MARK.helper}` },
 		]);
@@ -270,7 +270,11 @@ describe('a profile in the API store', () => {
 		const noneElsewhere = (opened?: Element): void => {
 			const page = (target.textContent ?? '').replace(opened?.textContent ?? '', '');
 			for (const x of texts) expect(page, 'the page outside the opened description').not.toContain(x);
-			const inHeads = [...target.querySelectorAll('button[aria-expanded]')].flatMap((h) => [h, ...h.querySelectorAll('*')]);
+			const heads = [...target.querySelectorAll('button[aria-expanded]')];
+			const inHeads = heads.flatMap((h) => [h, ...h.querySelectorAll('*')]);
+			// The scan reaches the four heads, and inside them the names and the chips with their own title.
+			expect(heads, 'the card heads').toHaveLength(4);
+			expect(inHeads.filter((e) => e.matches('[data-profile-name], [data-testid="api-auth-chip"][title]')), 'names and titled chips in the heads').toHaveLength(6);
 			for (const h of inHeads) for (const x of texts) {
 				expect(h.getAttribute('title') ?? '', 'a head\'s title').not.toContain(x);
 				expect(h.getAttribute('aria-label') ?? '', 'a head\'s label').not.toContain(x);
