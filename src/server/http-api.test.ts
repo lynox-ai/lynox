@@ -328,6 +328,8 @@ vi.mock('../core/engine.js', () => ({
       scrubFreedPages: vi.fn(),
       hasVault: true,
       resolve: mockSecretResolve,
+      // Existence without a value (`SecretStore.holds`), over the same slots `resolve` answers.
+      holds: (name: string): boolean => mockSecretResolve(name) != null,
       isEnvironmentSecret: mockSecretIsEnvironment,
       containsSecret: mockSecretContains,
       maskSecrets: mockSecretMask,
@@ -6562,7 +6564,7 @@ describe('LynoxHTTPApi', () => {
 
     async function connect(
       author: string | undefined, asMandate: boolean, id = 'books',
-      opts: { clientIdKey?: string; others?: import('../core/api-store.js').ApiProfile[]; unreleased?: boolean; method?: 'GET' | 'POST' | 'HEAD'; query?: string; lang?: string; scope?: string } = {},
+      opts: { clientIdKey?: string; others?: import('../core/api-store.js').ApiProfile[]; unreleased?: boolean; method?: 'GET' | 'POST' | 'HEAD'; query?: string; lang?: string; scope?: string; login?: typeof MANDATE_LOGIN } = {},
     ): Promise<{ status: number; text: string; state: string | null; location: string }> {
       const { ApiStore } = await import('../core/api-store.js');
       const store = new ApiStore();
@@ -6596,7 +6598,7 @@ describe('LynoxHTTPApi', () => {
         },
       });
       try {
-        const token = asMandate ? webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token : webUiLoginSession(TEST_SECRET, null)!.token;
+        const token = asMandate ? webUiLoginSession(TEST_SECRET, opts.login ?? MANDATE_LOGIN)!.token : webUiLoginSession(TEST_SECRET, null)!.token;
         // A mandate's connect goes on from the note page with a POST that names the note shown.
         const method = opts.method ?? (asMandate ? 'POST' : 'GET');
         const query = opts.query ?? (asMandate && method === 'POST' ? '?shown_note=3' : '');
@@ -6704,7 +6706,24 @@ describe('LynoxHTTPApi', () => {
       const r = await connect(TAG, true);
       expect(r.status).toBe(302);
       expect(verifyProfileOAuthState(r.state ?? '', TEST_SECRET, Math.floor(Date.now() / 1000))?.by)
-        .toEqual({ tag: TAG, mandateId: 'TEST-MANDATE-1' });
+        .toEqual({ tag: TAG, mandateId: 'TEST-MANDATE-1', display: 'TEST-DISPLAY' });
+    });
+
+    // A name the state cannot carry once encoded (a lone surrogate passes every character rule
+    // and JSON writes it as six bytes) does not stop the start: it is signed without the name.
+    it('starts a mandate\'s connection without its name when the name does not fit the state, and with it otherwise', async () => {
+      const { verifyProfileOAuthState } = await import('../core/oauth-state-cookie.js');
+      const email = `${'\udc00'.repeat(240)}@x.invalid`;
+      const login = { ...MANDATE_LOGIN, email, display: '\udc00'.repeat(200) };
+      const r = await connect(`mandate:${email}`, true, 'books', { login });
+      expect(r.status).toBe(302);
+      expect(verifyProfileOAuthState(r.state ?? '', TEST_SECRET, Math.floor(Date.now() / 1000))?.by)
+        .toEqual({ tag: `mandate:${email}`, mandateId: 'TEST-MANDATE-1' });
+      // Control: the same session with a short name carries it.
+      const short = await connect(`mandate:${email}`, true, 'books', { login: { ...login, display: 'TEST-DISPLAY' } });
+      expect(short.status).toBe(302);
+      expect(verifyProfileOAuthState(short.state ?? '', TEST_SECRET, Math.floor(Date.now() / 1000))?.by)
+        .toEqual({ tag: `mandate:${email}`, mandateId: 'TEST-MANDATE-1', display: 'TEST-DISPLAY' });
     });
 
     // The note before the provider's login (the approved wording), word for word: a
@@ -21074,7 +21093,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     mockSecretSet.mockReset();
   });
 
-  async function arrange(opts: { base?: string; oauthExtra?: Record<string, unknown>; tokenBody?: string; by?: import('../core/oauth-state-cookie.js').ConnectingPrincipal; asked?: string[]; consent?: string } = {}): Promise<{ cookie: string; store: InstanceType<Awaited<typeof import('../core/api-store.js')>['ApiStore']> }> {
+  async function arrange(opts: { base?: string; oauthExtra?: Record<string, unknown>; tokenBody?: string; by?: import('../core/oauth-state-cookie.js').ConnectingPrincipal; asked?: string[]; consent?: string; grant?: Record<string, unknown> } = {}): Promise<{ cookie: string; store: InstanceType<Awaited<typeof import('../core/api-store.js')>['ApiStore']> }> {
     const { ApiStore } = await import('../core/api-store.js');
     const store = new ApiStore();
     expect(store.register({
@@ -21084,7 +21103,8 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
         vault_keys: ['SHOP_CLIENT_ID'],
         oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', ...(opts.oauthExtra ?? {}) },
       },
-    })).toBe(true);
+      ...(opts.grant !== undefined ? { oauth_grant: opts.grant } : {}),
+    } as never)).toBe(true);
     mockGetApiStore.mockReturnValue(store);
     mockSecretResolve.mockImplementation((n: string) => (n === 'SHOP_CLIENT_ID' ? 'id-1' : CLIENT_SECRET));
     // A vetted endpoint stands in for the store's: what is under test is what happens before it.
@@ -21149,6 +21169,105 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     } finally {
       exchangePassFor.standIn = null;
     }
+  });
+
+  describe('the ask for an expiring token in the code exchange', () => {
+    /** Arranges the profile with or without a token in its vault slot, and the stamp it holds. */
+    async function arrangeHeld(held: { token: boolean; refresh?: boolean; expiresAt?: number; grant?: Record<string, unknown> }): Promise<{ cookie: string; store: Awaited<ReturnType<typeof arrange>>['store'] }> {
+      const { accessTokenKey, refreshTokenKey } = await vi.importActual<typeof import('../core/api-store.js')>('../core/api-store.js');
+      const out = await arrange({ ...(held.expiresAt === undefined ? {} : { oauthExtra: { token_expires_at: held.expiresAt } }), ...(held.grant !== undefined ? { grant: held.grant } : {}) });
+      mockSecretResolve.mockImplementation((n: string) => {
+        if (n === accessTokenKey(PROFILE)) return held.token ? 'at-old' : null;
+        if (n === refreshTokenKey(PROFILE)) return held.refresh === true ? 'rt-old' : null;
+        return n === 'SHOP_CLIENT_ID' ? 'id-1' : CLIENT_SECRET;
+      });
+      return out;
+    }
+    const sentParams = (): Record<string, string> =>
+      (mockExchangeToken.mock.calls[0]![0] as { params: Record<string, string> }).params;
+
+    it('asks a store with no token yet for an expiring one, in the body the exchange pass covers', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { serializeTokenBody } = await import('../core/oauth-token-exchange.js');
+      exchangePassFor.calls = [];
+      exchangePassFor.standIn = async () => ({ stand: 'in' });
+      try {
+        const { cookie } = await arrangeHeld({ token: false });
+        expect((await call(signed(good()), cookie)).status).toBe(200);
+        expect(sentParams()['expiring']).toBe('1');
+        const [, , body] = exchangePassFor.calls[0]! as [unknown, string, string];
+        expect(body).toBe(serializeTokenBody(sentParams(), 'form'));
+        expect(body).toContain('expiring=1');
+      } finally {
+        exchangePassFor.standIn = null;
+      }
+    });
+
+    it('does not ask a store connected with a token that does not expire, when it is connected again', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { cookie } = await arrangeHeld({ token: true });
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      expect(sentParams()).not.toHaveProperty('expiring');
+    });
+
+    it('refuses the connect while a refresh of the same store runs, and exchanges nothing', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { holdStoreRefreshForTests } = await import('../core/store-token-refresh.js');
+      const release = holdStoreRefreshForTests(PROFILE);
+      try {
+        const { cookie } = await arrangeHeld({ token: false });
+        const res = await call(signed(good()), cookie);
+        expect(res.status).toBe(409);
+        expect(await res.text()).toContain('renewing its access to this store right now');
+        expect(mockExchangeToken).not.toHaveBeenCalled();
+      } finally {
+        release();
+      }
+    });
+
+    it('holds the store against a refresh only until the connect returns', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { storeConnectsHeldForTests } = await import('../core/store-token-refresh.js');
+      const { cookie } = await arrangeHeld({ token: false });
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      expect(storeConnectsHeldForTests()).toBe(0);
+    });
+
+    it('records when the refresh token of an expiring connection runs out', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const before = Date.now();
+      const { cookie, store } = await arrange({ tokenBody: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600, refresh_token_expires_in: 7_776_000, scope: 'read_products,read_orders' }) });
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      expect(store.get(PROFILE)?.oauth_grant?.refresh_expires_at).toBeGreaterThanOrEqual(before + 7_776_000_000 - 1000);
+    });
+
+    it('asks a store whose token already expires again when it is connected again, by the refresh token the engine keeps', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { cookie } = await arrangeHeld({ token: true, refresh: true });
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      expect(sentParams()['expiring']).toBe('1');
+    });
+
+    it('asks again by the refresh end the grant records, with no refresh token in the slot', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { cookie } = await arrangeHeld({ token: true, grant: { origin: 'callback', state: 'refresh-dead', refresh_expires_at: Date.now() + 86_400_000 } });
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      expect(sentParams()['expiring']).toBe('1');
+    });
+
+    it('a connect after the refresh ended (refresh-dead) records the new connection\'s own state', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { cookie, store } = await arrangeHeld({ token: false, grant: { origin: 'callback', state: 'refresh-dead' } });
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      expect(store.get(PROFILE)?.oauth_grant?.state).toBe('no-refresh');
+    });
+
+    it('decides by what the engine keeps, not by token_expires_at, which a profile update can write', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { cookie } = await arrangeHeld({ token: true, expiresAt: Date.now() + 3_600_000 });
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      expect(sentParams()).not.toHaveProperty('expiring');
+    });
   });
 
   it('shows a plain connection failure when the exchange was refused on a redirect, not the note the model reads', async () => {
@@ -22018,6 +22137,27 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
           // A profile on no provider the engine reads an account from: the closing row says so.
           ['done', 'GET /api/oauth/callback account:unknown', `profile:${PROFILE}`, 'mandate'],
         ]);
+      });
+
+      // PRD §7(c): every row of a mandate names the person as they were shown. The callback has
+      // no session; the name comes from the state its start signed.
+      it('puts the mandate\'s name from the signed state on both its rows', async () => {
+        const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID, display: 'Muster AG, Erika Beispiel' } });
+        store.register({ ...store.get(PROFILE)!, created_by: TAG });
+        expect((await complete(cookie)).status).toBe(200);
+        const named = recorded as unknown as Array<{ phase: string; principal: { kind: string; display?: string; mandateId?: string } }>;
+        expect(named.map((e) => [e.phase, e.principal.kind, e.principal.display, e.principal.mandateId])).toEqual([
+          ['attempt', 'mandate', 'Muster AG, Erika Beispiel', MID],
+          ['done', 'mandate', 'Muster AG, Erika Beispiel', MID],
+        ]);
+      });
+
+      it('control: a state signed without a name gives rows without one, and still records them', async () => {
+        const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+        store.register({ ...store.get(PROFILE)!, created_by: TAG });
+        expect((await complete(cookie)).status).toBe(200);
+        const named = recorded as unknown as Array<{ phase: string; principal: { display?: string } }>;
+        expect(named.map((e) => [e.phase, 'display' in e.principal])).toEqual([['attempt', false], ['done', false]]);
       });
 
       it('stores nothing when the attempt cannot be written', async () => {
