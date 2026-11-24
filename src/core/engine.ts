@@ -35,6 +35,7 @@ import { ContainmentMirror, ExactMirror, exactHeldAtBoot, exactMarkerOf, syncCon
 import { exactMarkerOnDisk, isExactHeld, refuseDebug } from './exact-debug-refusal.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog, recordMandateRevoked } from './audit-log.js';
+import { sweepAuditLog } from './audit-retention.js';
 import { MandateEnds } from './mandate-ends.js';
 import { pauseEndedPlans } from './plan-pause.js';
 import { isErrorTextReducedForProcess, processErrorText } from './error-egress.js';
@@ -514,6 +515,8 @@ export class Engine {
   private _startedAt = Date.now();
   /** Hourly debug-capture retention sweep; see `_pruneWireCaptures`. */
   private _wireRetentionTimer: ReturnType<typeof setInterval> | null = null;
+  /** Hourly actor-trail retention sweep; see `_sweepAuditLog`. */
+  private _auditRetentionTimer: ReturnType<typeof setInterval> | null = null;
   private _runRegistry: import('./run-registry.js').RunRegistry | null = null;
   private _runBufferManager: import('./run-buffer.js').RunBufferManager | null = null;
   private _runExecutor: import('./run-executor.js').RunExecutor | null = null;
@@ -1378,6 +1381,14 @@ export class Engine {
     this._onboardingFlagStore = this.engineDb ? new OnboardingFlagStore(this.engineDb) : null;
     // The actor trail rides engine.db as well (v22), for the same reason: it is always opened.
     this._toolContext.auditLog = this.engineDb ? new AuditLog(this.engineDb.getDb()) : null;
+    // How long the trail keeps a row (audit-retention.ts): once now and then hourly, so the first
+    // row is deleted on the day it turns 365 days old, whether or not anyone acts on the instance.
+    if (this.engineDb !== null) {
+      this._sweepAuditLog();
+      // run-group-starter: boot code, before any run exists; the sweep reports no spend.
+      this._auditRetentionTimer = setInterval(() => this._sweepAuditLog(), 60 * 60_000);
+      this._auditRetentionTimer.unref();
+    }
     // And the end of each mandate (v24), which a later reader checks without a request.
     this._mandateEnds = this.engineDb ? new MandateEnds(this.engineDb.getDb()) : null;
     this._toolContext.mandateEnds = this._mandateEnds;
@@ -3521,6 +3532,21 @@ export class Engine {
     pruneWireSinks();
   }
 
+  /**
+   * Fold the trail's old polls and delete what is past its time (`sweepAuditLog`). Best-effort: a
+   * failed sweep must not stop the engine, and it is reported rather than swallowed. Nothing is
+   * changed then; the next hour tries again.
+   */
+  private _sweepAuditLog(): void {
+    const db = this.engineDb?.getDb();
+    if (db === undefined) return;
+    try {
+      sweepAuditLog(db);
+    } catch (err) {
+      process.stderr.write(`[lynox] audit log retention sweep failed (${err instanceof Error ? err.message : String(err)}) — old trail rows are NOT being removed\n`);
+    }
+  }
+
   /** Fire orchestrator shutdown hooks (for Pro extensions — includes worker pool shutdown). */
   private async _runShutdownHooks(): Promise<void> {
     for (const hook of this._hooks) {
@@ -3638,6 +3664,10 @@ export class Engine {
     if (this._wireRetentionTimer) {
       clearInterval(this._wireRetentionTimer);
       this._wireRetentionTimer = null;
+    }
+    if (this._auditRetentionTimer) {
+      clearInterval(this._auditRetentionTimer);
+      this._auditRetentionTimer = null;
     }
 
     // Save file manifest for next session's diff

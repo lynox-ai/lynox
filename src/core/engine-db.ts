@@ -1636,6 +1636,14 @@ const MIGRATIONS: string[] = [
   // this, a grant with no named row walks the whole trail.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (70);
    CREATE INDEX IF NOT EXISTS idx_audit_log_mandate ON audit_log(mandate_id, id);`,
+  // v71: how long the trail keeps a row (audit-retention.ts). A day row stands for the polls of one
+  // person, route and day once that day is more than 30 days past: `poll_count` reads, the first at
+  // `ts`, the last at `poll_last`. NULL on every other row. The index on `ts` serves the sweep,
+  // which deletes by time.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (71);
+   ALTER TABLE audit_log ADD COLUMN poll_count INTEGER;
+   ALTER TABLE audit_log ADD COLUMN poll_last TEXT;
+   CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts);`,
 ];
 
 export interface EngineDbOptions {

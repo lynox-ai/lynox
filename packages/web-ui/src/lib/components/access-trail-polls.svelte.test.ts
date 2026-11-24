@@ -108,6 +108,18 @@ describe('reads on the routes the interface polls by itself', () => {
 		expect(target.querySelector('[data-legend="interface-polls"]')).not.toBeNull();
 	});
 
+	it('counts a day row as the reads it stands for, and says so on its line', async () => {
+		// The engine folds a day's polls into one row after 30 days: 40 reads, the last at `until`.
+		const day = { id: `d${String(nextId++)}`, kind: 'event', action: 'GET /api/runs/active', target: null, phase: 'read', at: ago(60 * 24 * 40), until: ago(60 * 24 * 40 - 300), count: 40, person: IDA, auto: true };
+		await render([poll(1), day]);
+		const [group] = summaries();
+		expect(group!.startsWith(tf('access_trail.polls_many', { n: '41', span: 'X' }).split('X')[0]!)).toBe(true);
+		const lines = [...target.querySelectorAll('li[data-entry-kind="polls"] details [data-poll-day]')];
+		expect(lines).toHaveLength(1);
+		expect(lines[0]!.textContent!.startsWith(tf('access_trail.poll_day', { n: '40', time: 'X' }).split('X')[0]!)).toBe(true);
+		expect(t('access_trail.poll_day')).not.toBe('access_trail.poll_day');
+	});
+
 	it('opens a group to every read in it', async () => {
 		await render([poll(1), poll(2), poll(3)]);
 		const lines = [...target.querySelectorAll('li[data-entry-kind="polls"] details [data-entry-kind="event"]')];
