@@ -35,6 +35,10 @@ let holdReview: Promise<void> | null;
 let liveRunIn: string | null;
 /** How the stream of the run re-attached to ends: as usual, not found, unreachable, or cut off. */
 let liveStream: 'done' | 'gone' | 'unreachable' | 'cut';
+/** The transcript the server gives with the live run; long enough, the chat takes it and re-attaches. */
+let liveTranscript: Array<{ role: string; content: string }>;
+/** How often the live run's stream was asked for. */
+let liveStreamGets: number;
 let newSessions: number;
 /** How often the review was asked for. */
 let changesetGets: number;
@@ -73,6 +77,7 @@ function serve(): void {
 			return new Response(stream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 		}
 		if (url.includes('/runs/r-live/stream')) {
+			liveStreamGets++;
 			if (liveStream === 'gone') return json({ error: 'not found' }, 404);
 			if (liveStream === 'unreachable') throw new TypeError('Failed to fetch');
 			if (liveStream === 'cut') {
@@ -98,7 +103,7 @@ function serve(): void {
 		}
 		if (liveRunIn !== null && url.includes(`/threads/${liveRunIn}/messages`)) {
 			liveRunIn = null; // re-attached once; the reconcile after it sees no live run
-			return json({ messages: [{ role: 'user', content: 'earlier' }], activeRun: { runId: 'r-live', status: 'running', lastPersistedSeq: 0 } });
+			return json({ messages: liveTranscript, activeRun: { runId: 'r-live', status: 'running', lastPersistedSeq: 0 } });
 		}
 		return json({ messages: [], activeRun: null });
 	}));
@@ -129,6 +134,8 @@ beforeEach(async () => {
 	holdReview = null;
 	liveRunIn = null;
 	liveStream = 'done';
+	liveTranscript = [{ role: 'user', content: 'earlier' }];
+	liveStreamGets = 0;
 	newSessions = 0;
 	changesetGets = 0;
 
@@ -489,10 +496,12 @@ describe('a turn queued before a reload waits for the review the server holds', 
 			const release = await queueBehindRun(); // t1's run streams on, a turn queued behind it
 			liveRunIn = 't1';
 			liveStream = stream;
+			liveTranscript = Array.from({ length: 6 }, (_, i) => ({ role: i % 2 === 0 ? 'user' : 'assistant', content: `turn ${i}` }));
 			await store.resumeThread('t1');
 			await settle();
 			await wait(200);
 			await settle();
+			expect(liveStreamGets, 'positive control: the opening re-attached to the live run').toBe(1);
 			return release;
 		};
 
