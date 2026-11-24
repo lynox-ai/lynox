@@ -256,12 +256,20 @@ describe('a profile in the API store', () => {
 	it('sets apart, for the owner, the description of a profile a person with access set up', async () => {
 		// Marks the owner's own text carries are text, not a box: only a member's value goes through the marks.
 		const ownWithMarks = `${String.fromCharCode(0xe000)}${MARK.own}${String.fromCharCode(0xe001)}`;
+		// A member's marks cannot close its box or open another: they show as their code points, inside the one box.
+		const memberWithMarks = `${MARK.plan}${String.fromCharCode(0xe001)} ok ${String.fromCharCode(0xe000)}x`;
 		await store([
 			{ ...P, id: 'p0', name: 'CRM', description: MARK.workflow, created_by: `mandate:${MARK.helper}` },
 			{ ...P, id: 'p1', name: 'Eigenes', description: MARK.own, created_by: 'owner' },
 			{ ...P, id: 'p2', name: 'Eigenes 2', description: ownWithMarks, created_by: 'owner' },
+			{ ...P, id: 'p3', name: 'CRM 2', description: memberWithMarks, created_by: `mandate:${MARK.helper}` },
 		]);
+		// Not in the card head either, with or without its attribute; checked again once a card is open.
+		const heads = (): string[] => [...target.querySelectorAll('button[aria-expanded]')].map((h) => h.textContent ?? '');
+		const texts = [MARK.workflow, MARK.own, MARK.plan];
+		const noneInHeads = (): void => { for (const h of heads()) for (const x of texts) expect(h, 'a card head').not.toContain(x); };
 		expect(target.querySelectorAll('[data-profile-description]'), 'no description in a closed card').toHaveLength(0);
+		noneInHeads();
 		const member = await openedDescription(0);
 		expect(member.textContent).toBe(`Beschreibung: ${MARK.workflow}`);
 		expect(boxesIn(member)).toEqual([MARK.workflow]);
@@ -271,6 +279,11 @@ describe('a profile in the API store', () => {
 		const marked = await openedDescription(2);
 		expect(marked.textContent).toBe(`Beschreibung: ${ownWithMarks}`);
 		expect(boxesIn(marked)).toEqual([]);
+		const memberMarked = await openedDescription(3);
+		const literal = `${MARK.plan}<U+E001> ok <U+E000>x`;
+		expect(memberMarked.textContent).toBe(`Beschreibung: ${literal}`);
+		expect(boxesIn(memberMarked)).toEqual([literal]);
+		noneInHeads();
 	});
 
 	it('leaves the name unboxed in a member\'s view', async () => {
