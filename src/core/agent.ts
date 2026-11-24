@@ -83,10 +83,10 @@ import { SearchResultAddresses } from './search-result-addresses.js';
 import type { ConversationLatch } from './conversation-latch.js';
 import type { NoticeLanguage } from './notice-language.js';
 import { noticeLanguage } from './notice-language.js';
-import { normalizeHostName, normalizeMailTarget, type SendTarget } from './send-target.js';
+import { carriesAddress, normalizeHostName, normalizeMailTarget, type SendTarget } from './send-target.js';
 import {
   originAsk, originCarriedAsk, originCarriedDenied, originCarriedMandate, originCarriedUnattended, originBashAfterForeign, originDenied, originLookupFailedHead, originLookupFailedMandate, originLookupFailedUnattended,
-  originRefusedMandate, originRefusedUnattended, originUnreadable, type OriginRefusal, type OriginTargets, type SendOrigin, type TargetNoun,
+  originRefusedMandate, originRefusedUnattended, originTokenUrlAsk, originTokenUrlRefused, originTokenUrlUnreadable, originUnreadable, watchEveryMinutes, type OriginRefusal, type OriginTargets, type SendOrigin, type TargetNoun,
 } from './origin-notices.js';
 import type { CallTargetOrigin } from './call-connection.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
@@ -5272,17 +5272,35 @@ export class Agent implements IAgent {
     // Checked as a read: the latch made the address a target. Its question and refusals say "read".
     let asRead = false;
     let carried = false;
+    // Checked as a save: the address is where a profile the call saves later posts a client's
+    // credentials (`ToolEntry.credentialAddress`). Not a read: neither a search's result nor a
+    // connected API's host makes it known. Its question and refusals say "save".
+    let saveAddress: string | null = null;
+    let saving = false;
     try {
       targets = tool.sendTargets !== undefined ? tool.sendTargets(tc.input) : null;
       if (targets === null && whenLatched !== undefined) {
-        // An address a search in this conversation listed as a result was chosen by the provider,
-        // not written by the model (what it can still carry: `SearchResultAddresses`).
-        asRead = true;
-        const address = tool.readAddress?.(tc.input) ?? null;
-        if (address !== null && this.searchResultAddresses.has(address)) return {};
-        // An address that carries another one is asked about whatever its host: a service that
-        // fetches it sends the read on to an address nobody here can name for sure.
-        carried = tool.readCarriesAddress?.(tc.input) === true;
+        // A declaration that throws names a save whose address cannot be read: refused as one.
+        try {
+          saveAddress = tool.credentialAddress?.(tc.input) ?? null;
+        } catch (err) {
+          saving = true;
+          throw err;
+        }
+        saving = saveAddress !== null;
+        if (saveAddress !== null) {
+          // An address that carries another one is asked about whatever its host, as for a read.
+          carried = carriesAddress(saveAddress);
+        } else {
+          // An address a search in this conversation listed as a result was chosen by the provider,
+          // not written by the model (what it can still carry: `SearchResultAddresses`).
+          asRead = true;
+          const address = tool.readAddress?.(tc.input) ?? null;
+          if (address !== null && this.searchResultAddresses.has(address)) return {};
+          // An address that carries another one is asked about whatever its host: a service that
+          // fetches it sends the read on to an address nobody here can name for sure.
+          carried = tool.readCarriesAddress?.(tc.input) === true;
+        }
         targets = whenLatched(tc.input);
       }
     } catch {
@@ -5294,10 +5312,10 @@ export class Agent implements IAgent {
     // empty one, a recipient field that yields none) refuses the whole call, in every session and
     // without a question: a yes to a target nobody can see would hold for anything.
     if (targetsUnread) {
-      const unreadNoun: TargetNoun = asRead || tc.name === 'web_research' ? 'page' : tc.name === 'http_request' ? 'host' : 'mail';
+      const unreadNoun: TargetNoun = saving ? 'tokenUrl' : asRead || tc.name === 'web_research' ? 'page' : tc.name === 'http_request' ? 'host' : 'mail';
       try { this.onOriginRefused?.({ targets: { values: [], unreadable: true }, noun: unreadNoun, origin: this.originOfTargets() }); } catch { /* the refusal stands */ }
       if (guardRefuses) return {};
-      const text = originUnreadable(unreadNoun);
+      const text = saving ? originTokenUrlUnreadable() : originUnreadable(unreadNoun);
       await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: text, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
       return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(text), is_error: true } };
     }
@@ -5310,7 +5328,7 @@ export class Agent implements IAgent {
     const lookupFailed = foreign.some((v) => v.verdict === 'unreadable');
     const shownTargets = foreign.map((v) => v.target.value);
     const shown: OriginTargets = { values: shownTargets, unreadable: false };
-    const noun: TargetNoun = asRead || tc.name === 'web_research' ? 'page' : foreign[0]!.target.kind === 'host' ? 'host' : 'mail';
+    const noun: TargetNoun = saving ? 'tokenUrl' : asRead || tc.name === 'web_research' ? 'page' : foreign[0]!.target.kind === 'host' ? 'host' : 'mail';
     // A source that could not be read leaves where the target comes from unchecked: every report of
     // it (the run's result, the approval card, the question, the model texts) says it is not known,
     // never the origin it would have had.
@@ -5331,11 +5349,13 @@ export class Agent implements IAgent {
     };
     const refuseUnattended = (): Promise<{ refusal: BetaToolResultBlockParam }> => {
       try { this.onOriginRefused?.({ targets: shown, noun, origin }); } catch { /* the refusal stands */ }
+      if (saving) return refuse(originTokenUrlRefused('unattended', shown, origin, carried, lookupFailed));
       return refuse(carried ? originCarriedUnattended(shown) : lookupFailed ? originLookupFailedUnattended(shown, noun) : originRefusedUnattended(shown, origin, noun));
     };
     // Someone the owner let in answers this session's questions themselves: asking them would
     // protect nothing. A target the owner named goes out as it would for the owner.
     if (this.principal.kind !== 'owner') {
+      if (saving) return refuse(originTokenUrlRefused('mandate', shown, origin, carried, lookupFailed));
       return refuse(carried ? originCarriedMandate(shown) : lookupFailed ? originLookupFailedMandate(shown, noun) : originRefusedMandate(shown, origin, noun));
     }
     if (!this.promptUser) return refuseUnattended();
@@ -5345,11 +5365,13 @@ export class Agent implements IAgent {
     // A host a stored profile names but that does not count for reads: the question says how it would.
     const profileHosts = asRead ? this._profileHosts() : new Set<string>();
     const connected = shownTargets.filter((h) => profileHosts.has(h));
-    const question = carried ? originCarriedAsk(shown, lang) : originAsk(tc.name, tc.input, noun, shown, origin, lang, connected, lookupFailed);
+    const question = saveAddress !== null ? originTokenUrlAsk(shown, saveAddress, lang, carried, lookupFailed)
+      : carried ? originCarriedAsk(shown, lang, watchEveryMinutes(tc.name, tc.input)) : originAsk(tc.name, tc.input, noun, shown, origin, lang, connected, lookupFailed);
     const answer = await this.promptUser(question, ['Allow', 'Deny', '\x00'], { blocked: true });
     if (answer === UNATTENDED_BLOCK_ANSWER) return refuseUnattended();
     if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-      const denied = carried ? originCarriedDenied(shown) : lookupFailed ? `${originLookupFailedHead(shown)} ${originDenied(shown, origin, noun)}` : originDenied(shown, origin, noun);
+      const denied = saving ? originTokenUrlRefused('denied', shown, origin, carried, lookupFailed)
+        : carried ? originCarriedDenied(shown) : lookupFailed ? `${originLookupFailedHead(shown)} ${originDenied(shown, origin, noun)}` : originDenied(shown, origin, noun);
       return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(denied), is_error: true } };
     }
     return { origin: passed };

@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { t, getLocale } from '../i18n.svelte.js';
+	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { clickOutside } from '../utils/click-outside.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import {
@@ -82,6 +82,30 @@
 		} finally {
 			refreshing = false;
 		}
+	}
+
+	// The notice's jump to the newest follow-up in the thread history; `seq` lets it repeat.
+	let followUpJump = $state<{ id: string; seq: number } | undefined>(undefined);
+	// A jump belongs to the item it was asked on: opening another item drops it.
+	let jumpItemId: string | undefined;
+	$effect(() => {
+		const id = full?.item.id;
+		if (id !== jumpItemId) {
+			jumpItemId = id;
+			followUpJump = undefined;
+		}
+	});
+
+	/** The notice above the item's own mail: how many mails came after it and from whom. The
+	 *  sender's name is absent when the engine found the newest one sensitive. */
+	function followUpNotice(f: NonNullable<InboxItem['followUps']>, fallbackDate: string | undefined): string {
+		const date = dateFormat(f.latestAt ?? fallbackDate);
+		const name = f.latestFromName?.trim();
+		const many = f.count > 1;
+		if (name !== undefined && name.length > 0) {
+			return tf(many ? 'inbox.follow_up_notice_many' : 'inbox.follow_up_notice_one', { count: String(f.count), name, date });
+		}
+		return tf(many ? 'inbox.follow_up_notice_many_anon' : 'inbox.follow_up_notice_one_anon', { count: String(f.count), date });
 	}
 
 	function dateFormat(iso: string | undefined): string {
@@ -409,6 +433,20 @@
 						{/if}
 					</div>
 				{/if}
+				{@const followUps = full.item.followUps}
+				{#if followUps !== undefined && followUps.count > 0}
+					<div class="mb-4 rounded-[var(--radius-md)] border border-border bg-bg-subtle px-3 py-2 text-[12px] text-text" role="note" data-testid="inbox-follow-up-notice">
+						<p class="break-words [overflow-wrap:anywhere]" data-testid="inbox-follow-up-notice-text">{followUpNotice(followUps, full.item.mailDate)}</p>
+						{#if thread?.messages.some((m) => m.id === followUps.latestMessageId)}
+							<button
+								type="button"
+								class="mt-1 underline hover:text-accent-text min-h-[36px] pointer-coarse:min-h-[44px]"
+								data-testid="inbox-follow-up-jump"
+								onclick={() => { followUpJump = { id: followUps.latestMessageId, seq: (followUpJump?.seq ?? 0) + 1 }; }}
+							>{t('inbox.follow_up_jump')}</button>
+						{/if}
+					</div>
+				{/if}
 				{#if full.body.source === 'missing'}
 					<p class="rounded-[var(--radius-md)] border border-warning bg-warning-subtle px-3 py-2 text-[12px] text-warning">
 						{t('inbox.reading_body_missing')}
@@ -420,7 +458,7 @@
 				{/if}
 				{#if thread && (thread.messages.length > 0 || thread.partial)}
 					<div class="mt-6">
-						<InboxThreadHistory {thread} currentMessageId={full.item.messageId} />
+						<InboxThreadHistory {thread} currentMessageId={full.item.messageId} focusRequest={followUpJump} />
 					</div>
 				{/if}
 				{@render children?.()}
