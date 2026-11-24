@@ -24604,8 +24604,16 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
     it('the review route still checks the conversation: a mandate cannot answer its own review in the owner\'s conversation', async () => {
       const { file } = review(MANDATE);
       asMandate();
-      await refusal(await answer('rollback', FOREIGN));
+      expect((await answer('rollback', FOREIGN)).status).toBe(403);
       expect(readFileSync(file, 'utf-8')).toBe('after');
+    });
+
+    it('the review is answered by who made it, not by who ran last: a mandate whose later run failed cannot answer the owner\'s review', async () => {
+      const { file } = review(OWNER_PRINCIPAL, { lastRun: MANDATE });
+      asMandate();
+      expect(await card(), 'no card either').toMatchObject({ hasChanges: false });
+      expect((await answer('rollback')).status).toBe(403);
+      expect(readFileSync(file, 'utf-8'), 'the owner\'s change stays').toBe('after');
     });
 
     it('when the changes cannot be read, a rollback still rolls back, gives no count, names every file it left, and the hold ends', async () => {
