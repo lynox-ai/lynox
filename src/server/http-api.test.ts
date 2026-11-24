@@ -13436,14 +13436,17 @@ describe('LynoxHTTPApi', () => {
       const refusedBody = (await refused.json()) as { error: string; code?: string };
       expect(refusedBody).toMatchObject({ error: 'lynox reaches Shopify stores only on instances that lynox runs. This instance is self-hosted, so this run cannot start here.', code: 'reach_approve_shopifySelfHosted' });
       expect(refused.status).toBe(409);
-      // Writing on says the halt's cause, not the approving sentence.
+      // The resume route checks the reach before the run's phase, and says it with the resuming
+      // sentence, not the approving one.
       const resumed = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }) });
       expect(await resumed.json()).toMatchObject({ error: 'lynox reaches Shopify stores only on instances that lynox runs. This instance is self-hosted, so the run cannot go on here.', code: 'reach_resume_shopifySelfHosted' });
       expect(resumed.status).toBe(409);
       // A store whose preset pins no API version has no endpoint: a setting of lynox's, not the store's.
       noApiVersion.on = true;
       try {
-        expect(await (await approve()).json()).toMatchObject({ error: 'A setting for Shopify is missing in lynox. Only lynox can fix it (support@lynox.ai); until then the run cannot be approved.', code: 'reach_approve_shopifyNoApiVersion' });
+        const noVersion = await approve();
+        expect(await noVersion.json()).toMatchObject({ error: 'A setting for Shopify is missing in lynox. Only lynox can fix it (support@lynox.ai); until then the run cannot be approved.', code: 'reach_approve_shopifyNoApiVersion' });
+        expect(noVersion.status).toBe(409);
       } finally {
         noApiVersion.on = false;
       }

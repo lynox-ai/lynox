@@ -1083,7 +1083,9 @@ describe('going on from a run that halted', () => {
 				expect([lang, k, bulkHaltCause(any(k, { phase: 'planned', judge: { rule: 'r' } as never, judgeServedBy: null }), true, null, mandate, true)]).toEqual([lang, k, t[`bulk.halt.${k}`]]);
 				expect([lang, k, bulkHaltCause(any(k, { resumeOpen: 2, resumeTries: 2, resumeSends: 0, sentUnknown: 0, conflicts: 2 }), true, null, mandate, true)]).toEqual([lang, k, t[`bulk.halt.${k}`]]);
 				// Checking is not continuing: the owner is offered a check, so the mandate reads the cause alone.
-				expect([lang, k, bulkHaltCause(any(k, { haltReason: engine, sentUnknown: 1, resumeSends: 0 }), true, null, mandate, true)]).toEqual([lang, k, t[`bulk.halt.${k}`]]);
+				const checked = any(k, { haltReason: engine, sentUnknown: 1, resumeSends: 0 });
+				expect(bulkResumeKind(checked)).toBe('check');
+				expect([lang, k, bulkHaltCause(checked, true, null, mandate, true)]).toEqual([lang, k, t[`bulk.halt.${k}`]]);
 			}
 		}
 	});
