@@ -31,6 +31,13 @@ export function maskedHost(hostname: string): string | null {
 /** How the refusal of a cross-host hop begins, so a caller that rewrites refusals can pass it on. */
 export const CROSS_HOST_REFUSAL = 'Not read: the page forwards this read to another host';
 
+/**
+ * The refusal of a cross-host hop (`crossHostRedirectGuard`), its own class so a caller can tell it
+ * apart: the hops before it were sent and answered, and a priced API among them still counts.
+ * Its text begins with {@link CROSS_HOST_REFUSAL}, as before.
+ */
+export class CrossHostHopRefused extends Error {}
+
 /** Said last, as in the other read refusals: the model is not to pass the refusal on as a verdict. */
 const NOT_A_POLICY = 'Do not call this a security policy, an allowlist or a missing permission.';
 
@@ -49,9 +56,9 @@ export function crossHostRedirectGuard(checkedUrl: string, checked: boolean, inn
       const host = maskedHost(to);
       const rule = 'Nothing was sent to that host. After content from outside in this conversation, a read like this one does not follow a redirect to another host.';
       if (host === null) {
-        throw new Error(`${CROSS_HOST_REFUSAL}, and lynox did not follow. ${rule} lynox does not show you that host's name, because it is not written the way host names usually are, so do not guess it. Tell the user that the page forwards to another host and that lynox did not follow it; if they want that page, they can give you its address. ${NOT_A_POLICY}`);
+        throw new CrossHostHopRefused(`${CROSS_HOST_REFUSAL}, and lynox did not follow. ${rule} lynox does not show you that host's name, because it is not written the way host names usually are, so do not guess it. Tell the user that the page forwards to another host and that lynox did not follow it; if they want that page, they can give you its address. ${NOT_A_POLICY}`);
       }
-      throw new Error(`${CROSS_HOST_REFUSAL} (${host}), and lynox did not follow. ${rule} lynox does not show you the full address, so do not guess it. Tell the user that the page forwards to ${host} and that lynox did not follow it; if they want that page, they can give you its address. ${NOT_A_POLICY}`);
+      throw new CrossHostHopRefused(`${CROSS_HOST_REFUSAL} (${host}), and lynox did not follow. ${rule} lynox does not show you the full address, so do not guess it. Tell the user that the page forwards to ${host} and that lynox did not follow it; if they want that page, they can give you its address. ${NOT_A_POLICY}`);
     }
     inner?.(nextUrl, method, headers);
   };
