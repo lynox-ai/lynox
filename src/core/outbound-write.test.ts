@@ -1121,6 +1121,26 @@ describe('a secret inside JSON text inside a value', () => {
       ['text after the value', `{"token":${esc}} x`, `{"token":"${STORED}"} x`],
     ] as const;
 
+    // A `&` in a string of the JSON text cuts it once the whole body is decoded; the escaped literal is still read.
+    const withAmp = `{"a":"p&q","token":${esc}}`;
+    const plainAmp = `{"a":"p&q","token":"${STORED}"}`;
+
+    it('a form inside a decoded form value, its JSON text carrying a `&` in a string: not shown as text, starred in a form', () => {
+      const nested = (json: string) => `p=${encodeURIComponent(`b=${encodeURIComponent(json)}`)}`;
+      expect(bodyForQuestion(nested(withAmp), mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      expect(bodyForQuestion(nested(withAmp), mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
+      // Control: written plainly, the value is masked and nothing counts as escaped.
+      expect(bodyForQuestion(nested(plainAmp), mask, FORM)).toMatchObject({ escapedSecret: false });
+    });
+
+    it('`;` between pairs, with a `&` in a string of the JSON text: not shown as text, starred in a form', () => {
+      const semi = (json: string) => `a=1;value=${encodeURIComponent(json)}`;
+      expect(bodyForQuestion(semi(withAmp), mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+      expect(bodyForQuestion(semi(withAmp), mask, FORM)).toEqual({ text: 'a = ***', escapedSecret: true });
+      // Control: written plainly, the value is masked and nothing counts as escaped.
+      expect(bodyForQuestion(semi(plainAmp), mask, FORM)).toMatchObject({ escapedSecret: false });
+    });
+
     it.each(lenient)('with %s, as a JSON body and inside a JSON value', (_f, hidden, plain) => {
       expect(bodyForQuestion(hidden, mask, 'application/json')).toEqual({ unshowable: 'escaped-secret' });
       expect(bodyForQuestion(JSON.stringify({ v: hidden }), mask)).toEqual({ unshowable: 'escaped-secret' });
