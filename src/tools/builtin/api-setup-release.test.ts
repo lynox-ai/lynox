@@ -384,7 +384,7 @@ describe('release_secret: the question carries no text a mandate\'s turn wrote',
     return { question, apf: apiStore.trailIdOf(p.id)!, apiStore, p };
   }
   const head = (apf: string, role: string, hosts: string): string =>
-    `⚠ api_setup: release the vault key "CRM_KEY" to API profile ${apf}? It was set up in the session of ${M}. If you allow it, lynox sends the value of "CRM_KEY", as ${role}, to ${hosts}, with every request and run through this profile, your own and bulk runs included, until that mandate ends or you withdraw the release.`;
+    `⚠ API profiles: release the vault key "CRM_KEY" to API profile ${apf}? It was set up in the session of ${M}. If you allow it, lynox sends the value of "CRM_KEY", as ${role}, to ${hosts}, with every request and run through this profile, your own and bulk runs included, until that mandate ends or you withdraw the release.`;
   const tail = (held = 'holds a value'): string => ` The vault ${held} under this name. Any change to where the value goes ends the release. Release it?`;
   const more = (n: number, apf: string): string => n === 1
     ? ` 1 more setting of this profile (such as its auth type, scopes, path or query) is part of the release too; a change to it ends it. To see it first, deny, ask here to view API profile ${apf}, then ask to release "CRM_KEY" again.`

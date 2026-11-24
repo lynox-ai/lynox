@@ -75,7 +75,7 @@ describe('the rule that decides a hard block marks it', () => {
   it('every unattended [BLOCKED return of the guard says which class it is', () => {
     const source = readFileSync(join(__dirname, '..', 'tools', 'permission-guard.ts'), 'utf8').split('\n');
     const blockedReturns = source.filter((l) => /return\b.*framed`/.test(l) && /\[BLOCKED|blockReason/.test(l));
-    expect(blockedReturns.length, 'positive control: the guard\'s blocked returns are found').toBe(11);
+    expect(blockedReturns.length, 'positive control: the guard\'s blocked returns are found').toBe(13);
     expect(blockedReturns.filter((l) => !/return (hardBlock|askable)\(framed`/.test(l))).toEqual([]);
   });
 });
@@ -130,6 +130,47 @@ describe('the agent asks a hard block with meta.blocked, and reports a refusal o
     // Same machinery, the other way: a hard block on the same agent does carry it.
     await call(agent, 'bash', { command: 'rm -rf /' });
     expect(metas.map((m) => m?.blocked === true)).toEqual([false, true]);
+  });
+});
+
+describe('a tool from outside the engine that confirms by itself', () => {
+  // A self-confirming tool skips the generic Allow/Deny and is stopped only by a warning that
+  // reads `[BLOCKED` (the agent's gate). What its own check returns, a label or a payload, must
+  // reach that gate the same way.
+  const plugin = (check: () => unknown): ToolEntry & { calls: unknown[] } => {
+    const calls: unknown[] = [];
+    return {
+      calls,
+      requiresConfirmation: true,
+      definition: { name: 'Merge', description: 'Merge', input_schema: { type: 'object', properties: {}, additionalProperties: true } },
+      handler: async (input: unknown) => { calls.push(input); return 'done'; },
+      destructive: { mode: 'data', check },
+    } as unknown as ToolEntry & { calls: unknown[] };
+  };
+
+  it.each([
+    ['a payload', () => ({ message: 'drop everything' })],
+    ['a label', () => 'drop everything'],
+    ['no text', () => ''],
+  ])('unattended, %s from its check is asked about, and a denial keeps the handler from running', async (_kind, check) => {
+    const tool = plugin(check);
+    const asked: string[] = [];
+    const promptUser = vi.fn(async (q: unknown) => { asked.push(typeof q === 'string' ? q : JSON.stringify(q)); return 'Deny'; });
+    const agent = new Agent({ name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [tool], autonomy: 'autonomous', promptUser });
+    const result = await call(agent, 'Merge', {});
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain('External tool');
+    expect(result.is_error).toBe(true);
+    expect(tool.calls).toEqual([]);
+  });
+
+  it('attended, its own confirmation replaces the generic one: the handler runs unasked by the agent', async () => {
+    const tool = plugin(() => ({ message: 'drop everything' }));
+    const promptUser = vi.fn(async () => 'Deny');
+    const agent = new Agent({ name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [tool], autonomy: 'guided', promptUser });
+    await call(agent, 'Merge', {});
+    expect(promptUser).not.toHaveBeenCalled();
+    expect(tool.calls).toHaveLength(1);
   });
 });
 
