@@ -378,6 +378,11 @@ describe('helpers', () => {
 		expect(segments(`a${c(0xe002)}x${c(0xe003)}b`)).toEqual([{ text: 'a', foreign: false }, { text: 'x', foreign: false }, { text: 'b', foreign: false }]);
 		expect(segments(`a${c(0xe002)}b`)).toEqual([{ text: 'ab', foreign: false }]);
 	});
+	it('a fold with no title in it folds nothing, even one that holds only the commas a list has', () => {
+		const c = (cp: number): string => String.fromCodePoint(cp);
+		expect(segments(`a${c(0xe002)}${c(0xe003)}b`).some((p) => p.more !== undefined)).toBe(false);
+		expect(segments(`a${c(0xe002)}, ${c(0xe003)}b`).some((p) => p.more !== undefined)).toBe(false);
+	});
 	it('fold marks around lynox words fold nothing, even with a value among them', () => {
 		const c = (cp: number): string => String.fromCodePoint(cp);
 		const line = `a${c(0xe002)} was not run, ${shownValue('P6')}${c(0xe003)}`;
