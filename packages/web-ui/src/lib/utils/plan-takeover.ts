@@ -7,7 +7,13 @@ export const SHOWN_VALUE_MAX = 80;
 /** Where a value someone else wrote starts and ends inside a sentence of lynox's (Private Use). */
 export const VALUE_OPEN = '\uE000';
 export const VALUE_CLOSE = '\uE001';
-const VALUE_MARK = /[\uE000\uE001]/g;
+/**
+ * Where the titles a list of plans keeps folded start and end ({@link planList}): the view shows
+ * a button in their place and puts them in when it is pressed.
+ */
+export const MORE_OPEN = '\uE002';
+export const MORE_CLOSE = '\uE003';
+const VALUE_MARK = /[\uE000-\uE003]/g;
 
 /**
  * A value someone else wrote (a plan's title, a name, an account) as a sentence of lynox's shows
@@ -51,20 +57,20 @@ export function shownWhole(text: string): string {
 	return setApart(visible(text));
 }
 
-/** One piece of a sentence: lynox's words, or a value someone else wrote (`foreign`). */
-export interface Segment { text: string; foreign: boolean }
-
 /**
- * A sentence split at the marks {@link shownValue} sets. A mark without its partner is dropped and
- * what follows it stays lynox's text: only a whole pair sets a value apart.
+ * One piece of a sentence: lynox's words, or a value someone else wrote (`foreign`). A piece with
+ * `more` is the folded rest of a list of plans ({@link planList}): `n` titles, and the pieces that
+ * name them once the list is opened.
  */
-export function segments(line: string): Segment[] {
+export interface Segment { text: string; foreign: boolean; more?: { n: number; pieces: Segment[] } }
+
+function valuePieces(line: string): Segment[] {
 	const out: Segment[] = [];
 	const push = (text: string, foreign: boolean): void => {
 		const clean = text.replace(VALUE_MARK, '');
 		if (clean !== '' || foreign) out.push({ text: clean, foreign });
 	};
-	const pair = /\uE000([^\uE000\uE001]*)\uE001/g;
+	const pair = /\uE000([^\uE000-\uE003]*)\uE001/g;
 	let at = 0;
 	for (let m = pair.exec(line); m !== null; m = pair.exec(line)) {
 		push(line.slice(at, m.index), false);
@@ -75,9 +81,34 @@ export function segments(line: string): Segment[] {
 	return out;
 }
 
-/** A sentence as plain text, without its marks: for a label, a title or a log. */
+/**
+ * A sentence split at the marks {@link shownValue} and {@link planList} set. A mark without its
+ * partner is dropped and what follows it stays lynox's text: only a whole pair sets a value apart,
+ * and only a whole pair folds a list's rest. A value cannot carry a mark of either kind
+ * ({@link setApart} prints it as its code point).
+ */
+export function segments(line: string): Segment[] {
+	const out: Segment[] = [];
+	const fold = /\uE002([^\uE002\uE003]*)\uE003/g;
+	let at = 0;
+	for (let m = fold.exec(line); m !== null; m = fold.exec(line)) {
+		out.push(...valuePieces(line.slice(at, m.index)));
+		const pieces = valuePieces(m[1]!);
+		out.push({ text: '', foreign: false, more: { n: pieces.filter((p) => p.foreign).length, pieces } });
+		at = m.index + m[0].length;
+	}
+	out.push(...valuePieces(line.slice(at)));
+	return out;
+}
+
+/** What the button in place of a folded list's rest says: "and {n} more". */
+export function moreText(n: number): string {
+	return tf('takeover.plans_more', { n: String(n) });
+}
+
+/** A sentence as plain text, without its marks, a folded list as the button reads: for a label, a title or a log. */
 export function plainText(line: string): string {
-	return segments(line).map((s) => s.text).join('');
+	return segments(line).map((s) => (s.more === undefined ? s.text : ` ${moreText(s.more.n)}`)).join('');
 }
 
 /**
@@ -143,11 +174,15 @@ export function nameOfTag(tag: string): string {
 	return tag.startsWith(MANDATE_TAG) ? tag.slice(MANDATE_TAG.length) : tag;
 }
 
-/** At most five plans by name, the rest as "and {n} more" (U-037 Nachtrag 2). */
+/**
+ * At most five plans by name; past five, the rest folded between {@link MORE_OPEN} and
+ * {@link MORE_CLOSE}: the view shows "and {n} more" as a button in the sentence and, once it is
+ * pressed, the remaining titles in its place, each in its own box (U-037).
+ */
 export function planList(titles: readonly string[]): string {
 	const shown = titles.map(shownValue);
 	if (shown.length <= 5) return shown.join(', ');
-	return tf('takeover.plans_more', { plans: shown.slice(0, 5).join(', '), n: String(shown.length - 5) });
+	return `${shown.slice(0, 5).join(', ')}${MORE_OPEN}, ${shown.slice(5).join(', ')}${MORE_CLOSE}`;
 }
 
 type WorkflowRole = 'workflow-created' | 'workflow-edited';

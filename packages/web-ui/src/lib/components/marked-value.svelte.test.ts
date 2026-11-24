@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { shownValue, shownWhole } from '../utils/plan-takeover.js';
+import { planList, shownValue, shownWhole } from '../utils/plan-takeover.js';
+import { tf } from '../i18n.svelte.js';
 import { valueSegments } from '../utils/value-breaks.js';
 
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
@@ -68,5 +69,35 @@ describe('MarkedLine draws its box as before', () => {
 	it('the class of a value set apart is the box, then the code font', async () => {
 		const el = await draw('line', `Konto: ${shownValue('acme')}`);
 		expect(el.querySelector('bdi[data-foreign-value]')!.getAttribute('class')).toBe(`${BOX} font-mono`);
+	});
+});
+
+// A list of plans past five keeps its rest folded behind a button in the sentence (U-037); pressing
+// it puts the remaining titles in its place, in the same sentence, and moves focus to the first.
+describe('a folded list of plans in a sentence', () => {
+	const titles = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7'];
+	it('shows five titles and a button that says how many more, not expanded', async () => {
+		const el = await draw('line', `Plans: ${planList(titles)}.`);
+		expect([...el.querySelectorAll('bdi[data-foreign-value]')].map((b) => b.textContent)).toEqual(['P1', 'P2', 'P3', 'P4', 'P5']);
+		const button = el.querySelector('button[data-testid="plans-more"]')!;
+		expect(button.textContent).toBe(tf('takeover.plans_more', { n: '2' }));
+		expect(button.getAttribute('aria-expanded')).toBe('false');
+		expect(button.getAttribute('aria-label')).toBe(tf('takeover.plans_more_show', { n: '2' }));
+		expect(el.textContent).toBe(`Plans: P1, P2, P3, P4, P5 ${tf('takeover.plans_more', { n: '2' })}.`);
+	});
+	it('pressing it puts the remaining titles into the same sentence, each in its box, and focuses the first', async () => {
+		const el = await draw('line', `Plans: ${planList(titles)}.`);
+		(el.querySelector('button[data-testid="plans-more"]') as HTMLButtonElement).click();
+		flushSync();
+		expect(el.querySelector('button')).toBeNull();
+		const boxes = [...el.querySelectorAll('bdi[data-foreign-value]')];
+		expect(boxes.map((b) => b.textContent)).toEqual(titles);
+		expect(el.textContent).toBe('Plans: P1, P2, P3, P4, P5, P6, P7.');
+		expect(document.activeElement).toBe(boxes[5]);
+	});
+	it('CONTROL: five titles draw no button', async () => {
+		const el = await draw('line', planList(titles.slice(0, 5)));
+		expect(el.querySelector('button')).toBeNull();
+		expect(el.querySelectorAll('bdi[data-foreign-value]').length).toBe(5);
 	});
 });

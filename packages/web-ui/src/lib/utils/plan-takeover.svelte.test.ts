@@ -360,6 +360,19 @@ describe('helpers', () => {
 		setLocale('en');
 		expect(plainText(planList(['1', '2', '3', '4', '5', '6', '7']))).toBe('1, 2, 3, 4, 5 and 2 more');
 	});
+	it('past five, the rest is folded as one piece that carries every remaining title in its own box', () => {
+		const folded = segments(planList(['1', '2', '3', '4', '5', '6', '7'])).filter((p) => p.more !== undefined);
+		expect(folded.length).toBe(1);
+		expect(folded[0]!.more!.n).toBe(2);
+		expect(folded[0]!.more!.pieces).toEqual([{ text: ', ', foreign: false }, { text: '6', foreign: true }, { text: ', ', foreign: false }, { text: '7', foreign: true }]);
+		// Five or fewer fold nothing.
+		expect(segments(planList(['1', '2', '3', '4', '5'])).some((p) => p.more !== undefined)).toBe(false);
+	});
+	it('a title cannot open or close a fold of its own: its fold marks are printed as their code points', () => {
+		const c = (cp: number): string => String.fromCodePoint(cp);
+		const line = planList([`a${c(0xe002)}b${c(0xe003)}`]);
+		expect(segments(line)).toEqual([{ text: 'a<U+E002>b<U+E003>', foreign: true }]);
+	});
 });
 
 describe('the refusals at the button', () => {
