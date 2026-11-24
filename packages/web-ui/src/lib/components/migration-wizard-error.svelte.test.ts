@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { t, tf, setLocale, getLocale } from '../i18n.svelte.js';
-import { reset, setTarget, startMigration, getStep, getRetry, MIGRATION_HOLD_MS } from '../stores/migration.svelte.js';
+import { reset, setTarget, startMigration, cancelMigration, getStep, getRetry, getError, getErrorReason, getErrorNotStarted, MIGRATION_HOLD_MS } from '../stores/migration.svelte.js';
 import { getToasts, dismissToast } from '../stores/toast.svelte.js';
 import { _resetManagedStatus } from '../stores/integrations/managed.svelte.js';
 
@@ -25,6 +25,10 @@ const SENTENCE = 'The target instance could not restore the data. It says: "Cann
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 let events: string;
+/** When set, how the export route answers instead of the event stream. */
+let exportAnswer: (() => Response) | null;
+/** When set, how the preview route answers. */
+let previewAnswer: (() => Response) | null;
 
 beforeEach(() => {
 	reset();
@@ -33,8 +37,12 @@ beforeEach(() => {
 	document.body.appendChild(target);
 	_resetManagedStatus();
 	events = '';
+	exportAnswer = null;
+	previewAnswer = null;
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 		const u = String(url);
+		if (u.endsWith('/migration/export') && exportAnswer) return exportAnswer();
+		if (u.endsWith('/migration/preview') && previewAnswer) return previewAnswer();
 		if (u.endsWith('/migration/export')) return new Response(events, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 		const body = u.endsWith('/config') ? { billing_tier_set: false } : { secrets: 1, databases: ['engine.db'], artifacts: 0, hasConfig: true };
 		return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -159,5 +167,138 @@ describe('the migration wizard after an error', () => {
 		expect(target.textContent).not.toContain('Restoring data on target...');
 		release?.();
 		await running;
+	});
+});
+
+describe('the migration wizard when this instance does not start the migration', () => {
+	async function refusedWith(answer: () => Response): Promise<void> {
+		exportAnswer = answer;
+		const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
+		component = mount(MigrationWizard, { target });
+		await settle();
+		setTarget('https://target.example.com', 'a'.repeat(64));
+		await startMigration();
+		await settle();
+		expect(getStep()).toBe('error');
+	}
+
+	for (const lang of ['de', 'en'] as const) {
+		it(`says so in its own words and shows its reason beside it in its own element, not as the engine's (${lang})`, async () => {
+			const before = getLocale();
+			setLocale(lang);
+			try {
+				await refusedWith(() => new Response(JSON.stringify({ error: 'targetUrl must resolve to a public host' }), { status: 400, headers: { 'Content-Type': 'application/json' } }));
+				expect(text('migration-error-title')).toBe(t('migration.error_title_not_started'));
+				expect(text('migration-error-detail')).toBe(t('migration.error_not_started'));
+				expect(q('migration-error-detail')?.getAttribute('lang')).toBeNull();
+				expect(text('migration-error-reason')).toBe(`${t('migration.error_reason')} targetUrl must resolve to a public host`);
+				// The reason is someone else's value: in its own isolated box, not part of the sentence.
+				expect(q('migration-error-reason')?.querySelector('bdi[data-foreign-value]')?.textContent).toBe('targetUrl must resolve to a public host');
+				expect(q('migration-error-reason')?.getAttribute('lang')).toBeNull();
+				expect(getRetry()).toBe('now');
+			} finally {
+				setLocale(before);
+			}
+		});
+	}
+
+	it('shows no reason for an answer that is not the instance\'s JSON, such as a proxy\'s error page', async () => {
+		await refusedWith(() => new Response('<html><body><h1>502 Bad Gateway</h1></body></html>', { status: 502, headers: { 'Content-Type': 'text/html' } }));
+		expect(text('migration-error-title')).toBe(t('migration.error_title_not_started'));
+		expect(text('migration-error-detail')).toBe(t('migration.error_not_started'));
+		expect(q('migration-error-reason')).toBeNull();
+		expect(target.textContent).not.toContain('Bad Gateway');
+	});
+
+	it('shows the reason on one line, without control or bidi characters, and cut', async () => {
+		await refusedWith(() => new Response(JSON.stringify({ error: `bad\n\u202Eline\u0007 ${'x'.repeat(400)}` }), { status: 400 }));
+		const reason = text('migration-error-reason') ?? '';
+		expect(reason).not.toMatch(/[\n\u202E\u0007]/);
+		expect(reason.startsWith(`${t('migration.error_reason')} bad line x`)).toBe(true);
+		expect(reason.endsWith('…')).toBe(true);
+		expect([...reason].length).toBe([...`${t('migration.error_reason')} `].length + 200);
+	});
+
+	it('clears the reason, and that it did not start, once the user starts over', async () => {
+		await refusedWith(() => new Response(JSON.stringify({ error: 'targetUrl must resolve to a public host' }), { status: 400 }));
+		expect(q('migration-error-reason')).not.toBeNull();
+		reset();
+		await settle();
+		expect(getErrorReason()).toBe('');
+		expect(getErrorNotStarted()).toBe(false);
+		expect(q('migration-error-reason')).toBeNull();
+	});
+
+	it('does not keep the reason under a later error of another kind', async () => {
+		await refusedWith(() => new Response(JSON.stringify({ error: 'targetUrl must resolve to a public host' }), { status: 400 }));
+		expect(q('migration-error-reason')).not.toBeNull();
+		// The next attempt starts, and the engine stops it with its own sentence.
+		exportAnswer = null;
+		events = sse('error', { message: SENTENCE, retry: 'later' });
+		await startMigration();
+		await settle();
+		expect(text('migration-error-detail')).toBe(SENTENCE);
+		expect(q('migration-error-reason')).toBeNull();
+		// It started this time, so it did not finish.
+		expect(text('migration-error-title')).toBe(t('migration.error_title'));
+	});
+
+	it('shows no reason from an answer longer than it reads', async () => {
+		await refusedWith(() => new Response(JSON.stringify({ error: 'x'.repeat(9000) }), { status: 400 }));
+		expect(text('migration-error-detail')).toBe(t('migration.error_not_started'));
+		expect(q('migration-error-reason')).toBeNull();
+	});
+
+	it('keeps the user\'s cancel when the refusal arrives while its answer is still being read', async () => {
+		let finish: (() => void) | undefined;
+		exportAnswer = () => new Response(new ReadableStream<Uint8Array>({
+			start(c) {
+				c.enqueue(new TextEncoder().encode('{"error":"targetUrl must'));
+				finish = () => { c.enqueue(new TextEncoder().encode(' resolve to a public host"}')); c.close(); };
+			},
+		}), { status: 400 });
+		const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
+		component = mount(MigrationWizard, { target });
+		await settle();
+		setTarget('https://target.example.com', 'a'.repeat(64));
+		const started = startMigration();
+		await settle();
+		cancelMigration();
+		finish?.();
+		await started;
+		await settle();
+		expect(getError()).toBe(t('migration.cancelled'));
+		expect(getErrorReason()).toBe('');
+		expect(q('migration-error-reason')).toBeNull();
+		expect(getErrorNotStarted()).toBe(false);
+		expect(text('migration-error-title')).toBe(t('migration.error_title'));
+	});
+});
+
+describe('the migration wizard when the event stream breaks', () => {
+	it('shows the browser\'s text as its own, not marked as the engine\'s sentence', async () => {
+		exportAnswer = () => new Response(new ReadableStream<Uint8Array>({ start(c) { c.error(new Error('stream broke')); } }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+		const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
+		component = mount(MigrationWizard, { target });
+		await settle();
+		setTarget('https://target.example.com', 'a'.repeat(64));
+		await startMigration();
+		await settle();
+		expect(getStep()).toBe('error');
+		expect(getError()).toBe('stream broke');
+		expect(text('migration-error-detail')).toBe('stream broke');
+		expect(q('migration-error-detail')?.getAttribute('lang')).toBeNull();
+	});
+});
+
+describe('the migration wizard when the preview cannot be loaded', () => {
+	it('says so in its own words, not with the answer\'s text', async () => {
+		previewAnswer = () => new Response('<html><body><h1>502 Bad Gateway</h1></body></html>', { status: 502, headers: { 'Content-Type': 'text/html' } });
+		const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
+		component = mount(MigrationWizard, { target });
+		await settle();
+		expect(getError()).toBe(t('migration.error_preview'));
+		expect(target.textContent).toContain(t('migration.error_preview'));
+		expect(target.textContent).not.toContain('Bad Gateway');
 	});
 });
