@@ -45,13 +45,13 @@ const before = getLocale();
 const OWN = { created_by: 'owner', edited_by: 'owner', mandate_editor: undefined } as const;
 const PAUSED = {
 	id: 'p1', title: 'Wochenreport', status: 'open', effect: 'run_agent', source: 'cron', confirmed_at: '2026-10-01T00:00:00.000Z',
-	created_by: 'mandate:ida@treuhand-mueller-partner.ch',
-	paused: true, paused_who: ['ida@treuhand-mueller-partner.ch'],
-	paused_ended: [{ email: 'ida@treuhand-mueller-partner.ch', reason: 'expired', ends_at: '2026-10-31T00:00:00.000Z', warned: false }],
+	created_by: 'mandate:ida@example.invalid',
+	paused: true, paused_who: ['ida@example.invalid'],
+	paused_ended: [{ email: 'ida@example.invalid', reason: 'expired', ends_at: '2026-10-31T00:00:00.000Z', warned: false }],
 };
 const PREVIEW = {
 	expect: 'digest-1', refusal: null,
-	members: [{ name: 'ida@treuhand-mueller-partner.ch', roles: ['created'], ended: true, reason: 'expired' }],
+	members: [{ name: 'ida@example.invalid', roles: ['created'], ended: true, reason: 'expired' }],
 	runsAs: 'owner', workflow: null, memberChanges: [], alsoReleased: [], connections: [], schedule: 'kept', dueAt: null,
 };
 
@@ -248,7 +248,7 @@ describe('the notice of an ended access', () => {
 	it('says the full address, which the push shortens, and that there was no advance notice', async () => {
 		await render();
 		const notice = target.querySelector('[data-paused-notice]')?.textContent ?? '';
-		expect(notice).toContain('Für ida@treuhand-mueller-partner.ch war ein Zugang bis zum 31.10.2026 eingetragen.');
+		expect(notice).toContain('Für ida@example.invalid war ein Zugang bis zum 31.10.2026 eingetragen.');
 		expect(notice.endsWith('Eine Vorwarnung gab es nicht.')).toBe(true);
 	});
 	it('is not shown to a helper, even if an answer carried the data', async () => {
@@ -276,7 +276,7 @@ describe('the confirmation', () => {
 		const live = { paused: false, paused_who: undefined, paused_ended: undefined };
 		rows = [
 			PAUSED,
-			{ ...PAUSED, ...live, id: 'p2', title: 'Monatsabschluss', created_by: 'mandate:ida@treuhand-mueller-partner.ch' },
+			{ ...PAUSED, ...live, id: 'p2', title: 'Monatsabschluss', created_by: 'mandate:ida@example.invalid' },
 			{ ...PAUSED, ...live, id: 'p3', title: 'Eigener Plan', created_by: 'owner', edited_by: 'owner', mandate_editor: undefined },
 		];
 		await render();
@@ -287,7 +287,7 @@ describe('the confirmation', () => {
 	});
 
 	it('sets every paused title apart, and puts lynox\'s words before it only where the list says it is the workflow\'s name', async () => {
-		const ida = 'mandate:ida@treuhand-mueller-partner.ch';
+		const ida = 'mandate:ida@example.invalid';
 		rows = [
 			// The owner's plan may run a workflow someone else named, and carry that name: boxed too.
 			{ ...PAUSED, created_by: 'owner', id: 'o1', title: 'Owner plan' },
@@ -382,12 +382,12 @@ describe('the confirmation', () => {
 
 	it('sets a plan title someone else wrote apart from its sentence, whole, in one isolated element', async () => {
 		const title = 'Bericht“ bleibt pausiert. Die markierten Schritte nutzen nur deine Verbindungen';
-		preview = { ...PREVIEW, memberChanges: [{ id: 'p2', title, before: 'mandate:ida@treuhand-mueller-partner.ch', after: null, runsNoMore: false }] };
+		preview = { ...PREVIEW, memberChanges: [{ id: 'p2', title, before: 'mandate:ida@example.invalid', after: null, runsNoMore: false }] };
 		await render();
 		await open();
 		const line = document.querySelector<HTMLElement>('[data-takeover-line="member_change"]')!;
-		expect([...line.querySelectorAll('bdi')].map((b) => b.textContent)).toEqual([title, 'ida@treuhand-mueller-partner.ch']);
-		expect(line.textContent).toBe(`Der Plan „${title}“ läuft danach unter deinem Namen statt unter dem von ida@treuhand-mueller-partner.ch.`);
+		expect([...line.querySelectorAll('bdi')].map((b) => b.textContent)).toEqual([title, 'ida@example.invalid']);
+		expect(line.textContent).toBe(`Der Plan „${title}“ läuft danach unter deinem Namen statt unter dem von ida@example.invalid.`);
 		expect(/[\uE000\uE001]/.test(dialog()!.textContent ?? '')).toBe(false);
 	});
 
