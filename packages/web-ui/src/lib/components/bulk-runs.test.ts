@@ -754,7 +754,11 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('storeAccessEnded', unclear), true, EN)?.before).toBe('Ask lynox in the chat to connect the store again. Then you can check again.');
 		expect(bulkResumeText(w('storeClientMisnamed', unclear), false, DE)?.before).toBe('Bitte lynox im Chat, das Profil für shop.example.invalid anzupassen. Danach kannst du nachprüfen.');
 		expect(bulkResumeText(w('storeClientMisnamed', unclear), false, EN)?.before).toBe('Ask lynox in the chat to fix the profile for shop.example.invalid. Then you can check again.');
-		for (const key of ['storeAccessEnded', 'storeClientMisnamed']) expect(bulkResumeText(w(key, unclear), true, DE)?.after, key).toBeNull();
+		for (const key of ['storeAccessEnded', 'storeClientMisnamed']) {
+			// The step comes first, the check sentence after it, and nothing follows the check.
+			expect(bulkResumeText(w(key, unclear), true, DE)?.check, key).toBe(DE.tf('bulk.resume.check_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
+			expect(bulkResumeText(w(key, unclear), true, DE)?.after, key).toBeNull();
+		}
 		// A step that follows the check stays where it was.
 		const markup = bulkResumeText(w('markupAddedByShop', unclear), true, DE);
 		expect(markup?.before).toBeNull();
