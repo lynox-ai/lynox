@@ -29,7 +29,7 @@
   preview first.
 - On first start `engine.db` moves from schema **68** to **70**, `history.db`
   from **72** to **74** and `mail-state.db` from **20** to **23**. The steps add
-  tables, columns and an index. Existing inbox rules are marked confirmed as of
+  tables, columns and indexes. Existing inbox rules are marked confirmed as of
   their creation, and once after the step a pass gives every workflow the owner
   had confirmed the digest of its steps. In `datastore.db`, which carries no
   version, each table gains the columns that say who wrote a row last, and each
@@ -42,8 +42,11 @@
   approval names where the target came from on its card. A session of someone
   the owner let in is refused, and so is a run nobody watches: a scheduled or
   triggered run that sends to such a target stops that send and says so in its
-  result. A trigger from before its creator was recorded counts as the owner's
-  only once the owner confirms its recipients in the Triggers view. Once the
+  result. Contacts, earlier sends and conversation text from before the update
+  do not count as owner-named: the first send to such a recipient after the
+  update asks, and a scheduled or triggered run's send to one stops. A trigger
+  from before its creator was recorded counts as the owner's only once the
+  owner confirms its recipients in the Triggers view. Once the
   conversation has read outside content, a `web_research` read whose URL has a
   query goes through the same question and follows no redirect to another
   host. (#2636, #2658)
@@ -52,28 +55,32 @@
   the owner had confirmed are stamped once at the first start; a workflow
   someone with access built or changed waits for the owner's stamp, through
   `GET /api/workflows/:id/stamp-preview` and `POST /api/workflows/:id/confirm`
-  (owner only, `expect` required). Workflow exports leave the digest out.
-  (#2451)
+  (owner only, `expect` required). Meanwhile `POST /api/workflows/:id/run`
+  answers `409` with code `workflow_awaits_stamp`; a webhook or one-shot
+  trigger of such a workflow is switched off and has to be switched on again
+  after the stamp, while a schedule waits and resumes by itself. Workflow
+  exports leave the digest out. (#2451)
 - `POST /api/sessions/:id/reply` answers a question only when the body names
   it with `promptId` (from the `prompt` event or
   `GET /api/sessions/:id/pending-prompt`).
-  Without it nothing is answered: `409` with code `prompt_id_required` while a
-  question is open, `404` otherwise. (#2644)
+  Without it (and with an `answer`) nothing is answered: `409` with code
+  `prompt_id_required` while a question is open, `404` otherwise. (#2644)
 - A Shopify connection records the version of the consent text it was
   confirmed under. A bulk run on a connection from before writes a product's
   title and SEO texts as before, but not its description or image alt text;
-  for those, connect the store again. The Shopify connection now also asks for
-  writing files, and the alt-text form runs only where that was asked and
-  granted. (#2580, #2485)
+  for those, connect the store again. A Shopify connection can now also ask for
+  writing files (`write_files`); the alt-text form runs only where that was
+  asked and granted. (#2580, #2485)
 - A new workflow step id is 1 to 40 characters of `a-z`, `0-9`, `_` and `-`.
   A save with another id, or with a step reference no run can resolve, is
   refused; a stored step id from before still runs and is shown by its
   position. (#2589, #2604, #2606)
 - An engine that started without one of its stores now says so and refuses
-  what it could not keep: without `history.db` the agent does not run, since
-  the spending caps cannot be checked, and an HTTP or mail send limit that is
-  set refuses the send instead of sending uncounted; without `engine.db` API
-  profile changes, memory changes and to-do changes are refused. The status
+  what it could not keep: without `history.db` the agent does not run while a
+  daily or monthly spending cap is set, since it cannot be checked, and an
+  HTTP or mail send limit that is set refuses the send instead of sending
+  uncounted; without `engine.db` API profile changes, memory changes and to-do
+  changes are refused. The status
   bar names the missing store and what it stops. (#2423, #2443,
   #2447, #2457, #2540)
 - The daily and monthly spending caps are now checked before model calls
