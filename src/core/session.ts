@@ -1006,7 +1006,10 @@ export class Session {
         const runId = randomUUID();
         // Relative to the workspace the files live in, not to the process: in the image the
         // process runs in /app and every workspace path would start with `../`.
-        runChangeset = workspaceChangeset(runId);
+        // Who made this review and whether this run's client shows it travel with the manager:
+        // the principal set above is this run's, and a later run that fails before it gets
+        // here must not change who may answer this one.
+        runChangeset = workspaceChangeset(runId, { createdBy: principalTag(this._principal), shownForReview: this._runShowsReview });
         this._changesetManager = runChangeset;
         this._recreateAgent();
       } else {

@@ -9,6 +9,7 @@
 import { recipientConfirmDigest, recipientsConfirmable } from '../core/recipient-confirm.js';
 import { errorText, errorTextReduced, processErrorText } from '../core/error-egress.js';
 import { jsonFault } from '../core/json-fault.js';
+import { mayAnswerReview } from '../core/changeset.js';
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
@@ -97,7 +98,7 @@ import type { ApprovalStore } from '../core/approval-store.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
 import { RECORD_EXPORT_PAGE_MAX } from '../core/data-store.js';
-import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion, TriggerRecord, PlannedPipeline } from '../types/index.js';
+import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion, TriggerRecord, PlannedPipeline, ChangesetDiff } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
 import { acquireSlot, readSlot, sweepSlot, type HeldSlot } from '../core/export-slot.js';
 import { sweepStaleExports } from '../core/export-archive.js';
@@ -5010,6 +5011,27 @@ export class LynoxHTTPApi {
         return;
       }
 
+      // A client that shows the review card after a run (it says so with
+      // `shows_changeset_review`) gets its next message held while that card is open and the
+      // sender may answer it: a new run would replace the review, and with it the way to roll
+      // the previous run's changes back. The answer names the review, so the client fetches
+      // the card and sends the message once the review is answered. Only a review made by
+      // such a client holds, and only one the card shows (`hasChanges()`, not `!isEmpty()`:
+      // a review of only deleted files shows no card and must not hold). The cheap checks
+      // come first; `hasChanges()` reads the files. Placed after the takeover above, so a
+      // stuck run is still ended, and before any upload, so a held message leaves no file.
+      const heldBy = session.getChangesetManager();
+      if (
+        (body as Record<string, unknown> | null)?.['shows_changeset_review'] === true
+        && heldBy !== null
+        && heldBy.shownForReview
+        && mayAnswerReview(heldBy, this._principalOf(req))
+        && heldBy.hasChanges()
+      ) {
+        errorResponse(res, 409, 'The changes of the last run wait for a review', 'review_pending', { runId: heldBy.runId });
+        return;
+      }
+
       // Global concurrency cap (Tier 2, AC6). Bound how many chat runs execute
       // at once across all threads — many parallel headless runs would otherwise
       // blow LLM cost + run-buffer memory (R3). Fail fast here (before the LLM
@@ -6383,7 +6405,9 @@ export class LynoxHTTPApi {
       const session = this.sessionStore.get(params['id']!);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       const csm = session.getChangesetManager();
-      if (!csm || !csm.hasChanges()) {
+      // The card goes only to someone who may answer it: a reader of the chat who cannot would
+      // see a review that holds every message they send and refuses every answer they give.
+      if (!csm || !mayAnswerReview(csm, this._principalOf(_req)) || !csm.hasChanges()) {
         jsonResponse(res, 200, { hasChanges: false, files: [] });
         return;
       }
@@ -6407,8 +6431,11 @@ export class LynoxHTTPApi {
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       // The changeset is the last run's work and outlives it: only that run's principal (or
       // the owner) accepts or rolls it back, even in the mandate's own conversation (§3.13 E7).
-      // The next run replaces it, whoever starts it, as it always has.
-      if (this._refuseUnlessOwns(_req, res, 'review the changes of this run', () => [this._threadRow(params['id']!), this._lastRunRow(session)])) return;
+      // Who that is the manager records itself (`mayAnswerReview`), the same rule the card and
+      // the hold on the next message read; no manager is no one's review. The next run
+      // replaces it, whoever starts it, as it always has.
+      const reviewed = session.getChangesetManager();
+      if (this._refuseUnlessOwns(_req, res, 'review the changes of this run', () => [this._threadRow(params['id']!), reviewed ? { created_by: reviewed.createdBy } : undefined])) return;
       // While a run is in progress the changeset is that run's and still growing: a rollback
       // would reset files under a run that goes on writing them, and the cleanup after it
       // would take backups the run still needs.
@@ -6439,53 +6466,81 @@ export class LynoxHTTPApi {
         return;
       }
 
-      const changes = csm.getChanges();
-      let accepted = 0;
-      let rolledBack = 0;
-      // Every tracked file by the name the review shows: a file replaced by a link since the review
-      // is no longer among `changes`, but the answer still names it, and the rollback names it back.
-      const absByName = csm.reviewNames();
-      const nameByAbs = new Map([...absByName].map(([name, abs]) => [abs, name]));
-      // The files the rollback left as they are (replaced or linked since, or not writable).
-      let notRestored: string[] = [];
-      const nameOf = (abs: string): string => nameByAbs.get(abs) ?? abs;
-      // Rollback all: a file the review does not show now and the backup could not read is left
-      // out. Nothing was saved for it, so nothing was promised, and the reason the answer gives for
-      // it would be wrong. A file shown once and replaced by a link since cannot be told apart from
-      // it here; a partial answer names what the person chose, so there nothing is left out.
-      const shownNow = new Set(changes.map((c) => c.absolutePath));
-      const named = (left: string[]): string[] => left
-        .filter((abs) => shownNow.has(abs) || csm.hasOriginal(abs))
-        .map(nameOf);
-
-      if (action === 'accept') {
-        accepted = changes.length;
-        csm.acceptAll();
-      } else if (action === 'rollback') {
-        notRestored = named(csm.rollbackAll());
-        rolledBack = changes.filter((c) => !notRestored.includes(c.file)).length;
-      } else {
-        // Partial: validate rolledBackFiles against changeset entries
-        const clientFiles = Array.isArray(b?.['rolledBackFiles']) ? b['rolledBackFiles'] as string[] : [];
-        // The paths the review showed, mapped back to the files they name. Not resolved
-        // against `process.cwd()`: the review's paths are relative to the workspace.
-        const toRollback: string[] = [];
-
-        for (const f of clientFiles) {
-          if (typeof f !== 'string') continue;
-          const abs = absByName.get(f);
-          if (abs !== undefined && !toRollback.includes(abs)) toRollback.push(abs);
+      // Reading the changes can fail before anything was done. The review ends either way, or
+      // its hold on the next message would outlive the card. For an accept that is the answer
+      // chosen; for a rollback it is not, and the answer says so: nothing was rolled back, and
+      // with the backups gone it no longer can be.
+      let changes: ChangesetDiff[];
+      try {
+        changes = csm.getChanges();
+      } catch {
+        csm.cleanup();
+        if (action === 'accept') {
+          jsonResponse(res, 200, { ok: true, accepted: 0, rolledBack: 0, notRestored: [] });
+        } else {
+          errorResponse(res, 500, 'The changes could not be read; nothing was rolled back', 'rollback_unreadable');
         }
-
-        if (toRollback.length > 0) {
-          notRestored = csm.rollbackFiles(toRollback).map(nameOf);
-        }
-        rolledBack = toRollback.length - notRestored.length;
-        accepted = changes.filter((c) => !toRollback.includes(c.absolutePath)).length;
+        return;
       }
+      // Set once a rollback has begun to restore files: a throw after it left some restored and
+      // some not, which the answer must not report as "nothing was rolled back".
+      let rollbackStarted = false;
+      try {
+        let accepted = 0;
+        let rolledBack = 0;
+        // Every tracked file by the name the review shows: a file replaced by a link since the review
+        // is no longer among `changes`, but the answer still names it, and the rollback names it back.
+        const absByName = csm.reviewNames();
+        const nameByAbs = new Map([...absByName].map(([name, abs]) => [abs, name]));
+        // The files the rollback left as they are (replaced or linked since, or not writable).
+        let notRestored: string[] = [];
+        const nameOf = (abs: string): string => nameByAbs.get(abs) ?? abs;
+        // Rollback all: a file the review does not show now and the backup could not read is left
+        // out. Nothing was saved for it, so nothing was promised, and the reason the answer gives for
+        // it would be wrong. A file shown once and replaced by a link since cannot be told apart from
+        // it here; a partial answer names what the person chose, so there nothing is left out.
+        const shownNow = new Set(changes.map((c) => c.absolutePath));
+        const named = (left: string[]): string[] => left
+          .filter((abs) => shownNow.has(abs) || csm.hasOriginal(abs))
+          .map(nameOf);
 
-      csm.cleanup();
-      jsonResponse(res, 200, { ok: true, accepted, rolledBack, notRestored });
+        if (action === 'accept') {
+          accepted = changes.length;
+          csm.acceptAll();
+        } else if (action === 'rollback') {
+          rollbackStarted = true;
+          notRestored = named(csm.rollbackAll());
+          rolledBack = changes.filter((c) => !notRestored.includes(c.file)).length;
+        } else {
+          // Partial: validate rolledBackFiles against changeset entries
+          const clientFiles = Array.isArray(b?.['rolledBackFiles']) ? b['rolledBackFiles'] as string[] : [];
+          // The paths the review showed, mapped back to the files they name. Not resolved
+          // against `process.cwd()`: the review's paths are relative to the workspace.
+          const toRollback: string[] = [];
+
+          for (const f of clientFiles) {
+            if (typeof f !== 'string') continue;
+            const abs = absByName.get(f);
+            if (abs !== undefined && !toRollback.includes(abs)) toRollback.push(abs);
+          }
+
+          if (toRollback.length > 0) {
+            rollbackStarted = true;
+            notRestored = csm.rollbackFiles(toRollback).map(nameOf);
+          }
+          rolledBack = toRollback.length - notRestored.length;
+          accepted = changes.filter((c) => !toRollback.includes(c.absolutePath)).length;
+        }
+
+        jsonResponse(res, 200, { ok: true, accepted, rolledBack, notRestored });
+      } catch (err) {
+        if (!rollbackStarted) throw err;
+        errorResponse(res, 500, 'The rollback stopped partway', 'rollback_aborted');
+      } finally {
+        // Every answer ends the review, a failed one too: the hold on the next message never
+        // outlives it.
+        csm.cleanup();
+      }
     }, OWN));
 
     // ── Compact (context management) ──
