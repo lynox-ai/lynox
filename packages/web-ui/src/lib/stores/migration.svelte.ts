@@ -112,7 +112,7 @@ function fail(code: string, from: { retry: MigrationRetry; params?: MigrationErr
 	errorParams = known === code ? from.params ?? {} : {};
 	errorReason = from.reason ?? '';
 	errorNotStarted = migrationNotStarted(known);
-	error = migrationErrorPlain(migrationErrorView(errorCode, errorParams, errorReason));
+	error = migrationErrorPlain(migrationErrorView(errorCode, errorParams, errorReason, from.retry));
 	retry = from.retry;
 	errorAt = Date.now();
 	step = 'error';

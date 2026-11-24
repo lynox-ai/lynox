@@ -26,6 +26,8 @@ let runAnswers: RunAnswer[];
 let card: Array<{ file: string; status: string; diff: string }>;
 let changesetStatus: number;
 let reviewAnswer: { status: number; body: unknown };
+/** While set, the first run's stream stays open until it resolves. */
+let holdFirstRun: Promise<void> | null;
 
 const notes = [{ file: 'notes.md', status: 'modified', diff: '-a\n+b' }];
 
@@ -45,8 +47,9 @@ function serve(): void {
 			if (answer === 'busy') return json({ error: 'A run is already in progress for this session' }, 409);
 			if (answer === 'held') return json({ error: 'The changes of the last run wait for a review', code: 'review_pending', runId: 'run-7' }, 409);
 			const enc = new TextEncoder();
+			const held = runTasks.length === 1 ? holdFirstRun : null;
 			return new Response(new ReadableStream<Uint8Array>({
-				start(c) { c.enqueue(enc.encode(`event: done\ndata: ${JSON.stringify({ result: 'ok' })}\n\n`)); c.close(); },
+				async start(c) { if (held) await held; c.enqueue(enc.encode(`event: done\ndata: ${JSON.stringify({ result: 'ok' })}\n\n`)); c.close(); },
 			}), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 		}
 		if (url.endsWith('/changeset')) {
@@ -78,6 +81,7 @@ beforeEach(async () => {
 	card = [];
 	changesetStatus = 200;
 	reviewAnswer = { status: 200, body: { ok: true, accepted: 1, rolledBack: 0, notRestored: [] } };
+	holdFirstRun = null;
 	serve();
 });
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -154,6 +158,25 @@ describe('a message the open review holds', () => {
 		await settle();
 		expect(runTasks, 'no third send').toHaveLength(2);
 		expect(message('next step')).toMatchObject({ queued: false, failed: true });
+	});
+
+	it('failed for a tap, it does not keep the message queued behind it waiting', async () => {
+		let release!: () => void;
+		holdFirstRun = new Promise<void>((r) => { release = r; });
+		runAnswers = ['ok', 'held', 'ok'];
+		changesetStatus = 500;
+		void store.sendMessage('edit the notes');
+		await settle();
+		await store.sendMessage('first');
+		await store.sendMessage('second');
+		expect(message('second')?.queued, 'positive control: both wait behind the run').toBe(true);
+		release();
+		await settle();
+		await wait(500);
+		await settle();
+		expect(message('first'), 'positive control: the first is failed, for a tap').toMatchObject({ queued: false, failed: true });
+		expect(runTasks, 'the second is sent after it').toEqual(['edit the notes', 'first', 'second']);
+		expect(message('second')?.queued).toBe(false);
 	});
 });
 

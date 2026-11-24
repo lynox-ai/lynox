@@ -352,6 +352,41 @@ describe('Task Tools', () => {
       expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'https://example.com/items?page=2' }, makeAgent())).toContain('Watch task created');
     });
 
+    it('does not create a watch on a host the network policy does not let this instance read', async () => {
+      const created = vi.spyOn(tm, 'createWatch');
+      created.mockClear();
+      const withPolicy = (networkPolicy: 'allow-list' | 'deny-all' | 'guarded' | 'allow-all'): IAgent => {
+        const a = makeAgent();
+        Object.assign(a.toolContext, { networkPolicy, allowedHosts: new Set(['listed.example']), allowedWildcards: [] });
+        return a;
+      };
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'https://other.example/p' }, withPolicy('allow-list')))
+        .toBe("Error: watch_url not watched: its host other.example is not in this instance's network allow-list. No watch was created. The operator can add the host to the allow-list (network_policy).");
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'https://listed.example/p' }, withPolicy('deny-all')))
+        .toBe("Error: watch_url not watched: this instance's network_policy is deny-all, so lynox reads no web page. No watch was created. Only the operator can change network_policy.");
+      const https = makeAgent();
+      Object.assign(https.toolContext, { networkPolicy: 'guarded', enforceHttps: true });
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'http://other.example/p' }, https))
+        .toBe('Error: watch_url not watched: this instance only reads HTTPS pages (enforce_https). No watch was created. Watch the https:// address instead.');
+      const privateHttps = makeAgent();
+      Object.assign(privateHttps.toolContext, { networkPolicy: 'guarded', enforceHttps: true });
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'http://10.0.0.1/p' }, privateHttps))
+        .toBe('Error: watch_url not watched: this instance\'s network settings refuse it: private IP address "10.0.0.1". No watch was created.');
+      const both = withPolicy('allow-list');
+      Object.assign(both.toolContext, { enforceHttps: true });
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'http://other.example/p' }, both))
+        .toBe("Error: watch_url not watched: its host other.example is not in this instance's network allow-list. No watch was created. The operator can add the host to the allow-list (network_policy). The address must also be https://, since this instance only reads HTTPS pages (enforce_https).");
+      for (const watch_url of ['ftp://other.example/p', 'not a url']) {
+        expect(await taskCreateTool.handler({ title: 'Watch', watch_url }, withPolicy('guarded')))
+          .toBe('Error: watch_url not watched: it is not an http or https address. No watch was created.');
+      }
+      expect(created, 'no watch was stored').not.toHaveBeenCalled();
+      // Controls: the list's own host, and guarded and allow-all, which let a credential-free read through.
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'https://listed.example/p' }, withPolicy('allow-list'))).toContain('Watch task created');
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'https://other.example/p' }, withPolicy('guarded'))).toContain('Watch task created');
+      expect(await taskCreateTool.handler({ title: 'Watch', watch_url: 'https://other.example/p' }, withPolicy('allow-all'))).toContain('Watch task created');
+    });
+
     it('floors a too-small watch interval at 5 minutes', async () => {
       const result = await taskCreateTool.handler(
         { title: 'Watch', watch_url: 'https://example.com', watch_interval_minutes: 1 },

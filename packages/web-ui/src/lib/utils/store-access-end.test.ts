@@ -1,15 +1,24 @@
 import { describe, it, expect } from 'vitest';
-import { hostParts, hostSegments, longDay } from './store-access-end.js';
+import { longDay } from './store-access-end.js';
+import { placeholderParts, valueSegments } from './value-breaks.js';
 
-describe('a store host in a sentence', () => {
-	it('splits the sentence at {host}, and keeps a sentence without one whole', () => {
-		expect(hostParts('Der Shop {host} läuft ab.')).toEqual({ before: 'Der Shop ', after: ' läuft ab.' });
-		expect(hostParts('Kein Platzhalter.')).toEqual({ before: 'Kein Platzhalter.', after: '' });
+describe('a host or URL in a sentence', () => {
+	it('splits the sentence at its placeholder, and keeps a sentence without one whole', () => {
+		expect(placeholderParts('Der Shop {host} läuft ab.', '{host}')).toEqual({ before: 'Der Shop ', after: ' läuft ab.' });
+		expect(placeholderParts('Konto: {account}', '{account}')).toEqual({ before: 'Konto: ', after: '' });
+		expect(placeholderParts('Kein Platzhalter.', '{host}')).toEqual({ before: 'Kein Platzhalter.', after: '' });
 	});
 
 	it('cuts a host after each dot only, and a host without a dot not at all', () => {
-		expect(hostSegments('beta-shop.myshopify.com')).toEqual(['beta-shop.', 'myshopify.', 'com']);
-		expect(hostSegments('localhost')).toEqual(['localhost']);
+		expect(valueSegments('beta-shop.myshopify.com', 'host')).toEqual(['beta-shop.', 'myshopify.', 'com']);
+		expect(valueSegments('acme-store', 'host')).toEqual(['acme-store']);
+		expect(valueSegments('localhost', 'host')).toEqual(['localhost']);
+	});
+
+	it('cuts a URL after a dot or a slash, never inside the // of its scheme, at a hyphen or mid-word', () => {
+		expect(valueSegments('https://acme-store.myshopify.com/admin/api/2025-10', 'url')).toEqual(['https://', 'acme-store.', 'myshopify.', 'com/', 'admin/', 'api/', '2025-10']);
+		expect(valueSegments('https://x.lynox.cloud/api/oauth/callback', 'url')).toEqual(['https://', 'x.', 'lynox.', 'cloud/', 'api/', 'oauth/', 'callback']);
+		expect(valueSegments('https://acme-store.myshopify.com/admin/api/2025-10', 'url').join('')).toBe('https://acme-store.myshopify.com/admin/api/2025-10');
 	});
 });
 

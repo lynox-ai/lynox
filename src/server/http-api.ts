@@ -157,7 +157,7 @@ import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
 import { takeOverWorkflow, workflowTakeoverPreview, type WorkflowTakeoverDeps, type WorkflowTakeoverRefusal } from '../core/workflow-takeover.js';
 import { EngineLessRefused } from '../core/engine-less-refusal.js';
-import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerFieldsNotCarriedError, TriggerTierUnsupportedError, titleIsWorkflowName, isTriggerModelTierUpdate, triggerTakesModelTier, type BeforeTriggerWrite, type TaskManager } from '../core/task-manager.js';
+import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerFieldsNotCarriedError, TriggerTierUnsupportedError, titleIsWorkflowName, isTriggerModelTierUpdate, triggerTakesModelTier, type BeforeTriggerWrite, type TaskManager, watchRefusedNow, type BlockedReason } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -2667,16 +2667,21 @@ export class LynoxHTTPApi {
     return deps;
   }
 
-  /** The takeover's reads and writes, or null when engine.db is not there; answers nothing. */
+  /**
+   * The takeover's reads and writes, or null when engine.db or the store of access ends is not
+   * there; answers nothing. Without the store every person would read as ended, so a preview would
+   * say a live person's access ended, and a takeover would move what a live person shaped.
+   */
   #takeoverDepsIfReady(): TakeoverDeps | null {
     const engine = this.engine;
     const engineDb = engine?.getEngineDb() ?? null;
     if (engine === null || engine === undefined || engineDb === null) return null;
     const ends = engine.getMandateEnds();
+    if (ends === null || ends === undefined) return null;
     return {
       db: engineDb.getDb(),
       triggers: new TriggerStore(engineDb),
-      isLive: (mandateId) => ends?.isLive(mandateId) ?? false,
+      isLive: (mandateId) => ends.isLive(mandateId),
       audit: engine.getAuditLog(),
       prompts: engine.getPromptStore(),
     };
@@ -2685,13 +2690,12 @@ export class LynoxHTTPApi {
   /**
    * What the workflow takeover reads and writes (`workflow-takeover.ts`): the plan takeover's, the
    * workflow store on the same engine.db, whose hash the stamp is taken with, and the connections.
-   * Null with a 503 when engine.db is not there, or the store of access ends: without it every
-   * person would read as ended, and a workflow a live person shaped could be taken over.
+   * Null with a 503 when engine.db or the store of access ends is not there (`#takeoverDepsIfReady`).
    */
   #workflowTakeoverDeps(res: ServerResponse): WorkflowTakeoverDeps | null {
     const deps = this.#takeoverDepsIfReady();
     const engineDb = this.engine?.getEngineDb() ?? null;
-    if (deps === null || engineDb === null || (this.engine?.getMandateEnds() ?? null) === null) {
+    if (deps === null || engineDb === null) {
       errorResponse(res, 503, 'Taking over a workflow is not available on this instance right now.');
       return null;
     }
@@ -9559,6 +9563,15 @@ export class LynoxHTTPApi {
         ? taskManager.listTriggers({ paused: true })
         : taskManager.listTriggers(status ? { status } : undefined);
       const bulkLedgerForList = engine.getBulkLedger() ?? engine.getBulkLedgerSwitchedOff?.() ?? null;
+      const policyContext = engine.getToolContext();
+      const refusedWatch = (trigger: TriggerRecord): { blocked_reason: BlockedReason } | null => {
+        try {
+          const refused = watchRefusedNow(trigger, policyContext);
+          return refused === null ? null : { blocked_reason: refused };
+        } catch {
+          return null;
+        }
+      };
       const triggers = rows
         .map((trigger) => {
           const starter = loop?.runningStarterTag(trigger.id);
@@ -9593,6 +9606,9 @@ export class LynoxHTTPApi {
             // sets the name apart as a value. Any other title stays whole, the prefix included; so
             // does the title of a plan with no schedule, and one whose workflow was renamed since.
             ...(workflow !== undefined && (trigger.schedule_cron ?? '') !== '' && titleIsWorkflowName(trigger.title, workflow.name) ? { title_workflow: workflow.name } : {}),
+            // A watch the instance's network_policy keeps from its page, and why, as the poll would
+            // refuse it now: the view says so, with the way out (U-392).
+            ...(refusedWatch(trigger) ?? {}),
           };
         });
       // What the owner's stamp of each confirmed plan lists, and how each entry stands (B3), for the
@@ -10372,8 +10388,13 @@ export class LynoxHTTPApi {
       const fields = Object.keys(after).filter((f) => !(f in before) || canonicalJson(after[f]) !== canonicalJson(before[f]));
       return { key: written.key, fields, found: ledger.probeFound(status.id) };
     };
+    /** The start check's refusal for a store's own cause, with the code the page says it by (U-232). */
+    const storeReach = async (when: 'approve' | 'resume', cause: import('../core/bulk-notices.js').StoreReachCause): Promise<{ message: string; code: string }> => {
+      const { BULK_STORE_REACH_REFUSALS } = await import('../core/bulk-notices.js');
+      return { message: BULK_STORE_REACH_REFUSALS[when][cause], code: `reach_${when}_${cause}` };
+    };
     /** Why an external run could not reach its host now, or null (a local run, or one it can). */
-    const bulkExternalReach = async (runId: string, ledger: import('../core/bulk-ledger.js').BulkLedger): Promise<string | null> => {
+    const bulkExternalReach = async (runId: string, ledger: import('../core/bulk-ledger.js').BulkLedger, when: 'approve' | 'resume'): Promise<{ message: string; code?: string } | null> => {
       const status = ledger.getStatus(runId);
       if (!status || !status.targetSystem.startsWith('http:')) return null;
       const first = ledger.firstWritingKey(runId);
@@ -10381,7 +10402,12 @@ export class LynoxHTTPApi {
       // A Shopify run's targets are GIDs, not addresses: it writes to its store's endpoint.
       const { shopifyGraphqlEndpoint } = await import('../core/shopify-graphql.js');
       const key = ledger.shopifyApplyOf(runId) !== null ? shopifyGraphqlEndpoint(status.targetSystem.slice('http:'.length)) : first;
-      if (key === null) return 'This run\'s store has no endpoint lynox can write to.';
+      if (key === null) {
+        // A store host without an endpoint: the API version lynox writes to is not set.
+        const { isShopifyStoreHostName } = await import('../core/shopify-graphql.js');
+        return isShopifyStoreHostName(status.targetSystem.slice('http:'.length)) ? await storeReach(when, 'shopifyNoApiVersion')
+          : { message: 'This run\'s store has no endpoint lynox can write to.' };
+      }
       const { attachStoredCredential } = await import('../tools/builtin/http.js');
       const { resolveGuardedAckHosts } = await import('../core/tool-context.js');
       const { assertHostPolicy } = await import('../core/network-guard.js');
@@ -10389,12 +10415,15 @@ export class LynoxHTTPApi {
       try {
         assertHostPolicy(key, { surface: 'full-control', ackHosts: resolveGuardedAckHosts(ctx) }, ctx);
       } catch {
-        return 'The network policy does not allow this run\'s host.';
+        return { message: 'The network policy does not allow this run\'s host.' };
       }
       const apiStore = engine.getApiStore();
       const secretStore = engine.getSecretStore();
-      if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, /* the run's first writing key: a write */ true, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: ctx.mandateEnds, secretReleases: ctx.secretReleases, exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest, containment: ctx.containment, vaultNameBindings: ctx.vaultNameBindings, hostPolicy: ctx }, { bulkRunId: runId }))) {
-        return 'The stored credential for this run\'s host cannot be attached. Check the API connection for the host, then try again.';
+      const refused: { refusal?: import('../core/shopify-host.js').StoreAttachRefusal | undefined } = {};
+      if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, /* the run's first writing key: a write */ true, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: ctx.mandateEnds, secretReleases: ctx.secretReleases, exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest, containment: ctx.containment, vaultNameBindings: ctx.vaultNameBindings, hostPolicy: ctx }, { bulkRunId: runId }, refused))) {
+        // A store's own cause is said as the run page says it; connecting again would not help.
+        if (refused.refusal !== undefined) return await storeReach(when, refused.refusal);
+        return { message: 'The stored credential for this run\'s host cannot be attached. Check the API connection for the host, then try again.' };
       }
       return null;
     };
@@ -10686,8 +10715,8 @@ export class LynoxHTTPApi {
       // An external run is approved only when its first write would carry the credential
       // and reach the host — decided here, sending nothing. Otherwise the approval would
       // start a run that only collects refusals (build plan B §4 F5).
-      const reach = await bulkExternalReach(params['id']!, ledger);
-      if (reach !== null) { errorResponse(res, 409, reach); return; }
+      const reach = await bulkExternalReach(params['id']!, ledger, 'approve');
+      if (reach !== null) { errorResponse(res, 409, reach.message, reach.code); return; }
       if (refuseEndedPlanner(res, ledger, params['id']!)) return;
       // Only the literal `true` confirms; the approval records that it was given.
       const unmeasuredConfirmed = (body as Record<string, unknown>)['unmeasuredConfirmed'] === true;
@@ -10817,8 +10846,8 @@ export class LynoxHTTPApi {
       const resumeMax = rawResumeMax === undefined ? undefined : typeof rawResumeMax === 'number' ? rawResumeMax : Number.NaN;
       // The same check as approving: resuming an external run that halted because it could
       // not reach its host would only halt again on its first target.
-      const reach = await bulkExternalReach(params['id']!, ledger);
-      if (reach !== null) { errorResponse(res, 409, reach); return; }
+      const reach = await bulkExternalReach(params['id']!, ledger, 'resume');
+      if (reach !== null) { errorResponse(res, 409, reach.message, reach.code); return; }
       // A run no one can be shown to have planned would write without a row in the instance's
       // trail: it is not resumed (660b). It stays as it is; its approval was the owner's act.
       // The text is ux's. No await between this and the resume.
@@ -15845,8 +15874,9 @@ export class LynoxHTTPApi {
         res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
       };
 
-      // From the first handshake request on, the target may hold a session: a stop says when to
-      // try again (the catch below adds it where a step did not), unless it asks to check the target.
+      // Once the target may hold a session (it answered the handshake, or the first handshake
+      // request may have reached it), a stop says when to try again (the catch below adds it where
+      // a step did not), unless it asks to check the target.
       let sessionMayBeHeld = false;
       // The target's session as its handshake named it, and whether it has taken the manifest: a
       // stop before that ends the session (the target holds it 30 minutes otherwise).
@@ -15876,17 +15906,24 @@ export class LynoxHTTPApi {
                     : 'the connection broke before its answer was complete';
         // Nothing leaves the instance before the handshake is complete: the first request is this
         // one, and the data goes only with the manifest and the chunks.
-        // After the first handshake request the target may hold a session for 30 minutes and turns
-        // a new attempt away until then; every stop from here says when to try again, except where
-        // the user has to check the target first.
+        // Once the target may hold a session it keeps it for 30 minutes and turns a new attempt away
+        // until then; every stop from there says when to try again, except where the user has to
+        // check the target first.
         const AGAIN = 'You can start the migration again in 30 minutes at the latest.';
         // Said where the target's answer leaves no words to quote once the hidden characters are gone.
         const NO_REASON = 'The target instance gave no readable reason.';
         // The Web UI names the group a failed handshake falls in (`code`); the fine cause goes to the log.
         const handshakeGroup = (w: Why): MigrationStopCode =>
           w === 'unsent' ? 'handshake_blocked' : w === 'large' || w === 'format' ? 'handshake_not_lynox' : 'handshake_unreachable';
-        const handshakeFailed = (w: Why, code: MigrationStopCode = handshakeGroup(w)): MigrationStop =>
-          new MigrationStop(code, `lynox could not set up the connection to the target instance: ${why(w, TARGET_BODY_CAPS.handshake, ', so lynox did not read it', TARGET_REQUEST_TIMEOUTS_MS.handshake)}. Nothing was transferred. ${AGAIN}`, {}, w);
+        // A handshake request that got no answer in time, or failed after it went out, may have
+        // reached the target and started a session there; those wait, in the sentence (the catch
+        // below adds it wherever a session may be held) and in the retry. One the guard kept in
+        // cannot have. A connection failure is taken as not reached: a reset after sending may have
+        // reached it, and a retry then meets the target's own wait.
+        const handshakeFailed = (w: Why, code: MigrationStopCode = handshakeGroup(w)): MigrationStop => {
+          if (w === 'silent' || w === 'failed') sessionMayBeHeld = true;
+          return new MigrationStop(code, `lynox could not set up the connection to the target instance: ${why(w, TARGET_BODY_CAPS.handshake, ', so lynox did not read it', TARGET_REQUEST_TIMEOUTS_MS.handshake)}. Nothing was transferred.`, {}, w);
+        };
         // The whole transfer's deadline (from the manifest on) and the stop it says.
         let transfer: AbortSignal | undefined;
         let outOfTime = (): MigrationStop => new MigrationStop('transfer_out_of_time', '');

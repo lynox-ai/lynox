@@ -1823,8 +1823,8 @@ describe('Agent', () => {
       // list back to the 2-way ['Allow','Deny','\x00'] and the assertion on the
       // 3-way args fails — the wiring this test pins.
       vi.mocked(isDangerousDetailed).mockReturnValueOnce({
-        ...danger('⚠ spawn_agent: deep'),
-        payload: { message: '⚠ spawn_agent: deep', tier: 'deep', downgradeTo: 'balanced' },
+        ...danger('⚠ Delegation: deep'),
+        payload: { message: '⚠ Delegation: deep', tier: 'deep', downgradeTo: 'balanced' },
       });
       let consumed: unknown = undefined;
       const tool = makeTool('spawn_agent', vi.fn().mockImplementation((_input, agent) => {
@@ -1837,7 +1837,7 @@ describe('Agent', () => {
         .mockResolvedValueOnce(endTurnResponse('Done'));
       const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser });
       await agent.send('Spawn deep');
-      expect(promptUser).toHaveBeenCalledWith(frame('⚠ spawn_agent: deep'), ['Allow deep', 'Run on balanced', 'Cancel', '\x00'], expect.objectContaining({ signal: expect.any(AbortSignal) }));
+      expect(promptUser).toHaveBeenCalledWith(frame('⚠ Delegation: deep'), ['Allow deep', 'Run on balanced', 'Cancel', '\x00'], expect.objectContaining({ signal: expect.any(AbortSignal) }));
       expect(tool.handler).toHaveBeenCalled();
       expect(consumed).toBe('balanced');
     });
@@ -1863,8 +1863,8 @@ describe('Agent', () => {
 
     it('deep-consent 3-way GO: "Allow deep" proceeds WITHOUT a downgrade', async () => {
       vi.mocked(isDangerousDetailed).mockReturnValueOnce({
-        ...danger('⚠ spawn_agent: deep'),
-        payload: { message: '⚠ spawn_agent: deep', tier: 'deep', downgradeTo: 'balanced' },
+        ...danger('⚠ Delegation: deep'),
+        payload: { message: '⚠ Delegation: deep', tier: 'deep', downgradeTo: 'balanced' },
       });
       let consumed: unknown = 'untouched';
       const tool = makeTool('spawn_agent', vi.fn().mockImplementation((_input, agent) => {
@@ -1885,8 +1885,8 @@ describe('Agent', () => {
 
     it('deep-consent 3-way GO: "Cancel" denies — handler never runs', async () => {
       vi.mocked(isDangerousDetailed).mockReturnValueOnce({
-        ...danger('⚠ spawn_agent: deep'),
-        payload: { message: '⚠ spawn_agent: deep', tier: 'deep', downgradeTo: 'balanced' },
+        ...danger('⚠ Delegation: deep'),
+        payload: { message: '⚠ Delegation: deep', tier: 'deep', downgradeTo: 'balanced' },
       });
       const tool = makeTool('spawn_agent', vi.fn().mockResolvedValue('spawned'));
       const promptUser = vi.fn().mockResolvedValue('cancel');
@@ -8219,7 +8219,7 @@ describe('a child agent under its parent\'s review', () => {
       // The guard is mocked in this file; here it objects to every write, as the real one does
       // to a .env file.
       vi.mocked(isDangerousDetailed).mockClear();
-      vi.mocked(isDangerousDetailed).mockReturnValue({ warning: '⚠ write_file: write to sensitive path' });
+      vi.mocked(isDangerousDetailed).mockReturnValue({ warning: '⚠ File write: write to sensitive path' });
 
       const byChild = await write(child);
       expect(byChild.is_error).toBe(true);
@@ -8258,7 +8258,7 @@ describe('a child agent under its parent\'s review', () => {
       });
       const owner = new Agent({ name: 'parent', model: 'claude-sonnet-4-6', provider: 'anthropic', changesetManager: manager, changesetReviewedAfterRun: true });
       const child = new Agent({ name: 'child', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [overwrite], promptUser, changesetManager: owner.changeset });
-      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: '⚠ write_file: overwrite' });
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: '⚠ File write: overwrite' });
 
       const result = await (child as unknown as Exec)._executeOneInner({ type: 'tool_use', id: 'w1', name: 'write_file', input: { path: notes, content: 'x' } });
       expect(result.is_error).not.toBe(true);

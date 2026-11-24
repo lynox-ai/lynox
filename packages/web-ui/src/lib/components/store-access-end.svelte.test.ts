@@ -83,15 +83,15 @@ describe('the shell banner of a store whose access runs out', () => {
 			`Der Zugang von lynox zum Shop beta-shop.myshopify.com läuft am ${SOON.de} ab. Verbinde den Shop vorher neu, damit Läufe und Abfragen weiterlaufen. Erneut verbinden`,
 		]);
 		expect(all('store-access-host').map(text)).toEqual(['acme.myshopify.com', 'beta-shop.myshopify.com']);
-		// A break only after a dot: `<wbr>` there and nowhere else, never at the hyphen.
-		// Each piece unbreakable (a browser breaks after a hyphen otherwise), `<wbr>` between them.
-		const W = (x: string): string => `<span class="whitespace-nowrap">${x}</span>`;
+		// Break points only after a dot: `<wbr>` there and nowhere else, so not at the hyphen while a
+		// piece fits on a line. Each piece its own box, broken inside only when longer than a line.
+		// That a fitting piece stays whole is a rendering fact jsdom cannot check; this pins the markup.
+		const W = (x: string): string => `<span class="inline-block max-w-full break-all">${x}</span>`;
 		expect(all('store-access-host').map((h) => h.innerHTML.replace(/<!---->/g, ''))).toEqual([
 			`${W('acme.')}<wbr>${W('myshopify.')}<wbr>${W('com')}`,
 			`${W('beta-shop.')}<wbr>${W('myshopify.')}<wbr>${W('com')}`,
 		]);
-		expect(all('store-access-host').every((h) => !h.className.includes('break-all'))).toBe(true);
-		// The box moves to the next line whole when the host fits on one (U-391).
+		// The box is an inline-block up to the line's width, so the host can move to the next line whole (U-391).
 		expect(all('store-access-host').every((h) => h.classList.contains('inline-block') && h.classList.contains('max-w-full'))).toBe(true);
 		expect(all('store-access-reconnect').map((a) => (a.getAttribute('href') ?? '').replace(/^.*\/oauth\/connect\//, ''))).toEqual(['a', 'b']);
 		expect(all('store-access-reconnect').every((a) => (a.getAttribute('href') ?? '').includes('/oauth/connect/'))).toBe(true);

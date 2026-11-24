@@ -247,6 +247,13 @@ const EN_HALT_REASONS: Readonly<Record<keyof typeof BULK_HALT_REASONS, string>> 
   formCost: 'The store refused a read as too costly.',
   shopifyReadOff: 'Reading Shopify stores in a bulk run is switched off on this instance.',
   shopifyWriteOff: 'Writing to Shopify stores in a bulk run is switched off on this instance. Once it is on again, the run can be continued.',
+  // Why a request to a store got no pass, one sentence per cause and what to do (U-232), as the German one says it.
+  shopifySelfHosted: 'lynox reaches Shopify stores only on instances that lynox runs. This instance is self-hosted, so the run cannot go on here.',
+  shopifyNotSetUp: 'Shopify is not set up on this instance. Only lynox can set it up. Once lynox has set up Shopify, you can continue the run.',
+  shopifyUnconfirmed: 'lynox could not confirm that this instance may reach Shopify. You can continue the run in a few minutes.',
+  shopifyNotCleared: 'Shopify is not cleared for this instance right now. Only lynox can clear it. Once lynox has cleared Shopify, you can continue the run.',
+  containmentUnwritable: 'lynox could not record that this run reads the store; nothing was sent. You can continue the run later.',
+  shopifyNoApiVersion: 'A setting for Shopify is missing in lynox. Only lynox can fix it (support@lynox.ai).',
   consentOutdated: 'This Shopify connection does not yet let lynox change these fields. Reconnect Shopify (Settings → APIs), then ask lynox in the chat to plan the run again.',
   superseded: 'Another run with judging was started in its place. This one wrote nothing.',
   discarded: 'You discarded this run. lynox wrote nothing.',
@@ -315,6 +322,13 @@ function deHaltReason(reason: string): string | undefined {
     [BULK_HALT_REASONS.formCost]: 'Der Shop hat eine Abfrage als zu aufwendig abgelehnt.',
     [BULK_HALT_REASONS.shopifyReadOff]: 'Lesen von Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet.',
     [BULK_HALT_REASONS.shopifyWriteOff]: 'Schreiben in Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet. Ist es wieder an, lässt sich der Lauf fortsetzen.',
+    // Why a request to a store got no pass, one sentence per cause (U-232).
+    [BULK_HALT_REASONS.shopifySelfHosted]: 'Shopify-Shops erreicht lynox nur auf Instanzen, die lynox betreibt. Diese Instanz wird selbst betrieben, deshalb lässt sich der Lauf hier nicht fortsetzen.',
+    [BULK_HALT_REASONS.shopifyNotSetUp]: 'Shopify ist auf dieser Instanz nicht eingerichtet. Einrichten kann das nur lynox. Sobald lynox Shopify eingerichtet hat, kannst du den Lauf fortsetzen.',
+    [BULK_HALT_REASONS.shopifyUnconfirmed]: 'lynox konnte nicht bestätigen, dass diese Instanz Shopify erreichen darf. Du kannst den Lauf in ein paar Minuten fortsetzen.',
+    [BULK_HALT_REASONS.shopifyNotCleared]: 'Shopify ist für diese Instanz zurzeit nicht freigegeben. Freigeben kann nur lynox. Sobald lynox Shopify freigegeben hat, kannst du den Lauf fortsetzen.',
+    [BULK_HALT_REASONS.containmentUnwritable]: 'lynox konnte nicht festhalten, dass dieser Lauf den Shop liest; gesendet wurde nichts. Du kannst den Lauf später fortsetzen.',
+    [BULK_HALT_REASONS.shopifyNoApiVersion]: 'Für Shopify fehlt in lynox eine Einstellung. Beheben kann das nur lynox (support@lynox.ai).',
     // U-281, without the fields (the outcome's summary names them, `consentOutdated`).
     [BULK_HALT_REASONS.consentOutdated]: 'Diese Shopify-Verbindung erlaubt lynox noch nicht, diese Felder zu ändern. Verbinde Shopify neu (Einstellungen → APIs) und lass den Lauf im Chat neu planen.',
     [BULK_HALT_REASONS.superseded]: 'An seiner Stelle wurde ein anderer Lauf mit Beurteilung gestartet. Dieser hat nichts geschrieben.',
@@ -430,3 +444,32 @@ export function bulkPushTitle(effect: BulkTriggerEffect, end: BulkPushEnd, targe
   const host = targetSystem === null ? null : externalHostOf(targetSystem);
   return `${PUSH_STAGE[lang][effect]} ${PUSH_END[lang][end]}${host === null || host === '' ? '' : ` · ${host}`}`;
 }
+
+/** A store's own cause a bulk run's start check names (U-232): the attach's causes, and a store
+ *  without the API version lynox writes to. */
+export type StoreReachCause = import('./shopify-host.js').StoreAttachRefusal | 'shopifyNoApiVersion';
+/**
+ * The start check's sentence for a store's own cause, in the run page's English (U-232): on
+ * approving, the run has not started, so the sentence says to approve again
+ * (`bulk.reach.approve.<cause>`); on writing on, the halt's own cause (`bulk.halt.<cause>`).
+ * The route also sends a code (`reach_approve_<cause>`, `reach_resume_<cause>`), by which the page
+ * says it in its language.
+ */
+export const BULK_STORE_REACH_REFUSALS: Readonly<Record<'approve' | 'resume', Readonly<Record<StoreReachCause, string>>>> = Object.freeze({
+  approve: {
+    shopifySelfHosted: 'lynox reaches Shopify stores only on instances that lynox runs. This instance is self-hosted, so this run cannot start here.',
+    shopifyNotSetUp: 'Shopify is not set up on this instance. Only lynox can set it up (support@lynox.ai); after that you can approve the run.',
+    shopifyUnconfirmed: 'lynox could not confirm that this instance may reach Shopify. Try approving again in a few minutes.',
+    shopifyNotCleared: 'Shopify is not cleared for this instance right now. Only lynox can clear it (support@lynox.ai); after that you can approve the run.',
+    containmentUnwritable: 'lynox could not record that this run reads the store; nothing was sent. Try approving again later.',
+    shopifyNoApiVersion: 'A setting for Shopify is missing in lynox. Only lynox can fix it (support@lynox.ai); until then the run cannot be approved.',
+  },
+  resume: {
+    shopifySelfHosted: 'lynox reaches Shopify stores only on instances that lynox runs. This instance is self-hosted, so the run cannot go on here.',
+    shopifyNotSetUp: 'Shopify is not set up on this instance. Only lynox can set it up (support@lynox.ai).',
+    shopifyUnconfirmed: 'lynox could not confirm that this instance may reach Shopify.',
+    shopifyNotCleared: 'Shopify is not cleared for this instance right now. Only lynox can clear it (support@lynox.ai).',
+    containmentUnwritable: 'lynox could not record that this run reads the store; nothing was sent.',
+    shopifyNoApiVersion: 'A setting for Shopify is missing in lynox. Only lynox can fix it (support@lynox.ai).',
+  },
+});
