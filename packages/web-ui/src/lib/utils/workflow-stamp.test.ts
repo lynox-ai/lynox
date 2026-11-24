@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  STEP_TASK_HEAD, awaitsLineKey, awaitsStampRefusal, confirmOutcome, offersStamp, stillOffLine, parseStampPreview, stepHeading, templateText, timeoutText, visible,
+  awaitsLineKey, awaitsStampRefusal, confirmOutcome, modeKey, offersStamp, onFailureKey, stampChanges, stillOffLine, parseStampPreview, templateText, timeoutText, visible,
 } from './workflow-stamp.js';
 
 /** An answer of `GET /api/workflows/:id/stamp-preview` as the contract (242 r1) describes it. */
@@ -170,26 +170,74 @@ describe('visible — what changes how text reads is printed, not applied', () =
     expect(visible('ok\u{E0100}\u{E01EF}')).toBe('ok<U+E0100><U+E01EF>');
   });
 
-  it('applies to the recorded call and the step heading', () => {
+  it('applies to the recorded call', () => {
     expect(templateText({ url: 'https://a\u202Eb/' })).toContain('<U+202E>');
-    expect(stepHeading({ id: 'x\u202E', task: 'send\u202E' })).toEqual({ id: 'x<U+202E>', head: 'send<U+202E>' });
   });
 });
 
-describe('stepHeading — there is no step name, so id and the start of the task', () => {
-  it('keeps a short task whole and flattens its whitespace', () => {
-    expect(stepHeading({ id: 'a', task: '  Read\n the   report ' })).toEqual({ id: 'a', head: 'Read the report' });
+describe('modeKey, onFailureKey — a sentence for each value the engine knows, none guessed', () => {
+  it('names every mode and failure strategy the engine stores', () => {
+    expect(modeKey('interactive')).toBe('workflow_library.stamp.mode_interactive');
+    expect(modeKey('autonomous')).toBe('workflow_library.stamp.mode_autonomous');
+    expect(onFailureKey('stop')).toBe('workflow_library.stamp.on_failure_stop');
+    expect(onFailureKey('continue')).toBe('workflow_library.stamp.on_failure_continue');
+    // notify runs as continue does and reports to no one: it carries continue's name.
+    expect(onFailureKey('notify')).toBe('workflow_library.stamp.on_failure_continue');
   });
 
-  it('cuts a long task at the limit and marks the cut', () => {
-    const head = stepHeading({ id: 'a', task: 'x'.repeat(STEP_TASK_HEAD + 5) }).head;
-    expect(head).toBe(`${'x'.repeat(STEP_TASK_HEAD)}…`);
-    expect(stepHeading({ id: 'a', task: 'x'.repeat(STEP_TASK_HEAD) }).head).toBe('x'.repeat(STEP_TASK_HEAD));
+  it('has no sentence for another value, an inherited name among them', () => {
+    for (const v of ['Autonomous', 'halt', '', 'constructor', 'toString', '__proto__']) {
+      expect(modeKey(v), v).toBeNull();
+      expect(onFailureKey(v), v).toBeNull();
+    }
+  });
+});
+
+describe('stampChanges — what moved between the version shown and the one loaded after it', () => {
+  const p = (over: Record<string, unknown> = {}) => parseStampPreview(preview(over))!;
+  const steps = (...s: Array<Record<string, unknown>>) => ({ steps: s });
+  const fetch = { id: 'fetch', task: 'Read the report', tool: null, inputTemplate: null, tools: ['web_search'], model: 'fast', inputFrom: [] };
+  const post = { id: 'post', task: 'Send it', tool: 'http_request', inputTemplate: { url: 'https://other.example/x' }, tools: ['http_request'], model: null, inputFrom: ['fetch'] };
+
+  it('marks nothing when the two are alike', () => {
+    expect(stampChanges(p(), p())).toEqual({ settings: false, steps: new Set(), removed: [] });
   });
 
-  it('never cuts inside a character made of two code units', () => {
-    const head = stepHeading({ id: 'a', task: `${'x'.repeat(STEP_TASK_HEAD - 1)}😀tail` }).head;
-    expect(head).toBe(`${'x'.repeat(STEP_TASK_HEAD - 1)}😀…`);
+  it('marks exactly the step whose content changed, by its position in the new version', () => {
+    const c = stampChanges(p(steps(fetch, post)), p(steps(fetch, { ...post, inputTemplate: { url: 'https://evil.example/x' } })));
+    expect([...c.steps]).toEqual([1]);
+    expect(c.settings).toBe(false);
+  });
+
+  it('a step that is new is changed, and one that is gone is named by its id', () => {
+    const c = stampChanges(p(steps(fetch, post)), p(steps({ ...fetch, id: 'read' }, post)));
+    expect([...c.steps]).toEqual([0]);
+    expect(c.removed).toEqual(['fetch']);
+  });
+
+  it('a step that only moved is not marked', () => {
+    expect([...stampChanges(p(steps(fetch, post)), p(steps(post, fetch))).steps]).toEqual([]);
+  });
+
+  it('a change of mode, failure strategy, limits, parameters or contract marks the settings, not a step', () => {
+    for (const over of [{ mode: 'interactive' }, { onFailure: 'continue' }, { limits: { maxSteps: 6 } }, { parameters: [] }, { contract: null }]) {
+      const c = stampChanges(p(), p(over));
+      expect(c.settings, JSON.stringify(over)).toBe(true);
+      expect([...c.steps], JSON.stringify(over)).toEqual([]);
+    }
+  });
+
+  it('a change between two values with one name (continue, notify) marks nothing', () => {
+    expect(stampChanges(p({ onFailure: 'continue' }), p({ onFailure: 'notify' })).settings).toBe(false);
+    // An unknown value is compared as it came.
+    expect(stampChanges(p({ onFailure: 'halt' }), p({ onFailure: 'Halt' })).settings).toBe(true);
+  });
+
+  it('compares what the caller says a step shows', () => {
+    const before = p();
+    const after = p();
+    const notes = new Map([[before, 'on A'], [after, 'on B']]);
+    expect([...stampChanges(before, after, (q, i) => `${i === 1 ? notes.get(q) : ''}`).steps]).toEqual([1]);
   });
 });
 

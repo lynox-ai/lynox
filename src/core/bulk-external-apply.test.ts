@@ -3182,3 +3182,31 @@ describe('a send without a clear answer is not sent again', () => {
     }
   });
 });
+
+describe('the head counts of an external run', () => {
+  const none = { deselected: 0, invalid: 0, unchanged: 0, takenBack: 0, written: 0, conflict: 0, unclear: 0, failed: 0, settled: 0, open: 0 };
+
+  it('a send without an answer is counted once, as unclear, before and after a resume', async () => {
+    const s = shop();
+    s.dropAfter = new Set(['PATCH /products/0']);
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await approvedRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
+      const halted = ledger.getStatus(runId)!;
+      // Before the resume the target is both failed and unclear in the counts beside the heads.
+      expect([halted.failed, halted.sentUnknown]).toEqual([1, 1]);
+      expect(halted.heads).toEqual({ ...none, unclear: 1, open: 2 });
+
+      s.dropAfter = new Set();
+      expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      const resumed = ledger.getStatus(runId)!;
+      expect(resumed.heads).toEqual({ ...none, unclear: 1, written: 2 });
+      expect(Object.values(resumed.heads).reduce((a, b) => a + b, 0)).toBe(resumed.total);
+    } finally {
+      restore();
+    }
+  });
+});
