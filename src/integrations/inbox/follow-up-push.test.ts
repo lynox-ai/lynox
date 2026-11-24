@@ -70,6 +70,15 @@ describe('the push for an item a follow-up opened again', () => {
     expect(opts?.sender).toBeUndefined();
   });
 
+  it('shows the address when the name differs from a long item sender\'s name only past the push\'s length cut', async () => {
+    // Both labels are cut to 79 characters and an ellipsis: the follow-up's mark falls past the cut.
+    const long = `${'a'.repeat(78)}exyz`;
+    const id = inbox.listItems()[0]!.id;
+    mail.getConnection().prepare('UPDATE inbox_items SET from_name = ? WHERE id = ?').run(long, id);
+    const opts = await reopenWith(followUp({ address: 'fremd@example.net', name: `${'a'.repeat(78)}e\u0301xyz` }));
+    expect(opts?.sender).toEqual({ address: 'fremd@example.net', name: undefined });
+  });
+
   it('names the follow-up\'s sender when it is someone else', async () => {
     const opts = await reopenWith(followUp({ address: 'kollege@example.com', name: 'Kollege' }));
     expect(opts?.sender).toEqual({ address: 'kollege@example.com', name: 'Kollege' });

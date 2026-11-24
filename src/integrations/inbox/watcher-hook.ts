@@ -306,13 +306,16 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       && fields.fromAddress.toLowerCase() !== existing.fromAddress.toLowerCase();
     const notifyOpts: import('./notifier.js').InboxNotifyOptions = { flagged };
     if (otherSender) {
-      // Compared as read: one Unicode form, without characters that show nothing (a soft hyphen),
-      // removed before the push's length cut so padding cannot push the name past it. A name that
-      // reads as nothing shows the address too.
-      const asPushed = (x: string | undefined): string =>
-        sanitisePushText((x ?? '').normalize('NFKC').replace(/\p{Default_Ignorable_Code_Point}/gu, ''), 80).toLowerCase();
-      const name = asPushed(fields.fromName);
-      const showAddress = name === '' || name === asPushed(existing.fromName) || name === asPushed(existing.fromAddress);
+      // Compared as read: one Unicode form, without characters that show nothing (a soft hyphen).
+      // Folded both before the push's length cut (padding cannot push the name past it) and after
+      // it (the label as shown); a match either way, or a name that reads as nothing, shows the
+      // address.
+      const fold = (x: string): string => x.normalize('NFKC').replace(/\p{Default_Ignorable_Code_Point}/gu, '').toLowerCase();
+      const readings = (x: string | undefined): string[] =>
+        [sanitisePushText(fold(x ?? ''), 80), fold(sanitisePushText(x ?? '', 80))];
+      const own = readings(fields.fromName);
+      const theirs = [...readings(existing.fromName), ...readings(existing.fromAddress)];
+      const showAddress = own.includes('') || own.some((r) => theirs.includes(r));
       notifyOpts.sender = { address: fields.fromAddress ?? '', name: showAddress ? undefined : fields.fromName };
     }
     if (item && !snoozed) void opts.notifier.notifyNewItem(item, notifyOpts);
