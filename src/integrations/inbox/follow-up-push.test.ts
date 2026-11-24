@@ -75,12 +75,24 @@ describe('the push for an item a follow-up opened again', () => {
     expect(opts?.sender).toEqual({ address: 'kollege@example.com', name: 'Kollege' });
   });
 
-  it('keeps the confidential flag for a flagged follow-up from someone else', async () => {
-    const opts = await reopenWith(followUp(
+  it('shows the address of a follow-up that carries the item sender\'s name from another address', async () => {
+    const opts = await reopenWith(followUp({ address: 'fremd@example.net', name: ' kundin' }));
+    expect(opts?.sender).toEqual({ address: 'fremd@example.net', name: undefined });
+  });
+
+  it('pushes the fixed text, naming nobody, for a flagged follow-up from someone else', async () => {
+    const sent: NotificationMessage[] = [];
+    const router = { sendTo: vi.fn(async (_c: string, m: NotificationMessage) => { sent.push(m); return true; }) } as unknown as NotificationRouter;
+    notifier = createInboxNotifier({ router, perMinute: () => 10, perHour: () => 100, language: () => 'de' });
+    const hook = createInboxClassifierHook({ state: inbox, rules: new InboxRulesLoader(inbox), queue, accounts, notifier });
+    expect(await hook(ACCOUNT.id, followUp(
       { address: 'kollege@example.com', name: 'Kollege' },
       { subject: 'Dein Sicherheitscode', snippet: 'Bestätigungscode: 482917 — gültig für 5 Minuten.' },
-    ));
-    expect(opts?.flagged).toBe(true);
+    ))).toBe('duplicate');
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]!.body).toBe(FLAGGED_PUSH_TEXT.de);
+    expect(JSON.stringify(sent[0])).not.toContain('Kollege');
+    expect(JSON.stringify(sent[0])).not.toContain('kollege@');
   });
 });
 
@@ -94,12 +106,14 @@ describe('the push text', () => {
     await push.notifyNewItem(item, { sender: { address: 'kollege@example.com', name: 'Kollege' } });
     await push.notifyNewItem(item, { sender: { address: 'kollege@example.com' } });
     await push.notifyNewItem(item, { sender: { address: 'kol<b>lege@example.com', name: 'Kol\u202Elege' } });
+    await push.notifyNewItem(item, { sender: { address: 'kol<b>\u202Elege@example.com' } });
     await push.notifyNewItem(item, { flagged: true, sender: { address: 'kollege@example.com', name: 'Kollege' } });
     expect(sent.map((m) => m.body)).toEqual([
       'Kundin: Offerte',
       'Kollege: Offerte',
       'kollege@example.com: Offerte',
       'Kollege: Offerte',
+      'kol b lege@example.com: Offerte',
       FLAGGED_PUSH_TEXT.de,
     ]);
   });

@@ -298,11 +298,16 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     const snoozed = item?.snoozeUntil !== undefined && item.snoozeUntil.getTime() > Date.now();
     // The push names the item's own sender and subject, so its own mail's flag counts as well.
     const flagged = sensitive.isSensitive || itemCategories.length > 0;
-    // A follow-up from someone other than the item's sender is announced under its own sender.
+    // A follow-up from someone other than the item's sender is announced under its own sender. When
+    // it carries the item sender's name from another address, the push shows the address instead:
+    // a name alone would read as the item's sender.
     const otherSender = fields.fromAddress !== undefined && fields.fromAddress !== ''
       && fields.fromAddress.toLowerCase() !== existing.fromAddress.toLowerCase();
     const notifyOpts: import('./notifier.js').InboxNotifyOptions = { flagged };
-    if (otherSender) notifyOpts.sender = { address: fields.fromAddress ?? '', name: fields.fromName };
+    if (otherSender) {
+      const sameName = (fields.fromName ?? '').trim().toLowerCase() === (existing.fromName ?? '').trim().toLowerCase();
+      notifyOpts.sender = { address: fields.fromAddress ?? '', name: sameName ? undefined : fields.fromName };
+    }
     if (item && !snoozed) void opts.notifier.notifyNewItem(item, notifyOpts);
   };
 
