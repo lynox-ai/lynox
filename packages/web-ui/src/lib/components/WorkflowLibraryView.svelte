@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
@@ -7,11 +8,11 @@
 	import StampPreviewBody from './StampPreviewBody.svelte';
 	import WorkflowTakeoverDialog from './WorkflowTakeoverDialog.svelte';
 	import MarkedLine from './MarkedLine.svelte';
-	import { shownValue } from '../utils/plan-takeover.js';
+	import { shownValue, shownWhole } from '../utils/plan-takeover.js';
 	import { attemptKey, clearAttemptKey, clearAllAttemptKeys, attemptIsOver } from '../utils/run-attempt-key.js';
 	import { composeRunNotice, refusalBanner } from '../utils/run-notice.js';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
-	import { awaitsLineKey, awaitsStampRefusal, confirmOutcome, offersStamp, stillOffLine, parseStampPreview, visible, type StampPreview } from '../utils/workflow-stamp.js';
+	import { awaitsLineKey, awaitsStampRefusal, confirmOutcome, offersStamp, stillOffLine, parseStampPreview, stampChanges, visible, type StampChanges, type StampPreview } from '../utils/workflow-stamp.js';
 
 	// The card actions show on hover only where there is room beside the name AND a pointer that
 	// hovers. Below `md` they sit under the name and stay visible, and on a device without hover
@@ -438,6 +439,9 @@
 	// Why the view is open beyond the button: the steps changed under it, or a schedule was refused
 	// because the workflow waits for this stamp.
 	let stampLine = $state<'steps_changed' | 'awaits_at_schedule' | null>(null);
+	// After `steps_changed`: what differs from the version shown before, marked in the steps.
+	let stampChangesShown = $state<StampChanges | null>(null);
+	let stampDialog = $state<HTMLElement | null>(null);
 	// A schedule dialog the refusal interrupted, reopened as it was once the stamp holds.
 	let stampResumesSchedule = $state<SavedWorkflow | null>(null);
 	// Bumped by every load, so a late answer for an earlier opening writes nothing.
@@ -459,6 +463,7 @@
 		const generation = ++stampGeneration;
 		stampLoading = true;
 		stampPreview = null;
+		stampChangesShown = null;
 		try {
 			const res = await fetch(`${getApiBase()}/workflows/${encodeURIComponent(wf.id)}/stamp-preview`);
 			const body = res.ok ? await res.json().catch(() => null) : null;
@@ -515,7 +520,16 @@
 			if (outcome.kind === 'changed') {
 				// The line says the new version is shown below, so it goes up only once it is.
 				stampLine = null;
-				if (await loadStampPreview(wf) && opening === stampOpening) stampLine = 'steps_changed';
+				if (await loadStampPreview(wf) && opening === stampOpening && stampPreview !== null) {
+					stampLine = 'steps_changed';
+					stampChangesShown = stampChanges(shown, stampPreview);
+					// Brought into sight and focused: the changed part is what the owner has to read again.
+					// The line above, which says why, may scroll out of sight then (it carries role=status).
+					await tick();
+					const mark = stampDialog?.querySelector<HTMLElement>('[data-stamp-changed]');
+					mark?.focus();
+					mark?.scrollIntoView?.({ block: 'nearest' });
+				}
 				return;
 			}
 			if (outcome.kind === 'failed') { error = t(outcome.key); return; }
@@ -779,8 +793,9 @@
 									class="w-full min-h-11 md:[@media(hover:hover)]:min-h-0 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[16px] md:text-sm focus:border-accent focus:outline-none"
 								/>
 							{:else}
-								<!-- With a takeover to give, the title is someone else's value, as in the sentence below it. -->
-								<p class="text-sm font-medium line-clamp-2 break-words">{#if accessEnded(wf)}<MarkedLine text={shownValue(wf.name)} mono={false} />{:else}{wf.name}{/if}</p>
+								<!-- A workflow a person with access made or last changed (`runs_as`, sent to the owner only):
+								     its name may be that person's, so it is set apart, as in the sentence below it. -->
+								<p class="text-sm font-medium line-clamp-2 break-words" data-workflow-title>{#if accessEnded(wf) || wf.runs_as}<MarkedLine text={shownValue(wf.name)} mono={false} />{:else}{wf.name}{/if}</p>
 								{#if wf.description}
 									<p class="text-xs text-text-subtle mt-1 line-clamp-2 break-words">{wf.description}</p>
 								{/if}
@@ -815,7 +830,8 @@
 										</span>
 									{:else if wf.runs_as}
 										<span data-testid="runs-as-badge" class="inline-flex items-center gap-1 rounded-[var(--radius-sm)] border border-border bg-bg px-1.5 break-all">
-											{tf('workflow_library.runs_as', { person: wf.runs_as.person })}
+											<!-- One flex item: the sentence's own space keeps the box from "als". -->
+											<span><MarkedLine text={tf('workflow_library.runs_as', { person: shownValue(wf.runs_as.person) })} /></span>
 										</span>
 									{/if}
 								</div>
@@ -926,7 +942,7 @@
 		aria-label={t('workflow_library.params_title')}
 	>
 		<div class="w-full max-w-md rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg">
-			<h2 class="text-sm font-medium mb-1">{paramModalWf.name}</h2>
+			<h2 class="text-sm font-medium mb-1 break-words" data-params-title>{#if paramModalWf.runs_as}<MarkedLine text={shownWhole(paramModalWf.name)} mono={false} />{:else}{paramModalWf.name}{/if}</h2>
 			<p class="text-xs text-text-subtle mb-4">{t('workflow_library.params_hint')}</p>
 			<div class="space-y-3">
 				{#each paramModalWf.parameters ?? [] as param (param.name)}
@@ -970,7 +986,7 @@
 		aria-label={t('workflow_library.schedule_title')}
 	>
 		<div class="w-full max-w-md rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
-			<h2 class="text-sm font-medium mb-1">{t('workflow_library.schedule_title')}: {scheduleModalWf.name}</h2>
+			<h2 class="text-sm font-medium mb-1 break-words" data-schedule-title>{#if scheduleModalWf.runs_as}<MarkedLine text={`${t('workflow_library.schedule_title')}: ${shownWhole(scheduleModalWf.name)}`} mono={false} />{:else}{t('workflow_library.schedule_title')}: {scheduleModalWf.name}{/if}</h2>
 			<!-- "unattended" is false for a workflow that asks its owner while it runs. -->
 			<p class="text-xs text-text-subtle mb-4">{t(asksOwner(scheduleModalWf) ? 'workflow_library.schedule_hint_asks' : 'workflow_library.schedule_hint')}</p>
 
@@ -1133,9 +1149,11 @@
 		aria-modal="true"
 		aria-label={t('workflow_library.stamp.review')}
 		data-testid="stamp-dialog"
+		bind:this={stampDialog}
 	>
 		<div class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
-			<h2 class="text-sm font-medium mb-1 break-words">{t('workflow_library.stamp.review')}: {visible(stampWf.name)}</h2>
+			<!-- Where the owner approves the steps: a name a person with access gave is set apart, whole. -->
+			<h2 class="text-sm font-medium mb-1 break-words" data-stamp-review-title>{#if stampWf.runs_as}<MarkedLine text={`${t('workflow_library.stamp.review')}: ${shownWhole(stampWf.name)}`} mono={false} />{:else}{t('workflow_library.stamp.review')}: {visible(stampWf.name)}{/if}</h2>
 			{#if stampLine === 'steps_changed'}
 				<p bind:this={stampChangedLine} role="status" data-testid="stamp-line" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{t('workflow_library.stamp.refused.steps_changed')}</p>
 			{:else if stampLine === 'awaits_at_schedule' && stampPreview}
@@ -1157,7 +1175,7 @@
 			{#if stampLoading}
 				<p class="text-text-subtle text-sm">{t('common.loading')}</p>
 			{:else if stampPreview}
-				<StampPreviewBody preview={stampPreview} />
+				<StampPreviewBody preview={stampPreview} changes={stampChangesShown} />
 			{/if}
 
 			<div class="flex items-center justify-end gap-2 mt-5">

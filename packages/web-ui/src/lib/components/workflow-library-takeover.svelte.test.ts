@@ -217,7 +217,9 @@ describe('the dialog', () => {
 		expect(text('afterwards')).toBe('Danach gehört der Workflow keiner Person mit Zugang mehr. Jede Person, die Zugang hat, kann ihn dann im Chat ausführen oder planen lassen, unter ihrem eigenen Namen. Macht diese Person eine Kopie davon, gehört die Kopie ihr.');
 		// The stamp's own part: the fields beside the steps, and the steps.
 		const stamp = d.querySelector<HTMLElement>('[data-takeover-part="stamp"]')!;
-		expect(stamp.textContent).toContain('continue');
+		// The failure strategy by its name, not its stored value.
+		expect(stamp.querySelector('[data-testid="stamp-on-failure"]')?.textContent?.trim()).toBe('Weitermachen');
+		expect(stamp.textContent).not.toMatch(/\bcontinue\b/);
 		expect(stamp.textContent).toContain('recipient = someone@example.invalid');
 		expect(stamp.querySelectorAll('[data-testid="stamp-step"]').length).toBe(3);
 		expect(d.querySelector('[data-testid="takeover-confirm"]')?.textContent?.trim()).toBe('Übernehmen und Schritte bestätigen');
@@ -286,6 +288,89 @@ describe('the dialog', () => {
 		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
 		await settle();
 		expect(served.posts).toEqual([{ expect: 'digest-1' }, { expect: 'digest-2' }]);
+	});
+
+	it('after a change, exactly the step that changed is marked and takes the focus', async () => {
+		const moved = FULL();
+		moved['expect'] = 'digest-2';
+		(moved['steps'] as Array<Record<string, unknown>>)[1]!['inputTemplate'] = { url: 'https://evil.example.invalid/post' };
+		await open([ENDED], [FULL(), moved], { status: 409, body: { code: 'changed' } });
+		const d = await openDialog();
+		expect(d.querySelectorAll('[data-stamp-changed]')).toHaveLength(0);
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		const stepEls = [...d.querySelectorAll<HTMLElement>('[data-testid="stamp-step"]')];
+		expect(stepEls.map((s) => s.hasAttribute('data-stamp-changed'))).toEqual([false, true, false]);
+		expect(d.querySelectorAll('[data-stamp-changed]')).toHaveLength(1);
+		expect(document.activeElement).toBe(stepEls[1]);
+	});
+
+	it('a later refusal of another kind puts the focus back at the head, not on the old mark', async () => {
+		const moved = FULL();
+		moved['expect'] = 'digest-2';
+		(moved['steps'] as Array<Record<string, unknown>>)[1]!['inputTemplate'] = { url: 'https://evil.example.invalid/post' };
+		await open([ENDED], [FULL(), moved], { status: 409, body: { code: 'changed' } });
+		const d = await openDialog();
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		expect(d.querySelectorAll('[data-stamp-changed]')).toHaveLength(1);
+		vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		expect(d.querySelector('[data-testid="takeover-error"]')).not.toBeNull();
+		expect(document.activeElement).toBe(d.querySelector('#workflow-takeover-title'));
+	});
+
+	it('a connection that changed hands marks the step that uses it', async () => {
+		const moved = FULL();
+		moved['expect'] = 'digest-2';
+		(moved['connections'] as Array<Record<string, unknown>>)[0]!['by'] = JAN;
+		await open([ENDED], [FULL(), moved], { status: 409, body: { code: 'changed' } });
+		const d = await openDialog();
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		const stepEls = [...d.querySelectorAll<HTMLElement>('[data-testid="stamp-step"]')];
+		expect(stepEls.map((s) => s.hasAttribute('data-stamp-changed'))).toEqual([true, false, false]);
+	});
+
+	it('a change outside the stamp part marks nothing in it, and the focus stays at the head', async () => {
+		const moved = FULL();
+		moved['expect'] = 'digest-2';
+		moved['stillPaused'] = [];
+		await open([ENDED], [FULL(), moved], { status: 409, body: { code: 'changed' } });
+		const d = await openDialog();
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		expect(d.querySelectorAll('[data-stamp-changed]')).toHaveLength(0);
+		expect(document.activeElement).toBe(d.querySelector('#workflow-takeover-title'));
+	});
+
+	// A contract of the dialog, not a user path: its overlay keeps the cards behind it out of reach.
+	it('the open dialog given another workflow loads that one, without the marks or the changed line of the last', async () => {
+		const moved = FULL();
+		moved['expect'] = 'digest-2';
+		(moved['steps'] as Array<Record<string, unknown>>)[1]!['inputTemplate'] = { url: 'https://evil.example.invalid/post' };
+		const other = FULL();
+		other['expect'] = 'digest-3';
+		other['workflow'] = { id: 'wf-f', name: 'Ended two' };
+		const TWO = { ...base('wf-f', 'Ended two'), runs_as: { person: EVA, ended: true, covered_by_takeover: 0 } };
+		const served = await open([ENDED, TWO], [FULL(), moved, other], { status: 409, body: { code: 'changed' } });
+		const d = await openDialog();
+		d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+		await settle();
+		expect(d.querySelectorAll('[data-stamp-changed]')).toHaveLength(1);
+		expect(d.querySelector('[data-testid="takeover-changed"]')).not.toBeNull();
+		// The same dialog stays mounted and loads the other workflow.
+		openButton(card('Ended two'))!.click();
+		await settle();
+		expect(served.previews).toBe(3);
+		const urls = vi.mocked(fetch).mock.calls.map(([u]) => String(u)).filter((u) => u.includes('/takeover-preview'));
+		expect(urls.at(-1)).toContain('/workflows/wf-f/takeover-preview');
+		expect(dialog()).toBe(d);
+		expect(d.querySelector('#workflow-takeover-title')?.textContent).toContain('Ended two');
+		expect(d.querySelectorAll('[data-testid="stamp-step"]')).toHaveLength(3);
+		expect(d.querySelectorAll('[data-stamp-changed]')).toHaveLength(0);
+		expect(d.querySelector('[data-testid="takeover-changed"]')).toBeNull();
 	});
 
 	it('a stamp the engine refused reloads like a change, and says so above the new state', async () => {
@@ -753,17 +838,17 @@ describe('the library\'s own sentences', () => {
 		const run = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Ausführen');
 		run!.click();
 		await settle();
-		expect(target.querySelector('[data-page-error]')?.textContent).toBe('Eine Person mit Zugang hat den Workflow „Undetermined“ angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Er läuft erst wieder, wenn du ihn übernimmst: hier mit „Workflow übernehmen“.');
+		expect(target.querySelector('[data-page-error]')?.textContent).toBe('Eine Person mit Zugang hat den Workflow Undetermined angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Er läuft erst wieder, wenn du ihn übernimmst: hier mit „Workflow übernehmen“.');
 		expect(target.querySelector('[data-library-note="ended"]')?.textContent).toBe('Eine Person mit Zugang hat diesen Workflow angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Er läuft erst wieder, wenn du ihn übernimmst.');
 		expect(target.querySelector('[data-testid="access-ended-badge"]')?.textContent?.trim()).toBe('Zugang beendet');
 		expect(target.textContent).not.toContain('extern@kanzlei.example');
 	});
 
-	it('sets the title apart on a card with a takeover to give, and on no other card', async () => {
+	it('sets the title apart on a card a person with access made, ended or not, and not on the owner\'s own', async () => {
 		await open([ENDED, { ...base('wf-l', 'Live one'), runs_as: { person: JAN, ended: false } }, base('wf-o', 'Own one')]);
 		const titleBox = (name: string): string | null | undefined => card(name).querySelector('p')?.querySelector('bdi[data-foreign-value]')?.textContent;
 		expect(titleBox('Ended one')).toBe('Ended one');
-		expect(titleBox('Live one')).toBeUndefined();
+		expect(titleBox('Live one')).toBe('Live one');
 		expect(titleBox('Own one')).toBeUndefined();
 	});
 

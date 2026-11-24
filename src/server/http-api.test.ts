@@ -161,8 +161,15 @@ const OWNER_WORKFLOW_AUTHORSHIP = {
 const mockHistoryGetWorkflowAuthorship = vi.fn().mockReturnValue(OWNER_WORKFLOW_AUTHORSHIP);
 const mockTaskList = vi.fn().mockReturnValue([]);
 const mockTaskCreate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Test' });
-const mockTaskUpdate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Updated' });
-const mockTaskComplete = vi.fn().mockReturnValue({ id: 'task-1', status: 'completed' });
+/** As `TaskManager` does: the hook a route hands `update` (5th) or `complete` (4th) runs with the
+ *  trigger after the manager's checks, before its write; here, before the row is returned. */
+const writesTrigger = (hookAt: number, row: Record<string, unknown>) => (...args: unknown[]): Record<string, unknown> => {
+  const hook = args[hookAt];
+  if (typeof hook === 'function') (hook as (t: { id: unknown }) => void)({ id: args[0] });
+  return row;
+};
+const mockTaskUpdate = vi.fn(writesTrigger(4, { id: 'task-1', title: 'Updated' }));
+const mockTaskComplete = vi.fn(writesTrigger(3, { id: 'task-1', status: 'completed' }));
 const mockTaskCreatePipeline = vi.fn().mockReturnValue({ id: 'sched-1', title: 'Scheduled', pipeline_id: 'wf-sched', task_type: 'pipeline' });
 const mockTaskSetEnabled = vi.fn().mockReturnValue(true);
 const mockTaskMarkEditedBy = vi.fn().mockReturnValue(true);
@@ -781,8 +788,8 @@ beforeEach(() => {
   mockHistoryGetRun.mockReturnValue({ id: 'run-1', task_text: 'test' });
   mockHistoryGetStats.mockReturnValue({ total_runs: 5 });
   mockTaskCreate.mockReturnValue({ id: 'task-1', title: 'Test' });
-  mockTaskUpdate.mockReturnValue({ id: 'task-1', title: 'Updated' });
-  mockTaskComplete.mockReturnValue({ id: 'task-1', status: 'completed' });
+  mockTaskUpdate.mockImplementation(writesTrigger(4, { id: 'task-1', title: 'Updated' }));
+  mockTaskComplete.mockImplementation(writesTrigger(3, { id: 'task-1', status: 'completed' }));
   mockMemoryLoad.mockResolvedValue('knowledge content');
   mockMemoryUpdate.mockResolvedValue(true);
   mockMemoryDelete.mockResolvedValue(2);
@@ -11472,7 +11479,7 @@ describe('LynoxHTTPApi', () => {
       for (const modelTier of ['fast', 'balanced', 'deep', null, '']) {
         const res = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier }) });
         expect(res.status, String(modelTier)).toBe(200);
-        expect(mockTaskUpdate).toHaveBeenLastCalledWith('task-1', expect.objectContaining({ modelTier }), undefined, OWNER_PRINCIPAL);
+        expect(mockTaskUpdate).toHaveBeenLastCalledWith('task-1', expect.objectContaining({ modelTier }), undefined, OWNER_PRINCIPAL, undefined);
       }
       mockTaskUpdate.mockClear();
       for (const modelTier of ['opus', 'DEEP', 3, {}]) {
@@ -11492,7 +11499,7 @@ describe('LynoxHTTPApi', () => {
         expect(mockTaskUpdate).not.toHaveBeenCalled();
         const clear = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier: null }) });
         expect(clear.status).toBe(200);
-        expect(mockTaskUpdate).toHaveBeenCalledWith('task-1', expect.objectContaining({ modelTier: null }), undefined, OWNER_PRINCIPAL);
+        expect(mockTaskUpdate).toHaveBeenCalledWith('task-1', expect.objectContaining({ modelTier: null }), undefined, OWNER_PRINCIPAL, undefined);
       } finally {
         vi.unstubAllEnvs();
         vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
@@ -13283,6 +13290,26 @@ describe('LynoxHTTPApi', () => {
       if (!judged.ok) throw new Error('not planned');
       const judgedShown = await (await jsonFetch(`/api/bulk/runs/${judged.status.id}`)).json() as Record<string, unknown>;
       expect([judgedShown['listForm'], judgedShown['judgesHtml']]).toEqual(['shopify_filtered', true]);
+    });
+
+    it('says in the runs list which run still reads its list, from the rows it lists, without reading a run on its own', async () => {
+      const host = 'acme.myshopify.com';
+      const source = parseListSource(host, { form: 'shopify', after: { seo_title: 'x' } }, 'PATCH', () => null);
+      const listed = (): string => {
+        const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source) });
+        if (!planned.ok) throw new Error('not planned');
+        return planned.status.id;
+      };
+      const reading = listed();
+      const read = listed();
+      bulkDb.getDb().prepare(`UPDATE bulk_runs SET list_state = 'done' WHERE id = ?`).run(read);
+      const plain = planRun();
+      const byId = vi.spyOn(bulkLedger as unknown as { runRow: (id: string) => unknown }, 'runRow');
+      const listRun = vi.spyOn(bulkLedger, 'getListRun');
+      const body = await (await jsonFetch('/api/bulk/runs')).json() as { runs: { id: string; list: { state: string } | null }[] };
+      const states = Object.fromEntries(body.runs.map((r) => [r.id, r.list?.state ?? null]));
+      expect(states).toEqual({ [reading]: 'pending', [read]: 'done', [plain]: null });
+      expect([byId.mock.calls.length, listRun.mock.calls.length]).toEqual([0, 0]);
     });
 
     it('shows a list whose stored filters were changed past what a parse takes by its host, without failing and with no store filters, and a withdrawn path as its address', async () => {
@@ -22708,11 +22735,13 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       expect(((await res.json()) as { error: string }).error).toContain('Only the owner');
     });
 
-    it('marks a trigger it changes and drops the stamp BEFORE the change is written', async () => {
+    it('marks a trigger it changes and drops the stamp, through the hook the manager runs before its write', async () => {
       const res = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ title: 'new' }) });
       expect(res.status).toBe(200);
       expect(mockTaskMarkEditedBy).toHaveBeenCalledWith('task-1', MANDATE, true);
-      expect(mockTaskMarkEditedBy.mock.invocationCallOrder[0]!).toBeLessThan(mockTaskUpdate.mock.invocationCallOrder[0]!);
+      // Not before the call: the manager checks the change first (`task-routes-mark-after-checks.test.ts`).
+      expect(mockTaskUpdate.mock.invocationCallOrder[0]!).toBeLessThan(mockTaskMarkEditedBy.mock.invocationCallOrder[0]!);
+      expect(mockTaskUpdate.mock.calls[0]![4]).toEqual(expect.any(Function));
     });
 
     it('refuses a tier on a trigger whose runs start no agent before marking it', async () => {
@@ -22731,7 +22760,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       const ok = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier: 'deep' }) });
       expect(ok.status).toBe(200);
       expect(mockTaskMarkEditedBy).toHaveBeenCalledWith('task-1', MANDATE, true);
-      expect(mockTaskUpdate).toHaveBeenCalledWith('task-1', expect.objectContaining({ modelTier: 'deep' }), undefined, MANDATE);
+      expect(mockTaskUpdate).toHaveBeenCalledWith('task-1', expect.objectContaining({ modelTier: 'deep' }), undefined, MANDATE, expect.any(Function));
     });
 
     it('marks a trigger before switching it on or off, and before completing it', async () => {
