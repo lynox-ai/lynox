@@ -24609,25 +24609,54 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       expect(readFileSync(file, 'utf-8')).toBe('after');
     });
 
-    it('when the changes cannot be read, a rollback answers that nothing was rolled back, and the hold ends', async () => {
+    it('when the changes cannot be read, a rollback still rolls back, gives no count, names every file it left, and the hold ends', async () => {
       const { csm, file } = review(OWNER_PRINCIPAL);
+      // A file the run made, then replaced by another under the same name: the rollback leaves it.
+      const made = join(dirname(file), 'made.txt');
+      csm.backupBeforeWrite(made);
+      writeFileSync(made, 'by the run', 'utf-8');
+      csm.recordWritten(made);
+      rmSync(made);
+      writeFileSync(made, 'by someone else', 'utf-8');
       vi.spyOn(csm, 'getChanges').mockImplementation(() => { throw new Error('unreadable'); });
       const res = await answer('rollback');
-      expect(res.status).toBe(500);
-      expect(((await res.json()) as { code?: string }).code).toBe('rollback_unreadable');
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { rolledBack: unknown; notRestored: string[] };
+      expect(body.rolledBack, 'no count made up').toBeNull();
+      expect(body.notRestored, 'the file the run made and the rollback left is named').toContain('made.txt');
+      expect(readFileSync(file, 'utf-8'), 'the changed file is restored').toBe('before');
+      expect(readFileSync(made, 'utf-8')).toBe('by someone else');
+      expect(csm.isEmpty()).toBe(true);
+      await expectRan(await send());
+    });
+
+    it('when the changes cannot be read, an accept answers as accepted without a count, and the hold ends', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
+      vi.spyOn(csm, 'getChanges').mockImplementation(() => { throw new Error('unreadable'); });
+      const res = await answer('accept');
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ok: true, accepted: null });
       expect(readFileSync(file, 'utf-8')).toBe('after');
       expect(csm.isEmpty()).toBe(true);
       await expectRan(await send());
     });
 
-    it('when the changes cannot be read, an accept answers as accepted, and the hold ends', async () => {
-      const { csm } = review(OWNER_PRINCIPAL);
-      vi.spyOn(csm, 'getChanges').mockImplementation(() => { throw new Error('unreadable'); });
+    it('a mandate answering where there is no review gets "nothing to review", not a refusal', async () => {
+      sessionRanBy(MANDATE, { getChangesetManager: vi.fn(() => null) });
+      asMandate();
       const res = await answer('accept');
-      expect(res.status).toBe(200);
-      expect(await res.json()).toMatchObject({ ok: true, accepted: 0 });
-      expect(csm.isEmpty()).toBe(true);
-      await expectRan(await send());
+      expect(res.status).toBe(400);
+    });
+
+    it('a throw after a finished rollback is not reported as one that stopped partway', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
+      vi.spyOn(csm, 'hasOriginal').mockImplementation(() => { throw new Error('after'); });
+      vi.spyOn(csm, 'getChanges').mockReturnValue([{ file: 'gone.txt', absolutePath: join(dirname(file), 'gone.txt'), status: 'modified', diff: '', compared: true }] as never);
+      const left = vi.spyOn(csm, 'rollbackAll').mockReturnValue([join(dirname(file), 'x.txt')]);
+      const res = await answer('rollback');
+      expect(left).toHaveBeenCalled();
+      expect(res.status).toBe(500);
+      expect(await res.text(), 'not "stopped partway"').not.toContain('rollback_aborted');
     });
 
     it('a rollback that stops partway answers with its own refusal, and the hold ends', async () => {

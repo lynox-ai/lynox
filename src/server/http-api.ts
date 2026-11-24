@@ -6432,10 +6432,11 @@ export class LynoxHTTPApi {
       // The changeset is the last run's work and outlives it: only that run's principal (or
       // the owner) accepts or rolls it back, even in the mandate's own conversation (§3.13 E7).
       // Who that is the manager records itself (`mayAnswerReview`), the same rule the card and
-      // the hold on the next message read; no manager is no one's review. The next run
-      // replaces it, whoever starts it, as it always has.
+      // the hold on the next message read. Without a manager there is nothing to answer, which
+      // the 400 below says, after the conversation's own check. The next run replaces it,
+      // whoever starts it, as it always has.
       const reviewed = session.getChangesetManager();
-      if (this._refuseUnlessOwns(_req, res, 'review the changes of this run', () => [this._threadRow(params['id']!), reviewed ? { created_by: reviewed.createdBy } : undefined])) return;
+      if (this._refuseUnlessOwns(_req, res, 'review the changes of this run', () => reviewed ? [this._threadRow(params['id']!), { created_by: reviewed.createdBy }] : [this._threadRow(params['id']!)])) return;
       // While a run is in progress the changeset is that run's and still growing: a rollback
       // would reset files under a run that goes on writing them, and the cleanup after it
       // would take backups the run still needs.
@@ -6466,28 +6467,24 @@ export class LynoxHTTPApi {
         return;
       }
 
-      // Reading the changes can fail before anything was done. The review ends either way, or
-      // its hold on the next message would outlive the card. For an accept that is the answer
-      // chosen; for a rollback it is not, and the answer says so: nothing was rolled back, and
-      // with the backups gone it no longer can be.
-      let changes: ChangesetDiff[];
+      // Reading the changes can fail (the diff of a file). The answer goes on without them: a
+      // rollback needs only the backups, and the person asked for it. What is lost is the count,
+      // so it is not given (`null`), and the files the rollback left are all named, not only the
+      // ones the review would show: without the changes that filter would drop a file the run
+      // made and the rollback could not delete, and the answer would read as all restored.
+      let changes: ChangesetDiff[] | null;
       try {
         changes = csm.getChanges();
       } catch {
-        csm.cleanup();
-        if (action === 'accept') {
-          jsonResponse(res, 200, { ok: true, accepted: 0, rolledBack: 0, notRestored: [] });
-        } else {
-          errorResponse(res, 500, 'The changes could not be read; nothing was rolled back', 'rollback_unreadable');
-        }
-        return;
+        changes = null;
       }
-      // Set once a rollback has begun to restore files: a throw after it left some restored and
-      // some not, which the answer must not report as "nothing was rolled back".
+      // Set while a rollback restores files: a throw inside it left some restored and some not,
+      // which the answer must say. Cleared once it returned, so a throw after a finished rollback
+      // is not reported as one that stopped partway.
       let rollbackStarted = false;
       try {
-        let accepted = 0;
-        let rolledBack = 0;
+        let accepted: number | null = 0;
+        let rolledBack: number | null = 0;
         // Every tracked file by the name the review shows: a file replaced by a link since the review
         // is no longer among `changes`, but the answer still names it, and the rollback names it back.
         const absByName = csm.reviewNames();
@@ -6499,18 +6496,20 @@ export class LynoxHTTPApi {
         // out. Nothing was saved for it, so nothing was promised, and the reason the answer gives for
         // it would be wrong. A file shown once and replaced by a link since cannot be told apart from
         // it here; a partial answer names what the person chose, so there nothing is left out.
-        const shownNow = new Set(changes.map((c) => c.absolutePath));
-        const named = (left: string[]): string[] => left
-          .filter((abs) => shownNow.has(abs) || csm.hasOriginal(abs))
-          .map(nameOf);
+        const named = (left: string[], shown: ChangesetDiff[]): string[] => {
+          const shownNow = new Set(shown.map((c) => c.absolutePath));
+          return left.filter((abs) => shownNow.has(abs) || csm.hasOriginal(abs)).map(nameOf);
+        };
 
         if (action === 'accept') {
-          accepted = changes.length;
+          accepted = changes ? changes.length : null;
           csm.acceptAll();
         } else if (action === 'rollback') {
           rollbackStarted = true;
-          notRestored = named(csm.rollbackAll());
-          rolledBack = changes.filter((c) => !notRestored.includes(c.file)).length;
+          const left = csm.rollbackAll();
+          rollbackStarted = false;
+          notRestored = changes ? named(left, changes) : left.map(nameOf);
+          rolledBack = changes ? changes.filter((c) => !notRestored.includes(c.file)).length : null;
         } else {
           // Partial: validate rolledBackFiles against changeset entries
           const clientFiles = Array.isArray(b?.['rolledBackFiles']) ? b['rolledBackFiles'] as string[] : [];
@@ -6526,10 +6525,12 @@ export class LynoxHTTPApi {
 
           if (toRollback.length > 0) {
             rollbackStarted = true;
-            notRestored = csm.rollbackFiles(toRollback).map(nameOf);
+            const left = csm.rollbackFiles(toRollback);
+            rollbackStarted = false;
+            notRestored = left.map(nameOf);
           }
           rolledBack = toRollback.length - notRestored.length;
-          accepted = changes.filter((c) => !toRollback.includes(c.absolutePath)).length;
+          accepted = changes ? changes.filter((c) => !toRollback.includes(c.absolutePath)).length : null;
         }
 
         jsonResponse(res, 200, { ok: true, accepted, rolledBack, notRestored });

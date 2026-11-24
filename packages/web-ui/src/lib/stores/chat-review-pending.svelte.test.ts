@@ -130,6 +130,31 @@ describe('a message the open review holds', () => {
 		expect(runTasks, 'sent again, not stuck in the queue').toEqual(['next step', 'next step']);
 		expect(message('next step')?.queued).toBe(false);
 	});
+
+	it('is not sent again when the fetch after the hold fails: it is failed, for a tap', async () => {
+		runAnswers = ['held', 'ok'];
+		changesetStatus = 500;
+		await store.sendMessage('next step');
+		await settle();
+		await wait(500);
+		await settle();
+		expect(runTasks, 'asked once, not again and again').toEqual(['next step']);
+		expect(message('next step')).toMatchObject({ queued: false, failed: true });
+	});
+
+	it('held again right after a fetch that found no review: it is failed, not sent a third time', async () => {
+		runAnswers = ['held', 'held', 'ok'];
+		card = [];
+		await store.sendMessage('next step');
+		await settle();
+		await wait(500);
+		await settle();
+		expect(runTasks, 'positive control: the empty fetch sent it once more').toHaveLength(2);
+		await wait(500);
+		await settle();
+		expect(runTasks, 'no third send').toHaveLength(2);
+		expect(message('next step')).toMatchObject({ queued: false, failed: true });
+	});
 });
 
 describe('a turn queued before a reload, when the session is gone', () => {
@@ -173,9 +198,8 @@ describe('a rollback the server could not do', () => {
 	};
 
 	it.each([
-		['rollback_unreadable', 'changeset.rollback_unreadable'],
 		['rollback_aborted', 'changeset.rollback_aborted'],
-	] as const)('%s shows its own message until closed, as an error, and the review goes', async (code, key) => {
+	] as const)('%s shows its own message until closed, as an error, and sends the held message', async (code, key) => {
 		await openReview();
 		const { t } = await import('../i18n.svelte.js');
 		reviewAnswer = { status: 500, body: { error: 'failed', code } };
@@ -184,5 +208,8 @@ describe('a rollback the server could not do', () => {
 		expect(t(key), 'positive control: the key has a text').not.toBe(key);
 		expect(toasts).toContainEqual([t(key), 'error', null]);
 		expect(store.getPendingChangeset()).toBeNull();
+		await wait(200);
+		await settle();
+		expect(runTasks, 'the review is over: the held message goes').toEqual(['next step', 'next step']);
 	});
 });

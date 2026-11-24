@@ -657,6 +657,9 @@ let _offlineProbeInFlight = false;
 let _userStopEpoch = -1;
 let isOffline = $state(typeof navigator !== 'undefined' ? !navigator.onLine : false);
 
+/** The queued message the server last held for a review the fetch after it did not show. Held a
+ *  second time in a row without a card, it is not sent again by itself (see `_runTurn`). */
+let _heldWithoutCard: string | null = null;
 /** The changeset fetch in flight, so a drain that starts meanwhile waits for what it says. */
 let _changesetFetch: Promise<boolean> | null = null;
 /** The opening of a thread a drain is due or waiting for. A second drain asked for in the same
@@ -1675,6 +1678,8 @@ async function reviewPendingIn(res: Response): Promise<boolean> {
 }
 
 async function _runTurn(task: string, files: FileAttachment[] | undefined, displayText: string | undefined, runOptions: RunOptions | undefined, queueId: string | undefined, turn: TurnStart): Promise<void> {
+	// The opening of the thread this turn started in: a hold below acts on its list only.
+	const turnGen = _resumeGeneration;
 	chatError = null;
 	retryStatus = null;
 
@@ -1832,8 +1837,8 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 			_queuePollController.abort();
 			_queuePollController = null;
 		}
-		// The thread was left meanwhile: the list belongs to another thread now.
-		if (sessionId !== sid) {
+		// The thread was left or opened again meanwhile: the list belongs to another opening now.
+		if (sessionId !== sid || _resumeGeneration !== turnGen) {
 			endStreaming(turn.assistantMsg);
 			streamingActivity = 'idle';
 			streamingToolName = null;
@@ -1841,8 +1846,9 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 			return;
 		}
 		const held = messages[userMsgIdx];
+		let id: string | null = null;
 		if (held) {
-			const id = held.queueId ?? newQueueId();
+			id = held.queueId ?? newQueueId();
 			held.queueId = id;
 			held.queued = true;
 			held.failed = false;
@@ -1858,10 +1864,24 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 		streamingActivity = 'idle';
 		streamingToolName = null;
 		streamingToolPhase = null;
-		// No card after the fetch: the review is gone by now (answered elsewhere, its files put
-		// back). The message must not wait for an answer that will never come.
-		await fetchChangeset();
-		if (sessionId === sid && !pendingChangeset) drainQueueSoon(100);
+		const answered = await fetchChangeset();
+		if (sessionId !== sid || _resumeGeneration !== turnGen || held === undefined || id === null) return;
+		if (pendingChangeset) { _heldWithoutCard = null; return; }
+		// No card, although the server holds the message. Answered without one, the review is
+		// gone by now (answered elsewhere, its files put back): the message goes once more. Not
+		// answered, or held again right after that try, the card cannot be shown: the message
+		// is failed, for a tap to send again, instead of asking the server again and again.
+		if (answered && _heldWithoutCard !== id) {
+			_heldWithoutCard = id;
+			drainQueueSoon(100);
+			return;
+		}
+		_heldWithoutCard = null;
+		const at = messageQueue.findIndex((q) => q.id === id);
+		if (at >= 0) messageQueue.splice(at, 1);
+		held.queued = false;
+		held.failed = true;
+		persistChatNow();
 	};
 
 	if (res.status === 409 && await reviewPendingIn(res)) {
@@ -3630,15 +3650,14 @@ export async function submitChangesetReview(
 		if (!stale()) drainQueueSoon(100);
 		return;
 	}
-	// The review ended without the rollback asked for: the changes could not be read (nothing was
-	// rolled back) or the rollback stopped partway. The server closed the review either way, so
-	// the card goes; what happened stays on screen until the person closes it.
+	// The rollback stopped partway. The server closed the review, so the card goes; what
+	// happened stays on screen until the person closes it.
 	const failedCode = await res.json().then(
 		(j: unknown) => (j as { code?: unknown } | null)?.code,
 		() => undefined,
 	);
-	if (failedCode === 'rollback_unreadable' || failedCode === 'rollback_aborted') {
-		addToast(t(failedCode === 'rollback_unreadable' ? 'changeset.rollback_unreadable' : 'changeset.rollback_aborted'), 'error', null);
+	if (failedCode === 'rollback_aborted') {
+		addToast(t('changeset.rollback_aborted'), 'error', null);
 		if (!stale()) drainQueueSoon(100);
 		return;
 	}
