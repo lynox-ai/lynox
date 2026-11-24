@@ -687,7 +687,7 @@ describe('the owner view', () => {
     expect(ledger.getPreview(runId, { offset: 500 })).toHaveLength(1);
   });
 
-  it('serves only the targets the plan changes when asked, in plan order, paged among them', () => {
+  it('serves only the targets the plan changes when asked, the written ones first and then plan order, paged among them', () => {
     // Eight targets, two of them changed late in the plan: the page that names what a run wrote
     // finds them without loading the unchanged ones before them.
     const targets: PlannedTarget[] = Array.from({ length: 8 }, (_, i) => {

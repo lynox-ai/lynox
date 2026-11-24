@@ -1181,6 +1181,20 @@ describe('the allowed link domains of a judged list run', () => {
 	};
 	const resumeUrls = (): string[] => posts.filter((p) => p.url.endsWith('/resume')).map((p) => p.url);
 
+	it('opens another run with its unchanged targets folded, though they were shown on the run before', async () => {
+		targets = Array.from({ length: 8 }, (_, i) => ({ ...TARGETS[i === 0 ? 0 : 1]!, seq: i + 1, key: `gid://shopify/Product/${String(i + 1)}` }));
+		const done = (id: string): BulkRunDetailData => makeRun({ id, phase: 'done', total: 8, changes: { update: 1, create: 0, delete: 0, unchanged: 7, invalid: 0 } });
+		run = done('r1');
+		const open = await renderSwitchable();
+		runsById['r2'] = done('r2');
+		const unfold = (): HTMLButtonElement | undefined => buttonByText(tf('bulk.preview.show_unchanged', { n: '7' }));
+		unfold()!.click();
+		await settle();
+		expect(unfold()).toBeUndefined();
+		await open('r2');
+		expect(unfold()).toBeDefined();
+	});
+
 	it('sends no domains typed for another run with the start of this one', async () => {
 		run = judged();
 		const open = await renderSwitchable();

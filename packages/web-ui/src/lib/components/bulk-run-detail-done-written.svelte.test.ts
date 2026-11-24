@@ -175,6 +175,12 @@ describe('the page of a run that wrote a target late in its plan', () => {
 		expect(rows()).toEqual(['14']);
 		expect(button(tf('bulk.preview.show_unchanged', { n: '16' }))).toBeDefined();
 		expect(target.textContent).toContain(t('common.load_failed'));
+		// The failed ask left the fold closed: once the whole run loads, its unchanged targets stay folded.
+		fail = false;
+		button(tf('bulk.preview.show_all', { n: '17' }))!.click();
+		await settle();
+		expect(rows()).toEqual(['14']);
+		expect(button(tf('bulk.preview.show_unchanged', { n: '16' }))).toBeDefined();
 	});
 });
 
