@@ -17,7 +17,7 @@
 	import BulkHost from './BulkHost.svelte';
 	import {
 		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts, bulkCountsPending, bulkHeadCounts, bulkWorkingLine, bulkWorkingStep,
-		type BulkRunDetailData, type BulkTarget, type BulkSentencePart, type BulkMarkerKind,
+		type BulkRunDetailData, type BulkTarget, type BulkSentencePart, type BulkMarkerKind, bulkRestartNoneNote, bulkReachRefusalKey,
 	} from './bulk-runs.js';
 
 	let { runId, onBack, onOpen }: { runId: string; onBack: () => void; onOpen: (id: string) => void } = $props();
@@ -276,7 +276,7 @@
 	const refusalOf = (r: { ok: boolean; body: { error?: string; code?: string } }): string | null => {
 		if (r.ok) return null;
 		const code = r.body.code;
-		const key = code !== undefined && Object.hasOwn(REFUSAL_KEYS, code) ? REFUSAL_KEYS[code] : undefined;
+		const key = code !== undefined && Object.hasOwn(REFUSAL_KEYS, code) ? REFUSAL_KEYS[code] : code !== undefined ? bulkReachRefusalKey(code) ?? undefined : undefined;
 		return key !== undefined ? t(key) : (r.body.error ?? t('common.load_failed'));
 	};
 
@@ -1009,7 +1009,8 @@
 					{/if}
 				</div>
 			{:else if restartKind !== null}
-				<div class="space-y-3 border-t border-border pt-4">
+				{#if !(restartKind === 'none' && bulkRestartNoneNote(run.haltKey) === null && !haltText?.before && !supportMail)}
+				<div class="space-y-3 border-t border-border pt-4" data-testid="bulk-restart">
 					{#if haltText?.before}
 						<p class="text-sm">{@render hostText(haltText.before)}</p>
 					{/if}
@@ -1017,7 +1018,10 @@
 						<p class="text-sm"><a href={supportMail} class="{btnPlain} inline-block">{t('bulk.halt.support_mail')}</a></p>
 					{/if}
 					{#if restartKind === 'none'}
-						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.restart.none')}</p>
+						{@const noneNote = bulkRestartNoneNote(run.haltKey)}
+						{#if noneNote !== null}
+							<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-restart-none">{t(noneNote)}</p>
+						{/if}
 					{:else if restartKind === 'judge_own_key'}
 						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.start.judge_own_key')}</p>
 					{:else if restartKind === 'no_judge'}
@@ -1058,6 +1062,7 @@
 						{/if}
 					{/if}
 				</div>
+				{/if}
 			{:else if resumeKind !== null && resumeText}
 				<div class="space-y-3 border-t border-border pt-4">
 					{#if resumeText.before}

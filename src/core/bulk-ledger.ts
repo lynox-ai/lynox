@@ -417,6 +417,14 @@ export const BULK_HALT_REASONS = {
   formCost: 'the store refused a read as too costly for one request',
   shopifyReadOff: 'reading a Shopify store in a bulk run is switched off on this instance',
   shopifyWriteOff: 'writing to a Shopify store in a bulk run is switched off on this instance',
+  // Why a request to a store got no pass, one reason per cause (`StoreAttachRefusal`), never
+  // `credential`: the connection is there, and connecting it again changes nothing.
+  shopifySelfHosted: 'lynox reaches Shopify stores only on an instance that lynox runs',
+  shopifyNotSetUp: 'Shopify is not set up on this instance; lynox has to fix this',
+  shopifyUnconfirmed: 'lynox could not confirm that this instance may reach Shopify; the run can be resumed in a few minutes',
+  shopifyNotCleared: 'Shopify is not cleared for this instance right now; only lynox can clear it',
+  containmentUnwritable: 'lynox could not record that this run reads the store, so nothing was sent',
+  shopifyNoApiVersion: 'a setting for Shopify is missing in lynox; lynox has to fix this',
   // Fixed like every reason: the fields are named in the outcome's summary, not here.
   consentOutdated: 'the Shopify connection does not yet let lynox change a field this run writes; nothing was written in this call',
   // Fixed like every reason: the target is named by its mark (`shop_added_markup`), not here.

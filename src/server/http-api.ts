@@ -10388,8 +10388,13 @@ export class LynoxHTTPApi {
       const fields = Object.keys(after).filter((f) => !(f in before) || canonicalJson(after[f]) !== canonicalJson(before[f]));
       return { key: written.key, fields, found: ledger.probeFound(status.id) };
     };
+    /** The start check's refusal for a store's own cause, with the code the page says it by (U-232). */
+    const storeReach = async (when: 'approve' | 'resume', cause: import('../core/bulk-notices.js').StoreReachCause): Promise<{ message: string; code: string }> => {
+      const { BULK_STORE_REACH_REFUSALS } = await import('../core/bulk-notices.js');
+      return { message: BULK_STORE_REACH_REFUSALS[when][cause], code: `reach_${when}_${cause}` };
+    };
     /** Why an external run could not reach its host now, or null (a local run, or one it can). */
-    const bulkExternalReach = async (runId: string, ledger: import('../core/bulk-ledger.js').BulkLedger): Promise<string | null> => {
+    const bulkExternalReach = async (runId: string, ledger: import('../core/bulk-ledger.js').BulkLedger, when: 'approve' | 'resume'): Promise<{ message: string; code?: string } | null> => {
       const status = ledger.getStatus(runId);
       if (!status || !status.targetSystem.startsWith('http:')) return null;
       const first = ledger.firstWritingKey(runId);
@@ -10397,7 +10402,12 @@ export class LynoxHTTPApi {
       // A Shopify run's targets are GIDs, not addresses: it writes to its store's endpoint.
       const { shopifyGraphqlEndpoint } = await import('../core/shopify-graphql.js');
       const key = ledger.shopifyApplyOf(runId) !== null ? shopifyGraphqlEndpoint(status.targetSystem.slice('http:'.length)) : first;
-      if (key === null) return 'This run\'s store has no endpoint lynox can write to.';
+      if (key === null) {
+        // A store host without an endpoint: the API version lynox writes to is not set.
+        const { isShopifyStoreHostName } = await import('../core/shopify-graphql.js');
+        return isShopifyStoreHostName(status.targetSystem.slice('http:'.length)) ? await storeReach(when, 'shopifyNoApiVersion')
+          : { message: 'This run\'s store has no endpoint lynox can write to.' };
+      }
       const { attachStoredCredential } = await import('../tools/builtin/http.js');
       const { resolveGuardedAckHosts } = await import('../core/tool-context.js');
       const { assertHostPolicy } = await import('../core/network-guard.js');
@@ -10405,12 +10415,15 @@ export class LynoxHTTPApi {
       try {
         assertHostPolicy(key, { surface: 'full-control', ackHosts: resolveGuardedAckHosts(ctx) }, ctx);
       } catch {
-        return 'The network policy does not allow this run\'s host.';
+        return { message: 'The network policy does not allow this run\'s host.' };
       }
       const apiStore = engine.getApiStore();
       const secretStore = engine.getSecretStore();
-      if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, /* the run's first writing key: a write */ true, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: ctx.mandateEnds, secretReleases: ctx.secretReleases, exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest, containment: ctx.containment, vaultNameBindings: ctx.vaultNameBindings, hostPolicy: ctx }, { bulkRunId: runId }))) {
-        return 'The stored credential for this run\'s host cannot be attached. Check the API connection for the host, then try again.';
+      const refused: { refusal?: import('../core/shopify-host.js').StoreAttachRefusal | undefined } = {};
+      if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, /* the run's first writing key: a write */ true, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: ctx.mandateEnds, secretReleases: ctx.secretReleases, exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest, containment: ctx.containment, vaultNameBindings: ctx.vaultNameBindings, hostPolicy: ctx }, { bulkRunId: runId }, refused))) {
+        // A store's own cause is said as the run page says it; connecting again would not help.
+        if (refused.refusal !== undefined) return await storeReach(when, refused.refusal);
+        return { message: 'The stored credential for this run\'s host cannot be attached. Check the API connection for the host, then try again.' };
       }
       return null;
     };
@@ -10701,8 +10714,8 @@ export class LynoxHTTPApi {
       // An external run is approved only when its first write would carry the credential
       // and reach the host — decided here, sending nothing. Otherwise the approval would
       // start a run that only collects refusals (build plan B §4 F5).
-      const reach = await bulkExternalReach(params['id']!, ledger);
-      if (reach !== null) { errorResponse(res, 409, reach); return; }
+      const reach = await bulkExternalReach(params['id']!, ledger, 'approve');
+      if (reach !== null) { errorResponse(res, 409, reach.message, reach.code); return; }
       if (refuseEndedPlanner(res, ledger, params['id']!)) return;
       // Only the literal `true` confirms; the approval records that it was given.
       const unmeasuredConfirmed = (body as Record<string, unknown>)['unmeasuredConfirmed'] === true;
@@ -10832,8 +10845,8 @@ export class LynoxHTTPApi {
       const resumeMax = rawResumeMax === undefined ? undefined : typeof rawResumeMax === 'number' ? rawResumeMax : Number.NaN;
       // The same check as approving: resuming an external run that halted because it could
       // not reach its host would only halt again on its first target.
-      const reach = await bulkExternalReach(params['id']!, ledger);
-      if (reach !== null) { errorResponse(res, 409, reach); return; }
+      const reach = await bulkExternalReach(params['id']!, ledger, 'resume');
+      if (reach !== null) { errorResponse(res, 409, reach.message, reach.code); return; }
       // A run no one can be shown to have planned would write without a row in the instance's
       // trail: it is not resumed (660b). It stays as it is; its approval was the owner's act.
       // The text is ux's. No await between this and the resume.
