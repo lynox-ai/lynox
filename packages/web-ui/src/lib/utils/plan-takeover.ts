@@ -84,7 +84,7 @@ function valuePieces(line: string): Segment[] {
 /**
  * A sentence split at the marks {@link shownValue} and {@link planList} set. A mark without its
  * partner is dropped and what follows it stays lynox's text: only a whole pair sets a value apart,
- * and only a whole pair folds a list's rest. A value cannot carry a mark of either kind
+ * and only a whole pair with at least one value in it folds a list's rest. A value cannot carry a mark of either kind
  * ({@link setApart} prints it as its code point).
  */
 export function segments(line: string): Segment[] {
@@ -94,7 +94,11 @@ export function segments(line: string): Segment[] {
 	for (let m = fold.exec(line); m !== null; m = fold.exec(line)) {
 		out.push(...valuePieces(line.slice(at, m.index)));
 		const pieces = valuePieces(m[1]!);
-		out.push({ text: '', foreign: false, more: { n: pieces.filter((p) => p.foreign).length, pieces } });
+		const n = pieces.filter((p) => p.foreign).length;
+		// Only a fold with a title in it is one: marks around text that names no plan (a raw error
+		// that reached a sentence) stay inline, so nothing can hide behind "and 0 more".
+		if (n > 0) out.push({ text: '', foreign: false, more: { n, pieces } });
+		else out.push(...pieces);
 		at = m.index + m[0].length;
 	}
 	out.push(...valuePieces(line.slice(at)));

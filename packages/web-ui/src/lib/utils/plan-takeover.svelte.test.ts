@@ -373,6 +373,11 @@ describe('helpers', () => {
 		const line = planList([`a${c(0xe002)}b${c(0xe003)}`]);
 		expect(segments(line)).toEqual([{ text: 'a<U+E002>b<U+E003>', foreign: true }]);
 	});
+	it('fold marks around text that names no plan fold nothing, and a lone mark is dropped', () => {
+		const c = (cp: number): string => String.fromCodePoint(cp);
+		expect(segments(`a${c(0xe002)}x${c(0xe003)}b`)).toEqual([{ text: 'a', foreign: false }, { text: 'x', foreign: false }, { text: 'b', foreign: false }]);
+		expect(segments(`a${c(0xe002)}b`)).toEqual([{ text: 'ab', foreign: false }]);
+	});
 });
 
 describe('the refusals at the button', () => {

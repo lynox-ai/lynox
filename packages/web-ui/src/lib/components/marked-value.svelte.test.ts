@@ -94,6 +94,12 @@ describe('a folded list of plans in a sentence', () => {
 		expect(boxes.map((b) => b.textContent)).toEqual(titles);
 		expect(el.textContent).toBe('Plans: P1, P2, P3, P4, P5, P6, P7.');
 		expect(document.activeElement).toBe(boxes[5]);
+		expect(boxes[5]!.getAttribute('tabindex')).toBe('-1');
+		expect(boxes[5]!.getAttribute('class')).toContain('focus-visible:ring-2');
+	});
+	it('the button shows its focus', async () => {
+		const el = await draw('line', planList(titles));
+		expect(el.querySelector('button[data-testid="plans-more"]')!.getAttribute('class')).toContain('focus-visible:ring-2');
 	});
 	it('CONTROL: five titles draw no button', async () => {
 		const el = await draw('line', planList(titles.slice(0, 5)));

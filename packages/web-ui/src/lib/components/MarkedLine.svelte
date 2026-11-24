@@ -23,9 +23,12 @@
 	// each in its own box. There is no folding back. Focus goes to the first title it put in, so a
 	// keyboard or screen reader carries on where the button was.
 	let { text, mono = true }: { text: string; mono?: boolean } = $props();
-	let open = $state(false);
+	// The text the list was opened for: new text (another preview, another language) starts folded,
+	// so focus only ever moves after a press.
+	let openedFor = $state<string | null>(null);
+	const open = $derived(openedFor === text);
 	const gap = ' ';
 	const focusFirst = (node: HTMLElement): void => { node.focus(); };
 </script>
 
-{#each segments(text) as s, i (i)}{#if s.more !== undefined}{#if open}{#each s.more.pieces as p, j (j)}{#if p.foreign}{#if j === s.more.pieces.findIndex((q) => q.foreign)}<bdi data-foreign-value tabindex="-1" use:focusFirst class="{VALUE_BOX} {mono ? 'font-mono' : ''} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">{p.text}</bdi>{:else}<bdi data-foreign-value class="{VALUE_BOX} {mono ? 'font-mono' : ''}">{p.text}</bdi>{/if}{:else}{p.text}{/if}{/each}{:else}{gap}<button type="button" class="underline underline-offset-2 rounded-[var(--radius-sm)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" aria-expanded="false" aria-label={tf('takeover.plans_more_show', { n: String(s.more.n) })} data-testid="plans-more" onclick={() => { open = true; }}>{moreText(s.more.n)}</button>{/if}{:else if s.foreign}<bdi data-foreign-value class="{VALUE_BOX} {mono ? 'font-mono' : ''}">{s.text}</bdi>{:else}{s.text}{/if}{/each}
+{#each segments(text) as s, i (i)}{#if s.more !== undefined}{#if open}{#each s.more.pieces as p, j (j)}{#if p.foreign}{#if j === s.more.pieces.findIndex((q) => q.foreign)}<bdi data-foreign-value tabindex="-1" use:focusFirst class="{VALUE_BOX} {mono ? 'font-mono' : ''} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">{p.text}</bdi>{:else}<bdi data-foreign-value class="{VALUE_BOX} {mono ? 'font-mono' : ''}">{p.text}</bdi>{/if}{:else}{p.text}{/if}{/each}{:else}{gap}<button type="button" class="underline underline-offset-2 rounded-[var(--radius-sm)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" aria-expanded="false" aria-label={tf('takeover.plans_more_show', { n: String(s.more.n) })} data-testid="plans-more" onclick={() => { openedFor = text; }}>{moreText(s.more.n)}</button>{/if}{:else if s.foreign}<bdi data-foreign-value class="{VALUE_BOX} {mono ? 'font-mono' : ''}">{s.text}</bdi>{:else}{s.text}{/if}{/each}
