@@ -42,6 +42,7 @@ import { workflowAwaitsStampResult } from '../core/workflow-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
+import { builtInPresetOf } from '../core/oauth-presets.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_RESULT_TEXTS, connectedText, connectedWithMoreText, engineLessPageText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthBack, type OAuthLang, type OAuthText } from './oauth-pages.js';
 import { Engine } from '../core/engine.js';
@@ -14034,8 +14035,11 @@ export class LynoxHTTPApi {
       // connection somebody else made. `importWaiting`: the files the import of the earlier
       // profiles waits on, for the owner to repair or delete. `reader_may_connect`: whether this
       // reader's connect start goes through (`mayStartConnect`), so the page offers the link only there.
+      // `built_in_provider`: the display name of the built-in provider the profile signs in through
+      // (`builtInPresetOf`), or null. The stored `preset_id` is only checked for its form, so an id
+      // this engine does not know must not be shown as a provider sign-in.
       const reader = this._principalOf(req);
-      jsonResponse(res, 200, { profiles: store.getAll().map((p) => ({ ...profileForReader(p, reader), reader_may_connect: mayStartConnect(reader, p) })), importWaiting: store.importWaitsOn() });
+      jsonResponse(res, 200, { profiles: store.getAll().map((p) => ({ ...profileForReader(p, reader), reader_may_connect: mayStartConnect(reader, p), built_in_provider: builtInPresetOf(p)?.label ?? null })), importWaiting: store.importWaitsOn() });
     }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id', async (req, res, params) => {

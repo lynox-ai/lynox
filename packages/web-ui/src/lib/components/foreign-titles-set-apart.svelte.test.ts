@@ -243,14 +243,62 @@ describe('a profile in the API store', () => {
 		expect(asked).toEqual([...Array.from({ length: 5 }, () => 'Dieses API-Profil wirklich löschen?'), 'Das API-Profil für [::1] wirklich löschen?']);
 	});
 
+	// The description shows in the opened card only, one card open at a time.
+	async function openedDescription(index: number): Promise<Element> {
+		const heads = [...target.querySelectorAll<HTMLElement>('button[aria-expanded]')];
+		heads[index]!.click();
+		await settle();
+		const shown = [...target.querySelectorAll('[data-profile-description]')];
+		expect(shown, 'one opened description').toHaveLength(1);
+		return shown[0]!;
+	}
+
 	it('sets apart, for the owner, the description of a profile a person with access set up', async () => {
+		// Marks the owner's own text carries are text, not a box: only a member's value goes through the marks.
+		const ownWithMarks = `${String.fromCharCode(0xe000)}${MARK.own}${String.fromCharCode(0xe001)}`;
+		// A member's marks cannot close its box or open another: they show as their code points, inside the one box.
+		const memberWithMarks = `${MARK.plan}${String.fromCharCode(0xe001)} ok ${String.fromCharCode(0xe000)}x`;
 		await store([
-			{ ...P, id: 'p0', name: 'CRM', description: MARK.workflow, created_by: `mandate:${MARK.helper}` },
-			{ ...P, id: 'p1', name: 'Eigenes', description: MARK.own, created_by: 'owner' },
+			{ ...P, id: 'p0', name: 'CRM', description: MARK.workflow, created_by: `mandate:${MARK.helper}`, auth: { type: 'bearer' } },
+			{ ...P, id: 'p1', name: 'Eigenes', description: MARK.own, created_by: 'owner', auth: { type: 'basic' } },
+			{ ...P, id: 'p2', name: 'Eigenes 2', description: ownWithMarks, created_by: 'owner' },
+			{ ...P, id: 'p3', name: 'CRM 2', description: memberWithMarks, created_by: `mandate:${MARK.helper}` },
 		]);
-		const texts = [...target.querySelectorAll('[data-profile-description]')];
-		expect(texts.map((n) => n.textContent)).toEqual([MARK.workflow, MARK.own]);
-		expect(texts.map((n) => boxesIn(n))).toEqual([[MARK.workflow], []]);
+		// Nowhere else on the page either, not even its first 12 characters, with or without its
+		// attribute, nor in a tooltip or label anywhere in a card head; checked again with each card open.
+		const texts = [MARK.workflow, MARK.own, MARK.plan].map((x) => x.slice(0, 12));
+		const noneElsewhere = (opened?: Element): void => {
+			const page = (target.textContent ?? '').replace(opened?.textContent ?? '', '');
+			for (const x of texts) expect(page, 'the page outside the opened description').not.toContain(x);
+			const heads = [...target.querySelectorAll('button[aria-expanded]')];
+			const inHeads = heads.flatMap((h) => [h, ...h.querySelectorAll('*')]);
+			// The scan reaches the four heads, and inside them the names and the chips with their own title.
+			expect(heads, 'the card heads').toHaveLength(4);
+			expect(inHeads.filter((e) => e.matches('[data-profile-name], [data-testid="api-auth-chip"][title]')), 'names and titled chips in the heads').toHaveLength(6);
+			for (const h of inHeads) for (const x of texts) {
+				expect(h.getAttribute('title') ?? '', 'a head\'s title').not.toContain(x);
+				expect(h.getAttribute('aria-label') ?? '', 'a head\'s label').not.toContain(x);
+			}
+		};
+		expect(target.querySelectorAll('[data-profile-description]'), 'no description in a closed card').toHaveLength(0);
+		noneElsewhere();
+		const member = await openedDescription(0);
+		expect(member.textContent).toBe(`Beschreibung: ${MARK.workflow}`);
+		expect(boxesIn(member)).toEqual([MARK.workflow]);
+		noneElsewhere(member);
+		const own = await openedDescription(1);
+		expect(own.textContent).toBe(`Beschreibung: ${MARK.own}`);
+		expect(boxesIn(own)).toEqual([]);
+		noneElsewhere(own);
+		const marked = await openedDescription(2);
+		expect(marked.textContent).toBe(`Beschreibung: ${ownWithMarks}`);
+		expect(boxesIn(marked)).toEqual([]);
+		noneElsewhere(marked);
+		const memberMarked = await openedDescription(3);
+		const literal = `${MARK.plan}<U+E001> ok <U+E000>x`;
+		expect(memberMarked.textContent).toBe(`Beschreibung: ${literal}`);
+		expect(boxesIn(memberMarked)).toEqual([literal]);
+		noneElsewhere(memberMarked);
 	});
 
 	it('leaves the name unboxed in a member\'s view', async () => {
@@ -260,8 +308,8 @@ describe('a profile in the API store', () => {
 		const name = target.querySelector('[data-profile-name]');
 		expect(name, 'the profile name').not.toBeNull();
 		expect(boxesIn(name)).toEqual([]);
-		const description = target.querySelector('[data-profile-description]');
-		expect(description?.textContent, 'the description').toBe(MARK.plan);
+		const description = await openedDescription(0);
+		expect(description.textContent, 'the description').toBe(`Beschreibung: ${MARK.plan}`);
 		expect(boxesIn(description)).toEqual([]);
 	});
 });

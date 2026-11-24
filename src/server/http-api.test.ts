@@ -6671,6 +6671,34 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    // The page's sign-in chip names a provider only where the engine signs in through one: a
+    // preset id is stored after a check of its form alone, so an id the register does not know,
+    // or one on a profile that is not oauth2, names none.
+    it('names per profile in the list the built-in provider it signs in through, and only a known one', async () => {
+      const { ApiStore } = await import('../core/api-store.js');
+      const store = new ApiStore();
+      const oauth = (id: string, preset: string | undefined) => ({
+        id, name: id, base_url: 'https://api.example.com', description: 'd',
+        auth: { type: 'oauth2' as const, ...(preset === undefined ? {} : { oauth: { preset_id: preset } }) },
+      });
+      store.register(oauth('shop', 'shopify'));
+      store.register(oauth('books', 'bexio'));
+      store.register(oauth('lookalike', 'google'));
+      store.register(oauth('plain', undefined));
+      store.register({ id: 'keyed', name: 'keyed', base_url: 'https://api.example.com', description: 'd', auth: { type: 'bearer' as const, oauth: { preset_id: 'shopify' } } } as never);
+      mockGetApiStore.mockReturnValue(store);
+      try {
+        const token = webUiLoginSession(TEST_SECRET, null)!.token;
+        const res = await fetch(`${baseUrl}/api/api-profiles`, { headers: { cookie: `lynox_session=${token}` } });
+        expect(res.status).toBe(200);
+        const list = await res.json() as { profiles: { id: string; built_in_provider?: unknown }[] };
+        expect(Object.fromEntries(list.profiles.map((p) => [p.id, p.built_in_provider])))
+          .toEqual({ shop: 'Shopify', books: 'bexio', lookalike: null, plain: null, keyed: null });
+      } finally {
+        mockGetApiStore.mockReturnValue(null);
+      }
+    });
+
     it('starts a mandate\'s connection on a profile it wrote, signing the mandate into the state', async () => {
       const { verifyProfileOAuthState } = await import('../core/oauth-state-cookie.js');
       const r = await connect(TAG, true);

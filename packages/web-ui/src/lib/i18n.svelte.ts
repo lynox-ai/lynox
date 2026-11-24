@@ -2256,6 +2256,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	// Tasks into a section).
 	'settings.save': { de: 'Speichern', en: 'Save' },
 	'settings.saving': { de: 'Speichern...', en: 'Saving...' },
+	// The card's chip for how a profile signs in (utils/api-auth-label.ts), and its free description,
+	// shown labelled in the opened card.
+	'apis.auth_signin_via': { de: 'Anmeldung über {provider}', en: 'Sign-in via {provider}' },
+	'apis.auth_signin_provider': { de: 'Anmeldung beim Anbieter', en: 'Sign-in with the provider' },
+	'apis.auth_api_key': { de: 'API-Schlüssel', en: 'API key' },
+	'apis.auth_basic': { de: 'Benutzername und Passwort', en: 'Username and password' },
+	'apis.description': { de: 'Beschreibung: {text}', en: 'Description: {text}' },
 	'settings.saved': { de: 'Gespeichert', en: 'Saved' },
 	// A settings page in a mandate's session (ux U-104): the owner sets these, the mandate sees them.
 	'mail.owner_only_notice': { de: 'Postfächer verbindet nur der Inhaber dieser Instanz. Bitte den Inhaber, das Postfach in den Einstellungen unter „{label}“ zu verbinden.', en: 'Only the owner of this instance connects mailboxes. Ask the owner to connect the mailbox in Settings under “{label}”.' },
@@ -2812,6 +2819,14 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow_library.stamp.model': { de: 'Modell', en: 'Model' },
 	'workflow_library.stamp.mode': { de: 'Modus', en: 'Mode' },
 	'workflow_library.stamp.on_failure': { de: 'Bei Fehler', en: 'On failure' },
+	'workflow_library.stamp.mode_interactive': { de: 'Interaktiv', en: 'Interactive' },
+	'workflow_library.stamp.mode_autonomous': { de: 'Autonom', en: 'Autonomous' },
+	'workflow_library.stamp.on_failure_stop': { de: 'Keine Folgeschritte starten', en: 'Start no follow-on steps' },
+	'workflow_library.stamp.on_failure_stop_note': { de: 'Schritte, die mit dem fehlgeschlagenen an der Reihe waren, starten noch und laufen zu Ende.', en: 'Steps that were due along with the failed one still start and finish.' },
+	'workflow_library.stamp.on_failure_continue': { de: 'Weitermachen', en: 'Continue' },
+	'workflow_library.stamp.step': { de: 'Schritt', en: 'Step' },
+	'workflow_library.stamp.changed_mark': { de: 'Geändert', en: 'Changed' },
+	'workflow_library.stamp.removed_steps': { de: 'Nicht mehr dabei:', en: 'No longer included:' },
 	'workflow_library.stamp.limits': { de: 'Grenzen', en: 'Limits' },
 	'workflow_library.grant_toggle': { de: 'Schreibzugriffe ohne Rückfrage erlauben', en: 'Allow writes without asking' },
 	'workflow_library.grant_hint': { de: 'Ohne diese Freigabe wird jeder Schreibzugriff des geplanten Laufs verweigert. Mit ihr darf er genau die Adressen unten beschreiben – mit genau den Werten oben, und nur nach diesem Zeitplan.', en: 'Without this grant, every write of the scheduled run is refused. With it, the run may write to exactly the addresses below — with exactly the values above, and only on this schedule.' },
