@@ -59,10 +59,10 @@ export function shownWhole(text: string): string {
 
 /**
  * One piece of a sentence: lynox's words, or a value someone else wrote (`foreign`). A piece with
- * `more` is the folded rest of a list of plans ({@link planList}): `n` titles, and the pieces that
- * name them once the list is opened.
+ * `more` is the folded rest of a list of plans ({@link planList}): `n` titles, the pieces that name
+ * them once the list is opened, and `key`, the same for the same list in another sentence.
  */
-export interface Segment { text: string; foreign: boolean; more?: { n: number; pieces: Segment[] } }
+export interface Segment { text: string; foreign: boolean; more?: { n: number; pieces: Segment[]; key: string } }
 
 function valuePieces(line: string): Segment[] {
 	const out: Segment[] = [];
@@ -99,7 +99,7 @@ export function segments(line: string): Segment[] {
 		// Marks around anything else (a raw error that reached a sentence) stay inline, so none of
 		// lynox's words, and no sentence without a title, can hide behind "and {n} more".
 		const listOnly = pieces.every((p) => p.foreign || p.text === ', ');
-		if (n > 0 && listOnly) out.push({ text: '', foreign: false, more: { n, pieces } });
+		if (n > 0 && listOnly) out.push({ text: '', foreign: false, more: { n, pieces, key: m[1]! } });
 		else out.push(...pieces);
 		at = m.index + m[0].length;
 	}
@@ -109,7 +109,12 @@ export function segments(line: string): Segment[] {
 
 /** What the button in place of a folded list's rest says: "and {n} more". */
 export function moreText(n: number): string {
-	return tf('takeover.plans_more', { n: String(n) });
+	return n === 1 ? t('takeover.plans_more_one') : tf('takeover.plans_more', { n: String(n) });
+}
+
+/** The button's name for a screen reader: "and {n} more, show them". */
+export function moreLabel(n: number): string {
+	return n === 1 ? t('takeover.plans_more_show_one') : tf('takeover.plans_more_show', { n: String(n) });
 }
 
 /** A sentence as plain text, without its marks, a folded list as the button reads: for a label, a title or a log. */

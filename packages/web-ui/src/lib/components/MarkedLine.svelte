@@ -4,8 +4,8 @@
 </script>
 
 <script lang="ts">
-	import { moreText, segments } from '../utils/plan-takeover.js';
-	import { tf } from '../i18n.svelte.js';
+	import { moreLabel, moreText, segments } from '../utils/plan-takeover.js';
+	import type { FoldGroup } from '../utils/fold-group.svelte.js';
 	// A sentence of lynox's with the values someone else wrote in it (marked by `shownValue`) set
 	// apart, each in its own isolated element: a value cannot pass for lynox's words, nor turn the
 	// direction of the text around it. The box has no outer space of its own: the spaces in the
@@ -22,13 +22,17 @@
 	// the sentence, and pressing it puts the remaining titles in its place, in the same sentence,
 	// each in its own box. There is no folding back. Focus goes to the first title it put in, so a
 	// keyboard or screen reader carries on where the button was.
-	let { text, mono = true }: { text: string; mono?: boolean } = $props();
-	// The text the list was opened for: new text (another preview, another language) starts folded,
-	// so focus only ever moves after a press.
+	let { text, mono = true, group = undefined }: { text: string; mono?: boolean; group?: FoldGroup | undefined } = $props();
+	// Given the dialog's fold group (`group`), a press opens the same list in every
+	// sentence that names it; on its own, the text the list was opened for: new text (another
+	// preview, another language) starts folded. Focus moves only in the sentence that was pressed,
+	// and only after a press.
 	let openedFor = $state<string | null>(null);
-	const open = $derived(openedFor === text);
+	let pressedFor = $state<string | null>(null);
+	const isOpen = (key: string): boolean => (group !== undefined ? group.has(key) : openedFor === text);
+	const press = (key: string): void => { pressedFor = text; if (group !== undefined) group.open(key); else openedFor = text; };
 	const gap = ' ';
 	const focusFirst = (node: HTMLElement): void => { node.focus(); };
 </script>
 
-{#each segments(text) as s, i (i)}{#if s.more !== undefined}{#if open}{#each s.more.pieces as p, j (j)}{#if p.foreign}{#if j === s.more.pieces.findIndex((q) => q.foreign)}<bdi data-foreign-value tabindex="-1" use:focusFirst class="{VALUE_BOX} {mono ? 'font-mono' : ''} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">{p.text}</bdi>{:else}<bdi data-foreign-value class="{VALUE_BOX} {mono ? 'font-mono' : ''}">{p.text}</bdi>{/if}{:else}{p.text}{/if}{/each}{:else}{gap}<button type="button" class="underline underline-offset-2 rounded-[var(--radius-sm)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" aria-expanded="false" aria-label={tf('takeover.plans_more_show', { n: String(s.more.n) })} data-testid="plans-more" onclick={() => { openedFor = text; }}>{moreText(s.more.n)}</button>{/if}{:else if s.foreign}<bdi data-foreign-value class="{VALUE_BOX} {mono ? 'font-mono' : ''}">{s.text}</bdi>{:else}{s.text}{/if}{/each}
+{#each segments(text) as s, i (i)}{#if s.more !== undefined}{#if isOpen(s.more.key)}{#each s.more.pieces as p, j (j)}{#if p.foreign}{#if pressedFor === text && j === s.more.pieces.findIndex((q) => q.foreign)}<bdi data-foreign-value tabindex="-1" use:focusFirst class="{VALUE_BOX} {mono ? 'font-mono' : ''} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">{p.text}</bdi>{:else}<bdi data-foreign-value class="{VALUE_BOX} {mono ? 'font-mono' : ''}">{p.text}</bdi>{/if}{:else}{p.text}{/if}{/each}{:else}{gap}<button type="button" class="underline underline-offset-2 rounded-[var(--radius-sm)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" aria-expanded="false" aria-label={moreLabel(s.more.n)} data-testid="plans-more" onclick={() => press(s.more!.key)}>{moreText(s.more.n)}</button>{/if}{:else if s.foreign}<bdi data-foreign-value class="{VALUE_BOX} {mono ? 'font-mono' : ''}">{s.text}</bdi>{:else}{s.text}{/if}{/each}

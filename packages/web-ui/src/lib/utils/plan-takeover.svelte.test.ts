@@ -211,7 +211,7 @@ describe('T-2: plans that then run for someone else', () => {
 	it('names five plans and counts the rest, without a plan that runs no more (N7)', () => {
 		const p = preview({ memberChanges: ['1', '2', '3', '4', '5', '6', '7'].map((i) => change(i, 'mandate:ida@x.ch', null, i === '7')) });
 		expect(takeoverLines(p, fmt).filter((l) => l.kind === 'member_change').map((l) => l.text)).toEqual([
-			'Diese Pläne laufen danach unter deinem Namen statt unter dem von ida@x.ch: P1, P2, P3, P4, P5 und 1 weitere.',
+			'Diese Pläne laufen danach unter deinem Namen statt unter dem von ida@x.ch: P1, P2, P3, P4, P5 und 1 weiterer.',
 		]);
 	});
 	it('says nothing where whom the plan runs for does not change (N3), or it runs for the owner already', () => {

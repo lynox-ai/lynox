@@ -4,6 +4,7 @@
 	import { t, tf } from '../i18n.svelte.js';
 	import StampPreviewBody from './StampPreviewBody.svelte';
 	import MarkedLine from './MarkedLine.svelte';
+	import { FoldGroup } from '../utils/fold-group.svelte.js';
 	import { shownValue } from '../utils/plan-takeover.js';
 	import { stampChanges, type StampChanges } from '../utils/workflow-stamp.js';
 	import {
@@ -23,6 +24,8 @@
 	} = $props();
 
 	let preview = $state<WorkflowTakeoverPreview | null>(null);
+	// The lists of plans this preview has unfolded: a new preview starts folded.
+	const folds = $derived(preview === null ? undefined : new FoldGroup());
 	let loading = $state(true);
 	let sending = $state(false);
 	let error = $state('');
@@ -206,7 +209,7 @@
 			</div>
 			<div class="mt-3 space-y-2 text-xs">
 				{#each workflowTakeoverLines(p) as line, i (i)}
-					<p data-takeover-part={line.kind} class="break-words"><MarkedLine text={line.text} /></p>
+					<p data-takeover-part={line.kind} class="break-words"><MarkedLine text={line.text} group={folds} /></p>
 				{/each}
 			</div>
 		{/if}

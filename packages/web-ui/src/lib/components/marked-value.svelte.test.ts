@@ -2,7 +2,8 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { planList, shownValue, shownWhole } from '../utils/plan-takeover.js';
-import { tf } from '../i18n.svelte.js';
+import { setLocale, t, tf } from '../i18n.svelte.js';
+import { FoldGroup } from '../utils/fold-group.svelte.js';
 import { valueSegments } from '../utils/value-breaks.js';
 
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
@@ -121,5 +122,44 @@ describe('a folded list of plans in a sentence', () => {
 		const el = await draw('line', planList(titles.slice(0, 5)));
 		expect(el.querySelector('button')).toBeNull();
 		expect(el.querySelectorAll('bdi[data-foreign-value]').length).toBe(5);
+	});
+});
+
+describe('one list in two sentences of one dialog', () => {
+	const titles = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7'];
+	it('a press in one sentence opens the same list in the other, and focus stays in the one pressed', async () => {
+		const { default: View } = await import('./MarkedLine.svelte');
+		const group = new FoldGroup();
+		const draw2 = (text: string): HTMLElement => {
+			const el = document.createElement('div');
+			document.body.appendChild(el);
+			mounted.push({ c: mount(View, { target: el, props: { text, group } }), el });
+			return el;
+		};
+		const first = draw2(`Run again: ${planList(titles)}.`);
+		const second = draw2(`Under your name: ${planList(titles)}.`);
+		const other = draw2(`Others: ${planList(['Q1', 'Q2', 'Q3', 'Q4', 'Q5', 'Q6'])}.`);
+		flushSync();
+		(first.querySelector('button[data-testid="plans-more"]') as HTMLButtonElement).click();
+		flushSync();
+		expect([first.querySelector('button'), second.querySelector('button')]).toEqual([null, null]);
+		expect(second.textContent).toBe('Under your name: P1, P2, P3, P4, P5, P6, P7.');
+		expect(document.activeElement).toBe(first.querySelectorAll('bdi[data-foreign-value]')[5]);
+		// A different list in the same dialog stays folded.
+		expect(other.querySelector('button[data-testid="plans-more"]')).not.toBeNull();
+	});
+});
+
+describe('one more, in German', () => {
+	it('says the singular, and its label too', async () => {
+		setLocale('de');
+		const el = await draw('line', planList(['P1', 'P2', 'P3', 'P4', 'P5', 'P6']));
+		const button = el.querySelector('button[data-testid="plans-more"]')!;
+		expect(button.textContent).toBe('und 1 weiterer');
+		expect(button.getAttribute('aria-label')).toBe('und 1 weiteren anzeigen');
+		expect(t('takeover.plans_more_one')).toBe('und 1 weiterer');
+		setLocale('en');
+		const en = await draw('line', planList(['P1', 'P2', 'P3', 'P4', 'P5', 'P6']));
+		expect(en.querySelector('button[data-testid="plans-more"]')!.textContent).toBe('and 1 more');
 	});
 });

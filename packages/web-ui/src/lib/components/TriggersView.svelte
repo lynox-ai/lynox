@@ -15,6 +15,7 @@
 	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
 	import StampConfirm from './StampConfirm.svelte';
 	import MarkedLine from './MarkedLine.svelte';
+	import { FoldGroup } from '../utils/fold-group.svelte.js';
 	import RecipientConfirm from './RecipientConfirm.svelte';
 	import { isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 
@@ -339,6 +340,8 @@
 
 	let takeoverFor = $state<Trigger | null>(null);
 	let takeoverPreview = $state<TakeoverPreview | null>(null);
+	// The lists of plans the open preview has unfolded: a new preview starts folded.
+	const takeoverFolds = $derived(takeoverPreview === null ? undefined : new FoldGroup());
 	// A line above the preview: why it was fetched again, or why the takeover was refused.
 	let takeoverNote = $state('');
 	let takeoverBusy = $state(false);
@@ -828,7 +831,7 @@
 			{#if takeoverPreview !== null}
 				<ul class="space-y-2 text-xs text-text-muted" data-takeover-lines>
 					{#each takeoverLines(takeoverPreview, dayOf) as line}
-						<li class="break-words" data-takeover-line={line.kind}><MarkedLine text={line.text} /></li>
+						<li class="break-words" data-takeover-line={line.kind}><MarkedLine text={line.text} group={takeoverFolds} /></li>
 					{/each}
 				</ul>
 			{:else if takeoverNote === ''}
