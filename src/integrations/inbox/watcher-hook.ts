@@ -18,7 +18,7 @@
 // integration in Phase 2.
 
 import type { MailAuthType, MailEnvelope } from '../mail/provider.js';
-import { resolveThreadKey } from '../mail/thread-key.js';
+import { hasProviderThread, parentMessageIds, resolveThreadKey } from '../mail/thread-key.js';
 import type { InboxChannel, InboxItem } from '../../types/index.js';
 import type { ClassifierPromptInput } from './classifier/index.js';
 import type { InboxRulesLoader } from './rules-loader.js';
@@ -134,9 +134,9 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
    * "requires you" instead, open and not snoozed, and pushes. A snooze set to wake on a reply wakes
    * for the messages that may reopen an item: not for an automatic reply, our own mail or a message
    * older than the owner's reply. Without a Message-ID, or when the message is stored already,
-   * nothing happens, so a redelivered mail wakes nothing either. Only Gmail and Graph have threads:
-   * on IMAP the thread key is the Message-ID, so only a redelivered mail comes here, and it is
-   * stored already.
+   * nothing happens, so a redelivered mail wakes nothing either. Gmail and Graph name the thread
+   * themselves; on an IMAP server without thread ids the thread key is the Message-ID, and a reply
+   * comes here through its reply headers (`itemAnswered`).
    */
   const recordFollowUp = async (
     existing: InboxItem,
@@ -301,6 +301,19 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     if (item && !snoozed) void opts.notifier.notifyNewItem(item, { flagged });
   };
 
+  // The item a mail without a provider thread answers: the first of its parent Message-IDs
+  // (In-Reply-To, then References from the newest) that is an item's own mail or a message of its
+  // thread. The headers come from the sender, so only this account's and tenant's messages count.
+  const itemAnswered = (accountId: string, env: MailEnvelope): InboxItem | null => {
+    // A mail without a Message-ID cannot be stored as a thread message: it stays an item of its own.
+    if (hasProviderThread(env) || !env.messageId) return null;
+    for (const id of parentMessageIds(env)) {
+      const item = opts.state.findItemByParentMessageId(accountId, id, opts.tenantId);
+      if (item) return item;
+    }
+    return null;
+  };
+
   return async (accountId, env): Promise<InboxHookOutcome> => {
     if (disabledAccounts?.has(accountId)) return 'ignored';
     if (folderBlacklistLower?.has(env.folder.toLowerCase())) return 'ignored';
@@ -320,7 +333,9 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     // 1. A mail in a thread the inbox already holds is a follow-up, not a new item. If the item is
     //    snoozed and the owner chose to wake it on a reply, `recordFollowUp` wakes it for a message
     //    that may reopen an item.
-    const existing = opts.state.findItemByThread(accountId, threadKey);
+    //    On a server without thread ids each mail carries its own key, and the thread is the item
+    //    one of its reply headers names, in this account and tenant only (`itemAnswered`).
+    const existing = opts.state.findItemByThread(accountId, threadKey) ?? itemAnswered(accountId, env);
     if (existing) {
       await recordFollowUp(existing, env, sensitiveMode, account);
       return 'duplicate';

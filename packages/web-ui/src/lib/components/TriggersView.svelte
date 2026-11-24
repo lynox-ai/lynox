@@ -638,6 +638,11 @@
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-paused>{t('triggers.paused_takeover')}</span>
 								{/if}
 							</div>
+							<!-- A helper has no takeover button: who lets the plan run again is said here,
+							     visibly. A bulk run never reaches this pause (it has no helper's mark). -->
+							{#if viewer === 'mandate' && pausedOpen(trigger) && !(trigger.effect ?? '').startsWith('bulk_')}
+								<p class="mt-1 text-xs text-text-muted" data-trigger-paused-owner>{t('triggers.paused_owner_takes_over')}</p>
+							{/if}
 							<div class="flex flex-wrap gap-2 mt-1.5 text-xs text-text-subtle">
 								{#if trigger.schedule_cron}
 									<span class="flex items-center gap-1">
@@ -754,12 +759,18 @@
 								<button onclick={() => stopRun(trigger)} disabled={busy[trigger.id]} aria-label={t('triggers.stop_run')} title={t('triggers.stop_run')} class="rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 disabled:opacity-40" data-trigger-stop>■ {t('triggers.stop_run')}</button>
 							{/if}
 							<!-- Not offered while waiting: the engine refuses the run after the request
-							     has already been answered as started. Not at a completed paused plan
-							     either: it would be refused, and the refusal names no way out there. -->
-							{#if !held(trigger) && !pausedDone(trigger)}
+							     has already been answered as started. Not at a paused plan either: it
+							     would be refused, and the way out is the takeover, which the badge and
+							     the takeover button (or, to a helper, the line under the badge) say. -->
+							{#if !held(trigger) && !pausedDone(trigger) && !pausedOpen(trigger)}
 								<button onclick={() => runNow(trigger)} data-trigger-run-now disabled={busy[trigger.id]} aria-label={t('triggers.run_now')} title={t('triggers.run_now')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity disabled:opacity-40">▶ {t('triggers.run_now')}</button>
 							{/if}
-							<button onclick={() => togglePause(trigger)} disabled={busy[trigger.id]} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity disabled:opacity-40">{trigger.enabled === 0 ? t('triggers.resume') : t('triggers.pause')}</button>
+							<!-- Not at a plan that waits for its takeover: next to its badge the switch
+							     read as a second pause, and a helper's is refused. After the takeover it
+							     comes back, and an own pause set before stays. -->
+							{#if !pausedOpen(trigger)}
+								<button onclick={() => togglePause(trigger)} disabled={busy[trigger.id]} data-trigger-toggle class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity disabled:opacity-40">{trigger.enabled === 0 ? t('triggers.resume') : t('triggers.pause')}</button>
+							{/if}
 							<button onclick={() => manageInChat(trigger)} aria-label={t('triggers.manage_in_chat')} title={t('triggers.manage_in_chat')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity"><Icon name="chat" size="xs" /></button>
 							<button onclick={() => deleteTrigger(trigger)} disabled={busy[trigger.id]} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 transition-opacity disabled:opacity-40">{t('triggers.delete')}</button>
 							{#if offersCheck(trigger)}

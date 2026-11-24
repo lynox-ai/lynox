@@ -7,6 +7,8 @@
  * or bidi characters, so it displays as what it says.
  */
 
+import { homedir } from 'node:os';
+
 /** Bytes the source reads at most, per kind of answer. A real one is far below each. */
 export const TARGET_BODY_CAPS = {
   /** The handshake's key material, or its refusal text. */
@@ -135,19 +137,20 @@ export function capText(bytes: number): string {
 }
 
 /**
- * A target answer read as JSON, or a throw with `fail`'s text when it is over `cap`, does not
- * arrive in full in time, or is not JSON. The answer's own text is never quoted.
+ * A target answer read as JSON, or a throw with `fail`'s text (or the error `fail` gives) when it
+ * is over `cap`, does not arrive in full in time, or is not JSON. The answer's own text is never quoted.
  */
-export async function readTargetJson(r: Response, cap: number, fail: (why: UnreadAnswer) => string, timeoutMs: number = TARGET_BODY_TIMEOUT_MS): Promise<unknown> {
+export async function readTargetJson(r: Response, cap: number, fail: (why: UnreadAnswer) => string | Error, timeoutMs: number = TARGET_BODY_TIMEOUT_MS): Promise<unknown> {
+  const failure = (why: UnreadAnswer): Error => { const said = fail(why); return said instanceof Error ? said : new Error(said); };
   let text: string | null;
   try {
     text = await readTargetBody(r, cap, timeoutMs);
   } catch (err: unknown) {
     // Any other failure of the read (a reset, a closed connection) is the connection breaking.
-    throw new Error(fail(err instanceof TargetAnswerTooSlow ? 'slow' : 'broken'));
+    throw failure(err instanceof TargetAnswerTooSlow ? 'slow' : 'broken');
   }
-  if (text === null) throw new Error(fail('large'));
-  try { return JSON.parse(text) as unknown; } catch { throw new Error(fail('format')); }
+  if (text === null) throw failure('large');
+  try { return JSON.parse(text) as unknown; } catch { throw failure('format'); }
 }
 
 /**
@@ -225,6 +228,31 @@ export function relayedText(text: string, max: number = 500): string {
     if (n === max) return `${out.slice(0, end)}…`;
     n++;
     end += ch.length;
+  }
+  return out;
+}
+
+/** The home directories of this instance: the system's, and `HOME` when it names another one. */
+function ownHomes(): string[] {
+  let system = '';
+  try { system = homedir(); } catch { /* no home known */ }
+  return [system, process.env['HOME'] ?? ''];
+}
+
+/**
+ * This instance's own error text with its home directory written as `~` wherever it starts a path
+ * (`/home/x/.lynox/a.db` becomes `~/.lynox/a.db`). A home counts only as a whole path segment:
+ * `/home/xy` stays as it is when the home is `/home/x`, and so does a home inside a longer path.
+ * A home that is empty, relative or the root is left out. Only for this instance's text, never
+ * for the target's words.
+ */
+export function homeAsTilde(text: string, homes: readonly string[] = ownHomes()): string {
+  const usable = [...new Set(homes.map((h) => h.replace(/\/+$/, '')).filter((h) => h.startsWith('/') && h.length > 1))]
+    .sort((a, b) => b.length - a.length);
+  let out = text;
+  for (const home of usable) {
+    const escaped = home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`(?<![\\w.~/-])${escaped}(?=/|$|[^\\w.~-])`, 'g'), '~');
   }
   return out;
 }
