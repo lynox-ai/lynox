@@ -192,6 +192,10 @@ export const OAUTH_RESULT_TEXTS = {
     en: 'This connection can no longer be completed for the session that started it. Nothing was stored.',
     de: 'Diese Verbindung lässt sich für die Sitzung, die sie gestartet hat, nicht mehr abschliessen. Es wurde nichts gespeichert.',
   },
+  refreshRunning: {
+    en: 'lynox is renewing its access to this store right now. Nothing was stored. Wait a minute, then start the connection again.',
+    de: 'lynox erneuert gerade seinen Zugang zu diesem Shop. Es wurde nichts gespeichert. Warte eine Minute und starte die Verbindung dann noch einmal.',
+  },
   addressChanged: {
     en: 'This connection\'s address changed while it was being completed. Nothing was stored.',
     de: 'Die Adresse dieser Verbindung hat sich geändert, während sie abgeschlossen wurde. Es wurde nichts gespeichert.',

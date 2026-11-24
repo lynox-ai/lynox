@@ -244,6 +244,7 @@ export function bulkStartKind(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' |
 const BULK_RESTART_AS_IS = new Set([
 	'unavailable', 'timeBudget', 'consecutiveFailures', 'stoppedByOwner', 'listUnreadable', 'credential', 'unauthorized',
 	'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'costCap', 'unrecorded', 'listReadFailed', 'shopInactive',
+	'storeAccessEnded', 'storeClientMisnamed',
 ]);
 /** Halts a restart would meet again on the same targets: the run has to be planned again. */
 const BULK_RESTART_NONE = new Set(['contract', 'listFormWithdrawn', 'listFilterWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff']);
@@ -274,6 +275,7 @@ const BULK_BEFORE_PROMISES_GOING_ON: ReadonlySet<string> = new Set([
 	'bulk.halt.unavailable_before', 'bulk.halt.unavailable_judge_before', 'bulk.halt.unauthorized_before',
 	'bulk.halt.blocked_before_managed', 'bulk.halt.blocked_before_selfhost', 'bulk.halt.creditRefused_before',
 	'bulk.halt.spendLimit_before_managed', 'bulk.halt.spendLimit_before_selfhost', 'bulk.halt.consecutiveFailures_before',
+	'bulk.halt.storeAccessEnded_before', 'bulk.halt.storeClientMisnamed_before',
 ]);
 
 /** The page's own sentences for a planned run's halt: why it halted, and what the owner can do
@@ -317,6 +319,7 @@ export function bulkHaltText(
 const BULK_RESUME_WRITE = new Set([
 	'runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked',
 	'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff', 'markupAddedByShop',
+	'storeAccessEnded', 'storeClientMisnamed',
 ]);
 /** Halts writing on would not get past: the run has changed since it was approved (the engine
  *  refuses), or a target lies outside what it may write (it would halt there again). */
@@ -400,6 +403,8 @@ export function bulkResumeText(
 		: key === 'unauthorized' || key === 'unavailable' ? `bulk.halt.${key}_before`
 		: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_${tier}`
 		: key === 'markupAddedByShop' ? bulkHaltKeyOf(run, 'bulk.halt.markupAddedByShop_before')
+		// Writing on meets the same refusal until the store is connected again or its profile fixed.
+		: key === 'storeAccessEnded' || key === 'storeClientMisnamed' ? `bulk.halt.${key}_before`
 		: null;
 	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
 	if (kind === 'none') return { cause, before, check: null, after: null, kept: null, soFar: null, allows: null };
@@ -415,6 +420,8 @@ export function bulkResumeText(
 		const first = key === 'unauthorized' ? 'bulk.halt.unauthorized_before_check'
 			: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_check_${tier}`
 			: key === 'credential' ? 'bulk.halt.credential_before'
+			// A store whose access ended or whose profile names its app wrongly cannot be read either.
+			: key === 'storeAccessEnded' || key === 'storeClientMisnamed' ? `bulk.halt.${key}_before_check`
 			: null;
 		const then = key === 'unavailable' ? 'bulk.halt.unavailable_before_check'
 			: key === 'markupAddedByShop' ? bulkHaltKeyOf(run, 'bulk.halt.markupAddedByShop_before')

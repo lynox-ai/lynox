@@ -3940,7 +3940,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
       'https://api.crm.example/v1/contacts',
       headers,
       false,
-      { apiStore, secretStore: makeVault(SEED) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never,
+      { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false },  apiStore, secretStore: makeVault(SEED) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never,
       { bulkRunId: 'run-1' },
     );
 
@@ -3966,7 +3966,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
     stubBoth();
     const { attachStoredCredential } = await import('./http.js');
     const headers: Record<string, string> = {};
-    const attached = await attachStoredCredential('https://api.crm.example/v1/contacts', headers, false, { apiStore, secretStore: makeVault(SEED) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never, { bulkRunId: 'run-1' });
+    const attached = await attachStoredCredential('https://api.crm.example/v1/contacts', headers, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false },  apiStore, secretStore: makeVault(SEED) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never, { bulkRunId: 'run-1' });
     expect(attached !== null).toBe(sent);
     expect(headers['X-Pay-900'] !== undefined).toBe(sent);
   });
@@ -3984,7 +3984,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
     stubBoth();
     const { attachStoredCredential } = await import('./http.js');
     const headers: Record<string, string> = {};
-    const attached = await attachStoredCredential('https://api.bexio.com/2.0/contact', headers, write, { apiStore, secretStore: makeVault({ ...SEED, BEXIO_PAT: 'pat-value' }) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never, { bulkRunId: 'run-1' });
+    const attached = await attachStoredCredential('https://api.bexio.com/2.0/contact', headers, write, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false },  apiStore, secretStore: makeVault({ ...SEED, BEXIO_PAT: 'pat-value' }) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never, { bulkRunId: 'run-1' });
     expect(attached !== null).toBe(sent);
     expect(headers['Authorization'] === 'Bearer pat-value').toBe(sent);
   });

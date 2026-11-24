@@ -100,8 +100,9 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
       // `askedScopes`, `scopesOfAnswer` and `scopesBeyondAsked` read scopes and add no preset.
       // `connectCallText` only phrases the connect call around a profile id, like `presetClientSecretGuidance`.
       // `consentNoticeVersion` derives a digest from what a preset's page shows; `SHOPIFY_CONSENT_VERSION` is that digest for Shopify, frozen.
+      // `codeExchangeExtraParams` reads a preset's ask for an expiring token and what a profile holds; it adds no preset.
       // `RETIRED_PRESET_IDS` is a frozen list of ids no provider answers to; `retiredPresetIdOf` and `isRetiredPresetClientSecretName` read it.
-      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'RETIRED_PRESET_IDS', 'SHOPIFY_CONSENT_VERSION', 'askedScopes', 'builtInPresetOf', 'connectCallText', 'consentFrameProblems', 'consentNoticeVersion', 'derivePresetEndpoints', 'isPresetClientSecretName', 'isRetiredPresetClientSecretName', 'normalizedPresetParams', 'presetClientKeys', 'presetClientSecretGuidance', 'presetClientSecretGuidanceWith', 'presetIds', 'presetNotFollowed', 'presetParamsForModel', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetStoreHost', 'presetTokenBodyFormat', 'presetTokenHeaderName', 'retiredPresetIdOf', 'scopesBeyondAsked', 'scopesOfAnswer'].sort(),
+      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'RETIRED_PRESET_IDS', 'SHOPIFY_CONSENT_VERSION', 'askedScopes', 'builtInPresetOf', 'codeExchangeExtraParams', 'connectCallText', 'consentFrameProblems', 'consentNoticeVersion', 'derivePresetEndpoints', 'isPresetClientSecretName', 'isRetiredPresetClientSecretName', 'normalizedPresetParams', 'presetClientKeys', 'presetClientSecretGuidance', 'presetClientSecretGuidanceWith', 'presetIds', 'presetNotFollowed', 'presetParamsForModel', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetStoreHost', 'presetTokenBodyFormat', 'presetTokenHeaderName', 'retiredPresetIdOf', 'scopesBeyondAsked', 'scopesOfAnswer'].sort(),
     );
   });
 
