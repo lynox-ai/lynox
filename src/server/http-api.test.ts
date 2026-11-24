@@ -6704,7 +6704,7 @@ describe('LynoxHTTPApi', () => {
       const r = await connect(TAG, true);
       expect(r.status).toBe(302);
       expect(verifyProfileOAuthState(r.state ?? '', TEST_SECRET, Math.floor(Date.now() / 1000))?.by)
-        .toEqual({ tag: TAG, mandateId: 'TEST-MANDATE-1' });
+        .toEqual({ tag: TAG, mandateId: 'TEST-MANDATE-1', display: 'TEST-DISPLAY' });
     });
 
     // The note before the provider's login (the approved wording), word for word: a
@@ -21995,6 +21995,27 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
           // A profile on no provider the engine reads an account from: the closing row says so.
           ['done', 'GET /api/oauth/callback account:unknown', `profile:${PROFILE}`, 'mandate'],
         ]);
+      });
+
+      // PRD §7(c): every row of a mandate names the person as they were shown. The callback has
+      // no session; the name comes from the state its start signed.
+      it('puts the mandate\'s name from the signed state on both its rows', async () => {
+        const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID, display: 'Muster AG, Erika Beispiel' } });
+        store.register({ ...store.get(PROFILE)!, created_by: TAG });
+        expect((await complete(cookie)).status).toBe(200);
+        const named = recorded as unknown as Array<{ phase: string; principal: { kind: string; display?: string; mandateId?: string } }>;
+        expect(named.map((e) => [e.phase, e.principal.kind, e.principal.display, e.principal.mandateId])).toEqual([
+          ['attempt', 'mandate', 'Muster AG, Erika Beispiel', MID],
+          ['done', 'mandate', 'Muster AG, Erika Beispiel', MID],
+        ]);
+      });
+
+      it('control: a state signed without a name gives rows without one, and still records them', async () => {
+        const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+        store.register({ ...store.get(PROFILE)!, created_by: TAG });
+        expect((await complete(cookie)).status).toBe(200);
+        const named = recorded as unknown as Array<{ phase: string; principal: { display?: string } }>;
+        expect(named.map((e) => [e.phase, 'display' in e.principal])).toEqual([['attempt', false], ['done', false]]);
       });
 
       it('stores nothing when the attempt cannot be written', async () => {

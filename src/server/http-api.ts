@@ -12570,7 +12570,10 @@ export class LynoxHTTPApi {
       const signed = signProfileOAuthState(
         {
           state, profileId: id, verifier,
-          by: principal.kind === 'mandate' ? { tag: principalTag(principal), mandateId: principal.mandateId } : { tag: 'owner' },
+          // The mandate's name goes along, so the callback's trail rows carry it (PRD §7(c)).
+          by: principal.kind === 'mandate'
+            ? { tag: principalTag(principal), mandateId: principal.mandateId, ...(principal.display === undefined ? {} : { display: principal.display }) }
+            : { tag: 'owner' },
           // What the link asks for, from the same decision the confirmation is checked against
           // below (`shown_scopes`) and the link is built from: the callback records it as asked.
           asked: decision.scopes,
@@ -12778,7 +12781,10 @@ export class LynoxHTTPApi {
       // Who reads the client pair: the session that started the connection, with the grant it
       // signed into the cookie. A release of the owner's name counts for that grant only.
       const tagged = principalFromTag(by.tag);
-      const reader: RequestPrincipal = tagged.kind === 'mandate' ? { ...tagged, mandateId: by.mandateId } : tagged;
+      // The name the start signed in, as every other row of this person carries it.
+      const reader: RequestPrincipal = tagged.kind === 'mandate'
+        ? { ...tagged, mandateId: by.mandateId, ...(by.display === undefined ? {} : { display: by.display }) }
+        : tagged;
       const readCtx = { principal: reader, ends: engine.getMandateEnds(), releases: engine.getSecretReleases() };
       // Asked twice: here, before anything goes to the provider, and again just before the
       // tokens are stored, because the exchange is an await and the profile, the mandate and

@@ -202,11 +202,69 @@ describe('who started the connection rides inside the signature (PRD §3.13)', (
     }
   });
 
-  // The reader caps the encoded field. A principal valid on its face whose encoding is longer
-  // must not be signed: the user would consent at the provider and then be turned away.
-  it('does not sign a principal whose encoding the reader would refuse', () => {
-    const by = { tag: `mandate:${'\u00fc'.repeat(290)}@example.invalid`, mandateId: 'x'.repeat(64) };
+  // The reader caps the encoded field. The longest principal the login admits (tag, id and name
+  // at three bytes a character) has to fit under it: one that did not would be signed nowhere,
+  // and the person turned away before the provider's page.
+  it('signs and reads the longest principal the login admits, its name included', () => {
+    const by = {
+      tag: `mandate:${'\u4e00'.repeat(320 - 'mandate:'.length - '@x.invalid'.length)}@x.invalid`,
+      mandateId: 'x'.repeat(64),
+      display: '\u4e00'.repeat(200),
+    };
+    expect(by.tag).toHaveLength(320);
+    const cookie = signProfileOAuthState({ ...good, by }, SECRET, NOW) ?? '';
+    expect(verifyProfileOAuthState(cookie, SECRET, NOW)).toEqual({ ...good, by });
+  });
+
+  it('does not read a principal field longer than its cap, though its signature is good', () => {
+    const field = Buffer.from(JSON.stringify({ tag: MANDATE.tag, mandate_id: MANDATE.mandateId, display: 'n'.repeat(1900) })).toString('base64url');
+    expect(field.length).toBeGreaterThan(2400);
+    const payload = `${STATE}.bexio.${VERIFIER}.${field}.${ASKED}.none.${String(NOW)}`;
+    expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)).toBeNull();
+  });
+
+  // The callback's trail rows name the person as every other row of theirs does (PRD \u00a77(c)).
+  it('carries the mandate\'s name across, and refuses a cookie whose name was changed', () => {
+    const by = { ...MANDATE, display: 'Muster AG, Erika Beispiel' };
+    const cookie = signProfileOAuthState({ ...good, by }, SECRET, NOW) ?? '';
+    expect(verifyProfileOAuthState(cookie, SECRET, NOW)?.by).toEqual(by);
+    const parts = cookie.split('.');
+    const renamed = Buffer.from(JSON.stringify({ tag: by.tag, mandate_id: by.mandateId, display: 'Someone Else' })).toString('base64url');
+    expect(verifyProfileOAuthState([...parts.slice(0, 3), renamed, ...parts.slice(4)].join('.'), SECRET, NOW)).toBeNull();
+  });
+
+  it('control: a mandate without a name still signs and reads, with no name', () => {
+    const cookie = signProfileOAuthState({ ...good, by: MANDATE }, SECRET, NOW) ?? '';
+    expect(verifyProfileOAuthState(cookie, SECRET, NOW)?.by).toEqual(MANDATE);
+    expect(verifyProfileOAuthState(cookie, SECRET, NOW)?.by).not.toHaveProperty('display');
+  });
+
+  it.each([
+    ['the owner with a name', { tag: 'owner', display: 'Erika' }],
+    ['a name with a control character', { ...MANDATE, display: 'Erika\u0007' }],
+    ['a name with a line separator', { ...MANDATE, display: 'Erika\u2028Beispiel' }],
+    ['a name with surrounding space', { ...MANDATE, display: ' Erika' }],
+    ['an empty name', { ...MANDATE, display: '' }],
+    ['a name longer than the login contract allows', { ...MANDATE, display: 'n'.repeat(201) }],
+  ])('neither signs nor reads %s', (_label, by) => {
     expect(signProfileOAuthState({ ...good, by }, SECRET, NOW)).toBeNull();
+    const fields = 'mandateId' in by ? { tag: by.tag, mandate_id: by.mandateId, display: by.display } : { tag: by.tag, display: by.display };
+    const field = Buffer.from(JSON.stringify(fields)).toString('base64url');
+    const payload = `${STATE}.bexio.${VERIFIER}.${field}.${ASKED}.none.${String(NOW)}`;
+    expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)).toBeNull();
+  });
+
+  it('does not read a name that is not a string, though its signature is good', () => {
+    const field = Buffer.from(JSON.stringify({ tag: MANDATE.tag, mandate_id: MANDATE.mandateId, display: 7 })).toString('base64url');
+    const payload = `${STATE}.bexio.${VERIFIER}.${field}.${ASKED}.none.${String(NOW)}`;
+    expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)).toBeNull();
+  });
+
+  it('control: the same hand-built payload with a valid name reads', () => {
+    const by = { ...MANDATE, display: 'Erika Beispiel' };
+    const field = Buffer.from(JSON.stringify({ tag: by.tag, mandate_id: by.mandateId, display: by.display })).toString('base64url');
+    const payload = `${STATE}.bexio.${VERIFIER}.${field}.${ASKED}.none.${String(NOW)}`;
+    expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)?.by).toEqual(by);
   });
 
   it('refuses a cookie whose principal was swapped for the owner', () => {
