@@ -42,9 +42,11 @@
   approval names where the target came from on its card. A session of someone
   the owner let in is refused, and so is a run nobody watches: a scheduled or
   triggered run that sends to such a target stops that send and says so in its
-  result. Contacts, earlier sends and conversation text from before the update
-  do not count as owner-named: the first send to such a recipient after the
-  update asks, and a scheduled or triggered run's send to one stops. A trigger
+  result, unless the instruction of a trigger the owner set up names it.
+  Approving a send does not make its recipient owner-named. Contacts, earlier
+  sends and conversation text from before the update do not count as
+  owner-named either: a send to such a recipient asks until the owner names it
+  again, and a scheduled or triggered run's send to one stops. A trigger
   from before its creator was recorded counts as the owner's only once the
   owner confirms its recipients in the Triggers view. Once the
   conversation has read outside content, a `web_research` read whose URL has a
@@ -58,13 +60,15 @@
   (owner only, `expect` required). Meanwhile `POST /api/workflows/:id/run`
   answers `409` with code `workflow_awaits_stamp`; a webhook or one-shot
   trigger of such a workflow is switched off and has to be switched on again
-  after the stamp, while a schedule waits and resumes by itself. Workflow
+  after the stamp, while a schedule or watch waits and resumes by itself.
+  Workflow
   exports leave the digest out. (#2451)
 - `POST /api/sessions/:id/reply` answers a question only when the body names
   it with `promptId` (from the `prompt` event or
   `GET /api/sessions/:id/pending-prompt`).
   Without it (and with an `answer`) nothing is answered: `409` with code
-  `prompt_id_required` while a question is open, `404` otherwise. (#2644)
+  `prompt_id_required` while an `ask_user` question is open, `404` otherwise.
+  (#2644)
 - A Shopify connection records the version of the consent text it was
   confirmed under. A bulk run on a connection from before writes a product's
   title and SEO texts as before, but not its description or image alt text;
@@ -76,13 +80,12 @@
   refused; a stored step id from before still runs and is shown by its
   position. (#2589, #2604, #2606)
 - An engine that started without one of its stores now says so and refuses
-  what it could not keep: without `history.db` the agent does not run while a
-  daily or monthly spending cap is set, since it cannot be checked, and an
-  HTTP or mail send limit that is set refuses the send instead of sending
-  uncounted; without `engine.db` API profile changes, memory changes and to-do
-  changes are refused. The status
-  bar names the missing store and what it stops. (#2423, #2443,
-  #2447, #2457, #2540)
+  what it could not keep: without `history.db` the agent does not run, since
+  the spending caps (by default $100 a day and $500 a month) cannot be
+  checked, and an HTTP or mail send limit that is set refuses the send instead
+  of sending uncounted; without `engine.db` API profile changes, memory
+  changes and to-do changes are refused. The status bar names the missing
+  store and what it stops. (#2423, #2443, #2447, #2457, #2540)
 - The daily and monthly spending caps are now checked before model calls
   outside a run as well: memory and knowledge extraction, the inbox
   classifier and `Engine.batch`. Voice routes answer 402 at the cap; local
