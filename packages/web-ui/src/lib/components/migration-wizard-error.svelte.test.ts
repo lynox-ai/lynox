@@ -169,6 +169,25 @@ describe('the migration wizard after an error', () => {
 		expect(q('migration-check-target')).toBeNull();
 	});
 
+	it('says why it waits when the connection setup did not complete and the target may hold an attempt', async () => {
+		vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+		vi.setSystemTime(new Date('2026-11-18T13:05:00Z'));
+		await failWith({ code: 'handshake_unreachable', params: {}, retry: 'later' });
+		const time = new Date(Date.now() + MIGRATION_HOLD_MS).toLocaleTimeString(getLocale() === 'de' ? 'de-CH' : 'en-GB', { hour: '2-digit', minute: '2-digit' });
+		expect(text('migration-error-detail')).toBe(t('migration.stop.handshake_no_answer'));
+		expect(getError()).toBe(t('migration.stop.handshake_no_answer'));
+		expect(text('migration-retry-from')).toBe(tf('migration.retry_from', { time }));
+		expect(retryButton()?.disabled).toBe(true);
+	});
+
+	it('asks to check the address when the target cannot hold an attempt, and lets it be tried now', async () => {
+		await failWith({ code: 'handshake_unreachable', params: {}, retry: 'now' });
+		expect(text('migration-error-detail')).toBe(t('migration.stop.handshake_unreachable'));
+		expect(getError()).toBe(t('migration.stop.handshake_unreachable'));
+		expect(q('migration-retry-from')).toBeNull();
+		expect(retryButton()?.disabled).toBe(false);
+	});
+
 	it('sets the vault key\'s names apart in the sentence', async () => {
 		await failWith({ code: 'vault_key_missing', params: {}, retry: 'none' });
 		const values = [...(q('migration-error-detail')?.querySelectorAll('bdi[data-foreign-value]') ?? [])].map((v) => v.textContent);

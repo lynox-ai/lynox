@@ -45,7 +45,7 @@
 	const targetUrl = $derived(getTargetUrl());
 	const retry = $derived(getRetry());
 	// The error's sentence in the UI's language, from its code, with the values set apart in boxes.
-	const errorView = $derived(migrationErrorView(getErrorCode(), getErrorParams(), getErrorReason()));
+	const errorView = $derived(migrationErrorView(getErrorCode(), getErrorParams(), getErrorReason(), retry));
 	const errorNotStarted = $derived(getErrorNotStarted());
 	// With `later` the target may hold its session for 30 minutes from the error; the retry opens then,
 	// without a reload.
