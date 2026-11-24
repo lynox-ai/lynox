@@ -271,6 +271,10 @@ export interface BulkRunStatus {
    *  for a run that is not atomic also one an external undo took back after a send that was
    *  never recorded. Not one an atomic rollback found unrecorded and settled. */
   undone: number;
+  /** Every target of the run in exactly one class ({@link BULK_HEADS}), from one grouped read:
+   *  the classes sum to {@link total}. The counts above may overlap (a failed write whose send
+   *  is also unclear, a conflict a second loop wrote); these do not. */
+  heads: Record<BulkHead, number>;
   kind: BulkRunKind;
   atomic: boolean;
   sourceRunId: string | null;
@@ -455,6 +459,30 @@ const WRITE_FAILED_SQL = `(change != 'invalid' AND applied_at IS NULL AND error 
 // target (written, failed, halted, released) gives the claim back; only a loop that died keeps
 // it, and that target counts once a later pass has read it.
 const UNCLEAR_SQL = "(unknown_sends > 0 AND applied_at IS NULL AND undone_at IS NULL AND claimed_at IS NULL AND (error IS NULL OR error != 'conflict'))";
+
+/** The classes {@link BulkRunStatus.heads} splits a run's targets into, in rank order: a target
+ *  counts in the first one it belongs to. Taken out, left out by the plan (`invalid`); unchanged;
+ *  written (`applied_at`, one found already holding its value included, as in
+ *  {@link BulkRunStatus.applied}), and of those the ones taken
+ *  back since; taken back without being written (an atomic rollback settles a send it never
+ *  recorded, an external undo takes back a send that failed), whatever error that send left; a
+ *  conflict; a send without a clear answer (an external run only, as
+ *  {@link BulkRunStatus.sentUnknown}); a failed write; and the rest, not written. The class
+ *  follows the target's state, not the way it got there. */
+export const BULK_HEADS = ['deselected', 'invalid', 'unchanged', 'takenBack', 'written', 'settled', 'conflict', 'unclear', 'failed', 'open'] as const;
+export type BulkHead = (typeof BULK_HEADS)[number];
+// One bound parameter: 1 for an external run.
+const BULK_HEAD_SQL = `CASE
+  WHEN deselected_at IS NOT NULL THEN 'deselected'
+  WHEN change = 'invalid' THEN 'invalid'
+  WHEN change = 'unchanged' THEN 'unchanged'
+  WHEN applied_at IS NOT NULL AND undone_at IS NOT NULL THEN 'takenBack'
+  WHEN applied_at IS NOT NULL THEN 'written'
+  WHEN undone_at IS NOT NULL THEN 'settled'
+  WHEN error = 'conflict' THEN 'conflict'
+  WHEN ? = 1 AND ${UNCLEAR_SQL} THEN 'unclear'
+  WHEN ${WRITE_FAILED_SQL} THEN 'failed'
+  ELSE 'open' END`;
 
 /** The failure-rate halt (PRD §3.4): a pass halts once more than this share of the run's
  *  writing targets failed in it. */
@@ -1844,6 +1872,16 @@ export class BulkLedger {
     return judgeOutliers(inputs, own, kinds, markers);
   }
 
+  /** Each target in the first class of {@link BULK_HEADS} it belongs to, in one grouped read, so
+   *  the counts sum to the run's targets by construction. */
+  private headsOf(row: RunRow): Record<BulkHead, number> {
+    const heads = Object.fromEntries(BULK_HEADS.map((h) => [h, 0])) as Record<BulkHead, number>;
+    for (const r of this.engineDb.getDb().prepare(
+      `SELECT ${BULK_HEAD_SQL} AS head, COUNT(*) AS n FROM bulk_targets WHERE run_id = ? GROUP BY head`,
+    ).all(externalHostOf(row.target_system) === null ? 0 : 1, row.id) as { head: BulkHead; n: number }[]) heads[r.head] = r.n;
+    return heads;
+  }
+
   private toStatus(row: RunRow): BulkRunStatus {
     const db = this.engineDb.getDb();
     const changes: Record<BulkChange, number> = { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 };
@@ -1888,6 +1926,7 @@ export class BulkLedger {
       applied: row.targets_applied, foundAsPlanned: outcome.foundAsPlanned ?? 0, shopAddedMarkup: outcome.shopAddedMarkup ?? 0, hostRewrote: outcome.hostRewrote ?? 0, failed: outcome.failed ?? 0,
       conflicts: outcome.conflicts ?? 0, undone: outcome.undone ?? 0,
       sentUnknown: externalHostOf(row.target_system) === null ? 0 : outcome.sentUnknown ?? 0,
+      heads: this.headsOf(row),
       maxTargets: row.max_targets,
       failedOnce: (pass.unknown ?? 0) > 0 ? null : pass.failedOnce ?? 0,
       failureLimit: bulkFailureLimit(pass.writing), resumeOpen: open, resumeTries, resumeSends,
