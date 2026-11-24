@@ -393,8 +393,9 @@ export class MailContext {
         // for a reply from the sender of this inbound. A follow-up is kept under the sent mail's
         // Message-ID, which an answer's thread key is not wherever the server gives no thread id or
         // its own one; so it is also matched by the mails the reply headers name, in this account.
-        const keys = parentMessageIds(env);
-        if (env.threadKey && !keys.includes(env.threadKey)) keys.unshift(env.threadKey);
+        // An automatic reply (an out-of-office note, a read receipt) is not the answer waited for.
+        const keys = env.isAutoReply ? [] : parentMessageIds(env);
+        if (!env.isAutoReply && env.threadKey && !keys.includes(env.threadKey)) keys.unshift(env.threadKey);
         // The From list comes from the sender: only its first few addresses are looked up.
         for (const sender of env.from.slice(0, MAX_REPLY_SENDERS)) {
           for (const key of keys) {

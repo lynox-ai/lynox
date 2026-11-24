@@ -92,6 +92,14 @@ describe('a reminder waiting for an answer', () => {
     expect(status(id)).toBe('resolved');
   });
 
+  it('keeps waiting when the recipient\'s automatic reply names the sent mail, by headers or by thread key', async () => {
+    const id = waitFor();
+    const resolved = await deliver(answer({ isAutoReply: true }));
+    await deliver(answer({ messageId: '<ooo2@x>', isAutoReply: true, threadKey: '<sent@me.example>' }));
+    expect(status(id)).toBe('pending');
+    expect(resolved).toEqual([]);
+  });
+
   it('is still resolved by the thread key where that is the sent mail\'s id (control)', async () => {
     const id = waitFor();
     await deliver(answer({ threadKey: '<sent@me.example>', inReplyTo: undefined }));

@@ -306,7 +306,9 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       && fields.fromAddress.toLowerCase() !== existing.fromAddress.toLowerCase();
     const notifyOpts: import('./notifier.js').InboxNotifyOptions = { flagged };
     if (otherSender) {
-      const asPushed = (x: string | undefined): string => sanitisePushText(x ?? '', 80).toLowerCase();
+      // Compared as read: one Unicode form, without characters that show nothing (a soft hyphen).
+      const asPushed = (x: string | undefined): string =>
+        sanitisePushText(x ?? '', 80).normalize('NFKC').replace(/\p{Default_Ignorable_Code_Point}/gu, '').toLowerCase();
       const name = asPushed(fields.fromName);
       const sameName = name === asPushed(existing.fromName) || name === asPushed(existing.fromAddress);
       notifyOpts.sender = { address: fields.fromAddress ?? '', name: sameName ? undefined : fields.fromName };
