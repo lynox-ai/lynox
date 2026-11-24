@@ -43,7 +43,7 @@ import { onBoxBlock, pv } from '../../core/prompt-value.js';
 import { toolWordFrame } from '../tool-words.js';
 import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../../core/preset-write-context.js';
 import { currentCallSignal, currentCallTargetOrigin, currentCallTwins, joinCallSignal, noteApiCost, noteCallConnection, noteGrantLift, type CallApiCost } from '../../core/call-connection.js';
-import { crossHostRedirectGuard, readHopsGuarded } from '../../core/read-hops.js';
+import { CrossHostHopRefused, crossHostRedirectGuard, readHopsGuarded } from '../../core/read-hops.js';
 import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
 import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, urlQueryStrings, queryReadings, queryKeyName, jsonObjectNotGraphql, type BodyReadings } from '../../core/outbound-write.js';
@@ -490,6 +490,18 @@ function sameTarget(a: string, b: string): boolean {
   return x.origin === y.origin && x.pathname === y.pathname && x.search === y.search;
 }
 
+/**
+ * The hops that answered before a redirect ride ended in an error, first to last: every request a
+ * server received, the first included. A refusal after one of them ends the call, and the call
+ * still counts the request a priced API answered (the cost in the `http_request` handler).
+ */
+const answeredHops = new WeakMap<object, readonly string[]>();
+
+/** {@link answeredHops} for an error a redirect ride threw; empty for any other. */
+export function answeredHopsOf(err: unknown): readonly string[] {
+  return typeof err === 'object' && err !== null ? answeredHops.get(err) ?? [] : [];
+}
+
 export async function fetchWithValidatedRedirects(
   url: string,
   init: RequestInit,
@@ -555,7 +567,8 @@ export async function fetchWithValidatedRedirects(
   // because the origin changed. The write was not sent there, and the response is that GET's —
   // unless a GET from there on carried an override (`sent.again.carried`), which a server may run.
   // `sent`: the write this call sent and a server answered, with a second sending on a redirect.
-): Promise<{ response: Response; finalUrl: string; writeFollowedAsRead?: string; sent?: SentWrite }> {
+  // `answered`: every hop a server answered, first to last, the final one included.
+): Promise<{ response: Response; finalUrl: string; answered: readonly string[]; writeFollowedAsRead?: string; sent?: SentWrite }> {
   let currentUrl = url;
   let method = (init.method ?? 'GET').toUpperCase();
   const originalMethod = method;
@@ -585,6 +598,8 @@ export async function fetchWithValidatedRedirects(
   // yet and carries no write of its own: only a failure there is one where the write "was not
   // sent". A failure further on, or on a hop that kept an override, is worded without it.
   let unansweredDowngrade: string | undefined;
+  // Every hop a server answered, for the error that ends the ride (`answeredHopsOf`).
+  const answered: string[] = [];
 
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
     try {
@@ -604,6 +619,7 @@ export async function fetchWithValidatedRedirects(
       // A hop to a store, from a request that was not one, is a redirect the engine does not follow.
       if (redirects > 0 && pass === undefined) refuseRedirectToStore(currentUrl);
       const response = await fetchPinned(currentUrl, requestInit, pass);
+      answered.push(currentUrl);
       sent ??= ownWrite ?? overrideHop;
       if (pendingAgain !== undefined && sent !== undefined) sent = { ...sent, again: pendingAgain };
       if (pendingAgain !== undefined) onSendAgain?.({ ...pendingAgain, answered: true });
@@ -614,6 +630,7 @@ export async function fetchWithValidatedRedirects(
         return {
           response,
           finalUrl: currentUrl,
+          answered: [...answered],
           ...(writeFollowedAsRead === undefined ? {} : { writeFollowedAsRead }),
           ...(sent === undefined ? {} : { sent }),
         };
@@ -722,8 +739,11 @@ export async function fetchWithValidatedRedirects(
       // Anything else that ends the call after a write was answered (the next host's policy, the
       // network, a redirect without a target) ends it with the note as well: the generic error
       // alone reads as "nothing happened". An abort is the caller's own limit and keeps its form.
+      if (answered.length > 0 && typeof err === 'object' && err !== null) answeredHops.set(err, [...answered]);
       if (sent === undefined || err instanceof RedirectRefusedAfterWrite || init.signal?.aborted === true) throw err;
-      throw new RedirectRefusedAfterWrite(sent, sent.via === undefined ? unansweredDowngrade : undefined, 'failed', err);
+      const failed = new RedirectRefusedAfterWrite(sent, sent.via === undefined ? unansweredDowngrade : undefined, 'failed', err);
+      answeredHops.set(failed, [...answered]);
+      throw failed;
     }
   }
 
@@ -3135,6 +3155,17 @@ function withFrontNotes(result: string, writeNote: string | undefined, sizeNotes
 }
 
 /** The profile of `url`'s host when it has a cost; `undefined` for any other URL. */
+/** The priced profile of the last hop in `hops` that has one: the API a redirect ride reached
+ *  last, which the call counts when the final answer came from elsewhere. */
+function lastPricedHop(hops: readonly string[] | undefined, toolContext: ToolContext | undefined): ApiProfile | undefined {
+  const list = hops ?? [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const profile = apiProfileOfUrl(list[i]!, toolContext);
+    if (profile !== undefined) return profile;
+  }
+  return undefined;
+}
+
 function apiProfileOfUrl(url: string, toolContext: ToolContext | undefined): ApiProfile | undefined {
   try {
     const profile = toolContext?.apiStore?.getByHostname(new URL(url).hostname);
@@ -4222,7 +4253,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               return writeKey(next, hopHeaders, 'drop') === writeKey(askedUrl, headers, 'drop') ? true : 'consent';
             }
           : undefined;
-      const { response, finalUrl: finalRequestUrl, writeFollowedAsRead, sent } = await Promise.race([
+      const { response, finalUrl: finalRequestUrl, answered: answeredHopUrls, writeFollowedAsRead, sent } = await Promise.race([
         fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, crossHostRedirectGuard(input.url, httpOutwardWrite(input) === null && readHopsGuarded(currentCallTargetOrigin()), delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect'))), auth.pass, (write) => { carriedWrite = write; }, (again) => { againWrite = again; }),
         wallTimeout,
         stopped,
@@ -4230,11 +4261,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const status = `${response.status} ${response.statusText}`;
       // After a write turned into a GET on another origin, the answer is that GET's, not the write's.
       answeredStatus = writeFollowedAsRead === undefined ? status : `${status} to the GET it was redirected to on ${urlForNote(finalRequestUrl)}`;
-      // Attributed to the final URL after redirects; when that host has no cost but the first one
+      // Attributed to the final URL after redirects; when that host has no cost but an earlier hop
       // has, the request still went to the priced API (a redirect to a CDN or a signed link). The
       // answer is then another party's, so its cost field is not read: only the profile rate counts.
       const answeringProfile = apiProfileOfUrl(finalRequestUrl, toolContext);
-      const costProfile = answeringProfile ?? apiProfileOfUrl(input.url, toolContext);
+      const costProfile = answeringProfile ?? lastPricedHop(answeredHopUrls, toolContext) ?? apiProfileOfUrl(input.url, toolContext);
       const costInAnswer = answeringProfile !== undefined;
       apiCost = costProfile === undefined ? undefined : apiCostOfAnswer(costProfile, undefined);
       // Strip sensitive response headers to prevent credential leakage to agent
@@ -4536,8 +4567,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       if (answeredStatus !== undefined && apiCost !== undefined) noteApiCost(apiCost);
       // So does a write whose redirect hop was refused: it was sent and answered before the hop.
       // And a read whose override hop was refused: the read went out and was answered.
-      if (err instanceof RedirectRefusedAfterWrite || err instanceof DelegatedHopRefused || err instanceof OverrideHopRefused) {
-        const sentTo = apiProfileOfUrl(input.url, toolContext);
+      // And a read whose hop to another host was refused (`CrossHostHopRefused`): the hops before it were answered.
+      // Counted at the last answered hop on a priced API: a write to a host without a profile that a
+      // redirect sends on to one was answered there before the next hop was refused.
+      if (err instanceof RedirectRefusedAfterWrite || err instanceof DelegatedHopRefused || err instanceof OverrideHopRefused || err instanceof CrossHostHopRefused) {
+        const sentTo = lastPricedHop(answeredHopsOf(err), toolContext) ?? apiProfileOfUrl(input.url, toolContext);
         if (sentTo !== undefined) noteApiCost(apiCostOfAnswer(sentTo, undefined));
       }
       // A soft failure leaves untouched. `ToolSoftFailure` extends Error with

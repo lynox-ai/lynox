@@ -28,6 +28,7 @@ import type { RequestPrincipal } from '../../core/request-principal.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { currentCallSignal, runInCallSlot, type CallSlot } from '../../core/call-connection.js';
+import { CROSS_HOST_REFUSAL } from '../../core/read-hops.js';
 import type { PinnedTransportInput } from '../../core/network-guard.js';
 import { approvalOrigin, writeApprovalKey } from '../../core/untrusted-epoch.js';
 
@@ -1827,6 +1828,43 @@ describe('httpRequestTool', () => {
           fetchMock.mock.calls.map(([u, init]) => `${(init as RequestInit | undefined)?.method ?? 'GET'} ${new URL(String(u)).pathname}`);
         const cancel = { url: 'https://api.bexio.com/2.0/kb_invoice/7/cancel', method: 'POST', body: '{}' };
 
+        // Decided, not overlooked: the readings are requests the engine makes for its question, and
+        // the call counts the one request it was asked to send. That holds while the only provider
+        // with a write context bears no rate of its own; a rate the owner sets on such a profile is
+        // the way it can stop holding (`PRESET_WRITE_CONTEXT`).
+        it('counts the write on its call, and nothing for the readings when the person refuses it, on a profile with a rate', async () => {
+          const { ApiStore } = await import('../../core/api-store.js');
+          const store = new ApiStore();
+          store.register({
+            id: 'bexio-api', name: 'bexio', base_url: 'https://api.bexio.com', description: 'bexio API',
+            cost: { model: 'per_call', rate_usd: 0.002 } as never,
+            auth: {
+              type: 'oauth2', vault_keys: ['BEXIO_CLIENT_ID', 'BEXIO_CLIENT_SECRET'],
+              oauth: { grant_type: 'refresh_token', client_id_key: 'BEXIO_CLIENT_ID', client_secret_key: 'BEXIO_CLIENT_SECRET', preset_id: 'bexio', scope: 'contact_show kb_invoice_edit' },
+            },
+          });
+          testCtx.apiStore = store;
+          mockDnsPublic();
+          const fetchMock = account({
+            '/2.0/kb_invoice/7': createMockResponse({ json: invoice }),
+            '/3.0/currencies/1': createMockResponse({ json: { id: 1, name: 'CHF' } }),
+          });
+          const slot: CallSlot = {};
+          await runInCallSlot(slot, () => handler(cancel, makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow') })));
+          expect(sent(fetchMock)).toEqual(['GET /2.0/kb_invoice/7', 'GET /3.0/currencies/1', 'POST /2.0/kb_invoice/7/cancel']);
+          expect(slot.apiCost).toEqual({ usd: 0.002, source: 'profile' });
+
+          // The person says no: the readings went out, the write did not, and nothing is counted.
+          const denied = account({
+            '/2.0/kb_invoice/7': createMockResponse({ json: invoice }),
+            '/3.0/currencies/1': createMockResponse({ json: { id: 1, name: 'CHF' } }),
+          });
+          const refused: CallSlot = {};
+          await runInCallSlot(refused, () => handler(cancel, makeAgent({ promptUser: vi.fn().mockResolvedValue('Deny') })).then(String, (e: unknown) => String(e)));
+          expect(sent(denied)).toEqual(['GET /2.0/kb_invoice/7', 'GET /3.0/currencies/1']);
+          expect(refused.apiCost).toBeUndefined();
+        });
+
         it('cancelling an invoice: reads it, and the question names number, recipient and amount, on the instance only', async () => {
           await withBexio();
           mockDnsPublic();
@@ -2046,6 +2084,34 @@ describe('httpRequestTool', () => {
           const res = await runInCallSlot(slot, () => visible({ url: 'https://example.com/v1/report', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: reviewed })));
           expect(res).toMatch(/^Write possibly landed: POST/);
           expect(slot.apiCost).toEqual({ usd: 0.002, source: 'profile' });
+        });
+
+        it('counts an approved write sent on through a host without a profile at the priced API that answered it, before a later hop is refused', async () => {
+          const { ApiStore } = await import('../../core/api-store.js');
+          testCtx.apiStore = new ApiStore();
+          testCtx.apiStore.register({ id: 'reports', name: 'Reports', base_url: 'https://api.reports.example.org/v1', description: 'Reports API', cost: { model: 'per_call', rate_usd: 0.002 } });
+          mockDnsPublic();
+          const fetchMock = vi.fn()
+            .mockResolvedValueOnce(createMockResponse({ status: 303, headers: { location: 'https://api.reports.example.org/v1/report' } }))
+            .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://api.reports.example.org/v1/report?_method=DELETE' } }));
+          vi.stubGlobal('fetch', fetchMock);
+          const slot: CallSlot = {};
+          const res = await runInCallSlot(slot, () => visible({ url: 'https://hooks.example.net/in', method: 'POST', body: '{}' }, makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow') })));
+          expect(fetchMock).toHaveBeenCalledTimes(2);
+          expect(res).toMatch(/^Write possibly landed: POST/);
+          expect(slot.apiCost).toEqual({ usd: 0.002, source: 'profile' });
+
+          // The next hop fails on the network instead: the priced API still answered first.
+          const failing = vi.fn()
+            .mockResolvedValueOnce(createMockResponse({ status: 303, headers: { location: 'https://api.reports.example.org/v1/report' } }))
+            .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.net/file' } }))
+            .mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+          vi.stubGlobal('fetch', failing);
+          const failed: CallSlot = {};
+          const out = await runInCallSlot(failed, () => visible({ url: 'https://hooks.example.net/in', method: 'POST', body: '{}' }, makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow') })));
+          expect(failing).toHaveBeenCalledTimes(3);
+          expect(out).toMatch(/^Write possibly landed: POST/);
+          expect(failed.apiCost).toEqual({ usd: 0.002, source: 'profile' });
         });
 
         it('a write refused for its header names the header, never its value', async () => {
@@ -4184,6 +4250,97 @@ describe('httpRequestTool', () => {
       const slot: CallSlot = {};
       await runInCallSlot(slot, () => handler({ url: 'https://short.example.org/k' }, costAgent(store, [])));
       expect(slot.apiCost).toEqual({ usd: 0.09, source: 'response' });
+    });
+
+    it('counts a read sent on through a host without a profile at the priced API that answered, when a later hop is refused', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001 });
+      mockDnsPublic();
+      const override = { status: 307, headers: { location: 'https://cdn.example.org/x?_method=DELETE' } };
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://api.dataforseo.com/v3/keywords' } }))
+        .mockResolvedValueOnce(createMockResponse(override));
+      vi.stubGlobal('fetch', fetchMock);
+      const slot: CallSlot = {};
+      const out = await runInCallSlot(slot, () => handler({ url: 'https://short.example.org/k' }, costAgent(store, [])).then(String, (e: unknown) => String(e)));
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(out).toContain(OVERRIDE_REDIRECT_REFUSAL);
+      expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+
+      // A host without a profile after the priced API changes nothing: the priced API still answered.
+      const later = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://api.dataforseo.com/v3/keywords' } }))
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.org/y' } }))
+        .mockResolvedValueOnce(createMockResponse(override));
+      vi.stubGlobal('fetch', later);
+      const second: CallSlot = {};
+      await runInCallSlot(second, () => handler({ url: 'https://short.example.org/k' }, costAgent(store, [])).then(String, (e: unknown) => String(e)));
+      expect(later).toHaveBeenCalledTimes(3);
+      expect(second.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+
+      // Control: nothing priced answered, nothing is counted.
+      const none = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.org/y' } }))
+        .mockResolvedValueOnce(createMockResponse(override));
+      vi.stubGlobal('fetch', none);
+      const third: CallSlot = {};
+      await runInCallSlot(third, () => handler({ url: 'https://short.example.org/k' }, costAgent(store, [])).then(String, (e: unknown) => String(e)));
+      expect(third.apiCost).toBeUndefined();
+    });
+
+    it('counts the priced API that answered a guarded read before its hop to another host was refused, and nothing when no priced API answered', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001 });
+      mockDnsPublic();
+      // A read after outside content: its redirects stay on its own host.
+      const held = { known: [], allKnown: false } as const;
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.org/x' } }));
+      vi.stubGlobal('fetch', fetchMock);
+      const slot: CallSlot = { targetOrigin: held };
+      const out = await runInCallSlot(slot, () => handler({ url: 'https://api.dataforseo.com/v3/keywords' }, costAgent(store, [])).then(String, (e: unknown) => String(e)));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(out).toContain(CROSS_HOST_REFUSAL);
+      expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+
+      // The override hop of such a read goes to another host: the same refusal, and the answer still counts.
+      const override = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://cdn.example.org/x?_method=DELETE' } }));
+      vi.stubGlobal('fetch', override);
+      const second: CallSlot = { targetOrigin: held };
+      const again = await runInCallSlot(second, () => handler({ url: 'https://api.dataforseo.com/v3/keywords' }, costAgent(store, [])).then(String, (e: unknown) => String(e)));
+      expect(override).toHaveBeenCalledTimes(1);
+      expect(again).toContain(CROSS_HOST_REFUSAL);
+      expect(second.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+
+      // Control: a host without a profile answered, nothing is counted.
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.org/y' } })));
+      const third: CallSlot = { targetOrigin: held };
+      const none = await runInCallSlot(third, () => handler({ url: 'https://short.example.org/k' }, costAgent(store, [])).then(String, (e: unknown) => String(e)));
+      expect(none).toContain(CROSS_HOST_REFUSAL);
+      expect(third.apiCost).toBeUndefined();
+    });
+
+    it('counts a request the priced API sent on to a host without a profile, after a host without one sent it there', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001, response_field: 'cost' });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://api.dataforseo.com/v3/keywords' } }))
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.org/signed' } }))
+        .mockResolvedValueOnce(createMockResponse({ headers: { 'content-type': 'application/json' }, json: { cost: 0.09 } })));
+      const slot: CallSlot = {};
+      await runInCallSlot(slot, () => handler({ url: 'https://short.example.org/k' }, costAgent(store, [])));
+      // The rate, not the figure in another party's answer.
+      expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+
+      // Two priced APIs on the way: the one reached last counts.
+      store.register({ id: 'serp', name: 'Serp', base_url: 'https://serp.example.com', description: 'second priced API', cost: { model: 'per_call', rate_usd: 0.005 } as never });
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://serp.example.com/q' } }))
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.org/signed' } }))
+        .mockResolvedValueOnce(createMockResponse({ headers: { 'content-type': 'application/json' }, json: { ok: true } })));
+      const both: CallSlot = {};
+      await runInCallSlot(both, () => handler({ url: 'https://api.dataforseo.com/v3/keywords' }, costAgent(store, [])));
+      expect(both.apiCost).toEqual({ usd: 0.005, source: 'profile' });
     });
 
     it('records nothing for a host whose profile has no cost', async () => {
