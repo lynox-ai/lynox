@@ -29,7 +29,8 @@ import { shapeRequestForModel } from '../core/llm-wire-rules.js';
 import {
   exchangeToken, serializeTokenBody, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
-import { consentNoticeVersion, derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
+import { beginStoreConnect, endStoreConnect } from '../core/store-token-refresh.js';
+import { codeExchangeExtraParams, consentNoticeVersion, derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
 import { bindShopifyCallback, shopifyCallbackRefusalLine, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import { connectNoteFor, noteButton, noteLang, noteText, noteTitle, type ConnectNote, type NoteLang } from './connect-note.js';
@@ -230,6 +231,9 @@ const readsThread = (thread: ThreadNamer): MandateStance => ({ kind: 'reads', th
 const ownerOnly = (what: string): MandateStance => ({ kind: 'owner-only', what });
 /** Rows one page of the access trail reads at most. */
 const ACCESS_TRAIL_MAX_ROWS = 500;
+
+/** A store's connect callback that holds its profile against a refresh, by request, until the route returns. */
+const storeConnectOf = new WeakMap<IncomingMessage, string>();
 /** A mandate may; the handler marks the act. */
 const MARK: MandateStance = { kind: 'mark' };
 /** A mandate may act on what it set up or last changed itself; the handler checks it. */
@@ -10326,7 +10330,7 @@ export class LynoxHTTPApi {
       }
       const apiStore = engine.getApiStore();
       const secretStore = engine.getSecretStore();
-      if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, /* the run's first writing key: a write */ true, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: ctx.mandateEnds, secretReleases: ctx.secretReleases, exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest, containment: ctx.containment, vaultNameBindings: ctx.vaultNameBindings }, { bulkRunId: runId }))) {
+      if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, /* the run's first writing key: a write */ true, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: ctx.mandateEnds, secretReleases: ctx.secretReleases, exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest, containment: ctx.containment, vaultNameBindings: ctx.vaultNameBindings, hostPolicy: ctx }, { bulkRunId: runId }))) {
         return 'The stored credential for this run\'s host cannot be attached. Check the API connection for the host, then try again.';
       }
       return null;
@@ -12893,13 +12897,34 @@ export class LynoxHTTPApi {
         return;
       }
 
-      const exchangeParams = authorizationCodeParams({
-        code: exchangeCode,
-        redirectUri: profileOAuthRedirectUri(),
-        clientId,
-        clientSecret,
-        verifier: signed.verifier,
-      });
+      // A store's connect and a refresh of the same connection never run at once (the store says
+      // not to): while a refresh runs the connect is refused, and from here until the route
+      // returns no refresh starts (`store-token-refresh.ts`).
+      if (storeCallback !== undefined) {
+        if (!beginStoreConnect(signed.profileId)) {
+          sendOAuthHtml(res, 409, OAUTH_RESULT_TEXTS.refreshRunning, 'apis');
+          return;
+        }
+        storeConnectOf.set(req, signed.profileId);
+      }
+      // The preset's ask for an expiring token goes into the body before it is serialised, so a
+      // store's exchange pass covers it. A profile that already holds a token without an expiry
+      // keeps the exchange it was connected with.
+      const exchangeParams = {
+        ...authorizationCodeParams({
+          code: exchangeCode,
+          redirectUri: profileOAuthRedirectUri(),
+          clientId,
+          clientSecret,
+          verifier: signed.verifier,
+        }),
+        ...codeExchangeExtraParams(preset, {
+          hasAccessToken: secretStore.holds(accessTokenKey(profile.id)),
+          // From what the engine itself keeps, never from a field the profile carries (a model may
+          // write `token_expires_at`): a grant with a refresh end, or a refresh token in its slot.
+          expiringHeld: profile.oauth_grant?.refresh_expires_at !== undefined || secretStore.holds(refreshTokenKey(profile.id)),
+        }),
+      };
       const bodyFormat = preset ? presetTokenBodyFormat(preset, oauth.body_format) : oauth.body_format ?? 'form';
       // A store's exchange goes out only under its own pass (PRD Appendix B4), minted over the
       // body as it is sent. Without one, `exchangeToken` refuses it as before.
@@ -12924,7 +12949,7 @@ export class LynoxHTTPApi {
         return;
       }
 
-      let parsed: { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown; scope?: unknown; id_token?: unknown };
+      let parsed: { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown; refresh_token_expires_in?: unknown; scope?: unknown; id_token?: unknown };
       try {
         parsed = JSON.parse(exchanged.text) as typeof parsed;
       } catch {
@@ -13161,6 +13186,10 @@ export class LynoxHTTPApi {
             const binding = engine.getEngineDb()?.storeBindingDigest(signed.profileId, storeCallback.origin, accessToken) ?? null;
             if (binding !== null) grantNext.store_binding = binding;
             else storeBindingFailed = true;
+            // When the refresh token of an expiring connection runs out, for the hint before it does.
+            const refreshExpiry = tokenExpiryFrom(parsed.refresh_token_expires_in);
+            if (refreshToken !== null && refreshExpiry !== 'unknown') grantNext.refresh_expires_at = refreshExpiry;
+            else delete grantNext.refresh_expires_at;
           }
           // This exchange's client and refresh token are the stamp, the same one
           // `fetch_token` writes after a good exchange. An exchange that returned
@@ -13231,6 +13260,11 @@ export class LynoxHTTPApi {
         await profileOAuthCallback(req, res, params, body);
       } finally {
         this.profileGrantsPending--;
+        const connecting = storeConnectOf.get(req);
+        if (connecting !== undefined) {
+          storeConnectOf.delete(req);
+          endStoreConnect(connecting);
+        }
       }
     }, free('a GET is answered before the dispatcher, where no stance applies; a HEAD reaches the dispatcher and this stance. Either way it completes only the connect its signed state cookie names, and that cookie is set only by /api/oauth/connect/:id (for a mandate only by the POST from the note page), where a mandate connects only a profile it set up'));
 

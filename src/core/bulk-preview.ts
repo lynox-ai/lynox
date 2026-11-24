@@ -141,6 +141,7 @@ function haltFor(read: ExternalRead): BulkHaltReason | null {
   switch (read.kind) {
     case 'no_credential': return BULK_HALT_REASONS.credential;
     case 'unauthorized': return BULK_HALT_REASONS.unauthorized;
+    case 'reconnect': return read.why === 'ended' ? BULK_HALT_REASONS.storeAccessEnded : BULK_HALT_REASONS.storeClientMisnamed;
     case 'blocked': return BULK_HALT_REASONS.blocked;
     case 'not_granted': return BULK_HALT_REASONS.contract;
     case 'unrecorded': return BULK_HALT_REASONS.unrecorded;
