@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { REPORT_MAX_DEPTH, TargetAnswerTooSlow, TargetDidNotAnswer, TransferOutOfTime, askTarget, transferDeadlineMs, isConnectionFailure, capText, discardBody, durationText, readTargetBody, readTargetJson, relayedReport, relayedText } from './migration-target-reply.js';
+import { REPORT_MAX_DEPTH, TargetAnswerTooSlow, TargetDidNotAnswer, TransferOutOfTime, askTarget, transferDeadlineMs, isConnectionFailure, capText, discardBody, durationText, readTargetBody, readTargetJson, relayedReport, relayedText, homeAsTilde } from './migration-target-reply.js';
 
 /** A response whose body is `parts`, then either ends or stays open; `cancelled` says whether it was let go. */
 function streamed(parts: string[], end = true): { res: Response; state: { cancelled: boolean } } {
@@ -173,5 +173,32 @@ describe('the target\'s words are shown without what would not display as itself
   it('cleans every string of a restore report, its keys included, and leaves the rest as it is', () => {
     expect(relayedReport({ secretsImported: 3, configApplied: true, portableDirSkipped: ['work‮space/a\nb'], 'k​': null }))
       .toEqual({ secretsImported: 3, configApplied: true, portableDirSkipped: ['workspace/a b'], k: null });
+  });
+});
+
+describe('this instance\'s error text shows its home directory as ~', () => {
+  it('writes the home as ~ where it starts a path, every time it does', () => {
+    expect(homeAsTilde("ENOENT: no such file or directory, open '/home/x/.lynox/a.db'", ['/home/x'])).toBe("ENOENT: no such file or directory, open '~/.lynox/a.db'");
+    expect(homeAsTilde('copy /home/x/a to /home/x/b failed', ['/home/x'])).toBe('copy ~/a to ~/b failed');
+  });
+
+  it('takes a home only as a whole path segment', () => {
+    expect(homeAsTilde('open /home/xy/a.db', ['/home/x'])).toBe('open /home/xy/a.db');
+    expect(homeAsTilde('open /home/x.old/a.db', ['/home/x'])).toBe('open /home/x.old/a.db');
+    expect(homeAsTilde('open /srv/home/x/a.db', ['/home/x'])).toBe('open /srv/home/x/a.db');
+  });
+
+  it('writes a home at the end of the text as ~', () => {
+    expect(homeAsTilde('cannot write to /home/x', ['/home/x'])).toBe('cannot write to ~');
+    expect(homeAsTilde('/home/x', ['/home/x/'])).toBe('~');
+  });
+
+  it('leaves a text without the home as it is, and ignores an empty, relative or root home', () => {
+    expect(homeAsTilde('open /var/lib/a.db', ['/home/x'])).toBe('open /var/lib/a.db');
+    expect(homeAsTilde('open /var/lib/a.db', ['', '/', 'home'])).toBe('open /var/lib/a.db');
+  });
+
+  it('takes both homes when HOME names another one than the system\'s', () => {
+    expect(homeAsTilde('/home/x/a and /data/x/b', ['/home/x', '/data/x'])).toBe('~/a and ~/b');
   });
 });

@@ -1448,7 +1448,7 @@ describe('httpRequestTool', () => {
             };
             const store = { getByHostname: () => profile, getHostConflict: () => undefined, unreadableHolds: () => false, knownProfiles: () => [profile], get: () => { throw new Error('store unavailable'); } };
             const headers: Record<string, string> = {};
-            const attach = attachStoredCredential('https://api.shop.example/v1/orders', headers, write, {
+            const attach = attachStoredCredential('https://api.shop.example/v1/orders', headers, write, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
               apiStore: store as never, secretStore: { resolve: () => 'shop-value' } as never, principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store as never),
             }, { bulkRunId: 'run-1' });
             if (outcome === 'rejects') await expect(attach).rejects.toThrow(/store unavailable/);
@@ -10172,7 +10172,7 @@ describe('requests to a Shopify store are refused', () => {
       };
       const store = { getByHostname: () => profile, getHostConflict: () => undefined, unreadableHolds: () => false, knownProfiles: () => [profile], get: () => profile };
       const headers: Record<string, string> = {};
-      const attached = await attachStoredCredential(url, headers, false, {
+      const attached = await attachStoredCredential(url, headers, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
         apiStore: store as never, secretStore: { resolve: () => 'store-value' } as never, principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store as never),
       }, { bulkRunId: 'run-1' });
       return { attached, headers };

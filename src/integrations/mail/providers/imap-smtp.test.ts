@@ -303,6 +303,37 @@ describe('ImapSmtpProvider — LYNOX_MAIL_INSECURE_TLS opt-in', () => {
   });
 });
 
+describe('ImapSmtpProvider — list: reply headers', () => {
+  const env = (uid: number) => ({ date: new Date('2026-11-24T08:00:00Z'), subject: 'Re: Offerte', messageId: `<r${String(uid)}@example.com>`, inReplyTo: '<first@example.com>', from: [{ address: 'a@example.com' }], to: [{ address: 'me@example.com' }], cc: [] });
+
+  it('asks for References and reads its ids, keyed by the Message-ID when the server gives no thread id', async () => {
+    probe.search.mockResolvedValue([1]);
+    probe.fetch.mockImplementation(() => asyncIterFrom([{
+      ...makeFetchMessage({ uid: 1, envelope: env(1) }),
+      headers: Buffer.from('References: <root@example.com>\r\n <first@example.com>\r\n\r\n'),
+    }]));
+    const [e] = await new ImapSmtpProvider(ACCOUNT, credResolver).list({ folder: 'INBOX', limit: 10 });
+    const query = probe.fetch.mock.calls[0]?.[1] as { headers?: string[] };
+    expect(query.headers, 'without the header no reply on such a server finds its thread').toContain('references');
+    expect(e).toMatchObject({ threadKey: '<r1@example.com>', inReplyTo: '<first@example.com>', references: ['<root@example.com>', '<first@example.com>'] });
+  });
+
+  it('keeps the server thread id as the key when the server gives one', async () => {
+    probe.search.mockResolvedValue([2]);
+    probe.fetch.mockImplementation(() => asyncIterFrom([{ ...makeFetchMessage({ uid: 2, envelope: env(2) }), threadId: 'T-42' }]));
+    const [e] = await new ImapSmtpProvider(ACCOUNT, credResolver).list({ folder: 'INBOX', limit: 10 });
+    expect(e).toMatchObject({ threadKey: 'T-42', references: [] });
+  });
+
+  it('asks for References when it searches too', async () => {
+    probe.search.mockResolvedValue([1]);
+    probe.fetch.mockImplementation(() => asyncIterFrom([makeFetchMessage({ uid: 1 })]));
+    await new ImapSmtpProvider(ACCOUNT, credResolver).search({ text: 'x' });
+    const query = probe.fetch.mock.calls[0]?.[1] as { headers?: string[] };
+    expect(query.headers).toContain('references');
+  });
+});
+
 describe('ImapSmtpProvider — list: automatic mail', () => {
   it('marks an out-of-office reply as isAutoReplied, other automatic mail only as isAutoReply', async () => {
     probe.search.mockResolvedValue([1, 2, 3]);

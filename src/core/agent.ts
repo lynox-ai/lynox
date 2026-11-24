@@ -83,10 +83,10 @@ import { SearchResultAddresses } from './search-result-addresses.js';
 import type { ConversationLatch } from './conversation-latch.js';
 import type { NoticeLanguage } from './notice-language.js';
 import { noticeLanguage } from './notice-language.js';
-import { normalizeHostName, normalizeMailTarget, type SendTarget } from './send-target.js';
+import { carriesAddress, normalizeHostName, normalizeMailTarget, type SendTarget } from './send-target.js';
 import {
   originAsk, originCarriedAsk, originCarriedDenied, originCarriedMandate, originCarriedUnattended, originBashAfterForeign, originDenied, originLookupFailedHead, originLookupFailedMandate, originLookupFailedUnattended,
-  originRefusedMandate, originRefusedUnattended, originUnreadable, type OriginRefusal, type OriginTargets, type SendOrigin, type TargetNoun,
+  originRefusedMandate, originRefusedUnattended, originTokenUrlAsk, originTokenUrlRefused, originTokenUrlUnreadable, originUnreadable, watchEveryMinutes, type OriginRefusal, type OriginTargets, type SendOrigin, type TargetNoun,
 } from './origin-notices.js';
 import type { CallTargetOrigin } from './call-connection.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
@@ -471,11 +471,20 @@ export function providerSearchAdmitted(ctx: ToolContext | undefined): boolean {
   return policy === undefined || policy === 'allow-all' || policy === 'guarded';
 }
 
-/** Whether message content carries a search the provider ran itself: its call or its results. */
+/** The name the provider's web search is offered under, and counted under as an external-content
+ *  tool of the turn that ran it ({@link holdsProviderSearch}). */
+const PROVIDER_SEARCH_TOOL = 'web_search' as const;
+
+/** Whether message content carries a server tool the provider ran itself, its call or its result:
+ *  the web search, and any server tool offered later, which may reach outside content too. All but
+ *  the lazy tools' tool search, which searches the request's own tool definitions and fetches
+ *  nothing. A client tool's `tool_result` is not one. */
 function holdsProviderSearch(content: unknown): boolean {
   return Array.isArray(content) && content.some((b: unknown) => {
-    const type = (b as { type?: unknown } | null)?.type;
-    return type === 'server_tool_use' || type === 'web_search_tool_result';
+    const block = b as { type?: unknown; name?: unknown } | null;
+    const type = block?.type;
+    if (type === 'server_tool_use') return !(typeof block?.name === 'string' && block.name.startsWith('tool_search_tool_'));
+    return typeof type === 'string' && type.endsWith('_tool_result') && !type.startsWith('tool_search_tool_');
   });
 }
 
@@ -1129,8 +1138,8 @@ export class Agent implements IAgent {
   /** Whether this run has seen wrapped untrusted content (Wave 1.2). */
   get sawUntrustedData(): boolean { return this._sawUntrustedData; }
   /** DK.1 F5: sticky over the CONVERSATION (not reset per run) — set once this conversation
-   *  has ingested untrusted content (a wrapped marker OR an {@link Agent.EXTERNAL_CONTENT_TOOLS}
-   *  read). The per-run latch resets each turn, but an injected instruction ("on your NEXT
+   *  has ingested untrusted content (a wrapped marker, an {@link Agent.EXTERNAL_CONTENT_TOOLS}
+   *  read, OR a server tool the provider ran itself, such as its web search). The per-run latch resets each turn, but an injected instruction ("on your NEXT
    *  reply, remember(pin:true) …") persists in context, so a clean-latch turn could still be
    *  executing it. A durable-write gate ORs this in → such a deferred `remember` routes to
    *  pending_review, not active+pinned. Reset only on a fresh conversation (`reset`) or
@@ -1139,7 +1148,8 @@ export class Agent implements IAgent {
   private _conversationSawUntrusted = false;
   /** The taint state when the current tool batch started; read by the secret gate. */
   private _taintBeforeBatch: boolean | undefined;
-  /** Whether this conversation holds a search the provider ran itself (`web_search_20250305`):
+  /** Whether this conversation holds a server tool the provider ran itself, such as its web
+   *  search (`web_search_20250305`; any but the lazy tools' tool search, {@link holdsProviderSearch}):
    *  its results reach the model inside the response, past every tool dispatch. Set when such a
    *  response arrives, re-derived from the history on a load, cleared on `reset`, and carried
    *  across a rebuild of the agent (`restoreProviderSearch`). */
@@ -1190,13 +1200,13 @@ export class Agent implements IAgent {
     return this._taintBeforeBatch ?? true;
   }
 
-  /** Whether this conversation holds a search the provider ran itself (see `_providerSearchSeen`). */
+  /** Whether this conversation holds a server tool the provider ran itself (see `_providerSearchSeen`). */
   heldProviderSearch(): boolean {
     return this._providerSearchSeen;
   }
 
   /** Re-arms {@link heldProviderSearch} on an agent rebuilt for the same conversation, whose
-   *  history may no longer hold the search blocks (the context window drops old turns). */
+   *  history may no longer hold the server tool's blocks (the context window drops old turns). */
   restoreProviderSearch(): void { this._providerSearchSeen = true; }
 
   /**
@@ -1316,6 +1326,9 @@ export class Agent implements IAgent {
     // Direct ingest
     'bash', 'http_request', 'read_file', 'batch_files', 'media_process', 'api_setup',
     'web_research', 'mail_read', 'mail_search', 'mail_triage',
+    // The provider's own web search (`PROVIDER_SEARCH_TOOL`): never dispatched, counted when an
+    // answer carries any server tool the provider ran. Written out: the list is read as text.
+    'web_search',
     'google_docs', 'google_drive', 'google_sheets',
     // `calendar_read` returns SUMMARY/LOCATION text chosen by whoever sent the invitation —
     // an ingest channel that needs no compromise, only the operator's address. It wraps its
@@ -1926,10 +1939,11 @@ export class Agent implements IAgent {
     // DK.1 F5: re-derive the sticky conversation taint from the rehydrated history — a thread
     // whose context still carries a wrapped-untrusted marker keeps its durable-write gate armed.
     // And from the thread's record of it (`ConversationLatch`), which outlives a compaction that
-    // summarized the read away: either one is enough. A record that cannot be read counts as set.
-    if (this._contextHoldsUntrustedMarker() || this.conversationLatch?.isSet() === true) this._armConversationLatch();
-    else this._conversationSawUntrusted = false;
+    // summarized the read away, and from a server tool the provider ran (its web search), whose
+    // blocks the history still holds: any one is enough. A record that cannot be read counts as set.
     this._providerSearchSeen = this.messages.some((m) => holdsProviderSearch(m.content));
+    if (this._contextHoldsUntrustedMarker() || this.conversationLatch?.isSet() === true || this._providerSearchSeen) this._armConversationLatch();
+    else this._conversationSawUntrusted = false;
     // A user turn is written to the thread before `send()` sees its marker, so a crash between
     // the two leaves an upload's text in the thread and nothing in the set. The resume puts it
     // there. Only user turns' own text: a tool result's member entered the set before its
@@ -1937,6 +1951,8 @@ export class Agent implements IAgent {
     if (this.conversationRoot && this.messages.some(m => m.role === 'user' && Agent._contentHoldsUntrustedMarker(m.content))) {
       this.conversationGrants?.add(UNKNOWN_GRANT);
     }
+    // Likewise a provider server tool in a thread written before such a tool added to the set.
+    if (this.conversationRoot && this._providerSearchSeen) this.conversationGrants?.add(UNKNOWN_GRANT);
   }
 
   abort(): void {
@@ -3071,11 +3087,22 @@ export class Agent implements IAgent {
       const contentForHistory = response.content.filter(
         (b): b is Exclude<typeof b, { type: 'thinking' }> => b.type !== 'thinking',
       ) as BetaContentBlockParam[];
+      // A server tool the provider ran (its web search) reaches the model inside this answer,
+      // past every tool dispatch: content from outside, taken in now, counted as an
+      // external-content tool of this turn under the web search's name, whichever server tool it
+      // was. Counted before the
+      // answer is written, so a checkpoint and every call this answer makes see it. Any agent
+      // that gets the tool: its rows, too, may hold what the tool returned.
+      if (holdsProviderSearch(response.content)) {
+        this._providerSearchSeen = true;
+        this._turnToolNames.add(PROVIDER_SEARCH_TOOL);
+        this._armConversationLatch();
+        this.conversationGrants?.add(UNKNOWN_GRANT);
+      }
       // A thinking-only response (entire output budget spent on extended
       // thinking before max_tokens) strips to an empty array. Anthropic rejects
       // an assistant message with empty content and that would break the very
       // next request — substitute a minimal placeholder so history stays valid.
-      if (holdsProviderSearch(response.content)) this._providerSearchSeen = true;
       this.messages.push({
         role: 'assistant',
         content: contentForHistory.length > 0
@@ -5245,17 +5272,35 @@ export class Agent implements IAgent {
     // Checked as a read: the latch made the address a target. Its question and refusals say "read".
     let asRead = false;
     let carried = false;
+    // Checked as a save: the address is where a profile the call saves later posts a client's
+    // credentials (`ToolEntry.credentialAddress`). Not a read: neither a search's result nor a
+    // connected API's host makes it known. Its question and refusals say "save".
+    let saveAddress: string | null = null;
+    let saving = false;
     try {
       targets = tool.sendTargets !== undefined ? tool.sendTargets(tc.input) : null;
       if (targets === null && whenLatched !== undefined) {
-        // An address a search in this conversation listed as a result was chosen by the provider,
-        // not written by the model (what it can still carry: `SearchResultAddresses`).
-        asRead = true;
-        const address = tool.readAddress?.(tc.input) ?? null;
-        if (address !== null && this.searchResultAddresses.has(address)) return {};
-        // An address that carries another one is asked about whatever its host: a service that
-        // fetches it sends the read on to an address nobody here can name for sure.
-        carried = tool.readCarriesAddress?.(tc.input) === true;
+        // A declaration that throws names a save whose address cannot be read: refused as one.
+        try {
+          saveAddress = tool.credentialAddress?.(tc.input) ?? null;
+        } catch (err) {
+          saving = true;
+          throw err;
+        }
+        saving = saveAddress !== null;
+        if (saveAddress !== null) {
+          // An address that carries another one is asked about whatever its host, as for a read.
+          carried = carriesAddress(saveAddress);
+        } else {
+          // An address a search in this conversation listed as a result was chosen by the provider,
+          // not written by the model (what it can still carry: `SearchResultAddresses`).
+          asRead = true;
+          const address = tool.readAddress?.(tc.input) ?? null;
+          if (address !== null && this.searchResultAddresses.has(address)) return {};
+          // An address that carries another one is asked about whatever its host: a service that
+          // fetches it sends the read on to an address nobody here can name for sure.
+          carried = tool.readCarriesAddress?.(tc.input) === true;
+        }
         targets = whenLatched(tc.input);
       }
     } catch {
@@ -5267,10 +5312,10 @@ export class Agent implements IAgent {
     // empty one, a recipient field that yields none) refuses the whole call, in every session and
     // without a question: a yes to a target nobody can see would hold for anything.
     if (targetsUnread) {
-      const unreadNoun: TargetNoun = asRead || tc.name === 'web_research' ? 'page' : tc.name === 'http_request' ? 'host' : 'mail';
+      const unreadNoun: TargetNoun = saving ? 'tokenUrl' : asRead || tc.name === 'web_research' ? 'page' : tc.name === 'http_request' ? 'host' : 'mail';
       try { this.onOriginRefused?.({ targets: { values: [], unreadable: true }, noun: unreadNoun, origin: this.originOfTargets() }); } catch { /* the refusal stands */ }
       if (guardRefuses) return {};
-      const text = originUnreadable(unreadNoun);
+      const text = saving ? originTokenUrlUnreadable() : originUnreadable(unreadNoun);
       await this._emitSettledResult(tc.name, { type: 'tool_result', name: tc.name, result: text, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
       return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(text), is_error: true } };
     }
@@ -5283,7 +5328,7 @@ export class Agent implements IAgent {
     const lookupFailed = foreign.some((v) => v.verdict === 'unreadable');
     const shownTargets = foreign.map((v) => v.target.value);
     const shown: OriginTargets = { values: shownTargets, unreadable: false };
-    const noun: TargetNoun = asRead || tc.name === 'web_research' ? 'page' : foreign[0]!.target.kind === 'host' ? 'host' : 'mail';
+    const noun: TargetNoun = saving ? 'tokenUrl' : asRead || tc.name === 'web_research' ? 'page' : foreign[0]!.target.kind === 'host' ? 'host' : 'mail';
     // A source that could not be read leaves where the target comes from unchecked: every report of
     // it (the run's result, the approval card, the question, the model texts) says it is not known,
     // never the origin it would have had.
@@ -5304,11 +5349,13 @@ export class Agent implements IAgent {
     };
     const refuseUnattended = (): Promise<{ refusal: BetaToolResultBlockParam }> => {
       try { this.onOriginRefused?.({ targets: shown, noun, origin }); } catch { /* the refusal stands */ }
+      if (saving) return refuse(originTokenUrlRefused('unattended', shown, origin, carried, lookupFailed));
       return refuse(carried ? originCarriedUnattended(shown) : lookupFailed ? originLookupFailedUnattended(shown, noun) : originRefusedUnattended(shown, origin, noun));
     };
     // Someone the owner let in answers this session's questions themselves: asking them would
     // protect nothing. A target the owner named goes out as it would for the owner.
     if (this.principal.kind !== 'owner') {
+      if (saving) return refuse(originTokenUrlRefused('mandate', shown, origin, carried, lookupFailed));
       return refuse(carried ? originCarriedMandate(shown) : lookupFailed ? originLookupFailedMandate(shown, noun) : originRefusedMandate(shown, origin, noun));
     }
     if (!this.promptUser) return refuseUnattended();
@@ -5318,11 +5365,13 @@ export class Agent implements IAgent {
     // A host a stored profile names but that does not count for reads: the question says how it would.
     const profileHosts = asRead ? this._profileHosts() : new Set<string>();
     const connected = shownTargets.filter((h) => profileHosts.has(h));
-    const question = carried ? originCarriedAsk(shown, lang) : originAsk(tc.name, tc.input, noun, shown, origin, lang, connected, lookupFailed);
+    const question = saveAddress !== null ? originTokenUrlAsk(shown, saveAddress, lang, carried, lookupFailed)
+      : carried ? originCarriedAsk(shown, lang, watchEveryMinutes(tc.name, tc.input)) : originAsk(tc.name, tc.input, noun, shown, origin, lang, connected, lookupFailed);
     const answer = await this.promptUser(question, ['Allow', 'Deny', '\x00'], { blocked: true });
     if (answer === UNATTENDED_BLOCK_ANSWER) return refuseUnattended();
     if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-      const denied = carried ? originCarriedDenied(shown) : lookupFailed ? `${originLookupFailedHead(shown)} ${originDenied(shown, origin, noun)}` : originDenied(shown, origin, noun);
+      const denied = saving ? originTokenUrlRefused('denied', shown, origin, carried, lookupFailed)
+        : carried ? originCarriedDenied(shown) : lookupFailed ? `${originLookupFailedHead(shown)} ${originDenied(shown, origin, noun)}` : originDenied(shown, origin, noun);
       return { refusal: { type: 'tool_result', tool_use_id: tc.id, content: annotateNonRetryable(denied), is_error: true } };
     }
     return { origin: passed };

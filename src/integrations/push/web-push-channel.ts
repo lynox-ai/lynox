@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import webPush from 'web-push';
 import Database from 'better-sqlite3';
 import { scrubFreedPages, zeroDeletedContent } from '../../core/sqlite-constants.js';
+import { registerProcessSecret } from '../../core/secret-store.js';
 import type {
   ChannelOutcome,
   NotificationChannel,
@@ -224,6 +225,9 @@ export class WebPushNotificationChannel implements NotificationChannel {
   constructor(dataDir: string, opts: { isMandateLive?: (mandateId: string) => boolean } = {}) {
     this.isMandateLive = opts.isMandateLive ?? (() => false);
     this.vapidKeys = loadOrGenerateVapidKeys(dataDir);
+    // The private key lives in its own file, outside env and vault: masked with the engine's
+    // env secrets so a run that prints it does not carry it on.
+    if (typeof this.vapidKeys.privateKey === 'string') registerProcessSecret(this.vapidKeys.privateKey);
     this.store = new PushSubscriptionStore(join(dataDir, 'push-subscriptions.db'));
     webPush.setVapidDetails(
       this.vapidKeys.subject,

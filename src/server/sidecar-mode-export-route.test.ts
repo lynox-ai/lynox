@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
 import { MigrationImporter } from '../core/migration-import.js';
@@ -55,6 +55,10 @@ const target: {
   otherCurve?: boolean;
   /** Fail the restore request with the network guard's own refusal. */
   guardBlocksRestore?: boolean;
+  /** The network guard refuses this request before it goes out, naming the address the name resolved to. */
+  guardBlocks?: 'handshake' | 'completion' | 'manifest' | 'chunk' | undefined;
+  /** Answer this request with a status the response cannot be built from (an error without a code, after the request went out). */
+  oddStatus?: 'handshake' | 'completion' | 'manifest' | 'chunk' | undefined;
   /** The text of that refusal, when not the default one. */
   guardText?: string | undefined;
   /** Answer this step with a body of `bytes` bytes: the handshake, its refusal, or the restore's report. */
@@ -71,6 +75,8 @@ const target: {
   lastPartBodyLagMs?: number | undefined;
   /** Answer the restore with this raw body and 200. */
   restoreRaw?: string | undefined;
+  /** Answer the restore with a reply that breaks when the route reads its status. */
+  restoreBreaks?: boolean | undefined;
   /** Answer this step with a refusal whose body breaks off mid-way. */
   broken?: 'handshake-refusal' | 'manifest' | undefined;
   /** Refuse the handshake with 400 and this body. */
@@ -126,6 +132,8 @@ vi.mock('../core/network-guard.js', async (original) => {
         const foreign = generateKeyPairSync('ec', { namedCurve: 'secp256k1' }).publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
         return json({ ...p, serverPubKey: foreign, signature: signHandshake(foreign, deriveSigningKey(TOKEN)) });
       }
+      if (target.oddStatus !== undefined && target.oddStatus === step) throw new RangeError('init["status"] must be in the range of 200 to 599, inclusive.');
+      if (target.guardBlocks !== undefined && target.guardBlocks === step) throw new Error('Blocked: "target.example" resolves to private IP "10.0.0.5"');
       if (target.guardBlocksRestore && step === 'restore') throw new Error(target.guardText ?? 'Blocked: the redirect points to a private address');
       if (target.badSignature && step === 'handshake') {
         const p = target.importer!.startHandshake(TOKEN);
@@ -157,6 +165,9 @@ vi.mock('../core/network-guard.js', async (original) => {
         if (path === '/api/migration/manifest' && target.slow === 'manifest') return endless(422);
         if (path === '/api/migration/restore' && target.slow === 'restore') return endless(200);
         if (path === '/api/migration/restore' && target.restoreRaw !== undefined) return new Response(target.restoreRaw, { status: 200 });
+        if (path === '/api/migration/restore' && target.restoreBreaks === true) {
+          return Object.defineProperty(new Response('{}', { status: 200 }), 'ok', { get(): boolean { throw new Error(`the reply broke at ${homedir()}/.lynox`); } });
+        }
         if (path === '/api/migration/handshake' && (init.method ?? 'GET') === 'GET' && target.handshakeRaw !== undefined) return new Response(target.handshakeRaw, { status: 200 });
         if (path === '/api/migration/handshake' && (init.method ?? 'GET') === 'GET' && target.large?.at === 'handshake') return new Response(sized({ ...imp.startHandshake(TOKEN) }, target.large.bytes), { status: 200 });
         if (path === '/api/migration/handshake' && (init.method ?? 'GET') === 'GET' && target.large?.at === 'handshake-refusal') return new Response('x'.repeat(target.large.bytes), { status: 503 });
@@ -201,8 +212,14 @@ vi.mock('../core/network-guard.js', async (original) => {
 
 vi.mock('../core/migration-crypto.js', async (original) => {
   const real = await original<typeof import('../core/migration-crypto.js')>();
-  return { ...real, deriveTransferKey: vi.fn((...args: Parameters<typeof real.deriveTransferKey>) => { const k = real.deriveTransferKey(...args); derivedKeys.push(k); return k; }) };
+  return {
+    ...real,
+    deriveTransferKey: vi.fn((...args: Parameters<typeof real.deriveTransferKey>) => { const k = real.deriveTransferKey(...args); derivedKeys.push(k); return k; }),
+    // A failure with no words of its own, after the target answered the handshake.
+    verifyHandshake: vi.fn((...args: Parameters<typeof real.verifyHandshake>) => { if (cryptoFault.verify) throw new Error(''); return real.verifyHandshake(...args); }),
+  };
 });
+const cryptoFault = vi.hoisted(() => ({ verify: false }));
 
 const { LynoxHTTPApi } = await import('./http-api.js');
 const { reloadConfig } = await import('../core/config.js');
@@ -272,6 +289,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.lastPartBodyLagMs = undefined;
     transferDeadline.ms = 60_000;
     target.restoreRaw = undefined;
+    target.restoreBreaks = undefined;
     target.silent = undefined;
     target.okBodies = [];
     target.handshakeRefusal = undefined;
@@ -282,6 +300,8 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.badSignature = false;
     target.otherCurve = false;
     target.guardBlocksRestore = false;
+    target.guardBlocks = undefined;
+    target.oddStatus = undefined;
     target.guardText = undefined;
     target.abort = undefined;
     target.abortCalls = [];
@@ -601,6 +621,39 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(await message()).toBe('lynox lost the connection to the target instance while sending part 1 of the data. lynox stopped; the target instance has not restored anything. You can start the migration again in 30 minutes at the latest.');
   });
 
+  it('words a request the guard does not let out per step, never with the guard\'s own text', async () => {
+    setShellIsolationForTest(sidecar);
+    const message = async (): Promise<string | undefined> => ((await exportTo()).get('error') as { message: string } | undefined)?.message;
+    target.guardBlocks = 'handshake';
+    expect(await message()).toBe('lynox could not set up the connection to the target instance: lynox could not send its request to it. Nothing was transferred. You can start the migration again in 30 minutes at the latest.');
+    target.guardBlocks = 'completion';
+    expect(await message()).toBe('lynox could not set up the connection to the target instance: lynox could not send its request to it. Nothing was transferred. You can start the migration again in 30 minutes at the latest.');
+    target.guardBlocks = 'manifest';
+    expect(await message()).toBe('lynox could not send its request to the target instance. lynox stopped before sending your data. You can start the migration again in 30 minutes at the latest.');
+    target.guardBlocks = 'chunk';
+    const written = vi.spyOn(process.stderr, 'write');
+    try {
+      expect(await message()).toBe('lynox could not send part 1 of the data to the target instance. lynox stopped; the target instance has not restored anything. You can start the migration again in 30 minutes at the latest.');
+      // The log names the kind only, never the address the guard saw.
+      const logged = written.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('migration: a request to the target'));
+      expect(logged).toEqual(['[lynox:http] migration: a request to the target did not go out (Error)\n']);
+      expect(written.mock.calls.some((c) => String(c[0]).includes('10.0.0.5'))).toBe(false);
+    } finally {
+      written.mockRestore();
+    }
+  });
+
+  it('words a request that went out and failed without a connection error per step, never as one that was not sent', async () => {
+    setShellIsolationForTest(sidecar);
+    const message = async (): Promise<string | undefined> => ((await exportTo()).get('error') as { message: string } | undefined)?.message;
+    target.oddStatus = 'handshake';
+    expect(await message()).toBe('lynox could not set up the connection to the target instance: the request to it failed. Nothing was transferred. You can start the migration again in 30 minutes at the latest.');
+    target.oddStatus = 'manifest';
+    expect(await message()).toBe('The request to the target instance failed. lynox stopped before sending your data. You can start the migration again in 30 minutes at the latest.');
+    target.oddStatus = 'chunk';
+    expect(await message()).toBe('The request with part 1 of the data to the target instance failed. lynox stopped; the target instance has not restored anything. You can start the migration again in 30 minutes at the latest.');
+  });
+
   it('treats a server key that does not parse, or is on another curve, as an answer in the wrong format', async () => {
     setShellIsolationForTest(sidecar);
     target.otherCurve = true;
@@ -709,29 +762,233 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect((events.get('done') as { verification: unknown }).verification).toEqual({ databasesRestored: ['engine.db'], portableDirSkipped: ['workspace/ab c'], secretsImported: 2 });
   });
 
-  it('names what the user can do next with the error: start again now, later, or check the target first', async () => {
+  it('names what the user can do next with the error: start again now, later, check the target first, or nothing a retry changes', async () => {
     setShellIsolationForTest(sidecar);
     const retry = async (): Promise<unknown> => ((await exportTo()).get('error') as { retry?: unknown } | undefined)?.retry;
-    // Refused before the target holds a session: nothing to wait for.
+    // The handshake refused as it is (a 4xx): the same attempt fails again, so no retry.
     target.handshakeRefusal = { error: 'Invalid migration token' };
-    expect(await retry()).toBe('now');
+    expect(await retry()).toBe('none');
     target.handshakeRefusal = undefined;
-    // A session may still be held and the target did not end it: wait.
+    // The target busy with the manifest (a 5xx): a session may still be held and the target did not end it: wait.
     target.manifestError = 'no';
+    target.manifestStatus = 503;
     expect(await retry()).toBe('later');
     // The target ended it: start again now.
     target.abort = 'real';
     expect(await retry()).toBe('now');
+    // The manifest refused as it is (a 4xx): no retry, whether or not the session was ended.
+    target.manifestStatus = undefined;
+    expect(await retry()).toBe('none');
     target.manifestError = undefined;
     target.abort = undefined;
     // The restore may have run in part: check the target first.
     target.restoreError = 'restore refused';
     expect(await retry()).toBe('check');
     target.restoreError = undefined;
-    // A sentence that sends the user to support still leaves the target's session held: wait.
+    // A signature that does not check fails the same way on every attempt: no retry.
     target.badSignature = true;
-    expect(await retry()).toBe('later');
+    expect(await retry()).toBe('none');
     target.badSignature = undefined;
+  });
+
+  /** The error event's code, params and retry; its English message is checked by the tests above. */
+  async function stopOf(): Promise<{ code?: unknown; params?: Record<string, unknown>; retry?: unknown; message?: unknown }> {
+    return ((await exportTo()).get('error') ?? {}) as { code?: unknown; params?: Record<string, unknown>; retry?: unknown; message?: unknown };
+  }
+
+  it('gives each stop a code, its parameters and its retry for the UI\'s own sentence', { timeout: 30_000 }, async () => {
+    setShellIsolationForTest(sidecar);
+    // The handshake: three groups, the fine cause only in the log.
+    target.unreachable = 'handshake';
+    expect(await stopOf()).toMatchObject({ code: 'handshake_unreachable', params: {}, retry: 'now' });
+    target.unreachable = undefined;
+    target.guardBlocks = 'handshake';
+    expect(await stopOf()).toMatchObject({ code: 'handshake_blocked', retry: 'none' });
+    target.guardBlocks = undefined;
+    target.handshakeRaw = 'not json';
+    expect(await stopOf()).toMatchObject({ code: 'handshake_not_lynox', retry: 'none' });
+    target.handshakeRaw = undefined;
+    // A request of the completion that does not get through reads as the first one not getting through.
+    target.guardBlocks = 'completion';
+    expect((await stopOf()).code).toBe('handshake_unreachable');
+    target.guardBlocks = undefined;
+    // The completion refused, with the target's words for the box.
+    target.failCompletion = true;
+    expect(await stopOf()).toMatchObject({ code: 'handshake_incomplete', params: { targetText: 'completion refused' } });
+    target.failCompletion = false;
+    // A target still holding an earlier attempt.
+    target.handshakeRefusal = { error: 'x', code: 'migration_session_active' };
+    expect(await stopOf()).toMatchObject({ code: 'target_session_active', params: {} });
+    // The handshake refused (4xx), with its words; without words, no box.
+    target.handshakeRefusal = { error: 'Invalid migration token' };
+    expect(await stopOf()).toEqual({ code: 'handshake_refused', params: { targetText: 'Invalid migration token' }, retry: 'none', message: 'The target instance did not accept the migration. It says: "Invalid migration token". Nothing was transferred.' });
+    target.handshakeRefusal = { error: '\u200E' };
+    expect(await stopOf()).toMatchObject({ code: 'handshake_refused', params: {} });
+    target.handshakeRefusal = undefined;
+    // The handshake refused by a target failing (5xx): a retry may pass.
+    target.large = { at: 'handshake-refusal', bytes: 100 };
+    expect(await stopOf()).toMatchObject({ code: 'handshake_unavailable', params: { targetText: 'x'.repeat(100) }, retry: 'now' });
+    target.large = undefined;
+    target.badSignature = true;
+    expect(await stopOf()).toMatchObject({ code: 'handshake_unverified', params: {}, retry: 'none' });
+    target.badSignature = false;
+    // The manifest: refused as it is, the target failing, and not reachable.
+    target.manifestError = 'The bundle names a store this instance does not know';
+    expect(await stopOf()).toMatchObject({ code: 'manifest_refused', params: { targetText: 'The bundle names a store this instance does not know' }, retry: 'none' });
+    target.manifestStatus = 503;
+    expect(await stopOf()).toMatchObject({ code: 'manifest_unavailable', retry: 'later' });
+    target.manifestError = undefined;
+    target.manifestStatus = undefined;
+    target.broken = 'manifest';
+    expect((await stopOf()).code).toBe('manifest_unreachable');
+    target.broken = undefined;
+    target.unreachable = 'manifest';
+    expect(await stopOf()).toMatchObject({ code: 'manifest_unreachable', params: {}, retry: 'later' });
+    target.unreachable = undefined;
+  });
+
+  it('gives the stops whose retry follows the target\'s session their code and that retry', async () => {
+    setShellIsolationForTest(sidecar);
+    // A target still holding an earlier attempt: its refusal starts no session of this one, but the
+    // earlier attempt holds the target until it expires, so a new one waits for it.
+    target.handshakeRefusal = { error: 'x', code: 'migration_session_active' };
+    expect(await stopOf()).toMatchObject({ code: 'target_session_active', retry: 'later' });
+    target.handshakeRefusal = undefined;
+    // The completion refused: the target answered the handshake and holds a session it did not end.
+    target.failCompletion = true;
+    expect(await stopOf()).toMatchObject({ code: 'handshake_incomplete', retry: 'later' });
+    // The target ended it: start again now.
+    target.abort = 'real';
+    expect(await stopOf()).toMatchObject({ code: 'handshake_incomplete', retry: 'now' });
+    target.abort = undefined;
+    target.failCompletion = false;
+    // A refusal of the manifest that breaks off mid-way: read as the target not being reachable, its
+    // session still held.
+    target.broken = 'manifest';
+    expect(await stopOf()).toMatchObject({ code: 'manifest_unreachable', params: {}, retry: 'later' });
+    target.abort = 'real';
+    expect(await stopOf()).toMatchObject({ code: 'manifest_unreachable', params: {}, retry: 'now' });
+    target.abort = undefined;
+    target.broken = undefined;
+  });
+
+  it('gives a folder over the limits its code and no retry, after the handshake too', async () => {
+    setShellIsolationForTest(sidecar);
+    const { MigrationExporter } = await import('../core/migration-export.js');
+    const proto = MigrationExporter.prototype as unknown as { export: (...a: unknown[]) => unknown };
+    const real = proto.export;
+    // The real exporter, with limits the data dir's `apis` folder is over: two files, one allowed.
+    const extra = join(dir, 'apis', 'more.json');
+    writeFileSync(extra, '{"id":"more"}');
+    const spy = vi.spyOn(proto, 'export').mockImplementation(function (this: unknown, ...a: unknown[]) {
+      (this as { portableDirLimits: unknown }).portableDirLimits = { maxEntries: 1, maxBytes: 1024 };
+      return real.apply(this, a);
+    });
+    try {
+      expect(await stopOf()).toMatchObject({ code: 'folder_too_large', params: { dir: 'apis', entries: 1, bytes: 1024 }, retry: 'none' });
+    } finally {
+      spy.mockRestore();
+      rmSync(extra, { force: true });
+    }
+  });
+
+  it('names a part by its number out of all parts and by its kind, never by its name', async () => {
+    setShellIsolationForTest(sidecar);
+    target.unreachable = 'chunk';
+    const lost = await stopOf();
+    expect(lost).toMatchObject({ code: 'chunk_unreachable', retry: 'later' });
+    expect(lost.params).toEqual({ part: 1, parts: expect.any(Number) as number, kind: expect.any(String) as string });
+    target.unreachable = undefined;
+    target.chunkError = { at: 2, error: 'chunk refused' };
+    const refused = await stopOf();
+    expect(refused).toMatchObject({ code: 'chunk_refused', retry: 'later', params: { part: 3, targetText: 'chunk refused' } });
+    // The kind is the manifest's type for that part, one of the fixed types, never a file or table name.
+    expect(refused.params?.['kind']).toBe(target.manifest?.chunks[2]?.type);
+    expect(JSON.stringify(refused.params)).not.toContain(target.manifest?.chunks[2]?.name ?? '-');
+    target.chunkError = undefined;
+  });
+
+  it('gives the restore\'s stops their codes: refused before it began, failed on the target, unreadable, blocked, failed', async () => {
+    setShellIsolationForTest(sidecar);
+    target.restoreStatus = { status: 400, error: 'Cannot restore — not all chunks received.' };
+    expect(await stopOf()).toMatchObject({ code: 'restore_refused', params: { targetText: 'Cannot restore — not all chunks received.' }, retry: 'later' });
+    target.restoreStatus = { status: 500, error: 'restore refused' };
+    expect(await stopOf()).toMatchObject({ code: 'restore_failed_on_target', params: { targetText: 'restore refused' }, retry: 'check' });
+    target.restoreStatus = undefined;
+    target.restoreRaw = 'not json';
+    expect(await stopOf()).toMatchObject({ code: 'restore_unreadable', params: {}, retry: 'check' });
+    target.restoreRaw = undefined;
+    target.guardBlocksRestore = true;
+    expect(await stopOf()).toMatchObject({ code: 'restore_blocked', params: {}, retry: 'later' });
+    target.guardText = 'socket hang up in the restore';
+    expect(await stopOf()).toMatchObject({ code: 'restore_failed', params: { detail: 'socket hang up in the restore' }, retry: 'check' });
+    // This instance's home directory shows as ~ in the restore's error text too.
+    target.guardText = `cannot read ${homedir()}/.lynox/restore.log`;
+    expect(await stopOf()).toMatchObject({ code: 'restore_failed', params: { detail: 'cannot read ~/.lynox/restore.log' } });
+    // The home directory goes before the text is cut, so a cut cannot leave part of it.
+    target.guardText = `${'x'.repeat(490)} ${homedir()}/.lynox/restore.log`;
+    expect(await stopOf()).toMatchObject({ code: 'restore_failed', params: { detail: `${'x'.repeat(490)} ~/.lynox/…` } });
+    target.guardText = undefined;
+    target.guardBlocksRestore = false;
+    // A stop lynox cannot name, once the restore was asked for: it may have run, so check the target first.
+    target.restoreBreaks = true;
+    const unnamed = await stopOf();
+    expect(unnamed).toMatchObject({ code: 'unknown', retry: 'check' });
+    // Its English sentence for the log and the API shows the home directory as ~ as well.
+    expect(unnamed.message).toContain('the reply broke at ~/.lynox');
+    expect(unnamed.message).not.toContain(homedir());
+    target.restoreBreaks = undefined;
+  });
+
+  it('says how long the migration may take with the deadline\'s stops, in milliseconds for the UI to word', { timeout: 30_000 }, async () => {
+    setShellIsolationForTest(sidecar);
+    transferDeadline.ms = 700;
+    target.lagMs = 300;
+    expect(await stopOf()).toEqual(expect.objectContaining({ code: 'transfer_out_of_time', params: { durationMs: 700 }, retry: 'later' }));
+    target.lagMs = undefined;
+    transferDeadline.ms = 1500;
+    target.silent = 'restore';
+    expect(await stopOf()).toEqual(expect.objectContaining({ code: 'restore_out_of_time', params: { durationMs: 1500 }, retry: 'check' }));
+    target.silent = undefined;
+  });
+
+  it('gives the exporter\'s own stops their codes, and an empty stop the unreadable one', async () => {
+    setShellIsolationForTest(sidecar);
+    const { MigrationExporter } = await import('../core/migration-export.js');
+    const { MigrationStop } = await import('../core/migration-stop.js');
+    const proto = MigrationExporter.prototype as unknown as { export: (...a: unknown[]) => unknown; preview: () => unknown };
+    let spy = vi.spyOn(proto, 'export').mockImplementation(() => { throw new MigrationStop('data_too_large', 'too large', { bytes: 600, maxBytes: 500 }); });
+    try {
+      expect(await stopOf()).toMatchObject({ code: 'data_too_large', params: { bytes: 600, maxBytes: 500 }, retry: 'none' });
+    } finally { spy.mockRestore(); }
+    spy = vi.spyOn(proto, 'export').mockImplementation(() => { throw new Error('config\u202E unreadable'); });
+    try {
+      // After the handshake, and the target did not end its session: wait for it.
+      expect(await stopOf()).toMatchObject({ code: 'export_failed', params: { detail: 'config unreadable' }, retry: 'later' });
+    } finally { spy.mockRestore(); }
+    // This instance's home directory shows as ~, in the UI's detail and in the English message.
+    const home = homedir();
+    spy = vi.spyOn(proto, 'export').mockImplementation(() => { throw new Error(`cannot open ${home}/.lynox/a.db`); });
+    try {
+      expect(await stopOf()).toMatchObject({ code: 'export_failed', params: { detail: 'cannot open ~/.lynox/a.db' }, message: expect.stringMatching(/^cannot open ~\/\.lynox\/a\.db\b/) });
+    } finally { spy.mockRestore(); }
+    // Nothing readable before the handshake: lynox could not read why, and nothing was sent.
+    spy = vi.spyOn(proto, 'preview').mockImplementation(() => { throw 'no error object'; });
+    try {
+      const unread = await stopOf();
+      expect(unread.code).toBe('export_failed');
+      expect(unread.params).toEqual({});
+    } finally { spy.mockRestore(); }
+    // A stop without a code after the handshake: unreadable, and not said to have sent nothing.
+    cryptoFault.verify = true;
+    try {
+      expect(await stopOf()).toMatchObject({ code: 'unknown', params: { nothingSent: false }, retry: 'later', message: 'The migration stopped for a reason lynox could not read. You can start the migration again in 30 minutes at the latest.' });
+    } finally { cryptoFault.verify = false; }
+    const saved = process.env['LYNOX_VAULT_KEY'];
+    delete process.env['LYNOX_VAULT_KEY'];
+    try {
+      expect(await stopOf()).toMatchObject({ code: 'vault_key_missing', params: {}, retry: 'none' });
+    } finally { process.env['LYNOX_VAULT_KEY'] = saved; }
   });
 
   it('keeps the target\'s words in quotes, so they cannot pose as lynox\'s own sentence', async () => {

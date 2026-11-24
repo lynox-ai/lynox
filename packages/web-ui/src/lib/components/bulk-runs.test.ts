@@ -550,7 +550,7 @@ describe('going on from a run that halted', () => {
 		}
 	});
 
-	const AS_IS = ['unavailable', 'timeBudget', 'consecutiveFailures', 'stoppedByOwner', 'listUnreadable', 'credential', 'unauthorized', 'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'unrecorded', 'listReadFailed', 'shopInactive'];
+	const AS_IS = ['unavailable', 'timeBudget', 'consecutiveFailures', 'stoppedByOwner', 'listUnreadable', 'credential', 'unauthorized', 'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'unrecorded', 'listReadFailed', 'shopInactive', 'storeAccessEnded', 'storeClientMisnamed'];
 	const NONE = ['contract', 'listFormWithdrawn', 'listFilterWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff'];
 	const base = { phase: 'planned' as const, listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false };
 	const judged = { judge: { tier: 'fast', unjudged: 3 }, judgeServedBy: { provider: 'mistral', label: 'Mistral Medium' } } as unknown as Pick<BulkRunDetailData, 'judge' | 'judgeServedBy'>;
@@ -737,6 +737,34 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeKind(w('unavailable', { haltKey: null }))).toBeNull();
 	});
 
+	it('names the step before writing on for a store whose access lynox could not renew', () => {
+		// Writing on alone would meet the same refusal: the page names the step first, in both languages.
+		expect(bulkResumeKind(w('storeAccessEnded'))).toBe('write');
+		expect(bulkResumeText(w('storeAccessEnded'), true, DE)?.before).toBe('Bitte lynox im Chat, den Shop neu zu verbinden. Danach kannst du den Lauf hier fortsetzen.');
+		expect(bulkResumeText(w('storeAccessEnded'), true, EN)?.before).toBe('Ask lynox in the chat to connect the store again. Then you can continue the run here.');
+		expect(bulkResumeText(w('storeClientMisnamed'), true, DE)?.before).toBe('Bitte lynox im Chat, das Profil für shop.example.invalid anzupassen. Danach kannst du den Lauf hier fortsetzen.');
+		expect(bulkResumeText(w('storeClientMisnamed'), true, EN)?.before).toBe('Ask lynox in the chat to fix the profile for shop.example.invalid. Then you can continue the run here.');
+	});
+
+	it('names the step first, then checking, for a store whose access ended or whose profile is misnamed, when the run goes on by checking', () => {
+		// Without the access the check cannot read the store either: the step comes first and ends with checking.
+		const unclear = { probeConfirmed: false, maxTargets: 1, applied: 0, sentUnknown: 1, resumeOpen: 3, resumeTries: 1, resumeSends: 0 };
+		expect(bulkResumeKind(w('storeAccessEnded', unclear))).toBe('check');
+		expect(bulkResumeText(w('storeAccessEnded', unclear), true, DE)?.before).toBe('Bitte lynox im Chat, den Shop neu zu verbinden. Danach kannst du nachprüfen.');
+		expect(bulkResumeText(w('storeAccessEnded', unclear), true, EN)?.before).toBe('Ask lynox in the chat to connect the store again. Then you can check again.');
+		expect(bulkResumeText(w('storeClientMisnamed', unclear), false, DE)?.before).toBe('Bitte lynox im Chat, das Profil für shop.example.invalid anzupassen. Danach kannst du nachprüfen.');
+		expect(bulkResumeText(w('storeClientMisnamed', unclear), false, EN)?.before).toBe('Ask lynox in the chat to fix the profile for shop.example.invalid. Then you can check again.');
+		for (const key of ['storeAccessEnded', 'storeClientMisnamed']) {
+			// The step comes first, the check sentence after it, and nothing follows the check.
+			expect(bulkResumeText(w(key, unclear), true, DE)?.check, key).toBe(DE.tf('bulk.resume.check_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
+			expect(bulkResumeText(w(key, unclear), true, DE)?.after, key).toBeNull();
+		}
+		// A step that follows the check stays where it was.
+		const markup = bulkResumeText(w('markupAddedByShop', unclear), true, DE);
+		expect(markup?.before).toBeNull();
+		expect(markup?.after).toBe(DE.tf('bulk.halt.markupAddedByShop_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
+	});
+
 	it('offers no way on that the engine refuses for want of a probe', () => {
 		// Without a probe a run writes on only under a maximum of one: a higher one is refused.
 		expect(bulkResumeKind(w('maxTargets', { probeConfirmed: false, maxTargets: 1 }))).toBeNull();
@@ -809,7 +837,7 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('credential', unclear), true, DE)?.before).toBe(DE.tf('bulk.halt.credential_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
 		// No sentence around the check names continuing as the next step, for any halt that can come
 		// to it; a way to write on later (Shopify markup) may follow the check.
-		for (const key of ['unavailable', 'unauthorized', 'blocked', 'shopifyWriteOff', 'markupAddedByShop', 'credential', 'failureRate', 'consecutiveFailures', 'maxTargets']) {
+		for (const key of ['unavailable', 'unauthorized', 'blocked', 'shopifyWriteOff', 'markupAddedByShop', 'credential', 'failureRate', 'consecutiveFailures', 'maxTargets', 'storeAccessEnded', 'storeClientMisnamed']) {
 			for (const managed of [true, false]) {
 				const text = bulkResumeText(w(key, unclear), managed, DE);
 				expect(bulkResumeKind(w(key, unclear)), key).toBe('check');
@@ -958,8 +986,8 @@ describe('going on from a run that halted', () => {
 	it('counts the targets failed so far, as at least the ones failed now on a run from before the count', () => {
 		expect(bulkResumeText(w('failureRate'), true, DE)?.soFar).toBe('70 Ziele sind bisher mindestens einmal gescheitert.');
 		expect(bulkResumeText(w('consecutiveFailures', { failedOnce: 1 }), true, EN)?.soFar).toBe('1 target has failed at least once so far.');
-		expect(bulkResumeText(w('failureRate', { failedOnce: null }), true, DE)?.soFar).toBe('Bisher sind mindestens 51 Ziele gescheitert.');
-		expect(bulkResumeText(w('failureRate', { failedOnce: null, failed: 1 }), true, EN)?.soFar).toBe('So far at least 1 target has failed.');
+		expect(bulkResumeText(w('failureRate', { failedOnce: null }), true, DE)?.soFar).toBe('Bisher sind mindestens 51 Ziele ohne Bestätigung.');
+		expect(bulkResumeText(w('failureRate', { failedOnce: null, failed: 1 }), true, EN)?.soFar).toBe('So far, at least 1 target has no confirmation.');
 	});
 
 	it('says what writing on lets fail, by the limit against the open targets', () => {

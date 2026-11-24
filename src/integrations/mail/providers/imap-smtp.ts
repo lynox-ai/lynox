@@ -35,6 +35,7 @@ import {
 import { currentCallSignal } from '../../../core/call-connection.js';
 import { processErrorText } from '../../../core/error-egress.js';
 import { AUTOMATIC_MAIL_HEADERS, automaticMail } from '../automatic-mail.js';
+import { parseReferenceIds } from '../thread-key.js';
 
 // ── Credentials ────────────────────────────────────────────────────────────
 //
@@ -310,6 +311,9 @@ export { isAutoSubmittedHeader, isAutoRepliedHeader } from '../automatic-mail.js
 
 /** The headers fetched with every envelope: the automatic-mail marks, lower-cased for imapflow. */
 const AUTOMATIC_MAIL_FETCH_HEADERS = AUTOMATIC_MAIL_HEADERS.map((h) => h.toLowerCase());
+// What the watcher's list reads: the automatic-mail headers, and References, which tells the inbox
+// the thread of a reply when the server gives no thread id.
+const LIST_FETCH_HEADERS = ['references', ...AUTOMATIC_MAIL_FETCH_HEADERS];
 
 function isAuthError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
@@ -733,8 +737,9 @@ export class ImapSmtpProvider implements MailProvider {
             size: true,
             bodyStructure: true,
             bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
-            // The watcher lists new mail; without these headers no listed mail is ever automatic.
-            headers: AUTOMATIC_MAIL_FETCH_HEADERS,
+            // The watcher lists new mail; without these headers no listed mail is ever automatic,
+            // and a reply on a server without thread ids never finds its thread.
+            headers: LIST_FETCH_HEADERS,
           },
           { uid: true },
         )) {
@@ -917,8 +922,9 @@ export class ImapSmtpProvider implements MailProvider {
             size: true,
             bodyStructure: true,
             bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
-            // The watcher lists new mail; without these headers no listed mail is ever automatic.
-            headers: AUTOMATIC_MAIL_FETCH_HEADERS,
+            // The watcher lists new mail; without these headers no listed mail is ever automatic,
+            // and a reply on a server without thread ids never finds its thread.
+            headers: LIST_FETCH_HEADERS,
           },
           { uid: true },
         )) {
@@ -1183,6 +1189,7 @@ export class ImapSmtpProvider implements MailProvider {
       folder,
       threadKey: msg.threadId ?? env?.messageId,
       inReplyTo: env?.inReplyTo,
+      references: parseReferenceIds(headers.get('references')),
       from: toAddresses(env?.from),
       to: toAddresses(env?.to),
       cc: toAddresses(env?.cc),
