@@ -484,9 +484,12 @@ async function runRefresh(profileId: string, trigger: 'due' | 'unauthorized', ct
     setSecret(accessKey, access);
     if (rotated !== null) setSecret(refreshKey, rotated);
   } catch {
-    // The vault may hold the new access token beside the old binding, and the refresh token the
-    // store spent: every request to the store refuses on the binding, and says to connect again.
-    outcomeLine(profileId, 'dead', trigger, 'writing the new tokens to the vault failed; connect the store again');
+    // The vault may hold the new access token beside the old binding. Where the store rotated, it
+    // spent the refresh token: the connection is over, and is marked ended so the owner's hint says
+    // so. Where it did not rotate, the refresh token it holds still stands: nothing is marked.
+    const why = 'writing the new tokens to the vault failed; connect the store again';
+    if (rotated !== null) return writeFailed(profileId, ctx, plan, trigger, why);
+    outcomeLine(profileId, 'dead', trigger, why);
     return 'dead';
   }
   const liveRefresh = rotated ?? plan.presented.refresh;
@@ -529,9 +532,9 @@ async function runRefresh(profileId: string, trigger: 'due' | 'unauthorized', ct
   }
   if (!saved) {
     // The vault holds the new tokens, the profile the old binding: every request to the store now
-    // refuses on the binding and says to connect again, the safe direction.
-    outcomeLine(profileId, 'dead', trigger, 'the new tokens are in the vault but the profile could not be saved; connect the store again');
-    return 'dead';
+    // refuses on the binding and says to connect again, the safe direction. Marked ended as well,
+    // so the owner's hint does not keep showing an end that is no longer the real one.
+    return writeFailed(profileId, ctx, plan, trigger, 'the new tokens are in the vault but the profile could not be saved; connect the store again');
   }
   outcomeLine(profileId, 'ok', trigger, 'new tokens stored and bound');
   return 'renewed';
@@ -546,6 +549,53 @@ function sameScopes(a: readonly string[], b: readonly string[]): boolean {
   const x = new Set(a);
   const y = new Set(b);
   return x.size === y.size && [...x].every((s) => y.has(s));
+}
+
+/**
+ * The store rotated the tokens but writing them failed: the refresh token it spent cannot be used
+ * again, so the connection is over whether or not marking it ended works. The binding is taken away
+ * and the grant marked `refresh-dead` as in {@link endConnection}; if even that save fails, the
+ * outcome is still `dead` and the line says the mark is missing. A binding that is no longer the one
+ * the refresh began with (changed meanwhile) is left as it is, and the line says so.
+ */
+async function writeFailed(
+  profileId: string,
+  ctx: StoreRefreshContext,
+  plan: StoreRefreshPlan,
+  trigger: 'due' | 'unauthorized',
+  why: string,
+): Promise<StoreRefreshOutcome> {
+  const mark = await markEnded(profileId, ctx, plan);
+  const said = mark === 'ended' ? why
+    : mark === 'left' ? `${why}; the connection was left as it is (changed meanwhile)`
+    : `${why}; the connection could not be marked ended`;
+  outcomeLine(profileId, 'dead', trigger, said);
+  return 'dead';
+}
+
+/**
+ * Take the binding away and mark the grant `refresh-dead`, if the binding is still the one the
+ * refresh began with: `ended`. A profile whose binding is no longer that one, or that has none or no
+ * grant (a connect, a save that went through after all, a removal) is left as it is: `left`. A save
+ * that failed, or no store: `failed`.
+ */
+async function markEnded(profileId: string, ctx: StoreRefreshContext, plan: StoreRefreshPlan): Promise<'ended' | 'left' | 'failed'> {
+  const apiStore = ctx.toolContext.apiStore;
+  if (!apiStore) return 'failed';
+  try {
+    const { getLynoxDir } = await importConfig();
+    // Read after the import, with nothing between this and the save: a connect that saved
+    // meanwhile carries its own binding, which stays.
+    const now = apiStore.get(profileId);
+    if (now?.oauth_grant === undefined || now.oauth_grant.store_binding !== plan.presented.binding) return 'left';
+    const { store_binding: _gone, ...rest } = now.oauth_grant;
+    // A revocation stays one: saving it as anything else would lift it (`ApiStore.save`).
+    const grant: OAuthGrantRecord = { ...rest, state: rest.state === 'revoked' ? 'revoked' : 'refresh-dead' };
+    return apiStore.save({ ...now, oauth_grant: grant } as ApiProfile, join(getLynoxDir(), 'apis'), { actor: ctx.principal }).ok ? 'ended' : 'failed';
+  } catch {
+    // The binding stays; the store refuses the spent token itself, and the next refresh ends here again.
+    return 'failed';
+  }
 }
 
 /**
@@ -567,26 +617,9 @@ async function endConnection(
    */
   invalidGrantSaid = false,
 ): Promise<StoreRefreshOutcome> {
-  const apiStore = ctx.toolContext.apiStore;
   // Whether this ended the connection. A connect that saved meanwhile, or a save that failed,
   // leaves it as it is: then nothing says to connect again.
-  let ended = false;
-  if (apiStore) {
-    try {
-      const { getLynoxDir } = await importConfig();
-      // Read after the import, with nothing between this and the save: a connect that saved
-      // meanwhile carries its own binding, which stays.
-      const now = apiStore.get(profileId);
-      if (now?.oauth_grant !== undefined && now.oauth_grant.store_binding === plan.presented.binding) {
-        const { store_binding: _gone, ...rest } = now.oauth_grant;
-        // A revocation stays one: saving it as anything else would lift it (`ApiStore.save`).
-        const grant: OAuthGrantRecord = { ...rest, state: rest.state === 'revoked' ? 'revoked' : 'refresh-dead' };
-        ended = apiStore.save({ ...now, oauth_grant: grant } as ApiProfile, join(getLynoxDir(), 'apis'), { actor: ctx.principal }).ok;
-      }
-    } catch {
-      // The binding stays; the store refuses the spent token itself, and the next refresh ends here again.
-    }
-  }
+  const ended = (await markEnded(profileId, ctx, plan)) === 'ended';
   const said = invalidGrantSaid ? `${why} (invalid_grant)` : why;
   if (!ended) {
     outcomeLine(profileId, outcome, trigger, `${said}; the connection was left as it is (connected again meanwhile, or not saved)`);

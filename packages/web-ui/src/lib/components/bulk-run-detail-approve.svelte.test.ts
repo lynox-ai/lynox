@@ -103,11 +103,12 @@ beforeEach(() => {
 		gets.push(u);
 		// The owner's session: the page offers its acts only once the server says so.
 		if (u.endsWith('/config')) return reply({ managed: true, viewer: viewerOf });
-		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
+		// `changed=1`: the page asks for the targets the plan changes first (U-437).
+		const page = /\/targets\?offset=(\d+)&limit=(\d+)(&changed=1)?$/.exec(u);
 		const pageOf = /\/bulk\/runs\/([^/?]+)\/targets\?/.exec(u)?.[1];
 		if (page && pageOf !== undefined && holds[`${pageOf}/targets`] !== undefined) await holds[`${pageOf}/targets`];
 		if (page && pageOf !== undefined && failIds[`${pageOf}/targets`] === 'throw') throw new Error('network');
-		if (page) return reply({ targets: targets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
+		if (page) return reply({ targets: (page[3] ? targets.filter((x) => x.change !== 'unchanged') : targets).slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		const id = /\/bulk\/runs\/([^/?]+)$/.exec(u)?.[1];
 		// A held run answers once, for the first load that asks; a later load of it goes through.
 		if (id !== undefined && holds[id] !== undefined) { const h = holds[id]; delete holds[id]; await h; }
@@ -1179,6 +1180,21 @@ describe('the allowed link domains of a judged list run', () => {
 		return () => { delete holds[id]; release(); };
 	};
 	const resumeUrls = (): string[] => posts.filter((p) => p.url.endsWith('/resume')).map((p) => p.url);
+
+	it('opens another run with its unchanged targets folded, though they were shown on the run before', async () => {
+		targets = Array.from({ length: 8 }, (_, i) => ({ ...TARGETS[i === 0 ? 0 : 1]!, seq: i + 1, key: `gid://shopify/Product/${String(i + 1)}` }));
+		const done = (id: string): BulkRunDetailData => makeRun({ id, phase: 'done', total: 8, changes: { update: 1, create: 0, delete: 0, unchanged: 7, invalid: 0 } });
+		run = done('r1');
+		const open = await renderSwitchable();
+		// The next run is a preview, loaded whole: a fold left open would show its unchanged targets.
+		runsById['r2'] = { ...done('r2'), phase: 'previewed' };
+		const unfold = (): HTMLButtonElement | undefined => buttonByText(tf('bulk.preview.show_unchanged', { n: '7' }));
+		unfold()!.click();
+		await settle();
+		expect(unfold()).toBeUndefined();
+		await open('r2');
+		expect(unfold()).toBeDefined();
+	});
 
 	it('sends no domains typed for another run with the start of this one', async () => {
 		run = judged();

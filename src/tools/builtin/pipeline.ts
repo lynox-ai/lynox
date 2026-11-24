@@ -912,6 +912,7 @@ export async function runSavedWorkflow(
 
   // Asked of the workflow as read here, so no edit can fall between the check and the run. As stored:
   // the owner's stamp binds the stored definition, so the check must see that, not a renamed copy.
+  // A check that needs the steps as the run executes them builds that copy itself (`runStepIds`).
   const refused = runtime?.checkWorkflow?.(planned) ?? null;
   if (refused !== null) return { ok: false, error: refused };
 
