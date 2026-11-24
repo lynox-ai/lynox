@@ -46,7 +46,7 @@ const target: {
   /** Refuse the restore with this status and `error`. */
   restoreStatus?: { status: number; error: string } | undefined;
   /** Fail this request as a refused connection would. */
-  unreachable?: 'handshake' | 'manifest' | 'chunk' | undefined;
+  unreachable?: 'handshake' | 'completion' | 'manifest' | 'chunk' | undefined;
   /** Answer the handshake with a server key that does not parse. */
   badKey?: boolean;
   /** Answer the handshake with a signature that does not check. */
@@ -444,7 +444,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(await message()).toBe('lynox could not set up the connection to the target instance: its answer is over 64 KiB, so lynox did not read it. Nothing was transferred. You can start the migration again in 30 minutes at the latest.');
     // The handshake's refusal.
     target.large = { at: 'handshake-refusal', bytes: TARGET_BODY_CAPS.handshake + 1 };
-    expect(await message()).toBe('lynox could not set up the connection to the target instance: its answer is over 64 KiB, so lynox did not read it. Nothing was transferred. You can start the migration again in 30 minutes at the latest.');
+    expect(await message()).toBe('lynox could not set up the connection to the target instance: its answer is over 64 KiB, so lynox did not read it. Nothing was transferred.');
     target.large = { at: 'handshake-refusal', bytes: 600 };
     expect(await message()).toBe(`The target instance did not accept the migration. It says: "${'x'.repeat(500)}…". Nothing was transferred.`);
     // A refusal of the manifest (the same reader serves the chunks and the restore).
@@ -614,7 +614,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     setShellIsolationForTest(sidecar);
     const message = async (): Promise<string | undefined> => ((await exportTo()).get('error') as { message: string } | undefined)?.message;
     target.unreachable = 'handshake';
-    expect(await message()).toBe('lynox could not set up the connection to the target instance: it could not be reached. Nothing was transferred. You can start the migration again in 30 minutes at the latest.');
+    expect(await message()).toBe('lynox could not set up the connection to the target instance: it could not be reached. Nothing was transferred.');
     target.unreachable = 'manifest';
     expect(await message()).toBe('lynox could not reach the target instance. lynox stopped before sending your data. You can start the migration again in 30 minutes at the latest.');
     target.unreachable = 'chunk';
@@ -625,7 +625,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     setShellIsolationForTest(sidecar);
     const message = async (): Promise<string | undefined> => ((await exportTo()).get('error') as { message: string } | undefined)?.message;
     target.guardBlocks = 'handshake';
-    expect(await message()).toBe('lynox could not set up the connection to the target instance: lynox could not send its request to it. Nothing was transferred. You can start the migration again in 30 minutes at the latest.');
+    expect(await message()).toBe('lynox could not set up the connection to the target instance: lynox could not send its request to it. Nothing was transferred.');
     target.guardBlocks = 'completion';
     expect(await message()).toBe('lynox could not set up the connection to the target instance: lynox could not send its request to it. Nothing was transferred. You can start the migration again in 30 minutes at the latest.');
     target.guardBlocks = 'manifest';
@@ -640,6 +640,45 @@ describe('the migration export route in sidecar mode (real engine)', () => {
       expect(written.mock.calls.some((c) => String(c[0]).includes('10.0.0.5'))).toBe(false);
     } finally {
       written.mockRestore();
+    }
+  });
+
+  it('waits only where a handshake request may have reached the target: in the sentence, in the retry and in the abort', { timeout: 30_000 }, async () => {
+    setShellIsolationForTest(sidecar);
+    const WAIT = 'You can start the migration again in 30 minutes at the latest.';
+    type Stop = { code?: unknown; retry?: unknown; message?: string };
+    const stopAt = async (cause: 'guardBlocks' | 'unreachable' | 'silent' | 'oddStatus', step: 'handshake' | 'completion'): Promise<Stop> => {
+      target.guardBlocks = undefined; target.unreachable = undefined; target.silent = undefined; target.oddStatus = undefined;
+      target.abortCalls = [];
+      // The target ends a session it was asked to end, so an abort that went out shows here.
+      target.abort = 'real';
+      target[cause] = step;
+      try { return ((await exportTo()).get('error') ?? {}) as Stop; } finally { target[cause] = undefined; }
+    };
+    // The first request: kept in by the guard, or no connection — it cannot have reached the target.
+    for (const cause of ['guardBlocks', 'unreachable'] as const) {
+      const stop = await stopAt(cause, 'handshake');
+      expect(stop.message?.endsWith('Nothing was transferred.'), cause).toBe(true);
+      expect(stop.message, cause).not.toContain(WAIT);
+      expect(stop.retry, cause).toBe(cause === 'guardBlocks' ? 'none' : 'now');
+    }
+    // The first request: no answer in time, or failed after it went out — the target may hold a session.
+    for (const cause of ['silent', 'oddStatus'] as const) {
+      const stop = await stopAt(cause, 'handshake');
+      expect(stop.message?.endsWith(WAIT), cause).toBe(true);
+      expect(stop.retry, cause).toBe('later');
+      // The target named no session yet: there is nothing to end.
+      expect(target.abortCalls, cause).toEqual([]);
+    }
+    // The completion: the target answered the first request and named its session, whatever the cause;
+    // lynox ends it, and once the target confirms, the user can start again now.
+    for (const cause of ['guardBlocks', 'unreachable', 'silent', 'oddStatus'] as const) {
+      const stop = await stopAt(cause, 'completion');
+      expect(stop.code, cause).toBe('handshake_unreachable');
+      expect(target.abortCalls.length, cause).toBe(1);
+      expect(stop.retry, cause).toBe('now');
+      expect(stop.message?.endsWith('You can start the migration again now.'), cause).toBe(true);
+      expect(stop.message, cause).not.toContain(WAIT);
     }
   });
 
@@ -705,7 +744,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     setShellIsolationForTest(sidecar);
     const message = async (): Promise<string | undefined> => ((await exportTo()).get('error') as { message: string } | undefined)?.message;
     target.broken = 'handshake-refusal';
-    expect(await message()).toBe('lynox could not set up the connection to the target instance: the connection broke before its answer was complete. Nothing was transferred. You can start the migration again in 30 minutes at the latest.');
+    expect(await message()).toBe('lynox could not set up the connection to the target instance: the connection broke before its answer was complete. Nothing was transferred.');
     target.broken = 'manifest';
     expect(await message()).toBe('The target instance refused the migration. The connection broke before its answer was complete. You can start the migration again in 30 minutes at the latest.');
   });
@@ -747,7 +786,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.slow = 'handshake';
     expect(await message()).toBe('lynox could not set up the connection to the target instance: it did not finish its answer within 1.5 seconds. Nothing was transferred. You can start the migration again in 30 minutes at the latest.');
     target.slow = 'handshake-refusal';
-    expect(await message()).toBe('lynox could not set up the connection to the target instance: it did not finish its answer within 1.5 seconds. Nothing was transferred. You can start the migration again in 30 minutes at the latest.');
+    expect(await message()).toBe('lynox could not set up the connection to the target instance: it did not finish its answer within 1.5 seconds. Nothing was transferred.');
     target.slow = 'manifest';
     expect(await message()).toBe('The target instance refused the migration. It did not finish its answer within 1.5 seconds. You can start the migration again in 30 minutes at the latest.');
     target.slow = 'restore';

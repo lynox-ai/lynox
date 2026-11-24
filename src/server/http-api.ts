@@ -15814,8 +15814,9 @@ export class LynoxHTTPApi {
         res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
       };
 
-      // From the first handshake request on, the target may hold a session: a stop says when to
-      // try again (the catch below adds it where a step did not), unless it asks to check the target.
+      // Once the target may hold a session (it answered the handshake, or the first handshake
+      // request may have reached it), a stop says when to try again (the catch below adds it where
+      // a step did not), unless it asks to check the target.
       let sessionMayBeHeld = false;
       // The target's session as its handshake named it, and whether it has taken the manifest: a
       // stop before that ends the session (the target holds it 30 minutes otherwise).
@@ -15854,8 +15855,13 @@ export class LynoxHTTPApi {
         // The Web UI names the group a failed handshake falls in (`code`); the fine cause goes to the log.
         const handshakeGroup = (w: Why): MigrationStopCode =>
           w === 'unsent' ? 'handshake_blocked' : w === 'large' || w === 'format' ? 'handshake_not_lynox' : 'handshake_unreachable';
-        const handshakeFailed = (w: Why, code: MigrationStopCode = handshakeGroup(w)): MigrationStop =>
-          new MigrationStop(code, `lynox could not set up the connection to the target instance: ${why(w, TARGET_BODY_CAPS.handshake, ', so lynox did not read it', TARGET_REQUEST_TIMEOUTS_MS.handshake)}. Nothing was transferred. ${AGAIN}`, {}, w);
+        // A handshake request that got no answer in time, or failed after it went out, may have
+        // reached the target and started a session there; one the guard kept in or that found no
+        // connection cannot have. Only the first kind waits, in the sentence and in the retry.
+        const handshakeFailed = (w: Why, code: MigrationStopCode = handshakeGroup(w)): MigrationStop => {
+          if (w === 'silent' || w === 'failed') sessionMayBeHeld = true;
+          return new MigrationStop(code, `lynox could not set up the connection to the target instance: ${why(w, TARGET_BODY_CAPS.handshake, ', so lynox did not read it', TARGET_REQUEST_TIMEOUTS_MS.handshake)}. Nothing was transferred.${sessionMayBeHeld ? ` ${AGAIN}` : ''}`, {}, w);
+        };
         // The whole transfer's deadline (from the manifest on) and the stop it says.
         let transfer: AbortSignal | undefined;
         let outOfTime = (): MigrationStop => new MigrationStop('transfer_out_of_time', '');
