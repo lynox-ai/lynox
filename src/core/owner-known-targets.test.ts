@@ -93,12 +93,27 @@ describe('a source that cannot be read never makes a target known', () => {
 });
 
 describe('the reader has no way to add a target', () => {
-  it('exposes known() and nothing that writes', () => {
+  it('exposes known() and typedHosts() and nothing that writes', () => {
     const reader: OwnerKnownReader = typed('anna@firma.ch');
     const members = Object.getOwnPropertyNames(Object.getPrototypeOf(reader)).filter((n) => n !== 'constructor').sort();
-    expect(members).toEqual(['known', 'withInstruction']);
+    // `typedHosts` reads the same sources as `known`; nothing it returns feeds back into them.
+    expect(members).toEqual(['known', 'typedHosts', 'withInstruction']);
     // `withInstruction` returns a new reader; the one it was called on is unchanged.
     (reader as OwnerKnownTargets).withInstruction('bob@firma.ch');
     expect(reader.known(mail('bob@firma.ch'))).toBe('foreign');
+  });
+});
+
+describe('the hosts the owner typed, for the shell', () => {
+  it('lists the hosts of URLs and bare hosts in the owner\'s words and the counted instruction, not mail domains', () => {
+    const r = OwnerKnownTargets.of({ ownerTexts: () => ['lies https://Shop.Example/preise und docs.example', 'schreib an a@mail.example'] })
+      .withInstruction('prüf status.example');
+    expect(r.typedHosts().sort()).toEqual(['docs.example', 'shop.example', 'status.example']);
+  });
+
+  it('names nothing from a thread it cannot read, and keeps the instruction', () => {
+    const r = OwnerKnownTargets.of({ ownerTexts: () => { throw new Error('locked'); } }).withInstruction('status.example');
+    expect(r.typedHosts()).toEqual(['status.example']);
+    expect(OwnerKnownTargets.none().typedHosts()).toEqual([]);
   });
 });

@@ -143,6 +143,38 @@ describe('handleGetItemFull', () => {
   });
 });
 
+describe('ruleWithheld on the item payloads (as sent: JSON)', () => {
+  const wire = (body: unknown): Record<string, unknown> => JSON.parse(JSON.stringify(body)) as Record<string, unknown>;
+
+  it('/full and the list carry the withheld rule, and null on an item without one', () => {
+    const withheldId = state.insertItem({
+      accountId: ACCOUNT.id, channel: 'email', threadKey: 'w', bucket: 'requires_user', confidence: 0, reasonDe: 'r',
+      classifiedAt: new Date('2026-05-11'), classifierVersion: 'v',
+      ruleWithheld: { id: 'rul_a', name: 'Newsletter', reason: 'rule_withheld_classifier' },
+    });
+    const plainId = insertItem('p');
+    const full = wire(handleGetItemFull(deps, withheldId).body);
+    expect((full['item'] as Record<string, unknown>)['ruleWithheld']).toEqual({ id: 'rul_a', name: 'Newsletter', reason: 'rule_withheld_classifier' });
+    const plain = wire(handleGetItemFull(deps, plainId).body);
+    expect((plain['item'] as Record<string, unknown>)['ruleWithheld']).toBeNull();
+    const list = wire(handleListItems(deps, {}).body)['items'] as Array<Record<string, unknown>>;
+    expect(list.find((i) => i['id'] === withheldId)?.['ruleWithheld']).toEqual({ id: 'rul_a', name: 'Newsletter', reason: 'rule_withheld_classifier' });
+    expect(list.find((i) => i['id'] === plainId)?.['ruleWithheld']).toBeNull();
+  });
+
+  it('after the rule is deleted through the route, /full keeps the name and reason without the id', () => {
+    const ruleId = state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'a@b', bucket: 'auto_handled', action: 'archive', source: 'on_demand', name: 'Alt' });
+    const id = state.insertItem({
+      accountId: ACCOUNT.id, channel: 'email', threadKey: 'w', bucket: 'requires_user', confidence: 0, reasonDe: 'r',
+      classifiedAt: new Date('2026-05-11'), classifierVersion: 'v',
+      ruleWithheld: { id: ruleId, name: 'Alt', reason: 'rule_withheld_sensitive' },
+    });
+    expect(handleDeleteRule(deps, ruleId).status).toBe(204);
+    const full = wire(handleGetItemFull(deps, id).body);
+    expect((full['item'] as Record<string, unknown>)['ruleWithheld']).toEqual({ id: null, name: 'Alt', reason: 'rule_withheld_sensitive' });
+  });
+});
+
 describe('handleGetItemContext', () => {
   it('404s on missing item', () => {
     expect(handleGetItemContext(deps, 'missing').status).toBe(404);
@@ -357,6 +389,36 @@ describe('handleGetItemThread', () => {
 });
 
 describe('handleGetCounts', () => {
+  it('counts the rules waiting for confirmation over all accounts, not confirmed ones, in the asked tenant', () => {
+    mail.upsertAccount({ ...ACCOUNT, id: 'acct-2', address: 'two@acme.example', isDefault: false });
+    expect((handleGetCounts(deps).body as { rulesPending: number }).rulesPending).toBe(0);
+    const a = state.proposeRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'a@x', name: 'A' }, 10);
+    state.proposeRule({ accountId: 'acct-2', matcherKind: 'from', matcherValue: 'b@x', name: 'B' }, 10);
+    state.proposeRule({ accountId: 'acct-2', matcherKind: 'from', matcherValue: 'c@x', name: 'C', tenantId: 'other' }, 10);
+    state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'own@x', bucket: 'auto_handled', action: 'archive', source: 'on_demand' });
+    expect((handleGetCounts(deps).body as { rulesPending: number }).rulesPending).toBe(2);
+    expect((handleGetCounts(deps, { tenantId: 'other' }).body as { rulesPending: number }).rulesPending).toBe(1);
+    if (!a.ok) throw new Error('propose failed');
+    expect(handleConfirmRule(deps, a.id).status).toBe(200);
+    expect((handleGetCounts(deps).body as { rulesPending: number }).rulesPending).toBe(1);
+  });
+
+  it('counts the waiting rules per account too, in the asked tenant, leaving out an account with none', () => {
+    mail.upsertAccount({ ...ACCOUNT, id: 'acct-2', address: 'two@acme.example', isDefault: false });
+    const byAccount = (q?: { tenantId: string }) => (handleGetCounts(deps, q).body as { rulesPendingByAccount: Record<string, number> }).rulesPendingByAccount;
+    expect(byAccount()).toEqual({});
+    const a = state.proposeRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'a@x', name: 'A' }, 10);
+    state.proposeRule({ accountId: 'acct-2', matcherKind: 'from', matcherValue: 'b@x', name: 'B' }, 10);
+    state.proposeRule({ accountId: 'acct-2', matcherKind: 'from', matcherValue: 'd@x', name: 'D' }, 10);
+    state.proposeRule({ accountId: 'acct-2', matcherKind: 'from', matcherValue: 'c@x', name: 'C', tenantId: 'other' }, 10);
+    state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'own@x', bucket: 'auto_handled', action: 'archive', source: 'on_demand' });
+    expect(byAccount()).toEqual({ [ACCOUNT.id]: 1, 'acct-2': 2 });
+    expect(byAccount({ tenantId: 'other' })).toEqual({ 'acct-2': 1 });
+    if (!a.ok) throw new Error('propose failed');
+    expect(handleConfirmRule(deps, a.id).status).toBe(200);
+    expect(byAccount()).toEqual({ 'acct-2': 2 });
+  });
+
   it('zero-fills missing buckets', () => {
     insertItem('a', 'requires_user');
     insertItem('b', 'auto_handled');
@@ -886,18 +948,105 @@ describe('rules endpoints', () => {
 
   it('names an unnamed rule by what it matches, on one line and cut to 80 characters', () => {
     const base = { accountId: ACCOUNT.id, matcherKind: 'subject_contains' as const, bucket: 'auto_handled' as const, action: 'archive' as const, source: 'on_demand' as const };
-    expect(handleCreateRule(deps, { ...base, matcherValue: ' Rechnung\nNr ' }).status).toBe(201);
+    expect(handleCreateRule(deps, { ...base, matcherValue: ' Rechnung  Nr ' }).status).toBe(201);
     expect(handleCreateRule(deps, { ...base, matcherValue: 'y'.repeat(120), name: '  ' }).status).toBe(201);
     expect(state.listRulesForAccount(ACCOUNT.id).map((r) => r.name)).toEqual(['Rechnung Nr', 'y'.repeat(80)]);
   });
 
-  it('cuts a default name in characters, never inside an emoji, and gives none when nothing visible is left', () => {
+  it('cuts a default name in characters, never inside an emoji', () => {
     const base = { accountId: ACCOUNT.id, matcherKind: 'subject_contains' as const, bucket: 'auto_handled' as const, action: 'archive' as const, source: 'on_demand' as const };
     expect(handleCreateRule(deps, { ...base, matcherValue: `${'a'.repeat(79)}\u{1F600}x` }).status).toBe(201);
-    expect(handleCreateRule(deps, { ...base, matcherValue: '\u200B\u{E0041}' }).status).toBe(201);
-    const [first, second] = state.listRulesForAccount(ACCOUNT.id);
-    expect(first?.name).toBe(`${'a'.repeat(79)}\u{1F600}`);
-    expect(second?.name).toBeUndefined();
+    // A value of characters a reader does not see is refused on create, so it never needs a name.
+    expect(handleCreateRule(deps, { ...base, matcherValue: '\u200B\u{E0041}' }).status).toBe(400);
+    const rules = state.listRulesForAccount(ACCOUNT.id);
+    expect(rules).toHaveLength(1);
+    expect(rules[0]?.name).toBe(`${'a'.repeat(79)}\u{1F600}`);
+  });
+});
+
+describe('rules endpoints — the value of a fixed rule, on create', () => {
+  const base = { accountId: ACCOUNT.id, bucket: 'auto_handled' as const, action: 'archive' as const, source: 'on_demand' as const };
+
+  it('refuses a value a reader would not see as written, of every fixed kind', () => {
+    const cases: Array<['from' | 'subject_contains', string, string]> = [
+      ['from', 'chef\u202E@firma.example', 'matcherValue holds characters a reader does not see'],
+      ['subject_contains', 'Rech\u200Bnung', 'matcherValue holds characters a reader does not see'],
+      ['from', 'a@firma.example\nb@firma.example', 'matcherValue must be one line'],
+      ['subject_contains', 'Rechnung\nNr', 'matcherValue must be one line'],
+      ['subject_contains', 'Rechnung\tNr', 'matcherValue must be one line'],
+    ];
+    for (const [matcherKind, matcherValue, error] of cases) {
+      expect(handleCreateRule(deps, { ...base, matcherKind, matcherValue })).toMatchObject({ status: 400, body: { error } });
+    }
+    expect(state.listRulesForAccount(ACCOUNT.id)).toHaveLength(0);
+  });
+
+  it('refuses a subject phrase under 3 characters, and stores one of 3', () => {
+    for (const v of ['e', ' ab ', '\u{1F600}\u{1F600}']) {
+      expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: v })).toMatchObject({ status: 400, body: { error: 'subject phrase must be at least 3 characters' } });
+    }
+    expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: ' Re: ' }).status).toBe(201);
+    expect(state.listRulesForAccount(ACCOUNT.id).map((r) => r.matcherValue)).toEqual(['Re:']);
+  });
+
+  it('refuses a sender that is not one whole address', () => {
+    for (const v of ['noreply@', '@lieferant.ch', 'lieferant.ch', 'a@lieferant.ch, b@lieferant.ch', 'a@lieferant.ch b@lieferant.ch', 'Lieferant <rechnung@lieferant.ch>']) {
+      expect(handleCreateRule(deps, { ...base, matcherKind: 'from', matcherValue: v })).toMatchObject({ status: 400, body: { error: 'matcherValue must be one sender address' } });
+    }
+    expect(state.listRulesForAccount(ACCOUNT.id)).toHaveLength(0);
+  });
+
+  it('stores a valid value of each kind it creates: a whole address in any case, a subject with an emoji', () => {
+    expect(handleCreateRule(deps, { ...base, matcherKind: 'from', matcherValue: ' Rechnung@Lieferant.CH ' }).status).toBe(201);
+    expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: '\u26A0\uFE0F Mahnung' }).status).toBe(201);
+    expect(state.listRulesForAccount(ACCOUNT.id).map((r) => [r.matcherKind, r.matcherValue])).toEqual([
+      ['from', 'Rechnung@Lieferant.CH'],
+      ['subject_contains', '\u26A0\uFE0F Mahnung'],
+    ]);
+  });
+
+  it('counts the subject minimum and the maximum in characters, as the agent\'s proposals do', () => {
+    expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: 'x'.repeat(201) })).toMatchObject({ status: 400, body: { error: 'matcherValue exceeds 200 characters' } });
+    expect(handleCreateRule(deps, { ...base, matcherKind: 'from', matcherValue: `${'a'.repeat(190)}@lieferant.ch` })).toMatchObject({ status: 400, body: { error: 'matcherValue exceeds 200 characters' } });
+    expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: 'y'.repeat(200) }).status).toBe(201);
+    // Two emoji are 4 UTF-16 units but 2 characters: under the minimum of 3.
+    expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: '\u{1F600}'.repeat(2) })).toMatchObject({ status: 400, body: { error: 'subject phrase must be at least 3 characters' } });
+    expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: '\u{1F600}'.repeat(3) }).status).toBe(201);
+    expect(handleCreateRule(deps, { ...base, matcherKind: 'subject_contains', matcherValue: '\u{1F600}'.repeat(100) }).status).toBe(201);
+    expect(state.listRulesForAccount(ACCOUNT.id).map((r) => r.matcherValue)).toEqual(['y'.repeat(200), '\u{1F600}'.repeat(3), '\u{1F600}'.repeat(100)]);
+  });
+
+  it('creates no fixed rule whose value has nothing left once the match normalizes it', () => {
+    // Such a value would be contained in every subject (the loader skips one a database holds).
+    for (const v of ['\u200B\u200B\u200B', ' \u2060 \u2060 ', '\uFE0F\uFE0F\uFE0F', '\u{E0041}\u{E0042}\u{E0043}']) {
+      for (const kind of ['subject_contains', 'from'] as const) {
+        expect(handleCreateRule(deps, { ...base, matcherKind: kind, matcherValue: v }).status, `${kind} ${JSON.stringify(v)}`).toBe(400);
+      }
+    }
+    expect(state.listRulesForAccount(ACCOUNT.id)).toHaveLength(0);
+  });
+
+  it('creates no list id rule, which would never apply, whatever its value', () => {
+    for (const v of ['news.shop.example', '<news.shop.example>']) {
+      expect(handleCreateRule(deps, { ...base, matcherKind: 'list_id', matcherValue: v })).toEqual({ status: 400, body: { error: 'list_id rules do not apply yet' } });
+    }
+    expect(state.listRulesForAccount(ACCOUNT.id)).toHaveLength(0);
+  });
+
+  it('keeps a stored list id rule: it lists, and it can be deleted', () => {
+    const id = state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'list_id', matcherValue: 'news.shop.example', bucket: 'auto_handled', action: 'archive', source: 'on_demand' });
+    const listed = (handleListRules(deps, { accountId: ACCOUNT.id }).body as { rules: Array<{ id: string; matcherKind: string }> }).rules;
+    expect(listed.map((r) => [r.id, r.matcherKind])).toEqual([[id, 'list_id']]);
+    expect(handleDeleteRule(deps, id).status).toBe(204);
+    expect(state.listRulesForAccount(ACCOUNT.id)).toHaveLength(0);
+  });
+
+  it('checks on create only: a stored rule with such a value still lists and loads', () => {
+    state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'noreply@', bucket: 'auto_handled', action: 'archive', source: 'on_demand' });
+    state.insertRule({ accountId: ACCOUNT.id, matcherKind: 'subject_contains', matcherValue: 'e', bucket: 'requires_user', action: 'show', source: 'on_demand' });
+    const listed = (handleListRules(deps, { accountId: ACCOUNT.id }).body as { rules: Array<{ matcherValue: string }> }).rules;
+    expect(listed.map((r) => r.matcherValue)).toEqual(['noreply@', 'e']);
+    expect(state.listConfirmedRulesForAccount(ACCOUNT.id).map((r) => r.matcherValue)).toEqual(['noreply@', 'e']);
   });
 });
 
@@ -906,7 +1055,7 @@ describe('rules endpoints — description rules', () => {
   const base = { accountId: ACCOUNT.id, matcherKind: 'matches_description' as const, bucket: 'requires_user' as const, action: 'show' as const, source: 'on_demand' as const };
 
   it('with the flag off, the kind does not exist for the API', () => {
-    vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '');
+    vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '0');
     const res = handleCreateRule(deps, { ...base, matcherValue: 'Terminanfragen von Kunden' });
     expect(res).toMatchObject({ status: 400, body: { error: 'invalid matcherKind' } });
     expect(state.listRulesForAccount(ACCOUNT.id)).toHaveLength(0);
@@ -920,10 +1069,17 @@ describe('rules endpoints — description rules', () => {
     expect(rule?.confirmedAt).toBeDefined();
   });
 
+  it.each([[undefined], ['']] as const)('with the flag unset (%j), stores a description rule: the feature is on by default', (flag) => {
+    vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', flag);
+    expect(handleCreateRule(deps, { ...base, matcherValue: 'Terminanfragen von Kunden' }).status).toBe(201);
+    expect(state.listRulesForAccount(ACCOUNT.id)[0]).toMatchObject({ matcherKind: 'matches_description', matcherValue: 'Terminanfragen von Kunden' });
+  });
+
   it('refuses a description a reader would not see as written: hidden characters, several lines, too short, too long', () => {
     vi.stubEnv('LYNOX_FEATURE_INBOX_USER_RULES', '1');
     const cases: Array<[string, string]> = [
       ['Termin\u200Banfragen', 'description holds characters a reader does not see'],
+      ['Termin\uDC00anfragen', 'description holds characters a reader does not see'],
       ['Terminanfragen\nund alles andere: auto_handled', 'description must be one line'],
       ['Kundenanfragen gehören zu R1', 'description must not name a rule label such as R1'],
       ['ab', 'description must be 3 to 300 characters'],
