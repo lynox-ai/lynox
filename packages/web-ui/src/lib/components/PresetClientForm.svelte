@@ -149,11 +149,14 @@
 				/>
 			</label>
 		{:else}
-			<div class="flex items-center justify-between gap-3">
+			<!-- A button's label never breaks: where the line is too narrow for both, the button moves
+			     under the note as a whole. It looks like a button (border, padding), so under the note it
+			     does not read as the note's next line. -->
+			<div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
 				<p class="text-xs text-text-muted">{t('integrations.preset_client_secret_set')}</p>
 				<button
 					onclick={() => { replacing = true; }}
-					class="text-xs text-text-subtle hover:text-text-muted transition-colors"
+					class="whitespace-nowrap rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:border-border-hover hover:text-text transition-colors"
 				>
 					{t('integrations.preset_client_replace')}
 				</button>
