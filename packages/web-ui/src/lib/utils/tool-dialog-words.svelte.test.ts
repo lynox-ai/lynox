@@ -12,18 +12,15 @@ import { getLocale, setLocale, t } from '../i18n.svelte.js';
 const before = getLocale();
 afterEach(() => setLocale(before));
 
-function engineTable(name: 'TOOL_LINE_WORDS' | 'DIALOG_ONLY_WORDS'): Record<string, string> {
+function engineTable(name: 'TOOL_LINE_WORDS' | 'DIALOG_ONLY_WORDS'): { entries: Record<string, string>; lines: number } {
   let root = process.cwd();
   while (!existsSync(join(root, 'src/tools/tool-words.ts')) && dirname(root) !== root) root = dirname(root);
   const text = readFileSync(join(root, 'src/tools/tool-words.ts'), 'utf8');
   const block = new RegExp(`export const ${name}[^=]*= \\{([^}]*)\\}`).exec(text);
-  expect(block, `${name} is found`).not.toBeNull();
+  if (block === null) return { entries: {}, lines: -1 };
   const entries: Record<string, string> = {};
-  for (const m of block![1]!.matchAll(/^\s*([a-z_]+): '([^']+)',$/gm)) entries[m[1]!] = m[2]!;
-  // Every line of the block is an entry this reads: none is skipped unread.
-  const lines = block![1]!.split('\n').filter((line) => line.trim() !== '');
-  expect(Object.keys(entries).length, `${name}: every line is read`).toBe(lines.length);
-  return entries;
+  for (const m of block[1]!.matchAll(/^\s*([a-z_]+): '([^']+)',$/gm)) entries[m[1]!] = m[2]!;
+  return { entries, lines: block[1]!.split('\n').filter((line) => line.trim() !== '').length };
 }
 
 const englishLineWord = (tool: string): string | undefined => {
@@ -32,10 +29,15 @@ const englishLineWord = (tool: string): string | undefined => {
 };
 
 describe('the dialog word and the chat\'s tool-line word', () => {
-  const lineWords = engineTable('TOOL_LINE_WORDS');
-  const dialogOnly = engineTable('DIALOG_ONLY_WORDS');
+  const lineTable = engineTable('TOOL_LINE_WORDS');
+  const dialogTable = engineTable('DIALOG_ONLY_WORDS');
+  const lineWords = lineTable.entries;
+  const dialogOnly = dialogTable.entries;
 
   it('reads both tables', () => {
+    // Every line of each block is an entry this reads: none is skipped unread.
+    expect(Object.keys(lineWords).length, 'TOOL_LINE_WORDS: every line is read').toBe(lineTable.lines);
+    expect(Object.keys(dialogOnly).length, 'DIALOG_ONLY_WORDS: every line is read').toBe(dialogTable.lines);
     expect(Object.keys(lineWords).length).toBeGreaterThanOrEqual(15);
     expect(Object.keys(dialogOnly)).toEqual(['read_file', 'write_file', 'edit_file', 'batch_files', 'spawn_agent']);
   });
