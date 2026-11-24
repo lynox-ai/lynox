@@ -30,6 +30,7 @@ export const MAX_PARENT_IDS = 20;
 // A References header past this length is cut before it is scanned; real chains stay far below.
 const MAX_REFERENCES_CHARS = 16_384;
 const MESSAGE_ID_RE = /<[^<>\s]{1,512}>/g;
+const ONE_MESSAGE_ID_RE = /^<[^<>\s]{1,512}>$/;
 
 /**
  * The Message-IDs of a References header, oldest first, keeping only the newest
@@ -53,12 +54,13 @@ export function hasProviderThread(env: MailEnvelope): boolean {
 
 /**
  * The Message-IDs a mail names as its parents, nearest first: In-Reply-To, then References from
- * the newest back. Its own Message-ID is left out, and at most `MAX_PARENT_IDS` are returned.
+ * the newest back. Only ids in Message-ID form (`<…>`) count; its own Message-ID is left out, and
+ * at most `MAX_PARENT_IDS` are returned.
  */
 export function parentMessageIds(env: MailEnvelope): string[] {
   const out: string[] = [];
   const add = (id: string | undefined): void => {
-    if (!id || id === env.messageId || out.includes(id) || out.length >= MAX_PARENT_IDS) return;
+    if (!id || !ONE_MESSAGE_ID_RE.test(id) || id === env.messageId || out.includes(id) || out.length >= MAX_PARENT_IDS) return;
     out.push(id);
   };
   add(env.inReplyTo?.trim());

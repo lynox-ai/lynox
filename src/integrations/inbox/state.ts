@@ -626,16 +626,17 @@ export class InboxStateDb {
    * its parent: the item's own mail or a message the thread store holds for it (a follow-up).
    * Unlike the two lookups above this one is scoped to the account and tenant: the Message-ID
    * comes from the sender's headers, and a mail must not join a thread it was not delivered into.
-   * Only called for a server without thread ids, where an item's thread key is its own mail's
-   * Message-ID; so the item's own mail is found through the thread key, which is indexed.
+   * Only called for a server without thread ids, where an item filed from a mail with a
+   * Message-ID has that Message-ID as its thread key; the query seeks the indexed thread key and
+   * also requires the Message-ID, so an item keyed otherwise (a mail without one) is never named.
    */
   findItemByParentMessageId(accountId: string, messageId: string, tenantId: string = DEFAULT_TENANT_ID): InboxItem | null {
     if (!messageId) return null;
     const own = this.db
-      .prepare<[string, string, string], ItemRow>(
-        'SELECT * FROM inbox_items WHERE tenant_id = ? AND account_id = ? AND thread_key = ? LIMIT 1',
+      .prepare<[string, string, string, string], ItemRow>(
+        'SELECT * FROM inbox_items WHERE tenant_id = ? AND account_id = ? AND thread_key = ? AND message_id = ? LIMIT 1',
       )
-      .get(tenantId, accountId, messageId);
+      .get(tenantId, accountId, messageId, messageId);
     if (own) return rowToItem(own);
     const inThread = this.db
       .prepare<[string, string, string], ItemRow>(

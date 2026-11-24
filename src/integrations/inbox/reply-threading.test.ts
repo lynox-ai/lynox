@@ -132,6 +132,25 @@ describe('a reply on an IMAP server without thread ids', () => {
     expect(threadIds()).toEqual(['<reply@x>']);
   });
 
+  it('a reply naming the key of an item filed without a Message-ID does not join it', async () => {
+    const id = inbox.insertItem({
+      accountId: ACCOUNT.id, channel: 'email', threadKey: '<keyed@x>', bucket: 'requires_user', confidence: 0.9,
+      reasonDe: 'ohne Message-ID', classifiedAt: new Date('2026-11-23T08:00:00Z'),
+      classifierVersion: 'v1', subject: 'Offerte', fromAddress: 'kunde@example.com',
+    });
+    inbox.updateUserAction(id, 'replied', new Date('2026-11-23T09:00:00Z'));
+    expect(await hook()(ACCOUNT.id, reply({ inReplyTo: '<keyed@x>', references: ['<keyed@x>'] }))).toBe('enqueued');
+    expect(inbox.getItem(id)!.userAction).toBe('replied');
+    const noId = inbox.insertItem({
+      accountId: ACCOUNT.id, channel: 'email', threadKey: 'imap:INBOX:9', bucket: 'requires_user', confidence: 0.9,
+      reasonDe: 'ohne Message-ID', classifiedAt: new Date('2026-11-23T08:00:00Z'),
+      classifierVersion: 'v1', subject: 'Offerte', fromAddress: 'kunde@example.com',
+    });
+    inbox.updateUserAction(noId, 'replied', new Date('2026-11-23T09:00:00Z'));
+    expect(await hook()(ACCOUNT.id, reply({ messageId: '<reply-3@x>', inReplyTo: 'imap:INBOX:9', references: [] }))).toBe('enqueued');
+    expect(inbox.getItem(noId)!.userAction).toBe('replied');
+  });
+
   it('a reply naming a mail of another account becomes an item of its own and leaves that item alone', async () => {
     const id = seed({ accountId: OTHER.id });
     expect(await hook()(ACCOUNT.id, reply())).toBe('enqueued');
@@ -204,6 +223,12 @@ describe('reading the reply headers', () => {
   it('cuts an oversized References header before scanning it', () => {
     const huge = `<lost@x> ${'x'.repeat(40_000)} <kept@x>`;
     expect(parseReferenceIds(huge)).toEqual(['<kept@x>']);
+  });
+
+  it('takes only ids in Message-ID form', () => {
+    expect(parentMessageIds(reply({ inReplyTo: 'imap:INBOX:9', references: [] }))).toEqual([]);
+    expect(parentMessageIds(reply({ inReplyTo: ' <p@x> ', references: [] }))).toEqual(['<p@x>']);
+    expect(parentMessageIds(reply({ inReplyTo: '<p@x> <q@x>', references: [] }))).toEqual([]);
   });
 
   it('names In-Reply-To first, then References from the newest, without its own id or repeats', () => {
