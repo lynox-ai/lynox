@@ -701,6 +701,12 @@ describe('the owner view', () => {
     // Control: without it, every target in plan order.
     expect(ledger.getPreview(id).map((t) => t.key)).toEqual(['k0', 'k1', 'k2', 'k3', 'k4', 'k5', 'k6', 'k7']);
     expect(ledger.getPreview(id, { changed: false, limit: 2 }).map((t) => t.key)).toEqual(['k0', 'k1']);
+    // Once the run wrote the later one, it comes first among the changed; plan order stays without it.
+    approve(id);
+    expect(ledger.claimTarget(id, 7)).toBe(true);
+    ledger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 7, 'ok');
+    expect(ledger.getPreview(id, { changed: true }).map((t) => [t.key, t.written])).toEqual([['k7', true], ['k5', false]]);
+    expect(ledger.getPreview(id).map((t) => t.key).slice(5)).toEqual(['k5', 'k6', 'k7']);
   });
 });
 

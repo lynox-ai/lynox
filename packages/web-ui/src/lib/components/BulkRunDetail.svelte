@@ -39,9 +39,9 @@
 	let unmeasuredOk = $state(false);
 	// Unchanged targets fold away: the owner checks what is written and what lynox leaves out.
 	let showUnchanged = $state(false);
-	// A run not loaded whole that leaves targets unchanged opens on the targets its plan changes,
-	// so what it writes is on the page however late in the run it comes (U-437). The unchanged
-	// ones and the rest load on the owner's ask.
+	// A run not loaded whole that leaves targets unchanged, or has written, opens on the targets its
+	// plan changes, the written ones first, so what it wrote is on the page however late in the run
+	// it comes (U-437). The unchanged ones and the rest load, in plan order, on the owner's ask.
 	let changedOnly = $state(false);
 	let probeOk = $state(false);
 	let maxTargets = $state(1);
@@ -203,7 +203,7 @@
 				// So does one with a field that could not be checked for them: its sentence stands under it.
 				|| (r.body.hiddenUncheckedTargets ?? 0) > 0;
 			// Every page is asked for the run this load opened, never for one the page has moved to since.
-			let firstChanged = !whole && r.body.changes.unchanged > 0;
+			let firstChanged = !whole && (r.body.changes.unchanged > 0 || r.body.applied > 0);
 			let shown = whole ? await loadFrom(id, 0, r.body.total) : await loadTargets(id, 0, FIRST_PAGE, firstChanged);
 			// A run whose plan changes nothing opens on its first page as before: its unchanged
 			// targets are what there is to show.
@@ -219,7 +219,7 @@
 			if (left()) return false;
 			// Another run's domains are never sent with this one, and its wrong line never holds
 			// this one's start.
-			if (r.body.id !== run?.id) { startDomains = []; startDomainsValid = true; actionError = ''; }
+			if (r.body.id !== run?.id) { startDomains = []; startDomainsValid = true; actionError = ''; showUnchanged = false; }
 			run = r.body;
 			targets = shown;
 			changedOnly = firstChanged;
@@ -240,9 +240,10 @@
 		return true;
 	}
 
-	async function showMore(): Promise<void> {
+	/** Loads the rest of the run; true once the page shows it. */
+	async function showMore(): Promise<boolean> {
 		// While another run loads, the page still shows the one before: its rest is not asked for.
-		if (!run || run.id !== runId) return;
+		if (!run || run.id !== runId) return false;
 		// A list that a load has replaced since, or a run the page has left, is not appended to; a
 		// load of this run that failed and replaced nothing does not drop it.
 		const id = run.id;
@@ -252,12 +253,14 @@
 			// A page that holds only the changed targets loads the run whole, in plan order.
 			const whole = changedOnly;
 			const more = await loadFrom(id, whole ? 0 : targets.length, run.total);
-			if (left()) return;
+			if (left()) return false;
 			targets = whole ? more : [...targets, ...more];
 			changedOnly = false;
+			return true;
 		} catch {
-			if (left()) return;
+			if (left()) return false;
 			actionError = t('common.load_failed');
+			return false;
 		}
 	}
 
@@ -643,7 +646,8 @@
 	// The unchanged targets the run holds, as its counts say, while only the changed ones are loaded.
 	const foldedUnchanged = $derived(changedOnly && run !== null ? run.changes.unchanged : targets.length - unfolded.length);
 	async function showUnchangedTargets(): Promise<void> {
-		if (changedOnly) await showMore();
+		// Unfolded only once they are on the page: a load that failed or was overtaken leaves the fold.
+		if (changedOnly && !(await showMore())) return;
 		showUnchanged = true;
 	}
 	const writes = (x: BulkTarget): boolean => x.change === 'update' || x.change === 'create' || x.change === 'delete';

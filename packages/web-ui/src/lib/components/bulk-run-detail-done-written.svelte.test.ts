@@ -53,6 +53,7 @@ let component: Record<string, unknown> | undefined;
 let run: BulkRunDetailData;
 let targets: BulkTarget[];
 let asked: string[];
+let fail: boolean;
 
 beforeEach(() => {
 	setLocale('de');
@@ -61,6 +62,7 @@ beforeEach(() => {
 	run = makeRun();
 	targets = [];
 	asked = [];
+	fail = false;
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 		const u = String(url);
 		const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -68,7 +70,9 @@ beforeEach(() => {
 		const page = /\/targets\?offset=(\d+)&limit=(\d+)(&changed=1)?$/.exec(u);
 		if (page) {
 			asked.push(u.slice(u.indexOf('/targets')));
-			const from = page[3] ? targets.filter((x) => x.change !== 'unchanged') : targets;
+			// As the engine serves it: the changed targets, the written ones first; otherwise plan order.
+			const from = page[3] ? targets.filter((x) => x.change !== 'unchanged').sort((a, b) => Number(b.written === true) - Number(a.written === true) || a.seq - b.seq) : targets;
+			if (fail && !page[3]) throw new Error('network');
 			return reply({ targets: from.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		}
 		return reply(run);
@@ -142,13 +146,35 @@ describe('the page of a run that wrote a target late in its plan', () => {
 		expect(rows()).toEqual(['1', '2', '3', '4', '5', '6']);
 	});
 
-	it('control: a run without unchanged targets opens on its first page in plan order', async () => {
+	it('opens a run that changes every target on the written ones first, however late in the plan', async () => {
 		doneRun();
 		run = { ...run, changes: { ...run.changes, update: 17, unchanged: 0 } };
-		targets = Array.from({ length: 17 }, (_, i) => writtenAt(i + 1));
+		targets = Array.from({ length: 17 }, (_, i) => ({ ...writtenAt(i + 1), written: i + 1 === 14 || i + 1 === 16 }));
+		await render();
+		expect(rows()).toEqual(['14', '16', '1', '2', '3', '4']);
+		expect(asked).toEqual(['/targets?offset=0&limit=6&changed=1']);
+		// Nothing unchanged to fold.
+		expect([...target.querySelectorAll('button')].some((b) => /unveränderte/.test(b.textContent ?? ''))).toBe(false);
+	});
+
+	it('control: a run that left nothing unchanged and wrote nothing opens on its first page in plan order', async () => {
+		doneRun();
+		run = { ...run, applied: 0, changes: { ...run.changes, update: 17, unchanged: 0 } };
+		targets = Array.from({ length: 17 }, (_, i) => ({ ...writtenAt(i + 1), written: false }));
 		await render();
 		expect(rows()).toEqual(['1', '2', '3', '4', '5', '6']);
 		expect(asked).toEqual(['/targets?offset=0&limit=6']);
+	});
+
+	it('keeps the fold and says so when loading the unchanged targets fails', async () => {
+		doneRun();
+		await render();
+		fail = true;
+		button(tf('bulk.preview.show_unchanged', { n: '16' }))!.click();
+		await settle();
+		expect(rows()).toEqual(['14']);
+		expect(button(tf('bulk.preview.show_unchanged', { n: '16' }))).toBeDefined();
+		expect(target.textContent).toContain(t('common.load_failed'));
 	});
 });
 
