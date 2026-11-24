@@ -6562,7 +6562,7 @@ describe('LynoxHTTPApi', () => {
 
     async function connect(
       author: string | undefined, asMandate: boolean, id = 'books',
-      opts: { clientIdKey?: string; others?: import('../core/api-store.js').ApiProfile[]; unreleased?: boolean; method?: 'GET' | 'POST' | 'HEAD'; query?: string; lang?: string; scope?: string } = {},
+      opts: { clientIdKey?: string; others?: import('../core/api-store.js').ApiProfile[]; unreleased?: boolean; method?: 'GET' | 'POST' | 'HEAD'; query?: string; lang?: string; scope?: string; login?: typeof MANDATE_LOGIN } = {},
     ): Promise<{ status: number; text: string; state: string | null; location: string }> {
       const { ApiStore } = await import('../core/api-store.js');
       const store = new ApiStore();
@@ -6596,7 +6596,7 @@ describe('LynoxHTTPApi', () => {
         },
       });
       try {
-        const token = asMandate ? webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token : webUiLoginSession(TEST_SECRET, null)!.token;
+        const token = asMandate ? webUiLoginSession(TEST_SECRET, opts.login ?? MANDATE_LOGIN)!.token : webUiLoginSession(TEST_SECRET, null)!.token;
         // A mandate's connect goes on from the note page with a POST that names the note shown.
         const method = opts.method ?? (asMandate ? 'POST' : 'GET');
         const query = opts.query ?? (asMandate && method === 'POST' ? '?shown_note=3' : '');
@@ -6704,7 +6704,24 @@ describe('LynoxHTTPApi', () => {
       const r = await connect(TAG, true);
       expect(r.status).toBe(302);
       expect(verifyProfileOAuthState(r.state ?? '', TEST_SECRET, Math.floor(Date.now() / 1000))?.by)
-        .toEqual({ tag: TAG, mandateId: 'TEST-MANDATE-1' });
+        .toEqual({ tag: TAG, mandateId: 'TEST-MANDATE-1', display: 'TEST-DISPLAY' });
+    });
+
+    // A name the state cannot carry once encoded (a lone surrogate passes every character rule
+    // and JSON writes it as six bytes) does not stop the start: it is signed without the name.
+    it('starts a mandate\'s connection without its name when the name does not fit the state, and with it otherwise', async () => {
+      const { verifyProfileOAuthState } = await import('../core/oauth-state-cookie.js');
+      const email = `${'\udc00'.repeat(240)}@x.invalid`;
+      const login = { ...MANDATE_LOGIN, email, display: '\udc00'.repeat(200) };
+      const r = await connect(`mandate:${email}`, true, 'books', { login });
+      expect(r.status).toBe(302);
+      expect(verifyProfileOAuthState(r.state ?? '', TEST_SECRET, Math.floor(Date.now() / 1000))?.by)
+        .toEqual({ tag: `mandate:${email}`, mandateId: 'TEST-MANDATE-1' });
+      // Control: the same session with a short name carries it.
+      const short = await connect(`mandate:${email}`, true, 'books', { login: { ...login, display: 'TEST-DISPLAY' } });
+      expect(short.status).toBe(302);
+      expect(verifyProfileOAuthState(short.state ?? '', TEST_SECRET, Math.floor(Date.now() / 1000))?.by)
+        .toEqual({ tag: `mandate:${email}`, mandateId: 'TEST-MANDATE-1', display: 'TEST-DISPLAY' });
     });
 
     // The note before the provider's login (the approved wording), word for word: a
@@ -22018,6 +22035,27 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
           // A profile on no provider the engine reads an account from: the closing row says so.
           ['done', 'GET /api/oauth/callback account:unknown', `profile:${PROFILE}`, 'mandate'],
         ]);
+      });
+
+      // PRD §7(c): every row of a mandate names the person as they were shown. The callback has
+      // no session; the name comes from the state its start signed.
+      it('puts the mandate\'s name from the signed state on both its rows', async () => {
+        const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID, display: 'Muster AG, Erika Beispiel' } });
+        store.register({ ...store.get(PROFILE)!, created_by: TAG });
+        expect((await complete(cookie)).status).toBe(200);
+        const named = recorded as unknown as Array<{ phase: string; principal: { kind: string; display?: string; mandateId?: string } }>;
+        expect(named.map((e) => [e.phase, e.principal.kind, e.principal.display, e.principal.mandateId])).toEqual([
+          ['attempt', 'mandate', 'Muster AG, Erika Beispiel', MID],
+          ['done', 'mandate', 'Muster AG, Erika Beispiel', MID],
+        ]);
+      });
+
+      it('control: a state signed without a name gives rows without one, and still records them', async () => {
+        const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+        store.register({ ...store.get(PROFILE)!, created_by: TAG });
+        expect((await complete(cookie)).status).toBe(200);
+        const named = recorded as unknown as Array<{ phase: string; principal: { display?: string } }>;
+        expect(named.map((e) => [e.phase, 'display' in e.principal])).toEqual([['attempt', false], ['done', false]]);
       });
 
       it('stores nothing when the attempt cannot be written', async () => {
