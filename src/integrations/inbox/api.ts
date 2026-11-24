@@ -13,6 +13,7 @@
 
 import type {
   InboxBucket,
+  InboxItem,
   InboxRuleAction,
   InboxRuleMatcherKind,
   InboxRuleSource,
@@ -22,6 +23,7 @@ import type { ColdStartTracker } from './cold-start-tracker.js';
 import type { InboxContactResolver } from './contact-resolver.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxStateDb, ListItemsOptions } from './state.js';
+import { itemFollowUps } from './follow-ups.js';
 import { charCount, cutChars, descriptionProblem, fixedValueProblem, MAX_DESCRIPTION_RULES, namesRuleLabel, ruleLine } from './rule-text.js';
 import { isFeatureEnabled } from '../../core/features.js';
 
@@ -157,12 +159,18 @@ export function handleListItems(deps: InboxApiDeps, query: ListItemsQuery): ApiR
     if (snoozedOnly) return bad('ruleId cannot be combined with snoozedOnly');
     opts.ruleId = query.ruleId;
   }
-  return { status: 200, body: { items: deps.state.listItems(opts) } };
+  return { status: 200, body: { items: deps.state.listItems(opts).map((item) => withFollowUps(deps, item)) } };
 }
 
 export function handleGetItem(deps: InboxApiDeps, id: string): ApiResponse {
   const item = deps.state.getItem(id);
-  return item ? { status: 200, body: { item } } : notFound('item');
+  return item ? { status: 200, body: { item: withFollowUps(deps, item) } } : notFound('item');
+}
+
+/** The item as the inbox shows it: with the mail that came into its thread after its own mail. */
+function withFollowUps(deps: InboxApiDeps, item: InboxItem): InboxItem {
+  const followUps = itemFollowUps(deps.state, item);
+  return followUps === undefined ? item : { ...item, followUps };
 }
 
 /**
@@ -190,7 +198,7 @@ export function handleGetItemFull(deps: InboxApiDeps, id: string): ApiResponse {
       ? { md: legacy.bodyMd, source: 'cache', fetchedAt: legacy.fetchedAt.toISOString() }
       : { md: '', source: 'missing' };
   }
-  return { status: 200, body: { item, body } };
+  return { status: 200, body: { item: withFollowUps(deps, item), body } };
 }
 
 /**

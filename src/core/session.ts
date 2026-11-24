@@ -2739,7 +2739,8 @@ export class Session {
     this._createAgent();
     this.loadMessages(messages);
     if (tainted) this.agent?.restoreConversationTaint();
-    // Likewise a search the provider ran, whose blocks the context window may have dropped.
+    // Likewise a server tool the provider ran (its web search), whose blocks the context window
+    // may have dropped.
     if (searched) this.agent?.restoreProviderSearch();
   }
 
