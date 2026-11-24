@@ -211,7 +211,7 @@ describe('T-2: plans that then run for someone else', () => {
 	it('names five plans and counts the rest, without a plan that runs no more (N7)', () => {
 		const p = preview({ memberChanges: ['1', '2', '3', '4', '5', '6', '7'].map((i) => change(i, 'mandate:ida@x.ch', null, i === '7')) });
 		expect(takeoverLines(p, fmt).filter((l) => l.kind === 'member_change').map((l) => l.text)).toEqual([
-			'Diese Pläne laufen danach unter deinem Namen statt unter dem von ida@x.ch: P1, P2, P3, P4, P5 und 1 weitere.',
+			'Diese Pläne laufen danach unter deinem Namen statt unter dem von ida@x.ch: P1, P2, P3, P4, P5 und 1 weiterer.',
 		]);
 	});
 	it('says nothing where whom the plan runs for does not change (N3), or it runs for the owner already', () => {
@@ -359,6 +359,35 @@ describe('helpers', () => {
 		expect(plainText(planList(['1', '2', '3', '4', '5']))).toBe('1, 2, 3, 4, 5');
 		setLocale('en');
 		expect(plainText(planList(['1', '2', '3', '4', '5', '6', '7']))).toBe('1, 2, 3, 4, 5 and 2 more');
+	});
+	it('past five, the rest is folded as one piece that carries every remaining title in its own box', () => {
+		const folded = segments(planList(['1', '2', '3', '4', '5', '6', '7'])).filter((p) => p.more !== undefined);
+		expect(folded.length).toBe(1);
+		expect(folded[0]!.more!.n).toBe(2);
+		expect(folded[0]!.more!.pieces).toEqual([{ text: ', ', foreign: false }, { text: '6', foreign: true }, { text: ', ', foreign: false }, { text: '7', foreign: true }]);
+		// Five or fewer fold nothing.
+		expect(segments(planList(['1', '2', '3', '4', '5'])).some((p) => p.more !== undefined)).toBe(false);
+	});
+	it('a title cannot open or close a fold of its own: its fold marks are printed as their code points', () => {
+		const c = (cp: number): string => String.fromCodePoint(cp);
+		const line = planList([`a${c(0xe002)}b${c(0xe003)}`]);
+		expect(segments(line)).toEqual([{ text: 'a<U+E002>b<U+E003>', foreign: true }]);
+	});
+	it('fold marks around text that names no plan fold nothing, and a lone mark is dropped', () => {
+		const c = (cp: number): string => String.fromCodePoint(cp);
+		expect(segments(`a${c(0xe002)}x${c(0xe003)}b`)).toEqual([{ text: 'a', foreign: false }, { text: 'x', foreign: false }, { text: 'b', foreign: false }]);
+		expect(segments(`a${c(0xe002)}b`)).toEqual([{ text: 'ab', foreign: false }]);
+	});
+	it('a fold with no title in it folds nothing, even one that holds only the commas a list has', () => {
+		const c = (cp: number): string => String.fromCodePoint(cp);
+		expect(segments(`a${c(0xe002)}${c(0xe003)}b`).some((p) => p.more !== undefined)).toBe(false);
+		expect(segments(`a${c(0xe002)}, ${c(0xe003)}b`).some((p) => p.more !== undefined)).toBe(false);
+	});
+	it('fold marks around lynox words fold nothing, even with a value among them', () => {
+		const c = (cp: number): string => String.fromCodePoint(cp);
+		const line = `a${c(0xe002)} was not run, ${shownValue('P6')}${c(0xe003)}`;
+		expect(segments(line).some((p) => p.more !== undefined)).toBe(false);
+		expect(plainText(line)).toBe('a was not run, P6');
 	});
 });
 
