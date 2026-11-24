@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
-import { takeoverLines, refusalText, endedNotices, planList, nameOfTag, type TakeoverPreview, type TakeoverMember } from './plan-takeover.js';
+import { takeoverLines as markedLines, refusalText as markedRefusal, endedNotices as markedNotices, planList, plainText, segments, shownValue, nameOfTag, type TakeoverPreview, type TakeoverMember } from './plan-takeover.js';
 import { setLocale, getLocale } from '../i18n.svelte.js';
 
 const before = getLocale();
@@ -8,6 +8,10 @@ afterEach(() => setLocale(before));
 
 // Total, so a date where none belongs shows in the text (`[null]`) instead of throwing.
 const fmt = (iso: string | null): string => `[${String(iso).slice(0, 10)}]`;
+// The lines as their text reads, without the marks around values someone else wrote.
+const takeoverLines = (...a: Parameters<typeof markedLines>): ReturnType<typeof markedLines> => markedLines(...a).map((l) => ({ ...l, text: plainText(l.text) }));
+const refusalText = (...a: Parameters<typeof markedRefusal>): string => plainText(markedRefusal(...a));
+const endedNotices = (...a: Parameters<typeof markedNotices>): string[] => markedNotices(...a).map(plainText);
 
 function preview(over: Partial<TakeoverPreview> = {}): TakeoverPreview {
 	return {
@@ -201,11 +205,11 @@ describe('T-4 or T-5: whom the plan runs for afterwards', () => {
 		const k = kinds(stays(['workflow-created']));
 		expect([k.includes('runs_as_owner'), k.includes('runs_as_member')]).toEqual([false, true]);
 		expect(takeoverLines(stays(['workflow-created']), fmt).find((l) => l.kind === 'runs_as_member')?.text).toBe(
-			'Den Workflow „Rechnungen“ hat bo@x.ch angelegt, und bo@x.ch hat weiter Zugang. Darum läuft der Plan danach unter dem Namen von bo@x.ch, nicht unter deinem. Endet dieser Zugang, pausiert der Plan wieder, und du kannst ihn dann noch einmal übernehmen.',
+			'Den Workflow Rechnungen hat bo@x.ch angelegt, und bo@x.ch hat weiter Zugang. Darum läuft der Plan danach unter dem Namen von bo@x.ch, nicht unter deinem. Endet dieser Zugang, pausiert der Plan wieder, und du kannst ihn dann noch einmal übernehmen.',
 		);
 		setLocale('en');
 		expect(takeoverLines(stays(['workflow-created', 'workflow-edited']), fmt).find((l) => l.kind === 'runs_as_member')?.text).toBe(
-			'bo@x.ch changed the workflow “Rechnungen” and still has access. So after you take over, the plan runs under bo@x.ch\'s name, not yours. If that access ends, the plan pauses again, and you can take it over once more.',
+			'bo@x.ch changed the workflow Rechnungen and still has access. So after you take over, the plan runs under bo@x.ch\'s name, not yours. If that access ends, the plan pauses again, and you can take it over once more.',
 		);
 	});
 });
@@ -219,7 +223,7 @@ describe('one person under two grants (1029)', () => {
 			workflow: { id: 'w', name: 'Rechnungen', takenOver: false },
 		});
 		expect(takeoverLines(p, fmt).find((l) => l.kind === 'runs_as_member')?.text).toBe(
-			'Den Workflow „Rechnungen“ hat ida@x.ch geändert, und ida@x.ch hat weiter Zugang. Darum läuft der Plan danach unter dem Namen von ida@x.ch, nicht unter deinem. Endet dieser Zugang, pausiert der Plan wieder, und du kannst ihn dann noch einmal übernehmen.',
+			'Den Workflow Rechnungen hat ida@x.ch geändert, und ida@x.ch hat weiter Zugang. Darum läuft der Plan danach unter dem Namen von ida@x.ch, nicht unter deinem. Endet dieser Zugang, pausiert der Plan wieder, und du kannst ihn dann noch einmal übernehmen.',
 		);
 		expect(takeoverLines(p, fmt).filter((l) => l.kind === 'role').map((l) => l.text)).toEqual(['Angelegt von ida@x.ch', 'Nutzt den Workflow „Rechnungen“, den ida@x.ch geändert hat']);
 	});
@@ -229,7 +233,7 @@ describe('one person under two grants (1029)', () => {
 			runsAs: 'mandate:ida@x.ch',
 			workflow: { id: 'w', name: 'Rechnungen', takenOver: false },
 		});
-		expect(takeoverLines(p, fmt).find((l) => l.kind === 'runs_as_member')?.text.startsWith('Den Workflow „Rechnungen“ hat ida@x.ch angelegt,')).toBe(true);
+		expect(takeoverLines(p, fmt).find((l) => l.kind === 'runs_as_member')?.text.startsWith('Den Workflow Rechnungen hat ida@x.ch angelegt,')).toBe(true);
 	});
 	it('the same role under both grants is said once', () => {
 		// The ended grant's roles are the copy the pause took; the live grant changed the workflow again.
@@ -295,9 +299,9 @@ describe('helpers', () => {
 		expect([nameOfTag('mandate:ida@x.ch'), nameOfTag('owner')]).toEqual(['ida@x.ch', 'owner']);
 	});
 	it('five plans are named in full, six are cut', () => {
-		expect(planList(['1', '2', '3', '4', '5'])).toBe('1, 2, 3, 4, 5');
+		expect(plainText(planList(['1', '2', '3', '4', '5']))).toBe('1, 2, 3, 4, 5');
 		setLocale('en');
-		expect(planList(['1', '2', '3', '4', '5', '6', '7'])).toBe('1, 2, 3, 4, 5 and 2 more');
+		expect(plainText(planList(['1', '2', '3', '4', '5', '6', '7']))).toBe('1, 2, 3, 4, 5 and 2 more');
 	});
 });
 
@@ -310,7 +314,7 @@ describe('the refusals at the button', () => {
 		expect(refusalText('bulk', opts)).toBe('Einen Massenlauf musst du nicht übernehmen: Ihn hat kein Helfer eingerichtet.');
 	});
 	it('unreadable names the workflow when the preview had one', () => {
-		expect(refusalText('unreadable', { ...opts, workflow: 'Rechnungen' })).toBe('lynox kann nicht lesen, wer den Workflow „Rechnungen“ eingerichtet hat, und kann den Plan darum nicht übernehmen. Du kannst ihn abschliessen oder löschen. Der Plan bleibt pausiert.');
+		expect(refusalText('unreadable', { ...opts, workflow: 'Rechnungen' })).toBe('lynox kann nicht lesen, wer den Workflow Rechnungen eingerichtet hat, und kann den Plan darum nicht übernehmen. Du kannst ihn abschliessen oder löschen. Der Plan bleibt pausiert.');
 		expect(refusalText('unreadable', opts)).toBe('lynox kann nicht lesen, wer den Workflow dieses Plans eingerichtet hat, und kann den Plan darum nicht übernehmen. Du kannst ihn abschliessen oder löschen. Der Plan bleibt pausiert.');
 	});
 	it('a lasting failure points to support only on a managed instance', () => {
@@ -341,5 +345,14 @@ describe('the notices above the plans, with the full address', () => {
 		expect(unwarned.endsWith(' There was no advance notice.')).toBe(true);
 		expect(warned).toBe('b@x.ch had access until [2026-10-31]. Since then, the plan “Wochenreport” in which b@x.ch created or changed something is paused. Take it over if it should keep running. This also applies if the access has since been extended: the plan only runs again once you take it over.');
 		expect(revoked).not.toContain('advance notice');
+	});
+});
+
+describe('the marks around a value someone else wrote', () => {
+	it('splits a sentence at a whole pair only; a mark without its partner is dropped and stays text', () => {
+		expect(segments('a b c')).toEqual([{ text: 'a ', foreign: false }, { text: 'b', foreign: true }, { text: ' c', foreign: false }]);
+		expect(segments('a b c')).toEqual([{ text: 'a b c', foreign: false }]);
+		expect(segments('a b c')).toEqual([{ text: 'a b c', foreign: false }]);
+		expect(plainText(`x ${shownValue('y')} z`)).toBe('x y z');
 	});
 });

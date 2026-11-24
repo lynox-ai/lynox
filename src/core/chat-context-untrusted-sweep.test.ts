@@ -336,6 +336,23 @@ describe('chat-context untrusted-data sweep', () => {
     });
   }
 
+  // The batch takes each item's follow-up the same way, so the same positional check runs on it:
+  // both items carry the follow-up, and the batch has no body, only the follow-up's snippet.
+  for (const uid of [true, false]) {
+    it(`a batch's follow-up values stay inside the wrapper, and the first mail's are not shown (uid resolved: ${String(uid)})`, () => {
+      const out = resolveChatContext(null, { kind: 'mail-batch', ids: ['tainted-1', 'tainted-2'] }, taintedReader({ uid, followUp: true }))!;
+      const seen: string[] = [];
+      for (const [field, canary] of Object.entries(FOLLOW_UP_CANARY)) {
+        if (!out.includes(canary)) continue;
+        seen.push(field);
+        expect(unwrappedOccurrences(out, canary), `follow-up field "${field}" outside the wrapper:\n${out}`).toEqual([]);
+      }
+      expect(seen).toEqual(uid ? ['fromName', 'fromAddress', 'subject', 'snippet'] : ['fromName', 'fromAddress', 'subject', 'snippet', 'messageId']);
+      expect(Object.values(CANARY).filter((c) => out.includes(c))).toEqual([]);
+      expect(untrustedSpans(out)).toHaveLength(2);
+    });
+  }
+
   // Every encoding of the closing tag a sender might try. Parameterised, because
   // the single-form version of this test was a FALSE ASSURANCE: it asserted the
   // block "cannot be split" and gave the reason as "the interpolated fields are

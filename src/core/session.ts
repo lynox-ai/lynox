@@ -97,6 +97,7 @@ import { ConversationLatch } from './conversation-latch.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { turnIsLocked } from './mandate-tool-lock.js';
 import { ConversationGrants } from './conversation-grants.js';
+import { SearchResultAddresses } from './search-result-addresses.js';
 
 /** Context-usage % at which auto-compaction fires as a LAST-RESORT safety net.
  *  The primary path is user-triggered "prepare & compact" from COMPACT_PREPARE_PERCENT
@@ -566,6 +567,7 @@ export class Session {
    * state in tools/builtin/http.ts and tools/builtin/fs.ts and grew
    * (or, in the Set/Map's case, leaked) for the lifetime of the process.
    */
+  private readonly _searchResultAddresses = new SearchResultAddresses();
   private readonly _sessionCounters: import('../types/agent.js').SessionCounters = {
     httpRequests: 0,
     writeBytes: 0,
@@ -2733,9 +2735,12 @@ export class Session {
   private _rebuildAgentKeepingConversation(): void {
     const messages = this.saveMessages();
     const tainted = this.agent?.conversationSawUntrusted ?? false;
+    const searched = this.agent?.heldProviderSearch() ?? false;
     this._createAgent();
     this.loadMessages(messages);
     if (tainted) this.agent?.restoreConversationTaint();
+    // Likewise a search the provider ran, whose blocks the context window may have dropped.
+    if (searched) this.agent?.restoreProviderSearch();
   }
 
   /**
@@ -3106,6 +3111,8 @@ export class Session {
       changesetReviewedAfterRun: this._changesetManager !== null && this._runShowsReview,
       toolContext,
       sessionCounters: this._sessionCounters,
+      // The same record of what this conversation's searches listed, for every agent built for it.
+      searchResultAddresses: this._searchResultAddresses,
       // Phase 2: same blob-store reference across every Agent recreation so
       // `recall_tool_result` resolves handles minted by a prior `compact()`.
       toolResultBlobStore: this._toolResultBlobStore,
