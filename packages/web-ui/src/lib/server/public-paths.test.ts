@@ -8,6 +8,7 @@ describe('isPublic — exact matches', () => {
 		['/health'],
 		['/auth/magic'],
 		['/'],
+		['/_artifact-frame'],
 	])('treats %s as public', (path) => {
 		expect(isPublic(path)).toBe(true);
 	});
@@ -61,6 +62,7 @@ describe('PUBLIC_EXACT + PUBLIC_PREFIXES — public-surface inventory', () => {
 	it('locks the current public-path inventory', () => {
 		expect([...PUBLIC_EXACT].sort()).toEqual([
 			'/',
+			'/_artifact-frame',
 			'/auth/magic',
 			'/health',
 			'/login',

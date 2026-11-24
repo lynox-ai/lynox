@@ -15,18 +15,21 @@ import { join, relative } from 'node:path';
 const SRC = join(__dirname, '..');
 
 const BYPASS: readonly RegExp[] = [
-  /\b(secretStore|store|vault|secrets|inner|target)\??!?\.resolve\(/,
-  /getMasked\(/,
-  /\.fingerprint\(/,
-  /\bvault\??\.get\(/,
+  // Each call also in its optional and non-null forms, on the receiver and on the call, in either
+  // order (`?.resolve?.(`, `!.get(`, `resolve!(`, `!?.`): the first version of this list missed the
+  // optional call, the second the non-null ones.
+  /\b(secretStore|store|vault|secrets|inner|target)[?!]*\.resolve[?!]*\.?\(/,
+  /getMasked[?!]*\.?\(/,
+  /\.fingerprint[?!]*\.?\(/,
+  /\bvault[?!]*\.get[?!]*\.?\(/,
   /principal: OWNER_PRINCIPAL/,
-  /resolveSecretRefs\(/,
-  /\.getAll\(\)/,
-  /getSecretStore\(\)\??\.resolve\(/,
+  /resolveSecretRefs[?!]*\.?\(/,
+  /\.getAll[?!]*\.?\(\)/,
+  /getSecretStore[?!]*\.?\(\)[?!]*\.resolve[?!]*\.?\(/,
   // Gives nothing readable, but whether another member's or the owner's token exists is information too.
-  /\b(secretStore|store|vault|secrets|inner|target)\??!?\.holds[?!]?\.?\(/,
-  /\b(inner|target)\??\.holds\??\.bind\(/,
-  /getSecretStore\(\)\??\.holds\??\.?\(/,
+  /\b(secretStore|store|vault|secrets|inner|target)[?!]*\.holds[?!]*\.?\(/,
+  /\b(inner|target)[?!]*\.holds[?!]*\.bind\(/,
+  /getSecretStore[?!]*\.?\(\)[?!]*\.holds[?!]*\.?\(/,
 ];
 
 /** `file|line text` → why it may stand. Keyed by text, not line number, so an edit elsewhere in the file keeps it. */
@@ -44,13 +47,16 @@ const PINNED: Readonly<Record<string, string>> = {
   'tools/builtin/http.ts|const current = secretStore.resolve(refreshKey);': 'view; revoked-grant compare, not sent',
   'tools/builtin/http.ts|const stored = secretStore.resolve(refreshSlot);': 'view; renewal input',
   'tools/builtin/http.ts|const resolved = secretStore.resolve(tokenKey);': 'view; the attach, behind the member refusal',
+  'tools/builtin/http.ts|if (store?.holds !== undefined) return store.holds(mpSlot);': '401 reminder: whether a refresh token is there picks a fixed sentence',
+  'tools/builtin/http.ts|return (store?.resolve?.(mpSlot) ?? null) !== null;': 'fallback for a store without holds; existence only, value compared with null',
   'tools/builtin/http.ts|const user = secretStore.resolve(userKey);': 'view; basic auth, no token slot',
   'tools/builtin/http.ts|const pass = secretStore.resolve(passKey);': 'view; basic auth, no token slot',
   'tools/builtin/http.ts|const token = secretStore.resolve(tokenKey);': 'view; a profile\'s own key',
   'tools/builtin/http.ts|: a.secretStore.resolve(key)': 'view; existence answer for a model-owned key',
   'tools/builtin/http.ts|return { inputs: oauthRenewalInputs(profile, stores.secretStore.resolve(slot)), ms };': 'hashed into a hold key after a renewal that went through; not sent',
   // Existence and fingerprint compares: the value decides a boolean, it is not sent or shown.
-  'tools/builtin/api-setup.ts|if (store.resolve(name) !== null) left.push(name);': 'existence after delete, before a save',
+  'tools/builtin/api-setup.ts|if (store.holds !== undefined ? store.holds(name) : store.resolve(name) !== null) left.push(name);': 'existence after delete, before a save',
+  'tools/builtin/api-setup.ts|if (store.holds !== undefined) return !isInfraSecret(name) && store.holds(name);': 'existence probe, boolean only',
   // Raw on purpose: any token in a slot, a member's included, keeps the "not connected" line out;
   // read through the view, a member's connection would read as not connected to the owner.
   'tools/builtin/api-setup.ts|if (slots.some((name) => store.holds!(name))) return \'\';': 'view: existence of a token decides whether "not connected" is said',
@@ -96,6 +102,7 @@ const PINNED: Readonly<Record<string, string>> = {
   "server/http-api.ts|? { principal: OWNER_PRINCIPAL, actorKind: 'cp-migration' as const }": 'audit actor of a migration, no attach',
   "core/engine.ts|principal: OWNER_PRINCIPAL, action: 'connection.erasure.run-history',": 'audit actor of the connection erasure sweep, no attach',
   "core/plan-takeover.ts|principal: OWNER_PRINCIPAL, action: 'plan.takeover', phase: 'done', correlationId: newCorrelationId(),": 'audit actor of the owner\'s takeover of a paused plan, no attach',
+  "core/workflow-takeover.ts|principal: OWNER_PRINCIPAL, action: 'workflow.takeover', phase: 'done', correlationId: newCorrelationId(),": 'audit actor of the owner\'s takeover of a workflow, no attach',
   "core/session-store.ts|const summarySession = engine.createSession({ model: 'fast', principal: OWNER_PRINCIPAL });": 'the thread summary\'s session, built for the owner without tools, no attach',
   'core/migration-export.ts|const allSecrets = vault.getAll();': 'admin migration export, refused to a mandate before dispatch',
   'core/secret-vault.ts|const entries = oldVault.getAll();': 'vault re-key',
@@ -111,7 +118,7 @@ const PINNED: Readonly<Record<string, string>> = {
   'tools/builtin/api-setup.ts|const ids = apiStore.getAll().filter((p) => connectionWaits(p, ends)).map((p) => p.id);': 'profile ids, no values',
   'core/transcribe/session-context.ts|return store.getAll().map((p) => p.name).filter((n) => n.length > 0);': 'profile names, no values',
   'integrations/push/web-push-channel.ts|for (const row of this.store.getAll()) {': 'push subscriptions, not the vault',
-  'server/http-api.ts|profiles: store.getAll().map((p) => {': 'profiles as the reader may see them: no fingerprints, no account of another person\'s connection; plus whether this reader may start the connection, a yes or no from the same check as the connect start, and when a store\'s access ends (its host, date and whether it ended, all derived from the profile)',
+  'server/http-api.ts|profiles: store.getAll().map((p) => {': 'profiles as the reader may see them: no fingerprints, no account of another person\'s connection; plus whether this reader may start the connection, a yes or no from the same check as the connect start, and when a store\'s access ends (its host, date and whether it ended, all derived from the profile); plus the display name of the built-in provider the profile signs in through, a fixed register label derived from the preset id the reader already gets, or null',
   'server/http-api.ts|secret: (name) => this.engine?.getSecretStore()?.resolve(name) ?? null,': 'webhook signature secret named by its connection row; compared, not sent',
 };
 
@@ -167,6 +174,40 @@ describe('bypasses of the member-connection view', () => {
   it('mutant: a raw read of a token slot added to the worker is caught', () => {
     const mutated = new Map(files);
     mutated.set('core/worker-loop.ts', `${files.get('core/worker-loop.ts')!}\nconst leaked = secretStore.resolve(accessTokenKey(profile.id));\n`);
+    expect(unpinned(mutated)).toEqual([expect.stringContaining('core/worker-loop.ts:')]);
+  });
+
+  it('mutant: a raw read in its optional-call form is caught', () => {
+    const mutated = new Map(files);
+    mutated.set('core/worker-loop.ts', `${files.get('core/worker-loop.ts')!}\nconst leaked = agent.secretStore?.resolve?.(refreshSlot);\n`);
+    expect(unpinned(mutated)).toEqual([expect.stringContaining('core/worker-loop.ts:')]);
+  });
+
+  // One line per rule and form; each is a read that the list must not let through.
+  it.each([
+    'const a = store.resolve!(slot);',
+    'const a = secretStore!?.resolve(slot);',
+    'const a = vault!.get(name);',
+    'const a = vault?.get?.(name);',
+    'const a = vault!.getAll();',
+    'const a = agent.secretStore?.getMasked?.(name);',
+    'const a = view.fingerprint!(name);',
+    'const a = resolveSecretRefs?.(input, store);',
+    'const a = getSecretStore()!.resolve(x);',
+    'const a = getSecretStore?.()?.resolve(x);',
+    'const a = getSecretStore()!.holds(x);',
+    'const a = inner!.holds?.bind(inner);',
+    'const a = store.getMasked!(name);',
+    'const a = resolveSecretRefs!(input, store);',
+    'const a = vault.getAll!();',
+    'const a = store!?.holds(slot);',
+    'const a = store.resolve!?.(slot);',
+    'const a = vault.get!?.(name);',
+    'const a = getSecretStore?.().holds(x);',
+    'const a = inner.holds!.bind(inner);',
+  ])('mutant: the raw read %s is caught', (read) => {
+    const mutated = new Map(files);
+    mutated.set('core/worker-loop.ts', `${files.get('core/worker-loop.ts')!}\n${read}\n`);
     expect(unpinned(mutated)).toEqual([expect.stringContaining('core/worker-loop.ts:')]);
   });
 

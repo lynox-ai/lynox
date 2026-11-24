@@ -91,7 +91,7 @@ describe('a profile\'s values in boxes of pieces, for a narrow screen (U-391)', 
 	const W = (x: string): string => `<span class="inline-block max-w-full break-all">${x}</span>`;
 	const html = (id: string): string[] => [...target.querySelectorAll<HTMLElement>(`[data-testid="${id}"]`)].map((e) => e.innerHTML.replace(/<!---->/g, ''));
 
-	it('the base URL has `<wbr>` only after a dot or a slash, the account only after a dot, none at a hyphen', async () => {
+	it('the base URL has `<wbr>` only after a dot or a slash, none at a hyphen; the account is set apart whole in its own box', async () => {
 		serve({ profiles: [{ id: 'shop', name: 'Shop', base_url: 'https://acme-store.myshopify.com/admin/api/2025-10', description: '', oauth_grant: { connected_by: 'owner', account: { label: 'acme-store.myshopify.com' }, connected_by_reader: true } }], importWaiting: [] });
 		const { default: ApiStoreView } = await import('./ApiStoreView.svelte');
 		component = mount(ApiStoreView, { target });
@@ -101,11 +101,30 @@ describe('a profile\'s values in boxes of pieces, for a narrow screen (U-391)', 
 			flushSync();
 		}
 		expect(html('api-base-url')).toEqual([['https://', 'acme-store.', 'myshopify.', 'com/', 'admin/', 'api/', '2025-10'].map(W).join('<wbr>')]);
-		expect(html('api-connection-account')).toEqual([['acme-store.', 'myshopify.', 'com'].map(W).join('<wbr>')]);
+		// The account is someone else's value: set apart as one value, its box moving to the next line whole.
+		const account = target.querySelector<HTMLElement>('[data-testid="api-connection-account"]')!;
+		expect([...account.querySelectorAll('bdi[data-foreign-value]')].map((e) => e.textContent)).toEqual(['acme-store.myshopify.com']);
+		expect(account.querySelectorAll('wbr').length).toBe(0);
 		for (const id of ['api-base-url', 'api-connection-account']) {
 			const box = target.querySelector<HTMLElement>(`[data-testid="${id}"]`)!;
 			expect(box.classList.contains('inline-block') && box.classList.contains('max-w-full'), id).toBe(true);
 		}
 		expect(target.querySelector('[data-testid="api-connection"]')?.textContent?.trim()).toBe('Verbunden von dir · Konto: acme-store.myshopify.com');
+	});
+
+	it('the base URL shows a character that turns text around as its code point, not as the character', async () => {
+		const rlo = String.fromCharCode(0x202e);
+		serve({ profiles: [{ id: 'crm', name: 'CRM', base_url: `https://crm.example/${rlo}v2`, description: '' }], importWaiting: [] });
+		const { default: ApiStoreView } = await import('./ApiStoreView.svelte');
+		component = mount(ApiStoreView, { target });
+		for (let i = 0; i < 10; i++) {
+			await new Promise((r) => setTimeout(r, 0));
+			await tick();
+			flushSync();
+		}
+		const url = target.querySelector<HTMLElement>('[data-testid="api-base-url"]')!.textContent ?? '';
+		expect(url.includes(rlo)).toBe(false);
+		expect(url).toContain('U+202E');
+		expect(url.startsWith('https://crm.example/')).toBe(true);
 	});
 });

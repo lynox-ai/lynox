@@ -432,6 +432,14 @@ describe('spawn_agent tool', () => {
     expect(config['sendOrigin']).toEqual({ kind: 'childAgent' });
   });
 
+  it('a child shares the parent\'s record of what this conversation\'s searches listed', async () => {
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    vi.mocked(MockAgent).mockClear();
+    const searches = { has: () => false };
+    await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Analyze' }] }, makeAgent({ searchResultAddresses: searches } as unknown as Partial<IAgent>));
+    expect((vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['searchResultAddresses']).toBe(searches);
+  });
+
   it('a child of a trigger\'s run keeps the trigger as where a target comes from', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
     vi.mocked(MockAgent).mockClear();
