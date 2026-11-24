@@ -4084,6 +4084,13 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // chunked-transfer stall is invisible to the timeout below. Race below
     // is the wrap-around guarantee: no matter where in the pipeline things
     // hang, the fetch resolves within HARD_CAP plus HTTP_WALL_GRACE_MS of the timers starting.
+    // The session limit again, now with no await left before the count below: the check at the
+    // top ran before the questions and readings above, and calls of the same turn run side by
+    // side, so each of them could have passed it at 99. Checked and counted in one synchronous
+    // step, only one of them sends the 100th request. A call refused here sent nothing.
+    if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
+      blockedRequestLimit(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
+    }
     const requestedTimeout = input.timeout_ms ?? 30_000;
     const timeoutMs = Math.min(Math.max(1, requestedTimeout), HTTP_HARD_CAP_MS);
     const controller = new AbortController();
@@ -4136,6 +4143,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     stopped.catch(() => {});
 
     try {
+      // No await between the limit check before the timers and this line (see there).
       agent.sessionCounters.httpRequests++;
       // For a contract-governed write, re-validate every redirect hop against
       // the contract so a 307/308 can't carry the body past the host/path pin.
