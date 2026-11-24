@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll, onTestFinished } from 'vitest';
 import { recipientConfirmDigest } from '../core/recipient-confirm.js';
-import { CP_ADMIN_PRINCIPAL, principalFromTag, OWNER_PRINCIPAL, ownerInstructionCounts, type RequestPrincipal } from '../core/request-principal.js';
+import { CP_ADMIN_PRINCIPAL, principalFromTag, principalTag, OWNER_PRINCIPAL, ownerInstructionCounts, type RequestPrincipal } from '../core/request-principal.js';
 import { parseBrokerStartTokenV2 } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
 import { request as httpRequest, Agent as HttpAgent, ServerResponse, type Server } from 'node:http';
@@ -46,7 +46,7 @@ import { WorkflowStore } from '../core/workflow-store.js';
 import { RunHistory } from '../core/run-history.js';
 import { InputRequiredError } from '../core/input-required.js';
 import { StreamIncompleteError } from '../core/stream-incomplete.js';
-import { ChangesetManager } from '../core/changeset.js';
+import { ChangesetManager, mayAnswerReview } from '../core/changeset.js';
 import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 import { currentRunGroup } from '../core/run-group.js';
 import { APPROVAL_DRAFT_UNAVAILABLE, closeLoadedContext } from '../core/chat-context.js';
@@ -24695,6 +24695,244 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       starter = M;
       expect((await jsonFetch('/api/tasks/trg-1/stop', { method: 'POST' })).status).toBe(202);
       expect(stopTask).toHaveBeenCalledWith('trg-1');
+    });
+  });
+
+  describe('an open review holds the next message of a client that shows it', () => {
+    const dirs: string[] = [];
+    const running = (): Map<string, unknown> => (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+    beforeEach(() => {
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+      // A run starts only under a live grant.
+      swap('getMandateEnds', () => ({ record: (): void => {}, isLive: (): boolean => true }));
+      mockSessionRun.mockReset();
+      mockSessionRun.mockResolvedValue('ok');
+    });
+    afterEach(() => {
+      for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+      mockSessionRun.mockReset();
+    });
+
+    /** A review of one file the run of `by` wrote (or deleted), in a session whose last run
+     *  was `lastRun`'s, and whether that run's client showed the review. */
+    const review = (
+      by: RequestPrincipal,
+      opts: { shown?: boolean; change?: 'write' | 'delete'; lastRun?: RequestPrincipal } = {},
+    ): { csm: ChangesetManager; file: string } => {
+      const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-hold-'));
+      dirs.push(cwd);
+      const file = join(cwd, 'a.txt');
+      writeFileSync(file, 'before', 'utf-8');
+      const csm = new ChangesetManager(cwd, 'run-held', [], { createdBy: principalTag(by), shownForReview: opts.shown ?? true });
+      csm.backupBeforeWrite(file);
+      if ((opts.change ?? 'write') === 'write') writeFileSync(file, 'after', 'utf-8');
+      else rmSync(file);
+      sessionRanBy(opts.lastRun ?? by, { getChangesetManager: vi.fn(() => csm) });
+      return { csm, file };
+    };
+    const send = (extra: Record<string, unknown> = {}, id = OWN): Promise<Response> =>
+      jsonFetch(`/api/sessions/${id}/run`, { method: 'POST', body: JSON.stringify({ task: 'next', shows_changeset_review: true, ...extra }) });
+    /** What a `/run` answer came to, for one assert in the test itself: its status, its code,
+     *  the review it names, and how many runs started. */
+    const outcome = async (res: Response): Promise<{ status: number; code: unknown; runId: unknown; runs: number }> => {
+      const body = (await res.json().catch(() => null)) as { code?: unknown; runId?: unknown } | null;
+      const runs = mockSessionRun.mock.calls.length;
+      mockSessionRun.mockClear();
+      return { status: res.status, code: body?.code, runId: body?.runId, runs };
+    };
+    const HELD = { status: 409, code: 'review_pending', runId: 'run-held', runs: 0 };
+    const RAN = { status: 200, code: undefined, runId: undefined, runs: 1 };
+    const card = async (id = OWN): Promise<{ hasChanges: boolean; runId?: string }> =>
+      (await (await jsonFetch(`/api/sessions/${id}/changeset`)).json()) as { hasChanges: boolean; runId?: string };
+    const answer = (action: string, id = OWN): Promise<Response> =>
+      jsonFetch(`/api/sessions/${id}/changeset/review`, { method: 'POST', body: JSON.stringify({ action, runId: 'run-held' }) });
+
+    it('holds the owner\'s message while the owner\'s shown review has changes, and names the review', async () => {
+      review(OWNER_PRINCIPAL);
+      expect(await outcome(await send())).toEqual(HELD);
+      expect(await card()).toMatchObject({ hasChanges: true, runId: 'run-held' });
+    });
+
+    it('does not hold a request that does not say it shows the review (bot, API, worker)', async () => {
+      review(OWNER_PRINCIPAL);
+      expect(await outcome(await send({ shows_changeset_review: undefined }))).toEqual(RAN);
+      expect(await outcome(await send({ shows_changeset_review: 'true' }))).toEqual(RAN);
+    });
+
+    it('does not hold for a review whose run did not show it', async () => {
+      review(OWNER_PRINCIPAL, { shown: false });
+      expect(await outcome(await send())).toEqual(RAN);
+    });
+
+    it('does not hold a mandate on the owner\'s review, and gives it no card, even when the mandate ran last', async () => {
+      review(OWNER_PRINCIPAL, { lastRun: MANDATE });
+      asMandate();
+      expect(await card()).toEqual({ hasChanges: false, files: [] });
+      expect(await outcome(await send())).toEqual(RAN);
+    });
+
+    it('holds the owner on a mandate\'s review, which the owner sees and may answer', async () => {
+      review(MANDATE);
+      expect(await outcome(await send())).toEqual(HELD);
+      expect(await card()).toMatchObject({ hasChanges: true, runId: 'run-held' });
+      expect((await answer('accept')).status).toBe(200);
+    });
+
+    it('holds a mandate on its own review', async () => {
+      review(MANDATE);
+      asMandate();
+      expect(await card()).toMatchObject({ hasChanges: true });
+      expect(await outcome(await send())).toEqual(HELD);
+    });
+
+    it('never holds the control plane, and gives it no card, even on a review tagged as its own', async () => {
+      const { csm } = review(CP_ADMIN_PRINCIPAL);
+      expect(mayAnswerReview(csm, CP_ADMIN_PRINCIPAL)).toBe(false);
+      expect(mayAnswerReview(csm, OWNER_PRINCIPAL), 'positive control').toBe(true);
+      api.setPrincipalResolverForTesting(() => CP_ADMIN_PRINCIPAL);
+      expect(await card(FOREIGN)).toEqual({ hasChanges: false, files: [] });
+      const res = await send({}, FOREIGN);
+      expect(((await res.json()) as { code?: string }).code).not.toBe('review_pending');
+    });
+
+    it('does not hold for a review the card does not show (its only file was deleted)', async () => {
+      const { csm } = review(OWNER_PRINCIPAL, { change: 'delete' });
+      expect(csm.isEmpty(), 'the review still holds the deleted file').toBe(false);
+      expect(await card()).toMatchObject({ hasChanges: false });
+      expect(await outcome(await send())).toEqual(RAN);
+    });
+
+    it('answers a running session with the plain busy refusal, not the review', async () => {
+      review(OWNER_PRINCIPAL);
+      running().set(OWN, { streamAlive: true, lastEventAt: Date.now(), takeover: () => {} });
+      const res = await send();
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { code?: string }).code).toBeUndefined();
+    });
+
+    it('takes a stuck run over first, then holds the message for the review', async () => {
+      review(OWNER_PRINCIPAL);
+      const takeover = vi.fn(() => { running().delete(OWN); });
+      running().set(OWN, { streamAlive: false, lastEventAt: 0, takeover });
+      expect(await outcome(await send())).toEqual(HELD);
+      expect(takeover).toHaveBeenCalled();
+    });
+
+    it('a held message with an attached file leaves the files area as it was', async () => {
+      review(OWNER_PRINCIPAL);
+      const area = mkdtempSync(join(tmpdir(), 'lynox-cs-hold-area-'));
+      dirs.push(area);
+      setTenantWorkspace(area);
+      try {
+        const big = `id,amount\n${'1,42.00\n'.repeat(3_000)}`;
+        expect(await outcome(await send({ files: [{ name: 'buchungen.csv', type: 'text/csv', data: Buffer.from(big).toString('base64') }] }))).toEqual(HELD);
+        expect(readdirSync(area)).toEqual([]);
+      } finally {
+        clearTenantWorkspace();
+      }
+    });
+
+    it('answering the review ends the hold', async () => {
+      review(OWNER_PRINCIPAL);
+      expect(await outcome(await send())).toEqual(HELD);
+      expect((await answer('accept')).status).toBe(200);
+      expect(await outcome(await send())).toEqual(RAN);
+    });
+
+    it('the review route still checks the conversation: a mandate cannot answer its own review in the owner\'s conversation', async () => {
+      const { file } = review(MANDATE);
+      asMandate();
+      expect((await answer('rollback', FOREIGN)).status).toBe(403);
+      expect(readFileSync(file, 'utf-8')).toBe('after');
+    });
+
+    it('the review is answered by who made it, not by who ran last: a mandate that ran last cannot answer the owner\'s review', async () => {
+      const { file } = review(OWNER_PRINCIPAL, { lastRun: MANDATE });
+      asMandate();
+      expect(await card(), 'no card either').toMatchObject({ hasChanges: false });
+      expect((await answer('rollback')).status).toBe(403);
+      expect(readFileSync(file, 'utf-8'), 'the owner\'s change stays').toBe('after');
+    });
+
+    it('when the changes cannot be read, a rollback still rolls back, gives no count, names every file it left, and the hold ends', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
+      // A file the run made, then replaced by another under the same name: the rollback leaves it.
+      const made = join(dirname(file), 'made.txt');
+      csm.backupBeforeWrite(made);
+      writeFileSync(made, 'by the run', 'utf-8');
+      csm.recordWritten(made);
+      rmSync(made);
+      writeFileSync(made, 'by someone else', 'utf-8');
+      vi.spyOn(csm, 'getChanges').mockImplementation(() => { throw new Error('unreadable'); });
+      const res = await answer('rollback');
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { rolledBack: unknown; notRestored: string[] };
+      expect(body.rolledBack, 'no count made up').toBeNull();
+      expect(body.notRestored, 'the file the run made and the rollback left is named').toContain('made.txt');
+      expect(readFileSync(file, 'utf-8'), 'the changed file is restored').toBe('before');
+      expect(readFileSync(made, 'utf-8')).toBe('by someone else');
+      expect(csm.isEmpty()).toBe(true);
+      expect(await outcome(await send())).toEqual(RAN);
+    });
+
+    it('when the changes cannot be read, a file the rollback left is named even without a backup to show', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
+      vi.spyOn(csm, 'getChanges').mockImplementation(() => { throw new Error('unreadable'); });
+      vi.spyOn(csm, 'rollbackAll').mockReturnValue([file]);
+      vi.spyOn(csm, 'hasOriginal').mockReturnValue(false);
+      const res = await answer('rollback');
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { notRestored: string[] }).notRestored, 'maybe shown on the card: never left out').toEqual(['a.txt']);
+    });
+
+    it('control: with the changes read, a file not shown and without a backup is left out of the answer, as before', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
+      vi.spyOn(csm, 'getChanges').mockReturnValue([]);
+      vi.spyOn(csm, 'rollbackAll').mockReturnValue([file]);
+      vi.spyOn(csm, 'hasOriginal').mockReturnValue(false);
+      const res = await answer('rollback');
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { notRestored: string[] }).notRestored).toEqual([]);
+    });
+
+    it('when the changes cannot be read, an accept answers as accepted without a count, and the hold ends', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
+      vi.spyOn(csm, 'getChanges').mockImplementation(() => { throw new Error('unreadable'); });
+      const res = await answer('accept');
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ok: true, accepted: null });
+      expect(readFileSync(file, 'utf-8')).toBe('after');
+      expect(csm.isEmpty()).toBe(true);
+      expect(await outcome(await send())).toEqual(RAN);
+    });
+
+    it('a mandate answering where there is no review gets "nothing to review", not a refusal', async () => {
+      sessionRanBy(MANDATE, { getChangesetManager: vi.fn(() => null) });
+      asMandate();
+      const res = await answer('accept');
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error?: string }).error).toBe('No changeset to review');
+    });
+
+    it('a throw after a finished rollback is not reported as one that stopped partway', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
+      vi.spyOn(csm, 'hasOriginal').mockImplementation(() => { throw new Error('after'); });
+      vi.spyOn(csm, 'getChanges').mockReturnValue([{ file: 'gone.txt', absolutePath: join(dirname(file), 'gone.txt'), status: 'modified', diff: '', compared: true }] as never);
+      const left = vi.spyOn(csm, 'rollbackAll').mockReturnValue([join(dirname(file), 'x.txt')]);
+      const res = await answer('rollback');
+      expect(left).toHaveBeenCalled();
+      expect(res.status).toBe(500);
+      expect(await res.text(), 'not "stopped partway"').not.toContain('rollback_aborted');
+    });
+
+    it('a rollback that stops partway answers with its own refusal, and the hold ends', async () => {
+      const { csm } = review(OWNER_PRINCIPAL);
+      vi.spyOn(csm, 'rollbackAll').mockImplementation(() => { throw new Error('stopped'); });
+      const res = await answer('rollback');
+      expect(res.status).toBe(500);
+      expect(((await res.json()) as { code?: string }).code).toBe('rollback_aborted');
+      expect(csm.isEmpty()).toBe(true);
+      expect(await outcome(await send())).toEqual(RAN);
     });
   });
 

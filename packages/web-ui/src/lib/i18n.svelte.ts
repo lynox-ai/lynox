@@ -1914,7 +1914,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'changeset.review_unsent': { de: 'Deine Antwort ist möglicherweise nicht angekommen. Bitte versuche es erneut.', en: 'Your answer may not have arrived. Please try again.' },
 	'changeset.review_failed': { de: 'Deine Antwort konnte nicht übernommen werden.', en: 'Your answer could not be applied.' },
 	'changeset.not_restored': { de: 'Nicht zurückgesetzt: {files}. Diese Dateien wurden seit der Prüfung ersetzt oder verknüpft, oder sie liessen sich nicht schreiben. Sieh sie dir selbst an.', en: 'Not restored: {files}. These files were replaced or linked since the review, or could not be written. Look at them yourself.' },
+	'changeset.message_waiting': { de: 'Deine Nachricht geht los, sobald du über diese Änderungen entschieden hast.', en: 'Your message goes out once you have decided on these changes.' },
+	'changeset.not_restored_unknown': { de: 'Nicht zurückgesetzt: {files}. Warum, kann lynox hier nicht sagen. Sieh dir diese Dateien selbst an; sie können noch die Änderung tragen.', en: 'Not restored: {files}. lynox cannot tell why here. Look at these files yourself; they may still carry the change.' },
 	'changeset.not_restored_more': { de: '{files} und {n} weitere', en: '{files} and {n} more' },
+	'changeset.rollback_aborted': { de: 'Das Zurücksetzen brach mittendrin ab. Ein Teil der Dateien ist vielleicht zurückgesetzt, der Rest bleibt geändert und lässt sich hier nicht mehr zurücksetzen. Sieh dir die geänderten Dateien selbst an.', en: 'Rolling back stopped partway. Some files may be restored; the rest stay changed and can no longer be rolled back here. Check the changed files yourself.' },
 	'changeset.review_refused': { de: 'Deine Antwort wurde nicht übernommen: Diese Änderungen gehören zu einem früheren Lauf, oder ein Lauf ist gerade aktiv.', en: 'Your answer was not applied: these changes belong to an earlier run, or a run is in progress.' },
 
 	// Context management
