@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
-	import { formatCost } from '../format.js';
+	import { formatUsdIn } from '../format.js';
 	import { bootStoreLineKeys, bootStoresOf } from '../boot-store-notice.js';
 	import { parseActiveRuns, countLiveRuns } from '../utils/active-runs.js';
 	import { scrollFade } from '../utils/scroll-fade.js';
@@ -66,9 +66,9 @@
 	/** Today's cost as the cost endpoint last said it; null while unknown (not read yet, or the read
 	 *  failed). A zero is shown only when the endpoint said zero, never for "do not know". */
 	let todayCost = $state<number | null>(null);
-	/** A known amount; a real zero reads "$0.00" (`formatCost` gives "-" for 0, which is the unknown sign here). */
+	/** A known amount, a real zero included, with its number in the page's language (DE "0,0076 $"). */
 	function todayCostAmount(cost: number): string {
-		return cost === 0 ? '$0.00' : formatCost(cost);
+		return formatUsdIn(cost, getLocale() === 'de' ? 'de' : 'en');
 	}
 	/** The footer's figure: the period named with it, `$0.00` for a real zero; `-` alone while unknown. */
 	const todayCostShown = $derived(todayCost === null ? '-' : `${t('status.today')} ${todayCostAmount(todayCost)}`);

@@ -282,6 +282,37 @@ describe('handleGetItemContext', () => {
 });
 
 describe('handleGetItemThread', () => {
+  it('marks a received message kept without its text because it read as confidential, and no other', () => {
+    const itemId = state.insertItem({
+      accountId: ACCOUNT.id, channel: 'email', threadKey: 'thr-conf', bucket: 'requires_user', confidence: 0.5,
+      reasonDe: 'r', classifiedAt: new Date('2026-05-10T12:00:00Z'), classifierVersion: 'v',
+      fromAddress: 'sender@x', subject: 'hello', messageId: '<own@x>',
+    });
+    const add = (messageId: string, extra: Partial<Parameters<typeof state.insertThreadMessage>[0]> = {}): void => {
+      state.insertThreadMessage({
+        accountId: ACCOUNT.id, threadKey: 'thr-conf', messageId, fromAddress: 'sender@x', subject: 'Re: hello',
+        direction: 'inbound', mailDate: new Date('2026-05-11T10:00:00Z'), ...extra,
+      });
+    };
+    add('<flagged@x>');
+    add('<plain-empty@x>');
+    add('<flagged-masked@x>', { snippet: 'IBAN [redacted]' });
+    add('<sent@x>', { direction: 'outbound' });
+    add('<subject-reads@x>', { subject: 'Bitte überweisen auf CH9300762011623852957' });
+    for (const id of ['<flagged@x>', '<flagged-masked@x>', '<sent@x>']) {
+      state.appendAudit({ itemId, action: 'raised_on_sensitive_follow_up', actor: 'system', payloadJson: JSON.stringify({ message_id: id }) });
+    }
+    const body = handleGetItemThread(deps, itemId).body as { messages: ReadonlyArray<{ messageId: string; confidential?: boolean }> };
+    const marked = Object.fromEntries(body.messages.map((m) => [m.messageId, m.confidential === true]));
+    expect(marked).toEqual({
+      '<flagged@x>': true,
+      '<plain-empty@x>': false,
+      '<flagged-masked@x>': false,
+      '<sent@x>': false,
+      '<subject-reads@x>': true,
+    });
+  });
+
   it('404s on missing item', () => {
     expect(handleGetItemThread(deps, 'missing').status).toBe(404);
   });

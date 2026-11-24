@@ -21,6 +21,7 @@
 	import { inboxHeadline } from '../utils/inbox-headline.js';
 	import { senderRulePrefill, subjectRulePrefill } from '../inbox-rule-prefill.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
+	import WholeValue from './WholeValue.svelte';
 	import InboxThreadHistory from './InboxThreadHistory.svelte';
 	import Icon from '../primitives/Icon.svelte';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
@@ -106,6 +107,13 @@
 			return tf(many ? 'inbox.follow_up_notice_many' : 'inbox.follow_up_notice_one', { count: String(f.count), name, date });
 		}
 		return tf(many ? 'inbox.follow_up_notice_many_anon' : 'inbox.follow_up_notice_one_anon', { count: String(f.count), date });
+	}
+
+	/** The date of the mail whose text stands below: the item's own mail. A follow-up that opened
+	 *  the item again moves the item's date (the list sorts by it), not this one. */
+	function ownMailDate(item: InboxItem): string | undefined {
+		const own = item.messageId !== undefined ? thread?.messages.find((m) => m.messageId === item.messageId) : undefined;
+		return own?.mailDate ?? item.mailDate ?? item.classifiedAt;
 	}
 
 	function dateFormat(iso: string | undefined): string {
@@ -248,12 +256,14 @@
 						</h2>
 						<div class="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-[11px] text-text-subtle">
 							<span class="text-text-muted break-words [overflow-wrap:anywhere] min-w-0">
-								{full.item.fromName || full.item.fromAddress}
 								{#if full.item.fromName}
-									<span class="text-text-subtle">&lt;{full.item.fromAddress}&gt;</span>
+									{full.item.fromName}
+									<span class="text-text-subtle">&lt;<WholeValue value={full.item.fromAddress} kind="account" testid="inbox-reading-from-address" />&gt;</span>
+								{:else}
+									<WholeValue value={full.item.fromAddress} kind="account" testid="inbox-reading-from-address" />
 								{/if}
 							</span>
-							<span class="whitespace-nowrap">{dateFormat(full.item.mailDate ?? full.item.classifiedAt)}</span>
+							<span class="whitespace-nowrap" data-testid="inbox-reading-date">{dateFormat(ownMailDate(full.item))}</span>
 						</div>
 					{/if}
 				</div>
@@ -334,23 +344,24 @@
 			<!-- Mobile-only action row: stacks below the subject so the buttons no longer
 				starve the content of horizontal space. Touch-sized (min-h-[44px]). -->
 			{#if full}
-				<div class="mt-3 flex items-center gap-1.5 sm:hidden">
+				<div class="mt-3 flex flex-wrap items-center gap-1.5 sm:hidden">
 					<button
 						type="button"
-						class="flex-1 flex items-center justify-center gap-1.5 rounded-[var(--radius-sm)] border border-accent bg-accent px-3 py-2 text-[12px] text-accent-fg hover:opacity-90 min-h-[44px]"
+						class="basis-full flex items-center justify-center gap-1.5 whitespace-nowrap rounded-[var(--radius-sm)] border border-accent bg-accent px-3 py-2 text-[12px] text-accent-fg hover:opacity-90 min-h-[44px]"
+						data-testid="inbox-reply-in-chat-mobile"
 						onclick={() => replyInChat(full!.item)}
 						aria-label={t('inbox.reply_in_chat')}
 					><Icon name="chat" size="xs" />{t('inbox.reply_in_chat')}</button>
 					<button
 						type="button"
-						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"
+						class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"
 						onclick={() => void onArchive()}
 						aria-label={t('inbox.action_archive')}
 					>{t('inbox.action_archive')}</button>
-					<div class="relative" use:clickOutside={() => (snoozeOpen = false)}>
+					<div class="relative flex-1" use:clickOutside={() => (snoozeOpen = false)}>
 						<button
 							type="button"
-							class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"
+							class="w-full rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-muted hover:text-text hover:border-border-hover min-h-[44px]"
 							onclick={() => (snoozeOpen = !snoozeOpen)}
 							aria-expanded={snoozeOpen}
 							aria-haspopup="menu"
@@ -388,7 +399,7 @@
 						disabled={refreshing}
 						title={t('inbox.body_refresh_body_hint')}
 						aria-label={t('inbox.body_refresh_body')}
-						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-subtle hover:text-text hover:border-border-hover min-h-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
+						class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[12px] text-text-subtle hover:text-text hover:border-border-hover min-h-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
 					>{refreshing ? t('inbox.body_refresh_in_flight') : t('inbox.body_refresh_full_body')}</button>
 				</div>
 			{/if}
