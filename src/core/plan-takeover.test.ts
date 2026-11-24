@@ -577,7 +577,7 @@ describe('the workflow’s side', () => {
       ended(b, 'h@x.ch');
       pause(b, 'p', 'h@x.ch');
       take(b, 'p');
-      b.workflows.upsertCopy({ id: 'w-copy', name: 'W copy', definitionJson: '{"steps":[]}' }, { kind: 'mandate', email: 'm2@x.ch', mandateId: 'g-m2@x.ch' }, 'w');
+      b.workflows.upsertCopy({ id: 'w-copy', name: 'W copy', definitionJson: '{"steps":[]}', isTemplate: false }, { kind: 'mandate', email: 'm2@x.ch', mandateId: 'g-m2@x.ch' }, 'w');
       expect([from, planMandate(planAuthorshipOfWorkflow(b.workflows.authorship('w-copy')!))?.principal.email]).toEqual([from, 'm2@x.ch']);
     }
   });
@@ -1022,7 +1022,7 @@ describe('no other write touches the cover', () => {
     const tasks = new TaskManager(b.history);
     tasks.complete('p');
     tasks.reopen('p');
-    b.workflows.upsertCopy({ id: 'w-copy', name: 'W copy', definitionJson: '{"steps":[]}' }, { kind: 'owner' }, 'w');
+    b.workflows.upsertCopy({ id: 'w-copy', name: 'W copy', definitionJson: '{"steps":[]}', isTemplate: false }, { kind: 'owner' }, 'w');
     expect(cover()).toEqual(before);
     expect(memberOf(b, 'p')).toBeUndefined();
   });

@@ -2667,16 +2667,21 @@ export class LynoxHTTPApi {
     return deps;
   }
 
-  /** The takeover's reads and writes, or null when engine.db is not there; answers nothing. */
+  /**
+   * The takeover's reads and writes, or null when engine.db or the store of access ends is not
+   * there; answers nothing. Without the store every person would read as ended, so a preview would
+   * say a live person's access ended, and a takeover would move what a live person shaped.
+   */
   #takeoverDepsIfReady(): TakeoverDeps | null {
     const engine = this.engine;
     const engineDb = engine?.getEngineDb() ?? null;
     if (engine === null || engine === undefined || engineDb === null) return null;
     const ends = engine.getMandateEnds();
+    if (ends === null || ends === undefined) return null;
     return {
       db: engineDb.getDb(),
       triggers: new TriggerStore(engineDb),
-      isLive: (mandateId) => ends?.isLive(mandateId) ?? false,
+      isLive: (mandateId) => ends.isLive(mandateId),
       audit: engine.getAuditLog(),
       prompts: engine.getPromptStore(),
     };
@@ -2685,13 +2690,12 @@ export class LynoxHTTPApi {
   /**
    * What the workflow takeover reads and writes (`workflow-takeover.ts`): the plan takeover's, the
    * workflow store on the same engine.db, whose hash the stamp is taken with, and the connections.
-   * Null with a 503 when engine.db is not there, or the store of access ends: without it every
-   * person would read as ended, and a workflow a live person shaped could be taken over.
+   * Null with a 503 when engine.db or the store of access ends is not there (`#takeoverDepsIfReady`).
    */
   #workflowTakeoverDeps(res: ServerResponse): WorkflowTakeoverDeps | null {
     const deps = this.#takeoverDepsIfReady();
     const engineDb = this.engine?.getEngineDb() ?? null;
-    if (deps === null || engineDb === null || (this.engine?.getMandateEnds() ?? null) === null) {
+    if (deps === null || engineDb === null) {
       errorResponse(res, 503, 'Taking over a workflow is not available on this instance right now.');
       return null;
     }
