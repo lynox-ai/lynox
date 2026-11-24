@@ -3545,10 +3545,10 @@ export class Engine {
       sweepAuditLog(db, Date.now(), (day, err) => {
         // A fixed tag an operator can grep for: while a day stays unfolded, its polls are kept
         // single past the 30-day fold (audit-retention.ts).
-        process.stderr.write(`[lynox] AUDIT_FOLD_REFUSED day=${day} (${err instanceof Error ? err.message : String(err)}) — that day's polls stay single rows\n`);
+        process.stderr.write(`[lynox] AUDIT_FOLD_REFUSED day=${day} (${processErrorText(err)}) — that day's polls stay single rows\n`);
       });
     } catch (err) {
-      process.stderr.write(`[lynox] audit log retention sweep failed (${err instanceof Error ? err.message : String(err)}) — old trail rows are NOT being removed\n`);
+      process.stderr.write(`[lynox] audit log retention sweep failed (${processErrorText(err)}) — old trail rows are NOT being removed\n`);
     }
   }
 
