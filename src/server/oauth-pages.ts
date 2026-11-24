@@ -192,6 +192,10 @@ export const OAUTH_RESULT_TEXTS = {
     en: 'This connection can no longer be completed for the session that started it. Nothing was stored.',
     de: 'Diese Verbindung lässt sich für die Sitzung, die sie gestartet hat, nicht mehr abschliessen. Es wurde nichts gespeichert.',
   },
+  refreshRunning: {
+    en: 'lynox is renewing its access to this store right now. Nothing was stored. Wait a minute, then start the connection again.',
+    de: 'lynox erneuert gerade seinen Zugang zu diesem Shop. Es wurde nichts gespeichert. Warte eine Minute und starte die Verbindung dann noch einmal.',
+  },
   addressChanged: {
     en: 'This connection\'s address changed while it was being completed. Nothing was stored.',
     de: 'Die Adresse dieser Verbindung hat sich geändert, während sie abgeschlossen wurde. Es wurde nichts gespeichert.',
@@ -211,6 +215,10 @@ export const OAUTH_RESULT_TEXTS = {
   noteProviderUnknown: {
     en: 'This connection has no provider this instance knows, so it cannot show what the owner sees of it. Nothing was sent to the provider.',
     de: 'Diese Verbindung nennt keinen Anbieter, den lynox kennt. Deshalb kann diese Seite nicht zeigen, was der Inhaber dieser Instanz von ihr sieht. An den Anbieter wurde nichts gesendet.',
+  },
+  consentChanged: {
+    en: 'The text for this connection changed while you had the page open. Open the link again and read the new text. Nothing was sent to the provider.',
+    de: 'Der Text zu dieser Verbindung hat sich geändert, während du die Seite offen hattest. Öffne den Link noch einmal und lies den neuen Text. An den Anbieter wurde nichts gesendet.',
   },
   noteChanged: {
     en: 'This connection now shows another note than the page you confirmed. Open the link again and read the page. Nothing was sent to the provider.',

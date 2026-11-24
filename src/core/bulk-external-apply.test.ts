@@ -120,15 +120,19 @@ function serve(s: Shop): () => void {
 
 const url = (i: number | string): string => `https://${HOST}/products/${String(i)}`;
 
-function client(opts: { attach?: boolean; methods?: string[]; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean; connection?: (url: string, method: string) => AttachedConnection | null } = {}): ExternalClient {
+function client(opts: { attach?: boolean; methods?: string[]; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean; connection?: (url: string, method: string) => AttachedConnection | null; renew?: (url: string) => Promise<'renewed' | 'not-run' | 'dead' | 'client-misnamed'>; reconnect?: 'ended' | 'client-misnamed' } = {}): ExternalClient {
   return externalClient({
     contract: opts.contract ?? mintBulkContract(HOST, [0, 1, 2, 3, 'x'].map(url)),
     hostPolicy: createToolContext({}),
     ackHosts: undefined,
-    attach: async (u, headers, method) => {
+    attach: async (u, headers, method, out) => {
       opts.methods?.push(method);
-      if (opts.attach === false) return null;
+      if (opts.attach === false) {
+        if (opts.reconnect !== undefined && out !== undefined) out.reconnect = opts.reconnect;
+        return null;
+      }
       headers['authorization'] = `Bearer ${TOKEN}`;
+      if (opts.renew !== undefined && out !== undefined) out.renew = () => opts.renew!(u);
       return opts.connection ? opts.connection(u, method) : { id: 'fixture', grantId: 'grant-1' };
     },
     rateLimit: opts.rateLimit ?? (() => null),
@@ -615,6 +619,133 @@ describe('applying an external run', () => {
     } finally {
       restore();
     }
+  });
+
+  describe('a 401 to a token the engine can renew (a store connection whose token expires)', () => {
+    it('renews once and sends the same write once more, which lands', async () => {
+      const s = shop();
+      s.sequence = new Map([['PATCH /products/0', [401]]]);
+      const restore = serve(s);
+      try {
+        const renewed: string[] = [];
+        const refused: number[] = [];
+        const c = client({ renew: async (u) => { renewed.push(u); return 'renewed' as const; } });
+        expect((await c.write(url(0), 'PATCH', { price: '13.00' }, undefined, undefined, () => { refused.push(1); })).kind).toBe('ok');
+        expect(renewed).toEqual([url(0)]);
+        expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(2);
+        expect(s.items.get('/products/0')?.['price']).toBe('13.00');
+        // The first send was refused and is reported so, once; the second landed.
+        expect(refused).toEqual([1]);
+      } finally {
+        restore();
+      }
+    });
+
+    it('a token that runs out in the middle of a run is renewed there, and the run writes every target', async () => {
+      const s = shop();
+      // Targets 0 is written on the old token; at target 1 the hour is up.
+      s.sequence = new Map([['PATCH /products/1', [401]]]);
+      const restore = serve(s);
+      try {
+        let renewals = 0;
+        const c = client({ renew: async () => { renewals++; return 'renewed' as const; } });
+        const runId = await approvedRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+        const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+        expect(out.status).not.toBe('halted');
+        expect(ledger.getStatus(runId)).toMatchObject({ applied: 3, failed: 0 });
+        expect(renewals).toBe(1);
+        expect([0, 1, 2].map((i) => s.items.get(`/products/${String(i)}`)?.['price'])).toEqual(['15.00', '15.00', '15.00']);
+      } finally {
+        restore();
+      }
+    });
+
+    it('a second 401 after the renewal halts the run as before, and nothing is renewed twice', async () => {
+      const s = shop();
+      s.special.set('PATCH /products/0', { status: 401 });
+      const restore = serve(s);
+      try {
+        let renewals = 0;
+        const c = client({ renew: async () => { renewals++; return 'renewed' as const; } });
+        const runId = await approvedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+        const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+        expect(out.status).toBe('halted');
+        expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.unauthorized, applied: 0 });
+        expect(renewals).toBe(1);
+        expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(2);
+        // Both sends were refused and reported so: the target is unwritten and resumable, not unclear.
+        expect(ledger.listPending(runId)).toEqual([0, 1]);
+      } finally {
+        restore();
+      }
+    });
+
+    it('when nothing was renewed, the request is not sent again', async () => {
+      const s = shop();
+      s.special.set('PATCH /products/0', { status: 401 });
+      const restore = serve(s);
+      try {
+        const c = client({ renew: async () => 'not-run' as const });
+        const refused: number[] = [];
+        expect((await c.write(url(0), 'PATCH', { price: '13.00' }, undefined, undefined, () => { refused.push(1); })).kind).toBe('unauthorized');
+        // A refusal that stands is reported, once.
+        expect(refused).toEqual([1]);
+        expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
+      } finally {
+        restore();
+      }
+    });
+
+    for (const [renewal, why] of [['dead', 'ended'], ['client-misnamed', 'client-misnamed']] as const) {
+      it(`a 401 whose renewal says ${renewal} answers reconnect (${why}), sent once and reported refused once`, async () => {
+        const s = shop();
+        s.special.set('PATCH /products/0', { status: 401 });
+        const restore = serve(s);
+        try {
+          const c = client({ renew: async () => renewal });
+          const refused: number[] = [];
+          expect(await c.write(url(0), 'PATCH', { price: '13.00' }, undefined, undefined, () => { refused.push(1); })).toEqual({ kind: 'reconnect', why });
+          expect(refused).toEqual([1]);
+          expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
+        } finally {
+          restore();
+        }
+      });
+    }
+
+    for (const [why, reason] of [['ended', 'storeAccessEnded'], ['client-misnamed', 'storeClientMisnamed']] as const) {
+      it(`a store connection that has to be connected again (${why}) halts the run with its own reason, nothing sent, resumable`, async () => {
+        const s = shop();
+        const restore = serve(s);
+        try {
+          const ok = client();
+          const runId = await approvedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), ok);
+          const c = client({ attach: false, reconnect: why });
+          const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+          expect(out.status).toBe('halted');
+          expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS[reason], applied: 0 });
+          expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(0);
+          expect(ledger.listPending(runId)).toEqual([0, 1]);
+        } finally {
+          restore();
+        }
+      });
+    }
+
+    it('a 403 is not a token that ran out: no renewal, no second send', async () => {
+      const s = shop();
+      s.special.set('PATCH /products/0', { status: 403 });
+      const restore = serve(s);
+      try {
+        let renewals = 0;
+        const c = client({ renew: async () => { renewals++; return 'renewed' as const; } });
+        expect((await c.write(url(0), 'PATCH', { price: '13.00' })).kind).toBe('unauthorized');
+        expect(renewals).toBe(0);
+        expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
+      } finally {
+        restore();
+      }
+    });
   });
 
   it('halts at the first target on a refused or missing credential, leaving it unwritten and resumable', async () => {
@@ -1951,6 +2082,9 @@ describe('an unmeasured write form', () => {
       engineDb.getDb().prepare('UPDATE bulk_targets SET target_key = ? WHERE run_id = ? AND applied_at IS NOT NULL').run('not a url', runId);
       expect(ledger.probeBlockFor(runId)).toEqual({ missing: [{ kind: '/products/', cause: 'own_missing' }], step: null });
       expect(ledger.probeKey(runId)).toBeNull();
+      // A direct confirmation answers as for any target that is not a probe, and files nothing.
+      expect(ledger.confirmProbe(runId)).toEqual({ ok: false, reason: 'not_a_probe' });
+      expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_host_probes').get()).toEqual({ n: 0 });
     } finally {
       restore();
     }
@@ -3045,6 +3179,34 @@ describe('a send without a clear answer is not sent again', () => {
       } finally {
         restore();
       }
+    }
+  });
+});
+
+describe('the head counts of an external run', () => {
+  const none = { deselected: 0, invalid: 0, unchanged: 0, takenBack: 0, written: 0, conflict: 0, unclear: 0, failed: 0, settled: 0, open: 0 };
+
+  it('a send without an answer is counted once, as unclear, before and after a resume', async () => {
+    const s = shop();
+    s.dropAfter = new Set(['PATCH /products/0']);
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await approvedRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
+      const halted = ledger.getStatus(runId)!;
+      // Before the resume the target is both failed and unclear in the counts beside the heads.
+      expect([halted.failed, halted.sentUnknown]).toEqual([1, 1]);
+      expect(halted.heads).toEqual({ ...none, unclear: 1, open: 2 });
+
+      s.dropAfter = new Set();
+      expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      const resumed = ledger.getStatus(runId)!;
+      expect(resumed.heads).toEqual({ ...none, unclear: 1, written: 2 });
+      expect(Object.values(resumed.heads).reduce((a, b) => a + b, 0)).toBe(resumed.total);
+    } finally {
+      restore();
     }
   });
 });

@@ -63,7 +63,7 @@ async function attach(url: string, profiles: ApiProfile[], opts: {
   const read: string[] = [];
   const vault = opts.vault ?? { [accessTokenKey(profiles[0]?.id ?? 'shop-acme')]: TOKEN };
   const out: { pass?: StorePass | undefined } = {};
-  const attached = await attachStoredCredential(url, headers, false, {
+  const attached = await attachStoredCredential(url, headers, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, 
     apiStore: store,
     secretStore: { resolve: (n: string) => { read.push(n); return vault[n] ?? null; } } as never,
     principal: OWNER_PRINCIPAL, mandateEnds: null, secretReleases: null,
@@ -263,17 +263,19 @@ describe('the binding (AC4)', () => {
   });
 });
 
-describe('no renewal of a store preset (AC6)', () => {
-  it('a due token with a filled refresh slot does not enter the renewal', async () => {
+describe('no exchange renewal of a store preset (AC6)', () => {
+  it('a due token with a filled refresh slot does not enter the exchange renewal; the store refresh decides alone', async () => {
     const p = shopProfile({ oauth: { token_expires_at: Date.now() - 60_000, grant_type: 'refresh_token' } });
     const log = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     let r: Run;
     try {
       r = await attach(URL_OK, [p], { vault: { [accessTokenKey('shop-acme')]: TOKEN, [refreshTokenKey('shop-acme')]: 'shprt-refresh', S_CID: 'cid', S_CSECRET: 'csecret' } });
-      // This hand-built agent may not renew unattended, so the reads below cannot tell the skip
-      // from a renewal that stopped at that check; the skip's own line can. A refresh_token
-      // grant would otherwise pass `oauthProfileMayBeRenewedUnattended` and enter the renewal.
-      expect(log.mock.calls.map((c) => String(c[0])).some((l) => l.includes('oauth token renewal skipped for profile "shop-acme": a store connection is renewed by connecting it again'))).toBe(true);
+      // The exchange renewal (`api_setup fetch_token`) logs every outcome under "oauth token
+      // renewal"; it was not entered. The store's own refresh was, and refused: the client here is
+      // not the preset's pair of names (`store-token-refresh.ts`, `storeRefreshPassFor`).
+      const logged = log.mock.calls.map((c) => String(c[0]));
+      expect(logged.some((l) => l.includes('oauth token renewal'))).toBe(false);
+      expect(logged.some((l) => l.includes('[lynox:store] token refresh for api_profile "shop-acme" outcome=not-run (due): not started'))).toBe(true);
     } finally {
       log.mockRestore();
     }

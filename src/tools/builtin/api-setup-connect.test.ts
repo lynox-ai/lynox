@@ -4,8 +4,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { apiSetupTool } from './api-setup.js';
-import { ApiStore, type ApiProfile } from '../../core/api-store.js';
+import { apiSetupTool, unnamedValueStep, askableValueStep } from './api-setup.js';
+import { askSecretTool, MANDATE_SECRET_REFUSAL } from './ask-secret.js';
+import { ApiStore, type ApiProfile, type OAuthGrantRecord } from '../../core/api-store.js';
 import { releaseBinding } from '../../core/profile-secret-view.js';
 import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
@@ -368,7 +369,7 @@ describe('a save that cannot derive the authorize host says so', () => {
   // disclosure depend on whether an unrelated parameter happened to validate,
   // with no trace in either direction. Refusing the save was the other
   // candidate and is worse: a provider retired from the register would make
-  // every profile naming it unsaveable, including the update removing the field.
+  // every profile naming it unsaveable, even a save that keeps the provider.
   const saveWith = async (oauth: Record<string, unknown>, over: Partial<ApiProfile> = {}, prompt?: (q: unknown) => Promise<string>): Promise<string> => {
     const agent = agentWith(new ApiStore());
     if (prompt) (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = prompt;
@@ -1254,11 +1255,12 @@ describe('a save cannot take a profile off its built-in provider', () => {
     expect(store.get('vetted-api')?.description).toBe('changed');
   });
 
-  it('lets a profile off a provider the engine no longer knows', async () => {
-    // A preset retired from the register cannot connect anyway; holding the profile to it
-    // would make even the save that repairs it impossible.
+  it('lets a profile off a provider id this engine never had', async () => {
+    // Such an id cannot connect; holding the profile to it would make even the save that
+    // repairs a mistyped id impossible. A provider this engine once shipped is different and
+    // stays held (`RETIRED_PRESET_IDS`, api-setup-retired-preset.test.ts).
     const store = new ApiStore();
-    store.register({ ...prior, auth: { ...prior.auth!, oauth: { ...prior.auth!.oauth!, preset_id: 'retired-shop' } } });
+    store.register({ ...prior, auth: { ...prior.auth!, oauth: { ...prior.auth!.oauth!, preset_id: 'never-shipped' } } });
     const agent = agentWith(store);
     (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async () => 'allow';
     const reply = await apiSetupTool.handler({ action: 'update', profile: {
@@ -1431,5 +1433,285 @@ describe('connect refuses before the link what the route would refuse', () => {
     const owner = await connect(agentWith(ownerStore));
     expect(owner).toContain('It opens ');
     expect(owner).not.toContain('a button that continues to');
+  });
+});
+
+// Whether the client pair is stored is asked without reading it out, where the store
+// can answer that way, so the check is not recorded as a credential read.
+describe('connect asks whether the client pair is there without reading it', () => {
+  const KEYS = ['EXAMPLE_SHOP_CLIENT_ID', 'EXAMPLE_SHOP_CLIENT_SECRET'];
+  const scoped = (): ApiProfile => {
+    const base = shopProfile();
+    return { ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, scope: 'read_orders' } } };
+  };
+  /** A store that answers `holds`, and records every name it is asked to read out. */
+  function holding(held: readonly string[], read: string[]): Record<string, unknown> {
+    return {
+      holds: (name: string) => held.includes(name),
+      resolve: (name: string) => { read.push(name); return null; },
+      extractSecretNames: (input: unknown): string[] => [...JSON.stringify(input).matchAll(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g)].map((m) => m[1]!),
+      resolveSecretRefs: (input: unknown): unknown => {
+        for (const m of JSON.stringify(input).matchAll(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g)) read.push(m[1]!);
+        return input;
+      },
+    };
+  }
+  const withStore = (store: ApiStore, secretStore: unknown): never => ({ ...(agentWith(store) as object), secretStore } as never);
+
+  it('hands out the link on holds alone, and reads neither half of the pair', async () => {
+    const store = new ApiStore();
+    store.register(scoped());
+    const read: string[] = [];
+    const result = await connect(withStore(store, holding(KEYS, read)));
+    expect(result).toContain('/api/oauth/connect/shop-api');
+    expect(read.filter((n) => KEYS.includes(n))).toEqual([]);
+  });
+
+  it('says what is missing from the holds answer', async () => {
+    const store = new ApiStore();
+    store.register(scoped());
+    const read: string[] = [];
+    const result = await connect(withStore(store, holding(['EXAMPLE_SHOP_CLIENT_ID'], read)));
+    expect(result).toContain('the vault has no value for EXAMPLE_SHOP_CLIENT_SECRET');
+    expect(read.filter((n) => KEYS.includes(n))).toEqual([]);
+  });
+
+  it('an infrastructure secret never counts as the profile\'s client secret, even where the vault holds it', async () => {
+    const store = new ApiStore();
+    const base = scoped();
+    expect(store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, client_secret_key: 'LYNOX_SHOP_SECRET' } } })).toBe(true);
+    const read: string[] = [];
+    const result = await connect(withStore(store, holding([...KEYS, 'LYNOX_SHOP_SECRET'], read)));
+    // Counted as missing, so the reply is the one for a profile whose app is not where it reads it.
+    expect(result).not.toContain('/api/oauth/connect/shop-api');
+    expect(result).toContain('reads its app from names of its own');
+  });
+
+  it('a run whose scope leaves the secret out is not sent to enter it again, and nothing is recorded as denied', async () => {
+    const { scopeSecretStore } = await import('../../core/secret-scope.js');
+    const store = new ApiStore();
+    store.register(scoped());
+    const denied: string[] = [];
+    const result = await connect(withStore(store, scopeSecretStore(holding(KEYS, []) as never, ['EXAMPLE_SHOP_CLIENT_ID'], (n) => denied.push(n))));
+    expect(result).toContain('EXAMPLE_SHOP_CLIENT_SECRET is outside the secrets this run may see');
+    expect(result).toContain('Do not ask the user to enter it again');
+    expect(result).not.toContain('the vault has no value');
+    expect(result).not.toContain('ask_secret');
+    expect(denied).toEqual([]);
+  });
+});
+
+// A locked turn (a mandate's) collects no key with ask_secret, so the four answers that would send
+// it there read their own text (U-185); the owner's turn reads the text it read before.
+describe('connect and fetch_token in a locked turn send the model to no ask_secret', () => {
+  const MANDATE_P = { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' };
+  const as = (agent: never, principal: unknown): never => ({ ...(agent as object), principal }) as never;
+  const ownApp = (): ApiProfile => {
+    const p = shopProfile();
+    return { ...p, auth: { ...p.auth!, vault_keys: ['OWN_ID', 'OWN_SECRET'], oauth: { ...p.auth!.oauth!, preset_id: undefined, client_id_key: 'OWN_ID', client_secret_key: 'OWN_SECRET' } } };
+  };
+  const TAG = 'mandate:setup@example.org';
+  /** A mandate's agent whose profile the owner released the client pair to, as in the route tests above. */
+  const releasedTo = (store: ApiStore, secrets: Record<string, string>): never => {
+    const base = agentWith(store, secrets) as unknown as { secretStore: Record<string, unknown>; toolContext: Record<string, unknown> };
+    return {
+      ...base,
+      principal: MANDATE_P,
+      secretStore: { ...base.secretStore, resolve: (n: string) => secrets[n] ?? null, isEnvironmentSecret: () => false },
+      toolContext: {
+        ...base.toolContext,
+        mandateEnds: { isLive: (id: string) => id === 'M-1' },
+        secretReleases: {
+          releaseOf: (id: string, _author: string, name: string) => {
+            const p = store.get(id);
+            const binding = p && ['EXAMPLE_SHOP_CLIENT_ID', 'EXAMPLE_SHOP_CLIENT_SECRET', 'OWN_ID', 'OWN_SECRET', 'SHOP_API_REFRESH_TOKEN'].includes(name) ? releaseBinding(p, name) : null;
+            return binding === null || binding === undefined ? undefined : { binding, mandateId: 'M-1' };
+          },
+          pendingReleases: () => [],
+        },
+      },
+    } as never;
+  };
+  /** The same profile for each turn: the owner's own, and the helper's for the mandate. */
+  const pair = (profile: ApiProfile, secrets: Record<string, string> = {}): { owner: never; locked: never } => {
+    const ownerStore = new ApiStore();
+    ownerStore.register(profile);
+    const mandateStore = new ApiStore();
+    mandateStore.register({ ...profile, created_by: TAG });
+    return { owner: as(agentWith(ownerStore, secrets), OWNER_PRINCIPAL), locked: releasedTo(mandateStore, secrets) };
+  };
+  const both = async (p: { owner: never; locked: never }, run: (a: never) => Promise<string>): Promise<[string, string]> => [await run(p.owner), await run(p.locked)];
+  const fetchToken = (a: never): Promise<string> => apiSetupTool.handler({ action: 'fetch_token', id: 'shop-api' }, a) as Promise<string>;
+  const cases: Array<[string, () => Promise<[string, string]>]> = [
+    ['1 · no ORIGIN, a profile of its own app', async () => {
+      delete process.env['ORIGIN'];
+      return both(pair(ownApp()), (a) => connect(a));
+    }],
+    ['2 · no built-in provider', async () => {
+      const base = shopProfile();
+      return both(pair({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, preset_id: 'not-a-provider' } } }), (a) => connect(a));
+    }],
+    ['4 · the vault has no value', async () => both(pair(shopProfile()), (a) => connect(a))],
+    ['5 · fetch_token, the vault has no value', async () => {
+      const own = ownApp();
+      return both(pair({ ...own, auth: { ...own.auth!, oauth: { ...own.auth!.oauth!, grant_type: 'client_credentials', token_url: 'https://acme.shops.example.com/oauth/token' } } }), fetchToken);
+    }],
+  ];
+  // Word for word: the locked texts are U-185's (connect decided 08.11.); the owner's are today's.
+  const expected: Record<string, readonly [owner: string, locked: string]> = {
+    "1 · no ORIGIN, a profile of its own app": ["Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Set it, or collect the credentials with ask_secret and use action=fetch_token.", "Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Only the owner of this instance can set it or store the credentials: tell the user so, and use action=fetch_token once the credentials are stored."],
+    "2 · no built-in provider": ["Error: profile \"shop-api\" names no built-in provider, so there is no authorization page to send the user to. Known providers: broken-path, example-shop, lan-shop, vetted-shop. Set auth.oauth.preset_id with api_setup update, or keep using a credential the user pastes with ask_secret.", "Error: profile \"shop-api\" names no built-in provider, so there is no authorization page to send the user to. Known providers: broken-path, example-shop, lan-shop, vetted-shop. Set auth.oauth.preset_id with api_setup update, or use a key instead and tell the user that the owner of this instance has to store it."],
+    "4 · the vault has no value": ["Error: profile \"shop-api\" cannot authorize yet — the vault has no value for EXAMPLE_SHOP_CLIENT_ID and EXAMPLE_SHOP_CLIENT_SECRET. \"EXAMPLE_SHOP_CLIENT_SECRET\" is the OAuth client secret of a built-in provider. The owner of this lynox instance enters it in the connection form of the profile under Settings → API Profiles — not in the chat and not through ask_secret, and it is not referenced in a request. The engine sends it to the provider itself, for a profile that names \"EXAMPLE_SHOP_CLIENT_SECRET\" as its client secret and may read it. \"EXAMPLE_SHOP_CLIENT_ID\" is the client id of a built-in provider's app. The owner enters it in the connection form of the profile under Settings → API Profiles, together with the client secret — not in the chat. Then connect.", "Error: profile \"shop-api\" cannot authorize yet — the vault has no value for EXAMPLE_SHOP_CLIENT_ID and EXAMPLE_SHOP_CLIENT_SECRET. \"EXAMPLE_SHOP_CLIENT_SECRET\" is the OAuth client secret of a built-in provider. The owner of this lynox instance enters it in the connection form of the profile under Settings → API Profiles — not in the chat and not through ask_secret, and it is not referenced in a request. The engine sends it to the provider itself, for a profile that names \"EXAMPLE_SHOP_CLIENT_SECRET\" as its client secret and may read it. \"EXAMPLE_SHOP_CLIENT_ID\" is the client id of a built-in provider's app. The owner enters it in the connection form of the profile under Settings → API Profiles, together with the client secret — not in the chat. Once they are stored, connect."],
+    "5 · fetch_token, the vault has no value": ["Error: vault is missing the OAuth credentials for profile \"shop-api\": \"OWN_ID\", \"OWN_SECRET\". Call `ask_secret` for \"OWN_ID\", \"OWN_SECRET\" first. Then retry fetch_token.", "Error: vault is missing the OAuth credentials for profile \"shop-api\": \"OWN_ID\", \"OWN_SECRET\". The owner of this instance has to store \"OWN_ID\", \"OWN_SECRET\"; tell the user so. Once they are stored, retry fetch_token."],
+  };
+  it.each(cases)("%s: the owner reads today's text, a locked turn its own", async (name, run) => {
+    const [owner, locked] = await run();
+    expect(owner).toBe(expected[name]![0]);
+    expect(locked).toBe(expected[name]![1]);
+  });
+
+  // Two steps no caller reaches with a locked turn today: a check before them answers first. They
+  // decide by the turn themselves, so a locked turn that does arrive is held to its own text here.
+  it('the unnamed-value and askable steps give a locked turn its own text, the owner today\'s', () => {
+    const owner = { principal: OWNER_PRINCIPAL } as never;
+    const locked = { principal: MANDATE_P } as never;
+    expect(unnamedValueStep(owner)).toBe('then collect the value with ask_secret');
+    expect(unnamedValueStep(locked)).toBe('then tell the user that the owner of this instance has to store the value');
+    expect(askableValueStep(owner, ['A', 'B'])).toBe(' Call ask_secret for A and B.');
+    expect(askableValueStep(locked, ['A', 'B'])).toBe(' The owner of this instance has to store A and B; tell the user so.');
+    expect(askableValueStep(owner, [])).toBe('');
+    expect(askableValueStep(locked, [])).toBe('');
+  });
+
+  // The refresh token read from the derived access name: leaving output_secret_name out walks
+  // into the refresh refusal, whose advice sends the owner to ask_secret. The mandate's grant here
+  // is a fixture: a profile without a built-in provider gets no sign-in through connect, so a
+  // mandate hardly reaches this state. The locked swap is held anyway, for a grant that does
+  // arrive (an import, a later way to connect such a profile).
+  it('fetch_token, the refresh token read from the derived access name: the owner reads today\'s text, a locked turn its own', async () => {
+    // An OAuth profile of its own: its refresh slot is filled by hand. On a built-in provider the
+    // slot is filled by the sign-in, and the reply names no ask_secret (the case below).
+    const base = shopProfile();
+    const { preset_id: _p, preset_params: _pp, ...own } = base.auth!.oauth!;
+    const profile: ApiProfile = { ...base, auth: { ...base.auth!, oauth: { ...own, token_url: 'https://acme.shops.example.com/admin/oauth/access_token', refresh_token_key: 'SHOP_API_ACCESS_TOKEN' } } };
+    const secrets = { EXAMPLE_SHOP_CLIENT_ID: CLIENT_ID_VALUE, EXAMPLE_SHOP_CLIENT_SECRET: CLIENT_SECRET_VALUE, SHOP_API_ACCESS_TOKEN: 'rt-in-the-access-slot' };
+    const ownerStore = new ApiStore();
+    ownerStore.register(profile);
+    const mandateStore = new ApiStore();
+    mandateStore.register({ ...profile, created_by: TAG, oauth_grant: { origin: 'callback', state: 'connected', connected_by: TAG, connected_mandate_id: 'M-1' } as OAuthGrantRecord });
+    const [owner, locked] = [await fetchToken(as(agentWith(ownerStore, secrets), OWNER_PRINCIPAL)), await fetchToken(releasedTo(mandateStore, secrets))];
+    const clash = 'Error: output_secret_name "SHOP_API_ACCESS_TOKEN" is where this profile keeps its refresh token — the access token would be written over it. Leaving output_secret_name out does not help: this profile reads its refresh token from "SHOP_API_ACCESS_TOKEN", the name its access token needs. Point auth.oauth.refresh_token_key at a slot that holds only the refresh token — api_setup update — and ';
+    expect(owner).toBe(`${clash}store the token there with ask_secret.`);
+    expect(locked).toBe(`${clash}tell the user that the owner of this instance has to store the token there.`);
+  });
+
+  it('fetch_token, the refresh token read from the derived access name on a built-in provider: a locked turn reads the owner\'s text, which names no ask_secret', async () => {
+    const base = shopProfile();
+    const profile: ApiProfile = { ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: 'SHOP_API_ACCESS_TOKEN' } } };
+    const secrets = { EXAMPLE_SHOP_CLIENT_ID: CLIENT_ID_VALUE, EXAMPLE_SHOP_CLIENT_SECRET: CLIENT_SECRET_VALUE, SHOP_API_ACCESS_TOKEN: 'rt-in-the-access-slot' };
+    const ownerStore = new ApiStore();
+    ownerStore.register(profile);
+    const mandateStore = new ApiStore();
+    mandateStore.register({ ...profile, created_by: TAG, oauth_grant: { origin: 'callback', state: 'connected', connected_by: TAG, connected_mandate_id: 'M-1' } as OAuthGrantRecord });
+    const [owner, locked] = [await fetchToken(as(agentWith(ownerStore, secrets), OWNER_PRINCIPAL)), await fetchToken(releasedTo(mandateStore, secrets))];
+    expect(owner).toContain('Remove auth.oauth.refresh_token_key with api_setup update, then, to connect it, call api_setup with action "connect" and id "shop-api"');
+    expect(locked).toBe(owner);
+    expect(locked).not.toContain('ask_secret');
+  });
+
+  describe('ask_secret on a token slot of a profile on a built-in provider, in a locked turn', () => {
+    const SLOT = 'SHOP_API_ACCESS_TOKEN';
+    const CLIENT = { EXAMPLE_SHOP_CLIENT_ID: CLIENT_ID_VALUE, EXAMPLE_SHOP_CLIENT_SECRET: CLIENT_SECRET_VALUE };
+    const collect = async (agent: never): Promise<string> =>
+      String(await askSecretTool.handler({ action: 'collect', name: SLOT, prompt: 'The Shopify token' }, agent));
+    const WAY = 'is a token slot of a profile on the built-in "example-shop" provider, so it is not collected through ask_secret';
+
+    it('the mandate\'s own profile: the way to connect, as the owner reads it for the owner\'s', async () => {
+      const { owner, locked } = pair(shopProfile(), CLIENT);
+      const [o, l] = [await collect(owner), await collect(locked)];
+      expect(o).toContain(WAY);
+      expect(l).toBe(o);
+    });
+
+    it('a profile of the owner holds the slot: the refusal, word for word', async () => {
+      const store = new ApiStore();
+      store.register(shopProfile());
+      expect(await collect(releasedTo(store, CLIENT))).toBe(MANDATE_SECRET_REFUSAL);
+    });
+
+    it('a profile of the owner whose token slots were released to the mandate: the refusal, word for word', async () => {
+      const store = new ApiStore();
+      store.register(shopProfile());
+      const agent = releasedTo(store, CLIENT) as unknown as { toolContext: Record<string, unknown> };
+      const releases = {
+        releaseOf: (id: string, _author: string, name: string) => {
+          const p = store.get(id);
+          return p ? { binding: releaseBinding(p, name), mandateId: 'M-1' } : undefined;
+        },
+        pendingReleases: () => [],
+      };
+      expect(await collect({ ...agent, toolContext: { ...agent.toolContext, secretReleases: releases } } as never)).toBe(MANDATE_SECRET_REFUSAL);
+    });
+
+    it('a profile of its own that somebody else connected: the refusal, word for word', async () => {
+      const store = new ApiStore();
+      store.register({ ...shopProfile(), created_by: TAG, oauth_grant: { origin: 'callback', state: 'connected', connected_by: 'mandate:other@example.org', connected_mandate_id: 'M-2' } as OAuthGrantRecord });
+      expect(await collect(releasedTo(store, CLIENT))).toBe(MANDATE_SECRET_REFUSAL);
+    });
+
+    it('another profile reads the mandate\'s own refresh slot: the refusal, whichever comes first in the store', async () => {
+      const base = shopProfile();
+      const mine: ApiProfile = { ...base, created_by: TAG };
+      const theirs: ApiProfile = { ...base, id: 'shop-f', name: 'Shop F', auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: 'SHOP_API_REFRESH_TOKEN' } } };
+      const answers: string[] = [];
+      for (const order of [[mine, theirs], [theirs, mine]]) {
+        const store = new ApiStore();
+        for (const p of order) store.register(p);
+        answers.push(String(await askSecretTool.handler({ action: 'collect', name: 'SHOP_API_REFRESH_TOKEN', prompt: 'The Shopify token' }, releasedTo(store, CLIENT))));
+      }
+      expect(answers).toEqual([MANDATE_SECRET_REFUSAL, MANDATE_SECRET_REFUSAL]);
+      // control: without the other profile the same call gets the way to connect
+      const alone = new ApiStore();
+      alone.register(mine);
+      expect(String(await askSecretTool.handler({ action: 'collect', name: 'SHOP_API_REFRESH_TOKEN', prompt: 'The Shopify token' }, releasedTo(alone, CLIENT)))).toContain(WAY.replace('SHOP_API_ACCESS_TOKEN', 'SHOP_API_REFRESH_TOKEN'));
+    });
+
+    it('with api_setup at hand, the mandate\'s own profile: lynox asks connect as the mandate and passes its answer on', async () => {
+      const store = new ApiStore();
+      store.register({ ...shopProfile(), created_by: TAG });
+      const agent = releasedTo(store, CLIENT) as unknown as Record<string, unknown>;
+      const withTools = { ...agent, getAvailableTools: () => [apiSetupTool] };
+      const out = await collect(withTools as never);
+      expect(out).toContain(`${WAY}: its tokens come only from the provider's sign-in`);
+      expect(out).toContain('lynox has already asked api_setup to connect profile "shop-api"; its answer follows.');
+      const answer = out.split('api_setup connect answered: ')[1] ?? '';
+      expect(answer).toBe(String(await apiSetupTool.handler({ action: 'connect', id: 'shop-api' }, withTools as never)));
+    });
+
+    it('the check of the mandate\'s own profile throws: the refusal, word for word', async () => {
+      const store = new ApiStore();
+      store.register({ ...shopProfile(), created_by: TAG });
+      const agent = releasedTo(store, CLIENT) as unknown as { secretStore: Record<string, unknown> };
+      const throwing = { ...agent, secretStore: { ...agent.secretStore, isEnvironmentSecret: () => { throw new Error('unreadable'); } } };
+      expect(await collect(throwing as never)).toBe(MANDATE_SECRET_REFUSAL);
+      // control: the same agent with a store that answers is sent to connect
+      expect(await collect(agent as never)).toContain(WAY);
+    });
+
+    it('the profiles cannot be listed: the refusal, word for word', async () => {
+      const store = new ApiStore();
+      store.register({ ...shopProfile(), created_by: TAG });
+      const agent = releasedTo(store, CLIENT) as unknown as { toolContext: Record<string, unknown> };
+      const broken = { ...agent, toolContext: { ...agent.toolContext, apiStore: { knownProfiles: () => { throw new Error('unreadable'); }, get: () => undefined } } };
+      expect(await collect(broken as never)).toBe(MANDATE_SECRET_REFUSAL);
+    });
+
+    it('the slot is outside the agent\'s secret_scope: the refusal, word for word', async () => {
+      const store = new ApiStore();
+      store.register({ ...shopProfile(), created_by: TAG });
+      const agent = releasedTo(store, CLIENT) as unknown as { secretStore: Record<PropertyKey, unknown> };
+      const scoped = { ...agent, secretStore: { ...agent.secretStore, [Symbol.for('lynox.vaultScope')]: ['EXAMPLE_SHOP_CLIENT_ID'] } };
+      expect(await collect(scoped as never)).toBe(MANDATE_SECRET_REFUSAL);
+    });
   });
 });

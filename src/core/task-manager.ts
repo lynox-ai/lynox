@@ -9,12 +9,30 @@ import { readEnvAlias } from './env.js';
 import { cpSuppliesLLMKey } from '../contract/vocab.js';
 import { compose, renderFence } from '../core/data-boundary.js';
 import { isHandRunOf } from './hand-run-door.js';
-import { isMandateTag, isOwnerPrincipal, ownedBy, type RequestPrincipal } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, ownedBy, principalTag, type RequestPrincipal } from './request-principal.js';
 import { MAPPING_MAX_ENTRIES, mintRouteToken, parseWebhookSpec, type WebhookVerifierKind } from './webhook-verifiers.js';
 import { encodeStamp } from './plan-stamp.js';
 import type { StampEntry } from './plan-run-context.js';
 import { PAUSED_MODEL_TEXT, isPaused } from './plan-pause.js';
 import { stripHidden } from './hidden-text.js';
+import { EngineLessRefused } from './engine-less-refusal.js';
+
+/**
+ * The start of the title the engine gave a workflow scheduled without one, before it stored the
+ * workflow's name alone: such plans still carry it. Read only by {@link titleIsWorkflowName}.
+ */
+export const SCHEDULED_TITLE_PREFIX = 'Scheduled: ';
+
+/**
+ * Whether a plan's title is the name of the workflow it runs: as the engine titles a workflow
+ * scheduled without a title (the name alone, or, on plans from before, the prefix and the name).
+ * The view then puts its own words in front of the name in the reader's language. A title that
+ * starts with the prefix but goes on with anything else is not the name, and stays whole.
+ */
+export function titleIsWorkflowName(title: string, workflowName: string): boolean {
+  if (workflowName === '') return false;
+  return title === workflowName || title === `${SCHEDULED_TITLE_PREFIX}${workflowName}`;
+}
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -95,6 +113,41 @@ function refuseForeignTodo(task: TaskRecord, by: RequestPrincipal | undefined, w
 function refuseBulkTrigger(trigger: TriggerRecord): void {
   if (Object.hasOwn(BULK_EFFECTS, trigger.effect)) throw new BulkTriggerLockedError();
 }
+
+/** The `task_update` fields a scheduled plan can change, by the names the tool takes. A test
+ *  holds this to the tool's schema, so a field added there fails until it is named here or listed
+ *  as a to-do's. The refusal below names them, so the model is told what it can do instead. A
+ *  plan started by a webhook takes no run time or schedule (`WebhookTriggerScheduleError`). */
+export const PLAN_UPDATE_FIELDS: readonly string[] = ['title', 'description', 'status', 'assignee', 'run_at', 'schedule'];
+const WEBHOOK_PLAN_UPDATE_FIELDS: readonly string[] = PLAN_UPDATE_FIELDS.filter((f) => f !== 'run_at' && f !== 'schedule');
+
+/**
+ * A change of a trigger that names only fields a trigger does not carry (a priority, a due date,
+ * tags: those are a to-do's). Nothing would be written, so it is refused rather than answered
+ * as a missing row.
+ */
+export class TriggerFieldsNotCarriedError extends Error {
+  /** What the model reads: the refusal plus what it can do instead, in the tool's field names
+   *  (U-284). An API client reads only `message`: its field names are not the tool's. */
+  readonly forModel: string;
+  constructor(readonly fields: readonly string[], webhook = false) {
+    super(fields.length > 0
+      ? `This is a scheduled plan, not a to-do: it has no ${fields.join(', ')}. Nothing was changed.`
+      : 'This change names no field of a scheduled plan. Nothing was changed.');
+    const can = `A scheduled plan can change ${(webhook ? WEBHOOK_PLAN_UPDATE_FIELDS : PLAN_UPDATE_FIELDS).join(', ')}.`;
+    this.forModel = fields.length > 0
+      ? `${this.message} ${can} Tell the user that ${fields.join(', ')} ${fields.length === 1 ? 'belongs' : 'belong'} to to-dos rather than trying again.`
+      : `${this.message} ${can}`;
+    this.name = 'TriggerFieldsNotCarriedError';
+  }
+}
+
+/**
+ * Called by `update` and `complete` with the trigger they are about to write, after every check
+ * they make and before the write. A request marks its change here (`markEditedBy`), so a change
+ * the manager refuses leaves no mark and takes no stamp off.
+ */
+export type BeforeTriggerWrite = (trigger: TriggerRecord) => void;
 
 /** A schedule on a `webhook` trigger: it would make the trigger due without an event. */
 export class WebhookTriggerScheduleError extends Error {
@@ -262,6 +315,26 @@ export function createsTrigger(params: Pick<TaskCreateParams, 'assignee' | 'next
 export class TaskManager {
   constructor(private history: RunHistory) {}
 
+  /** Set by an engine that started without engine.db: see {@link refuseTaskChangesWithoutStore}. */
+  private changesRefused = false;
+
+  /**
+   * Called by an engine that started without engine.db. A to-do is then written to history.db
+   * only. With the subject graph on, the next boot with engine.db reads its to-dos from engine.db,
+   * and the copy that would put the change there runs once per engine.db; with it off, the change
+   * is read, but missing from engine.db once the graph is switched on. So a change from here on is
+   * refused with a plain reason (`EngineLessRefused`) instead, whichever the flag. Triggers
+   * refuse on their own: their store is engine.db. A manager never told this writes as before.
+   */
+  refuseTaskChangesWithoutStore(): void {
+    this.changesRefused = true;
+  }
+
+  /** Throws the refusal when this manager refuses to-do changes; before anything is written. */
+  private refuseIfEngineLess(): void {
+    if (this.changesRefused) throw new EngineLessRefused('task');
+  }
+
   /**
    * Look up a USER-TODO by id (or id-prefix, for UX convenience). The optional
    * `scopeFilter` folds the ownership check into the same SQL read used by
@@ -279,6 +352,7 @@ export class TaskManager {
   }
 
   create(params: TaskCreateParams): TaskRecord | TriggerRecord {
+    if (!createsTrigger(params)) this.refuseIfEngineLess();
     const id = randomUUID().slice(0, 8);
 
     if (params.parentTaskId) {
@@ -377,7 +451,7 @@ export class TaskManager {
       dueDate: params.dueDate ? params.dueDate.slice(0, 10) : undefined,
       tags: params.tags ? JSON.stringify(params.tags) : undefined,
       parentTaskId: params.parentTaskId,
-      ...(isMandateTag(params.createdBy) ? { createdBy: params.createdBy } : {}),
+      ...(isMandateTag(params.createdBy) || params.createdBy === principalTag(OWNER_PRINCIPAL) ? { createdBy: params.createdBy } : {}),
     });
 
     return this.history.getTask(id)!;
@@ -456,8 +530,9 @@ export class TaskManager {
   }
 
   /** @param by The request's principal, when a request completes it: a mandate completes only
-   *  a to-do of its own, and only its own subtasks with it. Absent for the engine. */
-  complete(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined, by?: RequestPrincipal): TaskRecord | TriggerRecord | undefined {
+   *  a to-do of its own, and only its own subtasks with it. Absent for the engine.
+   *  @param beforeTriggerWrite See {@link BeforeTriggerWrite}; not called for a to-do. */
+  complete(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined, by?: RequestPrincipal, beforeTriggerWrite?: BeforeTriggerWrite): TaskRecord | TriggerRecord | undefined {
     const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
 
     // An AGENT-TRIGGER has no subtask cascade — just flip its status. Carry
@@ -467,6 +542,7 @@ export class TaskManager {
     const trigger = this.history.getTrigger(id, scopeOpts);
     if (trigger) {
       refuseBulkTrigger(trigger);
+      beforeTriggerWrite?.(trigger);
       const ok = this.history.updateTrigger(trigger.id, { status: 'completed' }, scopeOpts);
       if (!ok) return undefined;
       return this.history.getTrigger(trigger.id, scopeOpts);
@@ -474,6 +550,7 @@ export class TaskManager {
 
     const task = this.history.getTask(id, scopeOpts);
     if (!task) return undefined;
+    this.refuseIfEngineLess();
     refuseForeignTodo(task, by, 'complete');
 
     const now = new Date().toISOString();
@@ -508,6 +585,7 @@ export class TaskManager {
    * legacy row is gone.
    */
   deleteTodo(id: string, by?: RequestPrincipal): boolean {
+    this.refuseIfEngineLess();
     if (by === undefined || isOwnerPrincipal(by)) return this.history.deleteTask(id);
     const { task, descendants } = this.history.getTaskDeleteSet(id);
     if (task === undefined) return false;
@@ -531,14 +609,16 @@ export class TaskManager {
 
     const task = this.history.getTask(id, scopeOpts);
     if (!task) return undefined;
+    this.refuseIfEngineLess();
 
     this.history.updateTask(task.id, { status: 'open', completedAt: '' }, scopeOpts);
     return this.history.getTask(task.id, scopeOpts);
   }
 
   /** @param by The request's principal, when a request changes it: a mandate changes only a
-   *  to-do of its own. Absent for the engine. */
-  update(id: string, params: TaskUpdateParams, scopeFilter?: Array<{ type: string; id: string }> | undefined, by?: RequestPrincipal): TaskRecord | TriggerRecord | undefined {
+   *  to-do of its own. Absent for the engine.
+   *  @param beforeTriggerWrite See {@link BeforeTriggerWrite}; not called for a to-do. */
+  update(id: string, params: TaskUpdateParams, scopeFilter?: Array<{ type: string; id: string }> | undefined, by?: RequestPrincipal, beforeTriggerWrite?: BeforeTriggerWrite): TaskRecord | TriggerRecord | undefined {
     const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
 
     if (params.status && !VALID_STATUSES.has(params.status)) {
@@ -626,6 +706,17 @@ export class TaskManager {
         }
       }
 
+      // Only these reach a column (`trigger-store.ts` › `updateFields`; an assignee counts as a
+      // touch there). Without one the write would set nothing and its `false` would read as
+      // a missing row.
+      const { title, description, status, assignee, nextRunAt, scheduleCron, modelTier } = triggerUpdate;
+      if ([title, description, status, assignee, nextRunAt, scheduleCron, modelTier].every((v) => v === undefined)) {
+        const named = ([['priority', params.priority], ['due date', params.dueDate], ['tags', params.tags]] as const)
+          .filter(([, v]) => v !== undefined).map(([name]) => name);
+        throw new TriggerFieldsNotCarriedError(named, trigger.source === 'webhook');
+      }
+
+      beforeTriggerWrite?.(trigger);
       const ok = this.history.updateTrigger(trigger.id, triggerUpdate, scopeOpts);
       if (!ok) return undefined;
       return this.history.getTrigger(trigger.id, scopeOpts);
@@ -633,6 +724,7 @@ export class TaskManager {
 
     const task = this.history.getTask(id, scopeOpts);
     if (!task) return undefined;
+    this.refuseIfEngineLess();
     refuseForeignTodo(task, by, 'change');
 
     const updateParams: {
@@ -920,6 +1012,14 @@ export class TaskManager {
     // refused attempt must not leave a mark that would hold the owner's approved run.
     refuseBulkTrigger(trigger);
     return this.history.markTriggerEditedBy(trigger.id, editor, clearStamp);
+  }
+
+  /** A run's change of a trigger under the owner's principal: see `TriggerStore.markEditedByRun`. */
+  markEditedByRun(id: string, runTag: string): boolean {
+    const trigger = this.history.getTrigger(id);
+    if (!trigger) return false;
+    refuseBulkTrigger(trigger);
+    return this.history.markTriggerEditedByRun(trigger.id, runTag);
   }
 
   /** Create a watch/monitor AGENT-TRIGGER → source='watch', effect='run_agent', assignee='lynox', computes next_run_at from interval. */
