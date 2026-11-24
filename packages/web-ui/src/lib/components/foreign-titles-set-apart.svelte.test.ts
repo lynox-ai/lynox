@@ -264,13 +264,14 @@ describe('a profile in the API store', () => {
 			{ ...P, id: 'p2', name: 'Eigenes 2', description: ownWithMarks, created_by: 'owner' },
 			{ ...P, id: 'p3', name: 'CRM 2', description: memberWithMarks, created_by: `mandate:${MARK.helper}` },
 		]);
-		// Nowhere else on the page either, not even in part, with or without its attribute, nor in a
-		// head's tooltip or label; checked again with each card open.
+		// Nowhere else on the page either, not even its first 12 characters, with or without its
+		// attribute, nor in a tooltip or label anywhere in a card head; checked again with each card open.
 		const texts = [MARK.workflow, MARK.own, MARK.plan].map((x) => x.slice(0, 12));
 		const noneElsewhere = (opened?: Element): void => {
 			const page = (target.textContent ?? '').replace(opened?.textContent ?? '', '');
 			for (const x of texts) expect(page, 'the page outside the opened description').not.toContain(x);
-			for (const h of target.querySelectorAll('button[aria-expanded]')) for (const x of texts) {
+			const inHeads = [...target.querySelectorAll('button[aria-expanded]')].flatMap((h) => [h, ...h.querySelectorAll('*')]);
+			for (const h of inHeads) for (const x of texts) {
 				expect(h.getAttribute('title') ?? '', 'a head\'s title').not.toContain(x);
 				expect(h.getAttribute('aria-label') ?? '', 'a head\'s label').not.toContain(x);
 			}
