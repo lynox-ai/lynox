@@ -26,7 +26,7 @@ import { SaveRefused, profileReadHost, accessTokenKey, collectVaultKeys, grantTo
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
-import { connectCallText, builtInPresetOf, retiredPresetIdOf, derivePresetEndpoints, presetIds, presetParamsForModel, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
+import { connectCallText, builtInPresetOf, retiredPresetIdOf, RETIRED_PRESET_IDS, derivePresetEndpoints, presetIds, presetParamsForModel, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { isCountrySecondLevel } from '../../core/public-suffix.js';
 import { delegatedRenewalWay, fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated, providerNotFollowed } from './http.js';
@@ -3549,7 +3549,7 @@ ${draftJson}
       }
       // A built-in provider's app names are written by its connection form and nothing else. A
       // token stored under one would be taken for the app, and a later grant would refuse it.
-      if (OAUTH_PRESETS.ids().some((p) => { const k = presetClientKeys(p); return outputName === k.id || outputName === k.secret; })) {
+      if ([...OAUTH_PRESETS.ids(), ...RETIRED_PRESET_IDS].some((p) => { const k = presetClientKeys(p); return outputName === k.id || outputName === k.secret; })) {
         return `Error: output_secret_name "${outputName}" holds the app of a built-in provider, which only its connection form writes — pick a name for this API's own token.`;
       }
       // A profile a mandate wrote does not write over what it may not read either: a value
