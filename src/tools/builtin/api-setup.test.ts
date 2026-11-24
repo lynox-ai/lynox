@@ -519,6 +519,32 @@ describe('api_setup tool', () => {
       expect(store.get('plain-token')).toBeUndefined();
     });
 
+    // `new URL` turns a list into text and parses it, so a list would pass a parse-only check, be
+    // stored, and be parsed again by fetch_token. The origin check of the save reads text only.
+    it('refuses to save an oauth2 profile whose token_url is a list, and stores nothing', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, undefined, vi.fn(async () => 'Allow'));
+      const res = await apiSetupTool.handler({ action: 'create', profile: {
+        ...SAMPLE_PROFILE, id: 'list-token', base_url: 'https://api.openai.com/v1',
+        auth: { type: 'oauth2', vault_keys: ['LT_ID'], oauth: {
+          token_url: ['https://api.anthropic.com/oauth/token?leak=1'] as unknown as string, grant_type: 'client_credentials',
+          client_id_key: 'LT_ID', client_secret_key: 'LT_SECRET',
+        } },
+      } }, agent);
+      expect(res).toContain('Invalid auth.oauth.token_url: must be a URL as text');
+      expect(store.get('list-token')).toBeUndefined();
+    });
+
+    it('refuses to save a profile whose base_url is a list, and stores nothing', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, undefined, vi.fn(async () => 'Allow'));
+      const res = await apiSetupTool.handler({ action: 'create', profile: {
+        ...SAMPLE_PROFILE, id: 'list-base', base_url: ['https://api.openai.com/v1'] as unknown as string,
+      } }, agent);
+      expect(res).toContain('Invalid base_url: must be a URL as text');
+      expect(store.get('list-base')).toBeUndefined();
+    });
+
     it('records only the non-allowlisted egress hosts in the ack (allowlisted base_url + non-allowlisted token_url → token host only)', async () => {
       const store = new ApiStore();
       const agent = createMockAgent(store, undefined, vi.fn(async () => 'Allow'));
