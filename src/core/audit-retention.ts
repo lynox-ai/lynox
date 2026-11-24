@@ -19,7 +19,7 @@
  *
  * Known edges, accepted: at the 365-day boundary a run whose first rows are deleted shows in the
  * owner's view with what is left of it; a person whose name changed within a folded day keeps one
- * day row per name; when the database refuses the oldest seven foldable days on every sweep, no
+ * day row per name; when the database refuses the oldest `FOLD_DAYS_PER_SWEEP` foldable days on every sweep, no
  * later day is folded until those are deleted (each refusal is reported).
  */
 import type Database from 'better-sqlite3';
