@@ -123,6 +123,17 @@ describe('the page of a run that wrote a target late in its plan', () => {
 		expect(asked.slice(1)).toEqual(['/targets?offset=0&limit=500']);
 	});
 
+	it('unfolds a preview loaded whole without asking for it again', async () => {
+		doneRun();
+		run = { ...run, phase: 'previewed', applied: 0 };
+		await render();
+		expect(asked).toEqual(['/targets?offset=0&limit=500']);
+		button(tf('bulk.preview.show_unchanged', { n: '16' }))!.click();
+		await settle();
+		expect(rows()).toEqual(Array.from({ length: 17 }, (_, i) => String(i + 1)));
+		expect(asked).toEqual(['/targets?offset=0&limit=500']);
+	});
+
 	it('loads the run whole from the start when the owner shows all, the unchanged ones still folded', async () => {
 		doneRun();
 		await render();

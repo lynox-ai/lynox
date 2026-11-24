@@ -1214,6 +1214,10 @@ describe('an owner\'s stop is called a stop, not a halt', () => {
 		expect(bulkHaltHeadKey({ haltKey: 'stoppedByOwner' })).toBe('bulk.head.stopped');
 		// A discarded run is named as discarded, next to its chip and sentence (U-324).
 		expect(bulkHaltHeadKey({ haltKey: 'discarded' })).toBe('bulk.head.discarded');
+		// Only a planned run waits for its start; the same key on a run past it stays a halt (U-437).
+		expect(bulkHaltHeadKey({ phase: 'planned', haltKey: 'awaitingStart' })).toBe('bulk.head.next');
+		expect(bulkHaltHeadKey({ phase: 'writing', haltKey: 'awaitingStart' })).toBe('bulk.head.halted');
+		expect(bulkHaltHeadKey({ phase: 'writing', haltKey: 'listed' })).toBe('bulk.head.halted');
 		expect(bulkHaltSuffixKey({ haltKey: 'stoppedByOwner' })).toBe('bulk.stopped_suffix');
 		for (const haltKey of ['maxTargets', 'costCap', 'consecutiveFailures', null]) {
 			expect(bulkHaltHeadKey({ haltKey })).toBe('bulk.head.halted');

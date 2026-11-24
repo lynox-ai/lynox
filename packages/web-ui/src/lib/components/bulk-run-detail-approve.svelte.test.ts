@@ -1186,7 +1186,8 @@ describe('the allowed link domains of a judged list run', () => {
 		const done = (id: string): BulkRunDetailData => makeRun({ id, phase: 'done', total: 8, changes: { update: 1, create: 0, delete: 0, unchanged: 7, invalid: 0 } });
 		run = done('r1');
 		const open = await renderSwitchable();
-		runsById['r2'] = done('r2');
+		// The next run is a preview, loaded whole: a fold left open would show its unchanged targets.
+		runsById['r2'] = { ...done('r2'), phase: 'previewed' };
 		const unfold = (): HTMLButtonElement | undefined => buttonByText(tf('bulk.preview.show_unchanged', { n: '7' }));
 		unfold()!.click();
 		await settle();
