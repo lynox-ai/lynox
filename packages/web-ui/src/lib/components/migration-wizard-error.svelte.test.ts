@@ -17,9 +17,9 @@ type SvelteClient = {
 };
 const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLIENT_ENTRY)) as SvelteClient;
 
-// The wizard's error state: one place for the error, the UI's own words in the UI's language with
-// the engine's sentence as its detail, a retry that follows what the engine says, and the step marks
-// staying where the error came.
+// The wizard's error state: one place for the error, the sentence for the engine's code in the UI's
+// language (the engine's English sentence is not shown), the target's words in a box of their own, a
+// retry that follows what the engine says, and the step marks staying where the error came.
 
 const SENTENCE = 'The target instance could not restore the data. It says: "Cannot restore — not all chunks received.". You can start the migration again in 30 minutes at the latest.';
 let target: HTMLElement;
@@ -84,15 +84,27 @@ const retryButton = (): HTMLButtonElement | null => q('migration-retry') as HTML
 const marks = (): string[] => [...target.querySelectorAll('.rounded-full.transition-all')].map((m) => (m.className.includes('w-6') ? 'here' : m.className.includes('bg-accent/50') ? 'past' : 'ahead'));
 
 describe('the migration wizard after an error', () => {
+	const WORDS = 'Cannot restore — not all chunks received.';
+	const SAID: Record<'de' | 'en', string> = {
+		de: 'Die Zielinstanz hat die Wiederherstellung abgelehnt, bevor sie begonnen hat. Sie hat nichts wiederhergestellt.',
+		en: 'The target instance refused to restore the data before it began. It has not restored anything.',
+	};
+	const LABEL: Record<'de' | 'en', string> = { de: 'Meldung der Zielinstanz:', en: 'Message from the target instance:' };
 	for (const lang of ['de', 'en'] as const) {
-		it(`says it in the UI's language and keeps the engine's sentence as its English detail, once (${lang})`, async () => {
+		it(`says the code's sentence in the UI's language, the target's words in their own box, and never the engine's English sentence (${lang})`, async () => {
 			const before = getLocale();
 			setLocale(lang);
 			try {
-				await failWith({ message: SENTENCE, retry: 'now' });
+				await failWith({ code: 'restore_refused', params: { targetText: WORDS }, message: SENTENCE, retry: 'later' });
 				expect(text('migration-error-title')).toBe(t('migration.error_title'));
-				expect(text('migration-error-detail')).toBe(SENTENCE);
-				expect(q('migration-error-detail')?.getAttribute('lang')).toBe('en');
+				expect(text('migration-error-detail')).toBe(SAID[lang]);
+				expect(q('migration-error-detail')?.getAttribute('lang')).toBeNull();
+				expect(text('migration-error-reason')).toBe(`${LABEL[lang]} ${WORDS}`);
+				const box = q('migration-error-reason')?.querySelector('bdi[data-foreign-value]');
+				expect(box?.textContent).toBe(WORDS);
+				expect(box?.getAttribute('lang')).toBe('en');
+				expect(target.textContent).not.toContain('You can start the migration again');
+				expect(target.textContent).not.toContain('It says');
 				// The card is the one place: no toast on top of it.
 				expect(getToasts()).toHaveLength(0);
 			} finally {
@@ -100,6 +112,106 @@ describe('the migration wizard after an error', () => {
 			}
 		});
 	}
+
+	it('shows no box where the target gave no readable words, and no sentence about that either', async () => {
+		await failWith({ code: 'handshake_refused', params: {}, message: 'The target instance did not accept the migration. The target instance gave no readable reason. Nothing was transferred.', retry: 'none' });
+		expect(text('migration-error-detail')).toBe(t('migration.stop.handshake_refused'));
+		expect(q('migration-error-reason')).toBeNull();
+		expect(target.textContent).not.toContain('readable reason');
+	});
+
+	it('shows the target\'s words as text, never as markup', async () => {
+		const words = '<img src=x onerror="window.__pwned=1"><b>bold</b>';
+		await failWith({ code: 'handshake_refused', params: { targetText: words }, retry: 'none' });
+		const box = q('migration-error-reason')?.querySelector('bdi[data-foreign-value]');
+		expect(box?.textContent).toBe(words);
+		expect(box?.children.length).toBe(0);
+		expect(target.querySelector('img')).toBeNull();
+		expect(target.querySelector('#migration-error-detail b, [data-testid="migration-error-reason"] b')).toBeNull();
+	});
+
+	it('sets a value in the sentence apart as text in its own box', async () => {
+		await failWith({ code: 'folder_too_large', params: { dir: '<i>apis</i>', entries: 20000, bytes: 64 * 1024 * 1024 }, retry: 'none' });
+		const values = [...(q('migration-error-detail')?.querySelectorAll('bdi[data-foreign-value]') ?? [])];
+		expect(values.map((v) => v.textContent)).toEqual(['<i>apis</i>']);
+		expect(q('migration-error-detail')?.querySelector('i')).toBeNull();
+		expect(q('migration-error-reason')).toBeNull();
+	});
+
+	it('lets a value box wrap as a whole and break inside only when it is longer than a line', async () => {
+		await failWith({ code: 'export_failed', params: { detail: 'cannot open ~/.lynox/a.db' }, retry: 'later' });
+		const boxes = [...target.querySelectorAll('[data-testid="migration-error-detail"] bdi[data-foreign-value], [data-testid="migration-error-reason"] bdi[data-foreign-value]')];
+		expect(boxes.length).toBeGreaterThan(0);
+		for (const box of boxes) {
+			expect(box.classList.contains('inline-block')).toBe(true);
+			expect(box.classList.contains('max-w-full')).toBe(true);
+			expect(box.classList.contains('[overflow-wrap:anywhere]')).toBe(true);
+			expect(box.classList.contains('box-decoration-clone')).toBe(false);
+		}
+	});
+
+	it('lets a value box in the sentence wrap as a whole too', async () => {
+		await failWith({ code: 'folder_too_large', params: { dir: 'apis', entries: 20000, bytes: 64 * 1024 * 1024 }, retry: 'none' });
+		const box = q('migration-error-detail')?.querySelector('bdi[data-foreign-value]');
+		expect(box?.classList.contains('inline-block')).toBe(true);
+		expect(box?.classList.contains('max-w-full')).toBe(true);
+		expect(box?.classList.contains('[overflow-wrap:anywhere]')).toBe(true);
+	});
+
+	it('holds the retry for a target still holding an earlier attempt, and says from when', async () => {
+		vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+		vi.setSystemTime(new Date('2026-11-18T13:05:00Z'));
+		await failWith({ code: 'target_session_active', params: {}, retry: 'later' });
+		const time = new Date(Date.now() + MIGRATION_HOLD_MS).toLocaleTimeString(getLocale() === 'de' ? 'de-CH' : 'en-GB', { hour: '2-digit', minute: '2-digit' });
+		expect(text('migration-error-detail')).toBe(t('migration.stop.target_session_active'));
+		expect(text('migration-retry-from')).toBe(tf('migration.retry_from', { time }));
+		expect(retryButton()?.disabled).toBe(true);
+		expect(q('migration-check-target')).toBeNull();
+	});
+
+	it('sets the vault key\'s names apart in the sentence', async () => {
+		await failWith({ code: 'vault_key_missing', params: {}, retry: 'none' });
+		const values = [...(q('migration-error-detail')?.querySelectorAll('bdi[data-foreign-value]') ?? [])].map((v) => v.textContent);
+		expect(values).toEqual(['LYNOX_VAULT_KEY', '~/.lynox/.env', 'vault.key']);
+	});
+
+	it('offers no retry where a retry would change nothing, and goes back to the inputs as they were', async () => {
+		const TOKEN = 'b'.repeat(64);
+		events = sse('error', { code: 'handshake_unverified', params: {}, retry: 'none' });
+		const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
+		component = mount(MigrationWizard, { target });
+		await settle();
+		const button = (label: string): HTMLButtonElement | undefined => [...target.querySelectorAll('button')].find((b) => b.textContent?.trim() === label);
+		button(t('migration.next'))!.click();
+		await settle();
+		const enter = (id: string, value: string): void => {
+			const input = target.querySelector<HTMLInputElement>(`#${id}`)!;
+			input.value = value;
+			input.dispatchEvent(new Event('input', { bubbles: true }));
+		};
+		enter('target-url', 'https://target.example.com');
+		enter('migration-token', TOKEN);
+		await settle();
+		button(t('migration.start'))!.click();
+		await settle();
+		expect(getStep()).toBe('error');
+		expect(retryButton()).toBeNull();
+		expect(q('migration-check-target')).toBeNull();
+		expect(q('migration-retry-from')).toBeNull();
+		(q('migration-back') as HTMLButtonElement).click();
+		await settle();
+		expect(getStep()).toBe('plan');
+		// What the user sees: the fields hold what was entered before.
+		expect(target.querySelector<HTMLInputElement>('#target-url')?.value).toBe('https://target.example.com');
+		expect(target.querySelector<HTMLInputElement>('#migration-token')?.value).toBe(TOKEN);
+		expect(button(t('migration.start'))?.disabled).toBe(false);
+	});
+
+	it('says an unknown code as a reason lynox could not read', async () => {
+		await failWith({ code: 'something_new', params: { nothingSent: true }, message: 'Something new happened.', retry: 'now' });
+		expect(text('migration-error-detail')).toBe(t('migration.stop.unknown'));
+		expect(target.textContent).not.toContain('Something new happened');
+	});
 
 	it('offers the retry at once when the engine says now', async () => {
 		await failWith({ message: SENTENCE, retry: 'now' });
@@ -125,7 +237,23 @@ describe('the migration wizard after an error', () => {
 	});
 
 	it('asks to check the target first, with no retry, when the restore may have run', async () => {
-		await failWith({ message: 'The target instance could not restore the data. It says: "x". Check on the target instance whether your data arrived before you migrate again.', retry: 'check' });
+		await failWith({ code: 'restore_failed_on_target', params: { targetText: 'x' }, message: 'The target instance could not restore the data. It says: "x". Check on the target instance whether your data arrived before you migrate again.', retry: 'check' });
+		expect(text('migration-error-detail')).toBe(t('migration.stop.restore_failed_on_target'));
+		expect(text('migration-check-target')).toBe(t('migration.check_target_first'));
+		expect(retryButton()).toBeNull();
+	});
+
+	it('asks to check the target when the stream says done without success', async () => {
+		events = sse('progress', { phase: 'transferring', message: 'Sending chunk 1/2...' }) + sse('done', { success: false });
+		const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
+		component = mount(MigrationWizard, { target });
+		await settle();
+		setTarget('https://target.example.com', 'a'.repeat(64));
+		await startMigration();
+		await settle();
+		expect(getStep()).toBe('error');
+		expect(text('migration-error-detail')).toBe(t('migration.stop.unknown'));
+		expect(getRetry()).toBe('check');
 		expect(text('migration-check-target')).toBe(t('migration.check_target_first'));
 		expect(retryButton()).toBeNull();
 	});
@@ -182,8 +310,34 @@ describe('the migration wizard when this instance does not start the migration',
 		expect(getStep()).toBe('error');
 	}
 
+	const STARTS: Record<'de' | 'en', string> = {
+		de: 'Unter dieser Instanz-URL ist keine öffentlich erreichbare Adresse zu finden. Es wurde nichts übertragen. Gib die Adresse deiner Zielinstanz ein, zum Beispiel https://dein-name.lynox.cloud.',
+		en: 'No publicly reachable address can be found at this instance URL. Nothing was transferred. Enter the address of your target instance, for example https://your-name.lynox.cloud.',
+	};
 	for (const lang of ['de', 'en'] as const) {
-		it(`says so in its own words and shows its reason beside it in its own element, not as the engine's (${lang})`, async () => {
+		it(`says a start check by its code in its own words, with no reason box and no retry (${lang})`, async () => {
+			const before = getLocale();
+			setLocale(lang);
+			try {
+				await refusedWith(() => new Response(JSON.stringify({ error: 'targetUrl must resolve to a public host', code: 'start_not_public' }), { status: 400, headers: { 'Content-Type': 'application/json' } }));
+				expect(text('migration-error-title')).toBe(t('migration.error_title_not_started'));
+				expect(text('migration-error-detail')).toBe(STARTS[lang]);
+				// The example address never breaks across lines, and is plain text, not a value box.
+				const example = q('migration-error-detail')?.querySelector('span.whitespace-nowrap');
+				expect(example?.textContent).toBe(lang === 'de' ? 'https://dein-name.lynox.cloud' : 'https://your-name.lynox.cloud');
+				expect(q('migration-error-detail')?.querySelector('bdi[data-foreign-value]')).toBeNull();
+				expect(q('migration-error-reason')).toBeNull();
+				expect(target.textContent).not.toContain('targetUrl');
+				expect(getRetry()).toBe('none');
+				expect(retryButton()).toBeNull();
+			} finally {
+				setLocale(before);
+			}
+		});
+	}
+
+	for (const lang of ['de', 'en'] as const) {
+		it(`says a refusal without a code in its own words and shows its reason beside it in its own element (${lang})`, async () => {
 			const before = getLocale();
 			setLocale(lang);
 			try {
@@ -232,12 +386,12 @@ describe('the migration wizard when this instance does not start the migration',
 	it('does not keep the reason under a later error of another kind', async () => {
 		await refusedWith(() => new Response(JSON.stringify({ error: 'targetUrl must resolve to a public host' }), { status: 400 }));
 		expect(q('migration-error-reason')).not.toBeNull();
-		// The next attempt starts, and the engine stops it with its own sentence.
+		// The next attempt starts, and the engine stops it with its code.
 		exportAnswer = null;
-		events = sse('error', { message: SENTENCE, retry: 'later' });
+		events = sse('error', { code: 'chunk_unreachable', params: { part: 2, parts: 5, kind: 'config' }, message: SENTENCE, retry: 'later' });
 		await startMigration();
 		await settle();
-		expect(text('migration-error-detail')).toBe(SENTENCE);
+		expect(text('migration-error-detail')).toContain(tf('migration.part_kind', { n: '2', m: '5', kind: t('migration.kind.config') }));
 		expect(q('migration-error-reason')).toBeNull();
 		// It started this time, so it did not finish.
 		expect(text('migration-error-title')).toBe(t('migration.error_title'));
@@ -267,7 +421,7 @@ describe('the migration wizard when this instance does not start the migration',
 		finish?.();
 		await started;
 		await settle();
-		expect(getError()).toBe(t('migration.cancelled'));
+		expect(getError()).toBe(t('migration.stop.cancelled'));
 		expect(getErrorReason()).toBe('');
 		expect(q('migration-error-reason')).toBeNull();
 		expect(getErrorNotStarted()).toBe(false);
@@ -276,7 +430,23 @@ describe('the migration wizard when this instance does not start the migration',
 });
 
 describe('the migration wizard when the event stream breaks', () => {
-	it('shows the browser\'s text as its own, not marked as the engine\'s sentence', async () => {
+	it('says that this instance cannot be reached when the request never got there, and keeps the browser\'s text out of the card', async () => {
+		exportAnswer = () => { throw new TypeError('Failed to fetch'); };
+		const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
+		component = mount(MigrationWizard, { target });
+		await settle();
+		setTarget('https://target.example.com', 'a'.repeat(64));
+		await startMigration();
+		await settle();
+		expect(getStep()).toBe('error');
+		expect(getError()).toBe(t('migration.stop.connection_failed'));
+		expect(text('migration-error-detail')).toBe(t('migration.stop.connection_failed'));
+		expect(target.textContent).not.toContain('Failed to fetch');
+		expect(getRetry()).toBe('now');
+		expect(retryButton()?.disabled).toBe(false);
+	});
+
+	it('asks to check the target, with no retry, when the stream breaks after the engine took the request', async () => {
 		exportAnswer = () => new Response(new ReadableStream<Uint8Array>({ start(c) { c.error(new Error('stream broke')); } }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 		const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
 		component = mount(MigrationWizard, { target });
@@ -285,10 +455,62 @@ describe('the migration wizard when the event stream breaks', () => {
 		await startMigration();
 		await settle();
 		expect(getStep()).toBe('error');
-		expect(getError()).toBe('stream broke');
-		expect(text('migration-error-detail')).toBe('stream broke');
-		expect(q('migration-error-detail')?.getAttribute('lang')).toBeNull();
+		expect(text('migration-error-detail')).toBe(t('migration.stop.connection_lost'));
+		expect(target.textContent).not.toContain('stream broke');
+		expect(getRetry()).toBe('check');
+		expect(text('migration-check-target')).toBe(t('migration.check_target_first'));
+		expect(retryButton()).toBeNull();
 	});
+
+	it('asks to check the target when the stream ends without a result', async () => {
+		events = sse('progress', { phase: 'transferring', message: 'Sending chunk 1/2...' });
+		const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
+		component = mount(MigrationWizard, { target });
+		await settle();
+		setTarget('https://target.example.com', 'a'.repeat(64));
+		await startMigration();
+		await settle();
+		expect(text('migration-error-detail')).toBe(t('migration.stop.connection_lost'));
+		expect(getRetry()).toBe('check');
+		expect(text('migration-check-target')).toBe(t('migration.check_target_first'));
+		expect(retryButton()).toBeNull();
+	});
+});
+
+describe('the migration wizard after a cancel', () => {
+	// A cancel stops only the browser listening: the engine carries on, so the target may still
+	// restore the data. The card asks to check it first at every step, the first one included.
+	for (const phase of ['preview', 'transferring', 'restoring']) {
+		it(`asks to check the target first, with no retry, after a cancel during ${phase}`, async () => {
+			let release: (() => void) | undefined;
+			exportAnswer = () => new Response(new ReadableStream<Uint8Array>({
+				start(c) {
+					c.enqueue(new TextEncoder().encode(sse('progress', { phase, message: '...' })));
+					release = () => c.close();
+				},
+			}), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+			const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
+			component = mount(MigrationWizard, { target });
+			await settle();
+			setTarget('https://target.example.com', 'a'.repeat(64));
+			const running = startMigration();
+			await settle();
+			expect(getStep()).toBe('transferring');
+			const cancel = [...target.querySelectorAll('button')].find((b) => b.textContent?.trim() === t('migration.cancel'));
+			expect(cancel, 'the transfer step offers its cancel button').toBeDefined();
+			cancel!.click();
+			await settle();
+			release?.();
+			await running;
+			await settle();
+			expect(getStep()).toBe('error');
+			expect(text('migration-error-detail')).toBe(t('migration.stop.cancelled'));
+			expect(getRetry()).toBe('check');
+			expect(text('migration-check-target')).toBe(t('migration.check_target_first'));
+			expect(retryButton()).toBeNull();
+			expect(target.textContent).not.toContain(t('migration.retry'));
+		});
+	}
 });
 
 describe('the migration wizard when the preview cannot be loaded', () => {
@@ -300,5 +522,35 @@ describe('the migration wizard when the preview cannot be loaded', () => {
 		expect(getError()).toBe(t('migration.error_preview'));
 		expect(target.textContent).toContain(t('migration.error_preview'));
 		expect(target.textContent).not.toContain('Bad Gateway');
+	});
+});
+
+describe('the migration wizard\'s own check of the target address', () => {
+	for (const url of ['http://192.168.1.5', 'https://192.168.1.5', 'https://localhost', 'https://127.0.0.1:8443', 'https://[::1]', 'https://169.254.169.254', 'https://10.0.0.5', 'ftp://example.com']) {
+		it(`turns ${url} down before sending, as the engine would, with no retry`, async () => {
+			const { default: MigrationWizard } = await import('./MigrationWizard.svelte');
+			component = mount(MigrationWizard, { target });
+			await settle();
+			setTarget(url, 'a'.repeat(64));
+			await startMigration();
+			await settle();
+			expect(getStep()).toBe('error');
+			expect(text('migration-error-title')).toBe(t('migration.error_title_not_started'));
+			expect(text('migration-error-detail')).toBe(t('migration.stop.browser_invalid_url'));
+			expect(retryButton()).toBeNull();
+			expect((vi.mocked(fetch).mock.calls).some((c) => String(c[0]).endsWith('/migration/export'))).toBe(false);
+		});
+	}
+
+	it('promises no local address any more', () => {
+		for (const lang of ['de', 'en'] as const) {
+			const before = getLocale();
+			setLocale(lang);
+			try {
+				expect(t('migration.stop.browser_invalid_url')).not.toMatch(/lokal|local/i);
+			} finally {
+				setLocale(before);
+			}
+		}
 	});
 });

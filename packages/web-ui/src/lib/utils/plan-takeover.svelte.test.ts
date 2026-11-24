@@ -34,22 +34,53 @@ const wfMember = (roles: TakeoverMember['roles'], name = 'ida@x.ch'): TakeoverMe
 
 describe('the role lines (T-1, Fassung 4)', () => {
 	it('says every role that applies, in DE and EN', () => {
-		const p = preview({
-			members: [wfMember(['created', 'edited', 'workflow-created', 'workflow-edited'])],
-			workflow: { id: 'w', name: 'Rechnungen', takenOver: false },
-		});
-		expect(texts(p).slice(0, 4)).toEqual([
+		const wf = { id: 'w', name: 'Rechnungen', takenOver: false };
+		const roleTexts = (roles: TakeoverMember['roles']): string[] => takeoverLines(preview({ members: [wfMember(roles)], workflow: wf }), fmt).filter((l) => l.kind === 'role').map((l) => l.text);
+		expect(roleTexts(['created', 'edited', 'workflow-created'])).toEqual([
 			'Angelegt von ida@x.ch',
 			'Bearbeitet von ida@x.ch',
 			'Nutzt den Workflow „Rechnungen“, den ida@x.ch angelegt hat',
-			'Nutzt den Workflow „Rechnungen“, den ida@x.ch geändert hat',
 		]);
+		expect(roleTexts(['workflow-edited'])).toEqual(['Nutzt den Workflow „Rechnungen“, den ida@x.ch geändert hat']);
 		setLocale('en');
-		expect(texts(p).slice(0, 4)).toEqual([
+		expect(roleTexts(['created', 'edited', 'workflow-created'])).toEqual([
 			'Created by ida@x.ch',
 			'Edited by ida@x.ch',
 			'Uses the workflow “Rechnungen”, which ida@x.ch created',
-			'Uses the workflow “Rechnungen”, which ida@x.ch changed',
+		]);
+		expect(roleTexts(['workflow-edited'])).toEqual(['Uses the workflow “Rechnungen”, which ida@x.ch changed']);
+	});
+	it('says one line per person for the workflow, also over two accesses, in DE and EN', () => {
+		const wf = { id: 'w', name: 'Rechnungen', takenOver: false };
+		const roleTexts = (members: TakeoverMember[]): string[] => takeoverLines(preview({ members, workflow: wf }), fmt).filter((l) => l.kind === 'role').map((l) => l.text);
+		const both = 'Nutzt den Workflow „Rechnungen“, den ida@x.ch angelegt und geändert hat';
+		expect(roleTexts([wfMember(['created', 'edited', 'workflow-created', 'workflow-edited'])])).toEqual(['Angelegt von ida@x.ch', 'Bearbeitet von ida@x.ch', both]);
+		// The same person under an ended and a live access: one line, at the first access.
+		expect(roleTexts([wfMember(['workflow-created']), { name: 'ida@x.ch', roles: ['workflow-edited'], ended: false, reason: null }])).toEqual([both]);
+		// Two people: each keeps their own line.
+		expect(roleTexts([wfMember(['workflow-created'], 'a@x.ch'), wfMember(['workflow-edited'], 'b@x.ch')])).toEqual([
+			'Nutzt den Workflow „Rechnungen“, den a@x.ch angelegt hat',
+			'Nutzt den Workflow „Rechnungen“, den b@x.ch geändert hat',
+		]);
+		setLocale('en');
+		const bothEn = 'Uses the workflow “Rechnungen”, which ida@x.ch created and changed';
+		expect(roleTexts([wfMember(['workflow-created', 'workflow-edited'])])).toEqual([bothEn]);
+		expect(roleTexts([wfMember(['workflow-created']), { name: 'ida@x.ch', roles: ['workflow-edited'], ended: false, reason: null }])).toEqual([bothEn]);
+		expect(roleTexts([wfMember(['workflow-created'], 'a@x.ch'), wfMember(['workflow-edited'], 'b@x.ch')])).toEqual([
+			'Uses the workflow “Rechnungen”, which a@x.ch created',
+			'Uses the workflow “Rechnungen”, which b@x.ch changed',
+		]);
+	});
+	it('says the workflow line at the access that has a workflow role, after that access\'s plan roles', () => {
+		// The first access has a plan role only: the workflow line waits for the access that brings it.
+		const p = preview({
+			members: [wfMember(['created']), { name: 'ida@x.ch', roles: ['edited', 'workflow-edited'], ended: false, reason: null }],
+			workflow: { id: 'w', name: 'Rechnungen', takenOver: false },
+		});
+		expect(takeoverLines(p, fmt).filter((l) => l.kind === 'role').map((l) => l.text)).toEqual([
+			'Angelegt von ida@x.ch',
+			'Bearbeitet von ida@x.ch',
+			'Nutzt den Workflow „Rechnungen“, den ida@x.ch geändert hat',
 		]);
 	});
 });
@@ -82,6 +113,11 @@ describe('F2: the workflow is taken over with the plan', () => {
 		expect(f2(preview({ members, workflow: { ...wf, from } }))).toBe(changedBy('a@x.ch'));
 		expect(f2(preview({ members: [...members].reverse(), workflow: { ...wf, from } }))).toBe(changedBy('a@x.ch'));
 		expect(f2(preview({ members, workflow: { ...wf, from: { name: 'b@x.ch', role: 'workflow-edited' } } }))).toBe(changedBy('b@x.ch'));
+		// The person the mark names has no workflow line under any access; the other person keeps theirs.
+		const twice = [...members, { name: 'b@x.ch', roles: ['workflow-created' as const], ended: false, reason: null }];
+		expect(takeoverLines(preview({ members: twice, workflow: { ...wf, from: { name: 'b@x.ch', role: 'workflow-edited' } } }), fmt).filter((l) => l.kind === 'role').map((l) => l.text)).toEqual([
+			'Nutzt den Workflow „Rechnungen“, den a@x.ch geändert hat',
+		]);
 		// The role is the mark's, not the member's: a member who also changed it is said to have created it when the
 		// mark is the creation. (Not a state the engine makes today: a covered editor's mark is covered with the creator's.)
 		const both = [wfMember(['workflow-created'], 'b@x.ch'), wfMember(['workflow-created', 'workflow-edited'], 'a@x.ch')];
@@ -105,9 +141,14 @@ describe('F2: the workflow is taken over with the plan', () => {
 		);
 	});
 	it('takes the place of the role line it says, for that member only (ux)', () => {
+		// The person F2 names has no workflow line of their own: F2 names the person and the workflow.
 		const one = preview({ members: [wfMember(['created', 'workflow-created', 'workflow-edited'])], workflow: wf });
-		expect(texts(one).slice(0, 2)).toEqual(['Angelegt von ida@x.ch', 'Nutzt den Workflow „Rechnungen“, den ida@x.ch angelegt hat']);
-		expect(kinds(one).slice(0, 3)).toEqual(['role', 'role', 'f2']);
+		expect(texts(one)[0]).toBe('Angelegt von ida@x.ch');
+		expect(kinds(one).slice(0, 2)).toEqual(['role', 'f2']);
+		expect(texts(one)[1]?.startsWith('Dieser Plan nutzt den Workflow „Rechnungen“, den ida@x.ch geändert hat.')).toBe(true);
+		// Also not under that person's other access.
+		const twoAccesses = preview({ members: [wfMember(['workflow-edited']), { name: 'ida@x.ch', roles: ['workflow-created'], ended: false, reason: null }], workflow: wf });
+		expect(kinds(twoAccesses).filter((k) => k === 'role' || k === 'f2')).toEqual(['f2']);
 		const two = preview({ members: [wfMember(['workflow-created'], 'a@x.ch'), wfMember(['workflow-edited'], 'b@x.ch')], workflow: wf });
 		expect(texts(two)[0]).toBe('Nutzt den Workflow „Rechnungen“, den a@x.ch angelegt hat');
 		expect(kinds(two).slice(0, 2)).toEqual(['role', 'f2']);
