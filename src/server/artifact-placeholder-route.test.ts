@@ -10,7 +10,7 @@ import type { ArtifactStore } from '../core/artifact-store.js';
 
 /**
  * The gallery route (`POST /api/artifacts`, what "save to gallery" in the chat calls) refuses content
- * that holds only the engine's placeholder for an already saved document with 422 and writes
+ * that holds only the engine's placeholder, not a document, with 422 and writes
  * nothing. Real content, also a larger document that quotes the placeholder, is saved as before.
  * On a booted engine, because the store has to be the one the route uses.
  */
@@ -68,7 +68,7 @@ describe('POST /api/artifacts with the placeholder (real engine)', () => {
     const before = store().list().length;
     const refused = await post({ title: 'Pitch', content: PLACEHOLDER });
     expect(refused.status).toBe(422);
-    expect(refused.text).toContain('This is the placeholder the assistant keeps for an already saved document, not the document. Nothing was saved.');
+    expect(refused.text).toContain("This is only the assistant's placeholder, not a document. Nothing was saved.");
     // The code is what the web UI reads to say this in the person's language.
     expect(JSON.parse(refused.text)).toMatchObject({ code: 'artifact_placeholder' });
     expect(store().list()).toHaveLength(before);

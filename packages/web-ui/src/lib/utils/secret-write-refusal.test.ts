@@ -6,6 +6,7 @@ const reply = (status: number, body: string): Response => new Response(body, { s
 describe('secretWriteRefusal', () => {
 	it('reads a 403 marked as a built-in provider client secret', async () => {
 		expect(await secretWriteRefusal(reply(403, JSON.stringify({ error: 'x', code: 'preset_client_secret' })))).toBe('preset_client');
+		expect(await secretWriteRefusal(reply(403, JSON.stringify({ error: 'x', code: 'retired_preset_client_secret' })))).toBe('retired_preset_client');
 	});
 
 	it('reads any other 403 as a platform-managed name', async () => {

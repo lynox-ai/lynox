@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
+import { EngineDb } from './engine-db.js';
+import { RETENTION_ACTION } from './audit-retention.js';
 import type { LynoxConfig } from '../types/index.js';
 
 /**
@@ -45,6 +47,24 @@ describe('Engine boot — the actor trail is wired', () => {
     log!.record({ principal: { kind: 'mandate', email: 'recipient@example.invalid' }, action: 'boot check', phase: 'attempt', correlationId: 'c-boot' });
     const rows = engine.getEngineDb()!.getDb().prepare('SELECT correlation_id FROM audit_log').all() as Array<{ correlation_id: string }>;
     expect(rows.map(r => r.correlation_id)).toEqual(['c-boot']);
+  });
+
+  it('deletes the rows past their time when it starts, without waiting for the hourly sweep', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-audit-boot-'));
+    dirs.push(dir);
+    for (const k of ['LYNOX_VAULT_KEY', 'LYNOX_MANAGED_INSTANCE_ID']) setEnv(k, undefined);
+    setEnv('LYNOX_DATA_DIR', dir);
+    reloadConfig();
+    const before = new EngineDb(); // the same file the engine opens (LYNOX_DATA_DIR)
+    const insert = before.getDb().prepare("INSERT INTO audit_log (ts, actor_kind, actor_email, action, phase, correlation_id) VALUES (?, 'mandate', 'helper@example.invalid', 'GET /api/inbox/items', 'read', ?)");
+    insert.run(new Date(Date.now() - 400 * 24 * 60 * 60_000).toISOString(), 'c-old');
+    insert.run(new Date(Date.now() - 60_000).toISOString(), 'c-young');
+    before.close();
+    const engine = new Engine({} as LynoxConfig);
+    engines.push(engine);
+    await engine.init();
+    const rows = engine.getEngineDb()!.getDb().prepare('SELECT correlation_id, action FROM audit_log ORDER BY id').all() as Array<{ correlation_id: string; action: string }>;
+    expect(rows.map((r) => r.correlation_id === 'c-young' ? 'c-young' : r.action)).toEqual(['c-young', RETENTION_ACTION]);
   });
 
   it('finds every tool of the booted registry that writes outside classified', async () => {

@@ -125,19 +125,35 @@ export const ARTIFACT_FIT_CODE =
  * are set explicitly. So unifying on `'none'` is de-duplication, not tightening
  * — which is why it is safe to do in the same change.
  *
- * `img-src *` is deliberate: artifacts legitimately show remote images — a logo,
- * a diagram, a map, a picture in a report — and narrowing it is a product
- * decision about what an artifact may display, not a change this module makes on
- * its own.
+ * `img-src` allows `data:` and `blob:` only, no remote host. For remote images
+ * that is the state artifacts had before they moved to the frame endpoint: as
+ * `srcdoc` frames they inherited the app's policy (`img-src 'self' data: blob:`),
+ * so remote images were already blocked whatever this policy said. Same-origin
+ * images, which that policy allowed, are now blocked too: an artifact has an
+ * opaque origin and no use for them. The endpoint inherits nothing,
+ * so this policy has to hold that state itself; an image request to another
+ * host is a way to send data out without any script. Allowing remote images in
+ * artifacts would be a product decision, not a change this module makes on its
+ * own. `base-uri` and `form-action` are `'none'` for the same reason: they used
+ * to come from the inherited policy.
  */
 /** The frame's default viewport, for the branch that cannot query a document. */
 const VIEWPORT_META = '<meta name="viewport" content="width=device-width,initial-scale=1">';
 
-export const ARTIFACT_CSP =
-	'<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; ' +
+/**
+ * The artifact policy as directives. The frame endpoint (`/_artifact-frame`) sends it as its
+ * own response header, and the meta below carries the same text into the document, so the
+ * artifact is held to it twice: by the header, which the document cannot remove, and by the
+ * meta, which travels with a downloaded copy.
+ */
+export const ARTIFACT_POLICY =
+	'default-src \'none\'; ' +
 	'script-src \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com; ' +
 	'style-src \'unsafe-inline\' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; ' +
-	'font-src https://fonts.gstatic.com; img-src * data: blob:; connect-src \'none\'">';
+	'font-src https://fonts.gstatic.com; img-src data: blob:; connect-src \'none\'; ' +
+	'base-uri \'none\'; form-action \'none\'';
+
+export const ARTIFACT_CSP = `<meta http-equiv="Content-Security-Policy" content="${ARTIFACT_POLICY}">`;
 
 /**
  * Is there a document tag here that we would have to insert INTO?
@@ -344,7 +360,7 @@ const OVERFLOW_FIX =
 
 /**
  * The frame's own styling for an artifact that brought NO document of its own.
- * An iframe srcdoc does not inherit the parent's CSS variables, so a fragment
+ * A frame document does not inherit the parent's CSS variables, so a fragment
  * would otherwise render black-on-white inside a dark app.
  */
 function fragmentDefaults(theme: 'light' | 'dark'): string {
@@ -355,7 +371,8 @@ function fragmentDefaults(theme: 'light' | 'dark'): string {
 }
 
 /**
- * The srcdoc for the INLINE artifact bubble.
+ * The frame document for the INLINE artifact bubble: the endpoint writes it into its
+ * sandboxed frame (see `artifact-frame-host.ts`).
  *
  * ## Why the head is built here and not by the component
  *
@@ -388,7 +405,8 @@ export function buildArtifactBubbleFrame(
 }
 
 /**
- * Build the srcdoc for a fullscreen artifact preview: the CSP and a default
+ * Build the frame document for a fullscreen artifact preview (written into the
+ * sandboxed endpoint frame): the CSP and a default
  * viewport first in `<head>`, the fit-to-width script last in `<body>`.
  *
  * ⚠ This docstring used to say "Pure string transform — DOM-free so it is
@@ -402,4 +420,16 @@ export function buildArtifactBubbleFrame(
  */
 export function injectArtifactPreview(html: string): string {
 	return injectIntoArtifactFrame(html, '', ARTIFACT_FIT_CODE);
+}
+
+/**
+ * The file an html artifact is exported as from the gallery: the artifact under the same
+ * policy it runs under in the app, carried as a meta element. A copy opened from disk has no
+ * frame endpoint and no response header around it, so without the meta it would load remote
+ * images (and anything else the policy keeps out) that it never loads in the app. The chat's
+ * download already carries the policy through its frame document; this keeps the gallery's
+ * export the same.
+ */
+export function artifactExportDocument(html: string): string {
+	return injectIntoArtifactFrame(html, '', '');
 }

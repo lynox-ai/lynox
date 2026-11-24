@@ -132,9 +132,13 @@ describe('the webhook drain', () => {
     return tm.createWebhookTrigger({ title: 'Orders', pipelineId: 'wf-orders', verifier: 'shopify-hmac', connectionId: 'shop-a', confirmedAt: '2026-10-01T00:00:00.000Z' }).trigger.id;
   }
   let seq = 0;
+  // Events arrive an hour before the test runs, a second apart: inside the retention window, which
+  // the loop measures from the clock, on whatever day the suite runs.
+  const arrivedFrom = Date.now() - 60 * 60 * 1000;
+  const arrivedAt = (n: number): string => new Date(arrivedFrom + n * 1000).toISOString();
   function deliver(triggerId: string, values: Record<string, string | number | boolean> = { email: 'kim@example.com' }, headers: Record<string, string> = {}): string {
     seq++;
-    ledger.record({ triggerId, dedupKey: `k-${String(seq)}`, headers, state: 'received', values: { values, unread: {} }, now: `2026-10-22T12:00:${String(seq).padStart(2, '0')}.000Z` });
+    ledger.record({ triggerId, dedupKey: `k-${String(seq)}`, headers, state: 'received', values: { values, unread: {} }, now: arrivedAt(seq) });
     return ledger.listByTrigger(triggerId).at(-1)!.id;
   }
   const eventOf = (triggerId: string, id: string) => ledger.listByTrigger(triggerId).find((e) => e.id === id)!;
@@ -938,8 +942,9 @@ describe('the webhook drain', () => {
     const id = deliver(t);
     expect(ledger.begin(id, 'a1')).toBe(true);
     expect(ledger.finish(id, 'a1', { state: 'failed', reason: 'x' })).toBe(true);
-    expect(ledger.sweepValues('2026-10-22T12:00:00.000Z')).toBe(0);
-    expect(ledger.sweepValues('2026-11-30T00:00:00.000Z')).toBe(1);
+    // Not before its own arrival: the window clears what arrived strictly before it.
+    expect(ledger.sweepValues(arrivedAt(seq))).toBe(0);
+    expect(ledger.sweepValues(new Date(arrivedFrom + 39 * 24 * 60 * 60 * 1000).toISOString())).toBe(1);
     expect(eventOf(t, id).valuesJson).toBeNull();
   });
 });
@@ -1027,7 +1032,7 @@ describe('the ledger\'s moves', () => {
   it('gets the index on a database that ran the drain columns before it existed', () => {
     const db = engineDb.getDb();
     // Every later version goes too: the migrations run from the highest one recorded.
-    db.exec('ALTER TABLE bulk_targets DROP COLUMN link_domain; ALTER TABLE bulk_targets DROP COLUMN context_secret_field; ALTER TABLE bulk_targets DROP COLUMN context; ALTER TABLE bulk_targets DROP COLUMN host_rewrote; ALTER TABLE bulk_targets DROP COLUMN shop_added_markup; DROP INDEX idx_inbound_events_state_received; DROP INDEX idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; DELETE FROM schema_version WHERE version >= 62;');
+    db.exec('ALTER TABLE bulk_targets DROP COLUMN link_domain; ALTER TABLE bulk_targets DROP COLUMN context_secret_field; ALTER TABLE bulk_targets DROP COLUMN context; ALTER TABLE bulk_targets DROP COLUMN host_rewrote; ALTER TABLE bulk_targets DROP COLUMN shop_added_markup; DROP INDEX idx_inbound_events_state_received; DROP INDEX idx_connections_trail_id; ALTER TABLE connections DROP COLUMN trail_id; DELETE FROM schema_version WHERE version >= 62; DROP INDEX IF EXISTS idx_audit_log_poll_fold; DROP INDEX IF EXISTS idx_audit_log_ts; ALTER TABLE audit_log DROP COLUMN poll_last; ALTER TABLE audit_log DROP COLUMN poll_count;');
     engineDb.close();
     engineDb = new EngineDb(join(dir, 'engine.db'));
     expect(engineDb.getDb().prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_inbound_events_state_received'`).get()).toBeDefined();
