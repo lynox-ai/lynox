@@ -29,6 +29,7 @@ import type { CapabilityContract } from '../types/capability-contract.js';
 import { contractGrants, isMintedShopifyWrite } from '../tools/permission-guard.js';
 import { assertHostPolicy, fetchPinned, type HostPolicyContext } from './network-guard.js';
 import type { StorePass } from './store-pass.js';
+import type { StoreAttachRefusal } from './shopify-host.js';
 import { urlScanForms } from './url-scan-forms.js';
 import { BulkRedirectError, BulkSecretError, BulkWriterHalt, type TargetWriter } from './bulk-apply.js';
 import { isMailProviderTarget } from './bulk-mail-targets.js';
@@ -65,6 +66,9 @@ export type ExternalRead =
    * (`gateReading`); nothing was sent.
    */
   | { kind: 'no_credential' }
+  /** A store refused the request a pass for a cause of its own (self-hosted, a part missing, the
+   *  control plane, the run's record); nothing was sent. */
+  | { kind: 'store_refused'; reason: StoreAttachRefusal }
   /** The network policy or the address check refused the host; nothing was sent. */
   | { kind: 'blocked' }
   /** The run's contract does not grant this call; nothing was sent. */
@@ -319,8 +323,9 @@ export interface ExternalClientDeps {
    *  did, null when it did not. */
   /** `out.pass` receives the store pass of a request to a Shopify store, which the send then carries. */
   /** `out.renew`, when the attach sets it, renews the attached connection's token after a 401 to
-   *  it (a store whose token expires, `store-token-refresh.ts`): true when a new one is stored. */
-  attach: (url: string, headers: Record<string, string>, method: string, out?: { pass?: StorePass | undefined; renew?: (() => Promise<StoreRefreshOutcome>) | undefined; reconnect?: 'ended' | 'client-misnamed' | undefined }) => Promise<AttachedConnection | null>;
+   *  it (a store whose token expires, `store-token-refresh.ts`): true when a new one is stored.
+   *  `out.reconnect` or `out.refusal`, when it attached nothing, says why. */
+  attach: (url: string, headers: Record<string, string>, method: string, out?: { pass?: StorePass | undefined; renew?: (() => Promise<StoreRefreshOutcome>) | undefined; reconnect?: 'ended' | 'client-misnamed' | undefined; refusal?: StoreAttachRefusal | undefined }) => Promise<AttachedConnection | null>;
   /** The profile's own rate limit: null when a request may go, else it may not. */
   rateLimit: (hostname: string) => string | null;
 
@@ -489,12 +494,17 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     const readBeforeAttach = gateReading(method, headers, url, payload);
     // The method a server acts on, as the contract was checked: a GET that names a write method
     // in its query is a write to the attach as well.
-    const attached: { pass?: StorePass | undefined; renew?: (() => Promise<StoreRefreshOutcome>) | undefined; reconnect?: 'ended' | 'client-misnamed' | undefined } = {};
+    const attached: { pass?: StorePass | undefined; renew?: (() => Promise<StoreRefreshOutcome>) | undefined; reconnect?: 'ended' | 'client-misnamed' | undefined; refusal?: StoreAttachRefusal | undefined } = {};
     // A GraphQL read is a read to the attach as well, whatever its verb: the body it sends is
     // one the contract admitted only because it cannot write.
     const connection = await deps.attach(url, headers, graphql !== undefined && graphql.writes !== true ? 'GET' : gated, attached);
-    // A store connection that only connecting again helps names why, and the run halts on that.
-    if (!connection) return attached.reconnect !== undefined ? { kind: 'reconnect', why: attached.reconnect } : { kind: 'no_credential' };
+    // A store connection that only connecting again helps names why, and the run halts on that;
+    // so does a store's own cause. The attach sets at most one of the two.
+    if (!connection) {
+      if (attached.reconnect !== undefined) return { kind: 'reconnect', why: attached.reconnect };
+      if (attached.refusal !== undefined) return { kind: 'store_refused', reason: attached.refusal };
+      return { kind: 'no_credential' };
+    }
     status.renew = attached.renew;
     if (gateReading(method, headers, url, payload) !== readBeforeAttach) return { kind: 'no_credential' };
     if (deps.rateLimit(hostname) !== null) return { kind: 'rate_limited' };
@@ -615,7 +625,8 @@ export function graphqlWriteAnswer(answer: ExternalRead): ExternalRead {
  * 408 or 499 to a write not, see `readResponse`), or an address refused before it was
  * reached. Not a 5xx, a timeout or a broken connection,
  * after which the host may have acted, and not a redirect: a host may apply a write and
- * answer with a redirect to the result.
+ * answer with a redirect to the result. Not a refusal at the attach either (no credential, a
+ * store's own cause, a reconnect): that request was never sent, so there is no send to answer.
  */
 export function refusedAnswer(answer: ExternalRead): boolean {
   switch (answer.kind) {
@@ -727,6 +738,7 @@ export function externalWriter(client: ExternalClient, opts: {
     }
     switch (got.kind) {
       case 'no_credential': throw new BulkWriterHalt(BULK_HALT_REASONS.credential);
+      case 'store_refused': throw new BulkWriterHalt(BULK_HALT_REASONS[got.reason]);
       case 'unauthorized': throw new BulkWriterHalt(BULK_HALT_REASONS.unauthorized);
       case 'reconnect': throw new BulkWriterHalt(got.why === 'ended' ? BULK_HALT_REASONS.storeAccessEnded : BULK_HALT_REASONS.storeClientMisnamed);
       case 'blocked': throw new BulkWriterHalt(BULK_HALT_REASONS.blocked);

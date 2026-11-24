@@ -51,7 +51,7 @@ import { inquiryOptions, summarizeDelivery } from './notification-router.js';
 import { stripHidden } from './hidden-text.js';
 import { runTaskPrompt, RUN_TASK_ANSWERED, RUN_TASK_ANSWER_PREAMBLE } from './run-task-turn.js';
 import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect, BulkTriggerEffect } from '../types/index.js';
-import { admittedTriggerTier, WATCH_OVERRIDE_REFUSAL } from './task-manager.js';
+import { admittedTriggerTier, WATCH_OVERRIDE_REFUSAL, watchPolicyRefusal } from './task-manager.js';
 import { readAddressWrites } from './outbound-write.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
@@ -4098,6 +4098,15 @@ export class WorkerLoop {
     if (readAddressWrites(config.url)) {
       const taskManager = this.engine.getTaskManager();
       if (taskManager) this.#recordRun(taskManager, task.id, `The watched page was not read: its address ${WATCH_OVERRIDE_REFUSAL} Set the watch up again in the chat with the address of the page without the override or the mutation.`, 'failed');
+      return;
+    }
+
+    // The instance's network_policy decides whether the page may be read at all, at every poll:
+    // the policy may have changed since the watch was created.
+    const refusedBy = watchPolicyRefusal(config.url, this.engine.getToolContext());
+    if (refusedBy !== null) {
+      const taskManager = this.engine.getTaskManager();
+      if (taskManager) this.#recordRun(taskManager, task.id, `The watched page was not read: ${refusedBy.why}${refusedBy.wayOut === '' ? '' : ` ${refusedBy.wayOut}`}`, 'failed');
       return;
     }
 
