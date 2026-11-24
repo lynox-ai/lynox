@@ -27,6 +27,7 @@ import { TaskStore, taskRecordToRow } from './task-store.js';
 import { HISTORY_MARKERS_DDL } from './history-markers.js';
 import { findHiddenChar, findHiddenInName, hiddenCharRefusal } from './hidden-text.js';
 import { stepIdIssue } from '../orchestrator/step-id.js';
+import { templateRefIssue } from '../orchestrator/template-refs.js';
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
 
@@ -1643,6 +1644,37 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (72);
    ALTER TABLE pipeline_runs ADD COLUMN started_by_run_id TEXT;
    CREATE INDEX IF NOT EXISTS idx_pipeline_runs_started_by ON pipeline_runs(started_by_run_id);`,
+  // v73: who wrote a thread message (`ThreadMessageRecord.author`): a `principalTag` for a turn
+  // the person typed, or a run's own tag (`trigger:<id>`) for a turn a trigger started, which is
+  // never `owner`, not even for the owner's own trigger (`runAuthorTag`). NULL on every older
+  // row and on every row the engine writes itself (assistant turns, tool results, notes), and
+  // NULL means unknown: it is never read as the owner's. No backfill.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (73);
+   ALTER TABLE thread_messages ADD COLUMN author TEXT;`,
+  // v74: two facts about a thread that a check before a send reads.
+  // `thread_typed_text`: the words a person typed into a turn, apart from what the route put
+  // around them in the same message (a loaded mail or run as context, an uploaded file). Keyed
+  // by the message's seq, written in the transaction that writes the message; only a route that
+  // knows where the typed words end writes one. A turn without a row has no typed words anyone
+  // can rely on, and reads as none. `principal` is the author tag of the run that wrote them;
+  // only rows whose principal is the owner are read as the owner's words.
+  // `thread_read_outside`: the thread's conversation has taken in content from outside (the
+  // agent's sticky latch). Only ever inserted, never deleted except with its thread, and
+  // written in the transaction of the message that carries what was read, so a resume after a
+  // compaction that summarized the read away still knows it. Tables, not columns: the
+  // statements can run again on a database that has them.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (74);
+   CREATE TABLE IF NOT EXISTS thread_typed_text (
+     thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+     seq INTEGER NOT NULL,
+     text TEXT NOT NULL,
+     principal TEXT,
+     PRIMARY KEY (thread_id, seq)
+   );
+   CREATE TABLE IF NOT EXISTS thread_read_outside (
+     thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+     at TEXT NOT NULL DEFAULT (datetime('now'))
+   );`,
 ];
 
 /** What {@link RunHistory.readWorkflowGrant} found for a grant id. */
@@ -3457,6 +3489,9 @@ export class RunHistory {
     // is shown by its position, and `update_workflow_steps` names the rename it needs first.
     const shapeIssue = stepIdIssue(planned.steps);
     if (shapeIssue) throw new Error(shapeIssue);
+    // A `{{<id>.result}}` no run could resolve is refused at the save, not met as raw text in a run.
+    const refIssue = templateRefIssue(planned.steps);
+    if (refIssue) throw new Error(refIssue);
     const contractError = validateContractAgainstSteps(planned);
     if (contractError) throw new Error(contractError);
     // S3f write-cutover: write the workflow definition DIRECTLY to engine.db. The
@@ -3595,6 +3630,16 @@ export class RunHistory {
    *  the owner's (TriggerStore.markEditedBy). Call BEFORE the change. */
   markTriggerEditedBy(id: string, editor: RequestPrincipal, clearStamp: boolean): boolean {
     return this._requireTriggerStore().markEditedBy(id, editor, clearStamp);
+  }
+
+  /** See `TriggerStore.confirmOwnerCreator`. */
+  confirmTriggerRecipients(id: string, expect: string): import('./recipient-confirm.js').RecipientConfirmOutcome {
+    return this._requireTriggerStore().confirmOwnerCreator(id, expect);
+  }
+
+  /** See `TriggerStore.markEditedByRun`. */
+  markTriggerEditedByRun(id: string, runTag: string): boolean {
+    return this._requireTriggerStore().markEditedByRun(id, runTag);
   }
 
 

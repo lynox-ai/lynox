@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { OAUTH_PRESETS, consentFrameProblems, derivePresetEndpoints, presetNotFollowed, presetRegisterOf, presetScopeRequest, presetStoreHost } from './oauth-presets.js';
+import { OAUTH_PRESETS, SHOPIFY_CONSENT_VERSION, consentFrameProblems, consentNoticeVersion, derivePresetEndpoints, presetNotFollowed, presetRegisterOf, presetScopeRequest, presetStoreHost } from './oauth-presets.js';
 import { decideConnect, isRefusal } from '../server/oauth-connect-decision.js';
 import { SHOPIFY_MEDIA_WRITABLE_FIELDS, isShopifyStoreHostName, shopifyGraphqlEndpoint } from './shopify-graphql.js';
 
@@ -198,5 +198,28 @@ describe('the Shopify customer text', () => {
       afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in Shopify.',
     });
     expect(shopify.consentNotice?.scopeNames).toEqual({ write_products: 'Produkte: Schreibzugriff', write_files: 'Dateien: Schreibzugriff' });
+  });
+
+  // A connection confirmed under another text does not cover the fields this text added
+  // (`shopifyConsentBlock`). A changed word changes the version, and this test fails until the
+  // constant is changed with the text.
+  it('holds the version of the customer text equal to the text', () => {
+    expect(consentNoticeVersion(shopify.consentNotice!), 'Text geändert: SHOPIFY_CONSENT_VERSION mit neu festlegen').toBe(SHOPIFY_CONSENT_VERSION);
+    expect(SHOPIFY_CONSENT_VERSION).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it('gives a new version for any changed word the page shows, and the same for fewer listed scopes', () => {
+    const notice = shopify.consentNotice!;
+    const base = consentNoticeVersion(notice);
+    const changed = [
+      { ...notice, paragraphs: [notice.paragraphs[0]!, notice.paragraphs[1]!.replace('Massenlauf', 'Sammellauf'), notice.paragraphs[2]!] },
+      { ...notice, frame: { ...notice.frame!, scopesNote: `${notice.frame!.scopesNote} ` } },
+      { ...notice, frame: { ...notice.frame!, button: 'Weiter' } },
+      { ...notice, frame: { ...notice.frame!, afterButton: undefined } },
+      { ...notice, scopeNames: { ...notice.scopeNames, write_files: 'Dateien' } },
+      { ...notice, lang: 'en' },
+    ];
+    for (const c of changed) expect(consentNoticeVersion(c)).not.toBe(base);
+    expect(consentNoticeVersion({ ...notice, writeScopes: ['write_products'] })).toBe(base);
   });
 });

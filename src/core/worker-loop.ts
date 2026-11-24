@@ -8,6 +8,7 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
+import { recipientsConfirmable } from './recipient-confirm.js';
 import { errorText, errorTextReduced, FixedTextError, processErrorText } from './error-egress.js';
 import { containThreadFrom, threadIsContained } from './containment.js';
 import { isProvisionedInstance } from './wire-capture.js';
@@ -17,16 +18,17 @@ import {
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, RESUMED_RUN_NOT_CONTAINED,
   WEBHOOK_ASKS_RESULT, resumedRunNotContained, WORKER_NOTICES, firstRunUnconfirmedReason, eventModeRefusedReason, type WorkerNotices,
 } from './worker-notices.js';
-import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
+import { BULK_NOTICES, bulkPushTitle, isDiscardReason, type BulkNotices, type BulkPushEnd } from './bulk-notices.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
+import { originRunNotice, type OriginRefusal, type SendOrigin, type TriggerSetUpBy } from './origin-notices.js';
 import { isFeatureEnabled } from './features.js';
 import { InboundEventStore, type EventOutcome, type InboundEventRecord } from './inbound-events.js';
 import { TriggerStore, type WebhookReceiverRow } from './trigger-store.js';
 import { ConnectionStore } from './connection-store.js';
 import { SHOPIFY_SHOP_HEADER, connectionShopHost, mappedValueOutsideTaskText, parseWebhookSpec } from './webhook-verifiers.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
-import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag, setUpByOther, shownMandate } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, ownerInstructionCounts, planAuthorshipOf, planMandate, planMembers, principalHasEnded, principalTag, setUpByOther, shownMandate } from './request-principal.js';
 import { OutwardReadUnrecorded, httpTarget, namedTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { PlanAuthorshipRow, RequestPrincipal } from './request-principal.js';
@@ -684,6 +686,9 @@ export function handRunCovers(grant: HandRunGrant | null, t: { created_by?: stri
   return isMandateTag(lastParty) && lastParty === principalTag(grant.principal);
 }
 
+/** The refusal notice of a run that ended by throwing, carried from the run to where the failure is recorded. */
+const ORIGIN_NOTICE_OF_ERROR = new WeakMap<object, string>();
+
 export class WorkerLoop {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false; // prevent overlapping ticks
@@ -710,6 +715,39 @@ export class WorkerLoop {
     /** The run lease's timing; only tests shorten it. */
     private readonly lease: { heartbeatMs: number; ttlMs: number } = { heartbeatMs: LEASE_HEARTBEAT_MS, ttlMs: LEASE_TTL_MS },
   ) {}
+
+  /** Where a target this trigger's run sends to comes from, when its instruction does not count. */
+  #triggerSendOrigin(task: TriggerRecord, instructionCounts: boolean): SendOrigin | undefined {
+    if (instructionCounts) return undefined;
+    const mandate = shownMandate(task);
+    const setUpBy: TriggerSetUpBy = mandate !== undefined ? { kind: 'other', who: mandate.address }
+      : task.created_by === principalTag(OWNER_PRINCIPAL) ? { kind: 'owner' }
+        : { kind: 'unknown' };
+    // A trigger from before its creator was recorded, nobody else's hand in it: its refusal points
+    // the owner at "Confirm recipients" in the Triggers view (`recipient-confirm.ts`).
+    return { kind: 'triggerRun', name: task.title, setUpBy, ...(recipientsConfirmable(task) ? { predatesRecord: true } : {}) };
+  }
+
+  /** The result lines for the sends this run refused, or null when it refused none. */
+  #originRefusedNotice(task: TriggerRecord, refusals: readonly OriginRefusal[]): string | null {
+    if (refusals.length === 0) return null;
+    const lang = noticeLanguage(this.engine.config?.language);
+    // One line per target and origin: a run that tried the same send again refused one thing, not two.
+    return [...new Set(refusals.map((r) => originRunNotice(task.title, r, lang)))].join('\n');
+  }
+
+  /**
+   * Hands the refusal notice of a run that ended by throwing to where the failure is recorded
+   * (`ORIGIN_NOTICE_OF_ERROR`). Never throws: a notice that cannot be built is left out, and the
+   * run's own error, with the status it decides (failed, timeout, stopped), is what is recorded.
+   */
+  #carryOriginNotice(err: unknown, task: TriggerRecord, refusals: () => readonly OriginRefusal[]): void {
+    if (typeof err !== 'object' || err === null) return;
+    try {
+      const notice = this.#originRefusedNotice(task, refusals());
+      if (notice !== null) ORIGIN_NOTICE_OF_ERROR.set(err, notice);
+    } catch { /* the run's own error stands */ }
+  }
 
   /** The worker's own sentences in the instance's notice language, read per notice (`notice-language.ts`). */
   #notices(): WorkerNotices {
@@ -806,7 +844,7 @@ export class WorkerLoop {
     result: string,
     status: RunEndStatus,
     run?: RunStarterSlot | null,
-    opts?: { readonly keepSchedule: true },
+    opts?: { readonly keepSchedule?: true; readonly noRetry?: true },
   ): boolean {
     // A request of this run that would have carried someone else's own login was refused: its
     // line goes under the result, and what ends as a success halts (`withMemberNotes`).
@@ -834,7 +872,7 @@ export class WorkerLoop {
     // A webhook run's event takes the end where nothing more specific was set: lynox's own
     // sentence, or the masked error of a run that threw.
     endEvent(slot ?? live, status === 'success' ? { state: 'done' } : { state: 'failed', reason: result });
-    const record = { ...(startedByOther(slot) ? { noRetry: true } : {}), ...(opts?.keepSchedule === true ? { keepSchedule: true } : {}) };
+    const record = { ...(startedByOther(slot) || opts?.noRetry === true ? { noRetry: true } : {}), ...(opts?.keepSchedule === true ? { keepSchedule: true } : {}) };
     return tm?.recordTaskRun(id, result, status, ...(Object.keys(record).length > 0 ? [record] : [])) ?? false;
   }
 
@@ -1483,9 +1521,9 @@ export class WorkerLoop {
 
       // The owner's notice of paused plans (`plan-pause.ts`), in the reminder's order: only with a
       // channel, claimed before it is sent, so two processes on one file send it once and none is
-      // used up while no channel is registered. At boot the worker starts before the server
-      // registers its push channel, so a pause from the boot sweep is told on the first tick that
-      // has a channel — usually the second. Fenced like the reminder.
+      // used up while no channel is registered. The server registers its push channel before it
+      // starts the worker, so a pause from the boot sweep is told on the first tick when push is
+      // set up. Fenced like the reminder.
       try {
         if (planPauseOn() && this.notificationRouter.hasChannels()) {
           const db = this.engine.getEngineDb()?.getDb();
@@ -2310,7 +2348,9 @@ export class WorkerLoop {
       // Nor is a run a non-owner started by hand: a retry carries no request, so it would run as
       // the schedule's run, not the request's (§3.12 point 6, "once per request").
       const taskManager = this.engine.getTaskManager();
-      const willRetry = this.#recordRun(taskManager, task.id, errorMsg, status, entry);
+      const refusedNotice = typeof err === 'object' && err !== null ? ORIGIN_NOTICE_OF_ERROR.get(err) : undefined;
+      const recordedError = refusedNotice === undefined ? errorMsg : `${refusedNotice}\n\n${errorMsg}`;
+      const willRetry = this.#recordRun(taskManager, task.id, recordedError, status, entry);
 
       // If the task was parked on a human it was interrupted while waiting.
       // It used to be RESOLVED with 'Task failed while waiting for your
@@ -2341,7 +2381,7 @@ export class WorkerLoop {
         const pushedMsg = reduce && !isTimeout ? errorText(err, true) : errorMsg;
         const notices = this.#notices();
         await this.notificationRouter.notify({
-          title: `${stopped ? '\u23f9' : '\u2717'} ${task.title}`,
+          title: `${stopped ? '\u23f9' : '\u2717'} ${this.#pushTitleOf(task, stopped ? 'stopped' : this.#bulkRunHalted(task) ? 'halted' : 'failed')}`,
           body: stopped ? notices.stoppedWith(pushedMsg) : notices.failed(pushedMsg),
           taskId: task.id,
           priority: stopped ? 'normal' : 'high',
@@ -2436,6 +2476,8 @@ export class WorkerLoop {
         ownerStopped,
         trailFor: (run) => bulkRunTrail(run, auditLog, trailTools),
         notices: this.#bulkNotices(),
+        // Read at the call, so a connection confirmed again since the run halted counts.
+        shopifyGrantOf: (host) => this.engine.getApiStore()?.getByHostname(host)?.oauth_grant,
       });
     } catch (err: unknown) {
       // What leaves here reaches the run result, the notification, the follow-up prompt and the
@@ -2539,6 +2581,7 @@ export class WorkerLoop {
       });
       return;
     }
+    if (outcome.gone === true) { this.#endGonePass(task, outcome.summary, 'preview'); return; }
     this.recordAndNotify(task, outcome.summary, outcome.status === 'done');
   }
 
@@ -2633,6 +2676,7 @@ export class WorkerLoop {
       });
       return;
     }
+    if (outcome.gone === true) { this.#endGonePass(task, outcome.summary, 'judge'); return; }
     this.recordAndNotify(task, outcome.summary, outcome.status === 'done');
   }
 
@@ -3254,7 +3298,28 @@ export class WorkerLoop {
     // Attribute the run to its trigger source (P1) so this scheduled
     // automation turn is distinguishable from a user chat turn in run-history.
     this.#stopIfStarterEnded(active, starter, task.id);
-    const result = await session.run(prompt, { triggerOrigin: task.source, principal: runAs });
+    // The trigger's own instruction, from its stored title and description, not from the prompt
+    // built above (which carries answers and fences): the targets it names are owner-known in this
+    // run only when the owner wrote it and nobody else changed it. Otherwise a target the run was
+    // not given comes from this trigger, by whom it was set up.
+    const instructionCounts = ownerInstructionCounts(task);
+    const runOrigin = this.#triggerSendOrigin(task, instructionCounts);
+    let result: string;
+    try {
+      result = await session.run(prompt, {
+        triggerOrigin: task.source, triggerId: task.id, principal: runAs,
+        ...(instructionCounts ? { ownerInstruction: `${task.title}\n${task.description}` } : {}),
+        ...(runOrigin !== undefined ? { sendOrigin: runOrigin } : {}),
+      });
+    } catch (err: unknown) {
+      // A run that fails, times out or is stopped after a send was refused still says so in its
+      // recorded result: the owner learns of the refusal from the result, not from the model.
+      this.#carryOriginNotice(err, task, () => session.getOriginRefusals?.() ?? []);
+      throw err;
+    }
+    // A send this run refused because the owner did not name its target is said in the result,
+    // with where the target came from and the way through the chat.
+    const originRefused = this.#originRefusedNotice(task, session.getOriginRefusals?.() ?? []);
 
     // ⛔ A run that ended ON A CAP is not a clean success, and this worker had no way of
     // knowing it ever happened: `costGuard` makes the agent stop and RETURN its text — it
@@ -3296,7 +3361,8 @@ export class WorkerLoop {
     const truncate = (text: string): string => text.length > MAX_TASK_RESULT_CHARS
       ? text.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
       : text;
-    const truncatedResult = truncate(budgetCut === null ? result : `${budgetCut}\n\n${result}`);
+    const withRefusals = originRefused === null ? result : `${originRefused}\n\n${result}`;
+    const truncatedResult = truncate(budgetCut === null ? withRefusals : `${budgetCut}\n\n${withRefusals}`);
 
     // Who ended the run, when an unanswered question is how it ended (see below).
     const endedByOwner = questionWentUnanswered && active?.stopRequested === true;
@@ -3343,7 +3409,7 @@ export class WorkerLoop {
       const pushed = resultReduced
         ? withMemberNotes(capStop === null ? notices.containedResult : `${capStop}\n\n${notices.containedResult}`, 'other', memberSaid).result
         : capStop === null ? memberTold.result
-          : withMemberNotes(truncate(`${capStop}\n\n${result}`), 'other', memberSaid).result;
+          : withMemberNotes(truncate(`${capStop}\n\n${withRefusals}`), 'other', memberSaid).result;
       await this.notificationRouter.notify({
         // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
         // engine itself cut off is the same false report as the `success` status was.
@@ -3641,6 +3707,19 @@ export class WorkerLoop {
       return;
     }
 
+    // A step refers to the output of a step it does not read, or has an id a run already uses: a retry
+    // meets the same refusal, so it is recorded as a failure without one and told in the owner's words
+    // (a webhook run's by its event). The record keeps the full refusal, which says how to repair it
+    // (`template-refs.ts`).
+    if (!result.ok && (result.unresolvedRefStep !== undefined || result.reservedIdStep !== undefined)) {
+      const told = result.reservedIdStep !== undefined
+        ? this.#notices().workflowStepIdReserved(result.reservedIdStep)
+        : this.#notices().workflowRefUnresolved(result.unresolvedRefStep!);
+      endEvent(this.#runSlotOf(task.id), { state: 'failed', reason: told, runId: result.runId });
+      this.recordAndNotify(task, result.error ?? told, false, told, { noRetry: true });
+      return;
+    }
+
     if (!result.ok) {
       endEvent(this.#runSlotOf(task.id), { state: 'failed', reason: result.error ?? 'The workflow run was refused.', runId: result.runId });
       // Surface conversion / validation / not-found / not-template errors as
@@ -3649,14 +3728,20 @@ export class WorkerLoop {
       // A refusal that names stored text carries its fixed wording too: a push from a contained
       // instance then says why the run did not start, not only that it failed.
       const message = result.error ?? `Pipeline ${task.pipeline_id} execution failed`;
-      throw result.fixedError !== undefined ? new FixedTextError(message, result.fixedError) : new Error(message);
+      const failure = result.fixedError !== undefined ? new FixedTextError(message, result.fixedError) : new Error(message);
+      // A send a step refused before the run failed is said before the error, as for a task run.
+      this.#carryOriginNotice(failure, task, () => result.originRefusals ?? []);
+      throw failure;
     }
 
     // What the owner must read even when every step completed: a write the run was
     // refused, or one that may have landed before a refused redirect, and why the run
     // had no write grant. A refused write does not fail its step, so without this the
     // only trace is a tool result nobody reads.
-    const grantLines = [...(result.grantNote !== undefined ? [result.grantNote] : []), ...(result.writeNotes ?? [])];
+    // And each send a step refused for a target the owner did not name, in the trigger's words:
+    // also when the run ended for it (a question it could not ask), so the end names the cause.
+    const originNotice = this.#originRefusedNotice(task, result.originRefusals ?? []);
+    const grantLines = [...(originNotice !== null ? originNotice.split('\n') : []), ...(result.grantNote !== undefined ? [result.grantNote] : []), ...(result.writeNotes ?? [])];
     const grantReport = grantLines.length > 0 ? `\n${grantLines.map((l) => `• ${l}`).join('\n')}` : '';
     const success = result.status === 'completed';
     endEvent(this.#runSlotOf(task.id), success
@@ -3788,7 +3873,7 @@ export class WorkerLoop {
       try {
         return this.engine.getTaskManager()?.startEscalation(triggerId, startedAt, retry) ?? false;
       } catch (err: unknown) {
-        process.stderr.write(`[lynox:worker] recording an escalation start failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox:worker] recording an escalation start failed: ${processErrorText(err)}\n`);
         return false;
       }
     };
@@ -3840,11 +3925,17 @@ export class WorkerLoop {
    *   · `'interrupted'` — the engine lost the run mid-way and did not start it again. It did
    *     not finish, so it stays high priority, but it is not a tool's or provider's failure.
    */
-  private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted' | 'stopped', said?: string): void {
+  /**
+   * A bulk run that failed and is left halted (a reason in its ledger, not ended) stays recorded
+   * and marked as failed (✗, high priority: told apart from a planned halt); its push title says
+   * it halted, which its body no longer says (U-324). Read from the ledger, not from how the
+   * pass returned: a pass that found its run dropped or moved on has not halted it.
+   */
+  private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted' | 'stopped', said?: string, opts?: { readonly noRetry: true }): void {
     const look = RUN_END_LOOK[end === true ? 'success' : end === false ? 'failed' : end];
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
-      this.#recordRun(taskManager, task.id, resultSummary, look.status);
+      this.#recordRun(taskManager, task.id, resultSummary, look.status, undefined, opts);
     }
 
     // Told as it was recorded (`#recordRun` adds the same lines), and once: a schedule that
@@ -3859,13 +3950,93 @@ export class WorkerLoop {
     // owner looks for it.
     if (this.#runSlotOf(task.id)?.event !== undefined) return;
     if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, notes)) {
+      const shownEnd: BulkPushEnd = told.status === 'failed' && this.#bulkRunHalted(task) ? 'halted'
+        : told.status === 'stopped' && this.#bulkRunDiscarded(task) ? 'discarded' : told.status;
       void this.notificationRouter.notify({
-        title: `${toldLook.mark} ${task.title}`,
+        title: `${toldLook.mark} ${this.#pushTitleOf(task, shownEnd)}`,
         body: told.result,
         taskId: task.id,
         priority: toldLook.priority,
       });
     }
+  }
+
+  /**
+   * The run a bulk trigger leads to, as its ledger row holds it: null for any other trigger, a
+   * run that is gone, or a read that fails, which costs a push its words, never the push.
+   */
+  #bulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null } | null {
+    const row = this.#readBulkRunRow(task);
+    return row === 'unreadable' ? null : row;
+  }
+
+  /** {@link #bulkRunRow}, with a read that failed told apart from a run that is gone. */
+  #readBulkRunRow(task: TriggerRecord): { phase: string; haltReason: string | null } | null | 'unreadable' {
+    if (task.bulk_run_id === undefined || !task.effect.startsWith('bulk_')) return null;
+    try {
+      const ledger = this.engine.getBulkLedger() ?? this.engine.getBulkLedgerSwitchedOff?.() ?? null;
+      // A plain row read: `getStatus` frees dead reads as it reads, and a push must not write.
+      const st = ledger?.getRunForApply(task.bulk_run_id);
+      if (st === null || st === undefined) return null;
+      return { phase: st.phase, haltReason: typeof st.haltReason === 'string' ? st.haltReason : null };
+    } catch {
+      return 'unreadable';
+    }
+  }
+
+  /** Whether a bulk run's trigger leads to a run its ledger holds halted and not ended. */
+  #bulkRunHalted(task: TriggerRecord): boolean {
+    const row = this.#bulkRunRow(task);
+    return row !== null && row.haltReason !== null && row.phase !== 'aborted' && row.phase !== 'done' && row.phase !== 'undone';
+  }
+
+  /** Whether a bulk run's trigger leads to a run the owner discarded before approving it. */
+  #bulkRunDiscarded(task: TriggerRecord): boolean {
+    const row = this.#bulkRunRow(task);
+    return row !== null && row.phase === 'aborted' && isDiscardReason(row.haltReason);
+  }
+
+  /**
+   * A preview or judge pass that found its run no longer its own to read. The pass knows only
+   * that; the ledger knows why, and the record and the push say it (U-324). A run ended before
+   * its approval (discarded by the owner, superseded, or planned under an access that ended) is
+   * told as stopped with its own sentence. A run another pass left halted in this stage is told
+   * as that halt. A run that is gone or moved past this stage is recorded and not pushed: the pass
+   * that took it on reports for itself. lynox wrote nothing in any of them. A ledger that cannot
+   * be read, or a run still planned and unhalted, says nothing of the kind: it is told as before.
+   */
+  #endGonePass(task: TriggerRecord, summary: string, phase: 'preview' | 'judge'): void {
+    const row = this.#readBulkRunRow(task);
+    if (row === 'unreadable' || (row !== null && row.phase === 'planned' && row.haltReason === null)) {
+      this.recordAndNotify(task, summary, false);
+      return;
+    }
+    if (row !== null && row.haltReason !== null && (row.phase === 'aborted' || row.phase === 'planned')) {
+      const sentence = this.#bulkNotices().halted(phase, row.haltReason);
+      this.recordAndNotify(task, sentence, row.phase === 'aborted' ? 'stopped' : false);
+      return;
+    }
+    const taskManager = this.engine.getTaskManager();
+    if (taskManager) this.#recordRun(taskManager, task.id, summary, 'failed');
+  }
+
+  /**
+   * The words after a push's end mark. A bulk run's trigger is titled with its run id, for the
+   * model that lists it; its push names the stage, how it ended and the host instead (U-324),
+   * in the owner's language. Every other trigger's push carries its title as it is.
+   */
+  #pushTitleOf(task: TriggerRecord, end: BulkPushEnd): string {
+    const effect = task.effect;
+    if (effect !== 'bulk_preview' && effect !== 'bulk_judge' && effect !== 'bulk_apply' && effect !== 'bulk_undo') return task.title;
+    // The host is a read of the ledger: a read that fails costs the title its host, never the push.
+    let system: string | undefined;
+    try {
+      const ledger = this.engine.getBulkLedger() ?? this.engine.getBulkLedgerSwitchedOff?.() ?? null;
+      system = task.bulk_run_id === undefined ? undefined : ledger?.getRunForApply(task.bulk_run_id)?.targetSystem;
+    } catch {
+      system = undefined;
+    }
+    return bulkPushTitle(effect, end, system ?? null, noticeLanguage(this.engine.config?.language));
   }
 
   /**
@@ -4041,7 +4212,7 @@ export class WorkerLoop {
     // _detectDanger). Removing the capability beats gating it. Same mechanism the
     // compaction summarizer uses for the same "pure summarize" shape.
     this.#stopIfStarterEnded(stopEntry, starter, task.id);
-    const analysis = await analysisSession.run(analysisPrompt, { noTools: true, triggerOrigin: 'watch', principal: runAs });
+    const analysis = await analysisSession.run(analysisPrompt, { noTools: true, triggerOrigin: 'watch', triggerId: task.id, principal: runAs });
     const truncatedAnalysis = analysis.length > MAX_TASK_RESULT_CHARS
       ? analysis.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
       : analysis;
