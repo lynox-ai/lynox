@@ -54,6 +54,7 @@ const POLLERS: Record<string, Poller> = {
   'lib/components/ApiStoreView.svelte': { readsNothing: 'a clock for the "expires in" texts' },
   'lib/components/StoreAccessBanner.svelte': { readsNothing: 'a clock that turns a store\'s end into "ended" while the page is open' },
   'lib/components/ChatView.svelte': { readsNothing: 'clocks for the elapsed time and the voice recording' },
+  'lib/components/MigrationWizard.svelte': { readsNothing: 'a clock that opens the retry once the target has released its session' },
   'lib/components/PromptAnchor.svelte': { readsNothing: 'a clock for the question\'s age' },
   'lib/components/StreamingActivityBar.svelte': { readsNothing: 'a clock for the running time' },
   'lib/server/auth.ts': { readsNothing: 'server-side cleanup of expired sessions, not a request' },

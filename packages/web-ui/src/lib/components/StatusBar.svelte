@@ -63,7 +63,17 @@
 	// (WorkerLoop background tasks). Kept separate so the bar never conflates a
 	// streaming chat run with a scheduled task. Only shown when > 0.
 	let liveRuns = $state(0);
-	let todayCost = $state(0);
+	/** Today's cost as the cost endpoint last said it; null while unknown (not read yet, or the read
+	 *  failed). A zero is shown only when the endpoint said zero, never for "do not know". */
+	let todayCost = $state<number | null>(null);
+	/** A known amount; a real zero reads "$0.00" (`formatCost` gives "-" for 0, which is the unknown sign here). */
+	function todayCostAmount(cost: number): string {
+		return cost === 0 ? '$0.00' : formatCost(cost);
+	}
+	/** The footer's figure: the period named with it, `$0.00` for a real zero; `-` alone while unknown. */
+	const todayCostShown = $derived(todayCost === null ? '-' : `${t('status.today')} ${todayCostAmount(todayCost)}`);
+	/** What a screen reader says for the cost: the visible text, or, while unknown, that it is unknown (a bare "-" is not spoken). */
+	const todayCostSpoken = $derived(todayCost === null ? t('status.today_cost_unknown') : todayCostShown);
 	let todayRuns = $state(0);
 	let panelOpen = $state(false);
 
@@ -211,9 +221,14 @@
 				liveRuns = 0;
 			}
 
-			if (dailyRes?.ok) {
-				const rows = (await dailyRes.json()) as Array<{ day: string; cost_usd: number; run_count: number; user_turns: number }>;
+			if (!dailyRes?.ok) {
+				// No answer about today's cost: shown as unknown, not as a zero.
+				todayCost = null;
+			} else {
+				// An answer that is not a list of days says nothing about today: unknown, not the old figure.
+				const rows = (await dailyRes.json().catch(() => null)) as Array<{ day: string; cost_usd: unknown; run_count: number; user_turns: number }> | null;
 				if (stale()) return;
+				if (!Array.isArray(rows)) { todayCost = null; return; }
 				// Match the LOCAL calendar day (the endpoint now buckets by local
 				// day via tzOffsetMin) — not UTC. toISOString() is UTC and would
 				// pick the wrong/empty bucket near the day boundary (the owner's
@@ -221,13 +236,20 @@
 				// local date parts so it lines up with the server's bucket key.
 				const d = new Date();
 				const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-				const todayRow = rows.find(r => r.day === today);
-				todayCost = todayRow?.cost_usd ?? 0;
+				const todayRow = rows.find(r => r?.day === today);
+				// No row for today is a day without cost: the endpoint answered, so that is a real zero.
+				// A figure that is no amount (not a number, not finite, below zero) is unknown, never shown.
+				const cost = todayRow?.cost_usd;
+				todayCost = todayRow === undefined ? 0 : typeof cost === 'number' && Number.isFinite(cost) && cost >= 0 ? cost : null;
 				// Headline "N runs today" = chat turns the user took, not voice
 				// renders or spawned sub-runs (which inflated the count).
 				todayRuns = todayRow?.user_turns ?? 0;
 			}
-		} catch { /* silent */ }
+		} catch {
+			// An earlier section threw (a body that is not JSON) before the cost was read: the
+			// figure from the last good poll is no longer known, so it is not shown as today's.
+			if (!stale()) todayCost = null;
+		}
 	}
 
 	async function loadPanelData() {
@@ -422,7 +444,7 @@
 	<button
 		onclick={togglePanel}
 		class="flex items-center gap-1.5 text-[11px] font-mono text-text-subtle hover:text-text transition-colors min-w-0"
-		aria-label="{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'} · {providerName} · {apiStatusLabel()} · {formatCost(todayCost)}"
+		aria-label="{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'} · {providerName} · {apiStatusLabel()} · {todayCostSpoken}"
 		title="{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'} · {providerName} · {apiStatusLabel()}{apiStatusTooltip ? ` — ${apiStatusTooltip}` : ''}"
 	>
 		<span class="inline-block h-1.5 w-1.5 rounded-full shrink-0 {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
@@ -430,7 +452,8 @@
 		<span class="inline-block h-1.5 w-1.5 rounded-full shrink-0 {apiStatusClass()}"></span>
 		<span class="truncate">{providerName}</span>
 		<span class="text-border shrink-0">|</span>
-		<span class="shrink-0">{formatCost(todayCost)}</span>
+		<!-- The period is named: next to a monthly cap note, a bare amount reads as the month's. -->
+		<span class="shrink-0 whitespace-nowrap">{todayCostShown}</span>
 	</button>
 	{@render voiceAutoSendBtn()}
 	{@render autoSpeakBtn()}
@@ -482,8 +505,9 @@
 	     Per PRD-IA-CONSOLIDATION-V2 Phase 2 P2-PR-B the click target moves
 	     from the legacy hub cost-limits route to /app/activity. Edit-limits
 	     SSoT now lives in /app/settings/workspace/limits (P3-PR-X). -->
-	<a href="/app/activity" class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0" aria-label="{formatCost(todayCost)} · {t('status.today')}" title="{formatCost(todayCost)} · {t('status.today')}">
-		{formatCost(todayCost)}
+	<!-- The period is named, as on the phone bar; the link's name is its visible text. -->
+	<a href="/app/activity" class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0 whitespace-nowrap" aria-label={todayCost === null ? todayCostSpoken : undefined}>
+		{todayCostShown}
 	</a>
 
 	<span class="text-border">|</span>
@@ -603,8 +627,10 @@
 						href="/app/activity"
 						onclick={closePanel}
 						class="bg-bg-muted rounded-[var(--radius-sm)] px-3 py-2 hover:bg-bg hover:text-text transition-colors"
+						data-panel-cost
+						aria-label={todayCost === null ? todayCostSpoken : undefined}
 					>
-						<p class="text-lg font-semibold text-text">{formatCost(todayCost)}</p>
+						<p class="text-lg font-semibold text-text">{todayCost === null ? '-' : todayCostAmount(todayCost)}</p>
 						<p class="text-xs text-text-subtle">{t('status.cost')}</p>
 					</a>
 					<a

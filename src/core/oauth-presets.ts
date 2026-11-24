@@ -706,6 +706,39 @@ export function builtInPresetOf(
 }
 
 /**
+ * Provider ids this engine once shipped in the register and no longer has. A profile set up
+ * through one of them stays what it was: a user's authorization through a built-in provider.
+ * Without this list, removing a provider from the register would turn its profiles into
+ * profiles of no provider, and the two checks that keep a user's grant from being replaced
+ * (the save that may not take a profile off its provider, and the renewal that may not swap
+ * the grant for an app-level token) would let them through.
+ *
+ * An id that was never shipped is not here, on purpose: a profile may be saved naming a
+ * provider this engine does not have, and such a profile must stay editable and keep its
+ * app-level exchange. Removing an entry from {@link REGISTER_ENTRIES} means adding its id
+ * here; a test pins the ids ever shipped and fails when one is in neither place.
+ *
+ * When an id goes in here, check what this list does not cover: the profile's `token_url` and
+ * `base_url` stay editable (fetch_token exchanges nothing for such a profile today).
+ */
+export const RETIRED_PRESET_IDS: readonly string[] = Object.freeze<string[]>([]);
+
+/**
+ * The retired provider a profile was set up through: its `auth.oauth.preset_id`, when
+ * `auth.type` is oauth2 and the id is one of {@link RETIRED_PRESET_IDS}. Undefined otherwise.
+ * Asked next to {@link builtInPresetOf} wherever a provider binds a profile; it does not read
+ * the register, so a provider still in the register is answered there and not here.
+ */
+export function retiredPresetIdOf(
+  profile: { readonly auth?: { readonly type?: string | undefined; readonly oauth?: { readonly preset_id?: string | undefined } | undefined } | undefined },
+  retired: readonly string[] = RETIRED_PRESET_IDS,
+): string | undefined {
+  if (profile.auth?.type !== 'oauth2') return undefined;
+  const presetId: unknown = profile.auth.oauth?.preset_id;
+  return typeof presetId === 'string' && retired.includes(presetId) ? presetId : undefined;
+}
+
+/**
  * The built-in provider whose API host a profile points at, when the profile does not go
  * through it: anything but `auth.type` oauth2 with that provider's `preset_id`. Undefined when
  * no provider claims the host, or when the profile follows the one that does. Asked where a
@@ -800,11 +833,22 @@ export function presetClientKeys(presetId: string): { readonly id: string; reado
 
 /**
  * Whether `name` is the client secret of a built-in provider ({@link presetClientKeys}). The set
- * is the register's, so it is finite and fixed at build time; a name an operator chose for an OAuth
- * client of their own (`MY_APP_CLIENT_SECRET`) is not in it.
+ * is the register's and the retired ids' ({@link RETIRED_PRESET_IDS}), so it is finite and fixed at
+ * build time; a name an operator chose for an OAuth client of their own (`MY_APP_CLIENT_SECRET`)
+ * is not in it. A retired provider's secret stays in it: the name keeps it off the model's list
+ * of secrets and out of `secret:` references, and retiring the provider leaves the value stored.
  */
-export function isPresetClientSecretName(name: string, register: PresetRegister = OAUTH_PRESETS): boolean {
-  return register.ids().some((id) => presetClientKeys(id).secret === name);
+export function isPresetClientSecretName(
+  name: string,
+  register: PresetRegister = OAUTH_PRESETS,
+  retired: readonly string[] = RETIRED_PRESET_IDS,
+): boolean {
+  return [...register.ids(), ...retired].some((id) => presetClientKeys(id).secret === name);
+}
+
+/** Whether `name` is the client secret of a provider this engine once shipped ({@link RETIRED_PRESET_IDS}). */
+export function isRetiredPresetClientSecretName(name: string, retired: readonly string[] = RETIRED_PRESET_IDS): boolean {
+  return retired.some((id) => presetClientKeys(id).secret === name);
 }
 
 /**
@@ -814,6 +858,20 @@ export function isPresetClientSecretName(name: string, register: PresetRegister 
  * a profile that names it as its client secret.
  */
 export function presetClientSecretGuidance(name: string): string {
+  return presetClientSecretGuidanceWith(name, RETIRED_PRESET_IDS);
+}
+
+/**
+ * {@link presetClientSecretGuidance} against a given retired list. Its own function, not a second
+ * parameter: callers pass the guidance to `.map`, which would hand the index in as that list.
+ */
+export function presetClientSecretGuidanceWith(name: string, retired: readonly string[]): string {
+  // A provider this engine once shipped has no connection form any more, so the form is not
+  // named; the name stays protected (`isPresetClientSecretName`), and a profile of the user's
+  // own takes another one.
+  if (isRetiredPresetClientSecretName(name, retired)) {
+    return `"${name}" is the OAuth client secret of a built-in provider this engine no longer has. It is not entered, used or referenced here — not in the chat and not through ask_secret. A profile of the user's own names its client secret differently.`;
+  }
   return `"${name}" is the OAuth client secret of a built-in provider. The owner of this lynox instance enters it in the connection form of the profile under Settings → API Profiles — not in the chat and not through ask_secret, and it is not referenced in a request. The engine sends it to the provider itself, for a profile that names "${name}" as its client secret and may read it.`;
 }
 

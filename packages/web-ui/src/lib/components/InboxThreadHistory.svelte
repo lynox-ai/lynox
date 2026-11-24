@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { tick } from 'svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import type { InboxThreadResponse } from '../stores/inbox.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
@@ -7,9 +8,11 @@
 		thread: InboxThreadResponse;
 		/** Highlight the message that matches the selected item (currently rendered above). */
 		currentMessageId?: string | undefined;
+		/** Bring this message into view, open it and move the focus to it; `seq` repeats the jump. */
+		focusRequest?: { id: string; seq: number } | undefined;
 	}
 
-	const { thread, currentMessageId }: Props = $props();
+	const { thread, currentMessageId, focusRequest }: Props = $props();
 
 	// Track which thread message is expanded. Per-id state so multiple
 	// can be open simultaneously when the user is comparing replies.
@@ -18,6 +21,22 @@
 	function toggle(id: string): void {
 		expanded[id] = !expanded[id];
 	}
+
+	let messageEls = $state<Record<string, HTMLElement | undefined>>({});
+
+	// A jump from the reading pane's notice: open the message, then scroll to it and give it the
+	// focus, so keyboard and screen reader land on the new mail too.
+	$effect(() => {
+		const req = focusRequest;
+		if (req === undefined) return;
+		if (thread.messages.some((m) => m.id === req.id && Boolean(m.bodyMd || m.snippet))) expanded[req.id] = true;
+		void tick().then(() => {
+			const el = messageEls[req.id];
+			if (el === undefined) return;
+			if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' });
+			el.focus();
+		});
+	});
 
 	function dateFormat(iso: string | undefined): string {
 		if (!iso) return '';
@@ -54,7 +73,10 @@
 				{@const isOpen = expanded[msg.id] === true}
 				<li
 					role="listitem"
-					class="rounded-[var(--radius-sm)] border bg-bg-subtle text-sm {currentMessageId !== undefined && msg.messageId === currentMessageId ? 'border-accent' : 'border-border'}"
+					tabindex="-1"
+					bind:this={messageEls[msg.id]}
+					data-thread-message-id={msg.id}
+					class="rounded-[var(--radius-sm)] border bg-bg-subtle text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent {currentMessageId !== undefined && msg.messageId === currentMessageId ? 'border-accent' : 'border-border'}"
 				>
 					<!-- Header is a button when there's body/snippet content to reveal,
 						a plain div otherwise. Touch-sized; aria-expanded reflects state. -->
