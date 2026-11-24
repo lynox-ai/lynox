@@ -573,3 +573,118 @@ describe('renaming a workflow (ux U-077)', () => {
 		expect(target.textContent).not.toContain('nicht als Text erscheint');
 	});
 });
+
+describe('the stamp part names settings, and shows no stored value', () => {
+	const twoSteps = (expect: string, postUrl = 'https://other.example/upload', over: Record<string, unknown> = {}): Record<string, unknown> => ({
+		...preview(expect),
+		...over,
+		steps: [
+			{ id: 'fetch_orders', task: 'Read the open orders', tool: null, inputTemplate: null, tools: ['web_search', 'http_request', 'read_file'], model: null, inputFrom: [] },
+			{ id: 'post', task: 'Send the report', tool: 'http_request', inputTemplate: { url: postUrl }, tools: ['http_request'], model: null, inputFrom: ['fetch_orders'] },
+		],
+	});
+	const openStamp = async (body: Record<string, unknown>): Promise<void> => {
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body }] });
+		await click(q('stamp-review'));
+	};
+
+	it('names the mode and the failure strategy, and prints neither stored value', async () => {
+		await openStamp(twoSteps('d1', undefined, { mode: 'autonomous', onFailure: 'notify' }));
+		expect(q('stamp-mode')?.textContent?.trim()).toBe('Autonom');
+		// notify runs as continue does and reports to no one: it is not named as if it reported.
+		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Weitermachen');
+		expect(q('stamp-mode')!.classList.contains('font-mono')).toBe(false);
+		const settings = q('stamp-settings')?.textContent ?? '';
+		expect(settings).not.toMatch(/\bautonomous\b|\bnotify\b/);
+	});
+
+	it('the interactive mode and the continue strategy are named too', async () => {
+		await openStamp(twoSteps('d1', undefined, { mode: 'interactive', onFailure: 'continue' }));
+		expect(q('stamp-mode')?.textContent?.trim()).toBe('Interaktiv');
+		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Weitermachen');
+	});
+
+	it('a value the view does not know is printed as it came, hidden characters shown', async () => {
+		await openStamp(twoSteps('d1', undefined, { mode: 'turbo\u202E', onFailure: 'halt' }));
+		expect(q('stamp-mode')?.textContent?.trim()).toBe('turbo<U+202E>');
+		expect(q('stamp-mode')!.classList.contains('font-mono')).toBe(true);
+		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('halt');
+	});
+
+	it('the stop strategy has its own name, and a line under it that the steps due along with the failed one still start', async () => {
+		await openStamp(twoSteps('d1', undefined, { onFailure: 'stop' }));
+		expect(q('stamp-on-failure')?.textContent?.trim()).toBe('Keine Folgeschritte starten');
+		expect(q('stamp-on-failure-note')?.textContent?.trim()).toBe('Schritte, die mit dem fehlgeschlagenen an der Reihe waren, starten noch und laufen zu Ende.');
+		// Under the name: the next element after the strategy's own value.
+		expect(q('stamp-on-failure')!.nextElementSibling).toBe(q('stamp-on-failure-note'));
+	});
+
+	it.each(['continue', 'notify', 'halt'])('the %s strategy carries no such line', async (onFailure) => {
+		await openStamp(twoSteps('d1', undefined, { onFailure }));
+		expect(q('stamp-on-failure')).not.toBeNull();
+		expect(q('stamp-on-failure-note')).toBeNull();
+	});
+
+	it('heads each step with its id and no number, and prints the task once', async () => {
+		await openStamp(twoSteps('d1'));
+		const stepEls = [...target.querySelectorAll<HTMLElement>('[data-testid="stamp-step"]')];
+		expect(stepEls.map((s) => s.querySelector('[data-testid="stamp-step-head"]')?.textContent?.replace(/\s+/g, ' ').trim())).toEqual(['Schritt fetch_orders', 'Schritt post']);
+		for (const [i, task] of ['Read the open orders', 'Send the report'].entries()) {
+			expect(stepEls[i]!.textContent!.split(task).length - 1, task).toBe(1);
+			expect(stepEls[i]!.querySelector('[data-testid="stamp-step-task"]')?.textContent).toBe(task);
+		}
+	});
+
+	it('a tool list wraps between names, not inside one', async () => {
+		await openStamp(twoSteps('d1'));
+		const list = target.querySelector<HTMLElement>('[data-testid="stamp-tool-list"]')!;
+		expect(list.textContent).toBe('web_search, http_request, read_file');
+		expect(list.classList.contains('break-all')).toBe(false);
+		expect(list.classList.contains('[overflow-wrap:anywhere]')).toBe(true);
+	});
+
+	it('after steps_changed, exactly the changed step is marked, focused and brought into sight', async () => {
+		await open('owner', WF, {
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: twoSteps('d1') }, { status: 200, body: twoSteps('d2', 'https://evil.example/upload') }],
+			'POST /workflows/wf-1/confirm': [{ status: 409, body: { code: 'steps_changed' } }],
+		});
+		await click(q('stamp-review'));
+		expect(target.querySelectorAll('[data-stamp-changed]')).toHaveLength(0);
+		await click(q('stamp-confirm'));
+		const stepEls = [...target.querySelectorAll<HTMLElement>('[data-testid="stamp-step"]')];
+		expect(stepEls.map((s) => s.hasAttribute('data-stamp-changed'))).toEqual([false, true]);
+		expect(stepEls.map((s) => s.querySelector('[data-testid="stamp-changed-mark"]')?.textContent?.trim() ?? null)).toEqual([null, 'Geändert']);
+		expect(target.querySelectorAll('[data-stamp-changed]')).toHaveLength(1);
+		expect(document.activeElement).toBe(stepEls[1]);
+		expect(scrolled).toContain(stepEls[1]);
+	});
+
+	it('a removed step is named, and a changed setting is marked where it stands', async () => {
+		const one = { ...twoSteps('d2', undefined, { onFailure: 'continue' }) };
+		one['steps'] = (one['steps'] as unknown[]).slice(1);
+		await open('owner', WF, {
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: twoSteps('d1') }, { status: 200, body: one }],
+			'POST /workflows/wf-1/confirm': [{ status: 409, body: { code: 'steps_changed' } }],
+		});
+		await click(q('stamp-review'));
+		await click(q('stamp-confirm'));
+		expect(q('stamp-settings')?.hasAttribute('data-stamp-changed')).toBe(true);
+		expect(q('stamp-removed')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Geändert Nicht mehr dabei: fetch_orders');
+		expect(target.querySelector('[data-testid="stamp-step"][data-stamp-changed]')).toBeNull();
+		// The first changed part, in reading order, takes the focus.
+		expect(document.activeElement).toBe(q('stamp-settings'));
+	});
+
+	it('a new open of the view marks nothing from the last one', async () => {
+		await open('owner', WF, {
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: twoSteps('d1') }, { status: 200, body: twoSteps('d2', 'https://evil.example/upload') }],
+			'POST /workflows/wf-1/confirm': [{ status: 409, body: { code: 'steps_changed' } }],
+		});
+		await click(q('stamp-review'));
+		await click(q('stamp-confirm'));
+		expect(target.querySelectorAll('[data-stamp-changed]')).toHaveLength(1);
+		await click(byText('Abbrechen'));
+		await click(q('stamp-review'));
+		expect(target.querySelectorAll('[data-stamp-changed]')).toHaveLength(0);
+	});
+});

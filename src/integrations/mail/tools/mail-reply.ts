@@ -250,9 +250,11 @@ export async function prepareReply(
   // RFC 3834 says: "Automatic responses SHOULD NOT be issued in response
   // to any message which contains an Auto-Submitted header field, where
   // that field has any value other than 'no'." We enforce this as a
-  // hard block — no confirmation can override it. Prevents mail loops.
+  // hard block — no confirmation can override it. Prevents mail loops. The same holds for the
+  // autoresponder headers and delivery reports `automaticMail` reads (automatic-mail.ts).
   if (original.envelope.isAutoReply) {
-    return { ok: false, message: `mail_reply blocked: original message has Auto-Submitted header (auto-generated/auto-replied). ` +
+    return { ok: false, message: `mail_reply blocked: original message was sent automatically ` +
+      `(an Auto-Submitted, autoresponder or Precedence header, or a delivery report). ` +
       `RFC 3834 forbids automatic replies to automated messages to prevent mail loops. ` +
       `If this is a real message that needs a response, use mail_send instead.` };
   }

@@ -7,6 +7,7 @@ import * as reranker from './search-reranker.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { runInCallSlot } from '../../core/call-connection.js';
 import type { IAgent, SessionCounters } from '../../types/index.js';
+import { SearchResultAddresses } from '../../core/search-result-addresses.js';
 
 function makeCounters(): SessionCounters {
   return {
@@ -632,5 +633,23 @@ describe('API-setup reminder in a locked turn', () => {
     expect(owner).toContain(OWNER_LINE);
     expect(locked).toContain(LOCKED_LINE);
     expect(locked).not.toContain('ask_secret');
+  });
+});
+
+describe('a search records the addresses it listed', () => {
+  async function searchWith(startedTainted: boolean | undefined, principal: unknown = OWNER_PRINCIPAL): Promise<SearchResultAddresses> {
+    const searches = new SearchResultAddresses();
+    const tool = createWebSearchTool(mockProvider([{ title: 'A', url: 'https://news.example/a', snippet: 's' }]));
+    const agent = { principal, searchResultAddresses: searches, ...(startedTainted === undefined ? {} : { batchStartedTainted: () => startedTainted }) };
+    await tool.handler({ action: 'search', query: 'q' }, agent as never);
+    return searches;
+  }
+
+  it('whatever the taint of its batch, and for a mandate too', async () => {
+    for (const started of [false, true, undefined]) {
+      expect((await searchWith(started)).has('https://news.example/a')).toBe(true);
+    }
+    const mandate = await searchWith(false, { kind: 'mandate', email: 'helfer@firma.example', mandateId: 'm-1' });
+    expect(mandate.has('https://news.example/a')).toBe(true);
   });
 });
