@@ -324,7 +324,7 @@ describe('the reconnect after a turn failed offline', () => {
 		expect(runPosts()).toBe(1);
 		expect(store.getMessages().filter((m) => m.role === 'user' && m.failed === true)).toEqual([]);
 		// The question still waits: its card is back and said, as when the message is held.
-		expect(store.getPendingPermission()?.question).toBe('⚠ mail_send needs your OK');
+		expect(store.getPendingPermission()?.question).toBe('⚠ New email needs your OK');
 		expect(toastKeys()).toEqual(['chat.question_waiting_decision']);
 	});
 
