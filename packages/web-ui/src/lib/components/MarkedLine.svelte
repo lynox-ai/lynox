@@ -1,3 +1,8 @@
+<script lang="ts" module>
+	/** The box a value someone else wrote is drawn in; `MarkedValue` draws the same one. */
+	export const VALUE_BOX = 'rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 box-decoration-clone';
+</script>
+
 <script lang="ts">
 	import { segments } from '../utils/plan-takeover.js';
 	// A sentence of lynox's with the values someone else wrote in it (marked by `shownValue`) set
@@ -15,4 +20,4 @@
 	let { text, mono = true }: { text: string; mono?: boolean } = $props();
 </script>
 
-{#each segments(text) as s, i (i)}{#if s.foreign}<bdi data-foreign-value class="rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 box-decoration-clone {mono ? 'font-mono' : ''}">{s.text}</bdi>{:else}{s.text}{/if}{/each}
+{#each segments(text) as s, i (i)}{#if s.foreign}<bdi data-foreign-value class="{VALUE_BOX} {mono ? 'font-mono' : ''}">{s.text}</bdi>{:else}{s.text}{/if}{/each}

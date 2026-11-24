@@ -6,9 +6,9 @@
  * The engine decides which erasures to tell about (`GET /api/connections/records`, owner-only);
  * this only reads the answer, drops a notice whose deadline has passed while the page was open,
  * and picks the text by the profile's state (`revocationView`).
- * Dates are shown without a time, in the reader's time zone: the erasure never happens before the
- * local day of `holdUntil`, and is done by the local day of `deadline` unless a run is still going
- * or the instance is off, which the notice says.
+ * Dates are shown without a time, with the month's name (`longDay`), in the reader's time zone:
+ * the erasure never happens before the local day of `holdUntil`, and is done by the local day of
+ * `deadline` unless a run is still going or the instance is off, which the notice says.
  */
 
 import { connectionLine, type OAuthGrantView } from './oauth-connection.js';
@@ -99,9 +99,4 @@ export function revocationView(
 	const by = connectionLine(grant as OAuthGrantView | undefined)?.by;
 	if (shown.reconnected && by?.kind === 'helper') return { kind: 'reconnected', who: by.address, notice: shown, avertable: held };
 	return { kind: held ? 'connectedAgain' : 'pending', notice: shown };
-}
-
-/** A date without a time, in the reader's time zone. */
-export function localDay(iso: string, locale: 'de' | 'en'): string {
-	return new Date(iso).toLocaleDateString(locale === 'de' ? 'de-CH' : 'en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
 }
