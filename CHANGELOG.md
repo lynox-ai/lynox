@@ -42,9 +42,8 @@
   approval names where the target came from on its card. A session of someone
   the owner let in is refused, and so is a run nobody watches: a scheduled or
   triggered run that sends to such a target stops that send and says so in its
-  result, unless the instruction of a trigger the owner set up names it.
-  Approving a send does not make its recipient owner-named. Contacts, earlier
-  sends and conversation text from before the update do not count as
+  result. Approving a send does not make its recipient owner-named. Contacts,
+  earlier sends and conversation text from before the update do not count as
   owner-named either: a send to such a recipient asks until the owner names it
   again, and a scheduled or triggered run's send to one stops. A trigger
   from before its creator was recorded counts as the owner's only once the
@@ -61,8 +60,7 @@
   answers `409` with code `workflow_awaits_stamp`; a webhook or one-shot
   trigger of such a workflow is switched off and has to be switched on again
   after the stamp, while a schedule or watch waits and resumes by itself.
-  Workflow
-  exports leave the digest out. (#2451)
+  Workflow exports leave the digest out. (#2451)
 - `POST /api/sessions/:id/reply` answers a question only when the body names
   it with `promptId` (from the `prompt` event or
   `GET /api/sessions/:id/pending-prompt`).
