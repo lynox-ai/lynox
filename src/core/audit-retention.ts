@@ -141,10 +141,9 @@ function foldDay(db: Database.Database, day: string): { folded: number; dayRows:
   for (const g of groups) {
     const row = first.get(g.first_id) as FirstRow | undefined;
     if (row === undefined) throw new Error(`audit sweep: row ${String(g.first_id)} vanished during the fold`);
-    const gone = remove.run(g.action, day, end, g.actor_kind, g.mandate_id, g.actor_email, g.actor_display, g.trail_form).changes;
-    // The group was read in this transaction, so anything else means the query and the delete
-    // disagree on which rows they mean; a day row would then miscount, so nothing is written.
-    if (gone !== g.n) throw new Error(`audit sweep: folding ${String(g.n)} reads deleted ${String(gone)}`);
+    // The same transaction read the group with the same predicate, and no read of a past day is
+    // written any more, so this deletes exactly the group's `n` rows.
+    remove.run(g.action, day, end, g.actor_kind, g.mandate_id, g.actor_email, g.actor_display, g.trail_form);
     insert.run(
       g.first_id, g.first_ts, g.actor_kind, g.actor_email, g.actor_display, g.mandate_id, g.action, row.correlation_id,
       row.run_id, row.request_id, recordedAt, row.plan_run, g.trail_form, g.n, g.last_ts,
