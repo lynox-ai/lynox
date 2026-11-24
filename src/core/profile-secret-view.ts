@@ -667,7 +667,8 @@ export function describeConnectionTokens(holdersOfEach: readonly (readonly { id?
  * - `nested` — an object whose own fields are placed in the next table.
  * - `inert` — it changes neither. A field the engine rewrites by itself belongs here, or every
  *   renewal would lapse the owner's release: `grant_type`, `token_expires_at`, `oauth_grant`,
- *   and `custom_endpoint_ack`, which every save stamps anew.
+ *   `custom_endpoint_ack`, which every save stamps anew, and `owner_clean_host`, which every
+ *   create or update writes or removes.
  */
 type FieldBearing = 'host' | 'role' | 'bound' | 'nested' | 'inert';
 type OAuthBlock = NonNullable<ApiAuth['oauth']>;
@@ -690,6 +691,7 @@ const PROFILE_FIELDS = {
   cost: 'inert',
   provenance: 'inert',
   custom_endpoint_ack: 'inert',
+  owner_clean_host: 'inert', // the engine's, rewritten on every save; decides which reads are asked, not where a secret goes
   oauth_grant: 'inert',
 } as const satisfies Record<keyof ApiProfile, FieldBearing>;
 
@@ -728,10 +730,11 @@ function boundOf<T extends object>(table: Readonly<Record<string, FieldBearing>>
 }
 
 /**
- * The `bound` fields of `profile` that are set, by their path, as the owner is shown them when
- * asked for a release. Read from the tables above, as {@link releaseBinding} is, so a field
- * placed there later is shown without a second edit: the question names every field whose
- * change ends the release.
+ * The `bound` fields of `profile` that are set, by their path. The release question counts them
+ * (a mandate's turn wrote their values, so it prints none of them, the scope included). Read from
+ * the tables above, as {@link releaseBinding} is, so a field placed there later
+ * is counted without a second edit: the question accounts for every field whose change ends the
+ * release.
  */
 export function releaseBoundFields(profile: ApiProfile): Array<[string, unknown]> {
   const out: Array<[string, unknown]> = [];
@@ -766,6 +769,16 @@ export function credentialBearing(profile: ApiProfile): string {
     auth: boundOf(AUTH_FIELDS, profile.auth),
     oauth: boundOf(OAUTH_FIELDS, profile.auth?.oauth),
   });
+}
+
+/**
+ * The version of a profile's release-bound settings as the owner is shown it: the first 8 hex
+ * digits of {@link bindingOf}. Only a reference for the person; the engine compares the whole
+ * digest (`ApiStore.ownerViewOf`), since a mandate's turn writes both settings it could compare
+ * and a short prefix it could match by trying.
+ */
+export function settingsVersion(profile: ApiProfile): string {
+  return bindingOf(profile).slice(0, 8);
 }
 
 /**

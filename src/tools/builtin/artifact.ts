@@ -59,7 +59,7 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
       type: 'object' as const,
       properties: {
         title: { type: 'string', description: 'Short descriptive title for the artifact' },
-        content: { type: 'string', description: 'Markdown (for type markdown — preferred default), full HTML (for type html), Mermaid syntax (for type mermaid), SVG markup (for type svg), or the raw file body for a data type (csv/tsv/json/text)' },
+        content: { type: 'string', description: 'Markdown (for type markdown — preferred default), full HTML (for type html; images only as inline SVG or data: URLs, remote image URLs do not load), Mermaid syntax (for type mermaid), SVG markup (for type svg), or the raw file body for a data type (csv/tsv/json/text)' },
         type: { type: 'string', enum: ['markdown', 'html', 'mermaid', 'svg', 'csv', 'tsv', 'json', 'text'], description: 'Artifact type. Default: markdown. Use html only for interactive output (dashboards, prototypes, charts). Use csv/tsv/json/text for data the user will download as a file.' },
         description: { type: 'string', description: 'Optional one-line description' },
         id: { type: 'string', description: 'Existing artifact ID to update. Omit to create new.' },
@@ -68,7 +68,8 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
     },
   },
   detailedGuidance:
-    'markdown renders fast and costs far fewer tokens than hand-written HTML, and the user already gets a polished, shareable view — prefer it for anything prose-shaped. Never wrap raw CSV/TSV/JSON in a markdown or html artifact; emit it as the matching data type so it downloads as a file. When you DO use html (incl. slide decks): make it mobile-ready — fluid %/max-width, never a fixed page-px width — and light unless the user asked for dark. Never embed Web Speech API, TTS, audio controls, or media players in html artifacts — the chat UI already provides audio output.',
+    'markdown renders fast and costs far fewer tokens than hand-written HTML, and the user already gets a polished, shareable view — prefer it for anything prose-shaped. Never wrap raw CSV/TSV/JSON in a markdown or html artifact; emit it as the matching data type so it downloads as a file. When you DO use html (incl. slide decks): make it mobile-ready — fluid %/max-width, never a fixed page-px width — and light unless the user asked for dark. Never embed Web Speech API, TTS, audio controls, or media players in html artifacts — the chat UI already provides audio output. ' +
+    'Images from other web addresses do not load in an html artifact — not in the chat, the gallery or a downloaded copy. Draw them as inline SVG, embed them as a data: URL, or leave them out; if the user asked for a specific image such as their logo, tell them in your reply that it cannot be shown from its web address.',
   handler: async (input: ArtifactSaveInput, agent: IAgent): Promise<string> => {
     const store = agent.toolContext.artifactStore;
     if (!store) return 'Artifact store not available.';
@@ -77,11 +78,11 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
     // placeholder would overwrite the real document.
     if (containsEvictionMarker(input.content)) {
       throw new Error(
-        'artifact_save refused: `content` contains the engine\'s placeholder for a saved document ' +
+        'artifact_save refused: `content` contains the engine\'s placeholder ' +
         '("[evicted after successful save …]", "[The body of this document was removed …]" or ' +
-        '"[The content of this call was the engine\'s placeholder …]"). The ' +
-        'engine puts it in your context where a document it already saved used to be — it is ' +
-        'not a document. Nothing was saved, and any existing artifact is unchanged. To change an ' +
+        '"[The content of this call was the engine\'s placeholder …]"). The engine leaves it in ' +
+        'your context in place of text it took out of an earlier call; a copy of it is not a ' +
+        'document. Nothing was saved, and any existing artifact is unchanged. To change an ' +
         'artifact, read_file its path and apply edit_file. To create one, write the full document ' +
         'into `content`. If read_file returns this placeholder too, the file itself holds it: ' +
         'artifact_history lists earlier versions, or write the document anew.',
@@ -281,7 +282,7 @@ export const artifactRestoreTool: ToolEntry<ArtifactRestoreInput> = {
         return `v${String(input.version)} of artifact ${input.id} is a link or has more than one name, so it was not read; nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`;
       }
       if (!(err instanceof ArtifactPlaceholderError)) throw err;
-      return `Could not restore — v${String(input.version)} of artifact ${input.id} holds only the engine's placeholder for a saved document, not a document. Nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`;
+      return `Could not restore — v${String(input.version)} of artifact ${input.id} holds only the engine's placeholder, not a document. Nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`;
     }
     if (!restored) {
       return `Could not restore — artifact ${input.id} or version ${String(input.version)} not found. Use artifact_history to see available versions.`;

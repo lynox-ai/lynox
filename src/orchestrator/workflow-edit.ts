@@ -1,6 +1,6 @@
 import type { InlinePipelineStep } from '../types/pipeline.js';
 import { findHiddenInName, stripHiddenInName } from '../core/hidden-text.js';
-import { isStepIdShape, stepIdRefusal, stepRunIds } from './step-id.js';
+import { isReservedStepId, isStepIdShape, reservedStepIdRefusal, stepIdRefusal, stepRunIds } from './step-id.js';
 import { fieldReferencing } from './template-refs.js';
 import { replacePlaceholders, splitLeadingSpace } from './placeholders.js';
 
@@ -26,11 +26,12 @@ export interface StepModification {
   after?: string | undefined;
 }
 
-/** Why `id` cannot be a new step's id, or null: an id outside the shape (`step-id.ts`). The shape
+/** Why `id` cannot be a new step's id, or null: an id outside the shape, or a reserved one (`step-id.ts`). The shape
  *  also keeps out what a reference could not name: a dot or a brace (`{{<id>.result}}` is cut at each
  *  dot and ends at `}`) and a leading `#`, which names a step by its position. */
 function newIdProblem(id: string, action: 'add_step' | 'rename_step'): string | null {
-  return isStepIdShape(id) ? null : `Error: ${action}: ${stepIdRefusal('the new id', { refs: false })}`;
+  if (!isStepIdShape(id)) return `Error: ${action}: ${stepIdRefusal('the new id', { refs: false })}`;
+  return isReservedStepId(id) ? `Error: ${action}: ${reservedStepIdRefusal('the new id', { refs: false })}` : null;
 }
 
 /** A step id as a refusal quotes it: as it reads, escaped, and short. */
