@@ -36,6 +36,7 @@
 	// A start check that can never pass refused approving this run (its id and the engine's code):
 	// the approval stays off for it, with the cause under it, until the page shows another run.
 	let hopeless = $state<{ id: string; code: string } | null>(null);
+	let hopelessLine = $state<HTMLParagraphElement | null>(null);
 	let busy = $state(false);
 	// The owner asked to discard the run and is shown the confirmation (U-324).
 	let confirmingDiscard = $state(false);
@@ -296,10 +297,7 @@
 				maxTargets: oneFirst ? 1 : maxTargets,
 				...(run.writeForm === 'unmeasured' ? { unmeasuredConfirmed: unmeasuredOk } : {}),
 			});
-			// Approving again would meet the same refusal: the approval goes off, and its cause is said
-			// under it instead of as the act's error line (an empty error, so the run is not reloaded).
-			if (!r.ok && bulkReachHopeless(r.body.code)) { hopeless = { id, code: r.body.code! }; return ''; }
-			return refusalOf(r);
+			return (await approvalHopeless(id, r)) ? '' : refusalOf(r);
 		});
 	}
 
@@ -375,8 +373,21 @@
 	function approveUndo(): Promise<void> {
 		return act(async (id) => {
 			if (!run?.checksum) return t('common.load_failed');
-			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(id)}/approve`, { checksum: run.checksum }));
+			const r = await post(`/bulk/runs/${encodeURIComponent(id)}/approve`, { checksum: run.checksum });
+			return (await approvalHopeless(id, r)) ? '' : refusalOf(r);
 		});
+	}
+
+	/** Approving again would meet the same refusal: the approval goes off for this run, and its cause
+	 *  is said under it instead of as the act's error line (the act then answers an empty error, so
+	 *  the run is not reloaded). The button that was pressed goes off under the focus, so the focus
+	 *  moves to the cause. */
+	async function approvalHopeless(id: string, r: { ok: boolean; body: PostBody }): Promise<boolean> {
+		if (r.ok || !bulkReachHopeless(r.body.code)) return false;
+		hopeless = { id, code: r.body.code! };
+		await tick();
+		hopelessLine?.focus();
+		return true;
 	}
 
 	/** Confirm the probe, then resume with the cap the owner set — against the checksum of the
@@ -1184,7 +1195,7 @@
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 					</div>
 					{#if hopelessReason !== null}
-						<p id="bulk-approve-hopeless" class="text-sm text-danger" data-testid="bulk-approve-hopeless">{hopelessReason}</p>
+						<p id="bulk-approve-hopeless" class="text-sm text-danger" tabindex="-1" bind:this={hopelessLine} data-testid="bulk-approve-hopeless">{hopelessReason}</p>
 					{:else if run.writeForm === 'unmeasured' && !unmeasuredOk}
 						<p id="bulk-approve-confirm-first" class="text-xs text-text-subtle">{t('bulk.approve.confirm_first')}</p>
 					{/if}
@@ -1237,9 +1248,13 @@
 						</div>
 					{/if}
 					<div class="flex flex-wrap gap-2">
-						<button type="button" class={btnPrimary} disabled={busy || creates.length !== run.changes.delete} onclick={approveUndo}>{t('bulk.undo.approve')}</button>
+						<button type="button" class={btnPrimary} disabled={busy || hopelessReason !== null || creates.length !== run.changes.delete}
+							aria-describedby={hopelessReason !== null ? 'bulk-approve-hopeless' : undefined} onclick={approveUndo}>{t('bulk.undo.approve')}</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 					</div>
+					{#if hopelessReason !== null}
+						<p id="bulk-approve-hopeless" class="text-sm text-danger" tabindex="-1" bind:this={hopelessLine} data-testid="bulk-approve-hopeless">{hopelessReason}</p>
+					{/if}
 				</div>
 			{:else if canUndo}
 				{@render undoOffer()}

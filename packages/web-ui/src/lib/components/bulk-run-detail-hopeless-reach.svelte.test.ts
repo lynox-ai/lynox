@@ -5,7 +5,8 @@ import { t, getLocale, setLocale } from '../i18n.svelte.js';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
 
 // A start check that refuses approving on a store's cause no wait and no retry clears: the page
-// takes the approval away for that run and says the cause under it. A cause that can clear keeps
+// takes the approval away for that run (a preview's or an undo's) and says the cause under it,
+// where the focus goes. A cause that can clear keeps
 // the approval and says the cause as the act's error.
 
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
@@ -36,12 +37,15 @@ let component: Record<string, unknown> | undefined;
 let refuseWith: string;
 let approvals: number;
 let runGets: number;
+/** The run the page is given. */
+let shown: BulkRunDetailData;
 
 beforeEach(() => {
 	target = document.createElement('div');
 	document.body.appendChild(target);
 	approvals = 0;
 	runGets = 0;
+	shown = RUN;
 	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const u = String(url);
 		const reply = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -53,7 +57,7 @@ beforeEach(() => {
 		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
 		if (page) return reply({ targets: TARGETS.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		if (/\/bulk\/runs\/r1$/.test(u)) runGets++;
-		return reply(RUN);
+		return reply(shown);
 	}));
 });
 
@@ -96,6 +100,8 @@ describe('the approval after a start check that can never pass', () => {
 			const reason = target.querySelector('[data-testid="bulk-approve-hopeless"]');
 			expect(reason?.textContent?.trim()).toBe(t(`bulk.reach.approve.${cause}`));
 			expect(approveButton().getAttribute('aria-describedby')).toBe(reason?.id);
+			// The pressed button went off under the focus: the focus is on the cause.
+			expect(document.activeElement).toBe(reason);
 			// Said once, under the approval, not a second time as the act's error line.
 			expect(errorLines()).toEqual([t(`bulk.reach.approve.${cause}`)]);
 			// A refusal is not a change: the run is not loaded again.
@@ -117,6 +123,25 @@ describe('the approval after a start check that can never pass', () => {
 		approveButton().click();
 		await settle();
 		expect(approvals).toBe(2);
+	});
+
+	it('goes off for an undo\'s approval too, with its cause under it', async () => {
+		shown = { ...RUN, kind: 'undo', sourceRunId: 'src1', probeConfirmed: true };
+		refuseWith = 'reach_approve_shopifyNoApiVersion';
+		await render();
+		const undo = (): HTMLButtonElement => [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === t('bulk.undo.approve'))!;
+		expect(undo().disabled).toBe(false);
+		undo().click();
+		await settle();
+		expect(undo().disabled).toBe(true);
+		const reason = target.querySelector('[data-testid="bulk-approve-hopeless"]');
+		expect(reason?.textContent?.trim()).toBe(t('bulk.reach.approve.shopifyNoApiVersion'));
+		expect(undo().getAttribute('aria-describedby')).toBe(reason?.id);
+		expect(document.activeElement).toBe(reason);
+		expect(errorLines()).toEqual([t('bulk.reach.approve.shopifyNoApiVersion')]);
+		undo().click();
+		await settle();
+		expect(approvals).toBe(1);
 	});
 
 	it('says the cause in the page\'s language', async () => {
