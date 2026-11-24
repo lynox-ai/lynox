@@ -1735,7 +1735,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.allow': { de: 'Erlauben', en: 'Allow' },
 	'chat.deny': { de: 'Ablehnen', en: 'Deny' },
 	'chat.consent_allow_deep': { de: 'Deep erlauben', en: 'Allow deep' },
-	'chat.consent_run_balanced': { de: 'Auf balanced ausführen', en: 'Run on balanced' },
+	'chat.consent_run_balanced': { de: 'Mit Ausgewogen ausführen', en: 'Run on balanced' },
 	'chat.consent_cancel': { de: 'Abbrechen', en: 'Cancel' },
 	'chat.permission_running': { de: 'Erlaubt — wird ausgeführt…', en: 'Allowed — running…' },
 	'chat.permission_denied_running': { de: 'Abgelehnt — wird beendet…', en: 'Denied — finishing up…' },

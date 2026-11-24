@@ -2709,10 +2709,13 @@ ${draftJson}
         ));
         // One paragraph per host, not per URL: a store preset puts its base, token and authorize
         // URLs on one host, and the same paragraph three times reads as three destinations.
+        // The hosts as the acceptances name them (describeDisclosure: the URL's hostname, or the URL
+        // when it does not parse), once each.
+        const nonVettedHosts = Array.from(new Set(nonVetted.map((u) => { try { return new URL(u).hostname; } catch { return u; } })));
         const disclosureIn = (l: DialogLanguage): string => [
           nonVetted.length > 0
             // The acceptance of each host (describeDisclosure) is binding text and stays English.
-            ? API_SETUP_DIALOG[l].outsideSubProcessors(profile.auth?.type === 'oauth2', Array.from(new Set(nonVetted.map((u) => describeDisclosure(u)))).join('\n\n'))
+            ? API_SETUP_DIALOG[l].outsideSubProcessors(profile.auth?.type === 'oauth2', nonVettedHosts, Array.from(new Set(nonVetted.map((u) => describeDisclosure(u)))).join('\n\n'))
             : undefined,
           redirectHostNames.length > 0 ? API_SETUP_DIALOG[l].redirect(redirectHostNames) : undefined,
           presetNoteFor?.(l),

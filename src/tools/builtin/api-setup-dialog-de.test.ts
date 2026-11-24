@@ -122,10 +122,10 @@ describe('the save question\'s list of changes in German', () => {
 describe('the sentence before a host outside the listed sub-processors', () => {
   it('is said in the session\'s language; the acceptance it introduces is passed through as given', () => {
     const acceptance = 'Custom endpoint outside lynox\'s listed sub-processors: x.example. By saving this configuration, you accept controller responsibility …';
-    expect(API_SETUP_DIALOG.en.outsideSubProcessors(true, acceptance)).toBe(`This engine will send data — and, for its OAuth token, the managed access_token — to host(s) outside lynox's listed sub-processors:\n\n${acceptance}`);
-    expect(API_SETUP_DIALOG.en.outsideSubProcessors(false, acceptance)).toBe(`This engine will send data to host(s) outside lynox's listed sub-processors:\n\n${acceptance}`);
-    expect(API_SETUP_DIALOG.de.outsideSubProcessors(true, acceptance)).toBe(`lynox sendet Daten – und für sein OAuth-Token das verwaltete access_token – an Hosts ausserhalb der aufgeführten Unterauftragsverarbeiter von lynox:\n\n${acceptance}`);
-    expect(API_SETUP_DIALOG.de.outsideSubProcessors(false, acceptance)).toBe(`lynox sendet Daten an Hosts ausserhalb der aufgeführten Unterauftragsverarbeiter von lynox:\n\n${acceptance}`);
+    expect(API_SETUP_DIALOG.en.outsideSubProcessors(true, ['x.example'], acceptance)).toBe(`This engine will send data — and, for its OAuth token, the managed access_token — to host(s) outside lynox's listed sub-processors:\n\n${acceptance}`);
+    expect(API_SETUP_DIALOG.en.outsideSubProcessors(false, ['x.example'], acceptance)).toBe(`This engine will send data to host(s) outside lynox's listed sub-processors:\n\n${acceptance}`);
+    expect(API_SETUP_DIALOG.de.outsideSubProcessors(true, ['x.example', 'y.example'], acceptance)).toBe(`lynox sendet Daten – und für das OAuth-Token das verwaltete access_token – an Hosts ausserhalb der aufgeführten Unterauftragsverarbeiter von lynox: x.example, y.example.\n\n${acceptance}`);
+    expect(API_SETUP_DIALOG.de.outsideSubProcessors(false, ['x.example'], acceptance)).toBe(`lynox sendet Daten an Hosts ausserhalb der aufgeführten Unterauftragsverarbeiter von lynox: x.example.\n\n${acceptance}`);
   });
 });
 
@@ -135,9 +135,9 @@ describe('the save question in German', () => {
 
   it('lists the changes before the disclosure, and leaves out what is empty', () => {
     const changes = securityChanges(grant({ scope: 'read' }), grant({ scope: 'read write' }), 'de').map((c) => c.text);
-    expect(flattenPrompt(ask(changes, 'Hinweis.'))).toBe('⚠ API-Profile: Zum Speichern von "Shop" braucht es deine Zustimmung.\n\nDas Speichern ändert:\n- Scopes hinzugefügt: write\n\nHinweis.\n\nDieses Profil annehmen und speichern?');
-    expect(flattenPrompt(ask([], 'Hinweis.'))).toBe('⚠ API-Profile: Zum Speichern von "Shop" braucht es deine Zustimmung.\n\nHinweis.\n\nDieses Profil annehmen und speichern?');
-    expect(flattenPrompt(ask(changes, ''))).toBe('⚠ API-Profile: Zum Speichern von "Shop" braucht es deine Zustimmung.\n\nDas Speichern ändert:\n- Scopes hinzugefügt: write\n\nDieses Profil annehmen und speichern?');
+    expect(flattenPrompt(ask(changes, 'Hinweis.'))).toBe('⚠ API-Profile: Zum Speichern von „Shop“ braucht es deine Zustimmung.\n\nDas Speichern ändert:\n- Scopes hinzugefügt: write\n\nHinweis.\n\nDieses Profil annehmen und speichern?');
+    expect(flattenPrompt(ask([], 'Hinweis.'))).toBe('⚠ API-Profile: Zum Speichern von „Shop“ braucht es deine Zustimmung.\n\nHinweis.\n\nDieses Profil annehmen und speichern?');
+    expect(flattenPrompt(ask(changes, ''))).toBe('⚠ API-Profile: Zum Speichern von „Shop“ braucht es deine Zustimmung.\n\nDas Speichern ändert:\n- Scopes hinzugefügt: write\n\nDieses Profil annehmen und speichern?');
   });
 
   it('asks in the same form as the English, the profile name and every change value as values', () => {
@@ -154,7 +154,7 @@ describe('the vault-key release question in German', () => {
 
   it('reads as German, with the same parts as the English', () => {
     expect(flattenPrompt(API_SETUP_DIALOG.de.release(toolWordFrame('api_setup', 'de'), p))).toBe(
-      '⚠ API-Profile: den Vault-Schlüssel "CRM_KEY" für das API-Profil apf_1 freigeben? Es wurde in der Sitzung von mandate:abc eingerichtet. Wenn du zustimmst, sendet lynox den Wert von "CRM_KEY" als bearer an api.example, bei jeder Anfrage und jedem Lauf über dieses Profil, auch bei deinen eigenen und bei Massenläufen, bis das Mandat endet oder du die Freigabe zurückziehst. Unter diesem Namen liegt im Vault ein Wert. Jede Änderung daran, wohin der Wert geht, beendet die Freigabe. Freigeben?');
+      '⚠ API-Profile: Den Vault-Schlüssel "CRM_KEY" für das API-Profil apf_1 freigeben? Es wurde in der Sitzung von mandate:abc eingerichtet. Wenn du zustimmst, sendet lynox den Wert von "CRM_KEY" als bearer an api.example, bei jeder Anfrage und jedem Lauf über dieses Profil, auch bei deinen eigenen Läufen und bei Massenläufen, bis dieser Zugang endet oder du die Freigabe zurückziehst. Unter diesem Namen liegt im Vault ein Wert. Jede Änderung daran, wohin der Wert geht, beendet die Freigabe. Freigeben?');
     const full = flattenPrompt(API_SETUP_DIALOG.de.release(toolWordFrame('api_setup', 'de'), { ...p, more: 2, viewed: { clock: '09:30', unchanged: false }, clientId: true, held: false }));
     expect(full).toContain(' 2 weitere Einstellungen dieses Profils (etwa Anmeldeart, Scopes, Pfad oder Query) gehören ebenfalls zur Freigabe');
     expect(full).toContain('bitte hier darum, das API-Profil apf_1 anzuzeigen, und bitte dann erneut darum, "CRM_KEY" freizugeben.');
@@ -177,10 +177,10 @@ describe('the vault-key release question in German', () => {
   });
 
   it('ends with the mandate, as the engine ends it, in both questions about a mandate\'s profile', () => {
-    expect(flattenPrompt(API_SETUP_DIALOG.de.release(toolWordFrame('api_setup', 'de'), p))).toContain('bis das Mandat endet oder du die Freigabe zurückziehst');
+    expect(flattenPrompt(API_SETUP_DIALOG.de.release(toolWordFrame('api_setup', 'de'), p))).toContain('bis dieser Zugang endet oder du die Freigabe zurückziehst');
     const adopt = (known: boolean): string => flattenPrompt(API_SETUP_DIALOG.de.adopt(toolWordFrame('api_setup', 'de'), { name: 'CRM', id: 'apf_1', by: 'mandate:abc', known, hosts: ['api.example'], names: ['K'] }));
-    expect(adopt(true)).toContain('in der Sitzung von mandate:abc autorisiert, deren Mandat nicht mehr aktiv ist.');
-    expect(adopt(false)).toContain('und lynox kann nicht feststellen, ob dieses Mandat noch aktiv ist.');
+    expect(adopt(true)).toContain('in der Sitzung von mandate:abc autorisiert, deren Zugang nicht mehr aktiv ist.');
+    expect(adopt(false)).toContain('und lynox kann nicht feststellen, ob dieser Zugang noch aktiv ist.');
   });
 
   it('counts the settings it does not print, in both languages, and names none of them', () => {
@@ -227,7 +227,7 @@ describe('the language comes from the session', () => {
     const de = (await run('de')).filter((q) => q.includes('Speichern'));
     expect(de).toHaveLength(1);
     expect(de[0]).toContain('Das Speichern ändert:\n- Scopes hinzugefügt: write');
-    expect(de[0]).toMatch(/^⚠ API-Profile: Zum Speichern von "Service"/);
+    expect(de[0]).toMatch(/^⚠ API-Profile: Zum Speichern von „Service“/);
     rmSync(dir, { recursive: true, force: true });
     dir = mkdtempSync(join(tmpdir(), 'api-setup-de-'));
     store = new ApiStore(join(dir, 'apis'));
@@ -244,7 +244,7 @@ describe('the language comes from the session', () => {
     };
     const de = (await run('de')).filter((q) => q.includes('Speichern'));
     expect(de).toHaveLength(1);
-    expect(de[0]).toContain('lynox sendet Daten an Hosts ausserhalb der aufgeführten Unterauftragsverarbeiter von lynox:\n\nCustom endpoint outside lynox\'s listed sub-processors: api.acme-crm.example.');
+    expect(de[0]).toContain('lynox sendet Daten an Hosts ausserhalb der aufgeführten Unterauftragsverarbeiter von lynox: api.acme-crm.example.\n\nCustom endpoint outside lynox\'s listed sub-processors: api.acme-crm.example.');
     rmSync(dir, { recursive: true, force: true });
     dir = mkdtempSync(join(tmpdir(), 'api-setup-de-'));
     store = new ApiStore(join(dir, 'apis'));

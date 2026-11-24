@@ -328,7 +328,7 @@ export const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
  * that spells it (`cat terraform/main.tf`) matches too. Under `block` that is a block; under
  * `ask`, a run with no one to ask refuses it unless a contract lifts it.
  *
- * - `block`: every command the rule matches also matches CRITICAL_BASH, so it is `[BLOCKED]`.
+ * - `block`: every command the rule matches also matches CRITICAL_BASH, so it is `[${system(T.blocked)}]`.
  *   A block cannot be lifted by a capability contract. Where the run has a
  *   question channel, it is put to a person; without one it is refused.
  * - `ask`: the command talks to another system (a remote host, a cloud account, a cluster, a
@@ -2014,7 +2014,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     if (autonomy === 'autonomous') {
       const hit = _scanBashDanger(rawCmd, CRITICAL_BASH, surfaces);
       if (hit) {
-        return hardBlock(framed`⚠ ${tool(toolName)}: ${system(L(hit.label))} — "${agentText(preview)}" [BLOCKED — ${system(T.runManually)}]`);
+        return hardBlock(framed`⚠ ${tool(toolName)}: ${system(L(hit.label))} — "${agentText(preview)}" [${system(T.blocked)} — ${system(T.runManually)}]`);
       }
       const ask = _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH, surfaces) ?? _scanBashDanger(rawCmd, UNATTENDED_ASK_BASH, surfaces) ?? curlOptionFromWords(rawCmd);
       if (ask) {
@@ -2039,7 +2039,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     // Check both raw (pre-symlink) and resolved path — /etc/ → /private/etc/ on macOS
     if (isSensitivePath(rawPath) || isSensitivePath(filePath)) {
       if (autonomy === 'autonomous') {
-        return hardBlock(framed`⚠ ${tool(toolName)}: ${system(T.readSensitive)} — "${agentText(filePath)}" [BLOCKED — ${system(T.systemFiles)}]`);
+        return hardBlock(framed`⚠ ${tool(toolName)}: ${system(T.readSensitive)} — "${agentText(filePath)}" [${system(T.blocked)} — ${system(T.systemFiles)}]`);
       }
       return framed`⚠ ${tool(toolName)}: ${system(T.readSensitive)} — "${agentText(filePath)}" — ${system(T.systemFiles)}`;
     }
@@ -2060,7 +2060,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     for (const judged of target !== null && target !== filePath ? [filePath, target] : [filePath]) {
       if (isSensitivePath(judged)) {
         if (autonomy === 'autonomous') {
-          return hardBlock(framed`⚠ ${tool(toolName)}: ${system(T.writeSensitive)} — "${agentText(judged)}" [BLOCKED — ${system(T.systemFiles)}]`);
+          return hardBlock(framed`⚠ ${tool(toolName)}: ${system(T.writeSensitive)} — "${agentText(judged)}" [${system(T.blocked)} — ${system(T.systemFiles)}]`);
         }
         return framed`⚠ ${tool(toolName)}: ${system(T.writeSensitive)} — "${agentText(judged)}" — ${system(T.systemFiles)}`;
       }
@@ -2069,7 +2069,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     const content = (input as { content?: unknown }).content;
     if (toolName === 'write_file' && typeof content === 'string' && content.trim() === '') {
       if (autonomy === 'autonomous') {
-        return hardBlock(framed`⚠ ${tool(toolName)}: ${system(T.overwriteEmpty)} — "${agentText(filePath)}" [BLOCKED]`);
+        return hardBlock(framed`⚠ ${tool(toolName)}: ${system(T.overwriteEmpty)} — "${agentText(filePath)}" [${system(T.blocked)}]`);
       }
       return framed`⚠ ${tool(toolName)}: ${system(T.overwriteFileEmpty)} — "${agentText(filePath)}"`;
     }
@@ -2077,7 +2077,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     if (autonomy === 'autonomous' && !isWorkspaceActive()) {
       const cwd = resolveRealPath(process.cwd());
       if (toolName === 'write_file' && !isPathWithin(filePath, cwd)) {
-        return hardBlock(framed`⚠ ${tool(toolName)}: ${system(T.writeOutsideProject)} — "${agentText(filePath)}" [BLOCKED — ${system(T.onlyWithinProject)}]`);
+        return hardBlock(framed`⚠ ${tool(toolName)}: ${system(T.writeOutsideProject)} — "${agentText(filePath)}" [${system(T.blocked)} — ${system(T.onlyWithinProject)}]`);
       }
     }
   }
@@ -2090,7 +2090,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     if (dirPath) {
       if (isSensitivePath(dirRaw) || isSensitivePath(dirPath) || LYNOX_DIR.test(dirRaw) || LYNOX_DIR.test(dirPath)) {
         if (autonomy === 'autonomous') {
-          return hardBlock(framed`⚠ ${tool(toolName)}: ${system(T.sensitiveDirectory)} — "${agentText(dirPath)}" [BLOCKED]`);
+          return hardBlock(framed`⚠ ${tool(toolName)}: ${system(T.sensitiveDirectory)} — "${agentText(dirPath)}" [${system(T.blocked)}]`);
         }
         return framed`⚠ ${tool(toolName)}: ${system(T.sensitiveDirectory)} — "${agentText(dirPath)}"`;
       }
@@ -2101,7 +2101,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
       const destPath = resolveRealPath(destRaw);
       if (isSensitivePath(destRaw) || isSensitivePath(destPath) || LYNOX_DIR.test(destRaw) || LYNOX_DIR.test(destPath)) {
         if (autonomy === 'autonomous') {
-          return hardBlock(framed`⚠ ${tool(toolName)}: ${system(T.moveIntoSensitive)} — "${agentText(destPath)}" [BLOCKED]`);
+          return hardBlock(framed`⚠ ${tool(toolName)}: ${system(T.moveIntoSensitive)} — "${agentText(destPath)}" [${system(T.blocked)}]`);
         }
         return framed`⚠ ${tool(toolName)}: ${system(T.moveFilesIntoSensitive)} — "${agentText(destPath)}"`;
       }
@@ -2111,7 +2111,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
       const cwd = resolveRealPath(getWorkspaceCwd());
       if (!isPathWithin(destPath, cwd)) {
         if (autonomy === 'autonomous') {
-          return hardBlock(framed`⚠ ${tool(toolName)}: ${system(T.moveOutsideProject)} — "${agentText(destPath)}" [BLOCKED]`);
+          return hardBlock(framed`⚠ ${tool(toolName)}: ${system(T.moveOutsideProject)} — "${agentText(destPath)}" [${system(T.blocked)}]`);
         }
         return framed`⚠ ${tool(toolName)}: ${system(T.moveOutsideProject)} — "${agentText(destPath)}"`;
       }
@@ -2124,7 +2124,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   const MAIL_WRITE_TOOLS = new Set(['mail_send', 'mail_reply', 'mail_connect']);
   if (MAIL_WRITE_TOOLS.has(toolName)) {
     if (autonomy === 'autonomous') {
-      return askable(framed`⚠ ${tool(toolName)} [BLOCKED — ${system(T.mailNeedsOk)}]`);
+      return askable(framed`⚠ ${tool(toolName)} [${system(T.blocked)} — ${system(T.mailNeedsOk)}]`);
     }
     return toolName === 'mail_connect' ? framed`⚠ ${tool(toolName)} — ${system(T.connectsMailbox)}` : framed`⚠ ${tool(toolName)} — ${system(T.sendsMail)}`;
   }
@@ -2166,10 +2166,10 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
         const text = typeof detail === 'string' ? detail
           : typeof detail === 'object' && detail !== null ? String((detail as { message?: unknown }).message ?? '') : '';
         if (text) {
-          if (autonomy === 'autonomous') return askable(framed`⚠ ${tool(toolName)}: "${agentText(text)}" [BLOCKED — ${system(blockReason)}]`);
+          if (autonomy === 'autonomous') return askable(framed`⚠ ${tool(toolName)}: "${agentText(text)}" [${system(T.blocked)} — ${system(blockReason)}]`);
           return framed`⚠ ${tool(toolName)}: "${agentText(text)}" — ${system(label)}`;
         }
-        if (autonomy === 'autonomous') return askable(framed`⚠ ${tool(toolName)} [BLOCKED — ${system(blockReason)}]`);
+        if (autonomy === 'autonomous') return askable(framed`⚠ ${tool(toolName)} [${system(T.blocked)} — ${system(blockReason)}]`);
         return framed`⚠ ${tool(toolName)} — ${system(label)}`;
       }
       if (typeof detail !== 'string') return framed`${system(detail.message)}`;
@@ -2177,12 +2177,12 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
       // without words as a value.
       const words = detail ? actionWords(toolName, detail, language) : null;
       if (detail && words === null) {
-        if (autonomy === 'autonomous') return askable(framed`⚠ ${tool(toolName)}: "${agentText(detail)}" [BLOCKED — ${system(blockReason)}]`);
+        if (autonomy === 'autonomous') return askable(framed`⚠ ${tool(toolName)}: "${agentText(detail)}" [${system(T.blocked)} — ${system(blockReason)}]`);
         return framed`⚠ ${tool(toolName)}: "${agentText(detail)}" — ${system(label)}`;
       }
       const suffix = words ? `: ${words}` : '';
       if (autonomy === 'autonomous') {
-        return askable(framed`⚠ ${tool(toolName)}${system(suffix)} [BLOCKED — ${system(blockReason)}]`);
+        return askable(framed`⚠ ${tool(toolName)}${system(suffix)} [${system(T.blocked)} — ${system(blockReason)}]`);
       }
       return framed`⚠ ${tool(toolName)}${system(suffix)} — ${system(label)}`;
     }
@@ -2201,7 +2201,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     const method = effectiveWriteMethod(String(req.method ?? 'GET'), headers, String(req.url ?? ''), typeof req.body === 'string' ? req.body : undefined) ?? 'OVERRIDE';
     if (method === 'DELETE') {
       if (autonomy === 'autonomous') {
-        return askable(framed`⚠ ${tool(toolName)}: HTTP DELETE [BLOCKED — ${system(T.destructiveOperation)}]`);
+        return askable(framed`⚠ ${tool(toolName)}: HTTP DELETE [${system(T.blocked)} — ${system(T.destructiveOperation)}]`);
       }
     }
     // Block write methods in autonomous mode — can send emails, create invoices, modify records.
