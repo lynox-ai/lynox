@@ -264,26 +264,36 @@ describe('a profile in the API store', () => {
 			{ ...P, id: 'p2', name: 'Eigenes 2', description: ownWithMarks, created_by: 'owner' },
 			{ ...P, id: 'p3', name: 'CRM 2', description: memberWithMarks, created_by: `mandate:${MARK.helper}` },
 		]);
-		// Not in the card head either, with or without its attribute; checked again once a card is open.
-		const heads = (): string[] => [...target.querySelectorAll('button[aria-expanded]')].map((h) => h.textContent ?? '');
-		const texts = [MARK.workflow, MARK.own, MARK.plan];
-		const noneInHeads = (): void => { for (const h of heads()) for (const x of texts) expect(h, 'a card head').not.toContain(x); };
+		// Nowhere else on the page either, not even in part, with or without its attribute, nor in a
+		// head's tooltip or label; checked again with each card open.
+		const texts = [MARK.workflow, MARK.own, MARK.plan].map((x) => x.slice(0, 12));
+		const noneElsewhere = (opened?: Element): void => {
+			const page = (target.textContent ?? '').replace(opened?.textContent ?? '', '');
+			for (const x of texts) expect(page, 'the page outside the opened description').not.toContain(x);
+			for (const h of target.querySelectorAll('button[aria-expanded]')) for (const x of texts) {
+				expect(h.getAttribute('title') ?? '', 'a head\'s title').not.toContain(x);
+				expect(h.getAttribute('aria-label') ?? '', 'a head\'s label').not.toContain(x);
+			}
+		};
 		expect(target.querySelectorAll('[data-profile-description]'), 'no description in a closed card').toHaveLength(0);
-		noneInHeads();
+		noneElsewhere();
 		const member = await openedDescription(0);
 		expect(member.textContent).toBe(`Beschreibung: ${MARK.workflow}`);
 		expect(boxesIn(member)).toEqual([MARK.workflow]);
+		noneElsewhere(member);
 		const own = await openedDescription(1);
 		expect(own.textContent).toBe(`Beschreibung: ${MARK.own}`);
 		expect(boxesIn(own)).toEqual([]);
+		noneElsewhere(own);
 		const marked = await openedDescription(2);
 		expect(marked.textContent).toBe(`Beschreibung: ${ownWithMarks}`);
 		expect(boxesIn(marked)).toEqual([]);
+		noneElsewhere(marked);
 		const memberMarked = await openedDescription(3);
 		const literal = `${MARK.plan}<U+E001> ok <U+E000>x`;
 		expect(memberMarked.textContent).toBe(`Beschreibung: ${literal}`);
 		expect(boxesIn(memberMarked)).toEqual([literal]);
-		noneInHeads();
+		noneElsewhere(memberMarked);
 	});
 
 	it('leaves the name unboxed in a member\'s view', async () => {
