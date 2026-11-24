@@ -101,8 +101,8 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
       // `connectCallText` only phrases the connect call around a profile id, like `presetClientSecretGuidance`.
       // `consentNoticeVersion` derives a digest from what a preset's page shows; `SHOPIFY_CONSENT_VERSION` is that digest for Shopify, frozen.
       // `codeExchangeExtraParams` reads a preset's ask for an expiring token and what a profile holds; it adds no preset.
-      // `RETIRED_PRESET_IDS` is a frozen list of ids no provider answers to, and `retiredPresetIdOf` reads it.
-      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'RETIRED_PRESET_IDS', 'SHOPIFY_CONSENT_VERSION', 'askedScopes', 'builtInPresetOf', 'codeExchangeExtraParams', 'connectCallText', 'consentFrameProblems', 'consentNoticeVersion', 'derivePresetEndpoints', 'isPresetClientSecretName', 'normalizedPresetParams', 'presetClientKeys', 'presetClientSecretGuidance', 'presetIds', 'presetNotFollowed', 'presetParamsForModel', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetStoreHost', 'presetTokenBodyFormat', 'presetTokenHeaderName', 'retiredPresetIdOf', 'scopesBeyondAsked', 'scopesOfAnswer'].sort(),
+      // `RETIRED_PRESET_IDS` is a frozen list of ids no provider answers to; `retiredPresetIdOf` and `isRetiredPresetClientSecretName` read it.
+      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'RETIRED_PRESET_IDS', 'SHOPIFY_CONSENT_VERSION', 'askedScopes', 'builtInPresetOf', 'codeExchangeExtraParams', 'connectCallText', 'consentFrameProblems', 'consentNoticeVersion', 'derivePresetEndpoints', 'isPresetClientSecretName', 'isRetiredPresetClientSecretName', 'normalizedPresetParams', 'presetClientKeys', 'presetClientSecretGuidance', 'presetClientSecretGuidanceWith', 'presetIds', 'presetNotFollowed', 'presetParamsForModel', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetStoreHost', 'presetTokenBodyFormat', 'presetTokenHeaderName', 'retiredPresetIdOf', 'scopesBeyondAsked', 'scopesOfAnswer'].sort(),
     );
   });
 
@@ -117,7 +117,7 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
     const SHIPPED = ['bexio', 'shopify'];
     // (a) every id ever shipped is still answered for.
     for (const id of SHIPPED) {
-      expect(OAUTH_PRESETS.get(id) !== undefined || RETIRED_PRESET_IDS.includes(id), `shipped id "${id}" is in neither the register nor RETIRED_PRESET_IDS. Adding it there: check isPresetClientSecretName for its app-secret names and the profile's editable token_url and base_url`).toBe(true);
+      expect(OAUTH_PRESETS.get(id) !== undefined || RETIRED_PRESET_IDS.includes(id), `shipped id "${id}" is in neither the register nor RETIRED_PRESET_IDS. Adding it there: check the profile's editable token_url and base_url`).toBe(true);
     }
     // (b) every id in the register is pinned.
     for (const id of OAUTH_PRESETS.ids()) {
