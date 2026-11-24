@@ -222,10 +222,19 @@ const mockGoogleAuth = {
  */
 const mockCpFetch = vi.fn();
 const mockDerivePresetEndpoints = vi.fn();
-vi.mock('../core/oauth-presets.js', async (importActual) => ({
-  ...(await importActual<typeof import('../core/oauth-presets.js')>()),
-  derivePresetEndpoints: (...a: unknown[]) => mockDerivePresetEndpoints(...a),
-}));
+// The engine ships no retired provider today, so a test that needs one adds its id here; the
+// list is empty for every other test, which then sees the real helpers' answers.
+const retiredForTest = vi.hoisted(() => ({ ids: [] as string[] }));
+vi.mock('../core/oauth-presets.js', async (importActual) => {
+  const actual = await importActual<typeof import('../core/oauth-presets.js')>();
+  const retired = (): string[] => [...actual.RETIRED_PRESET_IDS, ...retiredForTest.ids];
+  return {
+    ...actual,
+    derivePresetEndpoints: (...a: unknown[]) => mockDerivePresetEndpoints(...a),
+    isPresetClientSecretName: (name: string) => actual.isPresetClientSecretName(name, actual.OAUTH_PRESETS, retired()),
+    isRetiredPresetClientSecretName: (name: string) => actual.isRetiredPresetClientSecretName(name, retired()),
+  };
+});
 
 // The connect callback's exchange pass (`http.ts › storeExchangePassFor`): the real one unless a
 // test stands it in, to see what the callback hands it and what it does with the pass.
@@ -25938,6 +25947,31 @@ describe('PUT /api/secrets/:name and a built-in provider\'s client secret', () =
     const origStore = engineRef['getSecretStore'];
     engineRef['getSecretStore'] = () => null;
     onTestFinished(() => { engineRef['getSecretStore'] = origStore; });
+    const res = await jsonFetch('/api/secrets/SHOPIFY_CLIENT_SECRET', { method: 'PUT', body: JSON.stringify({ value: 'pasted-from-a-chat' }) });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { code?: string }).code).toBe('preset_client_secret');
+  });
+
+  // A provider lynox no longer offers has no connection form to send the owner to, so its
+  // client secret is refused with a code of its own; the settings views read only the code.
+  it.each(['self-host', 'managed'] as const)('refuses %s a write of a retired provider\'s client secret with its own code, and stores nothing', async (tier) => {
+    repayRateWindow();
+    mode(tier);
+    retiredForTest.ids = ['gone-shop'];
+    onTestFinished(() => { retiredForTest.ids = []; });
+    const res = await jsonFetch('/api/secrets/GONE_SHOP_CLIENT_SECRET', { method: 'PUT', body: JSON.stringify({ value: 'pasted-from-a-chat' }) });
+    expect(res.status).toBe(403);
+    const { error, code } = await res.json() as { error: string; code?: string };
+    expect(code).toBe('retired_preset_client_secret');
+    expect(error).toContain('no longer offers');
+    expect(error).not.toContain('connection form');
+    expect(mockSecretSet).not.toHaveBeenCalled();
+  });
+
+  it('control: with a retired provider on the list, a live provider\'s client secret keeps the connection-form refusal', async () => {
+    repayRateWindow();
+    retiredForTest.ids = ['gone-shop'];
+    onTestFinished(() => { retiredForTest.ids = []; });
     const res = await jsonFetch('/api/secrets/SHOPIFY_CLIENT_SECRET', { method: 'PUT', body: JSON.stringify({ value: 'pasted-from-a-chat' }) });
     expect(res.status).toBe(403);
     expect(((await res.json()) as { code?: string }).code).toBe('preset_client_secret');

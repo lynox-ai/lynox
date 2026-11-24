@@ -2443,6 +2443,8 @@ async function attachEngineManagedAuth(
       if (current === null || tokenFingerprint(current) === profile.oauth_grant?.revoked_fp) {
         // A provider this engine once shipped: neither a new consent nor a pasted token renews
         // it here, so the refusal names the way that exists (the 401 reminder's, as fixed text).
+        // Its one value is the profile id, which the store admits only in its pinned shape
+        // (`PROFILE_ID_PATTERN`, at save and at load); nothing the provider sent goes in.
         if (retiredPresetIdOf(profile) !== undefined) {
           return { refusal: `Error: the provider rejected the stored refresh token of api_profile "${profile.id}" as revoked or expired, and this profile was set up through a built-in provider this engine no longer has, so it cannot be renewed here. Do not ask the user for a token, and do not call api_setup fetch_token or connect for it. Tell the user. Another way of signing in to the same API replaces this connection, because one host holds one profile: ask the user first, then delete this profile and create the new one.` };
         }
