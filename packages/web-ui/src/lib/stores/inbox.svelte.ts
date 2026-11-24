@@ -324,6 +324,8 @@ export interface InboxThreadMessage {
 	direction: InboxMessageDirection;
 	fetchedAt: string; // ISO
 	inboxItemId?: string | undefined;
+	/** A received message the inbox kept without its text because it read as confidential. */
+	confidential?: boolean | undefined;
 }
 
 export interface InboxThreadResponse {

@@ -27,7 +27,7 @@ const WORDING: ReadonlyArray<readonly [key: string, de: string, en: string]> = [
 	['inbox.rules_items_link', 'Mails dieser Regel', 'Mail from this rule'],
 	['inbox.rule_filter_chip', 'Regel: {name}', 'Rule: {name}'],
 	['inbox.rule_filter_clear', 'Filter aufheben', 'Clear filter'],
-	['inbox.rule_filter_empty', 'Zurzeit liegt keine Mail dieser Regel in der Inbox.', 'No mail from this rule is in the inbox right now.'],
+	['inbox.rule_filter_empty', 'Zurzeit liegt keine Mail dieser Regel im Posteingang.', 'No mail from this rule is in the inbox right now.'],
 	['inbox.rule_withheld_classifier', 'Regel „{name}“ zurückgehalten: Der Klassifikator ordnete diese Mail anders ein, darum zeigt lynox sie dir. Soll die Regel hier immer greifen, mach daraus eine feste Regel.', 'Rule “{name}” held back: the classifier sorted this mail differently, so lynox shows it to you. If the rule should always apply here, turn it into a fixed rule.'],
 	['inbox.rule_withheld_unchecked', 'Regel „{name}“ zurückgehalten: Die Prüfung konnte nicht laufen, etwa wegen fehlendem KI-Budget oder Guthaben, darum zeigt lynox dir die Mail. Soll die Regel ohne Prüfung greifen, mach daraus eine feste Regel.', 'Rule “{name}” held back: the check could not run, for example because of no AI budget or credit, so lynox shows you the mail. If the rule should apply without a check, turn it into a fixed rule.'],
 	['inbox.rule_withheld_sensitive', 'Regel „{name}“ zurückgehalten: Diese Mail wirkt sensibel. Eine Regel legt solche Mails nie als erledigt ab, darum zeigt lynox sie dir.', 'Rule “{name}” held back: this mail looks sensitive. A rule never files such mail as handled, so lynox shows it to you.'],

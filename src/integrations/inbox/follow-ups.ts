@@ -160,7 +160,7 @@ function payloadOf(a: { payloadJson: string }): Record<string, unknown> {
 }
 
 /** The messages the item's audit names as found sensitive by the intake check. */
-function flaggedAtIntake(audit: ReadonlyArray<{ action: string; payloadJson: string }>): Set<string> {
+export function flaggedAtIntake(audit: ReadonlyArray<{ action: string; payloadJson: string }>): Set<string> {
   const ids = new Set<string>();
   for (const a of audit) {
     if (!SENSITIVE_FOLLOW_UP_ACTIONS.has(a.action)) continue;

@@ -24,6 +24,10 @@
 
 	let messageEls = $state<Record<string, HTMLElement | undefined>>({});
 
+	// The message the last jump went to. It carries the focus mark also after a mouse click, which
+	// shows no focus ring of its own, until the next click anywhere or the focus leaves it.
+	let jumpedTo = $state<string | undefined>(undefined);
+
 	// A jump from the reading pane's notice: open the message, then scroll to it and give it the
 	// focus, so keyboard and screen reader land on the new mail too.
 	$effect(() => {
@@ -34,8 +38,23 @@
 			const el = messageEls[req.id];
 			if (el === undefined) return;
 			if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' });
-			el.focus();
+			el.focus({ preventScroll: true });
+			jumpedTo = req.id;
 		});
+	});
+
+	// The mark goes with the next mouse or pen click. Listened to from the jump on, so the click
+	// that made the jump (already handled when the listener is added) does not clear it. A touch
+	// does not clear it: on a phone the first touch is often the scroll toward the message; a tap
+	// elsewhere moves the focus and so clears it on blur.
+	$effect(() => {
+		if (jumpedTo === undefined || typeof document === 'undefined') return;
+		const clear = (e: PointerEvent): void => {
+			if (e.pointerType === 'touch') return;
+			jumpedTo = undefined;
+		};
+		document.addEventListener('pointerdown', clear, { capture: true });
+		return () => document.removeEventListener('pointerdown', clear, { capture: true });
 	});
 
 	function dateFormat(iso: string | undefined): string {
@@ -76,7 +95,9 @@
 					tabindex="-1"
 					bind:this={messageEls[msg.id]}
 					data-thread-message-id={msg.id}
-					class="rounded-[var(--radius-sm)] border bg-bg-subtle text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent {currentMessageId !== undefined && msg.messageId === currentMessageId ? 'border-accent' : 'border-border'}"
+					data-jump-target={jumpedTo === msg.id ? 'true' : undefined}
+					onblur={() => { if (jumpedTo === msg.id) jumpedTo = undefined; }}
+					class="rounded-[var(--radius-sm)] border bg-bg-subtle text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent {jumpedTo === msg.id ? 'ring-2 ring-accent' : ''} {currentMessageId !== undefined && msg.messageId === currentMessageId ? 'border-accent' : 'border-border'}"
 				>
 					<!-- Header is a button when there's body/snippet content to reveal,
 						a plain div otherwise. Touch-sized; aria-expanded reflects state. -->
@@ -102,6 +123,8 @@
 							{/if}
 							{#if !isOpen && msg.snippet}
 								<p class="mt-1 line-clamp-2 text-[11px] text-text-subtle">{msg.snippet}</p>
+							{:else if !isExpandable && msg.confidential === true}
+								<p class="mt-1 text-[11px] text-text-subtle" data-testid="inbox-thread-message-withheld">{t('inbox.thread_message_confidential')}</p>
 							{/if}
 						</div>
 					</button>

@@ -109,6 +109,27 @@
 		const end = start + tab.offsetWidth;
 		if (start < row.scrollLeft) row.scrollLeft = start;
 		else if (end > row.scrollLeft + row.clientWidth) row.scrollLeft = end - row.clientWidth;
+		updateZoneRowCut();
+	});
+
+	// A pill cut at either edge of the row gets a fade there, so the cut reads as "more this way".
+	let zoneRowCutStart = $state(false);
+	let zoneRowCutEnd = $state(false);
+	function updateZoneRowCut(): void {
+		const row = mobileZoneRow;
+		if (row === null) return;
+		zoneRowCutStart = row.scrollLeft > 1;
+		zoneRowCutEnd = row.scrollLeft + row.clientWidth < row.scrollWidth - 1;
+	}
+	$effect(() => {
+		const row = mobileZoneRow;
+		if (row === null || typeof ResizeObserver === 'undefined') return;
+		// The row's own box and its content: a badge that appears later widens the pills without
+		// resizing the row.
+		const ro = new ResizeObserver(() => updateZoneRowCut());
+		ro.observe(row);
+		for (const child of row.children) ro.observe(child);
+		return () => ro.disconnect();
 	});
 
 	async function resolveRuleFilterName(ruleId: string, accountId: string): Promise<void> {
@@ -414,6 +435,13 @@
 			: d.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
 	}
 
+	/** The row's time: that of the newest message where the row announces one, else the item's mail. */
+	function rowTime(item: InboxItem): string {
+		const latest = item.followUps?.latestAt;
+		if (latest !== undefined && followUpLine(item, t, tf) !== undefined) return latest;
+		return item.mailDate ?? item.classifiedAt;
+	}
+
 	function channelLabel(_c: InboxItem['channel']): string {
 		return t('inbox.channel_email');
 	}
@@ -570,7 +598,8 @@
 
 					<!-- Mobile-only zone pills (md+ uses InboxZoneRail), then the rules entry the rail
 						carries on md+. -->
-					<div class="md:hidden relative flex items-center gap-1 mb-3 overflow-x-auto scrollbar-none -mx-4 px-4 py-1" bind:this={mobileZoneRow}>
+					<div class="md:hidden relative mb-3 -mx-4">
+					<div class="relative flex items-center gap-1 overflow-x-auto scrollbar-none px-4 py-1" bind:this={mobileZoneRow} onscroll={updateZoneRowCut} data-testid="inbox-zone-row">
 						<div
 							class="flex shrink-0 gap-1"
 							role="tablist"
@@ -636,6 +665,13 @@
 								<span class="sr-only">{rulesPendingLabel(getRulesPendingCount())}</span>
 							{/if}
 						</a>
+					</div>
+					{#if zoneRowCutStart}
+						<div class="pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-bg to-transparent" aria-hidden="true" data-testid="inbox-zone-row-cut-start"></div>
+					{/if}
+					{#if zoneRowCutEnd}
+						<div class="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-bg to-transparent" aria-hidden="true" data-testid="inbox-zone-row-cut-end"></div>
+					{/if}
 					</div>
 
 					{#if ruleFilterId !== null}
@@ -710,7 +746,7 @@
 													<Checkbox
 														checked={isSelectedForBulk(item.id)}
 														onclick={(e) => toggleBulkSelection(item.id, visibleIds, e.shiftKey)}
-														ariaLabel={`Auswählen: ${withFollowUpLine(item, item.subject?.trim() || item.reasonDe, t, tf)}`}
+														ariaLabel={tf('inbox.select_item', { label: withFollowUpLine(item, item.subject?.trim() || item.reasonDe, t, tf) })}
 													/>
 												</div>
 											{/if}
@@ -735,7 +771,7 @@
 													<span class="shrink-0 text-[11px] text-text-subtle tabular-nums">
 														{zone === 'snoozed' && item.snoozeUntil
 															? snoozeCountdown(item.snoozeUntil)
-															: dateFormat(item.mailDate ?? item.classifiedAt)}
+															: dateFormat(rowTime(item))}
 													</span>
 												</div>
 												<div class="flex items-center gap-1.5 text-[11px] text-text-subtle min-w-0">
@@ -746,7 +782,7 @@
 													<span class="shrink-0">{channelLabel(item.channel)}</span>
 													{#if item.classifierVersion === 'sensitive-prefilter' || isRaisedOpen(item)}
 														<span aria-hidden="true">·</span>
-														<span class="shrink-0 text-warning" aria-label="sensitive content">⚠</span>
+														<span class="shrink-0 text-warning" role="img" aria-label={t('inbox.sensitive_mark')}>⚠</span>
 													{/if}
 												</div>
 												{#if isRaisedOpen(item)}
