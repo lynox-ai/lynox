@@ -3,7 +3,6 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { t, tf, getLocale, setLocale } from '../i18n.svelte.js';
 import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
-import { bulkHaltHeadKey } from './bulk-runs.js';
 
 // A run that is not loaded whole opens on the targets its plan changes, so what it wrote is on its
 // page however late in the run it comes, and the button that shows the unchanged ones counts them
@@ -54,6 +53,7 @@ let run: BulkRunDetailData;
 let targets: BulkTarget[];
 let asked: string[];
 let fail: boolean;
+let viewer: string;
 
 beforeEach(() => {
 	setLocale('de');
@@ -63,10 +63,11 @@ beforeEach(() => {
 	targets = [];
 	asked = [];
 	fail = false;
+	viewer = 'owner';
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 		const u = String(url);
 		const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
-		if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
+		if (u.endsWith('/config')) return reply({ managed: true, viewer });
 		const page = /\/targets\?offset=(\d+)&limit=(\d+)(&changed=1)?$/.exec(u);
 		if (page) {
 			asked.push(u.slice(u.indexOf('/targets')));
@@ -196,17 +197,50 @@ describe('the page of a run that wrote a target late in its plan', () => {
 });
 
 describe('a run that waits for its start', () => {
-	it('names its sentence the next step, not a halt; a halted run stays halted', async () => {
-		expect(bulkHaltHeadKey({ phase: 'planned', haltKey: 'awaitingStart' })).toBe('bulk.head.next');
-		expect(bulkHaltHeadKey({ phase: 'planned', haltKey: 'listed' })).toBe('bulk.head.next');
-		expect(bulkHaltHeadKey({ phase: 'writing', haltKey: 'unavailable' })).toBe('bulk.head.halted');
-		expect(bulkHaltHeadKey({ phase: 'planned', haltKey: 'unavailable' })).toBe('bulk.head.halted');
+	const waiting = (o: Partial<BulkRunDetailData> = {}): void => {
 		run = makeRun({ phase: 'planned', undone: 0, undoneBy: null, targetSystem: SHOP, total: 0, applied: 0, haltKey: 'awaitingStart', haltReason: 'awaiting start',
-			changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+			changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 }, ...o });
+	};
+	const head = (): { labels: (string | undefined)[]; cause: string } => ({
+		labels: [...target.querySelectorAll('dt')].map((d) => d.textContent?.trim()),
+		cause: target.querySelector('[data-testid="bulk-halt-cause"]')?.textContent?.trim() ?? '',
+	});
+
+	it('names the next step where its sentence names the start the owner makes', async () => {
+		waiting();
 		await render();
-		const labels = [...target.querySelectorAll('dt')].map((d) => d.textContent?.trim());
-		expect(labels).toContain('Nächster Schritt');
-		expect(labels).not.toContain('Angehalten');
+		const h = head();
+		expect(h.labels).toContain('Nächster Schritt');
+		expect(h.labels).not.toContain('Angehalten');
+		expect(h.labels).not.toContain('Wartet');
+		expect(h.cause).toMatch(/^Starte den Lauf mit „/);
+	});
+
+	it('says it waits where no start is the owner\'s to make, and the note its sentence points to is on the page', async () => {
+		// No judge model for the rule: no start button; the note says why.
+		waiting({ judge: {} as BulkRunDetailData['judge'], judgeServedBy: null });
+		await render();
+		const h = head();
+		expect(h.labels).toContain('Wartet');
+		expect(h.labels).not.toContain('Nächster Schritt');
+		expect(h.cause).toBe(t('bulk.halt.wait_no_start'));
+		expect(target.textContent).toContain(t('bulk.start.no_judge_model'));
+	});
+
+	it('says it waits to a viewer who is not the owner and starts nothing', async () => {
+		viewer = 'mandate';
+		waiting();
+		await render();
+		const h = head();
+		expect(h.labels).toContain('Wartet');
+		expect(h.labels).not.toContain('Nächster Schritt');
+		expect(h.cause).toBe(t('bulk.halt.wait_owner_only'));
+	});
+
+	it('control: a planned run halted for another reason stays halted', async () => {
+		waiting({ haltKey: 'unavailable', haltReason: 'unavailable' });
+		await render();
+		expect(head().labels).toContain('Angehalten');
 	});
 });
 

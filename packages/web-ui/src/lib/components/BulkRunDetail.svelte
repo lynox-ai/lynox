@@ -776,7 +776,7 @@
 					<dd class="font-mono">{formatCost(run.costUsd)}{run.costCapUsd !== null ? ` / ${formatCost(run.costCapUsd)}` : ''}</dd>
 				{/if}
 				{#if run.haltReason}
-					<dt class="text-text-subtle">{t(bulkHaltHeadKey(run))}</dt>
+					<dt class="text-text-subtle">{t(bulkHaltHeadKey(run, startButton !== null && ownerActs))}</dt>
 					<!-- The engine's own words for a halt (its reason, when the page has no sentence for it) stay text. -->
 					{@const cause = bulkHaltCause(run, managed, startButton === null ? null : t(startButton), view, !ownerActs)}
 					<!-- An atomic undo that rolled back links the run it takes back, where it says to start again (U-335). -->

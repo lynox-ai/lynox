@@ -382,6 +382,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.head.cost': { de: 'KI-Kosten', en: 'AI cost' },
 	'bulk.head.halted': { de: 'Angehalten', en: 'Halted' },
 	'bulk.head.next': { de: 'Nächster Schritt', en: 'Next step' },
+	'bulk.head.waiting': { de: 'Wartet', en: 'Waiting' },
 	'bulk.head.stopped': { de: 'Gestoppt', en: 'Stopped' },
 	'bulk.head.discarded': { de: 'Verworfen', en: 'Discarded' },
 	// An aborted run cannot be continued; a superseded one has a newer run in its place (U-342).
