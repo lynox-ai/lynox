@@ -8,6 +8,7 @@ import { googleFetch, cpFetch } from '../../core/connector-egress.js';
 import { readControlPlaneIdentity, validateControlPlaneRefresh } from '../../core/control-plane-client.js';
 import type { HostPolicyContext } from '../../core/network-guard.js';
 import { classifyRefreshFailure, reclassifyForeignGrant, type RefreshFailureKind } from '../../core/oauth-refresh-failure.js';
+import { tokenAnswer, tokenErrorCode } from '../../core/oauth-token-answer.js';
 import { GOOGLE_OAUTH_TOKENS_KEY } from './vault-keys.js';
 
 // === Types ===
@@ -862,10 +863,10 @@ export class GoogleAuth {
 
         if (!response.ok) {
           const text = await response.text();
-          throw new Error(`Token exchange failed: ${response.status} ${text}`);
+          throw new Error(`Token exchange failed: ${response.status}${tokenErrorCode(text)}`);
         }
 
-        this._acceptMintedTokens(await response.json(), clientId);
+        this._acceptMintedTokens(await tokenAnswer(response, 'Token exchange failed'), clientId);
       } finally {
         close();
       }
@@ -923,10 +924,10 @@ export class GoogleAuth {
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(`Token exchange failed: ${response.status} ${text}`);
+      throw new Error(`Token exchange failed: ${response.status}${tokenErrorCode(text)}`);
     }
 
-    this._acceptMintedTokens(await response.json(), clientId);
+    this._acceptMintedTokens(await tokenAnswer(response, 'Token exchange failed'), clientId);
   }
 
   /**
@@ -950,10 +951,10 @@ export class GoogleAuth {
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(`Device auth request failed: ${response.status} ${text}`);
+      throw new Error(`Device auth request failed: ${response.status}${tokenErrorCode(text)}`);
     }
 
-    const data = await response.json() as {
+    const data = await tokenAnswer(response, 'Device auth request failed') as {
       device_code: string;
       user_code: string;
       verification_url: string;
@@ -982,17 +983,17 @@ export class GoogleAuth {
         }, this.hostPolicy);
 
         if (tokenRes.ok) {
-          this._acceptMintedTokens(await tokenRes.json(), clientId);
+          this._acceptMintedTokens(await tokenAnswer(tokenRes, 'Device auth failed'), clientId);
           return;
         }
 
-        const errorData = await tokenRes.json() as { error: string };
+        const errorData = await tokenAnswer(tokenRes, 'Device auth failed') as { error: string };
         if (errorData.error === 'authorization_pending') continue;
         if (errorData.error === 'slow_down') {
           await new Promise(r => setTimeout(r, pollInterval));
           continue;
         }
-        throw new Error(`Device auth failed: ${errorData.error}`);
+        throw new Error(`Device auth failed: ${tokenRes.status}${tokenErrorCode(JSON.stringify({ error: errorData.error }))}`);
       }
 
       throw new Error('Device auth timed out. Please try again.');
@@ -1389,11 +1390,13 @@ export class GoogleAuth {
         // one situation, contradicting each other, is worse than either.
         this._clientMisconfigured = { until: Date.now() + CLIENT_MISCONFIGURED_COOLDOWN_MS, remedy };
       }
-      throw new Error(`Token refresh failed: ${response.status} ${text}.${remedy}`);
+      // Status and the error code only: the body is Google's, open-ended, and would
+      // reach the model through a tool result.
+      throw new Error(`Token refresh failed: ${response.status}${tokenErrorCode(text)}.${remedy}`);
     }
 
     if (cp && handle) {
-      const body = validateControlPlaneRefresh(await response.json(), REFRESH_FAILURE_REMEDY.transient);
+      const body = validateControlPlaneRefresh(await tokenAnswer(response, 'Token refresh failed'), REFRESH_FAILURE_REMEDY.transient);
       this.tokenData = {
         ...this.tokenData,
         access_token: body.access_token,
@@ -1408,7 +1411,7 @@ export class GoogleAuth {
       return;
     }
 
-    const refreshed = validateTokenResponse(await response.json());
+    const refreshed = validateTokenResponse(await tokenAnswer(response, 'Token refresh failed'));
     // A rotated refresh token invalidates whatever the control plane sealed:
     // its handle stands for the token Google just replaced. Carrying it forward
     // would present an invalidated handle at the next CP refresh, which arrives
@@ -1544,10 +1547,10 @@ export class GoogleAuth {
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(`Service account token exchange failed: ${response.status} ${text}`);
+      throw new Error(`Service account token exchange failed: ${response.status}${tokenErrorCode(text)}`);
     }
 
-    const tokenData = validateTokenResponse(await response.json());
+    const tokenData = validateTokenResponse(await tokenAnswer(response, 'Service account token exchange failed'));
     this.serviceAccountTokenCache = {
       token: tokenData.access_token,
       expires_at: tokenData.expires_at,

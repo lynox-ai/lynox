@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { REPORT_MAX_DEPTH, TargetAnswerTooSlow, TargetDidNotAnswer, askTarget, isConnectionFailure, capText, discardBody, durationText, readTargetBody, readTargetJson, relayedReport, relayedText } from './migration-target-reply.js';
+import { REPORT_MAX_DEPTH, TargetAnswerTooSlow, TargetDidNotAnswer, TransferOutOfTime, askTarget, transferDeadlineMs, isConnectionFailure, capText, discardBody, durationText, readTargetBody, readTargetJson, relayedReport, relayedText } from './migration-target-reply.js';
 
 /** A response whose body is `parts`, then either ends or stays open; `cancelled` says whether it was let go. */
 function streamed(parts: string[], end = true): { res: Response; state: { cancelled: boolean } } {
@@ -83,6 +83,35 @@ describe('the source reads a target answer up to its cap and its deadline', () =
     await expect(askTarget(async () => { throw new Error('refused'); }, 'https://t.example/x', {}, 50)).rejects.toThrow('refused');
   });
 
+  it('cuts a request at its deadline also while the transport has not taken the signal yet', async () => {
+    // A fetch that ignores the signal, as the guard's name lookup does before it hands the request on
+    // (the guard ends that lookup itself after 5 s; here the request's deadline comes first).
+    const deaf = (): Promise<Response> => new Promise<Response>(() => { /* never answers, never listens */ });
+    const t0 = Date.now();
+    await expect(askTarget(deaf, 'https://t.example/x', {}, 50)).rejects.toBeInstanceOf(TargetDidNotAnswer);
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
+  it('ends a request when the whole transfer runs out of time, and refuses to start one after', async () => {
+    const overall = new AbortController();
+    const deaf = (): Promise<Response> => new Promise<Response>(() => { /* never answers */ });
+    const asked = askTarget(deaf, 'https://t.example/x', {}, 60_000, overall.signal);
+    overall.abort();
+    await expect(asked).rejects.toMatchObject({ name: 'TransferOutOfTime', asked: true });
+    let called = false;
+    await expect(askTarget(async () => { called = true; return new Response('ok'); }, 'https://t.example/x', {}, 60_000, overall.signal)).rejects.toMatchObject({ name: 'TransferOutOfTime', asked: false });
+    expect(called).toBe(false);
+    // Control: an answer in time under a live overall deadline is returned.
+    expect(await (await askTarget(async () => new Response('ok'), 'https://t.example/x', {}, 50, new AbortController().signal)).text()).toBe('ok');
+  });
+
+  it('sets the whole transfer\'s deadline from the bundle\'s size, in whole minutes', () => {
+    expect(transferDeadlineMs(0)).toBe(20 * 60_000);
+    // 500 MiB at 128 KiB/s is 4000 s on top of the 20 minutes: 86.7 minutes, rounded up.
+    expect(transferDeadlineMs(500 * 1024 * 1024)).toBe(87 * 60_000);
+    expect(transferDeadlineMs(-1)).toBe(20 * 60_000);
+  });
+
   it('tells a failing connection from the network guard\'s own refusal', () => {
     expect(isConnectionFailure(Object.assign(new Error('connect ECONNREFUSED 203.0.113.7:443'), { code: 'ECONNREFUSED' }))).toBe(true);
     expect(isConnectionFailure(new Error('fetch failed', { cause: Object.assign(new Error('x'), { code: 'ERR_TLS_CERT_ALTNAME_INVALID' }) }))).toBe(true);
@@ -107,6 +136,7 @@ describe('the target\'s words are shown without what would not display as itself
     ['invisible operators and deprecated format characters', '⁡⁢⁣⁤⁪⁯'],
     ['soft hyphen, Mongolian vowel separator, interlinear annotation', '­᠎￹￺￻'],
     ['tag characters', '\u{e0001}\u{e0041}\u{e007f}'],
+    ['lone surrogates', '\udc00\ud800'],
     ['variation selectors and fillers', '️\u{e0100}͏ᅟㅤﾠ'],
   ];
   for (const [what, chars] of hidden) {

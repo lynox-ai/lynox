@@ -206,11 +206,35 @@ export interface HostPolicyContext {
 }
 
 /** True iff `hostname` is in the operator floor (exact host or wildcard apex). */
-function hostInFloor(hostname: string, ctx: HostPolicyContext): boolean {
+function hostInFloor(hostname: string, ctx: Pick<HostPolicyContext, 'allowedHosts' | 'allowedWildcards'>): boolean {
   if (ctx.allowedHosts?.has(hostname)) return true;
   for (const domain of ctx.allowedWildcards) {
     if (hostname === domain || hostname.endsWith(`.${domain}`)) return true;
   }
+  return false;
+}
+
+/** The baseline's loopback names: no read of the engine's reaches them by the baseline. */
+const BASELINE_LOOPBACK: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '0.0.0.0']);
+
+/**
+ * Whether the policy itself names this host for the engine's full-control surface: the guarded
+ * baseline (its loopback names left out) under `guarded` and `allow-all`, and the operator floor
+ * under every policy but `deny-all`. The origin check counts this for a READ only, once foreign
+ * content is in the conversation: a send to such a host the owner did not name keeps asking.
+ */
+export function policyNamesHost(hostname: string, ctx: Pick<HostPolicyContext, 'networkPolicy' | 'allowedHosts' | 'allowedWildcards'>): boolean {
+  // Written as conditions, not a switch: tests/doc-drift.test.ts reads the guard's own deny-all case
+  // below by its first `case` label.
+  const policy = ctx.networkPolicy;
+  if (policy === 'allow-list') return hostInFloor(hostname, ctx);
+  if (policy === undefined || policy === 'allow-all' || policy === 'guarded') {
+    return (!BASELINE_LOOPBACK.has(hostname) && isGuardedBaselineHost(`https://${hostname}/`)) || hostInFloor(hostname, ctx);
+  }
+  if (policy === 'deny-all') return false;
+  // A policy this code does not know names no host, and a new value fails the build here.
+  const _exhaustive: never = policy;
+  void _exhaustive;
   return false;
 }
 
@@ -262,8 +286,12 @@ export function assertHostPolicy(
       // Still outside it: the LLM provider call, push notifications, error
       // reporting, IMAP/SMTP mail, voice transcribe/TTS, and a shell command
       // outside sidecar mode (in sidecar mode with the egress proxy, a shell
-      // command reaches only the exact host names this policy lets http_request
-      // reach; src/shell-sidecar/egress.ts). This list is
+      // command reaches only what src/shell-sidecar/egress.ts registers: under
+      // allow-all and no policy every host, until a tool round starts after the
+      // conversation took in foreign content; then, and under guarded, exact
+      // host names this policy names plus hosts the owner typed,
+      // and under guarded before that round a connected API's host; under
+      // allow-list the list; under deny-all none). This list is
       // stated identically in engine-init.ts and types/config.ts; a review found
       // all three carrying DIFFERENT lists in the very change that introduced
       // the sentence claiming they move together.
