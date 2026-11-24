@@ -2608,7 +2608,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'takeover.plans_more': { de: 'und {n} weitere', en: 'and {n} more' },
 	'takeover.plans_more_show': { de: 'und {n} weitere anzeigen', en: 'and {n} more, show them' },
 	'takeover.plans_more_one': { de: 'und 1 weiterer', en: 'and 1 more' },
-	'takeover.plans_more_show_one': { de: 'und 1 weiteren anzeigen', en: 'and 1 more, show them' },
+	'takeover.plans_more_show_one': { de: 'und 1 weiteren anzeigen', en: 'and 1 more, show it' },
 	'takeover.role.created': { de: 'Angelegt von {name}', en: 'Created by {name}' },
 	'takeover.role.edited': { de: 'Bearbeitet von {name}', en: 'Edited by {name}' },
 	'takeover.role.workflow-created': { de: 'Nutzt den Workflow „{workflow}“, den {name} angelegt hat', en: 'Uses the workflow “{workflow}”, which {name} created' },

@@ -161,5 +161,6 @@ describe('one more, in German', () => {
 		setLocale('en');
 		const en = await draw('line', planList(['P1', 'P2', 'P3', 'P4', 'P5', 'P6']));
 		expect(en.querySelector('button[data-testid="plans-more"]')!.textContent).toBe('and 1 more');
+		expect(en.querySelector('button[data-testid="plans-more"]')!.getAttribute('aria-label')).toBe('and 1 more, show it');
 	});
 });
