@@ -19,7 +19,7 @@ import type Database from 'better-sqlite3';
 import type { NotificationMessage } from './notification-router.js';
 import type { NoticeLanguage } from './notice-language.js';
 import type { RequestPrincipal } from './request-principal.js';
-import { MANDATE_TAG_PREFIX, creatorCovered, editorCovered, planAuthorshipOf, planMandate, planMembers } from './request-principal.js';
+import { MANDATE_TAG_PREFIX, planMandate, planMembers } from './request-principal.js';
 import { processErrorText } from './error-egress.js';
 
 /**
@@ -128,12 +128,10 @@ export interface PausePlanRow {
   readonly covered_edited_by: string | null;
   readonly covered_edited_id: string | null;
   readonly covered_edited_at: string | null;
-  /** When the owner last took this side over (unix seconds); a later change does not clear it. */
-  readonly covered_at?: number | null;
 }
 
 /** The covered marks of a side (`plan-takeover.ts`), read with its authorship. */
-export const COVER_COLS = 'covered_created_by, covered_created_id, covered_created_at, covered_edited_by, covered_edited_id, covered_edited_at, covered_at';
+export const COVER_COLS = 'covered_created_by, covered_created_id, covered_created_at, covered_edited_by, covered_edited_id, covered_edited_at';
 
 export const PAUSE_PLAN_COLS = `id, effect, status, confirmed_at, created_by, edited_by, created_mandate_id, created_at,
   mandate_editor, mandate_editor_id, mandate_edited_at, target_workflow_id, paused_at, ${COVER_COLS}`;
@@ -152,8 +150,6 @@ export interface WorkflowAuthorRow {
   covered_edited_by: string | null;
   covered_edited_id: string | null;
   covered_edited_at: string | null;
-  /** When the owner last took this side over (unix seconds); a later change does not clear it. */
-  covered_at?: number | null;
 }
 
 /** A workflow's authorship by its exact id: never the prefix match of `getPipeline`. Throws when it cannot be read. */
@@ -174,47 +170,13 @@ export function consentLetsThrough(row: Pick<PausePlanRow, 'effect' | 'confirmed
   return !(unstamped && (row.edited_by ?? row.created_by ?? '').startsWith(MANDATE_TAG_PREFIX));
 }
 
-/**
- * The roles a member has on one side of the plan, from that side's columns. A mark the owner took
- * over (`covered_*`) is the owner's now, as {@link planMandate} reads it, so it gives its member no
- * role: after a takeover and a later change by someone else, the one who made it is not said to
- * have made it.
- */
+/** The roles a member has on one side of the plan, from that side's columns. */
 function rolesOn(a: WorkflowAuthorRow, member: Extract<RequestPrincipal, { kind: 'mandate' }>, side: 'trigger' | 'workflow'): PauseRole[] {
   const tag = `${MANDATE_TAG_PREFIX}${member.email}`;
   const roles: PauseRole[] = [];
-  const authorship = planAuthorshipOf(a);
-  if (a.created_by === tag && a.created_mandate_id === (member.mandateId ?? null) && !creatorCovered(authorship)) roles.push(side === 'trigger' ? 'created' : 'workflow-created');
-  if (a.mandate_editor === tag && a.mandate_editor_id === (member.mandateId ?? null) && !editorCovered(authorship)) roles.push(side === 'trigger' ? 'edited' : 'workflow-edited');
+  if (a.created_by === tag && a.created_mandate_id === (member.mandateId ?? null)) roles.push(side === 'trigger' ? 'created' : 'workflow-created');
+  if (a.mandate_editor === tag && a.mandate_editor_id === (member.mandateId ?? null)) roles.push(side === 'trigger' ? 'edited' : 'workflow-edited');
   return roles;
-}
-
-/**
- * The roles a pause recorded for a member, without those the owner has taken over since.
- * A creation is one mark that never moves, so once a side's creator mark is covered no recorded
- * creation of it holds. A change moves on with each edit, and each edit clears the cover of the
- * one before (`CLEAR_EDITOR_COVER_SQL`), so a change is asked of the side's takeover time instead:
- * a side the owner took over at or after the pause (`covered_at`, which an edit leaves standing)
- * made every change the pause recorded on it the owner's. A change made after that takeover is
- * read fresh from the marks, not from the pause. Both times are the process clock in unix seconds
- * (`paused_at` from `writePause`, `covered_at` from the takeover's `now`), so they compare.
- */
-export function rolesStillMarked(
-  roles: readonly PauseRole[],
-  trigger: WorkflowAuthorRow,
-  workflow: WorkflowAuthorRow | undefined,
-  pausedAt: number | null,
-): PauseRole[] {
-  const creationTakenOver = (a: WorkflowAuthorRow | undefined): boolean => a !== undefined && creatorCovered(planAuthorshipOf(a));
-  const changeTakenOver = (a: WorkflowAuthorRow | undefined): boolean =>
-    a !== undefined && pausedAt !== null && typeof a.covered_at === 'number' && a.covered_at >= pausedAt;
-  return roles.filter((r) => {
-    if (r === 'created') return !creationTakenOver(trigger);
-    if (r === 'edited') return !changeTakenOver(trigger);
-    if (r === 'workflow-created') return !creationTakenOver(workflow);
-    if (r === 'workflow-edited') return !changeTakenOver(workflow);
-    return true;
-  });
 }
 
 /** A plan's members, read synchronously from its row and its workflow's row by exact id. */

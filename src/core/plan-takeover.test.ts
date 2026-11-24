@@ -613,35 +613,6 @@ describe('after the workflow was taken over on its own, a plan takeover names no
     b.db.prepare(`UPDATE workflows SET ${COVER_FROM_MARKS} WHERE id = 'w'`).run(nowS());
     expect(rolesShown(b)).toEqual([null, [['e@x.ch', ['edited']], ['c@x.ch', ['created']]]]);
   });
-
-  it('with the workflow covered and changed again by another member, the covered creator is not said to have created it', () => {
-    const b = box();
-    setup(b);
-    b.db.prepare(`UPDATE workflows SET ${COVER_FROM_MARKS} WHERE id = 'w'`).run(nowS());
-    // A change after the takeover: the editor mark is new and uncovered, the creator mark stays covered.
-    editor(b, 'workflows', 'w', 'd@x.ch', 'g-d@x.ch', '2026-03-01 10:00:00');
-    renewed(b, 'd@x.ch');
-    const shown = rolesShown(b) as [unknown, Array<[string, string[]]>];
-    const roles = new Map(shown[1]);
-    expect(roles.get('c@x.ch')).toEqual(['created']);
-    expect(roles.get('e@x.ch')).toEqual(['edited']);
-    expect(roles.get('d@x.ch')).toEqual(['workflow-edited']);
-  });
-
-  it('on the plan itself: a creation and a change taken over give no role, the change after it does', () => {
-    const b = box();
-    setup(b);
-    b.db.prepare(`UPDATE triggers SET ${COVER_FROM_MARKS} WHERE id = 'p'`).run(nowS());
-    // d's change goes through the store's own writer, which clears the cover of the change before.
-    b.triggers.markEditedBy('p', { kind: 'mandate', email: 'd@x.ch', mandateId: 'g-d@x.ch' }, false);
-    renewed(b, 'd@x.ch');
-    expect(b.db.prepare("SELECT covered_edited_by FROM triggers WHERE id = 'p'").get()).toEqual({ covered_edited_by: null });
-    const roles = new Map((rolesShown(b) as [unknown, Array<[string, string[]]>])[1]);
-    // e's change of the plan was recorded by the pause and taken over; c's creation was taken over.
-    expect(roles.get('e@x.ch')).toEqual(['workflow-created']);
-    expect(roles.get('c@x.ch')).toEqual(['workflow-created']);
-    expect(roles.get('d@x.ch')).toEqual(['edited']);
-  });
 });
 
 // The library card's sentence about taking a plan over (UX-053, ux U-079 (b), U-119) counts these.

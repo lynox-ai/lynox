@@ -19,7 +19,6 @@ import {
   WORKFLOW_TAKEOVER_DIGEST_PREFIX, takeOverWorkflow, workflowTakeoverPreview, type WorkflowTakeoverDeps,
 } from './workflow-takeover.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
-import { takeoverPreview } from './plan-takeover.js';
 
 /**
  * The owner's takeover of a workflow from the library (`workflow-takeover.ts`) on a real
@@ -613,49 +612,3 @@ describe('a commit that cannot complete leaves nothing behind', () => {
   });
 });
 
-// The plan takeover lists the roles a pause recorded. Each change of a workflow clears the cover of
-// the change before it, so whether the owner has taken a recorded change over since is read from
-// when the owner took the workflow over, against when the plan was paused. Built through the
-// writers the product uses: the store's save, the pause, and the workflow takeover itself.
-describe('a change the pause recorded, after the workflow was taken over on its own', () => {
-  const save = (b: Box, email: string, steps: unknown[]): void => {
-    b.workflows.upsert({ id: 'w', name: 'W', definitionJson: JSON.stringify({ id: 'w', name: 'W', template: true, steps }), isTemplate: true },
-      { kind: 'mandate', email, mandateId: `g-${email}` });
-  };
-  const setup = (b: Box): void => {
-    workflow(b, 'w', { email: 'c@x.ch' });
-    save(b, 'e@x.ch', STEPS);
-    plan(b, 'p', 'w', 'e@x.ch');
-    ended(b, 'e@x.ch');
-    renewed(b, 'c@x.ch');
-    writePause(b.db, 'p', [{ mandateId: 'g-e@x.ch', email: 'e@x.ch', reason: 'expired', endsAt: nowS() - H, roles: ['created', 'workflow-edited'], closedPrompt: false }]);
-  };
-  const rolesOf = (b: Box): Map<string, readonly string[]> => {
-    const pv = takeoverPreview(deps(b), 'p');
-    if (pv.kind !== 'preview') throw new Error(`no preview: ${JSON.stringify(pv)}`);
-    return new Map(pv.preview.members.map((m) => [m.name, m.roles]));
-  };
-
-  it('is the owner\'s once the workflow was taken over, and the member who changed it afterwards is named for their change', () => {
-    const b = box();
-    setup(b);
-    expect(takeOverWorkflow(deps(b), 'w', expectOf(b, 'w')).kind).toBe('taken_over');
-    // The takeover leaves the plan paused: its own creator's access ended.
-    expect(trow(b, 'p')['paused_at']).not.toBeNull();
-    save(b, 'd@x.ch', [...STEPS, { id: 's4', task: 'Write the summary' }]);
-    renewed(b, 'd@x.ch');
-    // The writer cleared the cover of the change before: what tells the takeover apart is its time.
-    expect(wfRow(b, 'w')['covered_edited_by']).toBeNull();
-    const roles = rolesOf(b);
-    expect(roles.get('e@x.ch')).toEqual(['created']);
-    expect(roles.get('d@x.ch')).toEqual(['workflow-edited']);
-  });
-
-  it('CONTROL: without the takeover, the same later change leaves the recorded change standing', () => {
-    const b = box();
-    setup(b);
-    save(b, 'd@x.ch', [...STEPS, { id: 's4', task: 'Write the summary' }]);
-    renewed(b, 'd@x.ch');
-    expect(rolesOf(b).get('e@x.ch')).toEqual(['created', 'workflow-edited']);
-  });
-});

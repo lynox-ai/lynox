@@ -24,7 +24,7 @@
 import { createHash } from 'node:crypto';
 import { newCorrelationId } from './audit-log.js';
 import {
-  PAUSE_PLAN_COLS, pausedForOf, planPauseOn, rolesStillMarked, rowPlanMembers, type PausePlanRow, type PauseRole,
+  PAUSE_PLAN_COLS, pausedForOf, planPauseOn, rowPlanMembers, type PausePlanRow, type PauseRole,
 } from './plan-pause.js';
 import type { StampEntry } from './plan-run-context.js';
 import { stampExpect, stampFromRow } from './plan-stamp.js';
@@ -157,9 +157,7 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
     // The workflow roles are read here, where the workflow reads — on the same grant only — and
     // added to the pause's, which stay: so F2 says the workflow moves, and a member who changed it
     // after a pause that knew only its creation is said to have changed it.
-    // A role the pause recorded on a mark the owner has taken over since is no longer that member's.
-    const marked = rolesStillMarked(e.roles, row, wf, row.paused_at);
-    const kept = workflowShown(wf) ? marked : marked.filter((r) => !isWorkflowRole(r));
+    const kept = workflowShown(wf) ? e.roles : e.roles.filter((r) => !isWorkflowRole(r));
     const added = roles(principal).filter((r) => isWorkflowRole(r) && !kept.includes(r));
     return { name: e.email, roles: [...kept, ...added], ended, reason: ended ? e.reason : null };
   });
