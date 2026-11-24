@@ -3,15 +3,17 @@
 	import { segments } from '../utils/plan-takeover.js';
 	import { valueSegments, type ValueKind } from '../utils/value-breaks.js';
 
-	// One value someone else wrote, set apart in the same box as `MarkedLine`, and kept whole by the
-	// value rule (U-428): the box moves to the next line whole while it fits, a longer value breaks
-	// between its pieces (after a dot, `@` or `/`), never at a hyphen; only a piece longer than a line
-	// breaks inside. `text` comes from `shownValue` / `shownWhole`, which did the neutralising: this
-	// only draws. Anything that is not exactly one marked value is drawn by `MarkedLine` as it is.
-	// The box reads left to right whatever letter the value starts with: its pieces are boxes of
-	// their own, which carry no direction, so a value led by a right-to-left letter would otherwise
-	// show its pieces in reverse (an address led by a Hebrew letter, `@com.paypal.attacker.io` after it, would read as if it ended in `paypal.com`). The box
-	// itself is a block in the line, so a value over several lines keeps one closed edge.
+	// One value someone else wrote, set apart with the box classes of `MarkedLine` (`VALUE_BOX`), and
+	// kept whole by the value rule (U-428): the box moves to the next line whole while it fits, a
+	// longer value breaks between its pieces (after a dot, `@` or `/`), never at a hyphen; only a
+	// piece longer than a line breaks inside. `text` comes from `shownValue` / `shownWhole`, which did
+	// the neutralising: this only draws. Anything that is not exactly one marked value is drawn by
+	// `MarkedLine` as it is.
+	// Unlike MarkedLine's box, which runs with the text and closes on each line, this box is one
+	// block in the line, so a value over several lines keeps one closed edge. It reads left to right
+	// whatever letter the value starts with: its pieces are boxes of their own, which carry no
+	// direction, so an address led by a right-to-left letter would otherwise show its pieces in
+	// reverse (with `@com.paypal.attacker.io` after it, it would read as if it ended in `paypal.com`).
 	let { text, kind = 'account', testid = undefined }: { text: string; kind?: ValueKind; testid?: string | undefined } = $props();
 	const parts = $derived(segments(text));
 	const one = $derived(parts.length === 1 && parts[0]!.foreign ? parts[0]!.text : null);
