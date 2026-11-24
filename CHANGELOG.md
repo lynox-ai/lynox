@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.19.0 — 2026-11-26
 
 ### Upgrade notes
 
@@ -24,9 +24,215 @@
   digest from `GET /api/tasks/:id/stamp-preview`, and answers 400 without it.
   Until now a confirm without it stamped whatever the schedule held when the
   request arrived, unbound to anything the owner was shown. The web UI sends it
-  from the release that carries #2207 on; a tab opened before the upgrade gets
-  "confirm failed" until it is reloaded. An API client that confirms schedules
-  reads the preview first.
+  since 2.18.0 (#2207); a tab still open from 2.17.x or earlier gets "confirm
+  failed" until it is reloaded. An API client that confirms schedules reads the
+  preview first.
+- On first start `engine.db` moves from schema **68** to **70**, `history.db`
+  from **72** to **74** and `mail-state.db` from **20** to **23**. The steps add
+  tables, columns and an index. Existing inbox rules are marked confirmed as of
+  their creation, and once after the step a pass gives every workflow the owner
+  had confirmed the digest of its steps. In `datastore.db`, which carries no
+  version, each table gains the columns that say who wrote a row last, and each
+  table gets an opaque id, at every start for a table that has none. There is
+  no down path. (#2451, #2595, #2593, #2636, #2347, #2558)
+- A sent mail, an HTTP write, a Drive share or a Calendar invite whose
+  recipient or host the owner did not name (in the words they typed in the
+  conversation, in a contact they wrote, or as a recipient of an earlier send
+  to owner-named recipients) now asks the owner first; a send filed for
+  approval names where the target came from on its card. A session of someone
+  the owner let in is refused, and so is a run nobody watches: a scheduled or
+  triggered run that sends to such a target stops that send and says so in its
+  result. A trigger from before its creator was recorded counts as the owner's
+  only once the owner confirms its recipients in the Triggers view. Once the
+  conversation has read outside content, a `web_research` read whose URL has a
+  query goes through the same question and follows no redirect to another
+  host. (#2636, #2658)
+- An unattended run, schedule, webhook or grant of a workflow now runs only
+  steps the owner stamped: the stamp holds a digest of the steps. Workflows
+  the owner had confirmed are stamped once at the first start; a workflow
+  someone with access built or changed waits for the owner's stamp, through
+  `GET /api/workflows/:id/stamp-preview` and `POST /api/workflows/:id/confirm`
+  (owner only, `expect` required). Workflow exports leave the digest out.
+  (#2451)
+- `POST /api/sessions/:id/reply` answers a question only when the body names
+  it with `promptId` (from the `prompt` event or
+  `GET /api/sessions/:id/pending-prompt`).
+  Without it nothing is answered: `409` with code `prompt_id_required` while a
+  question is open, `404` otherwise. (#2644)
+- A Shopify connection records the version of the consent text it was
+  confirmed under. A bulk run on a connection from before writes a product's
+  title and SEO texts as before, but not its description or image alt text;
+  for those, connect the store again. The Shopify connection now also asks for
+  writing files, and the alt-text form runs only where that was asked and
+  granted. (#2580, #2485)
+- A new workflow step id is 1 to 40 characters of `a-z`, `0-9`, `_` and `-`.
+  A save with another id, or with a step reference no run can resolve, is
+  refused; a stored step id from before still runs and is shown by its
+  position. (#2589, #2604, #2606)
+- An engine that started without one of its stores now says so and refuses
+  what it could not keep: without `history.db` the agent does not run, since
+  the spending caps cannot be checked, and an HTTP or mail send limit that is
+  set refuses the send instead of sending uncounted; without `engine.db` API
+  profile changes, memory changes and to-do changes are refused. The status
+  bar names the missing store and what it stops. (#2423, #2443,
+  #2447, #2457, #2540)
+- The daily and monthly spending caps are now checked before model calls
+  outside a run as well: memory and knowledge extraction, the inbox
+  classifier and `Engine.batch`. Voice routes answer 402 at the cap; local
+  whisper.cpp dictation and extraction by pattern alone cost nothing and are
+  not refused. (#2453)
+- `POST /api/searxng/check` is owner only. On an instance the control plane
+  provisions it checks only the provisioned `SEARXNG_URL` or a public
+  address. (#2436)
+- A plugin tool may no longer be named `fail_step`: workflow steps use that
+  name for their own tool. (#2495)
+- The health body may carry a `migration` block (`import_limit_mb`,
+  `baseline_mb`, `k`, `rest_factor`): what a migration into this instance may
+  hold in memory. It is optional and absent on older engines. (#2486)
+- When the access token file or the data folder belongs to another uid, the
+  container stops with the file, its owner, the uid it runs as and the way
+  out, instead of a bare "Permission denied" and a restart loop. (#2504)
+
+### Added
+
+- Inbox rules the agent proposes wait for the owner's confirmation and file
+  no mail before it; a rule can also describe mail in words, checked with one
+  cheap model call per mail before the classifier. Both sit behind
+  `LYNOX_FEATURE_INBOX_USER_RULES` (off by default). Rules have a name, items
+  name the rule that filed them, and the inbox lists by rule. (#2347, #2354)
+- A Shopify bulk run can write a product's description, under the HTML check
+  WooCommerce descriptions go through. (#2580)
+- The owner can discard a bulk run before approving it. (#2610)
+- The start of a judged list run has a field for the link domains it may
+  add. (#2561)
+- A workflow step can end itself as failed with `fail_step`; the run reports
+  it as failed instead of completed. (#2495)
+- `update_workflow_steps` can repair a stored step reference with
+  `set_input_from`. (#2604)
+- The Triggers view lets the owner confirm the recipients of a trigger from
+  before its creator was recorded. (#2636)
+- The complete data export can be staged as an archive by an engine command
+  (`node dist/scripts/export-archive.js`), with readable, masked stores and the
+  files; it shares one slot with the erasures across processes, and
+  `DELETE /api/data` answers 409 while it runs. (#2430)
+- A tool call that did not do what was asked shows as unsuccessful in the
+  chat, live and after a reload. (#2555)
+
+### Changed: bulk runs
+
+- Hidden characters a planner or judge adds are marked in the preview and
+  counted at approval and at the probe. (#2428)
+- Links inside WordPress shortcodes are held to the run's link domains, read
+  as the shop prints them; links, schemes and control characters are refused
+  on every run. (#2427)
+- The markup check, the read-back and the hidden-character check read HTML
+  only within bounds of size, nesting, tags and attributes; a field past them
+  is refused or listed as not checked. (#2438, #2449, #2556)
+- Descriptions the store added markup to are compared, minted and refused
+  in the form the store saves; a marked row whose key does not decrypt is
+  read for every target. (#2370, #2545, #2539)
+- The preview names a changed or refused field by its label, a judged run's
+  fields in words, and a field name the planner set in a box inside the
+  sentence; the page says why a judged start is held. (#2584, #2622, #2626)
+- A bulk run's push names its stage, end and host, and the trail names a
+  delegated run's planner by name. (#2603, #2570)
+- The Shopify and bexio consent pages say what lynox may change instead of
+  listing fields. (#2485)
+
+### Changed: plans, workflows and triggers
+
+- A step id outside the shape is shown by its position, and edit refusals
+  name steps by position. (#2589, #2606, #2618)
+- Escalation, workflow-question and scheduled-run threads open with a fixed
+  engine sentence, not a title or the task as the owner's turn; the task is
+  fenced as the task. (#2490, #2496)
+- A failed run's escalation thread names its steps in fixed lines, and
+  `diagnose_workflow_run` and the question thread leave out a plan name the
+  owner did not write. (#2582, #2583, #2536)
+- A scheduled run's workflow start is recorded as a schedule. (#2493)
+- A mandate is told who confirms a held-back task and where it stands; a
+  thread is titled in the language of its first message. (#2498)
+- A plan's refused connection is told to the owner in the owner's words.
+  (#2484)
+- Every trigger a turn that read outside content files or rewrites is marked,
+  and the approval card says which side read it. (#2440)
+- A watch whose stored address hides characters shows that address, marked,
+  in the stamp block. (#2429)
+
+### Changed: inbox and mail
+
+- A mail the sensitive check flagged is never filed as handled, and its
+  sender and subject stay off pushes and reminders. (#2492, #2509)
+- An inbox item comes back when a flagged message arrives in its thread.
+  (#2510)
+- A dropped IMAP session is reported as its own error, `connection_dropped`,
+  also for a read or a Sent copy after it. (#2487, #2548)
+- Sent replies are written to the sent log. (#2607)
+
+### Changed: cost
+
+- On a managed instance the control plane's usage count raises the local sum
+  only for its own billing period. (#2442)
+
+### Changed: backup and migration
+
+- A migration carries encrypted stores readable when the target takes them,
+  and the target encrypts them under its own key; the source checks the
+  bounds and its memory before it encrypts. (#2519, #2557, #2535, #2588,
+  #2599)
+- The backup list keeps its signature answers across restarts, in a file
+  MACed under a key derived from the vault key. (#2552)
+- The migration done step names the target's support, and Web UI notices name
+  the same way out as the engine's refusals. (#2574, #2566)
+
+### Changed: web UI
+
+- A failed session request fails the turn before a run is sent, and a tap on
+  a failed message sends that message again. (#2560)
+- The side panel names tools as the chat does; `api_setup` reads as API
+  profiles. (#2563, #2559)
+- The setup banner does not check a typed key while only managed access may
+  be used. (#2569)
+- The privacy page points to the instance log and the export path. (#2435)
+- One backup file is named in the singular, and the settings link is in
+  German on German pages. (#2573)
+
+### Changed: API profiles and connections
+
+- A built-in provider profile's token slot is never collected by `ask_secret`;
+  the model is sent to `connect`. (#2469, #2506)
+- A save over a profile the boot held back reads its grant. (#2471)
+- A refused request to a Shopify store names its own cause. (#2501)
+
+### Security
+
+- The owner's turn in a thread a helper wrote in is read as untrusted.
+  (#2426)
+- A key in a file a helper attaches is refused before it is saved; a helper's
+  turn gets prompt texts that do not send it to collect keys. (#2418, #2513)
+- A scoped sub-agent asks only for keys inside its scope. (#2483)
+- The vault's resolve guard is set before API profiles load. (#2454)
+- Reads and spec reads refuse a method override, a redirect hop a server may
+  run as a write, and a watch or feed address that may run as a write; a
+  contract write to GraphQL is held by its body on any path. (#2473, #2474,
+  #2478, #2488)
+- A refused write's note never shows a stored value, or part of one, in the
+  URL. (#2611, #2627)
+- A person's refused owner-only attempts and a revoke are recorded in the
+  trail; a table is named there by an opaque id. (#2595, #2558)
+- Who wrote each message, data-store row and sent mail is recorded. (#2593)
+- Error text on boot, mail, voice, push and store paths is reduced before it
+  is kept or shown. (#2421, #2422, #2515)
+- `{{…}}` placeholders are scanned in linear time. (#2632)
+- The release image installs its packages fresh, and both architectures are
+  scanned. (#2503)
+
+### Fixed
+
+- A tool call whose result event fails to deliver is recorded once. (#2638)
+- A chat run beside a scheduled question reads as running and stays apart on
+  takeover. (#2417, #2425)
+- An open connection check closes when its row stops offering it. (#2446)
 
 ## 2.18.0 — 2026-11-17
 
