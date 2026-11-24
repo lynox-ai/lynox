@@ -2075,7 +2075,7 @@ describe('(285) delete asks the person before it removes anything', () => {
     const ask = vi.fn(async (_q: unknown) => 'Deny');
     await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask as never));
     const q = ask.mock.calls[0]![0];
-    expect(flattenPrompt(q as never)).toBe('⚠ api_setup: delete the API profile CRM (id crm-api, host api.crm.example)? The 2 token(s) its sign-in stored are removed from the vault with it, also where another profile reads them, so the connection has to be authorized again. Delete it?');
+    expect(flattenPrompt(q as never)).toBe('⚠ API profiles: delete the API profile CRM (id crm-api, host api.crm.example)? The 2 token(s) its sign-in stored are removed from the vault with it, also where another profile reads them, so the connection has to be authorized again. Delete it?');
     const values = promptSegments(q as never).filter((x) => x.kind === 'value').map((x) => x.text);
     expect(values).toEqual(['CRM', 'crm-api', 'api.crm.example', '2']);
   });
@@ -2180,7 +2180,7 @@ describe('(285) delete asks the person before it removes anything', () => {
   });
 
   it('under autonomous the guard blocks a delete; interactively it adds no question of its own', () => {
-    expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'autonomous', apiSetupTool as never)).toBe('⚠ api_setup: delete [BLOCKED — destructive data operation needs your OK]');
+    expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'autonomous', apiSetupTool as never)).toBe('⚠ API profiles: delete [BLOCKED — destructive data operation needs your OK]');
     expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'guided', apiSetupTool as never)).toBeNull();
     expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'supervised', apiSetupTool as never)).toBeNull();
     expect(isDangerous('api_setup', { action: 'view', id: 'crm-api' }, 'autonomous', apiSetupTool as never)).toBeNull();
@@ -3940,7 +3940,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
       'https://api.crm.example/v1/contacts',
       headers,
       false,
-      { apiStore, secretStore: makeVault(SEED) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never,
+      { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false },  apiStore, secretStore: makeVault(SEED) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never,
       { bulkRunId: 'run-1' },
     );
 
@@ -3966,7 +3966,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
     stubBoth();
     const { attachStoredCredential } = await import('./http.js');
     const headers: Record<string, string> = {};
-    const attached = await attachStoredCredential('https://api.crm.example/v1/contacts', headers, false, { apiStore, secretStore: makeVault(SEED) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never, { bulkRunId: 'run-1' });
+    const attached = await attachStoredCredential('https://api.crm.example/v1/contacts', headers, false, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false },  apiStore, secretStore: makeVault(SEED) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never, { bulkRunId: 'run-1' });
     expect(attached !== null).toBe(sent);
     expect(headers['X-Pay-900'] !== undefined).toBe(sent);
   });
@@ -3984,7 +3984,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
     stubBoth();
     const { attachStoredCredential } = await import('./http.js');
     const headers: Record<string, string> = {};
-    const attached = await attachStoredCredential('https://api.bexio.com/2.0/contact', headers, write, { apiStore, secretStore: makeVault({ ...SEED, BEXIO_PAT: 'pat-value' }) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never, { bulkRunId: 'run-1' });
+    const attached = await attachStoredCredential('https://api.bexio.com/2.0/contact', headers, write, { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false },  apiStore, secretStore: makeVault({ ...SEED, BEXIO_PAT: 'pat-value' }) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never, { bulkRunId: 'run-1' });
     expect(attached !== null).toBe(sent);
     expect(headers['Authorization'] === 'Bearer pat-value').toBe(sent);
   });

@@ -8,6 +8,8 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
+import { join } from 'node:path';
+import { claimStoreReconnectHints } from './store-token-refresh.js';
 import { recipientsConfirmable } from './recipient-confirm.js';
 import { errorText, errorTextReduced, FixedTextError, processErrorText } from './error-egress.js';
 import { containThreadFrom, threadIsContained } from './containment.js';
@@ -49,7 +51,7 @@ import { inquiryOptions, summarizeDelivery } from './notification-router.js';
 import { stripHidden } from './hidden-text.js';
 import { runTaskPrompt, RUN_TASK_ANSWERED, RUN_TASK_ANSWER_PREAMBLE } from './run-task-turn.js';
 import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect, BulkTriggerEffect } from '../types/index.js';
-import { admittedTriggerTier, WATCH_OVERRIDE_REFUSAL } from './task-manager.js';
+import { admittedTriggerTier, WATCH_OVERRIDE_REFUSAL, watchPolicyRefusal } from './task-manager.js';
 import { readAddressWrites } from './outbound-write.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
@@ -1519,6 +1521,20 @@ export class WorkerLoop {
         );
       }
 
+      // The owner's hint that a store's access runs out soon (`store-token-refresh.ts`): only with a
+      // channel, claimed on the grant before it is sent. No timer and no refresh of its own.
+      try {
+        const apiStore = this.engine.getApiStore();
+        if (apiStore && this.notificationRouter.hasChannels()) {
+          const { getLynoxDir } = await import('./config.js');
+          for (const message of claimStoreReconnectHints(apiStore, join(getLynoxDir(), 'apis'), noticeLanguage(this.engine.config?.language))) {
+            void this.notificationRouter.notify(message);
+          }
+        }
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:worker] store reconnect hint failed: ${processErrorText(err)}\n`);
+      }
+
       // The owner's notice of paused plans (`plan-pause.ts`), in the reminder's order: only with a
       // channel, claimed before it is sent, so two processes on one file send it once and none is
       // used up while no channel is registered. The server registers its push channel before it
@@ -2714,7 +2730,7 @@ export class WorkerLoop {
         // The connection a request carried: the attached profile's id and the grant it held when
         // its credential was read. An empty or non-string grant (a file-loaded profile) is none.
         attach: async (url, headers, method, out) => {
-          const profile = await attachStoredCredential(url, headers, isWriteMethod(method), { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases, exactClearance: toolContext.exactClearance, storeBindingDigest: toolContext.storeBindingDigest, containment: toolContext.containment, vaultNameBindings: toolContext.vaultNameBindings }, { bulkRunId: run.id }, out);
+          const profile = await attachStoredCredential(url, headers, isWriteMethod(method), { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases, exactClearance: toolContext.exactClearance, storeBindingDigest: toolContext.storeBindingDigest, containment: toolContext.containment, vaultNameBindings: toolContext.vaultNameBindings, hostPolicy: toolContext }, { bulkRunId: run.id }, out);
           if (profile === null) return null;
           const grantId: unknown = profile.oauth_grant?.grant_id;
           return { id: profile.id, grantId: typeof grantId === 'string' && grantId !== '' ? grantId : null };
@@ -4082,6 +4098,15 @@ export class WorkerLoop {
     if (readAddressWrites(config.url)) {
       const taskManager = this.engine.getTaskManager();
       if (taskManager) this.#recordRun(taskManager, task.id, `The watched page was not read: its address ${WATCH_OVERRIDE_REFUSAL} Set the watch up again in the chat with the address of the page without the override or the mutation.`, 'failed');
+      return;
+    }
+
+    // The instance's network_policy decides whether the page may be read at all, at every poll:
+    // the policy may have changed since the watch was created.
+    const refusedBy = watchPolicyRefusal(config.url, this.engine.getToolContext());
+    if (refusedBy !== null) {
+      const taskManager = this.engine.getTaskManager();
+      if (taskManager) this.#recordRun(taskManager, task.id, `The watched page was not read: ${refusedBy.why}${refusedBy.wayOut === '' ? '' : ` ${refusedBy.wayOut}`}`, 'failed');
       return;
     }
 

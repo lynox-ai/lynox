@@ -258,6 +258,13 @@ export interface OAuthPreset {
    */
   readonly tokenBodyFormat?: 'form' | 'json';
   /**
+   * A parameter the code exchange adds to ask the provider for a token that expires and comes with
+   * a refresh token. Absent: none. Shopify takes `expiring=1` and requires it of every app created
+   * from 2026-12-01; an older app takes it as an opt-in. Whether the token expires is read from the
+   * answer, never from this field. Read through {@link codeExchangeExtraParams}.
+   */
+  readonly expiringParam?: { readonly name: string; readonly value: string };
+  /**
    * A check the callback runs on the provider's redirect before it exchanges the code, on top
    * of the state cookie every preset already has. Absent: none. `shopify-hmac` is
    * {@link ./oauth-callback-hmac.ts}.
@@ -297,6 +304,22 @@ export function presetTokenHeaderName(preset: OAuthPreset): string | undefined {
  */
 export function presetTokenBodyFormat(preset: OAuthPreset, profileFormat: 'form' | 'json' | undefined): 'form' | 'json' {
   return preset.tokenBodyFormat ?? profileFormat ?? 'form';
+}
+
+/**
+ * What the code exchange adds to the standard parameters for this preset: the ask for an expiring
+ * token, unless the profile already holds a connection whose token does not expire. That
+ * connection keeps the exchange it was made with, also when it is connected again; moving it to
+ * expiring tokens is a step of its own, not a side effect of a reconnect.
+ */
+export function codeExchangeExtraParams(
+  preset: OAuthPreset | undefined,
+  held: { readonly hasAccessToken: boolean; readonly expiringHeld: boolean },
+): Record<string, string> {
+  const ask = preset?.expiringParam;
+  if (ask === undefined) return {};
+  if (held.hasAccessToken && !held.expiringHeld) return {};
+  return { [ask.name]: ask.value };
 }
 
 /**
@@ -400,8 +423,9 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze<OAuthPreset[]>([
     // An app the merchant creates in their store's organisation, authorised through lynox's
     // connect link (PRD shopify-preset, revision 9). Paths, comma-separated scopes, the token
     // header and the form-encoded exchange from shopify.dev's authorization-code grant and
-    // access-scopes pages, read 2026-10-09 and 2026-10-18. No `expiring`: the token does not
-    // expire, so there is no refresh.
+    // access-scopes pages, read 2026-10-09 and 2026-10-18. `expiring=1` from shopify.dev's
+    // changelog of 2026-11-19: an app created from 2026-12-01 gets only expiring offline tokens
+    // (one hour, with a refresh token for 90 days); an older one may opt in.
     id: 'shopify',
     label: 'Shopify',
     host: { kind: 'template', param: 'shop', template: '{shop}.myshopify.com' },
@@ -410,6 +434,7 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze<OAuthPreset[]>([
     apiPathPrefix: '/admin/',
     authorizePath: '/admin/oauth/authorize',
     tokenPath: '/admin/oauth/access_token',
+    expiringParam: { name: 'expiring', value: '1' },
     // The store's subdomain, as Shopify names it: lower-case letters, digits and hyphens, not
     // starting with a hyphen, at most 63 of them (one DNS label). Shopify itself admits upper
     // case; the boundary does not.
@@ -693,8 +718,7 @@ export function builtInPresetOf(
  * app-level exchange. Removing an entry from {@link REGISTER_ENTRIES} means adding its id
  * here; a test pins the ids ever shipped and fails when one is in neither place.
  *
- * When an id goes in here, check two things this list does not cover: `isPresetClientSecretName`
- * no longer protects that provider's app-secret names, and the profile's `token_url` and
+ * When an id goes in here, check what this list does not cover: the profile's `token_url` and
  * `base_url` stay editable (fetch_token exchanges nothing for such a profile today).
  */
 export const RETIRED_PRESET_IDS: readonly string[] = Object.freeze<string[]>([]);
@@ -809,11 +833,22 @@ export function presetClientKeys(presetId: string): { readonly id: string; reado
 
 /**
  * Whether `name` is the client secret of a built-in provider ({@link presetClientKeys}). The set
- * is the register's, so it is finite and fixed at build time; a name an operator chose for an OAuth
- * client of their own (`MY_APP_CLIENT_SECRET`) is not in it.
+ * is the register's and the retired ids' ({@link RETIRED_PRESET_IDS}), so it is finite and fixed at
+ * build time; a name an operator chose for an OAuth client of their own (`MY_APP_CLIENT_SECRET`)
+ * is not in it. A retired provider's secret stays in it: the name keeps it off the model's list
+ * of secrets and out of `secret:` references, and retiring the provider leaves the value stored.
  */
-export function isPresetClientSecretName(name: string, register: PresetRegister = OAUTH_PRESETS): boolean {
-  return register.ids().some((id) => presetClientKeys(id).secret === name);
+export function isPresetClientSecretName(
+  name: string,
+  register: PresetRegister = OAUTH_PRESETS,
+  retired: readonly string[] = RETIRED_PRESET_IDS,
+): boolean {
+  return [...register.ids(), ...retired].some((id) => presetClientKeys(id).secret === name);
+}
+
+/** Whether `name` is the client secret of a provider this engine once shipped ({@link RETIRED_PRESET_IDS}). */
+export function isRetiredPresetClientSecretName(name: string, retired: readonly string[] = RETIRED_PRESET_IDS): boolean {
+  return retired.some((id) => presetClientKeys(id).secret === name);
 }
 
 /**
@@ -823,6 +858,20 @@ export function isPresetClientSecretName(name: string, register: PresetRegister 
  * a profile that names it as its client secret.
  */
 export function presetClientSecretGuidance(name: string): string {
+  return presetClientSecretGuidanceWith(name, RETIRED_PRESET_IDS);
+}
+
+/**
+ * {@link presetClientSecretGuidance} against a given retired list. Its own function, not a second
+ * parameter: callers pass the guidance to `.map`, which would hand the index in as that list.
+ */
+export function presetClientSecretGuidanceWith(name: string, retired: readonly string[]): string {
+  // A provider this engine once shipped has no connection form any more, so the form is not
+  // named; the name stays protected (`isPresetClientSecretName`), and a profile of the user's
+  // own takes another one.
+  if (isRetiredPresetClientSecretName(name, retired)) {
+    return `"${name}" is the OAuth client secret of a built-in provider this engine no longer has. It is not entered, used or referenced here — not in the chat and not through ask_secret. A profile of the user's own names its client secret differently.`;
+  }
   return `"${name}" is the OAuth client secret of a built-in provider. The owner of this lynox instance enters it in the connection form of the profile under Settings → API Profiles — not in the chat and not through ask_secret, and it is not referenced in a request. The engine sends it to the provider itself, for a profile that names "${name}" as its client secret and may read it.`;
 }
 

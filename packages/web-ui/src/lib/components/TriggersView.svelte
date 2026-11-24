@@ -11,6 +11,7 @@
 	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
 	import { endedNotices, pausedTitleLine, pausedWhoText, planTitle, refusalText, takeoverLines, writtenByMember, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
+	import { blockedReasonParts, hostLabels, type BlockedReason } from '../utils/blocked-reason.js';
 	import { awaitsOwnerStamp, listedLine, listedNote, stampable, usesConnections, type StampListed } from '../utils/stamp-confirm.js';
 	import StampConfirm from './StampConfirm.svelte';
 	import MarkedLine from './MarkedLine.svelte';
@@ -71,6 +72,9 @@
 		// The workflow's name, where the plan's title is that name as the engine wrote it
 		// (`GET /api/triggers`): the list puts lynox's words before it (`planTitle`).
 		title_workflow?: string;
+		// Why its run does not do its work, as a cause the view says in its own language
+		// (`GET /api/triggers`; a watch the instance's network_policy keeps from its page, U-392).
+		blocked_reason?: BlockedReason;
 		// From before its creator was recorded, nobody else's hand in it: it sends to none of the
 		// recipients it names until the owner confirms them (`GET /api/triggers`, owner only).
 		recipients_unconfirmed?: boolean;
@@ -674,6 +678,13 @@
 									<span class={notice.warn ? 'text-warning' : ''} data-escalation-notice={trigger.last_escalation_outcome}>{t(notice.key)} · {fmtDate(notice.at)}</span>
 								{/if}
 							</div>
+							<!-- Why its run does not do its work, with the way out (a watch the policy keeps from its
+							     page, U-392). The host is set apart as a value, as the plan views set apart what
+							     someone else wrote. -->
+							{#if trigger.blocked_reason}
+								{@const parts = blockedReasonParts(trigger.blocked_reason, t)}
+								<p class="mt-1 text-xs text-warning break-words" data-blocked-reason={trigger.blocked_reason.kind}>{parts.before}{#if parts.host !== null}<bdi data-foreign-value class="inline-block max-w-full rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono">{#each hostLabels(parts.host) as label, i (i)}<span class="inline-block max-w-full [overflow-wrap:anywhere]">{label}</span><wbr />{/each}</bdi>{/if}{parts.after}</p>
+							{/if}
 							<!-- A confirmed watch names its page too: its escalation leaves the address out when
 							     someone the owner let in set it up, and points here (PRD B6). -->
 							{#if showsWatchAddress(trigger) && !held(trigger)}
@@ -762,7 +773,8 @@
 							     has already been answered as started. Not at a paused plan either: it
 							     would be refused, and the way out is the takeover, which the badge and
 							     the takeover button (or, to a helper, the line under the badge) say. -->
-							{#if !held(trigger) && !pausedDone(trigger) && !pausedOpen(trigger)}
+							<!-- Nor where the policy keeps a watch from its page: the run would read nothing. -->
+							{#if !held(trigger) && !pausedDone(trigger) && !pausedOpen(trigger) && !trigger.blocked_reason}
 								<button onclick={() => runNow(trigger)} data-trigger-run-now disabled={busy[trigger.id]} aria-label={t('triggers.run_now')} title={t('triggers.run_now')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity disabled:opacity-40">▶ {t('triggers.run_now')}</button>
 							{/if}
 							<!-- Not at a plan that waits for its takeover: next to its badge the switch
