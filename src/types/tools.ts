@@ -9,6 +9,7 @@ import type { UntrustedCause } from '../core/untrusted-signals.js';
 import type { CallApiCost, CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 import type { ContainedRefusalReason } from '../core/containment.js';
 import type { SendTarget } from '../core/send-target.js';
+import type { HostPolicyContext } from '../core/network-guard.js';
 
 export type ToolHandler<TInput = unknown> =
   (input: TInput, agent: IAgent) => Promise<string>;
@@ -212,6 +213,18 @@ export interface ToolEntry<TInput = unknown> {
    * such a read is asked about whatever its host, unless a search listed its exact address.
    */
   readCarriesAddress?: ((input: TInput) => boolean) | undefined;
+  /**
+   * A refusal the handler would give for this call anyway, read before anyone is asked about it:
+   * the call ends with this text as its error and nobody answers a question that cannot change
+   * the outcome. `null` means nothing: every check after it (where the targets come from, the
+   * guard's question) runs exactly as without this field. It can only refuse; no return value
+   * skips a question or lets a call through. A throw refuses the call with a fixed text, never
+   * the exception's message, and nothing runs. It reads the input as the model wrote it, before
+   * `secret:` references are resolved: where the handler would see another value, it returns
+   * `null`. The text is the tool's own wording, written by its code, never a value of the input
+   * taken as a whole.
+   */
+  refusesUnasked?: ((input: TInput, ctx: HostPolicyContext) => string | null) | undefined;
   /**
    * The address a call SAVES for later credentialed sends, exactly as the input names it: the
    * token endpoint a profile the call saves will post a client ID and client secret to (`api_setup`

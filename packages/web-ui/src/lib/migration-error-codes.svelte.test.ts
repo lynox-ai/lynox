@@ -94,7 +94,7 @@ describe('the codes of a migration stop', () => {
 			if (code === 'start_refused') inBoth('migration.error_not_started');
 			else inBoth(migrationStopKey(code));
 		}
-		for (const key of ['migration.stop.unknown_nothing_sent', 'migration.stop.data_too_large_parts', 'migration.stop.data_too_large_size', 'migration.stop.data_too_large_both', 'migration.stop.start_not_public_example', 'migration.size_bytes', 'migration.target_says', 'migration.message', 'migration.part', 'migration.part_kind', 'migration.duration_minutes', 'migration.duration_seconds']) inBoth(key);
+		for (const key of ['migration.stop.unknown_nothing_sent', 'migration.stop.handshake_no_answer', 'migration.stop.data_too_large_parts', 'migration.stop.data_too_large_size', 'migration.stop.data_too_large_both', 'migration.stop.start_not_public_example', 'migration.size_bytes', 'migration.target_says', 'migration.message', 'migration.part', 'migration.part_kind', 'migration.duration_minutes', 'migration.duration_seconds']) inBoth(key);
 	});
 
 	it('name the start codes the route sends as the ones that say the migration did not start', () => {
