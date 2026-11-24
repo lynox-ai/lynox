@@ -427,6 +427,8 @@ export interface ApiSetupDialog {
   /** `changes`: what the save changes, one line each (`securityChanges`, in this language); `disclosure` may be empty. */
   readonly save: (word: PromptText, name: string, changes: readonly PromptText[], disclosure: string) => PromptText;
   readonly redirect: (hosts: string[]) => string;
+  /** The sentence before the acceptance of each host outside the listed sub-processors; `disclosures` (the acceptances, English, binding text) as given. */
+  readonly outsideSubProcessors: (oauth: boolean, disclosures: string) => string;
   readonly deleteUnreadable: (word: PromptText, id: string, source: string) => PromptText;
   readonly deleteProfile: (word: PromptText, name: string, id: string, host: string | undefined, loses: PromptText) => PromptText;
   readonly losesTokens: (tokens: number) => PromptText;
@@ -451,6 +453,7 @@ export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> 
       const disclosureBlock = disclosure === '' ? pv`` : pv`${disclosure}\n\n`;
       return pv`⚠ ${word}: saving "${name}" needs your acceptance.\n\n${changeBlock}${disclosureBlock}Accept and save this profile?`;
     },
+    outsideSubProcessors: (oauth, disclosures) => `This engine will send data${oauth ? ' — and, for its OAuth token, the managed access_token —' : ''} to host(s) outside lynox's listed sub-processors:\n\n${disclosures}`,
     redirect: (hosts) => `You will be sent to ${hosts.join(' and ')} in your own browser to authorize this profile. You sign in there, to that provider — not to lynox — and what comes back is stored here for this profile.`,
     deleteUnreadable: (word, id, source) => pv`⚠ ${word}: delete the stored API profile ${id}, which could not be read (${source})? Every vault name it carries is free for other profiles once it is gone. Delete it?`,
     deleteProfile: (word, name, id, host, loses) => pv`⚠ ${word}: delete the API profile ${name} (id ${id}${host ? pv`, host ${host}` : pv``})?${loses} Delete it?`,
@@ -480,6 +483,7 @@ export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> 
       const disclosureBlock = disclosure === '' ? pv`` : pv`${disclosure}\n\n`;
       return pv`⚠ ${word}: Zum Speichern von "${name}" braucht es deine Zustimmung.\n\n${changeBlock}${disclosureBlock}Dieses Profil annehmen und speichern?`;
     },
+    outsideSubProcessors: (oauth, disclosures) => `lynox sendet Daten${oauth ? ' – und für sein OAuth-Token das verwaltete access_token –' : ''} an Hosts ausserhalb der aufgeführten Unterauftragsverarbeiter von lynox:\n\n${disclosures}`,
     redirect: (hosts) => `Zur Freigabe dieses Profils öffnet sich ${hosts.join(' und ')} in deinem eigenen Browser. Du meldest dich dort beim Anbieter an, nicht bei lynox, und was zurückkommt, wird hier für dieses Profil gespeichert.`,
     deleteUnreadable: (word, id, source) => pv`⚠ ${word}: das gespeicherte API-Profil ${id} löschen, das sich nicht lesen liess (${source})? Jeder Vault-Name darin ist danach für andere Profile frei. Löschen?`,
     deleteProfile: (word, name, id, host, loses) => pv`⚠ ${word}: das API-Profil ${name} löschen (Id ${id}${host ? pv`, Host ${host}` : pv``})?${loses} Löschen?`,
@@ -497,11 +501,11 @@ export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> 
           ? pv` Diese Einstellungen wurden zuletzt um ${p.viewed.clock} in einem deiner Chats gelesen und haben sich seither nicht geändert (Version ${p.version}).`
           : pv` Diese Einstellungen haben sich geändert, nachdem sie zuletzt um ${p.viewed.clock} in einem deiner Chats gelesen wurden; lehne ab und sieh dir das Profil erneut an, bevor du zustimmst (Version ${p.version}).`;
       const clientIdSentence = p.clientId ? pv` Eine Client-ID steht ausserdem im Anmeldelink und geht an den Browser dessen, der ihn öffnet.` : '';
-      return pv`⚠ ${word}: den Vault-Schlüssel ${p.name} für das API-Profil ${p.trailId} freigeben? Es wurde in der Sitzung von ${p.author} eingerichtet. Wenn du zustimmst, sendet lynox den Wert von ${p.name} als ${p.role} an ${p.hosts.length > 0 ? p.hosts.join(', ') : 'keinen Host, den lynox benennen kann'}, bei jeder Anfrage und jedem Lauf über dieses Profil, auch bei deinen eigenen und bei Massenläufen, bis der Zugang dieser Person endet oder du die Freigabe zurückziehst.${moreSentence}${versionSentence}${clientIdSentence} Unter diesem Namen ${p.held ? 'liegt im Vault ein Wert' : 'liegt im Vault noch kein Wert'}. Jede Änderung daran, wohin der Wert geht, beendet die Freigabe. Freigeben?`;
+      return pv`⚠ ${word}: den Vault-Schlüssel ${p.name} für das API-Profil ${p.trailId} freigeben? Es wurde in der Sitzung von ${p.author} eingerichtet. Wenn du zustimmst, sendet lynox den Wert von ${p.name} als ${p.role} an ${p.hosts.length > 0 ? p.hosts.join(', ') : 'keinen Host, den lynox benennen kann'}, bei jeder Anfrage und jedem Lauf über dieses Profil, auch bei deinen eigenen und bei Massenläufen, bis das Mandat endet oder du die Freigabe zurückziehst.${moreSentence}${versionSentence}${clientIdSentence} Unter diesem Namen ${p.held ? 'liegt im Vault ein Wert' : 'liegt im Vault noch kein Wert'}. Jede Änderung daran, wohin der Wert geht, beendet die Freigabe. Freigeben?`;
     },
     adopt: (word, p) => {
       const shown = p.names.slice(0, ADOPT_NAMES_SHOWN).join(', ') + (p.names.length > ADOPT_NAMES_SHOWN ? ` und ${String(p.names.length - ADOPT_NAMES_SHOWN)} weitere` : '');
-      return pv`⚠ ${word}: die Verbindung des API-Profils ${p.name} (Id ${p.id}) übernehmen? Sie wurde beim Anbieter in der Sitzung von ${p.by} autorisiert, ${p.known ? 'deren Zugang beendet ist' : 'und lynox kann nicht feststellen, ob der Zugang dieser Person noch besteht'}. Nach der Übernahme gehört das Profil dir. lynox sendet dann bei deinen Anfragen und Läufen an ${p.hosts.length > 0 ? p.hosts.join(', ') : 'keinen Host, den lynox benennen kann'} die Tokens der Verbindung und die Vault-Namen, die dieses Profil nennt. Sie werden gelesen wie bei jedem deiner Profile, Werte aus der Umgebung eingeschlossen: ${shown.length > 0 ? shown : 'keine'}. Übernehmen?`;
+      return pv`⚠ ${word}: die Verbindung des API-Profils ${p.name} (Id ${p.id}) übernehmen? Sie wurde beim Anbieter in der Sitzung von ${p.by} autorisiert, ${p.known ? 'deren Mandat nicht mehr aktiv ist' : 'und lynox kann nicht feststellen, ob dieses Mandat noch aktiv ist'}. Nach der Übernahme gehört das Profil dir. lynox sendet dann bei deinen Anfragen und Läufen an ${p.hosts.length > 0 ? p.hosts.join(', ') : 'keinen Host, den lynox benennen kann'} die Tokens der Verbindung und die Vault-Namen, die dieses Profil nennt. Sie werden gelesen wie bei jedem deiner Profile, Werte aus der Umgebung eingeschlossen: ${shown.length > 0 ? shown : 'keine'}. Übernehmen?`;
     },
   },
 };
@@ -538,7 +542,7 @@ export interface SecurityChangeWords {
   readonly sendsToNoHost: (shown: string) => string;
   readonly sendsTo: (shown: string, host: string) => string;
   /** `held` scope tokens withheld, after the `shown` ones (which may be empty). */
-  readonly scopesWithheld: (shown: string, held: number) => string;
+  readonly scopesWithheld: (shown: readonly string[], held: number) => string;
   readonly line: (label: string, was: string, now: string) => PromptText;
   readonly scopesAdded: (scopes: string) => PromptText;
   readonly scopesRemoved: (scopes: string, noneLeft: boolean) => PromptText;
@@ -573,7 +577,7 @@ export const SECURITY_CHANGE_WORDS: Readonly<Record<DialogLanguage, SecurityChan
     sendsTo: (shown, host) => `${shown} (sends to ${host})`,
     scopesWithheld: (shown, held) => {
       const count = `${String(held)} ${held === 1 ? 'value shaped like a credential' : 'values shaped like credentials'} (not shown)`;
-      return shown === '' ? count : `${shown}; plus ${count}`;
+      return shown.length === 0 ? count : `${shown.join(' ')}; plus ${count}`;
     },
     line: (label, was, now) => pv`${label}: ${was} → ${now}`,
     scopesAdded: (scopes) => pv`scopes added: ${scopes}`,
@@ -609,7 +613,7 @@ export const SECURITY_CHANGE_WORDS: Readonly<Record<DialogLanguage, SecurityChan
     sendsTo: (shown, host) => `${shown} (sendet an ${host})`,
     scopesWithheld: (shown, held) => {
       const count = `${String(held)} ${held === 1 ? 'Wert in der Form von Zugangsdaten' : 'Werte in der Form von Zugangsdaten'} (nicht angezeigt)`;
-      return shown === '' ? count : `${shown}; dazu ${count}`;
+      return shown.length === 0 ? count : `${shown.join(' ')}; dazu ${count}`;
     },
     line: (label, was, now) => pv`${label}: ${was} → ${now}`,
     scopesAdded: (scopes) => pv`Scopes hinzugefügt: ${scopes}`,

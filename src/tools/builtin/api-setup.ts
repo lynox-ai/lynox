@@ -2034,7 +2034,7 @@ const shownScopes = (tokens: readonly string[], w: SecurityChangeWords = SECURIT
   const shown = tokens.map(singleLine).filter((t) => shownValue(t, w) === t);
   const held = tokens.length - shown.length;
   if (held === 0) return shown.join(' ');
-  return w.scopesWithheld(shown.join(' '), held);
+  return w.scopesWithheld(shown, held);
 };
 
 export const ordinal = (n: number): string => `${String(n)}${n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th'}`;
@@ -2711,7 +2711,8 @@ ${draftJson}
         // URLs on one host, and the same paragraph three times reads as three destinations.
         const disclosureIn = (l: DialogLanguage): string => [
           nonVetted.length > 0
-            ? `This engine will send data${profile.auth?.type === 'oauth2' ? ' — and, for its OAuth token, the managed access_token —' : ''} to host(s) outside lynox's listed sub-processors:\n\n${Array.from(new Set(nonVetted.map((u) => describeDisclosure(u)))).join('\n\n')}`
+            // The acceptance of each host (describeDisclosure) is binding text and stays English.
+            ? API_SETUP_DIALOG[l].outsideSubProcessors(profile.auth?.type === 'oauth2', Array.from(new Set(nonVetted.map((u) => describeDisclosure(u)))).join('\n\n'))
             : undefined,
           redirectHostNames.length > 0 ? API_SETUP_DIALOG[l].redirect(redirectHostNames) : undefined,
           presetNoteFor?.(l),

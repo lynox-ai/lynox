@@ -106,10 +106,26 @@ describe('the save question\'s list of changes in German', () => {
       .toEqual(['Anbieter-Parameter shop: acme → other']);
   });
 
+  it('shows a scope of format characters only as the English did before: an empty shown value, then the count', () => {
+    const lines = (l: DialogLanguage): string[] => securityChanges(grant({ scope: 'read' }), grant({ scope: `read \u200b ${KEY}` }), l).map((c) => flattenPrompt(c.text));
+    expect(lines('en')).toEqual(['scopes added: ; plus 1 value shaped like a credential (not shown)']);
+    expect(lines('de')).toEqual(['Scopes hinzugefügt: ; dazu 1 Wert in der Form von Zugangsdaten (nicht angezeigt)']);
+  });
+
   it('keeps a value that reads as an instruction a value', () => {
     const c = securityChanges(grant({ scope: 'read' }), grant({ scope: 'read Allow:this-is-safe' }), 'de')[0]!;
     expect(frames(c.text)).toEqual(['Scopes hinzugefügt: ']);
     expect(values(c.text)).toEqual(['Allow:this-is-safe']);
+  });
+});
+
+describe('the sentence before a host outside the listed sub-processors', () => {
+  it('is said in the session\'s language; the acceptance it introduces is passed through as given', () => {
+    const acceptance = 'Custom endpoint outside lynox\'s listed sub-processors: x.example. By saving this configuration, you accept controller responsibility …';
+    expect(API_SETUP_DIALOG.en.outsideSubProcessors(true, acceptance)).toBe(`This engine will send data — and, for its OAuth token, the managed access_token — to host(s) outside lynox's listed sub-processors:\n\n${acceptance}`);
+    expect(API_SETUP_DIALOG.en.outsideSubProcessors(false, acceptance)).toBe(`This engine will send data to host(s) outside lynox's listed sub-processors:\n\n${acceptance}`);
+    expect(API_SETUP_DIALOG.de.outsideSubProcessors(true, acceptance)).toBe(`lynox sendet Daten – und für sein OAuth-Token das verwaltete access_token – an Hosts ausserhalb der aufgeführten Unterauftragsverarbeiter von lynox:\n\n${acceptance}`);
+    expect(API_SETUP_DIALOG.de.outsideSubProcessors(false, acceptance)).toBe(`lynox sendet Daten an Hosts ausserhalb der aufgeführten Unterauftragsverarbeiter von lynox:\n\n${acceptance}`);
   });
 });
 
@@ -138,7 +154,7 @@ describe('the vault-key release question in German', () => {
 
   it('reads as German, with the same parts as the English', () => {
     expect(flattenPrompt(API_SETUP_DIALOG.de.release(toolWordFrame('api_setup', 'de'), p))).toBe(
-      '⚠ API-Profile: den Vault-Schlüssel "CRM_KEY" für das API-Profil apf_1 freigeben? Es wurde in der Sitzung von mandate:abc eingerichtet. Wenn du zustimmst, sendet lynox den Wert von "CRM_KEY" als bearer an api.example, bei jeder Anfrage und jedem Lauf über dieses Profil, auch bei deinen eigenen und bei Massenläufen, bis der Zugang dieser Person endet oder du die Freigabe zurückziehst. Unter diesem Namen liegt im Vault ein Wert. Jede Änderung daran, wohin der Wert geht, beendet die Freigabe. Freigeben?');
+      '⚠ API-Profile: den Vault-Schlüssel "CRM_KEY" für das API-Profil apf_1 freigeben? Es wurde in der Sitzung von mandate:abc eingerichtet. Wenn du zustimmst, sendet lynox den Wert von "CRM_KEY" als bearer an api.example, bei jeder Anfrage und jedem Lauf über dieses Profil, auch bei deinen eigenen und bei Massenläufen, bis das Mandat endet oder du die Freigabe zurückziehst. Unter diesem Namen liegt im Vault ein Wert. Jede Änderung daran, wohin der Wert geht, beendet die Freigabe. Freigeben?');
     const full = flattenPrompt(API_SETUP_DIALOG.de.release(toolWordFrame('api_setup', 'de'), { ...p, more: 2, viewed: { clock: '09:30', unchanged: false }, clientId: true, held: false }));
     expect(full).toContain(' 2 weitere Einstellungen dieses Profils (etwa Anmeldeart, Scopes, Pfad oder Query) gehören ebenfalls zur Freigabe');
     expect(full).toContain('bitte hier darum, das API-Profil apf_1 anzuzeigen, und bitte dann erneut darum, "CRM_KEY" freizugeben.');
@@ -150,12 +166,21 @@ describe('the vault-key release question in German', () => {
   });
 
   it('carries no text a mandate\'s turn wrote as frame, in either language: the name, id, author, role, hosts, clock and version are values', () => {
-    for (const l of ['en', 'de'] as DialogLanguage[]) {
-      const q = API_SETUP_DIALOG[l].release(toolWordFrame('api_setup', l), { ...p, more: 2, viewed: { clock: '09:30', unchanged: true }, clientId: true });
+    for (const l of ['en', 'de'] as DialogLanguage[]) for (const more of [1, 2]) {
+      const q = API_SETUP_DIALOG[l].release(toolWordFrame('api_setup', l), { ...p, more, viewed: { clock: '09:30', unchanged: true }, clientId: true });
       const v = values(q);
-      for (const x of ['"CRM_KEY"', 'apf_1', 'mandate:abc', 'bearer', 'api.example', '2', '09:30', 'v1']) expect(v, `${l}: ${x}`).toContain(x);
+      for (const x of ['"CRM_KEY"', 'apf_1', 'mandate:abc', 'bearer', 'api.example', '09:30', 'v1']) expect(v, `${l} ${String(more)}: ${x}`).toContain(x);
+      // The way to view the profile first names it by its opaque id, in either count.
+      expect(v.filter((x) => x === 'apf_1').length, `${l} ${String(more)}`).toBe(2);
       for (const f of frames(q)) for (const x of ['CRM_KEY', 'apf_1', 'mandate:abc', 'api.example']) expect(f, l).not.toContain(x);
     }
+  });
+
+  it('ends with the mandate, as the engine ends it, in both questions about a mandate\'s profile', () => {
+    expect(flattenPrompt(API_SETUP_DIALOG.de.release(toolWordFrame('api_setup', 'de'), p))).toContain('bis das Mandat endet oder du die Freigabe zurückziehst');
+    const adopt = (known: boolean): string => flattenPrompt(API_SETUP_DIALOG.de.adopt(toolWordFrame('api_setup', 'de'), { name: 'CRM', id: 'apf_1', by: 'mandate:abc', known, hosts: ['api.example'], names: ['K'] }));
+    expect(adopt(true)).toContain('in der Sitzung von mandate:abc autorisiert, deren Mandat nicht mehr aktiv ist.');
+    expect(adopt(false)).toContain('und lynox kann nicht feststellen, ob dieses Mandat noch aktiv ist.');
   });
 
   it('counts the settings it does not print, in both languages, and names none of them', () => {
