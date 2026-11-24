@@ -1,4 +1,5 @@
 import { stripHiddenInName } from '../core/hidden-text.js';
+import { placeholders, replacePlaceholders } from './placeholders.js';
 /**
  * The shape of a workflow step's id. An id reaches the model wherever a run, a diagnosis or an edit
  * names its step, and the owner needs it to repair a plan, so it cannot be left out. Its shape is
@@ -33,6 +34,27 @@ export function stepIdRefusal(where: string, { refs = true }: { refs?: boolean }
 }
 
 /**
+ * Ids in the shape that a step still cannot take, because the context of a run already uses the
+ * name: `params` holds the workflow's parameters (`{{params.<name>}}`), and a plain object reads
+ * `__proto__` and `constructor` through to its prototype. A step under `params` would take its place
+ * in the context of each step that reads it (`buildStepContext`), so a reference meant for the
+ * parameters would read the step's output instead. The contexts are built without a prototype, so
+ * the other two are kept out for any reader that is not.
+ */
+export const RESERVED_STEP_IDS: ReadonlySet<string> = new Set(['params', '__proto__', 'constructor']);
+
+/** Whether `id` is one of {@link RESERVED_STEP_IDS}. */
+export function isReservedStepId(id: unknown): boolean {
+  return typeof id === 'string' && RESERVED_STEP_IDS.has(id);
+}
+
+/** Why a reserved id is refused as a step id, naming where it is; the reserved names are lynox's own words. */
+export function reservedStepIdRefusal(where: string, { refs = true }: { refs?: boolean } = {}): string {
+  return `${where}: "params", "__proto__" and "constructor" cannot be step ids, because a run already uses these names ("params" holds the workflow's parameters). `
+    + 'Choose another id in the allowed form, for example fetch_orders.' + (refs ? ' If other steps refer to this step, use the new id there too.' : '');
+}
+
+/**
  * Why a step reference (`input_from`) outside the shape is refused: it names a step that should exist,
  * so the model is told to point at that step, not to choose a new id (U-316).
  */
@@ -49,6 +71,8 @@ export function stepRefRefusal(where: string): string {
 export function stepIdIssue(steps: ReadonlyArray<{ id?: unknown; input_from?: unknown }>, path = 'steps'): string | null {
   const at = steps.findIndex(s => !isStepIdShape(s.id));
   if (at !== -1) return stepIdRefusal(`step #${String(at + 1)} (${path}[${String(at)}].id)`);
+  const reserved = steps.findIndex(s => isReservedStepId(s.id));
+  if (reserved !== -1) return reservedStepIdRefusal(`step #${String(reserved + 1)} (${path}[${String(reserved)}].id)`);
   // A step's `input_from` names step ids too, and the graph check quotes one it cannot find: an entry
   // outside the shape is refused here, by its place, before that check could repeat its text.
   for (const [i, s] of steps.entries()) {
@@ -132,7 +156,7 @@ export type RunnableStep = { id: string; task: string; input_from?: string[] | u
 /** The first segment of each `{{…}}` placeholder in a text. */
 function placeholderHeads(text: unknown): string[] {
   if (typeof text !== 'string') return [];
-  return [...text.matchAll(/\{\{([^}]+)\}\}/g)].map(m => m[1]!.trim().split('.')[0]!);
+  return placeholders(text).map(p => p.inner.trim().split('.')[0]!);
 }
 
 function templateStrings(value: unknown): string[] {
@@ -228,7 +252,7 @@ export function runStepIds<T extends RunnableStep>(steps: readonly T[], names: R
   if (names.size === 0) return [...steps];
   // Longest first, so an id that begins with another one is matched whole.
   const olds = [...names.keys()].sort((a, b) => b.length - a.length);
-  const inText = (text: string): string => text.replace(/\{\{([^}]+)\}\}/g, (match: string, raw: string) => {
+  const inText = (text: string): string => replacePlaceholders(text, (match: string, raw: string) => {
     const path = raw.trim();
     if (path === 'params' || path.startsWith('params.')) return match;
     const old = olds.find(o => path === o || path.startsWith(`${o}.`));
