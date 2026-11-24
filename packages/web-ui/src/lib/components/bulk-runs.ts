@@ -410,6 +410,8 @@ export function bulkResumeText(
 		const first = key === 'unauthorized' ? 'bulk.halt.unauthorized_before_check'
 			: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_check_${tier}`
 			: key === 'credential' ? 'bulk.halt.credential_before'
+			// A store whose access ended or whose profile names its app wrongly cannot be read either.
+			: key === 'storeAccessEnded' || key === 'storeClientMisnamed' ? `bulk.halt.${key}_before_check`
 			: null;
 		const then = key === 'unavailable' ? 'bulk.halt.unavailable_before_check'
 			: key === 'markupAddedByShop' ? bulkHaltKeyOf(run, 'bulk.halt.markupAddedByShop_before')

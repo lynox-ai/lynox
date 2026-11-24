@@ -746,6 +746,21 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('storeClientMisnamed'), true, EN)?.before).toBe('Ask lynox in the chat to fix the profile for shop.example.invalid. Then you can continue the run here.');
 	});
 
+	it('names the step first, then checking, for a store whose access ended or whose profile is misnamed, when the run goes on by checking', () => {
+		// Without the access the check cannot read the store either: the step comes first and ends with checking.
+		const unclear = { probeConfirmed: false, maxTargets: 1, applied: 0, sentUnknown: 1, resumeOpen: 3, resumeTries: 1, resumeSends: 0 };
+		expect(bulkResumeKind(w('storeAccessEnded', unclear))).toBe('check');
+		expect(bulkResumeText(w('storeAccessEnded', unclear), true, DE)?.before).toBe('Bitte lynox im Chat, den Shop neu zu verbinden. Danach kannst du nachprüfen.');
+		expect(bulkResumeText(w('storeAccessEnded', unclear), true, EN)?.before).toBe('Ask lynox in the chat to connect the store again. Then you can check again.');
+		expect(bulkResumeText(w('storeClientMisnamed', unclear), false, DE)?.before).toBe('Bitte lynox im Chat, das Profil für shop.example.invalid anzupassen. Danach kannst du nachprüfen.');
+		expect(bulkResumeText(w('storeClientMisnamed', unclear), false, EN)?.before).toBe('Ask lynox in the chat to fix the profile for shop.example.invalid. Then you can check again.');
+		for (const key of ['storeAccessEnded', 'storeClientMisnamed']) expect(bulkResumeText(w(key, unclear), true, DE)?.after, key).toBeNull();
+		// A step that follows the check stays where it was.
+		const markup = bulkResumeText(w('markupAddedByShop', unclear), true, DE);
+		expect(markup?.before).toBeNull();
+		expect(markup?.after).toBe(DE.tf('bulk.halt.markupAddedByShop_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
+	});
+
 	it('offers no way on that the engine refuses for want of a probe', () => {
 		// Without a probe a run writes on only under a maximum of one: a higher one is refused.
 		expect(bulkResumeKind(w('maxTargets', { probeConfirmed: false, maxTargets: 1 }))).toBeNull();
@@ -818,7 +833,7 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('credential', unclear), true, DE)?.before).toBe(DE.tf('bulk.halt.credential_before', { provider: 'shop.example.invalid', host: 'shop.example.invalid' }));
 		// No sentence around the check names continuing as the next step, for any halt that can come
 		// to it; a way to write on later (Shopify markup) may follow the check.
-		for (const key of ['unavailable', 'unauthorized', 'blocked', 'shopifyWriteOff', 'markupAddedByShop', 'credential', 'failureRate', 'consecutiveFailures', 'maxTargets']) {
+		for (const key of ['unavailable', 'unauthorized', 'blocked', 'shopifyWriteOff', 'markupAddedByShop', 'credential', 'failureRate', 'consecutiveFailures', 'maxTargets', 'storeAccessEnded', 'storeClientMisnamed']) {
 			for (const managed of [true, false]) {
 				const text = bulkResumeText(w(key, unclear), managed, DE);
 				expect(bulkResumeKind(w(key, unclear)), key).toBe('check');
