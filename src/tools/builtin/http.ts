@@ -40,6 +40,7 @@ import {
 } from '../../core/html-extract.js';
 import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { onBoxBlock, pv } from '../../core/prompt-value.js';
+import { toolWordFrame } from '../tool-words.js';
 import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../../core/preset-write-context.js';
 import { currentCallSignal, currentCallTargetOrigin, currentCallTwins, joinCallSignal, noteApiCost, noteCallConnection, noteGrantLift, type CallApiCost } from '../../core/call-connection.js';
 import { crossHostRedirectGuard, readHopsGuarded } from '../../core/read-hops.js';
@@ -47,7 +48,7 @@ import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
 import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, urlQueryStrings, queryReadings, queryKeyName, jsonObjectNotGraphql, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
-import { clearanceRefusalText, isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_NOT_SET_UP, storeClearanceHeld, storeSetupRefusal } from '../../core/shopify-host.js';
+import { clearanceRefusalCause, clearanceRefusalText, isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_NOT_SET_UP, storeClearanceHeld, storeSetupRefusal } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
 import type { VerifiedStoreCallback } from '../../core/oauth-callback-hmac.js';
 import { chatIsContained, containedStoreWrite, containerOf, CONTAINED_WRITE_REFUSAL_AT_SEND, type ContainedConnection, type StoreContainer } from '../../core/containment.js';
@@ -1270,31 +1271,6 @@ export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IA
 }
 
 /**
- * Did a USER give this grant, so that an app-level token would replace their consent?
- *
- * Two marks, either suffices: `oauth_grant.origin === 'callback'` (only the callback
- * writes it; an incoming value is discarded on create and update) and a BUILT-IN preset
- * (`builtInPresetOf`: an oauth2 profile whose `auth.oauth.preset_id` the register knows, or `retiredPresetIdOf`:
- * one this engine once shipped): the built-in presets are
- * authorization-code flows, and the preset also marks a profile that re-entered the store
- * without its grant record (a JSON in the apis directory). A preset whose provider issues
- * app tokens would be refused here too, so adding one means revisiting this.
- *
- * ⚠ Known presets only, and the ones this engine once shipped (`retiredPresetIdOf`): a
- * provider removed from the register leaves profiles whose grant a user gave through it.
- * A profile may be saved naming a provider this engine never had (the save only notes it),
- * and `connect` refuses such a profile — so reading any `preset_id` as a user's consent
- * would refuse an app-only profile's exchange and send it to a `connect` that cannot run.
- *
- * ⚠ NOT "has an `oauth_grant`": `fetch_token` writes one after every successful exchange,
- * app-only profiles included (`written`, `connected_by`), and the renewal on attach runs the
- * same handler — so that test would refuse an app-only profile's second token. A profile
- * with neither mark is an app-only profile and is not told apart from one.
- *
- * The one place this question is answered: the unattended gate, the 401 reminder and
- * `fetch_token` itself (`api-setup.ts`) all ask it here.
- */
-/**
  * The way forward for a profile whose renewal would swap a user's authorization for an app token,
  * as one sentence: `fetch_token` ends with it, and so does the 401 reminder of a built-in
  * provider's profile, so the two never name different ways for the same profile.
@@ -1348,6 +1324,31 @@ export function retiredProviderReminder(profileId: string): string {
   return `\n\n**[Agent reminder: OAuth2 401, and this connection cannot be renewed here]**\nThis URL maps to api_profile "${profileId}". It was set up through a built-in provider this engine no longer has, so no token is requested for it: do not call api_setup fetch_token or connect for it, and do not edit the profile to make a renewal pass. Tell the user. Another way of signing in to the same API replaces this connection, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
 }
 
+/**
+ * Did a USER give this grant, so that an app-level token would replace their consent?
+ *
+ * Two marks, either suffices: `oauth_grant.origin === 'callback'` (only the callback
+ * writes it; an incoming value is discarded on create and update) and a BUILT-IN preset
+ * (`builtInPresetOf`: an oauth2 profile whose `auth.oauth.preset_id` the register knows, or `retiredPresetIdOf`:
+ * one this engine once shipped): the built-in presets are
+ * authorization-code flows, and the preset also marks a profile that re-entered the store
+ * without its grant record (a JSON in the apis directory). A preset whose provider issues
+ * app tokens would be refused here too, so adding one means revisiting this.
+ *
+ * ⚠ Known presets only, and the ones this engine once shipped (`retiredPresetIdOf`): a
+ * provider removed from the register leaves profiles whose grant a user gave through it.
+ * A profile may be saved naming a provider this engine never had (the save only notes it),
+ * and `connect` refuses such a profile — so reading any `preset_id` as a user's consent
+ * would refuse an app-only profile's exchange and send it to a `connect` that cannot run.
+ *
+ * ⚠ NOT "has an `oauth_grant`": `fetch_token` writes one after every successful exchange,
+ * app-only profiles included (`written`, `connected_by`), and the renewal on attach runs the
+ * same handler — so that test would refuse an app-only profile's second token. A profile
+ * with neither mark is an app-only profile and is not told apart from one.
+ *
+ * The one place this question is answered: the unattended gate, the 401 reminder and
+ * `fetch_token` itself (`api-setup.ts`) all ask it here.
+ */
 export function oauthGrantIsUserDelegated(profile: {
   auth?: { type?: string | undefined; oauth?: { preset_id?: string | undefined } | undefined } | undefined;
   oauth_grant?: { origin?: 'callback' | undefined } | undefined;
@@ -2243,9 +2244,16 @@ export function shopifyExchangeSwitchOn(): boolean {
 }
 
 /**
+ * Why {@link storeExchangePassFor} minted no pass, for the connect callback's page: the switch is
+ * off, a self-hosted instance, a managed one that misses a part, the control plane did not answer
+ * or refused, or the callback, its token URL and the profile on the host are not one store.
+ */
+export type StoreExchangeRefusal = 'switched_off' | 'self_hosted' | 'not_set_up' | 'unconfirmed' | 'not_cleared' | 'not_this_store';
+
+/**
  * The token exchange's pass (PRD Appendix B4), for the connect callback alone, once the store's
- * signature on the callback held (`callback`). `undefined` when any condition fails; the
- * exchange is then refused as before. In this order:
+ * signature on the callback held (`callback`). When any condition fails, the cause instead
+ * ({@link StoreExchangeRefusal}), and the exchange is then refused as before. In this order:
  *  0. the switch `LYNOX_SHOPIFY_EXCHANGE` is on (`1` or `true`); off by default;
  *  1. a provisioned managed instance, with the clearance and the store binding;
  *  2. the shell-exec sidecar;
@@ -2263,18 +2271,19 @@ export async function storeExchangePassFor(
   tokenUrl: string,
   body: string,
   toolContext: ToolContext | undefined,
-): Promise<StorePass | undefined> {
-  if (!shopifyExchangeSwitchOn()) return undefined;
-  if (controlPlaneFromEnv() === null || !toolContext?.exactClearance || !toolContext.storeBindingDigest) return undefined;
-  if (toolContext.shellIsolation.kind !== 'sidecar') return undefined;
+): Promise<StorePass | StoreExchangeRefusal> {
+  if (!shopifyExchangeSwitchOn()) return 'switched_off';
+  if (controlPlaneFromEnv() === null) return 'self_hosted';
+  if (!toolContext?.exactClearance || !toolContext.storeBindingDigest) return 'not_set_up';
+  if (toolContext.shellIsolation.kind !== 'sidecar') return 'not_set_up';
   let parsed: URL;
-  try { parsed = new URL(tokenUrl); } catch { return undefined; }
+  try { parsed = new URL(tokenUrl); } catch { return 'not_this_store'; }
   const origin = storeOriginOf(parsed);
-  if (origin === null || origin !== callback.origin || parsed.pathname !== STORE_EXCHANGE_PATH || parsed.href.includes('?')) return undefined;
+  if (origin === null || origin !== callback.origin || parsed.pathname !== STORE_EXCHANGE_PATH || parsed.href.includes('?')) return 'not_this_store';
   const profile = toolContext.apiStore?.getByHostname(parsed.hostname);
-  if (profile === undefined || profile.id !== callback.profileId || presetStoreHost(profile) !== normalizeHostForMatch(parsed.hostname)) return undefined;
+  if (profile === undefined || profile.id !== callback.profileId || presetStoreHost(profile) !== normalizeHostForMatch(parsed.hostname)) return 'not_this_store';
   const clearance = await toolContext.exactClearance.ensure();
-  if (!clearance.ok) return undefined;
+  if (!clearance.ok) return clearanceRefusalCause(clearance.reason, toolContext.exactClearance.heldRefusal());
   return mintStoreExchangePass(origin, body);
 }
 
@@ -2455,6 +2464,13 @@ async function attachEngineManagedAuth(
       const refreshKey = profile.auth?.oauth?.refresh_token_key ?? refreshTokenKey(profile.id);
       const current = secretStore.resolve(refreshKey);
       if (current === null || tokenFingerprint(current) === profile.oauth_grant?.revoked_fp) {
+        // A provider this engine once shipped: neither a new consent nor a pasted token renews
+        // it here, so the refusal names the way that exists (the 401 reminder's, as fixed text).
+        // Its one value is the profile id, which the store admits only in its pinned shape
+        // (`PROFILE_ID_PATTERN`, at save and at load); nothing the provider sent goes in.
+        if (retiredPresetIdOf(profile) !== undefined) {
+          return { refusal: `Error: the provider rejected the stored refresh token of api_profile "${profile.id}" as revoked or expired, and this profile was set up through a built-in provider this engine no longer has, so it cannot be renewed here. Do not ask the user for a token, and do not call api_setup fetch_token or connect for it. Tell the user. Another way of signing in to the same API replaces this connection, because one host holds one profile: ask the user first, then delete this profile and create the new one.` };
+        }
         // Both values are profile-controlled and this refusal is the model's to read,
         // outside the untrusted-data wrap: `revokedGrantMessage` shapes them, for this
         // caller and for `fetch_token` alike.
@@ -3607,7 +3623,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           blockedVerbatim(`Blocked: ${exfilWarning}`);
         }
         const answer = await agent.promptUser(
-          pv`⚠ http_request: ${exfilWarning} — Allow?`,
+          pv`⚠ ${toolWordFrame('http_request')}: ${exfilWarning} — Allow?`,
           ['Allow', 'Deny', '\x00'],
         );
         if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
@@ -4022,7 +4038,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             const sentNote = alsoNamed.length === 0 ? pv``
               : pv` It is sent as a ${sentMethod} that also names ${alsoNamed.join(', ')}; a server may run any of these.`;
             const answer = await promptUser(
-              pv`⚠ http_request: ${gatedMethod} to ${hostname} ${path} (${fields}) — Allow outbound data?${note}${sentNote}${contextBlock}${queryBlock}${headersBlock}${bodyBlock}`,
+              pv`⚠ ${toolWordFrame('http_request')}: ${gatedMethod} to ${hostname} ${path} (${fields}) — Allow outbound data?${note}${sentNote}${contextBlock}${queryBlock}${headersBlock}${bodyBlock}`,
               ['Allow', 'Deny', '\x00'],
             );
             const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());

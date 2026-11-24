@@ -9,6 +9,7 @@
 import { recipientConfirmDigest, recipientsConfirmable } from '../core/recipient-confirm.js';
 import { errorText, errorTextReduced, processErrorText } from '../core/error-egress.js';
 import { jsonFault } from '../core/json-fault.js';
+import { mayAnswerReview } from '../core/changeset.js';
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
@@ -29,12 +30,13 @@ import { shapeRequestForModel } from '../core/llm-wire-rules.js';
 import {
   exchangeToken, serializeTokenBody, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
-import { beginStoreConnect, endStoreConnect } from '../core/store-token-refresh.js';
-import { codeExchangeExtraParams, consentNoticeVersion, derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
+import { beginStoreConnect, endStoreConnect, storeAccessEnd } from '../core/store-token-refresh.js';
+import { codeExchangeExtraParams, consentNoticeVersion, derivePresetEndpoints, isPresetClientSecretName, isRetiredPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
 import { bindShopifyCallback, shopifyCallbackRefusalLine, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import { connectNoteFor, noteButton, noteLang, noteText, noteTitle, type ConnectNote, type NoteLang } from './connect-note.js';
 import type { StorePass } from '../core/store-pass.js';
+import type { StoreExchangeRefusal } from '../tools/builtin/http.js';
 import { accessTokenKey, lapsedSlots, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { ApiProfile, OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
@@ -45,7 +47,7 @@ import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
 import { builtInPresetOf } from '../core/oauth-presets.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
-import { OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_RESULT_TEXTS, connectedText, connectedWithMoreText, engineLessPageText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthBack, type OAuthLang, type OAuthText } from './oauth-pages.js';
+import { OAUTH_CONSENT_CSP, OAUTH_PAGE_CSP, OAUTH_RESULT_TEXTS, connectedText, connectedWithMoreText, engineLessPageText, exchangeRefusedText, oauthLangOf, oauthPageHtml, oauthResultHtml, type OAuthBack, type OAuthLang, type OAuthText } from './oauth-pages.js';
 import { Engine } from '../core/engine.js';
 import type { KnowledgeEntry, KnowledgeStatus } from '../types/memory.js';
 import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
@@ -99,7 +101,7 @@ import type { ApprovalStore } from '../core/approval-store.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
 import { RECORD_EXPORT_PAGE_MAX } from '../core/data-store.js';
-import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion, TriggerRecord, PlannedPipeline } from '../types/index.js';
+import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion, TriggerRecord, PlannedPipeline, ChangesetDiff } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
 import { acquireSlot, readSlot, sweepSlot, type HeldSlot } from '../core/export-slot.js';
 import { sweepStaleExports } from '../core/export-archive.js';
@@ -5016,6 +5018,27 @@ export class LynoxHTTPApi {
         return;
       }
 
+      // A client that shows the review card after a run (it says so with
+      // `shows_changeset_review`) gets its next message held while that card is open and the
+      // sender may answer it: a new run would replace the review, and with it the way to roll
+      // the previous run's changes back. The answer names the review, so the client fetches
+      // the card and sends the message once the review is answered. Only a review made by
+      // such a client holds, and only one the card shows (`hasChanges()`, not `!isEmpty()`:
+      // a review of only deleted files shows no card and must not hold). The cheap checks
+      // come first; `hasChanges()` reads the files. Placed after the takeover above, so a
+      // stuck run is still ended, and before any upload, so a held message leaves no file.
+      const heldBy = session.getChangesetManager();
+      if (
+        (body as Record<string, unknown> | null)?.['shows_changeset_review'] === true
+        && heldBy !== null
+        && heldBy.shownForReview
+        && mayAnswerReview(heldBy, this._principalOf(req))
+        && heldBy.hasChanges()
+      ) {
+        errorResponse(res, 409, 'The changes of the last run wait for a review', 'review_pending', { runId: heldBy.runId });
+        return;
+      }
+
       // Global concurrency cap (Tier 2, AC6). Bound how many chat runs execute
       // at once across all threads — many parallel headless runs would otherwise
       // blow LLM cost + run-buffer memory (R3). Fail fast here (before the LLM
@@ -6389,7 +6412,9 @@ export class LynoxHTTPApi {
       const session = this.sessionStore.get(params['id']!);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       const csm = session.getChangesetManager();
-      if (!csm || !csm.hasChanges()) {
+      // The card goes only to someone who may answer it: a reader of the chat who cannot would
+      // see a review that holds every message they send and refuses every answer they give.
+      if (!csm || !mayAnswerReview(csm, this._principalOf(_req)) || !csm.hasChanges()) {
         jsonResponse(res, 200, { hasChanges: false, files: [] });
         return;
       }
@@ -6413,8 +6438,12 @@ export class LynoxHTTPApi {
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       // The changeset is the last run's work and outlives it: only that run's principal (or
       // the owner) accepts or rolls it back, even in the mandate's own conversation (§3.13 E7).
-      // The next run replaces it, whoever starts it, as it always has.
-      if (this._refuseUnlessOwns(_req, res, 'review the changes of this run', () => [this._threadRow(params['id']!), this._lastRunRow(session)])) return;
+      // Who that is the manager records itself (`mayAnswerReview`), the same rule the card and
+      // the hold on the next message read. Without a manager there is nothing to answer, which
+      // the 400 below says, after the conversation's own check. The next run replaces it,
+      // whoever starts it, as it always has.
+      const reviewed = session.getChangesetManager();
+      if (this._refuseUnlessOwns(_req, res, 'review the changes of this run', () => reviewed ? [this._threadRow(params['id']!), { created_by: reviewed.createdBy }] : [this._threadRow(params['id']!)])) return;
       // While a run is in progress the changeset is that run's and still growing: a rollback
       // would reset files under a run that goes on writing them, and the cleanup after it
       // would take backups the run still needs.
@@ -6445,53 +6474,81 @@ export class LynoxHTTPApi {
         return;
       }
 
-      const changes = csm.getChanges();
-      let accepted = 0;
-      let rolledBack = 0;
-      // Every tracked file by the name the review shows: a file replaced by a link since the review
-      // is no longer among `changes`, but the answer still names it, and the rollback names it back.
-      const absByName = csm.reviewNames();
-      const nameByAbs = new Map([...absByName].map(([name, abs]) => [abs, name]));
-      // The files the rollback left as they are (replaced or linked since, or not writable).
-      let notRestored: string[] = [];
-      const nameOf = (abs: string): string => nameByAbs.get(abs) ?? abs;
-      // Rollback all: a file the review does not show now and the backup could not read is left
-      // out. Nothing was saved for it, so nothing was promised, and the reason the answer gives for
-      // it would be wrong. A file shown once and replaced by a link since cannot be told apart from
-      // it here; a partial answer names what the person chose, so there nothing is left out.
-      const shownNow = new Set(changes.map((c) => c.absolutePath));
-      const named = (left: string[]): string[] => left
-        .filter((abs) => shownNow.has(abs) || csm.hasOriginal(abs))
-        .map(nameOf);
-
-      if (action === 'accept') {
-        accepted = changes.length;
-        csm.acceptAll();
-      } else if (action === 'rollback') {
-        notRestored = named(csm.rollbackAll());
-        rolledBack = changes.filter((c) => !notRestored.includes(c.file)).length;
-      } else {
-        // Partial: validate rolledBackFiles against changeset entries
-        const clientFiles = Array.isArray(b?.['rolledBackFiles']) ? b['rolledBackFiles'] as string[] : [];
-        // The paths the review showed, mapped back to the files they name. Not resolved
-        // against `process.cwd()`: the review's paths are relative to the workspace.
-        const toRollback: string[] = [];
-
-        for (const f of clientFiles) {
-          if (typeof f !== 'string') continue;
-          const abs = absByName.get(f);
-          if (abs !== undefined && !toRollback.includes(abs)) toRollback.push(abs);
-        }
-
-        if (toRollback.length > 0) {
-          notRestored = csm.rollbackFiles(toRollback).map(nameOf);
-        }
-        rolledBack = toRollback.length - notRestored.length;
-        accepted = changes.filter((c) => !toRollback.includes(c.absolutePath)).length;
+      // Reading the changes can fail (the diff of a file). The answer goes on without them: a
+      // rollback needs only the backups, and the person asked for it. What is lost is the count,
+      // so it is not given (`null`), and the files the rollback left are all named, not only the
+      // ones the review would show: without the changes that filter would drop a file the run
+      // made and the rollback could not delete, and the answer would read as all restored.
+      let changes: ChangesetDiff[] | null;
+      try {
+        changes = csm.getChanges();
+      } catch {
+        changes = null;
       }
+      // Set while a rollback restores files: a throw inside it left some restored and some not,
+      // which the answer must say. Cleared once it returned, so a throw after a finished rollback
+      // is not reported as one that stopped partway.
+      let rollbackStarted = false;
+      try {
+        let accepted: number | null = 0;
+        let rolledBack: number | null = 0;
+        // Every tracked file by the name the review shows: a file replaced by a link since the review
+        // is no longer among `changes`, but the answer still names it, and the rollback names it back.
+        const absByName = csm.reviewNames();
+        const nameByAbs = new Map([...absByName].map(([name, abs]) => [abs, name]));
+        // The files the rollback left as they are (replaced or linked since, or not writable).
+        let notRestored: string[] = [];
+        const nameOf = (abs: string): string => nameByAbs.get(abs) ?? abs;
+        // Rollback all: a file the review does not show now and the backup could not read is left
+        // out. Nothing was saved for it, so nothing was promised, and the reason the answer gives for
+        // it would be wrong. A file shown once and replaced by a link since cannot be told apart from
+        // it here; a partial answer names what the person chose, so there nothing is left out.
+        const named = (left: string[], shown: ChangesetDiff[]): string[] => {
+          const shownNow = new Set(shown.map((c) => c.absolutePath));
+          return left.filter((abs) => shownNow.has(abs) || csm.hasOriginal(abs)).map(nameOf);
+        };
 
-      csm.cleanup();
-      jsonResponse(res, 200, { ok: true, accepted, rolledBack, notRestored });
+        if (action === 'accept') {
+          accepted = changes ? changes.length : null;
+          csm.acceptAll();
+        } else if (action === 'rollback') {
+          rollbackStarted = true;
+          const left = csm.rollbackAll();
+          rollbackStarted = false;
+          notRestored = changes ? named(left, changes) : left.map(nameOf);
+          rolledBack = changes ? changes.filter((c) => !notRestored.includes(c.file)).length : null;
+        } else {
+          // Partial: validate rolledBackFiles against changeset entries
+          const clientFiles = Array.isArray(b?.['rolledBackFiles']) ? b['rolledBackFiles'] as string[] : [];
+          // The paths the review showed, mapped back to the files they name. Not resolved
+          // against `process.cwd()`: the review's paths are relative to the workspace.
+          const toRollback: string[] = [];
+
+          for (const f of clientFiles) {
+            if (typeof f !== 'string') continue;
+            const abs = absByName.get(f);
+            if (abs !== undefined && !toRollback.includes(abs)) toRollback.push(abs);
+          }
+
+          if (toRollback.length > 0) {
+            rollbackStarted = true;
+            const left = csm.rollbackFiles(toRollback);
+            rollbackStarted = false;
+            notRestored = left.map(nameOf);
+          }
+          rolledBack = toRollback.length - notRestored.length;
+          accepted = changes ? changes.filter((c) => !toRollback.includes(c.absolutePath)).length : null;
+        }
+
+        jsonResponse(res, 200, { ok: true, accepted, rolledBack, notRestored });
+      } catch (err) {
+        if (!rollbackStarted) throw err;
+        errorResponse(res, 500, 'The rollback stopped partway', 'rollback_aborted');
+      } finally {
+        // Every answer ends the review, a failed one too: the hold on the next message never
+        // outlives it.
+        csm.cleanup();
+      }
     }, OWN));
 
     // ── Compact (context management) ──
@@ -7727,6 +7784,12 @@ export class LynoxHTTPApi {
       // which is what the model was told it never needs. The client id is not refused: it is
       // not a secret, and removing either stays possible below.
       if (isPresetClientSecretName(name)) {
+        // A provider lynox no longer offers has no connection form, so its refusal has a code of
+        // its own: the settings views would otherwise send the owner to that form.
+        if (isRetiredPresetClientSecretName(name)) {
+          errorResponse(res, 403, `"${name}" belongs to a built-in provider lynox no longer offers, so it can't be saved here. For a profile of your own, choose another name.`, 'retired_preset_client_secret');
+          return;
+        }
         errorResponse(res, 403, `"${name}" is the client secret of a built-in provider. It is entered in the connection form of the profile under Settings → API Profiles, not here.`, 'preset_client_secret');
         return;
       }
@@ -12929,9 +12992,12 @@ export class LynoxHTTPApi {
       // A store's exchange goes out only under its own pass (PRD Appendix B4), minted over the
       // body as it is sent. Without one, `exchangeToken` refuses it as before.
       let exchangePass: StorePass | undefined;
+      let exchangeRefused: StoreExchangeRefusal | undefined;
       if (storeCallback !== undefined) {
         const { storeExchangePassFor } = await import('../tools/builtin/http.js');
-        exchangePass = await storeExchangePassFor(storeCallback, endpoints.tokenUrl, serializeTokenBody(exchangeParams, bodyFormat), engine.getToolContext());
+        const got = await storeExchangePassFor(storeCallback, endpoints.tokenUrl, serializeTokenBody(exchangeParams, bodyFormat), engine.getToolContext());
+        if (typeof got === 'string') exchangeRefused = got;
+        else exchangePass = got;
       }
       const exchanged = await exchangeToken({
         endpoint: vetting,
@@ -12945,7 +13011,11 @@ export class LynoxHTTPApi {
         // error body is the one place a client secret has been seen echoed back.
         // Nor is the exchange's own message: a redirect the loop refused says "Write possibly
         // landed" for the model, and here nothing landed that the person would have to check.
-        sendOAuthHtml(res, 502, OAUTH_RESULT_TEXTS.exchangeFailed, 'apis');
+        // An exchange to a store without a pass was not sent (`exchangeToken` refuses it before
+        // sending): the page names why there was no pass, since starting again changes nothing
+        // for most causes. Only then: any other failure is not the pass's.
+        const unsentForPass = !exchanged.ok && exchanged.unsentForPass === true;
+        sendOAuthHtml(res, 502, unsentForPass ? exchangeRefusedText(exchangeRefused) : OAUTH_RESULT_TEXTS.exchangeFailed, 'apis');
         return;
       }
 
@@ -14078,11 +14148,27 @@ export class LynoxHTTPApi {
       // connection somebody else made. `importWaiting`: the files the import of the earlier
       // profiles waits on, for the owner to repair or delete. `reader_may_connect`: whether this
       // reader's connect start goes through (`mayStartConnect`), so the page offers the link only there.
+      // `store_access_ends`: a store whose access runs out within the hint's window, has run out, or
+      // whose refresh ended, until it is connected again (`storeAccessEnd`): the host the engine
+      // derives, whether it ended, and the end when known; so an owner without web push sees it in
+      // the app before the end.
       // `built_in_provider`: the display name of the built-in provider the profile signs in through
       // (`builtInPresetOf`), or null. The stored `preset_id` is only checked for its form, so an id
       // this engine does not know must not be shown as a provider sign-in.
       const reader = this._principalOf(req);
-      jsonResponse(res, 200, { profiles: store.getAll().map((p) => ({ ...profileForReader(p, reader), reader_may_connect: mayStartConnect(reader, p), built_in_provider: builtInPresetOf(p)?.label ?? null })), importWaiting: store.importWaitsOn() });
+      const now = Date.now();
+      jsonResponse(res, 200, {
+        profiles: store.getAll().map((p) => {
+          const end = storeAccessEnd(p, now);
+          return {
+            ...profileForReader(p, reader),
+            reader_may_connect: mayStartConnect(reader, p),
+            built_in_provider: builtInPresetOf(p)?.label ?? null,
+            ...(end === null ? {} : { store_access_ends: { host: end.host, ended: end.ended, ...(end.until === null ? {} : { at: new Date(end.until).toISOString() }) } }),
+          };
+        }),
+        importWaiting: store.importWaitsOn(),
+      });
     }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id', async (req, res, params) => {

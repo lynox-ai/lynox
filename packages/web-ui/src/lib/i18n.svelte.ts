@@ -1373,6 +1373,12 @@ const translations: Record<string, Record<Locale, string>> = {
 	// text the owner is told while an erasure a revocation started is pending; dates without a time.
 	'apis.reconnect': { de: 'Erneut verbinden', en: 'Reconnect' },
 	'apis.access_ended': { de: 'lynox konnte den Zugang zu diesem Shop nicht erneuern.', en: 'lynox could not renew its access to this store.' },
+	// Before a store's access runs out (utils/store-access-end.ts, U-391): the owner reads both sentences, a mandate the first.
+	'apis.access_ends_on': { de: 'Der Zugang von lynox zu diesem Shop läuft am {date} ab.', en: "lynox's access to this store runs out on {date}." },
+	'apis.access_ends_way': { de: 'Verbinde ihn vorher neu, damit Läufe und Abfragen weiterlaufen.', en: 'Reconnect it before then so runs and requests keep going.' },
+	// The owner's banner in the shell, one line per store (StoreAccessBanner, U-391); {host} is shown in a box.
+	'store_access.banner_soon': { de: 'Der Zugang von lynox zum Shop {host} läuft am {date} ab. Verbinde den Shop vorher neu, damit Läufe und Abfragen weiterlaufen.', en: "lynox's access to the store {host} runs out on {date}. Reconnect the store before then so runs and requests keep going." },
+	'store_access.banner_ended': { de: 'lynox konnte den Zugang zum Shop {host} nicht erneuern. Läufe und Abfragen an den Shop gehen erst wieder, wenn du ihn neu verbindest.', en: 'lynox could not renew its access to the store {host}. Runs and requests to the store only work again once you reconnect it.' },
 	'apis.revoked_on': { de: 'Vom Anbieter widerrufen am {date}', en: 'Revoked by the provider on {date}' },
 	// The long texts sit in a closed <details> below the dates and the way out.
 	'apis.erasure_details': { de: 'Was gelöscht wird und was bleibt', en: 'What is deleted and what stays' },
@@ -1908,7 +1914,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'changeset.review_unsent': { de: 'Deine Antwort ist möglicherweise nicht angekommen. Bitte versuche es erneut.', en: 'Your answer may not have arrived. Please try again.' },
 	'changeset.review_failed': { de: 'Deine Antwort konnte nicht übernommen werden.', en: 'Your answer could not be applied.' },
 	'changeset.not_restored': { de: 'Nicht zurückgesetzt: {files}. Diese Dateien wurden seit der Prüfung ersetzt oder verknüpft, oder sie liessen sich nicht schreiben. Sieh sie dir selbst an.', en: 'Not restored: {files}. These files were replaced or linked since the review, or could not be written. Look at them yourself.' },
+	'changeset.message_waiting': { de: 'Deine Nachricht geht los, sobald du über diese Änderungen entschieden hast.', en: 'Your message goes out once you have decided on these changes.' },
+	'changeset.not_restored_unknown': { de: 'Nicht zurückgesetzt: {files}. Warum, kann lynox hier nicht sagen. Sieh dir diese Dateien selbst an; sie können noch die Änderung tragen.', en: 'Not restored: {files}. lynox cannot tell why here. Look at these files yourself; they may still carry the change.' },
 	'changeset.not_restored_more': { de: '{files} und {n} weitere', en: '{files} and {n} more' },
+	'changeset.rollback_aborted': { de: 'Das Zurücksetzen brach mittendrin ab. Ein Teil der Dateien ist vielleicht zurückgesetzt, der Rest bleibt geändert und lässt sich hier nicht mehr zurücksetzen. Sieh dir die geänderten Dateien selbst an.', en: 'Rolling back stopped partway. Some files may be restored; the rest stay changed and can no longer be rolled back here. Check the changed files yourself.' },
 	'changeset.review_refused': { de: 'Deine Antwort wurde nicht übernommen: Diese Änderungen gehören zu einem früheren Lauf, oder ein Lauf ist gerade aktiv.', en: 'Your answer was not applied: these changes belong to an earlier run, or a run is in progress.' },
 
 	// Context management
@@ -2514,6 +2523,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'secrets.use_llm_page':         { de: 'Dieser Key gehört in die LLM-Provider-Seite, nicht hierher.',           en: 'This key belongs on the LLM provider page, not here.' },
 	'secrets.managed_blocked':      { de: 'Dieser Name wird automatisch verwaltet (Mail, OAuth, Engine-interne). Wähle einen anderen Namen für deinen Integrations-Schlüssel.', en: 'This name is platform-managed (mail, OAuth, engine internals). Pick a different name for your integration key.' },
 	'secrets.preset_client_use_form': { de: 'Das ist das Client-Secret einer eingebauten Verbindung. Du trägst es im App-Zugang des Profils ein (Einstellungen → APIs), nicht hier.', en: 'This is the client secret of a built-in provider. Enter it under “App credentials” in its profile (Settings → APIs), not here.' },
+	'secrets.retired_preset_client': { de: 'Dieser Name gehört zu einer eingebauten Verbindung, die lynox nicht mehr anbietet, und lässt sich hier nicht speichern. Wähl für ein eigenes Profil einen anderen Namen.', en: 'This name belongs to a built-in provider lynox no longer offers, so it can\'t be saved here. For a profile of your own, choose another name.' },
 	'secrets.managed_notice_title': { de: 'Managed-Hosting',                                                       en: 'Managed hosting' },
 	'secrets.managed_notice_body':  { de: 'Du kannst hier Schlüssel für deine eigenen Integrationen hinterlegen (Stripe, DataForSEO, Hetzner, …). Mail-Konten, OAuth-Tokens und Engine-interne Einstellungen werden automatisch vom Plan verwaltet — diese werden hier abgewiesen.', en: 'Add keys for your own integrations here (Stripe, DataForSEO, Hetzner, …). Mail accounts, OAuth tokens and engine-internal settings are managed by your plan automatically — those names are rejected.' },
 	'secrets.no_admin':             { de: 'Keine Admin-Berechtigung — Key-Liste nicht verfügbar.',                 en: 'No admin permission — key list unavailable.' },
