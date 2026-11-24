@@ -599,7 +599,7 @@
 					<!-- Mobile-only zone pills (md+ uses InboxZoneRail), then the rules entry the rail
 						carries on md+. -->
 					<div class="md:hidden relative mb-3 -mx-4">
-					<div class="flex items-center gap-1 overflow-x-auto scrollbar-none px-4 py-1" bind:this={mobileZoneRow} onscroll={updateZoneRowCut} data-testid="inbox-zone-row">
+					<div class="relative flex items-center gap-1 overflow-x-auto scrollbar-none px-4 py-1" bind:this={mobileZoneRow} onscroll={updateZoneRowCut} data-testid="inbox-zone-row">
 						<div
 							class="flex shrink-0 gap-1"
 							role="tablist"
