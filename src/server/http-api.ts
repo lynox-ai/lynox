@@ -12567,13 +12567,10 @@ export class LynoxHTTPApi {
       // The version of the customer text this start shows, and the confirmation below is checked
       // against: the callback records it as the text the connection was confirmed under.
       const consentVersion = decision.consent ? consentNoticeVersion(decision.consent) : undefined;
-      const signed = signProfileOAuthState(
+      const by = principal.kind === 'mandate' ? { tag: principalTag(principal), mandateId: principal.mandateId } : { tag: 'owner' };
+      const signWith = (who: typeof by & { display?: string }): string | null => signProfileOAuthState(
         {
-          state, profileId: id, verifier,
-          // The mandate's name goes along, so the callback's trail rows carry it (PRD §7(c)).
-          by: principal.kind === 'mandate'
-            ? { tag: principalTag(principal), mandateId: principal.mandateId, ...(principal.display === undefined ? {} : { display: principal.display }) }
-            : { tag: 'owner' },
+          state, profileId: id, verifier, by: who,
           // What the link asks for, from the same decision the confirmation is checked against
           // below (`shown_scopes`) and the link is built from: the callback records it as asked.
           asked: decision.scopes,
@@ -12582,12 +12579,18 @@ export class LynoxHTTPApi {
         httpSecret,
         Math.floor(Date.now() / 1000),
       );
+      // The mandate's name goes along, so the callback's trail rows carry it (PRD §7(c)). A name
+      // the format cannot carry (too long once encoded) does not stop the start: it is signed
+      // without one, and those two rows name the person by address, as before the name was carried.
+      const signed = (principal.kind === 'mandate' && principal.display !== undefined
+        ? signWith({ ...by, display: principal.display }) : null) ?? signWith(by);
       if (!signed) {
         // `decideConnect` has already established the secret and the profile, and
         // the id it saw is the id signed here. What still lands here is a value the
         // format cannot carry: a mandate address whose encoding exceeds what the
         // reader accepts, a list of asked scopes the format refuses, or a whole value
-        // longer than a browser keeps (`PROFILE_OAUTH_STATE_MAX_LEN`). Refused before
+        // longer than a browser keeps (`PROFILE_OAUTH_STATE_MAX_LEN`), each without the
+        // mandate's name, which is dropped first. Refused before
         // the user is sent anywhere, and never asserted, because this is the one place
         // where a wrong value would mint a cookie that verifies as a DIFFERENT one.
         sendOAuthHtml(res, 500, OAUTH_RESULT_TEXTS.startFailed, 'apis');

@@ -59,7 +59,9 @@ const PURPOSE = 'lynox-profile-oauth-state';
 
 /**
  * The encoded principal field, as the reader accepts it and so as the signer may write it. Room
- * for the longest tag, mandate id and name the login admits, each at three bytes a character.
+ * for the longest tag, mandate id and name this module admits at three bytes a character. A
+ * value JSON escapes (a lone surrogate takes six) can pass it; the signer then refuses, and the
+ * start signs again without the name.
  */
 const PRINCIPAL_FIELD = /^[A-Za-z0-9_-]{1,2400}$/;
 
