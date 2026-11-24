@@ -8,6 +8,7 @@ import { isValidCron, nextOccurrence } from './cron-parser.js';
 import { readEnvAlias } from './env.js';
 import { cpSuppliesLLMKey } from '../contract/vocab.js';
 import { compose, renderFence } from '../core/data-boundary.js';
+import { assertHostPolicy, type HostPolicyContext } from './network-guard.js';
 import { isHandRunOf } from './hand-run-door.js';
 import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, ownedBy, principalTag, type RequestPrincipal } from './request-principal.js';
 import { MAPPING_MAX_ENTRIES, mintRouteToken, parseWebhookSpec, type WebhookVerifierKind } from './webhook-verifiers.js';
@@ -1331,6 +1332,71 @@ export class TaskManager {
 }
 
 const MAX_RUN_RESULT_CHARS = 10_000;
+
+/**
+ * Why a trigger's run does not do its work, for the Triggers view (`blocked_reason` in
+ * `GET /api/triggers`): a cause, never text, which the view says in its own language. Watch kinds
+ * only for now; another cause adds a kind.
+ */
+export type BlockedReason = { kind: 'watch_allow_list'; host: string } | { kind: 'watch_deny_all' } | { kind: 'watch_https' };
+
+const DENY_ALL_REFUSAL = 'Blocked: network access denied for this tool (network_policy=deny-all)';
+const ALLOW_LIST_REFUSAL_START = 'Blocked: hostname "';
+const ALLOW_LIST_REFUSAL_END = '" not in network allow-list';
+const HTTPS_REFUSAL_START = 'Blocked: HTTP not allowed';
+
+/**
+ * Why `network_policy` keeps a watch from reading `url`, or null when it may. A watch is a
+ * credential-free read, so it gets the `discovery` surface, as every other such read: under
+ * `allow-list` a host outside the list is refused, under `deny-all` every host, under `guarded`
+ * and `allow-all` it passes. Asked at creation and before every poll, so a watch the policy forbids
+ * is neither created nor read, and one created before the policy changed stops being read.
+ * The reason is told by the whole refusal, never by a word in it, since a host name can carry one.
+ */
+export function watchPolicyRefusal(url: string, ctx: HostPolicyContext | undefined): { why: string; wayOut: string; shown: BlockedReason | null } | null {
+  try {
+    assertHostPolicy(url, { surface: 'discovery' }, ctx);
+    return null;
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.startsWith('Blocked: unsupported protocol') || err instanceof TypeError) return { why: 'it is not an http or https address.', wayOut: '', shown: null };
+    // enforce_https is checked first; when the policy would refuse the https address too, that
+    // reason is the one to tell, since switching to https alone would not help, and the way out
+    // names both steps.
+    if (message.startsWith(HTTPS_REFUSAL_START) && /^http:/i.test(url)) {
+      const deeper = watchPolicyRefusal(`https:${url.slice('http:'.length)}`, ctx);
+      if (deeper !== null && deeper.shown !== null) return { ...deeper, wayOut: `${deeper.wayOut} The address must also be https://, since this instance only reads HTTPS pages (enforce_https).` };
+      // Refused at https for a reason the view has no kind for (a private address, a policy this
+      // code does not know): that reason, told as is.
+      if (deeper !== null) return deeper;
+    }
+    if (message === DENY_ALL_REFUSAL) {
+      return { why: 'this instance\'s network_policy is deny-all, so lynox reads no web page.', wayOut: 'Only the operator can change network_policy.', shown: { kind: 'watch_deny_all' } };
+    }
+    if (message.startsWith(ALLOW_LIST_REFUSAL_START) && message.endsWith(ALLOW_LIST_REFUSAL_END)) {
+      // The host as the allow-list compared it (an IPv6 literal without its brackets), so an
+      // operator who copies it adds the entry that matches.
+      const host = message.slice(ALLOW_LIST_REFUSAL_START.length, -ALLOW_LIST_REFUSAL_END.length);
+      return { why: `its host ${host} is not in this instance's network allow-list.`, wayOut: 'The operator can add the host to the allow-list (network_policy).', shown: { kind: 'watch_allow_list', host } };
+    }
+    if (message.startsWith(HTTPS_REFUSAL_START)) return { why: 'this instance only reads HTTPS pages (enforce_https).', wayOut: 'Watch the https:// address instead.', shown: { kind: 'watch_https' } };
+    const why = message.replace(/^Blocked:\s*/, '');
+    return { why: `this instance's network settings refuse it: ${/[.!?]$/.test(why) ? why : `${why}.`}`, wayOut: '', shown: null };
+  }
+}
+
+/**
+ * What the Triggers view says about a watch the policy keeps from its page, from the policy as it
+ * is now (the poll asks the same): null for a trigger that is no watch, a watch whose page is read,
+ * or one refused for a reason only the poll knows.
+ */
+export function watchRefusedNow(trigger: Pick<TriggerRecord, 'source' | 'watch_config'>, ctx: HostPolicyContext | undefined): BlockedReason | null {
+  if (trigger.source !== 'watch' || typeof trigger.watch_config !== 'string') return null;
+  let url: unknown;
+  try { url = (JSON.parse(trigger.watch_config) as { url?: unknown }).url; } catch { return null; }
+  if (typeof url !== 'string' || url === '') return null;
+  return watchPolicyRefusal(url, ctx)?.shown ?? null;
+}
 
 /** After "its address" or "watch_url": why an address a server may run as a write is not watched (`readAddressWrites`). */
 export const WATCH_OVERRIDE_REFUSAL = 'carries a method override (such as `_method=DELETE`) or a GraphQL mutation, which a server may run as a write instead of showing a page.';
