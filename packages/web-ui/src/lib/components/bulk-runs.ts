@@ -1386,15 +1386,16 @@ export function bulkReachRefusalKey(code: string): string | null {
 	return m[1] === 'approve' ? `bulk.reach.approve.${m[2]!}` : `bulk.halt.${m[2]!}`;
 }
 
-/** Whether the page offers the owner a way on from this halt: a restart for a planned run, writing
- *  on or checking for one that wrote. */
+/** Whether the page offers the owner to continue the run from this halt: a restart for a planned
+ *  run, writing on for one that wrote. Not checking: that is not continuing the run, and the
+ *  mandate's sentence says the owner can continue it. */
 function bulkOwnerGoesOn(run: Parameters<typeof bulkHaltText>[0] & Parameters<typeof bulkResumeText>[0]): boolean {
 	if (run.phase === 'planned') {
 		const restart = bulkRestartKind(run);
 		return restart !== null && !BULK_NO_RESTART_BUTTON.has(restart);
 	}
 	const resume = bulkResumeKind(run);
-	return resume === 'write' || resume === 'max' || resume === 'check';
+	return resume === 'write' || resume === 'max';
 }
 
 /** The address the support halts point to. */

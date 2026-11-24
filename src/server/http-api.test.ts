@@ -241,6 +241,14 @@ vi.mock('../tools/builtin/http.js', async (importActual) => {
   };
 });
 
+// A Shopify preset without the API version lynox writes to: the store's endpoint is the real one
+// unless a test switches it off.
+const noApiVersion = vi.hoisted(() => ({ on: false }));
+vi.mock('../core/shopify-graphql.js', async (importActual) => {
+  const actual = await importActual<typeof import('../core/shopify-graphql.js')>();
+  return { ...actual, shopifyGraphqlEndpoint: (host: string) => (noApiVersion.on ? null : actual.shopifyGraphqlEndpoint(host)) };
+});
+
 const mockExchangeToken = vi.fn();
 vi.mock('../core/oauth-token-exchange.js', async (importActual) => ({
   ...(await importActual<typeof import('../core/oauth-token-exchange.js')>()),
@@ -13428,6 +13436,17 @@ describe('LynoxHTTPApi', () => {
       const refusedBody = (await refused.json()) as { error: string; code?: string };
       expect(refusedBody).toMatchObject({ error: 'lynox reaches Shopify stores only on instances that lynox runs. This instance is self-hosted, so this run cannot start here.', code: 'reach_approve_shopifySelfHosted' });
       expect(refused.status).toBe(409);
+      // Writing on says the halt's cause, not the approving sentence.
+      const resumed = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }) });
+      expect(await resumed.json()).toMatchObject({ error: 'lynox reaches Shopify stores only on instances that lynox runs. This instance is self-hosted, so the run cannot go on here.', code: 'reach_resume_shopifySelfHosted' });
+      expect(resumed.status).toBe(409);
+      // A store whose preset pins no API version has no endpoint: a setting of lynox's, not the store's.
+      noApiVersion.on = true;
+      try {
+        expect(await (await approve()).json()).toMatchObject({ error: 'A setting for Shopify is missing in lynox. Only lynox can fix it (support@lynox.ai); until then the run cannot be approved.', code: 'reach_approve_shopifyNoApiVersion' });
+      } finally {
+        noApiVersion.on = false;
+      }
       // With a control plane but without the parts a store pass needs, it is one lynox has to set up.
       // (Set and put back by hand: `vi.unstubAllEnvs` would also drop this file's own stubs.)
       const before = { url: process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'], id: process.env['LYNOX_MANAGED_INSTANCE_ID'] };
