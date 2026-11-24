@@ -43,7 +43,7 @@ import { onBoxBlock, pv } from '../../core/prompt-value.js';
 import { toolWordFrame } from '../tool-words.js';
 import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../../core/preset-write-context.js';
 import { currentCallSignal, currentCallTargetOrigin, currentCallTwins, joinCallSignal, noteApiCost, noteCallConnection, noteGrantLift, type CallApiCost } from '../../core/call-connection.js';
-import { crossHostRedirectGuard, readHopsGuarded } from '../../core/read-hops.js';
+import { CrossHostHopRefused, crossHostRedirectGuard, readHopsGuarded } from '../../core/read-hops.js';
 import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
 import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, isReadMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, urlQueryStrings, queryReadings, queryKeyName, jsonObjectNotGraphql, type BodyReadings } from '../../core/outbound-write.js';
@@ -4567,9 +4567,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       if (answeredStatus !== undefined && apiCost !== undefined) noteApiCost(apiCost);
       // So does a write whose redirect hop was refused: it was sent and answered before the hop.
       // And a read whose override hop was refused: the read went out and was answered.
+      // And a read whose hop to another host was refused (`CrossHostHopRefused`): the hops before it were answered.
       // Counted at the last answered hop on a priced API: a write to a host without a profile that a
       // redirect sends on to one was answered there before the next hop was refused.
-      if (err instanceof RedirectRefusedAfterWrite || err instanceof DelegatedHopRefused || err instanceof OverrideHopRefused) {
+      if (err instanceof RedirectRefusedAfterWrite || err instanceof DelegatedHopRefused || err instanceof OverrideHopRefused || err instanceof CrossHostHopRefused) {
         const sentTo = lastPricedHop(answeredHopsOf(err), toolContext) ?? apiProfileOfUrl(input.url, toolContext);
         if (sentTo !== undefined) noteApiCost(apiCostOfAnswer(sentTo, undefined));
       }

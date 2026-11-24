@@ -28,6 +28,7 @@ import type { RequestPrincipal } from '../../core/request-principal.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { currentCallSignal, runInCallSlot, type CallSlot } from '../../core/call-connection.js';
+import { CROSS_HOST_REFUSAL } from '../../core/read-hops.js';
 import type { PinnedTransportInput } from '../../core/network-guard.js';
 import { approvalOrigin, writeApprovalKey } from '../../core/untrusted-epoch.js';
 
@@ -4283,6 +4284,38 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', none);
       const third: CallSlot = {};
       await runInCallSlot(third, () => handler({ url: 'https://short.example.org/k' }, costAgent(store, [])).then(String, (e: unknown) => String(e)));
+      expect(third.apiCost).toBeUndefined();
+    });
+
+    it('counts the priced API that answered a guarded read before its hop to another host was refused, and nothing when no priced API answered', async () => {
+      const store = await costStore({ model: 'per_call', rate_usd: 0.001 });
+      mockDnsPublic();
+      // A read after outside content: its redirects stay on its own host.
+      const held = { known: [], allKnown: false } as const;
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.org/x' } }));
+      vi.stubGlobal('fetch', fetchMock);
+      const slot: CallSlot = { targetOrigin: held };
+      const out = await runInCallSlot(slot, () => handler({ url: 'https://api.dataforseo.com/v3/keywords' }, costAgent(store, [])).then(String, (e: unknown) => String(e)));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(out).toContain(CROSS_HOST_REFUSAL);
+      expect(slot.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+
+      // The override hop of such a read goes to another host: the same refusal, and the answer still counts.
+      const override = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://cdn.example.org/x?_method=DELETE' } }));
+      vi.stubGlobal('fetch', override);
+      const second: CallSlot = { targetOrigin: held };
+      const again = await runInCallSlot(second, () => handler({ url: 'https://api.dataforseo.com/v3/keywords' }, costAgent(store, [])).then(String, (e: unknown) => String(e)));
+      expect(again).toContain(CROSS_HOST_REFUSAL);
+      expect(second.apiCost).toEqual({ usd: 0.001, source: 'profile' });
+
+      // Control: a host without a profile answered, nothing is counted.
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.org/y' } })));
+      const third: CallSlot = { targetOrigin: held };
+      const none = await runInCallSlot(third, () => handler({ url: 'https://short.example.org/k' }, costAgent(store, [])).then(String, (e: unknown) => String(e)));
+      expect(none).toContain(CROSS_HOST_REFUSAL);
       expect(third.apiCost).toBeUndefined();
     });
 
