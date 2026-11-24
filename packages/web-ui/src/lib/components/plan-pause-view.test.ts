@@ -32,7 +32,7 @@ describe('a paused plan in the Triggers view', () => {
     expect(I18N).toContain(`en: "Paused: {who}'s access has ended. The plan runs again only once you take it over."`);
     expect(I18N).toContain("de: 'Pausiert: Der Zugang der Person, die ihn eingerichtet hat, ist beendet. Der Plan läuft erst wieder, wenn du ihn übernimmst.'");
     expect(I18N).toContain("en: 'Paused: the access of the person who set it up has ended. The plan runs again only once you take it over.'");
-    expect(VIEW).toMatch(/const who = trigger\.paused_who\?\.join\(', '\) \?\? ''/);
+    expect(VIEW).toContain('const who = pausedWhoText(trigger.paused_who);');
   });
 
   it('the list carries `paused`, and the view labels it and shows no next run', () => {

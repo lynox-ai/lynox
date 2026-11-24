@@ -9,8 +9,9 @@ import { OWNER_PRINCIPAL, UNKNOWN_RUN_TAG, isOwnerPrincipal, isRunTag, mandateId
 import { PAUSED_MODEL_TEXT, isPaused } from '../../core/plan-pause.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
-import { WATCH_OVERRIDE_REFUSAL } from '../../core/task-manager.js';
+import { TriggerFieldsNotCarriedError, WATCH_OVERRIDE_REFUSAL, watchPolicyRefusal, type BeforeTriggerWrite } from '../../core/task-manager.js';
 import { readAddressWrites } from '../../core/outbound-write.js';
+import { carriesAddress, hostTargets } from '../../core/send-target.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
 
@@ -334,8 +335,32 @@ function createdNote(task: object, byOwner: boolean): string {
   return `. It is listed under Automation › ${'effect' in task ? 'Triggers' : 'Tasks'}.`;
 }
 
+/**
+ * The page a `task_create` call sets up a watch on, or `null`: the handler takes `workflow_id`
+ * first, then `schedule`, and only then `watch_url`, so a call with one of those creates no watch.
+ */
+function watchedUrl(input: TaskCreateInput): string | null {
+  if (input.workflow_id || input.schedule) return null;
+  return input.watch_url ? input.watch_url : null;
+}
+
 export const taskCreateTool: ToolEntry<TaskCreateInput> = {
   undo: 'compensatable',
+  // After content from outside, the page a watch reads goes through the origin check as a read: the
+  // model chose its address, and once the owner confirms the watch under Automation → Triggers the
+  // worker reads it unattended and again and again, so data in its path or host name would leave on
+  // every check. It is checked like `http_request`'s GET, once, when the watch is created; its
+  // question says how often the page is read, and that the yes does not confirm the watch
+  // (`watchEveryMinutes`). A page a search listed needs no question (`readAddress`).
+  sendTargetsWhenLatched: (input) => {
+    const url = watchedUrl(input);
+    return url === null ? null : hostTargets(url);
+  },
+  readCarriesAddress: (input) => {
+    const url = watchedUrl(input);
+    return url !== null && carriesAddress(url);
+  },
+  readAddress: (input) => watchedUrl(input),
   definition: {
     name: 'task_create',
     description: 'Create a task for a concrete deliverable with a deadline or assignee. Not for general notes (use memory_store with status namespace). Only create tasks when the user requests it or a clear action item emerges.',
@@ -578,6 +603,9 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         // A watch only reads its page, unattended and again and again: an address a server may
         // run as a write (`?_method=DELETE`, a GraphQL mutation) would send that write on every check.
         if (readAddressWrites(input.watch_url)) return `Error: watch_url ${WATCH_OVERRIDE_REFUSAL} No watch was created. Pass the address of the page without the override or the mutation.`;
+        // A watch the policy forbids is not created only to fail on every poll.
+        const refusedBy = watchPolicyRefusal(input.watch_url, agent.toolContext);
+        if (refusedBy !== null) return `Error: watch_url not watched: ${refusedBy.why} No watch was created.${refusedBy.wayOut === '' ? '' : ` ${refusedBy.wayOut}`}`;
         // Floor the interval at 5 min: the JSON-schema `minimum` is only advisory
         // for an LLM-supplied arg, so clamp defensively to bound fetch + LLM spend.
         const intervalMinutes = Math.max(5, input.watch_interval_minutes ?? 60);
@@ -679,12 +707,13 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         }
       }
       // A mandate's change of a schedule — any field, the schedule, completion — takes the
-      // owner's stamp off it, the rule the HTTP routes apply (`_markMandateEdit`), so a stamped
-      // schedule stops until the owner stamps it again (PRD §3.12 point 3, H2). Resolved under
-      // the same scope as the write below, and before it: the mark must land on the trigger
-      // the write changes. A TODO is not a trigger and carries no mark: a mandate changes only a
-      // to-do of its own, which `complete` and `update` check on the row they resolve, as the
-      // HTTP routes do.
+      // owner's stamp off it, the rule the HTTP routes apply, so a stamped schedule stops until
+      // the owner stamps it again (PRD §3.12 point 3, H2). The manager calls the mark with the
+      // trigger it is about to write, after its own checks and before the write: the mark lands
+      // on the trigger the write changes, and a change it refuses (an invalid cron or status,
+      // fields a trigger does not carry) leaves the owner's stamp where it was. A TODO is not a
+      // trigger and carries no mark: a mandate changes only a to-do of its own, which `complete`
+      // and `update` check on the row they resolve, as the HTTP routes do.
       // A paused plan (`plan-pause.ts`) changes only by its takeover: a mandate changes nothing on
       // it, and the owner may complete it but not edit it. Before the mark, so a refusal marks nothing.
       const pausedTarget = managerRef.getTrigger(input.task_id, scopeFilter);
@@ -698,21 +727,19 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         target: () => [['task', managerRef.getTrigger(input.task_id, scopeFilter)?.id]],
         main: ['apply'],
       }, (w) => {
-        if (!isOwnerPrincipal(agent.principal)) {
-          const trigger = managerRef.getTrigger(input.task_id, scopeFilter);
-          if (trigger) w.run('mark', () => managerRef.markEditedBy(trigger.id, agent.principal, true), ifTrue);
-        } else if (agent.writeAuthor !== principalTag(OWNER_PRINCIPAL)
-          && (input.title !== undefined || input.description !== undefined)) {
-          // Under the owner's principal but not the owner's own turn (a trigger's or a workflow's
-          // run) changing the instruction (its title or description): the change is the run's, so
-          // the instruction stops counting as the owner's. An unknown author is marked as such,
-          // never left as the owner. A change that leaves the instruction as it is (its status,
-          // its schedule) keeps it the owner's.
-          const trigger = managerRef.getTrigger(input.task_id, scopeFilter);
-          if (trigger) w.run('mark', () => managerRef.markEditedByRun(trigger.id, runTagOf(agent)), ifTrue);
-        }
+        // A mandate's change marks the trigger with its principal; a change under the owner's
+        // principal but not the owner's own turn (a trigger's or a workflow's run) that rewrites the
+        // instruction (its title or description) marks it with the run's tag, an unknown author as
+        // such, never as the owner. A change that leaves the instruction as it is (its status, its
+        // schedule) keeps it the owner's. Either mark is set only once the write has passed its
+        // checks (`BeforeTriggerWrite`), so a refused change marks nothing.
+        const mark: BeforeTriggerWrite | undefined = !isOwnerPrincipal(agent.principal)
+          ? (trigger) => { w.run('mark', () => managerRef.markEditedBy(trigger.id, agent.principal, true), ifTrue); }
+          : agent.writeAuthor !== principalTag(OWNER_PRINCIPAL) && (input.title !== undefined || input.description !== undefined)
+            ? (trigger) => { w.run('mark', () => managerRef.markEditedByRun(trigger.id, runTagOf(agent)), ifTrue); }
+            : undefined;
         if (input.status === 'completed') {
-          const task = w.run('apply', () => managerRef.complete(input.task_id, scopeFilter, agent.principal), ifNonNull);
+          const task = w.run('apply', () => managerRef.complete(input.task_id, scopeFilter, agent.principal, mark), ifNonNull);
           if (!task) return `Task not found: ${input.task_id}`;
           return `Task completed: ${formatTaskLine(task)}`;
         }
@@ -731,7 +758,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
           // created here does (`instructionTakenIn`, the same rule); the manager records it only
           // with a title or description change.
           untrusted: instructionTakenIn(agent),
-        }, scopeFilter, agent.principal), ifNonNull);
+        }, scopeFilter, agent.principal, mark), ifNonNull);
         if (!task) return `Task not found: ${input.task_id}`;
         // A run's earlier rewrite keeps its tag after a later change in the owner's own turn: a
         // change of the title or of part of the description leaves the run's words in place, and
@@ -753,6 +780,8 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       });
     } catch (e: unknown) {
       logErrorChain('task_update', e);
+      // A plan's missing fields: the model also reads what it can change instead (U-284).
+      if (e instanceof TriggerFieldsNotCarriedError) return `Error: ${e.forModel}`;
       return `Error: ${e instanceof Error ? e.message : String(e)}`;
     }
   },

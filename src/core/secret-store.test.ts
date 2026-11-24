@@ -470,7 +470,9 @@ describe('SecretStore', () => {
       process.env['LYNOX_SECRET_INNER'] = inner;
       process.env['LYNOX_VAULT_KEY'] = outer;
       const store = new SecretStore();
-      expect(store.maskSecrets(`k=${outer}`)).toBe('k=***9876');
+      // One mask for both, and without the last four: a merged span shows them only when every
+      // value in it could, as in `maskSecretsAndPatterns` (the short one could not).
+      expect(store.maskSecrets(`k=${outer}`)).toBe('k=***');
     });
 
     it('masks them without a store, for a caller that holds none', () => {

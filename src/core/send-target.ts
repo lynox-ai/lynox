@@ -85,3 +85,45 @@ export function hostTargets(url: string): SendTarget[] {
   if (target === null) throw new UnknownSendTargetError('host');
   return [target];
 }
+
+/**
+ * Whether a read's address carries another address: `http:` or `https:`, in any case, in its path
+ * or query, as written or decoded up to {@link CARRY_DECODE_ROUNDS} times. A service that fetches
+ * an address it is given (`https://reader.example/https://x/…`, `?url=https%3A%2F%2Fx`) sends the
+ * read on, with what the address holds, to a host no parser here can name for sure: each service
+ * reads the carried address its own way. So no host is guessed; such a read is asked about (or
+ * refused where nobody can be asked), whatever its own host. The fragment is never sent and is
+ * not read. An address that does not parse carries nothing here; its own target is unreadable.
+ *
+ * Not seen, by design: an address without a scheme (`//x.example/…`, a bare `x.example/…` that a
+ * service completes itself) or in another encoding (base64, five or more percent-encodings). A
+ * service that fetches such an address on a host the owner named sends the read on unasked.
+ */
+export function carriesAddress(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url.trim());
+  } catch {
+    return false;
+  }
+  let layer = parsed.pathname + parsed.search;
+  for (let round = 0; round <= CARRY_DECODE_ROUNDS; round++) {
+    if (/https?:/i.test(layer)) return true;
+    let next: string;
+    try {
+      next = decodeURIComponent(layer);
+    } catch {
+      // One broken escape (`%ZZ`, a cut UTF-8 sequence) makes decodeURIComponent throw for the
+      // whole string, while the services that read a parameter decode leniently, escape by escape.
+      // So does this: every valid `%XX` on its own, a byte as a character, which is enough to see
+      // an ASCII `http:`.
+      next = layer.replace(/%([0-9a-f]{2})/gi, (_m, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)));
+    }
+    if (next === layer) return false;
+    layer = next;
+  }
+  return false;
+}
+
+/** How often {@link carriesAddress} decodes before it stops looking: an address encoded up to four times is seen. */
+export const CARRY_DECODE_ROUNDS = 4;

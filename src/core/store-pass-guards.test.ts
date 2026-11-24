@@ -92,16 +92,17 @@ function callArgs(src: string, name: string): string[] {
 const MINTS: Record<string, string> = {
   'tools/builtin/http.ts › mintStorePassFor › mintStorePass': 'request pass: refused without a container; contains the thread or run before minting',
   'tools/builtin/http.ts › storeExchangePassFor › mintStoreExchangePass': 'exchange pass: the connect callback only; contains nothing, it fetches no store data',
+  'core/store-token-refresh.ts › storeRefreshPassFor › mintStoreRefreshPass': 'refresh pass: a bound connection only, over a body built from the vault; contains nothing, it fetches no store data',
 };
 
 describe('every mint of a store pass has its containment rule', () => {
-  it('lists each function that calls mintStorePass or mintStoreExchangePass', () => {
+  it('lists each function that calls mintStorePass, mintStoreExchangePass or mintStoreRefreshPass', () => {
     const found: string[] = [];
     for (const p of sources(SRC)) {
       const src = readFileSync(p, 'utf-8');
       const rel = relative(SRC, p).replace(/\\/g, '/');
       if (rel === 'core/store-pass.ts') continue; // the definitions
-      for (const m of src.matchAll(/(?<![\w.])(mintStorePass|mintStoreExchangePass)\(/g)) {
+      for (const m of src.matchAll(/(?<![\w.])(mintStorePass|mintStoreExchangePass|mintStoreRefreshPass)\(/g)) {
         const before = src.slice(0, m.index);
         const fn = [...before.matchAll(/\n(?:export )?(?:async )?function (\w+)\(/g)].pop()?.[1] ?? '(top level)';
         found.push(`${rel} › ${fn} › ${m[1]!}`);
@@ -176,7 +177,7 @@ describe('the exchange pass is minted in one place, for the connect callback alo
     expect(at).toBeGreaterThan(fn);
     expect(at).toBeLessThan(next);
     const body = http.slice(fn, at);
-    expect(body.indexOf('if (!shopifyExchangeSwitchOn()) return undefined;')).toBeGreaterThan(-1);
+    expect(body.indexOf("if (!shopifyExchangeSwitchOn()) return 'switched_off';")).toBeGreaterThan(-1);
     expect(body.indexOf('exactClearance.ensure()')).toBeGreaterThan(body.indexOf('shopifyExchangeSwitchOn()'));
   });
 
@@ -199,7 +200,8 @@ describe('the exchange pass is minted in one place, for the connect callback alo
       .sort();
     // The provider list (`contained-providers.ts`) holds every model and speech request of an
     // instance with the switch on to §E7's providers; it reads the switch, it does not widen it.
-    expect(callers).toEqual(['core/contained-providers.ts', 'core/session.ts', 'tools/builtin/http.ts']);
+    // The refresh of an expiring store connection (`store-token-refresh.ts`) asks it before its pass.
+    expect(callers).toEqual(['core/contained-providers.ts', 'core/session.ts', 'core/store-token-refresh.ts', 'tools/builtin/http.ts']);
     const session = readFileSync(join(SRC, 'core/session.ts'), 'utf-8');
     expect(session.match(/shopifyPresetSuffix\(shopifyExchangeSwitchOn\(\)\)/g) ?? []).toHaveLength(2);
   });
@@ -212,6 +214,55 @@ describe('the exchange pass is minted in one place, for the connect callback alo
     expect(callers).toEqual(['server/http-api.ts']);
     const api = readFileSync(join(SRC, 'server/http-api.ts'), 'utf-8');
     expect(api.match(/storeExchangePassFor\(/g) ?? []).toHaveLength(1);
+  });
+});
+
+describe('the refresh pass is minted in one place, for a bound connection, over a body from the vault', () => {
+  const users = (name: string): string[] => sources(SRC)
+    .filter((p) => new RegExp(`\\b${name}\\b`).test(readFileSync(p, 'utf-8')))
+    .map((p) => relative(SRC, p).replace(/\\/g, '/'))
+    .sort();
+  const refresh = (): string => readFileSync(join(SRC, 'core/store-token-refresh.ts'), 'utf-8');
+  const passFor = (): string => {
+    const src = refresh();
+    const fn = src.indexOf('export async function storeRefreshPassFor(');
+    expect(fn).toBeGreaterThan(-1);
+    return src.slice(fn, src.indexOf('\n}\n', fn));
+  };
+
+  it('only store-pass.ts defines mintStoreRefreshPass and only store-token-refresh.ts calls it, once', () => {
+    expect(users('mintStoreRefreshPass')).toEqual(['core/store-pass.ts', 'core/store-token-refresh.ts']);
+    expect(refresh().match(/mintStoreRefreshPass\(/g) ?? []).toHaveLength(1);
+  });
+
+  it('mints after the switch, the binding check over the vault\'s access token, and the clearance', () => {
+    const body = passFor();
+    const at = body.indexOf('mintStoreRefreshPass(');
+    const order = [
+      'if (!shopifyExchangeSwitchOn()) return undefined;',
+      "const access = secretStore.resolve(accessTokenKey(profile.id));",
+      'const digest = toolContext.storeBindingDigest(profile.id, origin, access);',
+      'if (digest === null || !sameDigest(digest, bound)) return undefined;',
+      'const clearance = await toolContext.exactClearance.ensure();',
+    ].map((line) => body.indexOf(line));
+    for (const i of order) expect(i).toBeGreaterThan(-1);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(at).toBeGreaterThan(order[order.length - 1]!);
+  });
+
+  it('takes no body: the one it mints over is the refresh grant, built from the vault', () => {
+    const body = passFor();
+    expect(body.slice(0, body.indexOf(')'))).toBe('export async function storeRefreshPassFor(profileId: string, ctx: StoreRefreshContext');
+    expect(body).toContain("const params = { grant_type: 'refresh_token', client_id: clientId, client_secret: clientSecret, refresh_token: refresh };");
+    expect(body).toContain('pass: mintStoreRefreshPass(origin, serializeTokenBody(params, bodyFormat)),');
+  });
+
+  it('only the refresh itself asks for a refresh pass', () => {
+    const callers = sources(SRC)
+      .filter((p) => /\bstoreRefreshPassFor\(/.test(readFileSync(p, 'utf-8').replace(/export async function storeRefreshPassFor\(/, '')))
+      .map((p) => relative(SRC, p).replace(/\\/g, '/'));
+    expect(callers).toEqual(['core/store-token-refresh.ts']);
+    expect(refresh().match(/storeRefreshPassFor\(/g) ?? []).toHaveLength(2); // the definition and runRefresh's call
   });
 });
 
