@@ -22,7 +22,7 @@ import { currentCallSignal, currentCallTargetOrigin, joinCallSignal, noteOwnStop
 import { CROSS_HOST_REFUSAL, crossHostRedirectGuard, readHopsGuarded } from '../../core/read-hops.js';
 import { carriesAddress, hostTargets, UnknownSendTargetError } from '../../core/send-target.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret, ExchangeFacts } from '../../core/api-store.js';
-import { SaveRefused, profileReadHost, accessTokenKey, collectVaultKeys, grantTokenNames, tokenSlotNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
+import { SaveRefused, profileReadHost, accessTokenKey, collectVaultKeys, grantTokenNames, tokenSlotNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE, OPAQUE_PROFILE_ID_SHAPE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
@@ -37,15 +37,16 @@ import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
 import { pv, singleLine } from '../../core/prompt-value.js';
+import type { PromptText } from '../../types/agent.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
-import { isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
+import { OWNER_PRINCIPAL, isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
 import { ownersCleanBatch } from '../../core/owner-clean-batch.js';
 import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
 import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
 import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
-import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, sharesAnotherGrant, sharedGrantOwner, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
+import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, sharesAnotherGrant, sharedGrantOwner, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle, settingsVersion, bindingOf } from '../../core/profile-secret-view.js';
 import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-bindings.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
@@ -1861,22 +1862,64 @@ function adoptionHosts(profile: ApiProfile): string[] {
 
 /**
  * Where a released value goes, as the owner is asked about it: each of {@link credentialEndpoints}
- * by its host, with the port when it is not the default, and for the token endpoint its path and
- * query too. Userinfo and a fragment are not shown. Only https reaches the question (`not-https`).
+ * by its host, with the port when it is not the default. Only the shaped host reaches the
+ * question, because a mandate's turn wrote the profile and the owner confirms this dialog: a path,
+ * query, fragment or userinfo is that turn's free text, so an endpoint that carries one is only counted
+ * (`withDetail`), with the profile's other bound settings. Only https reaches the question
+ * (`not-https`).
  */
-function releaseDestinations(profile: ApiProfile): string[] {
-  const shown = new Set<string>();
+function releaseDestinations(profile: ApiProfile): { hosts: string[]; withDetail: number } {
+  const hosts = new Set<string>();
+  const detailed = new Set<string>();
   for (const e of credentialEndpoints(profile)) {
     const u = new URL(e);
-    const rest = `${u.pathname === '/' ? '' : u.pathname}${u.search}`;
-    shown.add(`${shapedForLog(u.hostname, HOSTNAME_SHAPE, 255)}${u.port ? `:${u.port}` : ''}${rest === '' ? '' : JSON.stringify(boundedForQuestion(singleLine(rest)))}`);
+    hosts.add(`${shapedForLog(u.hostname, HOSTNAME_SHAPE, 255)}${u.port ? `:${u.port}` : ''}`);
+    if (`${u.pathname === '/' ? '' : u.pathname}${u.search}${u.hash}` !== '' || u.username !== '' || u.password !== '') detailed.add(e);
   }
-  return [...shown];
+  return { hosts: [...hosts], withDetail: detailed.size };
 }
 
-/** A value as the release question shows it: at most 200 characters, and a cut is marked. */
-function boundedForQuestion(value: string): string {
-  return value.length > 200 ? `${value.slice(0, 200)}…(${String(value.length - 200)} more)` : value;
+/**
+ * For a profile a mandate wrote: the version of the settings a release binds, as the owner's
+ * release question names it. The owner's view is recorded, so that question can say whether the
+ * profile changed since (`ownerViewOf`); a mandate's view is not, since it is not the owner seeing
+ * it. Empty for the owner's own profiles.
+ */
+function releaseVersionNote(agent: IAgent, apiStore: ApiStore, profile: ApiProfile): string {
+  if (!isMandateAuthored(profile)) return '';
+  // Only an owner's interactive turn counts as a read the question may name: a workflow or worker
+  // run, or an autonomous turn, reads the profile without anyone being shown it. A trigger's,
+  // workflow's or task's run carries its run tag as author under the owner's principal, and a
+  // sub-agent a run origin of its own while it forwards the parent's prompt; neither showed the
+  // owner the profile (the same reading as `ownersCleanBatch`). Nor does the owner's turn in a
+  // thread a helper started (`helperThread`): the model that shows the owner the profile there has
+  // read the helper's content, so its view is no read the question may vouch for. The question
+  // then keeps saying the settings changed, which is the safe side.
+  if (isOwnerPrincipal(agent.principal) && agent.writeAuthor === principalTag(OWNER_PRINCIPAL)
+    && agent.sendOrigin === undefined && agent.autonomy !== 'autonomous' && agent.promptUser !== undefined) {
+    apiStore.noteOwnerView(profile.id, bindingOf(profile), new Date());
+  }
+  const trailId = apiStore.trailIdOf(profile.id);
+  return `\n\nRelease settings of API profile ${trailId ?? '(no opaque id)'}: version ${settingsVersion(profile)}.`;
+}
+
+/** `at` as the release question names a time: HH:MM in the person's timezone, else in UTC, said. */
+function releaseClock(at: Date, timeZone: string | undefined): string {
+  if (timeZone) {
+    try {
+      return new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hour12: false }).format(at);
+    } catch { /* an invalid zone falls back to UTC below */ }
+  }
+  return `${at.toISOString().slice(11, 16)} UTC`;
+}
+
+/**
+ * The profile `id` that `raw` names: the profile with that opaque id when `raw` has the shape of
+ * one and such a profile exists, else `raw` itself. The opaque id wins over a slug spelled the
+ * same, so the id a release question names always reaches the profile it asked about.
+ */
+function profileIdFrom(apiStore: ApiStore, raw: string): string {
+  return (OPAQUE_PROFILE_ID_SHAPE.test(raw) ? apiStore.idOfTrailId(raw) : undefined) ?? raw;
 }
 
 /**
@@ -1937,6 +1980,138 @@ function consentOf(agent: IAgent, profile: ApiProfile): Pick<OAuthGrantRecord, '
   const p = agent.principal;
   if (p.kind !== 'mandate' || profile.created_by !== principalTag(p)) return { connected_by: 'owner' };
   return p.mandateId === undefined ? { connected_by: principalTag(p) } : { connected_by: principalTag(p), connected_mandate_id: p.mandateId };
+}
+
+// Split as the engine sends it: on whitespace only. A comma is part of a scope, so "read,write" is
+// one scope and "read write" two.
+const scopeTokens = (scope: string | undefined): string[] =>
+  (scope ?? '').split(/\s+/).filter((s) => s !== '');
+
+/**
+ * A profile value as the save question shows it: on one line, so a value cannot draw a list line
+ * of its own, and withheld where it has the shape of a credential. Tool input passes through the
+ * secret resolver before the handler, so a field written as a vault reference holds the value.
+ */
+const shownValue = (value: string): string => {
+  const line = singleLine(value);
+  return maskSecretPatterns(line, { includeGeneric: true }) === line ? line : '(a value shaped like a credential, not shown)';
+};
+
+/**
+ * An address as the save question shows it, read the way a request reads it: the host it sends to
+ * is named whenever the written text does not start with it (a user name before an `@`, a host
+ * written in other letters that the URL parser turns into punycode), and the origin stays visible
+ * when the rest is withheld. Text the URL parser does not take is said to be no address, so it
+ * cannot pass for one.
+ */
+const shownUrl = (value: string): string => {
+  let url: URL;
+  try { url = new URL(value); } catch { return `${shownValue(value)} (not an address a request can use)`; }
+  const shown = shownValue(value);
+  if (shown !== singleLine(value)) return `${url.origin} (the rest is shaped like a credential, not shown)`;
+  if (url.host === '') return `${shown} (sends to no host)`;
+  // Written as read only when the host is followed by a path, a port and a path, or nothing: a
+  // `\`, `?` or `#` after it would let more host-like text follow that the request never uses.
+  const lead = `${url.protocol}//${url.host}`;
+  const asRead = shown.toLowerCase().startsWith(lead.toLowerCase()) && /^(?::\d+)?(?:\/|$)/.test(shown.slice(lead.length));
+  return asRead ? shown : `${shown} (sends to ${url.host})`;
+};
+
+/**
+ * Scope tokens as the save question shows them: each is withheld on its own, so one cannot hide
+ * another. The ones shown are listed; the withheld ones are counted after them.
+ */
+const shownScopes = (tokens: readonly string[]): string => {
+  const shown = tokens.map(singleLine).filter((t) => shownValue(t) === t);
+  const held = tokens.length - shown.length;
+  if (held === 0) return shown.join(' ');
+  const count = `${String(held)} ${held === 1 ? 'value shaped like a credential' : 'values shaped like credentials'} (not shown)`;
+  return shown.length === 0 ? count : `${shown.join(' ')}; plus ${count}`;
+};
+
+export const ordinal = (n: number): string => `${String(n)}${n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th'}`;
+
+/**
+ * Which secret name each place of a profile reads, by place rather than as a set: a name moved to
+ * another place, or `vault_keys` put in another order, sends another credential. For basic auth the
+ * pair actually sent is a place of its own, because each half falls back to `vault_keys` (http.ts).
+ * Keyed by the label the question shows: `vault_keys` reads as "secret read", counted from the
+ * first when the profile reads several.
+ */
+const secretPlacesOf = (p: ApiProfile, several: boolean): Map<string, string> => {
+  const places = new Map<string, string>();
+  const put = (label: string, name: string | undefined): void => { if (typeof name === 'string' && name !== '') places.set(label, name); };
+  const a = p.auth;
+  (a?.vault_keys ?? []).forEach((name, i) => { put(several ? `secret read (${ordinal(i + 1)})` : 'secret read', name); });
+  put('secret read for the user name (username_key)', a?.username_key);
+  put('secret read for the password (password_key)', a?.password_key);
+  if (a?.type === 'basic') {
+    put('secret read for the user name sent (basic auth)', a.username_key ?? a.vault_keys?.[0]);
+    put('secret read for the password sent (basic auth)', a.password_key ?? a.vault_keys?.[1]);
+  }
+  put('secret read for the OAuth client id (oauth.client_id_key)', a?.oauth?.client_id_key);
+  put('secret read for the OAuth client secret (oauth.client_secret_key)', a?.oauth?.client_secret_key);
+  put('secret read for the OAuth refresh token (oauth.refresh_token_key)', a?.oauth?.refresh_token_key);
+  return places;
+};
+
+/**
+ * What a save changes against the stored profile, in the fields that decide where a credential
+ * goes, how it travels and what it may do. One line each, with the values as values, in the order
+ * of what matters most to someone who reads only the first lines: where the secret goes and which
+ * one is read, then what it may do (grant, audience, scopes, the provider's parameters). Empty for
+ * a new profile or a save that changes none of these.
+ * `widens` is false only for a line that takes something away without anything taking its place:
+ * a scope removed while others remain (with none left, a provider may grant its default), or a
+ * place that no longer reads a secret. That narrows what the profile may do.
+ */
+export interface SecurityChange { readonly text: PromptText; readonly widens: boolean }
+
+export function securityChanges(prior: ApiProfile | undefined, next: ApiProfile): SecurityChange[] {
+  if (prior === undefined) return [];
+  const out: SecurityChange[] = [];
+  const add = (text: PromptText, widens = true): void => { out.push({ text, widens }); };
+  const field = (label: string, a: string | undefined, b: string | undefined, show: (v: string) => string = shownValue): void => {
+    if ((a ?? '') !== (b ?? '')) add(pv`${label}: ${a === undefined ? '(none)' : show(a)} → ${b === undefined ? '(none)' : show(b)}`);
+  };
+  // Where the secret goes, how it travels, and which one is read.
+  field('address (base_url)', prior.base_url, next.base_url, shownUrl);
+  field('token address (token_url)', prior.auth?.oauth?.token_url, next.auth?.oauth?.token_url, shownUrl);
+  field('how the secret is attached (auth.type)', prior.auth?.type, next.auth?.type);
+  field('header it is sent in (auth.header_name)', prior.auth?.header_name, next.auth?.header_name);
+  field('query parameter it is sent in (auth.query_param)', prior.auth?.query_param, next.auth?.query_param);
+  field('basic auth form (auth.basic_format)', prior.auth?.basic_format, next.auth?.basic_format);
+  field('token request body (auth.oauth.body_format)', prior.auth?.oauth?.body_format, next.auth?.oauth?.body_format);
+  const several = Math.max(prior.auth?.vault_keys?.length ?? 0, next.auth?.vault_keys?.length ?? 0) > 1;
+  const [sWas, sNow] = [secretPlacesOf(prior, several), secretPlacesOf(next, several)];
+  for (const label of [...new Set([...sWas.keys(), ...sNow.keys()])]) {
+    const [a, b] = [sWas.get(label), sNow.get(label)];
+    if (a === b) continue;
+    add(pv`${label}: ${a === undefined ? '(none)' : shownValue(a)} → ${b === undefined ? '(none)' : shownValue(b)}`, b !== undefined);
+  }
+  // What it may do.
+  field('grant type', prior.auth?.oauth?.grant_type, next.auth?.oauth?.grant_type);
+  field('audience', prior.auth?.oauth?.audience, next.auth?.oauth?.audience);
+  const was = new Set(scopeTokens(prior.auth?.oauth?.scope));
+  const now = new Set(scopeTokens(next.auth?.oauth?.scope));
+  const added = [...now].filter((s) => !was.has(s));
+  const removed = [...was].filter((s) => !now.has(s));
+  if (added.length > 0) add(pv`scopes added: ${shownScopes(added)}`);
+  if (removed.length > 0) {
+    add(now.size === 0
+      ? pv`scopes removed: ${shownScopes(removed)} (none left: the provider decides which it grants)`
+      : pv`scopes removed: ${shownScopes(removed)}`, now.size === 0);
+  }
+  const pp = (p: ApiProfile): Record<string, unknown> =>
+    isPlainRecord(p.auth?.oauth?.preset_params) ? p.auth!.oauth!.preset_params as Record<string, unknown> : {};
+  const [ppWas, ppNow] = [pp(prior), pp(next)];
+  for (const key of [...new Set([...Object.keys(ppWas), ...Object.keys(ppNow)])].sort()) {
+    const [a, b] = [ppWas[key], ppNow[key]];
+    if (JSON.stringify(a) !== JSON.stringify(b)) {
+      add(pv`provider parameter ${shownValue(key)}: ${a === undefined ? '(none)' : shownValue(String(a))} → ${b === undefined ? '(none)' : shownValue(String(b))}`);
+    }
+  }
+  return out;
 }
 
 /**
@@ -2089,11 +2264,12 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
       if (!apiStore) {
         return 'No API profiles registered.';
       }
-      const profile = apiStore.get(input.id);
+      // The release question names a profile by its opaque id, so `view` takes that id too.
+      const profile = apiStore.get(profileIdFrom(apiStore, input.id));
       if (!profile) {
         return `API profile "${input.id}" not found. Use action "list" to see available profiles.`;
       }
-      return apiStore.formatProfile(profile) + notConnectedNote(agent, profile);
+      return apiStore.formatProfile(profile) + notConnectedNote(agent, profile) + releaseVersionNote(agent, apiStore, profile);
     }
 
     if (input.action === 'bootstrap') {
@@ -2338,6 +2514,10 @@ ${draftJson}
       }
       delete profile.created_by;
       const prior = agent.toolContext?.apiStore?.storedProfile(profile.id);
+      // The stored profile the questions below describe. A save in between (another chat, a token
+      // exchange) would be overwritten by this one and the change list would be against a state
+      // that is gone, so the save checks it again right before it writes.
+      const priorState = JSON.stringify(prior ?? null);
       // A save may not take a profile off the built-in provider it was set up with. A model
       // that wanted a write scope the preset refuses saved over a working read connection as
       // its own OAuth app; connect then refused that, and the user had neither. The answer
@@ -2476,6 +2656,16 @@ ${draftJson}
       // prompted") that could never be followed — the prompt was unreachable and the
       // else-branch below deleted any ack that did exist.
       const nonVetted = egressUrls.filter((u) => !isVettedEgressHost(u));
+      // What this save changes in the fields that decide where a credential goes and what it may
+      // do. Any such change is asked about, on any host and for any kind of profile, and named in
+      // the question: a consent to "save this profile" is not a consent to the scope a text in a
+      // tool result asked the model to add. A refresh sends the stored scope and audience, and a
+      // swap to a name already bound to the same address sends another credential there, so
+      // neither the host check nor the binding question covers them.
+      const changes = securityChanges(prior, profile);
+      // Only a change that widens or moves something asks on its own; a save that only takes a
+      // scope or a secret away narrows the profile. Every change is still listed when it asks.
+      const widens = changes.some((c) => c.widens);
       // Two questions, one prompt, and the redirect half is asked even when the
       // host IS vetted. That is not thoroughness: it is what keeps the refusal
       // at connect time followable. If this only ran for non-vetted hosts, a
@@ -2483,7 +2673,7 @@ ${draftJson}
       // would refuse for want of an acceptance, and its advice — save again and
       // accept — would point at a prompt that never appears. That dead end is
       // the one this file already carries a scar from.
-      if (nonVetted.length > 0 || redirectUrls.length > 0) {
+      if (nonVetted.length > 0 || redirectUrls.length > 0 || widens) {
         // Controller-responsibility acceptance MUST be a real OUT-OF-BAND human
         // confirmation — NEVER an agent-supplied tool argument. A prompt-injected
         // agent (malicious mail/page/doc) that could self-approve would repoint an
@@ -2535,9 +2725,16 @@ ${draftJson}
           if (nonVetted.length > 0) {
             return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
           }
+          // A change to where a credential goes or what it may do, with nobody to accept it: refused.
+          if (widens) {
+            return `Blocked: profile "${profile.id}" not saved. The save changes its scopes, provider parameters, addresses, grant or the secrets it reads, and that needs the user's acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved. Tell the user in one sentence that the profile was not saved because this change needs their acceptance, and that they can save it again by asking lynox in a chat where they can answer. Do not try to save it in another way.`;
+          }
         } else {
+          const changeList = changes.reduce<PromptText | undefined>((acc, c) => acc === undefined ? pv`\n- ${c.text}` : pv`${acc}\n- ${c.text}`, undefined);
+          const changeBlock = changeList === undefined ? pv`` : pv`This save changes:${changeList}\n\n`;
+          const disclosureBlock = disclosure === '' ? pv`` : pv`${disclosure}\n\n`;
           const answer = await agent.promptUser(
-            pv`⚠ api_setup: saving "${profile.name}" needs your acceptance.\n\n${disclosure}\n\nAccept and save this profile?`,
+            pv`⚠ api_setup: saving "${profile.name}" needs your acceptance.\n\n${changeBlock}${disclosureBlock}Accept and save this profile?`,
             ['Allow', 'Deny', '\x00'],
           );
           if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
@@ -2667,6 +2864,10 @@ ${draftJson}
       // kind only.
       const freshTrailId = apiStore.newTrailId();
       return withInstanceWrite(agent, { site: 'api_setup#save', kind: () => (prior === undefined ? 'create' : 'change'), store: 'api_profiles', target: () => [['profile', apiStore.trailIdOf(savedId) ?? freshTrailId]], main: ['save'] }, (w) => {
+        // No await from here to the save.
+        if (JSON.stringify(apiStore.storedProfile(savedId) ?? null) !== priorState) {
+          return `Error: API profile "${savedId}" changed while the question was open (for example, another chat saved it or its token was renewed), so the answer no longer covers this save. Nothing was saved and no stored token was removed. Read the profile again; if the change is still wanted, save it again; if it still needs their acceptance, the user is asked again.`;
+        }
         if (cleared.length > 0) {
           const refusal = apiStore.saveRefusal(profile);
           if (refusal !== null) return `Error: ${refusal} No token slot was emptied: ${cleared.join(', ')} ${cleared.length === 1 ? 'is' : 'are'} left as ${cleared.length === 1 ? 'it was' : 'they were'}.`;
@@ -3721,7 +3922,6 @@ ${draftJson}
 
     if (input.action === 'release_secret' || input.action === 'withdraw_release') {
       if (!input.id || !input.secret_name) return `Error: "id" and "secret_name" are required for ${input.action}.`;
-      const id = input.id;
       const name = input.secret_name;
       if (!isOwnerPrincipal(agent.principal)) {
         return `Error: only the owner can ${input.action === 'release_secret' ? 'release a vault name to a profile' : 'take a release back'}. Nothing was changed.`;
@@ -3731,6 +3931,8 @@ ${draftJson}
       if (!releases || !apiStore || !agent.secretStore) {
         return 'Error: releases cannot be recorded on this instance right now. Nothing was changed.';
       }
+      // The release question names the profile by its opaque id, so these take that id too.
+      const id = profileIdFrom(apiStore, input.id);
       const shownName = JSON.stringify(shapedForLog(name, VAULT_NAME_SHAPE, 64));
       if (input.action === 'withdraw_release') {
         // Narrows what a profile reads, so it is not asked.
@@ -3774,17 +3976,39 @@ ${draftJson}
       const author = profile.created_by!;
       // What the person is shown is what is stored: the same binding, read once, before the wait.
       const binding = releaseBinding(profile, name)!;
-      const hosts = releaseDestinations(profile);
+      // The owner confirms this dialog, and a mandate's turn wrote the profile, so the question
+      // carries fixed wording plus only what the engine shapes:
+      // the vault name, the profile's opaque id (the `id` is the mandate's own word), the role and
+      // the hosts. Every other field whose change ends the release is counted, so the person still
+      // learns that there is more, and how to read it first. The scope is counted too: a scope
+      // token may be any printable run without a space, so a listed one is free text as well
+      // (`Owner-note:reviewed-by-lynox-safe-to-Allow.` is one valid token).
+      const trailId = apiStore.trailIdOf(id);
+      if (trailId === undefined) {
+        return `${shownName} cannot be released to this API profile yet: it has no opaque id to name it by in the question. lynox assigns one when it starts; after that, the release can be asked for again. Nothing was changed.`;
+      }
+      const { hosts, withDetail } = releaseDestinations(profile);
       const role = sendRole(profile, name)!;
-      // Every field whose change ends the release, so what the person agrees to is all of it.
-      const authority = releaseBoundFields(profile)
-        .map(([field, value]) => `${field} ${typeof value === 'string' ? JSON.stringify(boundedForQuestion(singleLine(value))) : boundedForQuestion(singleLine(JSON.stringify(value)))}`)
-        .join(', ');
+      const more = releaseBoundFields(profile).length + withDetail;
+      const moreSentence = more === 0 ? ''
+        : more === 1
+          ? pv` 1 more setting of this profile (such as its auth type, scopes, path or query) is part of the release too; a change to it ends it. To see it first, deny, ask here to view API profile ${trailId}, then ask to release ${shownName} again.`
+          : pv` ${String(more)} more settings of this profile (such as its auth type, scopes, path or query) are part of the release too; a change to any of them ends it. To see them first, deny, ask here to view API profile ${trailId}, then ask to release ${shownName} again.`;
+      // Counted settings are not printed, so a save between the owner's view and this question
+      // could change them under the same words. The engine compares what the owner viewed with what
+      // this question asks about, by the whole digest; the short version is only a reference.
+      const viewed = apiStore.ownerViewOf(id);
+      const version = settingsVersion(profile);
+      const versionSentence = viewed === undefined ? ''
+        : viewed.binding === bindingOf(profile)
+          ? pv` These settings were last read in one of your chats at ${releaseClock(viewed.at, agent.userTimezone)} and have not changed since (version ${version}).`
+          : pv` These settings changed after they were last read in one of your chats at ${releaseClock(viewed.at, agent.userTimezone)}; deny and view the profile again before you allow it (version ${version}).`;
+      const clientIdSentence = role === 'oauth.client_id_key' ? pv` A client id also goes into the sign-in link, to the browser of whoever opens it.` : '';
       const held = vaultHolds({ secretStore: agent.secretStore } as IAgent, name);
       const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
         ? Promise.resolve(null)
         : promptUser(
-          pv`⚠ api_setup: release the vault name ${shownName} to API profile ${id}, set up in the session of ${singleLine(author)}? The engine then sends its value, as ${role}, to ${hosts.length > 0 ? hosts.join(', ') : 'no host it can name'}${authority ? ` (${authority})` : ''}, for every request and run through this profile, the user's own and bulk runs included, until that mandate ends or the user withdraws it.${role === 'oauth.client_id_key' ? ' A client id also goes into the sign-in link, to the browser of whoever opens it.' : ''} The vault ${held ? 'holds a value' : 'holds no value yet'} under this name. Any change to where it goes ends the release. Release it?`,
+          pv`⚠ api_setup: release the vault key ${shownName} to API profile ${trailId}? It was set up in the session of ${singleLine(author)}. If you allow it, lynox sends the value of ${shownName}, as ${role}, to ${hosts.length > 0 ? hosts.join(', ') : 'no host it can name'}, with every request and run through this profile, your own and bulk runs included, until that mandate ends or you withdraw the release.${moreSentence}${versionSentence}${clientIdSentence} The vault ${held ? 'holds a value' : 'holds no value yet'} under this name. Any change to where the value goes ends the release. Release it?`,
           ['Allow', 'Deny', '\x00'],
         ));
       if (answer === null) { noteOwnStopSentence(); return `Blocked: ${shownName} was not released — the run was stopped before the question was asked.`; }

@@ -91,6 +91,13 @@ beforeEach(() => {
 				run = { ...run, checksum: 'c2', deselected: run.deselected + 1, changes: { ...run.changes, update: run.changes.update - 1 } };
 				return reply({ checksum: 'c2' });
 			}
+			const back = /\/targets\/(\d+)\/reselect$/.exec(u);
+			if (back) {
+				const seq = Number(back[1]);
+				targets = targets.map((x) => (x.seq === seq ? { ...x, deselected: false } : x));
+				run = { ...run, checksum: 'c3', deselected: run.deselected - 1, changes: { ...run.changes, update: run.changes.update + 1 } };
+				return reply({ checksum: 'c3' });
+			}
 			return reply({});
 		}
 		gets.push(u);
@@ -296,9 +303,12 @@ describe('approving a preview', () => {
 		expect(target.textContent).toContain(t('bulk.approve.only_one'));
 		expect(target.textContent).not.toContain(t('bulk.approve.one_first'));
 		expect(buttonByText(t('bulk.approve.write_one'))).toBeUndefined();
+		const asked = gets.length;
 		buttonByText(t('bulk.deselect.off'))!.click();
 		await settle();
 		expect(posts).toEqual([{ url: expect.stringMatching(/\/bulk\/runs\/r1\/targets\/1\/deselect$/) as unknown as string, body: { checksum: 'c1' } }]);
+		// The run is asked for again (its counts and checksum moved); no page of its targets is.
+		expect(gets.slice(asked)).toEqual([expect.stringMatching(/\/bulk\/runs\/r1$/) as unknown as string]);
 		expect(target.textContent).toContain(t('bulk.deselect.taken_out'));
 		expect(buttonByText(t('bulk.deselect.on'))).toBeDefined();
 		// Nothing left to write: the sentence and a way back, no button that cannot act and no note on a write.
@@ -1315,6 +1325,20 @@ describe('the allowed link domains of a judged list run', () => {
 		expect(target.textContent).not.toContain(t('bulk.deselect.refused.not_writing'));
 	});
 
+	it('sends no take-out while another run loads, though the page still shows the one before', async () => {
+		run = makeRun();
+		const open = await renderSwitchable();
+		runsById['r2'] = makeRun({ id: 'r2' });
+		const release = held('r2');
+		await open('r2', false);
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		expect(posts).toEqual([]);
+		release();
+		await settle();
+		expect(posts).toEqual([]);
+	});
+
 	it('leaves a refusal shown on one run behind when another opens', async () => {
 		run = makeRun();
 		const open = await renderSwitchable();
@@ -1727,6 +1751,94 @@ describe('the start of a judged run, in words', () => {
 		expect(supersede.disabled).toBe(true);
 		expect(hint()).toBe(t('bulk.start.hint_cap'));
 		expect(supersede.getAttribute('aria-describedby')).toBe('bulk-start-hint');
+	});
+});
+
+describe('a toggle on the run\'s page', () => {
+	it('puts a target back against the checksum the take-out answered, and loads no page of targets for either', async () => {
+		await render();
+		const asked = gets.length;
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		buttonByText(t('bulk.deselect.on'))!.click();
+		await settle();
+		expect(posts.map((p) => p.body)).toEqual([{ checksum: 'c1' }, { checksum: 'c2' }]);
+		expect(gets.slice(asked).some((u) => /\/targets\?/.test(u))).toBe(false);
+		expect(target.textContent).not.toContain(t('bulk.deselect.taken_out'));
+		expect(buttonByText(t('bulk.deselect.off'))).toBeDefined();
+	});
+
+	for (const [what, change] of [
+		['another view took a second target out meanwhile', (r: BulkRunDetailData): BulkRunDetailData => ({ ...r, deselected: r.deselected + 1 })],
+		['the run lists another number of targets', (r: BulkRunDetailData): BulkRunDetailData => ({ ...r, total: r.total + 1 })],
+		// Another view put one target back and took another out: the counts are as this toggle left
+		// them, only the checksum tells the run moved.
+		['another view moved a pair of targets that cancels out', (r: BulkRunDetailData): BulkRunDetailData => ({ ...r, checksum: 'c9' })],
+	] as const) {
+		it(`loads the run whole where ${what}`, async () => {
+			await render();
+			const asked = gets.length;
+			const realFetch = globalThis.fetch;
+			vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+				if (init?.method !== 'POST' && posts.length > 0 && /\/bulk\/runs\/r1$/.test(String(url)) && gets.length === asked) run = change(run);
+				return realFetch(url, init);
+			}));
+			buttonByText(t('bulk.deselect.off'))!.click();
+			await settle();
+			expect(gets.slice(asked).some((u) => /\/targets\?/.test(u))).toBe(true);
+		});
+	}
+
+	it('loads the run whole where the ask for it fails', async () => {
+		await render();
+		const asked = gets.length;
+		const realFetch = globalThis.fetch;
+		let failed = false;
+		vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+			if (!failed && init?.method !== 'POST' && posts.length > 0 && /\/bulk\/runs\/r1$/.test(String(url))) {
+				failed = true;
+				gets.push(String(url));
+				return new Response('{}', { status: 502, headers: { 'Content-Type': 'application/json' } });
+			}
+			return realFetch(url, init);
+		}));
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		expect(gets.slice(asked).some((u) => /\/targets\?/.test(u))).toBe(true);
+		expect(target.textContent).toContain(t('bulk.deselect.taken_out'));
+	});
+
+	it('loads the run whole where the ask for it throws, and shows the toggle', async () => {
+		await render();
+		const asked = gets.length;
+		const realFetch = globalThis.fetch;
+		let failed = false;
+		vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+			if (!failed && init?.method !== 'POST' && posts.length > 0 && /\/bulk\/runs\/r1$/.test(String(url))) {
+				failed = true;
+				gets.push(String(url));
+				throw new Error('network');
+			}
+			return realFetch(url, init);
+		}));
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		expect(gets.slice(asked).some((u) => /\/targets\?/.test(u))).toBe(true);
+		expect(target.textContent).toContain(t('bulk.deselect.taken_out'));
+	});
+
+	it('loads the run whole where it is no longer the preview it showed', async () => {
+		await render();
+		const asked = gets.length;
+		const realFetch = globalThis.fetch;
+		vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+			// The engine moved the run on between the toggle and the ask: it is approved now.
+			if (init?.method !== 'POST' && posts.length > 0 && /\/bulk\/runs\/r1$/.test(String(url))) run = { ...run, phase: 'approved' };
+			return realFetch(url, init);
+		}));
+		buttonByText(t('bulk.deselect.off'))!.click();
+		await settle();
+		expect(gets.slice(asked).some((u) => /\/targets\?/.test(u))).toBe(true);
 	});
 });
 

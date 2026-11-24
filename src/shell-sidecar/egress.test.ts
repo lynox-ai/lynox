@@ -8,7 +8,7 @@ import { guardedBaselineHostList, isGuardedBaselineHost, GATE_MEMBERSHIP_FOR_TES
 import { MAX_EXEC_TIMEOUT_MS } from './protocol.js';
 
 const input = (over: Partial<ShellPolicyInput>): ShellPolicyInput => ({
-  networkPolicy: 'guarded', allowedHosts: undefined, allowedWildcards: [], ackHosts: undefined, ...over,
+  networkPolicy: 'guarded', allowedHosts: undefined, allowedWildcards: [], ackHosts: undefined, tainted: false, ...over,
 });
 
 describe('the set a shell call may reach', () => {
@@ -181,22 +181,22 @@ describe('one call against the registration listener', () => {
   });
 });
 
-describe('what the conversation brought in joins the set', () => {
-  it('joins under guarded only: allow-list keeps the operator\'s list, allow-all and deny-all are unchanged', () => {
-    const provenanceHosts = ['news.example', 'shop.example'];
-    const g = computeShellSet(input({ networkPolicy: 'guarded', provenanceHosts }));
-    expect(g.kind === 'hosts' && g.hosts).toEqual(expect.arrayContaining(provenanceHosts));
-    const l = computeShellSet(input({ networkPolicy: 'allow-list', allowedHosts: new Set(['only.example']), provenanceHosts }));
+describe('the hosts the owner typed join the set', () => {
+  it('before taint they join under guarded only: allow-list keeps the operator\'s list, allow-all and deny-all are unchanged', () => {
+    const typedHosts = ['news.example', 'shop.example'];
+    const g = computeShellSet(input({ networkPolicy: 'guarded', typedHosts }));
+    expect(g.kind === 'hosts' && g.hosts).toEqual(expect.arrayContaining(typedHosts));
+    const l = computeShellSet(input({ networkPolicy: 'allow-list', allowedHosts: new Set(['only.example']), typedHosts }));
     expect(l.kind === 'hosts' && l.hosts).toEqual(['only.example']);
-    expect(computeShellSet(input({ networkPolicy: 'allow-all', provenanceHosts }))).toEqual({ kind: 'all' });
-    expect(computeShellSet(input({ networkPolicy: 'deny-all', provenanceHosts })).kind).toBe('none');
+    expect(computeShellSet(input({ networkPolicy: 'allow-all', typedHosts }))).toEqual({ kind: 'all' });
+    expect(computeShellSet(input({ networkPolicy: 'deny-all', typedHosts })).kind).toBe('none');
   });
 
   it('fills only the room the policy leaves, newest first, and never turns the set into none', () => {
     const base = computeShellSet(input({ networkPolicy: 'guarded' }));
     const baseCount = base.kind === 'hosts' ? base.hosts.length : 0;
     const policy = new Set(Array.from({ length: MAX_SHELL_SET - 1 - baseCount }, (_, i) => `p${String(i)}.example`));
-    const s = computeShellSet(input({ networkPolicy: 'guarded', allowedHosts: policy, provenanceHosts: ['old.example', 'new.example'] }));
+    const s = computeShellSet(input({ networkPolicy: 'guarded', allowedHosts: policy, typedHosts: ['old.example', 'new.example'] }));
     expect(s.kind).toBe('hosts');
     if (s.kind !== 'hosts') return;
     expect(s.hosts).toHaveLength(MAX_SHELL_SET);
@@ -207,9 +207,49 @@ describe('what the conversation brought in joins the set', () => {
 
   it('skips what the proxy cannot take, without naming it as a policy entry', () => {
     const base = computeShellSet(input({ networkPolicy: 'guarded' }));
-    const s = computeShellSet(input({ networkPolicy: 'guarded', provenanceHosts: ['10.0.0.1', '*.wild.example', 'Upper.Example', 'ok.example'] }));
+    const s = computeShellSet(input({ networkPolicy: 'guarded', typedHosts: ['10.0.0.1', '*.wild.example', 'Upper.Example', 'ok.example'] }));
     if (base.kind !== 'hosts' || s.kind !== 'hosts') throw new Error('expected host sets');
     expect(s.hosts).toEqual([...base.hosts, 'ok.example'].sort());
     expect(s.dropped).toEqual(base.dropped);
+  });
+});
+
+describe('after taint the set is what the engine counts for a read', () => {
+  const floor = new Set(['floor.example']);
+  const ack = new Set(['ack.example']);
+  const typedHosts = ['typed.example'];
+  const baseline = (): string[] => {
+    const b = computeShellSet(input({ networkPolicy: 'guarded' }));
+    if (b.kind !== 'hosts') throw new Error('expected a host set');
+    return b.hosts;
+  };
+
+  it('guarded: baseline, floor and typed hosts, without a connected API\'s host', () => {
+    const s = computeShellSet(input({ networkPolicy: 'guarded', allowedHosts: floor, ackHosts: ack, typedHosts, tainted: true }));
+    expect(s).toEqual({ kind: 'hosts', hosts: [...baseline(), 'floor.example', 'typed.example'].sort(), dropped: [] });
+    // Before taint the connected API's host is in.
+    const clean = computeShellSet(input({ networkPolicy: 'guarded', allowedHosts: floor, ackHosts: ack, typedHosts }));
+    expect(clean.kind === 'hosts' && clean.hosts).toContain('ack.example');
+  });
+
+  it('allow-all and no policy: no longer every host, but baseline, floor and typed hosts', () => {
+    for (const networkPolicy of ['allow-all', undefined] as const) {
+      const s = computeShellSet(input({ networkPolicy, allowedHosts: floor, ackHosts: ack, typedHosts, tainted: true }));
+      expect(s).toEqual({ kind: 'hosts', hosts: [...baseline(), 'floor.example', 'typed.example'].sort(), dropped: [] });
+    }
+  });
+
+  it('allow-all: a floor wildcard is dropped and named, as under guarded', () => {
+    const s = computeShellSet(input({ networkPolicy: 'allow-all', allowedWildcards: ['wild.example'], tainted: true }));
+    expect(s.kind === 'hosts' && s.dropped).toEqual(['*.wild.example']);
+  });
+
+  it('allow-list: the list as is, typed hosts do not join', () => {
+    const s = computeShellSet(input({ networkPolicy: 'allow-list', allowedHosts: floor, ackHosts: ack, typedHosts, tainted: true }));
+    expect(s).toEqual({ kind: 'hosts', hosts: ['floor.example'], dropped: [] });
+  });
+
+  it('deny-all: none', () => {
+    expect(computeShellSet(input({ networkPolicy: 'deny-all', allowedHosts: floor, typedHosts, tainted: true })).kind).toBe('none');
   });
 });

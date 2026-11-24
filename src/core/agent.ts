@@ -78,6 +78,7 @@ import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns, maskEngineEnvSecrets } from './secret-store.js';
 import { UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { OwnerKnownReader, OwnerKnownVerdict } from './owner-known-targets.js';
+import { policyNamesHost } from './network-guard.js';
 import { SearchResultAddresses } from './search-result-addresses.js';
 import type { ConversationLatch } from './conversation-latch.js';
 import type { NoticeLanguage } from './notice-language.js';
@@ -97,9 +98,9 @@ import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene
 import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS, DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES } from './tool-result-blob-store.js';
 import { openSync, closeSync, constants, fstatSync } from 'node:fs';
 import { toWorkspaceRel, workspaceBase } from './workspace-rel.js';
+import { resolveToolPath } from './workspace.js';
 import { FILE_TOOL_READ_CAP_BYTES, isReadLimit, openRead, readFdCapped } from './workspace-fd.js';
 import { oversizeWayOut, resolveWritablePath } from '../tools/builtin/fs.js';
-import { resolve } from 'node:path';
 import type {
   BetaMessageParam,
   BetaTool,
@@ -5167,6 +5168,9 @@ export class Agent implements IAgent {
     // A read only: the host of a connected API the owner chose (`ApiStore.readKnownHosts`). A send
     // never asks this, so a profile cannot make a send's target known.
     if (asRead && target.kind === 'host' && this._readKnownHosts().has(target.value)) return 'known';
+    // A read only: a host the policy itself names, its baseline and the operator's floor. A send to
+    // one the owner did not name keeps asking.
+    if (asRead && target.kind === 'host' && this._policyNamesHost(target.value)) return 'known';
     if (target.kind === 'host') {
       // Only a reviewed contract: a person was shown the hosts and accepted them. Only while it
       // governs this call (not withheld after outside content), and only a host written out in
@@ -5175,6 +5179,13 @@ export class Agent implements IAgent {
       if (contract?.origin === 'reviewed' && contract.hostPatterns.some((p) => normalizeHostName(p) === target.value)) return 'known';
     }
     return this.ownerKnown?.known(target) ?? 'foreign';
+  }
+
+  /** {@link policyNamesHost} for this agent's policy. A context that does not carry the
+   *  instance's policy (`isPolicyUnread`) names nothing (fail-closed, as `providerSearchAdmitted`). */
+  private _policyNamesHost(host: string): boolean {
+    const tc = this.toolContext;
+    return tc !== undefined && !isPolicyUnread(tc) && policyNamesHost(host, tc);
   }
 
   /** {@link ApiStore.readKnownHosts}, or none when no store can answer: the read is then asked about. */
@@ -5711,7 +5722,7 @@ export class Agent implements IAgent {
     // a prompt the user may take a while to answer.
     if (mutatesFile && this.changesetManager?.active) {
       const reviewed = (tc.input as Record<string, unknown>)[REVIEWED_PATH_FIELD];
-      if (typeof reviewed === 'string' && reviewed && this.changesetManager.backupBeforeWrite(resolve(reviewed)) === false) {
+      if (typeof reviewed === 'string' && reviewed && this.changesetManager.backupBeforeWrite(resolveToolPath(reviewed)) === false) {
         // Nothing could be saved for the review: the write would be in neither the review nor
         // the rollback, and nothing would say so.
         const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
@@ -5836,7 +5847,7 @@ export class Agent implements IAgent {
       // Which file the write left at the path: a rollback deletes a new file only while it is still this one.
       if (mutatesFile && this.changesetManager?.active) {
         const written = (tc.input as Record<string, unknown>)[REVIEWED_PATH_FIELD];
-        if (typeof written === 'string' && written) this.changesetManager.recordWritten?.(resolve(written));
+        if (typeof written === 'string' && written) this.changesetManager.recordWritten?.(resolveToolPath(written));
       }
 
       // Without a store (a headless workflow step) the engine's own env secrets are still

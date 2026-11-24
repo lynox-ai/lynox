@@ -12,8 +12,11 @@ import { TARGET_BODY_CAPS } from '../core/migration-target-reply.js';
 vi.mock('../core/migration-target-reply.js', async (original) => ({
   ...(await original<typeof import('../core/migration-target-reply.js')>()),
   TARGET_BODY_TIMEOUT_MS: 1500,
-  TARGET_REQUEST_TIMEOUTS_MS: { handshake: 300, manifest: 400, chunk: 500, restore: 600 },
+  TARGET_REQUEST_TIMEOUTS_MS: { handshake: 300, manifest: 400, chunk: 500, restore: 3000 },
+  // The whole transfer's deadline (from the bundle's size in production), set per test here.
+  transferDeadlineMs: () => transferDeadline.ms,
 }));
+const transferDeadline = vi.hoisted(() => ({ ms: 60_000 }));
 import { resetShellIsolationForTest, setShellIsolationForTest, type ShellIsolation } from '../core/shell-isolation.js';
 import { _resetWorkspaceAccess } from '../core/workspace-access.js';
 
@@ -60,6 +63,12 @@ const target: {
   handshakeRaw?: string | undefined;
   /** Answer this step with a body that starts and never ends. */
   slow?: 'handshake' | 'handshake-refusal' | 'manifest' | 'restore' | undefined;
+  /** Answer each part and the restore after this long (each inside its own deadline). */
+  lagMs?: number | undefined;
+  /** Parts answered after their lag. */
+  partsAnswered: number;
+  /** The last part's answer: its body ends after this long (inside the body's own deadline). */
+  lastPartBodyLagMs?: number | undefined;
   /** Answer the restore with this raw body and 200. */
   restoreRaw?: string | undefined;
   /** Answer this step with a refusal whose body breaks off mid-way. */
@@ -81,7 +90,7 @@ const target: {
   abortCalls: unknown[];
   /** Answer the handshake without its session id, as an older target. */
   noSessionId?: boolean;
-} = { importer: null, manifest: null, healthCalls: 0, okBodies: [], abortCalls: [] };
+} = { importer: null, manifest: null, healthCalls: 0, okBodies: [], abortCalls: [], partsAnswered: 0 };
 /** A body that sends its first bytes and then breaks off. */
 const brokenOff = (status: number): Response => new Response(new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new TextEncoder().encode('{"error":"x')); c.error(new Error('other side closed')); } }), { status });
 /** A body that sends its first bytes and never ends. */
@@ -131,6 +140,13 @@ vi.mock('../core/network-guard.js', async (original) => {
       if (target.silent !== undefined && target.silent === step) {
         return new Promise<Response>((_resolve, reject) => { init.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }); });
       }
+      if (target.lagMs !== undefined && (path === '/api/migration/chunk' || path === '/api/migration/restore')) {
+        await new Promise<void>((resolve, reject) => {
+          const t = setTimeout(resolve, target.lagMs);
+          init.signal?.addEventListener('abort', () => { clearTimeout(t); reject(new Error('aborted')); }, { once: true });
+        });
+        if (path === '/api/migration/chunk') target.partsAnswered++;
+      }
       try {
         if (path === '/api/health') { target.healthCalls++; return target.health === undefined ? json({ error: 'none' }, 404) : json(target.health); }
         if (path === '/api/migration/handshake' && (init.method ?? 'GET') === 'GET' && target.broken === 'handshake-refusal') return brokenOff(503);
@@ -165,6 +181,11 @@ vi.mock('../core/network-guard.js', async (original) => {
         if (path === '/api/migration/chunk' && target.chunkError && (body as { seq: number }).seq === target.chunkError.at) return json({ error: target.chunkError.error }, 422);
         if (path === '/api/migration/restore' && target.restoreError !== undefined) return json({ error: target.restoreError }, 500);
         if (path === '/api/migration/restore' && target.restoreStatus) return json({ error: target.restoreStatus.error }, target.restoreStatus.status);
+        if (path === '/api/migration/chunk' && target.lastPartBodyLagMs !== undefined && (body as { seq: number }).seq === (target.manifest?.chunks.length ?? 0) - 1) {
+          imp.receiveChunk(body as Parameters<MigrationImporter['receiveChunk']>[0]);
+          const lag = target.lastPartBodyLagMs;
+          return new Response(new ReadableStream<Uint8Array>({ start(c) { setTimeout(() => { c.enqueue(new TextEncoder().encode('{}')); c.close(); }, lag); } }), { status: 200 });
+        }
         if (path === '/api/migration/chunk') { const r = json(imp.receiveChunk(body as Parameters<MigrationImporter['receiveChunk']>[0])); target.okBodies.push(r); return r; }
         // The target's restore is not under test: answered without writing.
         if (path === '/api/migration/restore' && target.large?.at === 'restore') return new Response(sized({ success: true, verification: {} }, target.large.bytes), { status: 200 });
@@ -246,6 +267,10 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.handshakeRaw = undefined;
     target.restoreReport = undefined;
     target.slow = undefined;
+    target.lagMs = undefined;
+    target.partsAnswered = 0;
+    target.lastPartBodyLagMs = undefined;
+    transferDeadline.ms = 60_000;
     target.restoreRaw = undefined;
     target.silent = undefined;
     target.okBodies = [];
@@ -367,15 +392,15 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(((await exportTo()).get('error') as { message: string }).message).toBe(`The target instance refused the migration. It says: "${'x'.repeat(500)}". You can start the migration again in 30 minutes at the latest.`);
   });
 
-  it('keeps the raw answer, named by its step, when the destination gives no usable error text', async () => {
+  it('keeps the raw answer in quotes after the step\'s own sentence when the destination gives no usable error text', async () => {
     setShellIsolationForTest(sidecar);
     for (const error of ['', 42, null]) {
       target.manifestError = error;
-      expect(((await exportTo()).get('error') as { message: string }).message).toBe(`Manifest rejected: ${JSON.stringify(JSON.stringify({ error }))}. You can start the migration again in 30 minutes at the latest.`);
+      expect(((await exportTo()).get('error') as { message: string }).message).toBe(`The target instance refused the migration. It says: ${JSON.stringify(JSON.stringify({ error }))}. You can start the migration again in 30 minutes at the latest.`);
     }
     target.manifestError = undefined;
     target.manifestRaw = 'bad gateway';
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('Manifest rejected: "bad gateway". You can start the migration again in 30 minutes at the latest.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused the migration. It says: "bad gateway". You can start the migration again in 30 minutes at the latest.');
     // No words left to quote, in the error text or the raw answer: said as such, never as empty quotes.
     target.manifestRaw = undefined;
     for (const error of ['\n\t ', '\u202e']) {
@@ -407,7 +432,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.manifestRaw = 'x'.repeat(TARGET_BODY_CAPS.refusal + 1);
     expect(await message()).toBe('The target instance refused the migration. Its answer is over 64 KiB, so lynox did not read it. You can start the migration again in 30 minutes at the latest.');
     target.manifestRaw = 'x'.repeat(TARGET_BODY_CAPS.refusal);
-    expect(await message()).toBe(`Manifest rejected: "${'x'.repeat(500)}…". You can start the migration again in 30 minutes at the latest.`);
+    expect(await message()).toBe(`The target instance refused the migration. It says: "${'x'.repeat(500)}…". You can start the migration again in 30 minutes at the latest.`);
     // The restore's report.
     target.manifestRaw = undefined;
     target.large = { at: 'restore', bytes: TARGET_BODY_CAPS.restore };
@@ -454,7 +479,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.abort = 'real';
     target.failCompletion = true;
     const first = await exportTo();
-    expect((first.get('error') as { message: string }).message).toBe('Handshake completion failed. You can start the migration again now.');
+    expect((first.get('error') as { message: string }).message).toBe('lynox could not finish setting up the connection to the target instance. Nothing was transferred. You can start the migration again now.');
     expect(target.abortCalls).toHaveLength(1);
     expect(target.abortCalls[0]).toMatch(/^[0-9a-f]{32}$/);
     // The same target, at once: its session is gone, so the handshake is not turned away.
@@ -485,7 +510,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
   it('keeps the 30 minutes where the target did not confirm that it ended the session', async () => {
     setShellIsolationForTest(sidecar);
     const message = async (): Promise<string | undefined> => ((await exportTo()).get('error') as { message: string } | undefined)?.message;
-    const later = 'Handshake completion failed. You can start the migration again in 30 minutes at the latest.';
+    const later = 'lynox could not finish setting up the connection to the target instance. Nothing was transferred. You can start the migration again in 30 minutes at the latest.';
     target.failCompletion = true;
     // An older target: no route (404), or no session id in its handshake, so no abort is sent.
     expect(await message()).toBe(later);
@@ -511,7 +536,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.chunkError = undefined;
     // A target whose signature does not check is not asked anything further.
     target.badSignature = true;
-    expect(((await exportTo()).get('error') as { message: string }).message).toMatch(/^Handshake signature invalid/);
+    expect(((await exportTo()).get('error') as { message: string }).message).toMatch(/^lynox could not confirm that it is talking to the target instance/);
     target.badSignature = false;
     target.handshakeRefusal = { error: 'Migration session already active. Finalize or cleanup first.' };
     const refused = (await exportTo()).get('error') as { message: string };
@@ -519,7 +544,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(target.abortCalls).toEqual([]);
   });
 
-  it('gives up on a target that does not start answering, per step, with what the user can know', async () => {
+  it('gives up on a target that does not start answering, per step, with what the user can know', { timeout: 30_000 }, async () => {
     setShellIsolationForTest(sidecar);
     const message = async (): Promise<string | undefined> => ((await exportTo()).get('error') as { message: string } | undefined)?.message;
     target.silent = 'handshake';
@@ -531,7 +556,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.silent = 'chunk';
     expect(await message()).toBe('The target instance did not answer within 0.5 seconds while receiving part 1 of the data. lynox stopped; the target instance has not restored anything. You can start the migration again in 30 minutes at the latest.');
     target.silent = 'restore';
-    expect(await message()).toBe('The target instance\'s report on restoring the data could not be read: it did not answer within 0.6 seconds. Check on the target instance whether your data arrived before you migrate again.');
+    expect(await message()).toBe('The target instance\'s report on restoring the data could not be read: it did not answer within 3 seconds. Check on the target instance whether your data arrived before you migrate again.');
   });
 
   it('reads the target\'s answers to the manifest and every chunk to their end', async () => {
@@ -604,7 +629,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     } finally { spy.mockRestore(); }
     // A handshake whose signature does not check.
     target.badSignature = true;
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('Handshake signature invalid — refusing to derive transfer key. If this happens again, write to support@lynox.ai.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('lynox could not confirm that it is talking to the target instance, so it did not set up the connection. Nothing was transferred. If this happens again, write to support@lynox.ai.');
   });
 
   it('adds the retry sentence to a stop after the handshake that did not word one', async () => {
@@ -632,6 +657,37 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(await message()).toBe('The target instance refused the migration. The connection broke before its answer was complete. You can start the migration again in 30 minutes at the latest.');
   });
 
+  it('stops a target that answers every step just inside its deadline once the whole transfer runs out of time', { timeout: 30_000 }, async () => {
+    setShellIsolationForTest(sidecar);
+    const message = async (): Promise<string | undefined> => ((await exportTo()).get('error') as { message: string } | undefined)?.message;
+    // Each part answered after 300 ms, inside its 500 ms; the whole transfer may take 700 ms.
+    target.lagMs = 300;
+    transferDeadline.ms = 700;
+    expect(await message()).toBe('The migration took longer than 0.7 seconds, so lynox stopped it. The target instance has not restored anything. You can start the migration again in 30 minutes at the latest.');
+    // Stopped while a part was still waiting, not after all of them: at most two of the six answered.
+    expect(target.manifest?.chunks.length).toBe(6);
+    expect(target.partsAnswered).toBeLessThanOrEqual(2);
+    // Out of time while the restore was asked for: the data has gone out, so check the target.
+    // (The restore does not answer; the whole transfer's 1.5 s end before its own 3 s.)
+    target.lagMs = undefined;
+    target.silent = 'restore';
+    transferDeadline.ms = 1500;
+    expect(await message()).toBe('The migration took longer than 1.5 seconds, so lynox stopped waiting for the target instance to restore the data. Check on the target instance whether your data arrived before you migrate again.');
+    target.silent = undefined;
+    // Out of time before the restore was asked for (the last part's answer took the rest): nothing
+    // was restored, so the user can try again.
+    transferDeadline.ms = 300;
+    target.lastPartBodyLagMs = 600;
+    expect(await message()).toBe('The migration took longer than 0.3 seconds, so lynox stopped it. The target instance has not restored anything. You can start the migration again in 30 minutes at the latest.');
+    target.lastPartBodyLagMs = undefined;
+    // Control: the same lag with time enough completes.
+    target.lagMs = 300;
+    transferDeadline.ms = 60_000;
+    const done = await exportTo();
+    expect(done.get('error')).toBeUndefined();
+    expect(done.get('done')).toBeDefined();
+  });
+
   it('gives up on an answer that does not arrive in full in time, per step', { timeout: 30_000 }, async () => {
     setShellIsolationForTest(sidecar);
     const message = async (): Promise<string | undefined> => ((await exportTo()).get('error') as { message: string } | undefined)?.message;
@@ -651,6 +707,31 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     const events = await exportTo();
     expect(events.get('error')).toBeUndefined();
     expect((events.get('done') as { verification: unknown }).verification).toEqual({ databasesRestored: ['engine.db'], portableDirSkipped: ['workspace/ab c'], secretsImported: 2 });
+  });
+
+  it('names what the user can do next with the error: start again now, later, or check the target first', async () => {
+    setShellIsolationForTest(sidecar);
+    const retry = async (): Promise<unknown> => ((await exportTo()).get('error') as { retry?: unknown } | undefined)?.retry;
+    // Refused before the target holds a session: nothing to wait for.
+    target.handshakeRefusal = { error: 'Invalid migration token' };
+    expect(await retry()).toBe('now');
+    target.handshakeRefusal = undefined;
+    // A session may still be held and the target did not end it: wait.
+    target.manifestError = 'no';
+    expect(await retry()).toBe('later');
+    // The target ended it: start again now.
+    target.abort = 'real';
+    expect(await retry()).toBe('now');
+    target.manifestError = undefined;
+    target.abort = undefined;
+    // The restore may have run in part: check the target first.
+    target.restoreError = 'restore refused';
+    expect(await retry()).toBe('check');
+    target.restoreError = undefined;
+    // A sentence that sends the user to support still leaves the target's session held: wait.
+    target.badSignature = true;
+    expect(await retry()).toBe('later');
+    target.badSignature = undefined;
   });
 
   it('keeps the target\'s words in quotes, so they cannot pose as lynox\'s own sentence', async () => {
@@ -676,7 +757,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     target.manifestStatus = undefined;
     // After the manifest no session can be ended: the target's "now" does not replace lynox's 30 minutes.
     target.chunkError = { at: 0, error: posing };
-    expect(await message()).toBe(`The target instance refused part 1 of the data. It says: ${quoted}. ${AGAIN}`);
+    expect(await message()).toBe(`The target instance refused part 1 of 6 of the data. It says: ${quoted}. ${AGAIN}`);
     target.chunkError = undefined;
   });
 
@@ -686,15 +767,15 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused the migration. It says: "refused gnp.exe nextline". You can start the migration again in 30 minutes at the latest.');
     target.manifestError = undefined;
     target.manifestRaw = 'bad\r\ngateway\u202D';
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('Manifest rejected: "bad  gateway". You can start the migration again in 30 minutes at the latest.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused the migration. It says: "bad  gateway". You can start the migration again in 30 minutes at the latest.');
   });
 
-  it('says which part of the data the destination refused, counted from 1, and that it could not restore', async () => {
+  it('says which part of the data the destination refused, counted from 1 out of all parts, and that it could not restore', async () => {
     setShellIsolationForTest(sidecar);
     target.chunkError = { at: 0, error: 'chunk refused' };
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 1 of the data. It says: "chunk refused". You can start the migration again in 30 minutes at the latest.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 1 of 6 of the data. It says: "chunk refused". You can start the migration again in 30 minutes at the latest.');
     target.chunkError = { at: 2, error: 'chunk refused' };
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 3 of the data. It says: "chunk refused". You can start the migration again in 30 minutes at the latest.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 3 of 6 of the data. It says: "chunk refused". You can start the migration again in 30 minutes at the latest.');
     target.chunkError = undefined;
     target.restoreError = 'restore refused';
     expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance could not restore the data. It says: "restore refused". Check on the target instance whether your data arrived before you migrate again.');
@@ -704,7 +785,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance could not restore the data. It says: "Check on the target instance.". Check on the target instance whether your data arrived before you migrate again.');
     target.chunkError = { at: 0, error: `support@lynox.ai ${'\ud800'.repeat(600)}` };
     target.restoreError = undefined;
-    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 1 of the data. It says: "support@lynox.ai". You can start the migration again in 30 minutes at the latest.');
+    expect(((await exportTo()).get('error') as { message: string }).message).toBe('The target instance refused part 1 of 6 of the data. It says: "support@lynox.ai". You can start the migration again in 30 minutes at the latest.');
     target.chunkError = undefined;
     // A refusal before the restore started (here: a missing chunk, 400) keeps the retry sentence.
     target.restoreError = undefined;
@@ -716,7 +797,7 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     setShellIsolationForTest(sidecar);
     target.failCompletion = true;
     const events = await exportTo();
-    expect((events.get('error') as { message: string }).message).toMatch(/Handshake completion failed/);
+    expect((events.get('error') as { message: string }).message).toMatch(/lynox could not finish setting up the connection to the target instance/);
     expect(derivedKeys).toHaveLength(1);
     expect(derivedKeys[0]!.every(b => b === 0)).toBe(true);
   });

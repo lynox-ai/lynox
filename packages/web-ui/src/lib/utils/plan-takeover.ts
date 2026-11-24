@@ -34,6 +34,14 @@ export function setApart(text: string): string {
 	return `${VALUE_OPEN}${flat}${VALUE_CLOSE}`;
 }
 
+/**
+ * {@link shownValue} without the cut: for a heading where the owner confirms which item they act on,
+ * so a long name is read to its end and two names that share a beginning stay apart.
+ */
+export function shownWhole(text: string): string {
+	return setApart(visible(text));
+}
+
 /** One piece of a sentence: lynox's words, or a value someone else wrote (`foreign`). */
 export interface Segment { text: string; foreign: boolean }
 
@@ -311,30 +319,48 @@ export function refusalText(code: string, opts: { workflow: string | null; manag
 	}
 }
 
-/** The engine's start of a title it derives from a workflow's name (`SCHEDULED_TITLE_PREFIX`), kept equal by a test. */
-export const SCHEDULED_TITLE_PREFIX = 'Scheduled: ';
+/**
+ * A plan's title as the trigger list carries it. `title_workflow`: the workflow's name, where the
+ * engine titled the plan with that name (scheduled without a title); the list sets it only then.
+ */
+export interface PlanTitle {
+	title: string;
+	title_workflow?: string | undefined;
+}
+
+/** A plan's title for a list line: lynox's words in the reader's language before a workflow's name. */
+export function planTitle(plan: PlanTitle): string {
+	const name = plan.title_workflow;
+	return name !== undefined ? tf('triggers.scheduled_title', { workflow: name }) : plan.title;
+}
 
 /** Who set a plan up and changed it, as the trigger list carries it (tags: `owner`, `mandate:<address>`). */
 export interface PlanAuthorship {
-	title: string;
 	created_by?: string | undefined;
 	edited_by?: string | undefined;
 	mandate_editor?: string | undefined;
 }
 
 /**
+ * Whether a person with access set the plan up or changed it, now or before the owner's last
+ * change (`mandate_editor`): its title may then be that person's words, and the owner's plan list
+ * sets it apart ({@link pausedTitleLine}) on the plan's card, not only where a takeover is offered.
+ */
+export function writtenByMember(plan: PlanAuthorship): boolean {
+	return [plan.created_by, plan.edited_by, plan.mandate_editor].some((tag) => (tag ?? '').startsWith('mandate:'));
+}
+
+/**
  * The title of a plan with a takeover to give, as a line with the value set apart. The title is
  * someone else's value on every such plan: even one the owner set up runs a workflow a person with
- * access made or changed, and its title may be that workflow's name, put there by lynox's agent or
- * by the engine. Only where the owner alone set up and changed the plan does a title that starts
- * with the engine's prefix keep that prefix outside the box. The engine writes it when a workflow
- * is scheduled without a title, and the owner may have typed it into a title of their own; either
- * way only the constant stands outside, and the rest is the value. On any other plan the whole
- * title is the value, so a person with access cannot borrow lynox's words. Sentences that name
- * plans (`planList`, the dialog's lines) keep every title whole in its box.
+ * access made or changed. Where the engine titled the plan with its workflow's name, lynox's words
+ * stand outside and the name is the value; any other title is the value whole, a title that starts
+ * with "Scheduled: " included, so a person with access cannot borrow lynox's words. Whether the
+ * title is the name is the list's to say (`title_workflow`), never read from the title's text.
+ * Sentences that name plans (`planList`, the dialog's lines) keep every title whole in its box.
  */
-export function pausedTitleLine(plan: PlanAuthorship): string {
-	const ownerOnly = plan.created_by === 'owner' && (plan.edited_by ?? 'owner') === 'owner' && (plan.mandate_editor ?? '') === '';
-	if (ownerOnly && plan.title.startsWith(SCHEDULED_TITLE_PREFIX)) return SCHEDULED_TITLE_PREFIX + shownValue(plan.title.slice(SCHEDULED_TITLE_PREFIX.length));
+export function pausedTitleLine(plan: PlanTitle): string {
+	const name = plan.title_workflow;
+	if (name !== undefined) return tf('triggers.scheduled_title', { workflow: shownValue(name) });
 	return shownValue(plan.title);
 }
