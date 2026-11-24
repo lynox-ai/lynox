@@ -185,6 +185,14 @@ describe('a watch task_create sets up after foreign content', () => {
     expect(tool.created).toEqual([]);
   });
 
+  it('an address with a secret reference is not refused before the handler, which sees its value', async () => {
+    const tool = taskCreate();
+    const ask = asker('Allow');
+    const agent = withPolicy(agentOf(tool, ask.fn, 'nothing named', false), 'deny-all');
+    await call(agent, { title: 'Watch', watch_url: 'secret:FEED_URL' });
+    expect(tool.created).toEqual(['secret:FEED_URL']);
+  });
+
   it('CONTROL: a call the handler does not turn into a watch is not asked about (a schedule or a workflow comes first)', async () => {
     const tool = taskCreate();
     const ask = asker('Deny');
