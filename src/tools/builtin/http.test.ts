@@ -18,7 +18,7 @@ import dns from 'node:dns/promises';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { httpRequestTool, detectSecretInContent, egressSecretRefusal, mailSecretRefusal, MAX_REQUESTS_PER_SESSION, httpTimeoutMessage, httpStoppedMessage, isWriteMethod, undoClassFor, HTTP_RATE_UNCOUNTED, OVERRIDE_REDIRECT_REFUSAL } from './http.js';
+import { httpRequestTool, detectSecretInContent, egressSecretRefusal, mailSecretRefusal, MAX_REQUESTS_PER_SESSION, httpTimeoutMessage, httpStoppedMessage, isWriteMethod, undoClassFor, HTTP_RATE_UNCOUNTED, OVERRIDE_REDIRECT_REFUSAL, HTTP_WALL_GRACE_MS } from './http.js';
 import { applyHttpRateLimits, createToolContext, applyNetworkPolicy } from '../../core/tool-context.js';
 import type { ToolCallCountProvider, ToolContext } from '../../core/tool-context.js';
 import type { LynoxUserConfig, SessionCounters } from '../../types/index.js';
@@ -2527,6 +2527,71 @@ describe('httpRequestTool', () => {
       expect(refused).toHaveLength(1);
       expect(refused[0]!.reason).toBeInstanceOf(ToolSoftFailure);
       expect((refused[0]!.reason as ToolSoftFailure).agentVisibleResult).toBe(U010_REQUEST_LIMIT);
+    });
+
+    it('at the limit a request the person would be asked about asks no one and sends nothing', async () => {
+      // The check at the top refuses before the question: the one before sending would refuse too,
+      // but only after the person was asked to allow a request that never goes out. A long query
+      // is one such request (the GET exfiltration question).
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockImplementation(async () => createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      const promptUser = vi.fn().mockResolvedValue('Allow');
+      testCounters.httpRequests = MAX_REQUESTS_PER_SESSION;
+
+      const url = `http://example.com/api?data=${'a'.repeat(600)}`;
+
+      const result = await visible({ url }, makeAgent({ promptUser }));
+
+      expect(result).toBe(U010_REQUEST_LIMIT);
+      expect(promptUser).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(testCounters.httpRequests).toBe(MAX_REQUESTS_PER_SESSION);
+
+      // One below the limit, the same request is asked about and sent.
+      testCounters.httpRequests = MAX_REQUESTS_PER_SESSION - 1;
+      await handler({ url }, makeAgent({ promptUser }));
+      expect(promptUser).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('a call refused before sending leaves no timer of its own running', async () => {
+      // The refused call of two at 99 starts no timeout: one it started would run on, and the wall
+      // clock's rejection would fire with no one awaiting it.
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockImplementation(async () => createMockResponse({ body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      testCounters.httpRequests = MAX_REQUESTS_PER_SESSION - 1;
+      const timeout = 54_321;
+      const started = new Set<unknown>();
+      const cleared = new Set<unknown>();
+      const realSet = globalThis.setTimeout;
+      const realClear = globalThis.clearTimeout;
+      const setSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+        const id = realSet(fn, ms);
+        if (ms === timeout || ms === timeout + HTTP_WALL_GRACE_MS) started.add(id);
+        return id;
+      }) as typeof setTimeout);
+      const clearSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(((id?: Parameters<typeof clearTimeout>[0]) => {
+        cleared.add(id);
+        realClear(id);
+      }) as typeof clearTimeout);
+      try {
+        const results = await Promise.allSettled([
+          handler({ url: 'http://example.com/a', timeout_ms: timeout }, makeAgent()),
+          handler({ url: 'http://example.com/b', timeout_ms: timeout }, makeAgent()),
+        ]);
+        const refused = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+        expect(refused).toHaveLength(1);
+        expect((refused[0]!.reason as ToolSoftFailure).agentVisibleResult).toBe(U010_REQUEST_LIMIT);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        // The call that sent started its two timers and cleared both; the refused one started none.
+        expect(started.size).toBe(2);
+        expect([...started].filter((id) => !cleared.has(id))).toEqual([]);
+      } finally {
+        setSpy.mockRestore();
+        clearSpy.mockRestore();
+      }
     });
 
     it('two calls of one turn at 98 both send: the check before sending refuses only past the limit', async () => {
