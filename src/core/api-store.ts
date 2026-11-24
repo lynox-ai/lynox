@@ -3258,9 +3258,9 @@ export class ApiStore {
    * them for a connected API: the exact host of a profile's `base_url` (no subdomain, no suffix),
    * when the owner accepted that host at a save (`custom_endpoint_ack.hosts`) or saved the profile
    * in their own chat, in a tool batch that began before any foreign content and in a conversation
-   * without a search the provider ran itself (`owner_clean_host`, bound to the host it was saved
-   * with). A
-   * profile a mandate wrote never counts, nor does a listed sub-processor host on its own. For
+   * without a server tool the provider ran itself, such as its web search (`owner_clean_host`,
+   * bound to the host it was saved with). A profile a mandate wrote never counts, nor does a
+   * listed sub-processor host on its own. For
    * reads only: a send's targets never consult this.
    */
   readKnownHosts(): Set<string> {
