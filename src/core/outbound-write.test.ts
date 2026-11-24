@@ -1129,7 +1129,7 @@ describe('a secret inside JSON text inside a value', () => {
       const nested = (json: string) => `p=${encodeURIComponent(`b=${encodeURIComponent(json)}`)}`;
       expect(bodyForQuestion(nested(withAmp), mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
       expect(bodyForQuestion(nested(withAmp), mask, FORM)).toEqual({ text: 'p = ***', escapedSecret: true });
-      // Control: written plainly, the value is masked and nothing counts as escaped.
+      // Control: written plainly, nothing counts as an escaped secret.
       expect(bodyForQuestion(nested(plainAmp), mask, FORM)).toMatchObject({ escapedSecret: false });
     });
 
@@ -1137,7 +1137,7 @@ describe('a secret inside JSON text inside a value', () => {
       const semi = (json: string) => `a=1;value=${encodeURIComponent(json)}`;
       expect(bodyForQuestion(semi(withAmp), mask, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
       expect(bodyForQuestion(semi(withAmp), mask, FORM)).toEqual({ text: 'a = ***', escapedSecret: true });
-      // Control: written plainly, the value is masked and nothing counts as escaped.
+      // Control: written plainly, nothing counts as an escaped secret.
       expect(bodyForQuestion(semi(plainAmp), mask, FORM)).toMatchObject({ escapedSecret: false });
     });
 
