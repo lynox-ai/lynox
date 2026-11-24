@@ -144,6 +144,9 @@ const TOOL_WORDS: Readonly<Record<string, readonly [de: string, en: string]>> = 
   google_drive: ['Google Drive: Datei freigeben', 'Google Drive: share file'],
   'google_calendar:create': ['Google Calendar: Termin anlegen', 'Google Calendar: create event'],
   'google_calendar:update': ['Google Calendar: Termin ändern', 'Google Calendar: change event'],
+  // A watch's page is asked about as a read (`originReadAsk` with `watchEveryMinutes`), whose
+  // question does not start with these words; they stand for the test that every declaring tool has some.
+  task_create: ['Seite beobachten', 'Watch page'],
 };
 
 /** The tool names {@link toolWord} has words for; a test holds this against every tool that declares send targets. */
@@ -174,7 +177,7 @@ export function originAsk(tool: string, input: unknown, noun: TargetNoun, target
   const from = originFrom(origin, lang);
   const list = targetList(targets, lang);
   const many = countOf(targets) > 1;
-  if (noun === 'page') return originReadAsk(targetList(targets, lang, true), lang, connected.length > 0, unchecked);
+  if (noun === 'page') return originReadAsk(targetList(targets, lang, true), lang, connected.length > 0, unchecked, watchEveryMinutes(tool, input));
   if (lang === 'de') {
     const head = noun === 'mail'
       ? (many ? pv`${word}: Die Empfänger ${list} hast nicht du genannt. ` : pv`${word}: Den Empfänger ${list} hast nicht du genannt. `)
@@ -195,19 +198,58 @@ export function originAsk(tool: string, input: unknown, noun: TargetNoun, target
 }
 
 /**
+ * How often the watch a `task_create` call sets up checks its page, as the handler clamps it (at
+ * least 5 minutes, 60 when not given); `null` for any other call. Its question says that the watch
+ * reads its page again and again once confirmed, and that the yes does not confirm it.
+ */
+export function watchEveryMinutes(tool: string, input: unknown): number | null {
+  if (tool !== 'task_create' || typeof input !== 'object' || input === null) return null;
+  const { watch_url: url, watch_interval_minutes: every } = input as { watch_url?: unknown; watch_interval_minutes?: unknown };
+  if (typeof url !== 'string' || url === '') return null;
+  return Math.max(5, typeof every === 'number' ? every : 60);
+}
+
+/**
+ * How a read question opens, the sentence on what the host gets, and what its yes covers: one
+ * read, or the checks of a watch (U-384). A watch the model creates runs only once the owner confirms
+ * it under Automation → Triggers (`getDue` holds an unconfirmed `run_agent` row), so its question says
+ * that the yes creates it and does not confirm it.
+ */
+function readHead(list: string, lang: NoticeLanguage, every: number | null): { head: PromptText; whole: PromptText; yes: string } {
+  if (every === null) {
+    return lang === 'de'
+      ? { head: pv`Seite auf ${list} lesen?`, whole: pv`${list} erhält dabei die ganze Adresse, auch den Pfad und alles nach dem „?“.`, yes: originAskOnce(lang, 'page') }
+      : { head: pv`Read the page on ${list}?`, whole: pv`${list} then gets the whole address, including the path and everything after the "?".`, yes: originAskOnce(lang, 'page') };
+  }
+  return lang === 'de'
+    ? {
+      head: pv`Seite auf ${list} beobachten? Wenn du die Beobachtung danach unter Automation → Trigger bestätigst, prüft lynox die Seite alle ${String(every)} Minuten selbst, bis du sie dort pausierst oder löschst.`,
+      whole: pv`${list} erhält bei jeder Prüfung die ganze Adresse, auch den Pfad und alles nach dem „?“.`,
+      yes: 'Ein Ja legt die Beobachtung an, bestätigt ist sie damit noch nicht.',
+    }
+    : {
+      head: pv`Watch the page on ${list}? Once you confirm the watch under Automation → Triggers, lynox checks the page every ${String(every)} minutes on its own, until you pause or delete it there.`,
+      whole: pv`On every check, ${list} gets the whole address, including the path and everything after the "?".`,
+      yes: 'A yes creates the watch; it does not confirm it.',
+    };
+}
+
+/**
  * The question before a read (`page`): the host gets the whole address, path and query, and the
  * way out that is not a click. A host the owner writes in the chat counts as named by them for the
- * rest of the conversation (`owner-known-targets.ts`), so lynox does not ask about it again.
+ * rest of the conversation (`owner-known-targets.ts`), so lynox does not ask about it again. For a
+ * watch (`every`) it says how often the page is read, and that the yes holds for every check.
  */
-function originReadAsk(list: string, lang: NoticeLanguage, connected: boolean, unchecked: boolean): PromptText {
+function originReadAsk(list: string, lang: NoticeLanguage, connected: boolean, unchecked: boolean, every: number | null = null): PromptText {
   // The condition lynox checks, not an origin it would have to know: the owner may have typed the
   // address themselves into a conversation with foreign content.
+  const { head, whole, yes } = readHead(list, lang, every);
   if (lang === 'de') {
-    if (unchecked) return pv`Seite auf ${list} lesen? Im Gespräch steht Inhalt von ausserhalb, und ob du ${list} genannt hast, konnte lynox nicht prüfen. ${list} erhält dabei die ganze Adresse, auch den Pfad und alles nach dem „?“. ${originAskOnce(lang, 'page')}`;
-    return pv`Seite auf ${list} lesen? Im Gespräch steht Inhalt von ausserhalb, und ${list} hast du nicht genannt. ${list} erhält dabei die ganze Adresse, auch den Pfad und alles nach dem „?“. ${originAskOnce(lang, 'page')}\n\nSchreib ${list} hier in den Chat, dann fragt lynox in diesem Gespräch nicht mehr nach diesem Host.${connected ? pv`\n\n${list} gehört zu einer gespeicherten Verbindung. Bitte lynox in einem neuen Gespräch, diese Verbindung noch einmal zu speichern; danach fragt lynox beim Lesen von dort nicht mehr.` : ''}`;
+    if (unchecked) return pv`${head} Im Gespräch steht Inhalt von ausserhalb, und ob du ${list} genannt hast, konnte lynox nicht prüfen. ${whole} ${yes}`;
+    return pv`${head} Im Gespräch steht Inhalt von ausserhalb, und ${list} hast du nicht genannt. ${whole} ${yes}\n\nSchreib ${list} hier in den Chat, dann fragt lynox in diesem Gespräch nicht mehr nach diesem Host.${connected ? pv`\n\n${list} gehört zu einer gespeicherten Verbindung. Bitte lynox in einem neuen Gespräch, diese Verbindung noch einmal zu speichern; danach fragt lynox beim Lesen von dort nicht mehr.` : ''}`;
   }
-  if (unchecked) return pv`Read the page on ${list}? This conversation contains content from outside, and lynox could not check whether you named ${list}. ${list} then gets the whole address, including the path and everything after the "?". ${originAskOnce(lang, 'page')}`;
-  return pv`Read the page on ${list}? This conversation contains content from outside, and you haven't named ${list}. ${list} then gets the whole address, including the path and everything after the "?". ${originAskOnce(lang, 'page')}\n\nWrite ${list} here in the chat, and lynox won't ask about this host again in this conversation.${connected ? pv`\n\n${list} belongs to a saved connection. Ask lynox in a new conversation to save that connection again; after that, lynox won't ask when it reads from there.` : ''}`;
+  if (unchecked) return pv`${head} This conversation contains content from outside, and lynox could not check whether you named ${list}. ${whole} ${yes}`;
+  return pv`${head} This conversation contains content from outside, and you haven't named ${list}. ${whole} ${yes}\n\nWrite ${list} here in the chat, and lynox won't ask about this host again in this conversation.${connected ? pv`\n\n${list} belongs to a saved connection. Ask lynox in a new conversation to save that connection again; after that, lynox won't ask when it reads from there.` : ''}`;
 }
 
 /**
@@ -215,12 +257,13 @@ function originReadAsk(list: string, lang: NoticeLanguage, connected: boolean, u
  * reason is said, and it has no way out: naming the host does not make it pass, because the
  * question is about where a service sends the read on, not about the host.
  */
-export function originCarriedAsk(targets: OriginTargets, lang: NoticeLanguage): PromptText {
+export function originCarriedAsk(targets: OriginTargets, lang: NoticeLanguage, every: number | null = null): PromptText {
   const list = targetList(targets, lang, true);
+  const { head, yes } = readHead(list, lang, every);
   if (lang === 'de') {
-    return pv`Seite auf ${list} lesen? In dieser Adresse steckt eine weitere Adresse (ein „http:“ oder „https:“ im Pfad oder nach dem „?“). Der Dienst kann die Anfrage mit allem, was die Adresse enthält, dorthin weiterschicken. Weil im Gespräch Inhalt von ausserhalb steht, fragt lynox bei solchen Adressen jedes Mal, auch bei einem Host, den du genannt hast. ${originAskOnce(lang, 'page')}`;
+    return pv`${head} In dieser Adresse steckt eine weitere Adresse (ein „http:“ oder „https:“ im Pfad oder nach dem „?“). Der Dienst kann die Anfrage mit allem, was die Adresse enthält, dorthin weiterschicken. Weil im Gespräch Inhalt von ausserhalb steht, fragt lynox bei solchen Adressen jedes Mal, auch bei einem Host, den du genannt hast. ${yes}`;
   }
-  return pv`Read the page on ${list}? This address carries another address (an "http:" or "https:" in the path or after the "?"). The service can pass the request on, with everything the address holds, to that other address. Because this conversation contains content from outside, lynox asks about such addresses every time, even for a host you named. ${originAskOnce(lang, 'page')}`;
+  return pv`${head} This address carries another address (an "http:" or "https:" in the path or after the "?"). The service can pass the request on, with everything the address holds, to that other address. Because this conversation contains content from outside, lynox asks about such addresses every time, even for a host you named. ${yes}`;
 }
 
 /** The question for a reply that goes only to the sender of the mail it answers. */

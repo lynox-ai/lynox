@@ -12,7 +12,8 @@ export interface CleanBatchReader {
 
 /**
  * Whether the running call is the owner's own, in their interactive chat, in a tool batch that
- * began before any foreign content, in a conversation without a search the provider ran itself.
+ * began before any foreign content, in a conversation without a server tool the provider ran
+ * itself, such as its web search.
  * Only then may a call record something a later step trusts without asking: the host saved with an
  * API profile (`owner_clean_host`).
  *
@@ -21,8 +22,9 @@ export interface CleanBatchReader {
  *   another conversation could otherwise name a host unattended.
  * - The batch's snapshot, not the turn's: the dispatch counts a call's own tool as foreign content
  *   before the handler runs. Outside a batch the answer is `false`.
- * - A search the provider ran itself reaches the model past every dispatch and arms nothing, so a
- *   conversation holding one is never clean here.
+ * - A server tool the provider ran itself (any but the lazy tools' tool search) reaches the model
+ *   past every dispatch. Its answer arms the conversation latch, and a conversation holding one
+ *   is never clean here either: this check stays as a guard of its own.
  */
 export function ownersCleanBatch(agent: CleanBatchReader): boolean {
   return isOwnerPrincipal(agent.principal)

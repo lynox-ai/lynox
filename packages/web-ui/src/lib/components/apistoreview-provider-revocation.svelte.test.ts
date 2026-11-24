@@ -84,6 +84,28 @@ const APPROVED: Record<'revoked' | 'connectedAgain' | 'reconnected', { de: strin
 	},
 };
 
+describe('a store connection whose refresh ended (refresh-dead)', () => {
+	const ended = { id: 'shop', name: 'Shop', base_url: 'https://acme.myshopify.com', description: '', auth: { type: 'oauth2' }, oauth_grant: { state: 'refresh-dead' } };
+
+	it('says lynox could not renew the access, offers the button, and names no revocation or erasure', async () => {
+		serve([ended], { status: 200, body: { notices: [] } });
+		await render();
+		expect(q('api-access-ended')?.textContent).toBe('lynox konnte den Zugang zu diesem Shop nicht erneuern.');
+		expect(q('api-revoked')?.textContent).not.toContain('widerrufen');
+		const link = q('api-reconnect') as HTMLAnchorElement | null;
+		expect(link?.textContent).toBe('Erneut verbinden');
+		expect(link?.getAttribute('href')).toBe('/api/oauth/connect/shop');
+		expect(q('api-erasure-window')).toBeNull();
+	});
+
+	it('a connected store shows none of it', async () => {
+		serve([{ ...ended, oauth_grant: { state: 'connected' } }], { status: 200, body: { notices: [] } });
+		await render();
+		expect(q('api-access-ended')).toBeNull();
+		expect(q('api-reconnect')).toBeNull();
+	});
+});
+
 describe('a profile its provider revoked', () => {
 	it('the owner with a pending erasure: revoked on, the window, the notice, and the button to the engine\'s connect route', async () => {
 		serve([revokedProfile], { status: 200, body: { notices: [n(7)] } });

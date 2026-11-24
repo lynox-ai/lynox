@@ -26,10 +26,10 @@ import { SaveRefused, profileReadHost, accessTokenKey, collectVaultKeys, grantTo
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
-import { connectCallText, builtInPresetOf, derivePresetEndpoints, presetIds, presetParamsForModel, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
+import { connectCallText, builtInPresetOf, retiredPresetIdOf, derivePresetEndpoints, presetIds, presetParamsForModel, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { isCountrySecondLevel } from '../../core/public-suffix.js';
-import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated, providerNotFollowed } from './http.js';
+import { delegatedRenewalWay, fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated, providerNotFollowed } from './http.js';
 import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
 import { callForStructuredJson, extractionSpendOf, BudgetError, ExtractShapeError, ExtractionStoppedError, SchemaValueError, type ExtractSchema } from '../../core/llm-helper.js';
 import { recordSessionCost } from '../../core/session-budget.js';
@@ -39,7 +39,7 @@ import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '..
 import { pv, singleLine } from '../../core/prompt-value.js';
 import type { PromptText } from '../../types/agent.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
-import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
+import { isInfraSecret, isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
 import { OWNER_PRINCIPAL, isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
 import { ownersCleanBatch } from '../../core/owner-clean-batch.js';
@@ -345,7 +345,9 @@ function validateProfile(profile: ApiProfile): string | null {
     // `client_secret_key`, the token is attached from a slot derived from the
     // profile id, and `collectVaultKeys` counts the OAuth keys on its own. A list
     // here changes nothing for such a profile, so demanding one only costs a round.
-    if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0) && !builtInPresetOf(profile)) {
+    // So is a provider this engine once shipped: its profiles have that shape, and a save that
+    // keeps the provider must not fail on a list they never had.
+    if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0) && !builtInPresetOf(profile) && retiredPresetIdOf(profile) === undefined) {
       return 'auth.vault_keys is required for auth.type="oauth2" (lists the vault key names the OAuth grant will resolve)';
     }
     // OAuth2 metadata: required when type='oauth2' AND the agent intends to
@@ -1642,7 +1644,8 @@ function emptyTokenSlots(store: SecretStoreLike | null | undefined, names: reado
         continue;
       }
       store.deleteSecret(name);
-      if (store.resolve(name) !== null) left.push(name);
+      // Whether a value is still there, asked without reading it out where the store can.
+      if (store.holds !== undefined ? store.holds(name) : store.resolve(name) !== null) left.push(name);
     } catch {
       left.push(name);
     }
@@ -1665,6 +1668,10 @@ function mergeWrites(current: OAuthGrantRecord | undefined, writes: WrittenSecre
 function vaultHolds(agent: IAgent, name: string): boolean {
   const store = agent.secretStore;
   if (!store) return false;
+  // Asked without reading the value out, so the check is not recorded as a credential read. A
+  // store that cannot answer that way is asked as before: the answer decides what the user is told.
+  // An infrastructure secret is never resolved into tool input, so it never fills a profile's slot.
+  if (store.holds !== undefined) return !isInfraSecret(name) && store.holds(name);
   const probe = { _: `secret:${name}` };
   const probed = store.resolveSecretRefs(probe) as { _: string };
   return probed._ !== `secret:${name}`;
@@ -2526,6 +2533,13 @@ ${draftJson}
       if (priorPreset && builtInPresetOf(profile)?.id !== priorPreset.id) {
         return `Error: profile "${profile.id}" is set up through the built-in "${priorPreset.id}" provider, and a save cannot remove or change auth.oauth.preset_id or auth.type: the sign-in and the scopes it may ask for belong to the provider, not to the profile. Nothing was saved. Scopes this provider allows: ${[...priorPreset.requiredScopes, ...priorPreset.allowedScopes].join(' ')}. Connecting here cannot authorize a scope outside that list, so tell the user it is not available rather than offering it. Another way of signing in to the same API replaces this connection, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
       }
+      // The same holds for a provider this engine once shipped and no longer has: the profile
+      // was set up through it, and its grant is a user's. The id is named because it equals one
+      // of ours (`RETIRED_PRESET_IDS`), the rule the unknown-preset note below keeps.
+      const priorRetired = prior && !priorPreset ? retiredPresetIdOf(prior) : undefined;
+      if (priorRetired !== undefined && retiredPresetIdOf(profile) !== priorRetired) {
+        return `Error: profile "${profile.id}" is set up through the built-in "${priorRetired}" provider, which this engine no longer has, and a save cannot remove or change auth.oauth.preset_id or auth.type: the sign-in belongs to the provider, not to the profile. Nothing was saved. Another way of signing in to the same API replaces this connection, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
+      }
       const reserved = reservedAppNameRefusal(profile);
       if (reserved) return `Validation error: ${reserved}`;
       if (!isOwnerPrincipal(agent.principal)) profile.created_by = principalTag(agent.principal);
@@ -2535,8 +2549,10 @@ ${draftJson}
       // this tool's own call as foreign content before the handler runs, so the turn would never
       // be clean here. Only a save in a batch that began before the conversation's first foreign
       // content records its host, and an earlier `api_setup` call counts as such content.
-      // Outside a batch nothing is recorded, nor in a conversation holding a search the provider
-      // ran itself: its results reach the model past every dispatch and arm nothing.
+      // Outside a batch nothing is recorded, nor in a conversation holding a server tool the
+      // provider ran itself, such as its web search: its results reach the model past every
+      // dispatch. Such a tool also
+      // arms the conversation latch; this check stays as a guard of its own.
       // Only the owner's interactive run: a trigger's, a workflow's or a task's run carries a run
       // tag as its author even under the owner's principal, and a sub-agent a run origin of its
       // own; a workflow made in another conversation could otherwise name a host unattended. The
@@ -2609,7 +2625,7 @@ ${draftJson}
       // unrelated parameter happened to validate — with no trace in either
       // direction. Refusing the save instead was the other candidate and is
       // worse: a provider retired from the register would make every profile
-      // naming it unsaveable, including the update that would remove the field.
+      // naming it unsaveable, even a save that keeps the provider.
       let presetNote: string | undefined;
       const redirectUrls: string[] = [];
       // Set only where a human actually answered. An acceptance nobody gave is
@@ -2963,6 +2979,14 @@ ${draftJson}
       if (profile.auth?.type !== 'oauth2') {
         return `Error: profile "${id}" has auth.type="${authTypeForModel(profile.auth?.type)}", not "oauth2". Connecting sends the user to a provider to authorize; a profile that carries a static credential does not need it.`;
       }
+      // A provider this engine once shipped: there is nothing to connect it to, and the profile
+      // stays held to it, so neither an update to another provider nor fetch_token (both
+      // suggested further down for other profiles) works. Asked before anything else that could
+      // answer with one of those.
+      const retiredId = retiredPresetIdOf(profile);
+      if (retiredId !== undefined) {
+        return `Error: profile "${id}" was set up through the built-in "${retiredId}" provider, which this engine no longer has, so there is no authorization page to send the user to. Tell the user this connection can no longer be renewed here; another way of signing in to the same API replaces it, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
+      }
       // The link is built from the server's own origin, never assembled by the
       // model: a link the model writes is a link the model chooses. Without an
       // HTTP server there is nothing to send the user to.
@@ -3088,6 +3112,12 @@ ${draftJson}
             return `Error: profile "${id}" cannot authorize yet — it does not name ${unnamed.join(' or ')}. Save it again with api_setup update: on the built-in "${appOfProvider.id}" provider the names are set to "${keys.id}" and "${keys.secret}", and the owner enters the app in the profile's connection form under Settings → API Profiles.`;
           }
           return `Error: profile "${id}" cannot authorize yet — it does not name ${unnamed.join(' or ')}. Set the vault key name(s) with api_setup update, ${unnamedValueStep(agent)}.`;
+        }
+        // A name this run's secret scope leaves out may well be stored: the run cannot tell, so it
+        // does not send the user to enter it again.
+        const outOfScope = unfilled.filter((k) => agent.secretStore?.explainUnresolved?.(k) === 'out-of-scope');
+        if (outOfScope.length > 0) {
+          return `Error: profile "${id}" cannot authorize in this run: ${outOfScope.join(' and ')} ${outOfScope.length === 1 ? 'is' : 'are'} outside the secrets this run may see, so it cannot tell whether ${outOfScope.length === 1 ? 'it is' : 'they are'} stored. Nothing was sent. Do not ask the user to enter ${outOfScope.length === 1 ? 'it' : 'them'} again; connect from a run that may see ${outOfScope.length === 1 ? 'it' : 'them'}.`;
         }
         const withheld = agent.secretStore ? withheldFrom(agent.secretStore, profile, apiStore, unfilled, readCtxOf(agent)) : [];
         if (withheld.length > 0) return `Error: profile "${id}" cannot authorize yet. ${withheldText(withheld)}`;
@@ -3302,6 +3332,14 @@ ${draftJson}
         return `Error: profile "${input.id}" is oauth2, so its tokens would live in a vault slot that belongs to a credential of this instance. Nothing was sent. Choose a different id for this profile.`;
       }
       const oauth = profile.auth.oauth;
+      // A provider this engine once shipped and no longer has: the profile's grant is a user's,
+      // and no endpoint of that provider is left to exchange it at. The profile's own `token_url`
+      // was display only while the provider existed, and it does not become the endpoint now,
+      // or an edit to it would send the user's refresh token to a host the profile names.
+      const retiredId = retiredPresetIdOf(profile);
+      if (retiredId !== undefined) {
+        return `Error: profile "${input.id}" was set up through the built-in "${retiredId}" provider, which this engine no longer has, so no token is requested for it. Nothing was sent. Tell the user this connection can no longer be renewed here; another way of signing in to the same API replaces it, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
+      }
       // A profile that names a preset this engine knows exchanges tokens at the preset's own
       // endpoint — the one the callback used — and its `token_url` is display only. Otherwise a
       // profile the agent wrote could send the provider's refresh token, and the client secret,
@@ -3356,21 +3394,8 @@ ${draftJson}
         const subject = profile.oauth_grant?.origin === 'callback' || tokenPreset === undefined
           ? `was authorized by a user${tokenPreset !== undefined ? ` through the "${tokenPreset.id}" provider` : ''}, and it declares no refresh_token grant to renew that authorization with. Nothing was sent: requesting an app-level token instead would replace the user's authorization with a different one.`
           : `connects through the "${tokenPreset.id}" provider, which issues its tokens only through a user's authorization, and it declares no refresh_token grant. Nothing was sent: fetch_token does not request an app-level token for it.`;
-        // A preset profile that reads its refresh token from a name of its own: a connect stores the
-        // token under the derived name and, since this profile does not read that one, leaves it
-        // without a grant type again (`readersRefreshSlot`, the OAuth callback). Sending it to
-        // connect alone would bring it back here; the field has to go first. Unless the slot is
-        // another profile's grant this one shares through the same provider: that sharing is on
-        // purpose, and what it lacks is the grant type, not a connection of its own.
-        const ownReadSlot = readersRefreshSlot(profile) !== refreshTokenKey(input.id);
-        const next = tokenPreset === undefined
-          ? 'This connection needs re-authorizing by the person who owns it: say so, and do not edit the profile to make the exchange pass.'
-          : ownReadSlot && apiStore !== undefined && sharesAnotherGrant(apiStore, profile)
-            ? 'It shares the connection of another profile through this provider and renews through it: set auth.oauth.grant_type to "refresh_token" with api_setup update. Do not remove auth.oauth.refresh_token_key or connect it on its own, that would end the sharing.'
-          : ownReadSlot
-            ? `Remove auth.oauth.refresh_token_key with api_setup update, then, to connect it, ${connectCallText(input.id)} While the profile names a refresh slot of its own, a connect stores the refresh token where this profile does not read it, and it ends here again.`
-            : `To connect it, ${connectCallText(input.id)}`;
-        return `Error: profile "${input.id}" ${subject} ${next}`;
+        // The same sentence the 401 reminder of a built-in provider's profile ends with.
+        return `Error: profile "${input.id}" ${subject} ${delegatedRenewalWay(profile, tokenPreset, apiStore)}`;
       }
       // A preset's token endpoint takes the body its provider documents, whatever the profile says.
       const bodyFormat = tokenPreset ? presetTokenBodyFormat(tokenPreset, oauth.body_format) : oauth.body_format ?? 'form';

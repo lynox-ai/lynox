@@ -466,6 +466,15 @@ export interface OAuthGrantRecord {
    */
   store_binding?: string | undefined;
   /**
+   * When the refresh token of an expiring store connection runs out, epoch milliseconds, from the
+   * `refresh_token_expires_in` of the exchange or refresh that stored it. Absent: unknown, or a
+   * token that does not expire. Written by the engine alone (`store-token-refresh.ts`, the connect
+   * callback).
+   */
+  refresh_expires_at?: number | undefined;
+  /** The {@link refresh_expires_at} the owner was last told about (`claimStoreReconnectHints`). */
+  reconnect_hint_for?: number | undefined;
+  /**
    * The connection's current grant (PRD connection-attribution A1/A2): an opaque id for one
    * epoch of the connection, recorded in engine.db `connection_grants`. Not OAuth-specific —
    * every `api` profile carries one once the ledger is wired, an API-key profile included.
@@ -3258,9 +3267,9 @@ export class ApiStore {
    * them for a connected API: the exact host of a profile's `base_url` (no subdomain, no suffix),
    * when the owner accepted that host at a save (`custom_endpoint_ack.hosts`) or saved the profile
    * in their own chat, in a tool batch that began before any foreign content and in a conversation
-   * without a search the provider ran itself (`owner_clean_host`, bound to the host it was saved
-   * with). A
-   * profile a mandate wrote never counts, nor does a listed sub-processor host on its own. For
+   * without a server tool the provider ran itself, such as its web search (`owner_clean_host`,
+   * bound to the host it was saved with). A profile a mandate wrote never counts, nor does a
+   * listed sub-processor host on its own. For
    * reads only: a send's targets never consult this.
    */
   readKnownHosts(): Set<string> {
