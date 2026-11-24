@@ -621,6 +621,33 @@ export class InboxStateDb {
     return row ? rowToItem(row) : null;
   }
 
+  /**
+   * The item of this account and tenant that a mail answers, by a Message-ID the mail names as
+   * its parent: the item's own mail or a message of its thread (an inbound follow-up or a sent
+   * reply). Unlike the two lookups above this one is scoped to the account and tenant: the
+   * Message-ID comes from the sender's headers, and a mail must not join a thread it was not
+   * delivered into.
+   */
+  findItemByParentMessageId(accountId: string, messageId: string, tenantId: string = DEFAULT_TENANT_ID): InboxItem | null {
+    if (!messageId) return null;
+    const own = this.db
+      .prepare<[string, string, string], ItemRow>(
+        'SELECT * FROM inbox_items WHERE tenant_id = ? AND account_id = ? AND message_id = ? ORDER BY classified_at DESC LIMIT 1',
+      )
+      .get(tenantId, accountId, messageId);
+    if (own) return rowToItem(own);
+    const inThread = this.db
+      .prepare<[string, string, string], ItemRow>(
+        `SELECT i.* FROM inbox_thread_messages t
+           JOIN inbox_items i
+             ON i.tenant_id = t.tenant_id AND i.account_id = t.account_id AND i.thread_key = t.thread_key
+          WHERE t.tenant_id = ? AND t.account_id = ? AND t.message_id = ?
+          ORDER BY i.classified_at DESC LIMIT 1`,
+      )
+      .get(tenantId, accountId, messageId);
+    return inThread ? rowToItem(inThread) : null;
+  }
+
   /** Whether the thread store already holds this message for this account. */
   hasThreadMessage(tenantId: string, accountId: string, messageId: string): boolean {
     const row = this.db
