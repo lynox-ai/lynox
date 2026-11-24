@@ -17,7 +17,7 @@
 	import BulkHost from './BulkHost.svelte';
 	import {
 		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts, bulkCountsPending, bulkHeadCounts, bulkWorkingLine, bulkWorkingStep,
-		type BulkRunDetailData, type BulkTarget, type BulkSentencePart, type BulkMarkerKind, bulkRestartNoneNote, bulkReachRefusalKey,
+		type BulkRunDetailData, type BulkTarget, type BulkSentencePart, type BulkMarkerKind, bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless,
 	} from './bulk-runs.js';
 
 	let { runId, onBack, onOpen }: { runId: string; onBack: () => void; onOpen: (id: string) => void } = $props();
@@ -33,6 +33,9 @@
 	let loading = $state(true);
 	let error = $state('');
 	let actionError = $state('');
+	// A start check that can never pass refused approving this run (its id and the engine's code):
+	// the approval stays off for it, with the cause under it, until the page shows another run.
+	let hopeless = $state<{ id: string; code: string } | null>(null);
 	let busy = $state(false);
 	// The owner asked to discard the run and is shown the confirmation (U-324).
 	let confirmingDiscard = $state(false);
@@ -208,7 +211,7 @@
 			if (left()) return false;
 			// Another run's domains are never sent with this one, and its wrong line never holds
 			// this one's start.
-			if (r.body.id !== run?.id) { startDomains = []; startDomainsValid = true; actionError = ''; }
+			if (r.body.id !== run?.id) { startDomains = []; startDomainsValid = true; actionError = ''; hopeless = null; }
 			run = r.body;
 			targets = shown;
 			creates = deleted;
@@ -273,6 +276,11 @@
 		start_domains_invalid: 'bulk.start_domains.invalid',
 		start_domains_frozen: 'bulk.start_domains.frozen',
 	};
+	const hopelessReason = $derived.by(() => {
+		if (hopeless === null || run === null || hopeless.id !== run.id) return null;
+		const key = bulkReachRefusalKey(hopeless.code);
+		return key !== null ? t(key) : null;
+	});
 	const refusalOf = (r: { ok: boolean; body: { error?: string; code?: string } }): string | null => {
 		if (r.ok) return null;
 		const code = r.body.code;
@@ -283,11 +291,15 @@
 	function approve(oneFirst: boolean): Promise<void> {
 		return act(async (id) => {
 			if (!run?.checksum) return t('common.load_failed');
-			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(id)}/approve`, {
+			const r = await post(`/bulk/runs/${encodeURIComponent(id)}/approve`, {
 				checksum: run.checksum,
 				maxTargets: oneFirst ? 1 : maxTargets,
 				...(run.writeForm === 'unmeasured' ? { unmeasuredConfirmed: unmeasuredOk } : {}),
-			}));
+			});
+			// Approving again would meet the same refusal: the approval goes off, and its cause is said
+			// under it instead of as the act's error line (an empty error, so the run is not reloaded).
+			if (!r.ok && bulkReachHopeless(r.body.code)) { hopeless = { id, code: r.body.code! }; return ''; }
+			return refusalOf(r);
 		});
 	}
 
@@ -1164,14 +1176,16 @@
 					{/if}
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary} bind:this={approveButton}
-							disabled={busy || (run.writeForm === 'unmeasured' && !unmeasuredOk)}
-							aria-describedby={run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}
+							disabled={busy || hopelessReason !== null || (run.writeForm === 'unmeasured' && !unmeasuredOk)}
+							aria-describedby={hopelessReason !== null ? 'bulk-approve-hopeless' : run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}
 							onclick={() => approve(host !== null && !run!.probeConfirmed)}>
 							{host !== null && !run.probeConfirmed ? t(bulkWriting(run) === 1 ? 'bulk.approve.write_only' : 'bulk.approve.write_one') : t('bulk.approve.approve')}
 						</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 					</div>
-					{#if run.writeForm === 'unmeasured' && !unmeasuredOk}
+					{#if hopelessReason !== null}
+						<p id="bulk-approve-hopeless" class="text-sm text-danger" data-testid="bulk-approve-hopeless">{hopelessReason}</p>
+					{:else if run.writeForm === 'unmeasured' && !unmeasuredOk}
 						<p id="bulk-approve-confirm-first" class="text-xs text-text-subtle">{t('bulk.approve.confirm_first')}</p>
 					{/if}
 					{/if}
