@@ -556,7 +556,7 @@ function sameScopes(a: readonly string[], b: readonly string[]): boolean {
  * again, so the connection is over whether or not marking it ended works. The binding is taken away
  * and the grant marked `refresh-dead` as in {@link endConnection}; if even that save fails, the
  * outcome is still `dead` and the line says the mark is missing. A binding that is no longer the one
- * the refresh began with is left as it is, and the line says so.
+ * the refresh began with (changed meanwhile) is left as it is, and the line says so.
  */
 async function writeFailed(
   profileId: string,
@@ -567,7 +567,7 @@ async function writeFailed(
 ): Promise<StoreRefreshOutcome> {
   const mark = await markEnded(profileId, ctx, plan);
   const said = mark === 'ended' ? why
-    : mark === 'left' ? `${why}; the connection was left as it is (bound again meanwhile)`
+    : mark === 'left' ? `${why}; the connection was left as it is (changed meanwhile)`
     : `${why}; the connection could not be marked ended`;
   outcomeLine(profileId, 'dead', trigger, said);
   return 'dead';
@@ -575,8 +575,9 @@ async function writeFailed(
 
 /**
  * Take the binding away and mark the grant `refresh-dead`, if the binding is still the one the
- * refresh began with: `ended`. A binding that is no longer that one (a connect, or a save that went
- * through after all) is left as it is: `left`. A save that failed, or no store: `failed`.
+ * refresh began with: `ended`. A profile whose binding is no longer that one, or that has none or no
+ * grant (a connect, a save that went through after all, a removal) is left as it is: `left`. A save
+ * that failed, or no store: `failed`.
  */
 async function markEnded(profileId: string, ctx: StoreRefreshContext, plan: StoreRefreshPlan): Promise<'ended' | 'left' | 'failed'> {
   const apiStore = ctx.toolContext.apiStore;

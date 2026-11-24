@@ -394,7 +394,7 @@ describe('the refresh of an expiring store connection', () => {
     }
     expect(profile().oauth_grant?.store_binding).toBe(bind(ID, ORIGIN, 'at-new'));
     expect(profile().oauth_grant?.state).not.toBe('refresh-dead');
-    expect(lines().filter((l) => l.includes('could not be saved; connect the store again; the connection was left as it is (bound again meanwhile)'))).toHaveLength(1);
+    expect(lines().filter((l) => l.includes('could not be saved; connect the store again; the connection was left as it is (changed meanwhile)'))).toHaveLength(1);
     expect(lines().some((l) => l.includes('could not be marked ended'))).toBe(false);
   });
 
