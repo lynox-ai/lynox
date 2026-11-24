@@ -82,7 +82,8 @@ export function noticeShows(notice: ProviderNotice | undefined, now: Date): noti
 export type RevocationView =
 	| { kind: 'revoked'; revokedAt: string | null; notice: ProviderNotice | null; avertable: boolean }
 	| { kind: 'reconnected'; who: string; notice: ProviderNotice; avertable: boolean }
-	| { kind: 'connectedAgain' | 'pending'; notice: ProviderNotice };
+	| { kind: 'connectedAgain' | 'pending'; notice: ProviderNotice }
+	| { kind: 'ended'; notice: null };
 
 export function revocationView(
 	grant: { state?: unknown; revoked_at?: unknown; connected_by?: unknown } | undefined,
@@ -92,7 +93,9 @@ export function revocationView(
 	const shown = noticeShows(notice, now) ? notice : null;
 	const held = shown !== null && Date.parse(shown.holdUntil) > now.getTime();
 	if (grant?.state === 'revoked') return { kind: 'revoked', revokedAt: shown?.revokedAt ?? revokedAt(grant), notice: shown, avertable: held };
-	if (shown === null) return null;
+	// A store connection whose refresh ended (`refresh-dead`): no revocation, nothing to delete;
+	// connecting again is the way back.
+	if (shown === null) return grant?.state === 'refresh-dead' ? { kind: 'ended', notice: null } : null;
 	const by = connectionLine(grant as OAuthGrantView | undefined)?.by;
 	if (shown.reconnected && by?.kind === 'helper') return { kind: 'reconnected', who: by.address, notice: shown, avertable: held };
 	return { kind: held ? 'connectedAgain' : 'pending', notice: shown };

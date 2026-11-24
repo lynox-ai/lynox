@@ -168,12 +168,13 @@ describe('a completed plan that keeps its pause', () => {
 
 describe('Run now at a paused plan (ux U-179)', () => {
 	const runNow = (): HTMLButtonElement | null => target.querySelector<HTMLButtonElement>('[data-trigger-run-now]');
-	it('is not offered at a completed plan that keeps its pause', async () => {
+	it('is not offered at a completed plan that keeps its pause, which keeps its switch', async () => {
 		rows = [{ ...PAUSED, status: 'completed' }];
 		await render();
 		// The row is there, so the button is missing at it, not with an empty list.
 		expect(target.textContent).toContain('Wochenreport');
 		expect(runNow()).toBeNull();
+		expect(target.querySelector('[data-trigger-toggle]')?.textContent?.trim()).toBe('Pausieren');
 	});
 	it('is not offered to a helper there either, who is told the pause without the names', async () => {
 		viewer = 'mandate';
@@ -182,17 +183,59 @@ describe('Run now at a paused plan (ux U-179)', () => {
 		await render();
 		expect(target.textContent).toContain('Wochenreport');
 		expect(runNow()).toBeNull();
-		// The same row, open: the helper has the button, so its absence above is the pause's.
+		// The same row, not paused: the helper has the button, so its absence above is the pause's.
 		unmount(component!);
 		component = undefined;
-		rows = [{ ...row, status: 'open' }];
+		rows = [{ ...row, status: 'open', paused: false }];
 		await render();
 		expect(runNow()).not.toBeNull();
 	});
-	it('stays at an open paused plan, where the refusal names the takeover the row offers', async () => {
+});
+
+describe('a plan that waits for its takeover (U-410)', () => {
+	const runNow = (): HTMLButtonElement | null => target.querySelector<HTMLButtonElement>('[data-trigger-run-now]');
+	const toggle = (): HTMLButtonElement | null => target.querySelector<HTMLButtonElement>('[data-trigger-toggle]');
+	const ownerLine = (): HTMLElement | null => target.querySelector<HTMLElement>('[data-trigger-paused-owner]');
+	it('offers the owner the takeover and neither Run now nor Pause, and no line for a helper', async () => {
 		await render();
-		expect(runNow()?.textContent).toContain('Jetzt ausführen');
-		expect(button()).not.toBeNull();
+		expect(button()?.textContent?.trim()).toBe('Übernehmen');
+		expect([runNow(), toggle(), ownerLine()]).toEqual([null, null, null]);
+	});
+	it('hides Resume too where the owner had paused the plan before', async () => {
+		rows = [{ ...PAUSED, enabled: 0 }];
+		await render();
+		expect(target.textContent).toContain('Wochenreport');
+		expect([runNow(), toggle()]).toEqual([null, null]);
+	});
+	it('tells a helper, visibly under the badge, who lets it run again, with neither button, in DE and EN', async () => {
+		viewer = 'mandate';
+		await render();
+		expect([button(), runNow(), toggle()]).toEqual([null, null, null]);
+		expect(ownerLine()?.textContent).toBe('Pausiert, bis der Inhaber den Plan übernimmt.');
+		expect(ownerLine()?.previousElementSibling?.querySelector('[data-trigger-paused]')).not.toBeNull();
+		unmount(component!);
+		component = undefined;
+		setLocale('en');
+		await render();
+		expect(ownerLine()?.textContent).toBe('Paused until the owner takes the plan over.');
+		// Not at a bulk run, which no takeover lets run again (the engine never pauses one).
+		unmount(component!);
+		component = undefined;
+		rows = [{ ...PAUSED, effect: 'bulk_apply' }];
+		await render();
+		// The row is there with its badge, so the line is missing at it, not with an empty list.
+		expect(target.querySelector('[data-trigger-paused]')).not.toBeNull();
+		expect(ownerLine()).toBeNull();
+	});
+	it('gives back both buttons, and no line, once the plan is not paused', async () => {
+		for (const v of ['owner', 'mandate']) {
+			viewer = v;
+			rows = [{ ...PAUSED, paused: false, paused_who: undefined, paused_ended: undefined }];
+			await render();
+			expect([runNow() !== null, toggle()?.textContent?.trim(), ownerLine()]).toEqual([true, 'Pausieren', null]);
+			unmount(component!);
+			component = undefined;
+		}
 	});
 	it('stays at a completed plan that is not paused', async () => {
 		rows = [{ ...PAUSED, status: 'completed', paused: false, paused_who: undefined, paused_ended: undefined }];

@@ -412,6 +412,8 @@ export const BULK_HALT_REASONS = {
   listOrder: 'a page of the list did not continue in id order after the last id read',
   listReadFailed: 'the store answered a page of the list with an error',
   shopInactive: 'the store is closed or frozen',
+  storeAccessEnded: 'the store connection\'s access could not be renewed and it has to be connected again',
+  storeClientMisnamed: 'the store connection does not keep its app\'s client under the provider\'s vault names',
   formCost: 'the store refused a read as too costly for one request',
   shopifyReadOff: 'reading a Shopify store in a bulk run is switched off on this instance',
   shopifyWriteOff: 'writing to a Shopify store in a bulk run is switched off on this instance',
