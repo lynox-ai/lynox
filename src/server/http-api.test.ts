@@ -13292,6 +13292,26 @@ describe('LynoxHTTPApi', () => {
       expect([judgedShown['listForm'], judgedShown['judgesHtml']]).toEqual(['shopify_filtered', true]);
     });
 
+    it('says in the runs list which run still reads its list, from the rows it lists, without reading a run on its own', async () => {
+      const host = 'acme.myshopify.com';
+      const source = parseListSource(host, { form: 'shopify', after: { seo_title: 'x' } }, 'PATCH', () => null);
+      const listed = (): string => {
+        const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source) });
+        if (!planned.ok) throw new Error('not planned');
+        return planned.status.id;
+      };
+      const reading = listed();
+      const read = listed();
+      bulkDb.getDb().prepare(`UPDATE bulk_runs SET list_state = 'done' WHERE id = ?`).run(read);
+      const plain = planRun();
+      const byId = vi.spyOn(bulkLedger as unknown as { runRow: (id: string) => unknown }, 'runRow');
+      const listRun = vi.spyOn(bulkLedger, 'getListRun');
+      const body = await (await jsonFetch('/api/bulk/runs')).json() as { runs: { id: string; list: { state: string } | null }[] };
+      const states = Object.fromEntries(body.runs.map((r) => [r.id, r.list?.state ?? null]));
+      expect(states).toEqual({ [reading]: 'pending', [read]: 'done', [plain]: null });
+      expect([byId.mock.calls.length, listRun.mock.calls.length]).toEqual([0, 0]);
+    });
+
     it('shows a list whose stored filters were changed past what a parse takes by its host, without failing and with no store filters, and a withdrawn path as its address', async () => {
       repayRateWindow();
       const host = 'shop.example.com';
