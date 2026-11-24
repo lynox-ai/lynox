@@ -185,7 +185,7 @@ describe('a watch task_create sets up after foreign content', () => {
     expect(tool.created).toEqual([]);
   });
 
-  it('an address with a secret reference is not refused before the handler, which sees its value', async () => {
+  it('a secret reference does not make the hook refuse the call', async () => {
     const tool = taskCreate();
     const ask = asker('Allow');
     const agent = withPolicy(agentOf(tool, ask.fn, 'nothing named', false), 'deny-all');
