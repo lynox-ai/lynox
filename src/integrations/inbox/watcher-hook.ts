@@ -306,12 +306,14 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       && fields.fromAddress.toLowerCase() !== existing.fromAddress.toLowerCase();
     const notifyOpts: import('./notifier.js').InboxNotifyOptions = { flagged };
     if (otherSender) {
-      // Compared as read: one Unicode form, without characters that show nothing (a soft hyphen).
+      // Compared as read: one Unicode form, without characters that show nothing (a soft hyphen),
+      // removed before the push's length cut so padding cannot push the name past it. A name that
+      // reads as nothing shows the address too.
       const asPushed = (x: string | undefined): string =>
-        sanitisePushText(x ?? '', 80).normalize('NFKC').replace(/\p{Default_Ignorable_Code_Point}/gu, '').toLowerCase();
+        sanitisePushText((x ?? '').normalize('NFKC').replace(/\p{Default_Ignorable_Code_Point}/gu, ''), 80).toLowerCase();
       const name = asPushed(fields.fromName);
-      const sameName = name === asPushed(existing.fromName) || name === asPushed(existing.fromAddress);
-      notifyOpts.sender = { address: fields.fromAddress ?? '', name: sameName ? undefined : fields.fromName };
+      const showAddress = name === '' || name === asPushed(existing.fromName) || name === asPushed(existing.fromAddress);
+      notifyOpts.sender = { address: fields.fromAddress ?? '', name: showAddress ? undefined : fields.fromName };
     }
     if (item && !snoozed) void opts.notifier.notifyNewItem(item, notifyOpts);
   };
