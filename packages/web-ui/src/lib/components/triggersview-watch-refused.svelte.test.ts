@@ -141,6 +141,22 @@ describe('a watch the network policy keeps from its page', () => {
 		expect(labels(blocked)).toEqual(labels(read).filter((l) => l !== read.querySelector('[data-trigger-run-now]')!.getAttribute('aria-label')));
 	});
 
+	it('a watch that waits for its takeover and that the policy keeps from its page says both, and offers only the takeover, chat and delete', async () => {
+		setLocale('de');
+		rows = [{ ...WATCH, id: 'w-both', title: 'Beides', paused: true, blocked_reason: { kind: 'watch_deny_all' } }];
+		const { default: TriggersView } = await import('./TriggersView.svelte');
+		component = mount(TriggersView, { target });
+		await settle();
+		const card = [...target.querySelectorAll<HTMLElement>('[data-trigger-title]')].find((e) => e.textContent === 'Beides')!.closest<HTMLElement>('.group')!;
+		expect(card.querySelector('[data-trigger-paused]')!.textContent).toBe('Pausiert · Übernahme nötig');
+		expect(card.querySelector('[data-blocked-reason]')!.textContent).toBe('Liest die Seite nicht: Diese Instanz liest keine Webseiten. Ändern kann das der Betreiber der Instanz.');
+		expect(card.querySelector('[data-trigger-run-now]')).toBeNull();
+		expect(card.querySelector('[data-trigger-toggle]')).toBeNull();
+		expect(card.querySelector('[data-trigger-takeover]')).not.toBeNull();
+		expect([...card.querySelectorAll('button')].map((b) => b.getAttribute('aria-label') ?? b.textContent!.trim()))
+			.toEqual(['Im Chat verwalten', 'Löschen', card.querySelector('[data-trigger-takeover]')!.textContent!.trim()]);
+	});
+
 	it('CONTROL: a watch whose page is read offers run now', async () => {
 		await render('de', undefined);
 		expect(target.querySelector('[data-trigger-run-now]')).not.toBeNull();
