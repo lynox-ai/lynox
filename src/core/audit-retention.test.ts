@@ -4,7 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EngineDb } from './engine-db.js';
 import { AuditLog, newCorrelationId } from './audit-log.js';
-import { AUDIT_RETENTION_MS, FOLDED_POLLS, FOLD_DAYS_PER_SWEEP, RETENTION_ACTION, RETENTION_ACTOR, sweepAuditLog } from './audit-retention.js';
+import {
+  AUDIT_RETENTION_MS, FOLDED_POLLS, FOLD_DAYS_PER_SWEEP, FOLD_STALL_AFTER_MS, RETENTION_ACTION, RETENTION_ACTOR, STALL_PROBE_SQL, SWEEP_STALE_AFTER_MS,
+  auditRetentionState, sqliteErrorCode, sweepAuditLog,
+} from './audit-retention.js';
 import { buildTrail, INTERFACE_POLLS, readTrailPage, type TrailEvent, type TrailSources } from './audit-trail-view.js';
 import type { RequestPrincipal } from './request-principal.js';
 
@@ -271,5 +274,79 @@ describe('the actor trail keeps what it holds for a set time', () => {
 
     expect(() => sweepAuditLog(engine.getDb(), NOW, noFail)).toThrow('refused');
     expect(all()).toEqual(before);
+  });
+
+  describe('the health word says whether the trail keeps its retention', () => {
+    const behind = new Date(NOW - FOLD_STALL_AFTER_MS - 60_000).toISOString();
+    const onTime = new Date(NOW - FOLD_STALL_AFTER_MS + 60 * 60_000).toISOString();
+    const folded = { at: NOW - 60_000, refused: false, dayRows: 1 };
+
+    it('says ok when no poll is past its fold, after a sweep that folded nothing', () => {
+      read(ana, PROVIDERS, onTime);
+      read(ana, 'GET /api/inbox/items', behind);
+      expect(auditRetentionState(engine.getDb(), NOW, { at: NOW, refused: false, dayRows: 0 })).toBe('ok');
+    });
+
+    it('measures the last sweep\'s age on the clock the caller passes, not on the wall clock', () => {
+      // A sweep 1 min ago on a monotonic clock, while the wall clock has moved on by hours.
+      expect(auditRetentionState(engine.getDb(), NOW, { at: 5_000, refused: false, dayRows: 0 }, 65_000)).toBe('ok');
+      expect(auditRetentionState(engine.getDb(), NOW, { at: 5_000, refused: false, dayRows: 0 }, 5_000 + SWEEP_STALE_AFTER_MS + 1)).toBe('stalled');
+    });
+
+    it('says stalled before any sweep and once the last is too old, even with nothing behind', () => {
+      expect(auditRetentionState(engine.getDb(), NOW, null)).toBe('stalled');
+      expect(auditRetentionState(engine.getDb(), NOW, { at: NOW - SWEEP_STALE_AFTER_MS - 1, refused: false, dayRows: 0 })).toBe('stalled');
+      expect(auditRetentionState(engine.getDb(), NOW, { at: NOW - SWEEP_STALE_AFTER_MS, refused: false, dayRows: 0 })).toBe('ok');
+    });
+
+    it('says stalled when the last sweep was refused, even with nothing behind', () => {
+      expect(auditRetentionState(engine.getDb(), NOW, { at: NOW, refused: true, dayRows: 3 })).toBe('stalled');
+    });
+
+    it('says stalled when a poll is past its fold and the sweeps do not fold it', () => {
+      read(ben, ACTIVE, behind);
+      // No sweep yet, one that wrote no day row, and one too long ago.
+      expect(auditRetentionState(engine.getDb(), NOW, null)).toBe('stalled');
+      expect(auditRetentionState(engine.getDb(), NOW, { ...folded, dayRows: 0 })).toBe('stalled');
+      expect(auditRetentionState(engine.getDb(), NOW, { ...folded, at: NOW - SWEEP_STALE_AFTER_MS - 1 })).toBe('stalled');
+    });
+
+    it('says ok while the sweeps work through a backlog, and once it is folded', () => {
+      read(ben, ACTIVE, behind);
+      expect(auditRetentionState(engine.getDb(), NOW, folded)).toBe('ok');
+      expect(auditRetentionState(engine.getDb(), NOW, { ...folded, at: NOW - SWEEP_STALE_AFTER_MS })).toBe('ok');
+      const r = sweepAuditLog(engine.getDb(), NOW, noFail);
+      expect(r.dayRows).toBe(1);
+      expect(auditRetentionState(engine.getDb(), NOW, { at: NOW, refused: false, dayRows: 0 })).toBe('ok');
+    });
+
+    it('says ok for a poll 33 days old less an hour, stalled for one a minute past', () => {
+      const idle = { at: NOW, refused: false, dayRows: 0 };
+      read(ana, PROVIDERS, onTime);
+      expect(auditRetentionState(engine.getDb(), NOW, idle)).toBe('ok');
+      read(ana, PROVIDERS, behind);
+      expect(auditRetentionState(engine.getDb(), NOW, idle)).toBe('stalled');
+    });
+
+    it('asks the trail with two seeks on the fold index, not a walk over old rows', () => {
+      const plan = (engine.getDb().prepare(`EXPLAIN QUERY PLAN ${STALL_PROBE_SQL}`).all(...FOLDED_POLLS, behind) as { detail: string }[]).map((r) => r.detail);
+      expect(plan).toEqual([expect.stringMatching(/^SEARCH audit_log USING (COVERING )?INDEX idx_audit_log_poll_fold \(action=\? AND ts<\?\)$/)]);
+    });
+  });
+
+  describe('a refusal keeps its SQLite code where the error text is reduced', () => {
+    it('names the code of a refused write, and nothing for an error without one', () => {
+      engine.getDb().exec("CREATE TRIGGER refuse_all BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'ana@example.invalid'); END;");
+      let caught: unknown;
+      try { read(ana, PROVIDERS, new Date(NOW).toISOString()); } catch (err) { caught = err; }
+      expect(sqliteErrorCode(caught)).toBe(' code=SQLITE_CONSTRAINT_TRIGGER');
+      expect(sqliteErrorCode(caught)).not.toContain('ana@');
+      expect(sqliteErrorCode(new Error('plain'))).toBe('');
+      expect(sqliteErrorCode(Object.assign(new Error('x'), { code: 'ana@example.invalid' }))).toBe('');
+      expect(sqliteErrorCode(Object.assign(new Error('x'), { code: 'SQLITE_CONSTRAINT ana@example.invalid' }))).toBe('');
+      expect(sqliteErrorCode(Object.assign(new Error('x'), { code: 'SQLITE_BUSY\nana' }))).toBe('');
+      expect(sqliteErrorCode(Object.assign(new Error('x'), { code: 'ana@example.invalid SQLITE_BUSY' }))).toBe('');
+      expect(sqliteErrorCode(null)).toBe('');
+    });
   });
 });
