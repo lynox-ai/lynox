@@ -1,6 +1,7 @@
 <!--
-  Passkey setup prompt — shown after first OTP login on managed instances.
-  Conditions: managed mode, WebAuthn available, no passkey registered, not dismissed.
+  Passkey setup hint — a quiet strip at the top of the chat column, in the flow (U-454): it never
+  covers the composer or a work page's buttons. Shown on managed instances with WebAuthn, to the
+  owner, while no passkey is registered and the hint was not dismissed.
 -->
 <script lang="ts">
 	import { t } from '$lib/i18n.svelte.js';
@@ -60,7 +61,7 @@
 			});
 
 			if (!startRes.ok) {
-				error = 'Could not start registration.';
+				error = t('account.security.passkey_start_failed');
 				return;
 			}
 
@@ -87,7 +88,7 @@
 			const verifyData = await verifyRes.json() as { verified?: boolean; error?: string };
 
 			if (!verifyRes.ok || !verifyData.verified) {
-				error = verifyData.error ?? 'Registration failed.';
+				error = t('account.security.passkey_failed');
 				return;
 			}
 
@@ -97,7 +98,7 @@
 			if (err instanceof Error && err.name === 'NotAllowedError') {
 				return; // User cancelled
 			}
-			error = 'Registration failed. Please try again.';
+			error = t('account.security.passkey_failed');
 		} finally {
 			registering = false;
 		}
@@ -110,52 +111,29 @@
 </script>
 
 {#if visible}
-	<div class="fixed inset-x-4 bottom-24 z-50 rounded-xl border border-border bg-bg-subtle p-4 shadow-2xl backdrop-blur-sm sm:bottom-12 sm:left-auto sm:right-4 sm:w-80">
+	<div class="mx-4 mt-3 flex shrink-0 flex-col gap-2 rounded-[var(--radius-md)] border border-border bg-bg-subtle px-3 py-2 sm:flex-row sm:items-center sm:justify-between md:mx-6" data-passkey-hint>
 		{#if success}
-			<div class="flex items-center gap-3">
-				<div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-success/10 text-success">
-					<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-						<path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
-					</svg>
-				</div>
-				<p class="text-sm text-text">
-					{t('passkeySetupSuccess')}
-				</p>
-			</div>
+			<p class="text-sm text-text" role="status">{t('passkeySetupSuccess')}</p>
 		{:else}
-			<div class="mb-3 flex items-start gap-3">
-				<div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-accent/10 text-accent">
-					<svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-						<path stroke-linecap="round" stroke-linejoin="round" d="M12 11c0 3.517-1.009 6.799-2.753 9.571m-3.44-2.04l.054-.09A13.916 13.916 0 008 11a4 4 0 118 0c0 1.017-.07 2.019-.203 3m-2.118 6.844A21.88 21.88 0 0015.171 17m3.839 1.132c.645-2.266.99-4.659.99-7.132A8 8 0 008 4.07M3 15.364c.64-1.319 1-2.8 1-4.364 0-1.457.39-2.823 1.07-4" />
-					</svg>
-				</div>
-				<div>
-					<p class="text-sm font-medium text-text">
-						{t('passkeySetupTitle')}
-					</p>
-					<p class="mt-0.5 text-xs text-text-muted">
-						{t('passkeySetupDescription')}
-					</p>
-				</div>
+			<div class="min-w-0">
+				<p class="text-sm text-text">{t('passkeySetupHint')}</p>
+				{#if error}
+					<p class="mt-1 text-xs text-danger" role="alert">{error}</p>
+				{/if}
 			</div>
-
-			{#if error}
-				<p class="mb-3 text-xs text-danger">{error}</p>
-			{/if}
-
-			<div class="flex gap-2">
+			<div class="flex shrink-0 gap-2">
 				<button
 					onclick={setupPasskey}
 					disabled={registering}
-					class="flex-1 rounded-[var(--radius-md)] bg-accent px-3 py-1.5 text-xs font-medium text-white
-						transition-colors hover:bg-accent-hover disabled:opacity-50"
+					class="rounded-[var(--radius-md)] bg-accent px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
+					data-passkey-setup
 				>
-					{registering ? (t('passkeySetupRegistering')) : (t('passkeySetupCta'))}
+					{registering ? t('passkeySetupRegistering') : t('passkeySetupCta')}
 				</button>
 				<button
 					onclick={dismiss}
-					class="rounded-[var(--radius-md)] px-3 py-1.5 text-xs text-text-muted
-						transition-colors hover:text-text hover:bg-bg-muted"
+					class="rounded-[var(--radius-md)] px-3 py-1.5 text-xs text-text-muted transition-colors hover:bg-bg-muted hover:text-text"
+					data-passkey-later
 				>
 					{t('passkeySetupDismiss')}
 				</button>

@@ -129,6 +129,7 @@
 	import { isVoiceAutoSendEnabled } from '../stores/voice-autosend.svelte.js';
 	import { goto, afterNavigate } from '$app/navigation';
 	import { onMount, tick, untrack } from 'svelte';
+	import PasskeyPrompt from './PasskeyPrompt.svelte';
 	import { isMistralPresetBase } from '../utils/mistral-endpoint.js';
 
 	// Welcome screen state
@@ -2560,6 +2561,9 @@
 	     overscroll-locked this is belt-and-suspenders, not load-bearing —
 	     it stays so the transcript's overscroll semantics remain local even
 	     if an ancestor becomes scrollable again someday. -->
+	<!-- The passkey hint (U-454): a strip in the flow above the transcript, the only place it shows,
+	     so it never covers the composer or a work page. -->
+	<PasskeyPrompt />
 	<div class="relative flex min-h-0 flex-1 flex-col">
 	<div class="flex-1 min-w-0 overflow-x-hidden overflow-y-auto overscroll-y-contain px-4 py-6 md:px-6" bind:this={messagesEl} onscroll={onMessagesScroll}>
 		{#if threadReadRefusal !== null && messages.length === 0}
