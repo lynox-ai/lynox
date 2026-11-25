@@ -58,7 +58,7 @@ const WRITTEN = { ok: true, json: async () => ({ updatedRange: 'Sheet1!B2:C3', u
 const APPENDED = { ok: true, json: async () => ({ updates: { updatedRange: 'Sheet1!A9:B9', updatedRows: 1, updatedCells: 2 } }) };
 
 /** Said wherever a question shows a formula: the functions are examples, and the address may be built. */
-const FETCHES = 'A formula can make Google fetch an address and send data from the sheet with it: functions such as IMPORTXML, IMPORTHTML, IMPORTDATA, IMPORTFEED, IMPORTRANGE and IMAGE do, and other functions can too. The address need not be written out, since a formula can build it from other cells.';
+const FETCHES = 'A formula can make Google fetch an address and send data from the sheet with it. IMPORTXML, IMPORTHTML, IMPORTDATA, IMPORTFEED, IMPORTRANGE and IMAGE are examples; other functions can do it too. The address need not be written out: a formula can build it from other cells.';
 const HIDDEN = 'Writing as formulas is offered only when every formula is shown here. To write them as formulas, ask in the chat to write at most 5 at a time.';
 const PLAIN_WRITE_QUESTION = 'Overwrite range "Sheet1!B2:C3" in spreadsheet sid? This will replace existing data.';
 
@@ -272,7 +272,7 @@ describe('google_sheets format after content from outside the chat', () => {
   beforeEach(() => { vi.clearAllMocks(); });
 
   const PLAIN_FORMAT_QUESTION = 'Apply batch changes to spreadsheet sid? Formatting requests can delete or overwrite cells and sheets.';
-  const NOTE_ONE = `This chat has read content from outside lynox, such as a web page, an email or a file. 1 of these requests can write cell content or a rule, or change what a cell reads as, such as a number pattern, a link, the text direction or hidden rows. Content and rules can hold a formula, and Google runs a formula on its side. ${FETCHES} It is shown here in full:`;
+  const NOTE_ONE = `This chat has read content from outside lynox, such as a web page, an email or a file. 1 of these requests can write cell content or a rule, or change what a reader sees in a cell or sheet, such as a number pattern, a link, the text direction or hidden rows. Content and rules can hold a formula, which Google runs on its side. ${FETCHES} The request is shown in full:`;
   const APPLIED = { ok: true, json: async () => ({ replies: [{}, {}] }) };
   const RANGE = { sheetId: 0, startRowIndex: 0, endRowIndex: 1 };
   const BORDERS = { updateBorders: { range: RANGE, top: { style: 'SOLID' } } };
@@ -323,6 +323,7 @@ describe('google_sheets format after content from outside the chat', () => {
     await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [paste, FORMULA_CELLS, 'odd'] }, a);
     const lines = flattenPrompt(asked(a).prompt).split('\n');
     expect(lines[2]).toContain('3 of these requests can write cell content or a rule');
+    expect(lines[2]).toMatch(/These 3 requests are shown in full:$/);
     expect(lines.slice(-3)).toEqual([`pasteData: ${JSON.stringify(paste.pasteData)}`, `updateCells: ${JSON.stringify(FORMULA_CELLS.updateCells)}`, 'request: "odd"']);
   });
 
@@ -400,7 +401,7 @@ describe('google_sheets format after content from outside the chat', () => {
   it('refuses a request one character longer than a question shows, without asking or shortening it, and says how to split', async () => {
     const a = agent('sawUntrustedData', 'Yes');
     const result = await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [BORDERS, cellsOfLine(FORMAT_LINE_MAX + 1)] }, a);
-    expect(result).toContain(`at most ${FORMAT_REQUESTS_SHOWN}, each at most ${FORMAT_LINE_MAX} characters as shown`);
+    expect(result).toContain(`one question shows at most ${FORMAT_REQUESTS_SHOWN}, each at most ${FORMAT_LINE_MAX} characters.`);
     expect(result).toContain('Split it');
     expect(a.promptUser).not.toHaveBeenCalled();
     expect(mockFetch).not.toHaveBeenCalled();
