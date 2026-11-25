@@ -110,6 +110,16 @@ describe('Engine boot — the actor trail is wired', () => {
       expect(stderr).not.toContain('refused by test');
     });
 
+    it('says ok right after boot even when the wall clock jumps hours ahead', async () => {
+      const { engine } = await bootOn(() => undefined);
+      const jump = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 5 * 60 * 60_000);
+      try {
+        expect(engine.getAuditRetentionState()).toBe('ok');
+      } finally {
+        jump.mockRestore();
+      }
+    });
+
     it('says nothing once the engine is shut down, rather than stalled', async () => {
       const { engine } = await bootOn(() => undefined);
       expect(engine.getAuditRetentionState()).toBe('ok');

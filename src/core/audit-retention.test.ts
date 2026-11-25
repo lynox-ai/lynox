@@ -287,6 +287,12 @@ describe('the actor trail keeps what it holds for a set time', () => {
       expect(auditRetentionState(engine.getDb(), NOW, { at: NOW, refused: false, dayRows: 0 })).toBe('ok');
     });
 
+    it('measures the last sweep\'s age on the clock the caller passes, not on the wall clock', () => {
+      // A sweep 1 min ago on a monotonic clock, while the wall clock has moved on by hours.
+      expect(auditRetentionState(engine.getDb(), NOW, { at: 5_000, refused: false, dayRows: 0 }, 65_000)).toBe('ok');
+      expect(auditRetentionState(engine.getDb(), NOW, { at: 5_000, refused: false, dayRows: 0 }, 5_000 + SWEEP_STALE_AFTER_MS + 1)).toBe('stalled');
+    });
+
     it('says stalled before any sweep and once the last is too old, even with nothing behind', () => {
       expect(auditRetentionState(engine.getDb(), NOW, null)).toBe('stalled');
       expect(auditRetentionState(engine.getDb(), NOW, { at: NOW - SWEEP_STALE_AFTER_MS - 1, refused: false, dayRows: 0 })).toBe('stalled');

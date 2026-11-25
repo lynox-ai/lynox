@@ -3544,10 +3544,12 @@ export class Engine {
   private _sweepAuditLog(): void {
     const db = this.engineDb?.getDb();
     if (db === undefined) return;
-    const at = Date.now();
+    // Monotonic, for the health word's "when did it last run": a host that slept or a wall clock that
+    // jumped must not make the last sweep look stale. The sweep itself works on wall time.
+    const at = performance.now();
     let refused = false;
     try {
-      const r = sweepAuditLog(db, at, (day, err) => {
+      const r = sweepAuditLog(db, Date.now(), (day, err) => {
         refused = true;
         // A fixed tag an operator can grep for: while a day stays unfolded, its polls are kept
         // single past the 30-day fold (audit-retention.ts). The SQLite code keeps the cause
@@ -3569,7 +3571,7 @@ export class Engine {
     const db = this.engineDb?.getDb();
     // Closed at shutdown: no trail to keep any more, and not a stall.
     if (db === undefined || !db.open) return undefined;
-    return auditRetentionState(db, Date.now(), this._auditSweep);
+    return auditRetentionState(db, Date.now(), this._auditSweep, performance.now());
   }
 
   /** Fire orchestrator shutdown hooks (for Pro extensions — includes worker pool shutdown). */

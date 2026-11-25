@@ -120,7 +120,11 @@ export function sweepAuditLog(
 
 /** What the engine keeps of its last sweep, for {@link auditRetentionState}. */
 export interface AuditSweepRecord {
-  /** When it ran (ms). */
+  /**
+   * When it ran (ms), on the clock the caller passes to {@link auditRetentionState} as `clockNow`.
+   * The engine uses a monotonic clock, so a host that slept or a wall clock that jumped does not
+   * make a sweep look older than it is.
+   */
   readonly at: number;
   /** Whether a day, or the delete, was refused. */
   readonly refused: boolean;
@@ -141,8 +145,9 @@ export function auditRetentionState(
   db: Database.Database,
   now: number,
   last: AuditSweepRecord | null,
+  clockNow: number = now,
 ): AuditRetentionState {
-  if (last === null || now - last.at > SWEEP_STALE_AFTER_MS || last.refused) return 'stalled';
+  if (last === null || clockNow - last.at > SWEEP_STALE_AFTER_MS || last.refused) return 'stalled';
   const behind = db.prepare(STALL_PROBE_SQL).get(...FOLDED_POLLS, new Date(now - FOLD_STALL_AFTER_MS).toISOString());
   return behind !== undefined && last.dayRows === 0 ? 'stalled' : 'ok';
 }
