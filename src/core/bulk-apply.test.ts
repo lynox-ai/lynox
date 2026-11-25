@@ -481,6 +481,9 @@ describe('a target found already holding its value', () => {
     expect([u.applied, u.foundAsPlanned]).toEqual([2, 1]);
     // In the undo's head: one taken back by it ("written" there), one it found already back.
     expect(u.heads).toMatchObject({ written: 1, unchanged: 1, takenBack: 0 });
+    // In the source's head: the found one stays unchanged; both the run wrote are taken back, the
+    // one the undo found already back included (its old value is there again).
+    expect(ledger.getStatus(runId)!.heads).toMatchObject({ written: 0, unchanged: 1, takenBack: 2 });
     // Through the `unchanged` branch, not `takenBack`: an undo's own rows carry no `undone_at`
     // (the source's rows do), and the one it found is marked found and never sent to.
     // The undo plans newest first: its first row is the third target, the one found already back.

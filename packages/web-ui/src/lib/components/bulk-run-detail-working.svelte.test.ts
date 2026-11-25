@@ -206,7 +206,7 @@ describe('a run the engine works on', () => {
 		expect(line()).toBe('lynox urteilt …');
 	});
 
-	it('says lynox writes, with the written targets out of those it writes, approved and while writing, and the head moves too', async () => {
+	it('says lynox writes, with the targets done out of those it writes, approved and while writing, and the head moves too', async () => {
 		run = makeRun({ phase: 'approved', total: 4, changes: { ...UPDATES(3), unchanged: 1 } });
 		await render();
 		expect(line()).toBe('lynox schreibt … 0 von 3 erledigt');

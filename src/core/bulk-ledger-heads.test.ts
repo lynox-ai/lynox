@@ -137,7 +137,8 @@ describe('the head counts of a run', () => {
   it('a target found already holding its value and never sent to is unchanged, not written', () => {
     expect(classes(EXTERNAL, [
       { applied: true, found: true },
-      // Sent to and then found so: a loop that died wrote it, so it was written.
+      // Not a state a pass leaves (a target is marked found only while never sent to): it pins that
+      // the head reads found only together with no send, so a sent one stays written.
       { applied: true, found: true, sent: true },
       { applied: true },
       // Taken back ranks first, as before.
