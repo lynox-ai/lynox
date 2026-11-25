@@ -42,7 +42,7 @@ import { serializeTokenBody } from './oauth-token-exchange.js';
 import type { StoreAttachRefusal } from './shopify-host.js';
 import {
   beginStoreConnect, endStoreConnect, refreshStoreToken, resetStoreRefreshForTests, claimStoreReconnectHints, storeReconnectDue, storeAccessEnd, STORE_RECONNECT_HINT_MS,
-  STORE_REFRESH_WINDOW_MS, storeRefreshPassFor, type StoreRefreshContext,
+  STORE_REFRESH_WINDOW_MS, storeRefreshPassFor, connectionStillIneligible, type StoreRefreshContext,
 } from './store-token-refresh.js';
 
 const ID = 'shop-acme';
@@ -475,9 +475,142 @@ describe('the refresh of an expiring store connection', () => {
     expect(await refreshStoreToken(ID, 'unauthorized', ctx())).toBe('dead');
     expect(hold.calls).toHaveLength(1);
     expect(lines().some((l) => l.includes('not started: the last refresh ended this connection'))).toBe(true);
-    // Once a later refresh ends otherwise, the window is plain again.
+    // Once a later refresh ends otherwise, the window says that instead: the binding is gone, so
+    // the connection cannot be renewed as it stands.
     vi.setSystemTime(Date.now() + STORE_REFRESH_WINDOW_MS + 1000);
     expect(await refreshStoreToken(ID, 'due', ctx())).toBe('ineligible');
+    expect(await refreshStoreToken(ID, 'unauthorized', ctx())).toBe('ineligible');
+    expect(hold.calls).toHaveLength(1);
+  });
+
+  it('inside the window after a refresh found the connection unable to be renewed, a caller hears that again, not that nothing ran', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vault.delete(refreshTokenKey(ID));
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('ineligible');
+    expect(await refreshStoreToken(ID, 'unauthorized', ctx())).toBe('ineligible');
+    expect(hold.calls).toHaveLength(0);
+    expect(lines().some((l) => l.includes('not started: the connection still cannot be renewed as it stands'))).toBe(true);
+  });
+
+  it('inside the window after an unrenewable refresh, a slot filled meanwhile is not called unrenewable: nothing ran this time', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vault.delete(refreshTokenKey(ID));
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('ineligible');
+    vault.set(refreshTokenKey(ID), 'rt-old');
+    expect(await refreshStoreToken(ID, 'unauthorized', ctx())).toBe('not-run');
+    expect(hold.calls).toHaveLength(0);
+  });
+
+  // The window's check is a copy of steps 5 and 6 of the refresh pass: both are run on the same
+  // profile, with each criterion held and then broken, and must agree.
+  const criteria: [string, () => void][] = [
+    ['the binding is missing', () => { const p = profile(); expect(store.save({ ...p, oauth_grant: { ...p.oauth_grant!, store_binding: undefined } } as ApiProfile).ok).toBe(true); }],
+    ['the access token is not in the vault', () => { vault.delete(accessTokenKey(ID)); }],
+    ['the binding does not hold over the access token', () => { vault.set(accessTokenKey(ID), 'at-other'); }],
+    ['the refresh token is not in the vault', () => { vault.delete(refreshTokenKey(ID)); }],
+    ['the client secret is not in the vault', () => { vault.delete('SHOPIFY_CLIENT_SECRET'); }],
+  ];
+  /** The context with a store that can say whether a name is there without reading it, as the real one can. */
+  const ctxHolds = (): StoreRefreshContext => {
+    const c = ctx();
+    return { ...c, secretStore: { ...c.secretStore, holds: (n: string) => vault.has(n) } as never };
+  };
+  for (const [name, breakIt] of [...criteria, ['the client id is not in the vault', () => { vault.delete('SHOPIFY_CLIENT_ID'); }] as [string, () => void]]) {
+    it(`the window's check and the refresh pass agree on each criterion: ${name}`, async () => {
+      const held = await storeRefreshPassFor(ID, ctx());
+      expect(typeof held).toBe('object');
+      expect(connectionStillIneligible(ID, ctx())).toBe(false);
+      expect(connectionStillIneligible(ID, ctxHolds())).toBe(false);
+      breakIt();
+      expect(await storeRefreshPassFor(ID, ctx())).toBe('ineligible');
+      expect(connectionStillIneligible(ID, ctx())).toBe(true);
+      expect(connectionStillIneligible(ID, ctxHolds())).toBe(true);
+    });
+  }
+
+  it('the window\'s check reads one value, the access token: for the refresh token and the client it asks only whether they are there', () => {
+    const read: string[] = [];
+    const c = ctxHolds();
+    const counting = { ...c, secretStore: { ...c.secretStore, resolve: (n: string) => { read.push(n); return vault.get(n) ?? null; } } as never };
+    expect(connectionStillIneligible(ID, counting)).toBe(false);
+    expect(read).toEqual([accessTokenKey(ID)]);
+  });
+
+  it('inside the window after an unrenewable refresh, a token found due again reads that nothing ran, and reads nothing from the vault', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vault.delete(refreshTokenKey(ID));
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('ineligible');
+    const read: string[] = [];
+    const c = ctx();
+    const counting = { ...c, secretStore: { ...c.secretStore, resolve: (n: string) => { read.push(n); return vault.get(n) ?? null; } } as never };
+    expect(await refreshStoreToken(ID, 'due', counting)).toBe('not-run');
+    expect(read).toEqual([]);
+    // The 401 that token gets is told the truth.
+    expect(await refreshStoreToken(ID, 'unauthorized', ctx())).toBe('ineligible');
+    expect(hold.calls).toHaveLength(0);
+  });
+
+  it('the window\'s check and the refresh pass agree that an engine without a key to check the binding with is not the connection\'s cause', async () => {
+    const c = ctx();
+    c.toolContext.storeBindingDigest = () => null;
+    vault.delete(refreshTokenKey(ID));
+    expect(await storeRefreshPassFor(ID, c)).toBeUndefined();
+    expect(connectionStillIneligible(ID, c)).toBe(false);
+  });
+
+  it('asking again inside the window asks the control plane nothing and sends nothing, whichever way it reads', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vault.delete(refreshTokenKey(ID));
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('ineligible');
+    expect(clearanceAsked).toBe(0);
+    expect(await refreshStoreToken(ID, 'unauthorized', ctx())).toBe('ineligible');
+    // Renewable again: the full pass would ask for the clearance and mint; the window does neither.
+    vault.set(refreshTokenKey(ID), 'rt-old');
+    expect(await refreshStoreToken(ID, 'unauthorized', ctx())).toBe('not-run');
+    expect(clearanceAsked).toBe(0);
+    expect(hold.calls).toHaveLength(0);
+  });
+
+  it('inside the window after an unrenewable refresh, a client renamed off the preset reads that nothing ran, as before', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vault.delete(refreshTokenKey(ID));
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('ineligible');
+    const p = profile();
+    expect(store.save({ ...p, auth: { ...p.auth, oauth: { ...p.auth!.oauth, client_id_key: 'OTHER_ID' } } } as ApiProfile).ok).toBe(true);
+    expect(await refreshStoreToken(ID, 'unauthorized', ctx())).toBe('not-run');
+    expect(hold.calls).toHaveLength(0);
+  });
+
+  it('inside the window after an unrenewable refresh, an access token gone from the vault still reads unrenewable', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vault.delete(refreshTokenKey(ID));
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('ineligible');
+    vault.set(refreshTokenKey(ID), 'rt-old');
+    vault.delete(accessTokenKey(ID));
+    expect(await refreshStoreToken(ID, 'unauthorized', ctx())).toBe('ineligible');
+    expect(hold.calls).toHaveLength(0);
+  });
+
+  it('inside the window after an unrenewable refresh, a connection made again meanwhile is not called unrenewable', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    // The binding no longer holds over the token in the vault, as after a token written by hand.
+    vault.set(accessTokenKey(ID), 'at-other');
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('ineligible');
+    // A connect inside the window binds the profile again over the token it wrote.
+    const p = profile();
+    expect(store.save({ ...p, oauth_grant: { ...p.oauth_grant!, state: 'connected', store_binding: bind(ID, ORIGIN, 'at-other')! } } as ApiProfile).ok).toBe(true);
+    expect(await refreshStoreToken(ID, 'unauthorized', ctx())).toBe('not-run');
+    expect(hold.calls).toHaveLength(0);
+  });
+
+  it('a refresh that ran after an unrenewable one forgets it: inside the next window a caller hears that nothing ran', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vault.delete(refreshTokenKey(ID));
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('ineligible');
+    vault.set(refreshTokenKey(ID), 'rt-old');
+    vi.setSystemTime(Date.now() + STORE_REFRESH_WINDOW_MS + 1000);
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('renewed');
+    vault.delete(refreshTokenKey(ID));
     expect(await refreshStoreToken(ID, 'unauthorized', ctx())).toBe('not-run');
     expect(hold.calls).toHaveLength(1);
   });
