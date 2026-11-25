@@ -199,6 +199,8 @@ describe('EngineDb.recreated', () => {
 describe('the copy of the generation and the tool guard', () => {
   it('refuses the shell tool the copy, as every file the sessions rest on', async () => {
     const { isDangerous } = await import('../tools/permission-guard.js');
-    expect(isDangerous('bash', { command: 'echo 9007199254740991 > ~/.lynox/owner-sessions-generation' }, 'autonomous')).toContain('lynox secret store');
+    const danger = isDangerous('bash', { command: 'echo 9007199254740991 > ~/.lynox/owner-sessions-generation' }, 'autonomous');
+    expect(danger).toContain('lynox secret store');
+    expect(danger).toContain('[BLOCKED');
   });
 });

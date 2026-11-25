@@ -29,7 +29,9 @@
  * at that boot, which a clock set back afterwards can leave ahead): it is told and held to the clock,
  * so a file written by something else can force one new login at most, never raise the generation
  * past what a cookie can carry, and a mirror ahead of a clock set back still ends what engine.db
- * brought back.
+ * brought back while engine.db is below the clock. What it does not end: an engine.db brought back
+ * that is itself still ahead of a clock set back (the clock of a boot that recreated it); that
+ * generation is let in again.
  *
  * Not an agent tool, on purpose: ending every session is the owner's act through a route of its
  * own, never something a model can be talked into.
