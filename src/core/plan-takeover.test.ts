@@ -296,7 +296,7 @@ describe('the workflow’s side', () => {
     ended(b, 'h@x.ch');
     pause(b, 'p', 'h@x.ch');
     const before = takeoverPreview(deps(b), 'p');
-    expect(before.kind === 'preview' && before.preview.workflowGone).toBe(false);
+    expect(before.kind === 'preview' && [before.preview.workflow?.id, before.preview.workflowGone]).toEqual(['w', false]);
     b.db.prepare("DELETE FROM workflows WHERE id = 'w'").run();
     expect(row(b, 'p')['target_workflow_id']).toBeNull();
     const p = takeoverPreview(deps(b), 'p');
