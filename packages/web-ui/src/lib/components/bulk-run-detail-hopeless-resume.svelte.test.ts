@@ -87,6 +87,8 @@ async function render(): Promise<void> {
 const button = (label: string): HTMLButtonElement =>
 	[...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === label)!;
 const errorLines = (): string[] => [...target.querySelectorAll('p.text-danger')].map((p) => p.textContent?.trim() ?? '');
+/** The sentences of the block that offers writing on. */
+const blockLines = (b: HTMLButtonElement): string[] => [...b.closest('div.space-y-3')!.querySelectorAll('p')].map((p) => p.textContent?.trim() ?? '');
 
 describe('writing on after a start check that can never pass', () => {
 	for (const cause of ['shopifySelfHosted', 'shopifyNoApiVersion'] as const) {
@@ -95,6 +97,9 @@ describe('writing on after a start check that can never pass', () => {
 			await render();
 			const writeOn = (): HTMLButtonElement => button(t('bulk.resume.write'));
 			expect(writeOn().disabled).toBe(false);
+			// Before the press the block says how writing on goes.
+			const offered = blockLines(writeOn());
+			expect(offered.length).toBeGreaterThan(1);
 			const loadsBefore = runGets;
 			writeOn().click();
 			await settle();
@@ -105,6 +110,10 @@ describe('writing on after a start check that can never pass', () => {
 			expect(writeOn().getAttribute('aria-describedby')).toBe(reason?.id);
 			expect(document.activeElement).toBe(reason);
 			expect(errorLines()).toEqual([t(`bulk.halt.${cause}`)]);
+			// Nothing promises writing on any more: between the halt's cause and the buttons only the reason.
+			expect(blockLines(writeOn())).toEqual([t(`bulk.halt.${cause}`)]);
+			expect(reason!.compareDocumentPosition(writeOn()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+			expect(target.querySelector('[data-testid="bulk-halt-cause"]')).not.toBeNull();
 			expect(runGets).toBe(loadsBefore);
 			writeOn().click();
 			await settle();
@@ -116,9 +125,12 @@ describe('writing on after a start check that can never pass', () => {
 		refuseWith = 'reach_resume_shopifyUnconfirmed';
 		await render();
 		const writeOn = (): HTMLButtonElement => button(t('bulk.resume.write'));
+		const offered = blockLines(writeOn());
 		writeOn().click();
 		await settle();
 		expect(writeOn().disabled).toBe(false);
+		// The way on stays as it was said.
+		expect(blockLines(writeOn()).filter((l) => !errorLines().includes(l))).toEqual(offered);
 		expect(writeOn().getAttribute('aria-describedby')).toBeNull();
 		expect(target.querySelector('[data-testid="bulk-resume-hopeless"]')).toBeNull();
 		expect(errorLines()).toEqual([t('bulk.halt.shopifyUnconfirmed')]);

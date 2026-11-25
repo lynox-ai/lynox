@@ -34,7 +34,7 @@
 	let error = $state('');
 	let actionError = $state('');
 	// A start check that can never pass refused approving or writing on this run (its id and the
-	// engine's code): both stay off for it, with the cause under the button, until the page shows
+	// engine's code): both stay off for it, with the cause by the button, until the page shows
 	// another run or is opened again.
 	let hopeless = $state<{ id: string; code: string } | null>(null);
 	let hopelessLine = $state<HTMLParagraphElement | null>(null);
@@ -398,7 +398,7 @@
 	}
 
 	/** Approving or writing on again would meet the same refusal: both go off for this run, and the
-	 *  cause is said under the button instead of as the act's error line (the act then answers an
+	 *  cause is said by the button instead of as the act's error line (the act then answers an
 	 *  empty error, so the run is not reloaded). The button that was pressed goes off under the focus,
 	 *  so the focus moves to the cause. */
 	async function reachHopeless(id: string, r: { ok: boolean; body: PostBody }): Promise<boolean> {
@@ -1117,11 +1117,13 @@
 				{/if}
 			{:else if resumeKind !== null && resumeText}
 				<div class="space-y-3 border-t border-border pt-4">
-					{#if resumeText.before}
+					<!-- After a start check that can never pass, nothing promises writing on: the halt's cause,
+					     the reason, and the buttons stay. -->
+					{#if resumeText.before && hopelessReason === null}
 						<p class="text-sm">{@render hostText(resumeText.before)}</p>
 					{/if}
 					<!-- The support link stands under the sentence that names support, which comes before the check. -->
-					{#if supportMail}
+					{#if supportMail && hopelessReason === null}
 						<p class="text-sm"><a href={supportMail} class="{btnPlain} inline-block">{t('bulk.halt.support_mail')}</a></p>
 					{/if}
 					{#if resumeKind === 'none'}
@@ -1132,6 +1134,12 @@
 						{/if}
 					{:else if resumeKind === 'nothing'}
 						<p class="text-sm">{@render hostText(resumeText.check ?? '')}</p>
+					{:else if hopelessReason !== null}
+						<p id="bulk-resume-hopeless" class="text-sm text-danger" tabindex="-1" bind:this={hopelessLine} data-testid="bulk-resume-hopeless">{hopelessReason}</p>
+						<div class="flex flex-wrap gap-2">
+							<button type="button" class={btnPrimary} disabled aria-describedby="bulk-resume-hopeless">{resumeKind === 'check' ? t('bulk.resume.check') : resumeWords!.button}</button>
+							<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
+						</div>
 					{:else}
 						{#if resumeText.soFar}
 							<p class="text-sm">{@render hostText(resumeText.soFar)}</p>
@@ -1164,13 +1172,9 @@
 							<p class="text-sm text-text-muted">{resumeWords!.window}</p>
 						{/if}
 						<div class="flex flex-wrap gap-2">
-							<button type="button" class={btnPrimary} disabled={busy || hopelessReason !== null || (resumeKind === 'max' && bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run)) === null)}
-								aria-describedby={hopelessReason !== null ? 'bulk-resume-hopeless' : undefined} onclick={resume}>{resumeKind === 'check' ? t('bulk.resume.check') : resumeWords!.button}</button>
+							<button type="button" class={btnPrimary} disabled={busy || (resumeKind === 'max' && bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run)) === null)} onclick={resume}>{resumeKind === 'check' ? t('bulk.resume.check') : resumeWords!.button}</button>
 							<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 						</div>
-						{#if hopelessReason !== null}
-							<p id="bulk-resume-hopeless" class="text-sm text-danger" tabindex="-1" bind:this={hopelessLine} data-testid="bulk-resume-hopeless">{hopelessReason}</p>
-						{/if}
 					{/if}
 				</div>
 				{#if canUndo}
