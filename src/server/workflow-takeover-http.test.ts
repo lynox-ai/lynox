@@ -215,7 +215,7 @@ describe('the workflow takeover routes (real engine)', () => {
     end('m@example.invalid');
     const extra = {
       mode: 'autonomous', on_failure: 'continue', limits: { maxSpendUsd: 2, maxIterations: 7 },
-      capabilityContract: { hostPatterns: ['api.example.invalid'], pathPatterns: ['/v1/*'], httpMethods: ['POST'] },
+      capabilityContract: { grantedTools: ['http_request'], hostPatterns: ['api.example.invalid'], pathPatterns: ['/v1/*'], httpMethods: ['POST'], paramConstraints: { recipient: { regex: '[a-z]+@example\\.invalid' } } },
       parameters: [{ name: 'recipient', type: 'string', description: '', defaultValue: 'stranger@example.invalid' }, { name: 'subject', type: 'string', description: '' }],
     };
     db().prepare('UPDATE workflows SET definition_json = json_patch(definition_json, ?) WHERE id = ?').run(JSON.stringify(extra), id);
@@ -226,7 +226,7 @@ describe('the workflow takeover routes (real engine)', () => {
     // The values are the ones written, not empty defaults on both sides.
     expect(stamp.json['onFailure']).toBe('continue');
     expect(stamp.json['contract']).toEqual(['POST https://api.example.invalid/v1/*']);
-    expect(stamp.json['parameters']).toEqual([{ name: 'recipient', required: false, default: 'stranger@example.invalid' }, { name: 'subject', required: true, default: null }]);
+    expect(stamp.json['parameters']).toEqual([{ name: 'recipient', required: false, default: 'stranger@example.invalid', allowed: { enum: null, regex: '[a-z]+@example\\.invalid', min: null, max: null } }, { name: 'subject', required: true, default: null, allowed: null }]);
     expect(stamp.json['limits']).toEqual({ maxSpendUsd: 2, maxIterations: 7 });
     expect(stamp.json['mode']).toBe('autonomous');
   });

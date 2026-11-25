@@ -23397,6 +23397,59 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         } finally { restore(); }
       });
 
+      describe('what the contract allows, as the run enforces it', () => {
+        const WITH = (contract: Record<string, unknown>, parameters: unknown[] = MANDATE_WF.parameters) => ({ ...structuredClone(MANDATE_WF), parameters, capabilityContract: contract });
+        async function previewOf(wf: unknown): Promise<Record<string, unknown>> {
+          const restore = shaped();
+          const h = hist();
+          h['getWorkflowExact']!.mockImplementation((id: string) => (id === 'wf-sched' ? structuredClone(wf) : undefined));
+          try {
+            const res = await jsonFetch('/api/workflows/wf-sched/stamp-preview');
+            expect(res.status).toBe(200);
+            return await res.json() as Record<string, unknown>;
+          } finally { restore(); }
+        }
+        const GRANT = { version: 1, grantedTools: ['http_request'], httpMethods: ['GET', 'POST'], hostPatterns: ['api.example.com'], pathPatterns: ['/upload'], paramConstraints: {} };
+
+        it('shows each parameter with the rules its contract sets for it, and none for a name the workflow does not have', async () => {
+          const params = [
+            { name: 'month', description: '', type: 'string', source: 'user_input', defaultValue: 'May' },
+            { name: 'count', description: '', type: 'number', source: 'user_input' },
+            { name: 'code', description: '', type: 'string', source: 'user_input' },
+            { name: 'free', description: '', type: 'string', source: 'user_input' },
+          ];
+          const shown = await previewOf(WITH({ ...GRANT, paramConstraints: { month: { enum: ['May', 'June', { x: 1 }] }, count: { min: 1, max: 5 }, code: { regex: '[a-z]+', min: 2 }, ghost: { enum: ['x'] } } }, params));
+          expect(shown['parameters']).toEqual([
+            { name: 'month', required: false, default: 'May', allowed: { enum: ['May', 'June'], regex: null, min: null, max: null } },
+            { name: 'count', required: true, default: null, allowed: { enum: null, regex: null, min: 1, max: 5 } },
+            { name: 'code', required: true, default: null, allowed: { enum: null, regex: '[a-z]+', min: 2, max: null } },
+            { name: 'free', required: true, default: null, allowed: null },
+          ]);
+          expect(shown['contract']).toEqual(['GET https://api.example.com/upload', 'POST https://api.example.com/upload']);
+        });
+
+        it('shows a list that is not an array as one that admits nothing, as the run reads it', async () => {
+          const shown = await previewOf(WITH({ ...GRANT, paramConstraints: { month: { enum: 'May' } } }));
+          expect((shown['parameters'] as Array<Record<string, unknown>>)[0]!['allowed']).toEqual({ enum: [], regex: null, min: null, max: null });
+        });
+
+        it('a rule named like a property every object has is not shown for a parameter it does not name', async () => {
+          const params = [{ name: 'toString', description: '', type: 'string', source: 'user_input' }];
+          const shown = await previewOf(WITH({ ...GRANT, paramConstraints: {} }, params));
+          expect((shown['parameters'] as Array<Record<string, unknown>>)[0]!['allowed']).toBeNull();
+        });
+
+        it('a contract without the request tool, or without a host or a path, grants nothing and is shown as an empty list', async () => {
+          expect((await previewOf(WITH({ ...GRANT, grantedTools: ['bash', 'write_file'] })))['contract']).toEqual([]);
+          expect((await previewOf(WITH({ ...GRANT, pathPatterns: [] })))['contract']).toEqual([]);
+          expect((await previewOf(WITH({ ...GRANT, hostPatterns: [] })))['contract']).toEqual([]);
+          expect((await previewOf(WITH({ ...GRANT, grantedTools: 'http_request' })))['contract']).toEqual([]);
+          // CONTROL: the same contract with the request tool lists its writes; without a contract, nothing.
+          expect((await previewOf(WITH(GRANT)))['contract']).toHaveLength(2);
+          expect((await previewOf(MANDATE_WF))['contract']).toBeNull();
+        });
+      });
+
       it('the preview shows each step as it runs, with the captured call and the tools it gets, and no secret', async () => {
         const restore = shaped();
         try {
@@ -23404,7 +23457,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
           expect(res.status).toBe(200);
           const shown = await res.json() as Record<string, unknown> & { steps: Array<Record<string, unknown>> };
           expect(shown).toMatchObject({ expect: 'digest-1', stampedAt: null, changedBy: 'mandate', awaitsStamp: true, mode: 'autonomous', onFailure: 'stop', limits: null, contract: null });
-          expect(shown['parameters']).toEqual([{ name: 'month', required: false, default: 'May' }]);
+          expect(shown['parameters']).toEqual([{ name: 'month', required: false, default: 'May', allowed: null }]);
           expect(shown.steps[0]).toEqual({ id: 's1', task: 'look up the report', tool: null, inputTemplate: null, tools: ['memory_recall'], model: null, role: null, roleGrant: null, effort: null, thinking: null, timeoutMs: null, inputFrom: null });
           expect(shown.steps[1]).toMatchObject({ id: 's2', tool: 'http_request', inputTemplate: MANDATE_WF.steps[1]!.input_template });
           // A step that names no tools gets the inline pool, and the replayed tool with it; never bash silently.

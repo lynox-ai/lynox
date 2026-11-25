@@ -81,6 +81,7 @@ import { getRerankerCapability } from '../integrations/search/search-reranker.js
 import { resolveProviderApiKey, mayFallBackToStoredKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
 import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, providerIdentity, type ProviderIdentity, mainChatTierLabels, mainChatTierLabelsFromTierSet } from '../core/llm/catalog.js';
 import type { LLMProvider } from '../types/models.js';
+import type { CapabilityContract } from '../types/capability-contract.js';
 import { SessionStore } from '../core/session-store.js';
 import { sessionInitialTier, type Session } from '../core/session.js';
 import { RunAbortedError, TOOL_AUDIT_INPUT_MAX_CHARS } from '../core/agent.js';
@@ -336,17 +337,51 @@ export const TAKEOVER_REFUSALS: Record<TakeoverRefusal | 'changed' | 'prompts' |
  */
 function stampShown(planned: PlannedPipeline): {
   mode: PlannedPipeline['mode']; onFailure: NonNullable<PlannedPipeline['on_failure']>; limits: PlannedPipeline['limits'] | null;
-  contract: string[] | null; parameters: Array<{ name: string; required: boolean; default: unknown }>;
+  contract: string[] | null; parameters: Array<{ name: string; required: boolean; default: unknown; allowed: ShownAllowed | null }>;
 } {
-  const contract = planned.capabilityContract;
+  const contract = (planned.capabilityContract ?? undefined) as Partial<CapabilityContract> | undefined;
+  const list = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+  // Only `http_request` is ever granted (`contractGrants`), and only for a method, host and path
+  // the contract names: without it, or without a host or a path, the contract grants nothing, and
+  // the preview shows an empty list, which the view words as such.
+  const grants = list(contract?.grantedTools).includes('http_request');
+  const constraints = contract?.paramConstraints;
   return {
     mode: planned.mode,
     onFailure: planned.on_failure ?? 'stop',
     limits: planned.limits ?? null,
     // What the contract lets the run write, as the grant's preview words it.
-    contract: contract === undefined ? null : contract.hostPatterns.flatMap((h) => contract.pathPatterns.flatMap((p) => contract.httpMethods.map((m) => `${m} https://${h}${p}`))),
-    parameters: (planned.parameters ?? []).map((p) => ({ name: p.name, required: p.defaultValue === undefined || p.defaultValue === null, default: p.defaultValue ?? null })),
+    contract: contract === undefined ? null : !grants ? [] : list(contract.hostPatterns).flatMap((h) => list(contract.pathPatterns).flatMap((p) => list(contract.httpMethods).map((m) => `${m} https://${h}${p}`))),
+    parameters: (planned.parameters ?? []).map((p) => ({
+      name: p.name, required: p.defaultValue === undefined || p.defaultValue === null, default: p.defaultValue ?? null,
+      allowed: allowedShown(constraints, p.name),
+    })),
   };
+}
+
+/** What a contract allows for one parameter, as the stamp and the takeover previews show it. */
+interface ShownAllowed { enum: Array<string | number | boolean> | null; regex: string | null; min: number | string | null; max: number | string | null }
+
+/**
+ * The values a contract allows for a parameter, read the way the run enforces them
+ * (`applyConstraint`, at bind, for a supplied value and a default alike): every facet that is
+ * present holds. Null when the contract sets nothing for it. A list that is not an array admits
+ * nothing at the run, so it is shown as an empty one; an entry no bound value can equal (an
+ * object) is left out. A pattern or bound of another type is shown as the run reads it, as text.
+ */
+function allowedShown(constraints: unknown, name: string): ShownAllowed | null {
+  if (typeof constraints !== 'object' || constraints === null || !Object.hasOwn(constraints, name)) return null;
+  const c: unknown = (constraints as Record<string, unknown>)[name];
+  if (typeof c !== 'object' || c === null) return null;
+  const { enum: values, regex, min, max } = c as Record<string, unknown>;
+  const bound = (v: unknown): number | string | null => (v === undefined ? null : typeof v === 'number' ? v : String(v));
+  const shown: ShownAllowed = {
+    enum: values === undefined ? null : Array.isArray(values) ? values.filter((v): v is string | number | boolean => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') : [],
+    regex: regex === undefined ? null : String(regex),
+    min: bound(min),
+    max: bound(max),
+  };
+  return shown.enum === null && shown.regex === null && shown.min === null && shown.max === null ? null : shown;
 }
 
 /**

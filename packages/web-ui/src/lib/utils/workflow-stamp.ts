@@ -46,10 +46,23 @@ export type StampEffort = (typeof STAMP_EFFORTS)[number];
 export const STAMP_THINKING = ['enabled', 'adaptive', 'disabled'] as const;
 export type StampThinking = (typeof STAMP_THINKING)[number];
 
+/**
+ * What a contract allows for one parameter (`allowed` in the stamp preview), read the way the run
+ * enforces it at bind: every facet that is present holds. An empty list admits nothing.
+ */
+export interface StampAllowed {
+  enum: Array<string | number | boolean> | null;
+  regex: string | null;
+  min: number | string | null;
+  max: number | string | null;
+}
+
 export interface StampParameter {
   name: string;
   required: boolean;
   default: unknown;
+  /** What the contract allows for it (`stamp-contract.ts`), or null when it sets nothing. */
+  allowed: StampAllowed | null;
 }
 
 export interface StampPreview {
@@ -61,7 +74,8 @@ export interface StampPreview {
   parameters: StampParameter[];
   onFailure: string | null;
   limits: unknown;
-  /** The contract tuples, one line per (method, URL), or null without a contract. */
+  /** The contract tuples, one line per (method, URL), or null without a contract. Empty for a
+   *  contract that grants nothing (no `http_request`, no host or no path). */
   contract: string[] | null;
   steps: StampStep[];
 }
@@ -77,6 +91,24 @@ const optOneOf = <T extends string>(v: unknown, values: readonly T[]): T | null 
 /** Absent or null is none; a finite, non-negative number is itself; anything else is BAD. */
 const optMs = (v: unknown): number | null | typeof BAD =>
   v === undefined || v === null ? null : typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : BAD;
+/**
+ * Absent or null is none; what a contract allows read whole is itself; anything else is BAD. A list
+ * holds only values a bound parameter can be, a bound is a number or the text the run reads, and at
+ * least one facet is set: the server sends none for a parameter the contract sets nothing for.
+ */
+const optAllowed = (v: unknown): StampAllowed | null | typeof BAD => {
+  if (v === undefined || v === null) return null;
+  if (!isRecord(v)) return BAD;
+  const values = v['enum'] ?? null;
+  if (values !== null && (!Array.isArray(values) || !values.every((x) => typeof x === 'string' || typeof x === 'number' || typeof x === 'boolean'))) return BAD;
+  const regex = optStr(v['regex']);
+  const bound = (b: unknown): number | string | null | typeof BAD => (b === undefined || b === null ? null : typeof b === 'number' || typeof b === 'string' ? b : BAD);
+  const min = bound(v['min']);
+  const max = bound(v['max']);
+  if (regex === BAD || min === BAD || max === BAD) return BAD;
+  if (values === null && regex === null && min === null && max === null) return BAD;
+  return { enum: values as Array<string | number | boolean> | null, regex, min, max };
+};
 /** Absent or null is none; a grant read whole is itself; anything else is BAD. */
 const optGrant = (v: unknown): StampRoleGrant | null | typeof BAD => {
   if (v === undefined || v === null) return null;
@@ -137,7 +169,9 @@ export function parseStampPreview(body: unknown): StampPreview | null {
   const parameters: StampParameter[] = [];
   for (const p of rawParams) {
     if (!isRecord(p) || typeof p['name'] !== 'string') return null;
-    parameters.push({ name: p['name'], required: p['required'] === true, default: p['default'] ?? null });
+    const allowed = optAllowed(p['allowed']);
+    if (allowed === BAD) return null;
+    parameters.push({ name: p['name'], required: p['required'] === true, default: p['default'] ?? null, allowed });
   }
   const mode = optStr(body['mode']);
   const onFailure = optStr(body['onFailure']);
@@ -206,7 +240,7 @@ export function onFailureKey(onFailure: string): string | null {
 
 /** What moved between the preview that was shown and the one loaded after a refusal. */
 export interface StampChanges {
-  /** Mode, failure strategy, limits, parameters or contract. */
+  /** Mode, failure strategy, limits, parameters (with what the contract allows for each) or contract. */
   settings: boolean;
   /** Positions in the new preview of steps that are new or differ from the step of that id before. */
   steps: ReadonlySet<number>;

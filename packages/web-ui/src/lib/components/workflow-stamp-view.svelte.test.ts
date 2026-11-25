@@ -688,3 +688,114 @@ describe('the stamp part names settings, and shows no stored value', () => {
 		expect(target.querySelectorAll('[data-stamp-changed]')).toHaveLength(0);
 	});
 });
+
+describe('what the contract allows, and a contract that grants nothing (U-451)', () => {
+	const withParams = (expect: string, parameters: unknown[], contract: string[] | null = null): Record<string, unknown> => ({ ...preview(expect), parameters, contract });
+	const openStamp = async (body: Record<string, unknown>): Promise<void> => {
+		await open('owner', WF, { 'GET /workflows/wf-1/stamp-preview': [{ status: 200, body }] });
+		await click(q('stamp-review'));
+	};
+	const allowedOf = (): string[] => [...target.querySelectorAll<HTMLElement>('[data-testid="stamp-param-allowed"]')].map((el) => el.textContent!.replace(/\s+/g, ' ').trim());
+	const boxesOf = (): string[] => [...target.querySelectorAll<HTMLElement>('[data-testid="stamp-param-allowed"] [data-foreign-value]')].map((el) => el.textContent!);
+
+	it('prints under each parameter one line per rule, in words, each value in its own box', async () => {
+		await openStamp(withParams('d1', [
+			{ name: 'month', required: false, default: 'May', allowed: { enum: ['May', 'June'], regex: null, min: null, max: null } },
+			{ name: 'count', required: true, default: null, allowed: { enum: null, regex: null, min: 1, max: 5 } },
+			{ name: 'code', required: true, default: null, allowed: { enum: null, regex: '[a-z]+', min: 2, max: null } },
+			{ name: 'top', required: true, default: null, allowed: { enum: null, regex: null, min: null, max: 9 } },
+			{ name: 'none', required: true, default: null, allowed: { enum: [], regex: null, min: null, max: null } },
+			{ name: 'free', required: true, default: null, allowed: null },
+		]));
+		expect(allowedOf()).toEqual([
+			'erlaubt: May, June',
+			'erlaubt: 1 bis 5',
+			'erlaubt: was ganz zum Muster [a-z]+ passt',
+			'erlaubt: mindestens 2',
+			'erlaubt: höchstens 9',
+			'kein Wert erlaubt',
+		]);
+		expect(boxesOf()).toEqual(['May', 'June', '1', '5', '[a-z]+', '2', '9']);
+		// Under its own parameter: the lines sit in that parameter's row, and a parameter without rules has none.
+		const rows = [...target.querySelectorAll<HTMLElement>('[data-testid="stamp-settings"] li')];
+		expect(rows.map((r) => r.querySelectorAll('[data-testid="stamp-param-allowed"]').length)).toEqual([1, 1, 2, 1, 1, 0]);
+	});
+
+	it('a value is shown as it is matched: spaces that would fold away, and hidden characters, are printed', async () => {
+		await openStamp(withParams('d1', [
+			{ name: 'shop', required: true, default: null, allowed: { enum: ['a  b', ' x', 'y\u202E', 'p\tq'], regex: null, min: null, max: null } },
+		]));
+		expect(boxesOf()).toEqual(['a<U+0020><U+0020>b', '<U+0020>x', 'y<U+202E>', 'p<U+0009>q']);
+	});
+
+	it('a contract that grants nothing says so in a sentence, in place of the list', async () => {
+		await openStamp(withParams('d1', [], []));
+		expect(q('stamp-contract-none')?.textContent?.trim()).toBe('Dieser Workflow hat keine Freigabe, ohne Rückfrage an andere Dienste zu schreiben. Lesen kann er weiterhin.');
+		expect(target.textContent).not.toContain('Ohne Rückfrage darf dieser Workflow');
+	});
+
+	it('a contract that grants writes lists them under a title that says they need no asking; without a contract there is neither', async () => {
+		await openStamp(withParams('d1', [], ['POST https://api.example.com/upload']));
+		expect(target.textContent).toContain('Ohne Rückfrage darf dieser Workflow diese ausgehenden Aktionen durchführen:');
+		expect(target.textContent).toContain('POST https://api.example.com/upload');
+		expect(q('stamp-contract-none')).toBeNull();
+	});
+
+	it('CONTROL: without a contract there is no list and no sentence', async () => {
+		await openStamp(withParams('d1', [], null));
+		expect(q('stamp-contract-none')).toBeNull();
+		expect(target.textContent).not.toContain('Ohne Rückfrage darf dieser Workflow');
+	});
+
+	it('a rule that changed after the preview was shown marks the settings', async () => {
+		const at = (values: string[]): Record<string, unknown> => withParams('d', [{ name: 'month', required: true, default: null, allowed: { enum: values, regex: null, min: null, max: null } }]);
+		await open('owner', WF, {
+			'GET /workflows/wf-1/stamp-preview': [{ status: 200, body: { ...at(['May']), expect: 'd1' } }, { status: 200, body: { ...at(['June']), expect: 'd2' } }],
+			'POST /workflows/wf-1/confirm': [{ status: 409, body: { code: 'steps_changed' } }],
+		});
+		await click(q('stamp-review'));
+		await click(q('stamp-confirm'));
+		expect(q('stamp-settings')?.hasAttribute('data-stamp-changed')).toBe(true);
+		expect(allowedOf()).toEqual(['erlaubt: June']);
+	});
+
+	describe('the plan dialog', () => {
+		const GRANT = { version: 1, grantedTools: ['http_request', 'bash'], httpMethods: ['POST'], hostPatterns: ['h.example'], pathPatterns: ['/p'], paramConstraints: {} };
+		const openPlan = async (capabilityContract?: unknown): Promise<void> => {
+			await open('owner', capabilityContract === undefined ? WF : { ...WF, capabilityContract });
+			await click(byText('Planen'));
+			expect(byText('Bestätigen & planen'), 'the plan dialog').not.toBeNull();
+		};
+
+		it('lists only the writes the engine grants, and no other tool', async () => {
+			await openPlan(GRANT);
+			expect(target.textContent).toContain('Ohne Rückfrage darf dieser Workflow diese ausgehenden Aktionen durchführen:');
+			expect(target.textContent).toContain('POST https://h.example/p');
+			expect(target.textContent).not.toMatch(/\bbash\b/);
+			expect(q('schedule-contract-none')).toBeNull();
+		});
+
+		it.each([
+			['without the request tool', { ...GRANT, grantedTools: ['bash'] }],
+			['without a path, which grants no path rather than the whole host', { ...GRANT, pathPatterns: [] }],
+			['without a host', { ...GRANT, hostPatterns: [] }],
+			['that is not an object', 'http_request'],
+		])('a contract %s says it grants nothing', async (_label, contract) => {
+			await openPlan(contract);
+			expect(q('schedule-contract-none')?.textContent?.trim()).toBe('Dieser Workflow hat keine Freigabe, ohne Rückfrage an andere Dienste zu schreiben. Lesen kann er weiterhin.');
+			expect(target.textContent).not.toContain('Ohne Rückfrage darf dieser Workflow');
+			expect(target.textContent).not.toContain('https://h.example');
+		});
+
+		it('CONTROL: without a contract there is no list and no sentence', async () => {
+			await openPlan();
+			expect(q('schedule-contract-none')).toBeNull();
+			expect(target.textContent).not.toContain('Ohne Rückfrage darf dieser Workflow');
+		});
+
+		it('prints a hidden character in a granted address instead of reading it', async () => {
+			await openPlan({ ...GRANT, hostPatterns: ['h\u202E.example'] });
+			expect(target.textContent).toContain('POST https://h<U+202E>.example/p');
+		});
+	});
+});
