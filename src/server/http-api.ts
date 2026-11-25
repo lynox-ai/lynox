@@ -10636,6 +10636,10 @@ export class LynoxHTTPApi {
         // the owner sees it before the start the hash binds, never only the fields it decides.
         judgeRule: judgeRule ? { rule: judgeRule.rule, schema: judgeRule.schema, tier: judgeRule.tier, ...(judgeRule.context !== undefined ? { context: judgeRule.context } : {}) } : null,
         judgeRuleHash: judgeRule?.hash ?? null,
+        // A rule taken word for word from a saved artifact is not lynox's wording: the page says
+        // where it came from, by the title it had when the run was planned. Read from the stored
+        // rule, so the owner's only, as the rule is.
+        ruleFromArtifact: judgeRule?.source !== undefined ? (judgeRule.source.title !== undefined ? { title: judgeRule.source.title } : {}) : null,
         judgeModel,
         judgeServedBy,
         // The start route refuses every judged start on such an instance (judge_unavailable); the

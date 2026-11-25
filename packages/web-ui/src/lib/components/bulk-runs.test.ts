@@ -7,7 +7,7 @@ import {
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
 	bulkSentenceParts, bulkSecretInContextKey,
-	bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkRuleSourceText, BULK_RULE_SOURCE_TITLE_SHOWN_MAX, BULK_RULE_SOURCE_CODES,
+	bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkArtifactTitle, bulkRuleSourceKey, bulkRuleFromArtifactKey, BULK_RULE_SOURCE_CODES,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -2036,55 +2036,45 @@ describe('bulkSecretInContextKey', () => {
 });
 
 // A start refused because the run's rule came from a saved artifact that changed, is gone or
-// cannot be read now: the page words each code itself, and names the artifact by the title it had
-// at planning, a value an access can write.
-describe('the start refusals of a run whose rule came from an artifact', () => {
+// cannot be read now, and the sentence under such a rule: the page words each itself, and names
+// the artifact by the title it had at planning, a value an access can write.
+describe('the sentences about a rule taken from a saved artifact', () => {
 	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
 	const Q = String.raw`'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"`;
-	const ENTRY = new RegExp(String.raw`^\s*'(bulk\.rule_source\.[a-z_]+)': \{ de: (?:${Q}), en: (?:${Q}) \},$`);
+	const ENTRY = new RegExp(String.raw`^\s*'(bulk\.(?:rule_source\.[a-z_]+|(?:start|approve)\.rule_from_artifact[a-z_]*))': \{ de: (?:${Q}), en: (?:${Q}) \},$`);
 	const de: Record<string, string> = {};
 	const en: Record<string, string> = {};
 	for (const l of source.split('\n')) {
 		const m = ENTRY.exec(l);
 		if (m) { de[m[1]!] = (m[2] ?? m[3])!; en[m[1]!] = (m[4] ?? m[5])!; }
 	}
-	const from = (table: Record<string, string>): BulkI18n => ({
-		t: (k) => table[k] ?? `MISSING ${k}`,
-		tf: (k, vars) => Object.entries(vars).reduce((s, [name, v]) => s.split(`{${name}}`).join(v), table[k] ?? `MISSING ${k}`),
-	});
-	const DE = from(de);
-	const EN = from(en);
 
-	it('has a sentence in both languages for every code, with and without a title', () => {
-		expect(Object.keys(de).sort()).toEqual(['bulk.rule_source.changed', 'bulk.rule_source.changed_titled', 'bulk.rule_source.gone', 'bulk.rule_source.gone_titled', 'bulk.rule_source.unreadable']);
-		for (const code of BULK_RULE_SOURCE_CODES) {
-			for (const i18n of [DE, EN]) {
-				for (const title of [undefined, 'Regeln']) expect(bulkRuleSourceText(code, title, i18n)).not.toMatch(/MISSING|\{title\}/);
+	it('picks a sentence for every code, named only where a title is there and the artifact can be read', () => {
+		expect(BULK_RULE_SOURCE_CODES.map((c) => [bulkRuleSourceKey(c, true), bulkRuleSourceKey(c, false)])).toEqual([
+			['bulk.rule_source.changed_titled', 'bulk.rule_source.changed'],
+			['bulk.rule_source.gone_titled', 'bulk.rule_source.gone'],
+			['bulk.rule_source.unreadable', 'bulk.rule_source.unreadable'],
+		]);
+		expect(bulkRuleSourceKey('checksum', true)).toBeNull();
+		expect(bulkRuleSourceKey(undefined, false)).toBeNull();
+		expect([bulkRuleFromArtifactKey('start', true), bulkRuleFromArtifactKey('approve', false)])
+			.toEqual(['bulk.start.rule_from_artifact', 'bulk.approve.rule_from_artifact_untitled']);
+	});
+
+	it('takes a title only when it is text with more than spaces', () => {
+		expect([bulkArtifactTitle('Regeln'), bulkArtifactTitle(''), bulkArtifactTitle('  \n'), bulkArtifactTitle(undefined), bulkArtifactTitle(null), bulkArtifactTitle(7)])
+			.toEqual(['Regeln', null, null, null, null, null]);
+	});
+
+	it('has each sentence in both languages; a named one has its title slot and no quote marks of its own around it', () => {
+		const keys = [...BULK_RULE_SOURCE_CODES.flatMap((c) => [bulkRuleSourceKey(c, true)!, bulkRuleSourceKey(c, false)!]),
+			...(['start', 'approve'] as const).flatMap((s) => [bulkRuleFromArtifactKey(s, true), bulkRuleFromArtifactKey(s, false)])];
+		for (const key of new Set(keys)) {
+			for (const table of [de, en]) {
+				expect(table[key], key).toBeDefined();
+				expect(table[key]!.includes('{title}'), key).toBe(key.endsWith('_titled') || key.endsWith('.rule_from_artifact'));
+				expect(table[key], key).not.toMatch(/[„“”"»«]\{title\}|\{title\}[„“”"»«]/);
 			}
 		}
-	});
-
-	it('names the artifact by its planned title, set apart, and words the sentence without one when there is none', () => {
-		expect(bulkRuleSourceText('rule_source_changed', 'Regeln', DE)).toBe('Die Regel in „Regeln“ wurde geändert, seit dieser Lauf geplant wurde. Die Änderung stammt vielleicht nicht von dir. Lies die Regel unter Artefakte, dann bitte lynox im Chat, den Lauf neu zu planen.');
-		expect(bulkRuleSourceText('rule_source_changed', undefined, EN)).toBe("This run's rule has changed since it was planned. The change may not be yours. Read the rule under Artifacts, then ask lynox in the chat to plan the run again.");
-		expect(bulkRuleSourceText('rule_source_gone', 'Regeln', DE)).toContain('Beim Planen hiess es „Regeln“.');
-		expect(bulkRuleSourceText('rule_source_gone', '', EN)).toBe(en['bulk.rule_source.gone']);
-		// Nothing about the artifact when the store cannot be read: no title, even if one came.
-		expect(bulkRuleSourceText('rule_source_unreadable', 'Regeln', DE)).toBe(de['bulk.rule_source.unreadable']);
-		expect(bulkRuleSourceText('checksum', 'Regeln', DE)).toBeNull();
-		expect(bulkRuleSourceText(undefined, undefined, DE)).toBeNull();
-	});
-
-	it('shows a direction override or a hidden character in the title as text, and cuts a long title with „…“, never inside a mark', () => {
-		const shown = bulkRuleSourceText('rule_source_changed', 'Regeln\u202Edrow\u200B', DE)!;
-		expect(shown).toContain('„Regeln⟨U+202E⟩drow⟨U+200B⟩“');
-		expect(shown).not.toMatch(/[\u202E\u200B]/);
-		const long = 'R'.repeat(80);
-		const cut = bulkRuleSourceText('rule_source_gone', long, EN)!;
-		expect(cut).toContain(`“${'R'.repeat(BULK_RULE_SOURCE_TITLE_SHOWN_MAX - 1)}…”`);
-		expect(bulkRuleSourceText('rule_source_gone', 'R'.repeat(BULK_RULE_SOURCE_TITLE_SHOWN_MAX), EN)).toContain(`“${'R'.repeat(BULK_RULE_SOURCE_TITLE_SHOWN_MAX)}”`);
-		// Cut before it is made visible: a hidden character's mark stands whole or not at all.
-		const marked = bulkRuleSourceText('rule_source_gone', `${'R'.repeat(BULK_RULE_SOURCE_TITLE_SHOWN_MAX - 2)}\u202E${'R'.repeat(10)}`, EN)!;
-		expect(marked).toContain(`“${'R'.repeat(BULK_RULE_SOURCE_TITLE_SHOWN_MAX - 2)}⟨U+202E⟩…”`);
 	});
 });

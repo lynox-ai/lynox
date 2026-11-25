@@ -13903,11 +13903,11 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
-      it('an access never reads a rule taken from an artifact: not on the run\'s page, and it cannot start or resume the run', async () => {
+      it('an access never reads a rule taken from an artifact nor where it came from: not on the run\'s page, and it cannot start or resume the run', async () => {
         const text = 'R1 „sachlich“, keine Superlative.\n';
         const fromArtifact = normalizeJudgeRule(
           { rule: text, schema: { title: { type: 'string', maxLength: 40 } } },
-          { source: { artifact: 'a1b2c3d4', version: 1, sha256: createHash('sha256').update(text, 'utf8').digest('hex') } },
+          { source: { artifact: 'a1b2c3d4', version: 1, sha256: createHash('sha256').update(text, 'utf8').digest('hex'), title: 'Regelwerk Shop' } },
         );
         const id = bulkLedger.recordDryRun({
           createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
@@ -13915,16 +13915,21 @@ describe('LynoxHTTPApi', () => {
           judge: fromArtifact,
         }).id;
         const owner = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
-        // Control: the owner is shown the text as planned.
+        // Control: the owner is shown the text as planned, and where it came from by its planned title.
         expect((owner['judgeRule'] as { rule: string }).rule).toBe(text);
+        expect(owner['ruleFromArtifact']).toEqual({ title: 'Regelwerk Shop' });
         const self = api as unknown as { _principalOf: (req: unknown) => unknown };
         const orig = self._principalOf;
         self._principalOf = () => ({ kind: 'mandate', email: 'helper@example.ch', mandateId: 'M-1' });
         try {
           const page = await jsonFetch(`/api/bulk/runs/${id}`);
           const body = await page.text();
+          // The page answers the access, without the rule and without the artifact it came from.
+          expect(page.status).toBe(200);
           expect(body).not.toContain('sachlich');
-          if (page.status === 200) expect((JSON.parse(body) as Record<string, unknown>)['judgeRule']).toBeNull();
+          expect(body).not.toContain('Regelwerk');
+          const shown = JSON.parse(body) as Record<string, unknown>;
+          expect([shown['judgeRule'], shown['ruleFromArtifact']]).toEqual([null, null]);
           const started = await start(id, { judgeRuleHash: bulkLedger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 1.5 });
           expect(started.status).toBe(403);
           expect(bulkLedger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);

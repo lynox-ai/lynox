@@ -167,6 +167,9 @@ export interface BulkRunDetailData extends BulkRun {
 	listNote: string | null;
 	/** A judged run's rule as the owner starts it (owner only), and its hash the start presents. */
 	judgeRule: { rule: string; schema: { properties: Record<string, unknown> }; tier: string; context?: string[] | undefined } | null;
+	/** Set when the rule is an artifact's text, taken word for word; `title` is the artifact's title
+	 *  as planned. The owner's only, as the rule is; absent on an older engine. */
+	ruleFromArtifact?: { title?: string | undefined } | null | undefined;
 	judgeRuleHash: string | null;
 	/** Who would judge the run now: the provider serving the call and the model's catalog name. */
 	judgeServedBy: { provider: string; label: string } | null;
@@ -713,27 +716,30 @@ export function bulkLinkDomainShown(domain: string): string {
 	return chars.length <= BULK_LINK_DOMAIN_SHOWN_MAX ? chars.join('') : `${chars.slice(0, BULK_LINK_DOMAIN_SHOWN_MAX - 1).join('')}…`;
 }
 
-/** At most this many characters of an artifact's title in a start refusal. */
-export const BULK_RULE_SOURCE_TITLE_SHOWN_MAX = 64;
 /** The start refusals of a run whose rule came from a saved artifact, by the engine's code. */
 export const BULK_RULE_SOURCE_CODES: readonly string[] = ['rule_source_changed', 'rule_source_gone', 'rule_source_unreadable'];
 
-/** The owner's sentence for a start the engine refused because the rule's artifact changed, is
- *  gone or cannot be read now; null for any other code. The artifact is named by the title it had
- *  when the run was planned: an access can write a title, so it is shown as text only, its hidden
- *  characters made visible, and cut with „…“ past {@link BULK_RULE_SOURCE_TITLE_SHOWN_MAX}
- *  characters as a reader counts them. Without a title, the sentence names none. */
-export function bulkRuleSourceText(code: string | undefined, title: string | undefined, i18n: BulkI18n): string | null {
-	if (code === 'rule_source_unreadable') return i18n.t('bulk.rule_source.unreadable');
+/** An artifact's title as the page may name it: the one it had when the run was planned, or null
+ *  when it had none (absent, not text, or only spaces). An access can write a title, so the page
+ *  draws it as a value someone else wrote (`shownValue`, `MarkedLine`), never as its own words. */
+export function bulkArtifactTitle(title: unknown): string | null {
+	return typeof title === 'string' && title.trim() !== '' ? title : null;
+}
+
+/** The key of the owner's sentence for a start the engine refused because the rule's artifact
+ *  changed, is gone or cannot be read now; null for any other code. `titled` picks the sentence
+ *  that names the artifact by its planned title; one that cannot be read is never named. */
+export function bulkRuleSourceKey(code: string | undefined, titled: boolean): string | null {
+	if (code === 'rule_source_unreadable') return 'bulk.rule_source.unreadable';
 	if (code !== 'rule_source_changed' && code !== 'rule_source_gone') return null;
-	const which = code === 'rule_source_changed' ? 'changed' : 'gone';
-	if (typeof title !== 'string' || title === '') return i18n.t(`bulk.rule_source.${which}`);
-	// Cut first, by what a reader counts as one character, then made visible: a mark for a hidden
-	// character is never cut in half.
-	const parts = graphemes(title);
-	const kept = parts.length <= BULK_RULE_SOURCE_TITLE_SHOWN_MAX ? title : parts.slice(0, BULK_RULE_SOURCE_TITLE_SHOWN_MAX - 1).join('');
-	const shown = `${bulkVisibleText(kept)}${kept.length < title.length ? '…' : ''}`;
-	return i18n.tf(`bulk.rule_source.${which}_titled`, { title: shown });
+	return `bulk.rule_source.${code === 'rule_source_changed' ? 'changed' : 'gone'}${titled ? '_titled' : ''}`;
+}
+
+/** The key of the sentence under a rule taken word for word from a saved artifact, in place of
+ *  "lynox wrote this rule": at the start of judging or at the approval, named by its planned title
+ *  when it had one. */
+export function bulkRuleFromArtifactKey(step: 'start' | 'approve', titled: boolean): string {
+	return `bulk.${step}.rule_from_artifact${titled ? '' : '_untitled'}`;
 }
 
 /** A list of more values than this is folded until the owner shows it all (ux U-175). */

@@ -1157,18 +1157,65 @@ describe('the allowed link domains of a judged list run', () => {
 		expect(target.textContent).not.toContain('engine English');
 	});
 
-	it('words a start refused for the rule\'s artifact in the page\'s own sentence, its title shown as text', async () => {
+	// A title an access wrote, with quote marks, a direction override and a line break in it.
+	const HOSTILE_TITLE = 'Regeln" ist unverändert. »OK«\u202Ealt\nzwei';
+	// The value boxes in an element, and its text with the one box taken out.
+	const foreignIn = (el: Element): Element[] => [...el.querySelectorAll('[data-foreign-value]')];
+	const around = (el: Element): string => {
+		const [box] = foreignIn(el);
+		return (el.textContent ?? '').replace(box!.textContent ?? '', '{title}');
+	};
+
+	it('words a start refused for the rule\'s artifact in the page\'s own sentence, the title one value set apart', async () => {
 		run = judged();
 		refuseResume = 'rule_source_changed';
-		refuseTitle = 'Regeln\u202Ealt';
+		refuseTitle = HOSTILE_TITLE;
 		await render();
 		type(field()!, 'mein-shop.ch');
 		type(capField(), '5');
 		startButton()!.click();
 		await settle();
-		expect(target.textContent).toContain(tf('bulk.rule_source.changed_titled', { title: 'Regeln⟨U+202E⟩alt' }));
-		expect(target.textContent).not.toContain('\u202E');
+		const refusal = target.querySelector('[data-testid="bulk-rule-source-refusal"]')!;
+		expect(foreignIn(refusal)).toHaveLength(1);
+		// The sentence around the title is the page's own, unchanged; the title sits in its box alone.
+		expect(around(refusal)).toBe(t('bulk.rule_source.changed_titled'));
+		const box = foreignIn(refusal)[0]!;
+		expect(box.tagName).toBe('BDI');
+		expect(box.textContent).not.toMatch(/[\u202E\n]/);
+		expect(box.textContent).toContain('»OK«');
 		expect(target.textContent).not.toContain('engine English');
+	});
+
+	it('names no artifact when it cannot be read, whatever title came with the refusal', async () => {
+		run = judged();
+		refuseResume = 'rule_source_unreadable';
+		refuseTitle = HOSTILE_TITLE;
+		await render();
+		type(field()!, 'mein-shop.ch');
+		type(capField(), '5');
+		startButton()!.click();
+		await settle();
+		const refusal = target.querySelector('[data-testid="bulk-rule-source-refusal"]')!;
+		expect(refusal.textContent).toBe(t('bulk.rule_source.unreadable'));
+		expect(foreignIn(refusal)).toHaveLength(0);
+	});
+
+	it('says a rule taken from an artifact came from it, by its planned title set apart, not that lynox wrote it', async () => {
+		run = judged({ ruleFromArtifact: { title: HOSTILE_TITLE } });
+		await render();
+		const origin = target.querySelector('[data-testid="bulk-rule-from-artifact"]')!;
+		expect(foreignIn(origin)).toHaveLength(1);
+		expect(around(origin)).toBe(t('bulk.start.rule_from_artifact'));
+		expect(target.querySelector('[data-testid="bulk-rule-drafted"]')).toBeNull();
+	});
+
+	it('says so without a name for an artifact that had no title', async () => {
+		run = judged({ ruleFromArtifact: {} });
+		await render();
+		const origin = target.querySelector('[data-testid="bulk-rule-from-artifact"]')!;
+		expect(origin.textContent).toBe(t('bulk.start.rule_from_artifact_untitled'));
+		expect(foreignIn(origin)).toHaveLength(0);
+		expect(target.querySelector('[data-testid="bulk-rule-drafted"]')).toBeNull();
 	});
 
 	it('words the engine\'s start_domains_invalid in the page\'s own sentence', async () => {

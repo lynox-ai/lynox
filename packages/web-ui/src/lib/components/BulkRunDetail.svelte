@@ -15,8 +15,10 @@
 	import BulkRefusedValue from './BulkRefusedValue.svelte';
 	import BulkStartDomains from './BulkStartDomains.svelte';
 	import BulkHost from './BulkHost.svelte';
+	import MarkedLine from './MarkedLine.svelte';
+	import { shownValue } from '../utils/plan-takeover.js';
 	import {
-		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkRuleSourceText, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts, bulkCountsPending, bulkHeadCounts, bulkWorkingLine, bulkWorkingStep,
+		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkArtifactTitle, bulkRuleFromArtifactKey, bulkRuleSourceKey, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts, bulkCountsPending, bulkHeadCounts, bulkWorkingLine, bulkWorkingStep,
 		type BulkRunDetailData, type BulkTarget, type BulkSentencePart, type BulkMarkerKind, bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkShowsFailure,
 	} from './bulk-runs.js';
 
@@ -33,6 +35,9 @@
 	let loading = $state(true);
 	let error = $state('');
 	let actionError = $state('');
+	// A refusal that names a value someone else wrote (an artifact's title): drawn by `MarkedLine`,
+	// which sets the value apart, never as part of lynox's sentence.
+	let actionMarked = $state('');
 	// A start check that can never pass refused approving or writing on this run (its id and the
 	// engine's code): both stay off for it, with the cause by the button, until the page shows
 	// another run, is opened again, or is loaded by the owner's own act.
@@ -230,7 +235,7 @@
 			if (left()) return false;
 			// Another run's domains are never sent with this one, and its wrong line never holds
 			// this one's start.
-			if (r.body.id !== run?.id) { startDomains = []; startDomainsValid = true; actionError = ''; showUnchanged = false; hopeless = null; }
+			if (r.body.id !== run?.id) { startDomains = []; startDomainsValid = true; actionError = ''; actionMarked = ''; showUnchanged = false; hopeless = null; }
 			run = r.body;
 			targets = shown;
 			changedOnly = firstChanged;
@@ -283,6 +288,7 @@
 		const id = runId;
 		busy = true;
 		actionError = '';
+		actionMarked = '';
 		try {
 			const refusal = await fn(id);
 			if (runId === id) {
@@ -310,8 +316,12 @@
 	const refusalOf = (r: { ok: boolean; body: { error?: string; code?: string; title?: string } }): string | null => {
 		if (r.ok) return null;
 		const code = r.body.code;
-		const ruleSource = bulkRuleSourceText(code, r.body.title, i18n);
-		if (ruleSource !== null) return ruleSource;
+		const title = code === 'rule_source_unreadable' ? null : bulkArtifactTitle(r.body.title);
+		const ruleSourceKey = bulkRuleSourceKey(code, title !== null);
+		if (ruleSourceKey !== null) {
+			actionMarked = title !== null ? tf(ruleSourceKey, { title: shownValue(title) }) : t(ruleSourceKey);
+			return '';
+		}
 		const key = code !== undefined && Object.hasOwn(REFUSAL_KEYS, code) ? REFUSAL_KEYS[code] : code !== undefined ? bulkReachRefusalKey(code) ?? undefined : undefined;
 		return key !== undefined ? t(key) : (r.body.error ?? t('common.load_failed'));
 	};
@@ -362,6 +372,7 @@
 		const id = runId;
 		busy = true;
 		actionError = '';
+		actionMarked = '';
 		try {
 			if (!run.checksum) {
 				actionError = t('common.load_failed');
@@ -740,6 +751,7 @@
 {#snippet hostBox()}<BulkHost value={host ?? ''} />{/snippet}
 <!-- A text of the page that names the host among its words: the host boxed wherever it stands. -->
 {#snippet hostText(text: string)}{#each bulkHostSplit(text, host) as part, i (i)}{#if 'slot' in part}{@render hostBox()}{:else}{part.text}{/if}{/each}{/snippet}
+{#snippet ruleOrigin(step: 'start' | 'approve')}{#if run?.ruleFromArtifact}{@const title = bulkArtifactTitle(run.ruleFromArtifact.title)}<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-from-artifact"><MarkedLine text={title !== null ? tf(bulkRuleFromArtifactKey(step, true), { title: shownValue(title) }) : t(bulkRuleFromArtifactKey(step, false))} mono={false} /></p>{:else}<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t(`bulk.${step}.rule_drafted`)}</p>{/if}{/snippet}
 {#snippet sentence(parts: BulkSentencePart[], fields: readonly string[])}{#each parts as part, i (i)}{#if 'slot' in part}{@render fieldNames(fields)}{:else}{part.text}{/if}{/each}{/snippet}
 <!-- A sentence of the page split at its placeholders: the host boxed, the target's name and the field
      names as the page shows them. Text the page did not write (a target's key) is never searched for
@@ -856,7 +868,7 @@
 				<div data-testid="bulk-approve-rule">
 					<h2 class="text-sm font-medium mb-1">{t('bulk.start.rule')}</h2>
 					<p class="text-sm whitespace-pre-wrap rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">{bulkVisibleText(run.judgeRule.rule)}</p>
-					<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t('bulk.approve.rule_drafted')}</p>
+					{@render ruleOrigin('approve')}
 				</div>
 			{/if}
 			{#if run.kind === 'apply' && targets.length > 0}
@@ -1015,7 +1027,7 @@
 						<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.rule')}</h3>
 						<p class="text-sm whitespace-pre-wrap rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">{bulkVisibleText(run.judgeRule.rule)}</p>
 						<!-- The agent wrote the rule, from the owner's words or from data it read: the owner checks it (U-335). -->
-						<p class="text-sm text-text-muted mt-1" data-testid="bulk-rule-drafted">{t('bulk.start.rule_drafted')}</p>
+						{@render ruleOrigin('start')}
 					</div>
 					<div>
 						<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.fields')}</h3>
@@ -1336,6 +1348,9 @@
 			{/if}
 			{#if actionError}
 				<p class="text-sm text-danger">{actionError}</p>
+			{/if}
+			{#if actionMarked}
+				<p class="text-sm text-danger" data-testid="bulk-rule-source-refusal"><MarkedLine text={actionMarked} mono={false} /></p>
 			{/if}
 		</section>
 	{/if}

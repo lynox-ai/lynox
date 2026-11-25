@@ -110,11 +110,11 @@ const sha256Of = (text: string): string => createHash('sha256').update(text, 'ut
  */
 export function judgeRuleFromArtifact(
   input: unknown,
-  store: Pick<ArtifactStore, 'get'> | null,
-  ownerPlans: boolean,
+  planner: () => { store: Pick<ArtifactStore, 'get'> | null; ownerPlans: boolean },
 ): { input: Record<string, unknown>; source: JudgeRuleSource } | null {
   if (!isPlainObject(input) || !Object.hasOwn(input, 'rule_artifact')) return null;
   const { rule_artifact: ref, ...rest } = input;
+  const { store, ownerPlans } = planner();
   if (rest['rule'] !== undefined) throw new BulkSourceError('Give judge.rule or judge.rule_artifact, not both.');
   if (!ownerPlans) {
     throw new BulkSourceError('judge.rule_artifact is for the owner: under an access, type the rule as judge.rule.');

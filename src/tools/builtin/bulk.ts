@@ -446,7 +446,11 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       if (sources !== 1) throw new BulkSourceError('Give exactly one of source_file, source_collection or source_list.');
       // A rule named by its artifact is read here, once, before any form is planned: every form
       // below plans the same text, and stores where it came from.
-      const fromArtifact = judgeRuleFromArtifact(input.judge, agent.toolContext.artifactStore, isOwnerPrincipal(agent.principal));
+      // Who plans and where artifacts live are asked only for a rule named by its artifact: a plan
+      // without one reads neither, as before.
+      const fromArtifact = judgeRuleFromArtifact(input.judge, () => ({
+        store: agent.toolContext.artifactStore, ownerPlans: isOwnerPrincipal(agent.principal),
+      }));
       const judgeInput: unknown = fromArtifact?.input ?? input.judge;
       const ruleSource = fromArtifact?.source;
       if (input.source_list !== undefined) return planList(input, agent, ledger, judgeInput, ruleSource);
