@@ -418,15 +418,16 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     // A 401 to a token the attach can renew: renewed once, and the same request sent once more. A
     // 401 was not acted on, so a write sent again is not a second write; the first send is
     // reported as refused before it, so each send that was sent is answered once.
-    // A renewal that cannot help names why, and the run halts on that instead of a plain 401.
+    // A renewal that cannot help names why, and the run halts on that instead of a plain 401: a
+    // connection that ended, or one that cannot be renewed as it stands, is connected again.
     if (answer.kind === 'unauthorized' && status.http === 401 && status.renew !== undefined) {
       const renewal = await status.renew();
       if (renewal === 'renewed') {
         onRefused?.();
         answer = await sendOnce(method, url, body, signal, onSend, maxBytes, graphql, {});
-      } else if (renewal === 'client-misnamed' || renewal === 'dead') {
+      } else if (renewal === 'client-misnamed' || renewal === 'dead' || renewal === 'ineligible') {
         onRefused?.();
-        return { kind: 'reconnect', why: renewal === 'dead' ? 'ended' : 'client-misnamed' };
+        return { kind: 'reconnect', why: renewal === 'client-misnamed' ? 'client-misnamed' : 'ended' };
       }
     }
     if (refusedAnswer(answer)) onRefused?.();
