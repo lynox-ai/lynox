@@ -34,30 +34,28 @@ function render(props: Record<string, unknown>): HTMLElement {
 // Each piece its own box, broken inside only when longer than a line; `<wbr>` only between pieces.
 // That a fitting address stays whole is a rendering fact jsdom cannot check; this pins the markup.
 const W = (x: string): string => `<span class="inline-block max-w-full break-all">${x}</span>`;
+const H = (x: string): string => `<span class="inline-block max-w-full break-all font-medium text-text">${x}</span>`;
 const markup = (el: Element): string => el.innerHTML.replace(/<!---->/g, '');
 
 describe('a watched page\'s address', () => {
-	it('breaks only after a dot or slash, never at the hyphen inside the host, with the host set off', () => {
+	it('breaks only after a dot or slash, never at the hyphen inside the host; host set off, path flowing on in the same box', () => {
 		const el = render({ host: 'https://preise.lieferant-beispiel.ch', rest: '/preise/heizoel' });
 		expect(el.textContent).toBe('https://preise.lieferant-beispiel.ch/preise/heizoel');
 		expect(markup(el)).toBe(
-			`<span class="inline-block max-w-full font-medium text-text">${W('https://')}<wbr>${W('preise.')}<wbr>${W('lieferant-beispiel.')}<wbr>${W('ch')}</span>`
-			+ '<wbr>'
-			+ `<span class="inline-block max-w-full ">${W('/')}<wbr>${W('preise/')}<wbr>${W('heizoel')}</span>`,
+			`${H('https://')}<wbr>${H('preise.')}<wbr>${H('lieferant-beispiel.')}<wbr>${H('ch')}`
+			+ `<wbr>${W('/')}<wbr>${W('preise/')}<wbr>${W('heizoel')}`,
 		);
 	});
 
-	it('is one box up to the line\'s width, so an address that fits moves to the next line whole', () => {
+	it('has the box classes that let an address that fits move to the next line whole', () => {
 		const el = render({ host: 'https://preise.lieferant-beispiel.ch', rest: '/p' });
 		expect(el.tagName).toBe('SPAN');
-		expect(el.classList.contains('inline-block')).toBe(true);
-		expect(el.classList.contains('max-w-full')).toBe(true);
+		expect([...el.classList]).toEqual(['inline-block', 'max-w-full']);
 	});
 
-	it('without a path shows the host alone, with no break after it', () => {
-		const el = render({ host: 'https://shop.example' });
-		expect(el.textContent).toBe('https://shop.example');
-		expect(el.children).toHaveLength(1);
-		expect(markup(el).endsWith('</span></span>')).toBe(true);
+	it('with the bare path "/" ends in that slash, joined to the host by a break point only', () => {
+		const el = render({ host: 'https://shop.example', rest: '/' });
+		expect(el.textContent).toBe('https://shop.example/');
+		expect(markup(el)).toBe(`${H('https://')}<wbr>${H('shop.')}<wbr>${H('example')}<wbr>${W('/')}`);
 	});
 });

@@ -85,8 +85,8 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		const { cond, body } = ifBlockAround('data-trigger-watch');
 		// Not while it waits: the held block names the address there (`StampConfirm` or the consent box), never twice.
 		expect(cond).toBe('showsWatchAddress(trigger) && !held(trigger)');
-		expect(body).toContain("{watchOf(trigger)?.host ?? ''}");
-		expect(body).toContain("{watchOf(trigger)?.rest ?? ''}");
+		// Host and path through the address that keeps the host whole and set off.
+		expect(body).toContain(`<WatchAddress host={watchOf(trigger)?.host ?? ''} rest={watchOf(trigger)?.rest ?? ''} testid="trigger-watch-address" />`);
 	});
 
 	it('a waiting trigger carries its own badge, whole', () => {
