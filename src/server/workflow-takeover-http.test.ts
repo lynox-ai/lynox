@@ -246,15 +246,17 @@ describe('the workflow takeover routes (real engine)', () => {
     end('g@example.invalid');
     const stamp = await ask('GET', `/api/workflows/${id}/stamp-preview`, ownerCookie);
     const p = await ask('GET', `/api/workflows/${id}/takeover-preview`, ownerCookie);
-    expect(p.json['steps']).toEqual((stamp.json['steps'] as Array<Record<string, unknown>>).map((s) => ({ ...s, foreignConnection: false, connectionProfile: null })));
+    expect(p.json['steps']).toEqual((stamp.json['steps'] as Array<Record<string, unknown>>).map((s) => ({ ...s, foreignConnection: false, connectionProfile: null, targetAtRun: false })));
     expect(p.json['marks']).toEqual([{ name: 'g@example.invalid', role: 'workflow-created', ended: true }]);
     expect(p.json['planned']).toBeUndefined();
   });
 
-  it('marks a captured step on a connection a mandate made, and names the covered mandate’s connection', async () => {
+  it('marks a captured step on a connection a mandate made, and one whose target is set only when it runs, and names the covered mandate’s connection', async () => {
     const id = workflow('k@example.invalid', { steps: [
       { id: 's1', task: 'Summarise the week' },
       { id: 's2', task: 'Read the orders', tool: 'http_request', input_template: { url: 'https://shop.example.invalid/orders', method: 'GET' } },
+      // Its host is set only when it runs: marked without a profile, and said so.
+      { id: 's3', task: 'Send the order', tool: 'http_request', input_template: { url: 'https://{{s2.host}}/orders', method: 'POST' } },
     ] });
     end('k@example.invalid');
     const shop = {
@@ -266,8 +268,9 @@ describe('the workflow takeover routes (real engine)', () => {
     inner.getApiStore = () => ({ knownProfiles: () => [shop], getByHostname: (h: string) => (h === 'shop.example.invalid' ? shop : undefined) });
     try {
       const p = await ask('GET', `/api/workflows/${id}/takeover-preview`, ownerCookie);
-      expect((p.json['steps'] as Array<{ id: string; foreignConnection: boolean; connectionProfile: string | null }>).map((s) => [s.id, s.foreignConnection, s.connectionProfile]))
-        .toEqual([['s1', false, null], ['s2', true, 'shop']]);
+      expect((p.json['steps'] as Array<{ id: string; foreignConnection: boolean; connectionProfile: string | null; targetAtRun: boolean }>).map((s) => [s.id, s.foreignConnection, s.connectionProfile, s.targetAtRun]))
+        // s1 is in words: it may send a request whose address the model gives.
+        .toEqual([['s1', true, null, true], ['s2', true, 'shop', false], ['s3', true, null, true]]);
       expect(p.json['connections']).toEqual([{ profileId: 'shop', account: 'Main store', by: 'k@example.invalid', provider: 'shop.example.invalid' }]);
     } finally {
       inner.getApiStore = orig;

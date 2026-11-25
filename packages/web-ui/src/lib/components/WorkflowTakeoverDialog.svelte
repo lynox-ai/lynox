@@ -147,7 +147,9 @@
 				changedLine = '';
 				if (await load() && preview !== null) {
 					changedLine = outcome.text;
-					// A step shows its note too: a connection that changed hands changes the step.
+					// A step's note counts too: a known connection that changed hands changes the step. A step
+					// whose target is set only when it runs has no note; whether it is one is in the step itself
+					// (`targetAtRun`), and its sentence names no person, so no hand can change it.
 					changes = stampChanges(shown, preview, (q, i) => `${JSON.stringify(q.steps[i])}\n${stepConnectionNote(q, q.steps[i]!) ?? ''}`);
 					toMark = true;
 				}
