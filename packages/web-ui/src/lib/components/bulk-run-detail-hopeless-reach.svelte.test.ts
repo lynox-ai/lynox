@@ -39,6 +39,9 @@ let approvals: number;
 let runGets: number;
 /** The run the page is given. */
 let shown: BulkRunDetailData;
+/** Answers held back until the test lets them through: the approval, and run r2's own answer. */
+let holdApprove: Promise<void> | null;
+let holdR2: Promise<void> | null;
 
 beforeEach(() => {
 	target = document.createElement('div');
@@ -46,17 +49,20 @@ beforeEach(() => {
 	approvals = 0;
 	runGets = 0;
 	shown = RUN;
+	holdApprove = null;
+	holdR2 = null;
 	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const u = String(url);
 		const reply = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 		if (init?.method === 'POST') {
-			if (u.endsWith('/approve')) { approvals++; return reply({ error: 'engine English', code: refuseWith }, 409); }
+			if (u.endsWith('/approve')) { approvals++; if (holdApprove !== null) await holdApprove; return reply({ error: 'engine English', code: refuseWith }, 409); }
 			return reply({});
 		}
 		if (u.endsWith('/config')) return reply({ managed: true, viewer: 'owner' });
 		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
 		if (page) return reply({ targets: TARGETS.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		if (/\/bulk\/runs\/r1$/.test(u)) runGets++;
+		if (/\/bulk\/runs\/r2$/.test(u)) { if (holdR2 !== null) await holdR2; return reply({ ...shown, id: 'r2' }); }
 		return reply(shown);
 	}));
 });
@@ -142,6 +148,32 @@ describe('the approval after a start check that can never pass', () => {
 		undo().click();
 		await settle();
 		expect(approvals).toBe(1);
+	});
+
+	it('leaves a run the page moved away from as it is: no cause, no focus taken', async () => {
+		refuseWith = 'reach_approve_shopifySelfHosted';
+		let letApprove!: () => void;
+		holdApprove = new Promise((r) => { letApprove = r; });
+		let letR2!: () => void;
+		holdR2 = new Promise((r) => { letR2 = r; });
+		const props = $state({ runId: 'r1', onBack: () => {}, onOpen: () => {} });
+		const { default: BulkRunDetail } = await import('./BulkRunDetail.svelte');
+		component = mount(BulkRunDetail, { target, props });
+		await settle();
+		approveButton().click();
+		await settle();
+		// The owner opens another run while the approval is out; that run has not loaded yet.
+		props.runId = 'r2';
+		await settle();
+		const before = document.activeElement;
+		letApprove();
+		await settle();
+		expect(approvals).toBe(1);
+		expect(target.querySelector('[data-testid="bulk-approve-hopeless"]')).toBeNull();
+		expect(document.activeElement).toBe(before);
+		letR2();
+		await settle();
+		expect(target.querySelector('[data-testid="bulk-approve-hopeless"]')).toBeNull();
 	});
 
 	it('says the cause in the page\'s language', async () => {

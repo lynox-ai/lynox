@@ -402,9 +402,11 @@
 	 *  moves to the cause. */
 	async function approvalHopeless(id: string, r: { ok: boolean; body: PostBody }): Promise<boolean> {
 		if (r.ok || !bulkReachHopeless(r.body.code)) return false;
+		// The page moved to another run while the approval was out: neither its state nor its focus.
+		if (runId !== id) return true;
 		hopeless = { id, code: r.body.code! };
 		await tick();
-		hopelessLine?.focus();
+		if (runId === id) hopelessLine?.focus();
 		return true;
 	}
 
