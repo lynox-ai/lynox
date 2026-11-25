@@ -771,6 +771,18 @@ export function setPinnedTransportForTests(transport: PinnedTransport): () => vo
 }
 
 /**
+ * A store pass refused the request as it is formed (its path, its body, its headers): nothing was
+ * sent. Its own class, so a caller tells it from the network policy's refusals, which name the
+ * host; the message still starts with `Blocked:` like every refusal here.
+ */
+export class StoreRequestRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StoreRequestRefusedError';
+  }
+}
+
+/**
  * SSRF-safe fetch: resolves DNS once, validates the IP, then pins the http(s)
  * connection to that IP via Agent.lookup. The original hostname is preserved
  * in the URL path (so the Host header is correct) and reaches TLS as SNI (since
@@ -784,18 +796,6 @@ export function setPinnedTransportForTests(transport: PinnedTransport): () => vo
  * Does NOT follow redirects (use fetchWithPublicRedirects for that).
  * Aborts on init.signal; respects init.method/headers/body.
  */
-/**
- * A store pass refused the request as it is formed (its path, its body, its headers): nothing was
- * sent. Its own class, so a caller tells it from the network policy's refusals, which name the
- * host; the message still starts with `Blocked:` like every refusal here.
- */
-export class StoreRequestRefusedError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'StoreRequestRefusedError';
-  }
-}
-
 export async function fetchPinned(url: string, init: RequestInit = {}, pass?: StorePass): Promise<Response> {
   const parsed = new URL(url);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {

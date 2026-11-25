@@ -797,8 +797,8 @@ describe('applying an external run', () => {
       const runId = await approvedRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '15' } })), c);
       const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
       expect(out.status).toBe('halted');
-      expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.storeRequestRefused, applied: 1, failed: 0 });
-      // Target 0 stays written; the refused PATCH reached the stub only as the refusal, and nothing after it was sent.
+      expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.storeRequestRefused, applied: 1, failed: 0, sentUnknown: 0 });
+      // Target 0 stays written; the refused PATCH reached the stub only as the refusal, and target 2 after it was not sent.
       expect(s.items.get('/products/0')!['price']).toBe('15.00');
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0', '/products/1']);
       expect(refusedAnswer({ kind: 'store_request_refused' })).toBe(true);

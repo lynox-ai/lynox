@@ -583,17 +583,19 @@ describe('going on from a run that halted', () => {
 			cause: 'lynox hat eine Anfrage dieses Laufs nicht an den Shop gesendet: Ihre Form lässt lynox nicht zu Shopify durch.',
 			before: 'Steht in der Regel oder einem Wert etwas wie ein Zugangsschlüssel oder Token, nimm es heraus, bevor lynox den Lauf neu plant.',
 			check: null, after: null,
-			kept: 'Was lynox vor dem Halt geschrieben hat, bleibt geschrieben; nicht gesendet wurde nur diese eine Anfrage.',
+			kept: 'Was lynox vor dem Halt geschrieben hat, bleibt geschrieben. Ab dieser Anfrage hat lynox nichts mehr gesendet.',
 			soFar: null, allows: null,
 		});
 		// An undo writes back what the store held: nothing to take out, and what it took back stays.
 		expect(bulkResumeText(w('storeRequestRefused', { kind: 'undo' }), true, EN)).toEqual({
 			cause: 'lynox did not send a request of this undo to the store: lynox does not let a request of this form through to Shopify.',
 			before: null, check: null, after: null,
-			kept: 'What lynox took back before the halt stays taken back; only this one request was not sent.',
+			kept: 'What lynox took back before the halt stays taken back. From this request on, lynox sent nothing more.',
 			soFar: null, allows: null,
 		});
-		// Another way to no write on says nothing of what stays.
+		// Nothing written yet: nothing is said to stay. Another way to no write on says nothing of it either.
+		expect(bulkResumeText(w('storeRequestRefused', { applied: 0 }), true, DE)?.kept).toBeNull();
+		expect(bulkResumeText(w('storeRequestRefused', { kind: 'undo', applied: 0 }), true, EN)?.kept).toBeNull();
 		expect(bulkResumeText(w('contract'), true, DE)?.kept).toBeNull();
 		for (const [lang, i] of [['de', DE], ['en', EN]] as const) {
 			for (const run of [w('storeRequestRefused'), w('storeRequestRefused', { kind: 'undo' })]) {

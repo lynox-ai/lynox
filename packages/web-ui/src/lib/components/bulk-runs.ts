@@ -442,8 +442,9 @@ export function bulkResumeText(
 		: key === 'storeRequestRefused' && run.kind !== 'undo' ? 'bulk.halt.storeRequestRefused_before'
 		: null;
 	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
-	// Only the refused request went unsent: what was written (or taken back) before it stays.
-	const stays = key === 'storeRequestRefused' ? i18n.t(bulkHaltKeyOf(run, 'bulk.halt.storeRequestRefused_kept')) : null;
+	// What was written (or taken back) before the refused request stays; from it on nothing was
+	// sent. Said only where something was: before the first target the cause says it all.
+	const stays = key === 'storeRequestRefused' && run.applied > 0 ? i18n.t(bulkHaltKeyOf(run, 'bulk.halt.storeRequestRefused_kept')) : null;
 	if (kind === 'none') return { cause, before, check: null, after: null, kept: stays, soFar: null, allows: null };
 	// Nothing to send: no step before writing on applies, and what is left needs a new run.
 	if (kind === 'nothing') return { cause, before: null, check: i18n.tf(`bulk.resume.nothing_left${run.kind === 'undo' ? '_undo' : ''}`, vars), after: null, kept: null, soFar: null, allows: null };
