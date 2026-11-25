@@ -1651,9 +1651,14 @@ const MIGRATIONS: string[] = [
   // key set their source to NULL, so they stayed readable and out of reach of any later deletion.
   // This moves each relationship of a replaced memory to the end of its chain of successors
   // (relation-source.ts › repointToChainEndSql). Counted and logged before it runs (`_migrate`).
-  // Mirrors agent-memory.db v8.
+  // `origin_memory_id` names the memory whose text an edge's description came from and is never
+  // moved, so a hard deletion of that memory still takes the edge with it; no foreign key, so the
+  // GC deleting that memory does not clear it. Filled from the source first. Mirrors agent-memory.db v8.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (72);
-   ${repointToChainEndSql('relationships')}`,
+   ALTER TABLE relationships ADD COLUMN origin_memory_id TEXT;
+   UPDATE relationships SET origin_memory_id = source_memory_id WHERE origin_memory_id IS NULL;
+   ${repointToChainEndSql('relationships')}
+   CREATE INDEX IF NOT EXISTS idx_rel_origin_memory ON relationships(origin_memory_id);`,
 ];
 
 /** The migration index (0-based) of v72, which moves relationships to the end of their chain. */

@@ -325,11 +325,16 @@ const MIGRATIONS: string[] = [
 
   // v8: relations follow the memory that carries their fact. Before, a consolidation retired the
   // duplicate and left its relations on it; the GC then deleted the memory and the relations kept
-  // a source nothing resolves. This moves each relation of a replaced memory to the end of its
+  // a source nothing resolves. `origin_memory_id` names the memory whose text a relation came from
+  // and is never moved, so a hard deletion of that memory still takes the relation with it; it is
+  // filled from the source first. Then each relation of a replaced memory moves to the end of its
   // chain of successors (relation-source.ts › repointToChainEndSql). Counted and logged before it
   // runs (`_migrate`). Mirrors engine.db v72.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (8);
-   ${repointToChainEndSql('relations')}`,
+   ALTER TABLE relations ADD COLUMN origin_memory_id TEXT;
+   UPDATE relations SET origin_memory_id = source_memory_id WHERE origin_memory_id IS NULL;
+   ${repointToChainEndSql('relations')}
+   CREATE INDEX IF NOT EXISTS idx_relations_origin ON relations(origin_memory_id);`,
 ];
 
 /** The migration index (0-based) of v8, which moves relations to the end of their chain. */
@@ -654,8 +659,9 @@ export class AgentMemoryDb {
       // 2. Delete mentions for these memories
       this.db.prepare(`DELETE FROM mentions WHERE memory_id IN (${memSub})`).run(threadId);
 
-      // 3. Delete relations sourced from these memories
-      this.db.prepare(`DELETE FROM relations WHERE source_memory_id IN (${memSub})`).run(threadId);
+      // 3. Delete relations sourced from these memories, or written from them and moved since
+      //    to the memory that carries the fact now (`origin_memory_id`, never moved).
+      this.db.prepare(`DELETE FROM relations WHERE source_memory_id IN (${memSub}) OR origin_memory_id IN (${memSub})`).run(threadId, threadId);
 
       // 4. Clean supersedes: clear superseded_by pointers, then delete records
       this.db.prepare(`UPDATE memories SET superseded_by = NULL WHERE superseded_by IN (${memSub})`).run(threadId);
@@ -721,8 +727,9 @@ export class AgentMemoryDb {
 
         // 2. Mentions of the erased memories.
         this.db.prepare(`DELETE FROM mentions WHERE memory_id IN (${memSub})`).run();
-        // 3. Relations sourced from the erased memories.
-        this.db.prepare(`DELETE FROM relations WHERE source_memory_id IN (${memSub})`).run();
+        // 3. Relations sourced from the erased memories, or written from them and moved since to
+        //    the memory that carries the fact now (`origin_memory_id`, never moved).
+        this.db.prepare(`DELETE FROM relations WHERE source_memory_id IN (${memSub}) OR origin_memory_id IN (${memSub})`).run();
         // 4. Supersedes: clear dangling pointers, then drop the lineage records.
         this.db.prepare(`UPDATE memories SET superseded_by = NULL WHERE superseded_by IN (${memSub})`).run();
         this.db.prepare(`DELETE FROM supersedes WHERE new_memory_id IN (${memSub}) OR old_memory_id IN (${memSub})`).run();
@@ -1270,9 +1277,9 @@ export class AgentMemoryDb {
     const now = new Date().toISOString();
     this.db.prepare(`
       INSERT INTO relations (id, from_entity_id, to_entity_id, relation_type,
-        description, confidence, source_memory_id, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, fromEntityId, toEntityId, relationType, description, confidence, sourceMemoryId, now);
+        description, confidence, source_memory_id, origin_memory_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, fromEntityId, toEntityId, relationType, description, confidence, sourceMemoryId, sourceMemoryId, now);
   }
 
   createSupersedes(newMemoryId: string, oldMemoryId: string, reason: string): void {
@@ -1369,8 +1376,9 @@ export class AgentMemoryDb {
   }
 
   /**
-   * The same relations for the data export, those of a deleted source included and
-   * marked: what is still stored belongs in the export until the reap removes it.
+   * The same relations for the data export, those of a retired source (deleted, or
+   * replaced by a contradiction) included and marked: what is still stored belongs in
+   * the export until the reap removes it.
    */
   getEntityRelationsForExport(entityId: string, limit = 50): Array<RelationRow & { source_deleted: 0 | 1 }> {
     const safeLimit = Math.max(1, Math.min(limit, 200));

@@ -233,6 +233,7 @@ function seedOldLegacy(path: string): void {
   db.close();
   const raw = new Database(path);
   raw.prepare('DELETE FROM schema_version WHERE version >= 8').run();
+  raw.exec('DROP INDEX IF EXISTS idx_relations_origin; ALTER TABLE relations DROP COLUMN origin_memory_id;');
   // Name the memories by letter so the assertions can read them.
   for (const [k, id] of Object.entries(ids)) {
     raw.prepare('UPDATE relations SET source_memory_id = ? WHERE source_memory_id = ?').run(`m-${k}`, id);
@@ -257,6 +258,7 @@ function seedOldEngine(path: string): void {
   // One edge per triple in engine.db: a kind per source keeps them apart.
   for (const k of ['a', 'b', 'c', 'e', 'f']) rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: `rel_${k}`, description: k, sourceMemoryId: `m-${k}` });
   db.prepare('DELETE FROM schema_version WHERE version >= 72').run();
+  db.exec('DROP INDEX IF EXISTS idx_rel_origin_memory; ALTER TABLE relationships DROP COLUMN origin_memory_id;');
   engine.close();
 }
 
@@ -285,6 +287,12 @@ describe('the migration moves relations from before the rule to the end of their
     await layer.init();
     expect(legacyBySource(join(dir, 'mem.db'))).toEqual(MOVED);
     expect(engineBySource(engine)).toEqual(MOVED);
+    // The origin is filled from the source before the move and is not moved itself.
+    const ORIGIN = { rel_a: 'm-a', rel_b: 'm-b', rel_c: 'm-c', rel_e: 'm-e', rel_f: 'm-f' };
+    const rawLegacy = new Database(join(dir, 'mem.db'), { readonly: true });
+    expect(Object.fromEntries((rawLegacy.prepare('SELECT relation_type AS k, origin_memory_id AS o FROM relations').all() as Array<{ k: string; o: string }>).map(r => [r.k, r.o]))).toEqual(ORIGIN);
+    rawLegacy.close();
+    expect(Object.fromEntries((engine.getDb().prepare('SELECT kind AS k, origin_memory_id AS o FROM relationships').all() as Array<{ k: string; o: string }>).map(r => [r.k, r.o]))).toEqual(ORIGIN);
 
     // Counts only, per class: a and b to c, e to the deleted d, f without an end.
     const counts = logged.filter(l => l.includes('relations of replaced memories'));
@@ -328,17 +336,165 @@ describe('the migration moves relations from before the rule to the end of their
     const dir = tmp();
     seedOldLegacy(join(dir, 'mem.db'));
     seedOldEngine(join(dir, 'engine.db'));
-    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    new AgentMemoryDb(join(dir, 'mem.db')).close();
-    new EngineDb(join(dir, 'engine.db'), '').close();
-
     for (const [file, table] of [['mem.db', 'relations'], ['engine.db', 'relationships']] as const) {
+      // From the state before the migration: the first run moves, the second changes nothing.
       const raw = new Database(join(dir, file));
-      const before = raw.prepare(`SELECT id, source_memory_id FROM ${table} ORDER BY id`).all();
+      const seeded = raw.prepare(`SELECT id, source_memory_id FROM ${table} ORDER BY id`).all();
       raw.exec(repointToChainEndSql(table));
+      const once = raw.prepare(`SELECT id, source_memory_id FROM ${table} ORDER BY id`).all();
+      expect(once).not.toEqual(seeded);
       raw.exec(repointToChainEndSql(table));
-      expect(raw.prepare(`SELECT id, source_memory_id FROM ${table} ORDER BY id`).all()).toEqual(before);
+      expect(raw.prepare(`SELECT id, source_memory_id FROM ${table} ORDER BY id`).all()).toEqual(once);
       raw.close();
     }
   });
 });
+
+describe('a hard deletion of the memory a relation came from takes it, wherever it moved', () => {
+  async function consolidated(): Promise<{ layer: KnowledgeLayer; engine: EngineDb; keeper: string; victim: string }> {
+    const { layer, engine } = makeLayer();
+    await layer.init();
+    mock.extraction = NAMES;
+    const keeper = (await layer.store('Meridian AG uses PostgreSQL for the backend database layer in production.', 'knowledge', scope, { sourceThreadId: 't-keeper' })).memoryId;
+    mock.extraction = EDGE;
+    const victim = (await layer.store('Meridian AG uses PostgreSQL for the backend database layer.', 'knowledge', scope, { sourceThreadId: 't-victim' })).memoryId;
+    expect(layer.consolidateMemories('knowledge', 'context', 'proj-1')).toBe(1);
+    expect(legacySources(layer)).toEqual([keeper]);
+    expect(engineSources(engine)).toEqual([keeper]);
+    return { layer, engine, keeper, victim };
+  }
+
+  it('the GC of the replaced duplicate does not: what it handed on stays on the keeper', async () => {
+    const { layer, engine, keeper, victim } = await consolidated();
+    await layer.gc();
+    expect(layer.getDb().getMemory(victim)).toBeNull();
+    expect(legacySources(layer)).toEqual([keeper]);
+    expect(engineSources(engine)).toEqual([keeper]);
+  });
+
+  it('purging the duplicate\'s chat removes its relations from the keeper, in both stores', async () => {
+    const { layer, engine, keeper } = await consolidated();
+    expect(layer.purgeThread('t-victim')).toBeGreaterThan(0);
+    expect(layer.getDb().getMemory(keeper)!.is_active).toBe(1);
+    expect(legacySources(layer)).toEqual([]);
+    expect(engineRows(engine)).toBe(0);
+  });
+
+  it('erasing the duplicate by a pattern only it matches removes its relations from the keeper', async () => {
+    const { layer, engine, keeper } = await consolidated();
+    expect(await layer.eraseByPattern('backend database layer.')).toBeGreaterThan(0);
+    expect(layer.getDb().getMemory(keeper)!.is_active).toBe(1);
+    expect(legacySources(layer)).toEqual([]);
+    expect(engineRows(engine)).toBe(0);
+  });
+
+  it('the person erasure\'s purge of the duplicate removes its relations from the keeper', async () => {
+    const { layer, engine, victim } = await consolidated();
+    layer.purgeMemoryStubsForErasure([victim]);
+    layer.purgeLegacyMemoriesForErasure([victim], []);
+    expect(legacySources(layer)).toEqual([]);
+    expect(engineRows(engine)).toBe(0);
+  });
+});
+
+describe('the origin is never moved: a → b → c', () => {
+  function legacyChain(): { db: AgentMemoryDb; ids: Record<string, string> } {
+    const db = new AgentMemoryDb(join(tmp(), 'mem.db'));
+    closers.push(() => db.close());
+    const x = db.createEntity({ canonicalName: 'Alice', entityType: 'person', scopeType: 'global', scopeId: 'g' });
+    const y = db.createEntity({ canonicalName: 'Acme', entityType: 'organization', scopeType: 'global', scopeId: 'g' });
+    const ids: Record<string, string> = {};
+    for (const k of ['a', 'b', 'c', 'other']) ids[k] = db.createMemory({ text: `memory ${k}`, namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+    // Mentions from another memory keep both entities out of the orphan reap.
+    db.createMention(ids['other']!, x); db.createMention(ids['other']!, y);
+    db.createRelation(x, y, 'works_at', 'CTO', ids['a']!);
+    db.supersedMemory(ids['a']!, ids['b']!); db.repointRelations(ids['a']!, ids['b']!);
+    db.supersedMemory(ids['b']!, ids['c']!); db.repointRelations(ids['b']!, ids['c']!);
+    expect(db.listAllRelations().map(r => r.source_memory_id)).toEqual([ids['c']]);
+    return { db, ids };
+  }
+  function engineChain(): { engine: EngineDb; mem: MemoryGraphStore } {
+    const engine = new EngineDb(join(tmp(), 'engine.db'), '');
+    closers.push(() => engine.close());
+    const mem = new MemoryGraphStore(engine);
+    engine.getDb().prepare("INSERT INTO subjects (id, kind, name) VALUES ('s1','person','Alice'),('s2','organization','Acme')").run();
+    for (const k of ['a', 'b', 'c']) mem.upsertStub({ id: k, text: k, namespace: 'knowledge', scopeType: 'context', scopeId: 'c' });
+    new RelationshipStore(engine).createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_at', description: 'CTO', sourceMemoryId: 'a' });
+    mem.markSuperseded('a', 'b', { carryRelationships: true });
+    mem.markSuperseded('b', 'c', { carryRelationships: true });
+    expect(engineSources(engine)).toEqual(['c']);
+    return { engine, mem };
+  }
+
+  it('erasing the step in between keeps the relation, in both stores', () => {
+    const { db, ids } = legacyChain();
+    db.purgeMemoriesByIds([ids['b']!]);
+    expect(db.listAllRelations().map(r => r.source_memory_id)).toEqual([ids['c']]);
+    const { engine, mem } = engineChain();
+    mem.purgeMemories(['b']);
+    expect(engineSources(engine)).toEqual(['c']);
+  });
+
+  it('erasing the first memory removes the relation, in both stores', () => {
+    const { db, ids } = legacyChain();
+    db.purgeMemoriesByIds([ids['a']!]);
+    expect(db.listAllRelations()).toEqual([]);
+    const { engine, mem } = engineChain();
+    mem.purgeMemories(['a']);
+    expect(engineRows(engine)).toBe(0);
+  });
+
+  it('a re-assert that writes the description takes the writer as origin; one that keeps it keeps the origin', () => {
+    const { engine } = engineChain();
+    const rels = new RelationshipStore(engine);
+    const origin = (): string | null => (engine.getDb().prepare('SELECT origin_memory_id AS o FROM relationships').get() as { o: string | null }).o;
+    rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_at', description: '', sourceMemoryId: 'c' });
+    expect(origin()).toBe('a');
+    rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_at', description: 'CEO', sourceMemoryId: 'c' });
+    expect(origin()).toBe('c');
+  });
+});
+
+describe('a successor without an engine.db stub gets one before relations move to it', () => {
+  it('consolidation: the keeper\'s stub is written from its legacy row, the mirror stands and the edges move', async () => {
+    const { layer, engine } = makeLayer();
+    await layer.init();
+    mock.extraction = NONE;
+    const keeper = (await layer.store('Meridian AG uses PostgreSQL for the backend database layer in production.', 'knowledge', scope)).memoryId;
+    mock.extraction = EDGE;
+    const victim = (await layer.store('Meridian AG uses PostgreSQL for the backend database layer.', 'knowledge', scope)).memoryId;
+    layer.getDb().confirmMemory(keeper); layer.getDb().confirmMemory(keeper); layer.getDb().confirmMemory(victim);
+    // A keeper written before the subject graph: no stub in engine.db.
+    engine.getDb().prepare('DELETE FROM memories WHERE id = ?').run(keeper);
+    const mem = new MemoryGraphStore(engine);
+    expect(mem.getStub(keeper)).toBeNull();
+
+    expect(layer.consolidateMemories('knowledge', 'context', 'proj-1')).toBe(1);
+    expect(mem.getStub(victim)!.is_active).toBe(0);
+    expect(mem.getStub(keeper)!.is_active).toBe(1);
+    // The stub carries the legacy count, which already holds this run's transfer; no second addition.
+    const count = (engine.getDb().prepare('SELECT confirmation_count AS c FROM memories WHERE id = ?').get(keeper) as { c: number }).c;
+    expect(count).toBe(layer.getDb().getMemory(keeper)!.confirmation_count);
+    expect(count).toBe(3);
+    expect(engineSources(engine)).toEqual([keeper]);
+  });
+
+  it('a move: the copy\'s stub is written from its legacy row and the edges move without an alarm', async () => {
+    const { layer, engine } = makeLayer();
+    await layer.init();
+    mock.extraction = EDGE;
+    const original = (await layer.store('Alice works at Acme GmbH as CTO.', 'knowledge', scope)).memoryId;
+    mock.extraction = NONE;
+    const copy = (await layer.store('The quarterly report shows Acme GmbH revenue grew twelve percent.', 'knowledge', { type: 'global', id: 'global' })).memoryId;
+    engine.getDb().prepare('DELETE FROM memories WHERE id = ?').run(copy);
+    const logged: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => { logged.push(String(chunk)); return true; });
+
+    const retired = await layer.retireForMove('Alice works at Acme', 'knowledge', scope);
+    expect(() => layer.markMoved(retired, copy)).not.toThrow();
+    expect(new MemoryGraphStore(engine).getStub(copy)).not.toBeNull();
+    expect(engineSources(engine)).toEqual([copy]);
+    expect(logged.filter(l => /CRITICAL|parity/i.test(l))).toEqual([]);
+  });
+});
+
