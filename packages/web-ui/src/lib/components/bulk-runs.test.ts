@@ -1091,7 +1091,7 @@ describe('going on from a run that halted', () => {
 		expect(ex(2, 0, DE)).toBe(DE.t('bulk.undo.explain'));
 		expect(ex(0, null, EN)).toBe(EN.t('bulk.undo.explain'));
 		// Written and open.
-		expect(ex(2, 3, DE)).toContain('Bei 3 weiteren Zielen ist offen, ob die Änderung beim Anbieter angekommen ist.');
+		expect(ex(2, 3, DE)).toContain('Bei 3\u00a0weiteren Zielen ist offen, ob die Änderung beim Anbieter angekommen ist.');
 		expect(ex(2, 1, DE)).toContain('Bei einem weiteren Ziel ist offen, ob');
 		expect(ex(2, 1, EN)).toContain('For one more target it is unclear whether');
 		// The singular forms in full: one target, never "those".
@@ -1100,7 +1100,7 @@ describe('going on from a run that halted', () => {
 		expect(ex(2, 3, DE)).toMatch(/^Die Rücknahme stellt bei jedem geschriebenen Ziel/);
 		// None written: it does not say "every written target".
 		expect(ex(0, 1, DE)).toMatch(/^Kein Ziel ist als geschrieben bestätigt\. Bei einem Ziel ist offen, ob/);
-		expect(ex(0, 2, EN)).toMatch(/^No target is confirmed as written\. For 2 targets it is unclear/);
+		expect(ex(0, 2, EN)).toMatch(/^No target is confirmed as written\. For 2\u00a0targets it is unclear/);
 		expect(ex(0, 2, DE)).not.toContain('jedem geschriebenen Ziel');
 		// No number promised before writing that the undo cannot know.
 		for (const [w, o] of [[2, 3], [0, 1]] as const) {

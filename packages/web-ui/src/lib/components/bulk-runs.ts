@@ -1166,11 +1166,6 @@ export function bulkLabel(run: Pick<BulkRun, 'kind' | 'total' | 'targetSystem'>,
 	return i18n.tf(run.kind === 'undo' ? `bulk.label_undo${one}` : `bulk.label${one}`, { n, target: bulkSystemName(run.targetSystem, i18n) });
 }
 
-/** The line about targets that held another value than expected when lynox last read them, or
- *  null when there are none. Worded for every case: after a send without a clear answer lynox did
- *  send to them (so not "not written"), an undo expects what its source wrote (so not "since the
- *  preview"), a later resume reads them again (so of the last read only), and a local run has no
- *  provider to name. */
 /** The undo offer's sentence: written targets only, written plus targets of which it is open
  *  whether the change arrived, or only those. The open ones are named apart from the written ones
  *  (the head's count), because the undo reads them first and resets only where the run's value is. */
@@ -1196,6 +1191,11 @@ export function bulkUndoApproveText(run: Pick<BulkRunDetailData, 'changes' | 'un
 	return `${head} ${i18n.tf(`bulk.undo.approve_open_more${openOne}`, { n: String(open) })} ${i18n.t('bulk.undo.approve_changed_stay')}`;
 }
 
+/** The line about targets that held another value than expected when lynox last read them, or
+ *  null when there are none. Worded for every case: after a send without a clear answer lynox did
+ *  send to them (so not "not written"), an undo expects what its source wrote (so not "since the
+ *  preview"), a later resume reads them again (so of the last read only), and a local run has no
+ *  provider to name. */
 export function bulkConflictsText(run: Pick<BulkRun, 'conflicts' | 'heads'>, i18n: BulkI18n): string | null {
 	// The head's conflicts where the engine sends them: a target two loops raced on is written
 	// and still carries the losing loop's conflict, and lynox did not leave it as it was.
