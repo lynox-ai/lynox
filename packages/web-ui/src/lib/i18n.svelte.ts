@@ -869,6 +869,12 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.halt.checksum': { de: 'Der Lauf hat sich seit deiner Freigabe geändert.', en: 'The run has changed since you approved it.' },
 	'bulk.halt.failureRate_write': { de: 'In diesem Durchgang liessen sich mehr als {limit} Ziele nicht schreiben.', en: 'In this pass, more than {limit} targets could not be written.' },
 	'bulk.halt.failureRate_write0': { de: 'In diesem Durchgang liess sich ein Ziel nicht schreiben.', en: 'In this pass, a target could not be written.' },
+	'bulk.halt.failureRate_unclear_one': { de: 'In diesem Durchgang blieb bei einem Ziel offen, ob die Änderung angekommen ist.', en: 'In this pass, it stayed unclear whether one change arrived.' },
+	'bulk.halt.failureRate_unclear': { de: 'In diesem Durchgang blieb bei {n} Zielen offen, ob die Änderung angekommen ist.', en: 'In this pass, it stayed unclear for {n} targets whether the change arrived.' },
+	'bulk.halt.failureRate_mixed_fn_un': { de: 'In diesem Durchgang liessen sich {f} Ziele nicht schreiben, und bei {u} blieb offen, ob die Änderung angekommen ist.', en: 'In this pass, {f} targets could not be written, and for {u} it stayed unclear whether the change arrived.' },
+	'bulk.halt.failureRate_mixed_f1_un': { de: 'In diesem Durchgang liess sich 1 Ziel nicht schreiben, und bei {u} blieb offen, ob die Änderung angekommen ist.', en: 'In this pass, 1 target could not be written, and for {u} it stayed unclear whether the change arrived.' },
+	'bulk.halt.failureRate_mixed_fn_u1': { de: 'In diesem Durchgang liessen sich {f} Ziele nicht schreiben, und bei 1 Ziel blieb offen, ob die Änderung angekommen ist.', en: 'In this pass, {f} targets could not be written, and for 1 target it stayed unclear whether the change arrived.' },
+	'bulk.halt.failureRate_mixed_f1_u1': { de: 'In diesem Durchgang liess sich 1 Ziel nicht schreiben, und bei 1 Ziel blieb offen, ob die Änderung angekommen ist.', en: 'In this pass, 1 target could not be written, and for 1 target it stayed unclear whether the change arrived.' },
 	'bulk.halt.consecutiveFailures_write': { de: 'Dreimal hintereinander liess sich ein Ziel nicht schreiben.', en: 'Three times in a row a target could not be written.' },
 	'bulk.halt.failures_before_write': { de: 'Prüfe unten die Ziele mit Fehler, bevor du weiterschreibst.', en: 'Check the targets with an error below before you continue writing.' },
 	// The same halts of an undo, in its words (U-335, Nachtrag 2).
@@ -1413,6 +1419,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'apis.access_ends_way': { de: 'Verbinde ihn vorher neu, damit Läufe und Abfragen weiterlaufen.', en: 'Reconnect it before then so runs and requests keep going.' },
 	// The owner's banner in the shell, one line per store (StoreAccessBanner, U-391); {host} is shown in a box.
 	'store_access.banner_soon': { de: 'Der Zugang von lynox zum Shop {host} läuft am {date} ab. Verbinde den Shop vorher neu, damit Läufe und Abfragen weiterlaufen.', en: "lynox's access to the store {host} runs out on {date}. Reconnect the store before then so runs and requests keep going." },
+	'store_access.banner_unknown': { de: 'Der Zugang zu {host} galt bis {date}. Ob lynox ihn erneuert hat, kann diese Seite gerade nicht abfragen. Lade sie später neu.', en: 'Access to {host} was valid until {date}. This page cannot check right now whether lynox renewed it. Reload it later.' },
 	'store_access.banner_ended': { de: 'lynox konnte den Zugang zum Shop {host} nicht erneuern. Läufe und Abfragen an den Shop gehen erst wieder, wenn du ihn neu verbindest.', en: 'lynox could not renew its access to the store {host}. Runs and requests to the store only work again once you reconnect it.' },
 	'apis.revoked_on': { de: 'Vom Anbieter widerrufen am {date}', en: 'Revoked by the provider on {date}' },
 	// The long texts sit in a closed <details> below the dates and the way out.

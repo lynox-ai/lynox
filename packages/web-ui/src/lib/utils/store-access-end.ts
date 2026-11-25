@@ -56,6 +56,13 @@ export function storeAccessAskAgain(profiles: readonly StoreAccessProfile[], ask
 	});
 }
 
+/** Whether the profile's known end has passed at `now` (on this browser's clock). */
+export function storeAccessEndPassed(profile: StoreAccessProfile, now: Date): boolean {
+	const iso = profile.store_access_ends?.at;
+	const at = typeof iso === 'string' ? Date.parse(iso) : Number.NaN;
+	return !Number.isNaN(at) && at <= now.getTime();
+}
+
 /**
  * A deadline's day with the month's name, in the reader's time zone (U-391): `5. Dezember 2026`,
  * `December 5, 2026`. Never in digits alone: `05/12/2026` reads as May 12 to an American reader.

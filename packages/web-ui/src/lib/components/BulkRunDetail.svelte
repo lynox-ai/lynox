@@ -17,7 +17,7 @@
 	import BulkHost from './BulkHost.svelte';
 	import {
 		BULK_STEPS, bulkHostSplit, bulkLabelParts, bulkTemplateParts, bulkMandateI18n, bulkOne, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltCause, bulkHaltHeadKey, bulkHaltText, bulkInvalidText, bulkListFilterFolded, bulkListFilterText, bulkListStatusText, bulkSkippedHead, bulkFieldNamesText, bulkFieldLabelKey, bulkFieldShapeText, bulkSentenceParts, bulkSecretInContextKey, bulkFieldChoices, bulkStartHintKey, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkManagedOf, bulkMarkupList, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkRollbackIncomplete, bulkRollbackLeft, bulkSentUnknownText, bulkSentUnknownParts, bulkConflictsText, bulkSeoEntityCount, bulkStartButtonKey, bulkStartKind, bulkStep, bulkStepLabelKey, bulkSteps, bulkAfterTakenBack, bulkUndoneText, bulkTargetName, bulkTargetLabel, bulkEngineWorking, bulkFollowDelay, BULK_FOLLOW_MS, BULK_FOLLOW_MAX_MS, bulkSupportMailto, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting, BULK_DESELECT_REFUSALS, bulkTakesStartDomains, bulkHiddenSegments, bulkHiddenAddsOf, bulkHiddenCountText, bulkOutlierOrder, bulkOutlierReasonMap, bulkOutlierCountText, bulkOutlierSpreadTexts, bulkOutlierSpreadClosing, bulkOutlierSpreadSeqs, bulkOutlierShowText, bulkOutlierFilteredText, bulkRawText, bulkHiddenHtml, bulkUncheckedCountText, bulkHiddenUnchecked, bulkResumeWords, bulkRolledBackParts, bulkCountsPending, bulkHeadCounts, bulkWorkingLine, bulkWorkingStep,
-		type BulkRunDetailData, type BulkTarget, type BulkSentencePart, type BulkMarkerKind, bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless,
+		type BulkRunDetailData, type BulkTarget, type BulkSentencePart, type BulkMarkerKind, bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkShowsFailure,
 	} from './bulk-runs.js';
 
 	let { runId, onBack, onOpen }: { runId: string; onBack: () => void; onOpen: (id: string) => void } = $props();
@@ -209,7 +209,10 @@
 				// preview, at a probe too, so each has to be on the page.
 				|| (r.body.hiddenAddsTargets ?? 0) > 0
 				// So does one with a field that could not be checked for them: its sentence stands under it.
-				|| (r.body.hiddenUncheckedTargets ?? 0) > 0;
+				|| (r.body.hiddenUncheckedTargets ?? 0) > 0
+				// So does one halted on its failures: the step to check the targets with an error
+				// stands only where one is marked, and a marked one may lie past the first page.
+				|| r.body.haltKey === 'failureRate' || r.body.haltKey === 'consecutiveFailures';
 			// Every page is asked for the run this load opened, never for one the page has moved to since.
 			let firstChanged = !whole && (r.body.changes.unchanged > 0 || r.body.applied > 0);
 			let shown = whole ? await loadFrom(id, 0, r.body.total) : await loadTargets(id, 0, FIRST_PAGE, firstChanged);
@@ -616,7 +619,8 @@
 	// A sentence that names an owner's act names the owner to a mandate.
 	const view = $derived(mandate ? bulkMandateI18n(i18n) : i18n);
 	const restartKind = $derived(run ? bulkRestartKind(run) : null);
-	const haltText = $derived(run ? bulkHaltText(run, managed, i18n) : null);
+	const failureMarked = $derived(targets.some(bulkShowsFailure));
+	const haltText = $derived(run ? bulkHaltText(run, managed, i18n, failureMarked) : null);
 	// A long filter list is folded until the owner shows it all; for this run only (ux U-175).
 	let filtersShownFor = $state<string | null>(null);
 	const filtersFolded = $derived(run !== null && filtersShownFor !== run.id ? bulkListFilterFolded(run.listFilters) : 0);
@@ -634,7 +638,7 @@
 	const resumeKind = $derived(run ? bulkResumeKind(run) : null);
 	// Writing on was refused for good: only where the page offers writing on at all.
 	const resumeHopeless = $derived(hopelessReason !== null && resumeKind !== null && resumeKind !== 'none' && resumeKind !== 'nothing');
-	const resumeText = $derived(run ? bulkResumeText(run, managed, i18n) : null);
+	const resumeText = $derived(run ? bulkResumeText(run, managed, i18n, failureMarked) : null);
 	const resumeWords = $derived(run ? bulkResumeWords(run, i18n) : null);
 	const rolledBack = $derived(run ? bulkRolledBackParts(run, view) : null);
 	const sentUnknownText = $derived(run ? bulkSentUnknownText(run, view) : null);

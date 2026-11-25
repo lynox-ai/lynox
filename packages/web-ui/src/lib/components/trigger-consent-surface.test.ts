@@ -85,8 +85,8 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		const { cond, body } = ifBlockAround('data-trigger-watch');
 		// Not while it waits: the held block names the address there (`StampConfirm` or the consent box), never twice.
 		expect(cond).toBe('showsWatchAddress(trigger) && !held(trigger)');
-		expect(body).toContain("{watchOf(trigger)?.host ?? ''}");
-		expect(body).toContain("{watchOf(trigger)?.rest ?? ''}");
+		// Host and path through the address that keeps the host whole and set off.
+		expect(body).toContain(`<WatchAddress host={watchOf(trigger)?.host ?? ''} rest={watchOf(trigger)?.rest ?? ''} testid="trigger-watch-address" />`);
 	});
 
 	it('a waiting trigger carries its own badge, whole', () => {
@@ -136,7 +136,7 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 			'<div class="text-xs text-text-muted" data-consent-watch>',
 			`<span class="font-medium" data-consent-label="watch">{t('triggers.watch_url')}:</span>`,
 			'<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">'
-				+ `<span class="font-medium text-text">{watchOf(trigger)?.host ?? ''}</span>{watchOf(trigger)?.rest ?? ''}</p>`,
+				+ `<WatchAddress host={watchOf(trigger)?.host ?? ''} rest={watchOf(trigger)?.rest ?? ''} testid="consent-watch-address" /></p>`,
 			'{#if watchOf(trigger)?.intervalMinutes}',
 			`<p class="mt-0.5" data-consent-cadence>{tf('triggers.watch_every', { minutes: String(watchOf(trigger)?.intervalMinutes) })}</p>`,
 			'{/if}',
