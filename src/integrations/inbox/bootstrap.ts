@@ -380,6 +380,8 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
       const acct = opts.mailStateDb.getAccount(id);
       return acct ? { address: acct.address, displayName: acct.displayName, authType: acct.authType } : null;
     },
+    // Read per message, not cached: an account connected later counts from its first mail on.
+    isOwnAddress: (address) => opts.mailStateDb.listAccounts().some((a) => a.address.toLowerCase() === address),
   };
 
   const hookOpts: Parameters<typeof createInboxClassifierHook>[0] = {

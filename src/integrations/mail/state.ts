@@ -641,6 +641,20 @@ const MIGRATIONS: string[] = [
    );
    CREATE INDEX IF NOT EXISTS idx_mail_sent_owner_known_address ON mail_sent_owner_known(tenant_id, address);
    COMMIT;`,
+
+  // v24: the rule that named an item but was not applied: its id, its name as it was then, and
+  // why (one of the reasons the CHECK below lists). Written with the item, as the bucket is, and
+  // never by a later write: an item is classified once. Deleting the rule clears the id and keeps
+  // name and reason. Rows from before carry NULL, which reads as "no rule withheld"; nothing is
+  // backfilled, as no released version withheld a rule. One transaction, as v17.
+  `BEGIN;
+   INSERT OR IGNORE INTO schema_version (version) VALUES (24);
+   ALTER TABLE inbox_items ADD COLUMN rule_withheld_id TEXT;
+   ALTER TABLE inbox_items ADD COLUMN rule_withheld_name TEXT;
+   ALTER TABLE inbox_items ADD COLUMN rule_withheld_reason TEXT
+     CHECK (rule_withheld_reason IS NULL OR rule_withheld_reason IN
+       ('rule_withheld_sensitive', 'rule_withheld_classifier', 'rule_withheld_unchecked', 'forwarded_by_person'));
+   COMMIT;`,
 ];
 
 export interface MailStateDbOptions {
