@@ -235,9 +235,8 @@ describe('every name the engine decides by is one no plugin tool can take', () =
  * Every tool the engine can build is in one of five places: on an external-content list the
  * agent counts by name, on the list it counts only while a capability contract governs the run,
  * among the tools that mark what they return as outside content, among the tools that return no
- * text from outside, or among the ones not classified yet. A new tool
- * in none of them fails here, so it cannot reach the model without someone deciding where its
- * result comes from.
+ * text from outside, or among the ones not classified yet. A new tool in none of them fails here,
+ * so it cannot reach the model without someone deciding where its result comes from.
  */
 describe('every tool the engine can build is classified by where its result comes from', () => {
   const lists = Agent as unknown as Record<'EXTERNAL_CONTENT_TOOLS' | 'CONTRACT_EXTERNAL_TOOLS', ReadonlySet<string>>;
@@ -317,7 +316,7 @@ describe('every tool the engine can build is classified by where its result come
     expect(unclassifiedOf(['bash', 'a_tool_nobody_classified', 'ask_user'])).toEqual(['a_tool_nobody_classified']);
   });
 
-  it('counts only the memory reads under a contract, and nothing else', () => {
+  it('holds the contract-only list to exactly the memory reads', () => {
     // Outside a contract this list counts for nothing, so a tool moved onto it from an
     // unconditional list stops counting in every ordinary conversation.
     expect([...lists.CONTRACT_EXTERNAL_TOOLS].sort()).toEqual(['memory_list', 'memory_recall', 'recall']);
