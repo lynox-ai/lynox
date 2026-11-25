@@ -360,9 +360,9 @@ describe('the shell banner in a tab that stays open past an end', () => {
 	});
 
 	it('an end that comes while the engine answers is not called ended: the time is the question\'s, and the next minute asks again', async () => {
-		// The first answer takes 45 s; A's end comes 20 s into it.
-		const END_IN_ANSWER = '2099-01-20T11:58:20.000Z';
-		answerTakes = [45_000];
+		// The first answer takes 10 s (inside the question's limit); A's end comes 5 s into it.
+		const END_IN_ANSWER = '2099-01-20T11:58:05.000Z';
+		answerTakes = [10_000];
 		answers = [[A(END_IN_ANSWER)], [A(RENEWED)]];
 		await open();
 		expect(shown()).toEqual([SOON_LINE('acme.myshopify.com', '20. Januar 2099')]);
@@ -382,11 +382,12 @@ describe('the shell banner in a tab that stays open past an end', () => {
 		await minutes(2);
 		expect(configAsks).toBe(2);
 		expect(questions).toBe(1);
-		// 12:00:05 the profiles are asked without it.
+		// 12:00:05 the profiles are asked without it; with no owner named, nothing shows.
 		await vi.advanceTimersByTimeAsync(5_000);
 		await settle();
 		expect(questions).toBe(2);
 		expect(configAsks).toBe(2);
+		expect(shown()).toEqual([]);
 	});
 
 
