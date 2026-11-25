@@ -23443,9 +23443,9 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         it('a rule no value can meet is shown as admitting nothing, as the run refuses every value', async () => {
           // A list with nothing a value can equal.
           expect(await one('string', { enum: [{ v: 'x' }, null] })).toEqual(NONE);
-          // A lower bound no number reaches, an upper bound every number passes.
+          // A lower bound no number reaches, an upper bound every number exceeds.
           expect(await one('number', { min: '1e999' })).toEqual(NONE);
-          expect(await one('number', { max: '-1e999', min: 1 })).toEqual(NONE);
+          expect(await one('number', { max: '-1e999' })).toEqual(NONE);
           // Bounds that cross.
           expect(await one('number', { min: 5, max: 1 })).toEqual(NONE);
           // A pattern that does not compile on its own, the one that could leave the run's anchors.
