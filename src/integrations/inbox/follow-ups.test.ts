@@ -479,6 +479,16 @@ describe('a raise ends the reply or archive before it, whatever the item showed 
     expect(dealt(id)).toMatchObject({ count: 2 });
   });
 
+  it('a reply written before undos were logged is still ended by a raise that names it: the answered mail is not counted', async () => {
+    const id = await seedHandled();
+    inbox.updateUserAction(id, 'replied', new Date());
+    inbox.appendAudit({ itemId: id, action: 'replied', actor: 'user', payloadJson: JSON.stringify({ at: new Date().toISOString() }) });
+    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    const raise = inbox.listAuditForItem(id).find((x) => x.action === 'raised_on_sensitive_follow_up');
+    expect(JSON.parse(raise!.payloadJson)).toMatchObject({ prior_user_action: 'replied' });
+    expect(dealt(id)).toMatchObject({ count: 1 });
+  });
+
   it('a clear of a snooze through the action route leaves the reply before it: reply, snooze, clear, flagged mail, on an item out of "requires you"', async () => {
     const id = await seedHandled();
     expect(handleSetAction(deps(), id, { action: 'replied' }).status).toBe(200);
