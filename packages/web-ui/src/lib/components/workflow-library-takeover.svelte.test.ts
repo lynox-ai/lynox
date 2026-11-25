@@ -250,51 +250,85 @@ describe('the dialog', () => {
 		expect(notes).toEqual([`Verbindung von ${EVA}`, 'Verbindung einer Person mit Zugang', null]);
 	});
 
-	describe('a step whose target is set only when it runs', () => {
-		/** FULL, with a third step whose host is set only when it runs. */
-		const atRun = (connections?: Array<Record<string, unknown>>): Record<string, unknown> => {
+	describe('steps whose target is set only when they run', () => {
+		const run = (id: string, task: string): Record<string, unknown> => step(id, task, { foreignConnection: true, connectionProfile: null, targetAtRun: true });
+		/** FULL with its steps replaced: in words, set only when they run, beside the shop step. */
+		const withSteps = (steps: Array<Record<string, unknown>>, connections?: Array<Record<string, unknown>>): Record<string, unknown> => {
 			const p = FULL();
-			(p['steps'] as Array<Record<string, unknown>>)[2] = step('s3', 'Send the order', { tool: 'http_request', inputTemplate: { url: 'https://{{s1.host}}/orders' }, foreignConnection: true, connectionProfile: null, targetAtRun: true });
+			p['steps'] = steps;
 			if (connections !== undefined) p['connections'] = connections;
 			return p;
 		};
+		const SHOP = step('s2', 'Bestellungen lesen', { tool: 'http_request', inputTemplate: { url: 'https://shop.example.invalid/orders' }, foreignConnection: true, connectionProfile: 'shop' });
+		const REPORT = (): Array<Record<string, unknown>> => [run('s1', 'Bestellungen zusammenfassen'), SHOP, run('s3', 'Auffälligkeiten prüfen'), run('s4', 'Bericht schicken')];
 		const notes = (d: HTMLElement): Array<string | null> => [...d.querySelectorAll<HTMLElement>('[data-testid="stamp-step"]')].map((s) => s.querySelector('[data-testid="stamp-step-note"]')?.textContent?.trim() ?? null);
+		const sentence = (d: HTMLElement): string | undefined => d.querySelector('[data-takeover-part="connection_at_run"]')?.textContent?.trim();
 		const parts = (d: HTMLElement): string[] => [...d.querySelectorAll<HTMLElement>('[data-takeover-part]')].map((e) => e.dataset['takeoverPart']!);
 
-		it('notes it may use the connection of the one person whose connections are in play, and says so in its own sentence after the connections', async () => {
-			await open([ENDED], [atRun()]);
+		it('names them in one sentence after the connection, each by its task and in a box, without a note at them, and says whose connection it may be', async () => {
+			await open([ENDED], [withSteps(REPORT())]);
 			const d = await openDialog();
-			expect(notes(d)).toEqual([`Verbindung von ${EVA}`, 'Verbindung einer Person mit Zugang', `Ziel erst beim Lauf bekannt, nutzt vielleicht die Verbindung von ${EVA}`]);
-			expect(d.querySelector('[data-takeover-part="connection_at_run"]')?.textContent?.trim()).toBe(`Bei Schritten mit „Ziel erst beim Lauf bekannt“ zeigt sich erst im Lauf, welche Verbindung sie nutzen. Ist es die von ${EVA}, scheitern sie nach dem Übernehmen, bis du das Programm selbst verbunden hast.`);
+			expect(notes(d)).toEqual([null, `Verbindung von ${EVA}`, null, null]);
+			expect(sentence(d)).toBe(`Bei diesen Schritten zeigt sich erst im Lauf, welche Verbindung sie nutzen: Bestellungen zusammenfassen, Auffälligkeiten prüfen, Bericht schicken. Ist es die von ${EVA}, scheitern sie nach dem Übernehmen, bis du das Programm selbst verbunden hast.`);
+			const boxed = [...d.querySelector('[data-takeover-part="connection_at_run"]')!.querySelectorAll('[data-foreign-value]')].map((e) => e.textContent);
+			expect(boxed).toEqual(['Bestellungen zusammenfassen', 'Auffälligkeiten prüfen', 'Bericht schicken', EVA]);
 			const order = parts(d);
 			expect(order.indexOf('connection_at_run')).toBe(order.lastIndexOf('connection') + 1);
 		});
 
-		it('names no one when the connections in play are several people\'s, in the note and in the sentence', async () => {
-			await open([ENDED], [atRun([
+		it('without a sentence on a connection before it, says where to connect the service', async () => {
+			await open([ENDED], [withSteps([run('s1', 'Bestellungen zusammenfassen'), run('s3', 'Auffälligkeiten prüfen'), step('s4', 'Nachdenken')])]);
+			const d = await openDialog();
+			expect(parts(d)).not.toContain('connection');
+			expect(sentence(d)).toBe(`Bei diesen Schritten zeigt sich erst im Lauf, welche Verbindung sie nutzen: Bestellungen zusammenfassen, Auffälligkeiten prüfen. Ist es die von ${EVA}, scheitern sie nach dem Übernehmen, bis du das Programm, das sie erreichen, selbst mit deinem Konto verbunden hast: in den Einstellungen unter „APIs“ über „Neue API“.`);
+		});
+
+		it('says one step in the singular, and every step of the workflow without a list', async () => {
+			await open([ENDED], [withSteps([run('s1', 'Bestellungen zusammenfassen'), step('s2', 'Nachdenken')])]);
+			let d = await openDialog();
+			expect(sentence(d)).toBe(`Bei diesem Schritt zeigt sich erst im Lauf, welche Verbindung er nutzt: Bestellungen zusammenfassen. Ist es die von ${EVA}, scheitert er nach dem Übernehmen, bis du das Programm, das er erreicht, selbst mit deinem Konto verbunden hast: in den Einstellungen unter „APIs“ über „Neue API“.`);
+			if (component) unmount(component);
+			component = undefined;
+			target.replaceChildren();
+			await open([ENDED], [withSteps([run('s1', 'Bestellungen zusammenfassen'), run('s2', 'Bericht schicken')])]);
+			d = await openDialog();
+			expect(sentence(d)).toBe(`Bei jedem Schritt dieses Workflows zeigt sich erst im Lauf, welche Verbindung er nutzt. Ist es die von ${EVA}, scheitert er nach dem Übernehmen, bis du das Programm, das er erreicht, selbst mit deinem Konto verbunden hast: in den Einstellungen unter „APIs“ über „Neue API“.`);
+		});
+
+		it('names no one when the connections in play are several people\'s; one person under two spellings is one', async () => {
+			await open([ENDED], [withSteps(REPORT(), [
 				{ profileId: 'shop', provider: 'Shop', account: 'Main store', by: EVA },
 				{ profileId: 'chat', provider: 'Chat', account: null, by: JAN },
 			])]);
-			const d = await openDialog();
-			expect(notes(d)[2]).toBe('Ziel erst beim Lauf bekannt, nutzt vielleicht die Verbindung einer Person mit Zugang');
-			expect(d.querySelector('[data-takeover-part="connection_at_run"]')?.textContent?.trim()).toBe('Bei Schritten mit „Ziel erst beim Lauf bekannt“ zeigt sich erst im Lauf, welche Verbindung sie nutzen. Ist es die einer Person mit Zugang, scheitern sie nach dem Übernehmen, bis du das Programm selbst verbunden hast.');
-		});
-
-		it('one person under two spellings of the address is one person', async () => {
-			await open([ENDED], [atRun([
+			let d = await openDialog();
+			expect(sentence(d)).toContain('Ist es die einer Person mit Zugang, scheitern sie');
+			if (component) unmount(component);
+			component = undefined;
+			target.replaceChildren();
+			await open([ENDED], [withSteps(REPORT(), [
 				{ profileId: 'shop', provider: 'Shop', account: 'Main store', by: EVA },
 				{ profileId: 'chat', provider: 'Chat', account: null, by: EVA.toUpperCase() },
 			])]);
+			d = await openDialog();
+			expect(sentence(d)).toContain(`Ist es die von ${EVA}, scheitern sie`);
+		});
+
+		it('folds a list past five steps behind a button that opens it', async () => {
+			const many = [SHOP, ...['A', 'B', 'C', 'D', 'E', 'F', 'G'].map((x, i) => run(`r${String(i)}`, `Schritt ${x}`))];
+			await open([ENDED], [withSteps(many)]);
 			const d = await openDialog();
-			expect(notes(d)[2]).toBe(`Ziel erst beim Lauf bekannt, nutzt vielleicht die Verbindung von ${EVA}`);
+			const part = d.querySelector('[data-takeover-part="connection_at_run"]')!;
+			expect(part.querySelector('[data-testid="plans-more"]')?.textContent).toBe('und 2 weitere');
+			part.querySelector<HTMLButtonElement>('[data-testid="plans-more"]')!.click();
+			flushSync();
+			expect(sentence(d)).toContain('Schritt A, Schritt B, Schritt C, Schritt D, Schritt E, Schritt F, Schritt G.');
 		});
 
 		it('says it in English too', async () => {
 			setLocale('en');
-			await open([ENDED], [atRun()]);
+			await open([ENDED], [withSteps(REPORT())]);
 			const d = await openDialog();
-			expect(notes(d)[2]).toBe(`target known only when it runs; may use ${EVA}'s connection`);
-			expect(d.querySelector('[data-takeover-part="connection_at_run"]')?.textContent?.trim()).toBe(`Steps marked “target known only when it runs” show which connection they use only when they run. If it is ${EVA}'s, they fail after you take over until you connect the program yourself.`);
+			expect(sentence(d)).toBe(`For these steps, which connection they use shows only when they run: Bestellungen zusammenfassen, Auffälligkeiten prüfen, Bericht schicken. If it is ${EVA}'s, they fail after you take over until you connect the service yourself.`);
 		});
 
 		it('without such a step there is no such sentence', async () => {
@@ -304,12 +338,8 @@ describe('the dialog', () => {
 		});
 
 		it('a preview that says a target is set only when it runs for an unmarked step, or one with a profile, or not as a flag, is not read', () => {
-			const withStep = (extra: Record<string, unknown>): Record<string, unknown> => {
-				const p = atRun();
-				(p['steps'] as Array<Record<string, unknown>>)[2] = { ...(p['steps'] as Array<Record<string, unknown>>)[2], ...extra };
-				return p;
-			};
-			expect(parseWorkflowTakeoverPreview(atRun())).not.toBeNull();
+			const withStep = (extra: Record<string, unknown>): Record<string, unknown> => withSteps([{ ...run('s1', 'Bestellungen zusammenfassen'), ...extra }]);
+			expect(parseWorkflowTakeoverPreview(withStep({}))).not.toBeNull();
 			expect(parseWorkflowTakeoverPreview(withStep({ foreignConnection: false }))).toBeNull();
 			expect(parseWorkflowTakeoverPreview(withStep({ connectionProfile: 'shop' }))).toBeNull();
 			expect(parseWorkflowTakeoverPreview(withStep({ targetAtRun: 'yes' }))).toBeNull();

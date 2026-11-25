@@ -5,7 +5,7 @@ import { getLocale, setLocale, tf } from '../i18n.svelte.js';
 // that loses a word, or falls back to the other language, fails here. The values filled in are
 // stand-ins, so each placeholder shows where it lands.
 
-const VALUES = {"person": "Eva", "name": "Eva", "plan": "Weekly", "plans": "Daily, Nightly", "provider": "Shop", "account": " (Main store)", "tab": "TAB", "button": "BUTTON", "n": "2", "review": "REVIEW"};
+const VALUES = {"person": "Eva", "name": "Eva", "plan": "Weekly", "plans": "Daily, Nightly", "provider": "Shop", "account": " (Main store)", "tab": "TAB", "button": "BUTTON", "n": "2", "review": "REVIEW", "who": "WHO", "end": "END", "steps": "S1, S2", "step": "S1"};
 
 const SENTENCES: Array<[string, string, string]> = [
 	["workflow_library.takeover.access_ended",
@@ -53,18 +53,24 @@ const SENTENCES: Array<[string, string, string]> = [
 	["workflow_library.takeover.step_connection",
 		"Verbindung von Eva",
 		"Eva's connection"],
-	["workflow_library.takeover.step_at_run",
-		"Ziel erst beim Lauf bekannt, nutzt vielleicht die Verbindung von Eva",
-		"target known only when it runs; may use Eva's connection"],
-	["workflow_library.takeover.step_at_run_unnamed",
-		"Ziel erst beim Lauf bekannt, nutzt vielleicht die Verbindung einer Person mit Zugang",
-		"target known only when it runs; may use the connection of someone with access"],
-	["workflow_library.takeover.connection_at_run",
-		"Bei Schritten mit „Ziel erst beim Lauf bekannt“ zeigt sich erst im Lauf, welche Verbindung sie nutzen. Ist es die von Eva, scheitern sie nach dem Übernehmen, bis du das Programm selbst verbunden hast.",
-		"Steps marked “target known only when it runs” show which connection they use only when they run. If it is Eva's, they fail after you take over until you connect the program yourself."],
-	["workflow_library.takeover.connection_at_run_unnamed",
-		"Bei Schritten mit „Ziel erst beim Lauf bekannt“ zeigt sich erst im Lauf, welche Verbindung sie nutzen. Ist es die einer Person mit Zugang, scheitern sie nach dem Übernehmen, bis du das Programm selbst verbunden hast.",
-		"Steps marked “target known only when it runs” show which connection they use only when they run. If it is the connection of someone with access, they fail after you take over until you connect the program yourself."],
+	["workflow_library.takeover.at_run.many",
+		"Bei diesen Schritten zeigt sich erst im Lauf, welche Verbindung sie nutzen: S1, S2. Ist es WHO, scheitern sie nach dem Übernehmen, END",
+		"For these steps, which connection they use shows only when they run: S1, S2. If it is WHO, they fail after you take over END"],
+	["workflow_library.takeover.at_run.one",
+		"Bei diesem Schritt zeigt sich erst im Lauf, welche Verbindung er nutzt: S1. Ist es WHO, scheitert er nach dem Übernehmen, END",
+		"For this step, which connection it uses shows only when it runs: S1. If it is WHO, it fails after you take over END"],
+	["workflow_library.takeover.at_run.all",
+		"Bei jedem Schritt dieses Workflows zeigt sich erst im Lauf, welche Verbindung er nutzt. Ist es WHO, scheitert er nach dem Übernehmen, END",
+		"For every step of this workflow, which connection it uses shows only when it runs. If it is WHO, it fails after you take over END"],
+	["workflow_library.takeover.at_run.who", "die von Eva", "Eva's"],
+	["workflow_library.takeover.at_run.who_unnamed", "die einer Person mit Zugang", "the connection of someone with access"],
+	["workflow_library.takeover.at_run.end", "bis du das Programm selbst verbunden hast.", "until you connect the service yourself."],
+	["workflow_library.takeover.at_run.end_where_many",
+		"bis du das Programm, das sie erreichen, selbst mit deinem Konto verbunden hast: in den Einstellungen unter „APIs“ über „Neue API“.",
+		"until you connect the service they reach yourself, with your own account: in Settings under “APIs”, via “New API”."],
+	["workflow_library.takeover.at_run.end_where_one",
+		"bis du das Programm, das er erreicht, selbst mit deinem Konto verbunden hast: in den Einstellungen unter „APIs“ über „Neue API“.",
+		"until you connect the service it reaches yourself, with your own account: in Settings under “APIs”, via “New API”."],
 	["workflow_library.takeover.step_connection_unnamed",
 		"Verbindung einer Person mit Zugang",
 		"connection of someone with access"],

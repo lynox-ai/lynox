@@ -269,7 +269,8 @@ describe('the workflow takeover routes (real engine)', () => {
     try {
       const p = await ask('GET', `/api/workflows/${id}/takeover-preview`, ownerCookie);
       expect((p.json['steps'] as Array<{ id: string; foreignConnection: boolean; connectionProfile: string | null; targetAtRun: boolean }>).map((s) => [s.id, s.foreignConnection, s.connectionProfile, s.targetAtRun]))
-        .toEqual([['s1', false, null, false], ['s2', true, 'shop', false], ['s3', true, null, true]]);
+        // s1 is in words: it may send a request whose address the model gives.
+        .toEqual([['s1', true, null, true], ['s2', true, 'shop', false], ['s3', true, null, true]]);
       expect(p.json['connections']).toEqual([{ profileId: 'shop', account: 'Main store', by: 'k@example.invalid', provider: 'shop.example.invalid' }]);
     } finally {
       inner.getApiStore = orig;

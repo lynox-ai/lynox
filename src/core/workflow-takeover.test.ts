@@ -211,7 +211,8 @@ describe('a workflow whose mandate ended is taken over: covered, stamped and rec
       [['q', 'Plan q', [entry]]],
       [['workflow-created', 'h@x.ch', true, false]],
       [['mine', 'g-h@x.ch', 'Main store', 'shop.example.invalid']],
-      [['s2', 'mine']],
+      // s1 is in words and s3 replays another tool: both may send a request the model addresses.
+      [['s1', null], ['s2', 'mine'], ['s3', null]],
     ]));
     expect(WORKFLOW_TAKEOVER_DIGEST_PREFIX).toBe('lynox:workflow-takeover:v1');
     expect(expectOf(b, 'w')).toBe(expected);
@@ -385,8 +386,9 @@ describe('the connections a run as the owner no longer uses', () => {
     const pv = workflowTakeoverPreview(deps(b), 'w');
     expect(pv.kind === 'preview' && pv.preview.connections).toEqual([{ profileId: 'mine', provider: 'mine.example.invalid', account: 'Main store', by: 'h@x.ch' }]);
     // s2 calls the shop, which another mandate connected: marked though its person is not one shown.
-    // s3 names the same host through another tool, which sends no connection: not marked.
-    expect(pv.kind === 'preview' && pv.preview.foreignConnectionSteps).toEqual([{ step: 's2', profileId: 'shop' }]);
+    // s1 is in words and s3 replays another tool, but both may send a request whose address the
+    // model gives: marked, without a profile.
+    expect(pv.kind === 'preview' && pv.preview.foreignConnectionSteps).toEqual([{ step: 's1', profileId: null }, { step: 's2', profileId: 'shop' }, { step: 's3', profileId: null }]);
   });
 
   it('a step on the owner’s own connection is not marked', () => {
@@ -399,9 +401,10 @@ describe('the connections a run as the owner no longer uses', () => {
   });
 });
 
-describe('steps whose target is set only when they run, and bulk steps', () => {
-  const req = (id: string, url: string): unknown => ({ id, task: id, tool: 'http_request', input_template: { url, method: 'POST' } });
-  const bulk = (id: string, input: Record<string, unknown>): unknown => ({ id, task: id, tool: 'bulk_plan', input_template: { target_system: 'http', ...input } });
+describe('steps whose target is set only when they run', () => {
+  const req = (id: string, url: unknown): unknown => ({ id, task: id, tool: 'http_request', input_template: { url, method: 'POST' } });
+  /** A step in words that may send no request: it names tools without the request tool. */
+  const quiet = (id: string): unknown => ({ id, task: id, tools: ['read_file'] });
   const marked = (b: Box): unknown => {
     const pv = workflowTakeoverPreview(deps(b), 'w');
     return pv.kind === 'preview' ? pv.preview.foreignConnectionSteps : pv.kind;
@@ -419,7 +422,7 @@ describe('steps whose target is set only when they run, and bulk steps', () => {
     return b;
   };
 
-  it('marks, without a profile, a request whose host a placeholder decides: in the host, as the whole address, in the user info, in the port, in the scheme', () => {
+  it('marks, without a profile, a request whose host a placeholder decides: in the host, as the whole address, in the user info, in the port, after the host, in the scheme', () => {
     const b = withConnections([
       req('host', 'https://{{s0.host}}/orders'),
       req('spaced', 'https://{{ s0.host }}/orders'),
@@ -432,37 +435,42 @@ describe('steps whose target is set only when they run, and bulk steps', () => {
     expect(marked(b)).toEqual(['host', 'spaced', 'whole', 'userinfo', 'port', 'suffix', 'scheme'].map((step) => ({ step, profileId: null })));
   });
 
-  it('a placeholder after the host leaves the host as written: marked by its profile when that is a mandate’s, not at all when it is the owner’s', () => {
+  it('a placeholder after the host leaves the host as written, also where the address is written loosely: marked by its profile when that is a mandate’s, not at all when it is the owner’s', () => {
     const b = withConnections([
       req('path', 'https://shop.example.invalid/orders/{{s0.id}}'),
       req('query', 'https://shop.example.invalid/orders?after={{s0.id}}'),
+      req('loose', 'https:shop.example.invalid/orders/{{s0.id}}'),
+      req('one-slash', 'https:/shop.example.invalid/{{s0.id}}'),
       req('own', 'https://owner.example.invalid/orders/{{s0.id}}'),
     ]);
-    expect(marked(b)).toEqual([{ step: 'path', profileId: 'shop' }, { step: 'query', profileId: 'shop' }]);
+    expect(marked(b)).toEqual(['path', 'query', 'loose', 'one-slash'].map((step) => ({ step, profileId: 'shop' })));
   });
 
-  it('a step whose target is set only when it runs is not marked when no connection of a covered mandate is in play', () => {
-    const b = box();
-    workflow(b, 'w', { email: 'h@x.ch' }, false, [req('host', 'https://{{s0.host}}/orders'), bulk('b', { target_host: '{{s0.host}}' })]);
-    ended(b, 'h@x.ch');
-    // Another mandate connected the shop, but not the one whose mark is covered.
-    b.profiles.push(profile('shop', 'shop.example.invalid', 'other@x.ch', 'g-other'), profile('owners', 'owner.example.invalid', null));
-    expect(marked(b)).toEqual([]);
-  });
-
-  it('marks a bulk step by the connection of its target host, as the run reads it; one whose host a placeholder decides without a profile', () => {
+  it('a step in words that may send a request leaves the address to the model: marked without a profile; one that may send none is not', () => {
     const b = withConnections([
-      bulk('fixed', { target_host: 'Shop.Example.Invalid.' }),
-      bulk('templated', { target_host: '{{s0.host}}.example.invalid' }),
-      bulk('own', { target_host: 'owner.example.invalid' }),
-      bulk('none', { source_list: { path: '/orders' } }),
-      bulk('not-a-host', { target_host: 'https://shop.example.invalid/' }),
+      { id: 'words', task: 'Summarise the orders' },
+      { id: 'declared', task: 'Fetch the orders', tools: ['http_request', 'read_file'] },
+      { id: 'other-tool', task: 'Read the page', tool: 'web_research', input_template: { url: 'https://owner.example.invalid/' } },
+      quiet('quiet'),
+      { id: 'none', task: 'Think', tools: [] },
+      req('no-url', undefined),
     ]);
-    expect(marked(b)).toEqual([{ step: 'fixed', profileId: 'shop' }, { step: 'templated', profileId: null }]);
+    expect(marked(b)).toEqual(['words', 'declared', 'other-tool', 'no-url'].map((step) => ({ step, profileId: null })));
   });
 
-  it('another tool with a placeholder where a host would be is not marked: it sends no connection', () => {
-    const b = withConnections([{ id: 'web', task: 'web', tool: 'web_research', input_template: { url: 'https://{{s0.host}}/' } }]);
+  it('marks a step whose target is set only when it runs while any mandate’s connection exists, also when none of the covered mandate’s does', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' }, false, [req('host', 'https://{{s0.host}}/orders'), quiet('quiet')]);
+    ended(b, 'h@x.ch');
+    b.profiles.push(profile('shop', 'shop.example.invalid', 'other@x.ch', 'g-other'), profile('owners', 'owner.example.invalid', null));
+    expect(marked(b)).toEqual([{ step: 'host', profileId: null }]);
+  });
+
+  it('marks none of them while no mandate’s connection exists: no step can reach one', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' }, false, [req('host', 'https://{{s0.host}}/orders'), { id: 'words', task: 'Summarise' }]);
+    ended(b, 'h@x.ch');
+    b.profiles.push(profile('owners', 'owner.example.invalid', null));
     expect(marked(b)).toEqual([]);
   });
 });

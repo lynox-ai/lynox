@@ -20,7 +20,8 @@
 import { createHash } from 'node:crypto';
 import { newCorrelationId } from './audit-log.js';
 import { isMandateConnection, type ApiStore } from './api-store.js';
-import { canonicalHost } from './canonical-host.js';
+import { placeholders, replacePlaceholders } from '../orchestrator/placeholders.js';
+import { inlineStepToolNames } from '../orchestrator/runtime-adapter.js';
 import type { StampEntry } from './plan-run-context.js';
 import { connectionShown } from './profile-secret-view.js';
 import { stampFromRow } from './plan-stamp.js';
@@ -91,8 +92,8 @@ export interface WorkflowTakeoverPreview {
   readonly connections: readonly WorkflowTakeoverConnection[];
   /**
    * Captured steps whose call goes to a profile some mandate connected (whoever it was), with that
-   * profile; `null` for a step whose target is set only when it runs, while a connection of a covered
-   * mark's mandate is in play: it may use one. `null` never means a step goes to no such profile.
+   * profile; `null` for a step whose target is set only when it runs, while some mandate's
+   * connection exists: it may use one. `null` never means a step goes to no such profile.
    */
   readonly foreignConnectionSteps: ReadonlyArray<{ readonly step: string; readonly profileId: string | null }>;
 }
@@ -131,41 +132,49 @@ export interface WorkflowTakeoverState {
 
 /** The tool whose call the runtime sends with a profile's connection (`http.ts`). */
 const REQUEST_TOOL = 'http_request';
-/** The tool that plans a bulk run; its writes go with the connection of `target_host` (`worker-loop.ts`). */
-const BULK_TOOL = 'bulk_plan';
-/** A placeholder a captured call resolves raw when it runs (`contract-validation.ts`). */
-const PLACEHOLDER = '{{';
+/**
+ * Two stand-ins for every placeholder, chosen to move a host wherever a value can: the second
+ * carries user info and ends the authority, so a placeholder before the path parses to another host.
+ */
+const PROBES = ['a', 'b@c.invalid/'] as const;
+
+/** The host `url` parses to, or `undefined` when it does not parse. */
+function hostOf(url: string): string | undefined {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
- * Where a captured step's call goes, read off the call: a host, `'at_run'` when a placeholder
- * stands where the host is decided, or `null` for a call that uses no connection. A placeholder
- * resolves raw, so one anywhere before the path (scheme, user info, host, port) can move the host:
- * that call's target is set only when it runs.
+ * Where a step's requests go: a host, `'at_run'` when the host is set only when it runs, or `null`
+ * for a step that sends no request.
+ *
+ * A captured request step replays its call: its host is read off the call. A placeholder resolves
+ * raw when the step runs (`placeholders.ts`), so the call is parsed with two different stand-ins for
+ * each one, the way `new URL` reads it at run time: when the host differs, or the call does not parse
+ * with a stand-in, its host is set only when it runs. Any other step that may send a request (the
+ * request tool among its tools, `inlineStepToolNames`) leaves the address to the model: set only
+ * when it runs too.
  */
 function stepTarget(step: unknown): { readonly host: string } | 'at_run' | null {
   if (step === null || typeof step !== 'object') return null;
-  const { tool, input_template: input } = step as { tool?: unknown; input_template?: unknown };
-  if (input === null || typeof input !== 'object') return null;
-  if (tool === BULK_TOOL) {
-    const host = (input as Record<string, unknown>)['target_host'];
-    if (typeof host !== 'string') return null;
-    if (host.includes(PLACEHOLDER)) return 'at_run';
-    const canonical = canonicalHost(host);
-    return canonical === null ? null : { host: canonical };
+  const { tool, tools, input_template: input } = step as { tool?: unknown; tools?: unknown; input_template?: unknown };
+  if (tool !== REQUEST_TOOL) {
+    const declared = Array.isArray(tools) ? tools.filter((t): t is string => typeof t === 'string') : undefined;
+    const names = inlineStepToolNames({ tools: declared, tool: typeof tool === 'string' ? tool : undefined });
+    return names.has(REQUEST_TOOL) ? 'at_run' : null;
   }
-  if (tool !== REQUEST_TOOL) return null;
-  const url = (input as Record<string, unknown>)['url'];
-  if (typeof url !== 'string') return null;
-  // The part that decides the host: everything up to the path. Without a scheme, all of it.
-  const scheme = url.indexOf('://');
-  const path = scheme === -1 ? -1 : url.slice(scheme + 3).search(/[/?#\\]/);
-  const head = scheme === -1 || path === -1 ? url : url.slice(0, scheme + 3 + path);
-  if (head.includes(PLACEHOLDER)) return 'at_run';
-  try {
-    return { host: new URL(url).hostname };
-  } catch {
-    return null;
+  const url = input !== null && typeof input === 'object' ? (input as Record<string, unknown>)['url'] : undefined;
+  // A request step without an address of its own: the model gives it one.
+  if (typeof url !== 'string') return 'at_run';
+  if (placeholders(url).length === 0) {
+    const host = hostOf(url);
+    return host === undefined ? null : { host };
   }
+  const [first, second] = PROBES.map((probe) => hostOf(replacePlaceholders(url, () => probe)));
+  return first === undefined || first !== second ? 'at_run' : { host: first };
 }
 
 /**
@@ -256,15 +265,16 @@ export function workflowTakeoverOf(deps: WorkflowTakeoverDeps, wfId: string): Wo
     }
     connections.sort((a, b) => (a.profileId < b.profileId ? -1 : a.profileId > b.profileId ? 1 : 0));
     // A step whose target can be read off its call is marked when that target is a mandate's
-    // connection. One whose target is set only when it runs may reach one: it is marked, without a
-    // profile, as long as a connection of a covered mark's mandate is in play.
+    // connection, whoever's. One whose target is set only when it runs may reach any such
+    // connection: it is marked, without a profile, as long as one exists.
+    const anyMandateConnection = deps.profiles.knownProfiles().some((p) => isMandateConnection(p));
     const steps: unknown[] = Array.isArray(planned.steps) ? planned.steps : [];
     for (const st of steps) {
       const id = (st as { id?: unknown }).id;
       if (typeof id !== 'string') continue;
       const target = stepTarget(st);
       if (target === 'at_run') {
-        if (connections.length > 0) foreignConnectionSteps.push({ step: id, profileId: null });
+        if (anyMandateConnection) foreignConnectionSteps.push({ step: id, profileId: null });
         continue;
       }
       const p = target === null ? undefined : deps.profiles.getByHostname(target.host);

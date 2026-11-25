@@ -125,14 +125,28 @@ function onlyPerson(p: Pick<WorkflowTakeoverPreview, 'connections'>): string | u
 	return people.size === 1 ? p.connections[0]!.by : undefined;
 }
 
+/**
+ * The sentence for the steps whose target is set only when they run: each by its task, the list
+ * folded past five, or none when it is every step of the workflow. Whose connection it may be is
+ * named when the preview's connections are one person's. Without a sentence on a connection before
+ * it, it says where to connect the service.
+ */
+function atRunSentence(p: Pick<WorkflowTakeoverPreview, 'connections' | 'steps'>, steps: readonly WorkflowTakeoverStep[], afterConnection: boolean): string {
+	const only = onlyPerson(p);
+	const who = only === undefined ? t('workflow_library.takeover.at_run.who_unnamed') : tf('workflow_library.takeover.at_run.who', { name: shownValue(only) });
+	const all = steps.length === p.steps.length && steps.length > 1;
+	const one = steps.length === 1 || all;
+	const end = afterConnection ? t('workflow_library.takeover.at_run.end') : t(one ? 'workflow_library.takeover.at_run.end_where_one' : 'workflow_library.takeover.at_run.end_where_many');
+	if (all) return tf('workflow_library.takeover.at_run.all', { who, end });
+	if (steps.length === 1) return tf('workflow_library.takeover.at_run.one', { step: shownValue(steps[0]!.task), who, end });
+	return tf('workflow_library.takeover.at_run.many', { steps: planList(steps.map((s) => s.task)), who, end });
+}
+
 /** The note at a step whose call uses a connection someone with access made; named only when that connection is one the preview names. */
 export function stepConnectionNote(p: Pick<WorkflowTakeoverPreview, 'connections'>, step: WorkflowTakeoverStep): string | null {
 	if (!step.foreignConnection) return null;
-	if (step.targetAtRun) {
-		// Which connection it uses shows only when it runs: named only when one person's are in play.
-		const only = onlyPerson(p);
-		return only === undefined ? t('workflow_library.takeover.step_at_run_unnamed') : tf('workflow_library.takeover.step_at_run', { name: shownValue(only) });
-	}
+	// Which connection it uses shows only when it runs: the sentence below names it, not a note.
+	if (step.targetAtRun) return null;
 	const by = step.connectionProfile === null ? undefined : p.connections.find((c) => c.profileId === step.connectionProfile)?.by;
 	return by === undefined ? t('workflow_library.takeover.step_connection_unnamed') : tf('workflow_library.takeover.step_connection', { name: shownValue(by) });
 }
@@ -172,15 +186,11 @@ export function workflowTakeoverLines(p: WorkflowTakeoverPreview): WorkflowTakeo
 			}),
 		});
 	}
-	// Steps whose target is set only when it runs: which connection they use shows only then, so
-	// they get their own sentence, after the ones above, and only when there is such a step.
-	if (p.steps.some((s) => s.foreignConnection && s.targetAtRun)) {
-		const only = onlyPerson(p);
-		lines.push({
-			kind: 'connection_at_run',
-			text: only === undefined ? t('workflow_library.takeover.connection_at_run_unnamed') : tf('workflow_library.takeover.connection_at_run', { name: shownValue(only) }),
-		});
-	}
+	// Steps whose target is set only when it runs: which connection they use shows only then. One
+	// sentence names them all, after the ones above, and only when there is such a step: a step
+	// without a note is either named here or reaches no one's connection.
+	const atRun = p.steps.filter((s) => s.foreignConnection && s.targetAtRun);
+	if (atRun.length > 0) lines.push({ kind: 'connection_at_run', text: atRunSentence(p, atRun, lines.length > 0) });
 	const paused = new Set(p.stillPaused.map((s) => s.id));
 	const released = new Set(p.alsoReleased.map((r) => r.id));
 	// Released and then run under the owner's name instead of a person's: one sentence for both.
