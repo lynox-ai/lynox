@@ -100,13 +100,14 @@ describe('ToolSilenceClock', () => {
       expect(clock.holds(t0 + 2), 'the call runs after its response ended').toBe(true);
       clock.note(next, t0 + 3);
       // Only the new call, if the next event is one, still holds.
+      expect(clock.holds(t0 + 4), `the next ${next.type} itself`).toBe(next.type === 'tool_call');
       expect(clock.holds(t0 + 70_001), `after ${next.type}`).toBe(false);
     }
   });
 
   // A call runs after its response's turn_end. Nothing but the agent's NEXT response, its own
   // result, or its limit ends its hold: not a sibling's result, not a sub-agent's events.
-  it('keeps a running call after its response ended, whatever else arrives meanwhile', () => {
+  it('keeps a running call after its response ended through a sibling\'s result and a sub-agent\'s events', () => {
     const clock = new ToolSilenceClock();
     clock.note(call('bash', 'long', { timeout_ms: 180_000 }), t0);
     clock.note(call('http_request', 'short'), t0 + 1);
