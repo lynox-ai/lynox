@@ -42,7 +42,7 @@ export function storeAccessShown(profile: StoreAccessProfile, now: Date, locale:
 
 /**
  * Whether the page should ask the engine again (`GET /api/api-profiles`): an end it was told of
- * has come since the last answer it got (`askedAt`). Until that answer the page shows what the
+ * has come since the last question that was answered was sent (`askedAt`). Until an answer to a newer one the page shows what the
  * engine said then, so an end that passes in an open tab is never called ended on the browser's
  * clock alone: a run may have renewed the store meanwhile. An end at or before `askedAt` was
  * already the engine's word and asks nothing; neither does a page that has no answer yet.

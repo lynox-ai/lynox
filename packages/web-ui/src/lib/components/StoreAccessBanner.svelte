@@ -15,16 +15,21 @@
 	// the session the owner's, also when that answer comes late (a retry).
 	let profiles = $state<StoreAccessProfile[]>([]);
 	let dismissed = $state(false);
-	// When the question the profiles answer was sent. The lines read the ends as of then: "ended"
-	// only for an end the engine already knew had passed, never on this browser's clock alone (a
-	// run may renew the store while the tab stays open).
+	// When the question the profiles answer was sent. The lines read the ends as of then: an end
+	// that passes while the tab stays open is not called ended until the engine has been asked
+	// after it (a run may renew the store meanwhile). The time is this browser's, sent with the
+	// question; the engine's own `ended` always counts.
 	let askedAt = $state<number | null>(null);
 	let now = new Date();
 	const lines = $derived(askedAt === null ? [] : profiles.flatMap((p) => { const shown = storeAccessShown(p, new Date(askedAt!), getLocale()); return shown === null ? [] : [shown]; }));
 
-	// One question at a time, and none hangs: a request that gets no answer is given up after this
-	// long, and the next minute asks again.
+	// None hangs: a question that gets no answer is given up after this long, and the next minute
+	// asks again. The viewer is waited for a shorter while: an answer that does not come is a viewer
+	// not named yet, which is asked as before (the line shows only once the server names the owner).
 	const QUESTION_MS = 15_000;
+	const VIEWER_MS = 5_000;
+	// One question at a time. Today a question ends before the next minute's look; the flag keeps it
+	// so if the limit above is ever raised past a minute or another start is added.
 	let asking = false;
 
 	async function load(): Promise<void> {
@@ -32,8 +37,10 @@
 		asking = true;
 		const abort = new AbortController();
 		const timeout = setTimeout(() => abort.abort(), QUESTION_MS);
+		let viewerWait: ReturnType<typeof setTimeout> | undefined;
 		try {
-			await loadSettingsViewer();
+			await Promise.race([loadSettingsViewer(), new Promise<void>((r) => { viewerWait = setTimeout(r, VIEWER_MS); })]);
+			clearTimeout(viewerWait);
 			// A session the server named another's is not asked; one not named yet is, and shows only
 			// once the owner's.
 			if (isViewerKnown() && !isOwnerSession()) return;
@@ -44,6 +51,7 @@
 			profiles = data.profiles ?? [];
 			askedAt = sent;
 		} catch { /* silent: StatusBar handles an engine that is down; the next minute asks again */ } finally {
+			clearTimeout(viewerWait);
 			clearTimeout(timeout);
 			asking = false;
 		}
