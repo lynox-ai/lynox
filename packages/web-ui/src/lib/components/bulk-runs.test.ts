@@ -597,8 +597,9 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('storeRequestRefused', { applied: 0 }), true, DE, false)?.kept).toBeNull();
 		expect(bulkResumeText(w('storeRequestRefused', { kind: 'undo', applied: 0 }), true, EN, false)?.kept).toBeNull();
 		expect(bulkResumeText(w('contract'), true, DE, false)?.kept).toBeNull();
-		// A refused request leaves no target with an error, so the preview marks none (`false` above).
-		// Whether one is marked does not change any of these sentences: they name no failed target.
+		// The refused request records no error on its own target, but earlier targets can carry one
+		// (this fixture has failed ones), so both values are checked. Whether one is marked does not
+		// change any of these sentences: they name no failed target.
 		expect(bulkHaltText(planned, true, DE, true)).toEqual(bulkHaltText(planned, true, DE, false));
 		for (const run of [w('storeRequestRefused'), w('storeRequestRefused', { kind: 'undo' }), w('storeRequestRefused', { applied: 0 })]) {
 			expect(bulkResumeText(run, true, DE, true)).toEqual(bulkResumeText(run, true, DE, false));
