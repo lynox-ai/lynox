@@ -60,7 +60,7 @@ describe('parseStampPreview — what a contract allows for a parameter (U-451)',
   const withAllowed = (allowed: unknown): Record<string, unknown> => preview({ parameters: [{ name: 'month', required: true, default: null, allowed }] });
 
   it('reads every rule whole, and a parameter without one as having none', () => {
-    const all = { enum: ['May', 3], regex: '[a-z]+', min: 1, max: 9 };
+    const all = { enum: ['May', 3, true], regex: '[a-z]+', min: 1, max: 9 };
     expect(parseStampPreview(withAllowed(all))!.parameters[0]!.allowed).toEqual(all);
     expect(parseStampPreview(withAllowed({ enum: [] }))!.parameters[0]!.allowed).toEqual({ enum: [], regex: null, min: null, max: null });
     expect(parseStampPreview(withAllowed(null))!.parameters[0]!.allowed).toBeNull();
@@ -71,7 +71,7 @@ describe('parseStampPreview — what a contract allows for a parameter (U-451)',
     ['a list that is not an array', { enum: 'May' }],
     ['a list with a value no parameter can be', { enum: ['May', { x: 1 }] }],
     ['a pattern that is not text', { regex: 5 }],
-    ['a list with a value no parameter is after its conversion', { enum: [true] }],
+    ['a list with a value no parameter can equal', { enum: [{ v: 1 }] }],
     ['a bound that is not a number', { min: [1] }],
     ['a bound given as text', { min: '1' }],
     ['an upper bound that is not a number', { max: { n: 1 } }],

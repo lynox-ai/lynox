@@ -23420,9 +23420,9 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
           ];
           const shown = await previewOf(WITH({ ...GRANT, paramConstraints: { month: { enum: ['May', 'June', { x: 1 }, 5] }, count: { min: 1, max: 5, enum: [2, '3', 4] }, code: { regex: '[a-z]+' }, ghost: { enum: ['x'] } } }, params));
           expect(shown['parameters']).toEqual([
-            // Only values of the parameter's kind: a text parameter is never the number 5, a number never '3'.
-            { name: 'month', required: false, default: 'May', allowed: { enum: ['May', 'June'], regex: null, min: null, max: null } },
-            { name: 'count', required: true, default: null, allowed: { enum: [2, 4], regex: null, min: 1, max: 5 } },
+            // As written: a value of another kind than a supplied value has can still be the stored default's.
+            { name: 'month', required: false, default: 'May', allowed: { enum: ['May', 'June', 5], regex: null, min: null, max: null } },
+            { name: 'count', required: true, default: null, allowed: { enum: [2, '3', 4], regex: null, min: 1, max: 5 } },
             { name: 'code', required: true, default: null, allowed: { enum: null, regex: '[a-z]+', min: null, max: null } },
             { name: 'free', required: true, default: null, allowed: null },
           ]);
@@ -23441,12 +23441,11 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         };
 
         it('a rule no value can meet is shown as admitting nothing, as the run refuses every value', async () => {
-          // A bound on a parameter that is not a number: the run requires a number for it.
-          expect(await one('string', { min: 1, max: 5 })).toEqual(NONE);
-          expect(await one('date', { max: 5 })).toEqual(NONE);
-          // A list with no value of the parameter's kind.
-          expect(await one('string', { enum: [5] })).toEqual(NONE);
-          expect(await one('number', { enum: ['5'] })).toEqual(NONE);
+          // A list with nothing a value can equal.
+          expect(await one('string', { enum: [{ v: 'x' }, null] })).toEqual(NONE);
+          // A lower bound no number reaches, an upper bound every number passes.
+          expect(await one('number', { min: '1e999' })).toEqual(NONE);
+          expect(await one('number', { max: '-1e999', min: 1 })).toEqual(NONE);
           // Bounds that cross.
           expect(await one('number', { min: 5, max: 1 })).toEqual(NONE);
           // A pattern that does not compile on its own, the one that could leave the run's anchors.
@@ -23456,12 +23455,21 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
           expect(await one('string', { regex: 'a|b' })).toEqual({ enum: null, regex: 'a|b', min: null, max: null });
         });
 
+        it('a rule a supplied value never meets, but the stored default can, is shown as written, not as admitting nothing', async () => {
+          // The run checks the default as stored (a text '5' on a number parameter, a number 3 on a text one).
+          expect(await one('number', { enum: ['5'] })).toEqual({ enum: ['5'], regex: null, min: null, max: null });
+          expect(await one('string', { min: 1, max: 5 })).toEqual({ enum: null, regex: null, min: 1, max: 5 });
+          expect(await one('string', { enum: [true] })).toEqual({ enum: [true], regex: null, min: null, max: null });
+        });
+
         it('a bound is shown as the comparison reads it, and one that reads as no number is not shown', async () => {
           expect(await one('number', { max: '10' })).toEqual({ enum: null, regex: null, min: null, max: 10 });
           expect(await one('number', { min: null, max: 3 })).toEqual({ enum: null, regex: null, min: 0, max: 3 });
           expect(await one('number', { max: 'abc', min: 2 })).toEqual({ enum: null, regex: null, min: 2, max: null });
           // Full-width digits read as no number: they bound nothing, so nothing is shown that reads as ten.
           expect(await one('number', { max: '\uFF11\uFF10' })).toBeNull();
+          // An upper bound past every number bounds nothing either.
+          expect(await one('number', { max: '1e999' })).toBeNull();
         });
 
         it('a rule that sets nothing is shown as none, as the run enforces nothing for it', async () => {

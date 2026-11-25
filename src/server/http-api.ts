@@ -353,45 +353,47 @@ function stampShown(planned: PlannedPipeline): {
       : contract.hostPatterns.flatMap((h) => contract.pathPatterns.flatMap((p) => contract.httpMethods.map((m) => `${m} https://${h}${p}`))),
     parameters: (planned.parameters ?? []).map((p) => ({
       name: p.name, required: p.defaultValue === undefined || p.defaultValue === null, default: p.defaultValue ?? null,
-      allowed: allowedShown(constraints, p),
+      allowed: allowedShown(constraints, p.name),
     })),
   };
 }
 
 /** What a contract allows for one parameter, as the stamp and the takeover previews show it. */
-interface ShownAllowed { enum: Array<string | number> | null; regex: string | null; min: number | null; max: number | null }
+interface ShownAllowed { enum: Array<string | number | boolean> | null; regex: string | null; min: number | null; max: number | null }
 
 /**
- * The values a contract allows for a parameter, read the way the run enforces them at bind
- * (`applyConstraint` on the value `coerceParam` made: a number for a number parameter, text for
- * any other; for a supplied value and a default alike): every rule that is set holds. Null when
- * the contract sets nothing for it, or nothing that narrows it. A rule no value can meet (a list
- * that is not an array, or holds no value of the parameter's kind; a bound on a parameter that is
- * not a number, or bounds that cross; a pattern that does not compile on its own) is shown as
- * admitting nothing. A bound is shown as the comparison reads it (`Number`), and one that reads as
- * no number bounds nothing, so it is not shown.
+ * The values a contract allows for a parameter, as written, read the way the run enforces them at
+ * bind (`applyConstraint`): every rule that is set holds. Null when the contract sets nothing for
+ * it, or nothing that narrows it.
+ *
+ * Shown as admitting nothing only where no value passes: not a value supplied for the run, which
+ * `coerceParam` converts first, nor the stored default, which the run checks as stored. So a list
+ * that is not an array, or holds nothing a value can equal (`===`: text, a number or true/false);
+ * a pattern that does not compile on its own; bounds that cross, a lower bound of +Infinity or an
+ * upper one of -Infinity. A value or bound of a kind a supplied value never has is shown as
+ * written: the default may still have it, and showing more than passes is the safe side.
+ * A bound is read as the comparison reads it (`Number`); one that reads as no finite number bounds
+ * nothing, so it is not shown.
  */
-function allowedShown(constraints: unknown, param: { name: string; type?: unknown }): ShownAllowed | null {
-  if (typeof constraints !== 'object' || constraints === null || !Object.hasOwn(constraints, param.name)) return null;
-  const c: unknown = (constraints as Record<string, unknown>)[param.name];
+function allowedShown(constraints: unknown, name: string): ShownAllowed | null {
+  if (typeof constraints !== 'object' || constraints === null || !Object.hasOwn(constraints, name)) return null;
+  const c: unknown = (constraints as Record<string, unknown>)[name];
   if (typeof c !== 'object' || c === null) return null;
   const { enum: values, regex, min, max } = c as Record<string, unknown>;
   const none: ShownAllowed = { enum: [], regex: null, min: null, max: null };
-  const numeric = param.type === 'number';
   if (values !== undefined && !Array.isArray(values)) return none;
-  if ((min !== undefined || max !== undefined) && !numeric) return none;
   if (regex !== undefined) {
     try { new RegExp(String(regex)); } catch { return none; }
   }
-  const kept = values === undefined ? null : (values as unknown[]).filter((v): v is string | number => (numeric ? typeof v === 'number' && Number.isFinite(v) : typeof v === 'string'));
+  const kept = values === undefined ? null : (values as unknown[]).filter((v): v is string | number | boolean => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean');
   if (kept !== null && kept.length === 0) return none;
-  const bound = (b: unknown): number | null => {
-    if (b === undefined) return null;
-    const n = Number(b);
-    return Number.isNaN(n) ? null : n;
-  };
-  const shown: ShownAllowed = { enum: kept, regex: regex === undefined ? null : String(regex), min: bound(min), max: bound(max) };
-  if (shown.min !== null && shown.max !== null && shown.min > shown.max) return none;
+  const lo = min === undefined ? null : Number(min);
+  const hi = max === undefined ? null : Number(max);
+  if (lo === Infinity || hi === -Infinity) return none;
+  const shownLo = lo !== null && Number.isFinite(lo) ? lo : null;
+  const shownHi = hi !== null && Number.isFinite(hi) ? hi : null;
+  if (shownLo !== null && shownHi !== null && shownLo > shownHi) return none;
+  const shown: ShownAllowed = { enum: kept, regex: regex === undefined ? null : String(regex), min: shownLo, max: shownHi };
   return shown.enum === null && shown.regex === null && shown.min === null && shown.max === null ? null : shown;
 }
 
