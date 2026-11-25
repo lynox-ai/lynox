@@ -264,11 +264,112 @@ describe('google_sheets after content from outside the chat', () => {
     expect(sentUrl()).toContain('insertDataOption=INSERT_ROWS');
   });
 
-  it('leaves format as it was: its raw requests are not read for formulas', async () => {
-    const a = agent('sawUntrustedData', 'Yes');
-    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ replies: [{}] }) });
-    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [{ repeatCell: { cell: { userEnteredValue: { formulaValue: FETCHING } } } }] }, a);
+});
+
+describe('google_sheets format after content from outside the chat', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  const PLAIN_FORMAT_QUESTION = 'Apply batch changes to spreadsheet sid? Formatting requests can delete or overwrite cells and sheets.';
+  const NOTE_ONE = 'This chat has read content from outside lynox, such as a web page, an email or a file. 1 of these requests can write cell content or a rule, which can hold a formula, and Google runs a formula on its side. A formula can make Google fetch an address named in it, with data from the sheet in that address. It is shown here in full:';
+  const APPLIED = { ok: true, json: async () => ({ replies: [{}, {}] }) };
+  const RANGE = { sheetId: 0, startRowIndex: 0, endRowIndex: 1 };
+  const BORDERS = { updateBorders: { range: RANGE, top: { style: 'SOLID' } } };
+  const BOLD = { repeatCell: { range: RANGE, cell: { userEnteredFormat: { textFormat: { bold: true } } }, fields: 'userEnteredFormat.textFormat.bold' } };
+  const FORMULA_CELLS = { updateCells: { range: RANGE, rows: [{ values: [{ userEnteredValue: { formulaValue: FETCHING } }] }], fields: 'userEnteredValue' } };
+
+  function sentRequests(): unknown[] {
+    return (JSON.parse((mockFetch.mock.calls[0]![1] as { body: string }).body) as { requests: unknown[] }).requests;
+  }
+
+  it('shows a request that writes a formula in full, with its range and content', async () => {
+    const a = agent('sawUntrustedData', 'No');
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [FORMULA_CELLS] }, a);
     expect(asked(a).options).toEqual(['Yes', 'No']);
-    expect(flattenPrompt(asked(a).prompt)).toBe('Apply batch changes to spreadsheet sid? Formatting requests can delete or overwrite cells and sheets.');
+    expect(flattenPrompt(asked(a).prompt)).toBe([PLAIN_FORMAT_QUESTION, '', NOTE_ONE, `updateCells: ${JSON.stringify(FORMULA_CELLS.updateCells)}`].join('\n'));
+    // The request is a value, set apart from the question's own words.
+    const values = promptSegments(asked(a).prompt).filter((s) => s.kind === 'value').map((s) => s.text);
+    expect(values).toContain(JSON.stringify(FORMULA_CELLS.updateCells));
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('asks the whole batch when a pure formatting request comes with one that writes cells, and sends nothing on no', async () => {
+    const a = agent('sawUntrustedData', 'No');
+    const result = await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [BORDERS, FORMULA_CELLS] }, a);
+    expect(result).toBe('Action cancelled by user.');
+    expect(mockFetch).not.toHaveBeenCalled();
+    const lines = flattenPrompt(asked(a).prompt).split('\n');
+    expect(lines.slice(-2)).toEqual([`updateCells: ${JSON.stringify(FORMULA_CELLS.updateCells)}`, 'and 1 formatting request that writes no cell content']);
+  });
+
+  it('sends every request of the batch as given when the owner says yes', async () => {
+    mockFetch.mockResolvedValueOnce(APPLIED);
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [BORDERS, FORMULA_CELLS] }, agent('sawUntrustedData', 'Yes'));
+    expect(sentRequests()).toEqual([BORDERS, FORMULA_CELLS]);
+  });
+
+  it('shows a request type it does not know, as one that may write cells', async () => {
+    const a = agent('sawUntrustedData', 'No');
+    const made = { setSomethingNew: { range: RANGE, value: FETCHING } };
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [made] }, a);
+    expect(flattenPrompt(asked(a).prompt).split('\n').at(-1)).toBe(`setSomethingNew: ${JSON.stringify(made.setSomethingNew)}`);
+  });
+
+  it('counts the requests it shows, and keeps each on one line', async () => {
+    const a = agent('sawUntrustedData', 'No');
+    const paste = { pasteData: { coordinate: { sheetId: 0 }, data: `a,${FETCHING}\nB1: harmless`, delimiter: ',' } };
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [paste, FORMULA_CELLS, 'odd'] }, a);
+    const lines = flattenPrompt(asked(a).prompt).split('\n');
+    expect(lines[2]).toContain('3 of these requests can write cell content or a rule');
+    expect(lines.slice(-3)).toEqual([`pasteData: ${JSON.stringify(paste.pasteData)}`, `updateCells: ${JSON.stringify(FORMULA_CELLS.updateCells)}`, 'request: "odd"']);
+  });
+
+  it.each([
+    ['a value with the format', { repeatCell: { range: RANGE, cell: { userEnteredFormat: {}, userEnteredValue: { formulaValue: FETCHING } }, fields: 'userEnteredFormat' } }],
+    ['a mask that writes the value', { repeatCell: { range: RANGE, cell: { userEnteredFormat: {} }, fields: 'userEnteredFormat,userEnteredValue' } }],
+    ['a mask for every field', { repeatCell: { range: RANGE, cell: { userEnteredFormat: {} }, fields: '*' } }],
+    ['a mask that only starts like the format', { repeatCell: { range: RANGE, cell: { userEnteredFormat: {} }, fields: 'userEnteredFormatting' } }],
+    ['a mask with an unclosed group', { repeatCell: { range: RANGE, cell: { userEnteredFormat: {} }, fields: 'userEnteredFormat(textFormat,userEnteredValue' } }],
+    ['a mask with a stray close', { repeatCell: { range: RANGE, cell: { userEnteredFormat: {} }, fields: 'userEnteredFormat),userEnteredValue' } }],
+    ['no mask', { repeatCell: { range: RANGE, cell: { userEnteredFormat: {} } } }],
+    ['two types in one request', { updateBorders: { range: RANGE }, updateCells: FORMULA_CELLS.updateCells }],
+    ['a condition rule', { addConditionalFormatRule: { rule: { ranges: [RANGE], booleanRule: { condition: { type: 'CUSTOM_FORMULA', values: [{ userEnteredValue: FETCHING }] } } } } }],
+  ])('shows a repeatCell or request with %s', async (_label, request) => {
+    const a = agent('sawUntrustedData', 'No');
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [request] }, a);
+    expect(flattenPrompt(asked(a).prompt)).toContain(NOTE_ONE);
+  });
+
+  it.each([
+    ['borders', [BORDERS]],
+    ['a format-only repeatCell', [BOLD]],
+    ['a grouped format mask', [{ repeatCell: { range: RANGE, cell: { userEnteredFormat: {} }, fields: 'userEnteredFormat(backgroundColor,textFormat), userEnteredFormat.wrapStrategy' } }]],
+    ['merges, sizes and bands', [{ mergeCells: { range: RANGE, mergeType: 'MERGE_ALL' } }, { unmergeCells: { range: RANGE } }, { updateDimensionProperties: { range: { sheetId: 0, dimension: 'ROWS' }, properties: { pixelSize: 30 }, fields: 'pixelSize' } }, { autoResizeDimensions: { dimensions: { sheetId: 0, dimension: 'COLUMNS' } } }, { addBanding: { bandedRange: { range: RANGE } } }, { updateBanding: { bandedRange: { bandedRangeId: 1 }, fields: 'rowProperties' } }, { deleteBanding: { bandedRangeId: 1 } }]],
+  ])('asks as always for %s', async (_label, requests) => {
+    const a = agent('sawUntrustedData', 'Yes');
+    mockFetch.mockResolvedValueOnce(APPLIED);
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: requests }, a);
+    expect(asked(a).options).toEqual(['Yes', 'No']);
+    expect(flattenPrompt(asked(a).prompt)).toBe(PLAIN_FORMAT_QUESTION);
+    expect(sentRequests()).toEqual(requests);
+  });
+
+  it('asks as always, before any content from outside, even for a request that writes a formula', async () => {
+    const a = agent('none', 'Yes');
+    mockFetch.mockResolvedValueOnce(APPLIED);
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [FORMULA_CELLS] }, a);
+    expect(flattenPrompt(asked(a).prompt)).toBe(PLAIN_FORMAT_QUESTION);
+    expect(sentRequests()).toEqual([FORMULA_CELLS]);
+  });
+
+  it.each(['sawExternalContentTool', 'conversationSawUntrusted'] as const)('counts content from outside by %s as well', async (taint) => {
+    const a = agent(taint, 'No');
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [FORMULA_CELLS] }, a);
+    expect(flattenPrompt(asked(a).prompt)).toContain(NOTE_ONE);
+  });
+
+  it('refuses in a run nobody watches, and sends nothing', async () => {
+    const result = await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [FORMULA_CELLS] }, agent('sawUntrustedData'));
+    expect(result).toContain('requires user confirmation');
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });

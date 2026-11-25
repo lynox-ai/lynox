@@ -173,6 +173,82 @@ function formulaNote(formulas: readonly FormulaCell[]): PromptText {
   return joinPrompts([head, ...lines, ...more], '\n');
 }
 
+/**
+ * Request types that only change how cells look or how rows and columns are sized: none of them
+ * carries cell content or a rule, so none can hold a formula. A list of what may pass, never of
+ * what may not: a type missing here, or one Google adds later, is shown in full.
+ */
+const PURE_FORMAT_TYPES = new Set([
+  'updateBorders', 'mergeCells', 'unmergeCells', 'updateDimensionProperties', 'autoResizeDimensions',
+  'addBanding', 'updateBanding', 'deleteBanding',
+]);
+
+/**
+ * Whether a field mask names cell formats only: every top-level path is `userEnteredFormat` or a
+ * part of it. Parentheses group sub-fields of one path, so only commas outside them separate paths.
+ */
+function formatOnlyMask(fields: unknown): boolean {
+  if (typeof fields !== 'string') return false;
+  const paths: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < fields.length; i++) {
+    const c = fields[i];
+    if (c === '(') depth++;
+    else if (c === ')' && --depth < 0) return false;
+    else if (c === ',' && depth === 0) { paths.push(fields.slice(start, i)); start = i + 1; }
+  }
+  if (depth !== 0) return false;
+  paths.push(fields.slice(start));
+  return paths.every((p) => /^userEnteredFormat(?:$|\.|\()/.test(p.trim()));
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Whether one :batchUpdate request can write no cell content and no rule. A request names its
+ * type as its only key; anything else is not taken as pure. `repeatCell` is pure only when its
+ * mask and its cell name formats alone: with any other field it writes a value, a note or a rule.
+ */
+function isPureFormatRequest(request: unknown): boolean {
+  if (!isPlainObject(request)) return false;
+  const keys = Object.keys(request);
+  if (keys.length !== 1) return false;
+  const type = keys[0]!;
+  if (PURE_FORMAT_TYPES.has(type)) return true;
+  if (type !== 'repeatCell') return false;
+  const body = request[type];
+  if (!isPlainObject(body) || !formatOnlyMask(body['fields'])) return false;
+  const cell = body['cell'];
+  return cell === undefined || (isPlainObject(cell) && Object.keys(cell).every((k) => k === 'userEnteredFormat'));
+}
+
+/**
+ * What a format question adds after content from outside, when some requests can write cell
+ * content or a rule: why it asks, then each of those requests in full, on one line each, so the
+ * range and the content the owner decides on are in front of them. Null when every request is
+ * pure formatting. Not shortened and not capped: the requests are the model's own output, so
+ * their size is bounded by it, and a shortened request would hide the part that fetches.
+ */
+function formatRequestsNote(requests: readonly unknown[]): PromptText | null {
+  const shown = requests.filter((r) => !isPureFormatRequest(r));
+  if (shown.length === 0) return null;
+  const n = shown.length;
+  const head = n === 1
+    ? pv`This chat has read content from outside lynox, such as a web page, an email or a file. 1 of these requests can write cell content or a rule, which can hold a formula, and Google runs a formula on its side. A formula can make Google fetch an address named in it, with data from the sheet in that address. It is shown here in full:`
+    : pv`This chat has read content from outside lynox, such as a web page, an email or a file. ${n} of these requests can write cell content or a rule, which can hold a formula, and Google runs a formula on its side. A formula can make Google fetch an address named in it, with data from the sheet in that address. They are shown here in full:`;
+  const lines = shown.map((request) => {
+    const type = isPlainObject(request) && Object.keys(request).length === 1 ? Object.keys(request)[0]! : null;
+    const body = singleLine(JSON.stringify(type === null ? request : (request as Record<string, unknown>)[type]) ?? String(request));
+    return type === null ? pv`request: ${body}` : pv`${singleLine(type)}: ${body}`;
+  });
+  const rest = requests.length - n;
+  const more = rest === 0 ? [] : [rest === 1 ? pv`and 1 formatting request that writes no cell content` : pv`and ${rest} formatting requests that write no cell content`];
+  return joinPrompts([head, ...lines, ...more], '\n');
+}
+
 // === Tool Creation ===
 
 // Actions flagged destructive to the permission guard. `format` is included
@@ -278,9 +354,13 @@ export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<Sh
           // After content from outside the chat, a cell that starts like a formula is shown with
           // the question: Google runs it on its side, where no check on the engine's requests
           // sees the address it may fetch. Before that, the question is the plain one above.
-          const formulas = deriveTurnUntrusted(agent) ? formulasToShow(input) : [];
+          const tainted = deriveTurnUntrusted(agent);
+          const formulas = tainted ? formulasToShow(input) : [];
+          // A format call is asked about as one batch: a request that can write cell content or a
+          // rule is shown in full beside the question, and the answer covers every request in it.
+          const requestsNote = tainted && input.action === 'format' ? formatRequestsNote(input.format_requests ?? []) : null;
           if (formulas.length === 0) {
-            const answer = await agent.promptUser(confirmMsg, ['Yes', 'No']);
+            const answer = await agent.promptUser(requestsNote === null ? confirmMsg : joinPrompts([confirmMsg, requestsNote], '\n\n'), ['Yes', 'No']);
             if (answer.toLowerCase() !== 'yes' && answer !== '1') {
               return 'Action cancelled by user.';
             }
