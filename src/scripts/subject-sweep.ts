@@ -592,7 +592,7 @@ export function main(): void {
       try {
         // datastore.db has no read-only mode (its ctor runs `_initMeta`); history.db does,
         // and a report must not migrate a tenant's live store to answer a question. (The key
-        // check at the start opens vault.db, which on an old vault may add its key-check row.)
+        // check at the start opens vault.db, which may migrate it, switch it to WAL and add its key-check row.)
         ds = existsSync(dsPath) ? new DataStore(dsPath) : null;
         const t = openThreadStoreReadOnly(dir);
         historyDb = t.historyDb;

@@ -83,7 +83,7 @@ export function main(): void {
     // never constructs EngineDb (whose ctor would migrate/materialize engine.db).
     // (Since mig v44 is now non-destructive, merely opening RunHistory above no
     // longer drops anything either — the dry-run is read-only for the stores. The key
-    // check above opens vault.db, which on an old vault may add its key-check row.)
+    // check above opens vault.db, which may migrate it, switch it to WAL and add its key-check row.)
     const legacy = {
       workflows: getAllPlannedPipelines(historyDb).length,
       triggers: getLegacyTriggerRows(historyDb).length,

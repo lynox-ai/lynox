@@ -69,7 +69,7 @@ describe.each(SCRIPTS)('$name — a vault key the vault refuses stops the run be
     expect(storeFiles(), 'a store was opened under the foreign key').toEqual([]);
   });
 
-  it('a vault.db that cannot be opened at all stops the run too, and opens no store', () => {
+  it('a vault.db that cannot be opened at all stops the run too, names the file, and opens no store', () => {
     rmSync(join(dir, 'vault.db'), { force: true });
     for (const f of readdirSync(dir)) rmSync(join(dir, f), { force: true });
     writeFileSync(join(dir, 'vault.db'), 'not a database, a broken copy of one');
@@ -77,6 +77,7 @@ describe.each(SCRIPTS)('$name — a vault key the vault refuses stops the run be
     try { run(KEY_B); } catch (err) { thrown = err; }
     expect(thrown, 'the run went on past a vault it could not open').toBeInstanceOf(Error);
     expect(thrown).not.toBeInstanceOf(VaultKeyMismatchError);
+    expect((thrown as Error).message, 'the refusal does not name the vault and what to do').toMatch(/vault at .*vault\.db could not be opened.*Stop the engine/);
     expect(existsSync(join(dir, 'engine.db')), 'engine.db was opened under an unchecked key').toBe(false);
     expect(storeFiles(), 'a store was opened under an unchecked key').toEqual([]);
   });
