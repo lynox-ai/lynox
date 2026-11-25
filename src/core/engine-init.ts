@@ -514,14 +514,24 @@ function requireDeliveredVaultKey(): void {
  * check). Called right after the key is settled and before any store opens, so nothing on this
  * boot writes under a key that is not the vault's. Only that refusal stops the start: no vault yet,
  * no key, or a vault that cannot be opened for another reason leaves it to `initSecrets`, as before.
+ * `strict` is for a caller that has no `initSecrets` after it, such as an operator script: there,
+ * with a key loaded, a vault that is on disk but cannot be opened stops the run too, since nothing
+ * has checked the key. The refusal names the file and what to do. Without a key it returns as
+ * before; a caller that must not write unencrypted checks that itself.
  */
-export function assertVaultKeyOpensVault(): void {
+export function assertVaultKeyOpensVault(opts: { strict?: boolean } = {}): void {
   if (!process.env['LYNOX_VAULT_KEY'] || !existsSync(getVaultDbPath())) return;
   let vault: SecretVault | null = null;
   try {
     vault = new SecretVault();
   } catch (err) {
     if (err instanceof VaultKeyMismatchError) throw err;
+    if (opts.strict === true) {
+      throw new Error(
+        `The vault at ${getVaultDbPath()} could not be opened, so the vault key is not checked and no store ` +
+        `was opened. Stop the engine if it holds the file, or repair the file, then run again. ` +
+        `(${getErrorMessage(err)})`, { cause: err });
+    }
   } finally {
     vault?.close();
   }

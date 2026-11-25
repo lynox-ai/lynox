@@ -27,7 +27,7 @@
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { ensureVaultKey, loadVaultKeyFromDotEnv } from '../core/engine-init.js';
+import { assertVaultKeyOpensVault, ensureVaultKey, loadVaultKeyFromDotEnv } from '../core/engine-init.js';
 import { getLynoxDir, setDataDir } from '../core/config.js';
 import { EngineDb } from '../core/engine-db.js';
 import { AgentMemoryDb } from '../core/agent-memory-db.js';
@@ -71,7 +71,8 @@ export function shouldRefusePlaintextPii(dir: string, isEncrypted: boolean, allo
   return existsSync(join(dir, 'vault.db')) && !isEncrypted && !allowPlaintext;
 }
 
-function main(): void {
+/** Exported for the vault-key test; runs only when invoked directly (below). */
+export function main(): void {
   const args = parseArgs(process.argv.slice(2));
   if (args.dataDir) setDataDir(args.dataDir);
   const dir = getLynoxDir();
@@ -97,6 +98,10 @@ function main(): void {
   // without it engine.db memory text (PII) would be written under a divergent key.
   loadVaultKeyFromDotEnv();
   ensureVaultKey();
+  // The engine's own start check: a key the vault on disk refuses stops the run here, before
+  // a store opens, so no row is written under a key that is not the vault's. Strict: no
+  // `initSecrets` follows here, so a vault that cannot be opened at all stops the run as well.
+  assertVaultKeyOpensVault({ strict: true });
 
   // Constructed INSIDE the try so a throw from the second ctor still closes the
   // first handle (EngineDb open succeeding then AgentMemoryDb open throwing would

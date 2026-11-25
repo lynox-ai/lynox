@@ -41,7 +41,7 @@ import { pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
 import { getLynoxDir, setDataDir } from '../core/config.js';
 import { EngineDb } from '../core/engine-db.js';
-import { ensureVaultKey, loadVaultKeyFromDotEnv } from '../core/engine-init.js';
+import { assertVaultKeyOpensVault, ensureVaultKey, loadVaultKeyFromDotEnv } from '../core/engine-init.js';
 import { SubjectStore, personNameTokens, isPersonSubsetSafe, makeSubjectExternalRefs } from '../core/subject-store.js';
 import type { SubjectExternalRefs } from '../core/subject-store.js';
 import { DataStore } from '../core/data-store.js';
@@ -524,6 +524,10 @@ export function main(): void {
   // that key the sweep stops here instead of writing under none.
   loadVaultKeyFromDotEnv();
   ensureVaultKey();
+  // The engine's own start check: a key the vault on disk refuses stops the run here, before
+  // a store opens, so no row is written under a key that is not the vault's. Strict: no
+  // `initSecrets` follows here, so a vault that cannot be opened at all stops the run as well.
+  assertVaultKeyOpensVault({ strict: true });
   const dir = getLynoxDir();
   const engineDb = new EngineDb(join(dir, 'engine.db'));   // ctor migrates on open (no-op)
   try {
@@ -587,7 +591,8 @@ export function main(): void {
       let historyDb: Database.Database | null = null;
       try {
         // datastore.db has no read-only mode (its ctor runs `_initMeta`); history.db does,
-        // and a report must not migrate a tenant's live store to answer a question.
+        // and a report must not migrate a tenant's live store to answer a question. (The key
+        // check at the start opens vault.db, which may migrate it, switch it to WAL and add its key-check row.)
         ds = existsSync(dsPath) ? new DataStore(dsPath) : null;
         const t = openThreadStoreReadOnly(dir);
         historyDb = t.historyDb;

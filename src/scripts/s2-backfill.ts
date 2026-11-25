@@ -22,7 +22,7 @@
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { ensureVaultKey, loadVaultKeyFromDotEnv } from '../core/engine-init.js';
+import { assertVaultKeyOpensVault, ensureVaultKey, loadVaultKeyFromDotEnv } from '../core/engine-init.js';
 import { getLynoxDir, setDataDir } from '../core/config.js';
 import { EngineDb } from '../core/engine-db.js';
 import { AgentMemoryDb } from '../core/agent-memory-db.js';
@@ -74,7 +74,8 @@ function countMappableEntities(memoryDb: AgentMemoryDb, pageSize: number): numbe
   return n;
 }
 
-function main(): void {
+/** Exported for the vault-key test; runs only when invoked directly (below). */
+export function main(): void {
   const args = parseArgs(process.argv.slice(2));
   if (args.dataDir) setDataDir(args.dataDir);
   // Resolve the vault key EXACTLY as the engine does (env > ~/.lynox/.env >
@@ -83,6 +84,10 @@ function main(): void {
   // without it engine.db PII would be written under a divergent key (or plaintext).
   loadVaultKeyFromDotEnv();
   ensureVaultKey();
+  // The engine's own start check: a key the vault on disk refuses stops the run here, before
+  // a store opens, so no row is written under a key that is not the vault's. Strict: no
+  // `initSecrets` follows here, so a vault that cannot be opened at all stops the run as well.
+  assertVaultKeyOpensVault({ strict: true });
 
   const dir = getLynoxDir();
   const engineDb = new EngineDb(join(dir, 'engine.db'));
