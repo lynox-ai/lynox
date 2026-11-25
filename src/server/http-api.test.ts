@@ -4809,9 +4809,19 @@ describe('LynoxHTTPApi', () => {
         const opened = realNow();
         await onStream({ type: 'tool_call', name: 'http_request', input: { url: 'https://example.com' }, agent: 'main', toolUseId: 'tu-hang' });
         (slots.get('tool-hung-1') as { lastEventAt: number }).lastEventAt = opened - 61_000;
-        // The request's own limit is a minute; 66 seconds later it is past it and its margin.
-        const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 66_000);
+        // The request's own limit is a minute: 30 seconds in, it still holds the run.
+        let ahead = 30_000;
+        const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + ahead);
         try {
+          const held = await jsonFetch('/api/sessions/tool-hung-1/run', {
+            method: 'POST',
+            body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+          });
+          expect(held.status).toBe(409);
+          await held.text();
+          expect(mockSessionAbort).not.toHaveBeenCalled();
+          // 66 seconds in, it is past its limit and the margin.
+          ahead = 66_000;
           mockSessionRun.mockResolvedValueOnce('second response');
           const next = await jsonFetch('/api/sessions/tool-hung-1/run', {
             method: 'POST',

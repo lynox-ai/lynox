@@ -7,6 +7,12 @@
  * open, the run counts as silent only once that call is past its own limit: the tool's bound
  * plus a margin. Every call has a deadline, also one whose result never arrives, so nothing
  * holds a run for longer than the longest bound.
+ *
+ * Not every call streams a result: a refused call answers the model without one. What shows that
+ * a turn's calls are over is the agent's next turn: its text or thinking comes only once every
+ * call of the turn before has settled. Text in the same response after a call ends that call's
+ * hold early, which is the old behaviour, never a longer one. Time the run spends waiting on a
+ * person (a consent or secret prompt) does not count against a call's limit.
  */
 
 import { capTimeout, MAX_EXEC_TIMEOUT_MS } from '../shell-sidecar/protocol.js';
@@ -14,6 +20,7 @@ import { CLIENT_GRACE_MS } from '../shell-sidecar/client.js';
 import { HTTP_HARD_CAP_MS } from '../tools/builtin/http.js';
 import { FFMPEG_TIMEOUT_MS } from '../tools/builtin/media-process.js';
 import { SPAWN_TIMEOUT } from '../tools/builtin/spawn.js';
+import { FOLLOW_UP_TOOL_NAME } from './follow-up-fallback.js';
 
 /** The bound for a tool without one of its own (workflow steps, bulk checks, integrations,
  *  MCP tools). No built-in tool with its own bound runs longer than a shell command at its
@@ -44,24 +51,39 @@ interface ToolEvent {
   readonly input?: unknown;
   readonly toolUseId?: string | undefined;
   readonly subAgentId?: string | undefined;
+  readonly subAgent?: string | undefined;
+}
+
+interface OpenCall {
+  deadline: number;
+  /** The agent the call belongs to: the run's own (`''`) or a sub-agent, by name. */
+  readonly owner: string;
 }
 
 /** The open tool calls of one run, each with the moment its own limit has passed. */
 export class ToolSilenceClock {
-  private readonly open = new Map<string, number>();
+  private readonly open = new Map<string, OpenCall>();
   private unpaired = 0;
+  private pausedAt: number | undefined;
 
   /** Opens a call on its `tool_call`, closes it on the `tool_result` with the same id. */
   note(event: ToolEvent, now: number = Date.now()): void {
+    const owner = event.subAgent ?? '';
+    if (event.type === 'text' || event.type === 'thinking') {
+      for (const [key, call] of this.open) if (call.owner === owner) this.open.delete(key);
+      return;
+    }
     if (event.type === 'tool_call') {
+      // Answered on the spot from the turn's own text, at the end of the turn.
+      if (event.name === FOLLOW_UP_TOOL_NAME) return;
       const key = this.keyOf(event);
       if (key === undefined) {
         // A call without a usable id cannot be paired with its result: it ends at the ceiling,
         // under a key no result can name.
-        this.open.set(`unpaired ${String(++this.unpaired)}`, now + TOOL_SILENCE_CEILING_MS + TOOL_SILENCE_MARGIN_MS);
+        this.open.set(`unpaired ${String(++this.unpaired)}`, { deadline: now + TOOL_SILENCE_CEILING_MS + TOOL_SILENCE_MARGIN_MS, owner });
         return;
       }
-      this.open.set(key, now + toolBoundMs(event.name ?? '', event.input) + TOOL_SILENCE_MARGIN_MS);
+      this.open.set(key, { deadline: now + toolBoundMs(event.name ?? '', event.input) + TOOL_SILENCE_MARGIN_MS, owner });
       return;
     }
     if (event.type === 'tool_result') {
@@ -70,11 +92,25 @@ export class ToolSilenceClock {
     }
   }
 
-  /** True while a call is open and not yet past its own limit. */
+  /** The run waits on a person from now. Idempotent. */
+  pause(now: number = Date.now()): void {
+    this.pausedAt ??= now;
+  }
+
+  /** The wait is over: every open call gets the time it waited added to its limit. */
+  resume(now: number = Date.now()): void {
+    if (this.pausedAt === undefined) return;
+    const waited = Math.max(0, now - this.pausedAt);
+    this.pausedAt = undefined;
+    for (const call of this.open.values()) call.deadline += waited;
+  }
+
+  /** True while a call is open and not yet past its own limit (counting a wait still going on). */
   holds(now: number = Date.now()): boolean {
+    const waiting = this.pausedAt === undefined ? 0 : Math.max(0, now - this.pausedAt);
     let held = false;
-    for (const [key, deadline] of this.open) {
-      if (deadline > now) held = true;
+    for (const [key, call] of this.open) {
+      if (call.deadline + waiting > now) held = true;
       else this.open.delete(key);
     }
     return held;

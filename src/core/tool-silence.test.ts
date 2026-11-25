@@ -2,12 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { MAX_EXEC_TIMEOUT_MS } from '../shell-sidecar/protocol.js';
 import { CLIENT_GRACE_MS } from '../shell-sidecar/client.js';
 import { DEFAULT_BASH_TIMEOUT_MS } from './constants.js';
+import { FOLLOW_UP_TOOL_NAME } from './follow-up-fallback.js';
 import { TOOL_SILENCE_CEILING_MS, TOOL_SILENCE_MARGIN_MS, ToolSilenceClock, toolBoundMs } from './tool-silence.js';
 
 const call = (name: string, toolUseId: string | undefined, input: unknown = {}, subAgentId?: string) =>
-  ({ type: 'tool_call', name, input, toolUseId, subAgentId });
+  ({ type: 'tool_call', name, input, toolUseId, subAgentId, subAgent: subAgentId === undefined ? undefined : `agent-${subAgentId}` });
 const result = (name: string, toolUseId: string | undefined, subAgentId?: string) =>
-  ({ type: 'tool_result', name, toolUseId, subAgentId });
+  ({ type: 'tool_result', name, toolUseId, subAgentId, subAgent: subAgentId === undefined ? undefined : `agent-${subAgentId}` });
 
 describe('toolBoundMs', () => {
   it('gives a shell command its own limit, capped the way the execution caps it', () => {
@@ -87,5 +88,46 @@ describe('ToolSilenceClock', () => {
     clock.note(call('bash', 'a', { timeout_ms: 180_000 }), t0);
     clock.note(result('bash', undefined), t0 + 1);
     expect(clock.holds(t0 + 2)).toBe(true);
+  });
+
+  // A refused call answers the model without a streamed result; the agent's next turn shows
+  // that every call of the turn before has settled.
+  it('lets go of an agent\'s calls once that agent writes again', () => {
+    const clock = new ToolSilenceClock();
+    clock.note(call('bash', 'a', { timeout_ms: 180_000 }), t0);
+    clock.note({ type: 'text', text: 'next turn' }, t0 + 1);
+    expect(clock.holds(t0 + 2)).toBe(false);
+    clock.note(call('bash', 'b', { timeout_ms: 180_000 }), t0 + 3);
+    clock.note({ type: 'thinking', thinking: 'next turn' }, t0 + 4);
+    expect(clock.holds(t0 + 5)).toBe(false);
+  });
+
+  it('keeps a call open while a different agent writes', () => {
+    const clock = new ToolSilenceClock();
+    clock.note(call('spawn_agent', 'a'), t0);
+    clock.note({ type: 'text', text: 'the child works', subAgent: 'agent-sub-1' }, t0 + 1);
+    expect(clock.holds(t0 + 2)).toBe(true);
+    clock.note(call('bash', 'c', { timeout_ms: 180_000 }, 'sub-1'), t0 + 3);
+    clock.note({ type: 'text', text: 'the parent' }, t0 + 4);
+    expect(clock.holds(t0 + 5)).toBe(true);
+  });
+
+  it('does not hold for the follow-up suggestions answered at the end of a turn', () => {
+    const clock = new ToolSilenceClock();
+    clock.note({ type: 'tool_call', name: FOLLOW_UP_TOOL_NAME, input: {} }, t0);
+    expect(clock.holds(t0 + 1)).toBe(false);
+  });
+
+  it('does not count a wait on a person against a call\'s limit', () => {
+    const clock = new ToolSilenceClock();
+    clock.note(call('bash', 'a', { timeout_ms: 180_000 }), t0);
+    const limit = 180_000 + CLIENT_GRACE_MS + TOOL_SILENCE_MARGIN_MS;
+    clock.pause(t0 + 10_000);
+    clock.pause(t0 + 50_000); // a second pause does not restart the wait
+    expect(clock.holds(t0 + limit + 1_000), 'still waiting').toBe(true);
+    clock.resume(t0 + 130_000);
+    clock.resume(t0 + 200_000); // nor does a second resume add more
+    expect(clock.holds(t0 + limit + 120_000 - 1)).toBe(true);
+    expect(clock.holds(t0 + limit + 120_000)).toBe(false);
   });
 });

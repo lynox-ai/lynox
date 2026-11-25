@@ -5954,6 +5954,7 @@ export class LynoxHTTPApi {
       // far. Idempotent — with no live timer it is a no-op, so a defensive
       // double-pause can never double-subtract the budget.
       const pauseWallClock = (): void => {
+        toolClock.pause();
         if (streamTimeout === undefined) return;
         clearTimeout(streamTimeout);
         streamTimeout = undefined;
@@ -5964,6 +5965,7 @@ export class LynoxHTTPApi {
       // works on headless and keeps its ceiling. Skips once the wall-clock itself
       // has fired, and if a timer is somehow already live so it never stacks two.
       const resumeWallClock = (): void => {
+        toolClock.resume();
         // The answer is activity too: a run that waited long for it is not silent from here on,
         // and a new message must not take it over before its next engine event.
         const live = this.runningSessions.get(sessionId);
