@@ -176,6 +176,24 @@ describe('the approval after a start check that can never pass', () => {
 		expect(target.querySelector('[data-testid="bulk-approve-hopeless"]')).toBeNull();
 	});
 
+	it('offers the approval again once the page has shown another run and comes back', async () => {
+		refuseWith = 'reach_approve_shopifySelfHosted';
+		const props = $state({ runId: 'r1', onBack: () => {}, onOpen: () => {} });
+		const { default: BulkRunDetail } = await import('./BulkRunDetail.svelte');
+		component = mount(BulkRunDetail, { target, props });
+		await settle();
+		approveButton().click();
+		await settle();
+		expect(approveButton().disabled).toBe(true);
+		props.runId = 'r2';
+		await settle();
+		props.runId = 'r1';
+		await settle();
+		// Opened again, the run is asked again: the route answers on the next press.
+		expect(approveButton().disabled).toBe(false);
+		expect(target.querySelector('[data-testid="bulk-approve-hopeless"]')).toBeNull();
+	});
+
 	it('says the cause in the page\'s language', async () => {
 		const before = getLocale();
 		setLocale('de');
