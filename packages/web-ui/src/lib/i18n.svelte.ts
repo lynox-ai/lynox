@@ -3295,11 +3295,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'tool.calendar': { de: 'Kalender', en: 'Calendar' },
 
 	// Passkey prompt
-	'passkeySetupTitle': { de: 'Schneller anmelden mit Passkey', en: 'Faster login with Passkey' },
-	'passkeySetupDescription': { de: 'Nutze Face ID oder Fingerabdruck statt E-Mail-Code.', en: 'Use Face ID or fingerprint instead of email code.' },
-	'passkeySetupCta': { de: 'Jetzt einrichten', en: 'Set up now' },
-	'passkeySetupDismiss': { de: 'Später', en: 'Maybe later' },
-	'passkeySetupRegistering': { de: 'Einrichten...', en: 'Setting up...' },
+	'passkeySetupHint': { de: 'Schneller anmelden mit einem Passkey: Face ID oder Fingerabdruck statt E-Mail-Code.', en: 'Sign in faster with a passkey: Face ID or fingerprint instead of the email code.' },
+	'passkeySetupCta': { de: 'Einrichten', en: 'Set up' },
+	'passkeySetupDismiss': { de: 'Später', en: 'Later' },
+	'passkeySetupRegistering': { de: 'Wird eingerichtet …', en: 'Setting up …' },
 	'passkeySetupSuccess': { de: 'Passkey eingerichtet! Beim nächsten Login kannst du ihn nutzen.', en: 'Passkey set up! You can use it next time you log in.' },
 
 	// Migration
