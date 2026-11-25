@@ -23433,6 +23433,14 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
           expect((shown['parameters'] as Array<Record<string, unknown>>)[0]!['allowed']).toEqual({ enum: [], regex: null, min: null, max: null });
         });
 
+        it('a rule that sets nothing is shown as none, as the run enforces nothing for it', async () => {
+          const shown = await previewOf(WITH({ ...GRANT, paramConstraints: { month: {} } }));
+          expect((shown['parameters'] as Array<Record<string, unknown>>)[0]!['allowed']).toBeNull();
+          // CONTROL: the same parameter with one rule shows it.
+          const ruled = await previewOf(WITH({ ...GRANT, paramConstraints: { month: { max: 3 } } }));
+          expect((ruled['parameters'] as Array<Record<string, unknown>>)[0]!['allowed']).toEqual({ enum: null, regex: null, min: null, max: 3 });
+        });
+
         it('a rule named like a property every object has is not shown for a parameter it does not name', async () => {
           const params = [{ name: 'toString', description: '', type: 'string', source: 'user_input' }];
           const shown = await previewOf(WITH({ ...GRANT, paramConstraints: {} }, params));
