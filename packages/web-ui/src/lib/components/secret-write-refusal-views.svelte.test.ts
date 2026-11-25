@@ -74,7 +74,7 @@ describe('the settings views name the connection form for a built-in provider cl
 	it.each(VIEWS)('%s names no form for the client secret of a provider lynox no longer offers', async (_v, load) => {
 		putReply = { status: 403, body: { error: 'x', code: 'retired_preset_client_secret' } };
 		const shown = await editAndSave(await load());
-		expect(shown).toContain('This name belongs to a built-in provider lynox no longer offers, so it can\'t be saved here. For a profile of your own, choose another name.');
+		expect(shown).toContain('This name belongs to a built-in provider lynox no longer offers, so it can\'t be saved here. For a connection of your own, choose another name.');
 		expect(shown).not.toContain('App credentials');
 	});
 

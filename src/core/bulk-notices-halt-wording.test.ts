@@ -8,7 +8,7 @@ import { BULK_HALT_REASONS } from './bulk-ledger.js';
  */
 describe('the German halt notice for a stored access', () => {
   it('names the page where the access is connected again', () => {
-    expect(BULK_NOTICES.de.halted('apply', BULK_HALT_REASONS.credential)).toBe('Massenlauf angehalten: lynox findet keinen gespeicherten Zugang zum Zielsystem. Verbinde ihn unter Einstellungen → API-Verbindungen neu oder bitte lynox im Chat darum.');
-    expect(BULK_NOTICES.de.halted('apply', BULK_HALT_REASONS.unauthorized)).toBe('Massenlauf angehalten: Das Zielsystem hat den gespeicherten Zugang abgelehnt. Ist er unter Einstellungen → API-Verbindungen neu verbunden, lässt sich der Lauf fortsetzen.');
+    expect(BULK_NOTICES.de.halted('apply', BULK_HALT_REASONS.credential)).toBe('lynox findet keinen gespeicherten Zugang zum Zielsystem. Verbinde ihn unter Einstellungen → API-Verbindungen neu oder bitte lynox im Chat darum.');
+    expect(BULK_NOTICES.de.halted('apply', BULK_HALT_REASONS.unauthorized)).toBe('Das Zielsystem hat den gespeicherten Zugang abgelehnt. Ist er unter Einstellungen → API-Verbindungen neu verbunden, lässt sich der Lauf fortsetzen.');
   });
 });

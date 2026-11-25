@@ -210,7 +210,7 @@ describe('the dialog', () => {
 		expect(parts).toEqual(['marks', 'intro', 'stamp', 'connection', 'member_change', 'lapsing', 'released', 'paused', 'afterwards']);
 		const text = (part: string): string | undefined => d.querySelector<HTMLElement>(`[data-takeover-part="${part}"]`)?.textContent?.trim();
 		expect(text('intro')).toBe('Übernimmst du den Workflow, gehört er dir, und „Ausführen“ läuft unter deinem Namen.');
-		expect(text('connection')).toBe(`${EVA} hat Shop mit einem eigenen Konto verbunden (Main store). Nach dem Übernehmen nutzt der Workflow diese Verbindung nicht mehr. Braucht er sie, verbinde das Programm selbst mit deinem Konto: in den Einstellungen unter „APIs“ über „Neue API“. Sonst scheitern die markierten Schritte.`);
+		expect(text('connection')).toBe(`${EVA} hat Shop mit einem eigenen Konto verbunden (Main store). Nach dem Übernehmen nutzt der Workflow diese Verbindung nicht mehr. Braucht er sie, verbinde das Programm selbst mit deinem Konto: in den Einstellungen unter „API-Verbindungen“ über „Neue Verbindung“. Sonst scheitern die markierten Schritte.`);
 		expect(text('member_change')).toBe(`Der Plan „Weekly“ läuft danach unter deinem Namen statt unter dem von ${EVA}.`);
 		expect(text('lapsing')).toBe('Beim Plan „Hourly“ gelten die freigegebenen Verbindungen danach nicht mehr. Gib sie unter Automation → Trigger mit „Verbindungen prüfen“ neu frei. Bis dahin scheitern seine Schritte, die eine Verbindung brauchen.');
 		expect(text('paused')).toBe('Der Plan „Monthly“ ist pausiert und bleibt es. Soll er weiterlaufen, übernimm ihn einzeln unter „Trigger“ mit „Übernehmen“.');
