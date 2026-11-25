@@ -409,6 +409,24 @@ describe('the shell banner in a tab that stays open past an end', () => {
 		expect(shown()).toEqual([SOON_LINE('acme.myshopify.com', '20. Februar 2099')]);
 	});
 
+	it('an answer after a failed question clears it: an end that passes later keeps its date while the next question is open', async () => {
+		// 12:00 the question fails; 12:01 the next one is answered 10 s late, and A's new end
+		// (12:01:05) comes inside that answer; 12:02 asks again, and that question stays open.
+		const END_IN_ANSWER = '2099-01-20T12:01:05.000Z';
+		answers = [[A(END_A)], 500, [A(END_IN_ANSWER)], 'hang'];
+		answerTakes = [0, 0, 10_000];
+		await open();
+		await minutes(2);
+		expect(shown()).toEqual([UNKNOWN_LINE('acme.myshopify.com', '20. Januar 2099')]);
+		await minutes(1);
+		expect(questions).toBe(3);
+		expect(shown()).toEqual([SOON_LINE('acme.myshopify.com', '20. Januar 2099')]);
+		// 12:02: the end has passed and a question is open, but none has failed since the answer.
+		await minutes(1);
+		expect(questions).toBe(4);
+		expect(shown()).toEqual([SOON_LINE('acme.myshopify.com', '20. Januar 2099')]);
+	});
+
 	it('a failed question followed by the engine\'s "ended" reads ended', async () => {
 		answers = [[A(END_A)], 500, [A(END_A, true)]];
 		await open();
