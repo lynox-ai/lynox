@@ -37,6 +37,17 @@ describe('the API connection questions say connection', () => {
     expect(flattenPrompt(API_SETUP_DIALOG.de.adopt(word, p))).toBe('⚠ API: Die Anmeldung der API-Verbindung CRM (Id crm-api) übernehmen? Sie wurde beim Anbieter in der Sitzung von mandate:abc autorisiert, deren Zugang nicht mehr aktiv ist. Nach der Übernahme gehört die Verbindung dir. lynox sendet dann bei deinen Anfragen und Läufen an api.crm.example die Tokens der Anmeldung und die Vault-Namen, die diese Verbindung nennt. Sie werden gelesen wie bei jeder deiner Verbindungen, Werte aus der Umgebung eingeschlossen: CRM_TOKEN. Übernehmen?');
   });
 
+  it('asks to delete a connection', () => {
+    expect(flattenPrompt(API_SETUP_DIALOG.en.deleteProfile(word, 'CRM', 'crm-api', 'api.crm.example', pv``))).toBe('⚠ API: delete the API connection CRM (id crm-api, host api.crm.example)? Delete it?');
+    expect(flattenPrompt(API_SETUP_DIALOG.de.deleteProfile(word, 'CRM', 'crm-api', 'api.crm.example', pv``))).toBe('⚠ API: die API-Verbindung CRM löschen (Id crm-api, Host api.crm.example)? Löschen?');
+  });
+
+  it('asks to release a vault key to a connection, and refers to it as the connection', () => {
+    const p = { name: 'CRM_TOKEN', trailId: 'crm-api', author: 'mandate:abc', slots: [], hosts: ['api.crm.example'], more: 0, viewed: undefined, version: 'v1', clientId: false, held: true };
+    expect(flattenPrompt(API_SETUP_DIALOG.en.release(word, p))).toMatch(/^⚠ API: release the vault key CRM_TOKEN to API connection crm-api\? It was set up in the session of mandate:abc\. /);
+    expect(flattenPrompt(API_SETUP_DIALOG.de.release(word, p))).toMatch(/^⚠ API: Den Vault-Schlüssel CRM_TOKEN für die API-Verbindung crm-api freigeben\? Sie wurde in der Sitzung von mandate:abc eingerichtet\. /);
+  });
+
   it('says why no authorization address could be derived, about the connection', () => {
     expect(PRESET_NOTE.en.unknownProvider('google')).toBe('No authorization address could be derived: this connection names a provider this engine does not have built in, so there is nothing here to disclose or accept. It knows: google.');
     expect(PRESET_NOTE.en.badPreset('x', 'bad')).toBe('No authorization address could be derived: the built-in provider "x" is defined wrongly in this engine — bad. Nothing on this connection fixes that; report it.');
