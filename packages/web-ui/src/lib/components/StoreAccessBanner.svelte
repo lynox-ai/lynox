@@ -26,7 +26,7 @@
 	// None hangs: a question that gets no answer is given up after this long, and the next minute
 	// asks again. The viewer is waited for a shorter while: an answer that does not come is a viewer
 	// not named yet, whose profiles are asked (the same route serves every user); the line shows
-	// only once the server names the owner, also when it names a mandate later.
+	// only once the server names the owner, and stays hidden when it names a mandate later.
 	const QUESTION_MS = 15_000;
 	const VIEWER_MS = 5_000;
 	// One question at a time. Today a question ends before the next minute's look; the flag keeps it
