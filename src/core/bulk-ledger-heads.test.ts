@@ -38,6 +38,8 @@ interface Row {
   claimed?: boolean;
   /** The run sent its write (`write_sent`). */
   sent?: boolean;
+  /** Failed in at least one pass (`failed_once`). */
+  failedOnce?: boolean;
 }
 
 /** A run of the given targets, its counters as the rows say. */
@@ -47,10 +49,10 @@ function run(targetSystem: string, rows: Row[]): string {
   db.prepare(`INSERT INTO bulk_runs (id, rule_hash, target_system, undo, phase, targets_total, targets_applied)
     VALUES (?, 'fixture', ?, 'restorable', 'aborted', ?, ?)`).run(id, targetSystem, rows.length, rows.filter((r) => r.applied).length);
   rows.forEach((r, seq) => {
-    db.prepare(`INSERT INTO bulk_targets (run_id, seq, target_key, change, deselected_at, applied_at, undone_at, error, unknown_sends, claimed_at, write_sent)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    db.prepare(`INSERT INTO bulk_targets (run_id, seq, target_key, change, deselected_at, applied_at, undone_at, error, unknown_sends, claimed_at, write_sent, failed_once)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       id, seq, engineDb.enc(`k${String(seq)}`), r.change ?? 'update', r.deselected ? AT : null, r.applied ? AT : null,
-      r.undone ? AT : null, r.error ?? null, r.unknownSends ?? 0, r.claimed ? AT : null, r.sent ? 1 : 0,
+      r.undone ? AT : null, r.error ?? null, r.unknownSends ?? 0, r.claimed ? AT : null, r.sent ? 1 : 0, r.failedOnce ? 1 : 0,
     );
   });
   return id;
@@ -153,3 +155,36 @@ describe('the head counts of a run', () => {
     expect(ledger.getStatus(run(LOCAL, []))!.heads).toEqual(Object.fromEntries(BULK_HEADS.map((h) => [h, 0])));
   });
 });
+
+describe('the unclear sends a halt names', () => {
+  // A timeout is recorded as a failure (`write_failed`, `failed_once`) and leaves the send unclear.
+  const timedOut: Row = { sent: true, unknownSends: 1, error: 'write_failed', failedOnce: true };
+  const refused: Row = { sent: true, error: 'write_failed', failedOnce: true };
+
+  it('counts a target whose send is unclear now and that this pass recorded as failed', () => {
+    const s = ledger.getStatus(run(EXTERNAL, [timedOut, refused, { applied: true, failedOnce: true }]))!;
+    expect(s.passUnclear).toBe(1);
+    expect(s.heads.failed).toBe(1);
+    expect(s.heads.unclear).toBe(1);
+    // Failed once counts every target that failed in a pass, an unclear one included.
+    expect(s.failedOnce).toBe(3);
+  });
+
+  it('leaves out an unclear target no failure of this pass names', () => {
+    // Left unclear by an earlier pass: a resume cleared its error, or this pass only read it.
+    const s = ledger.getStatus(run(EXTERNAL, [
+      { sent: true, unknownSends: 1, failedOnce: true },
+      { sent: true, unknownSends: 1, error: 'sent_unknown', failedOnce: true },
+    ]))!;
+    expect(s.passUnclear).toBe(0);
+    expect(s.heads.unclear).toBe(2);
+  });
+
+  it('reads unclear off the same predicate as the head: a local run has no unclear target', () => {
+    const s = ledger.getStatus(run(LOCAL, [timedOut, refused]))!;
+    expect(s.heads.unclear).toBe(0);
+    expect(s.passUnclear).toBe(0);
+    expect(s.heads.failed).toBe(2);
+  });
+});
+
