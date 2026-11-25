@@ -27,7 +27,7 @@ import { BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSour
 import type { BulkInvalidReason } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { contractGrants, isMintedShopifyWrite } from '../tools/permission-guard.js';
-import { assertHostPolicy, fetchPinned, type HostPolicyContext } from './network-guard.js';
+import { assertHostPolicy, fetchPinned, StoreRequestRefusedError, type HostPolicyContext } from './network-guard.js';
 import type { StorePass } from './store-pass.js';
 import type { StoreAttachRefusal } from './shopify-host.js';
 import { urlScanForms } from './url-scan-forms.js';
@@ -71,6 +71,9 @@ export type ExternalRead =
   | { kind: 'store_refused'; reason: StoreAttachRefusal }
   /** The network policy or the address check refused the host; nothing was sent. */
   | { kind: 'blocked' }
+  /** The store's pass refused the request as it is formed (`StoreRequestRefusedError`); nothing
+   *  was sent. Not `blocked`: the host may be reached, and going on sends the same request again. */
+  | { kind: 'store_request_refused' }
   /** The run's contract does not grant this call; nothing was sent. */
   | { kind: 'not_granted' }
   /** The address or the body looked like it carries a secret; nothing was sent. */
@@ -522,6 +525,7 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
           ...(payload !== undefined ? { body: payload } : {}),
         }, attached.pass);
       } catch (err: unknown) {
+        if (err instanceof StoreRequestRefusedError) return { kind: 'store_request_refused' };
         if (err instanceof Error && err.message.startsWith('Blocked:')) return { kind: 'blocked' };
         return { kind: 'failed' };
       }
@@ -630,7 +634,7 @@ export function graphqlWriteAnswer(answer: ExternalRead): ExternalRead {
  */
 export function refusedAnswer(answer: ExternalRead): boolean {
   switch (answer.kind) {
-    case 'unauthorized': case 'not_found': case 'retry_after': case 'refused': case 'blocked':
+    case 'unauthorized': case 'not_found': case 'retry_after': case 'refused': case 'blocked': case 'store_request_refused':
       return true;
     default:
       return false;
@@ -742,6 +746,7 @@ export function externalWriter(client: ExternalClient, opts: {
       case 'unauthorized': throw new BulkWriterHalt(BULK_HALT_REASONS.unauthorized);
       case 'reconnect': throw new BulkWriterHalt(got.why === 'ended' ? BULK_HALT_REASONS.storeAccessEnded : BULK_HALT_REASONS.storeClientMisnamed);
       case 'blocked': throw new BulkWriterHalt(BULK_HALT_REASONS.blocked);
+      case 'store_request_refused': throw new BulkWriterHalt(BULK_HALT_REASONS.storeRequestRefused);
       case 'not_granted': throw new BulkWriterHalt(BULK_HALT_REASONS.contract);
       case 'unrecorded': throw new BulkWriterHalt(BULK_HALT_REASONS.unrecorded);
       case 'secret': throw new BulkSecretError();

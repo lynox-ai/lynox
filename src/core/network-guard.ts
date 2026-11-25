@@ -771,6 +771,18 @@ export function setPinnedTransportForTests(transport: PinnedTransport): () => vo
 }
 
 /**
+ * A store pass refused the request as it is formed (its path, its body, its headers): nothing was
+ * sent. Its own class, so a caller tells it from the network policy's refusals, which name the
+ * host; the message still starts with `Blocked:` like every refusal here.
+ */
+export class StoreRequestRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StoreRequestRefusedError';
+  }
+}
+
+/**
  * SSRF-safe fetch: resolves DNS once, validates the IP, then pins the http(s)
  * connection to that IP via Agent.lookup. The original hostname is preserved
  * in the URL path (so the Host header is correct) and reaches TLS as SNI (since
@@ -805,11 +817,11 @@ export async function fetchPinned(url: string, init: RequestInit = {}, pass?: St
     // A store pass reaches its own store and nothing else (`store-pass.ts`), checked here on
     // the URL as it is finally sent, on every hop.
     const refusal = toStore ? storePassRefusal(parsed, headers, pass, init.method ?? 'GET') : 'a store pass reaches only its own store';
-    if (refusal !== null) throw new Error(`Blocked: request to a Shopify store refused: ${refusal}. ${storeRefusalNext(refusal)}`);
+    if (refusal !== null) throw new StoreRequestRefusedError(`Blocked: request to a Shopify store refused: ${refusal}. ${storeRefusalNext(refusal)}`);
     // The exchange's body is digested as the bytes it is sent as; a body that is not a string
     // is not the one serialised for it.
     if (pass.kind === 'exchange' && typeof init.body !== 'string') {
-      throw new Error('Blocked: request to a Shopify store refused: the token exchange sends its body as a string. Do not retry it with changed headers or a changed address.');
+      throw new StoreRequestRefusedError('Blocked: request to a Shopify store refused: the token exchange sends its body as a string. Do not retry it with changed headers or a changed address.');
     }
   } else if (toStore) {
     // Without a pass: a Host header that names a store while the URL does not is the header's
@@ -832,7 +844,7 @@ export async function fetchPinned(url: string, init: RequestInit = {}, pass?: St
   if (pass !== undefined) {
     // After the body is bytes: the exchange's pass names those bytes, and is spent here.
     const bodyRefusal = storePassBodyRefusal(pass, body, headers);
-    if (bodyRefusal !== null) throw new Error(`Blocked: request to a Shopify store refused: ${bodyRefusal}. ${storeRefusalNext(bodyRefusal)}`);
+    if (bodyRefusal !== null) throw new StoreRequestRefusedError(`Blocked: request to a Shopify store refused: ${bodyRefusal}. ${storeRefusalNext(bodyRefusal)}`);
   }
 
   // Default port matches Node's URL behaviour (empty → protocol default).

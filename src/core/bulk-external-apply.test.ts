@@ -36,7 +36,7 @@ import {
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { runBulkPreview } from './bulk-preview.js';
 import { bulkWriterFor, runBulkEffect, type TargetWriter } from './bulk-apply.js';
-import { setPinnedTransportForTests, type PinnedTransportInput } from './network-guard.js';
+import { setPinnedTransportForTests, StoreRequestRefusedError, type PinnedTransportInput } from './network-guard.js';
 import { createToolContext } from './tool-context.js';
 import { TriggerStore } from './trigger-store.js';
 import { WorkerLoop } from './worker-loop.js';
@@ -73,6 +73,8 @@ interface Shop {
   landThenFail?: Set<string>;
   /** `METHOD path` whose request reaches the shop and whose connection then breaks. */
   dropAfter?: Set<string>;
+  /** Per `METHOD path`, the store's pass refuses the request at the send (`StoreRequestRefusedError`). */
+  passRefuses?: Set<string>;
   /** Per `METHOD path`, the answers of the next requests in order (0: the connection breaks);
    *  once used up, the shop answers as usual. */
   sequence?: Map<string, number[]>;
@@ -97,6 +99,7 @@ function serve(s: Shop): () => void {
     const body = input.body === undefined ? undefined : JSON.parse(input.body.toString('utf8')) as unknown;
     const auth = Object.entries(input.headers).find(([k]) => k.toLowerCase() === 'authorization')?.[1];
     s.requests.push({ method: input.method, path, body, auth });
+    if (s.passRefuses?.has(`${input.method} ${path}`)) throw new StoreRequestRefusedError('Blocked: request to a Shopify store refused: the body names an access token. Do not retry it with a changed body.');
     if (s.dropAfter?.has(`${input.method} ${path}`)) throw new Error('connection reset');
     const next = s.sequence?.get(`${input.method} ${path}`)?.shift();
     if (next === 0) throw new Error('connection reset');
@@ -780,6 +783,25 @@ describe('applying an external run', () => {
       expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(noCred) })).status).toBe('halted');
       expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.credential);
       expect(s.requests.length).toBe(before);
+    } finally {
+      restore();
+    }
+  });
+
+  it('halts the write on a pass\'s refusal at the send with its own reason, keeps what was written before, and counts the refusal as no write', async () => {
+    const s = shop();
+    s.passRefuses = new Set(['PATCH /products/1']);
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await approvedRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+      const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(out.status).toBe('halted');
+      expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.storeRequestRefused, applied: 1, failed: 0, sentUnknown: 0 });
+      // Target 0 stays written; the refused PATCH reached the stub only as the refusal, and target 2 after it was not sent.
+      expect(s.items.get('/products/0')!['price']).toBe('15.00');
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0', '/products/1']);
+      expect(refusedAnswer({ kind: 'store_request_refused' })).toBe(true);
     } finally {
       restore();
     }
