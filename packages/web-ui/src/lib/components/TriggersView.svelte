@@ -8,6 +8,7 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { escalationNotice } from '../utils/trigger-escalation.js';
+	import WatchAddress from './WatchAddress.svelte';
 	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction, showsWatchAddress, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
 	import { endedNotices, pausedTitleLine, pausedWhoText, planTitle, refusalText, takeoverLines, writtenByMember, type PausedEnded, type TakeoverPreview } from '../utils/plan-takeover.js';
 	import { refreshPausedPlans } from '../stores/paused-plans.svelte.js';
@@ -693,7 +694,7 @@
 							{#if showsWatchAddress(trigger) && !held(trigger)}
 								<p class="mt-1 break-words text-xs text-text-muted" data-trigger-watch>
 									<span class="font-medium">{t('triggers.watch_url')}:</span>
-									<span class="font-medium text-text">{watchOf(trigger)?.host ?? ''}</span>{watchOf(trigger)?.rest ?? ''}
+									<WatchAddress host={watchOf(trigger)?.host ?? ''} rest={watchOf(trigger)?.rest ?? ''} testid="trigger-watch-address" />
 								</p>
 							{/if}
 							{#if held(trigger)}
@@ -722,7 +723,7 @@
 									{#if !ownerStamps(trigger) && showsWatchTarget(trigger)}
 										<div class="text-xs text-text-muted" data-consent-watch>
 											<span class="font-medium" data-consent-label="watch">{t('triggers.watch_url')}:</span>
-											<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5"><span class="font-medium text-text">{watchOf(trigger)?.host ?? ''}</span>{watchOf(trigger)?.rest ?? ''}</p>
+											<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5"><WatchAddress host={watchOf(trigger)?.host ?? ''} rest={watchOf(trigger)?.rest ?? ''} testid="consent-watch-address" /></p>
 											{#if watchOf(trigger)?.intervalMinutes}
 												<p class="mt-0.5" data-consent-cadence>{tf('triggers.watch_every', { minutes: String(watchOf(trigger)?.intervalMinutes) })}</p>
 											{/if}
