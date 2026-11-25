@@ -9,6 +9,7 @@ import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
 import { epochStartByTimeSql } from './grant-ledger.js';
+import { chainEndCountsSql, logChainEndCounts, repointToChainEndSql } from './relation-source.js';
 
 /**
  * EngineDb — the consolidated per-tenant subject-graph store (Foundation Rework v2, S0).
@@ -1645,7 +1646,18 @@ const MIGRATIONS: string[] = [
    ALTER TABLE audit_log ADD COLUMN poll_last TEXT;
    CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts);
    CREATE INDEX IF NOT EXISTS idx_audit_log_poll_fold ON audit_log(action, ts) WHERE phase = 'read' AND poll_count IS NULL;`,
+  // v72: relationships follow the memory that carries their fact. Before, a consolidation retired
+  // the duplicate and left its relationships on it; the GC then deleted the memory and the foreign
+  // key set their source to NULL, so they stayed readable and out of reach of any later deletion.
+  // This moves each relationship of a replaced memory to the end of its chain of successors
+  // (relation-source.ts › repointToChainEndSql). Counted and logged before it runs (`_migrate`).
+  // Mirrors agent-memory.db v8.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (72);
+   ${repointToChainEndSql('relationships')}`,
 ];
+
+/** The migration index (0-based) of v72, which moves relationships to the end of their chain. */
+const REPOINT_MIGRATION_INDEX = 71;
 
 export interface EngineDbOptions {
   /**
@@ -1846,6 +1858,10 @@ export class EngineDb {
     for (let i = currentVersion; i < MIGRATIONS.length; i++) {
       // Atomic per-migration: the version stamp + DDL are all-or-nothing, so a
       // crash can't bump the version past un-applied schema (see AgentMemoryDb).
+      if (i === REPOINT_MIGRATION_INDEX) {
+        logChainEndCounts('engine.db', this.db.prepare(chainEndCountsSql('relationships')).get() as
+          { to_active: number; to_deleted: number; without_end: number } | undefined);
+      }
       this.db.transaction(() => { this.db.exec(MIGRATIONS[i]!); })();
     }
   }

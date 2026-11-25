@@ -5,7 +5,7 @@ import { blobToEmbed, cosineSimilarity } from './embedding.js';
 import { canSupersede } from './provenance.js';
 import type { ProvenanceKind } from '../types/memory.js';
 import { ENCRYPTED_PREFIX } from './strict-decrypt.js';
-import { sourceKeptSql } from './relation-source.js';
+import { reapRetiredSourceSql, repointRelationsSql, sourceKeptSql } from './relation-source.js';
 
 /** The columns {@link MemoryGraphStore.getStub} reads back (test/inspection). */
 export interface MemoryStubRow {
@@ -323,7 +323,15 @@ export class MemoryGraphStore {
   markSuperseded(
     memoryId: string,
     supersededById: string,
-    opts?: { newTier?: ProvenanceKind | undefined },
+    opts?: {
+      newTier?: ProvenanceKind | undefined;
+      /**
+       * The successor carries the same fact (a consolidation's keeper, a tier raise's new
+       * row): the retired stub's relationships move onto it, in the same transaction. Off for
+       * a contradiction, whose relationships belong to the outdated fact and stay on the stub.
+       */
+      carryRelationships?: boolean | undefined;
+    },
   ): TierDivergenceReport | null {
     let diverged: TierDivergenceReport | null = null;
     if (opts?.newTier !== undefined) {
@@ -333,10 +341,13 @@ export class MemoryGraphStore {
         diverged = { newTier: opts.newTier, stubTier: old.source_type as ProvenanceKind };
       }
     }
-    this.db.prepare(`
-      UPDATE memories SET is_active = 0, superseded_by = ?, updated_at = datetime('now')
-      WHERE id = ?
-    `).run(supersededById, memoryId);
+    this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE memories SET is_active = 0, superseded_by = ?, updated_at = datetime('now')
+        WHERE id = ?
+      `).run(supersededById, memoryId);
+      if (opts?.carryRelationships) this.db.prepare(repointRelationsSql('relationships')).run(supersededById, memoryId);
+    })();
     return diverged;
   }
 
@@ -529,6 +540,11 @@ export class MemoryGraphStore {
         this.db.prepare(
           `DELETE FROM relationships WHERE source_memory_id IN (${placeholders})`,
         ).run(...chunk);
+        // A predecessor naming a purged memory as its successor would point at nothing; it reads
+        // as deleted from here on, as in AgentMemoryDb.purgeMemoriesByIds.
+        this.db.prepare(
+          `UPDATE memories SET superseded_by = NULL WHERE superseded_by IN (${placeholders})`,
+        ).run(...chunk);
         deleted += this.db.prepare(
           `DELETE FROM memories WHERE id IN (${placeholders})`,
         ).run(...chunk).changes;
@@ -538,13 +554,28 @@ export class MemoryGraphStore {
     }).immediate();
   }
 
+  /**
+   * Move the relationships of `fromId` onto `toId`, which carries the same fact now and must
+   * exist (the source is a foreign key). Not for a contradiction. Returns the relationships moved.
+   */
+  repointRelationships(fromId: string, toId: string): number {
+    return this.db.prepare(repointRelationsSql('relationships')).run(toId, fromId).changes;
+  }
+
   /** The engine.db mirror of {@link AgentMemoryDb.markReplaced}, in one transaction. */
   markReplaced(ids: string[], successorId: string): number {
     if (ids.length === 0) return 0;
     const placeholders = ids.map(() => '?').join(',');
-    return this.db.transaction(() => this.db.prepare(
-      `UPDATE memories SET superseded_by = ?, updated_at = datetime('now') WHERE id IN (${placeholders}) AND is_active = 0 AND superseded_by IS NULL AND id <> ?`,
-    ).run(successorId, ...ids, successorId).changes)();
+    return this.db.transaction(() => {
+      const changed = this.db.prepare(
+        `UPDATE memories SET superseded_by = ?, updated_at = datetime('now') WHERE id IN (${placeholders}) AND is_active = 0 AND superseded_by IS NULL AND id <> ?`,
+      ).run(successorId, ...ids, successorId).changes;
+      // The moved fact's relationships go with it, only from the rows this move names as replaced.
+      this.db.prepare(
+        `UPDATE relationships SET source_memory_id = ? WHERE source_memory_id IN (SELECT id FROM memories WHERE id IN (${placeholders}) AND superseded_by = ?)`,
+      ).run(successorId, ...ids, successorId);
+      return changed;
+    })();
   }
 
   /**
@@ -612,12 +643,11 @@ export class MemoryGraphStore {
         ? this._linkedSubjectIds('SELECT id FROM memories WHERE is_active = 0', [])
         : [];
       // Before the memories, as `purgeMemories` does: the FK is ON DELETE SET NULL, so a
-      // relationship sourced from a deleted stub would survive it with its `description`
-      // and no source, indistinguishable from an edge that never had one. Deleted means
-      // deactivated without a successor; a superseded stub's relationships stay as before.
-      this.db.prepare(
-        'DELETE FROM relationships WHERE source_memory_id IN (SELECT id FROM memories WHERE is_active = 0 AND superseded_by IS NULL)',
-      ).run();
+      // relationship sourced from a retired stub would survive it with its `description`
+      // and no source, indistinguishable from an edge that never had one, and out of reach of
+      // any later deletion. A stub replaced by the same fact handed its relationships to the
+      // successor; what a retired stub still holds belongs to a deleted or contradicted fact.
+      this.db.prepare(reapRetiredSourceSql('relationships')).run();
       const changes = this.db.prepare('DELETE FROM memories WHERE is_active = 0').run().changes;
       return { deleted: changes, candidates: found };
     }).immediate();

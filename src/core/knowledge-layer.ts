@@ -2210,6 +2210,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         // short-circuits (`existing && incoming`) when either row is missing, so retiring
         // first would make it silently pass. Order is load-bearing, not stylistic.
         if (!this.db.supersedMemory(candidate.id, id, { trustGate: true })) throw TIER_RAISE_REFUSED;
+        this.db.repointRelations(candidate.id, id);
         this.db.createSupersedes(id, candidate.id, 'tier-raise');
         this.db.addConfirmations(id, candidate.confirmation_count);
         return id;
@@ -2268,6 +2269,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
           confirmationCount: candidate.confirmation_count,
         });
         if (oldMentions.length > 0) memoryGraph.linkSubjects(newId, oldMentions);
+        // After the new stub exists: the relationships' source is a foreign key to it.
+        memoryGraph.repointRelationships(candidate.id, newId);
       })();
       this._emitMirrorDivergences(diverged, namespace);
     } catch (err: unknown) {
@@ -2309,7 +2312,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       try {
         this.engineDb!.getDb().transaction(() => {
           for (const p of pairs) {
-            memoryGraph.markSuperseded(p.victimId, p.keeperId);
+            memoryGraph.markSuperseded(p.victimId, p.keeperId, { carryRelationships: true });
             memoryGraph.addConfirmations(p.keeperId, p.victimConfirmations);
           }
         })();
