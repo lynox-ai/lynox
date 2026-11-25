@@ -1353,7 +1353,7 @@ const HTTPS_REFUSAL_START = 'Blocked: HTTP not allowed';
  * is neither created nor read, and one created before the policy changed stops being read.
  * The reason is told by the whole refusal, never by a word in it, since a host name can carry one.
  */
-export function watchPolicyRefusal(url: string, ctx: HostPolicyContext | undefined): { why: string; wayOut: string; shown: BlockedReason | null } | null {
+export function watchPolicyRefusal(url: string, ctx: HostPolicyContext | undefined): { why: string; wayOut: string; shown: BlockedReason | null; privateAddress?: true } | null {
   try {
     assertHostPolicy(url, { surface: 'discovery' }, ctx);
     return null;
@@ -1381,7 +1381,10 @@ export function watchPolicyRefusal(url: string, ctx: HostPolicyContext | undefin
     }
     if (message.startsWith(HTTPS_REFUSAL_START)) return { why: 'this instance only reads HTTPS pages (enforce_https).', wayOut: 'Watch the https:// address instead.', shown: { kind: 'watch_https' } };
     const why = message.replace(/^Blocked:\s*/, '');
-    return { why: `this instance's network settings refuse it: ${/[.!?]$/.test(why) ? why : `${why}.`}`, wayOut: '', shown: null };
+    // A private or internal address: the poll tells it as lynox's own sentence, as a fetch refused
+    // for the same reason (`watch-fetch-cause.ts`).
+    const privateAddress = /^Blocked: (private IP address "|"[^"]*" resolves to private IP ")/.test(message);
+    return { why: `this instance's network settings refuse it: ${/[.!?]$/.test(why) ? why : `${why}.`}`, wayOut: '', shown: null, ...(privateAddress ? { privateAddress: true as const } : {}) };
   }
 }
 

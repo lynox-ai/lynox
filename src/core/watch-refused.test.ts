@@ -49,7 +49,7 @@ describe('watchRefusedNow', () => {
 
   it('tells a refusal of the https address that no setting names as it is, without a way out or a line in the view', () => {
     expect(watchPolicyRefusal('http://10.0.0.1/p', ctx('guarded', true))).toEqual({
-      why: 'this instance\'s network settings refuse it: private IP address "10.0.0.1".', wayOut: '', shown: null,
+      why: 'this instance\'s network settings refuse it: private IP address "10.0.0.1".', wayOut: '', shown: null, privateAddress: true,
     });
     const unknown = { ...ctx('guarded', true), networkPolicy: 'no-such-policy' } as unknown as Parameters<typeof watchPolicyRefusal>[1];
     expect(watchPolicyRefusal('http://listed.example/p', unknown)).toEqual({

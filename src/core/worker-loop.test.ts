@@ -588,8 +588,50 @@ describe('WorkerLoop', () => {
     policy = { ...policy, networkPolicy: 'allow-list' };
     // Control: the list's own host is requested (the page answers 500, so the check ends there).
     mockFetchPinned.mockResolvedValueOnce(new Response('down', { status: 500 }));
-    await expect(fire(makeTask({ id: 't-pol3', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://listed.test/p', interval_minutes: 60 }) }))).rejects.toThrow(/HTTP 500/);
+    await expect(fire(makeTask({ id: 't-pol3', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://listed.test/p', interval_minutes: 60 }) }))).rejects.toThrow(/HTTP status 500/);
     expect(mockFetchPinned).toHaveBeenCalledTimes(1);
+  });
+
+  it('executeWatch fails a page it could not read with lynox\'s own sentence in the instance\'s language, the raw error only as its cause', async () => {
+    vi.useRealTimers();
+    const taskManager = { recordTaskRun: vi.fn(), updateWatchConfig: vi.fn() } as unknown as TaskManager;
+    const engine = {
+      getTaskManager: vi.fn(() => taskManager),
+      getUserConfig: vi.fn(() => ({})),
+      getToolContext: vi.fn(() => ({ containment: null })),
+      createSession: vi.fn(),
+      escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
+      getEngineDb: () => null,
+      getMandateEnds: () => null,
+      config: { language: 'de' },
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
+    const BLOCKED_DE = 'liess sich nicht lesen: Die Adresse führt in ein privates oder internes Netz, das eine Beobachtung nicht liest. Daran ändert ein neuer Versuch nichts. Ändere die Adresse der Beobachtung oder lösche sie.';
+    mockFetchPinned.mockClear();
+    // A private address the policy check refuses before any request: recorded, not thrown.
+    await fire(makeTask({ id: 't-lit', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'http://127.0.0.1/admin', interval_minutes: 60 }) }));
+    expect(vi.mocked(taskManager.recordTaskRun).mock.calls.at(-1)?.slice(1)).toEqual([`Die beobachtete Seite http://127.0.0.1/admin ${BLOCKED_DE}`, 'failed']);
+    expect(mockFetchPinned).not.toHaveBeenCalled();
+    // A host that resolves to a private address, refused by the fetch itself: thrown, the raw error as its cause.
+    const raw = new Error('Blocked: "intra.example" resolves to private IP "10.0.0.4"');
+    mockFetchPinned.mockRejectedValueOnce(raw);
+    const err = await fire(makeTask({ id: 't-blk', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://intra.example/admin', interval_minutes: 60 }) })).then(() => null, (e: unknown) => e as Error);
+    expect(err?.message).toBe(`Die beobachtete Seite https://intra.example/admin ${BLOCKED_DE}`);
+    expect(err?.message).not.toContain('Blocked');
+    expect(err?.cause).toBe(raw);
+    mockFetchPinned.mockResolvedValueOnce(new Response('gone', { status: 404, statusText: 'Not Found' }));
+    await expect(fire(makeTask({ id: 't-404', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://shop.example/alt', interval_minutes: 60 }) })))
+      .rejects.toThrow('Die beobachtete Seite https://shop.example/alt liess sich nicht lesen: Der Server hat mit HTTP-Status 404 (nicht gefunden) geantwortet.');
+    // English without a German configuration.
+    Object.assign(engine as unknown as Record<string, unknown>, { config: {} });
+    mockFetchPinned.mockRejectedValueOnce(raw);
+    await expect(fire(makeTask({ id: 't-blk-en', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://intra.example/admin', interval_minutes: 60 }) })))
+      .rejects.toThrow('The watched page https://intra.example/admin could not be read: The address leads into a private or internal network, which a watch does not read.');
+    await fire(makeTask({ id: 't-lit-en', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'http://127.0.0.1/admin', interval_minutes: 60 }) }));
+    expect(String(vi.mocked(taskManager.recordTaskRun).mock.calls.at(-1)?.[1])).toBe("The watched page http://127.0.0.1/admin could not be read: The address leads into a private or internal network, which a watch does not read. Trying again will not change that. Change the watch's address or delete the watch.");
+    // Each queued answer was read: the three fetched pages were requested, the literal never.
+    expect(mockFetchPinned).toHaveBeenCalledTimes(3);
   });
 
   it('executeWatch hands the analysis model the stored URL without the characters that render as nothing', async () => {
