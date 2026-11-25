@@ -12179,6 +12179,9 @@ describe('LynoxHTTPApi', () => {
         { id: 'trg-bea', title: 'Wochenbericht', created_by: 'owner', mandate_editor: 'mandate:bea@example.com', mandate_editor_id: 'grant-b', mandate_edited_at: AT },
         { id: 'trg-taken', title: 'Übernommen', created_by: 'mandate:anna@example.com', created_mandate_id: 'grant-a', created_at: AT,
           covered_created_by: 'mandate:anna@example.com', covered_created_id: 'grant-a', covered_created_at: AT },
+        // The owner took over the change a helper made last: the same line, said as taken over.
+        { id: 'trg-edit-taken', title: 'Geändert, übernommen', created_by: 'owner', mandate_editor: 'mandate:bea@example.com', mandate_editor_id: 'grant-b', mandate_edited_at: AT,
+          covered_edited_by: 'mandate:bea@example.com', covered_edited_id: 'grant-b', covered_edited_at: AT },
         { id: 'trg-own', title: 'Eigener', created_by: 'owner' },
         { id: 'trg-old', title: 'Alt' },
         // A helper's mark from before grant ids were stored: whose grant it was is not known.
@@ -12203,6 +12206,7 @@ describe('LynoxHTTPApi', () => {
             'trg-anna': [{ kind: 'set_up_by', name: 'Anna A.', takenOver: false }],
             'trg-bea': [{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }],
             'trg-taken': [{ kind: 'set_up_by', name: 'Anna A.', takenOver: true }],
+            'trg-edit-taken': [{ kind: 'last_changed_by', name: 'Bea B.', takenOver: true }],
             'trg-own': [],
             'trg-old': [],
             'trg-legacy': [{ kind: 'set_up_by', name: 'anna@example.com', takenOver: false }],
@@ -12226,7 +12230,7 @@ describe('LynoxHTTPApi', () => {
           api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'bea@example.com' }) as RequestPrincipal);
           const readsBefore = reads.length;
           const none = await setupOf();
-          for (const id of ['trg-anna', 'trg-bea', 'trg-taken', 'trg-own', 'trg-old', 'trg-legacy']) expect(none.byId[id]).toEqual([]);
+          for (const id of ['trg-anna', 'trg-bea', 'trg-taken', 'trg-edit-taken', 'trg-own', 'trg-old', 'trg-legacy']) expect(none.byId[id]).toEqual([]);
           expect(reads.length).toBe(readsBefore);
           for (const name of Object.values(shown)) expect(none.text).not.toContain(name);
           // A trail that cannot be read costs the owner the names, not the list: the address stands in.
