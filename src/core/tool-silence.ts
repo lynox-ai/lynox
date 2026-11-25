@@ -77,6 +77,11 @@ export class ToolSilenceClock {
       for (const call of this.open.values()) if (call.owner === owner) call.responseEnded = true;
       return;
     }
+    // Safe only because the agent loop awaits the dispatch of a response's calls before it calls
+    // the model again (`Agent._dispatchTools`, awaited in `Agent._loop`): an event of
+    // the agent's next response cannot arrive while one of those calls still runs. A loop that
+    // streamed on during its calls would release them early here; tool-silence-agent-loop.test.ts
+    // drives the real loop to catch that.
     if (event.type === 'text' || event.type === 'thinking' || event.type === 'tool_call') {
       for (const [key, call] of this.open) if (call.owner === owner && call.responseEnded) this.open.delete(key);
     }
