@@ -70,12 +70,12 @@ function tmp(): string {
   return dir;
 }
 
-function makeLayer(opts: { dir?: string; provider?: EmbeddingProvider; trustGate?: boolean } = {}): { layer: KnowledgeLayer; engine: EngineDb; dir: string } {
+function makeLayer(opts: { dir?: string; provider?: EmbeddingProvider; trustGate?: boolean; reads?: boolean } = {}): { layer: KnowledgeLayer; engine: EngineDb; dir: string } {
   const dir = opts.dir ?? tmp();
   const engine = new EngineDb(join(dir, 'engine.db'), '');
   const layer = new KnowledgeLayer(
     join(dir, 'mem.db'), opts.provider ?? new LocalProvider(), undefined, undefined,
-    engine, true, false, false, false, opts.trustGate ?? false,
+    engine, true, opts.reads ?? false, false, false, opts.trustGate ?? false,
   );
   closers.push(() => engine.close(), () => layer.close());
   return { layer, engine, dir };
@@ -128,8 +128,8 @@ describe('a relation follows the memory that carries its fact, in both stores', 
     expect(engineSources(engine)).toEqual([]);
   });
 
-  it('a contradiction does not hand the relations on: they go with the outdated fact, and the GC removes them', async () => {
-    const { layer, engine, dir } = makeLayer();
+  it.each([['legacy reads', false], ['engine.db reads', true]] as const)('a contradiction does not hand the relations on: they go with the outdated fact, and the GC removes them (%s)', async (_label, reads) => {
+    const { layer, engine, dir } = makeLayer({ reads });
     await layer.init();
     mock.extraction = EDGE;
     const old = (await layer.store('Alice works at Acme GmbH as CTO.', 'knowledge', scope)).memoryId;
