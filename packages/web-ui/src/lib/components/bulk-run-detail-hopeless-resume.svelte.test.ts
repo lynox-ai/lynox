@@ -39,6 +39,9 @@ let resumes: number;
 let confirms: number;
 let runGets: number;
 let shown: BulkRunDetailData;
+/** Answers held back until the test lets them through: the resume, and run r2's own answer. */
+let holdResume: Promise<void> | null;
+let holdR2: Promise<void> | null;
 
 beforeEach(() => {
 	target = document.createElement('div');
@@ -47,11 +50,13 @@ beforeEach(() => {
 	confirms = 0;
 	runGets = 0;
 	shown = RUN;
+	holdResume = null;
+	holdR2 = null;
 	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const u = String(url);
 		const reply = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 		if (init?.method === 'POST') {
-			if (u.endsWith('/resume')) { resumes++; return reply({ error: 'engine English', code: refuseWith }, 409); }
+			if (u.endsWith('/resume')) { resumes++; if (holdResume !== null) await holdResume; return reply({ error: 'engine English', code: refuseWith }, 409); }
 			if (u.endsWith('/confirm-probe')) { confirms++; return reply({}); }
 			return reply({});
 		}
@@ -59,6 +64,7 @@ beforeEach(() => {
 		const page = /\/targets\?offset=(\d+)&limit=(\d+)/.exec(u);
 		if (page) return reply({ targets: TARGETS.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		if (/\/bulk\/runs\/r1$/.test(u)) runGets++;
+		if (/\/bulk\/runs\/r2$/.test(u)) { if (holdR2 !== null) await holdR2; return reply({ ...shown, id: 'r2' }); }
 		return reply(shown);
 	}));
 });
@@ -170,6 +176,32 @@ describe('writing on after a start check that can never pass', () => {
 		expect(button(t('bulk.probe.continue')).disabled).toBe(false);
 		expect(target.querySelector('[data-testid="bulk-probe-hopeless"]')).toBeNull();
 		expect(errorLines()).toEqual([t('bulk.halt.shopifyNotCleared')]);
+	});
+
+	it('leaves a run that halted otherwise its way-on sentences, when the refusal answers after the run was opened again', async () => {
+		refuseWith = 'reach_resume_shopifySelfHosted';
+		let letResume!: () => void;
+		holdResume = new Promise((r) => { letResume = r; });
+		holdR2 = new Promise(() => {});
+		const props = $state({ runId: 'r1', onBack: () => {}, onOpen: () => {} });
+		const { default: BulkRunDetail } = await import('./BulkRunDetail.svelte');
+		component = mount(BulkRunDetail, { target, props });
+		await settle();
+		button(t('bulk.resume.write')).click();
+		await settle();
+		// While writing on is out, the owner opens another run and comes back; meanwhile the run
+		// halted on a refusal that offers no writing on.
+		props.runId = 'r2';
+		await settle();
+		shown = { ...RUN, haltKey: 'storeRequestRefused' };
+		props.runId = 'r1';
+		await settle();
+		letResume();
+		await settle();
+		expect(resumes).toBe(1);
+		expect(target.querySelector('[data-testid="bulk-resume-none"]')).not.toBeNull();
+		expect(target.textContent).toContain(t('bulk.halt.storeRequestRefused_before'));
+		expect(target.querySelector('[data-testid="bulk-resume-hopeless"]')).toBeNull();
 	});
 
 	it('says the cause in the page\'s language', async () => {
