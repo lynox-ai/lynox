@@ -34,10 +34,13 @@ import { Containment } from './containment.js';
 import { ContainmentMirror, ExactMirror, exactHeldAtBoot, exactMarkerOf, syncContainmentMirror, syncExactMarker } from './history-markers.js';
 import { exactMarkerOnDisk, isExactHeld, refuseDebug } from './exact-debug-refusal.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
-import { AuditLog } from './audit-log.js';
+import { AuditLog, recordMandateRevoked } from './audit-log.js';
+import { auditRetentionState, sqliteErrorCode, sweepAuditLog, type AuditSweepRecord } from './audit-retention.js';
+import type { AuditRetentionState } from '../contract/http.js';
 import { MandateEnds } from './mandate-ends.js';
 import { pauseEndedPlans } from './plan-pause.js';
-import { processErrorText } from './error-egress.js';
+import { isErrorTextReducedForProcess, processErrorText } from './error-egress.js';
+import { tableInLog } from './data-store-boot-log.js';
 import { fireBeforeRunGate } from './metered-request.js';
 import { SecretReleases } from './secret-releases.js';
 import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
@@ -513,6 +516,10 @@ export class Engine {
   private _startedAt = Date.now();
   /** Hourly debug-capture retention sweep; see `_pruneWireCaptures`. */
   private _wireRetentionTimer: ReturnType<typeof setInterval> | null = null;
+  /** Hourly actor-trail retention sweep; see `_sweepAuditLog`. */
+  private _auditRetentionTimer: ReturnType<typeof setInterval> | null = null;
+  /** The last actor-trail sweep, for the health word; null before the first. */
+  private _auditSweep: AuditSweepRecord | null = null;
   private _runRegistry: import('./run-registry.js').RunRegistry | null = null;
   private _runBufferManager: import('./run-buffer.js').RunBufferManager | null = null;
   private _runExecutor: import('./run-executor.js').RunExecutor | null = null;
@@ -919,7 +926,7 @@ export class Engine {
   /**
    * What the inbox reads through the mail registry. `confirmAutoReply`: an envelope from Graph's
    * watch carries no headers, so for every follow-up from someone else the hook asks for the full
-   * message, whose envelope reads Auto-Submitted. Looked up at call time, so a provider
+   * message, whose envelope reads the automatic-mail headers. Looked up at call time, so a provider
    * added or replaced later is the one asked. No provider: throw, and the hook reopens.
    */
   private _applyInboxMailLookups(bootOpts: Parameters<typeof import('../integrations/inbox/bootstrap.js').bootstrapInbox>[0]): void {
@@ -1377,6 +1384,14 @@ export class Engine {
     this._onboardingFlagStore = this.engineDb ? new OnboardingFlagStore(this.engineDb) : null;
     // The actor trail rides engine.db as well (v22), for the same reason: it is always opened.
     this._toolContext.auditLog = this.engineDb ? new AuditLog(this.engineDb.getDb()) : null;
+    // How long the trail keeps a row (audit-retention.ts): once now and then hourly, so the first
+    // row is deleted on the day it turns 365 days old, whether or not anyone acts on the instance.
+    if (this.engineDb !== null) {
+      this._sweepAuditLog();
+      // run-group-starter: boot code, before any run exists; the sweep reports no spend.
+      this._auditRetentionTimer = setInterval(() => this._sweepAuditLog(), 60 * 60_000);
+      this._auditRetentionTimer.unref();
+    }
     // And the end of each mandate (v24), which a later reader checks without a request.
     this._mandateEnds = this.engineDb ? new MandateEnds(this.engineDb.getDb()) : null;
     this._toolContext.mandateEnds = this._mandateEnds;
@@ -1689,6 +1704,12 @@ export class Engine {
       runOutsideGroup(() => queueMicrotask(() => this.endEndedMandateRuns()));
     });
     this._mandateEnds?.onRevoke(() => this.endEndedMandateRuns());
+    // The revoke in the revoked person's trail. A throw is logged by `MandateEnds.revoke` and
+    // undoes nothing: the end is already written and every later request is refused by it.
+    this._mandateEnds?.onRevoke((mandateId) => {
+      const log = this.getAuditLog();
+      if (log !== null) recordMandateRevoked(log, mandateId);
+    });
     this._runSweepTimer = setInterval(() => this.endEndedMandateRuns(), 5 * 60_000);
     this._runSweepTimer.unref?.();
 
@@ -2152,15 +2173,34 @@ export class Engine {
       // constructor, which the operator scripts also run against a live store. A table
       // that fails stays readable but refuses inserts and upserts until a restart migrates
       // it; the rest of the store is unaffected.
+      // On an instance with an exact connection these lines name no table, and the database's
+      // text, which can quote one, is left out (data-store-boot-log.ts). `refuseDebug` has run by
+      // now (`_initPersistence`), so the marker is read.
+      const reducedLog = isErrorTextReducedForProcess();
       const sourceColumns = this._dataStore.ensureSourceColumns();
       for (const f of sourceColumns.failed) {
-        process.stderr.write(`[lynox] DataStore: table "${f.collection}" could not get its source columns and refuses writes until a restart migrates it: ${f.error}\n`);
+        process.stderr.write(`[lynox] DataStore: ${tableInLog(f.collection, reducedLog)} could not get its source columns and refuses writes until a restart migrates it${reducedLog ? '' : `: ${f.error}`}\n`);
       }
       if (sourceColumns.invalid.length > 0) {
         process.stderr.write(`[lynox] DataStore: skipped ${String(sourceColumns.invalid.length)} listed table name(s) that are not valid table names; they were left unchanged\n`);
       }
       if (sourceColumns.missing.length > 0) {
-        process.stderr.write(`[lynox] DataStore: listed table(s) without a database table: ${sourceColumns.missing.join(', ')}\n`);
+        process.stderr.write(reducedLog
+          ? `[lynox] DataStore: ${String(sourceColumns.missing.length)} listed table(s) without a database table\n`
+          : `[lynox] DataStore: listed table(s) without a database table: ${sourceColumns.missing.join(', ')}\n`);
+      }
+      // The opaque id a mandate's row in the instance trail names a table by. Every boot, so a
+      // table created without one (by an older build on this file) gets it here. Never thrown:
+      // a table without an id is named by its kind only.
+      const collectionIds = this._dataStore.ensureCollectionIds();
+      if (collectionIds.failed !== null) {
+        process.stderr.write(`[lynox] DataStore: tables could not get their ids; a mandate's rows name them by their kind only until a restart assigns them${reducedLog ? '' : `: ${collectionIds.failed}`}\n`);
+      }
+      if (collectionIds.indexFailed !== null) {
+        process.stderr.write(`[lynox] DataStore: the unique index on table ids could not be created${reducedLog ? '' : `: ${collectionIds.indexFailed}`}\n`);
+      }
+      for (const r of collectionIds.renumbered) {
+        process.stderr.write(`[lynox] DataStore: ${tableInLog(r.name, reducedLog)} shared its id with another and got a new one: ${r.from} -> ${r.to}\n`);
       }
       // Registered as soon as the store exists — all six, unconditionally. This
       // used to wait for `listCollections().length > 0`, which an instance with
@@ -3222,14 +3262,14 @@ export class Engine {
     return (delivery: DeliverySummary): void => {
       if (caller) {
         try { caller(delivery); } catch (err: unknown) {
-          process.stderr.write(`[escalation] recording the delivery failed: ${err instanceof Error ? err.message : String(err)}\n`);
+          process.stderr.write(`[escalation] recording the delivery failed: ${processErrorText(err)}\n`);
         }
       }
       if (this.userConfig.escalation_mail === false) return;
       for (const hook of this._hooks) {
         if (!hook.onEscalationReported) continue;
         try { hook.onEscalationReported(delivery); } catch (err: unknown) {
-          process.stderr.write(`[escalation] a hook failed on the delivery: ${err instanceof Error ? err.message : String(err)}\n`);
+          process.stderr.write(`[escalation] a hook failed on the delivery: ${processErrorText(err)}\n`);
         }
       }
     };
@@ -3495,6 +3535,45 @@ export class Engine {
     pruneWireSinks();
   }
 
+  /**
+   * Delete what is past its time and fold the trail's old polls (`sweepAuditLog`). Best-effort: a
+   * failed step must not stop the engine, and it is reported rather than swallowed. A refused delete
+   * applies nothing; a refused day is left as it was while the other days fold. The next hour tries
+   * again.
+   */
+  private _sweepAuditLog(): void {
+    const db = this.engineDb?.getDb();
+    if (db === undefined) return;
+    // Monotonic, for the health word's "when did it last run": a host that slept or a wall clock that
+    // jumped must not make the last sweep look stale. The sweep itself works on wall time.
+    const at = performance.now();
+    let refused = false;
+    try {
+      const r = sweepAuditLog(db, Date.now(), (day, err) => {
+        refused = true;
+        // A fixed tag an operator can grep for: while a day stays unfolded, its polls are kept
+        // single past the 30-day fold (audit-retention.ts). The SQLite code keeps the cause
+        // where the error text is reduced.
+        process.stderr.write(`[lynox] AUDIT_FOLD_REFUSED day=${day} (${processErrorText(err)}${sqliteErrorCode(err)}) — that day's polls stay single rows\n`);
+      });
+      this._auditSweep = { at, refused, dayRows: r.dayRows };
+    } catch (err) {
+      this._auditSweep = { at, refused: true, dayRows: 0 };
+      process.stderr.write(`[lynox] audit log retention sweep failed (${processErrorText(err)}${sqliteErrorCode(err)}) — old trail rows are NOT being removed\n`);
+    }
+  }
+
+  /**
+   * The health body's `engine.audit_retention` word (audit-retention.ts, `auditRetentionState`);
+   * undefined without engine.db, where there is no trail to keep.
+   */
+  getAuditRetentionState(): AuditRetentionState | undefined {
+    const db = this.engineDb?.getDb();
+    // Closed at shutdown: no trail to keep any more, and not a stall.
+    if (db === undefined || !db.open) return undefined;
+    return auditRetentionState(db, Date.now(), this._auditSweep, performance.now());
+  }
+
   /** Fire orchestrator shutdown hooks (for Pro extensions — includes worker pool shutdown). */
   private async _runShutdownHooks(): Promise<void> {
     for (const hook of this._hooks) {
@@ -3612,6 +3691,10 @@ export class Engine {
     if (this._wireRetentionTimer) {
       clearInterval(this._wireRetentionTimer);
       this._wireRetentionTimer = null;
+    }
+    if (this._auditRetentionTimer) {
+      clearInterval(this._auditRetentionTimer);
+      this._auditRetentionTimer = null;
     }
 
     // Save file manifest for next session's diff

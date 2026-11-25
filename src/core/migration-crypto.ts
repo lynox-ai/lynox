@@ -49,6 +49,16 @@ const ECDH_CURVE = 'x25519';
 /** Maximum chunk payload size (8 MB — leaves room for base64 overhead within 30 MB body limit). */
 export const MAX_CHUNK_BYTES = 8 * 1024 * 1024;
 
+/**
+ * Most chunks one migration carries. The destination refuses a manifest with more (it bounds the
+ * memory a transfer may hold), and the source checks it before it encrypts anything. Each kind
+ * of data starts its own chunks, so a part-filled chunk per kind uses up count without size.
+ */
+export const MIGRATION_MAX_CHUNKS = 64;
+
+/** Most bytes one migration carries, summed over the chunks' original sizes; checked on both sides like the count. */
+export const MIGRATION_MAX_TOTAL_BYTES = 500 * 1024 * 1024;
+
 /** Migration token TTL (30 minutes). */
 export const MIGRATION_TOKEN_TTL_MS = 30 * 60 * 1000;
 
@@ -63,6 +73,22 @@ export interface HandshakeServerPayload {
   serverPubKey: string;   // base64
   signature: string;      // hex — HMAC-SHA256(serverPubKey, signingKey)
   challengeNonce: string; // hex — 32 random bytes, used as HKDF salt
+  /**
+   * The importer that answers this handshake takes `sqlite_db_plain` stores. Only `true` counts;
+   * absent on an older destination. Not covered by the signature, and it need not be: the bundle
+   * goes only to the peer the signature names, and that peer already receives the vault's secrets
+   * in plaintext under the transfer key alone. A `true` from that peer gives it the stores' columns
+   * readable, which on the raw path it could not read; given the secrets it holds, that adds no
+   * reach. Anyone else on the way can only flip the flag, not read the bundle. A destination that
+   * does not take plaintext refuses such a manifest at `setManifest`.
+   */
+  acceptsPlainStores?: boolean | undefined;
+  /**
+   * This handshake's session, random and not derived from anything: the source names it when it
+   * ends the session before its manifest (`POST /api/migration/abort`), so a late abort cannot end
+   * a newer attempt's session. Absent on an older destination, which has no abort either.
+   */
+  sessionId?: string | undefined;
 }
 
 export interface HandshakeClientPayload {
@@ -344,9 +370,12 @@ export function generateMigrationToken(): string {
 }
 
 /**
- * Timing-safe comparison of migration tokens.
+ * Timing-safe comparison of migration tokens. Both must be the token's shape, 64 hex characters:
+ * hex decoding stops at the first character that is not hex, so the token with anything appended
+ * would decode to the same bytes.
  */
 export function verifyMigrationToken(provided: string, stored: string): boolean {
+  if (!/^[0-9a-f]{64}$/i.test(provided) || !/^[0-9a-f]{64}$/i.test(stored)) return false;
   const a = Buffer.from(provided, 'hex');
   const b = Buffer.from(stored, 'hex');
   if (a.length !== b.length || a.length !== 32) return false;

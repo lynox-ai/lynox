@@ -9,7 +9,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 type Store = typeof import('./chat.svelte.js');
 
 vi.mock('./toast.svelte.js', () => ({ addToast: () => 1 }));
-vi.mock('./threads.svelte.js', () => ({ loadThreads: async () => {} }));
+vi.mock('./threads.svelte.js', () => ({ loadThreads: async () => {}, getRunStatus: () => undefined }));
 
 const json = (body: unknown, status = 200): Response =>
 	new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -235,9 +235,12 @@ describe('"Plan in a new chat"', () => {
 		await store.retryFailedTurn(failed!, 'Verbessere die Texte');
 		await settle();
 		expect(store.getThreadContained(), 'positive control: the retry ran').toBe(true);
-		const resent = store.getMessages().filter((m) => m.role === 'user' && m !== failed && m.failed !== true);
-		expect(resent).toHaveLength(1);
-		expect(resent[0]?.typed).toBe(true);
+		// The failed message itself is the one sent again (not a copy under it), and it stays typed.
+		const users = store.getMessages().filter((m) => m.role === 'user');
+		expect(users).toHaveLength(1);
+		expect(users[0]).toBe(failed);
+		expect(users[0]?.failed).toBeFalsy();
+		expect(users[0]?.typed).toBe(true);
 	});
 
 	it('is forgotten by another new chat', async () => {
