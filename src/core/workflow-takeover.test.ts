@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { BUILTIN_ROLES } from './roles.js';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -102,8 +103,8 @@ const STEPS = [
 ];
 
 /** A workflow created by `by` (a mandate), with two steps; stamped by the owner when `stamped`. */
-function workflow(b: Box, id: string, by?: { email: string; grant?: string | null }, stamped = false): string {
-  const base = { id, name: 'W', template: true, steps: STEPS } as unknown as PlannedPipeline;
+function workflow(b: Box, id: string, by?: { email: string; grant?: string | null }, stamped = false, steps: readonly unknown[] = STEPS): string {
+  const base = { id, name: 'W', template: true, steps } as unknown as PlannedPipeline;
   const planned = stamped ? withOwnerStamp(b.engineDb, base, '2026-01-02T00:00:00.000Z') : base;
   b.db.prepare("INSERT INTO workflows (id, name, definition_json, created_by, created_mandate_id, created_at) VALUES (?, 'W', ?, ?, ?, '2026-01-01 00:00:00')")
     .run(id, JSON.stringify(planned), by ? tag(by.email) : null, by === undefined ? null : (by.grant === undefined ? `g-${by.email}` : by.grant));
@@ -211,7 +212,8 @@ describe('a workflow whose mandate ended is taken over: covered, stamped and rec
       [['q', 'Plan q', [entry]]],
       [['workflow-created', 'h@x.ch', true, false]],
       [['mine', 'g-h@x.ch', 'Main store', 'shop.example.invalid']],
-      [['s2', 'mine']],
+      // s1 is in words and s3 replays another tool: both may send a request the model addresses.
+      [['s1', null], ['s2', 'mine'], ['s3', null]],
     ]));
     expect(WORKFLOW_TAKEOVER_DIGEST_PREFIX).toBe('lynox:workflow-takeover:v1');
     expect(expectOf(b, 'w')).toBe(expected);
@@ -385,8 +387,9 @@ describe('the connections a run as the owner no longer uses', () => {
     const pv = workflowTakeoverPreview(deps(b), 'w');
     expect(pv.kind === 'preview' && pv.preview.connections).toEqual([{ profileId: 'mine', provider: 'mine.example.invalid', account: 'Main store', by: 'h@x.ch' }]);
     // s2 calls the shop, which another mandate connected: marked though its person is not one shown.
-    // s3 names the same host through another tool, which sends no connection: not marked.
-    expect(pv.kind === 'preview' && pv.preview.foreignConnectionSteps).toEqual([{ step: 's2', profileId: 'shop' }]);
+    // s1 is in words and s3 replays another tool, but both may send a request whose address the
+    // model gives: marked, without a profile.
+    expect(pv.kind === 'preview' && pv.preview.foreignConnectionSteps).toEqual([{ step: 's1', profileId: null }, { step: 's2', profileId: 'shop' }, { step: 's3', profileId: null }]);
   });
 
   it('a step on the owner’s own connection is not marked', () => {
@@ -396,6 +399,107 @@ describe('the connections a run as the owner no longer uses', () => {
     b.profiles.push(profile('shop', 'shop.example.invalid', null));
     const pv = workflowTakeoverPreview(deps(b), 'w');
     expect(pv.kind === 'preview' && pv.preview.foreignConnectionSteps).toEqual([]);
+  });
+});
+
+describe('steps whose target is set only when they run', () => {
+  const req = (id: string, url: unknown): unknown => ({ id, task: id, tool: 'http_request', input_template: { url, method: 'POST' } });
+  /** A step in words that may send no request: it names tools without the request tool. */
+  const quiet = (id: string): unknown => ({ id, task: id, tools: ['read_file'] });
+  const marked = (b: Box): unknown => {
+    const pv = workflowTakeoverPreview(deps(b), 'w');
+    return pv.kind === 'preview' ? pv.preview.foreignConnectionSteps : pv.kind;
+  };
+  /** A workflow a mandate made, whose own connection is covered, beside the owner's and another mandate's. */
+  const withConnections = (steps: readonly unknown[]): Box => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' }, false, steps);
+    ended(b, 'h@x.ch');
+    b.profiles.push(
+      profile('mine', 'mine.example.invalid', 'h@x.ch', 'g-h@x.ch'),
+      profile('shop', 'shop.example.invalid', 'other@x.ch', 'g-other'),
+      profile('owners', 'owner.example.invalid', null),
+    );
+    return b;
+  };
+
+  it('marks, without a profile, a request whose host a placeholder decides: in the host, as the whole address, in the user info, in the port, after the host, in the scheme', () => {
+    const b = withConnections([
+      req('host', 'https://{{s0.host}}/orders'),
+      req('spaced', 'https://{{ s0.host }}/orders'),
+      req('whole', '{{s0.url}}'),
+      req('userinfo', 'https://{{s0.who}}@owner.example.invalid/orders'),
+      req('port', 'https://owner.example.invalid:{{s0.port}}/orders'),
+      req('suffix', 'https://owner.example.invalid{{s0.rest}}'),
+      req('scheme', '{{s0.scheme}}://owner.example.invalid/orders'),
+    ]);
+    expect(marked(b)).toEqual(['host', 'spaced', 'whole', 'userinfo', 'port', 'suffix', 'scheme'].map((step) => ({ step, profileId: null })));
+  });
+
+  it('a placeholder after the host leaves the host as written, also where the address is written loosely: marked by its profile when that is a mandate’s, not at all when it is the owner’s', () => {
+    const b = withConnections([
+      req('path', 'https://shop.example.invalid/orders/{{s0.id}}'),
+      req('query', 'https://shop.example.invalid/orders?after={{s0.id}}'),
+      req('loose', 'https:shop.example.invalid/orders/{{s0.id}}'),
+      req('one-slash', 'https:/shop.example.invalid/{{s0.id}}'),
+      req('own', 'https://owner.example.invalid/orders/{{s0.id}}'),
+    ]);
+    expect(marked(b)).toEqual(['path', 'query', 'loose', 'one-slash'].map((step) => ({ step, profileId: 'shop' })));
+  });
+
+  it('a step in words that may send a request leaves the address to the model: marked without a profile; one that may send none is not', () => {
+    const b = withConnections([
+      { id: 'words', task: 'Summarise the orders' },
+      { id: 'declared', task: 'Fetch the orders', tools: ['http_request', 'read_file'] },
+      { id: 'other-tool', task: 'Read the page', tool: 'web_research', input_template: { url: 'https://owner.example.invalid/' } },
+      quiet('quiet'),
+      { id: 'none', task: 'Think', tools: [] },
+      req('no-url', undefined),
+    ]);
+    expect(marked(b)).toEqual(['words', 'declared', 'other-tool', 'no-url'].map((step) => ({ step, profileId: null })));
+  });
+
+  it('a step whose role hands it the run’s tools, the request tool among them, may send a request: marked, though its own tools name none; a read-only role or one without such a grant hands nothing on', () => {
+    const b = withConnections([
+      { id: 'collector', task: 'Fetch the report', role: 'collector', tools: ['read_file'] },
+      { id: 'collector-replay', task: 'Read the file', role: 'collector', tool: 'read_file', input_template: { path: 'a.txt' }, tools: [] },
+      { id: 'researcher', task: 'Look it up', role: 'researcher', tools: ['read_file'] },
+      { id: 'creator', task: 'Write it', role: 'creator', tools: ['read_file'] },
+      { id: 'unknown', task: 'Odd', role: 'toString', tools: ['read_file'] },
+    ]);
+    expect(marked(b)).toEqual(['collector', 'collector-replay'].map((step) => ({ step, profileId: null })));
+  });
+
+  it('a read-only role hands nothing on, even one whose grant names the request tool: the step keeps its own tools', () => {
+    // No built-in role is read-only with a grant of its own; one is added for this test, as `spawnInline` reads it.
+    BUILTIN_ROLES['readonly-sender'] = { model: 'fast', effort: 'low', autonomy: 'guided', description: 'test', readOnly: true, allowTools: ['http_request'] };
+    try {
+      const b = withConnections([{ id: 'ro', task: 'Look it up', role: 'readonly-sender', tools: ['read_file'] }]);
+      expect(marked(b)).toEqual([]);
+    } finally {
+      delete BUILTIN_ROLES['readonly-sender'];
+    }
+  });
+
+  it('a request whose address does not parse is marked without a profile: the model may send the request itself', () => {
+    const b = withConnections([req('bare', 'shop.example.invalid/orders'), req('empty', '')]);
+    expect(marked(b)).toEqual(['bare', 'empty'].map((step) => ({ step, profileId: null })));
+  });
+
+  it('marks a step whose target is set only when it runs while any mandate’s connection exists, also when none of the covered mandate’s does', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' }, false, [req('host', 'https://{{s0.host}}/orders'), quiet('quiet')]);
+    ended(b, 'h@x.ch');
+    b.profiles.push(profile('shop', 'shop.example.invalid', 'other@x.ch', 'g-other'), profile('owners', 'owner.example.invalid', null));
+    expect(marked(b)).toEqual([{ step: 'host', profileId: null }]);
+  });
+
+  it('marks none of them while no mandate’s connection exists: no step can reach one', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' }, false, [req('host', 'https://{{s0.host}}/orders'), { id: 'words', task: 'Summarise' }]);
+    ended(b, 'h@x.ch');
+    b.profiles.push(profile('owners', 'owner.example.invalid', null));
+    expect(marked(b)).toEqual([]);
   });
 });
 

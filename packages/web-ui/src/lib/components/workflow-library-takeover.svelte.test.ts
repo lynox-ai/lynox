@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { setLocale, getLocale, t } from '../i18n.svelte.js';
+import { parseWorkflowTakeoverPreview } from '../utils/workflow-takeover.js';
 
 // A margin or a padding class of any side or axis, also behind variants (`sm:`, `hover:`) and `!`:
 // `m`/`p` with one of `lrxytbse`, `bs` or `be`, or none. Not `max-w-`, `min-w-`, `place-`, `pointer-`.
@@ -36,7 +37,7 @@ const base = (id: string, name: string): Record<string, unknown> => ({
 });
 const step = (id: string, task: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
 	id, task, tool: null, inputTemplate: null, tools: [], model: null, role: null, roleGrant: null, effort: null, thinking: null,
-	timeoutMs: null, inputFrom: [], foreignConnection: false, connectionProfile: null, ...extra,
+	timeoutMs: null, inputFrom: [], foreignConnection: false, connectionProfile: null, targetAtRun: false, ...extra,
 });
 
 /** A preview with every part filled. */
@@ -247,6 +248,114 @@ describe('the dialog', () => {
 		const d = await openDialog();
 		const notes = [...d.querySelectorAll<HTMLElement>('[data-testid="stamp-step"]')].map((s) => s.querySelector('[data-testid="stamp-step-note"]')?.textContent?.trim() ?? null);
 		expect(notes).toEqual([`Verbindung von ${EVA}`, 'Verbindung einer Person mit Zugang', null]);
+	});
+
+	describe('steps whose target is set only when they run', () => {
+		const run = (id: string, task: string): Record<string, unknown> => step(id, task, { foreignConnection: true, connectionProfile: null, targetAtRun: true });
+		/** FULL with its steps replaced: in words, set only when they run, beside the shop step. */
+		const withSteps = (steps: Array<Record<string, unknown>>, connections?: Array<Record<string, unknown>>): Record<string, unknown> => {
+			const p = FULL();
+			p['steps'] = steps;
+			if (connections !== undefined) p['connections'] = connections;
+			return p;
+		};
+		const SHOP = step('s2', 'Bestellungen lesen', { tool: 'http_request', inputTemplate: { url: 'https://shop.example.invalid/orders' }, foreignConnection: true, connectionProfile: 'shop' });
+		const REPORT = (): Array<Record<string, unknown>> => [run('s1', 'Bestellungen zusammenfassen'), SHOP, run('s3', 'Auffälligkeiten prüfen'), run('s4', 'Bericht schicken')];
+		const notes = (d: HTMLElement): Array<string | null> => [...d.querySelectorAll<HTMLElement>('[data-testid="stamp-step"]')].map((s) => s.querySelector('[data-testid="stamp-step-note"]')?.textContent?.trim() ?? null);
+		const sentence = (d: HTMLElement): string | undefined => d.querySelector('[data-takeover-part="connection_at_run"]')?.textContent?.trim();
+		const parts = (d: HTMLElement): string[] => [...d.querySelectorAll<HTMLElement>('[data-takeover-part]')].map((e) => e.dataset['takeoverPart']!);
+
+		it('names them in one sentence after the connection, each by its task and in a box, without a note at them, and names no person', async () => {
+			await open([ENDED], [withSteps(REPORT())]);
+			const d = await openDialog();
+			expect(notes(d)).toEqual([null, `Verbindung von ${EVA}`, null, null]);
+			expect(sentence(d)).toBe(`Bei diesen Schritten zeigt sich erst im Lauf, welche Verbindung sie nutzen: Bestellungen zusammenfassen, Auffälligkeiten prüfen, Bericht schicken. Ist es die Verbindung einer Person mit Zugang, scheitern sie nach dem Übernehmen, bis du das Programm selbst verbunden hast.`);
+			const boxed = [...d.querySelector('[data-takeover-part="connection_at_run"]')!.querySelectorAll('[data-foreign-value]')].map((e) => e.textContent);
+			expect(boxed).toEqual(['Bestellungen zusammenfassen', 'Auffälligkeiten prüfen', 'Bericht schicken']);
+			const order = parts(d);
+			expect(order.indexOf('connection_at_run')).toBe(order.lastIndexOf('connection') + 1);
+		});
+
+		it('without a sentence on a connection before it, says where to connect the service', async () => {
+			await open([ENDED], [withSteps([run('s1', 'Bestellungen zusammenfassen'), run('s3', 'Auffälligkeiten prüfen'), step('s4', 'Nachdenken')])]);
+			const d = await openDialog();
+			expect(parts(d)).not.toContain('connection');
+			expect(sentence(d)).toBe(`Bei diesen Schritten zeigt sich erst im Lauf, welche Verbindung sie nutzen: Bestellungen zusammenfassen, Auffälligkeiten prüfen. Ist es die Verbindung einer Person mit Zugang, scheitern sie nach dem Übernehmen, bis du das Programm, das sie erreichen, selbst mit deinem Konto verbunden hast: in den Einstellungen unter „APIs“ über „Neue API“.`);
+		});
+
+		it('says one step in the singular, and every step of the workflow without a list', async () => {
+			await open([ENDED], [withSteps([run('s1', 'Bestellungen zusammenfassen'), step('s2', 'Nachdenken')])]);
+			let d = await openDialog();
+			expect(sentence(d)).toBe(`Bei diesem Schritt zeigt sich erst im Lauf, welche Verbindung er nutzt: Bestellungen zusammenfassen. Ist es die Verbindung einer Person mit Zugang, scheitert er nach dem Übernehmen, bis du das Programm, das er erreicht, selbst mit deinem Konto verbunden hast: in den Einstellungen unter „APIs“ über „Neue API“.`);
+			if (component) unmount(component);
+			component = undefined;
+			target.replaceChildren();
+			await open([ENDED], [withSteps([run('s1', 'Bestellungen zusammenfassen'), run('s2', 'Bericht schicken')])]);
+			d = await openDialog();
+			expect(sentence(d)).toBe(`Bei jedem Schritt dieses Workflows zeigt sich erst im Lauf, welche Verbindung er nutzt. Ist es die Verbindung einer Person mit Zugang, scheitert er nach dem Übernehmen, bis du das Programm, das er erreicht, selbst mit deinem Konto verbunden hast: in den Einstellungen unter „APIs“ über „Neue API“.`);
+		});
+
+		it('after a change, a step that became one whose target is set only when it runs is marked, and a new person behind a connection changes no such step', async () => {
+			const before = withSteps(REPORT());
+			const moved = withSteps(REPORT(), [{ profileId: 'shop', provider: 'Shop', account: 'Main store', by: JAN }]);
+			moved['expect'] = 'digest-2';
+			// Only the person behind the shop changed: the shop step's note changes, the sentence does not.
+			await open([ENDED], [before, moved], { status: 409, body: { code: 'changed' } });
+			let d = await openDialog();
+			const said = sentence(d);
+			d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+			await settle();
+			expect([...d.querySelectorAll<HTMLElement>('[data-testid="stamp-step"]')].map((s) => s.hasAttribute('data-stamp-changed'))).toEqual([false, true, false, false]);
+			expect(sentence(d)).toBe(said);
+			if (component) unmount(component);
+			component = undefined;
+			target.replaceChildren();
+			// A step that sent nothing before may now send a request whose address the model gives: marked as changed.
+			const quiet = withSteps([run('s1', 'Bestellungen zusammenfassen'), SHOP, step('s3', 'Auffälligkeiten prüfen'), run('s4', 'Bericht schicken')]);
+			const louder = withSteps(REPORT());
+			louder['expect'] = 'digest-2';
+			await open([ENDED], [quiet, louder], { status: 409, body: { code: 'changed' } });
+			d = await openDialog();
+			d.querySelector<HTMLButtonElement>('[data-testid="takeover-confirm"]')!.click();
+			await settle();
+			expect([...d.querySelectorAll<HTMLElement>('[data-testid="stamp-step"]')].map((s) => s.hasAttribute('data-stamp-changed'))).toEqual([false, false, true, false]);
+		});
+
+		it('folds a list past five steps behind a button that opens it', async () => {
+			const many = [SHOP, ...['A', 'B', 'C', 'D', 'E', 'F', 'G'].map((x, i) => run(`r${String(i)}`, `Schritt ${x}`))];
+			await open([ENDED], [withSteps(many)]);
+			const d = await openDialog();
+			const part = d.querySelector('[data-takeover-part="connection_at_run"]')!;
+			expect(part.querySelector('[data-testid="plans-more"]')?.textContent).toBe('und 2 weitere');
+			part.querySelector<HTMLButtonElement>('[data-testid="plans-more"]')!.click();
+			flushSync();
+			expect(sentence(d)).toContain('Schritt A, Schritt B, Schritt C, Schritt D, Schritt E, Schritt F, Schritt G.');
+		});
+
+		it('says it in English too', async () => {
+			setLocale('en');
+			await open([ENDED], [withSteps(REPORT())]);
+			const d = await openDialog();
+			expect(sentence(d)).toBe(`For these steps, which connection they use shows only when they run: Bestellungen zusammenfassen, Auffälligkeiten prüfen, Bericht schicken. If it is the connection of someone with access, they fail after you take over until you connect the service yourself.`);
+		});
+
+		it('without such a step there is no such sentence', async () => {
+			await open([ENDED]);
+			const d = await openDialog();
+			expect(d.querySelector('[data-takeover-part="connection_at_run"]')).toBeNull();
+		});
+
+		it('a preview that says a target is set only when it runs for an unmarked step, or one with a profile, or not as a flag, is not read', () => {
+			const withStep = (extra: Record<string, unknown>): Record<string, unknown> => withSteps([{ ...run('s1', 'Bestellungen zusammenfassen'), ...extra }]);
+			expect(parseWorkflowTakeoverPreview(withStep({}))).not.toBeNull();
+			expect(parseWorkflowTakeoverPreview(withStep({ foreignConnection: false }))).toBeNull();
+			expect(parseWorkflowTakeoverPreview(withStep({ connectionProfile: 'shop' }))).toBeNull();
+			expect(parseWorkflowTakeoverPreview(withStep({ targetAtRun: 'yes' }))).toBeNull();
+			// An engine that does not send the flag yet: no step reads as one.
+			const old = FULL();
+			for (const st of old['steps'] as Array<Record<string, unknown>>) delete st['targetAtRun'];
+			expect(parseWorkflowTakeoverPreview(old)?.steps.map((st) => st.targetAtRun)).toEqual([false, false, false]);
+		});
 	});
 
 	it('says one released plan by its title, and several in one sentence', async () => {

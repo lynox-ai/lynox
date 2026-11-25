@@ -22,12 +22,12 @@ vi.mock('../../core/store-pass.js', async (importOriginal) => {
   };
 });
 
-const renewal = vi.hoisted(() => ({ result: false as boolean | 'client-misnamed', urls: [] as string[] }));
+const renewal = vi.hoisted(() => ({ result: false as boolean | 'client-misnamed' | 'dead' | 'ineligible', urls: [] as string[] }));
 vi.mock('../../core/store-token-refresh.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../core/store-token-refresh.js')>();
   return {
     ...actual,
-    refreshStoreToken: async (id: string, trigger: string) => { renewal.urls.push(`${id}:${trigger}`); return renewal.result === 'client-misnamed' ? 'client-misnamed' : renewal.result ? 'renewed' : 'not-run'; },
+    refreshStoreToken: async (id: string, trigger: string) => { renewal.urls.push(`${id}:${trigger}`); return renewal.result === 'client-misnamed' || renewal.result === 'dead' || renewal.result === 'ineligible' ? renewal.result : renewal.result ? 'renewed' : 'not-run'; },
   };
 });
 
@@ -183,12 +183,25 @@ describe('a 401 from the store', () => {
     expect(atReceipt).toHaveLength(1);
   });
 
-  it('says nothing of a renewal that did not happen', async () => {
+  const NOT_THIS_TIME = 'The engine did not renew the access token for this store this time. Send the same request once more; if the store answers 401 again, tell the user';
+
+  it('a renewal that did not run this time says to send once more, and gives no advice to connect again', async () => {
     storeAnswer = async () => new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } });
     const out = await request(agent({ current: 'thread-1' }));
     expect(renewal.urls).toEqual(['shop-acme:unauthorized']);
     expect(out).not.toContain(NOTE);
-    // Without a renewal the existing reminder still speaks.
+    expect(out).toContain(NOT_THIS_TIME);
+    expect(out.slice(out.indexOf(NOT_THIS_TIME))).not.toMatch(REMINDER);
+    expect(out).not.toContain('Agent reminder');
+  });
+
+  it('a connection the renewal ended keeps the reminder, and says nothing of sending once more', async () => {
+    renewal.result = 'dead';
+    storeAnswer = async () => new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } });
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(renewal.urls).toEqual(['shop-acme:unauthorized']);
+    expect(out).not.toContain(NOTE);
+    expect(out).not.toContain(NOT_THIS_TIME);
     expect(out).toMatch(REMINDER);
   });
 
@@ -207,6 +220,45 @@ describe('a 401 from the store', () => {
     const out = await request(agent({ current: 'thread-1' }));
     expect(renewal.urls).toEqual([]);
     expect(out).not.toContain(NOTE);
+  });
+});
+
+describe('a 401 from the store, for a built-in provider\'s profile that records no token URL', () => {
+  const NOT_THIS_TIME = 'The engine did not renew the access token for this store this time. Send the same request once more; if the store answers 401 again, tell the user';
+  beforeEach(() => {
+    renewal.result = false;
+    renewal.urls = [];
+    const store = new ApiStore();
+    store.register(shopProfile());
+    ctx.apiStore = store;
+    ctx.vaultNameBindings = bindingsAsMigrated(store);
+  });
+
+  it('a renewal that did not run this time gives no advice to connect again', async () => {
+    storeAnswer = async () => new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } });
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(renewal.urls).toEqual(['shop-acme:unauthorized']);
+    expect(out).toContain(NOT_THIS_TIME);
+    expect(out).not.toContain('Agent reminder');
+    expect(out.slice(out.indexOf(NOT_THIS_TIME))).not.toMatch(/api_setup[^.]*connect/i);
+  });
+
+  it('a connection that cannot be renewed as it stands says to connect again, and nothing of sending once more', async () => {
+    renewal.result = 'ineligible';
+    storeAnswer = async () => new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } });
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(renewal.urls).toEqual(['shop-acme:unauthorized']);
+    expect(out).not.toContain(NOT_THIS_TIME);
+    expect(out).toContain('To connect it, call api_setup with action "connect" and id "shop-acme"');
+  });
+
+  it('a connection the renewal ended says nothing of sending once more, and says to connect again', async () => {
+    renewal.result = 'dead';
+    storeAnswer = async () => new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } });
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(out).not.toContain(NOT_THIS_TIME);
+    // The way that still works is named: connect again.
+    expect(out).toContain('To connect it, call api_setup with action "connect" and id "shop-acme"');
   });
 });
 
