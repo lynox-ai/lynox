@@ -4575,34 +4575,6 @@ export class Agent implements IAgent {
    *     in an edited task must be stored as a ref, not resolved into the def.
    *   - `spawn_agent`: delegation, not storage — see the note on the member itself. */
   /**
-   * Where may the secrets in this call go? Consent (`hasConsent`) is per NAME and a vault
-   * entry has it from load, so on its own it does not say anything about the destination.
-   *
-   * - `http_request`: a vault secret that is not a token slot goes without a prompt to an origin
-   *   (scheme, host and port) it is bound to (`vault-name-bindings.ts`, `boundCtx`), and is
-   *   refused anywhere else once it is bound at all. A name bound nowhere is refused when stored
-   *   profiles send it to different destinations (`isContestedName`); otherwise it needs the
-   *   user's approval for that name and origin, held for the Session, and with no one to ask the
-   *   call is refused. A token slot goes only where its grant points (`slotMayReach`), and without
-   *   a prompt only to a host a person accepted for the api_profile that names it
-   *   (`collectVaultKeys`; the profile found by `getByHostname`, the acceptance by
-   *   `isEndpointAcked`); elsewhere it needs the same approval.
-   *   A reference in the userinfo or host (as the URL parser reads them) is refused, and a call
-   *   whose host changes once the secrets are filled in is refused too.
-   * - Any other tool: its destination cannot be read from the input (a shell command can reach
-   *   any host), so each call is shown to the user with the tool and the secrets — the command
-   *   when it is the whole input, otherwise the whole input — and refused if too long to show.
-   *   With no one to ask it runs only if the conversation had taken in no untrusted data
-   *   before this tool batch (each call's own tool arms the latch on dispatch, before this gate).
-   *
-   * Approving here also records the name consent, so the user is not asked twice. The prompts
-   * of this gate (not the name-consent prompt after it) are asked one at a time per Session
-   * (the prompt store holds one pending prompt per Session), and none of them is raised once
-   * the run is aborted.
-   *
-   * Returns the refusal to send back, or `null` when the call may proceed.
-   */
-  /**
    * For a missing `secret:` name in a request to a host whose API profile the engine attaches a
    * credential for (bearer, header, oauth2): a sentence that the name is not needed when it was
    * meant as that credential. A guessed token name otherwise reads as one to collect. Conditional,
@@ -4635,6 +4607,34 @@ export class Agent implements IAgent {
     } catch { return ''; }
   }
 
+  /**
+   * Where may the secrets in this call go? Consent (`hasConsent`) is per NAME and a vault
+   * entry has it from load, so on its own it does not say anything about the destination.
+   *
+   * - `http_request`: a vault secret that is not a token slot goes without a prompt to an origin
+   *   (scheme, host and port) it is bound to (`vault-name-bindings.ts`, `boundCtx`), and is
+   *   refused anywhere else once it is bound at all. A name bound nowhere is refused when stored
+   *   profiles send it to different destinations (`isContestedName`); otherwise it needs the
+   *   user's approval for that name and origin, held for the Session, and with no one to ask the
+   *   call is refused. A token slot goes only where its grant points (`slotMayReach`), and without
+   *   a prompt only to a host a person accepted for the api_profile that names it
+   *   (`collectVaultKeys`; the profile found by `getByHostname`, the acceptance by
+   *   `isEndpointAcked`); elsewhere it needs the same approval.
+   *   A reference in the userinfo or host (as the URL parser reads them) is refused, and a call
+   *   whose host changes once the secrets are filled in is refused too.
+   * - Any other tool: its destination cannot be read from the input (a shell command can reach
+   *   any host), so each call is shown to the user with the tool and the secrets — the command
+   *   when it is the whole input, otherwise the whole input — and refused if too long to show.
+   *   With no one to ask it runs only if the conversation had taken in no untrusted data
+   *   before this tool batch (each call's own tool arms the latch on dispatch, before this gate).
+   *
+   * Approving here also records the name consent, so the user is not asked twice. The prompts
+   * of this gate (not the name-consent prompt after it) are asked one at a time per Session
+   * (the prompt store holds one pending prompt per Session), and none of them is raised once
+   * the run is aborted.
+   *
+   * Returns the refusal to send back, or `null` when the call may proceed.
+   */
   private async _gateSecretDestination(
     tc: { id: string; name: string; input: unknown },
     secretNames: string[],

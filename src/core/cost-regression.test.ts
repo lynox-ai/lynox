@@ -494,13 +494,13 @@ function measureStaticPrefixTokens(): number {
 // call, so without this the first html artifact would be written with images that never load.
 // The full rule, the ways around it and what to tell the user stay in `detailedGuidance`.
 // 2026-11-17: +56 (24061 → 24117, both measured the same day with the budget set to 1, the base
-// main 22d3046b, the only prefix file that differs being http.ts; on 2026-11-25 measured again
-// after merging main 565661445: 24096 → 24152, still +56) — `http_request`'s description
+// main 22d3046b, the only prefix file that differs being http.ts; on 2026-11-25, after merging
+// main 565661445 whose budget was 24096, the merge measured 24152) — `http_request`'s description
 // says that a bearer, header or oauth2 profile gets its credential from the engine, so the model
 // writes no auth header, `secret:` reference or token request for it. Without it, models guess a
 // connection's derived token name and write it as `secret:NAME`; the online eval
 // tests/online/ask-secret-token-slot-eval.test.ts measured runs with such a reference at 13 of 24
-// on main and 3 of 24 with this sentence and the refusal texts that go with it. The refusal texts
+// on main 22d3046b and 3 of 24 with this sentence and the refusal texts that go with it. The refusal texts
 // are not part of this prefix; they reach the model when a reference is refused.
 const STATIC_PREFIX_BUDGET = 24152;
 
