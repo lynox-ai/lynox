@@ -144,6 +144,18 @@ describe('ToolSilenceClock', () => {
     expect(clock.holds(t0 + 9)).toBe(false);
   });
 
+  it('does not let the parent\'s response end mark a sub-agent\'s call', () => {
+    const clock = new ToolSilenceClock();
+    clock.note(call('bash', 'c', { timeout_ms: 180_000 }, 'sub-1'), t0);
+    clock.note({ type: 'turn_end' }, t0 + 1);
+    // The sub-agent's next call ends only the sub-agent's own marked calls, and c is not one.
+    clock.note(call('http_request', 'd', {}, 'sub-1'), t0 + 2);
+    clock.note(result('http_request', 'd', 'sub-1'), t0 + 3);
+    expect(clock.holds(t0 + 4), 'c is still open').toBe(true);
+    clock.note(result('bash', 'c', 'sub-1'), t0 + 5);
+    expect(clock.holds(t0 + 6)).toBe(false);
+  });
+
   it('does not hold for the follow-up suggestions answered at the end of a turn', () => {
     const clock = new ToolSilenceClock();
     clock.note({ type: 'tool_call', name: FOLLOW_UP_TOOL_NAME, input: {} }, t0);
