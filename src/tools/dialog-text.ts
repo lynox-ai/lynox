@@ -389,6 +389,28 @@ export const SECRET_DIALOG: Readonly<Record<DialogLanguage, SecretDialog>> = {
   },
 };
 
+/**
+ * The question before a vault secret may go to more addresses than it is bound to. `name`, `bound`
+ * and `added` are values (the vault name and the addresses); `bound` empty: the secret is bound to
+ * no address yet. Customer-visible copy: the English as approved by the business owner, the German as reviewed for this text.
+ */
+export interface BindingDialog {
+  readonly question: (name: string, bound: readonly string[], added: readonly string[]) => PromptText;
+}
+
+export const BINDING_DIALOG: Readonly<Record<DialogLanguage, BindingDialog>> = {
+  en: {
+    question: (name, bound, added) => bound.length === 0
+      ? pv`${name} is stored in your vault and is not yet limited to any address.\n\nThis profile would send it to: ${added.join(', ')}.\n\nAllow ${name} to be sent there? From then on it goes only to the addresses you have allowed.`
+      : pv`${name} is sent only to: ${bound.join(', ')}.\n\nThis profile would also send it to: ${added.join(', ')}.\n\nAllow ${name} to be sent there as well?`,
+  },
+  de: {
+    question: (name, bound, added) => bound.length === 0
+      ? pv`${name} liegt in deinem Vault und ist noch an keine Adresse gebunden.\n\nDieses Profil würde den Wert senden an: ${added.join(', ')}.\n\nDarf ${name} dorthin gesendet werden? Danach geht der Wert nur noch an die Adressen, die du erlaubt hast.`
+      : pv`${name} wird nur gesendet an: ${bound.join(', ')}.\n\nDieses Profil würde den Wert auch senden an: ${added.join(', ')}.\n\nDarf ${name} auch dorthin gesendet werden?`,
+  },
+};
+
 /** Why `api_setup` could not name a provider's sign-in address, in each language. */
 export interface PresetNote {
   readonly unknownProvider: (known: string) => string;
