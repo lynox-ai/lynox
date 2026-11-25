@@ -159,7 +159,7 @@ import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
 import { takeOverWorkflow, workflowTakeoverPreview, type WorkflowTakeoverDeps, type WorkflowTakeoverRefusal } from '../core/workflow-takeover.js';
 import { EngineLessRefused } from '../core/engine-less-refusal.js';
-import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerFieldsNotCarriedError, TriggerTierUnsupportedError, titleIsWorkflowName, isTriggerModelTierUpdate, triggerTakesModelTier, type BeforeTriggerWrite, type TaskManager, watchRefusedNow, type BlockedReason } from '../core/task-manager.js';
+import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerFieldsNotCarriedError, TriggerTierUnsupportedError, titleIsWorkflowName, isTriggerModelTierUpdate, triggerTakesModelTier, type BeforeTriggerWrite, type TaskManager, watchRefusedNow, storedRunCause, type BlockedReason } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -450,8 +450,9 @@ export const WORKFLOW_TAKEOVER_REFUSALS: Record<WorkflowTakeoverRefusal | 'chang
  * paused it, and `paused_ended`, how and when each access ended: the view says it in full, where
  * the push had to shorten the name.
  */
-export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for' | 'last_escalation_at' | 'last_escalation_outcome'> & Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome'> & { paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
-  const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome, ...stored } = trigger;
+export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for' | 'last_escalation_at' | 'last_escalation_outcome' | 'last_run_cause'> & Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome'> & { paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
+  // The stored run cause leaves only as `blocked_reason`, parsed (`storedRunCause`), never as stored.
+  const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome, last_run_cause: _cause, ...stored } = trigger;
   // Whether a wakeup reached the owner, and the step to take when it did not (their push
   // subscription), are the owner's: a mandate reading them would be told about the owner's
   // devices as if they were its own, and could act on neither. An absent value leaves the JSON.
@@ -9725,13 +9726,13 @@ export class LynoxHTTPApi {
         : taskManager.listTriggers(status ? { status } : undefined);
       const bulkLedgerForList = engine.getBulkLedger() ?? engine.getBulkLedgerSwitchedOff?.() ?? null;
       const policyContext = engine.getToolContext();
-      const refusedWatch = (trigger: TriggerRecord): { blocked_reason: BlockedReason } | null => {
-        try {
-          const refused = watchRefusedNow(trigger, policyContext);
-          return refused === null ? null : { blocked_reason: refused };
-        } catch {
-          return null;
-        }
+      // Why the run does not do its work: a watch the policy refuses now holds the next run and is
+      // told first; otherwise the cause the last failed run stored, read through its closed parser.
+      const blockedReasonOf = (trigger: TriggerRecord): { blocked_reason: BlockedReason } | null => {
+        let refused: BlockedReason | null = null;
+        try { refused = watchRefusedNow(trigger, policyContext); } catch { refused = null; }
+        const reason = refused ?? storedRunCause(trigger);
+        return reason === null ? null : { blocked_reason: reason };
       };
       const triggers = rows
         .map((trigger) => {
@@ -9767,9 +9768,9 @@ export class LynoxHTTPApi {
             // sets the name apart as a value. Any other title stays whole, the prefix included; so
             // does the title of a plan with no schedule, and one whose workflow was renamed since.
             ...(workflow !== undefined && (trigger.schedule_cron ?? '') !== '' && titleIsWorkflowName(trigger.title, workflow.name) ? { title_workflow: workflow.name } : {}),
-            // A watch the instance's network_policy keeps from its page, and why, as the poll would
-            // refuse it now: the view says so, with the way out (U-392).
-            ...(refusedWatch(trigger) ?? {}),
+            // Why the run does not do its work: a watch the instance's network_policy keeps from its
+            // page now, or the cause its last failed run stored. The view says it, with the way out.
+            ...(blockedReasonOf(trigger) ?? {}),
           };
         });
       // What the owner's stamp of each confirmed plan lists, and how each entry stands (B3), for the
@@ -14778,8 +14779,12 @@ export class LynoxHTTPApi {
         exportData['contained_unknown_threads'] = threadsWithMessages.filter((t) => t.contained_unknown !== undefined).length;
         exportData['threads'] = threadsWithMessages;
       } else {
+        // The engine opens the thread store at boot whenever it can (its history database
+        // first, then the store on it), so none here means one of those opens failed. The
+        // threads were not read, which is not the same as there being none.
         exportData['threads'] = [];
-        exportData['threads_may_be_incomplete'] = false;
+        exportData['threads_may_be_incomplete'] = true;
+        process.stderr.write('⚠ /api/export: thread store unavailable — threads exported empty and marked incomplete\n');
         exportData['contained_threads'] = 0;
         exportData['contained_unknown_threads'] = 0;
       }
@@ -14909,7 +14914,14 @@ export class LynoxHTTPApi {
         } catch {
           exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
         }
+      } else if (engine.getUserConfig().durable_memory_enabled === true) {
+        // Switched on, yet no store: the engine opens it at boot when the setting is on, so
+        // that open failed (or its database did). Not read, so not known to be empty.
+        exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
+        process.stderr.write('⚠ /api/export: durable knowledge store unavailable — exported empty and marked incomplete\n');
       } else {
+        // Switched off: no store was opened, so nothing is read and nothing failed. Entries
+        // written while it was on stay in engine.db and are not in this block.
         exportData['durable_knowledge'] = EMPTY_KNOWLEDGE;
       }
 
@@ -14965,10 +14977,14 @@ export class LynoxHTTPApi {
         crmWalked.set('contacts', contacts);
         crmWalked.set('deals', deals);
       } else {
+        // The engine always opens the CRM at boot, so no CRM here means that open
+        // failed. The lists are empty because they could not be read, not because the
+        // owner has no contacts or deals, and the copy says so.
         exportData['contacts'] = [];
-        exportData['contacts_may_be_incomplete'] = false;
+        exportData['contacts_may_be_incomplete'] = true;
         exportData['deals'] = [];
-        exportData['deals_may_be_incomplete'] = false;
+        exportData['deals_may_be_incomplete'] = true;
+        process.stderr.write('⚠ /api/export: CRM unavailable — contacts and deals exported empty and marked incomplete\n');
       }
 
       const ds = engine.getDataStore();
@@ -14996,8 +15012,11 @@ export class LynoxHTTPApi {
         exportData['datastore'] = datastoreExport;
         exportData['datastore_may_be_incomplete'] = incomplete.length > 0;
       } else {
+        // Same reason as the CRM above: the DataStore is opened at boot, and a null one
+        // failed to open. An empty block here is unread, not empty.
         exportData['datastore'] = {};
-        exportData['datastore_may_be_incomplete'] = false;
+        exportData['datastore_may_be_incomplete'] = true;
+        process.stderr.write('⚠ /api/export: DataStore unavailable — datastore exported empty and marked incomplete\n');
       }
 
       // Secret names (never values — GDPR export must not leak secrets)

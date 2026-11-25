@@ -45,6 +45,14 @@
   `guarded` a connected API's host is left out. `allow-list` and `deny-all` are
   unchanged. A command that needs another host after that reaches it once the
   owner names the host in the chat.
+- `GET /api/export` now sets `contacts_may_be_incomplete`,
+  `deals_may_be_incomplete`, `datastore_may_be_incomplete`,
+  `threads_may_be_incomplete` and `durable_knowledge.may_be_incomplete` to
+  `true` when the store behind the block could not be opened at boot (the
+  durable knowledge one only while durable memory is switched on). Until now
+  those blocks came out empty and marked complete, as if the account held no
+  contacts, deals, tables, chats or memory entries. A client that reads the
+  flags only as "a cap was reached" also sees them on such an instance.
 
 ## 2.18.0 — 2026-11-17
 

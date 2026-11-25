@@ -1399,7 +1399,7 @@ export class Engine {
     // And the end of each mandate (v24), which a later reader checks without a request.
     this._mandateEnds = this.engineDb ? new MandateEnds(this.engineDb.getDb()) : null;
     this._toolContext.mandateEnds = this._mandateEnds;
-    // And the live generation of the owner's sessions (v73). Published for the web UI, which runs in
+    // And the live generation of the owner's sessions (v74). Published for the web UI, which runs in
     // this process on a managed instance and checks the same generation (`readSessionToken`).
     const ownerMirror = join(getLynoxDir(), 'owner-sessions-generation');
     this._ownerSessions = this.engineDb ? new OwnerSessions(this.engineDb.getDb(), { mirrorPath: ownerMirror }) : null;

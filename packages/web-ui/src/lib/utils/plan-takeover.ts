@@ -237,22 +237,30 @@ function f2Line(p: TakeoverPreview): { line: TakeoverLine; by: TakeoverMember; r
  * T-2: other plans on the workflow that then run for someone else, grouped by (before, after).
  * Only a change of whom a plan runs for is said (N3); a plan that will not run again by itself is
  * left out of what is shown (N7) — the digest still holds it.
+ * `listed`: the plans the sentence right above these lines lists (F2's plans that run again). The
+ * first line only, and only if its plans run under the owner's name and are exactly those, points
+ * back to that list instead of repeating it: below another sentence, "these plans" would read as
+ * that sentence's. Every other line keeps its own list.
  */
-export function memberChangeLines(changes: readonly TakeoverMemberChange[]): TakeoverLine[] {
-	const groups = new Map<string, { before: string; after: string | null; titles: string[] }>();
+export function memberChangeLines(changes: readonly TakeoverMemberChange[], listed: ReadonlySet<string> = new Set()): TakeoverLine[] {
+	const groups = new Map<string, { before: string; after: string | null; titles: string[]; ids: Set<string> }>();
 	for (const c of changes) {
 		if (c.runsNoMore || c.before === null || c.before === c.after) continue;
 		const key = `${c.before}\u0000${c.after ?? ''}`;
-		const g = groups.get(key) ?? { before: c.before, after: c.after, titles: [] };
+		const g = groups.get(key) ?? { before: c.before, after: c.after, titles: [], ids: new Set<string>() };
 		g.titles.push(c.title);
+		g.ids.add(c.id);
 		groups.set(key, g);
 	}
-	return [...groups.values()].map((g) => {
+	const sameAsListed = (ids: ReadonlySet<string>): boolean => ids.size === listed.size && [...ids].every((id) => listed.has(id));
+	return [...groups.values()].map((g, i) => {
 		const one = g.titles.length === 1;
 		const before = shownValue(nameOfTag(g.before));
 		const plan = shownValue(g.titles[0]!);
 		const text = g.after === null
-			? (one ? tf('takeover.change.owner_one', { plan, before }) : tf('takeover.change.owner_many', { plans: planList(g.titles), before }))
+			? (one ? tf('takeover.change.owner_one', { plan, before })
+				: i === 0 && sameAsListed(g.ids) ? tf('takeover.change.owner_many_listed', { before })
+					: tf('takeover.change.owner_many', { plans: planList(g.titles), before }))
 			: (one ? tf('takeover.change.member_one', { plan, before, after: shownValue(nameOfTag(g.after)) }) : tf('takeover.change.member_many', { plans: planList(g.titles), before, after: shownValue(nameOfTag(g.after)) }));
 		return { kind: 'member_change' as const, text };
 	});
@@ -324,7 +332,8 @@ export function takeoverLines(p: TakeoverPreview, formatDate: (iso: string) => s
 		}
 	}
 	if (f2 !== null) lines.push(f2.line);
-	lines.push(...memberChangeLines(p.memberChanges));
+	// F2's last sentence lists the plans that run again; the T-2 line right below it may point back to that list.
+	lines.push(...memberChangeLines(p.memberChanges, f2 === null ? new Set() : new Set(p.alsoReleased.map((r) => r.id))));
 	lines.push(...connectionLines(p));
 	lines.push(runsAsLine(p));
 	lines.push(...scheduleLines(p, formatDate));

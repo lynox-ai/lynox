@@ -1659,9 +1659,15 @@ const MIGRATIONS: string[] = [
    UPDATE relationships SET origin_memory_id = source_memory_id WHERE origin_memory_id IS NULL;
    ${repointToChainEndSql('relationships')}
    CREATE INDEX IF NOT EXISTS idx_rel_origin_memory ON relationships(origin_memory_id);`,
-  // v73: the live generation of the owner's sessions (owner-sessions.ts). One row; an owner session
-  // cookie of any other generation is refused. Kept across the owner's erasure (`deleteAllData`).
+  // v73: why a trigger's last run failed, as a cause lynox knows (`RunCause`, JSON), written with
+  // the run's status on every run end and NULL when the run had none. The trigger list says it
+  // (`blocked_reason`); `last_run_result` cannot be read for that, since it carries outside text.
+  // Existing rows stay NULL: their causes were never recorded.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (73);
+   ALTER TABLE triggers ADD COLUMN last_run_cause TEXT;`,
+  // v74: the live generation of the owner's sessions (owner-sessions.ts). One row; an owner session
+  // cookie of any other generation is refused. Kept across the owner's erasure (`deleteAllData`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (74);
    CREATE TABLE IF NOT EXISTS owner_sessions (
      id INTEGER PRIMARY KEY CHECK (id = 1),
      generation INTEGER NOT NULL,

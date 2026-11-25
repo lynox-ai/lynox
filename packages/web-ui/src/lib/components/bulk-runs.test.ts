@@ -1041,16 +1041,39 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('checksum'), true, DE, true)).toEqual({ cause: 'Der Lauf hat sich seit deiner Freigabe geändert.', before: null, check: null, after: null, kept: null, soFar: null, allows: null });
 	});
 
+	it('counts as written only what the run wrote: a target found already holding its value is not', () => {
+		const heads = (written: number, takenBack: number, unchanged: number) => ({
+			deselected: 0, invalid: 0, unchanged, takenBack, written, settled: 0, conflict: 0, unclear: 0, failed: 0, open: 0,
+		});
+		const TAIL = ' Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.';
+		const STAYS = `Was schon geschrieben ist, bleibt. lynox versucht alle übrigen Ziele noch einmal.${TAIL}`;
+		const NONE = `Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt die übrigen Ziele.${TAIL}`;
+		// Only found ones: applied 2, none written by the run. The found ones are done, so the rest
+		// is tried, not all targets; the head counts them as unchanged.
+		expect(bulkResumeText(w('timeBudget', { applied: 2, heads: heads(0, 0, 2) }), true, DE, true)?.kept).toBe(NONE);
+		expect(bulkResumeText(w('timeBudget', { applied: 2, heads: heads(0, 0, 2), resumeTries: 4 }), true, EN, true)?.kept)
+			.toBe('No target is confirmed as written yet. lynox now tries the remaining targets up to the approved maximum. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
+		// Found and written mixed: something the run wrote stays, as before.
+		expect(bulkResumeText(w('timeBudget', { applied: 3, heads: heads(1, 0, 2) }), true, DE, true)?.kept).toBe(STAYS);
+		// Written and taken back since counts as applied, as before.
+		expect(bulkResumeText(w('timeBudget', { applied: 1, heads: heads(0, 1, 0) }), true, DE, true)?.kept).toBe(STAYS);
+		// An engine without heads: applied, as before.
+		expect(bulkResumeText(w('timeBudget', { applied: 2 }), true, DE, true)?.kept).toBe(STAYS);
+		// An undo keeps reading the applied count: the same heads give its sentence that something stays.
+		expect(bulkResumeText(w('timeBudget', { kind: 'undo', applied: 2, heads: heads(0, 0, 2) }), true, DE, true)?.kept)
+			.toBe('Was schon zurückgenommen ist, bleibt so. lynox nimmt alle übrigen Ziele zurück. Ausgenommen sind Ziele, deren früheren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
+	});
+
 	it('says all the rest is tried only when the maximum does not stop the pass first', () => {
 		expect(bulkResumeText(w('timeBudget'), true, DE, true)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht alle übrigen Ziele noch einmal. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
 		expect(bulkResumeText(w('timeBudget', { resumeTries: 4 }), true, DE, true)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht die übrigen Ziele bis zur freigegebenen Höchstzahl. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
 		// At its maximum the run writes on under the new one the owner types.
 		expect(bulkResumeText(w('maxTargets'), true, EN, true)?.kept).toBe('What is already written stays. lynox tries the remaining targets up to the approved maximum. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
 		// With no target confirmed as written, nothing is said to stay — also where targets failed.
-		expect(bulkResumeText(w('expired', { phase: 'approved', applied: 0, failed: 0, failedOnce: 0 }), true, DE, true)?.kept).toBe('Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt alle Ziele. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
-		expect(bulkResumeText(w('consecutiveFailures', { applied: 0, failed: 3, failedOnce: 3 }), true, EN, true)?.kept).toBe('No target is confirmed as written yet. lynox now tries all targets. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
-		expect(bulkResumeText(w('unavailable', { applied: 0, resumeTries: 4 }), true, DE, true)?.kept).toBe('Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt die Ziele bis zur freigegebenen Höchstzahl. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
-		expect(bulkResumeText(w('unavailable', { applied: 0, resumeTries: 4 }), true, EN, true)?.kept).toBe('No target is confirmed as written yet. lynox now tries the targets up to the approved maximum. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
+		expect(bulkResumeText(w('expired', { phase: 'approved', applied: 0, failed: 0, failedOnce: 0 }), true, DE, true)?.kept).toBe('Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt die übrigen Ziele. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
+		expect(bulkResumeText(w('consecutiveFailures', { applied: 0, failed: 3, failedOnce: 3 }), true, EN, true)?.kept).toBe('No target is confirmed as written yet. lynox now tries the remaining targets. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
+		expect(bulkResumeText(w('unavailable', { applied: 0, resumeTries: 4 }), true, DE, true)?.kept).toBe('Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt die übrigen Ziele bis zur freigegebenen Höchstzahl. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
+		expect(bulkResumeText(w('unavailable', { applied: 0, resumeTries: 4 }), true, EN, true)?.kept).toBe('No target is confirmed as written yet. lynox now tries the remaining targets up to the approved maximum. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
 	});
 
 	it('counts the targets failed so far, as at least the ones failed now on a run from before the count', () => {
@@ -1156,14 +1179,14 @@ describe('going on from a run that halted', () => {
 		for (const code of ['reach_approve_credential', 'reach_later_shopifyNotCleared', 'planner_unknown', 'reach_approve_constructor']) expect([code, bulkReachRefusalKey(code)]).toEqual([code, null]);
 	});
 
-	it('takes the approval away only where approving can never pass: self-hosted, no API version', () => {
+	it('takes approving and writing on away only where they can never pass: self-hosted, no API version', () => {
 		const hopeless = ['shopifySelfHosted', 'shopifyNoApiVersion'];
 		for (const k of ['shopifySelfHosted', 'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable', 'shopifyNoApiVersion']) {
 			expect([k, bulkReachHopeless(`reach_approve_${k}`)]).toEqual([k, hopeless.includes(k)]);
-			// Writing on is not approving: its refusal keeps the page as it is.
-			expect([k, bulkReachHopeless(`reach_resume_${k}`)]).toEqual([k, false]);
+			// Writing on meets the same start check: the same causes take it away.
+			expect([k, bulkReachHopeless(`reach_resume_${k}`)]).toEqual([k, hopeless.includes(k)]);
 		}
-		for (const code of [undefined, 'reach_approve_credential', 'planner_unknown', 'reach_approve_constructor', 'xreach_approve_shopifySelfHosted']) expect([code, bulkReachHopeless(code)]).toEqual([code, false]);
+		for (const code of [undefined, 'reach_approve_credential', 'reach_resume_credential', 'planner_unknown', 'reach_approve_constructor', 'reach_undo_shopifySelfHosted', 'reach_resumex_shopifySelfHosted', 'xreach_approve_shopifySelfHosted', 'xreach_resume_shopifySelfHosted']) expect([code, bulkReachHopeless(code)]).toEqual([code, false]);
 	});
 
 	it('words the five halts that had only the engine\'s reason, in both languages', () => {
