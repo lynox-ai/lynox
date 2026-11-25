@@ -6725,7 +6725,7 @@ describe('a secret reference in a tool whose destination cannot be read', () => 
     const { agent, handler } = bashAgent(promptUser);
     await agent.send('go');
     const question = flattenPrompt(promptUser.mock.calls[0]![0] as string | PromptText);
-    expect(question).toContain('bash');
+    expect(question).toContain('Command wants to use secret(s)');
     expect(question).toContain('SERVICE_TOKEN');
     expect(question).toContain('wget --header');
     expect(handler).not.toHaveBeenCalled();
