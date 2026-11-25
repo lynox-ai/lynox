@@ -4770,6 +4770,62 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    // A shell command can work silently for longer than the stale window; taken over in the
+    // middle of it, the run was lost.
+    it('does not take over a dropped run whose shell command is still within its own limit', async () => {
+      repayRateWindow();
+      await withDroppableRun('tool-working-1', 'none', async ({ slots, drop }) => {
+        await drop();
+        const onStream = mockSessionInstance.onStream as (e: unknown) => Promise<void>;
+        await onStream({ type: 'tool_call', name: 'bash', input: { command: 'sleep 150', timeout_ms: 180_000 }, agent: 'main', toolUseId: 'tu-sleep' });
+        (slots.get('tool-working-1') as { lastEventAt: number }).lastEventAt = Date.now() - 61_000;
+        const next = await jsonFetch('/api/sessions/tool-working-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+        });
+        expect(next.status).toBe(409);
+        await next.text();
+        expect(mockSessionAbort).not.toHaveBeenCalled();
+        // Its result arrives: the run is silent again past the window, and now it is taken over.
+        await onStream({ type: 'tool_result', name: 'bash', result: 'done', agent: 'main', toolUseId: 'tu-sleep' });
+        (slots.get('tool-working-1') as { lastEventAt: number }).lastEventAt = Date.now() - 61_000;
+        mockSessionRun.mockResolvedValueOnce('second response');
+        const after = await jsonFetch('/api/sessions/tool-working-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+        });
+        expect(after.status).toBe(200);
+        await after.text();
+        expect(mockSessionAbort).toHaveBeenCalled();
+      });
+    });
+
+    it('takes over a dropped run whose tool hangs past its own limit', async () => {
+      repayRateWindow();
+      await withDroppableRun('tool-hung-1', 'none', async ({ slots, drop }) => {
+        await drop();
+        const onStream = mockSessionInstance.onStream as (e: unknown) => Promise<void>;
+        const realNow = Date.now.bind(Date);
+        const opened = realNow();
+        await onStream({ type: 'tool_call', name: 'http_request', input: { url: 'https://example.com' }, agent: 'main', toolUseId: 'tu-hang' });
+        (slots.get('tool-hung-1') as { lastEventAt: number }).lastEventAt = opened - 61_000;
+        // The request's own limit is a minute; 66 seconds later it is past it and its margin.
+        const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 66_000);
+        try {
+          mockSessionRun.mockResolvedValueOnce('second response');
+          const next = await jsonFetch('/api/sessions/tool-hung-1/run', {
+            method: 'POST',
+            body: JSON.stringify({ task: 'are you stuck?', protocol: 1 }),
+          });
+          expect(next.status).toBe(200);
+          await next.text();
+          expect(mockSessionAbort).toHaveBeenCalled();
+        } finally {
+          spy.mockRestore();
+        }
+      });
+    });
+
     it('takes over a dropped run whose engine has been silent past the stale window', async () => {
       repayRateWindow();
       await withDroppableRun('stale-silent-1', 'none', async ({ slots, drop }) => {
