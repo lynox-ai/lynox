@@ -15,7 +15,9 @@
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
-	import { injectArtifactPreview as injectArtifactFit } from '../utils/artifact-frame.js';
+	import { artifactExportDocument, injectArtifactPreview as injectArtifactFit } from '../utils/artifact-frame.js';
+	import { svgExportDocument } from '../utils/svg-export.js';
+	import { attachArtifactFrame } from '../utils/artifact-frame-host.js';
 	import { saveOrShareBlob } from '../utils/save-blob.js';
 
 	let selected = $state<Artifact | null>(null);
@@ -141,6 +143,12 @@
 		return injectArtifactFit(html);
 	}
 
+	/** The preview frame runs on the sandboxed frame endpoint and gets its document from
+	 *  memory once it is ready (utils/artifact-frame-host.ts). */
+	function artifactFrame(node: HTMLIFrameElement, html: string): void {
+		attachArtifactFrame(node, html);
+	}
+
 	function typeIcon(type: string): string {
 		if (type === 'mermaid') return '◇';
 		if (type === 'svg') return '△';
@@ -170,11 +178,24 @@
 	}
 
 	// iOS/Android → the native share sheet ("Save to Files"/"Save to Drive"); a raw
-	// <a download> is a dead click on iOS. Desktop → direct download. Same helper +
-	// behaviour as the inline artifact pill's share, so the two views are coherent.
+	// <a download> is a dead click on iOS. Desktop → direct download. Same helper as the inline
+	// artifact pill's share; the file differs for svg only (the pill gives the html it shows).
 	function exportArtifact(a: Artifact) {
-		const filename = `${a.title.replace(/\s+/g, '-').toLowerCase()}.${extensionFor(a.type)}`;
-		void saveOrShareBlob(new Blob([a.content], { type: mimeFor(a.type) }), filename);
+		const base = a.title.replace(/\s+/g, '-').toLowerCase();
+		// An html file keeps the artifact policy, as the chat's download does (artifactExportDocument).
+		// An svg file cannot carry the policy, so it goes out without anything that reaches another
+		// address (svgExportDocument). Content it cannot write as such a file (no svg in it, or
+		// one that reads back differently once written) goes out as plain text, which a browser
+		// opened on it only shows.
+		let type = a.type;
+		let body = a.content;
+		if (a.type === 'html') body = artifactExportDocument(a.content);
+		else if (a.type === 'svg') {
+			const svg = svgExportDocument(a.content);
+			if (svg === null) type = 'text';
+			else body = svg;
+		}
+		void saveOrShareBlob(new Blob([body], { type: mimeFor(type) }), `${base}.${extensionFor(type)}`);
 	}
 
 	/** Save as PDF via the browser print pipeline — same path as the inline
@@ -313,12 +334,15 @@
 					</div>
 				</div>
 			{:else if selected.type === 'html' || selected.type === 'svg'}
-				<iframe
-					srcdoc={injectArtifactPreview(selected.content)}
-					sandbox="allow-scripts"
-					class="w-full h-full border-none bg-bg-elevated"
-					title={selected.title}
-				></iframe>
+				<!-- A new version gets a new frame: the frame takes its document once. -->
+				{#key `${selected.id}:${selected.version ?? 1}`}
+					<iframe
+						use:artifactFrame={injectArtifactPreview(selected.content)}
+						sandbox="allow-scripts"
+						class="w-full h-full border-none bg-bg-elevated"
+						title={selected.title}
+					></iframe>
+				{/key}
 			{:else if selected.type === 'mermaid'}
 				<div class="p-6 overflow-auto h-full">
 					<MarkdownRenderer content={'```mermaid\n' + selected.content + '\n```'} />
