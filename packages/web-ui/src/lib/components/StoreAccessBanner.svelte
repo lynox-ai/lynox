@@ -4,7 +4,7 @@
 	import { untrack } from 'svelte';
 	import { connectHref } from '../oauth-connect-path.js';
 	import { isOwnerSession, isViewerKnown, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
-	import { storeAccessShown, type StoreAccessProfile } from '../utils/store-access-end.js';
+	import { storeAccessAskAgain, storeAccessShown, type StoreAccessProfile } from '../utils/store-access-end.js';
 	import { placeholderParts } from '../utils/value-breaks.js';
 	import WholeValue from './WholeValue.svelte';
 
@@ -15,26 +15,48 @@
 	// the session the owner's, also when that answer comes late (a retry).
 	let profiles = $state<StoreAccessProfile[]>([]);
 	let dismissed = $state(false);
-	let now = $state(new Date());
-	const lines = $derived(profiles.flatMap((p) => { const shown = storeAccessShown(p, now, getLocale()); return shown === null ? [] : [shown]; }));
+	// When the question the profiles answer was sent. The lines read the ends as of then: "ended"
+	// only for an end the engine already knew had passed, never on this browser's clock alone (a
+	// run may renew the store while the tab stays open).
+	let askedAt = $state<number | null>(null);
+	let now = new Date();
+	const lines = $derived(askedAt === null ? [] : profiles.flatMap((p) => { const shown = storeAccessShown(p, new Date(askedAt!), getLocale()); return shown === null ? [] : [shown]; }));
+
+	// One question at a time, and none hangs: a request that gets no answer is given up after this
+	// long, and the next minute asks again.
+	const QUESTION_MS = 15_000;
+	let asking = false;
 
 	async function load(): Promise<void> {
-		await loadSettingsViewer();
-		// A session the server named another's is not asked; one not named yet is, and shows only
-		// once the owner's.
-		if (isViewerKnown() && !isOwnerSession()) return;
+		if (asking) return;
+		asking = true;
+		const abort = new AbortController();
+		const timeout = setTimeout(() => abort.abort(), QUESTION_MS);
 		try {
-			const res = await fetch(`${getApiBase()}/api-profiles`);
+			await loadSettingsViewer();
+			// A session the server named another's is not asked; one not named yet is, and shows only
+			// once the owner's.
+			if (isViewerKnown() && !isOwnerSession()) return;
+			const sent = Date.now();
+			const res = await fetch(`${getApiBase()}/api-profiles`, { signal: abort.signal });
 			if (!res.ok) return;
 			const data = (await res.json()) as { profiles?: StoreAccessProfile[] };
 			profiles = data.profiles ?? [];
-		} catch { /* silent: StatusBar handles an engine that is down */ }
+			askedAt = sent;
+		} catch { /* silent: StatusBar handles an engine that is down; the next minute asks again */ } finally {
+			clearTimeout(timeout);
+			asking = false;
+		}
 	}
 
 	$effect(() => {
 		untrack(() => void load());
-		// An end that passes while the page is open: the line says so within a minute.
-		const timer = setInterval(() => { now = new Date(); }, 60_000);
+		// An end that passes while the page is open: the engine is asked again within a minute, and
+		// the line says what it answers (renewed, or ended).
+		const timer = setInterval(() => {
+			now = new Date();
+			if (storeAccessAskAgain(profiles, askedAt, now)) void load();
+		}, 60_000);
 		return () => clearInterval(timer);
 	});
 </script>

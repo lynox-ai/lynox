@@ -41,6 +41,22 @@ export function storeAccessShown(profile: StoreAccessProfile, now: Date, locale:
 }
 
 /**
+ * Whether the page should ask the engine again (`GET /api/api-profiles`): an end it was told of
+ * has come since the last answer it got (`askedAt`). Until that answer the page shows what the
+ * engine said then, so an end that passes in an open tab is never called ended on the browser's
+ * clock alone: a run may have renewed the store meanwhile. An end at or before `askedAt` was
+ * already the engine's word and asks nothing; neither does a page that has no answer yet.
+ */
+export function storeAccessAskAgain(profiles: readonly StoreAccessProfile[], askedAt: number | null, now: Date): boolean {
+	if (askedAt === null) return false;
+	return profiles.some((p) => {
+		const iso = p.store_access_ends?.at;
+		const at = typeof iso === 'string' ? Date.parse(iso) : Number.NaN;
+		return !Number.isNaN(at) && at > askedAt && at <= now.getTime();
+	});
+}
+
+/**
  * A deadline's day with the month's name, in the reader's time zone (U-391): `5. Dezember 2026`,
  * `December 5, 2026`. Never in digits alone: `05/12/2026` reads as May 12 to an American reader.
  */

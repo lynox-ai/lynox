@@ -239,3 +239,114 @@ describe('the store row on Settings → APIs before the end', () => {
 		expect(q('api-reconnect-not-yours')).toBeNull();
 	});
 });
+
+describe('the shell banner in a tab that stays open past an end', () => {
+	// The clock of this test: two minutes before the first store's end. Each minute the banner looks
+	// whether an end it was told of has come since its last answer, and only then asks again.
+	const T0 = Date.parse('2099-01-20T11:58:00.000Z');
+	const END_A = '2099-01-20T11:59:30.000Z';
+	const END_B = '2099-01-20T12:00:30.000Z';
+	const RENEWED = '2099-02-20T12:00:00.000Z';
+	const SOON_LINE = (host: string, day: string): string => `Der Zugang von lynox zum Shop ${host} läuft am ${day} ab. Verbinde den Shop vorher neu, damit Läufe und Abfragen weiterlaufen. Erneut verbinden`;
+	const ENDED_LINE = (host: string): string => `lynox konnte den Zugang zum Shop ${host} nicht erneuern. Läufe und Abfragen an den Shop gehen erst wieder, wenn du ihn neu verbindest. Erneut verbinden`;
+	const A = (at: string, ended = false): Record<string, unknown> => shop('a', 'acme.myshopify.com', at, { store_access_ends: { host: 'acme.myshopify.com', ended, at } });
+	const B = shop('b', 'beta-shop.myshopify.com', END_B, { store_access_ends: { host: 'beta-shop.myshopify.com', ended: false, at: END_B } });
+
+	/** Each question for the profiles takes the next answer: a list, a status, or 'hang' (it waits until aborted). */
+	let answers: (unknown[] | number | 'hang')[];
+	let questions: number;
+	beforeEach(() => {
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+		vi.setSystemTime(T0);
+		setLocale('de');
+		questions = 0;
+		answers = [];
+		vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+			const json = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			if (url.endsWith('/config')) return json({ viewer: 'owner' });
+			questions++;
+			const next = answers.shift() ?? 500;
+			if (next === 'hang') {
+				return new Promise<Response>((_, reject) => { init?.signal?.addEventListener('abort', () => reject(new Error('aborted'))); });
+			}
+			if (typeof next === 'number') return new Response('{}', { status: next, headers: { 'Content-Type': 'application/json' } });
+			return json({ profiles: next });
+		}));
+	});
+	afterEach(() => { vi.useRealTimers(); });
+
+	async function settle(): Promise<void> {
+		for (let i = 0; i < 10; i++) {
+			await vi.advanceTimersByTimeAsync(0);
+			await tick();
+			flushSync();
+		}
+	}
+	async function open(): Promise<void> {
+		const { default: View } = await import('./StoreAccessBanner.svelte');
+		component = mount(View, { target });
+		await settle();
+	}
+	async function minutes(n: number): Promise<void> {
+		for (let i = 0; i < n; i++) {
+			await vi.advanceTimersByTimeAsync(60_000);
+			await settle();
+		}
+	}
+	const shown = (): string[] => all('store-access-line').map(text);
+
+	it('while a question is open the date stays, and another store\'s end asks once the question has cleared', async () => {
+		answers = [[A(END_A), B], 'hang', [A(RENEWED), B]];
+		await open();
+		expect(questions).toBe(1);
+		expect(shown()).toEqual([SOON_LINE('acme.myshopify.com', '20. Januar 2099'), SOON_LINE('beta-shop.myshopify.com', '20. Januar 2099')]);
+		// 11:59: nothing has come yet.
+		await minutes(1);
+		expect(questions).toBe(1);
+		// 12:00: A's end has come; the question goes out and gets no answer.
+		await minutes(1);
+		expect(questions).toBe(2);
+		expect(shown()).toEqual([SOON_LINE('acme.myshopify.com', '20. Januar 2099'), SOON_LINE('beta-shop.myshopify.com', '20. Januar 2099')]);
+		// 12:00:15 the open question is given up; nothing flips.
+		await vi.advanceTimersByTimeAsync(15_000);
+		await settle();
+		expect(shown()).toEqual([SOON_LINE('acme.myshopify.com', '20. Januar 2099'), SOON_LINE('beta-shop.myshopify.com', '20. Januar 2099')]);
+		// 12:01:15: A's end and now B's have come since the last answer; one question asks for both.
+		await minutes(1);
+		expect(questions).toBe(3);
+		expect(shown()).toEqual([SOON_LINE('acme.myshopify.com', '20. Februar 2099'), ENDED_LINE('beta-shop.myshopify.com')]);
+	});
+
+	it('an end the engine renewed meanwhile shows the new date, never "ended"', async () => {
+		answers = [[A(END_A)], [A(RENEWED)]];
+		await open();
+		await minutes(2);
+		expect(questions).toBe(2);
+		expect(shown()).toEqual([SOON_LINE('acme.myshopify.com', '20. Februar 2099')]);
+		await minutes(5);
+		expect(questions).toBe(2);
+		expect(shown()).toEqual([SOON_LINE('acme.myshopify.com', '20. Februar 2099')]);
+	});
+
+	it('an end the engine confirms reads ended, and the banner asks no more for it', async () => {
+		answers = [[A(END_A)], [A(END_A, true)]];
+		await open();
+		await minutes(2);
+		expect(questions).toBe(2);
+		expect(shown()).toEqual([ENDED_LINE('acme.myshopify.com')]);
+		await minutes(10);
+		expect(questions).toBe(2);
+		expect(shown()).toEqual([ENDED_LINE('acme.myshopify.com')]);
+	});
+
+	it('a question that fails changes nothing, and the next minute asks again', async () => {
+		answers = [[A(END_A)], 500, [A(RENEWED)]];
+		await open();
+		await minutes(2);
+		expect(questions).toBe(2);
+		expect(shown()).toEqual([SOON_LINE('acme.myshopify.com', '20. Januar 2099')]);
+		await minutes(1);
+		expect(questions).toBe(3);
+		expect(shown()).toEqual([SOON_LINE('acme.myshopify.com', '20. Februar 2099')]);
+	});
+});
