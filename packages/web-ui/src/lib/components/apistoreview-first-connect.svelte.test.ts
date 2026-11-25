@@ -76,6 +76,21 @@ describe('the first connect of a profile on a built-in provider', () => {
 		expect(q('api-connect-first-not-yours')).toBeNull();
 	});
 
+	it('the owner, a profile a person with access set up: no first connect, the form stays', async () => {
+		serve('owner', [{ ...shop, created_by: 'mandate:anna@example.com' }]);
+		await render();
+		expect(q('preset-client-form')).not.toBeNull();
+		expect(q('api-connect-first')).toBeNull();
+		expect(q('api-connect-first-link')).toBeNull();
+		expect(q('api-connect-first-not-yours')).toBeNull();
+	});
+
+	it('the owner, a profile the owner set up: the first connect', async () => {
+		serve('owner', [{ ...shop, created_by: 'owner' }]);
+		await render();
+		expect(q('api-connect-first-link')?.getAttribute('href')).toBe('/api/oauth/connect/shop');
+	});
+
 	it('the owner, no secret saved: no button, the form is the step before', async () => {
 		serve('owner', [shop], false);
 		await render();

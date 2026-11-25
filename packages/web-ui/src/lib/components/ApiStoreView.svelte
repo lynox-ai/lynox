@@ -343,8 +343,11 @@
 						</div>
 					{/if}
 					{#if onBuiltInProvider(profile) && isOwnerSession()}
+						<!-- No first connect on a profile a person with access set up: the view hides a connection the
+						     owner makes there from every reader, the owner included, so it would show as connected and
+						     carry nothing (`hiddenFromProfile`). -->
 						<div class="border-t border-border px-4 py-3">
-							<PresetClientForm profileId={profile.id} connectHref={notYetConnected(profile) ? connectHref(getApiBase(), profile.id) : null} />
+							<PresetClientForm profileId={profile.id} connectHref={notYetConnected(profile) && !setUpByMember(profile) ? connectHref(getApiBase(), profile.id) : null} />
 						</div>
 					{:else if notYetConnected(profile) && profile.reader_may_connect === false}
 						<!-- The server says `false` only to a mandate, which connects only a profile it set up. -->
