@@ -229,7 +229,7 @@ class ShopifyMediaRefusal extends BulkSourceError {}
 
 /** Where the connections are listed, as the owner's UI names it (web-ui `nav.settings` → `settings.apis`,
  *  held equal by a test): in the instance's language, so the model copies the label the person sees. */
-const CONNECTIONS_PLACE = { de: 'Einstellungen → APIs', en: 'Settings → APIs' } as const;
+const CONNECTIONS_PLACE = { de: 'Einstellungen → API-Verbindungen', en: 'Settings → API connections' } as const;
 export function connectionsPlace(): string {
   return CONNECTIONS_PLACE[noticeLanguage(loadConfig().language)];
 }

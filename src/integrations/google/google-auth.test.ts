@@ -248,6 +248,33 @@ describe('GoogleAuth', () => {
       expect(vault.delete).not.toHaveBeenCalled();
     });
 
+    // The error reaches the model through every Google and mail tool, and the
+    // agent masks only values it already stores.
+    it('names a refresh failure by its status and error code, never by the body', async () => {
+      const frag = ['zq', 'Vx81Lm'].join('');
+      const vaultAuth = new GoogleAuth({
+        clientId: 'test-id',
+        clientSecret: 'test-secret',
+        vault: makeVaultWithExpiredTokens() as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: 'invalid_request', error_description: `bad client ${frag}` }), { status: 400 }));
+      const err = await vaultAuth.getAccessToken().then(() => null, (e: unknown) => e as Error);
+      expect(err?.message).toMatch(/^Token refresh failed: 400 \(invalid_request\)\./);
+      expect(err?.message).not.toContain(frag);
+    });
+
+    it('names a malformed refresh answer, never quotes it', async () => {
+      const frag = ['zq', 'Vx81Lm'].join('');
+      const vaultAuth = new GoogleAuth({
+        clientId: 'test-id',
+        clientSecret: 'test-secret',
+        vault: makeVaultWithExpiredTokens() as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      mockFetch.mockResolvedValueOnce(new Response(`${frag}abcdef`, { status: 200 }));
+      const err = await vaultAuth.getAccessToken().then(() => null, (e: unknown) => e as Error);
+      expect(err?.message).toBe('Token refresh failed: the answer is not valid JSON');
+    });
+
     it('keeps the refresh token on a 429 rate limit', async () => {
       const vault = makeVaultWithExpiredTokens();
       const vaultAuth = new GoogleAuth({
@@ -852,6 +879,16 @@ describe('GoogleAuth', () => {
       expect(auth.grantPending).toBe(false);
     });
 
+    it('exchangeRedirectCode names a failure and a malformed answer without their text', async () => {
+      const frag = ['zq', 'Vx81Lm'].join('');
+      mockFetch.mockResolvedValueOnce(new Response(`denied ${frag}`, { status: 400 }));
+      const failed = await auth.exchangeRedirectCode('code', 'https://example.test/cb').then(() => null, (e: unknown) => e as Error);
+      expect(failed?.message).toBe('Token exchange failed: 400');
+      mockFetch.mockResolvedValueOnce(new Response(`${frag}abcdef`, { status: 200 }));
+      const malformed = await auth.exchangeRedirectCode('code', 'https://example.test/cb').then(() => null, (e: unknown) => e as Error);
+      expect(malformed?.message).toBe('Token exchange failed: the answer is not valid JSON');
+    });
+
     it('startLocalAuth, from the wait on', async () => {
       const { authUrl, waitForCode } = await auth.startLocalAuth();
       expect(auth.grantPending).toBe(false);
@@ -898,6 +935,31 @@ describe('GoogleAuth', () => {
       await vi.advanceTimersByTimeAsync(6_000);
       await run;
       expect(auth.grantPending).toBe(false);
+    });
+
+    it('startDeviceFlow keeps the client error code and drops the rest of the body', async () => {
+      const frag = ['zq', 'Vx81Lm'].join('');
+      // The connect page reads `invalid_client` / `unauthorized_client` out of this message.
+      mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: 'invalid_client', error_description: `client ${frag}` }), { status: 401 }));
+      const failed = await auth.startDeviceFlow().then(() => null, (e: unknown) => e as Error);
+      expect(failed?.message).toBe('Device auth request failed: 401 (invalid_client)');
+      mockFetch.mockResolvedValueOnce(new Response(`${frag}abcdef`, { status: 200 }));
+      const malformed = await auth.startDeviceFlow().then(() => null, (e: unknown) => e as Error);
+      expect(malformed?.message).toBe('Device auth request failed: the answer is not valid JSON');
+    });
+
+    it('startDeviceFlow names a refused poll by its status and code, never by the error text', async () => {
+      const frag = ['zq', 'Vx81Lm'].join('');
+      mockFetch.mockResolvedValueOnce(new Response(
+        JSON.stringify({ device_code: 'dc', user_code: 'uc', verification_url: 'https://example.test/d', expires_in: 300, interval: 1 }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ));
+      const { waitForAuth } = await auth.startDeviceFlow();
+      mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: `denied ${frag}` }), { status: 400 }));
+      vi.useFakeTimers();
+      const run = waitForAuth().then(() => null, (e: unknown) => e as Error);
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect((await run)?.message).toBe('Device auth failed: 400');
     });
   });
 
@@ -1800,6 +1862,20 @@ describe('GoogleAuth', () => {
       expect(t).toBe('sa-token-after-recovery');
       expect(mockFetch).toHaveBeenCalledTimes(2);
     });
+
+    it('names a service-account failure by its status and error code, never by the body', async () => {
+      const frag = ['zq', 'Vx81Lm'].join('');
+      mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: 'invalid_grant', error_description: `jwt ${frag}` }), { status: 400 }));
+      const err = await makeSaAuth().getAccessToken().then(() => null, (e: unknown) => e as Error);
+      expect(err?.message).toBe('Service account token exchange failed: 400 (invalid_grant)');
+    });
+
+    it('names a malformed service-account answer, never quotes it', async () => {
+      const frag = ['zq', 'Vx81Lm'].join('');
+      mockFetch.mockResolvedValueOnce(new Response(`${frag}abcdef`, { status: 200 }));
+      const err = await makeSaAuth().getAccessToken().then(() => null, (e: unknown) => e as Error);
+      expect(err?.message).toBe('Service account token exchange failed: the answer is not valid JSON');
+    });
   });
 });
 
@@ -2020,6 +2096,14 @@ describe('refresh through the control plane (the client secret stays there)', ()
     expect(body).toEqual({ instance_id: 'inst-1', refresh_handle: 'sealed-handle-1' });
     // And the client secret appears nowhere in the request.
     expect(JSON.stringify(init)).not.toContain('test-secret');
+  });
+
+  it('names a malformed control-plane answer, never quotes it', async () => {
+    setEnv(true);
+    const frag = ['zq', 'Vx81Lm'].join('');
+    mockFetch.mockResolvedValueOnce(new Response(`${frag}abcdef`, { status: 200 }));
+    const err = await authWith(vaultWith({ refresh_handle: 'sealed-handle-1' })).getAccessToken().then(() => null, (e: unknown) => e as Error);
+    expect(err?.message).toBe('Token refresh failed: the answer is not valid JSON');
   });
 
   it('calls Google directly when there is no handle (self-host is unchanged)', async () => {
