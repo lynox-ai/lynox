@@ -499,6 +499,7 @@ describe('the refresh of an expiring store connection', () => {
     expect(store.save({ ...p, auth: { ...p.auth, oauth: { ...p.auth!.oauth, refresh_token_key: 'SOME_OTHER_SLOT' } } } as ApiProfile).ok).toBe(true);
     expect(await refreshStoreToken(ID, 'due', ctx())).toBe('not-run');
     expect(hold.calls).toHaveLength(0);
+    expect(lines().some((l) => l.includes('connect the store again'))).toBe(false);
   });
 
   it('an engine without a key to check the binding with is not the connection\'s cause: nothing ran', async () => {
@@ -520,6 +521,7 @@ describe('the refresh of an expiring store connection', () => {
     expect(await refreshStoreToken(ID, 'due', ctx())).toBe('not-run');
     expect(clearanceAsked).toBe(1);
     expect(hold.calls).toHaveLength(0);
+    expect(lines().some((l) => l.includes('connect the store again'))).toBe(false);
     expect(lines().some((l) => l.includes('outcome=not-run (due): the connection does not qualify for a refresh now (switch, control plane, refresh slot, binding key or clearance)'))).toBe(true);
   });
 

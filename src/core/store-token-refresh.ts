@@ -367,7 +367,11 @@ function clientStillMisnamed(profileId: string, ctx: StoreRefreshContext): boole
   return oauth.client_id_key !== client.id || oauth.client_secret_key !== client.secret;
 }
 
-/** Whether the profile still has no binding, as its ended refresh left it: a connect inside the window binds it again (no vault read). */
+/**
+ * Whether the profile still has no binding, as its ended refresh left it: a connect inside the
+ * window binds it again (no vault read). A `dead` that kept the binding (no rotation, or a mark that
+ * could not be saved) reads `not-run` inside the window: the attach still checks that binding.
+ */
 function connectionStillEnded(profileId: string, ctx: StoreRefreshContext): boolean {
   const profile = ctx.toolContext.apiStore?.get(profileId);
   return profile !== undefined && typeof profile.oauth_grant?.store_binding !== 'string';
