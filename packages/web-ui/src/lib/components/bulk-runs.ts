@@ -483,9 +483,13 @@ export function bulkResumeText(
 	// "All the rest" holds only when the approved maximum does not stop the pass first; a run
 	// written on under a new maximum is bounded by that one. With no target confirmed as written,
 	// nothing is said to stay: a write sent and failed may still have reached its target, which the
-	// next try reads first and counts as written.
+	// next try reads first and counts as written. A target found already holding its value was not
+	// written by the run (the head's `unchanged`), so it does not count: the applied ones less those
+	// are the head's written and taken back.
 	const capped = kind === 'max' || run.resumeTries < open;
-	const kept = i18n.t(`bulk.resume.kept_${verb}${run.applied === 0 ? '_none' : ''}${capped ? '_capped' : ''}`);
+	// Only for a write: an undo's sentence keeps reading the applied count, as before.
+	const written = verb === 'write' && run.heads !== undefined ? run.heads.written + run.heads.takenBack : run.applied;
+	const kept = i18n.t(`bulk.resume.kept_${verb}${written === 0 ? '_none' : ''}${capped ? '_capped' : ''}`);
 	if (!failures) return { cause, before, check: null, after: null, kept, soFar: null, allows: null };
 	const f = run.failed;
 	const soFar = run.failedOnce === null
@@ -1232,7 +1236,8 @@ export function bulkWorkingLine(
 	}
 	if (step === 'write' || step === 'undo') {
 		// Out of every target the run plans to write: `applied` counts each once, one found as
-		// planned too, so it never passes them. An approval or a probe that ends the write earlier
+		// planned too, so it never passes them. Read as done, not as written: the head counts a
+		// target found so as unchanged. An approval or a probe that ends the write earlier
 		// halts the run, and the halt's sentence says why; the line is gone then.
 		return { key: `bulk.working.${step}`, params: { a: String(run.applied), n: String(bulkWriting(run)) } };
 	}
