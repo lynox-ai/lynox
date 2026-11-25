@@ -7,8 +7,8 @@ import { t, tf, getLocale, setLocale } from '../i18n.svelte.js';
 
 // A halted run's sentences on a target whose send has no clear answer (U-364):
 // the halt names unclear targets apart from the ones that could not be written, the step "check
-// the targets with an error below" stands only where the preview marks one, a cancelled run is
-// called cancelled, and the rest of a run with no way on has no result rather than being open.
+// the targets with an error below" stands only where the preview marks one, an aborted run is
+// called aborted, and the rest of a run with no way on has no result rather than being open.
 
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
 type SvelteClient = {
@@ -265,8 +265,8 @@ describe('the step to check the targets with an error', () => {
 	});
 });
 
-describe('a cancelled run', () => {
-	it('is called cancelled over its cause and in the list, not halted', async () => {
+describe('an aborted run', () => {
+	it('is called aborted over its cause and in the list, not halted', async () => {
 		run = makeRun({ phase: 'aborted', total: 4, changes: UPDATES(4), haltKey: 'mandateEnded', haltReason: 'the access that planned this run has ended before it was approved', heads: { ...NONE, open: 4 } });
 		await render();
 		const dt = [...target.querySelectorAll('dt')].map((d) => d.textContent);

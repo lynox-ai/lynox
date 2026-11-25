@@ -731,6 +731,16 @@ describe('going on from a run that halted', () => {
 	});
 	const WRITE_ON = ['runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked', 'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff'];
 
+	// The failed and unclear targets of this pass are counted in a write's cause only: an undo keeps
+	// its own words, whatever the pass left unclear (U-335).
+	it('keeps an undo\'s failure-rate cause when its pass left sends unclear', () => {
+		const heads = { deselected: 0, invalid: 0, unchanged: 0, takenBack: 0, written: 0, conflict: 0, unclear: 1, failed: 1, settled: 0, open: 2 };
+		expect(bulkResumeText(w('failureRate', { kind: 'undo', failureLimit: 0, heads, passUnclear: 1 }), true, DE, true)?.cause).toBe(DE.t('bulk.halt.failureRate_undo0'));
+		expect(bulkResumeText(w('failureRate', { kind: 'undo', failureLimit: 2, heads, passUnclear: 1 }), true, DE, true)?.cause).toBe(DE.tf('bulk.halt.failureRate_undo', { limit: '2' }));
+		// Control: the same pass of a write names its failed and unclear targets.
+		expect(bulkResumeText(w('failureRate', { failureLimit: 0, heads, passUnclear: 1 }), true, DE, true)?.cause).toBe(DE.tf('bulk.halt.failureRate_mixed_f1_u1', { f: '1', u: '1' }));
+	});
+
 	it('sorts the halts of a write run into writing on, writing on under a higher maximum, and no way on', () => {
 		for (const k of WRITE_ON) expect(bulkResumeKind(w(k)), k).toBe('write');
 		expect(bulkResumeKind(w('maxTargets'))).toBe('max');
@@ -1298,8 +1308,7 @@ describe('an owner\'s stop is called a stop, not a halt', () => {
 	// „Angehalten: Der Lauf wurde von Hand gestoppt.“
 	const HERE = fileURLToPath(new URL('.', import.meta.url));
 	it('the owner\'s stop gets the stop words, every other halt keeps the halt words', () => {
-		expect(bulkHaltHeadKey({ haltKey: 'stoppedByOwner', phase: 'writing' })).toBe('bulk.head.stopped');
-		expect(bulkHaltSuffixKey({ haltKey: 'stoppedByOwner' })).toBe('bulk.stopped_suffix');
+		expect(bulkHaltHeadKey({ haltKey: 'stoppedByOwner' })).toBe('bulk.head.stopped');
 		// A discarded run is named as discarded, next to its chip and sentence (U-324).
 		expect(bulkHaltHeadKey({ haltKey: 'discarded' })).toBe('bulk.head.discarded');
 		// Only a planned run waits for its start; the same key on a run past it stays a halt (U-437).
@@ -1313,7 +1322,7 @@ describe('an owner\'s stop is called a stop, not a halt', () => {
 		expect(bulkHaltHeadKey({ phase: 'planned', haltKey: 'unavailable' }, true)).toBe('bulk.head.halted');
 		expect(bulkHaltSuffixKey({ haltKey: 'stoppedByOwner' })).toBe('bulk.stopped_suffix');
 		for (const haltKey of ['maxTargets', 'costCap', 'consecutiveFailures', null]) {
-			expect(bulkHaltHeadKey({ haltKey, phase: 'writing' })).toBe('bulk.head.halted');
+			expect(bulkHaltHeadKey({ haltKey })).toBe('bulk.head.halted');
 			expect(bulkHaltSuffixKey({ haltKey })).toBe('bulk.halted_suffix');
 		}
 		// the key is the engine's own name for the owner's stop
@@ -1909,7 +1918,7 @@ describe('a run the owner discarded before approving it, as the list and the ste
 		// The twins: another end before approval, and a run that is not aborted.
 		expect(bulkPhaseKey({ phase: 'aborted', haltKey: 'mandateEnded' })).toBe('bulk.phase.aborted');
 		expect(bulkPhaseHasSuffix({ phase: 'aborted', haltKey: 'mandateEnded', haltReason: 'x' })).toBe(false);
-		// A halted run that is not cancelled carries the suffix.
+		// A halted run that is not aborted carries the suffix.
 		expect(bulkPhaseHasSuffix({ phase: 'writing', haltKey: 'mandateEnded', haltReason: 'x' })).toBe(true);
 		expect(bulkPhaseKey({ phase: 'previewed', haltKey: null })).toBe('bulk.phase.previewed');
 		expect(bulkPhaseHasSuffix({ phase: 'previewed', haltKey: null, haltReason: null })).toBe(false);
