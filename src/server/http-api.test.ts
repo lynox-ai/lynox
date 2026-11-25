@@ -13818,6 +13818,36 @@ describe('LynoxHTTPApi', () => {
         expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 })).status).toBe(200);
       });
 
+      it('answers a start with a rule hash other than the planned one as a changed run, without reading the artifact', async () => {
+        const text = 'R1 „sachlich“, keine Superlative.\n';
+        const fromArtifact = normalizeJudgeRule(
+          { rule: text, schema: { title: { type: 'string', maxLength: 40 } } },
+          { source: { artifact: 'a1b2c3d4', version: 1, sha256: createHash('sha256').update(text, 'utf8').digest('hex') } },
+        );
+        const id = bulkLedger.recordDryRun({
+          createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
+          targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', title: 'old' } }, after: judgeTemplate(fromArtifact) }],
+          judge: fromArtifact,
+        }).id;
+        const engineRef = (api as unknown as { engine: { getArtifactStore: ReturnType<typeof vi.fn> } }).engine;
+        const store = engineRef.getArtifactStore() as { get: ReturnType<typeof vi.fn> };
+        store.get.mockClear();
+        try {
+          // The artifact was edited too: the wrong hash is what the owner is told about.
+          store.get.mockReturnValue({ id: 'a1b2c3d4', version: 2, content: text.replace('keine', 'wenige'), type: 'markdown' });
+          const res = await start(id, { judgeRuleHash: 'not-the-planned-hash', costCapUsd: 1.5 });
+          expect(res.status).toBe(409);
+          const body = (await res.json()) as { error: string; code?: string };
+          expect(body.error).toBe('The bulk run changed since it was shown — reload it and check again.');
+          expect(body.code).not.toBe('rule_source_changed');
+          expect(store.get).not.toHaveBeenCalled();
+          expect(bulkLedger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
+        } finally {
+          store.get.mockReset();
+          store.get.mockReturnValue(null);
+        }
+      });
+
       it('once judging began, the run judges by its planned text: a halt resumes after the artifact changed, without reading it', async () => {
         const text = 'R1 „sachlich“, keine Superlative.\n';
         const fromArtifact = normalizeJudgeRule(

@@ -147,7 +147,7 @@ describe('bulk_plan takes a judge rule from a saved artifact', () => {
     expect(ledger.listRuns(10)).toHaveLength(0);
   });
 
-  it('names the artifact in each refusal of its text: empty, a hidden character, a lost document, no store', async () => {
+  it('names the artifact when its text is empty, holds a hidden character or lost its document, and says when no store is there', async () => {
     const empty = artifacts.save({ title: 'Leer', content: '  \n', type: 'text' });
     expect(await plan({ rule_artifact: empty.id })).toContain(`Artifact ${empty.id} is empty; a rule needs text.`);
     const hidden = artifacts.save({ title: 'Versteckt', content: 'R1\u200Bsachlich', type: 'text' });
