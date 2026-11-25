@@ -641,6 +641,28 @@ describe('mail_reply tool', () => {
     expect(prompt).toContain('only the first 3999 are shown');
   });
 
+  it('drops a to or cc override that carries a line break or a control character, and sends nothing when no to address is left', async () => {
+    provider.fetch.mockResolvedValue(makeMessage(envelope(80, { messageId: '<o80@x>', from: 'alice@example.com', subject: 'Hi' }), 'Original.'));
+    provider.send.mockResolvedValue({ messageId: '<r@x>', accepted: ['bob@x.test'], rejected: [] });
+    const promptUser = vi.fn(async () => 'Yes');
+    const agent = { ...OWNER_AGENT, promptUser } as unknown as IAgent;
+    const tool = createMailReplyTool(registry);
+
+    for (const to of ['a@x.test\r\nBcc: b@x.test', 'a@x.test\u0000']) {
+      const refused = await tool.handler({ uid: 80, body: 'Thanks.', to }, agent).catch((e: unknown) => e);
+      expect(String(refused)).not.toContain('Reply sent');
+      expect(String(refused)).toContain('the "to" override holds no valid address');
+    }
+    expect(provider.send, 'a recipient with CR/LF or NUL is never sent to').not.toHaveBeenCalled();
+    expect(promptUser, 'nothing is offered for confirmation').not.toHaveBeenCalled();
+
+    await tool.handler({ uid: 80, body: 'Thanks.', to: 'bob@x.test', cc: 'carol@x.test\u0000, erin@x.test\nBcc: f@x.test, dave@x.test' }, agent);
+    expect(provider.send).toHaveBeenCalledTimes(1);
+    const sent = provider.send.mock.calls[0]![0] as { to: Array<{ address: string }>; cc?: Array<{ address: string }> };
+    expect(sent.to.map((a) => a.address)).toEqual(['bob@x.test']);
+    expect((sent.cc ?? []).map((a) => a.address)).toEqual(['dave@x.test']);
+  });
+
   // The reply confirmation renders the REMOTE sender's subject, and the prompt
   // is markdown-rendered in the web UI. A newline there opens a block-level
   // HTML comment that swallows the recipients, the body quote and the oversize
@@ -2121,7 +2143,7 @@ describe('mail_reply in three steps', () => {
   it('prepare refuses an auto-generated original before any consent', async () => {
     provider.fetch.mockResolvedValue(makeMessage({ ...envelope(91, { messageId: '<o91@x>' }), isAutoReply: true }, 'Out of office.'));
     const prepared = await prepareReply(registry, undefined, { uid: 91, body: 'Thanks.' });
-    expect(prepared.ok ? '' : prepared.message).toContain('Auto-Submitted header');
+    expect(prepared.ok ? '' : prepared.message).toContain('was sent automatically');
     expect(provider.send).not.toHaveBeenCalled();
   });
 

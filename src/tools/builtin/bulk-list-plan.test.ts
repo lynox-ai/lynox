@@ -123,7 +123,7 @@ describe('bulk_plan with source_list and judge', () => {
   it('takes the list without "after": every target planned with the rule\'s template', async () => {
     const id = runIdOf(await judged({}));
     expect(ledger.getListRun(id)!.source.after).toEqual({ status: null });
-    expect(ledger.getStatus(id)!.judge).toEqual({ tier: 'fast', unjudged: 0 });
+    expect(ledger.getStatus(id)!.judge).toEqual({ tier: 'fast', unjudged: 0, judged: 0 });
   });
 
   it('refuses "after" beside judge, and a rule that decides the id field', async () => {

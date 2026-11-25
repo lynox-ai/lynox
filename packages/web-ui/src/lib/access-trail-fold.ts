@@ -16,6 +16,9 @@ export interface FoldableEntry {
 	readonly kind: string;
 	readonly at: string;
 	readonly auto?: true | undefined;
+	/** A day row: the polls of one day, folded by the engine after 30 days; `count` reads up to `until`. */
+	readonly count?: number | undefined;
+	readonly until?: string | undefined;
 }
 
 export type FoldedItem<E extends FoldableEntry> =
@@ -29,6 +32,8 @@ export type FoldedItem<E extends FoldableEntry> =
 			/** Oldest and newest time in the group. */
 			readonly from: string;
 			readonly to: string;
+			/** How many reads the group stands for: a day row counts as the reads it folded. */
+			readonly reads: number;
 	  };
 
 /** A read the engine marked as made by the web UI itself. */
@@ -47,8 +52,9 @@ export function foldInterfacePolls<E extends FoldableEntry>(entries: readonly E[
 		if (run.length === 0) return;
 		// By time, not by position: pages that were loaded later are appended, so the order is not
 		// guaranteed across a page edge.
-		const times = run.map((e) => e.at).sort((a, b) => Date.parse(a) - Date.parse(b));
-		out.push({ kind: 'polls', id: `polls:${run[0]!.id}`, entries: run, from: times[0]!, to: times[times.length - 1]! });
+		const times = run.flatMap((e) => (e.until === undefined ? [e.at] : [e.at, e.until])).sort((a, b) => Date.parse(a) - Date.parse(b));
+		const reads = run.reduce((n, e) => n + (e.count ?? 1), 0);
+		out.push({ kind: 'polls', id: `polls:${run[0]!.id}`, entries: run, from: times[0]!, to: times[times.length - 1]!, reads });
 		run = [];
 	};
 	for (const e of entries) {

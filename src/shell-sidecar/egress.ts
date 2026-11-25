@@ -42,6 +42,20 @@ export interface ShellPolicyInput {
   readonly allowedHosts: ReadonlySet<string> | undefined;
   readonly allowedWildcards: readonly string[] | undefined;
   readonly ackHosts: ReadonlySet<string> | undefined;
+  /**
+   * The hosts the owner typed in this thread, oldest first (`OwnerKnownTargets.typedHosts`). They
+   * join under `guarded` and, once the call's batch started tainted, under `allow-all` and no
+   * policy, after the policy's hosts and only into the room the proxy has left, newest first. Under `allow-list` the
+   * operator's list is the boundary, as it is for the engine's own requests.
+   */
+  readonly typedHosts?: readonly string[] | undefined;
+  /**
+   * Whether the call's batch started after the conversation had taken in foreign content
+   * (`Agent.batchStartedTainted`). The set is fixed then: a shell call reaches a host after taint
+   * only if the engine would pass a read of it without asking, and then for any method, since the
+   * proxy sees a host name and nothing else.
+   */
+  readonly tainted: boolean;
 }
 
 export type ShellSet =
@@ -57,6 +71,12 @@ export type ShellSet =
  * (`assertHostPolicy` compares a lower-case host to the entry as written, so it is dead there
  * too). The baseline's `localhost` and IP literals are dropped the same way; the proxy refuses
  * private addresses anyway.
+ *
+ * Once the call's batch started tainted, the set is what the engine counts for a read without
+ * asking, as far as a host name can say it: the baseline, the floor and the hosts the owner typed.
+ * A connected API's host is left out (the engine counts it for a read only, the shell would reach
+ * it for any method, and the shell carries no credential for it), and `allow-all` no longer means
+ * every host.
  */
 export function computeShellSet(input: ShellPolicyInput): ShellSet {
   const policy = input.networkPolicy;
@@ -65,7 +85,9 @@ export function computeShellSet(input: ShellPolicyInput): ShellSet {
     // As `assertHostPolicy`: no policy at all is `allow-all`.
     case undefined:
     case 'allow-all':
-      return { kind: 'all' };
+      if (!input.tainted) return { kind: 'all' };
+      candidates = [...guardedBaselineHostList().filter((h) => h !== 'localhost'), ...(input.allowedHosts ?? [])];
+      break;
     case 'deny-all':
       return { kind: 'none', why: 'the network policy is deny-all' };
     case 'allow-list':
@@ -74,7 +96,11 @@ export function computeShellSet(input: ShellPolicyInput): ShellSet {
     case 'guarded':
       // The baseline's loopback names are left out: a shell call has no business there, and the
       // proxy refuses a private address anyway.
-      candidates = [...guardedBaselineHostList().filter((h) => h !== 'localhost'), ...(input.allowedHosts ?? []), ...(input.ackHosts ?? [])];
+      candidates = [
+        ...guardedBaselineHostList().filter((h) => h !== 'localhost'),
+        ...(input.allowedHosts ?? []),
+        ...(input.tainted ? [] : (input.ackHosts ?? [])),
+      ];
       break;
     default: {
       const _exhaustive: never = policy;
@@ -91,6 +117,11 @@ export function computeShellSet(input: ShellPolicyInput): ShellSet {
   for (const w of input.allowedWildcards ?? []) dropped.push(`*.${w}`);
   if (hosts.size > MAX_SHELL_SET) {
     return { kind: 'none', why: `the network policy names more than ${String(MAX_SHELL_SET)} hosts, more than the egress proxy takes` };
+  }
+  const typed = policy === 'allow-list' ? [] : (input.typedHosts ?? []);
+  for (let i = typed.length - 1; i >= 0 && hosts.size < MAX_SHELL_SET; i--) {
+    const h = typed[i];
+    if (typeof h === 'string' && isExactHostname(h)) hosts.add(h);
   }
   return { kind: 'hosts', hosts: [...hosts].sort(), dropped };
 }
