@@ -343,6 +343,8 @@ describe('the actor trail keeps what it holds for a set time', () => {
       expect(sqliteErrorCode(caught)).not.toContain('ana@');
       expect(sqliteErrorCode(new Error('plain'))).toBe('');
       expect(sqliteErrorCode(Object.assign(new Error('x'), { code: 'ana@example.invalid' }))).toBe('');
+      expect(sqliteErrorCode(Object.assign(new Error('x'), { code: 'SQLITE_CONSTRAINT ana@example.invalid' }))).toBe('');
+      expect(sqliteErrorCode(Object.assign(new Error('x'), { code: 'SQLITE_BUSY\nana' }))).toBe('');
       expect(sqliteErrorCode(null)).toBe('');
     });
   });

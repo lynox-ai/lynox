@@ -92,17 +92,20 @@ describe('Engine boot — the actor trail is wired', () => {
       db.prepare("INSERT INTO audit_log (ts, actor_kind, actor_email, action, phase, correlation_id) VALUES (?, 'mandate', 'helper@example.invalid', 'GET /api/runs/active', 'read', 'c-poll')").run(ts);
     };
 
-    it('says ok once the boot sweep folded a poll past its fold date', async () => {
-      const { engine } = await bootOn((db) => oldPoll(db, new Date(Date.now() - 40 * DAY).toISOString()));
+    it('says ok while the boot sweep folds a backlog it has not finished', async () => {
+      // Ten past days, seven folded per sweep: three stay single and past the stall bound.
+      const { engine } = await bootOn((db) => { for (let d = 40; d < 50; d++) oldPoll(db, new Date(Date.now() - d * DAY).toISOString()); });
+      const db = engine.getEngineDb()!.getDb();
+      expect(db.prepare('SELECT COUNT(*) AS n FROM audit_log WHERE poll_count IS NOT NULL').get()).toEqual({ n: 7 });
+      expect(db.prepare('SELECT COUNT(*) AS n FROM audit_log WHERE poll_count IS NULL').get()).toEqual({ n: 3 });
       expect(engine.getAuditRetentionState()).toBe('ok');
-      const n = engine.getEngineDb()!.getDb().prepare('SELECT poll_count FROM audit_log WHERE correlation_id = ?').get('c-poll');
-      expect(n).toEqual({ poll_count: 1 });
     });
 
     it('says stalled when the boot sweep was refused a day; with the error text reduced, the line keeps the SQLite code and drops the text', async () => {
       reduceErrorTextForProcess();
       const { engine, stderr } = await bootOn((db) => {
-        oldPoll(db, new Date(Date.now() - 40 * DAY).toISOString());
+        // Foldable, but younger than the stall bound: only the refusal can say stalled.
+        oldPoll(db, new Date(Date.now() - 31 * DAY).toISOString());
         db.exec("CREATE TRIGGER refuse_day_rows BEFORE INSERT ON audit_log WHEN NEW.poll_count IS NOT NULL BEGIN SELECT RAISE(ABORT, 'refused by test'); END;");
       });
       expect(engine.getAuditRetentionState()).toBe('stalled');
@@ -125,6 +128,22 @@ describe('Engine boot — the actor trail is wired', () => {
       expect(engine.getAuditRetentionState()).toBe('ok');
       await engine.shutdown();
       expect(engine.getAuditRetentionState()).toBeUndefined();
+    });
+
+    it('says stalled when a later sweep throws after a good one', async () => {
+      const { engine } = await bootOn(() => undefined);
+      expect(engine.getAuditRetentionState()).toBe('ok');
+      const db = engine.getEngineDb()!.getDb();
+      db.prepare("INSERT INTO audit_log (ts, actor_kind, actor_email, action, phase, correlation_id) VALUES (?, 'mandate', 'helper@example.invalid', 'GET /api/inbox/items', 'read', 'c-old')")
+        .run(new Date(Date.now() - 400 * DAY).toISOString());
+      db.exec("CREATE TRIGGER refuse_marks BEFORE INSERT ON audit_log WHEN NEW.actor_kind = 'retention' BEGIN SELECT RAISE(ABORT, 'refused by test'); END;");
+      const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        (engine as unknown as { _sweepAuditLog(): void })._sweepAuditLog();
+      } finally {
+        spy.mockRestore();
+      }
+      expect(engine.getAuditRetentionState()).toBe('stalled');
     });
 
     it('says stalled when the boot sweep could not delete, and logs the SQLite code', async () => {
