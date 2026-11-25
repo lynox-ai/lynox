@@ -747,6 +747,7 @@ describe('the way out a refused or missing token name points to', () => {
     const s = legacyStoreOf(shopApi(), vend);
     const result = await agentCall(s, { ...OWNER_VAULT, VEND_RT: value('vend', 'refresh') }, call('https://vend.example/v1/orders', name));
     expect(result).toContain("referenced secret(s) the vault doesn't have");
+    expect(result).toContain('Recover: call `ask_secret`');
     expect(result).not.toContain('belongs to api_profile');
   });
 
