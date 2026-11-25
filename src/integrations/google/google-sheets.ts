@@ -222,6 +222,7 @@ function maskPaths(fields: string): string[] | null {
   const list = (depth: number): string[] | null => {
     if (depth > MASK_DEPTH) return null;
     const out: string[] = [];
+    // run-group-starter: a synchronous parse of one mask string; it ends before the call returns.
     for (;;) {
       spaces();
       let path = name();
