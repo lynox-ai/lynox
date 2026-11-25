@@ -165,20 +165,78 @@ export function parseStampPreview(body: unknown): StampPreview | null {
  */
 // Tag characters (U+E0000–E007F) are invisible when rendered but read by a model: text hidden in a
 // harmless task. Variation selectors (U+FE00–FE0F, U+E0100–E01EF) can carry data the same way.
-// Whole code points (`u`), so the astral ranges match.
-const HIDDEN = /[\u034F\u061C\u115F\u1160\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\u3164\uFE00-\uFE0F\uFEFF\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
+// Every format character (`\p{Cf}`: the soft hyphen, the Arabic letter mark, the invisible
+// operators and the rest of the class) and every default-ignorable code point (the Hangul and
+// Mongolian fillers and variation selectors, the combining grapheme joiner, the unassigned
+// ignorables) reads as nothing or as something else, so the whole classes are printed, not a list
+// of their members; the class `hidden-chars.ts` uses, without its exceptions for emoji and letters.
+// So are noncharacters, the line and paragraph separators, the Braille pattern blank (U+2800) and
+// the control characters other than tab, line feed and carriage return, which a multi-line task
+// text keeps as written. Whole code points (`u`), so the astral ranges match.
+const HIDDEN = /[\p{Cf}\p{Default_Ignorable_Code_Point}\p{Noncharacter_Code_Point}\p{Zl}\p{Zp}\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u2800]/gu;
 export function visible(text: string): string {
   return text.replace(HIDDEN, (c) => `<U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}>`);
 }
 
-/** How long the start of a step's task text runs in the step's heading (there is no step name). */
-export const STEP_TASK_HEAD = 80;
+// The name of each mode and failure strategy the engine knows. A mode is named as the setting is
+// and says nothing about asking: an interactive workflow can be saved without a step that asks, so
+// a name that described asking would be false for some workflow. A failure strategy is named by
+// what a run does. Under a stop no step of a later phase starts; after a step fails or a gate
+// rejects, the steps of its own phase still start and finish (the view says so under the name).
+// `notify` carries the name of `continue`: it runs the same and tells no one but a debug log, so a
+// name that promised a report would promise what no run does. A value outside these is printed as
+// it came (with hidden characters shown): no name is guessed.
+const MODE_KEYS: ReadonlyMap<string, string> = new Map([
+  ['interactive', 'workflow_library.stamp.mode_interactive'],
+  ['autonomous', 'workflow_library.stamp.mode_autonomous'],
+]);
+const ON_FAILURE_KEYS: ReadonlyMap<string, string> = new Map([
+  ['stop', 'workflow_library.stamp.on_failure_stop'],
+  ['continue', 'workflow_library.stamp.on_failure_continue'],
+  ['notify', 'workflow_library.stamp.on_failure_continue'],
+]);
+/** The key of a mode's name, or null for a mode this view does not know. */
+export function modeKey(mode: string): string | null {
+  return MODE_KEYS.get(mode) ?? null;
+}
+/** The key of a failure strategy's name, or null for one this view does not know. */
+export function onFailureKey(onFailure: string): string | null {
+  return ON_FAILURE_KEYS.get(onFailure) ?? null;
+}
 
-/** The heading of a step: its id and the start of its task text, cut on a whole character. */
-export function stepHeading(step: { id: string; task: string }): { id: string; head: string } {
-  const flat = step.task.replace(/\s+/g, ' ').trim();
-  const chars = Array.from(flat);
-  return { id: visible(step.id), head: visible(chars.length > STEP_TASK_HEAD ? `${chars.slice(0, STEP_TASK_HEAD).join('')}…` : flat) };
+/** What moved between the preview that was shown and the one loaded after a refusal. */
+export interface StampChanges {
+  /** Mode, failure strategy, limits, parameters or contract. */
+  settings: boolean;
+  /** Positions in the new preview of steps that are new or differ from the step of that id before. */
+  steps: ReadonlySet<number>;
+  /** Ids of steps that were shown before and are gone now. */
+  removed: string[];
+}
+
+/**
+ * Compares two previews of the same workflow, step by step id. `stepKey` is what a step shows: by
+ * default the step itself; the takeover adds the note it prints at a step. A step that only moved
+ * is not marked.
+ */
+export function stampChanges<P extends StampPreview>(before: P, after: P, stepKey: (p: P, i: number) => string = (p, i) => JSON.stringify(p.steps[i])): StampChanges {
+  // Mode and failure strategy by what the view shows for them: two values with one name (notify and
+  // continue) are no change the owner could find.
+  const shown = (key: string | null, raw: string | null): string | null => key ?? raw;
+  const settingsOf = (p: P): string => JSON.stringify([
+    p.mode === null ? null : shown(modeKey(p.mode), p.mode),
+    p.onFailure === null ? null : shown(onFailureKey(p.onFailure), p.onFailure),
+    p.limits, p.parameters, p.contract,
+  ]);
+  const was = new Map<string, string>();
+  before.steps.forEach((s, i) => { if (!was.has(s.id)) was.set(s.id, stepKey(before, i)); });
+  const steps = new Set<number>();
+  const now = new Set<string>();
+  after.steps.forEach((s, i) => {
+    now.add(s.id);
+    if (was.get(s.id) !== stepKey(after, i)) steps.add(i);
+  });
+  return { settings: settingsOf(before) !== settingsOf(after), steps, removed: [...was.keys()].filter((id) => !now.has(id)) };
 }
 
 /** A recorded step's input template as the view prints it: the literal call, nothing hidden. */
@@ -187,9 +245,12 @@ export function templateText(template: unknown): string {
   return visible(typeof template === 'string' ? template : JSON.stringify(template, null, 2));
 }
 
-/** Whether the library offers the owner the stamp of this workflow. */
-export function offersStamp(wf: { awaitsStamp?: boolean | undefined }, viewer: string | undefined): boolean {
-  return wf.awaitsStamp === true && viewer === 'owner';
+/**
+ * Whether the library offers the owner the stamp of this workflow. Not where its person's access
+ * ended: the takeover stamps it as well, and is the one thing offered there.
+ */
+export function offersStamp(wf: { awaitsStamp?: boolean | undefined; runs_as?: { ended: boolean } | null | undefined }, viewer: string | undefined): boolean {
+  return wf.awaitsStamp === true && viewer === 'owner' && wf.runs_as?.ended !== true;
 }
 
 export type ConfirmOutcome =

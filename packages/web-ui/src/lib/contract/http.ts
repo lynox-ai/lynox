@@ -355,6 +355,14 @@ export interface HealthBody {
      * route answers without auth. Absent from engines older than this field.
      */
     durable_memory?: DurableMemoryState | undefined;
+    /**
+     * Whether the instance log keeps its retention: `ok`; `stalled` when the last sweep was
+     * refused, or when a poll older than its fold date is still a single row and the sweeps have
+     * stopped folding. The control plane alerts its operator on `stalled`. One word, no reason:
+     * the route answers without auth. Absent from engines older than this field and from an
+     * engine without engine.db.
+     */
+    audit_retention?: AuditRetentionState | undefined;
   };
   /**
    * What a migration into this instance may hold in memory. A source reads it before it
@@ -378,6 +386,9 @@ export interface HealthBody {
 
 /** The `engine.durable_memory` word of {@link HealthBody}. */
 export type DurableMemoryState = 'on' | 'off' | 'not_loaded';
+
+/** The `engine.audit_retention` word of {@link HealthBody}. */
+export type AuditRetentionState = 'ok' | 'stalled';
 
 // === Magic-link verify — POST /internal/auth/verify-magic (engine → CP) ===
 

@@ -1443,7 +1443,7 @@ describe('isDangerous', () => {
 
     it('BLOCKS http_request POST in autonomous mode (write operation)', () => {
       const result = isDangerous('http_request', { method: 'POST', url: 'https://api.example.com/data' }, 'autonomous');
-      expect(result).toBe('⚠ http_request: HTTP POST — write operation, needs your OK');
+      expect(result).toBe('⚠ API request: HTTP POST — write operation, needs your OK');
     });
 
     it('BLOCKS http_request PUT in autonomous mode (write operation)', () => {
@@ -2544,8 +2544,8 @@ describe('isDangerous', () => {
     ];
 
     it.each(MODES)('names each form as the written one is named (%s)', (mode) => {
-      expect(check('cat ~/.lynox/workspace/../engine.db', mode), 'positive control: the written form').toContain(`bash: ${TRAVERSAL}`);
-      for (const command of LEAVES) expect(check(command, mode), command).toContain(`bash: ${TRAVERSAL}`);
+      expect(check('cat ~/.lynox/workspace/../engine.db', mode), 'positive control: the written form').toContain(`Command: ${TRAVERSAL}`);
+      for (const command of LEAVES) expect(check(command, mode), command).toContain(`Command: ${TRAVERSAL}`);
     });
 
     it('reads no dot-dot into a word that forms none', () => {
@@ -3340,7 +3340,7 @@ describe('isDangerous — capability-contract grant', () => {
   });
 });
 
-// A `destructive.check` may return a WarningPayload (spawn-agent deep-tier
+// A built-in tool's `destructive.check` may return a WarningPayload (spawn-agent deep-tier
 // consent) instead of a plain action-label string. The guard must render the
 // payload's `message` verbatim — NOT wrap it in the generic "modifies external
 // data" label, which is the wrong framing for a cost-consent gate — and must
@@ -3348,40 +3348,40 @@ describe('isDangerous — capability-contract grant', () => {
 describe('isDangerous — WarningPayload check (spawn-style consent)', () => {
   it('renders the payload message verbatim, not the generic external-data label', () => {
     const entry: ToolEntry = {
-      definition: { name: 'consent_tool', description: '', input_schema: { type: 'object' as const, properties: {}, required: [] } },
+      definition: { name: 'spawn_agent', description: '', input_schema: { type: 'object' as const, properties: {}, required: [] } },
       handler: async () => '',
       destructive: {
         mode: 'external',
-        check: () => ({ message: '⚠ consent_tool: custom consent text naming tier + cost' }) satisfies WarningPayload,
+        check: () => ({ message: '⚠ Delegation: custom consent text naming tier + cost' }) satisfies WarningPayload,
       },
     };
-    const result = isDangerous('consent_tool', {}, undefined, entry);
+    const result = isDangerous('spawn_agent', {}, undefined, entry);
     // Mutate the guard back to wrapping `detail` as a suffix and this reads
-    // `⚠ consent_tool: [object Object] — modifies external data` instead.
-    expect(result).toBe('⚠ consent_tool: custom consent text naming tier + cost');
+    // `⚠ Delegation: [object Object] — modifies external data` instead.
+    expect(result).toBe('⚠ Delegation: custom consent text naming tier + cost');
     expect(result).not.toContain('modifies external data');
   });
 
   it('passes the autonomy ctx to the check so it can opt out in autonomous mode', () => {
     const seen: Array<{ autonomy?: AutonomyLevel } | undefined> = [];
     const entry: ToolEntry = {
-      definition: { name: 'consent_tool', description: '', input_schema: { type: 'object' as const, properties: {}, required: [] } },
+      definition: { name: 'spawn_agent', description: '', input_schema: { type: 'object' as const, properties: {}, required: [] } },
       handler: async () => '',
       destructive: {
         mode: 'external',
         check: (_input, ctx) => {
           seen.push(ctx);
-          return ctx?.autonomy === 'autonomous' ? null : ({ message: '⚠ consent_tool: needs your OK' } satisfies WarningPayload);
+          return ctx?.autonomy === 'autonomous' ? null : ({ message: '⚠ Delegation: needs your OK' } satisfies WarningPayload);
         },
       },
     };
     // Autonomous → check opts out → not flagged. Mutate the ctx pass-away and the
     // check sees ctx=undefined, returns the payload, and the spawn is refused
     // headlessly instead of clamped — the D2 regression at the guard layer.
-    expect(isDangerous('consent_tool', {}, 'autonomous', entry)).toBeNull();
-    expect(isDangerous('consent_tool', {}, 'guided', entry)).toBe('⚠ consent_tool: needs your OK');
-    expect(seen).toContainEqual({ autonomy: 'autonomous' });
-    expect(seen).toContainEqual({ autonomy: 'guided' });
+    expect(isDangerous('spawn_agent', {}, 'autonomous', entry)).toBeNull();
+    expect(isDangerous('spawn_agent', {}, 'guided', entry)).toBe('⚠ Delegation: needs your OK');
+    expect(seen).toContainEqual({ autonomy: 'autonomous', language: 'en' });
+    expect(seen).toContainEqual({ autonomy: 'guided', language: 'en' });
   });
 
   it('a plain-string check still gets the wrapped form (backward compatible)', () => {
@@ -3393,7 +3393,7 @@ describe('isDangerous — WarningPayload check (spawn-style consent)', () => {
         return typeof a === 'string' && a === 'upload' ? a : null;
       } },
     };
-    expect(isDangerous('gd', { action: 'upload' }, undefined, entry)).toBe('⚠ gd: upload — modifies external data');
+    expect(isDangerous('gd', { action: 'upload' }, undefined, entry)).toBe('⚠ External tool "gd": "upload" — modifies external data');
     expect(isDangerous('gd', { action: 'search' }, undefined, entry)).toBeNull();
   });
 });
@@ -3814,11 +3814,11 @@ describe('edit_file is guarded as write_file is', () => {
   it.each(['config/.env', 'home/.ssh/id_rsa', 'deploy.key', 'credentials.json'])('blocks an unattended edit of %s, as write_file is blocked', (path) => {
     const write = isDangerous('write_file', { path, content: 'b' }, 'autonomous');
     expect(write).toContain('write to sensitive path');
-    expect(isDangerous('edit_file', edit(path), 'autonomous')).toBe(write!.replace('write_file', 'edit_file'));
+    expect(isDangerous('edit_file', edit(path), 'autonomous')).toBe(write!.replace('File write', 'File edit'));
   });
   it('asks about an edit of a sensitive path in a chat', () => {
     const result = isDangerous('edit_file', edit('config/.env'));
-    expect(result).toContain('edit_file: write to sensitive path');
+    expect(result).toContain('File edit: write to sensitive path');
     expect(result).not.toContain('[BLOCKED');
   });
   // edit_file confines its own path (to the workspace or the artifacts root), so the guard does not

@@ -126,7 +126,7 @@ describe('a value beyond the bounds', () => {
   it('is listed as unread, within a bound set before measuring', () => {
     const [change, ms] = timed(() => markupChangesOf('description', null, measured));
     // Errs toward warning: an undo of it still says it may write back a script.
-    expect(change).toEqual({ field: 'description', added: [], removed: [], addsOutsideAllowlist: true, unread: true });
+    expect(change).toEqual({ field: 'description', added: [], removed: [], addsOutsideAllowlist: true, addsOnlyPassive: false, unread: true });
     expect(ms).toBeLessThan(3000);
   });
 

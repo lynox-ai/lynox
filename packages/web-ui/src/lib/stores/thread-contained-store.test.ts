@@ -37,7 +37,7 @@ describe('the open chat\'s `contained` flag in the chat store', () => {
 		expect(clears.sort()).toEqual(['endStreaming', 'newChat', 'resumeThread']);
 		// Where no stream was open, the run's end is said directly: a re-attach that found the run
 		// finished (404), a re-attach that lost ownership, and a reconcile.
-		expect(src).toContain('if (!res.ok || !res.body) { runEnded(null); signalRunEnded(); return; }');
+		expect(src).toContain('if (!res.ok || !res.body) { runEnded(null); signalRunEnded(); drainAfterReattach(gen); return; }');
 		expect(src).toMatch(/export async function reconcileThread\(\): Promise<void> \{\n\tconst tid = sessionId;\n\tif \(!tid\) return;\n(\t\/\/[^\n]*\n)*\trunEnded\(null\);/);
 		expect(src).toContain('\t\t\tendStreaming(answer);\n\t\t\tstreamingActivity = \'idle\';\n\t\t\tstreamingToolName = null;\n\t\t\tstreamingToolPhase = null;\n\t\t} else {\n\t\t\trunEnded(answer);\n\t\t}');
 	});

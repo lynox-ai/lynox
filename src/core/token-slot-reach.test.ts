@@ -507,7 +507,7 @@ describe('W1: the engine attaches a token slot only to a target of its grant', (
     const { attachStoredCredential } = await import('../tools/builtin/http.js');
     const headers: Record<string, string> = {};
     const store = legacyStoreOf(shopApi(), reporter({ type: 'bearer', vault_keys: ['SHOP_API_REFRESH_TOKEN'] }));
-    const stores = { apiStore: store, secretStore: handlerVault(OWNER_VAULT) as never, principal: { kind: 'owner' } as never, mandateEnds: null, secretReleases: null, vaultNameBindings: bindingsAsMigrated(store) };
+    const stores = { hostPolicy: { networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], enforceHttps: false }, apiStore: store, secretStore: handlerVault(OWNER_VAULT) as never, principal: { kind: 'owner' } as never, mandateEnds: null, secretReleases: null, vaultNameBindings: bindingsAsMigrated(store) };
     expect(await attachStoredCredential('https://reports.example/v1/x', headers, false, stores, { bulkRunId: 'run-1' })).toBeNull();
     expect(headers).toEqual({});
     // Control: the owner's own request through the same entry is attached.

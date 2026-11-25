@@ -2,27 +2,15 @@
 	import { getContext, isPinned, togglePin, closePanel } from '../stores/context-panel.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
+	import { toolCallLabel } from '../utils/tool-call-label.js';
 
 	const ctx = $derived(getContext());
 	const pinned = $derived(isPinned());
 
-	const TOOL_LABELS: Record<string, string> = {
-		write_file: 'tool.file_created', read_file: 'tool.file_read',
-		bash: 'tool.command', http_request: 'tool.api_request',
-		web_research: 'tool.web_search', spawn_agent: 'tool.delegated',
-		memory_store: 'tool.remembered', memory_recall: 'tool.knowledge_recalled',
-		memory_update: 'tool.knowledge_updated', data_store_query: 'tool.data_queried',
-		data_store_insert: 'tool.data_stored', data_store_create: 'tool.table_created',
-		run_workflow: 'tool.pipeline', ask_user: 'tool.question',
-		task_create: 'tool.task_created', plan_task: 'tool.plan_created',
-		artifact_save: 'tool.artifact_saved', google_calendar: 'tool.calendar',
-		api_setup: 'tool.api_profiles',
-	};
-
 	function meta(name: string) {
 		const def = getToolIcon(name);
-		const labelKey = TOOL_LABELS[name];
-		const label = labelKey ? t(labelKey) : name;
+		// The chat's word for the tool, so both places name a call the same way.
+		const label = toolCallLabel(name, undefined, t)?.action ?? name;
 		return { label, paths: def.paths, color: def.color };
 	}
 
