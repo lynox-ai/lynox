@@ -472,17 +472,19 @@ const WRITE_FAILED_SQL = `(change != 'invalid' AND applied_at IS NULL AND error 
 // left it unclear it still carries that send's own failure. Only an external run's targets: a
 // local writer's outcome is always known, and its sends are counted all the same. Not a target a
 // live loop holds: it is being sent to now, and its answer may still come. Every way a pass leaves
-// a target (written, failed, halted, released) gives the claim back; a claim older than
-// {@link BULK_CLAIM_STALE_MS} belongs to a loop that died, as {@link BulkLedger.claimTarget} reads
-// it, and its target is unclear as it stands. One bound parameter: the time before which a claim
-// is stale ({@link staleBefore}).
+// a target (written, failed, halted, released) gives the claim back; past
+// {@link BULK_CLAIM_STALE_MS} a second loop may take the target ({@link BulkLedger.claimTarget}),
+// and from there on it counts as unclear, as it stands. A live but slow loop can still hold such
+// a claim (one request may take as long as the bound); the count then errs to the careful side,
+// "unclear" until its answer is booked. One bound parameter: the time before which a claim is
+// stale ({@link staleBefore}).
 const UNCLEAR_SQL = "(unknown_sends > 0 AND applied_at IS NULL AND undone_at IS NULL AND (claimed_at IS NULL OR claimed_at < ?) AND (error IS NULL OR error != 'conflict'))";
 // {@link UNCLEAR_SQL} on a run: two bound parameters, 1 for an external run, then the stale time.
 // Every count that names or leaves out a run's unclear targets reads this one, so they move together.
 const RUN_UNCLEAR_SQL = `(? = 1 AND ${UNCLEAR_SQL})`;
 
-/** The time before which a target's claim belongs to a loop that died: the one bound for it,
- *  shared by {@link BulkLedger.claimTarget} and {@link UNCLEAR_SQL}. */
+/** The time before which a target's claim is stale, so a second loop may take it: the one bound
+ *  for it, shared by {@link BulkLedger.claimTarget} and {@link UNCLEAR_SQL}. */
 function staleBefore(now: number): string {
   return new Date(now - BULK_CLAIM_STALE_MS).toISOString();
 }

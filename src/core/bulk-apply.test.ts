@@ -2139,6 +2139,15 @@ describe('a local send whose write threw', () => {
     await runBulkEffect(runId, 'bulk_apply', effectDeps(readFails));
     expect(sends(runId)).toEqual([{ seq: 0, write_sent: 1, unknown_sends: 1 }]);
   });
+
+  it('books only its own send as answered, and keeps the one a loop that died left', async () => {
+    const { runId, initial } = recordMemoryRun(1);
+    approve(runId);
+    engineDb.getDb().prepare('UPDATE bulk_targets SET write_sent = 1, unknown_sends = 1 WHERE run_id = ?').run(runId);
+    // This pass sends again (a local writer has no unclear-send check) and its write throws.
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(memory(initial, new Set(['k000'])).writer));
+    expect(sends(runId)).toEqual([{ seq: 0, write_sent: 1, unknown_sends: 1 }]);
+  });
 });
 
 describe('what a resume after a failure halt may still do', () => {
