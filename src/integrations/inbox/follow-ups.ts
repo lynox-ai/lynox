@@ -125,8 +125,9 @@ function lastHandledAt(
   // A reply (through lynox, recorded by the system) or an archive (by the owner) dealt with the
   // thread only if a follow-up then opened the item again: an open item whose last reply or archive
   // is followed by nothing had it undone, and counts from before it. Every undo writes an audit row,
-  // the bulk undo and bulk "unhandled" too; an undo of a bulk action puts back what was pending
-  // before that bulk. A clear of a snooze undoes nothing the owner answered.
+  // the bulk undo and bulk "unhandled" too; an undo puts back what was pending before the action it
+  // undoes (a bulk's, or the item's last one, named by `undid`). "Unhandled" says the owner has not
+  // dealt with it. A clear of a snooze undoes nothing the owner answered.
   // A raise ends a pending reply or archive whatever the item showed when the mail came (a snooze,
   // a wake, an action taken meanwhile): the undos are all in the audit. Except for an action written
   // before undos were (no `undo_logged`): a bulk undo of it left no trace, so only a raise that
@@ -134,9 +135,12 @@ function lastHandledAt(
   type Pending = { at: Date | undefined; logged: boolean } | undefined;
   let pending: Pending;
   const beforeBulk = new Map<string, Pending>();
+  // What was pending before the item's last reply, archive or "unhandled", for an undo of it.
+  let beforeLast: Pending;
   const remember = (p: Record<string, unknown>): void => {
     const bulk = p['bulk_id'];
     if (typeof bulk === 'string' && !beforeBulk.has(bulk)) beforeBulk.set(bulk, pending);
+    beforeLast = pending;
   };
   for (const a of audit) {
     const p = payloadOf(a);
@@ -144,13 +148,27 @@ function lastHandledAt(
       remember(p);
       pending = { at: a.createdAt, logged: p['undo_logged'] === true };
     } else if (a.action === 'snoozed') {
-      remember(p);
+      const bulk = p['bulk_id'];
+      if (typeof bulk === 'string' && !beforeBulk.has(bulk)) beforeBulk.set(bulk, pending);
     } else if (a.action === 'undo') {
       const intent = p['intent'];
       if (intent === 'unsnooze') continue;
       if (intent === 'bulk_undo') {
+        // A bulk without a row of its own (written before bulks were audited) was an "unhandled",
+        // which ended nothing the owner had answered: what is pending stays.
         const bulk = p['bulk_id'];
-        pending = typeof bulk === 'string' ? beforeBulk.get(bulk) : undefined;
+        if (typeof bulk === 'string' && beforeBulk.has(bulk)) pending = beforeBulk.get(bulk);
+        continue;
+      }
+      if (intent === undefined && 'undid' in p) {
+        // A clear of the item's action, naming it: a snooze or nothing undone leaves the reply or
+        // archive before it standing; a reply, archive or "unhandled" undone puts back what was
+        // pending before it.
+        const undid = p['undid'];
+        if (undid === 'replied' || undid === 'archived' || undid === 'unhandled') {
+          pending = beforeLast;
+          beforeLast = undefined;
+        }
         continue;
       }
       remember(p);
