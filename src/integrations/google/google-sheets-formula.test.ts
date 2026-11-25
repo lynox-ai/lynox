@@ -365,6 +365,7 @@ describe('google_sheets format after content from outside the chat', () => {
     ['a number pattern', fmt('userEnteredFormat.numberFormat', { numberFormat: { type: 'NUMBER', pattern: '"Pay to CH93 0076"' } })],
     ['a pattern path', fmt('userEnteredFormat.numberFormat.pattern', { numberFormat: { pattern: ';;;' } })],
     ['a link path', fmt('userEnteredFormat.textFormat.link', { textFormat: { link: { uri: 'https://collect.example/' } } })],
+    ['a link path though the cell sets no link', fmt('userEnteredFormat.textFormat.link', { textFormat: { bold: true } })],
     ['the whole text format', fmt('userEnteredFormat.textFormat', { textFormat: { link: { uri: 'https://collect.example/' } } })],
     ['a link under the whole cell format', fmt('userEnteredFormat', { backgroundColor: { red: 1 }, textFormat: { link: { uri: 'https://collect.example/' } } })],
     ['a number format under the whole cell format', fmt('userEnteredFormat', { numberFormat: { type: 'TEXT', pattern: '"Pay to CH93 0076"' } })],
@@ -412,6 +413,7 @@ describe('google_sheets format after content from outside the chat', () => {
     const wide = String.fromCodePoint(0x1f600);
     const request = cellsOfLine(FORMAT_LINE_MAX - 10, wide.repeat(10)) as { updateCells: unknown };
     await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [request] }, a);
+    expect(a.promptUser).toHaveBeenCalledTimes(1);
     const line = flattenPrompt(asked(a).prompt).split('\n').at(-1)!;
     expect([...line]).toHaveLength(FORMAT_LINE_MAX);
     expect(line.length).toBeGreaterThan(FORMAT_LINE_MAX);
