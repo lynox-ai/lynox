@@ -15,6 +15,7 @@ import { errorText, errorTextReduced, FixedTextError, processErrorText } from '.
 import { containThreadFrom, threadIsContained } from './containment.js';
 import { isProvisionedInstance } from './wire-capture.js';
 import { noticeLanguage } from './notice-language.js';
+import { WatchHttpStatusError, watchFetchCause } from './watch-fetch-cause.js';
 import {
   EVENT_MAPPING_REFUSED, EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED_EN, EVENT_SHOP_MOVED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE,
   MANDATE_UNSTAMPED_RESULT, NO_REASON_RECORDED, PLAN_OF_ANOTHER_RESULT, PLAN_RUN_UNRECORDED_RESULT, RESUMED_RUN_NOT_CONTAINED,
@@ -316,6 +317,8 @@ const DEFER_RELOG_MS = 10 * 60_000;
 // the window would buffer the whole body into memory and OOM the worker. 10 MB
 // is far above any real HTML page; the signal extractor caps further at 256 KB.
 const WATCH_MAX_BODY_BYTES = 10 * 1024 * 1024;
+/** How long a watch waits for its page. */
+const WATCH_FETCH_TIMEOUT_MS = 30_000;
 /** How much of a watch's last summary is kept with its baseline and handed to the next change. */
 const WATCH_SUMMARY_CHARS = 2000;
 
@@ -4112,7 +4115,12 @@ export class WorkerLoop {
     const refusedBy = watchPolicyRefusal(config.url, this.engine.getToolContext());
     if (refusedBy !== null) {
       const taskManager = this.engine.getTaskManager();
-      if (taskManager) this.#recordRun(taskManager, task.id, `The watched page was not read: ${refusedBy.why}${refusedBy.wayOut === '' ? '' : ` ${refusedBy.wayOut}`}`, 'failed');
+      if (taskManager) {
+        this.#recordRun(taskManager, task.id, refusedBy.privateAddress === true
+          // The address may carry a key; the run's catch masks a thrown failure, this one is recorded here.
+          ? maskSecretPatterns(this.#notices().watchFetchFailed(config.url, { kind: 'blocked' }), { includeGeneric: true })
+          : `The watched page was not read: ${refusedBy.why}${refusedBy.wayOut === '' ? '' : ` ${refusedBy.wayOut}`}`, 'failed');
+      }
       return;
     }
 
@@ -4137,17 +4145,21 @@ export class WorkerLoop {
     // socket to that IP (closing the rebind window) + never follows redirects,
     // so it subsumes the protocol/host/IP SSRF checks we used to hand-roll here.
     let fetchResult: string;
+    const deadline = AbortSignal.timeout(WATCH_FETCH_TIMEOUT_MS);
     try {
       const res = await fetchPinned(config.url, {
-        signal: AbortSignal.timeout(30_000),
+        signal: deadline,
         headers: { 'User-Agent': 'lynox-watch/1.0' },
       });
       if (!res.ok) {
-        throw new Error(`HTTP ${String(res.status)} ${res.statusText}`);
+        throw new WatchHttpStatusError(res.status, res.statusText);
       }
       fetchResult = await readBodyCapped(res, WATCH_MAX_BODY_BYTES);
     } catch (err: unknown) {
-      throw new Error(`Watch fetch failed for ${config.url}: ${err instanceof Error ? err.message : String(err)}`);
+      // The owner reads lynox's own sentence for the cause, in the instance's language; the raw
+      // error goes with it as the cause, to the error report, and is not shown.
+      const cause = watchFetchCause(err, { timeoutSeconds: WATCH_FETCH_TIMEOUT_MS / 1000, maxBytes: WATCH_MAX_BODY_BYTES, timedOut: deadline.aborted });
+      throw new Error(this.#notices().watchFetchFailed(config.url, cause), { cause: err });
     }
 
     // Reduce to a stable visible-content signal before hashing. Hashing the raw
