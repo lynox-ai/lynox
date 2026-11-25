@@ -280,9 +280,11 @@ export async function storeRefreshPassFor(profileId: string, ctx: StoreRefreshCo
   const client = presetClientKeys(preset.id);
   if (oauth.client_id_key !== client.id || oauth.client_secret_key !== client.secret) return 'client-misnamed';
   const refreshSlot = refreshTokenKey(profile.id);
-  // From here a refusal is the connection's own (`ineligible`): connecting it again replaces each
-  // of these. The clearance below is not: a connect asks the same control plane.
-  if (oauth.refresh_token_key !== undefined && oauth.refresh_token_key !== refreshSlot) return 'ineligible';
+  // A refresh slot the profile names elsewhere stays named there after a connect: not the connection's.
+  if (oauth.refresh_token_key !== undefined && oauth.refresh_token_key !== refreshSlot) return undefined;
+  // From here a refusal is the connection's own (`ineligible`): connecting it again writes the
+  // binding, the tokens and, from the preset's client, names a client that is missing. The
+  // clearance below is not: a connect asks the same control plane.
   const bound = profile.oauth_grant?.store_binding;
   const access = secretStore.resolve(accessTokenKey(profile.id));
   if (typeof bound !== 'string' || !access) return 'ineligible';
@@ -329,7 +331,7 @@ export function refreshStoreToken(profileId: string, trigger: 'due' | 'unauthori
       logLine(profileId, 'not started: the client is still under other names than the preset\'s');
       return Promise.resolve('client-misnamed');
     }
-    if (lastDead.has(profileId)) {
+    if (lastDead.has(profileId) && connectionStillEnded(profileId, ctx)) {
       logLine(profileId, 'not started: the last refresh ended this connection');
       return Promise.resolve('dead');
     }
@@ -363,6 +365,12 @@ function clientStillMisnamed(profileId: string, ctx: StoreRefreshContext): boole
   if (oauth === undefined || presetId === undefined || OAUTH_PRESETS.get(presetId) === undefined) return false;
   const client = presetClientKeys(presetId);
   return oauth.client_id_key !== client.id || oauth.client_secret_key !== client.secret;
+}
+
+/** Whether the profile still has no binding, as its ended refresh left it: a connect inside the window binds it again (no vault read). */
+function connectionStillEnded(profileId: string, ctx: StoreRefreshContext): boolean {
+  const profile = ctx.toolContext.apiStore?.get(profileId);
+  return profile !== undefined && typeof profile.oauth_grant?.store_binding !== 'string';
 }
 
 function logLine(profileId: string, what: string): void {
@@ -442,12 +450,12 @@ async function runRefresh(profileId: string, trigger: 'due' | 'unauthorized', ct
   }
   if (plan === 'ineligible') {
     endTrail('failed');
-    outcomeLine(profileId, 'ineligible', trigger, 'the connection does not qualify for a refresh (binding, refresh token or client); connect the store again');
+    outcomeLine(profileId, 'ineligible', trigger, 'the connection does not qualify for a refresh (binding, access or refresh token, or client); connect the store again');
     return 'ineligible';
   }
   if (plan === undefined) {
     endTrail('failed');
-    outcomeLine(profileId, 'not-run', trigger, 'the connection does not qualify for a refresh now (switch, control plane or clearance)');
+    outcomeLine(profileId, 'not-run', trigger, 'the connection does not qualify for a refresh now (switch, control plane, refresh slot, binding key or clearance)');
     return 'not-run';
   }
   const exchanged = await exchangeToken({ endpoint: plan.endpoint, params: plan.params, bodyFormat: plan.bodyFormat }, ctx.toolContext as ToolContext, undefined, plan.pass);
