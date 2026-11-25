@@ -574,12 +574,12 @@ describe('going on from a run that halted', () => {
 		const planned = { ...base, haltKey: 'storeRequestRefused', targetSystem: 'http:shop.example.invalid', costUsd: 0, costCapUsd: null };
 		expect(bulkRestartKind(planned)).toBe('none');
 		expect(bulkRestartNoneNote('storeRequestRefused')).toBe('bulk.restart.none');
-		expect(bulkHaltText(planned, true, DE)).toEqual({
+		expect(bulkHaltText(planned, true, DE, false)).toEqual({
 			cause: 'lynox hat eine Anfrage dieses Laufs nicht an den Shop gesendet: Ihre Form lässt lynox nicht zu Shopify durch.',
 			before: 'Steht in der Regel oder einem Wert etwas wie ein Zugangsschlüssel oder Token, nimm es heraus, bevor lynox den Lauf neu plant.',
 		});
 		expect(bulkResumeKind(w('storeRequestRefused'))).toBe('none');
-		expect(bulkResumeText(w('storeRequestRefused'), true, DE)).toEqual({
+		expect(bulkResumeText(w('storeRequestRefused'), true, DE, false)).toEqual({
 			cause: 'lynox hat eine Anfrage dieses Laufs nicht an den Shop gesendet: Ihre Form lässt lynox nicht zu Shopify durch.',
 			before: 'Steht in der Regel oder einem Wert etwas wie ein Zugangsschlüssel oder Token, nimm es heraus, bevor lynox den Lauf neu plant.',
 			check: null, after: null,
@@ -587,21 +587,27 @@ describe('going on from a run that halted', () => {
 			soFar: null, allows: null,
 		});
 		// An undo writes back what the store held: nothing to take out, and what it took back stays.
-		expect(bulkResumeText(w('storeRequestRefused', { kind: 'undo' }), true, EN)).toEqual({
+		expect(bulkResumeText(w('storeRequestRefused', { kind: 'undo' }), true, EN, false)).toEqual({
 			cause: 'lynox did not send a request of this undo to the store: lynox does not let a request of this form through to Shopify.',
 			before: null, check: null, after: null,
 			kept: 'What lynox took back before the halt stays taken back. From this request on, lynox sent nothing more.',
 			soFar: null, allows: null,
 		});
 		// Nothing written yet: nothing is said to stay. Another way to no write on says nothing of it either.
-		expect(bulkResumeText(w('storeRequestRefused', { applied: 0 }), true, DE)?.kept).toBeNull();
-		expect(bulkResumeText(w('storeRequestRefused', { kind: 'undo', applied: 0 }), true, EN)?.kept).toBeNull();
-		expect(bulkResumeText(w('contract'), true, DE)?.kept).toBeNull();
+		expect(bulkResumeText(w('storeRequestRefused', { applied: 0 }), true, DE, false)?.kept).toBeNull();
+		expect(bulkResumeText(w('storeRequestRefused', { kind: 'undo', applied: 0 }), true, EN, false)?.kept).toBeNull();
+		expect(bulkResumeText(w('contract'), true, DE, false)?.kept).toBeNull();
+		// A refused request leaves no target with an error, so the preview marks none (`false` above).
+		// Whether one is marked does not change any of these sentences: they name no failed target.
+		expect(bulkHaltText(planned, true, DE, true)).toEqual(bulkHaltText(planned, true, DE, false));
+		for (const run of [w('storeRequestRefused'), w('storeRequestRefused', { kind: 'undo' }), w('storeRequestRefused', { applied: 0 })]) {
+			expect(bulkResumeText(run, true, DE, true)).toEqual(bulkResumeText(run, true, DE, false));
+		}
 		for (const [lang, i] of [['de', DE], ['en', EN]] as const) {
 			for (const run of [w('storeRequestRefused'), w('storeRequestRefused', { kind: 'undo' })]) {
-				for (const [part, text] of Object.entries(bulkResumeText(run, true, i)!)) if (text !== null) expect(text, `${lang} ${part}`).not.toMatch(/bulk\.|\{/);
+				for (const [part, text] of Object.entries(bulkResumeText(run, true, i, false)!)) if (text !== null) expect(text, `${lang} ${part}`).not.toMatch(/bulk\.|\{/);
 			}
-			for (const text of Object.values(bulkHaltText(planned, true, i)!)) if (text !== null) expect(text, lang).not.toMatch(/bulk\.|\{/);
+			for (const text of Object.values(bulkHaltText(planned, true, i, false)!)) if (text !== null) expect(text, lang).not.toMatch(/bulk\.|\{/);
 		}
 	});
 
