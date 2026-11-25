@@ -4,7 +4,7 @@
 	import { untrack } from 'svelte';
 	import { connectHref } from '../oauth-connect-path.js';
 	import { isOwnerSession, isViewerKnown, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
-	import { storeAccessAskAgain, storeAccessShown, type StoreAccessProfile } from '../utils/store-access-end.js';
+	import { storeAccessAskAgain, storeAccessEndPassed, storeAccessShown, type StoreAccessProfile } from '../utils/store-access-end.js';
 	import { placeholderParts } from '../utils/value-breaks.js';
 	import WholeValue from './WholeValue.svelte';
 
@@ -20,8 +20,15 @@
 	// after it (a run may renew the store meanwhile). The time is this browser's, sent with the
 	// question; the engine's own `ended` always counts.
 	let askedAt = $state<number | null>(null);
-	let now = new Date();
-	const lines = $derived(askedAt === null ? [] : profiles.flatMap((p) => { const shown = storeAccessShown(p, new Date(askedAt!), getLocale()); return shown === null ? [] : [shown]; }));
+	// Whether the last question went unanswered. A line still "soon" as of the last answer whose end
+	// has passed since then says the page cannot check it now, not a date in the past as if ahead.
+	let askFailed = $state(false);
+	let now = $state(new Date());
+	const lines = $derived(askedAt === null ? [] : profiles.flatMap((p) => {
+		const shown = storeAccessShown(p, new Date(askedAt!), getLocale());
+		if (shown === null) return [];
+		return [{ ...shown, unknown: shown.kind === 'soon' && askFailed && storeAccessEndPassed(p, now) }];
+	}));
 
 	// None hangs: a question that gets no answer is given up after this long, and the next minute
 	// asks again. The viewer is waited for a shorter while: an answer that does not come is a viewer
@@ -47,11 +54,12 @@
 			if (isViewerKnown() && !isOwnerSession()) return;
 			const sent = Date.now();
 			const res = await fetch(`${getApiBase()}/api-profiles`, { signal: abort.signal });
-			if (!res.ok) return;
+			if (!res.ok) { askFailed = true; return; }
 			const data = (await res.json()) as { profiles?: StoreAccessProfile[] };
 			profiles = data.profiles ?? [];
 			askedAt = sent;
-		} catch { /* silent: StatusBar handles an engine that is down; the next minute asks again */ } finally {
+			askFailed = false;
+		} catch { askFailed = true; /* StatusBar handles an engine that is down; the next minute asks again */ } finally {
 			clearTimeout(viewerWait);
 			clearTimeout(timeout);
 			asking = false;
@@ -74,7 +82,7 @@
 	<div role="status" class="border-b border-warning/30 bg-warning-subtle px-4 py-2.5 flex items-start justify-between gap-3" data-testid="store-access-banner">
 		<ul class="space-y-2 min-w-0">
 			{#each lines as line (line.profileId)}
-				{@const parts = placeholderParts(tf(line.kind === 'soon' ? 'store_access.banner_soon' : 'store_access.banner_ended', { date: line.date, host: '{host}' }), '{host}')}
+				{@const parts = placeholderParts(tf(line.unknown ? 'store_access.banner_unknown' : line.kind === 'soon' ? 'store_access.banner_soon' : 'store_access.banner_ended', { date: line.date, host: '{host}' }), '{host}')}
 				<li class="flex items-center gap-3 flex-wrap text-[12px] text-warning" data-testid="store-access-line">
 					<span class="min-w-0 break-words">{parts.before}<WholeValue value={line.host} class="font-mono rounded-[var(--radius-sm)] bg-bg-muted px-1 py-0.5 text-text" testid="store-access-host" />{parts.after}</span>
 					<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->

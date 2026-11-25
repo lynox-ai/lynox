@@ -14697,7 +14697,8 @@ export class LynoxHTTPApi {
           exportData['knowledge_graph'] = {
             entities,
             relationships: [...relationSet.values()],
-            relationships_note: 'sourceDeleted: the memory this relation was derived from was removed. '
+            relationships_note: 'sourceDeleted: the memory this relation was derived from was removed, '
+              + 'or replaced by a newer memory that contradicts it. '
               + 'The relation is no longer shown or used, and is removed at the next cleanup.',
             stats,
           };
