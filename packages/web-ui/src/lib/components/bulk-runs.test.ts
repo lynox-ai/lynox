@@ -1059,6 +1059,9 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('timeBudget', { applied: 1, heads: heads(0, 1, 0) }), true, DE, true)?.kept).toBe(STAYS);
 		// An engine without heads: applied, as before.
 		expect(bulkResumeText(w('timeBudget', { applied: 2 }), true, DE, true)?.kept).toBe(STAYS);
+		// An undo keeps reading the applied count: the same heads give its sentence that something stays.
+		expect(bulkResumeText(w('timeBudget', { kind: 'undo', applied: 2, heads: heads(0, 0, 2) }), true, DE, true)?.kept)
+			.toBe('Was schon zurückgenommen ist, bleibt so. lynox nimmt alle übrigen Ziele zurück. Ausgenommen sind Ziele, deren früheren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
 	});
 
 	it('says all the rest is tried only when the maximum does not stop the pass first', () => {
