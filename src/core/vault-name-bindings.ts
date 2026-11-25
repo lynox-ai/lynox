@@ -220,7 +220,8 @@ export function hasInvisibleCharacters(value: string): boolean {
  * stored and validated state: the vault name from the profile being saved, `bound` from the
  * stored binding, `added` from {@link credentialEndpoints} of that profile.
  *
- * Customer-visible copy, approved by the business owner; in the language of the session that asks
+ * Customer-visible copy (the English is the text the business owner approved), in the language of
+ * the session that asks
  * (`language`, from the agent's `dialogLanguage`, never from the profile or the model).
  */
 export function bindingQuestion(name: string, bound: readonly string[], added: readonly string[], language: DialogLanguage): PromptText {
