@@ -35,13 +35,53 @@ function hostedInstance(): boolean {
 	return isHostedInstance(tier) || Boolean(env['LYNOX_MANAGED_INSTANCE_ID']);
 }
 
+/**
+ * The key the engine publishes, in its own process, the live generation of the owner's sessions
+ * under (core `src/core/owner-sessions.ts`, `OWNER_SESSIONS_GENERATION_KEY`). On a managed instance
+ * the web UI runs in the engine's process and checks the same generation. Where nothing is
+ * published (a web UI in a process of its own) this reader refuses no generation and mints 0, and
+ * the engine still refuses a session of another generation on every `/api` request.
+ */
+const OWNER_SESSIONS_GENERATION_KEY = Symbol.for('lynox.ownerSessionsGeneration');
+
+/**
+ * The live generation: undefined when nothing is published, null when the reader throws or answers
+ * something other than a whole number from 0, which is not trusted with the owner's sessions.
+ */
+function liveOwnerGeneration(): number | null | undefined {
+	const read = (globalThis as Record<symbol, unknown>)[OWNER_SESSIONS_GENERATION_KEY];
+	if (typeof read !== 'function') return undefined;
+	try {
+		const generation: unknown = read();
+		return typeof generation === 'number' && Number.isSafeInteger(generation) && generation >= 0 ? generation : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Whether something of the owner's minted in `generation` is refused: any generation but the live one. */
+function ownerSessionEnded(generation: number): boolean {
+	const live = liveOwnerGeneration();
+	return live === undefined ? false : live === null || generation !== live;
+}
+
+/** The generation to mint an owner session in now: the live one, 0 when none can be read. */
+function mintOwnerGeneration(): number {
+	return liveOwnerGeneration() ?? 0;
+}
+
 /** The owner's principal: every owner login mints it (PRD D2). */
 export interface OwnerSessionPrincipal {
 	v: 1;
 	kind: 'owner';
+	/** The generation it was minted in (core `owner-sessions.ts`); absent is generation 0. */
+	gen?: number;
 }
 
-/** The principal the owner's session carries. */
+/**
+ * The principal the owner's session carries. `createSessionToken` signs it in the live generation,
+ * so every owner login, wherever it comes from, mints a session of the generation that is let in.
+ */
 export const OWNER_SESSION_PRINCIPAL: OwnerSessionPrincipal = Object.freeze({ v: 1, kind: 'owner' });
 
 /**
@@ -91,9 +131,15 @@ export function createSessionToken(secret: string, principal?: OwnerSessionPrinc
 	const key = deriveKey(secret, 'lynox-session');
 	const nonce = randomBytes(8).toString('hex');
 	const ts = Math.floor(Date.now() / 1000).toString();
-	const payload = principal === undefined
+	// The owner's principal in the live generation; generation 0 keeps today's bytes, `{v:1,kind:'owner'}`,
+	// as the engine mints them (`_ownerPrincipalPart`).
+	const generation = principal?.kind === 'owner' ? mintOwnerGeneration() : 0;
+	const signed = principal?.kind === 'owner'
+		? (generation === 0 ? { v: 1, kind: 'owner' } : { v: 1, kind: 'owner', gen: generation })
+		: principal;
+	const payload = signed === undefined
 		? `${nonce}.${ts}`
-		: `${nonce}.${Buffer.from(JSON.stringify(principal), 'utf8').toString('base64url')}.${ts}`;
+		: `${nonce}.${Buffer.from(JSON.stringify(signed), 'utf8').toString('base64url')}.${ts}`;
 	const hmac = createHmac('sha256', key).update(payload).digest('hex');
 	return `${payload}.${hmac}`;
 }
@@ -108,9 +154,15 @@ function parseSessionPrincipal(part: string): OwnerSessionPrincipal | MandateSes
 	if (raw === null || typeof raw !== 'object') return null;
 	const p = raw as Record<string, unknown>;
 	if (p['v'] !== 1) return null;
-	// The owner's principal is exactly `{v:1,kind:'owner'}`: any other field beside it is a
-	// shape this reader does not know, refused rather than read as the owner.
-	if (p['kind'] === 'owner') return Object.keys(p).length === 2 ? OWNER_SESSION_PRINCIPAL : null;
+	// The owner's principal is exactly `{v:1,kind:'owner'}` (generation 0) or `{v:1,kind:'owner',gen:n}`
+	// with n a whole number from 1: any other field, or another `gen`, is a shape this reader does not
+	// know, refused rather than read as the owner.
+	if (p['kind'] === 'owner') {
+		const keys = Object.keys(p).length;
+		if (keys === 2) return OWNER_SESSION_PRINCIPAL;
+		const gen = p['gen'];
+		return keys === 3 && typeof gen === 'number' && Number.isSafeInteger(gen) && gen >= 1 ? { v: 1, kind: 'owner', gen } : null;
+	}
 	if (p['kind'] !== 'mandate') return null;
 	const { email, display, mandate_id: mandateId, exp } = p;
 	if (typeof email !== 'string' || email.length === 0) return null;
@@ -170,11 +222,12 @@ export function readSessionToken(token: string, secret: string): { iat: number; 
 		return null;
 	}
 
-	if (parts.length < 4) return hostedInstance() ? null : { iat: timestamp, principal: null };
+	// A token without a principal was minted before generations existed: generation 0.
+	if (parts.length < 4) return hostedInstance() || ownerSessionEnded(0) ? null : { iat: timestamp, principal: null };
 	const principal = parseSessionPrincipal(parts[1]!);
 	if (principal === null) return null;
 	if (timestamp - nowS > SESSION_FUTURE_SKEW_S) return null;
-	if (principal.kind === 'owner') return { iat: timestamp, principal: null };
+	if (principal.kind === 'owner') return ownerSessionEnded(principal.gen ?? 0) ? null : { iat: timestamp, principal: null };
 	if (nowS >= principal.exp) return null;
 	return { iat: timestamp, principal };
 }
@@ -309,6 +362,8 @@ setInterval(() => {
 interface LinkCode {
 	code: string;
 	expiresAt: number;
+	/** The generation of the owner's sessions it was made in: an end after it ends the code too. */
+	generation: number;
 }
 
 const linkCodes = new Map<string, LinkCode>();
@@ -317,7 +372,7 @@ const LINK_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 /** Create a one-time link code that can be used once to authenticate. */
 export function createLinkCode(): string {
 	const code = randomBytes(32).toString('base64url');
-	linkCodes.set(code, { code, expiresAt: Date.now() + LINK_CODE_TTL_MS });
+	linkCodes.set(code, { code, expiresAt: Date.now() + LINK_CODE_TTL_MS, generation: mintOwnerGeneration() });
 	return code;
 }
 
@@ -326,7 +381,8 @@ export function consumeLinkCode(code: string): boolean {
 	const entry = linkCodes.get(code);
 	if (!entry) return false;
 	linkCodes.delete(code);
-	return Date.now() < entry.expiresAt;
+	// Made in a generation that has since been ended: it would mint that session back.
+	return Date.now() < entry.expiresAt && !ownerSessionEnded(entry.generation);
 }
 
 // Cleanup expired codes

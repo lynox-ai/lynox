@@ -1659,6 +1659,14 @@ const MIGRATIONS: string[] = [
    UPDATE relationships SET origin_memory_id = source_memory_id WHERE origin_memory_id IS NULL;
    ${repointToChainEndSql('relationships')}
    CREATE INDEX IF NOT EXISTS idx_rel_origin_memory ON relationships(origin_memory_id);`,
+  // v73: the live generation of the owner's sessions (owner-sessions.ts). One row; an owner session
+  // cookie of any other generation is refused. Kept across the owner's erasure (`deleteAllData`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (73);
+   CREATE TABLE IF NOT EXISTS owner_sessions (
+     id INTEGER PRIMARY KEY CHECK (id = 1),
+     generation INTEGER NOT NULL,
+     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+   );`,
 ];
 
 /** The migration index (0-based) of v72, which moves relationships to the end of their chain. */
@@ -1763,7 +1771,7 @@ export class EngineDb {
   deleteAllData(): void {
     const tables = this.db
       .prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('schema_version', 'verb_backfill_marker', 'vault_name_binding_migration') AND name NOT LIKE 'sqlite_%'",
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('schema_version', 'verb_backfill_marker', 'vault_name_binding_migration', 'owner_sessions') AND name NOT LIKE 'sqlite_%'",
       )
       .all() as { name: string }[];
     this.db.transaction(() => {
@@ -1781,6 +1789,10 @@ export class EngineDb {
    * @internal — posture introspection; not a public API.
    */
   get isEncrypted(): boolean { return this._encKey !== null; }
+
+  /** Whether this open set a corrupt file aside and started an empty one (`onCorruption: 'recreate'`). */
+  get recreated(): boolean { return this._recreated; }
+  private _recreated = false;
 
   /**
    * Open the SQLite database. ONLY a failed `integrity_check` (genuine file
@@ -1814,6 +1826,7 @@ export class EngineDb {
       }
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`⚠ Engine database corrupted (${msg}) — renaming to .corrupt and starting fresh\n`);
+      this._recreated = true;
       try { db.close(); } catch { /* best-effort */ }
       const corruptPath = `${path}.corrupt-${Date.now()}`;
       try {
