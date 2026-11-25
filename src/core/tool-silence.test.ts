@@ -90,26 +90,57 @@ describe('ToolSilenceClock', () => {
     expect(clock.holds(t0 + 2)).toBe(true);
   });
 
-  // A refused call answers the model without a streamed result; the agent's next turn shows
-  // that every call of the turn before has settled.
-  it('lets go of an agent\'s calls once that agent writes again', () => {
+  // A refused call answers the model without a streamed result; the agent's next response shows
+  // that every call of the response before has settled.
+  it('lets go of a response\'s calls once the agent streams its next response', () => {
+    for (const next of [{ type: 'text', text: 'next' }, { type: 'thinking', thinking: 'next' }, call('http_request', 'z')]) {
+      const clock = new ToolSilenceClock();
+      clock.note(call('bash', 'a', { timeout_ms: 180_000 }), t0);
+      clock.note({ type: 'turn_end' }, t0 + 1);
+      expect(clock.holds(t0 + 2), 'the call runs after its response ended').toBe(true);
+      clock.note(next, t0 + 3);
+      // Only the new call, if the next event is one, still holds.
+      expect(clock.holds(t0 + 70_001), `after ${next.type}`).toBe(false);
+    }
+  });
+
+  // A call runs after its response's turn_end. Nothing but the agent's NEXT response, its own
+  // result, or its limit ends its hold: not a sibling's result, not a sub-agent's events.
+  it('keeps a running call after its response ended, whatever else arrives meanwhile', () => {
+    const clock = new ToolSilenceClock();
+    clock.note(call('bash', 'long', { timeout_ms: 180_000 }), t0);
+    clock.note(call('http_request', 'short'), t0 + 1);
+    clock.note({ type: 'turn_end' }, t0 + 2);
+    clock.note(result('http_request', 'short'), t0 + 3);
+    clock.note({ type: 'text', text: 'a child works', subAgent: 'agent-sub-1' }, t0 + 4);
+    clock.note(call('bash', 'c', {}, 'sub-1'), t0 + 5);
+    clock.note({ type: 'turn_end', subAgent: 'agent-sub-1' }, t0 + 6);
+    clock.note(result('bash', 'c', 'sub-1'), t0 + 7);
+    expect(clock.holds(t0 + 150_000)).toBe(true);
+  });
+
+  it('keeps a call open while the response that made it is still streaming', () => {
     const clock = new ToolSilenceClock();
     clock.note(call('bash', 'a', { timeout_ms: 180_000 }), t0);
-    clock.note({ type: 'text', text: 'next turn' }, t0 + 1);
-    expect(clock.holds(t0 + 2)).toBe(false);
-    clock.note(call('bash', 'b', { timeout_ms: 180_000 }), t0 + 3);
-    clock.note({ type: 'thinking', thinking: 'next turn' }, t0 + 4);
-    expect(clock.holds(t0 + 5)).toBe(false);
+    clock.note({ type: 'text', text: 'and one more thing' }, t0 + 1);
+    clock.note(call('bash', 'b', { timeout_ms: 180_000 }), t0 + 2);
+    expect(clock.holds(t0 + 3)).toBe(true);
+    clock.note(result('bash', 'b'), t0 + 4);
+    expect(clock.holds(t0 + 5), 'a is still open').toBe(true);
   });
 
   it('keeps a call open while a different agent writes', () => {
     const clock = new ToolSilenceClock();
     clock.note(call('spawn_agent', 'a'), t0);
-    clock.note({ type: 'text', text: 'the child works', subAgent: 'agent-sub-1' }, t0 + 1);
-    expect(clock.holds(t0 + 2)).toBe(true);
-    clock.note(call('bash', 'c', { timeout_ms: 180_000 }, 'sub-1'), t0 + 3);
-    clock.note({ type: 'text', text: 'the parent' }, t0 + 4);
-    expect(clock.holds(t0 + 5)).toBe(true);
+    clock.note({ type: 'turn_end' }, t0 + 1);
+    clock.note({ type: 'text', text: 'the child works', subAgent: 'agent-sub-1' }, t0 + 2);
+    expect(clock.holds(t0 + 3)).toBe(true);
+    clock.note(call('bash', 'c', { timeout_ms: 180_000 }, 'sub-1'), t0 + 4);
+    clock.note({ type: 'turn_end', subAgent: 'agent-sub-1' }, t0 + 5);
+    clock.note({ type: 'text', text: 'the parent' }, t0 + 6);
+    expect(clock.holds(t0 + 7), 'the parent\'s text ends only the parent\'s calls').toBe(true);
+    clock.note(result('bash', 'c', 'sub-1'), t0 + 8);
+    expect(clock.holds(t0 + 9)).toBe(false);
   });
 
   it('does not hold for the follow-up suggestions answered at the end of a turn', () => {

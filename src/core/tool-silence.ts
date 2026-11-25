@@ -9,10 +9,12 @@
  * holds a run for longer than the longest bound.
  *
  * Not every call streams a result: a refused call answers the model without one. What shows that
- * a turn's calls are over is the agent's next turn: its text or thinking comes only once every
- * call of the turn before has settled. Text in the same response after a call ends that call's
- * hold early, which is the old behaviour, never a longer one. Time the run spends waiting on a
- * person (a consent or secret prompt) does not count against a call's limit.
+ * a turn's calls are over is the agent's next response: the agent streams it only once every
+ * call of the response before has settled. A response ends with its `turn_end`, before its calls
+ * run; the next text, thinking or call of the same agent after it ends the hold of every call
+ * that response made. (A sub-agent's `turn_end` is not forwarded: its calls end with their
+ * result or their limit.) Time the run spends waiting on a person (a consent or secret prompt)
+ * does not count against a call's limit.
  */
 
 import { capTimeout, MAX_EXEC_TIMEOUT_MS } from '../shell-sidecar/protocol.js';
@@ -58,6 +60,8 @@ interface OpenCall {
   deadline: number;
   /** The agent the call belongs to: the run's own (`''`) or a sub-agent, by name. */
   readonly owner: string;
+  /** The response that made the call has ended: the agent's next event shows it settled. */
+  responseEnded: boolean;
 }
 
 /** The open tool calls of one run, each with the moment its own limit has passed. */
@@ -69,9 +73,12 @@ export class ToolSilenceClock {
   /** Opens a call on its `tool_call`, closes it on the `tool_result` with the same id. */
   note(event: ToolEvent, now: number = Date.now()): void {
     const owner = event.subAgent ?? '';
-    if (event.type === 'text' || event.type === 'thinking') {
-      for (const [key, call] of this.open) if (call.owner === owner) this.open.delete(key);
+    if (event.type === 'turn_end') {
+      for (const call of this.open.values()) if (call.owner === owner) call.responseEnded = true;
       return;
+    }
+    if (event.type === 'text' || event.type === 'thinking' || event.type === 'tool_call') {
+      for (const [key, call] of this.open) if (call.owner === owner && call.responseEnded) this.open.delete(key);
     }
     if (event.type === 'tool_call') {
       // Answered on the spot from the turn's own text, at the end of the turn.
@@ -80,10 +87,10 @@ export class ToolSilenceClock {
       if (key === undefined) {
         // A call without a usable id cannot be paired with its result: it ends at the ceiling,
         // under a key no result can name.
-        this.open.set(`unpaired ${String(++this.unpaired)}`, { deadline: now + TOOL_SILENCE_CEILING_MS + TOOL_SILENCE_MARGIN_MS, owner });
+        this.open.set(`unpaired ${String(++this.unpaired)}`, { deadline: now + TOOL_SILENCE_CEILING_MS + TOOL_SILENCE_MARGIN_MS, owner, responseEnded: false });
         return;
       }
-      this.open.set(key, { deadline: now + toolBoundMs(event.name ?? '', event.input) + TOOL_SILENCE_MARGIN_MS, owner });
+      this.open.set(key, { deadline: now + toolBoundMs(event.name ?? '', event.input) + TOOL_SILENCE_MARGIN_MS, owner, responseEnded: false });
       return;
     }
     if (event.type === 'tool_result') {

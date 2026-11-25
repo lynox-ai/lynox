@@ -4778,6 +4778,8 @@ describe('LynoxHTTPApi', () => {
         await drop();
         const onStream = mockSessionInstance.onStream as (e: unknown) => Promise<void>;
         await onStream({ type: 'tool_call', name: 'bash', input: { command: 'sleep 150', timeout_ms: 180_000 }, agent: 'main', toolUseId: 'tu-sleep' });
+        // The response that made the call ends before the call runs; that alone releases nothing.
+        await onStream({ type: 'turn_end', stop_reason: 'tool_use', usage: {}, agent: 'main' });
         (slots.get('tool-working-1') as { lastEventAt: number }).lastEventAt = Date.now() - 61_000;
         const next = await jsonFetch('/api/sessions/tool-working-1/run', {
           method: 'POST',
