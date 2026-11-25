@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { readable } from 'svelte/store';
 import { t, tf, getLocale, setLocale } from '../i18n.svelte.js';
 import { resetSettingsViewer } from '../stores/settings-viewer.svelte.js';
-import type { BulkRunDetailData } from './bulk-runs.js';
+import type { BulkRunDetailData, BulkTarget } from './bulk-runs.js';
 
 // A halted undo is continued in its own words: it takes targets back, so its page does not say
 // that what is written stays, nor offer to write on (U-335). A halted write keeps its words.
@@ -56,7 +56,14 @@ beforeEach(() => {
 		const u = String(url);
 		const reply = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 		if (u.endsWith('/config')) return reply({ managed: true, viewer });
-		if (/\/targets\?/.test(u)) return reply({ targets: [] });
+		// Every target of the run, the first one marked with its failure: a run halted on its
+		// failures is loaded whole, and the step to check them stands only where one is marked.
+		if (/\/targets\?/.test(u)) {
+			return reply({ targets: Array.from({ length: run.total }, (_, seq): BulkTarget => ({
+				seq, key: `https://demo.myshopify.com/products/${String(seq)}`, change: 'update', error: seq === 0 ? 'write_failed' : null, deselected: false,
+				diff: seq === 0 ? { kind: 'none' } : { kind: 'fields', fields: [{ field: 'price', before: '12.00', after: '15' }] },
+			})) });
+		}
 		return reply(run);
 	}));
 });

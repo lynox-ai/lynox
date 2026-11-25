@@ -25,6 +25,7 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { TRAIL_FORM } from './audit-log.js';
+import type { AuditRetentionState } from '../contract/http.js';
 
 const DAY_MS = 24 * 60 * 60_000;
 /** How long a row is kept, from its time. */
@@ -33,6 +34,10 @@ export const AUDIT_RETENTION_MS = 365 * DAY_MS;
 export const POLL_FOLD_AFTER_MS = 30 * DAY_MS;
 /** Days folded per sweep at most, so a first sweep over a long history does not hold the engine. */
 export const FOLD_DAYS_PER_SWEEP = 7;
+/** A poll still single this long after its time means the fold is behind: 30 days plus 3 of slack. */
+export const FOLD_STALL_AFTER_MS = POLL_FOLD_AFTER_MS + 3 * DAY_MS;
+/** How old the last sweep may be before it no longer counts as folding (the sweep runs hourly). */
+export const SWEEP_STALE_AFTER_MS = 2 * 60 * 60_000;
 /** The action of the row a sweep leaves when it deleted rows. */
 export const RETENTION_ACTION = 'audit:retention';
 /** The actor of that row: the instance itself, not a person. The owner's view does not read it. */
@@ -79,6 +84,8 @@ interface FirstRow {
 const POLL_IN = FOLDED_POLLS.map(() => '?').join(', ');
 /** The reads a fold may take; `idx_audit_log_poll_fold` covers exactly these. */
 const FOLDABLE = `phase = 'read' AND poll_count IS NULL AND action IN (${POLL_IN})`;
+/** Whether a foldable poll is older than a bound; read by the health route. Exported for its plan test. */
+export const STALL_PROBE_SQL = `SELECT 1 FROM audit_log WHERE ${FOLDABLE} AND ts < ? LIMIT 1`;
 
 /**
  * Delete what is past its time, then fold the polls of up to `FOLD_DAYS_PER_SWEEP` past days, oldest
@@ -109,6 +116,49 @@ export function sweepAuditLog(
     }
   }
   return { folded, dayRows, deleted };
+}
+
+/** What the engine keeps of its last sweep, for {@link auditRetentionState}. */
+export interface AuditSweepRecord {
+  /**
+   * When it ran (ms), on the clock the caller passes to {@link auditRetentionState} as `clockNow`.
+   * The engine uses a monotonic clock, so a host that slept or a wall clock that jumped does not
+   * make a sweep look older than it is.
+   */
+  readonly at: number;
+  /** Whether a day, or the delete, was refused. */
+  readonly refused: boolean;
+  /** Day rows it wrote. */
+  readonly dayRows: number;
+}
+
+/**
+ * The `engine.audit_retention` word of the health body. `stalled` when no sweep ran within
+ * `SWEEP_STALE_AFTER_MS` (the engine sweeps once at boot, right after engine.db opens, then hourly),
+ * when the last sweep was refused (a day or the delete), or when a poll is still single past
+ * `FOLD_STALL_AFTER_MS` and the last sweep wrote no day row. A backlog that sweeps are working
+ * through (a first run over a long history folds seven days an hour) is `ok`, so a deploy does not
+ * raise an alarm on its own. The backlog query is `idx_audit_log_poll_fold`'s own predicate, so it
+ * stays two index seeks on a long trail.
+ */
+export function auditRetentionState(
+  db: Database.Database,
+  now: number,
+  last: AuditSweepRecord | null,
+  clockNow: number = now,
+): AuditRetentionState {
+  if (last === null || clockNow - last.at > SWEEP_STALE_AFTER_MS || last.refused) return 'stalled';
+  const behind = db.prepare(STALL_PROBE_SQL).get(...FOLDED_POLLS, new Date(now - FOLD_STALL_AFTER_MS).toISOString());
+  return behind !== undefined && last.dayRows === 0 ? 'stalled' : 'ok';
+}
+
+/**
+ * The SQLite result code of `err` (` code=SQLITE_…`), or nothing. A fixed name SQLite sets; it quotes
+ * nothing stored, so a log line keeps the cause where its error text is reduced.
+ */
+export function sqliteErrorCode(err: unknown): string {
+  const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined;
+  return typeof code === 'string' && /^SQLITE_[A-Z_]+$/.test(code) ? ` code=${code}` : '';
 }
 
 /** The ISO bound of the day after `day` (`YYYY-MM-DD`). */
