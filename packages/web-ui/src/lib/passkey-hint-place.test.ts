@@ -13,13 +13,15 @@ const svelteFiles = (dir: string): string[] => readdirSync(dir).flatMap((n) => {
 });
 
 describe('where the passkey hint shows', () => {
-	it('only in the chat, above the transcript: no layout or work page renders it', () => {
+	it('only in the chat, first in the transcript\'s scroll area so it scrolls away: no layout or work page renders it', () => {
 		const sites = svelteFiles(root).filter((f) => /<PasskeyPrompt\b/.test(readFileSync(f, 'utf8')));
 		expect(sites.map((f) => f.slice(root.length))).toEqual(['lib/components/ChatView.svelte']);
 		const chat = readFileSync(join(root, 'lib/components/ChatView.svelte'), 'utf8');
 		expect(chat.match(/<PasskeyPrompt\b/g)).toHaveLength(1);
 		const at = chat.indexOf('<PasskeyPrompt />');
 		expect(at).toBeGreaterThan(-1);
-		expect(at).toBeLessThan(chat.indexOf('bind:this={messagesEl}'));
+		// Inside the scroll area (after the element that scrolls), before the first message.
+		expect(at).toBeGreaterThan(chat.indexOf('bind:this={messagesEl}'));
+		expect(at).toBeLessThan(chat.indexOf('{#each messages as msg'));
 	});
 });

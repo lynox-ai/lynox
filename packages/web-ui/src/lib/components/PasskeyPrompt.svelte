@@ -111,7 +111,7 @@
 </script>
 
 {#if visible}
-	<div class="mx-4 mt-3 flex shrink-0 flex-col gap-2 rounded-[var(--radius-md)] border border-border bg-bg-subtle px-3 py-2 sm:flex-row sm:items-center sm:justify-between md:mx-6" data-passkey-hint>
+	<div class="mx-auto mb-5 flex w-full max-w-3xl shrink-0 flex-col gap-2 rounded-[var(--radius-md)] border border-border bg-bg-subtle px-3 py-2 sm:flex-row sm:items-center sm:justify-between lg:max-w-4xl xl:max-w-5xl" data-passkey-hint>
 		{#if success}
 			<p class="text-sm text-text" role="status">{t('passkeySetupSuccess')}</p>
 		{:else}

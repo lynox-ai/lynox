@@ -2561,18 +2561,18 @@
 	     overscroll-locked this is belt-and-suspenders, not load-bearing —
 	     it stays so the transcript's overscroll semantics remain local even
 	     if an ancestor becomes scrollable again someday. -->
-	<!-- The passkey hint (U-454): a strip in the flow above the transcript, the only place it shows,
-	     so it never covers the composer or a work page. -->
-	<PasskeyPrompt />
 	<div class="relative flex min-h-0 flex-1 flex-col">
-	<div class="flex-1 min-w-0 overflow-x-hidden overflow-y-auto overscroll-y-contain px-4 py-6 md:px-6" bind:this={messagesEl} onscroll={onMessagesScroll}>
+	<div class="flex flex-1 min-w-0 flex-col overflow-x-hidden overflow-y-auto overscroll-y-contain px-4 py-6 md:px-6" bind:this={messagesEl} onscroll={onMessagesScroll}>
+		<!-- The passkey hint (U-454): a strip at the top of the transcript, in its column, the only place
+		     it shows. It scrolls away with a long thread and never covers the composer or a work page. -->
+		<PasskeyPrompt />
 		{#if threadReadRefusal !== null && messages.length === 0}
 			<!-- Not this reader's chat to read: the reason, not an empty start page. -->
-			<div class="flex h-full items-center justify-center">
+			<div class="flex flex-1 items-center justify-center">
 				<p class="max-w-md text-center text-sm text-text-muted" role="status" data-thread-read-refused>{t(threadReadRefusal)}</p>
 			</div>
 		{:else if messages.length === 0 && !isStreaming}
-			<div class="flex h-full items-center justify-center">
+			<div class="flex flex-1 items-center justify-center">
 				{#if hasApiKey === false}
 					{@const variant = inlineProviderVariant()}
 					{@const labelText = variant === 'mistral' ? 'Mistral API Key' : variant === 'openai-custom' ? 'API Key' : t('onboard.api_key_label')}
@@ -2785,7 +2785,7 @@
 			</div>
 		{/if}
 
-		<div class="mx-auto max-w-3xl lg:max-w-4xl xl:max-w-5xl space-y-5">
+		<div class="mx-auto w-full max-w-3xl lg:max-w-4xl xl:max-w-5xl space-y-5">
 			{#each messages as msg, msgIdx (msg.queueId ?? msgIdx + ':' + msg.content.slice(0, 20))}
 				{#if msg.compactionNote}
 					<!-- Rendered as a left-bordered inline block, the same visual

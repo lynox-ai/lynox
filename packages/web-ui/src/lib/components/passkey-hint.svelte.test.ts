@@ -64,5 +64,9 @@ describe('the passkey hint is a strip in the flow (U-454)', () => {
 		flushSync();
 		expect(target.querySelector('[data-passkey-hint]')).toBeNull();
 		expect(localStorage.getItem('lynox_passkey_dismissed')).toBe('1');
+		// Back in the chat later: a fresh mount does not show it again.
+		if (component) unmount(component);
+		component = undefined;
+		expect(await open('de')).toBeNull();
 	});
 });
