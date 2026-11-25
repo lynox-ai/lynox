@@ -1114,6 +1114,9 @@ describe('going on from a run that halted', () => {
 		const ap = (update: number, create: number, undoOpen: number | undefined, i: BulkI18n) =>
 			bulkUndoApproveText({ changes: { update, create, delete: 0, unchanged: 0, invalid: 0 }, ...(undoOpen === undefined ? {} : { undoOpen }) }, i);
 		expect(ap(3, 0, undefined, DE)).toBe('3\u00a0Ziele bekommen ihren Wert von vorher zurück. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.');
+		// One target with none open: the singular sentence, never "1 Ziele".
+		expect(ap(1, 0, undefined, DE)).toBe('1\u00a0Ziel bekommt seinen Wert von vorher zurück. Hat es seither jemand geändert, bleibt es, wie es ist.');
+		expect(ap(0, 1, 0, EN)).toBe('1\u00a0target gets its previous value back. If someone has changed it since then, it stays as it is.');
 		expect(ap(3, 0, 0, EN)).toBe('3\u00a0targets get their previous value back. Targets that someone has changed since then stay as they are.');
 		expect(ap(2, 1, 1, DE)).toBe('2\u00a0geschriebene Ziele bekommen ihren Wert von vorher zurück. Bei einem weiteren Ziel sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus dem ursprünglichen Lauf steht. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.');
 		expect(ap(3, 0, 2, DE)).toBe('1\u00a0geschriebenes Ziel bekommt seinen Wert von vorher zurück. Bei 2\u00a0weiteren Zielen sieht die Rücknahme zuerst nach und setzt nur zurück, wo der Wert aus dem ursprünglichen Lauf steht. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.');
