@@ -17,6 +17,7 @@ describe('remembered facts keep the operator\'s language', () => {
   });
 
   it('the capture instruction applies the operator\'s language to a fact from the assistant half too', () => {
+    expect(flat(CAPTURE_SYSTEM)).toContain('This holds for a fact from the assistant half too');
     expect(flat(CAPTURE_SYSTEM)).toContain('a fact from an English mail in a German conversation is written in German');
   });
 
