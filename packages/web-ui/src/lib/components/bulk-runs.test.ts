@@ -2075,7 +2075,7 @@ describe('the start refusals of a run whose rule came from an artifact', () => {
 		expect(bulkRuleSourceText(undefined, undefined, DE)).toBeNull();
 	});
 
-	it('shows a direction override or a hidden character in the title as text, and cuts a long title with „…“', () => {
+	it('shows a direction override or a hidden character in the title as text, and cuts a long title with „…“, never inside a mark', () => {
 		const shown = bulkRuleSourceText('rule_source_changed', 'Regeln\u202Edrow\u200B', DE)!;
 		expect(shown).toContain('„Regeln⟨U+202E⟩drow⟨U+200B⟩“');
 		expect(shown).not.toMatch(/[\u202E\u200B]/);
@@ -2083,5 +2083,8 @@ describe('the start refusals of a run whose rule came from an artifact', () => {
 		const cut = bulkRuleSourceText('rule_source_gone', long, EN)!;
 		expect(cut).toContain(`“${'R'.repeat(BULK_RULE_SOURCE_TITLE_SHOWN_MAX - 1)}…”`);
 		expect(bulkRuleSourceText('rule_source_gone', 'R'.repeat(BULK_RULE_SOURCE_TITLE_SHOWN_MAX), EN)).toContain(`“${'R'.repeat(BULK_RULE_SOURCE_TITLE_SHOWN_MAX)}”`);
+		// Cut before it is made visible: a hidden character's mark stands whole or not at all.
+		const marked = bulkRuleSourceText('rule_source_gone', `${'R'.repeat(BULK_RULE_SOURCE_TITLE_SHOWN_MAX - 2)}\u202E${'R'.repeat(10)}`, EN)!;
+		expect(marked).toContain(`“${'R'.repeat(BULK_RULE_SOURCE_TITLE_SHOWN_MAX - 2)}⟨U+202E⟩…”`);
 	});
 });

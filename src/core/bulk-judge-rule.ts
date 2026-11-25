@@ -91,6 +91,10 @@ export interface JudgeRuleSourceRefusal {
 /** The artifact types whose content is text a rule can be: not a page, a diagram or a table. */
 const RULE_ARTIFACT_TYPES: ReadonlySet<string> = new Set(['markdown', 'text']);
 
+/** The most characters of an artifact's title a run keeps to name it later: an access can write
+ *  a title of any length, and the owner's page shows a few dozen. */
+export const JUDGE_RULE_SOURCE_TITLE_MAX = 200;
+
 const sha256Of = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex');
 
 /**
@@ -136,7 +140,9 @@ export function judgeRuleFromArtifact(
     input: { ...rest, rule: artifact.content },
     source: {
       artifact: artifact.id, version: artifact.version, sha256: sha256Of(artifact.content),
-      ...(artifact.title !== '' ? { title: artifact.title } : {}),
+      ...(typeof artifact.title === 'string' && artifact.title !== ''
+        ? { title: [...artifact.title].slice(0, JUDGE_RULE_SOURCE_TITLE_MAX).join('') }
+        : {}),
     },
   };
 }

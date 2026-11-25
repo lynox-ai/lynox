@@ -107,6 +107,18 @@ describe('bulk_plan takes a judge rule from a saved artifact', () => {
     expect([b.rule, b.source]).toEqual([RULE_TEXT, source]);
   });
 
+  it('keeps no title for an artifact without one, and at most 200 characters of a long one', async () => {
+    const saved = artifacts.save({ title: 'Regeln', content: RULE_TEXT, type: 'markdown' });
+    const titled = (title: unknown): Pick<ArtifactStore, 'get'> => ({ get: (id: string) => ({ ...artifacts.get(saved.id)!, id, title: title as string }) });
+    for (const none of ['', undefined]) {
+      const stored = ledger.getJudgeRuleForOwner(runId(await plan({ rule_artifact: saved.id }, OWNER_PRINCIPAL, titled(none))))!;
+      expect(stored.source).toEqual({ artifact: saved.id, version: saved.version, sha256: sha(RULE_TEXT) });
+      expect('title' in stored.source!).toBe(false);
+    }
+    const long = ledger.getJudgeRuleForOwner(runId(await plan({ rule_artifact: saved.id }, OWNER_PRINCIPAL, titled('ä'.repeat(250)))))!;
+    expect(long.source!.title).toBe('ä'.repeat(200));
+  });
+
   it('a typed rule stores no source, and keeps the hash it had before a source existed', async () => {
     const out = await plan({ rule: 'Write a short description.' });
     const stored = ledger.getJudgeRuleForOwner(runId(out))!;
