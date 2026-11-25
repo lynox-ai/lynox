@@ -17,6 +17,7 @@ import type { StampEntry } from './plan-run-context.js';
 import { PAUSED_MODEL_TEXT, isPaused } from './plan-pause.js';
 import { stripHidden } from './hidden-text.js';
 import { EngineLessRefused } from './engine-less-refusal.js';
+import { parseWatchFetchCause, type WatchFetchCause } from './watch-fetch-cause.js';
 
 /**
  * The start of the title the engine gave a workflow scheduled without one, before it stored the
@@ -1187,7 +1188,10 @@ export class TaskManager {
    *   conditions drifted from it (a cron or watch with retries set was never retried here,
    *   and its failures were reported nowhere).
    */
-  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted', opts?: { noRetry?: boolean | undefined; keepSchedule?: boolean | undefined }): boolean {
+  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted', opts?: { noRetry?: boolean | undefined; keepSchedule?: boolean | undefined; cause?: RunCause | undefined }): boolean {
+    // Written with the status on every run end, cleared when this run has none: a cause is never
+    // older than the status it explains.
+    const lastRunCause = opts?.cause === undefined ? null : JSON.stringify(opts.cause);
     const task = this.history.getTrigger(id);
     // The schedule was deleted while this run was in flight: deleting removes the row and
     // leaves the run going, so there is nothing left to record the run against.
@@ -1222,6 +1226,7 @@ export class TaskManager {
         lastRunAt: new Date().toISOString(),
         lastRunResult: result.length > MAX_RUN_RESULT_CHARS ? result.slice(0, MAX_RUN_RESULT_CHARS) : result,
         lastRunStatus: status,
+        lastRunCause,
         nextRunAt: undefined,
         retryCount: undefined,
       });
@@ -1317,6 +1322,7 @@ export class TaskManager {
       lastRunAt: now.toISOString(),
       lastRunResult: truncatedResult,
       lastRunStatus: status,
+      lastRunCause,
       nextRunAt,
       retryCount,
     });
@@ -1334,11 +1340,37 @@ export class TaskManager {
 const MAX_RUN_RESULT_CHARS = 10_000;
 
 /**
- * Why a trigger's run does not do its work, for the Triggers view (`blocked_reason` in
- * `GET /api/triggers`): a cause, never text, which the view says in its own language. Watch kinds
- * only for now; another cause adds a kind.
+ * Why a trigger's last run failed, as a cause lynox knows: stored with the run (`last_run_cause`)
+ * and never read from its result, which can carry a model's reply or a page's text. Carries no
+ * string of its own; a host the view names comes from the trigger's own watch address.
  */
-export type BlockedReason = { kind: 'watch_allow_list'; host: string } | { kind: 'watch_deny_all' } | { kind: 'watch_https' };
+export type RunCause = { kind: 'watch_fetch'; cause: WatchFetchCause };
+
+/**
+ * Why a trigger's run does not do its work, for the Triggers view (`blocked_reason` in
+ * `GET /api/triggers`): a cause, never text, which the view says in its own language. Two
+ * meanings in one field: why the next run is held now (a watch the network policy refuses,
+ * read at load), or why the last run failed (a stored {@link RunCause}). The first wins.
+ */
+export type BlockedReason = { kind: 'watch_allow_list'; host: string } | { kind: 'watch_deny_all' } | { kind: 'watch_https' } | RunCause;
+
+/** The run statuses a stored cause explains; after any other the cause is not shown. */
+const CAUSE_SHOWN_AFTER: ReadonlySet<string> = new Set(['failed']);
+
+/**
+ * The stored cause of a trigger's last run, or null: none stored, the last run did not fail, or
+ * the column holds anything but a cause lynox writes (`parseWatchFetchCause`).
+ */
+export function storedRunCause(trigger: { readonly last_run_status?: string | undefined; readonly last_run_cause?: string | undefined }): RunCause | null {
+  if (trigger.last_run_cause === undefined || !CAUSE_SHOWN_AFTER.has(trigger.last_run_status ?? '')) return null;
+  let value: unknown;
+  try { value = JSON.parse(trigger.last_run_cause); } catch { return null; }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const keys = Object.keys(value);
+  if (keys.length !== 2 || (value as { kind?: unknown }).kind !== 'watch_fetch' || !Object.hasOwn(value, 'cause')) return null;
+  const cause = parseWatchFetchCause((value as { cause?: unknown }).cause);
+  return cause === null ? null : { kind: 'watch_fetch', cause };
+}
 
 const DENY_ALL_REFUSAL = 'Blocked: network access denied for this tool (network_policy=deny-all)';
 const ALLOW_LIST_REFUSAL_START = 'Blocked: hostname "';

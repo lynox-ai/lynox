@@ -202,6 +202,7 @@ interface TriggerFullDbRow {
   last_run_at: string | null;
   last_run_result: string | null;
   last_run_status: string | null;
+  last_run_cause: string | null;
   notification_channel: string | null;
   max_retries: number | null;
   retry_count: number;
@@ -255,7 +256,7 @@ const EDITED_BY_RUN_SQL = `(substr(edited_by, 1, ${TRIGGER_AUTHOR_PREFIX.length}
 const TRIGGER_READ_COLS =
   `id, title, description, source, effect, condition_json, target_workflow_id, params_json,
    scope_type, scope_id, status, enabled, next_run_at, last_run_at, last_run_result,
-   last_run_status, notification_channel, max_retries, retry_count, created_at, updated_at,
+   last_run_status, last_run_cause, notification_channel, max_retries, retry_count, created_at, updated_at,
    confirmed_at, waiting_until, created_untrusted, created_by, edited_by, confirmed_by,
    created_mandate_id, mandate_editor, mandate_editor_id, mandate_edited_at, model_tier, last_escalation_at,
    last_escalation_outcome, paused_at, paused_due_at, paused_for,
@@ -301,6 +302,7 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
     last_run_at: row.last_run_at ?? undefined,
     last_run_result: row.last_run_result ?? undefined,
     last_run_status: row.last_run_status ?? undefined,
+    last_run_cause: row.last_run_cause ?? undefined,
     waiting_until: row.waiting_until ?? undefined,
     source: row.source as TriggerSource,
     effect: row.effect as TriggerEffect,
@@ -964,11 +966,13 @@ export class TriggerStore {
     lastRunAt: string;
     lastRunResult: string;
     lastRunStatus: string;
+    /** The cause of a failed run (`RunCause`, as JSON), or null: written on every run end. */
+    lastRunCause: string | null;
     nextRunAt?: string | null | undefined;
     retryCount?: number | undefined;
   }): void {
-    const sets: string[] = ['last_run_at = ?', 'last_run_result = ?', 'last_run_status = ?'];
-    const values: unknown[] = [update.lastRunAt, update.lastRunResult, update.lastRunStatus];
+    const sets: string[] = ['last_run_at = ?', 'last_run_result = ?', 'last_run_status = ?', 'last_run_cause = ?'];
+    const values: unknown[] = [update.lastRunAt, update.lastRunResult, update.lastRunStatus, update.lastRunCause];
     if (update.nextRunAt !== undefined) { sets.push('next_run_at = ?'); values.push(update.nextRunAt); }
     if (update.retryCount !== undefined) { sets.push('retry_count = ?'); values.push(update.retryCount); }
     sets.push("updated_at = datetime('now')");
