@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -65,6 +65,56 @@ describe('Engine boot — the actor trail is wired', () => {
     await engine.init();
     const rows = engine.getEngineDb()!.getDb().prepare('SELECT correlation_id, action FROM audit_log ORDER BY id').all() as Array<{ correlation_id: string; action: string }>;
     expect(rows.map((r) => r.correlation_id === 'c-young' ? 'c-young' : r.action)).toEqual(['c-young', RETENTION_ACTION]);
+  });
+
+  describe('the health word follows the sweep the engine ran', () => {
+    const DAY = 24 * 60 * 60_000;
+    /** Boots on an engine.db prepared by `seed`, and collects what the boot wrote to stderr. */
+    const bootOn = async (seed: (db: ReturnType<EngineDb['getDb']>) => void): Promise<{ engine: Engine; stderr: string }> => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-audit-boot-'));
+      dirs.push(dir);
+      for (const k of ['LYNOX_VAULT_KEY', 'LYNOX_MANAGED_INSTANCE_ID']) setEnv(k, undefined);
+      setEnv('LYNOX_DATA_DIR', dir);
+      reloadConfig();
+      const before = new EngineDb();
+      seed(before.getDb());
+      before.close();
+      const lines: string[] = [];
+      const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => { lines.push(String(chunk)); return true; });
+      const engine = new Engine({} as LynoxConfig);
+      engines.push(engine);
+      try { await engine.init(); } finally { spy.mockRestore(); }
+      return { engine, stderr: lines.join('') };
+    };
+    const oldPoll = (db: ReturnType<EngineDb['getDb']>, ts: string): void => {
+      db.prepare("INSERT INTO audit_log (ts, actor_kind, actor_email, action, phase, correlation_id) VALUES (?, 'mandate', 'helper@example.invalid', 'GET /api/runs/active', 'read', 'c-poll')").run(ts);
+    };
+
+    it('says ok once the boot sweep folded a poll past its fold date', async () => {
+      const { engine } = await bootOn((db) => oldPoll(db, new Date(Date.now() - 40 * DAY).toISOString()));
+      expect(engine.getAuditRetentionState()).toBe('ok');
+      const n = engine.getEngineDb()!.getDb().prepare('SELECT poll_count FROM audit_log WHERE correlation_id = ?').get('c-poll');
+      expect(n).toEqual({ poll_count: 1 });
+    });
+
+    it('says stalled when the boot sweep was refused a day, and logs the SQLite code but not the refusal text', async () => {
+      const { engine, stderr } = await bootOn((db) => {
+        oldPoll(db, new Date(Date.now() - 40 * DAY).toISOString());
+        db.exec("CREATE TRIGGER refuse_day_rows BEFORE INSERT ON audit_log WHEN NEW.poll_count IS NOT NULL BEGIN SELECT RAISE(ABORT, 'refused by test'); END;");
+      });
+      expect(engine.getAuditRetentionState()).toBe('stalled');
+      expect(stderr).toMatch(/AUDIT_FOLD_REFUSED day=\S+ \(.*code=SQLITE_CONSTRAINT_TRIGGER\)/);
+    });
+
+    it('says stalled when the boot sweep could not delete, and logs the SQLite code', async () => {
+      const { engine, stderr } = await bootOn((db) => {
+        db.prepare("INSERT INTO audit_log (ts, actor_kind, actor_email, action, phase, correlation_id) VALUES (?, 'mandate', 'helper@example.invalid', 'GET /api/inbox/items', 'read', 'c-old')")
+          .run(new Date(Date.now() - 400 * DAY).toISOString());
+        db.exec("CREATE TRIGGER refuse_marks BEFORE INSERT ON audit_log WHEN NEW.actor_kind = 'retention' BEGIN SELECT RAISE(ABORT, 'refused by test'); END;");
+      });
+      expect(engine.getAuditRetentionState()).toBe('stalled');
+      expect(stderr).toMatch(/audit log retention sweep failed \(.*code=SQLITE_CONSTRAINT_TRIGGER\)/);
+    });
   });
 
   it('finds every tool of the booted registry that writes outside classified', async () => {

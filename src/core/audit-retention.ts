@@ -25,6 +25,7 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { TRAIL_FORM } from './audit-log.js';
+import type { AuditRetentionState } from '../contract/http.js';
 
 const DAY_MS = 24 * 60 * 60_000;
 /** How long a row is kept, from its time. */
@@ -33,6 +34,10 @@ export const AUDIT_RETENTION_MS = 365 * DAY_MS;
 export const POLL_FOLD_AFTER_MS = 30 * DAY_MS;
 /** Days folded per sweep at most, so a first sweep over a long history does not hold the engine. */
 export const FOLD_DAYS_PER_SWEEP = 7;
+/** A poll still single this long after its time means the fold is behind: 30 days plus 3 of slack. */
+export const FOLD_STALL_AFTER_MS = POLL_FOLD_AFTER_MS + 3 * DAY_MS;
+/** How old the last sweep may be before it no longer counts as folding (the sweep runs hourly). */
+export const SWEEP_STALE_AFTER_MS = 2 * 60 * 60_000;
 /** The action of the row a sweep leaves when it deleted rows. */
 export const RETENTION_ACTION = 'audit:retention';
 /** The actor of that row: the instance itself, not a person. The owner's view does not read it. */
@@ -112,6 +117,45 @@ export function sweepAuditLog(
 }
 
 /** The ISO bound of the day after `day` (`YYYY-MM-DD`). */
+/** What the engine keeps of its last sweep, for {@link auditRetentionState}. */
+export interface AuditSweepRecord {
+  /** When it ran (ms). */
+  readonly at: number;
+  /** Whether a day, or the delete, was refused. */
+  readonly refused: boolean;
+  /** Day rows it wrote. */
+  readonly dayRows: number;
+}
+
+/**
+ * The `engine.audit_retention` word of the health body. `stalled` when the last sweep was refused
+ * (a day or the delete), or when a poll is still single past `FOLD_STALL_AFTER_MS` and the sweeps
+ * are not folding: none ran within `SWEEP_STALE_AFTER_MS`, or the last one wrote no day row. A
+ * backlog that sweeps are working through (a first run over a long history folds seven days an
+ * hour) is `ok`, so a deploy does not raise an alarm on its own.
+ */
+export function auditRetentionState(
+  db: Database.Database,
+  now: number,
+  last: AuditSweepRecord | null,
+): AuditRetentionState {
+  if (last?.refused === true) return 'stalled';
+  const behind = db.prepare(`SELECT 1 FROM audit_log WHERE ${FOLDABLE} AND ts < ? LIMIT 1`)
+    .get(...FOLDED_POLLS, new Date(now - FOLD_STALL_AFTER_MS).toISOString());
+  if (behind === undefined) return 'ok';
+  const folding = last !== null && last.dayRows > 0 && now - last.at <= SWEEP_STALE_AFTER_MS;
+  return folding ? 'ok' : 'stalled';
+}
+
+/**
+ * The SQLite result code of `err` (` code=SQLITE_…`), or nothing. A fixed name SQLite sets; it quotes
+ * nothing stored, so a log line keeps the cause where its error text is reduced.
+ */
+export function sqliteErrorCode(err: unknown): string {
+  const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined;
+  return typeof code === 'string' && /^SQLITE_[A-Z_]+$/.test(code) ? ` code=${code}` : '';
+}
+
 function nextDay(day: string): string {
   return new Date(Date.parse(`${day}T00:00:00.000Z`) + DAY_MS).toISOString().slice(0, 10);
 }

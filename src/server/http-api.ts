@@ -126,6 +126,7 @@ import { MIGRATION_STOP_RETRY, MigrationStop, type MigrationStopCode, type Migra
 import type { HandRunMarker, HandRunMinter } from '../core/hand-run-door.js';
 import type { WorkerLoop } from '../core/worker-loop.js';
 import type {
+  AuditRetentionState,
   HealthBody,
   UsageSummaryResponse,
   OAuthClaimPreviewRequest,
@@ -2411,6 +2412,14 @@ export class LynoxHTTPApi {
     // values (`_checkKeyless`), so new data in them lands in plain. Which state, and why, stays in the
     // boot log and in the owner's status field; `unknown` does not set it.
     const keylessOverCiphertext = this._keyless?.state === 'missing_over_encrypted_data';
+    // Whether the instance log keeps its retention (audit-retention.ts), one word for the control
+    // plane's monitor. A store that cannot answer cannot be keeping it either.
+    let auditRetention: AuditRetentionState | undefined;
+    try {
+      auditRetention = engine?.getAuditRetentionState();
+    } catch {
+      auditRetention = 'stalled';
+    }
 
     // BUILD_SHA is baked into the production Dockerfile via --build-arg.
     // Empty in dev images and any locally-built container that didn't pass
@@ -2444,6 +2453,7 @@ export class LynoxHTTPApi {
         active_sessions: this.runningSessions.size,
         total_threads: threadCount,
         ...(engine !== null ? { durable_memory: durableMemoryState(engine.getLegacyMemoryReason()) } : {}),
+        ...(auditRetention !== undefined ? { audit_retention: auditRetention } : {}),
       },
       // What a migration into this instance may hold in memory; a source reads it before it
       // exports (src/core/migration-ceiling.ts).

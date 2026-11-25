@@ -107,3 +107,22 @@ describe('/api/health names whether durable knowledge runs', () => {
     expect(r.text).not.toMatch(/engine\.db|EngineDb|wiring/i);
   }, 60_000);
 });
+
+/**
+ * `engine.audit_retention`: the word the control plane's monitor reads to tell its operator that
+ * the instance log stopped keeping its retention. Real boots, so the word comes from the sweep the
+ * boot ran; when it says `stalled` is covered on a booted engine in `audit-log-boot.test.ts`.
+ */
+describe('/api/health names whether the instance log keeps its retention', () => {
+  const word = (body: Record<string, unknown>): unknown => (body['engine'] as Record<string, unknown>)['audit_retention'];
+
+  it('says ok after a boot whose sweep ran', async () => {
+    expect(word((await bootAndProbe(null)).body)).toBe('ok');
+  }, 60_000);
+
+  it('leaves the word out when engine.db could not be opened, and says nothing more', async () => {
+    const r = await bootAndProbe('engine.db');
+    expect(r.body['engine']).not.toHaveProperty('audit_retention');
+    expect(r.text).not.toMatch(/audit_log|retention sweep|SQLITE_/i);
+  }, 60_000);
+});

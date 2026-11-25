@@ -35,7 +35,8 @@ import { ContainmentMirror, ExactMirror, exactHeldAtBoot, exactMarkerOf, syncCon
 import { exactMarkerOnDisk, isExactHeld, refuseDebug } from './exact-debug-refusal.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog, recordMandateRevoked } from './audit-log.js';
-import { sweepAuditLog } from './audit-retention.js';
+import { auditRetentionState, sqliteErrorCode, sweepAuditLog, type AuditSweepRecord } from './audit-retention.js';
+import type { AuditRetentionState } from '../contract/http.js';
 import { MandateEnds } from './mandate-ends.js';
 import { pauseEndedPlans } from './plan-pause.js';
 import { isErrorTextReducedForProcess, processErrorText } from './error-egress.js';
@@ -517,6 +518,8 @@ export class Engine {
   private _wireRetentionTimer: ReturnType<typeof setInterval> | null = null;
   /** Hourly actor-trail retention sweep; see `_sweepAuditLog`. */
   private _auditRetentionTimer: ReturnType<typeof setInterval> | null = null;
+  /** The last actor-trail sweep, for the health word; null before the first. */
+  private _auditSweep: AuditSweepRecord | null = null;
   private _runRegistry: import('./run-registry.js').RunRegistry | null = null;
   private _runBufferManager: import('./run-buffer.js').RunBufferManager | null = null;
   private _runExecutor: import('./run-executor.js').RunExecutor | null = null;
@@ -3541,15 +3544,31 @@ export class Engine {
   private _sweepAuditLog(): void {
     const db = this.engineDb?.getDb();
     if (db === undefined) return;
+    const at = Date.now();
+    let refused = false;
     try {
-      sweepAuditLog(db, Date.now(), (day, err) => {
+      const r = sweepAuditLog(db, at, (day, err) => {
+        refused = true;
         // A fixed tag an operator can grep for: while a day stays unfolded, its polls are kept
-        // single past the 30-day fold (audit-retention.ts).
-        process.stderr.write(`[lynox] AUDIT_FOLD_REFUSED day=${day} (${processErrorText(err)}) — that day's polls stay single rows\n`);
+        // single past the 30-day fold (audit-retention.ts). The SQLite code keeps the cause
+        // where the error text is reduced.
+        process.stderr.write(`[lynox] AUDIT_FOLD_REFUSED day=${day} (${processErrorText(err)}${sqliteErrorCode(err)}) — that day's polls stay single rows\n`);
       });
+      this._auditSweep = { at, refused, dayRows: r.dayRows };
     } catch (err) {
-      process.stderr.write(`[lynox] audit log retention sweep failed (${processErrorText(err)}) — old trail rows are NOT being removed\n`);
+      this._auditSweep = { at, refused: true, dayRows: 0 };
+      process.stderr.write(`[lynox] audit log retention sweep failed (${processErrorText(err)}${sqliteErrorCode(err)}) — old trail rows are NOT being removed\n`);
     }
+  }
+
+  /**
+   * The health body's `engine.audit_retention` word (audit-retention.ts, `auditRetentionState`);
+   * undefined without engine.db, where there is no trail to keep.
+   */
+  getAuditRetentionState(): AuditRetentionState | undefined {
+    const db = this.engineDb?.getDb();
+    if (db === undefined) return undefined;
+    return auditRetentionState(db, Date.now(), this._auditSweep);
   }
 
   /** Fire orchestrator shutdown hooks (for Pro extensions — includes worker pool shutdown). */
