@@ -150,11 +150,11 @@ describe('the save question in German', () => {
 });
 
 describe('the vault-key release question in German', () => {
-  const p = { name: '"CRM_KEY"', trailId: 'apf_1', author: 'mandate:abc', role: 'bearer', hosts: ['api.example'], more: 0, viewed: undefined, version: 'v1', clientId: false, held: true };
+  const p = { name: '"CRM_KEY"', trailId: 'apf_1', author: 'mandate:abc', slots: [{ slot: 'vault_keys[0]', kind: 'bearer-token' }] as const, hosts: ['api.example'], more: 0, viewed: undefined, version: 'v1', clientId: false, held: true };
 
   it('reads as German, with the same parts as the English', () => {
     expect(flattenPrompt(API_SETUP_DIALOG.de.release(toolWordFrame('api_setup', 'de'), p))).toBe(
-      '⚠ API-Profile: Den Vault-Schlüssel "CRM_KEY" für das API-Profil apf_1 freigeben? Es wurde in der Sitzung von mandate:abc eingerichtet. Wenn du zustimmst, sendet lynox den Wert von "CRM_KEY" als bearer an api.example, bei jeder Anfrage und jedem Lauf über dieses Profil, auch bei deinen eigenen Läufen und bei Massenläufen, bis dieser Zugang endet oder du die Freigabe zurückziehst. Unter diesem Namen liegt im Vault ein Wert. Jede Änderung daran, wohin der Wert geht, beendet die Freigabe. Freigeben?');
+      '⚠ API-Profile: Den Vault-Schlüssel "CRM_KEY" für das API-Profil apf_1 freigeben? Es wurde in der Sitzung von mandate:abc eingerichtet. Wenn du zustimmst, sendet lynox den Wert von "CRM_KEY" als Bearer-Token (vault_keys[0]) an api.example, bei jeder Anfrage und jedem Lauf über dieses Profil, auch bei deinen eigenen Läufen und bei Massenläufen, bis dieser Zugang endet oder du die Freigabe zurückziehst. Unter diesem Namen liegt im Vault ein Wert. Jede Änderung daran, wohin der Wert geht, beendet die Freigabe. Freigeben?');
     const full = flattenPrompt(API_SETUP_DIALOG.de.release(toolWordFrame('api_setup', 'de'), { ...p, more: 2, viewed: { clock: '09:30', unchanged: false }, clientId: true, held: false }));
     expect(full).toContain(' 2 weitere Einstellungen dieses Profils (etwa Anmeldeart, Scopes, Pfad oder Query) gehören ebenfalls zur Freigabe');
     expect(full).toContain('bitte hier darum, das API-Profil apf_1 anzuzeigen, und bitte dann erneut darum, "CRM_KEY" freizugeben.');
@@ -169,7 +169,7 @@ describe('the vault-key release question in German', () => {
     for (const l of ['en', 'de'] as DialogLanguage[]) for (const more of [1, 2]) {
       const q = API_SETUP_DIALOG[l].release(toolWordFrame('api_setup', l), { ...p, more, viewed: { clock: '09:30', unchanged: true }, clientId: true });
       const v = values(q);
-      for (const x of ['"CRM_KEY"', 'apf_1', 'mandate:abc', 'bearer', 'api.example', '09:30', 'v1']) expect(v, `${l} ${String(more)}: ${x}`).toContain(x);
+      for (const x of ['"CRM_KEY"', 'apf_1', 'mandate:abc', l === 'de' ? 'Bearer-Token (vault_keys[0])' : 'the bearer token (vault_keys[0])', 'api.example', '09:30', 'v1']) expect(v, `${l} ${String(more)}: ${x}`).toContain(x);
       // The way to view the profile first names it by its opaque id, in either count.
       expect(v.filter((x) => x === 'apf_1').length, `${l} ${String(more)}`).toBe(2);
       for (const f of frames(q)) for (const x of ['CRM_KEY', 'apf_1', 'mandate:abc', 'api.example']) expect(f, l).not.toContain(x);

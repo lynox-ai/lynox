@@ -796,15 +796,13 @@ export function sendRole(profile: ApiProfile, name: string): string | null {
 /** What a slot of {@link sendRole} is, for the words the owner reads; the engine picks it from the auth shape. */
 export type SendRoleKind = 'client-id' | 'client-secret' | 'basic-username' | 'basic-password' | 'bearer-token' | 'header-key';
 
-/** The kinds of the slots {@link sendRole} names, in the same order; empty when it names none. */
-export function sendRoleKinds(profile: ApiProfile, name: string): readonly SendRoleKind[] {
-  return sendSlots(profile, name).map((s) => s.kind);
-}
+/** A slot {@link sendRole} names, with its kind: the slot name is what a release binding stores, the kind is only read. */
+export interface SendSlot { readonly slot: string; readonly kind: SendRoleKind }
 
-/** One source for both: the slot name stays what a release binding stores, the kind is only read. */
-function sendSlots(profile: ApiProfile, name: string): readonly { slot: string; kind: SendRoleKind }[] {
+/** The slots {@link sendRole} is made of, in the same order; empty when it names none. */
+export function sendSlots(profile: ApiProfile, name: string): readonly SendSlot[] {
   const auth = profile.auth;
-  const slots: { slot: string; kind: SendRoleKind }[] = [];
+  const slots: SendSlot[] = [];
   if (auth?.type === 'oauth2') {
     if (auth.oauth?.client_id_key === name) slots.push({ slot: 'oauth.client_id_key', kind: 'client-id' });
     if (auth.oauth?.client_secret_key === name) slots.push({ slot: 'oauth.client_secret_key', kind: 'client-secret' });
