@@ -394,10 +394,12 @@ function clientStillMisnamed(profileId: string, ctx: StoreRefreshContext): boole
  * whether they are there (`holds`, no `secretAccess` event, where the store has it). It writes,
  * logs and sends nothing, mints no pass and asks the control plane nothing. Two differences from
  * the pass. An empty value counts as there for `holds` and as missing for the pass, so such a
- * profile reads `not-run` here, never ended. And steps 0 to 3 (the exchange switch, the control
- * plane, the profile's auth type and token endpoint) are not asked again: one of them changed
- * inside these 60 s reads "connect again" where the pass would read that nothing ran. That is a
- * wording only, and the connect it asks for is checked on its own.
+ * profile reads `not-run` here, never ended. And steps 0 to 2 and the endpoint part of step 3 are
+ * not asked again (the exchange switch, the control plane and its clearance, the sidecar, the
+ * profile's auth type, the token endpoint and its vetting): one of them changed inside these 60 s
+ * reads "connect again" where the pass would read that nothing ran. That is a wording only, and the
+ * connect it asks for is checked on its own. The preset, the store host and the binding key are
+ * asked again, and read that nothing ran, as in the pass.
  */
 export function connectionStillIneligible(profileId: string, ctx: StoreRefreshContext): boolean {
   const digestOf = ctx.toolContext.storeBindingDigest;

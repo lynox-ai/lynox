@@ -267,13 +267,21 @@ describe('the refresh pass is minted in one place, for a bound connection, over 
   });
 
   it('the window\'s own check, which reads the access token, is asked in one place: a 401\'s renewal inside the window', () => {
-    const callers = sources(SRC)
-      .filter((p) => /\bconnectionStillIneligible\(/.test(readFileSync(p, 'utf-8').replace(/export function connectionStillIneligible\(/, '')))
+    // By the name, not by `name(`: an import under another name, `?.(` or a value passed on would
+    // all call it without the parenthesis right after it.
+    const naming = sources(SRC)
+      .filter((p) => /\bconnectionStillIneligible\b/.test(readFileSync(p, 'utf-8')))
       .map((p) => relative(SRC, p).replace(/\\/g, '/'));
-    expect(callers).toEqual(['core/store-token-refresh.ts']);
-    const src = refresh();
-    expect(src.match(/connectionStillIneligible\(/g) ?? []).toHaveLength(2); // the definition and the window's call
-    expect(src).toContain("if (trigger === 'unauthorized' && lastIneligible.has(profileId) && connectionStillIneligible(profileId, ctx)) {");
+    expect(naming).toEqual(['core/store-token-refresh.ts']);
+    expect(refresh().match(/\bconnectionStillIneligible\b/g) ?? []).toHaveLength(2); // the definition and the window's call
+    // Inside the window, after its condition and before the line that says nothing ran.
+    const body = functionBody(refresh(), 'refreshStoreToken');
+    const windowAt = body.indexOf('if (last !== undefined && Date.now() - last < STORE_REFRESH_WINDOW_MS) {');
+    const callAt = body.indexOf("if (trigger === 'unauthorized' && lastIneligible.has(profileId) && connectionStillIneligible(profileId, ctx)) {");
+    const notRunAt = body.indexOf('not started: one refresh per');
+    expect(windowAt).toBeGreaterThan(-1);
+    expect(callAt).toBeGreaterThan(windowAt);
+    expect(notRunAt).toBeGreaterThan(callAt);
   });
 });
 
