@@ -18,6 +18,7 @@ import { createDriveTool } from '../integrations/google/google-drive.js';
 import { createCalendarTool } from '../integrations/google/google-calendar.js';
 import { createWebSearchTool } from '../integrations/search/web-search-tool.js';
 import * as builtinTools from '../tools/builtin/index.js';
+import { Agent } from './agent.js';
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..');
 const dirs: string[] = [];
@@ -125,22 +126,30 @@ describe('PluginManager.admitTools', () => {
   });
 });
 
+/**
+ * The name of every tool the engine can build, switched on or not: what a booted engine
+ * registers, the built-in catalog, and the tools the integrations build on demand.
+ */
+async function everyToolTheEngineCanBuild(): Promise<string[]> {
+  const dir = mkdtempSync(join(tmpdir(), 'lynox-builtin-names-'));
+  dirs.push(dir);
+  setEnv('LYNOX_FEATURE_PLUGINS', '0');
+  const engine = await boot(dir);
+  const noAuth = (): null => null;
+  const provider = { name: 'test', search: async () => [] } as unknown as SearchProvider;
+  const catalog = Object.values(builtinTools).filter((v): v is ToolEntry =>
+    typeof v === 'object' && v !== null && typeof (v as { definition?: { name?: unknown } }).definition?.name === 'string');
+  return [
+    ...engine.getRegistry().getEntries(), ...catalog,
+    ...createMailTools({} as MailRegistry),
+    createSheetsTool(noAuth), createDocsTool(noAuth), createDriveTool(noAuth), createCalendarTool(noAuth),
+    createWebSearchTool(provider),
+  ].map(t => (t as ToolEntry).definition.name);
+}
+
 describe('BUILTIN_TOOL_NAMES', () => {
   it('holds every tool the engine can build, switched on or not', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'lynox-builtin-names-'));
-    dirs.push(dir);
-    setEnv('LYNOX_FEATURE_PLUGINS', '0');
-    const engine = await boot(dir);
-    const noAuth = (): null => null;
-    const provider = { name: 'test', search: async () => [] } as unknown as SearchProvider;
-    const catalog = Object.values(builtinTools).filter((v): v is ToolEntry =>
-      typeof v === 'object' && v !== null && typeof (v as { definition?: { name?: unknown } }).definition?.name === 'string');
-    const all = [
-      ...engine.getRegistry().getEntries(), ...catalog,
-      ...createMailTools({} as MailRegistry),
-      createSheetsTool(noAuth), createDocsTool(noAuth), createDriveTool(noAuth), createCalendarTool(noAuth),
-      createWebSearchTool(provider),
-    ].map(t => (t as ToolEntry).definition.name);
+    const all = await everyToolTheEngineCanBuild();
     // A real catalog, or the check proves nothing.
     expect(new Set(all).size).toBeGreaterThan(55);
     expect(all.filter(n => !BUILTIN_TOOL_NAMES.has(n))).toEqual([]);
@@ -219,5 +228,109 @@ describe('every name the engine decides by is one no plugin tool can take', () =
     expect(namesOf("const X = new Set(['a', FOLLOW_UP_TOOL_NAME]);", 'X')).toEqual(['a', 'suggest_follow_ups']);
     expect(namesOf("const X = new Set(['a', SOME_OTHER, ...MORE]);", 'X')).toEqual(['a', '<unknown entry SOME_OTHER>', '<unknown entry ...MORE>']);
     expect(namesOf('const Z = 1;', 'X')).toBeNull();
+  });
+});
+
+/**
+ * Every tool the engine can build is in one of four places: on an external-content list the
+ * agent counts by name, among the tools that mark what they return as outside content, among
+ * the tools that return no text from outside, or among the ones not classified yet. A new tool
+ * in none of them fails here, so it cannot reach the model without someone deciding where its
+ * result comes from.
+ */
+describe('every tool the engine can build is classified by where its result comes from', () => {
+  const lists = Agent as unknown as Record<'EXTERNAL_CONTENT_TOOLS' | 'CONTRACT_EXTERNAL_TOOLS', ReadonlySet<string>>;
+  const listed = (): ReadonlySet<string> => new Set([...lists.EXTERNAL_CONTENT_TOOLS, ...lists.CONTRACT_EXTERNAL_TOOLS]);
+
+  /** Tools that wrap what they return in the outside-content marker, with the file that defines them. */
+  const MARKS_ITS_RESULT: Readonly<Record<string, string>> = {
+    inbox_read: 'integrations/mail/tools/inbox-read.ts',
+    recall_tool_result: 'tools/builtin/recall-tool-result.ts',
+    spawn_agent: 'tools/builtin/spawn.ts',
+  };
+
+  /** Tools that return no text from outside, each with what they do return. */
+  const NO_OUTSIDE_TEXT: Readonly<Record<string, string>> = {
+    artifact_delete: 'a fixed text and the id it was given',
+    artifact_save: 'the title it was given, the id, version and sizes',
+    ask_secret: 'fixed texts and the names of saved secrets, never their values',
+    ask_user: 'the owner\'s own answer',
+    bulk_plan: 'counts, fixed codes and the names it was given',
+    bulk_status: 'counts and fixed codes',
+    contacts_save: 'the name and address it was given',
+    data_store_create: 'the schema it was given',
+    data_store_delete: 'a count and the collection it was given',
+    data_store_drop: 'the collection it was given',
+    data_store_insert: 'counts, and warnings that name the fields it was given',
+    edit_file: 'the path and a count of replacements, no file content',
+    inbox_rule_propose: 'the id of the proposed rule and counts',
+    mail_connect: 'the address it was given',
+    mail_reply: 'ids, and the addresses of the mail it answers in a refusal',
+    mail_send: 'the message id, the accepted recipients and the mail server\'s reply',
+    memory_block_edit: 'fixed texts',
+    memory_delete: 'the pattern it was given and counts',
+    memory_focus: 'the name it was given',
+    memory_retire: 'fixed texts; the stored text goes only into the question to the owner',
+    memory_store: 'fixed texts',
+    memory_update: 'fixed texts and counts',
+    plan_task: 'the approval, ids and the owner\'s feedback',
+    remember: 'fixed texts and the subject it was given',
+    suggest_follow_ups: 'a count',
+    task_create: 'the new row, made from what it was given',
+    write_file: 'the path',
+    // Names the engine reserves although no built-in tool defines them.
+    tool_search_tool_regex: 'the provider\'s tool search over this engine\'s own tool definitions',
+    google_gmail: 'a reserved name no tool defines',
+    ask_human: 'the person\'s own answer to a workflow step',
+    fail_step: 'the step\'s own report that it failed',
+  };
+
+  /** Tools whose results are not classified yet. */
+  const NOT_YET_CLASSIFIED: ReadonlySet<string> = new Set([
+    'google_calendar', 'memory_promote', 'run_workflow', 'save_workflow', 'set_thread_context',
+    'subjects_merge', 'task_update', 'update_workflow_steps',
+  ]);
+
+  const classes = (): ReadonlyArray<readonly [string, ReadonlySet<string>]> => [
+    ['listed', listed()],
+    ['marks its result', new Set(Object.keys(MARKS_ITS_RESULT))],
+    ['no outside text', new Set(Object.keys(NO_OUTSIDE_TEXT))],
+    ['not yet classified', NOT_YET_CLASSIFIED],
+  ];
+
+  it('leaves no tool the engine can build, and no name it reserves, unclassified', async () => {
+    const built = await everyToolTheEngineCanBuild();
+    // A real catalog, or the check proves nothing.
+    expect(new Set(built).size).toBeGreaterThan(55);
+    const all = new Set([...built, ...BUILTIN_TOOL_NAMES]);
+    const classified = new Set(classes().flatMap(([, set]) => [...set]));
+    expect([...all].filter(n => !classified.has(n)).sort()).toEqual([]);
+  });
+
+  it('puts each tool in one class only', () => {
+    const seen = new Map<string, string>();
+    const twice: string[] = [];
+    for (const [label, set] of classes()) {
+      for (const name of set) {
+        const before = seen.get(name);
+        if (before !== undefined) twice.push(`${name}: ${before} and ${label}`);
+        seen.set(name, label);
+      }
+    }
+    expect(twice).toEqual([]);
+  });
+
+  it('CONTROL: names no tool the engine cannot build', async () => {
+    const all = new Set([...await everyToolTheEngineCanBuild(), ...BUILTIN_TOOL_NAMES]);
+    const named = [...Object.keys(MARKS_ITS_RESULT), ...Object.keys(NO_OUTSIDE_TEXT), ...NOT_YET_CLASSIFIED];
+    expect(named.filter(n => !all.has(n))).toEqual([]);
+  });
+
+  it('a tool counted as marking its result is defined in its file and wraps a result there', () => {
+    for (const [name, file] of Object.entries(MARKS_ITS_RESULT)) {
+      const source = readFileSync(join(SRC, file), 'utf8');
+      expect(source.includes(`name: '${name}'`), `${name} is defined in ${file}`).toBe(true);
+      expect(/\bwrapUntrustedData\(/.test(source), `${file} wraps a result`).toBe(true);
+    }
   });
 });
