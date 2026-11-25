@@ -4441,6 +4441,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           storeRenewed = true;
           const { storeClientMisnamedText } = await import('../../core/store-token-refresh.js');
           wrapped += `\n\n**[Engine note — the store's access could not be renewed]**\nThe ${storeClientMisnamedText(auth.profile?.id ?? '', true)}`;
+        } else if (renewal === 'not-run') {
+          // The renewal did not run this time, for a cause outside the connection: within the
+          // minute of the last one, a 429 or 5xx from the store, a connect in progress, the
+          // control plane. The reminder below says to connect again, which would not help, so the
+          // note says neither: send once more, and tell the user if the store refuses again.
+          // `ineligible` and `dead` (the connection cannot go on as it is) leave the reminder to speak.
+          storeRenewed = true;
+          wrapped += '\n\n**[Engine note — the store\'s access was not renewed this time]**\nThe engine did not renew the access token for this store this time. Send the same request once more; if the store answers 401 again, tell the user that the store refused the request, and do not change the profile for it.';
         }
       }
 
@@ -4451,8 +4459,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // set, or a built-in provider's profile — the 2026-05-18 Shopify failure mode: stale vault
       // access_token + agent ping-ponged the user through "re-paste from
       // admin UI" instead of calling `api_setup fetch_token`.
-      // Not after a renewal: the note above already says what to do, and this reminder would
-      // say the opposite (connect again, or fetch a token).
+      // Not after a renewal, nor after one that did not run this time: the note above already
+      // says what to do, and this reminder would say the opposite (connect again, or fetch a token).
       if (response.status === 401 && toolContext?.apiStore && !storeRenewed) {
         try {
           const reqHostname = new URL(input.url).hostname;

@@ -242,7 +242,8 @@ describe('the refresh pass is minted in one place, for a bound connection, over 
       'if (!shopifyExchangeSwitchOn()) return undefined;',
       "const access = secretStore.resolve(accessTokenKey(profile.id));",
       'const digest = toolContext.storeBindingDigest(profile.id, origin, access);',
-      'if (digest === null || !sameDigest(digest, bound)) return undefined;',
+      'if (digest === null) return undefined;',
+      "if (!sameDigest(digest, bound)) return 'ineligible';",
       'const clearance = await toolContext.exactClearance.ensure();',
     ].map((line) => body.indexOf(line));
     for (const i of order) expect(i).toBeGreaterThan(-1);
