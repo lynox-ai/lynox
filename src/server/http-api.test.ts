@@ -13818,6 +13818,45 @@ describe('LynoxHTTPApi', () => {
         expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 })).status).toBe(200);
       });
 
+      it('once judging began, the run judges by its planned text: a halt resumes after the artifact changed, without reading it', async () => {
+        const text = 'R1 „sachlich“, keine Superlative.\n';
+        const fromArtifact = normalizeJudgeRule(
+          { rule: text, schema: { title: { type: 'string', maxLength: 40 } } },
+          { source: { artifact: 'a1b2c3d4', version: 1, sha256: createHash('sha256').update(text, 'utf8').digest('hex') } },
+        );
+        const id = bulkLedger.recordDryRun({
+          createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
+          targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', title: 'old' } }, after: judgeTemplate(fromArtifact) }],
+          judge: fromArtifact,
+        }).id;
+        const hash = bulkLedger.getJudgeRuleForOwner(id)!.hash;
+        const engineRef = (api as unknown as { engine: { getArtifactStore: ReturnType<typeof vi.fn> } }).engine;
+        const store = engineRef.getArtifactStore() as { get: ReturnType<typeof vi.fn> };
+        store.get.mockReturnValueOnce({ id: 'a1b2c3d4', version: 1, content: text, type: 'markdown' });
+        expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 })).status).toBe(200);
+        expect(bulkLedger.getStatus(id)!.phase).toBe('planned');
+        // Judging, not halted: a second start is refused for its phase, not for the artifact.
+        store.get.mockClear();
+        store.get.mockReturnValue({ id: 'a1b2c3d4', version: 2, content: text.replace('keine', 'wenige'), type: 'markdown' });
+        try {
+          const again = await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 });
+          expect(again.status).toBe(409);
+          expect(((await again.json()) as { error: string; code?: string }).error).toBe('The bulk run is not in a phase that allows this.');
+          // Halted at its spend limit mid-judging, the artifact edited meanwhile: the owner resumes
+          // it, and the judge goes on with the text the run was started with.
+          bulkLedger.halt(id, BULK_HALT_REASONS.costCap);
+          new TriggerStore(bulkDb).updateFields(`bulk-preview-${id}`, { status: 'completed' });
+          const resumed = await start(id, { judgeRuleHash: hash, costCapUsd: 3 });
+          expect(resumed.status).toBe(200);
+          expect(bulkLedger.getJudgeRuleForOwner(id)!.rule).toBe(text);
+          expect(bulkLedger.getJudgeRuleForOwner(id)!.hash).toBe(hash);
+          expect(store.get).not.toHaveBeenCalled();
+        } finally {
+          store.get.mockReset();
+          store.get.mockReturnValue(null);
+        }
+      });
+
       it('an access never reads a rule taken from an artifact: not on the run\'s page, and it cannot start or resume the run', async () => {
         const text = 'R1 „sachlich“, keine Superlative.\n';
         const fromArtifact = normalizeJudgeRule(

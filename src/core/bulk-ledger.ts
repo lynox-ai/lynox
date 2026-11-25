@@ -3292,11 +3292,17 @@ export class BulkLedger {
      *  anywhere leaves none behind. Left out before the judge first started, the run has none;
      *  from then on the list is frozen: the same one, or none given, passes. */
     startDomains?: unknown;
+    /** Why the rule's saved source no longer holds the text it was planned with, or null
+     *  (`judgeRuleSourceChanged`). Asked only before the judge first starts: the start that
+     *  begins it is the one the owner approves the text with, and from then on the run judges by
+     *  the stored text alone, a resume after a halt included. */
+    ruleSourceChanged?: ((rule: JudgeRule) => string | null) | undefined;
   } = {}):
     { ok: true; status: BulkRunStatus; triggerId: string }
     | { ok: false; reason: 'not_found' | 'wrong_phase' | 'external_in_progress' | 'checksum' | 'cost_cap' | 'not_at_this_start' | 'start_domains_not_here' | 'start_domains_invalid' | 'start_domains_frozen' }
     | { ok: false; reason: 'supersede_required'; supersedable: { id: string; costUsd: number } }
-    | { ok: false; reason: 'rule_refused'; message: string } {
+    | { ok: false; reason: 'rule_refused'; message: string }
+    | { ok: false; reason: 'rule_source_changed'; message: string } {
     // A run left reading with no trigger is halted first, so the owner can start it again.
     this.freeDeadReads(runId);
     const run = this.runRow(runId);
@@ -3329,6 +3335,10 @@ export class BulkLedger {
       const refused = this.judgeRuleRefusal(run);
       if (refused !== null) return { ok: false, reason: 'rule_refused', message: refused };
       if (opts.judgeRuleHash === undefined || opts.judgeRuleHash !== run.judge_rule_hash) return { ok: false, reason: 'checksum' };
+      if (run.judge_started_at === null && opts.ruleSourceChanged !== undefined) {
+        const changed = opts.ruleSourceChanged(this.judgeRuleOf(run));
+        if (changed !== null) return { ok: false, reason: 'rule_source_changed', message: changed };
+      }
       if (opts.costCapUsd === undefined ? run.cost_cap_usd === null : !isWholeCents(opts.costCapUsd)) return { ok: false, reason: 'cost_cap' };
     }
     const db = this.engineDb.getDb();

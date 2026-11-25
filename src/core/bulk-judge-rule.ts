@@ -110,6 +110,10 @@ export function judgeRuleFromArtifact(
   if (!RULE_ARTIFACT_TYPES.has(artifact.type)) {
     throw new BulkSourceError(`Artifact ${ref} is of type ${artifact.type}; a rule is taken only from a markdown or text artifact.`);
   }
+  // Named by the artifact, so the planner knows which text to fix: the same checks
+  // `normalizeJudgeRule` applies to a typed rule, which would name judge.rule.
+  if (artifact.content.trim() === '') throw new BulkSourceError(`Artifact ${ref} is empty; a rule needs text.`);
+  refuseHidden(artifact.content, `Artifact ${ref}`);
   if (artifact.content.length > JUDGE_MAX_RULE_CHARS) {
     throw new BulkSourceError(
       `Artifact ${ref} has ${String(artifact.content.length)} characters; a rule may have at most ${String(JUDGE_MAX_RULE_CHARS)}. Save the rule alone as its own artifact and plan with that id.`,
@@ -130,10 +134,12 @@ export function judgeRuleFromArtifact(
  */
 export function judgeRuleSourceChanged(rule: Pick<JudgeRule, 'source'>, store: Pick<ArtifactStore, 'get'> | null): string | null {
   if (rule.source === undefined) return null;
-  const now = store?.get(rule.source.artifact) ?? null;
-  if (now === null) return `The artifact this run's rule was taken from (${rule.source.artifact}) is gone. Plan the run again.`;
+  if (store === null) return `Saved artifacts cannot be read on this instance right now, so this run's rule cannot be checked against artifact ${rule.source.artifact}. Try again later.`;
+  const now = store.get(rule.source.artifact);
+  if (now === null) return `The artifact this run's rule was taken from (${rule.source.artifact}) is gone or cannot be read. Plan the run again.`;
   if (sha256Of(now.content) !== rule.source.sha256) {
-    return `The rule in artifact ${rule.source.artifact} changed since this run was planned (v${String(rule.source.version)}, now v${String(now.version)}). Plan the run again to judge by the new text.`;
+    // Someone with access to this instance may have changed it, not only the owner.
+    return `The rule in artifact ${rule.source.artifact} changed since this run was planned (v${String(rule.source.version)}, now v${String(now.version)}); the change may not be yours. Read the artifact, then plan the run again to judge by its text.`;
   }
   return null;
 }
@@ -287,7 +293,7 @@ export function normalizeJudgeRule(
   if (!isPlainObject(input)) throw new BulkSourceError('judge must be an object with rule and schema.');
   const rule = input['rule'];
   if (typeof rule !== 'string' || rule.trim() === '') {
-    throw new BulkSourceError(`judge.rule must be a text of 1–${String(JUDGE_MAX_RULE_CHARS)} characters.`);
+    throw new BulkSourceError(`judge.rule must be a text of 1–${String(JUDGE_MAX_RULE_CHARS)} characters, or name a saved artifact as judge.rule_artifact.`);
   }
   if (rule.length > JUDGE_MAX_RULE_CHARS) {
     // The counted length, so the model shortens by a number instead of an estimate.

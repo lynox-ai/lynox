@@ -10913,15 +10913,6 @@ export class LynoxHTTPApi {
             errorResponse(res, 409, 'A bulk run with a judge cannot be started on an instance with its own model key yet.', 'judge_unavailable');
             return;
           }
-          // A rule taken from an artifact starts only while the artifact still holds the text the run
-          // was planned with: the run judges by the planned text, never a newer one, and an owner who
-          // edited the rule since meant the edit.
-          const planned = ledger.getJudgeRuleForOwner(params['id']!);
-          const changed = planned === null ? null : judgeRuleSourceChanged(planned, engine.getArtifactStore());
-          if (changed !== null) {
-            errorResponse(res, 409, changed, 'rule_source_changed');
-            return;
-          }
         }
         const rawCap = fields['costCapUsd'];
         const rawSupersedes = fields['supersedes'];
@@ -10934,6 +10925,10 @@ export class LynoxHTTPApi {
           // The link domains the owner allows a judged run's verdicts to add (PRD shopify-preset
           // §20.2 item 5, S20-4): only here, on the owner's route, written with the start itself.
           startDomains: fields['startDomains'],
+          // A rule taken from an artifact begins judging only while the artifact still holds the text
+          // the run was planned with: the run judges by the planned text, never a newer one, and an
+          // owner who edited the rule since meant the edit.
+          ruleSourceChanged: (rule) => judgeRuleSourceChanged(rule, engine.getArtifactStore()),
         });
         // The texts are ux's.
         if (!read.ok && read.reason === 'start_domains_invalid') {
@@ -10953,6 +10948,10 @@ export class LynoxHTTPApi {
           errorResponse(res, 409, 'Another judged run is started and not yet approved. Starting this one ends it, keeping what it spent: start again with "supersedes" set to its id.', 'supersede_required', {
             supersedable: { id: read.supersedable.id, costUsd: read.supersedable.costUsd },
           });
+          return;
+        }
+        if (!read.ok && read.reason === 'rule_source_changed') {
+          errorResponse(res, 409, read.message, 'rule_source_changed');
           return;
         }
         if (!read.ok && read.reason === 'rule_refused') {

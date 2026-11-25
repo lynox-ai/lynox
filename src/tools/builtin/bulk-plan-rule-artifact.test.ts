@@ -7,6 +7,13 @@ import { bulkPlanTool, bulkStatusTool } from './bulk.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { BulkLedger } from '../../core/bulk-ledger.js';
 import { ArtifactStore } from '../../core/artifact-store.js';
+import { DataStore } from '../../core/data-store.js';
+import { canonicalJson } from '../../core/bulk-ledger.js';
+import { setTenantWorkspace, clearTenantWorkspace } from '../../core/workspace.js';
+import { TEST_STAMP } from '../../../tests/helpers/row-stamp.js';
+import type { MemoryScopeRef } from '../../types/index.js';
+
+const scope: MemoryScopeRef = { type: 'context', id: 'bulk-rule-artifact-test' };
 import { judgeRuleSourceChanged, normalizeJudgeRule } from '../../core/bulk-judge-rule.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
 import type { IAgent } from '../../types/index.js';
@@ -26,16 +33,17 @@ let dir: string;
 let engineDb: EngineDb;
 let ledger: BulkLedger;
 let artifacts: ArtifactStore;
+let data: DataStore;
 
-function agent(principal: RequestPrincipal = OWNER_PRINCIPAL): IAgent {
-  return { toolContext: { bulkLedger: ledger, artifactStore: artifacts }, currentThreadId: 'thread-1', principal } as unknown as IAgent;
+function agent(principal: RequestPrincipal = OWNER_PRINCIPAL, store: Pick<ArtifactStore, 'get'> | null = artifacts): IAgent {
+  return { toolContext: { bulkLedger: ledger, artifactStore: store, dataStore: data }, currentThreadId: 'thread-1', principal } as unknown as IAgent;
 }
 
-const plan = (judge: Record<string, unknown>, principal?: RequestPrincipal): Promise<string> => bulkPlanTool.handler({
+const plan = (judge: Record<string, unknown>, principal?: RequestPrincipal, store?: Pick<ArtifactStore, 'get'> | null): Promise<string> => bulkPlanTool.handler({
   target_system: 'http', target_host: 'shop.example.com',
   source_list: { path: '/wp-json/wc/v3/products' },
   judge: { schema: { description: { type: 'string', maxLength: 2000 } }, ...judge },
-} as unknown as Parameters<typeof bulkPlanTool.handler>[0], agent(principal));
+} as unknown as Parameters<typeof bulkPlanTool.handler>[0], store === undefined ? agent(principal) : agent(principal, store));
 
 const runId = (out: string): string => /Bulk run ([0-9a-f-]{36})/.exec(out)![1]!;
 const sha = (s: string): string => createHash('sha256').update(s, 'utf8').digest('hex');
@@ -46,8 +54,13 @@ beforeEach(() => {
   ledger = new BulkLedger(engineDb, null);
   mkdirSync(join(dir, 'artifacts'));
   artifacts = new ArtifactStore(join(dir, 'artifacts'));
+  mkdirSync(join(dir, 'workspace'));
+  setTenantWorkspace(join(dir, 'workspace'));
+  data = new DataStore(join(dir, 'datastore.db'));
 });
 afterEach(() => {
+  clearTenantWorkspace();
+  data.close();
   engineDb.close();
   rmSync(dir, { recursive: true, force: true });
 });
@@ -63,11 +76,45 @@ describe('bulk_plan takes a judge rule from a saved artifact', () => {
     expect(out).toContain(`The rule is the text of artifact ${saved.id} (v${String(saved.version)}) as saved, unchanged.`);
   });
 
+  it('keeps a rule\'s leading spaces and its exact length of 4000 characters', async () => {
+    const indented = '  R1 eingerückt.\n';
+    const a = artifacts.save({ title: 'Eingerückt', content: indented, type: 'text' });
+    expect(ledger.getJudgeRuleForOwner(runId(await plan({ rule_artifact: a.id })))!.rule).toBe(indented);
+    const full = 'ä'.repeat(4_000);
+    const b = artifacts.save({ title: 'Voll', content: full, type: 'text' });
+    expect(ledger.getJudgeRuleForOwner(runId(await plan({ rule_artifact: b.id })))!.rule).toBe(full);
+  });
+
+  it('carries the text and its source on every form that takes a judge: a data-store run and a run from a collection to a host', async () => {
+    const saved = artifacts.save({ title: 'Regeln', content: RULE_TEXT, type: 'markdown' });
+    const source = { artifact: saved.id, version: saved.version, sha256: sha(RULE_TEXT) };
+    data.createCollection({ name: 'products', scope, columns: [{ name: 'sku', type: 'string' }, { name: 'title', type: 'string' }], uniqueKey: ['sku'] });
+    data.insertRecords({ collection: 'products', records: [{ sku: 'A', title: 'old' }], stamp: TEST_STAMP });
+    data.createCollection({ name: 'staged', scope, columns: [{ name: 'target', type: 'string' }], uniqueKey: ['target'] });
+    data.insertRecords({ collection: 'staged', records: [{ target: 'A' }], stamp: TEST_STAMP });
+    const toStore = await bulkPlanTool.handler({
+      target_system: 'data_store', target_collection: 'products', source_collection: 'staged',
+      judge: { rule_artifact: saved.id, schema: { title: { type: 'string', maxLength: 70 } } },
+    } as unknown as Parameters<typeof bulkPlanTool.handler>[0], agent());
+    const a = ledger.getJudgeRuleForOwner(runId(toStore))!;
+    expect([a.rule, a.source]).toEqual([RULE_TEXT, source]);
+    data.insertRecords({ collection: 'staged', records: [{ target: '/products/1' }], stamp: TEST_STAMP });
+    const toHost = await bulkPlanTool.handler({
+      target_system: 'http', target_host: 'api.example.com', source_collection: 'staged',
+      judge: { rule_artifact: saved.id, schema: { title: { type: 'string', maxLength: 70 } } },
+    } as unknown as Parameters<typeof bulkPlanTool.handler>[0], agent());
+    const b = ledger.getJudgeRuleForOwner(runId(toHost))!;
+    expect([b.rule, b.source]).toEqual([RULE_TEXT, source]);
+  });
+
   it('a typed rule stores no source, and keeps the hash it had before a source existed', async () => {
     const out = await plan({ rule: 'Write a short description.' });
     const stored = ledger.getJudgeRuleForOwner(runId(out))!;
     expect(stored.source).toBeUndefined();
     expect('source' in stored).toBe(false);
+    // The hash over exactly the shape a typed rule had before: no source key, not even a null one.
+    const { hash, ...rule } = stored;
+    expect(hash).toBe(engineDb.keyedHash(['bulk-judge-rule-v1', canonicalJson({ rule: rule.rule, schema: rule.schema, tier: rule.tier, verdict: rule.verdict })]));
   });
 
   it('a source the planner writes itself is not stored: only a text read from an artifact has one', async () => {
@@ -83,7 +130,10 @@ describe('bulk_plan takes a judge rule from a saved artifact', () => {
 
   it('under an access the rule is typed: an artifact\'s content is not read for a mandate, and nothing is planned', async () => {
     const saved = artifacts.save({ title: 'Regeln', content: RULE_TEXT, type: 'markdown' });
-    expect(await plan({ rule_artifact: saved.id }, MANDATE)).toContain('judge.rule_artifact is for the owner: under an access, type the rule as judge.rule.');
+    const reads: string[] = [];
+    const watched = { get: (id: string) => { reads.push(id); return artifacts.get(id); } };
+    expect(await plan({ rule_artifact: saved.id }, MANDATE, watched)).toContain('judge.rule_artifact is for the owner: under an access, type the rule as judge.rule.');
+    expect(reads).toEqual([]);
     expect(ledger.listRuns(10)).toHaveLength(0);
   });
 
@@ -93,7 +143,23 @@ describe('bulk_plan takes a judge rule from a saved artifact', () => {
     expect(await plan({ rule_artifact: page.id })).toContain(`Artifact ${page.id} is of type html; a rule is taken only from a markdown or text artifact.`);
     const long = artifacts.save({ title: 'Lang', content: 'x'.repeat(4_001), type: 'text' });
     expect(await plan({ rule_artifact: long.id })).toContain(`Artifact ${long.id} has 4001 characters; a rule may have at most 4000.`);
+    expect(await plan({ rule_artifact: '../etc' })).toContain('judge.rule_artifact must be the id of a saved artifact, as artifact_list shows it.');
     expect(ledger.listRuns(10)).toHaveLength(0);
+  });
+
+  it('names the artifact in each refusal of its text: empty, a hidden character, a lost document, no store', async () => {
+    const empty = artifacts.save({ title: 'Leer', content: '  \n', type: 'text' });
+    expect(await plan({ rule_artifact: empty.id })).toContain(`Artifact ${empty.id} is empty; a rule needs text.`);
+    const hidden = artifacts.save({ title: 'Versteckt', content: 'R1\u200Bsachlich', type: 'text' });
+    expect(await plan({ rule_artifact: hidden.id })).toContain(`Artifact ${hidden.id} holds a character a reader does not see`);
+    const lost = { get: (id: string) => ({ ...artifacts.get(empty.id)!, id, content: 'R1', lostOnSave: true as const }) };
+    expect(await plan({ rule_artifact: 'a1b2c3d4' }, OWNER_PRINCIPAL, lost)).toContain('Artifact a1b2c3d4 lost its document on a save');
+    expect(await plan({ rule_artifact: 'a1b2c3d4' }, OWNER_PRINCIPAL, null)).toContain('Saved artifacts are not available on this instance: type the rule as judge.rule.');
+    expect(ledger.listRuns(10)).toHaveLength(0);
+  });
+
+  it('a judge without rule and without rule_artifact is told both ways', async () => {
+    expect(await plan({})).toContain('or name a saved artifact as judge.rule_artifact.');
   });
 });
 
@@ -126,7 +192,7 @@ describe('a run whose rule came from an artifact starts only while the artifact 
     const edited = artifacts.save({ title: 'Regeln', content: RULE_TEXT.replace('160', '150'), type: 'markdown', id: saved.id });
     const stored = ledger.getJudgeRuleForOwner(id)!;
     expect(judgeRuleSourceChanged(stored, artifacts))
-      .toBe(`The rule in artifact ${saved.id} changed since this run was planned (v${String(saved.version)}, now v${String(edited.version)}). Plan the run again to judge by the new text.`);
+      .toBe(`The rule in artifact ${saved.id} changed since this run was planned (v${String(saved.version)}, now v${String(edited.version)}); the change may not be yours. Read the artifact, then plan the run again to judge by its text.`);
     // Nothing switches to the newer text.
     expect(stored.rule).toBe(RULE_TEXT);
   });
@@ -135,7 +201,8 @@ describe('a run whose rule came from an artifact starts only while the artifact 
     const saved = artifacts.save({ title: 'Regeln', content: RULE_TEXT, type: 'markdown' });
     const stored = ledger.getJudgeRuleForOwner(runId(await plan({ rule_artifact: saved.id })))!;
     expect(artifacts.delete(saved.id)).toBe(true);
-    expect(judgeRuleSourceChanged(stored, artifacts)).toBe(`The artifact this run's rule was taken from (${saved.id}) is gone. Plan the run again.`);
+    expect(judgeRuleSourceChanged(stored, artifacts)).toBe(`The artifact this run's rule was taken from (${saved.id}) is gone or cannot be read. Plan the run again.`);
+    expect(judgeRuleSourceChanged(stored, null)).toBe(`Saved artifacts cannot be read on this instance right now, so this run's rule cannot be checked against artifact ${saved.id}. Try again later.`);
   });
 
   it('a typed rule is never refused for its source', () => {
