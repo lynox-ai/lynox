@@ -6,8 +6,10 @@
 // The view shows the schedule from the preview, never from the list it polls, and confirms with the
 // preview's `expect`: what the owner reads is what is stamped, or the engine answers 409 `changed`.
 
-import { t, tf } from '../i18n.svelte.js';
+import { t } from '../i18n.svelte.js';
+import { fillTemplate } from '../i18n-fill.js';
 import { markHidden, marksHidden, watchOf } from './trigger-consent.js';
+import { setApart } from './plan-takeover.js';
 
 /** `GET /api/tasks/:id/stamp-preview` (owner only). */
 export interface StampPreview {
@@ -29,8 +31,11 @@ export interface StampPreview {
 	};
 	/** The address of the mandate the plan acts for; null when it acts for none. */
 	by: string | null;
-	/** For a workflow schedule: its name, and whether it is confirmed. Null for any other. */
-	workflow: { name: string | null; confirmed: boolean } | null;
+	/**
+	 * For a workflow schedule: its name, whether it is confirmed, and whether the person it runs for
+	 * lost access (absent from an older engine: not ended). Null for any other.
+	 */
+	workflow: { name: string | null; confirmed: boolean; ended?: boolean } | null;
 	connections: { id: string; profile: string; provider: string; account: string | null }[];
 }
 
@@ -52,7 +57,7 @@ export function readPreview(raw: unknown): StampPreview | null {
 		if (!strOrNull(s[k])) return null;
 	}
 	const w = raw['workflow'];
-	if (w !== null && !(isObj(w) && strOrNull(w['name']) && typeof w['confirmed'] === 'boolean')) return null;
+	if (w !== null && !(isObj(w) && strOrNull(w['name']) && typeof w['confirmed'] === 'boolean' && (w['ended'] === undefined || typeof w['ended'] === 'boolean'))) return null;
 	const c = raw['connections'];
 	if (!Array.isArray(c) || !c.every((e) => isObj(e) && typeof e['id'] === 'string' && typeof e['profile'] === 'string' && typeof e['provider'] === 'string' && strOrNull(e['account']))) return null;
 	return raw as unknown as StampPreview;
@@ -93,21 +98,55 @@ export function usesConnections(row: StampRow): boolean {
 	return row.effect === 'run_agent' || row.effect === 'run_workflow';
 }
 
+/**
+ * A value someone else wrote (a person's name, a provider read from a host, an account's label) as
+ * the stamp's sentences show it: marked by `markHidden` and by nothing else, the set {@link hiddenIn}
+ * checks, so every mark has its "marked above" note and a name with an emoji or a joiner reads as
+ * written; then set apart (`setApart`), so a label cannot read as lynox's words. Not cut: a host is
+ * read from its end. The view draws it with `MarkedLine`.
+ */
+function foreignValue(text: string): string {
+	return setApart(markHidden(text));
+}
+
+/**
+ * Whether a value says anything as the sentence shows it: spaces alone say nothing, but a character
+ * `markHidden` prints is something (its mark is what "marked above" points at), so the test runs on
+ * the marked text. `trim()` alone would take U+FEFF and U+2028 for space.
+ */
+function says(text: string | null): text is string {
+	return text !== null && markHidden(text).trim() !== '';
+}
+
 /** A provider with the account, or "account unknown" (legal POS-069: the line never stays empty). */
 function connectionText(c: StampPreview['connections'][number]): string {
-	return `${markHidden(c.provider)} (${c.account !== null && c.account !== '' ? markHidden(c.account) : t('stamp.account_unknown')})`;
+	return `${foreignValue(c.provider)} (${says(c.account) ? foreignValue(c.account) : t('stamp.account_unknown')})`;
 }
 
 /**
  * The sentence the owner confirms beside (legal POS-069, a binding text): whose own logins the plan
- * would use, and which. Null when the list is empty.
+ * would use, and which, as the view lays it out — its words up to the list (`lead`), then one
+ * connection per line, each with the comma or the closing words that follow it in the sentence.
+ * Read in order, the parts are the sentence word for word ({@link connectionsSentence}). Null when
+ * the list is empty. Every value in it is someone else's ({@link foreignValue}); lynox's own
+ * fallback for an unnamed person is not.
  */
-export function connectionsSentence(p: StampPreview): string | null {
+export function connectionsParts(p: StampPreview): { lead: string; items: string[] } | null {
 	if (p.connections.length === 0) return null;
-	return tf('stamp.connections', {
-		person: markHidden(p.by ?? t('takeover.connection_someone')),
-		connections: p.connections.map(connectionText).join(', '),
-	});
+	const vars = { person: says(p.by) ? foreignValue(p.by) : t('takeover.connection_someone') };
+	const template = t('stamp.connections');
+	const at = template.indexOf('{connections}');
+	const texts = p.connections.map(connectionText);
+	// A wording without the list's place: the whole sentence, the list joined into it.
+	if (at < 0) return { lead: fillTemplate(template, { ...vars, connections: texts.join(', ') }), items: [] };
+	const tail = fillTemplate(template.slice(at + '{connections}'.length), vars);
+	return { lead: fillTemplate(template.slice(0, at), vars), items: texts.map((x, i) => (i < texts.length - 1 ? `${x},` : `${x}${tail}`)) };
+}
+
+/** {@link connectionsParts} as one line of text. */
+export function connectionsSentence(p: StampPreview): string | null {
+	const parts = connectionsParts(p);
+	return parts === null ? null : [parts.lead.trimEnd(), ...parts.items].filter((x) => x !== '').join(' ');
 }
 
 /** What the preview's workflow parameters say, one `name: value` per entry; none when unreadable. */
@@ -145,8 +184,8 @@ export interface StampListed {
 
 /** One entry of {@link StampListed} as the row says it: provider, account, and how it stands. */
 export function listedLine(e: StampListed['entries'][number]): string {
-	const provider = e.provider !== null ? markHidden(e.provider) : t('stamp.state_removed');
-	const account = e.account !== null && e.account !== '' ? markHidden(e.account) : t('stamp.account_unknown');
+	const provider = e.provider !== null ? foreignValue(e.provider) : t('stamp.state_removed');
+	const account = says(e.account) ? foreignValue(e.account) : t('stamp.account_unknown');
 	return `${provider} (${account}): ${t(`stamp.state_${e.state}`)}`;
 }
 

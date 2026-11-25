@@ -36,6 +36,9 @@ export { default as DataStoreView } from './components/DataStoreView.svelte';
 export { default as FileBrowserView } from './components/FileBrowserView.svelte';
 export { default as TasksView } from './components/TasksView.svelte';
 export { default as TriggersView } from './components/TriggersView.svelte';
+// Renders artifacts in frames on `/_artifact-frame` (and prints through it): the host app must
+// serve that route with `artifactFrameResponse` from `src/lib/server/artifact-frame-endpoint.ts`,
+// as `src/routes/_artifact-frame/+server.ts` does. The route is not part of this package.
 export { default as ArtifactsView } from './components/ArtifactsView.svelte';
 export { default as IntelligenceHub } from './components/IntelligenceHub.svelte';
 export { default as ArtifactsHub } from './components/ArtifactsHub.svelte';
@@ -55,6 +58,9 @@ export { default as LLMSettings } from './components/LLMSettings.svelte';
 // HTTP-cap → WorkspaceLimitsView (`/settings/workspace/limits`),
 // context-window → LLMAdvancedView (`/settings/llm/advanced`). Legacy URL
 // `/app/hub/cost-limits` now 301-redirects to `/settings/workspace/limits`.
+// Renders artifacts in frames on `/_artifact-frame` (and prints through it): the host app must
+// serve that route with `artifactFrameResponse` from `src/lib/server/artifact-frame-endpoint.ts`,
+// as `src/routes/_artifact-frame/+server.ts` does. The route is not part of this package.
 export { default as MarkdownRenderer } from './components/MarkdownRenderer.svelte';
 export { default as ChangesetReview } from './components/ChangesetReview.svelte';
 export { default as ToastContainer } from './components/ToastContainer.svelte';
@@ -200,11 +206,15 @@ export type {
 export {
 	listInboxRules,
 	createInboxRule,
+	confirmInboxRule,
 	deleteInboxRule,
+	isRulePending,
 } from './api/inbox-rules.js';
 export type {
 	InboxRule,
 	CreateRuleBody,
+	CreateRuleResult,
+	CreateRuleRefusal,
 	InboxRuleMatcherKind,
 	InboxRuleAction,
 	InboxRuleSource,

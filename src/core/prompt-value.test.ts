@@ -190,6 +190,9 @@ describe('promptUser callers', () => {
   function classifyArg(arg: string, before = ''): 'declared' | 'declaration' | 'undeclared' {
     const a = arg.trimStart();
     if (a.startsWith('pv`') || a.startsWith('promptValue(')) return 'declared';
+    // A question from a dialog table (`tools/dialog-text.ts`, `<NAME>_DIALOG[language].…`):
+    // each entry is typed to return `PromptText`, built there with `pv`.
+    if (/^[A-Z][A-Z_]*_DIALOG\[/.test(a)) return 'declared';
     if ((a.startsWith('`') || a.startsWith("'") || a.startsWith('"')) && !a.slice(0, 200).includes('${')) return 'declared';
     // A declaration always has the COLON; a ternary never does.
     if (/^[A-Za-z_$][\w$]*\??\s*:/.test(a)) return 'declaration';
@@ -246,6 +249,8 @@ describe('promptUser callers', () => {
   it('classifies the argument shapes that were measured slipping through', () => {
     expect(classifyArg('pv`Do X with ${y}?`, opts')).toBe('declared');
     expect(classifyArg('promptValue(question), labels')).toBe('declared');
+    expect(classifyArg("HTTP_DIALOG[language].exfil(word, warning), opts"), 'a dialog table').toBe('declared');
+    expect(classifyArg('said.exfil(word, warning), opts'), 'a table under another name').toBe('undeclared');
     expect(classifyArg("'a fixed sentence', opts")).toBe('declared');
     // Undeclared, all four measured against the earlier rules:
     expect(classifyArg('agentText, opts'), 'a bare parameter').toBe('undeclared');
