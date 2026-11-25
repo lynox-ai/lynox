@@ -2667,6 +2667,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'takeover.f2.released': { de: 'Dann laufen auch diese Pläne wieder: {plans}.', en: 'These plans then run again too: {plans}.' },
 	'takeover.f2.released_one': { de: 'Dann läuft auch der Plan „{plan}“ wieder.', en: 'The plan “{plan}” then runs again too.' },
 	'takeover.change.owner_many': { de: 'Diese Pläne laufen danach unter deinem Namen statt unter dem von {before}: {plans}.', en: 'These plans then run under your name instead of {before}\'s: {plans}.' },
+	'takeover.change.owner_many_listed': { de: 'Diese Pläne laufen danach unter deinem Namen statt unter dem von {before}.', en: 'These plans then run under your name instead of {before}\'s.' },
 	'takeover.change.member_many': { de: 'Diese Pläne laufen danach unter dem Namen von {after} statt unter dem von {before}: {plans}.', en: 'These plans then run under {after}\'s name instead of {before}\'s: {plans}.' },
 	'takeover.change.owner_one': { de: 'Der Plan „{plan}“ läuft danach unter deinem Namen statt unter dem von {before}.', en: 'The plan “{plan}” then runs under your name instead of {before}\'s.' },
 	'takeover.change.member_one': { de: 'Der Plan „{plan}“ läuft danach unter dem Namen von {after} statt unter dem von {before}.', en: 'The plan “{plan}” then runs under {after}\'s name instead of {before}\'s.' },
