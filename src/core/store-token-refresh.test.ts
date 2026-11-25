@@ -76,12 +76,13 @@ describe('the refresh of an expiring store connection', () => {
   const vault = new Map<string, string>();
   let savedEnv: Record<string, string | undefined>;
   let clearanceAsked: number;
+  let clearanceOk: boolean;
   let stderr: ReturnType<typeof vi.spyOn>;
 
   const ctx = (): StoreRefreshContext => ({
     toolContext: {
       apiStore: store,
-      exactClearance: { ensure: async () => { clearanceAsked++; return { ok: true }; }, blockedNow: () => false, heldRefusal: () => null, reassert: async () => undefined } as never,
+      exactClearance: { ensure: async () => { clearanceAsked++; return clearanceOk ? { ok: true } : { ok: false }; }, blockedNow: () => false, heldRefusal: () => null, reassert: async () => undefined } as never,
       storeBindingDigest: bind,
       shellIsolation: { kind: 'sidecar', socket: '/run/lynox/shell.sock', root: {} } as never,
       ...OPEN_POLICY,
@@ -127,6 +128,7 @@ describe('the refresh of an expiring store connection', () => {
     hold.calls = [];
     hold.answer = async () => answer(RENEWED);
     clearanceAsked = 0;
+    clearanceOk = true;
     resetStoreRefreshForTests();
     stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
   });
@@ -190,8 +192,9 @@ describe('the refresh of an expiring store connection', () => {
 
   it('mints no pass when the binding does not hold over the access token in the vault, and sends nothing', async () => {
     vault.set(accessTokenKey(ID), 'at-put-there-by-someone-else');
-    expect(await storeRefreshPassFor(ID, ctx())).toBeUndefined();
-    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('not-run');
+    expect(await storeRefreshPassFor(ID, ctx())).toBe('ineligible');
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('ineligible');
+    expect(lines().some((l) => l.includes('outcome=ineligible (due): the connection does not qualify for a refresh (binding, refresh token or client); connect the store again'))).toBe(true);
     expect(hold.calls).toHaveLength(0);
     expect(clearanceAsked).toBe(0);
     expect(vault.get(refreshTokenKey(ID))).toBe('rt-old');
@@ -293,8 +296,8 @@ describe('the refresh of an expiring store connection', () => {
     expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
     expect(profile().oauth_grant?.store_binding).toBeUndefined();
     vi.setSystemTime(Date.now() + STORE_REFRESH_WINDOW_MS + 1000);
-    expect(await storeRefreshPassFor(ID, ctx())).toBeUndefined();
-    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('not-run');
+    expect(await storeRefreshPassFor(ID, ctx())).toBe('ineligible');
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('ineligible');
     expect(hold.calls).toHaveLength(1);
   });
 
@@ -393,6 +396,35 @@ describe('the refresh of an expiring store connection', () => {
     expect(await refreshStoreToken(ID, 'unauthorized', ctx())).toBe('renewed');
     expect(hold.calls).toHaveLength(2);
     expect(hold.calls[1]!.req.params['refresh_token']).toBe('rt-new');
+  });
+
+  it('inside the window after a refresh that ended the connection, a caller hears that it ended, not that nothing ran', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    hold.answer = async () => answer({ ...RENEWED, scope: 'read_customers' });
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
+    expect(await refreshStoreToken(ID, 'unauthorized', ctx())).toBe('dead');
+    expect(hold.calls).toHaveLength(1);
+    expect(lines().some((l) => l.includes('not started: the last refresh ended this connection'))).toBe(true);
+    // Once a later refresh ends otherwise, the window is plain again.
+    vi.setSystemTime(Date.now() + STORE_REFRESH_WINDOW_MS + 1000);
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('ineligible');
+    expect(await refreshStoreToken(ID, 'unauthorized', ctx())).toBe('not-run');
+    expect(hold.calls).toHaveLength(1);
+  });
+
+  it('a connection whose refresh token is not in the vault cannot be renewed as it stands, and sends nothing', async () => {
+    vault.delete(refreshTokenKey(ID));
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('ineligible');
+    expect(hold.calls).toHaveLength(0);
+    expect(clearanceAsked).toBe(0);
+  });
+
+  it('a control plane that does not clear the refresh is not the connection\'s cause: nothing ran, and nothing says to connect again', async () => {
+    clearanceOk = false;
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('not-run');
+    expect(clearanceAsked).toBe(1);
+    expect(hold.calls).toHaveLength(0);
+    expect(lines().some((l) => l.includes('outcome=not-run (due): the connection does not qualify for a refresh now (switch, control plane or clearance)'))).toBe(true);
   });
 
   it('two requests that find the token due share one refresh', async () => {

@@ -58,7 +58,13 @@ export interface StoreRefreshContext {
  * that changes the connection; the stored token stays as it was. `dead`: the store refused the
  * refresh or its answer could not be kept, and the connection has to be made again.
  */
-export type StoreRefreshOutcome = 'renewed' | 'not-run' | 'dead' | 'client-misnamed';
+/**
+ * `ineligible`: the connection itself cannot be renewed as it stands (its binding does not hold over
+ * the stored access token, its refresh token slot is empty or named elsewhere, its client is not in
+ * the vault). Nothing was sent and nothing was changed; connecting the store again is what helps.
+ * `not-run` is every other refresh that did not run: a passing cause, or one outside the connection.
+ */
+export type StoreRefreshOutcome = 'renewed' | 'not-run' | 'ineligible' | 'dead' | 'client-misnamed';
 
 /**
  * The refusal for a store connection whose client is not under the preset's own vault names: its
@@ -73,6 +79,8 @@ const connectsInFlight = new Map<string, number>();
 const lastAttempt = new Map<string, number>();
 /** Profiles whose last refresh found the client under other names: inside the window they stay refused, not sent with a stale token. */
 const lastMisnamed = new Set<string>();
+/** Profiles whose last refresh ended the connection: inside the window a caller hears that, not `not-run`. */
+const lastDead = new Set<string>();
 
 /**
  * A connect of `profileId` is about to mint its exchange pass. `false` when a refresh of the same
@@ -98,6 +106,7 @@ export function resetStoreRefreshForTests(): void {
   connectsInFlight.clear();
   lastAttempt.clear();
   lastMisnamed.clear();
+  lastDead.clear();
 }
 
 /** Hold `profileId` as if a refresh of it ran, until the returned function is called. For tests. */
@@ -247,7 +256,7 @@ export interface StoreRefreshPlan {
  *  6. client id, client secret and refresh token are in the vault;
  *  7. the control plane's clearance, as for the connect's exchange.
  */
-export async function storeRefreshPassFor(profileId: string, ctx: StoreRefreshContext): Promise<StoreRefreshPlan | 'client-misnamed' | undefined> {
+export async function storeRefreshPassFor(profileId: string, ctx: StoreRefreshContext): Promise<StoreRefreshPlan | 'client-misnamed' | 'ineligible' | undefined> {
   const { toolContext, secretStore } = ctx;
   if (!shopifyExchangeSwitchOn()) return undefined;
   if (controlPlaneFromEnv() === null || !toolContext.exactClearance || !toolContext.storeBindingDigest) return undefined;
@@ -271,16 +280,20 @@ export async function storeRefreshPassFor(profileId: string, ctx: StoreRefreshCo
   const client = presetClientKeys(preset.id);
   if (oauth.client_id_key !== client.id || oauth.client_secret_key !== client.secret) return 'client-misnamed';
   const refreshSlot = refreshTokenKey(profile.id);
-  if (oauth.refresh_token_key !== undefined && oauth.refresh_token_key !== refreshSlot) return undefined;
+  // From here a refusal is the connection's own (`ineligible`): connecting it again replaces each
+  // of these. The clearance below is not: a connect asks the same control plane.
+  if (oauth.refresh_token_key !== undefined && oauth.refresh_token_key !== refreshSlot) return 'ineligible';
   const bound = profile.oauth_grant?.store_binding;
   const access = secretStore.resolve(accessTokenKey(profile.id));
-  if (typeof bound !== 'string' || !access) return undefined;
+  if (typeof bound !== 'string' || !access) return 'ineligible';
   const digest = toolContext.storeBindingDigest(profile.id, origin, access);
-  if (digest === null || !sameDigest(digest, bound)) return undefined;
+  // No key to digest with is the engine's, not the connection's: connecting again would not help.
+  if (digest === null) return undefined;
+  if (!sameDigest(digest, bound)) return 'ineligible';
   const refresh = secretStore.resolve(refreshSlot);
   const clientId = secretStore.resolve(client.id);
   const clientSecret = secretStore.resolve(client.secret);
-  if (!refresh || !clientId || !clientSecret) return undefined;
+  if (!refresh || !clientId || !clientSecret) return 'ineligible';
   const clearance = await toolContext.exactClearance.ensure();
   if (!clearance.ok) return undefined;
   const params = { grant_type: 'refresh_token', client_id: clientId, client_secret: clientSecret, refresh_token: refresh };
@@ -316,6 +329,10 @@ export function refreshStoreToken(profileId: string, trigger: 'due' | 'unauthori
       logLine(profileId, 'not started: the client is still under other names than the preset\'s');
       return Promise.resolve('client-misnamed');
     }
+    if (lastDead.has(profileId)) {
+      logLine(profileId, 'not started: the last refresh ended this connection');
+      return Promise.resolve('dead');
+    }
     logLine(profileId, `not started: one refresh per ${String(STORE_REFRESH_WINDOW_MS / 1000)} s, the last at ${new Date(last).toISOString()}`);
     return Promise.resolve('not-run');
   }
@@ -328,6 +345,8 @@ export function refreshStoreToken(profileId: string, trigger: 'due' | 'unauthori
     .then((outcome) => {
       if (outcome === 'client-misnamed') lastMisnamed.add(profileId);
       else lastMisnamed.delete(profileId);
+      if (outcome === 'dead') lastDead.add(profileId);
+      else lastDead.delete(profileId);
       return outcome;
     })
     // run-group-starter: reports no spend, and the request that started it awaits it; its one outward call,
@@ -354,7 +373,7 @@ function logLine(profileId: string, what: string): void {
  * The one line every refresh that ran ends with, for the owner and a bulk run as for a mandate:
  * profile, outcome and a fixed reason. Never a token, a body or the store's answer.
  */
-function outcomeLine(profileId: string, outcome: 'ok' | 'not-run' | 'dead' | 'scope-mismatch' | 'cas-lost' | 'client-misnamed', trigger: 'due' | 'unauthorized', why: string): void {
+function outcomeLine(profileId: string, outcome: 'ok' | 'not-run' | 'ineligible' | 'dead' | 'scope-mismatch' | 'cas-lost' | 'client-misnamed', trigger: 'due' | 'unauthorized', why: string): void {
   logLine(profileId, `outcome=${outcome} (${trigger}): ${why}`);
 }
 
@@ -421,9 +440,14 @@ async function runRefresh(profileId: string, trigger: 'due' | 'unauthorized', ct
     outcomeLine(profileId, 'client-misnamed', trigger, 'the client is not under the preset\'s vault names');
     return 'client-misnamed';
   }
+  if (plan === 'ineligible') {
+    endTrail('failed');
+    outcomeLine(profileId, 'ineligible', trigger, 'the connection does not qualify for a refresh (binding, refresh token or client); connect the store again');
+    return 'ineligible';
+  }
   if (plan === undefined) {
     endTrail('failed');
-    outcomeLine(profileId, 'not-run', trigger, 'the connection does not qualify for a refresh (binding, refresh token or clearance)');
+    outcomeLine(profileId, 'not-run', trigger, 'the connection does not qualify for a refresh now (switch, control plane or clearance)');
     return 'not-run';
   }
   const exchanged = await exchangeToken({ endpoint: plan.endpoint, params: plan.params, bodyFormat: plan.bodyFormat }, ctx.toolContext as ToolContext, undefined, plan.pass);

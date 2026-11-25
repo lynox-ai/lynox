@@ -420,6 +420,8 @@ describe('the head names every target once', () => {
 		setLocale('en');
 		await render();
 		expect(dts()).toContain('Halted');
+		expect(dts()).not.toContain('Aborted');
+		expect(shown()).not.toContain('engine English');
 		expect(counts()).toBe('6 targets: 2 written · 0 conflicts · 0 failed · 4 open');
 		expect(shown()).toContain(tf('bulk.halt.storeAccessEnded', { provider: HOST }));
 		expect(shown()).toContain('Ask lynox in the chat to connect the store again. Then you can continue the run here.');

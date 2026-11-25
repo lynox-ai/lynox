@@ -4441,12 +4441,13 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           const { storeClientMisnamedText } = await import('../../core/store-token-refresh.js');
           wrapped += `\n\n**[Engine note — the store's access could not be renewed]**\nThe ${storeClientMisnamedText(auth.profile?.id ?? '', true)}`;
         } else if (renewal === 'not-run') {
-          // The renewal did not run this time: within the minute of the last one, a passing answer
-          // from the store (429, 5xx), a connect in progress. The connection still stands, so the
-          // reminder below, which says to connect again, would send the user through a connect
-          // that waiting does. Only `dead` (the connection ended) leaves the reminder to speak.
+          // The renewal did not run this time, for a cause outside the connection: within the
+          // minute of the last one, a 429 or 5xx from the store, a connect in progress, the
+          // control plane. The reminder below says to connect again, which would not help, so the
+          // note says neither: send once more, and tell the user if the store refuses again.
+          // `ineligible` and `dead` (the connection cannot go on as it is) leave the reminder to speak.
           storeRenewed = true;
-          wrapped += '\n\n**[Engine note — the store\'s access was not renewed this time]**\nThe engine could not renew the access token for this store just now, for a passing reason. Do not connect the store again for this. Wait a minute and send the same request once more; if the store answers 401 again then, tell the user.';
+          wrapped += '\n\n**[Engine note — the store\'s access was not renewed this time]**\nThe engine did not renew the access token for this store this time. Send the same request once more; if the store answers 401 again, tell the user that the store refused the request, and do not change the profile for it.';
         }
       }
 
