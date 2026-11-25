@@ -3,7 +3,7 @@ import { MailStateDb } from '../mail/state.js';
 import { InboxStateDb } from './state.js';
 import { InboxRulesLoader } from './rules-loader.js';
 import { createInboxClassifierHook, type HookQueue } from './watcher-hook.js';
-import { handleGetItem, handleGetItemFull, handleListItems } from './api.js';
+import { handleBulkAction, handleGetItem, handleGetItemFull, handleListItems, handleSetAction, handleSetSnooze, handleUndoBulk } from './api.js';
 import type { MailAccountConfig, MailEnvelope } from '../mail/provider.js';
 import type { SensitiveMode } from './sensitive-content.js';
 
@@ -220,7 +220,7 @@ describe('only mail since the owner last dealt with the thread is counted', () =
 describe('what does not count as dealing with the thread', () => {
   const otp = { subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' };
 
-  it('an archive undone in bulk (no audit) does not hide the mail before it when a flagged mail raises the item', async () => {
+  it('an archive written before undos were logged, then undone in bulk, does not hide the mail before it when a flagged mail raises the item', async () => {
     const id = inbox.insertItem({
       accountId: ACCOUNT.id, channel: 'email', threadKey: THREAD, bucket: 'auto_handled', confidence: 0.9,
       reasonDe: 'Newsletter', classifiedAt: new Date('2026-11-03T08:00:00Z'), classifierVersion: 'v1',
@@ -289,7 +289,7 @@ describe('the two remaining paths: stored text and a single undo', () => {
   it('a reply the owner undid does not mark the mail before it as answered', async () => {
     const id = seedReplied();
     await hook()(ACCOUNT.id, envelope());
-    // Replied, undone, then marked replied again without an audit (a bulk mark), and a new mail reopens.
+    // Replied and undone, then marked replied again with no audit row, and a new mail reopens.
     inbox.updateUserAction(id, 'replied', new Date());
     inbox.appendAudit({ itemId: id, action: 'replied', actor: 'user', payloadJson: '{}' });
     inbox.appendAudit({ itemId: id, action: 'undo', actor: 'user', payloadJson: JSON.stringify({ reverted_at: new Date().toISOString() }) });
@@ -300,8 +300,8 @@ describe('the two remaining paths: stored text and a single undo', () => {
   });
 });
 
-describe('an archive undone without an audit stays undone when a later action precedes a raise', () => {
-  it('archive, undo in bulk, snooze, then a flagged mail raises: the mail before the archive still counts', async () => {
+describe('an archive written before undos were logged stays undone when a later action precedes a raise', () => {
+  it('archive, undo in bulk without a trace, snooze, then a flagged mail raises: the mail before the archive still counts', async () => {
     const id = seedReplied();
     await hook()(ACCOUNT.id, envelope());
     // Archived and undone in bulk: the bulk undo leaves the archive audit and writes none of its own.
@@ -314,4 +314,188 @@ describe('an archive undone without an audit stays undone when a later action pr
     const [f] = followUpsOnEveryRoute(id) as Array<Record<string, unknown>>;
     expect(f).toMatchObject({ count: 2 });
   });
+});
+
+describe('a raise ends the reply or archive before it, whatever the item showed when the mail came', () => {
+  const otp = (at: Date, id = '<otp@x>') => envelope({ messageId: id, uid: 9, date: at, subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' });
+  const dealt = (id: string): Record<string, unknown> | undefined => (followUpsOnEveryRoute(id) as Array<Record<string, unknown> | undefined>)[0];
+  /** An item the classifier filed as handled, with one follow-up: open, but out of "requires you", so a flagged mail raises it. */
+  async function seedHandled(): Promise<string> {
+    const id = inbox.insertItem({
+      accountId: ACCOUNT.id, channel: 'email', threadKey: THREAD, bucket: 'auto_handled', confidence: 0.9,
+      reasonDe: 'Newsletter', classifiedAt: new Date('2026-11-03T08:00:00Z'), classifierVersion: 'v1',
+      messageId: '<first@x>', subject: 'Lieferung', fromAddress: 'kunde@example.com',
+    });
+    inbox.insertThreadMessage({ accountId: ACCOUNT.id, threadKey: THREAD, messageId: '<first@x>', fromAddress: 'kunde@example.com', subject: 'Lieferung', direction: 'inbound', inboxItemId: id, mailDate: new Date('2026-11-03T08:00:00Z') });
+    await hook()(ACCOUNT.id, envelope());
+    return id;
+  }
+
+  it('an archive taken while the inbox checks the mail for an automatic reply: named as the action the raise ended, the mail before it not counted', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    expect(inbox.getItem(id)?.userAction).toBeUndefined();
+    const confirming = createInboxClassifierHook({
+      state: inbox, rules: new InboxRulesLoader(inbox), queue,
+      accounts: { resolve: () => ({ address: ACCOUNT.address, displayName: 'Me', authType: 'oauth_microsoft' }) },
+      confirmAutoReply: async () => {
+        // The owner archives the item while the provider is asked.
+        expect(handleSetAction(deps(), id, { action: 'archived' }).status).toBe(200);
+        return false;
+      },
+    });
+    await confirming(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    const raise = inbox.listAuditForItem(id).find((a) => a.action === 'raised_on_sensitive_follow_up');
+    expect(JSON.parse(raise!.payloadJson)).toMatchObject({ prior_user_action: 'archived' });
+    expect(dealt(id)).toMatchObject({ count: 1 });
+  });
+
+  it('reply, snooze with wake on reply, then a flagged mail wakes and raises it: the answered mail is not counted', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    expect(handleSetAction(deps(), id, { action: 'replied' }).status).toBe(200);
+    expect(handleSetSnooze(deps(), id, { until: new Date(Date.now() + 86_400_000).toISOString() }).status).toBe(200);
+    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    expect(inbox.getItem(id)?.userAction).toBeUndefined();
+    expect(inbox.getItem(id)?.snoozeUntil).toBeUndefined();
+    expect(inbox.listAuditForItem(id).map((a) => a.action)).toContain('unsnoozed_on_reply');
+    expect(dealt(id)).toMatchObject({ count: 1 });
+  });
+
+  it('reply, then snoozed through the API action route, then a flagged mail raises: the answered mail is counted once, not again', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    expect(handleSetAction(deps(), id, { action: 'replied' }).status).toBe(200);
+    expect(handleSetAction(deps(), id, { action: 'snoozed' }).status).toBe(200);
+    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    const raise = inbox.listAuditForItem(id).find((a) => a.action === 'raised_on_sensitive_follow_up');
+    expect(JSON.parse(raise!.payloadJson)).toMatchObject({ prior_user_action: 'snoozed' });
+    expect(dealt(id)).toMatchObject({ count: 1 });
+  });
+
+  it('archive, bulk undo, snooze, then a flagged mail raises: the mail before the archive still counts', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    expect(handleSetAction(deps(), id, { action: 'archived' }).status).toBe(200);
+    expect(handleSetAction(deps(), id, { action: null }).status).toBe(200);
+    const bulk = handleBulkAction(deps(), { ids: [id], action: 'archived' }).body as { bulkId: string };
+    expect(handleUndoBulk(deps(), bulk.bulkId).body).toMatchObject({ reverted: 1 });
+    expect(inbox.getItem(id)?.userAction).toBeUndefined();
+    expect(handleSetAction(deps(), id, { action: 'snoozed' }).status).toBe(200);
+    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    expect(dealt(id)).toMatchObject({ count: 2 });
+  });
+
+  it('a bulk undo puts back the reply that was pending before the bulk: reply, bulk archive, bulk undo, flagged mail', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    expect(handleSetAction(deps(), id, { action: 'replied' }).status).toBe(200);
+    const bulk = handleBulkAction(deps(), { ids: [id], action: 'archived' }).body as { bulkId: string };
+    expect(handleUndoBulk(deps(), bulk.bulkId).body).toMatchObject({ reverted: 1 });
+    expect(inbox.getItem(id)?.userAction).toBe('replied');
+    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    expect(dealt(id)).toMatchObject({ count: 1 });
+  });
+
+  it('reply, then marked unhandled in bulk, then a flagged mail raises: the mail before the reply still counts', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    expect(handleSetAction(deps(), id, { action: 'replied' }).status).toBe(200);
+    expect((handleBulkAction(deps(), { ids: [id], action: 'unhandled' }).body as { applied: string[] }).applied).toEqual([id]);
+    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    expect(dealt(id)).toMatchObject({ count: 2 });
+  });
+
+  it('bulk unhandled, archived and snoozed, and the undo of each, leave an audit row, so the count does not depend on the pruned action log', () => {
+    const id = seedReplied();
+    const rows = (): Array<Record<string, unknown>> => inbox.listAuditForItem(id).map((r) => ({ action: r.action, ...JSON.parse(r.payloadJson) as Record<string, unknown> }));
+    const a = handleBulkAction(deps(), { ids: [id], action: 'unhandled' }).body as { bulkId: string };
+    handleUndoBulk(deps(), a.bulkId);
+    const b = handleBulkAction(deps(), { ids: [id], action: 'archived' }).body as { bulkId: string };
+    handleUndoBulk(deps(), b.bulkId);
+    const c = handleBulkAction(deps(), { ids: [id], action: 'snoozed' }).body as { bulkId: string };
+    handleUndoBulk(deps(), c.bulkId);
+    expect(rows()).toEqual([
+      expect.objectContaining({ action: 'undo', intent: 'unhandled', bulk_id: a.bulkId }),
+      expect.objectContaining({ action: 'undo', intent: 'bulk_undo', bulk_id: a.bulkId, undid: 'unhandled', restored: 'replied' }),
+      expect.objectContaining({ action: 'archived', bulk_id: b.bulkId, undo_logged: true }),
+      expect.objectContaining({ action: 'undo', intent: 'bulk_undo', bulk_id: b.bulkId, undid: 'archived', restored: 'replied' }),
+      expect.objectContaining({ action: 'snoozed', bulk_id: c.bulkId }),
+      expect.objectContaining({ action: 'undo', intent: 'bulk_undo', bulk_id: c.bulkId, undid: 'snoozed', restored: 'replied' }),
+    ]);
+  });
+
+  it('an undo that finds the item changed since the bulk puts nothing back and writes no row: bulk archive, flagged mail, undo', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    const bulk = handleBulkAction(deps(), { ids: [id], action: 'archived' }).body as { bulkId: string };
+    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    expect(handleUndoBulk(deps(), bulk.bulkId).body).toMatchObject({ reverted: 0, skipped: 1 });
+    expect(inbox.listAuditForItem(id).some((a) => a.action === 'undo' && (JSON.parse(a.payloadJson) as Record<string, unknown>)['intent'] === 'bulk_undo')).toBe(false);
+    expect(dealt(id)).toMatchObject({ count: 1 });
+  });
+
+  it('an undo of a bulk "unhandled" puts the reply back: reply, bulk unhandled, undo, flagged mail', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    expect(handleSetAction(deps(), id, { action: 'replied' }).status).toBe(200);
+    const bulk = handleBulkAction(deps(), { ids: [id], action: 'unhandled' }).body as { bulkId: string };
+    expect(handleUndoBulk(deps(), bulk.bulkId).body).toMatchObject({ reverted: 1 });
+    expect(inbox.getItem(id)?.userAction).toBe('replied');
+    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    expect(dealt(id)).toMatchObject({ count: 1 });
+  });
+
+  it('two bulks on one item: an undo of the later puts back what the earlier left pending', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    handleBulkAction(deps(), { ids: [id], action: 'archived' });
+    const later = handleBulkAction(deps(), { ids: [id], action: 'snoozed' }).body as { bulkId: string };
+    expect(handleUndoBulk(deps(), later.bulkId).body).toMatchObject({ reverted: 1 });
+    expect(inbox.getItem(id)?.userAction).toBe('archived');
+    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    expect(dealt(id)).toMatchObject({ count: 1 });
+  });
+
+  it('an undo row for a bulk the audit does not hold leaves the reply pending', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    expect(handleSetAction(deps(), id, { action: 'replied' }).status).toBe(200);
+    inbox.appendAudit({ itemId: id, action: 'undo', actor: 'user', payloadJson: JSON.stringify({ intent: 'bulk_undo', bulk_id: 'bulk_old', undid: 'unhandled', restored: 'replied' }) });
+    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    expect(dealt(id)).toMatchObject({ count: 1 });
+  });
+
+  it('reply, bulk archive, bulk undo, then the reply cleared: the mail before the reply counts again when a flagged mail raises the item', async () => {
+    const id = await seedHandled();
+    expect(handleSetAction(deps(), id, { action: 'replied' }).status).toBe(200);
+    const bulk = handleBulkAction(deps(), { ids: [id], action: 'archived' }).body as { bulkId: string };
+    expect(handleUndoBulk(deps(), bulk.bulkId).body).toMatchObject({ reverted: 1 });
+    expect(handleSetAction(deps(), id, { action: null }).status).toBe(200);
+    const undo = inbox.listAuditForItem(id).filter((x) => x.action === 'undo').at(-1);
+    expect(JSON.parse(undo!.payloadJson)).toMatchObject({ undid: 'replied' });
+    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    expect(inbox.listAuditForItem(id).some((x) => x.action === 'raised_on_sensitive_follow_up')).toBe(true);
+    expect(dealt(id)).toMatchObject({ count: 2 });
+  });
+
+  it('a reply written before undos were logged is still ended by a raise that names it: the answered mail is not counted', async () => {
+    const id = await seedHandled();
+    inbox.updateUserAction(id, 'replied', new Date());
+    inbox.appendAudit({ itemId: id, action: 'replied', actor: 'user', payloadJson: JSON.stringify({ at: new Date().toISOString() }) });
+    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    const raise = inbox.listAuditForItem(id).find((x) => x.action === 'raised_on_sensitive_follow_up');
+    expect(JSON.parse(raise!.payloadJson)).toMatchObject({ prior_user_action: 'replied' });
+    expect(dealt(id)).toMatchObject({ count: 1 });
+  });
+
+  it('a clear of a snooze through the action route leaves the reply before it: reply, snooze, clear, flagged mail, on an item out of "requires you"', async () => {
+    const id = await seedHandled();
+    expect(handleSetAction(deps(), id, { action: 'replied' }).status).toBe(200);
+    expect(handleSetAction(deps(), id, { action: 'snoozed' }).status).toBe(200);
+    expect(handleSetAction(deps(), id, { action: null }).status).toBe(200);
+    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    expect(dealt(id)).toMatchObject({ count: 1 });
+  });
+
 });

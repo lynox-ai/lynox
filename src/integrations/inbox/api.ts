@@ -519,50 +519,52 @@ export function handleBulkAction(deps: InboxApiDeps, body: BulkActionBody): ApiR
   const performedAt = new Date();
   const applied: string[] = [];
   const skipped: { id: string; reason: string }[] = [];
-  for (const id of body.ids) {
-    const item = deps.state.getItem(id);
-    if (item === null) {
-      skipped.push({ id, reason: 'not_found' });
-      continue;
-    }
-    if (item.userAction === body.action) {
-      skipped.push({ id, reason: 'already_in_state' });
-      continue;
-    }
-    deps.state.insertBulkActionLog({
-      tenantId: item.tenantId,
-      bulkId,
-      itemId: id,
-      priorUserAction: item.userAction ?? null,
-      priorUserActionAt: item.userActionAt ?? null,
-      action: body.action,
-      performedAt,
-    });
-    deps.state.updateUserAction(id, body.action, performedAt, item.tenantId);
-    // 'unhandled' is a soft revert and is not in InboxAuditAction —
-    // the inbox_user_action_log row already records the per-id state
-    // change with the shared bulk_id, so we skip the audit row for it.
-    if (body.action === 'archived' || body.action === 'snoozed') {
+  // One transaction: each item's action, its log row and its audit row commit together.
+  deps.state.runInTransaction(() => {
+    for (const id of body.ids) {
+      const item = deps.state.getItem(id);
+      if (item === null) {
+        skipped.push({ id, reason: 'not_found' });
+        continue;
+      }
+      if (item.userAction === body.action) {
+        skipped.push({ id, reason: 'already_in_state' });
+        continue;
+      }
+      deps.state.insertBulkActionLog({
+        tenantId: item.tenantId,
+        bulkId,
+        itemId: id,
+        priorUserAction: item.userAction ?? null,
+        priorUserActionAt: item.userActionAt ?? null,
+        action: body.action,
+        performedAt,
+      });
+      deps.state.updateUserAction(id, body.action, performedAt, item.tenantId);
+      // Every bulk action leaves an audit row, 'unhandled' as an 'undo' as on the single route: the
+      // action log is pruned after minutes, and what the owner undid must still read as undone when
+      // the inbox later counts the mail since the owner last dealt with the thread (`follow-ups.ts`).
+      // `undo_logged`: an undo of this action writes an audit row too (see `handleUndoBulk`).
       deps.state.appendAudit({
         tenantId: item.tenantId,
         itemId: id,
-        action: body.action,
+        action: body.action === 'unhandled' ? 'undo' : body.action,
         actor: 'user',
-        payloadJson: JSON.stringify({ bulk_id: bulkId, at: performedAt.toISOString() }),
+        payloadJson: JSON.stringify(body.action === 'unhandled'
+          ? { intent: 'unhandled', bulk_id: bulkId, at: performedAt.toISOString() }
+          : { bulk_id: bulkId, at: performedAt.toISOString(), undo_logged: true }),
         createdAt: performedAt,
       });
+      applied.push(id);
     }
-    applied.push(id);
-  }
+  });
   return { status: 200, body: { bulkId, applied, skipped } };
 }
 
 /**
  * Reverse a bulk action within the UNDO window (default 60s). Returns
- * 410 once expired. The per-id `undone_at` flag on `inbox_user_action_log`
- * is the undo audit trail; we do NOT write per-item rows into
- * `inbox_audit_log` for the undo path (the FK there is per-item, and
- * the row's prior state is already snapshot in user_action_log).
+ * 410 once expired. Each item put back gets an 'undo' audit row naming the bulk
+ * (`intent: 'bulk_undo'`), written with the revert: the action log is pruned after minutes.
  */
 export function handleUndoBulk(deps: InboxApiDeps, bulkId: string): ApiResponse {
   const { total, reverted, skipped } = deps.state.undoBulkActionCounted(bulkId);
@@ -644,37 +646,45 @@ export function handleSetAction(deps: InboxApiDeps, id: string, body: SetActionB
   }
   const at = body.at ? new Date(body.at) : null;
   if (body.at && Number.isNaN(at?.getTime())) return bad('invalid at: not an ISO date');
-  const ok = deps.state.updateUserAction(id, body.action, at);
+  // The action and its audit row commit together: a later count of the mail since the owner last
+  // dealt with the thread reads the audit, and an undo it cannot see would end the wrong action.
+  const ok = deps.state.runInTransaction((): boolean => {
+    // What a clear undoes, read with the write: undoing a snooze leaves a reply before it standing.
+    const undid = body.action === null ? deps.state.getItem(id)?.userAction ?? null : null;
+    if (!deps.state.updateUserAction(id, body.action, at)) return false;
+    // Audit the user action so the UNDO + GDPR-export trails are complete.
+    // 'unhandled' is the user actively un-marking a verdict; the audit
+    // schema does not have a matching action so we record it as 'undo' with
+    // the original intent preserved in the payload.
+    if (body.action === null) {
+      deps.state.appendAudit({
+        itemId: id,
+        action: 'undo',
+        actor: 'user',
+        payloadJson: JSON.stringify({ reverted_at: new Date().toISOString(), undid }),
+      });
+    } else if (body.action === 'unhandled') {
+      deps.state.appendAudit({
+        itemId: id,
+        action: 'undo',
+        actor: 'user',
+        payloadJson: JSON.stringify({
+          intent: 'unhandled',
+          at: (at ?? new Date()).toISOString(),
+        }),
+      });
+    } else {
+      deps.state.appendAudit({
+        itemId: id,
+        action: body.action,
+        actor: 'user',
+        // `undo_logged`: every undo of this action writes an audit row (here and in bulk).
+        payloadJson: JSON.stringify({ at: (at ?? new Date()).toISOString(), undo_logged: true }),
+      });
+    }
+    return true;
+  });
   if (!ok) return notFound('item');
-  // Audit the user action so the UNDO + GDPR-export trails are complete.
-  // 'unhandled' is the user actively un-marking a verdict; the audit
-  // schema does not have a matching action so we record it as 'undo' with
-  // the original intent preserved in the payload.
-  if (body.action === null) {
-    deps.state.appendAudit({
-      itemId: id,
-      action: 'undo',
-      actor: 'user',
-      payloadJson: JSON.stringify({ reverted_at: new Date().toISOString() }),
-    });
-  } else if (body.action === 'unhandled') {
-    deps.state.appendAudit({
-      itemId: id,
-      action: 'undo',
-      actor: 'user',
-      payloadJson: JSON.stringify({
-        intent: 'unhandled',
-        at: (at ?? new Date()).toISOString(),
-      }),
-    });
-  } else {
-    deps.state.appendAudit({
-      itemId: id,
-      action: body.action,
-      actor: 'user',
-      payloadJson: JSON.stringify({ at: (at ?? new Date()).toISOString() }),
-    });
-  }
   return { status: 200, body: { ok: true } };
 }
 
