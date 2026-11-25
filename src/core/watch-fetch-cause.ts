@@ -22,12 +22,16 @@ export class WatchHttpStatusError extends Error {
   }
 }
 
-/** A connection the server did not accept: refused, or no route to it. */
-const UNREACHABLE_CODES = new Set(['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH']);
+/** A connection the server refused. No route to it is told as `other`: the server was never reached. */
+const UNREACHABLE_CODES = new Set(['ECONNREFUSED']);
 /** A connection that was not made in time. */
 const CONNECT_TIMEOUT_CODES = new Set(['ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT']);
-/** A certificate the TLS handshake could not verify (expired, another name, self-signed, unknown issuer). */
-const TLS_CODE = /^(CERT_|ERR_TLS_|UNABLE_TO_VERIFY_|UNABLE_TO_GET_ISSUER_CERT|DEPTH_ZERO_SELF_SIGNED_CERT$|SELF_SIGNED_CERT_IN_CHAIN$|ERR_SSL_)/;
+/**
+ * A certificate the TLS handshake could not verify: expired or not yet valid, for another name,
+ * self-signed, or from an issuer it could not check. A handshake that failed for another reason
+ * (a protocol or cipher mismatch, plain HTTP on the TLS port) is told as `other`.
+ */
+const TLS_CODE = /^(CERT_|ERR_TLS_CERT_|UNABLE_TO_VERIFY_|UNABLE_TO_GET_ISSUER_CERT|DEPTH_ZERO_SELF_SIGNED_CERT$|SELF_SIGNED_CERT_IN_CHAIN$)/;
 /** A refusal of a private or internal address (`network-guard.ts`): the literal, or a host that resolves to one. */
 const PRIVATE_ADDRESS = /^Blocked: (private IP address "|"[^"]*" resolves to private IP ")/;
 /** A host that did not resolve (`network-guard.ts`). */
@@ -44,13 +48,14 @@ const UNRESOLVED = /^Blocked: (hostname "[^"]*" did not resolve to any IP|DNS re
  */
 export function watchFetchCause(err: unknown, limits: { readonly timeoutSeconds: number; readonly maxBytes: number; readonly timedOut: boolean }): WatchFetchCause {
   if (err instanceof WatchHttpStatusError) return { kind: 'http', status: err.status };
-  if (limits.timedOut || (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError'))) return { kind: 'timeout', seconds: limits.timeoutSeconds };
   const message = err instanceof Error ? err.message : '';
-  // `readBodyCapped` (`sanitize.ts`) stops a page past the cap with this message.
-  if (message === `response body exceeded ${String(limits.maxBytes)} bytes`) return { kind: 'too-large', megabytes: Math.round(limits.maxBytes / (1024 * 1024)) };
+  // A refusal first: whatever else happened, an address lynox does not read is told as such.
   if (PRIVATE_ADDRESS.test(message)) return { kind: 'blocked' };
   if (UNRESOLVED.test(message)) return { kind: 'unresolved' };
   if (message.startsWith('Blocked:')) return { kind: 'refused' };
+  if (limits.timedOut || (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError'))) return { kind: 'timeout', seconds: limits.timeoutSeconds };
+  // `readBodyCapped` (`sanitize.ts`) stops a page past the cap with this message.
+  if (message === `response body exceeded ${String(limits.maxBytes)} bytes`) return { kind: 'too-large', megabytes: Math.round(limits.maxBytes / (1024 * 1024)) };
   const code = (err as { code?: unknown } | null)?.code;
   if (typeof code === 'string') {
     if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return { kind: 'unresolved' };

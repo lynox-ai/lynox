@@ -17,7 +17,12 @@ describe('the cause of a failed watch fetch', () => {
     ['a record without an address', new Error('Blocked: DNS returned a record without an address for "x.example"'), { kind: 'unresolved' }],
     ['a socket that names a missing host', Object.assign(new Error('getaddrinfo ENOTFOUND x.example'), { code: 'ENOTFOUND' }), { kind: 'unresolved' }],
     ['a refused connection', Object.assign(new Error('connect ECONNREFUSED 203.0.113.9:443'), { code: 'ECONNREFUSED' }), { kind: 'unreachable' }],
-    ['no route to the host', Object.assign(new Error('connect EHOSTUNREACH'), { code: 'EHOSTUNREACH' }), { kind: 'unreachable' }],
+    ['no route to the host', Object.assign(new Error('connect EHOSTUNREACH'), { code: 'EHOSTUNREACH' }), { kind: 'other' }],
+    ['a handshake without a certificate fault', Object.assign(new Error('wrong version number'), { code: 'ERR_SSL_WRONG_VERSION_NUMBER' }), { kind: 'other' }],
+    ['a protocol mismatch', Object.assign(new Error('invalid protocol version'), { code: 'ERR_TLS_INVALID_PROTOCOL_VERSION' }), { kind: 'other' }],
+    ['a certificate not yet valid', Object.assign(new Error('certificate is not yet valid'), { code: 'CERT_NOT_YET_VALID' }), { kind: 'tls' }],
+    ['a certificate from an issuer it could not get', Object.assign(new Error('unable to get local issuer certificate'), { code: 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY' }), { kind: 'tls' }],
+    ['a private address after the deadline fired', new Error('Blocked: private IP address "10.0.0.4"'), { kind: 'blocked' }, true],
     ['a connection not made in time', Object.assign(new Error('connect ETIMEDOUT'), { code: 'ETIMEDOUT' }), { kind: 'timeout', seconds: 30 }],
     ['a connection cut off after it was accepted', Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }), { kind: 'other' }],
     ['an expired certificate', Object.assign(new Error('certificate has expired'), { code: 'CERT_HAS_EXPIRED' }), { kind: 'tls' }],
@@ -30,8 +35,8 @@ describe('the cause of a failed watch fetch', () => {
     ['a page past the cap', new Error(`response body exceeded ${String(LIMITS.maxBytes)} bytes`), { kind: 'too-large', megabytes: 10 }],
     ['anything else', new Error('socket hang up'), { kind: 'other' }],
     ['a thrown non-error', 'nope', { kind: 'other' }],
-  ] as const)('reads %s', (_label, err, cause) => {
-    expect(watchFetchCause(err, LIMITS)).toEqual(cause);
+  ] as const)('reads %s', (_label, err, cause, timedOut?: boolean) => {
+    expect(watchFetchCause(err, { ...LIMITS, timedOut: timedOut === true })).toEqual(cause);
   });
 
   it('reads the end of a page whose deadline fired while it arrived as the timeout, whatever the error says', () => {
@@ -42,6 +47,12 @@ describe('the cause of a failed watch fetch', () => {
     const err = await fetchPinned('http://127.0.0.1/').then(() => null, (e: unknown) => e);
     expect(err).toBeInstanceOf(Error);
     expect(watchFetchCause(err, LIMITS)).toEqual({ kind: 'blocked' });
+  });
+
+  it('reads the refusal the address check really throws for a store host as one lynox does not read', async () => {
+    const err = await fetchPinned('https://x.myshopify.com/products/a').then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(watchFetchCause(err, LIMITS)).toEqual({ kind: 'refused' });
   });
 
   it('keeps the words of the address check it reads: an unresolved host and the refusal prefix', () => {
@@ -75,7 +86,7 @@ describe('the sentence an owner reads for a page a watch could not read', () => 
     [{ kind: 'http', status: 500 }, 'The server answered with HTTP status 500 (server error).' + AGAIN_EN, 'Der Server hat mit HTTP-Status 500 (Fehler beim Server) geantwortet.' + AGAIN_DE],
     [{ kind: 'http', status: 599 }, 'The server answered with HTTP status 599 (server error).' + AGAIN_EN, 'Der Server hat mit HTTP-Status 599 (Fehler beim Server) geantwortet.' + AGAIN_DE],
     [{ kind: 'http', status: 600 }, 'The server answered with HTTP status 600.' + AGAIN_EN, 'Der Server hat mit HTTP-Status 600 geantwortet.' + AGAIN_DE],
-    ...([301, 302, 307, 308] as const).map((status) => [{ kind: 'http', status },
+    ...([301, 302, 303, 307, 308] as const).map((status) => [{ kind: 'http', status },
       `The server answered with HTTP status ${String(status)} (redirected). A watch does not follow a redirect. Open the address in a browser and enter the address you end up at, or delete the watch.`,
       `Der Server hat mit HTTP-Status ${String(status)} (weitergeleitet) geantwortet. Eine Beobachtung folgt keiner Weiterleitung. Öffne die Adresse im Browser und trage die Adresse ein, bei der du landest, oder lösche die Beobachtung.`] as const),
     [{ kind: 'http', status: 418 }, 'The server answered with HTTP status 418.' + AGAIN_EN, 'Der Server hat mit HTTP-Status 418 geantwortet.' + AGAIN_DE],

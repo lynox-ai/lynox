@@ -536,7 +536,7 @@ function watchFetchPermanent(cause: WatchFetchCause): boolean {
 
 /** A redirect: a watch does not follow one, so the page is never read until the address changes. */
 function isRedirect(cause: WatchFetchCause): boolean {
-  return cause.kind === 'http' && (cause.status === 301 || cause.status === 302 || cause.status === 307 || cause.status === 308);
+  return cause.kind === 'http' && (cause.status === 301 || cause.status === 302 || cause.status === 303 || cause.status === 307 || cause.status === 308);
 }
 
 /** The word for the HTTP statuses an owner meets most, or none. */
@@ -548,6 +548,7 @@ function httpStatusWord(status: number, language: NoticeLanguage): string | unde
     410: ['gone', 'entfernt'],
     301: ['redirected', 'weitergeleitet'],
     302: ['redirected', 'weitergeleitet'],
+    303: ['redirected', 'weitergeleitet'],
     307: ['redirected', 'weitergeleitet'],
     308: ['redirected', 'weitergeleitet'],
     429: ['too many requests', 'zu viele Anfragen'],

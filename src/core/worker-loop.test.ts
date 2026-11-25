@@ -633,11 +633,19 @@ describe('WorkerLoop', () => {
     // Each queued answer was read: the three fetched pages were requested, the literal never.
     expect(mockFetchPinned).toHaveBeenCalledTimes(3);
     // A key in the address of a private-address refusal is masked, as the run's catch masks a thrown one.
-    const key = ['ghp', 'Q'.repeat(36)].join('_');
+    // An opaque token without a vendor prefix: only the generic pattern catches it.
+    const key = ['opaque', 'Q'.repeat(44)].join('');
     await fire(makeTask({ id: 't-key', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: `http://127.0.0.1/feed?token=${key}`, interval_minutes: 60 }) }));
     const recordedKey = String(vi.mocked(taskManager.recordTaskRun).mock.calls.at(-1)?.[1]);
     expect(recordedKey).toContain('The watched page http://127.0.0.1/feed?token=');
     expect(recordedKey).not.toContain(key);
+    // A page whose deadline fired while it arrived: the socket error says nothing of time, the
+    // watch's own deadline does.
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValueOnce(AbortSignal.abort());
+    mockFetchPinned.mockRejectedValueOnce(Object.assign(new Error('aborted'), { code: 'ECONNRESET' }));
+    await expect(fire(makeTask({ id: 't-late', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://slow.example/feed', interval_minutes: 60 }) })))
+      .rejects.toThrow('The watched page https://slow.example/feed could not be read: The server did not answer within 30 seconds.');
+    timeout.mockRestore();
     mockFetchPinned.mockReset();
   });
 
