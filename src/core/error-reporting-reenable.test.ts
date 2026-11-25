@@ -29,8 +29,10 @@ vi.mock('@sentry/node', async () => {
 
 const Sentry = await import('@sentry/node');
 const {
-  initErrorReporting, captureError, shutdownErrorReporting, isErrorReportingEnabled, _resetForTesting,
+  initErrorReporting, captureError, captureLynoxError, captureUserFeedback, shutdownErrorReporting, isErrorReportingEnabled,
+  installGlobalHandlers, uninstallGlobalHandlers, _resetForTesting,
 } = await import('./error-reporting.js');
+const { LynoxError } = await import('./errors.js');
 
 const DSN = 'https://key@bugs.example.invalid/1';
 // Matched as the exception's value: the SDK attaches source lines as context, so another
@@ -72,6 +74,138 @@ it('reports from outside the request after reporting is turned on again inside o
   await Sentry.flush(2000);
   expect(reached('inside-the-request')).toBe(true);  // control: the client sends
   expect(reached('outside-the-request')).toBe(true);
+});
+
+// A request that started before reporting was turned off and on again (a long chat stream) and a
+// timer a request started keep the scope forked then, and that scope names the client of its time,
+// now closed. What they capture after the new init must reach the new client.
+it('reports from a timer a request started before reporting was turned off and on again', async () => {
+  expect(await initErrorReporting(DSN)).toBe(true);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let fired!: () => void;
+  const done = new Promise<void>((resolve) => { fired = resolve; });
+  let timerClient: unknown;
+  let onUncaught: ((e: Error) => void) | undefined;
+  let onRejection: ((r: unknown) => void) | undefined;
+  const server = http.createServer((_req, res) => {
+    // Started inside the request, so it runs in the request's scope; it captures only once released.
+    setTimeout(() => {
+      void gate.then(async () => {
+        timerClient = Sentry.getClient();
+        captureError(new Error('from-an-old-timer'));
+        onRejection?.(new Error('rejection-in-an-old-timer'));
+        onUncaught?.(new Error('uncaught-in-an-old-timer'));
+        captureLynoxError(new LynoxError('lynox-from-an-old-timer', 'TEST_CODE'));
+        await captureUserFeedback({ name: 'n', comments: 'feedback-from-an-old-timer' });
+        fired();
+      });
+    }, 0);
+    res.writeHead(200);
+    res.end();
+  });
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  await new Promise<void>((resolve, reject) => {
+    const rq = http.request({ host: '127.0.0.1', port, method: 'GET', path: '/' }, (r) => { r.resume(); r.on('end', resolve); });
+    rq.on('error', reject);
+    rq.end();
+  });
+
+  // Off, then on again from outside the request: the timer's scope still names the closed client.
+  await shutdownErrorReporting();
+  expect(await initErrorReporting(DSN)).toBe(true);
+  const liveClient = Sentry.getClient();
+  // The process-wide handlers, called by hand from the timer: emitting the events would reach
+  // the test runner's own listeners, and the uncaught one ends the process.
+  const before = { u: process.listeners('uncaughtException'), r: process.listeners('unhandledRejection') };
+  installGlobalHandlers();
+  onUncaught = process.listeners('uncaughtException').find((l) => !before.u.includes(l)) as typeof onUncaught;
+  onRejection = process.listeners('unhandledRejection').find((l) => !before.r.includes(l)) as typeof onRejection;
+  const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+  const liveFlush = vi.spyOn(liveClient!, 'flush');
+  // Undone even when an assert below fails, so no stubbed exit or real handler outlives the test.
+  try {
+    release();
+    await done;
+    // The uncaught handler waits for the live client's flush before it exits, not the old one's;
+    // read before the flush below, which calls the live client too.
+    expect(liveFlush).toHaveBeenCalledWith(2000);
+    await Sentry.flush(2000);
+    // The handler exits once its flush settles, here at once: the transport answers immediately.
+    await vi.waitFor(() => expect(exit).toHaveBeenCalled(), { timeout: 3000 });
+  } finally {
+    // On a failure above, the handler's exit may still be pending; it must meet the stub, not the
+    // real exit, or the worker dies instead of the assert reporting.
+    await vi.waitFor(() => expect(exit).toHaveBeenCalled(), { timeout: 3000 }).catch(() => undefined);
+    liveFlush.mockRestore();
+    exit.mockRestore();
+    uninstallGlobalHandlers();
+  }
+  // Control: the timer still runs in the scope forked before the re-init, which names the old,
+  // disabled client; without that the cases below would pass without the routing.
+  expect(timerClient).toBeDefined();
+  expect(timerClient).not.toBe(liveClient);
+  expect((timerClient as { getOptions(): { enabled?: boolean } }).getOptions().enabled).toBe(false);
+  expect(reached('rejection-in-an-old-timer')).toBe(true);
+  expect(reached('uncaught-in-an-old-timer')).toBe(true);
+  expect(reached('from-an-old-timer')).toBe(true);
+  expect(reached('lynox-from-an-old-timer')).toBe(true);
+  // Matched as the feedback's message field: the comment's bare text also rides along as source
+  // context in the error events above.
+  expect(sent.some((e) => e.includes('"message":"feedback-from-an-old-timer"'))).toBe(true);
+});
+
+// Off means off for what an old scope records too: nothing it captures then is sent, and no
+// breadcrumb it records then rides along with its next report once reporting is on again.
+it('sends nothing an old timer captures or records while reporting is off', async () => {
+  expect(await initErrorReporting(DSN)).toBe(true);
+  let whileOff!: () => void;
+  const offGate = new Promise<void>((resolve) => { whileOff = resolve; });
+  let offDone!: () => void;
+  const recordedOff = new Promise<void>((resolve) => { offDone = resolve; });
+  let afterOn!: () => void;
+  const onGate = new Promise<void>((resolve) => { afterOn = resolve; });
+  let onDone!: () => void;
+  const capturedOn = new Promise<void>((resolve) => { onDone = resolve; });
+  const server = http.createServer((_req, res) => {
+    setTimeout(() => {
+      void offGate.then(() => {
+        captureError(new Error('captured-while-off'));
+        Sentry.addBreadcrumb({ message: 'crumb-while-off' });
+        offDone();
+        return onGate;
+      }).then(() => {
+        Sentry.addBreadcrumb({ message: 'crumb-while-on' });
+        captureError(new Error('captured-after-on'));
+        onDone();
+      });
+    }, 0);
+    res.writeHead(200);
+    res.end();
+  });
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  await new Promise<void>((resolve, reject) => {
+    const rq = http.request({ host: '127.0.0.1', port, method: 'GET', path: '/' }, (r) => { r.resume(); r.on('end', resolve); });
+    rq.on('error', reject);
+    rq.end();
+  });
+
+  await shutdownErrorReporting();
+  whileOff();
+  await recordedOff;
+  expect(await initErrorReporting(DSN)).toBe(true);
+  afterOn();
+  await capturedOn;
+  await Sentry.flush(2000);
+  expect(reached('captured-while-off')).toBe(false);
+  // Control: the report after the re-init is sent and carries a breadcrumb recorded while on.
+  expect(reached('captured-after-on')).toBe(true);
+  expect(sent.some((e) => e.includes('"message":"crumb-while-on"'))).toBe(true);
+  expect(sent.some((e) => e.includes('"message":"crumb-while-off"'))).toBe(false);
 });
 
 it('turns reporting on when the toggle arrives while a shutdown is still running', async () => {

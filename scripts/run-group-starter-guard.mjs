@@ -295,4 +295,4 @@ export function main(argv, check = selfCheck) {
 
 const self = (() => { try { return realpathSync(fileURLToPath(import.meta.url)); } catch { return ''; } })();
 const invoked = (() => { try { return process.argv[1] ? realpathSync(process.argv[1]) : ''; } catch { return ''; } })();
-if (self !== '' && self === invoked) process.exit(main(process.argv.slice(2)));
+if (self !== '' && self === invoked) process.exitCode = main(process.argv.slice(2));

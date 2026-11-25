@@ -22,7 +22,7 @@ import type { ApiAuth, ApiProfile, ApiStore, OAuthGrantRecord } from './api-stor
 import type { MandateEnds } from './mandate-ends.js';
 import { createHash } from 'node:crypto';
 import { currentPlanOf, currentPlanOwnerStarted, currentPlanStamp } from './plan-run-context.js';
-import { derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, type OAuthPreset } from './oauth-presets.js';
+import { builtInPresetOf, derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, retiredPresetIdOf, type OAuthPreset } from './oauth-presets.js';
 import { MANDATE_TAG_PREFIX, principalTag, unhandledPrincipal, type RequestPrincipal } from './request-principal.js';
 import { singleLine } from './prompt-value.js';
 import { collapseToSingleLine } from './sanitize.js';
@@ -111,7 +111,10 @@ function credentialUrls(profile: ApiProfile): [URL | undefined, URL | undefined]
   if (preset) {
     const derived = derivePresetEndpoints(preset.id, oauth?.preset_params);
     if (!('kind' in derived)) tokenUrl = derived.tokenUrl;
-  } else if (oauth?.token_url) {
+  } else if (oauth?.token_url && retiredPresetIdOf(profile) === undefined) {
+    // Not for a provider this engine once shipped: its profile's `token_url` was display only
+    // while the provider existed, and no exchange runs for it now (fetch_token refuses it), so
+    // no slot of it may reach that address either.
     tokenUrl = oauth.token_url;
   }
   const parse = (u: string | undefined): URL | undefined => {
@@ -664,7 +667,8 @@ export function describeConnectionTokens(holdersOfEach: readonly (readonly { id?
  * - `nested` — an object whose own fields are placed in the next table.
  * - `inert` — it changes neither. A field the engine rewrites by itself belongs here, or every
  *   renewal would lapse the owner's release: `grant_type`, `token_expires_at`, `oauth_grant`,
- *   and `custom_endpoint_ack`, which every save stamps anew.
+ *   `custom_endpoint_ack`, which every save stamps anew, and `owner_clean_host`, which every
+ *   create or update writes or removes.
  */
 type FieldBearing = 'host' | 'role' | 'bound' | 'nested' | 'inert';
 type OAuthBlock = NonNullable<ApiAuth['oauth']>;
@@ -687,6 +691,7 @@ const PROFILE_FIELDS = {
   cost: 'inert',
   provenance: 'inert',
   custom_endpoint_ack: 'inert',
+  owner_clean_host: 'inert', // the engine's, rewritten on every save; decides which reads are asked, not where a secret goes
   oauth_grant: 'inert',
 } as const satisfies Record<keyof ApiProfile, FieldBearing>;
 
@@ -725,10 +730,11 @@ function boundOf<T extends object>(table: Readonly<Record<string, FieldBearing>>
 }
 
 /**
- * The `bound` fields of `profile` that are set, by their path, as the owner is shown them when
- * asked for a release. Read from the tables above, as {@link releaseBinding} is, so a field
- * placed there later is shown without a second edit: the question names every field whose
- * change ends the release.
+ * The `bound` fields of `profile` that are set, by their path. The release question counts them
+ * (a mandate's turn wrote their values, so it prints none of them, the scope included). Read from
+ * the tables above, as {@link releaseBinding} is, so a field placed there later
+ * is counted without a second edit: the question accounts for every field whose change ends the
+ * release.
  */
 export function releaseBoundFields(profile: ApiProfile): Array<[string, unknown]> {
   const out: Array<[string, unknown]> = [];
@@ -766,6 +772,16 @@ export function credentialBearing(profile: ApiProfile): string {
 }
 
 /**
+ * The version of a profile's release-bound settings as the owner is shown it: the first 8 hex
+ * digits of {@link bindingOf}. Only a reference for the person; the engine compares the whole
+ * digest (`ApiStore.ownerViewOf`), since a mandate's turn writes both settings it could compare
+ * and a short prefix it could match by trying.
+ */
+export function settingsVersion(profile: ApiProfile): string {
+  return bindingOf(profile).slice(0, 8);
+}
+
+/**
  * The slot in which the engine itself sends `name` for `profile`, or null when it sends it in
  * none. Only a shape the engine attaches has one: the client pair of an OAuth profile, the two
  * halves of a split Basic credential, and the first key of a bearer or header profile. A `query`
@@ -773,18 +789,30 @@ export function credentialBearing(profile: ApiProfile): string {
  * and a mandate's turn resolves none (`agent.ts`), so a release could not reach it.
  */
 export function sendRole(profile: ApiProfile, name: string): string | null {
+  const slots = sendSlots(profile, name);
+  return slots.length > 0 ? slots.map((s) => s.slot).join('+') : null;
+}
+
+/** What a slot of {@link sendRole} is, for the words the owner reads; the engine picks it from the auth shape. */
+export type SendRoleKind = 'client-id' | 'client-secret' | 'basic-username' | 'basic-password' | 'bearer-token' | 'header-key';
+
+/** A slot {@link sendRole} names, with its kind: the slot name is what a release binding stores, the kind is only read. */
+export interface SendSlot { readonly slot: string; readonly kind: SendRoleKind }
+
+/** The slots {@link sendRole} is made of, in the same order; empty when it names none. */
+export function sendSlots(profile: ApiProfile, name: string): readonly SendSlot[] {
   const auth = profile.auth;
-  const roles: string[] = [];
+  const slots: SendSlot[] = [];
   if (auth?.type === 'oauth2') {
-    if (auth.oauth?.client_id_key === name) roles.push('oauth.client_id_key');
-    if (auth.oauth?.client_secret_key === name) roles.push('oauth.client_secret_key');
+    if (auth.oauth?.client_id_key === name) slots.push({ slot: 'oauth.client_id_key', kind: 'client-id' });
+    if (auth.oauth?.client_secret_key === name) slots.push({ slot: 'oauth.client_secret_key', kind: 'client-secret' });
   } else if (auth?.type === 'basic' && auth.basic_format === 'user_pass_split') {
-    if ((auth.username_key ?? auth.vault_keys?.[0]) === name) roles.push('basic.username');
-    if ((auth.password_key ?? auth.vault_keys?.[1]) === name) roles.push('basic.password');
+    if ((auth.username_key ?? auth.vault_keys?.[0]) === name) slots.push({ slot: 'basic.username', kind: 'basic-username' });
+    if ((auth.password_key ?? auth.vault_keys?.[1]) === name) slots.push({ slot: 'basic.password', kind: 'basic-password' });
   } else if (auth?.type === 'bearer' || auth?.type === 'header') {
-    if (auth.vault_keys?.[0] === name) roles.push('vault_keys[0]');
+    if (auth.vault_keys?.[0] === name) slots.push({ slot: 'vault_keys[0]', kind: auth.type === 'bearer' ? 'bearer-token' : 'header-key' });
   }
-  return roles.length > 0 ? roles.join('+') : null;
+  return slots;
 }
 
 /**
@@ -1521,9 +1549,10 @@ function planMayUse(profile: ApiProfile): boolean {
 const OWNER_ALLOWS_AT = 'The owner can allow this connection under Automation → Triggers (German screen: Automation → Trigger), at this plan, with “Check connections” (German: „Verbindungen prüfen“).';
 
 export function connectionShown(profile: ApiProfile): { provider: string; shown: string } {
-  const presetId = profile.auth?.oauth?.preset_id;
   return {
-    provider: singleLine((presetId !== undefined ? OAUTH_PRESETS.get(presetId)?.label : undefined) ?? hostLabel(profile.base_url)),
+    // A profile that does not go through its built-in provider is named by its host, a stray
+    // preset_id on a static-credential profile included.
+    provider: singleLine(builtInPresetOf(profile)?.label ?? hostLabel(profile.base_url)),
     // The id too: one the import held back is read from a file, where it can carry a line break.
     shown: `${JSON.stringify(singleLine(profile.name))} (id ${singleLine(profile.id)})`,
   };
