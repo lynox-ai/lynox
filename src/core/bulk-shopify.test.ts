@@ -10,6 +10,13 @@ vi.mock('node:dns/promises', () => ({
   default: { lookup: vi.fn().mockResolvedValue([{ address: '23.227.38.65', family: 4 }]) },
 }));
 
+// A preset without its pinned API version, for one test: the run then has no endpoint at all.
+const noApiVersion = vi.hoisted(() => ({ on: false }));
+vi.mock('./shopify-graphql.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./shopify-graphql.js')>();
+  return { ...actual, shopifyGraphqlEndpoint: (host: string) => (noApiVersion.on ? null : actual.shopifyGraphqlEndpoint(host)) };
+});
+
 import dns from 'node:dns/promises';
 import { mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -852,9 +859,11 @@ describe('the worker\'s client for a Shopify run', () => {
     const run = { id, targetSystem: `http:${HOST}`, contractJson: ledger.getListRun(id)!.contractJson, delegatedPlanner: null };
     const page0 = { form: 'shopify_products_list', afterId: 0, filters: {} } as const;
     const read10 = { form: 'shopify_product_read', gid: gid(10) } as const;
-    // Past the grant: what stops it is the missing stored credential, nothing is sent.
-    expect(await factory(run, undefined, { phase: 'list', afterId: 0, filters: {} })!.graphqlRead(ENDPOINT, page0)).toEqual({ kind: 'no_credential' });
-    expect(await factory(run, undefined, { phase: 'read', targets: [gid(10)] })!.graphqlRead(ENDPOINT, read10)).toEqual({ kind: 'no_credential' });
+    // Past the grant: what stops it is the store's own refusal, named through the worker's attach
+    // (this process has no control plane, so it is a self-hosted one), and nothing is sent.
+    const selfHosted = { kind: 'store_refused', reason: 'shopifySelfHosted' };
+    expect(await factory(run, undefined, { phase: 'list', afterId: 0, filters: {} })!.graphqlRead(ENDPOINT, page0)).toEqual(selfHosted);
+    expect(await factory(run, undefined, { phase: 'read', targets: [gid(10)] })!.graphqlRead(ENDPOINT, read10)).toEqual(selfHosted);
     // The stored contract alone grants no read; a grant holds its own body and no other.
     expect(await factory(run)!.graphqlRead(ENDPOINT, page0)).toEqual({ kind: 'not_granted' });
     expect(await factory(run, undefined, { phase: 'list', afterId: 5, filters: {} })!.graphqlRead(ENDPOINT, page0)).toEqual({ kind: 'not_granted' });
@@ -884,6 +893,33 @@ describe('the switch', () => {
     s.requests.length = 0;
     expect((await runBulkPreview(id2, deps({ shopifyEnabled: () => false }))).status).toBe('halted');
     expect(ledger.getStatus(id2)!.haltReason).toBe(BULK_HALT_REASONS.shopifyReadOff);
+    expect(minted).toEqual([]);
+    expect(s.requests).toEqual([]);
+  });
+
+  it('halts as a missing setting of lynox\'s, not as an unreachable store, when the preset pins no API version', async () => {
+    fill(3);
+    const id = startedList();
+    noApiVersion.on = true;
+    try {
+      expect((await runBulkPreview(id, deps())).status).toBe('halted');
+    } finally {
+      noApiVersion.on = false;
+    }
+    expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.shopifyNoApiVersion);
+    expect(minted).toEqual([]);
+    expect(s.requests).toEqual([]);
+  });
+
+  it('halts as unreachable, not as a missing setting, when the run\'s host is not a store\'s', async () => {
+    fill(3);
+    const src = source();
+    const out = ledger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host: 'api.example.com', source: src, readContract: listReadContract('api.example.com', src) });
+    if (!out.ok) throw new Error(out.reason);
+    const started = ledger.resumePreview(out.status.id, Date.now(), { listChecksum: ledger.listStartChecksum(out.status.id)! });
+    if (!started.ok) throw new Error(started.reason);
+    expect((await runBulkPreview(out.status.id, deps())).status).toBe('halted');
+    expect(ledger.getStatus(out.status.id)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
     expect(minted).toEqual([]);
     expect(s.requests).toEqual([]);
   });
@@ -1518,7 +1554,7 @@ describe('applying a Shopify run', () => {
       expect(s.requests).toEqual([]);
       expect(s.products.get(10)!['descriptionHtml']).toBe('<p>1</p>');
       expect(ledger.getStatus(id)).toMatchObject({ applied: 0, failed: 0, sentUnknown: 0 });
-      expect(out.summary).toContain('lynox wrote nothing. This Shopify connection does not yet let lynox change the description. Reconnect Shopify (Settings → APIs), then ask lynox in the chat to plan the run again.');
+      expect(out.summary).toContain('lynox wrote nothing. This Shopify connection does not yet let lynox change the description. Reconnect Shopify (Settings → API connections), then ask lynox in the chat to plan the run again.');
     });
 
     it('writes the description once the connection was confirmed under the current text', async () => {
@@ -1658,6 +1694,28 @@ describe('applying a Shopify run', () => {
     db.prepare('UPDATE bulk_targets SET source_seq = 0 WHERE run_id = ? AND seq = 0').run(id);
     expect(ledger.shopifyApplyOf(undo)!.writes).toEqual([]);
     // Its read stays granted: the apply reads it and halts on the refused request.
+    expect(ledger.shopifyApplyOf(undo)!.reads).toEqual([gid(10)]);
+  });
+
+  it('mints no undo whose description a write of another family kept marked, recorded after planning', async () => {
+    const held = '<p>1</p><script>theirs()</script>';
+    const { id, undo } = await undoOf(held);
+    const db = engineDb.getDb();
+    // A run of its own family, on the same store and list form as the undo's source.
+    db.exec('CREATE TEMP TABLE other_run AS SELECT * FROM bulk_runs WHERE 0');
+    db.prepare('INSERT INTO other_run SELECT * FROM bulk_runs WHERE id = ?').run(id);
+    db.exec(`UPDATE other_run SET id = 'other-family', source_run_id = NULL; INSERT INTO bulk_runs SELECT * FROM other_run; DROP TABLE other_run`);
+    const mark = db.prepare(`INSERT INTO bulk_targets (run_id, seq, target_key, change, applied_at, result, after_planned, after_actual, shop_added_markup)
+      VALUES ('other-family', ?, ?, 'update', '2026-11-01T00:00:00.000Z', ?, ?, ?, 1)`);
+    const sent = engineDb.enc(JSON.stringify({ descriptionHtml: '<p>2</p>' }));
+    // On another product, and on this one with another value: neither is this undo's after-state.
+    mark.run(0, engineDb.enc(gid(11)), engineDb.enc('written'), sent, engineDb.enc(JSON.stringify({ value: { descriptionHtml: held }, estimated: false })));
+    mark.run(1, engineDb.enc(gid(10)), engineDb.enc('written'), sent, engineDb.enc(JSON.stringify({ value: { descriptionHtml: '<p>2</p><script>theirs()</script>' }, estimated: false })));
+    expect(ledger.shopifyApplyOf(undo)!.writes.map((w) => w.gid)).toEqual([gid(10)]);
+    // No link to the undo's family: its chain check alone passes it.
+    db.prepare(`UPDATE bulk_targets SET after_actual = ? WHERE run_id = 'other-family' AND seq = 1`)
+      .run(engineDb.enc(JSON.stringify({ value: { descriptionHtml: held }, estimated: false })));
+    expect(ledger.shopifyApplyOf(undo)!.writes).toEqual([]);
     expect(ledger.shopifyApplyOf(undo)!.reads).toEqual([gid(10)]);
   });
 
@@ -1995,6 +2053,30 @@ describe('applying a Shopify run', () => {
       expect(descriptionWrites()).toEqual(['<p>1</p>']);
       expect(ledger.getStatus(undo)).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.markupAddedByShop });
       expect(ledger.getPreview(undo)[0]).toMatchObject({ written: true, shopAddedMarkup: true });
+    });
+
+    // A new run, of another family, reads the marked description as the product's state.
+    it('leaves a product out of a new run whose description is what an earlier write left marked, reformatted too', async () => {
+      fill(1);
+      const id = await previewedWith({ descriptionHtml: '<p>Neu</p>' });
+      approvedOne(id);
+      keepsWithMarkup(SCRIPT);
+      expect((await applyLive(id)).status).toBe('halted');
+      expect(ledger.getPreview(id)[0]).toMatchObject({ written: true, shopAddedMarkup: true });
+      const row = (runId: string): { change: string; error: string | null } =>
+        engineDb.getDb().prepare('SELECT change, error FROM bulk_targets WHERE run_id = ? AND seq = 0').get(runId) as { change: string; error: string | null };
+      for (const kept of [`<p>Neu</p>${SCRIPT}`, `<P>Neu</P>${SCRIPT.replace('<script>', '<SCRIPT >')}`]) {
+        s.products.get(10)!['descriptionHtml'] = kept;
+        const next = await previewedWith({ descriptionHtml: '<p>Neuer</p>' });
+        expect(ledger.getRunForApply(next)).toMatchObject({ kind: 'apply' });
+        expect(row(next)).toEqual({ change: 'invalid', error: 'before_has_shop_markup' });
+        expect(stored(next, 'before')).toEqual({ absent: false, value: expect.objectContaining({ descriptionHtml: kept }) });
+        expect(ledger.shopifyApplyOf(next)!.writes).toEqual([]);
+      }
+      // The owner changed the text since: the product is no longer what the store added to.
+      s.products.get(10)!['descriptionHtml'] = `<p>Neu, vom Inhaber</p>${SCRIPT}`;
+      const owned = await previewedWith({ descriptionHtml: '<p>Neuer</p>' });
+      expect(row(owned)).toEqual({ change: 'update', error: null });
     });
 
     it('stores a planner\'s description in its canonical form, and the write sends exactly those bytes (#19)', async () => {

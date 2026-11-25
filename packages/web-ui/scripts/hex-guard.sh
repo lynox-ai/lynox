@@ -25,7 +25,6 @@
 #      entire head, so it is the file most likely to grow colour — worth knowing
 #      when the next hex lands there and nothing complains.
 #   - MarkdownRenderer.svelte mermaid PNG export  (asset-export decision)
-#   - MarkdownRenderer.svelte html2canvas         (asset-export decision)
 #   - KnowledgeGraphView.svelte typeHues          (categorical mid-tone palette, AA on both themes)
 #   - SubjectsView.svelte kindHues                (categorical subject-kind palette, same rationale as KG)
 #   - MobileAccess.svelte QR cell                 (QR-codes dark-on-white by convention)

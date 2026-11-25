@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
-import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, InvalidDueDateError, admittedTriggerTier } from './task-manager.js';
+import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, InvalidDueDateError, admittedTriggerTier, TriggerFieldsNotCarriedError, WebhookTriggerScheduleError, SCHEDULED_TITLE_PREFIX, titleIsWorkflowName } from './task-manager.js';
 import { TriggerStore } from './trigger-store.js';
 import { stampFromRow } from './plan-stamp.js';
 import { runAsHandRun } from './hand-run-door.js';
@@ -259,6 +259,47 @@ describe('TaskManager', () => {
       expect(() => tm.update(reminder.id, { modelTier: 'deep' })).toThrow(TriggerTierUnsupportedError);
       expect(tm.getTrigger(reminder.id)?.model_tier).toBeUndefined();
       expect(tm.update(reminder.id, { modelTier: null })?.model_tier).toBeUndefined();
+    });
+
+    it('calls the hook before the write only once every check passed: not for a refused tier, schedule on a webhook, cron, status, or fields a plan does not carry', () => {
+      const hook = vi.fn();
+      const reminder = tm.create({ title: 'Ping', taskType: 'reminder', scheduleCron: '0 9 * * *' });
+      expect(() => tm.update(reminder.id, { modelTier: 'deep' }, undefined, undefined, hook)).toThrow(TriggerTierUnsupportedError);
+      history.insertTrigger({ id: 'wh-hook', title: 'On delivery', source: 'webhook', effect: 'run_agent' });
+      expect(() => tm.update('wh-hook', { scheduleCron: '0 9 * * *' }, undefined, undefined, hook)).toThrow(WebhookTriggerScheduleError);
+      expect(() => tm.update(reminder.id, { scheduleCron: 'every now and then' }, undefined, undefined, hook)).toThrow('Invalid schedule');
+      expect(() => tm.update(reminder.id, { status: 'done' as never }, undefined, undefined, hook)).toThrow('Invalid status');
+      expect(() => tm.update(reminder.id, { priority: 'high' }, undefined, undefined, hook)).toThrow(TriggerFieldsNotCarriedError);
+      expect(hook).not.toHaveBeenCalled();
+    });
+
+    it('tells the model a webhook plan takes no run time or schedule, where it names what a plan can change', () => {
+      history.insertTrigger({ id: 'wh-fields', title: 'On delivery', source: 'webhook', effect: 'run_agent' });
+      const reminder = tm.create({ title: 'Ping', taskType: 'reminder', scheduleCron: '0 9 * * *' });
+      const refusalOf = (id: string): TriggerFieldsNotCarriedError => {
+        try { tm.update(id, { priority: 'high' }); } catch (err: unknown) { if (err instanceof TriggerFieldsNotCarriedError) return err; }
+        throw new Error('not refused');
+      };
+      expect(refusalOf('wh-fields').forModel).toContain('A scheduled plan can change title, description, status, assignee. ');
+      expect(refusalOf(reminder.id).forModel).toContain('A scheduled plan can change title, description, status, assignee, run_at, schedule. ');
+      // The API's sentence is the same for both.
+      expect(refusalOf('wh-fields').message).toBe(refusalOf(reminder.id).message);
+    });
+
+    it('calls the hook while the stored row is still unchanged, and a hook that throws leaves it so', () => {
+      const reminder = tm.create({ title: 'Ping', taskType: 'reminder', scheduleCron: '0 9 * * *' });
+      // What the hook reads is the stored row at that moment, not the trigger it was handed.
+      const seen: Array<[string | undefined, string | undefined]> = [];
+      const hook = vi.fn(() => { const row = tm.getTrigger(reminder.id); seen.push([row?.title, row?.status]); });
+      tm.update(reminder.id, { title: 'Ping, daily' }, undefined, undefined, hook);
+      tm.complete(reminder.id, undefined, undefined, hook);
+      expect(seen).toEqual([['Ping', 'open'], ['Ping, daily', 'open']]);
+      expect(tm.getTrigger(reminder.id)).toMatchObject({ title: 'Ping, daily', status: 'completed' });
+      const other = tm.create({ title: 'Pong', taskType: 'reminder', scheduleCron: '0 9 * * *' });
+      const fails = (): void => { throw new Error('mark failed'); };
+      expect(() => tm.update(other.id, { title: 'Pong, daily' }, undefined, undefined, fails)).toThrow('mark failed');
+      expect(() => tm.complete(other.id, undefined, undefined, fails)).toThrow('mark failed');
+      expect(tm.getTrigger(other.id)).toMatchObject({ title: 'Pong', status: 'open' });
     });
 
     it('refuses a model tier it does not know, legacy aliases included', () => {
@@ -1475,5 +1516,22 @@ describe.each([false, true])('a mandate\'s own to-dos (subject graph %s)', (grap
       expect(tm.deleteTodo('nope', M)).toBe(false);
       expect(tm.deleteTodo('nope', OTHER)).toBe(false);
     });
+  });
+});
+
+describe('titleIsWorkflowName', () => {
+  it('holds for the name alone and for the prefix with the name, and for nothing else', () => {
+    expect(titleIsWorkflowName('Report', 'Report')).toBe(true);
+    expect(titleIsWorkflowName(`${SCHEDULED_TITLE_PREFIX}Report`, 'Report')).toBe(true);
+    expect(SCHEDULED_TITLE_PREFIX).toBe('Scheduled: ');
+    // A title that starts with the prefix and goes on with anything but the name stays whole.
+    expect(titleIsWorkflowName('Scheduled: Report now', 'Report')).toBe(false);
+    expect(titleIsWorkflowName('Scheduled: Other', 'Report')).toBe(false);
+    expect(titleIsWorkflowName('Scheduled:Report', 'Report')).toBe(false);
+    expect(titleIsWorkflowName('Report ', 'Report')).toBe(false);
+    expect(titleIsWorkflowName('Monthly', 'Report')).toBe(false);
+    // A nameless workflow names nothing: neither an empty title nor the bare prefix is its name.
+    expect(titleIsWorkflowName('', '')).toBe(false);
+    expect(titleIsWorkflowName(SCHEDULED_TITLE_PREFIX, '')).toBe(false);
   });
 });

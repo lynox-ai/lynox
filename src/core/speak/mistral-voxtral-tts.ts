@@ -83,18 +83,20 @@ const VOICES_PAGE_LIMIT = 100;
 
 /**
  * Fallback voice catalog for the Settings picker when the live `/v1/audio/voices`
- * call is unreachable. A representative EN subset; safe to stay out-of-date
- * because the live fetch overwrites this in the UI the moment Mistral is
- * reachable.
+ * call is unreachable: the neutral voice of each named speaker in the live catalog,
+ * with the slug and the name Mistral gives it, so a voice reads the same whether the
+ * live fetch worked or not. Read from the live catalog on 2026-11-18 (66 voices).
+ * The live fetch overwrites this in the UI the moment Mistral is reachable.
  *
- * The list is English-only; the live catalog also has six `fr_marie_*` voices.
+ * Every id here must be a slug the live catalog has: the picker offers these voices,
+ * and an id Mistral does not know is a voice the user can pick but never hear. An
+ * earlier version listed four such ids (`en_alex_neutral` and others).
  */
 const FALLBACK_VOICES: ReadonlyArray<VoiceInfo> = [
-  { id: 'en_paul_neutral',    language: 'en', description: 'Paul — neutral' },
-  { id: 'en_alex_neutral',    language: 'en', description: 'Alex — neutral' },
-  { id: 'en_mary_neutral',    language: 'en', description: 'Mary — neutral' },
-  { id: 'en_john_neutral',    language: 'en', description: 'John — neutral' },
-  { id: 'en_sara_neutral',    language: 'en', description: 'Sara — neutral' },
+  { id: 'en_paul_neutral',    language: 'en', description: 'Paul - Neutral' },
+  { id: 'gb_oliver_neutral',  language: 'en', description: 'Oliver - Neutral' },
+  { id: 'gb_jane_neutral',    language: 'en', description: 'Jane - Neutral' },
+  { id: 'fr_marie_neutral',   language: 'fr', description: 'Marie - Neutral' },
 ];
 
 // MOVED to `./types.js` so the `SpeakProvider` contract can name it; re-exported here
