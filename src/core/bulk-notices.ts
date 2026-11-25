@@ -179,7 +179,7 @@ const EN: BulkNotices = Object.freeze({
   notApproved: (phase: string) => `Bulk run is ${phase}, not approved — nothing written.`,
   haltedResume: 'Bulk run is halted — resume it to continue.',
   consentOutdated: (fields: readonly string[], nothingYet: boolean) =>
-    `${nothingYet ? 'lynox wrote nothing.' : 'lynox writes nothing more in this run; what it already wrote stays.'} This Shopify connection does not yet let lynox change ${shopifyFieldsNamed(fields, 'en')}. Reconnect Shopify (Settings → APIs), then ask lynox in the chat to plan the run again.`,
+    `${nothingYet ? 'lynox wrote nothing.' : 'lynox writes nothing more in this run; what it already wrote stays.'} This Shopify connection does not yet let lynox change ${shopifyFieldsNamed(fields, 'en')}. Reconnect Shopify (Settings → API connections), then ask lynox in the chat to plan the run again.`,
   otherLoop: 'Bulk run stopped by another loop.',
   otherLoopHolds: 'Bulk run waiting for targets another loop holds.',
   noJudgedRun: 'No judged bulk run with this id.',
@@ -254,7 +254,7 @@ const EN_HALT_REASONS: Readonly<Record<keyof typeof BULK_HALT_REASONS, string>> 
   shopifyNotCleared: 'Shopify is not cleared for this instance right now. Only lynox can clear it. Once lynox has cleared Shopify, you can continue the run.',
   containmentUnwritable: 'lynox could not record that this run reads the store; nothing was sent. You can continue the run later.',
   shopifyNoApiVersion: 'A setting for Shopify is missing in lynox. Only lynox can fix it (support@lynox.ai).',
-  consentOutdated: 'This Shopify connection does not yet let lynox change these fields. Reconnect Shopify (Settings → APIs), then ask lynox in the chat to plan the run again.',
+  consentOutdated: 'This Shopify connection does not yet let lynox change these fields. Reconnect Shopify (Settings → API connections), then ask lynox in the chat to plan the run again.',
   superseded: 'Another run with judging was started in its place. This one wrote nothing.',
   discarded: 'You discarded this run. lynox wrote nothing.',
   judgeModel: 'The AI provider of this run has no model for judging, or the operator does not allow it.',
@@ -330,7 +330,7 @@ function deHaltReason(reason: string): string | undefined {
     [BULK_HALT_REASONS.containmentUnwritable]: 'lynox konnte nicht festhalten, dass dieser Lauf den Shop liest; gesendet wurde nichts. Du kannst den Lauf später fortsetzen.',
     [BULK_HALT_REASONS.shopifyNoApiVersion]: 'Für Shopify fehlt in lynox eine Einstellung. Beheben kann das nur lynox (support@lynox.ai).',
     // U-281, without the fields (the outcome's summary names them, `consentOutdated`).
-    [BULK_HALT_REASONS.consentOutdated]: 'Diese Shopify-Verbindung erlaubt lynox noch nicht, diese Felder zu ändern. Verbinde Shopify neu (Einstellungen → APIs) und lass den Lauf im Chat neu planen.',
+    [BULK_HALT_REASONS.consentOutdated]: 'Diese Shopify-Verbindung lässt lynox diese Felder noch nicht ändern. Verbinde Shopify neu (Einstellungen → API-Verbindungen) und plane den Lauf im Chat neu.',
     [BULK_HALT_REASONS.superseded]: 'An seiner Stelle wurde ein anderer Lauf mit Beurteilung gestartet. Dieser hat nichts geschrieben.',
     // Said to the owner, on whose device a push lands (U-324).
     [BULK_HALT_REASONS.discarded]: 'Du hast diesen Lauf verworfen. lynox hat nichts geschrieben.',
@@ -395,7 +395,7 @@ const DE: BulkNotices = Object.freeze({
   notApproved: () => 'Massenlauf nicht freigegeben; nichts geschrieben.',
   haltedResume: 'Massenlauf angehalten; geschrieben wird erst nach dem Fortsetzen.',
   consentOutdated: (fields: readonly string[], nothingYet: boolean) =>
-    `${nothingYet ? 'lynox hat nichts geschrieben.' : 'lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt.'} Diese Shopify-Verbindung erlaubt lynox noch nicht, ${shopifyFieldsNamed(fields, 'de')} zu ändern. Verbinde Shopify neu (Einstellungen → APIs); dann bitte lynox im Chat, den Lauf neu zu planen.`,
+    `${nothingYet ? 'lynox hat nichts geschrieben.' : 'lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt.'} Diese Shopify-Verbindung erlaubt lynox noch nicht, ${shopifyFieldsNamed(fields, 'de')} zu ändern. Verbinde Shopify neu (Einstellungen → API-Verbindungen); dann bitte lynox im Chat, den Lauf neu zu planen.`,
   otherLoop: 'Massenlauf beendet: Ein anderer Durchgang bearbeitet ihn.',
   otherLoopHolds: 'Massenlauf wartet auf Ziele, die ein anderer Durchgang hält.',
   noJudgedRun: 'Diesen Massenlauf mit Beurteilung gibt es nicht.',

@@ -420,7 +420,7 @@ describe('the notice tables', () => {
   // A bulk outcome is pushed whole: the longest a run produces in ordinary use must fit, and when
   // a body runs long the cut takes the counts, never the unclear-send warning before them.
   it('holds the released German halt reason for an outdated Shopify consent word for word (U-281)', () => {
-    expect(BULK_NOTICES.de.halted('apply', BULK_HALT_REASONS.consentOutdated)).toBe('Diese Shopify-Verbindung erlaubt lynox noch nicht, diese Felder zu ändern. Verbinde Shopify neu (Einstellungen → APIs) und lass den Lauf im Chat neu planen.');
+    expect(BULK_NOTICES.de.halted('apply', BULK_HALT_REASONS.consentOutdated)).toBe('Diese Shopify-Verbindung lässt lynox diese Felder noch nicht ändern. Verbinde Shopify neu (Einstellungen → API-Verbindungen) und plane den Lauf im Chat neu.');
   });
 
   it('keeps a bulk outcome within the web-push cut, the warning first, in both languages', () => {
