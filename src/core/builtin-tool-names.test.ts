@@ -242,11 +242,14 @@ describe('every tool the engine can build is classified by where its result come
   const lists = Agent as unknown as Record<'EXTERNAL_CONTENT_TOOLS' | 'CONTRACT_EXTERNAL_TOOLS', ReadonlySet<string>>;
   const listed = (): ReadonlySet<string> => new Set([...lists.EXTERNAL_CONTENT_TOOLS, ...lists.CONTRACT_EXTERNAL_TOOLS]);
 
-  /** Tools that wrap what they return in the outside-content marker, with the file that defines them. */
-  const MARKS_ITS_RESULT: Readonly<Record<string, string>> = {
-    inbox_read: 'integrations/mail/tools/inbox-read.ts',
-    recall_tool_result: 'tools/builtin/recall-tool-result.ts',
-    spawn_agent: 'tools/builtin/spawn.ts',
+  /**
+   * Tools that wrap what they return in the outside-content marker, with the file that defines
+   * them and how many wrap calls that file makes.
+   */
+  const MARKS_ITS_RESULT: Readonly<Record<string, { readonly file: string; readonly wraps: number }>> = {
+    inbox_read: { file: 'integrations/mail/tools/inbox-read.ts', wraps: 2 },
+    recall_tool_result: { file: 'tools/builtin/recall-tool-result.ts', wraps: 1 },
+    spawn_agent: { file: 'tools/builtin/spawn.ts', wraps: 2 },
   };
 
   /** Tools that return no text from outside, each with what they do return. */
@@ -265,8 +268,6 @@ describe('every tool the engine can build is classified by where its result come
     edit_file: 'the path and a count of replacements, no file content',
     inbox_rule_propose: 'the id of the proposed rule and counts',
     mail_connect: 'the address it was given',
-    mail_reply: 'ids, and the addresses of the mail it answers in a refusal',
-    mail_send: 'the message id, the accepted recipients and the mail server\'s reply',
     memory_block_edit: 'fixed texts',
     memory_delete: 'the pattern it was given and counts',
     memory_focus: 'the name it was given',
@@ -287,8 +288,8 @@ describe('every tool the engine can build is classified by where its result come
 
   /** Tools whose results are not classified yet. */
   const NOT_YET_CLASSIFIED: ReadonlySet<string> = new Set([
-    'google_calendar', 'memory_promote', 'run_workflow', 'save_workflow', 'set_thread_context',
-    'subjects_merge', 'task_update', 'update_workflow_steps',
+    'google_calendar', 'mail_reply', 'mail_send', 'memory_promote', 'run_workflow', 'save_workflow',
+    'set_thread_context', 'subjects_merge', 'task_update', 'update_workflow_steps',
   ]);
 
   const classes = (): ReadonlyArray<readonly [string, ReadonlySet<string>]> => [
@@ -298,13 +299,21 @@ describe('every tool the engine can build is classified by where its result come
     ['not yet classified', NOT_YET_CLASSIFIED],
   ];
 
+  /** The names among `names` that no class holds, sorted. */
+  const unclassifiedOf = (names: Iterable<string>): string[] => {
+    const classified = new Set(classes().flatMap(([, set]) => [...set]));
+    return [...new Set(names)].filter(n => !classified.has(n)).sort();
+  };
+
   it('leaves no tool the engine can build, and no name it reserves, unclassified', async () => {
     const built = await everyToolTheEngineCanBuild();
     // A real catalog, or the check proves nothing.
     expect(new Set(built).size).toBeGreaterThan(55);
-    const all = new Set([...built, ...BUILTIN_TOOL_NAMES]);
-    const classified = new Set(classes().flatMap(([, set]) => [...set]));
-    expect([...all].filter(n => !classified.has(n)).sort()).toEqual([]);
+    expect(unclassifiedOf([...built, ...BUILTIN_TOOL_NAMES])).toEqual([]);
+  });
+
+  it('CONTROL: a tool in no class is reported by its name', () => {
+    expect(unclassifiedOf(['bash', 'a_tool_nobody_classified', 'ask_user'])).toEqual(['a_tool_nobody_classified']);
   });
 
   it('puts each tool in one class only', () => {
@@ -326,11 +335,13 @@ describe('every tool the engine can build is classified by where its result come
     expect(named.filter(n => !all.has(n))).toEqual([]);
   });
 
-  it('a tool counted as marking its result is defined in its file and wraps a result there', () => {
-    for (const [name, file] of Object.entries(MARKS_ITS_RESULT)) {
+  it('a tool counted as marking its result is defined in its file, which calls the wrap as often as counted', () => {
+    for (const [name, { file, wraps }] of Object.entries(MARKS_ITS_RESULT)) {
       const source = readFileSync(join(SRC, file), 'utf8');
       expect(source.includes(`name: '${name}'`), `${name} is defined in ${file}`).toBe(true);
-      expect(/\bwrapUntrustedData\(/.test(source), `${file} wraps a result`).toBe(true);
+      // Comments left out, so a mention in one is not counted as a call.
+      const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+      expect(code.match(/\bwrapUntrustedData\(/g)?.length ?? 0, `wrap calls in ${file}`).toBe(wraps);
     }
   });
 });
