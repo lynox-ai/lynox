@@ -99,8 +99,9 @@ export function main(): void {
   loadVaultKeyFromDotEnv();
   ensureVaultKey();
   // The engine's own start check: a key the vault on disk refuses stops the run here, before
-  // a store opens, so no row is written under a key that is not the vault's.
-  assertVaultKeyOpensVault();
+  // a store opens, so no row is written under a key that is not the vault's. Strict: no
+  // `initSecrets` follows here, so a vault that cannot be opened at all stops the run as well.
+  assertVaultKeyOpensVault({ strict: true });
 
   // Constructed INSIDE the try so a throw from the second ctor still closes the
   // first handle (EngineDb open succeeding then AgentMemoryDb open throwing would

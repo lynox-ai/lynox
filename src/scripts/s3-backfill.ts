@@ -70,8 +70,9 @@ export function main(): void {
   loadVaultKeyFromDotEnv();
   ensureVaultKey();
   // The engine's own start check: a key the vault on disk refuses stops the run here, before
-  // a store opens, so no row is written under a key that is not the vault's.
-  assertVaultKeyOpensVault();
+  // a store opens, so no row is written under a key that is not the vault's. Strict: no
+  // `initSecrets` follows here, so a vault that cannot be opened at all stops the run as well.
+  assertVaultKeyOpensVault({ strict: true });
 
   const dir = getLynoxDir();
   const runHistory = new RunHistory();
@@ -81,7 +82,8 @@ export function main(): void {
     // Dry-run is side-effect-free: it reads only the legacy history.db tables and
     // never constructs EngineDb (whose ctor would migrate/materialize engine.db).
     // (Since mig v44 is now non-destructive, merely opening RunHistory above no
-    // longer drops anything either — the dry-run is fully read-only.)
+    // longer drops anything either — the dry-run is read-only for the stores. The key
+    // check above opens vault.db, which on an old vault may add its key-check row.)
     const legacy = {
       workflows: getAllPlannedPipelines(historyDb).length,
       triggers: getLegacyTriggerRows(historyDb).length,
