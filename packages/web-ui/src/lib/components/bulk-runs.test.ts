@@ -1301,6 +1301,15 @@ describe('an owner\'s stop is called a stop, not a halt', () => {
 		expect(bulkHaltHeadKey({ haltKey: 'stoppedByOwner' })).toBe('bulk.head.stopped');
 		// A discarded run is named as discarded, next to its chip and sentence (U-324).
 		expect(bulkHaltHeadKey({ haltKey: 'discarded' })).toBe('bulk.head.discarded');
+		// Only a planned run waits for its start; the same key on a run past it stays a halt (U-437).
+		// It reads "Next step" only where its sentence names the viewer's start, else "Waiting".
+		expect(bulkHaltHeadKey({ phase: 'planned', haltKey: 'awaitingStart' }, true)).toBe('bulk.head.next');
+		expect(bulkHaltHeadKey({ phase: 'planned', haltKey: 'listed' }, true)).toBe('bulk.head.next');
+		expect(bulkHaltHeadKey({ phase: 'planned', haltKey: 'awaitingStart' })).toBe('bulk.head.waiting');
+		expect(bulkHaltHeadKey({ phase: 'planned', haltKey: 'listed' }, false)).toBe('bulk.head.waiting');
+		expect(bulkHaltHeadKey({ phase: 'writing', haltKey: 'awaitingStart' }, true)).toBe('bulk.head.halted');
+		expect(bulkHaltHeadKey({ phase: 'writing', haltKey: 'listed' }, true)).toBe('bulk.head.halted');
+		expect(bulkHaltHeadKey({ phase: 'planned', haltKey: 'unavailable' }, true)).toBe('bulk.head.halted');
 		expect(bulkHaltSuffixKey({ haltKey: 'stoppedByOwner' })).toBe('bulk.stopped_suffix');
 		for (const haltKey of ['maxTargets', 'costCap', 'consecutiveFailures', null]) {
 			expect(bulkHaltHeadKey({ haltKey })).toBe('bulk.head.halted');
@@ -1310,7 +1319,7 @@ describe('an owner\'s stop is called a stop, not a halt', () => {
 		expect(Object.keys(BULK_HALT_REASONS)).toContain('stoppedByOwner');
 	});
 	it('both views ask the helpers, not a fixed key', () => {
-		expect(readFileSync(`${HERE}BulkRunDetail.svelte`, 'utf8')).toContain("{t(bulkHaltHeadKey(run))}");
+		expect(readFileSync(`${HERE}BulkRunDetail.svelte`, 'utf8')).toContain("{t(bulkHaltHeadKey(run, startButton !== null && ownerActs))}");
 		expect(readFileSync(`${HERE}BulkRunsView.svelte`, 'utf8')).toContain("t(bulkHaltSuffixKey(run))");
 		const i18n = readFileSync(`${HERE}../i18n.svelte.ts`, 'utf8');
 		expect(i18n).toContain("'bulk.head.stopped': { de: 'Gestoppt', en: 'Stopped' }");

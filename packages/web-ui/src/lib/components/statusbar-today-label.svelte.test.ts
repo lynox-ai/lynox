@@ -90,7 +90,7 @@ afterEach(() => {
 });
 
 describe('the status bar names the period of its cost', () => {
-	it.each([['de', 'heute $0.40'], ['en', 'today $0.40']] as const)('%s: "%s" on the phone bar and the desktop bar', async (locale, text) => {
+	it.each([['de', 'heute 0,40 $'], ['en', 'today $0.40']] as const)('%s: "%s" on the phone bar and the desktop bar', async (locale, text) => {
 		await mountIn(locale);
 		const { phone, phoneName, desktop } = shown();
 		expect(phone).toBe(text);
@@ -98,18 +98,18 @@ describe('the status bar names the period of its cost', () => {
 		// The link's name is its visible text (no aria-label that says it otherwise); the phone
 		// button's spoken summary carries the same words.
 		expect(desktop.hasAttribute('aria-label')).toBe(false);
-		expect(phoneName).toContain(text);
+		expect(phoneName.replace(/\s+/g, ' ')).toContain(text);
 	});
 
 	it.each([
 		['a day without a row', [] as const],
 		['a row of zero', 'zero'],
-	] as const)('shows a real zero as "heute $0.00" (%s)', async (_what, rows) => {
+	] as const)('shows a real zero as "heute 0,00 $" (%s)', async (_what, rows) => {
 		costAnswer = rows === 'zero' ? [{ day: today(), cost_usd: 0, run_count: 0, user_turns: 0 }] : [];
 		await mountIn('de');
 		const { phone, desktop } = shown();
-		expect(phone).toBe('heute $0.00');
-		expect(desktop.textContent?.replace(/\s+/g, ' ').trim()).toBe('heute $0.00');
+		expect(phone).toBe('heute 0,00 $');
+		expect(desktop.textContent?.replace(/\s+/g, ' ').trim()).toBe('heute 0,00 $');
 		// A real zero is known: no label, never "unknown"; the name is the visible text.
 		expect(desktop.hasAttribute('aria-label')).toBe(false);
 		expect(shown().phoneName).not.toContain('unbekannt');
@@ -132,12 +132,12 @@ describe('the status bar names the period of its cost', () => {
 		// A bare "-" is not spoken: both say that today's cost is unknown, and show no amount.
 		expect(desktop.getAttribute('aria-label')).toBe('Kosten heute unbekannt');
 		expect(phoneName.endsWith('· Kosten heute unbekannt')).toBe(true);
-		expect(phoneName).not.toContain('$0');
+		expect(phoneName).not.toMatch(/0[.,]00/);
 	});
 
 	it('drops a figure it knew once another part of the same read throws', async () => {
 		await mountIn('de');
-		expect(shown().phone).toBe('heute $0.40');
+		expect(shown().phone).toBe('heute 0,40 $');
 		providersBroken = true;
 		window.dispatchEvent(new Event('lynox:run-ended'));
 		await new Promise((r) => setTimeout(r, 450));
@@ -146,7 +146,7 @@ describe('the status bar names the period of its cost', () => {
 	});
 
 	it.each([
-		['a real zero', [] as const, '$0.00'],
+		['a real zero', [] as const, '0,00 $'],
 		['an unknown cost', 'held', '-'],
 	] as const)('the status panel shows %s as "%s"', async (_what, answer, tile) => {
 		costAnswer = answer;
@@ -155,7 +155,7 @@ describe('the status bar names the period of its cost', () => {
 		await settle();
 		const costTile = target.querySelector<HTMLAnchorElement>('a[data-panel-cost]');
 		expect(costTile, 'the panel opened').not.toBeNull();
-		expect(costTile?.querySelector('p.text-lg')?.textContent?.trim()).toBe(tile);
+		expect(costTile?.querySelector('p.text-lg')?.textContent?.replace(/\s+/g, ' ').trim()).toBe(tile);
 		// Unknown is said, as on the bars; a known figure, a real zero included, is named by its text.
 		expect(costTile?.getAttribute('aria-label') ?? null).toBe(tile === '-' ? 'Kosten heute unbekannt' : null);
 	});
@@ -167,7 +167,7 @@ describe('the status bar names the period of its cost', () => {
 		['a figure below zero', [{ day: today(), cost_usd: -5, run_count: 1, user_turns: 1 }]],
 	] as const)('drops a figure it knew once a later read answers with %s', async (_what, answer) => {
 		await mountIn('de');
-		expect(shown().phone).toBe('heute $0.40');
+		expect(shown().phone).toBe('heute 0,40 $');
 		costAnswer = answer;
 		// A run's end reads the cost again (after a short delay that coalesces several ends).
 		window.dispatchEvent(new Event('lynox:run-ended'));

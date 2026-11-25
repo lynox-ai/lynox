@@ -14,6 +14,7 @@
  * Profiles are written to ~/.lynox/apis/<id>.json and hot-reloaded into ApiStore.
  */
 
+import { API_SETUP_DIALOG, PRESET_NOTE, presetParamDescribe, SECURITY_CHANGE_WORDS, type DialogLanguage, type SecurityChangeWords } from '../dialog-text.js';
 import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
@@ -2000,9 +2001,9 @@ const scopeTokens = (scope: string | undefined): string[] =>
  * of its own, and withheld where it has the shape of a credential. Tool input passes through the
  * secret resolver before the handler, so a field written as a vault reference holds the value.
  */
-const shownValue = (value: string): string => {
+const shownValue = (value: string, w: SecurityChangeWords = SECURITY_CHANGE_WORDS.en): string => {
   const line = singleLine(value);
-  return maskSecretPatterns(line, { includeGeneric: true }) === line ? line : '(a value shaped like a credential, not shown)';
+  return maskSecretPatterns(line, { includeGeneric: true }) === line ? line : w.credentialShaped;
 };
 
 /**
@@ -2012,29 +2013,28 @@ const shownValue = (value: string): string => {
  * when the rest is withheld. Text the URL parser does not take is said to be no address, so it
  * cannot pass for one.
  */
-const shownUrl = (value: string): string => {
+const shownUrl = (value: string, w: SecurityChangeWords = SECURITY_CHANGE_WORDS.en): string => {
   let url: URL;
-  try { url = new URL(value); } catch { return `${shownValue(value)} (not an address a request can use)`; }
-  const shown = shownValue(value);
-  if (shown !== singleLine(value)) return `${url.origin} (the rest is shaped like a credential, not shown)`;
-  if (url.host === '') return `${shown} (sends to no host)`;
+  try { url = new URL(value); } catch { return w.notAnAddress(shownValue(value, w)); }
+  const shown = shownValue(value, w);
+  if (shown !== singleLine(value)) return w.originOnly(url.origin);
+  if (url.host === '') return w.sendsToNoHost(shown);
   // Written as read only when the host is followed by a path, a port and a path, or nothing: a
   // `\`, `?` or `#` after it would let more host-like text follow that the request never uses.
   const lead = `${url.protocol}//${url.host}`;
   const asRead = shown.toLowerCase().startsWith(lead.toLowerCase()) && /^(?::\d+)?(?:\/|$)/.test(shown.slice(lead.length));
-  return asRead ? shown : `${shown} (sends to ${url.host})`;
+  return asRead ? shown : w.sendsTo(shown, url.host);
 };
 
 /**
  * Scope tokens as the save question shows them: each is withheld on its own, so one cannot hide
  * another. The ones shown are listed; the withheld ones are counted after them.
  */
-const shownScopes = (tokens: readonly string[]): string => {
-  const shown = tokens.map(singleLine).filter((t) => shownValue(t) === t);
+const shownScopes = (tokens: readonly string[], w: SecurityChangeWords = SECURITY_CHANGE_WORDS.en): string => {
+  const shown = tokens.map(singleLine).filter((t) => shownValue(t, w) === t);
   const held = tokens.length - shown.length;
   if (held === 0) return shown.join(' ');
-  const count = `${String(held)} ${held === 1 ? 'value shaped like a credential' : 'values shaped like credentials'} (not shown)`;
-  return shown.length === 0 ? count : `${shown.join(' ')}; plus ${count}`;
+  return w.scopesWithheld(shown, held);
 };
 
 export const ordinal = (n: number): string => `${String(n)}${n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th'}`;
@@ -2046,20 +2046,20 @@ export const ordinal = (n: number): string => `${String(n)}${n % 10 === 1 && n %
  * Keyed by the label the question shows: `vault_keys` reads as "secret read", counted from the
  * first when the profile reads several.
  */
-const secretPlacesOf = (p: ApiProfile, several: boolean): Map<string, string> => {
+const secretPlacesOf = (p: ApiProfile, several: boolean, w: SecurityChangeWords = SECURITY_CHANGE_WORDS.en): Map<string, string> => {
   const places = new Map<string, string>();
   const put = (label: string, name: string | undefined): void => { if (typeof name === 'string' && name !== '') places.set(label, name); };
   const a = p.auth;
-  (a?.vault_keys ?? []).forEach((name, i) => { put(several ? `secret read (${ordinal(i + 1)})` : 'secret read', name); });
-  put('secret read for the user name (username_key)', a?.username_key);
-  put('secret read for the password (password_key)', a?.password_key);
+  (a?.vault_keys ?? []).forEach((name, i) => { put(several ? w.secretReadNth(i + 1) : w.secretRead, name); });
+  put(w.secretUsername, a?.username_key);
+  put(w.secretPassword, a?.password_key);
   if (a?.type === 'basic') {
-    put('secret read for the user name sent (basic auth)', a.username_key ?? a.vault_keys?.[0]);
-    put('secret read for the password sent (basic auth)', a.password_key ?? a.vault_keys?.[1]);
+    put(w.secretBasicUsername, a.username_key ?? a.vault_keys?.[0]);
+    put(w.secretBasicPassword, a.password_key ?? a.vault_keys?.[1]);
   }
-  put('secret read for the OAuth client id (oauth.client_id_key)', a?.oauth?.client_id_key);
-  put('secret read for the OAuth client secret (oauth.client_secret_key)', a?.oauth?.client_secret_key);
-  put('secret read for the OAuth refresh token (oauth.refresh_token_key)', a?.oauth?.refresh_token_key);
+  put(w.secretClientId, a?.oauth?.client_id_key);
+  put(w.secretClientSecret, a?.oauth?.client_secret_key);
+  put(w.secretRefreshToken, a?.oauth?.refresh_token_key);
   return places;
 };
 
@@ -2075,48 +2075,45 @@ const secretPlacesOf = (p: ApiProfile, several: boolean): Map<string, string> =>
  */
 export interface SecurityChange { readonly text: PromptText; readonly widens: boolean }
 
-export function securityChanges(prior: ApiProfile | undefined, next: ApiProfile): SecurityChange[] {
+export function securityChanges(prior: ApiProfile | undefined, next: ApiProfile, language: DialogLanguage = 'en'): SecurityChange[] {
   if (prior === undefined) return [];
+  const w = SECURITY_CHANGE_WORDS[language];
   const out: SecurityChange[] = [];
   const add = (text: PromptText, widens = true): void => { out.push({ text, widens }); };
-  const field = (label: string, a: string | undefined, b: string | undefined, show: (v: string) => string = shownValue): void => {
-    if ((a ?? '') !== (b ?? '')) add(pv`${label}: ${a === undefined ? '(none)' : show(a)} → ${b === undefined ? '(none)' : show(b)}`);
+  const field = (label: string, a: string | undefined, b: string | undefined, show: (v: string, w: SecurityChangeWords) => string = shownValue): void => {
+    if ((a ?? '') !== (b ?? '')) add(w.line(label, a === undefined ? w.none : show(a, w), b === undefined ? w.none : show(b, w)));
   };
   // Where the secret goes, how it travels, and which one is read.
-  field('address (base_url)', prior.base_url, next.base_url, shownUrl);
-  field('token address (token_url)', prior.auth?.oauth?.token_url, next.auth?.oauth?.token_url, shownUrl);
-  field('how the secret is attached (auth.type)', prior.auth?.type, next.auth?.type);
-  field('header it is sent in (auth.header_name)', prior.auth?.header_name, next.auth?.header_name);
-  field('query parameter it is sent in (auth.query_param)', prior.auth?.query_param, next.auth?.query_param);
-  field('basic auth form (auth.basic_format)', prior.auth?.basic_format, next.auth?.basic_format);
-  field('token request body (auth.oauth.body_format)', prior.auth?.oauth?.body_format, next.auth?.oauth?.body_format);
+  field(w.address, prior.base_url, next.base_url, shownUrl);
+  field(w.tokenAddress, prior.auth?.oauth?.token_url, next.auth?.oauth?.token_url, shownUrl);
+  field(w.authType, prior.auth?.type, next.auth?.type);
+  field(w.headerName, prior.auth?.header_name, next.auth?.header_name);
+  field(w.queryParam, prior.auth?.query_param, next.auth?.query_param);
+  field(w.basicFormat, prior.auth?.basic_format, next.auth?.basic_format);
+  field(w.tokenBody, prior.auth?.oauth?.body_format, next.auth?.oauth?.body_format);
   const several = Math.max(prior.auth?.vault_keys?.length ?? 0, next.auth?.vault_keys?.length ?? 0) > 1;
-  const [sWas, sNow] = [secretPlacesOf(prior, several), secretPlacesOf(next, several)];
+  const [sWas, sNow] = [secretPlacesOf(prior, several, w), secretPlacesOf(next, several, w)];
   for (const label of [...new Set([...sWas.keys(), ...sNow.keys()])]) {
     const [a, b] = [sWas.get(label), sNow.get(label)];
     if (a === b) continue;
-    add(pv`${label}: ${a === undefined ? '(none)' : shownValue(a)} → ${b === undefined ? '(none)' : shownValue(b)}`, b !== undefined);
+    add(w.line(label, a === undefined ? w.none : shownValue(a, w), b === undefined ? w.none : shownValue(b, w)), b !== undefined);
   }
   // What it may do.
-  field('grant type', prior.auth?.oauth?.grant_type, next.auth?.oauth?.grant_type);
-  field('audience', prior.auth?.oauth?.audience, next.auth?.oauth?.audience);
+  field(w.grantType, prior.auth?.oauth?.grant_type, next.auth?.oauth?.grant_type);
+  field(w.audience, prior.auth?.oauth?.audience, next.auth?.oauth?.audience);
   const was = new Set(scopeTokens(prior.auth?.oauth?.scope));
   const now = new Set(scopeTokens(next.auth?.oauth?.scope));
   const added = [...now].filter((s) => !was.has(s));
   const removed = [...was].filter((s) => !now.has(s));
-  if (added.length > 0) add(pv`scopes added: ${shownScopes(added)}`);
-  if (removed.length > 0) {
-    add(now.size === 0
-      ? pv`scopes removed: ${shownScopes(removed)} (none left: the provider decides which it grants)`
-      : pv`scopes removed: ${shownScopes(removed)}`, now.size === 0);
-  }
+  if (added.length > 0) add(w.scopesAdded(shownScopes(added, w)));
+  if (removed.length > 0) add(w.scopesRemoved(shownScopes(removed, w), now.size === 0), now.size === 0);
   const pp = (p: ApiProfile): Record<string, unknown> =>
     isPlainRecord(p.auth?.oauth?.preset_params) ? p.auth!.oauth!.preset_params as Record<string, unknown> : {};
   const [ppWas, ppNow] = [pp(prior), pp(next)];
   for (const key of [...new Set([...Object.keys(ppWas), ...Object.keys(ppNow)])].sort()) {
     const [a, b] = [ppWas[key], ppNow[key]];
     if (JSON.stringify(a) !== JSON.stringify(b)) {
-      add(pv`provider parameter ${shownValue(key)}: ${a === undefined ? '(none)' : shownValue(String(a))} → ${b === undefined ? '(none)' : shownValue(String(b))}`);
+      add(w.providerParameter(shownValue(key, w), a === undefined ? w.none : shownValue(String(a), w), b === undefined ? w.none : shownValue(String(b), w)));
     }
   }
   return out;
@@ -2627,7 +2624,8 @@ ${draftJson}
       // direction. Refusing the save instead was the other candidate and is
       // worse: a provider retired from the register would make every profile
       // naming it unsaveable, even a save that keeps the provider.
-      let presetNote: string | undefined;
+      // The model reads the English; the person is asked in the agent's language.
+      let presetNoteFor: ((language: DialogLanguage) => string) | undefined;
       const redirectUrls: string[] = [];
       // Set only where a human actually answered. An acceptance nobody gave is
       // the one thing this record must never contain.
@@ -2652,18 +2650,16 @@ ${draftJson}
           // a human's prompt. When the id IS known the two arms below do name it
           // — that string equals one of ours, so it discloses nothing.
           const known = presetIds();
-          presetNote = known.length > 0
-            ? `No authorization address could be derived: this profile names a provider this engine does not have built in, so there is nothing here to disclose or accept. It knows: ${known.join(', ')}.`
-            : 'No authorization address could be derived: this engine has no built-in providers yet, so there is nothing here to disclose or accept.';
+          presetNoteFor = (l) => known.length > 0 ? PRESET_NOTE[l].unknownProvider(known.join(', ')) : PRESET_NOTE[l].noProviders;
         } else if (derived.kind === 'bad-preset') {
-          presetNote = `No authorization address could be derived: the built-in provider "${presetId}" is defined wrongly in this engine — ${derived.detail}. Nothing on this profile fixes that; report it.`;
+          presetNoteFor = (l) => PRESET_NOTE[l].badPreset(String(presetId), derived.detail);
         } else if (derived.kind === 'missing-param') {
-          presetNote = `No authorization address could be derived: the provider "${presetId}" needs ${derived.param.describe} (auth.oauth.preset_params.${derived.param.name}), which this profile does not supply. Set it with api_setup update — the host is disclosed then.`;
+          presetNoteFor = (l) => PRESET_NOTE[l].missingParam(String(presetId), presetParamDescribe(derived.param.describe, l), derived.param.name);
         } else {
           // Supplied and REFUSED, which is a different sentence: telling someone
           // to set a value they already set is the advice that sends them round
           // a loop. The value itself is not repeated back.
-          presetNote = `No authorization address could be derived: the value this profile supplies for ${derived.param.describe} (auth.oauth.preset_params.${derived.param.name}) is not one the provider "${presetId}" accepts. Correct it with api_setup update — the host is disclosed then.`;
+          presetNoteFor = (l) => PRESET_NOTE[l].refusedParam(String(presetId), presetParamDescribe(derived.param.describe, l), derived.param.name);
         }
       }
       // isVettedEgressHost, not isAllowlistedEndpoint: the credential attach in
@@ -2679,7 +2675,8 @@ ${draftJson}
       // tool result asked the model to add. A refresh sends the stored scope and audience, and a
       // swap to a name already bound to the same address sends another credential there, so
       // neither the host check nor the binding question covers them.
-      const changes = securityChanges(prior, profile);
+      // Worded in the language the person is asked in; `widens` does not depend on the wording.
+      const changes = securityChanges(prior, profile, agent.dialogLanguage ?? 'en');
       // Only a change that widens or moves something asks on its own; a save that only takes a
       // scope or a secret away narrows the profile. Every change is still listed when it asks.
       const widens = changes.some((c) => c.widens);
@@ -2712,16 +2709,18 @@ ${draftJson}
         ));
         // One paragraph per host, not per URL: a store preset puts its base, token and authorize
         // URLs on one host, and the same paragraph three times reads as three destinations.
-        const disclosureParts = [
+        // The hosts as the acceptances name them (describeDisclosure: the URL's hostname, or the URL
+        // when it does not parse), once each.
+        const nonVettedHosts = Array.from(new Set(nonVetted.map((u) => { try { return new URL(u).hostname; } catch { return u; } })));
+        const disclosureIn = (l: DialogLanguage): string => [
           nonVetted.length > 0
-            ? `This engine will send data${profile.auth?.type === 'oauth2' ? ' — and, for its OAuth token, the managed access_token —' : ''} to host(s) outside lynox's listed sub-processors:\n\n${Array.from(new Set(nonVetted.map((u) => describeDisclosure(u)))).join('\n\n')}`
+            // The acceptance of each host (describeDisclosure) is binding text and stays English.
+            ? API_SETUP_DIALOG[l].outsideSubProcessors(profile.auth?.type === 'oauth2', nonVettedHosts, Array.from(new Set(nonVetted.map((u) => describeDisclosure(u)))).join('\n\n'))
             : undefined,
-          redirectHostNames.length > 0
-            ? `You will be sent to ${redirectHostNames.join(' and ')} in your own browser to authorize this profile. You sign in there, to that provider — not to lynox — and what comes back is stored here for this profile.`
-            : undefined,
-          presetNote,
-        ].filter((part): part is string => part !== undefined && part !== '');
-        const disclosure = disclosureParts.join('\n\n');
+          redirectHostNames.length > 0 ? API_SETUP_DIALOG[l].redirect(redirectHostNames) : undefined,
+          presetNoteFor?.(l),
+        ].filter((part): part is string => part !== undefined && part !== '').join('\n\n');
+        const disclosure = disclosureIn('en');
         if (!agent.promptUser) {
           // Two halves, two answers, because they fail in opposite directions.
           // The egress half has to refuse the SAVE: a stored profile with a
@@ -2747,11 +2746,8 @@ ${draftJson}
             return `Blocked: profile "${profile.id}" not saved. The save changes its scopes, provider parameters, addresses, grant or the secrets it reads, and that needs the user's acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved. Tell the user in one sentence that the profile was not saved because this change needs their acceptance, and that they can save it again by asking lynox in a chat where they can answer. Do not try to save it in another way.`;
           }
         } else {
-          const changeList = changes.reduce<PromptText | undefined>((acc, c) => acc === undefined ? pv`\n- ${c.text}` : pv`${acc}\n- ${c.text}`, undefined);
-          const changeBlock = changeList === undefined ? pv`` : pv`This save changes:${changeList}\n\n`;
-          const disclosureBlock = disclosure === '' ? pv`` : pv`${disclosure}\n\n`;
           const answer = await agent.promptUser(
-            pv`⚠ ${toolWordFrame('api_setup')}: saving "${profile.name}" needs your acceptance.\n\n${changeBlock}${disclosureBlock}Accept and save this profile?`,
+            API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].save(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), profile.name, changes.map((c) => c.text), disclosureIn(agent.dialogLanguage ?? 'en')),
             ['Allow', 'Deny', '\x00'],
           );
           if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
@@ -2944,6 +2940,7 @@ ${draftJson}
         // was non-vetted. A profile whose base_url is vetted saves with no prompt
         // at all, and that is the case where the missing authorize host would
         // otherwise leave no trace anywhere.
+        const presetNote = presetNoteFor?.('en');
         if (presetNote) parts.push(presetNote);
         if (redirectUrls.length > 0 && !redirectAccepted) {
           // Two sentences, because the two cases are not the same event. On a
@@ -3211,7 +3208,7 @@ ${draftJson}
         const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
           ? Promise.resolve(null)
           : promptUser(
-            pv`⚠ ${toolWordFrame('api_setup')}: delete the stored API profile ${id}, which could not be read (${singleLine(unreadableSource)})? Every vault name it carries is free for other profiles once it is gone. Delete it?`,
+            API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].deleteUnreadable(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), id, singleLine(unreadableSource)),
             ['Allow', 'Deny', '\x00'],
           ));
         if (answer === null) { noteOwnStopSentence(); return `Blocked: API profile entry "${id}" not deleted — the run was stopped before the question was asked.`; }
@@ -3230,15 +3227,14 @@ ${draftJson}
         let host = '';
         try { host = new URL(existing.base_url).hostname; } catch { /* no host to name */ }
         const tokens = recordedWrites(existing).length;
-        const loses = tokens > 0
-          ? pv` The ${tokens} token(s) its sign-in stored are removed from the vault with it, also where another profile reads them, so the connection has to be authorized again.`
-          : pv` Its settings (endpoints, guidelines, sign-in method) are removed.`;
+        const said = API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'];
+        const loses = tokens > 0 ? said.losesTokens(tokens) : said.losesSettings;
         // A waiter whose run was stopped asks nothing: the question would outlive the run as a
         // pending row and block the session's next prompt (the same rule as `http_request`).
         const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
           ? Promise.resolve(null)
           : promptUser(
-            pv`⚠ ${toolWordFrame('api_setup')}: delete the API profile ${singleLine(String(existing.name))} (id ${id}${host ? pv`, host ${host}` : pv``})?${loses} Delete it?`,
+            API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].deleteProfile(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), singleLine(String(existing.name)), id, host, loses),
             ['Allow', 'Deny', '\x00'],
           ));
         if (answer === null) { noteOwnStopSentence(); return `Blocked: API profile "${id}" not deleted — the run was stopped before the question was asked.`; }
@@ -4016,25 +4012,20 @@ ${draftJson}
       const { hosts, withDetail } = releaseDestinations(profile);
       const role = sendRole(profile, name)!;
       const more = releaseBoundFields(profile).length + withDetail;
-      const moreSentence = more === 0 ? ''
-        : more === 1
-          ? pv` 1 more setting of this profile (such as its auth type, scopes, path or query) is part of the release too; a change to it ends it. To see it first, deny, ask here to view API profile ${trailId}, then ask to release ${shownName} again.`
-          : pv` ${String(more)} more settings of this profile (such as its auth type, scopes, path or query) are part of the release too; a change to any of them ends it. To see them first, deny, ask here to view API profile ${trailId}, then ask to release ${shownName} again.`;
       // Counted settings are not printed, so a save between the owner's view and this question
       // could change them under the same words. The engine compares what the owner viewed with what
       // this question asks about, by the whole digest; the short version is only a reference.
       const viewed = apiStore.ownerViewOf(id);
       const version = settingsVersion(profile);
-      const versionSentence = viewed === undefined ? ''
-        : viewed.binding === bindingOf(profile)
-          ? pv` These settings were last read in one of your chats at ${releaseClock(viewed.at, agent.userTimezone)} and have not changed since (version ${version}).`
-          : pv` These settings changed after they were last read in one of your chats at ${releaseClock(viewed.at, agent.userTimezone)}; deny and view the profile again before you allow it (version ${version}).`;
-      const clientIdSentence = role === 'oauth.client_id_key' ? pv` A client id also goes into the sign-in link, to the browser of whoever opens it.` : '';
       const held = vaultHolds({ secretStore: agent.secretStore } as IAgent, name);
       const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
         ? Promise.resolve(null)
         : promptUser(
-          pv`⚠ ${toolWordFrame('api_setup')}: release the vault key ${shownName} to API profile ${trailId}? It was set up in the session of ${singleLine(author)}. If you allow it, lynox sends the value of ${shownName}, as ${role}, to ${hosts.length > 0 ? hosts.join(', ') : 'no host it can name'}, with every request and run through this profile, your own and bulk runs included, until that mandate ends or you withdraw the release.${moreSentence}${versionSentence}${clientIdSentence} The vault ${held ? 'holds a value' : 'holds no value yet'} under this name. Any change to where the value goes ends the release. Release it?`,
+          API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].release(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), {
+            name: shownName, trailId, author: singleLine(author), role, hosts, more, version,
+            viewed: viewed === undefined ? undefined : { clock: releaseClock(viewed.at, agent.userTimezone), unchanged: viewed.binding === bindingOf(profile) },
+            clientId: role === 'oauth.client_id_key', held,
+          }),
           ['Allow', 'Deny', '\x00'],
         ));
       if (answer === null) { noteOwnStopSentence(); return `Blocked: ${shownName} was not released — the run was stopped before the question was asked.`; }
@@ -4104,11 +4095,10 @@ ${draftJson}
       const names = collectVaultKeys(asked).map((k) => { const one = singleLine(k); return JSON.stringify(one.length > 80 ? `${one.slice(0, 80)}…` : one); });
       const ends = agent.toolContext?.mandateEnds ?? null;
       const known = asked.oauth_grant?.connected_mandate_id !== undefined && ends !== null;
-      const shownNames = names.slice(0, 30).join(', ') + (names.length > 30 ? ` and ${String(names.length - 30)} more` : '');
       const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
         ? Promise.resolve(null)
         : promptUser(
-          pv`⚠ ${toolWordFrame('api_setup')}: adopt the connection of API profile ${singleLine(String(asked.name))} (id ${id})? It was authorized at the provider in the session of ${by}, ${known ? 'which is not active' : 'and this engine cannot tell whether that mandate is still active'}. Once adopted, the profile is yours. The engine then sends to ${hosts.length > 0 ? hosts.join(', ') : 'no host it can name'}, for your requests and runs, the connection's tokens and the vault names this profile names, read like any of your profiles, values from the environment included: ${shownNames.length > 0 ? shownNames : 'none'}. Adopt it?`,
+          API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].adopt(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), { name: singleLine(String(asked.name)), id, by, known, hosts, names }),
           ['Allow', 'Deny', '\x00'],
         ));
       if (answer === null) { noteOwnStopSentence(); return `Blocked: the connection of API profile "${id}" was not adopted — the run was stopped before the question was asked.`; }

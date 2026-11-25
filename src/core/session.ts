@@ -3003,6 +3003,7 @@ export class Session {
       // the reason the plain read replaced a conditional spread that was doing nothing.
       abortScope: this.agent?.abortScope,
       name: 'lynox',
+      language: this.engine.config.language,
       model,
       // A background slot on another endpoint pins the pair the same way a profile does.
       modelPinnedByProfile: this._profileOverride !== null || (this._backgroundSlot !== null && slotCfg.crossProviderSlot),

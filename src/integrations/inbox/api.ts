@@ -23,7 +23,7 @@ import type { ColdStartTracker } from './cold-start-tracker.js';
 import type { InboxContactResolver } from './contact-resolver.js';
 import type { InboxRulesLoader } from './rules-loader.js';
 import type { InboxStateDb, ListItemsOptions } from './state.js';
-import { itemFollowUps } from './follow-ups.js';
+import { flaggedAtIntake, followUpIsSensitive, itemFollowUps } from './follow-ups.js';
 import { charCount, cutChars, descriptionProblem, fixedValueProblem, MAX_DESCRIPTION_RULES, namesRuleLabel, ruleLine } from './rule-text.js';
 import { isFeatureEnabled } from '../../core/features.js';
 
@@ -230,7 +230,17 @@ export function handleGetItemThread(
     const parent = deps.state.getThreadMessageByMessageId(item.accountId, item.inReplyTo, item.tenantId);
     partial = parent === null;
   }
-  return { status: 200, body: { messages, partial } };
+  // A received message whose text the inbox did not keep because it read as confidential: the
+  // history says so instead of showing an empty row. Only such a row is marked; one that kept its
+  // text (masked) shows that text.
+  const flagged = flaggedAtIntake(deps.state.listAuditForItem(item.id, item.tenantId));
+  const shown = messages.map((m) => {
+    const empty = (m.bodyMd === undefined || m.bodyMd.length === 0) && (m.snippet === undefined || m.snippet.length === 0);
+    return empty && m.direction === 'inbound' && (flagged.has(m.messageId) || followUpIsSensitive(m))
+      ? { ...m, confidential: true as const }
+      : m;
+  });
+  return { status: 200, body: { messages: shown, partial } };
 }
 
 /**

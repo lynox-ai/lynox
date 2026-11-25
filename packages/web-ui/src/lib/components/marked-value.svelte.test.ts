@@ -1,7 +1,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { shownValue, shownWhole } from '../utils/plan-takeover.js';
+import { planList, shownValue, shownWhole } from '../utils/plan-takeover.js';
+import { setLocale, t, tf } from '../i18n.svelte.js';
+import { FoldGroup } from '../utils/fold-group.svelte.js';
 import { valueSegments } from '../utils/value-breaks.js';
 
 const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
@@ -68,5 +70,97 @@ describe('MarkedLine draws its box as before', () => {
 	it('the class of a value set apart is the box, then the code font', async () => {
 		const el = await draw('line', `Konto: ${shownValue('acme')}`);
 		expect(el.querySelector('bdi[data-foreign-value]')!.getAttribute('class')).toBe(`${BOX} font-mono`);
+	});
+});
+
+// A list of plans past five keeps its rest folded behind a button in the sentence (U-037); pressing
+// it puts the remaining titles in its place, in the same sentence, and moves focus to the first.
+describe('a folded list of plans in a sentence', () => {
+	const titles = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7'];
+	it('shows five titles and a button that says how many more, not expanded', async () => {
+		const el = await draw('line', `Plans: ${planList(titles)}.`);
+		expect([...el.querySelectorAll('bdi[data-foreign-value]')].map((b) => b.textContent)).toEqual(['P1', 'P2', 'P3', 'P4', 'P5']);
+		const button = el.querySelector('button[data-testid="plans-more"]')!;
+		expect(button.textContent).toBe(tf('takeover.plans_more', { n: '2' }));
+		expect(button.getAttribute('aria-expanded')).toBe('false');
+		expect(button.getAttribute('aria-label')).toBe(tf('takeover.plans_more_show', { n: '2' }));
+		expect(el.textContent).toBe(`Plans: P1, P2, P3, P4, P5 ${tf('takeover.plans_more', { n: '2' })}.`);
+	});
+	it('pressing it puts the remaining titles into the same sentence, each in its box, and focuses the first', async () => {
+		const el = await draw('line', `Plans: ${planList(titles)}.`);
+		(el.querySelector('button[data-testid="plans-more"]') as HTMLButtonElement).click();
+		flushSync();
+		expect(el.querySelector('button')).toBeNull();
+		const boxes = [...el.querySelectorAll('bdi[data-foreign-value]')];
+		expect(boxes.map((b) => b.textContent)).toEqual(titles);
+		expect(el.textContent).toBe('Plans: P1, P2, P3, P4, P5, P6, P7.');
+		expect(document.activeElement).toBe(boxes[5]);
+		expect(boxes[5]!.getAttribute('tabindex')).toBe('-1');
+		expect(boxes[5]!.getAttribute('class')).toContain('focus-visible:ring-2');
+	});
+	it('new text starts folded again and takes no focus', async () => {
+		const { default: View } = await import('./MarkedLine.svelte');
+		const el = document.createElement('div');
+		document.body.appendChild(el);
+		const props = $state({ text: planList(titles) });
+		mounted.push({ c: mount(View, { target: el, props }), el });
+		flushSync();
+		(el.querySelector('button[data-testid="plans-more"]') as HTMLButtonElement).click();
+		flushSync();
+		expect(el.querySelector('button')).toBeNull();
+		(document.activeElement as HTMLElement).blur();
+		props.text = planList([...titles, 'P8']);
+		flushSync();
+		expect(el.querySelector('button[data-testid="plans-more"]')!.textContent).toBe(tf('takeover.plans_more', { n: '3' }));
+		expect(document.activeElement).toBe(document.body);
+	});
+	it('the button shows its focus', async () => {
+		const el = await draw('line', planList(titles));
+		expect(el.querySelector('button[data-testid="plans-more"]')!.getAttribute('class')).toContain('focus-visible:ring-2');
+	});
+	it('CONTROL: five titles draw no button', async () => {
+		const el = await draw('line', planList(titles.slice(0, 5)));
+		expect(el.querySelector('button')).toBeNull();
+		expect(el.querySelectorAll('bdi[data-foreign-value]').length).toBe(5);
+	});
+});
+
+describe('one list in two sentences of one dialog', () => {
+	const titles = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7'];
+	it('a press in one sentence opens the same list in the other, and focus stays in the one pressed', async () => {
+		const { default: View } = await import('./MarkedLine.svelte');
+		const group = new FoldGroup();
+		const draw2 = (text: string): HTMLElement => {
+			const el = document.createElement('div');
+			document.body.appendChild(el);
+			mounted.push({ c: mount(View, { target: el, props: { text, group } }), el });
+			return el;
+		};
+		const first = draw2(`Run again: ${planList(titles)}.`);
+		const second = draw2(`Under your name: ${planList(titles)}.`);
+		const other = draw2(`Others: ${planList(['Q1', 'Q2', 'Q3', 'Q4', 'Q5', 'Q6'])}.`);
+		flushSync();
+		(first.querySelector('button[data-testid="plans-more"]') as HTMLButtonElement).click();
+		flushSync();
+		expect([first.querySelector('button'), second.querySelector('button')]).toEqual([null, null]);
+		expect(second.textContent).toBe('Under your name: P1, P2, P3, P4, P5, P6, P7.');
+		expect(document.activeElement).toBe(first.querySelectorAll('bdi[data-foreign-value]')[5]);
+		// A different list in the same dialog stays folded.
+		expect(other.querySelector('button[data-testid="plans-more"]')).not.toBeNull();
+	});
+});
+
+describe('one more, in German', () => {
+	it('says the singular, and its label too', async () => {
+		setLocale('de');
+		const el = await draw('line', planList(['P1', 'P2', 'P3', 'P4', 'P5', 'P6']));
+		const button = el.querySelector('button[data-testid="plans-more"]')!;
+		expect(button.textContent).toBe('und 1 weiterer');
+		expect(button.getAttribute('aria-label')).toBe('und 1 weiteren anzeigen');
+		expect(t('takeover.plans_more_one')).toBe('und 1 weiterer');
+		setLocale('en');
+		const en = await draw('line', planList(['P1', 'P2', 'P3', 'P4', 'P5', 'P6']));
+		expect(en.querySelector('button[data-testid="plans-more"]')!.textContent).toBe('and 1 more');
+		expect(en.querySelector('button[data-testid="plans-more"]')!.getAttribute('aria-label')).toBe('and 1 more, show it');
 	});
 });

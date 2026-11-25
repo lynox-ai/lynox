@@ -343,6 +343,76 @@ describe('the refresh of an expiring store connection', () => {
     expect(vault.get(accessTokenKey(ID))).toBe('at-written-meanwhile');
   });
 
+  it('a refresh whose refresh-token write to the vault throws ends the connection as refresh-dead, and its end reads as ended', async () => {
+    const c = ctx();
+    const failing = { resolve: c.secretStore.resolve, set: (n: string, v: string) => { if (n === refreshTokenKey(ID)) throw new Error('vault is full'); vault.set(n, v); } } as never;
+    expect(await refreshStoreToken(ID, 'due', { ...c, secretStore: failing })).toBe('dead');
+    expect(profile().oauth_grant?.store_binding).toBeUndefined();
+    expect(profile().oauth_grant?.state).toBe('refresh-dead');
+    expect(hasRevokedGrant(profile())).toBe(false);
+    expect(storeAccessEnd(profile())).toMatchObject({ host: 'acme.myshopify.com', ended: true });
+    expect(lines().filter((l) => l.includes('outcome=dead (due): writing the new tokens to the vault failed; connect the store again'))).toHaveLength(1);
+    expect(lines().some((l) => l.includes('could not be marked ended'))).toBe(false);
+  });
+
+  it('a refresh whose profile save fails after the vault took the new tokens ends the connection as refresh-dead, and its end reads as ended', async () => {
+    const realSave = store.save.bind(store);
+    const save = vi.spyOn(store, 'save').mockImplementation((p, dir, opts) => (opts?.exchange !== undefined ? { ok: false } as never : realSave(p, dir, opts)));
+    try {
+      expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
+    } finally {
+      save.mockRestore();
+    }
+    expect(vault.get(accessTokenKey(ID))).toBe('at-new');
+    expect(profile().oauth_grant?.store_binding).toBeUndefined();
+    expect(profile().oauth_grant?.state).toBe('refresh-dead');
+    expect(storeAccessEnd(profile())).toMatchObject({ host: 'acme.myshopify.com', ended: true });
+    expect(lines().filter((l) => l.includes('outcome=dead (due): the new tokens are in the vault but the profile could not be saved; connect the store again'))).toHaveLength(1);
+    expect(lines().some((l) => l.includes('could not be marked ended'))).toBe(false);
+  });
+
+  it('an answer that rotated nothing, whose access write throws, is not marked ended: the refresh token the vault holds still stands', async () => {
+    const { refresh_token: _r, ...noRotation } = RENEWED;
+    hold.answer = async () => answer(noRotation);
+    const c = ctx();
+    const failing = { resolve: c.secretStore.resolve, set: () => { throw new Error('vault is full'); } } as never;
+    expect(await refreshStoreToken(ID, 'due', { ...c, secretStore: failing })).toBe('dead');
+    expect(vault.get(refreshTokenKey(ID))).toBe('rt-old');
+    expect(profile().oauth_grant?.store_binding).toBe(bind(ID, ORIGIN, 'at-old'));
+    expect(profile().oauth_grant?.state).toBe('connected');
+    expect(lines().filter((l) => l.includes('outcome=dead (due): writing the new tokens to the vault failed; connect the store again'))).toHaveLength(1);
+    expect(lines().some((l) => l.includes('marked ended') || l.includes('left as it is'))).toBe(false);
+  });
+
+  it('a save that throws after it went through leaves the new binding as it is, and the line says so, not that a mark is missing', async () => {
+    const realSave = store.save.bind(store);
+    const save = vi.spyOn(store, 'save').mockImplementation((p, dir, opts) => {
+      const r = realSave(p, dir, opts);
+      if (opts?.exchange !== undefined) throw new Error('a follow-up after the save failed');
+      return r;
+    });
+    try {
+      expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
+    } finally {
+      save.mockRestore();
+    }
+    expect(profile().oauth_grant?.store_binding).toBe(bind(ID, ORIGIN, 'at-new'));
+    expect(profile().oauth_grant?.state).not.toBe('refresh-dead');
+    expect(lines().filter((l) => l.includes('could not be saved; connect the store again; the connection was left as it is (changed meanwhile)'))).toHaveLength(1);
+    expect(lines().some((l) => l.includes('could not be marked ended'))).toBe(false);
+  });
+
+  it('a write failure whose ending cannot be saved either is still dead, and its line says the mark is missing', async () => {
+    const save = vi.spyOn(store, 'save').mockImplementation(() => ({ ok: false }) as never);
+    try {
+      expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
+    } finally {
+      save.mockRestore();
+    }
+    expect(profile().oauth_grant?.store_binding).toBe(bind(ID, ORIGIN, 'at-old'));
+    expect(lines().filter((l) => l.includes('outcome=dead (due): the new tokens are in the vault but the profile could not be saved; connect the store again; the connection could not be marked ended'))).toHaveLength(1);
+  });
+
   it('the store\'s invalid_grant ends the connection as refresh-dead, not as a revocation, and leaves the vault as it was', async () => {
     hold.answer = async () => answer({ error: 'invalid_grant', error_description: 'secret-looking provider text rt-old' }, 400);
     expect(await refreshStoreToken(ID, 'due', ctx())).toBe('dead');
