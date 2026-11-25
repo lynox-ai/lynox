@@ -636,8 +636,9 @@
 		filterLine?.focus();
 	}
 	const resumeKind = $derived(run ? bulkResumeKind(run) : null);
-	// Writing on was refused for good: only where the page offers writing on at all.
-	const resumeHopeless = $derived(hopelessReason !== null && resumeKind !== null && resumeKind !== 'none' && resumeKind !== 'nothing');
+	// Writing on was refused for good. The page shows the halt it was refused on until the owner's
+	// own load, which asks the run anew and clears the refusal.
+	const resumeHopeless = $derived(hopelessReason !== null);
 	const resumeText = $derived(run ? bulkResumeText(run, managed, i18n, failureMarked) : null);
 	const resumeWords = $derived(run ? bulkResumeWords(run, i18n) : null);
 	const rolledBack = $derived(run ? bulkRolledBackParts(run, view) : null);
