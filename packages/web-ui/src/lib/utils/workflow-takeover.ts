@@ -119,27 +119,20 @@ export function markLine(m: WorkflowTakeoverMark): string {
 	return `${who} · ${m.ended ? t('workflow_library.takeover.access_ended') : t('workflow_library.takeover.still_access')}`;
 }
 
-/** The one person whose connections the preview names, when it names exactly one; otherwise none. */
-function onlyPerson(p: Pick<WorkflowTakeoverPreview, 'connections'>): string | undefined {
-	const people = new Set(p.connections.map((c) => c.by.toLowerCase()));
-	return people.size === 1 ? p.connections[0]!.by : undefined;
-}
-
 /**
  * The sentence for the steps whose target is set only when they run: each by its task, the list
- * folded past five, or none when it is every step of the workflow. Whose connection it may be is
- * named when the preview's connections are one person's. Without a sentence on a connection before
- * it, it says where to connect the service.
+ * folded past five, or none when it is every step of the workflow. It names no person: such a step
+ * may reach anyone's connection, not only those the preview lists, so a name would say too little;
+ * and a sentence that never names one does not change when the person behind a connection does.
+ * Without a sentence on a connection before it, it says where to connect the service.
  */
-function atRunSentence(p: Pick<WorkflowTakeoverPreview, 'connections' | 'steps'>, steps: readonly WorkflowTakeoverStep[], afterConnection: boolean): string {
-	const only = onlyPerson(p);
-	const who = only === undefined ? t('workflow_library.takeover.at_run.who_unnamed') : tf('workflow_library.takeover.at_run.who', { name: shownValue(only) });
+function atRunSentence(p: Pick<WorkflowTakeoverPreview, 'steps'>, steps: readonly WorkflowTakeoverStep[], afterConnection: boolean): string {
 	const all = steps.length === p.steps.length && steps.length > 1;
 	const one = steps.length === 1 || all;
 	const end = afterConnection ? t('workflow_library.takeover.at_run.end') : t(one ? 'workflow_library.takeover.at_run.end_where_one' : 'workflow_library.takeover.at_run.end_where_many');
-	if (all) return tf('workflow_library.takeover.at_run.all', { who, end });
-	if (steps.length === 1) return tf('workflow_library.takeover.at_run.one', { step: shownValue(steps[0]!.task), who, end });
-	return tf('workflow_library.takeover.at_run.many', { steps: planList(steps.map((s) => s.task)), who, end });
+	if (all) return tf('workflow_library.takeover.at_run.all', { end });
+	if (steps.length === 1) return tf('workflow_library.takeover.at_run.one', { step: shownValue(steps[0]!.task), end });
+	return tf('workflow_library.takeover.at_run.many', { steps: planList(steps.map((s) => s.task)), end });
 }
 
 /** The note at a step whose call uses a connection someone with access made; named only when that connection is one the preview names. */

@@ -5,7 +5,7 @@ import { getLocale, setLocale, tf } from '../i18n.svelte.js';
 // that loses a word, or falls back to the other language, fails here. The values filled in are
 // stand-ins, so each placeholder shows where it lands.
 
-const VALUES = {"person": "Eva", "name": "Eva", "plan": "Weekly", "plans": "Daily, Nightly", "provider": "Shop", "account": " (Main store)", "tab": "TAB", "button": "BUTTON", "n": "2", "review": "REVIEW", "who": "WHO", "end": "END", "steps": "S1, S2", "step": "S1"};
+const VALUES = {"person": "Eva", "name": "Eva", "plan": "Weekly", "plans": "Daily, Nightly", "provider": "Shop", "account": " (Main store)", "tab": "TAB", "button": "BUTTON", "n": "2", "review": "REVIEW", "end": "END", "steps": "S1, S2", "step": "S1"};
 
 const SENTENCES: Array<[string, string, string]> = [
 	["workflow_library.takeover.access_ended",
@@ -54,16 +54,14 @@ const SENTENCES: Array<[string, string, string]> = [
 		"Verbindung von Eva",
 		"Eva's connection"],
 	["workflow_library.takeover.at_run.many",
-		"Bei diesen Schritten zeigt sich erst im Lauf, welche Verbindung sie nutzen: S1, S2. Ist es WHO, scheitern sie nach dem Übernehmen, END",
-		"For these steps, which connection they use shows only when they run: S1, S2. If it is WHO, they fail after you take over END"],
+		"Bei diesen Schritten zeigt sich erst im Lauf, welche Verbindung sie nutzen: S1, S2. Ist es die Verbindung einer Person mit Zugang, scheitern sie nach dem Übernehmen, END",
+		"For these steps, which connection they use shows only when they run: S1, S2. If it is the connection of someone with access, they fail after you take over END"],
 	["workflow_library.takeover.at_run.one",
-		"Bei diesem Schritt zeigt sich erst im Lauf, welche Verbindung er nutzt: S1. Ist es WHO, scheitert er nach dem Übernehmen, END",
-		"For this step, which connection it uses shows only when it runs: S1. If it is WHO, it fails after you take over END"],
+		"Bei diesem Schritt zeigt sich erst im Lauf, welche Verbindung er nutzt: S1. Ist es die Verbindung einer Person mit Zugang, scheitert er nach dem Übernehmen, END",
+		"For this step, which connection it uses shows only when it runs: S1. If it is the connection of someone with access, it fails after you take over END"],
 	["workflow_library.takeover.at_run.all",
-		"Bei jedem Schritt dieses Workflows zeigt sich erst im Lauf, welche Verbindung er nutzt. Ist es WHO, scheitert er nach dem Übernehmen, END",
-		"For every step of this workflow, which connection it uses shows only when it runs. If it is WHO, it fails after you take over END"],
-	["workflow_library.takeover.at_run.who", "die von Eva", "Eva's"],
-	["workflow_library.takeover.at_run.who_unnamed", "die einer Person mit Zugang", "the connection of someone with access"],
+		"Bei jedem Schritt dieses Workflows zeigt sich erst im Lauf, welche Verbindung er nutzt. Ist es die Verbindung einer Person mit Zugang, scheitert er nach dem Übernehmen, END",
+		"For every step of this workflow, which connection it uses shows only when it runs. If it is the connection of someone with access, it fails after you take over END"],
 	["workflow_library.takeover.at_run.end", "bis du das Programm selbst verbunden hast.", "until you connect the service yourself."],
 	["workflow_library.takeover.at_run.end_where_many",
 		"bis du das Programm, das sie erreichen, selbst mit deinem Konto verbunden hast: in den Einstellungen unter „APIs“ über „Neue API“.",

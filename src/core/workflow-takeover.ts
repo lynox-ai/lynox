@@ -22,6 +22,7 @@ import { newCorrelationId } from './audit-log.js';
 import { isMandateConnection, type ApiStore } from './api-store.js';
 import { placeholders, replacePlaceholders } from '../orchestrator/placeholders.js';
 import { inlineStepToolNames } from '../orchestrator/runtime-adapter.js';
+import { getRole } from './roles.js';
 import type { StampEntry } from './plan-run-context.js';
 import { connectionShown } from './profile-secret-view.js';
 import { stampFromRow } from './plan-stamp.js';
@@ -154,9 +155,11 @@ function hostOf(url: string): string | undefined {
  * A captured request step replays its call: its host is read off the call. A placeholder resolves
  * raw when the step runs (`placeholders.ts`), so the call is parsed with two different stand-ins for
  * each one, the way `new URL` reads it at run time: when the host differs, or the call does not parse
- * with a stand-in, its host is set only when it runs. Any other step that may send a request (the
- * request tool among its tools, `inlineStepToolNames`) leaves the address to the model: set only
- * when it runs too.
+ * with a stand-in, its host is set only when it runs; so is one whose address does not parse, since
+ * the model may then send the request itself. Any other step that may send a request leaves the
+ * address to the model: set only when it runs too. It may when the request tool is among its own
+ * tools (`inlineStepToolNames`), or when its role hands it the run's tools and the role's grant
+ * names the request tool (`spawnInline`: a role with `allowTools` that is not read-only).
  */
 function stepTarget(step: unknown): { readonly host: string } | 'at_run' | null {
   if (step === null || typeof step !== 'object') return null;
@@ -164,14 +167,17 @@ function stepTarget(step: unknown): { readonly host: string } | 'at_run' | null 
   if (tool !== REQUEST_TOOL) {
     const declared = Array.isArray(tools) ? tools.filter((t): t is string => typeof t === 'string') : undefined;
     const names = inlineStepToolNames({ tools: declared, tool: typeof tool === 'string' ? tool : undefined });
-    return names.has(REQUEST_TOOL) ? 'at_run' : null;
+    const { role } = step as { role?: unknown };
+    const grant = typeof role === 'string' ? getRole(role) : undefined;
+    const roleSends = grant?.allowTools !== undefined && grant.readOnly !== true && grant.allowTools.includes(REQUEST_TOOL);
+    return names.has(REQUEST_TOOL) || roleSends ? 'at_run' : null;
   }
   const url = input !== null && typeof input === 'object' ? (input as Record<string, unknown>)['url'] : undefined;
   // A request step without an address of its own: the model gives it one.
   if (typeof url !== 'string') return 'at_run';
   if (placeholders(url).length === 0) {
     const host = hostOf(url);
-    return host === undefined ? null : { host };
+    return host === undefined ? 'at_run' : { host };
   }
   const [first, second] = PROBES.map((probe) => hostOf(replacePlaceholders(url, () => probe)));
   return first === undefined || first !== second ? 'at_run' : { host: first };

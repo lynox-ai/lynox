@@ -458,6 +458,22 @@ describe('steps whose target is set only when they run', () => {
     expect(marked(b)).toEqual(['words', 'declared', 'other-tool', 'no-url'].map((step) => ({ step, profileId: null })));
   });
 
+  it('a step whose role hands it the run’s tools, the request tool among them, may send a request: marked, though its own tools name none; a read-only role or one without such a grant hands nothing on', () => {
+    const b = withConnections([
+      { id: 'collector', task: 'Fetch the report', role: 'collector', tools: ['read_file'] },
+      { id: 'collector-replay', task: 'Read the file', role: 'collector', tool: 'read_file', input_template: { path: 'a.txt' }, tools: [] },
+      { id: 'researcher', task: 'Look it up', role: 'researcher', tools: ['read_file'] },
+      { id: 'creator', task: 'Write it', role: 'creator', tools: ['read_file'] },
+      { id: 'unknown', task: 'Odd', role: 'toString', tools: ['read_file'] },
+    ]);
+    expect(marked(b)).toEqual(['collector', 'collector-replay'].map((step) => ({ step, profileId: null })));
+  });
+
+  it('a request whose address does not parse is marked without a profile: the model may send the request itself', () => {
+    const b = withConnections([req('bare', 'shop.example.invalid/orders'), req('empty', '')]);
+    expect(marked(b)).toEqual(['bare', 'empty'].map((step) => ({ step, profileId: null })));
+  });
+
   it('marks a step whose target is set only when it runs while any mandate’s connection exists, also when none of the covered mandate’s does', () => {
     const b = box();
     workflow(b, 'w', { email: 'h@x.ch' }, false, [req('host', 'https://{{s0.host}}/orders'), quiet('quiet')]);
