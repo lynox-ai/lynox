@@ -280,19 +280,19 @@ describe('the dialog', () => {
 			await open([ENDED], [withSteps([run('s1', 'Bestellungen zusammenfassen'), run('s3', 'Auffälligkeiten prüfen'), step('s4', 'Nachdenken')])]);
 			const d = await openDialog();
 			expect(parts(d)).not.toContain('connection');
-			expect(sentence(d)).toBe(`Bei diesen Schritten zeigt sich erst im Lauf, welche Verbindung sie nutzen: Bestellungen zusammenfassen, Auffälligkeiten prüfen. Ist es die Verbindung einer Person mit Zugang, scheitern sie nach dem Übernehmen, bis du das Programm, das sie erreichen, selbst mit deinem Konto verbunden hast: in den Einstellungen unter „APIs“ über „Neue API“.`);
+			expect(sentence(d)).toBe(`Bei diesen Schritten zeigt sich erst im Lauf, welche Verbindung sie nutzen: Bestellungen zusammenfassen, Auffälligkeiten prüfen. Ist es die Verbindung einer Person mit Zugang, scheitern sie nach dem Übernehmen, bis du das Programm, das sie erreichen, selbst mit deinem Konto verbunden hast: in den Einstellungen unter „API-Verbindungen“ über „Neue Verbindung“.`);
 		});
 
 		it('says one step in the singular, and every step of the workflow without a list', async () => {
 			await open([ENDED], [withSteps([run('s1', 'Bestellungen zusammenfassen'), step('s2', 'Nachdenken')])]);
 			let d = await openDialog();
-			expect(sentence(d)).toBe(`Bei diesem Schritt zeigt sich erst im Lauf, welche Verbindung er nutzt: Bestellungen zusammenfassen. Ist es die Verbindung einer Person mit Zugang, scheitert er nach dem Übernehmen, bis du das Programm, das er erreicht, selbst mit deinem Konto verbunden hast: in den Einstellungen unter „APIs“ über „Neue API“.`);
+			expect(sentence(d)).toBe(`Bei diesem Schritt zeigt sich erst im Lauf, welche Verbindung er nutzt: Bestellungen zusammenfassen. Ist es die Verbindung einer Person mit Zugang, scheitert er nach dem Übernehmen, bis du das Programm, das er erreicht, selbst mit deinem Konto verbunden hast: in den Einstellungen unter „API-Verbindungen“ über „Neue Verbindung“.`);
 			if (component) unmount(component);
 			component = undefined;
 			target.replaceChildren();
 			await open([ENDED], [withSteps([run('s1', 'Bestellungen zusammenfassen'), run('s2', 'Bericht schicken')])]);
 			d = await openDialog();
-			expect(sentence(d)).toBe(`Bei jedem Schritt dieses Workflows zeigt sich erst im Lauf, welche Verbindung er nutzt. Ist es die Verbindung einer Person mit Zugang, scheitert er nach dem Übernehmen, bis du das Programm, das er erreicht, selbst mit deinem Konto verbunden hast: in den Einstellungen unter „APIs“ über „Neue API“.`);
+			expect(sentence(d)).toBe(`Bei jedem Schritt dieses Workflows zeigt sich erst im Lauf, welche Verbindung er nutzt. Ist es die Verbindung einer Person mit Zugang, scheitert er nach dem Übernehmen, bis du das Programm, das er erreicht, selbst mit deinem Konto verbunden hast: in den Einstellungen unter „API-Verbindungen“ über „Neue Verbindung“.`);
 		});
 
 		it('after a change, a step that became one whose target is set only when it runs is marked, and a new person behind a connection changes no such step', async () => {
