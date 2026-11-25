@@ -392,7 +392,7 @@ export const SECRET_DIALOG: Readonly<Record<DialogLanguage, SecretDialog>> = {
 /**
  * The question before a vault secret may go to more addresses than it is bound to. `name`, `bound`
  * and `added` are values (the vault name and the addresses); `bound` empty: the secret is bound to
- * no address yet. Customer-visible copy: the English as approved by the business owner, the German as reviewed for this text.
+ * no address yet. Customer-visible copy; the English is the text the business owner approved.
  */
 export interface BindingDialog {
   readonly question: (name: string, bound: readonly string[], added: readonly string[]) => PromptText;

@@ -223,6 +223,6 @@ export function hasInvisibleCharacters(value: string): boolean {
  * Customer-visible copy, approved by the business owner; in the language of the session that asks
  * (`language`, from the agent's `dialogLanguage`, never from the profile or the model).
  */
-export function bindingQuestion(name: string, bound: readonly string[], added: readonly string[], language: DialogLanguage = 'en'): PromptText {
+export function bindingQuestion(name: string, bound: readonly string[], added: readonly string[], language: DialogLanguage): PromptText {
   return BINDING_DIALOG[language].question(name, bound, added);
 }
