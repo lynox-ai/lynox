@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { setLocale, getLocale, t } from '../i18n.svelte.js';
+import { parseWorkflowTakeoverPreview } from '../utils/workflow-takeover.js';
 
 // A margin or a padding class of any side or axis, also behind variants (`sm:`, `hover:`) and `!`:
 // `m`/`p` with one of `lrxytbse`, `bs` or `be`, or none. Not `max-w-`, `min-w-`, `place-`, `pointer-`.
@@ -36,7 +37,7 @@ const base = (id: string, name: string): Record<string, unknown> => ({
 });
 const step = (id: string, task: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
 	id, task, tool: null, inputTemplate: null, tools: [], model: null, role: null, roleGrant: null, effort: null, thinking: null,
-	timeoutMs: null, inputFrom: [], foreignConnection: false, connectionProfile: null, ...extra,
+	timeoutMs: null, inputFrom: [], foreignConnection: false, connectionProfile: null, targetAtRun: false, ...extra,
 });
 
 /** A preview with every part filled. */
@@ -247,6 +248,76 @@ describe('the dialog', () => {
 		const d = await openDialog();
 		const notes = [...d.querySelectorAll<HTMLElement>('[data-testid="stamp-step"]')].map((s) => s.querySelector('[data-testid="stamp-step-note"]')?.textContent?.trim() ?? null);
 		expect(notes).toEqual([`Verbindung von ${EVA}`, 'Verbindung einer Person mit Zugang', null]);
+	});
+
+	describe('a step whose target is set only when it runs', () => {
+		/** FULL, with a third step whose host is set only when it runs. */
+		const atRun = (connections?: Array<Record<string, unknown>>): Record<string, unknown> => {
+			const p = FULL();
+			(p['steps'] as Array<Record<string, unknown>>)[2] = step('s3', 'Send the order', { tool: 'http_request', inputTemplate: { url: 'https://{{s1.host}}/orders' }, foreignConnection: true, connectionProfile: null, targetAtRun: true });
+			if (connections !== undefined) p['connections'] = connections;
+			return p;
+		};
+		const notes = (d: HTMLElement): Array<string | null> => [...d.querySelectorAll<HTMLElement>('[data-testid="stamp-step"]')].map((s) => s.querySelector('[data-testid="stamp-step-note"]')?.textContent?.trim() ?? null);
+		const parts = (d: HTMLElement): string[] => [...d.querySelectorAll<HTMLElement>('[data-takeover-part]')].map((e) => e.dataset['takeoverPart']!);
+
+		it('notes it may use the connection of the one person whose connections are in play, and says so in its own sentence after the connections', async () => {
+			await open([ENDED], [atRun()]);
+			const d = await openDialog();
+			expect(notes(d)).toEqual([`Verbindung von ${EVA}`, 'Verbindung einer Person mit Zugang', `Ziel erst beim Lauf bekannt, nutzt vielleicht die Verbindung von ${EVA}`]);
+			expect(d.querySelector('[data-takeover-part="connection_at_run"]')?.textContent?.trim()).toBe(`Bei Schritten mit „Ziel erst beim Lauf bekannt“ zeigt sich erst im Lauf, welche Verbindung sie nutzen. Ist es die von ${EVA}, scheitern sie nach dem Übernehmen, bis du das Programm selbst verbunden hast.`);
+			const order = parts(d);
+			expect(order.indexOf('connection_at_run')).toBe(order.lastIndexOf('connection') + 1);
+		});
+
+		it('names no one when the connections in play are several people\'s, in the note and in the sentence', async () => {
+			await open([ENDED], [atRun([
+				{ profileId: 'shop', provider: 'Shop', account: 'Main store', by: EVA },
+				{ profileId: 'chat', provider: 'Chat', account: null, by: JAN },
+			])]);
+			const d = await openDialog();
+			expect(notes(d)[2]).toBe('Ziel erst beim Lauf bekannt, nutzt vielleicht die Verbindung einer Person mit Zugang');
+			expect(d.querySelector('[data-takeover-part="connection_at_run"]')?.textContent?.trim()).toBe('Bei Schritten mit „Ziel erst beim Lauf bekannt“ zeigt sich erst im Lauf, welche Verbindung sie nutzen. Ist es die einer Person mit Zugang, scheitern sie nach dem Übernehmen, bis du das Programm selbst verbunden hast.');
+		});
+
+		it('one person under two spellings of the address is one person', async () => {
+			await open([ENDED], [atRun([
+				{ profileId: 'shop', provider: 'Shop', account: 'Main store', by: EVA },
+				{ profileId: 'chat', provider: 'Chat', account: null, by: EVA.toUpperCase() },
+			])]);
+			const d = await openDialog();
+			expect(notes(d)[2]).toBe(`Ziel erst beim Lauf bekannt, nutzt vielleicht die Verbindung von ${EVA}`);
+		});
+
+		it('says it in English too', async () => {
+			setLocale('en');
+			await open([ENDED], [atRun()]);
+			const d = await openDialog();
+			expect(notes(d)[2]).toBe(`target known only when it runs; may use ${EVA}'s connection`);
+			expect(d.querySelector('[data-takeover-part="connection_at_run"]')?.textContent?.trim()).toBe(`Steps marked “target known only when it runs” show which connection they use only when they run. If it is ${EVA}'s, they fail after you take over until you connect the program yourself.`);
+		});
+
+		it('without such a step there is no such sentence', async () => {
+			await open([ENDED]);
+			const d = await openDialog();
+			expect(d.querySelector('[data-takeover-part="connection_at_run"]')).toBeNull();
+		});
+
+		it('a preview that says a target is set only when it runs for an unmarked step, or one with a profile, or not as a flag, is not read', () => {
+			const withStep = (extra: Record<string, unknown>): Record<string, unknown> => {
+				const p = atRun();
+				(p['steps'] as Array<Record<string, unknown>>)[2] = { ...(p['steps'] as Array<Record<string, unknown>>)[2], ...extra };
+				return p;
+			};
+			expect(parseWorkflowTakeoverPreview(atRun())).not.toBeNull();
+			expect(parseWorkflowTakeoverPreview(withStep({ foreignConnection: false }))).toBeNull();
+			expect(parseWorkflowTakeoverPreview(withStep({ connectionProfile: 'shop' }))).toBeNull();
+			expect(parseWorkflowTakeoverPreview(withStep({ targetAtRun: 'yes' }))).toBeNull();
+			// An engine that does not send the flag yet: no step reads as one.
+			const old = FULL();
+			for (const st of old['steps'] as Array<Record<string, unknown>>) delete st['targetAtRun'];
+			expect(parseWorkflowTakeoverPreview(old)?.steps.map((st) => st.targetAtRun)).toEqual([false, false, false]);
+		});
 	});
 
 	it('says one released plan by its title, and several in one sentence', async () => {

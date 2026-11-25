@@ -19,7 +19,8 @@
  */
 import { createHash } from 'node:crypto';
 import { newCorrelationId } from './audit-log.js';
-import { isMandateConnection, type ApiProfile, type ApiStore } from './api-store.js';
+import { isMandateConnection, type ApiStore } from './api-store.js';
+import { canonicalHost } from './canonical-host.js';
 import type { StampEntry } from './plan-run-context.js';
 import { connectionShown } from './profile-secret-view.js';
 import { stampFromRow } from './plan-stamp.js';
@@ -88,8 +89,12 @@ export interface WorkflowTakeoverPreview {
   /** Plans whose list of allowed connections lapses with the new stamp. */
   readonly lapsing: ReadonlyArray<{ readonly id: string; readonly title: string }>;
   readonly connections: readonly WorkflowTakeoverConnection[];
-  /** Captured steps whose call goes to a profile some mandate connected (whoever it was), with that profile. */
-  readonly foreignConnectionSteps: ReadonlyArray<{ readonly step: string; readonly profileId: string }>;
+  /**
+   * Captured steps whose call goes to a profile some mandate connected (whoever it was), with that
+   * profile; `null` for a step whose target is set only when it runs, while a connection of a covered
+   * mark's mandate is in play: it may use one. `null` never means a step goes to no such profile.
+   */
+  readonly foreignConnectionSteps: ReadonlyArray<{ readonly step: string; readonly profileId: string | null }>;
 }
 
 export type WorkflowTakeoverPreviewResult =
@@ -116,7 +121,7 @@ export interface WorkflowTakeoverState {
   readonly stillPaused: readonly TriggerRecord[];
   readonly lapsing: ReadonlyArray<{ readonly trigger: TriggerRecord; readonly entries: readonly StampEntry[] }>;
   readonly connections: readonly (WorkflowTakeoverConnection & { readonly grant: string })[];
-  readonly foreignConnectionSteps: ReadonlyArray<{ readonly step: string; readonly profileId: string }>;
+  readonly foreignConnectionSteps: ReadonlyArray<{ readonly step: string; readonly profileId: string | null }>;
   /** The digest of the steps as they are, the stamp is held to. */
   readonly stampDigest: string;
   /** The grant ids of the mandate marks the takeover covers that were not covered yet, for the audit row. */
@@ -126,18 +131,40 @@ export interface WorkflowTakeoverState {
 
 /** The tool whose call the runtime sends with a profile's connection (`http.ts`). */
 const REQUEST_TOOL = 'http_request';
+/** The tool that plans a bulk run; its writes go with the connection of `target_host` (`worker-loop.ts`). */
+const BULK_TOOL = 'bulk_plan';
+/** A placeholder a captured call resolves raw when it runs (`contract-validation.ts`). */
+const PLACEHOLDER = '{{';
 
-/** The profile a captured request step's call goes to: its literal `url`'s host, as the request tool maps it. */
-function stepProfile(profiles: Pick<ApiStore, 'getByHostname'>, step: unknown): ApiProfile | undefined {
-  if (step === null || typeof step !== 'object') return undefined;
+/**
+ * Where a captured step's call goes, read off the call: a host, `'at_run'` when a placeholder
+ * stands where the host is decided, or `null` for a call that uses no connection. A placeholder
+ * resolves raw, so one anywhere before the path (scheme, user info, host, port) can move the host:
+ * that call's target is set only when it runs.
+ */
+function stepTarget(step: unknown): { readonly host: string } | 'at_run' | null {
+  if (step === null || typeof step !== 'object') return null;
   const { tool, input_template: input } = step as { tool?: unknown; input_template?: unknown };
-  if (tool !== REQUEST_TOOL || input === null || typeof input !== 'object') return undefined;
+  if (input === null || typeof input !== 'object') return null;
+  if (tool === BULK_TOOL) {
+    const host = (input as Record<string, unknown>)['target_host'];
+    if (typeof host !== 'string') return null;
+    if (host.includes(PLACEHOLDER)) return 'at_run';
+    const canonical = canonicalHost(host);
+    return canonical === null ? null : { host: canonical };
+  }
+  if (tool !== REQUEST_TOOL) return null;
   const url = (input as Record<string, unknown>)['url'];
-  if (typeof url !== 'string') return undefined;
+  if (typeof url !== 'string') return null;
+  // The part that decides the host: everything up to the path. Without a scheme, all of it.
+  const scheme = url.indexOf('://');
+  const path = scheme === -1 ? -1 : url.slice(scheme + 3).search(/[/?#\\]/);
+  const head = scheme === -1 || path === -1 ? url : url.slice(0, scheme + 3 + path);
+  if (head.includes(PLACEHOLDER)) return 'at_run';
   try {
-    return profiles.getByHostname(new URL(url).hostname);
+    return { host: new URL(url).hostname };
   } catch {
-    return undefined;
+    return null;
   }
 }
 
@@ -218,7 +245,7 @@ export function workflowTakeoverOf(deps: WorkflowTakeoverDeps, wfId: string): Wo
   // The connections of the mandates whose marks are covered, by grant id: a run as the owner does
   // not reach them. A consent without a grant id cannot be told to be theirs, and gets no line.
   const connections: Array<WorkflowTakeoverConnection & { grant: string }> = [];
-  const foreignConnectionSteps: Array<{ step: string; profileId: string }> = [];
+  const foreignConnectionSteps: Array<{ step: string; profileId: string | null }> = [];
   if (deps.profiles !== null) {
     for (const p of deps.profiles.knownProfiles()) {
       const grant = p.oauth_grant?.connected_mandate_id;
@@ -228,12 +255,20 @@ export function workflowTakeoverOf(deps: WorkflowTakeoverDeps, wfId: string): Wo
       if (by !== undefined) connections.push({ profileId: p.id, grant, provider: connectionShown(p).provider, account: p.oauth_grant?.account?.label ?? null, by });
     }
     connections.sort((a, b) => (a.profileId < b.profileId ? -1 : a.profileId > b.profileId ? 1 : 0));
-    // A step is marked only where its target can be read off its literal call; others have none.
+    // A step whose target can be read off its call is marked when that target is a mandate's
+    // connection. One whose target is set only when it runs may reach one: it is marked, without a
+    // profile, as long as a connection of a covered mark's mandate is in play.
     const steps: unknown[] = Array.isArray(planned.steps) ? planned.steps : [];
     for (const st of steps) {
-      const p = stepProfile(deps.profiles, st);
       const id = (st as { id?: unknown }).id;
-      if (p !== undefined && isMandateConnection(p) && typeof id === 'string') foreignConnectionSteps.push({ step: id, profileId: p.id });
+      if (typeof id !== 'string') continue;
+      const target = stepTarget(st);
+      if (target === 'at_run') {
+        if (connections.length > 0) foreignConnectionSteps.push({ step: id, profileId: null });
+        continue;
+      }
+      const p = target === null ? undefined : deps.profiles.getByHostname(target.host);
+      if (p !== undefined && isMandateConnection(p)) foreignConnectionSteps.push({ step: id, profileId: p.id });
     }
   }
 

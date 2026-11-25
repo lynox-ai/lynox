@@ -102,8 +102,8 @@ const STEPS = [
 ];
 
 /** A workflow created by `by` (a mandate), with two steps; stamped by the owner when `stamped`. */
-function workflow(b: Box, id: string, by?: { email: string; grant?: string | null }, stamped = false): string {
-  const base = { id, name: 'W', template: true, steps: STEPS } as unknown as PlannedPipeline;
+function workflow(b: Box, id: string, by?: { email: string; grant?: string | null }, stamped = false, steps: readonly unknown[] = STEPS): string {
+  const base = { id, name: 'W', template: true, steps } as unknown as PlannedPipeline;
   const planned = stamped ? withOwnerStamp(b.engineDb, base, '2026-01-02T00:00:00.000Z') : base;
   b.db.prepare("INSERT INTO workflows (id, name, definition_json, created_by, created_mandate_id, created_at) VALUES (?, 'W', ?, ?, ?, '2026-01-01 00:00:00')")
     .run(id, JSON.stringify(planned), by ? tag(by.email) : null, by === undefined ? null : (by.grant === undefined ? `g-${by.email}` : by.grant));
@@ -396,6 +396,74 @@ describe('the connections a run as the owner no longer uses', () => {
     b.profiles.push(profile('shop', 'shop.example.invalid', null));
     const pv = workflowTakeoverPreview(deps(b), 'w');
     expect(pv.kind === 'preview' && pv.preview.foreignConnectionSteps).toEqual([]);
+  });
+});
+
+describe('steps whose target is set only when they run, and bulk steps', () => {
+  const req = (id: string, url: string): unknown => ({ id, task: id, tool: 'http_request', input_template: { url, method: 'POST' } });
+  const bulk = (id: string, input: Record<string, unknown>): unknown => ({ id, task: id, tool: 'bulk_plan', input_template: { target_system: 'http', ...input } });
+  const marked = (b: Box): unknown => {
+    const pv = workflowTakeoverPreview(deps(b), 'w');
+    return pv.kind === 'preview' ? pv.preview.foreignConnectionSteps : pv.kind;
+  };
+  /** A workflow a mandate made, whose own connection is covered, beside the owner's and another mandate's. */
+  const withConnections = (steps: readonly unknown[]): Box => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' }, false, steps);
+    ended(b, 'h@x.ch');
+    b.profiles.push(
+      profile('mine', 'mine.example.invalid', 'h@x.ch', 'g-h@x.ch'),
+      profile('shop', 'shop.example.invalid', 'other@x.ch', 'g-other'),
+      profile('owners', 'owner.example.invalid', null),
+    );
+    return b;
+  };
+
+  it('marks, without a profile, a request whose host a placeholder decides: in the host, as the whole address, in the user info, in the port, in the scheme', () => {
+    const b = withConnections([
+      req('host', 'https://{{s0.host}}/orders'),
+      req('spaced', 'https://{{ s0.host }}/orders'),
+      req('whole', '{{s0.url}}'),
+      req('userinfo', 'https://{{s0.who}}@owner.example.invalid/orders'),
+      req('port', 'https://owner.example.invalid:{{s0.port}}/orders'),
+      req('suffix', 'https://owner.example.invalid{{s0.rest}}'),
+      req('scheme', '{{s0.scheme}}://owner.example.invalid/orders'),
+    ]);
+    expect(marked(b)).toEqual(['host', 'spaced', 'whole', 'userinfo', 'port', 'suffix', 'scheme'].map((step) => ({ step, profileId: null })));
+  });
+
+  it('a placeholder after the host leaves the host as written: marked by its profile when that is a mandate’s, not at all when it is the owner’s', () => {
+    const b = withConnections([
+      req('path', 'https://shop.example.invalid/orders/{{s0.id}}'),
+      req('query', 'https://shop.example.invalid/orders?after={{s0.id}}'),
+      req('own', 'https://owner.example.invalid/orders/{{s0.id}}'),
+    ]);
+    expect(marked(b)).toEqual([{ step: 'path', profileId: 'shop' }, { step: 'query', profileId: 'shop' }]);
+  });
+
+  it('a step whose target is set only when it runs is not marked when no connection of a covered mandate is in play', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'h@x.ch' }, false, [req('host', 'https://{{s0.host}}/orders'), bulk('b', { target_host: '{{s0.host}}' })]);
+    ended(b, 'h@x.ch');
+    // Another mandate connected the shop, but not the one whose mark is covered.
+    b.profiles.push(profile('shop', 'shop.example.invalid', 'other@x.ch', 'g-other'), profile('owners', 'owner.example.invalid', null));
+    expect(marked(b)).toEqual([]);
+  });
+
+  it('marks a bulk step by the connection of its target host, as the run reads it; one whose host a placeholder decides without a profile', () => {
+    const b = withConnections([
+      bulk('fixed', { target_host: 'Shop.Example.Invalid.' }),
+      bulk('templated', { target_host: '{{s0.host}}.example.invalid' }),
+      bulk('own', { target_host: 'owner.example.invalid' }),
+      bulk('none', { source_list: { path: '/orders' } }),
+      bulk('not-a-host', { target_host: 'https://shop.example.invalid/' }),
+    ]);
+    expect(marked(b)).toEqual([{ step: 'fixed', profileId: 'shop' }, { step: 'templated', profileId: null }]);
+  });
+
+  it('another tool with a placeholder where a host would be is not marked: it sends no connection', () => {
+    const b = withConnections([{ id: 'web', task: 'web', tool: 'web_research', input_template: { url: 'https://{{s0.host}}/' } }]);
+    expect(marked(b)).toEqual([]);
   });
 });
 
