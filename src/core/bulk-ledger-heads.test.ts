@@ -3,7 +3,7 @@ import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
-import { BulkLedger, BULK_HEADS, type BulkHead } from './bulk-ledger.js';
+import { BulkLedger, BULK_CLAIM_STALE_MS, BULK_HEADS, type BulkHead } from './bulk-ledger.js';
 
 /**
  * The head counts of a run's status: every target in exactly one class, in rank order. Each row
@@ -27,6 +27,8 @@ afterEach(() => {
 });
 
 const AT = '2026-11-19T00:00:00.000Z';
+/** A status read while a claim made at {@link AT} is still live. */
+const LIVE = Date.parse(AT) + 1_000;
 
 interface Row {
   change?: 'update' | 'create' | 'delete' | 'unchanged' | 'invalid';
@@ -58,10 +60,10 @@ function run(targetSystem: string, rows: Row[]): string {
   return id;
 }
 
-/** The one class each single target of `rows` lands in. */
-function classes(targetSystem: string, rows: Row[]): BulkHead[] {
+/** The one class each single target of `rows` lands in, read at `now`. */
+function classes(targetSystem: string, rows: Row[], now?: number): BulkHead[] {
   return rows.map((r) => {
-    const heads = ledger.getStatus(run(targetSystem, [r]))!.heads;
+    const heads = ledger.getStatus(run(targetSystem, [r]), now)!.heads;
     const hit = BULK_HEADS.filter((h) => heads[h] === 1);
     expect(hit, JSON.stringify(r)).toHaveLength(1);
     return hit[0]!;
@@ -130,9 +132,43 @@ describe('the head counts of a run', () => {
     expect(classes(EXTERNAL, [{ error: 'write_failed', unknownSends: 1 }, { unknownSends: 1 }])).toEqual(['unclear', 'unclear']);
   });
 
-  it('a target a loop holds is not unclear: its answer may still come', () => {
-    expect(classes(EXTERNAL, [{ unknownSends: 1, claimed: true }, { unknownSends: 1, claimed: true, error: 'write_failed' }]))
+  it('a target a live loop holds is not unclear: its answer may still come', () => {
+    expect(classes(EXTERNAL, [{ unknownSends: 1, claimed: true }, { unknownSends: 1, claimed: true, error: 'write_failed' }], LIVE))
       .toEqual(['open', 'failed']);
+  });
+
+  describe('a claim a loop that died left', () => {
+    const at = Date.parse(AT);
+    const held: Row = { sent: true, unknownSends: 1, claimed: true };
+    it('is stale past the claim bound: its target is unclear, in the head and the banner count', () => {
+      const id = run(EXTERNAL, [held]);
+      const s = ledger.getStatus(id, at + BULK_CLAIM_STALE_MS + 1)!;
+      expect(s.heads.unclear).toBe(1);
+      expect(s.heads.open).toBe(0);
+      expect(s.sentUnknown).toBe(1);
+    });
+    it('is live up to the bound itself, as a claim is to the claim of a second loop', () => {
+      const id = run(EXTERNAL, [held]);
+      for (const now of [at + BULK_CLAIM_STALE_MS - 1, at + BULK_CLAIM_STALE_MS]) {
+        const s = ledger.getStatus(id, now)!;
+        expect(s.heads.unclear, String(now - at)).toBe(0);
+        expect(s.heads.open, String(now - at)).toBe(1);
+        expect(s.sentUnknown, String(now - at)).toBe(0);
+        // The same bound a second loop's claim reads: it may take the target only once stale.
+        expect(ledger.claimTarget(id, 0, now), String(now - at)).toBe(false);
+      }
+      expect(ledger.claimTarget(id, 0, at + BULK_CLAIM_STALE_MS + 1)).toBe(true);
+    });
+    it('the pass count reads the same stale bound as the head', () => {
+      // A built state, not one a pass leaves (recording a failure gives the claim back): it pins
+      // only that the pass count binds the bound where the head does.
+      const id = run(EXTERNAL, [{ ...held, error: 'write_failed', failedOnce: true }]);
+      expect(ledger.getStatus(id, LIVE)!.passUnclear).toBe(0);
+      expect(ledger.getStatus(id, at + BULK_CLAIM_STALE_MS + 1)!.passUnclear).toBe(1);
+    });
+    it('leaves a local run without unclear targets, stale or not', () => {
+      expect(classes(LOCAL, [held], at + BULK_CLAIM_STALE_MS + 1)).toEqual(['open']);
+    });
   });
 
   it('every target of a mixed run counts once: the classes sum to the total, none negative', () => {
