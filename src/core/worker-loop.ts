@@ -8,6 +8,8 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
+import { join } from 'node:path';
+import { claimStoreReconnectHints } from './store-token-refresh.js';
 import { recipientsConfirmable } from './recipient-confirm.js';
 import { errorText, errorTextReduced, FixedTextError, processErrorText } from './error-egress.js';
 import { containThreadFrom, threadIsContained } from './containment.js';
@@ -49,7 +51,7 @@ import { inquiryOptions, summarizeDelivery } from './notification-router.js';
 import { stripHidden } from './hidden-text.js';
 import { runTaskPrompt, RUN_TASK_ANSWERED, RUN_TASK_ANSWER_PREAMBLE } from './run-task-turn.js';
 import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect, BulkTriggerEffect } from '../types/index.js';
-import { admittedTriggerTier, WATCH_OVERRIDE_REFUSAL } from './task-manager.js';
+import { admittedTriggerTier, WATCH_OVERRIDE_REFUSAL, watchPolicyRefusal } from './task-manager.js';
 import { readAddressWrites } from './outbound-write.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
@@ -1519,11 +1521,25 @@ export class WorkerLoop {
         );
       }
 
+      // The owner's hint that a store's access runs out soon (`store-token-refresh.ts`): only with a
+      // channel, claimed on the grant before it is sent. No timer and no refresh of its own.
+      try {
+        const apiStore = this.engine.getApiStore();
+        if (apiStore && this.notificationRouter.hasChannels()) {
+          const { getLynoxDir } = await import('./config.js');
+          for (const message of claimStoreReconnectHints(apiStore, join(getLynoxDir(), 'apis'), noticeLanguage(this.engine.config?.language))) {
+            void this.notificationRouter.notify(message);
+          }
+        }
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:worker] store reconnect hint failed: ${processErrorText(err)}\n`);
+      }
+
       // The owner's notice of paused plans (`plan-pause.ts`), in the reminder's order: only with a
       // channel, claimed before it is sent, so two processes on one file send it once and none is
-      // used up while no channel is registered. At boot the worker starts before the server
-      // registers its push channel, so a pause from the boot sweep is told on the first tick that
-      // has a channel — usually the second. Fenced like the reminder.
+      // used up while no channel is registered. The server registers its push channel before it
+      // starts the worker, so a pause from the boot sweep is told on the first tick when push is
+      // set up. Fenced like the reminder.
       try {
         if (planPauseOn() && this.notificationRouter.hasChannels()) {
           const db = this.engine.getEngineDb()?.getDb();
@@ -2714,7 +2730,7 @@ export class WorkerLoop {
         // The connection a request carried: the attached profile's id and the grant it held when
         // its credential was read. An empty or non-string grant (a file-loaded profile) is none.
         attach: async (url, headers, method, out) => {
-          const profile = await attachStoredCredential(url, headers, isWriteMethod(method), { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases, exactClearance: toolContext.exactClearance, storeBindingDigest: toolContext.storeBindingDigest, containment: toolContext.containment, vaultNameBindings: toolContext.vaultNameBindings }, { bulkRunId: run.id }, out);
+          const profile = await attachStoredCredential(url, headers, isWriteMethod(method), { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases, exactClearance: toolContext.exactClearance, storeBindingDigest: toolContext.storeBindingDigest, containment: toolContext.containment, vaultNameBindings: toolContext.vaultNameBindings, hostPolicy: toolContext }, { bulkRunId: run.id }, out);
           if (profile === null) return null;
           const grantId: unknown = profile.oauth_grant?.grant_id;
           return { id: profile.id, grantId: typeof grantId === 'string' && grantId !== '' ? grantId : null };
@@ -3707,11 +3723,14 @@ export class WorkerLoop {
       return;
     }
 
-    // A step refers to the output of a step it does not read: a retry meets the same refusal, so it is
-    // recorded as a failure without one and told in the owner's words (a webhook run's by its event).
-    // The record keeps the full refusal, which says how to repair it (`template-refs.ts`).
-    if (!result.ok && result.unresolvedRefStep !== undefined) {
-      const told = this.#notices().workflowRefUnresolved(result.unresolvedRefStep);
+    // A step refers to the output of a step it does not read, or has an id a run already uses: a retry
+    // meets the same refusal, so it is recorded as a failure without one and told in the owner's words
+    // (a webhook run's by its event). The record keeps the full refusal, which says how to repair it
+    // (`template-refs.ts`).
+    if (!result.ok && (result.unresolvedRefStep !== undefined || result.reservedIdStep !== undefined)) {
+      const told = result.reservedIdStep !== undefined
+        ? this.#notices().workflowStepIdReserved(result.reservedIdStep)
+        : this.#notices().workflowRefUnresolved(result.unresolvedRefStep!);
       endEvent(this.#runSlotOf(task.id), { state: 'failed', reason: told, runId: result.runId });
       this.recordAndNotify(task, result.error ?? told, false, told, { noRetry: true });
       return;
@@ -3870,7 +3889,7 @@ export class WorkerLoop {
       try {
         return this.engine.getTaskManager()?.startEscalation(triggerId, startedAt, retry) ?? false;
       } catch (err: unknown) {
-        process.stderr.write(`[lynox:worker] recording an escalation start failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox:worker] recording an escalation start failed: ${processErrorText(err)}\n`);
         return false;
       }
     };
@@ -4079,6 +4098,15 @@ export class WorkerLoop {
     if (readAddressWrites(config.url)) {
       const taskManager = this.engine.getTaskManager();
       if (taskManager) this.#recordRun(taskManager, task.id, `The watched page was not read: its address ${WATCH_OVERRIDE_REFUSAL} Set the watch up again in the chat with the address of the page without the override or the mutation.`, 'failed');
+      return;
+    }
+
+    // The instance's network_policy decides whether the page may be read at all, at every poll:
+    // the policy may have changed since the watch was created.
+    const refusedBy = watchPolicyRefusal(config.url, this.engine.getToolContext());
+    if (refusedBy !== null) {
+      const taskManager = this.engine.getTaskManager();
+      if (taskManager) this.#recordRun(taskManager, task.id, `The watched page was not read: ${refusedBy.why}${refusedBy.wayOut === '' ? '' : ` ${refusedBy.wayOut}`}`, 'failed');
       return;
     }
 
