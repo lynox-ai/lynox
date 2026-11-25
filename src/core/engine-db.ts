@@ -9,6 +9,7 @@ import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
 import { epochStartByTimeSql } from './grant-ledger.js';
+import { chainEndCountsSql, logChainEndCounts, repointToChainEndSql } from './relation-source.js';
 
 /**
  * EngineDb — the consolidated per-tenant subject-graph store (Foundation Rework v2, S0).
@@ -43,6 +44,15 @@ import { epochStartByTimeSql } from './grant-ledger.js';
  */
 
 const ENGINE_HKDF_INFO = 'lynox-engine-encryption';
+
+/**
+ * The key engine.db's encrypted columns are stored under, derived from the vault key. Exported for
+ * the data export, which reads a snapshot by raw SQL and must not open the live store (the
+ * constructor migrates or recreates it).
+ */
+export function deriveEngineEncKey(vaultKey: string): Buffer {
+  return Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HKDF_INFO, CRYPTO_KEY_LENGTH));
+}
 /** Separate label for the keyed-digest subkey: the MAC never shares a key with AES-GCM. */
 const ENGINE_HASH_HKDF_INFO = 'lynox-engine-keyed-hash';
 /**
@@ -1612,7 +1622,47 @@ const MIGRATIONS: string[] = [
   // target: its page keeps the sentence without the domain.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (68);
    ALTER TABLE bulk_targets ADD COLUMN link_domain TEXT;`,
+  // v69: the once-only pass that gave every workflow stamp from before the digest its digest
+  // (`workflow-stamp.ts`, `stampExistingWorkflows`). After it a stamp without a digest does not
+  // hold, so a definition a backfill or a restored file brings back waits for the owner instead
+  // of running on a stamp nobody took over its steps. `done=0` until the pass has run.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (69);
+   CREATE TABLE IF NOT EXISTS workflow_stamp_marker (
+     id   INTEGER PRIMARY KEY CHECK (id = 1),
+     done INTEGER NOT NULL DEFAULT 0
+   );
+   INSERT OR IGNORE INTO workflow_stamp_marker (id, done) VALUES (1, 0);`,
+  // v70: a grant's rows by grant, named or not (`AuditLog.mandatePrincipalOf`). The revoke row
+  // looks its person up once per revoked grant, also for a grant that never acted here; without
+  // this, a grant with no named row walks the whole trail.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (70);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_mandate ON audit_log(mandate_id, id);`,
+  // v71: how long the trail keeps a row (audit-retention.ts). A day row stands for the polls of one
+  // person, route and day once that day is more than 30 days past: `poll_count` reads, the first at
+  // `ts`, the last at `poll_last`. NULL on every other row. The index on `ts` serves the sweep's
+  // delete by time, the partial one its fold, which reads one day of one route at a time.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (71);
+   ALTER TABLE audit_log ADD COLUMN poll_count INTEGER;
+   ALTER TABLE audit_log ADD COLUMN poll_last TEXT;
+   CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_poll_fold ON audit_log(action, ts) WHERE phase = 'read' AND poll_count IS NULL;`,
+  // v72: relationships follow the memory that carries their fact. Before, a consolidation retired
+  // the duplicate and left its relationships on it; the GC then deleted the memory and the foreign
+  // key set their source to NULL, so they stayed readable and out of reach of any later deletion.
+  // This moves each relationship of a replaced memory to the end of its chain of successors
+  // (relation-source.ts › repointToChainEndSql). Counted and logged before it runs (`_migrate`).
+  // `origin_memory_id` names the memory whose text an edge's description came from and is never
+  // moved, so a hard deletion of that memory still takes the edge with it; no foreign key, so the
+  // GC deleting that memory does not clear it. Filled from the source first. Mirrors agent-memory.db v8.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (72);
+   ALTER TABLE relationships ADD COLUMN origin_memory_id TEXT;
+   UPDATE relationships SET origin_memory_id = source_memory_id WHERE origin_memory_id IS NULL;
+   ${repointToChainEndSql('relationships')}
+   CREATE INDEX IF NOT EXISTS idx_rel_origin_memory ON relationships(origin_memory_id);`,
 ];
+
+/** The migration index (0-based) of v72, which moves relationships to the end of their chain. */
+const REPOINT_MIGRATION_INDEX = 71;
 
 export interface EngineDbOptions {
   /**
@@ -1652,7 +1702,7 @@ export class EngineDb {
     // share a derived key.
     const vaultKey = encryptionKey ?? process.env['LYNOX_VAULT_KEY'] ?? '';
     if (vaultKey) {
-      this._encKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HKDF_INFO, CRYPTO_KEY_LENGTH));
+      this._encKey = deriveEngineEncKey(vaultKey);
       this._hashKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HASH_HKDF_INFO, CRYPTO_KEY_LENGTH));
       this._bindKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', STORE_BINDING_HKDF_INFO, CRYPTO_KEY_LENGTH));
     } else {
@@ -1680,6 +1730,12 @@ export class EngineDb {
   /** Mark the boot-time verb-graph backfill complete (idempotent). */
   markVerbBackfillDone(): void {
     this.db.prepare('UPDATE verb_backfill_marker SET done = 1 WHERE id = 1').run();
+  }
+
+  /** True once the boot pass that gave the workflow stamps from before the digest theirs has run (v69). */
+  isWorkflowStampPassDone(): boolean {
+    const row = this.db.prepare('SELECT done FROM workflow_stamp_marker WHERE id = 1').get() as { done: number } | undefined;
+    return row?.done === 1;
   }
 
   /** Drop the free pages and empty the WAL; see `scrubFreedPages` in `sqlite-constants.ts`. */
@@ -1807,6 +1863,10 @@ export class EngineDb {
     for (let i = currentVersion; i < MIGRATIONS.length; i++) {
       // Atomic per-migration: the version stamp + DDL are all-or-nothing, so a
       // crash can't bump the version past un-applied schema (see AgentMemoryDb).
+      if (i === REPOINT_MIGRATION_INDEX) {
+        logChainEndCounts('engine.db', this.db.prepare(chainEndCountsSql('relationships')).get() as
+          { to_active: number; to_deleted: number; without_end: number } | undefined);
+      }
       this.db.transaction(() => { this.db.exec(MIGRATIONS[i]!); })();
     }
   }

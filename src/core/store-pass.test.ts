@@ -10,9 +10,9 @@ vi.mock('node:dns/promises', () => ({
   default: { lookup: vi.fn().mockResolvedValue([{ address: '23.227.38.65', family: 4 }]) },
 }));
 
-import { fetchPinned, fetchWithPublicRedirects, setPinnedTransportForTests } from './network-guard.js';
+import { fetchPinned, fetchWithPublicRedirects, setPinnedTransportForTests, StoreRequestRefusedError } from './network-guard.js';
 import { isStorePass, mintStoreExchangePass, mintStorePass, storePassRefusal, type StorePass } from './store-pass.js';
-import { SHOPIFY_UNAVAILABLE } from './shopify-host.js';
+import { SHOPIFY_HOST_HEADER, SHOPIFY_PAGES, SHOPIFY_REDIRECT } from './shopify-host.js';
 
 const ORIGIN = 'https://acme.myshopify.com';
 const TOKEN = 'shpat_test_value_0001';
@@ -40,8 +40,23 @@ const send = (url: string, headers: Record<string, string>, p: StorePass | undef
 describe('without a pass', () => {
   it('a store host is refused as before, and nothing is sent', async () => {
     await expect(send(`${ORIGIN}/admin/api/2025-01/shop.json`, { [H]: TOKEN }, undefined))
-      .rejects.toThrow(SHOPIFY_UNAVAILABLE);
+      .rejects.toThrow(SHOPIFY_PAGES);
     expect(sent).toHaveLength(0);
+  });
+
+  it('a Host header naming a store on another URL is refused as the header\'s fault', async () => {
+    await expect(send('https://other.example/x', { Host: 'acme.myshopify.com' }, undefined)).rejects.toThrow(SHOPIFY_HOST_HEADER);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('a redirect from another host into a store is not followed, and says so; one to another host is', async () => {
+    respond = (url) => (url.startsWith('https://other.example/') ? { status: 302, headers: { location: `${ORIGIN}/admin/api/2025-01/shop.json` } } : { status: 200 });
+    await expect(fetchWithPublicRedirects('https://other.example/start')).rejects.toThrow(SHOPIFY_REDIRECT);
+    expect(sent.map((r) => r.url)).toEqual(['https://other.example/start']);
+    sent = [];
+    respond = (url) => (url === 'https://other.example/start' ? { status: 302, headers: { location: 'https://third.example/end' } } : { status: 200 });
+    expect((await fetchWithPublicRedirects('https://other.example/start')).status).toBe(200);
+    expect(sent.map((r) => r.url)).toEqual(['https://other.example/start', 'https://third.example/end']);
   });
 });
 
@@ -497,5 +512,40 @@ describe('the token exchange\'s pass (kind exchange)', () => {
 
   it('storePassRefusal names nothing for the exchange, before its body is read', () => {
     expect(storePassRefusal(new URL(TOKEN_URL), FORM, xpass(), 'POST')).toBeNull();
+  });
+});
+
+describe('a refusal of the pass has its own class, the refusals without one do not', () => {
+  const GRAPHQL = `${ORIGIN}/admin/api/2025-10/graphql.json`;
+  const refusedBy = async (sending: Promise<Response>): Promise<unknown> => sending.then(() => null, (err: unknown) => err);
+
+  it('a path, a body, another store and an exchange body that is not a string: StoreRequestRefusedError, still a Blocked: message, nothing sent', async () => {
+    const cases: [string, Promise<Response>][] = [
+      ['path outside /admin/', send(`${ORIGIN}/apps/x`, { [H]: TOKEN }, pass())],
+      ['encoded path', send(`${ORIGIN}/admin/%2e%2e/apps`, { [H]: TOKEN }, pass())],
+      ['another store', send('https://other.myshopify.com/admin/x', { [H]: TOKEN }, pass())],
+      ['not a store', send('https://example.com/admin/x', { [H]: TOKEN }, pass())],
+      ['body names a token', fetchPinned(GRAPHQL, { method: 'POST', headers: { [H]: TOKEN, 'Content-Type': 'application/json' }, body: JSON.stringify({ query: '{ shop { name } }', variables: { q: 'access_token' } }) }, pass())],
+      ['exchange body not a string', fetchPinned(`${ORIGIN}/admin/oauth/access_token`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ code: 'c' }) }, mintStoreExchangePass(ORIGIN, 'code=c'))],
+    ];
+    for (const [label, sending] of cases) {
+      const err = await refusedBy(sending);
+      expect(err, label).toBeInstanceOf(StoreRequestRefusedError);
+      expect((err as Error).message, label).toMatch(/^Blocked: request to a Shopify store refused: /);
+    }
+    expect(sent).toEqual([]);
+  });
+
+  it('a store page without a pass and a Host header naming a store stay plain refusals', async () => {
+    for (const [label, sending] of [
+      ['store page', send(`${ORIGIN}/products.json`, {}, undefined)],
+      ['host header', send('https://other.example/x', { Host: 'acme.myshopify.com' }, undefined)],
+    ] as const) {
+      const err = await refusedBy(sending);
+      expect(err, label).toBeInstanceOf(Error);
+      expect(err, label).not.toBeInstanceOf(StoreRequestRefusedError);
+      expect((err as Error).message, label).toMatch(/^Blocked: /);
+    }
+    expect(sent).toEqual([]);
   });
 });

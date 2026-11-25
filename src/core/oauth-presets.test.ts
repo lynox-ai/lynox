@@ -1,5 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import { MEASURED_WRITE_FORMS } from './bulk-write-forms.js';
 import {
   OAUTH_PRESETS,
   askedScopes,
@@ -17,6 +16,8 @@ import {
   presetTokenHeaderName,
   type OAuthPreset,
   PRESET_ID_PATTERN,
+  RETIRED_PRESET_IDS,
+  retiredPresetIdOf,
 } from './oauth-presets.js';
 
 // Two presets that exercise both host rules. They live here, not in the
@@ -97,8 +98,50 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
       // And `consentFrameProblems`: it reads a preset's customer text and lists what is missing.
       // `normalizedPresetParams` returns a copy of a profile's values as its preset reads them;
       // `askedScopes`, `scopesOfAnswer` and `scopesBeyondAsked` read scopes and add no preset.
-      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'askedScopes', 'builtInPresetOf', 'consentFrameProblems', 'derivePresetEndpoints', 'isPresetClientSecretName', 'normalizedPresetParams', 'presetClientKeys', 'presetClientSecretGuidance', 'presetIds', 'presetNotFollowed', 'presetParamsForModel', 'presetStoreHost', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetTokenBodyFormat', 'presetTokenHeaderName', 'scopesBeyondAsked', 'scopesOfAnswer'].sort(),
+      // `connectCallText` only phrases the connect call around a profile id, like `presetClientSecretGuidance`.
+      // `consentNoticeVersion` derives a digest from what a preset's page shows; `SHOPIFY_CONSENT_VERSION` is that digest for Shopify, frozen.
+      // `codeExchangeExtraParams` reads a preset's ask for an expiring token and what a profile holds; it adds no preset.
+      // `RETIRED_PRESET_IDS` is a frozen list of ids no provider answers to; `retiredPresetIdOf` and `isRetiredPresetClientSecretName` read it.
+      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'RETIRED_PRESET_IDS', 'SHOPIFY_CONSENT_VERSION', 'askedScopes', 'builtInPresetOf', 'codeExchangeExtraParams', 'connectCallText', 'consentFrameProblems', 'consentNoticeVersion', 'derivePresetEndpoints', 'isPresetClientSecretName', 'isRetiredPresetClientSecretName', 'normalizedPresetParams', 'presetClientKeys', 'presetClientSecretGuidance', 'presetClientSecretGuidanceWith', 'presetIds', 'presetNotFollowed', 'presetParamsForModel', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetStoreHost', 'presetTokenBodyFormat', 'presetTokenHeaderName', 'retiredPresetIdOf', 'scopesBeyondAsked', 'scopesOfAnswer'].sort(),
     );
+  });
+
+  it('keeps every provider id it ever shipped, in the register or in the retired list', () => {
+    // Pinned by hand on purpose: a list read from the register would only check the register
+    // against itself. A provider removed from the register without its id going to
+    // RETIRED_PRESET_IDS fails (a), and its profiles would lose the lock that keeps a user's
+    // grant from being replaced. A provider added without being pinned here fails (b), so
+    // this list keeps up and a later removal is caught.
+    // APPEND-ONLY: an id leaves the register by moving to RETIRED_PRESET_IDS, never by being
+    // deleted here as well; a diff that removes a line below defeats this test.
+    const SHIPPED = ['bexio', 'shopify'];
+    // (a) every id ever shipped is still answered for.
+    for (const id of SHIPPED) {
+      expect(OAUTH_PRESETS.get(id) !== undefined || RETIRED_PRESET_IDS.includes(id), `shipped id "${id}" is in neither the register nor RETIRED_PRESET_IDS. Adding it there: check the profile's editable token_url and base_url`).toBe(true);
+    }
+    // (b) every id in the register is pinned.
+    for (const id of OAUTH_PRESETS.ids()) {
+      expect(SHIPPED, `register id "${id}" is not pinned in this test`).toContain(id);
+    }
+    // And no id is both: a retired id answers through retiredPresetIdOf only.
+    expect(RETIRED_PRESET_IDS.filter((id) => OAUTH_PRESETS.get(id) !== undefined)).toEqual([]);
+    // And every retired id is one a profile could have named.
+    expect(RETIRED_PRESET_IDS.filter((id) => !PRESET_ID_PATTERN.test(id))).toEqual([]);
+  });
+
+  it('refuses an id added to the retired list at runtime', () => {
+    expect(Object.isFrozen(RETIRED_PRESET_IDS)).toBe(true);
+    expect(() => { (RETIRED_PRESET_IDS as string[]).push('evil'); }).toThrow();
+  });
+
+  it('names a retired provider only for an oauth2 profile that names it', () => {
+    const oauth2 = (preset_id: string | undefined) => ({ auth: { type: 'oauth2', oauth: { preset_id } } });
+    expect(retiredPresetIdOf(oauth2('gone-shop'), ['gone-shop'])).toBe('gone-shop');
+    // An id that was never shipped binds nothing: such a profile stays editable.
+    expect(retiredPresetIdOf(oauth2('never-was'), ['gone-shop'])).toBeUndefined();
+    expect(retiredPresetIdOf(oauth2(undefined), ['gone-shop'])).toBeUndefined();
+    expect(retiredPresetIdOf({ auth: { type: 'bearer', oauth: { preset_id: 'gone-shop' } } }, ['gone-shop'])).toBeUndefined();
+    expect(retiredPresetIdOf(oauth2('gone-shop'))).toBeUndefined();
   });
 
   it('keeps a register a caller built to itself', () => {
@@ -455,7 +498,7 @@ describe('the bexio customer text covers every write scope the preset allows', (
   // scope on that side, reading included, may not come back into the list without a new text.
   it('allows no accounting, bank or payroll scope, reading included', () => {
     const bexio = OAUTH_PRESETS.get('bexio')!;
-    expect(bexio.consentNotice?.paragraphs.join(' ')).toContain('Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.');
+    expect(bexio.consentNotice?.paragraphs.join(' ')).toContain('Für Buchhaltung, Bank und Lohn fragt lynox bei bexio keine Rechte an.');
     const promised = /^(bank_|kb_bill|kb_expense|transaction|payroll|accounting|salary|archive_)/;
     expect([...bexio.allowedScopes, ...bexio.requiredScopes].filter((s) => promised.test(s))).toEqual([]);
   });
@@ -603,7 +646,7 @@ describe('the scopes a grant holds and the scopes a connection asks for', () => 
   });
 
   it('has nothing to compare for a scope the provider refuses, a provider that adds scopes of its own, or a profile of no provider', () => {
-    expect(askedScopes({ preset_id: 'shopify', scope: 'write_files' })).toBeUndefined();
+    expect(askedScopes({ preset_id: 'shopify', scope: 'write_themes' })).toBeUndefined();
     expect(askedScopes({ preset_id: 'shopify', scope: 'read_products write_products' })).toEqual(['read_products', 'write_products']);
     expect(askedScopes({ preset_id: 'bexio', scope: 'contact_show' })).toBeUndefined();
     expect(askedScopes({})).toBeUndefined();
@@ -616,14 +659,12 @@ describe('the scopes a grant holds and the scopes a connection asks for', () => 
   });
 });
 
-// bexio's consent text says a bulk run changes only what was tested at bexio, "today only existing
-// contacts". On a connected account a run writes only in a measured form (`bulk-external.ts`), so
-// the text holds while bexio's measured forms are exactly the contact update. A form added there
-// fails here, and the text needs a new approval.
-describe('the bexio customer text and the forms a bulk run may write there', () => {
-  it('names existing contacts while the contact update is bexio\'s only measured write form', () => {
-    const bexio = MEASURED_WRITE_FORMS.filter((f) => f.host === 'api.bexio.com');
-    expect(bexio.map((f) => [f.path.source, [...f.methods]])).toEqual([['^\\/2\\.0\\/contact\\/[0-9]+$', ['POST']]]);
-    expect(OAUTH_PRESETS.get('bexio')?.consentNotice?.paragraphs[1]).toContain('Ein Massenlauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte.');
+// The bulk-run paragraph names no form and no field: a run changes what its approved list holds,
+// in whichever form it writes. Shopify and bexio carry the same paragraph, so a form added on
+// either side needs no new text, and a sentence that names one comes back here.
+describe('the bulk-run paragraph of the customer texts', () => {
+  const GENERAL = 'Die eine Ausnahme ist ein Massenlauf: Vorher zeigt lynox die Liste aller Änderungen, und der Inhaber bestätigt den Lauf. Danach schreibt lynox die bestätigten Änderungen, ohne bei jeder einzeln zu fragen. Ein Massenlauf ändert nur, was in dieser Liste steht.';
+  it.each([['bexio'], ['shopify']])('is the same general paragraph for %s', (id) => {
+    expect(OAUTH_PRESETS.get(id)?.consentNotice?.paragraphs[1]).toBe(GENERAL);
   });
 });

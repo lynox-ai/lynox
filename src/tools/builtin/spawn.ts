@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto';
 
+import { SPAWN_DIALOG } from '../dialog-text.js';
 import { pinnedModelOf } from '../../core/profile-pair.js';
+import { dialogToolWord } from '../tool-words.js';
 import type { CostSnapshot, ToolEntry, SpawnSpec, IAgent, ModelTier, EmittingStreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent, PromptMeta, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
 import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, modelIdIsDeepBand, isBlockedModelId, profileNamed } from '../../types/index.js';
 import { estimateFirstTurnUSD, hasKnownPricing } from '../../core/pricing.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent, ContinuationLoopError, RunAbortedError, ToolCallImitationError, ToolLoopBreakError, type SendStop } from '../../core/agent.js';
+import { copyToolContext } from '../../core/tool-context.js';
 import { loopGuardStopReason } from '../../core/loop-guard-stop.js';
 import { isInputRequired } from '../../core/input-required.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
@@ -1754,6 +1757,8 @@ async function executeThinker(
     maxIterations,
     isolation: childIsolation,
     autonomy: parentAgent.autonomy,
+    // A child asks in its parent's language.
+    language: parentAgent.dialogLanguage,
     // A child of a run nobody watches files a mail like its parent: under the parent's trigger
     // (so the flooding limit counts the whole tree) and naming the root run. Taken from the
     // parent agent only, never from this tool's input; a chat's child gets none.
@@ -1786,6 +1791,8 @@ async function executeThinker(
     // Share the parent's Session counters so one conversation accumulates
     // a single http/write budget across the main agent + all sub-agents.
     sessionCounters: parentAgent.sessionCounters,
+    // One conversation, one record of what its searches listed (`SearchResultAddresses`).
+    searchResultAddresses: parentAgent.searchResultAddresses,
     // Share the recall blob store so a sub-agent's `recall_tool_result` can
     // resolve handles minted by the parent conversation's last compaction.
     toolResultBlobStore: parentAgent.toolResultBlobStore,
@@ -1802,7 +1809,9 @@ async function executeThinker(
     // also write-reachable — a child can mutate parent state through
     // dataStore / apiStore / runHistory (e.g. updateRun on the parent's
     // row). Acceptable because the child IS trusted code, but not hidden.
-    toolContext: { ...parentAgent.toolContext },
+    // `copyToolContext` keeps the mark of a context that does not carry the instance's network
+    // policy, so the provider-side web search stays withheld for the child as for its parent.
+    toolContext: copyToolContext(parentAgent.toolContext),
     // T2-X1 part 2: share the parent's SecretStore so `ask_secret`, vault
     // reads, and tool credential lookups work in the child. Documented
     // reach delta: a child's `http_request` will auto-inject `Bearer` tokens
@@ -1851,6 +1860,9 @@ async function executeThinker(
     // customer-granted-operator-access §3.13 E5) — again on top of the filtered list. After both
     // spreads for the same reason as the scope: no key a source gains later can rebind it.
     principal: parentAgent.principal,
+    // And who the parent writes as: a child of a trigger's run writes as that trigger, never
+    // as the owner. Unknown when the parent has none.
+    writeAuthor: parentAgent.writeAuthor ?? null,
     // T2-X1 part 4: pass the pre-minted runId so the constructor stamps it
     // onto the child and the child's downstream code (memory writes, tool-call
     // recording) can attribute work to this run.
@@ -1867,6 +1879,18 @@ async function executeThinker(
     recordToolCall: parentAgent.recordToolCall,
     // The root's set, by reference: what the child fetches is in it before the parent writes.
     conversationGrants: parentAgent.conversationGrants,
+    // The parent's owner-known targets, by reference and read-only: the child's task, written by
+    // the parent's model, and what the child reads add nothing. And the conversation's record of
+    // outside reads, which the child sets under the same thread.
+    ownerKnown: parentAgent.ownerKnown,
+    conversationLatch: parentAgent.conversationLatch,
+    noticeLanguage: parentAgent.noticeLanguage,
+    onOriginRefused: parentAgent.onOriginRefused,
+    // A target the child was not given by the owner comes from the run the parent is (a
+    // trigger's, a workflow's), or else from the subtask itself.
+    sendOrigin: parentAgent.sendOrigin?.kind === 'triggerRun' || parentAgent.sendOrigin?.kind === 'workflowRun'
+      ? parentAgent.sendOrigin
+      : { kind: 'childAgent' },
   };
 
   // Single try wraps both `new Agent(...)` AND `send(...)` so the runs-row
@@ -2953,20 +2977,14 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         providers.add(profile?.provider ?? inheritedProvider ?? (r.hybridSlot.crossProviderSlot ? r.hybridSlot.provider : baseProvider));
       }
       const providerList = [...providers].map((p) => providerFamilyLabel(p)).join(', ');
-      const childWord = deepSpecs.length === 1 ? 'One child would run' : `${deepSpecs.length} children would run`;
-      const tierWord = hasUnknownBand
-        ? 'a model gated as DEEP (or an unregistered custom model whose cost band the engine cannot prove)'
-        : 'the DEEP tier (a stronger reasoning model, more capable but more expensive)';
+      const said = SPAWN_DIALOG[ctx?.language ?? 'en'];
+      const childWord = said.children(deepSpecs.length);
+      const tierWord = hasUnknownBand ? said.tierUnknownBand : said.tierDeep;
       // The trailing clause must match the buttons offered (predicate 6,
       // non-phishing): promise "Run on balanced" only when the engine can honour it.
-      const tail = canDowngrade
-        ? `Allow only if the work genuinely needs deep; otherwise choose "Run on balanced".`
-        : `A model profile pins a specific endpoint and cannot be substituted down — allow only if you want this run on that model.`;
+      const tail = canDowngrade ? said.tailDowngrade : said.tailPinned;
       return {
-        message:
-          `⚠ spawn_agent: ${childWord} on ${tierWord}. ` +
-          `Estimated cost ~$${costUsd.toFixed(2)} against this session. ` +
-          `Provider: ${providerList}. ${tail}`,
+        message: said.sentence(dialogToolWord('spawn_agent', ctx?.language ?? 'en'), childWord, tierWord, costUsd.toFixed(2), providerList, tail),
         tier: resolvedTier,
         costUsd,
         provider: providerList,

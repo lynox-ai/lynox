@@ -49,3 +49,18 @@ export async function fetchControlPlaneUsageSummary(): Promise<ControlPlaneUsage
     return null;
   }
 }
+
+/**
+ * The used amount a managed instance shows for the current window.
+ *
+ * The control plane's `used_cents` counts the Stripe billing period it sends
+ * along. Only then is it the same window as the engine's local sum, and only
+ * then may it lift that sum (an engine younger than the billing cycle, after a
+ * migration or restore, would otherwise under-report). Without a period the
+ * engine counts the calendar month, and a figure counted over some other window
+ * must not replace it: the local sum stands.
+ */
+export function managedUsedCents(localUsedCents: number, cp: ControlPlaneUsageSummary | null): number {
+  if (!cp?.managed || !cp.period) return localUsedCents;
+  return Math.max(localUsedCents, cp.used_cents ?? 0);
+}

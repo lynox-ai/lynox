@@ -16,26 +16,66 @@
  */
 import { isPlainObject, type ExternalClient, type ExternalRead, type TargetIo } from './bulk-external.js';
 import type { BulkInvalidReason, BulkRunStatus, ListPageItem } from './bulk-ledger.js';
-import type { BulkNotices } from './bulk-notices.js';
-import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, asciiLower, isShopifyFilterValues, mediaImageGidNumber, productGidNumber, shopifyFilterValues, type ShopifyListFilterValue, type ShopifyWriteForm } from './shopify-graphql.js';
+import type { BulkNotices, ShopifyFilterKind } from './bulk-notices.js';
+import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, asciiLower, isShopifyFilterValues, isShopifyStatusValues, mediaImageGidNumber, productGidNumber, shopifyFilterValues, type ShopifyListFilterValue, type ShopifyWriteForm } from './shopify-graphql.js';
 import { isFeatureEnabled } from './features.js';
-import { presetStoreHost } from './oauth-presets.js';
+import { presetStoreHost, SHOPIFY_CONSENT_VERSION } from './oauth-presets.js';
 import type { ApiProfile } from './api-store.js';
 
-/** The Shopify scopes either of which `fileUpdate`, the bulk image form's write, needs (PRD
- *  shopify-preset §16.6). The Shopify preset asks for neither (`oauth-presets.ts`). */
-export const SHOPIFY_MEDIA_WRITE_SCOPES: readonly string[] = Object.freeze(['write_files', 'write_themes']);
+/**
+ * What the store connection for `host` allows the bulk image form (`fileUpdate`):
+ * - `writable`: the engine's own Shopify connection to that store (`presetStoreHost`, the same
+ *   profile the write attaches) ASKED for `write_files` — so the owner confirmed it on the consent
+ *   page before the link — and its grant, as Shopify answered it, holds it. A grant alone is not
+ *   enough: Shopify grants the app's configured scopes whatever the link asked for, so
+ *   `write_files` can arrive without the owner ever having confirmed it in lynox.
+ * - `not_asked`: that connection never asked for `write_files`, so asking for it would change
+ *   something: a new link with it in the scope.
+ * - `not_granted`: it asked and Shopify did not grant it, or no grant names what was granted. A
+ *   new link would ask for the same, so nothing is offered.
+ * - `no_connection`: no single Shopify connection of this engine maps to `host` — none, another
+ *   kind of profile, or one for another store. Nothing is known about what was asked or granted,
+ *   so neither a refusal by Shopify nor a new link is the thing to say.
+ */
+export type ShopifyMediaAccess = 'writable' | 'not_asked' | 'not_granted' | 'no_connection';
+
+export function shopifyMediaAccess(profile: Pick<ApiProfile, 'base_url' | 'auth' | 'oauth_grant'> | undefined, host: string): ShopifyMediaAccess {
+  // Only the Shopify preset derives its API host from the store (`apiOnDerivedHost`), so a match is that preset.
+  if (profile === undefined || presetStoreHost(profile) !== host) return 'no_connection';
+  // What the person confirmed, as the connect callback recorded it — never the profile's scope,
+  // which a save changes without a consent page. A grant from before it was recorded, or a
+  // record that is no list, asked for nothing: a new link would ask, so that case is offered.
+  const recorded: unknown = profile.oauth_grant?.asked_scope;
+  const asked = Array.isArray(recorded) ? recorded.filter((s): s is string => typeof s === 'string') : [];
+  if (!asked.includes('write_files')) return 'not_asked';
+  return (profile.oauth_grant?.granted_scope ?? []).includes('write_files') ? 'writable' : 'not_granted';
+}
 
 /**
- * Whether the store connection for `host` may run the bulk image form (`fileUpdate`): the engine's own Shopify
- * connection to that store (`presetStoreHost`, the same profile the write attaches) whose grant,
- * as Shopify answered it, holds `write_files` or `write_themes`. Without a recorded grant nothing
- * is known beyond the ask, and the preset never asks for either, so that counts as no.
+ * The fields a Shopify bulk run writes whatever customer text its connection was confirmed under:
+ * the ones the text before the current one named (a product's title and its SEO texts).
  */
-export function shopifyMediaWritable(profile: Pick<ApiProfile, 'base_url' | 'auth' | 'oauth_grant'> | undefined, host: string): boolean {
-  // Only the Shopify preset derives its API host from the store (`apiOnDerivedHost`), so a match is that preset.
-  if (profile === undefined || presetStoreHost(profile) !== host) return false;
-  return (profile.oauth_grant?.granted_scope ?? []).some((s) => SHOPIFY_MEDIA_WRITE_SCOPES.includes(s));
+export const SHOPIFY_FIELDS_BEFORE_CONSENT_TEXT: readonly string[] = Object.freeze(['title', 'seo_title', 'seo_description']);
+
+/**
+ * The fields of an apply that its connection does not cover yet, sorted; empty when it covers them
+ * all. A connection covers every field once it was confirmed under the current customer text
+ * ({@link SHOPIFY_CONSENT_VERSION}, recorded by the connect callback as `consent_version`). Under
+ * any other version, or none recorded — a grant from before it was recorded, or no grant, or a
+ * record that is no string — only {@link SHOPIFY_FIELDS_BEFORE_CONSENT_TEXT} on the product form,
+ * and nothing on the image form. Every field an after-state names counts, whether or not its value
+ * differs: the write sends it.
+ */
+export function shopifyConsentBlock(
+  apply: { readonly form: ShopifyWriteForm; readonly writes: readonly { readonly after: Readonly<Record<string, unknown>> }[] },
+  grant: unknown,
+): string[] {
+  const recorded: unknown = isPlainObject(grant) ? grant['consent_version'] : undefined;
+  if (recorded === SHOPIFY_CONSENT_VERSION) return [];
+  const allowed = new Set(apply.form === 'shopify_product' ? SHOPIFY_FIELDS_BEFORE_CONSENT_TEXT : []);
+  const fields = new Set<string>();
+  for (const w of apply.writes) for (const f of Object.keys(w.after)) if (!allowed.has(f)) fields.add(f);
+  return [...fields].sort();
 }
 
 /** Whether this instance reads Shopify stores in bulk runs. Asked when a run is planned and on
@@ -57,7 +97,9 @@ export const SHOPIFY_PRODUCT_FIELDS = ['title', 'descriptionHtml', 'seo_title', 
  *
  * The page's title is the SEO title, or the product's title where the SEO title is empty (measured
  * on a store), so it is that text which is compared, and the field it comes from which is named. The
- * description's own fallback is not followed: a run does not write `descriptionHtml` yet.
+ * description's own fallback, the product description where the SEO description is empty, is not
+ * followed: the description is HTML, where an `&` is mostly written `&amp;`, and how a theme shows
+ * the text it takes from it is not measured.
  * A product not read yet holds no before-image to compare with, and is not named.
  */
 export function shopifySeoEntityFields(prior: unknown, after: unknown): string[] {
@@ -175,21 +217,27 @@ export function shopifyBeforeImage(data: unknown, gid: string): { value: Record<
  */
 export function shopifyInFilter(data: unknown, filters: Readonly<Record<string, ShopifyListFilterValue>>): boolean {
   const product = isPlainObject(data) && isPlainObject(data['product']) ? data['product'] : {};
-  const field: Readonly<Record<string, string>> = { product_type: 'productType', vendor: 'vendor' };
+  // `status` is answered in capitals (`ACTIVE`) and searched in small letters: ASCII case folds them.
+  const field: Readonly<Record<string, string>> = { product_type: 'productType', vendor: 'vendor', status: 'status' };
   return Object.entries(filters).every(([key, value]) => {
     const name = Object.hasOwn(field, key) ? field[key]! : null;
     const held = name === null ? undefined : product[name];
     // A value the rule does not take (a stored source no parse built) holds no product.
-    if (!isShopifyFilterValues(value)) return false;
+    if (!(key === 'status' ? isShopifyStatusValues(value) : isShopifyFilterValues(value))) return false;
     return typeof held === 'string' && shopifyFilterValues(value).some((v) => asciiLower(held) === asciiLower(v));
   });
 }
 
 /** Which filters a Shopify list has, for the sentences below; null for a list without filters. */
-function filterKind(filters: Readonly<Record<string, ShopifyListFilterValue>>): 'product_type' | 'vendor' | 'both' | null {
+function filterKind(filters: Readonly<Record<string, ShopifyListFilterValue>>): ShopifyFilterKind | null {
   const type = filters['product_type'] !== undefined;
   const vendor = filters['vendor'] !== undefined;
-  if (!type && !vendor) return null;
+  const status = filters['status'] !== undefined;
+  // A status alone: the group is the whole store, so only the status can be to blame.
+  if (!type && !vendor) return status ? 'status' : null;
+  // A group read among one status may match none for either reason: neither is named as the one,
+  // and its sentence is the same for one value or several.
+  if (status) return 'group_status';
   // With both, each value may match products while the pair matches none: no value is to blame.
   return type && vendor ? 'both' : type ? 'product_type' : 'vendor';
 }

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { runTaskPrompt } from './run-task-turn.js';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -191,6 +192,18 @@ describe('generateBriefing', () => {
     expect(result).toContain('</session_briefing>');
     expect(result).toContain('Add tests');
     expect(result).toContain('Fix the bug');
+  });
+
+  it('names a scheduled run by its task, not by the engine\'s lead', () => {
+    history.insertRun({
+      taskText: `[Now: 2026-11-05T09:00:00.000Z]\n\n${compose(runTaskPrompt('Weekly offer', 'Send the list'), '\n')}`,
+      modelTier: 'balanced',
+      modelId: 'claude-sonnet-4-6',
+      contextId: '/my/project',
+    });
+    const result = generateBriefing('/my/project', history, null);
+    expect(result).toContain('Weekly offer');
+    expect(result).not.toContain('Carry out');
   });
 
   it('truncates long task text to 80 chars', () => {

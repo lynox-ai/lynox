@@ -20,6 +20,7 @@ export type FeatureFlag =
   | 'inbound-webhooks'
   | 'approval-queue'
   | 'inbox-read'
+  | 'inbox-user-rules'
   | 'shopify-bulk-read'
   | 'bulk-runs';
 
@@ -36,6 +37,7 @@ const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
   'inbound-webhooks': 'LYNOX_FEATURE_INBOUND_WEBHOOKS',
   'approval-queue': 'LYNOX_FEATURE_APPROVAL_QUEUE',
   'inbox-read': 'LYNOX_FEATURE_INBOX_READ',
+  'inbox-user-rules': 'LYNOX_FEATURE_INBOX_USER_RULES',
   'shopify-bulk-read': 'LYNOX_FEATURE_SHOPIFY_BULK_READ',
   'bulk-runs': 'LYNOX_FEATURE_BULK_RUNS',
 };
@@ -95,6 +97,14 @@ const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   // open items per bucket, a bucket's items, one item with its thread. Read-only. Default OFF,
   // and off means the tool is not registered.
   'inbox-read': false,
+  // Inbox rules the agent proposes and the owner confirms (`inbox_rule_propose`): a proposal
+  // applies to no mail until the owner confirms it. Also description rules
+  // (`matches_description`) with their model check. Default ON: the rule view lists a waiting
+  // proposal with what confirming does, counts the waiting ones next to its entry, and the reading
+  // pane says when a rule was held back on a mail. Set LYNOX_FEATURE_INBOX_USER_RULES=0 to turn it
+  // off: the tool is not registered, the API refuses the description kind and no description rule
+  // is checked. Confirmed rules, names and the filter by rule work either way.
+  'inbox-user-rules': true,
   // A bulk run may list a Shopify store's products and read their before-images through its
   // GraphQL API (`core/bulk-shopify.ts`). Such a run reads only: nothing can approve it until
   // a write form for the store exists. Default OFF; `bulk_plan` refuses the source with it off,

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from './workflow-stop.js';
+import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR, workflowBoundError } from './workflow-stop.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
 import { join } from 'node:path';
@@ -13,13 +13,14 @@ import type { SessionCounters } from '../types/agent.js';
 import type { IMemory } from '../types/memory.js';
 import { loadAgentDef } from './agent-registry.js';
 import { buildStepContext, contextForEventRun, resolveTaskTemplate, resolveInputTemplate } from './context.js';
+import { runStepsIssue } from './template-refs.js';
 import { shouldRunStep, buildConditionContext } from './conditions.js';
-import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, headlessStepModelOverride, resolveStepSlotCreds, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint, type ChatOrigin } from './runtime-adapter.js';
+import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, headlessStepModelOverride, resolveStepSlotCreds, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint, type ChatOrigin, type StepSpawnResult } from './runtime-adapter.js';
 import { computePhases } from './graph.js';
 import { channels } from '../core/observability.js';
 import { currentRunGroup, openRunGroup } from '../core/run-group.js';
 import type { Manifest, RunState, RunHooks, GateAdapter, AgentOutput, ManifestStep } from '../types/orchestration.js';
-import { GateRejectedError, GateExpiredError } from '../types/orchestration.js';
+import { GateRejectedError, GateExpiredError, StepReportedFailureError } from '../types/orchestration.js';
 import type { RunHistory } from '../core/run-history.js';
 import { PromptBudget, promptBudgetLimit } from './prompt-budget.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from './result-truncate.js';
@@ -410,13 +411,13 @@ export function workflowBoundExceeded(
 ): string | null {
   if (!limits) return null;
   if (limits.maxIterations !== undefined && iterations >= limits.maxIterations) {
-    return `Workflow exceeded its step limit (${limits.maxIterations}) — aborting to prevent a runaway.`;
+    return workflowBoundError('step', String(limits.maxIterations));
   }
   if (limits.maxWallClockMs !== undefined && Date.now() - startMs > limits.maxWallClockMs) {
-    return `Workflow exceeded its wall-clock limit (${Math.round(limits.maxWallClockMs / 1000)}s) — aborting to prevent a runaway.`;
+    return workflowBoundError('wall-clock', `${Math.round(limits.maxWallClockMs / 1000)}s`);
   }
   if (limits.maxSpendUsd !== undefined && stepCounters.costUSD > limits.maxSpendUsd) {
-    return `Workflow exceeded its spend limit ($${limits.maxSpendUsd.toFixed(2)}) — aborting to prevent a runaway.`;
+    return workflowBoundError('spend', `$${limits.maxSpendUsd.toFixed(2)}`);
   }
   return null;
 }
@@ -573,6 +574,15 @@ async function runManifestInGroup(
   if (preApproving) {
     throw new Error(`Invalid manifest: agents.${preApproving.id}.pre_approve: ${PRE_APPROVE_REMOVED}`);
   }
+
+  // Every manifest that runs, a nested pipeline's and a direct caller's included: a step id the
+  // context already uses, or a reference no run resolves (`template-refs.ts`).
+  // A caller outside the type system may leave `context` out, as the run's own spread allows. A
+  // nested run's steps are a `runtime: 'pipeline'` step's `pipeline` list, which no saved workflow holds.
+  const nested = depth > 0;
+  const stepsIssue = runStepsIssue(manifest.agents, (manifest.context as Record<string, unknown> | undefined) ?? {},
+    nested ? 'pipeline' : 'agents', { saved: !nested });
+  if (stepsIssue !== null) throw new Error(`Invalid manifest: ${nested ? 'in a nested pipeline, ' : ''}${stepsIssue}`);
 
   assertGatesEnforceable(manifest, options.gateAdapter !== undefined);
   const agentsDir = options.agentsDir ?? config.agents_dir ?? join(process.cwd(), 'agents');
@@ -1103,6 +1113,11 @@ async function executeStep(
   // pool hands out after the stop (the scope can only abort agents that already exist).
   if (stoppedByOwner(options, state)) return 'halt';
   if (questionUnanswered(options, state)) return 'halt';
+  // A run already ended for its makers' access — by a sibling's sub-run, or by a check that threw
+  // once — starts no further step, even when reading the access again would now let it: the
+  // pool of a capped phase hands out every step it holds. Only that cause: a sibling's gate
+  // rejection or failure leaves the steps of its phase to finish, as the parallel contract says.
+  if (state.status !== 'running' && isAuthorStop(state.error)) return 'halt';
   if (stopForEndedAuthor(options, state)) return 'halt';
 
   const stepStart = new Date().toISOString();
@@ -1198,7 +1213,7 @@ async function executeStep(
         }
       : undefined;
 
-    let r: { result: string; tokensIn: number; tokensOut: number; durationMs: number };
+    let r: StepSpawnResult;
 
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
@@ -1251,6 +1266,11 @@ async function executeStep(
     stepTokensIn = r.tokensIn;
     stepTokensOut = r.tokensOut;
     stepDurationMs = r.durationMs;
+
+    // The step's agent reported that it could not complete its task (`fail_step`). Thrown here,
+    // after its spend is stamped like a gate rejection's, so the catch records what it cost and
+    // `on_failure` decides what follows — as for any step that failed.
+    if (r.reportedFailure !== undefined) throw new StepReportedFailureError(step.id, r.reportedFailure);
 
     // Gate point check after step completes (real and mock paths)
     if (manifest.gate_points.includes(step.id) && options.gateAdapter) {
@@ -1364,9 +1384,11 @@ async function executeStep(
       return 'halt';
     }
 
+    const reported = err instanceof StepReportedFailureError;
     if (manifest.on_failure === 'stop') {
       state.status = 'failed';
       state.error = error.message;
+      state.errorReportedBy = reported ? { stepId: step.id, reason: error.message } : undefined;
       state.completedAt = new Date().toISOString();
       return 'halt';
     }
@@ -1383,6 +1405,7 @@ async function executeStep(
       costUsd: 0,
       skipped: false,
       error: error.message,
+      ...(reported ? { reportedFailure: true as const } : {}),
     });
 
     // 'notify' = continue + notification

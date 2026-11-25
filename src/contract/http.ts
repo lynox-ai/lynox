@@ -355,11 +355,40 @@ export interface HealthBody {
      * route answers without auth. Absent from engines older than this field.
      */
     durable_memory?: DurableMemoryState | undefined;
+    /**
+     * Whether the instance log keeps its retention: `ok`; `stalled` when the last sweep was
+     * refused, or when a poll older than its fold date is still a single row and the sweeps have
+     * stopped folding. The control plane alerts its operator on `stalled`. One word, no reason:
+     * the route answers without auth. Absent from engines older than this field and from an
+     * engine without engine.db.
+     */
+    audit_retention?: AuditRetentionState | undefined;
   };
+  /**
+   * What a migration into this instance may hold in memory. A source reads it before it
+   * exports and decides per store whether the plaintext path fits:
+   * `baseline_mb + bundle + rest_factor * rest + (k - 1) * store <= import_limit_mb`, sizes in MiB.
+   * The destination checks a manifest with the same numbers, so a later release that
+   * re-measures them does not make an older source fail. Optional: absent on an engine that
+   * predates it, and a reader that does not migrate ignores it.
+   */
+  migration?: {
+    /** The memory the import may use: the container's limit, else the host's memory. */
+    import_limit_mb: number;
+    /** Resident memory before the first chunk arrives. */
+    baseline_mb: number;
+    /** Peak memory over the baseline per byte of a store rewritten in memory. */
+    k: number;
+    /** Memory per byte of the decoded non-database chunks. */
+    rest_factor: number;
+  } | undefined;
 }
 
 /** The `engine.durable_memory` word of {@link HealthBody}. */
 export type DurableMemoryState = 'on' | 'off' | 'not_loaded';
+
+/** The `engine.audit_retention` word of {@link HealthBody}. */
+export type AuditRetentionState = 'ok' | 'stalled';
 
 // === Magic-link verify — POST /internal/auth/verify-magic (engine → CP) ===
 

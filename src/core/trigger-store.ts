@@ -1,10 +1,11 @@
 import type Database from 'better-sqlite3';
-import { MANDATE_TAG_PREFIX, isMandateTag, principalTag, type RequestPrincipal } from './request-principal.js';
+import { MANDATE_TAG_PREFIX, TRIGGER_AUTHOR_PREFIX, UNKNOWN_RUN_TAG, WORKFLOW_AUTHOR_PREFIX, isMandateTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { EngineDb } from './engine-db.js';
 import type { TriggerRecord, TriggerSource, TriggerEffect, TriggerStatus, BulkTriggerEffect } from '../types/pipeline.js';
 import type { DeliverySummary } from './notification-router.js';
 import { normalizeTier, type ModelTier } from '../types/index.js';
 import { PLAN_PAUSE_SQL_FN, planPauseOn } from './plan-pause.js';
+import { recipientConfirmDigest, recipientsConfirmable, type RecipientConfirmOutcome } from './recipient-confirm.js';
 
 /**
  * The parked status, as a typed constant rather than a SQL literal, so the two
@@ -241,6 +242,15 @@ const KEEP_MARKER_IF_UNSTAMPED_SQL =
 /** Drops the owner's takeover of the editor mark: written with every new mandate editor mark. */
 export const CLEAR_EDITOR_COVER_SQL = 'covered_edited_by = NULL, covered_edited_id = NULL, covered_edited_at = NULL';
 
+/**
+ * Whether the trigger's `edited_by` is a run's tag (`isRunTag` in request-principal.ts), as SQL.
+ * The prefixes are the code's own constants, compared exactly (not with LIKE), so the two cannot
+ * read a tag differently.
+ */
+const EDITED_BY_RUN_SQL = `(substr(edited_by, 1, ${TRIGGER_AUTHOR_PREFIX.length}) = '${TRIGGER_AUTHOR_PREFIX}'`
+  + ` OR substr(edited_by, 1, ${WORKFLOW_AUTHOR_PREFIX.length}) = '${WORKFLOW_AUTHOR_PREFIX}'`
+  + ` OR edited_by = '${UNKNOWN_RUN_TAG}')`;
+
 /** The full column list the S3e read methods SELECT (order matches TriggerFullDbRow). */
 const TRIGGER_READ_COLS =
   `id, title, description, source, effect, condition_json, target_workflow_id, params_json,
@@ -471,8 +481,9 @@ export class TriggerStore {
         max_retries = excluded.max_retries,
         retry_count = excluded.retry_count,
         confirmed_at = excluded.confirmed_at,
-        -- One way: a re-write may record a creator's taint, never clear one already recorded.
-        created_untrusted = COALESCE(excluded.created_untrusted, triggers.created_untrusted),
+        -- One way: a re-write may record a creator's taint, never clear one already recorded,
+        -- also not by writing the clean cause 'none' over it.
+        created_untrusted = COALESCE(NULLIF(excluded.created_untrusted, 'none'), triggers.created_untrusted),
         -- The creator is set once: a re-write never replaces it. edited_by is not
         -- written here at all; only markEditedBy writes it.
         created_by = COALESCE(triggers.created_by, excluded.created_by),
@@ -746,6 +757,9 @@ export class TriggerStore {
     // A named stamper takes the trigger over: it becomes the last party in `edited_by`,
     // which is what the mandate gate in {@link getDue} reads. Without it, a schedule a
     // mandate set up would be held again by the owner's own later rename, forever.
+    // Except over a run's tag: a stamp agrees to the run, not to an instruction a run rewrote,
+    // so that instruction still does not count as the owner's (`ownerInstructionCounts`). A run's
+    // tag is no mandate, so the mandate gate reads it as the stamper's would.
     const by = confirmedAt === null ? null : (confirmedBy ?? null);
     return this.db.prepare(
       // The reminder marker survives only while a trigger stays unstamped throughout: a write
@@ -758,8 +772,8 @@ export class TriggerStore {
       // a list clears any earlier one. Every other write that moves the stamp leaves the column
       // as it is, and the list stops counting because it names the stamp it was written with
       // (`stampFromRow` in plan-stamp.ts).
-      `UPDATE triggers SET confirmed_at = ?, confirmed_by = ?, edited_by = COALESCE(?, edited_by), consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', '?')}, stamp_connections = ?, updated_at = datetime('now') WHERE id = ?`,
-    ).run(confirmedAt, by, by, confirmedAt, confirmedAt === null ? null : (stampConnections ?? null), id).changes > 0;
+      `UPDATE triggers SET confirmed_at = ?, confirmed_by = ?, edited_by = CASE WHEN ? IS NULL OR ${EDITED_BY_RUN_SQL} THEN edited_by ELSE ? END, consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', '?')}, stamp_connections = ?, updated_at = datetime('now') WHERE id = ?`,
+    ).run(confirmedAt, by, by, by, confirmedAt, confirmedAt === null ? null : (stampConnections ?? null), id).changes > 0;
   }
 
   /**
@@ -804,6 +818,42 @@ export class TriggerStore {
   }
 
   /**
+   * The owner confirms the recipients of a trigger from before its creator was recorded
+   * (`recipient-confirm.ts`): its creator becomes the owner, and nothing else changes. Read, checked
+   * and written in one transaction, so a change between the check and the write cannot slip in:
+   * the trigger must still be confirmable and its instruction must still be the one the owner was
+   * shown (`expect`).
+   */
+  confirmOwnerCreator(id: string, expect: string): RecipientConfirmOutcome {
+    return this.db.transaction((): RecipientConfirmOutcome => {
+      const t = this.getById(id);
+      if (t === undefined) return 'not_found';
+      if (!recipientsConfirmable(t)) return 'not_confirmable';
+      if (recipientConfirmDigest(t) !== expect) return 'changed';
+      const changed = this.db.prepare(
+        `UPDATE triggers SET created_by = ? WHERE id = ? AND COALESCE(created_by, '') = ''`,
+      ).run(principalTag({ kind: 'owner' }), t.id).changes;
+      return changed > 0 ? 'confirmed' : 'not_confirmable';
+    })();
+  }
+
+  /**
+   * A run's change of a trigger under the owner's principal (a trigger's or a workflow's run, any
+   * session turn the owner did not write): `edited_by` takes the run's tag, so the trigger's
+   * instruction no longer counts as the owner's (`ownerInstructionCounts`). The stamp stays: the
+   * run acted for the owner, and the schedule keeps running as before.
+   *
+   * A trigger a mandate created or last changed keeps that mark: the hold that waits for the
+   * owner's stamp reads `COALESCE(edited_by, created_by)`, and a run's tag in its place would
+   * release it. Its instruction does not count as the owner's either way.
+   */
+  markEditedByRun(id: string, runTag: string): boolean {
+    return this.db.prepare(
+      `UPDATE triggers SET edited_by = ?, updated_at = datetime('now') WHERE id = ? AND COALESCE(edited_by, created_by, '') NOT LIKE ?`,
+    ).run(runTag, id, MANDATE_TAG_LIKE).changes > 0;
+  }
+
+  /**
    * S3f write-cutover: partial field update DIRECTLY on engine.db, mirroring the
    * legacy `updateTrigger`. `title`/`description`/`status` map to columns;
    * `nextRunAt` → `next_run_at` (empty-string/null clears); `scheduleCron` →
@@ -827,6 +877,9 @@ export class TriggerStore {
     waitingUntil?: string | null | undefined;
     /** The model tier the user chose for this trigger's runs; null clears the choice. */
     modelTier?: ModelTier | null | undefined;
+    /** What the turn that edits the instruction had taken in (`describeTurnUntrusted`), or
+     *  null/absent for a clean one. Read only with a title/description edit; it only ever adds. */
+    editedUntrusted?: string | null | undefined;
   }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
     const sets: string[] = [];
     const values: unknown[] = [];
@@ -845,6 +898,11 @@ export class TriggerStore {
     // pins the set of files that may name the setter, so a new one shows up red.
     if (params.title !== undefined || params.description !== undefined) {
       sets.push('confirmed_at = NULL', 'confirmed_by = NULL', `consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', 'NULL')}`);
+      // An instruction rewritten in a turn that had read outside content carries that mark, as
+      // one created there does (task_create). Add-only: a clean edit leaves a mark standing, or
+      // creating clean and editing later would shed it.
+      sets.push('created_untrusted = COALESCE(?, created_untrusted)');
+      values.push(params.editedUntrusted ?? null);
     }
     if (params.status !== undefined) {
       sets.push('status = ?');

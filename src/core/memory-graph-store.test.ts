@@ -180,30 +180,34 @@ describe('MemoryGraphStore (Foundation Rework v2 — S1b)', () => {
     engine.close();
   });
 
-  it('gcInactiveStubs hard-reaps relationships SOURCED from a deleted stub, keeps those of a superseded one', () => {
+  it('gcInactiveStubs hard-reaps relationships SOURCED from a deleted or contradicted stub, keeps what a replacement handed on', () => {
     const { engine, mem } = make();
     const db = engine.getDb();
     mem.upsertStub({ id: 'deleted', text: 'Alice works at Acme', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
     mem.upsertStub({ id: 'superseded', text: 'Bob joined Acme', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
     mem.upsertStub({ id: 'live', text: 'Alice knows Bob', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    mem.upsertStub({ id: 'merged', text: 'Bob is with Acme', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
     db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s1','person','Alice'),('s2','organization','Acme'),('s3','person','Bob')").run();
     db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind, description, source_memory_id) VALUES ('from-deleted','s1','s2','works_at','Alice works at Acme','deleted')").run();
     db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind, description, source_memory_id) VALUES ('from-superseded','s3','s2','member_of','Bob joined Acme','superseded')").run();
     db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind, description, source_memory_id) VALUES ('from-live','s1','s3','knows','Alice knows Bob','live')").run();
     db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind) VALUES ('no-source','s3','s2','works_for')").run();
+    db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind, description, source_memory_id) VALUES ('from-merged','s3','s2','part_of','Bob is with Acme','merged')").run();
     mem.deactivateByIds(['deleted']);
+    // Replaced without handing its edge on, as a contradiction does.
     mem.markSuperseded('superseded', 'live');
+    // Replaced by the same fact: the edge goes to the successor in the same write.
+    mem.markSuperseded('merged', 'live', { carryRelationships: true });
 
-    expect(mem.gcInactiveStubs()).toBe(2);
+    expect(mem.gcInactiveStubs()).toBe(3);
 
     // Reaped before the stub: deleted after it, the FK would already have set the source
-    // to NULL and the edge would stay, text and all, looking like one that never had one.
-    // The superseded stub's edge is out of this reap's scope and keeps its row; the FK then
-    // sets its source to NULL. That is unchanged by this sweep, not a state it endorses.
+    // to NULL and the edge would stay, text and all, looking like one that never had one
+    // and out of reach of any later deletion. The contradicted stub's edge goes the same way.
     const rels = (db.prepare('SELECT id, source_memory_id FROM relationships ORDER BY id').all() as { id: string; source_memory_id: string | null }[]);
     expect(rels).toEqual([
       { id: 'from-live', source_memory_id: 'live' },
-      { id: 'from-superseded', source_memory_id: null },
+      { id: 'from-merged', source_memory_id: 'live' },
       { id: 'no-source', source_memory_id: null },
     ]);
     expect(db.prepare("SELECT COUNT(*) c FROM relationships WHERE description = 'Alice works at Acme'").get()).toMatchObject({ c: 0 });

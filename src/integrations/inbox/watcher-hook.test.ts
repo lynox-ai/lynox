@@ -265,6 +265,36 @@ describe('createInboxClassifierHook — rule short-circuit', () => {
   });
 });
 
+describe('createInboxClassifierHook — description rules wait for the model check in the runner', () => {
+  it('a fixed rule files the mail before any description rule is asked, even one created earlier', async () => {
+    inbox.insertRule({ accountId: ACCOUNT.id, matcherKind: 'matches_description', matcherValue: 'Terminanfragen', bucket: 'auto_handled', action: 'mark_read', source: 'on_demand', createdAt: new Date(1_000) });
+    const fixed = inbox.insertRule({ accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'mustermann@example.com', bucket: 'requires_user', action: 'show', source: 'on_demand', createdAt: new Date(2_000) });
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    await hook(ACCOUNT.id, envelope());
+    expect(queueCalls).toHaveLength(0);
+    expect(inbox.listItems()[0]).toMatchObject({ bucket: 'requires_user', matchedRuleId: fixed });
+  });
+
+  it('with only a description rule, the mail goes to the queue: the hook applies none itself', async () => {
+    inbox.insertRule({ accountId: ACCOUNT.id, matcherKind: 'matches_description', matcherValue: 'Termin', bucket: 'auto_handled', action: 'archive', source: 'on_demand' });
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    await hook(ACCOUNT.id, envelope());
+    expect(queueCalls).toHaveLength(1);
+    expect(inbox.listItems()).toHaveLength(0);
+  });
+
+  it('marks an out-of-office reply in the payload, so the runner asks no description rule about it — and no other machine-sent mail', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    await hook(ACCOUNT.id, envelope({ isAutoReply: true, isAutoReplied: true }));
+    await hook(ACCOUNT.id, envelope({ uid: 2, messageId: '<m2@x>', threadKey: 'imap:thread-2', isAutoReply: true }));
+    await hook(ACCOUNT.id, envelope({ uid: 3, messageId: '<m3@x>', threadKey: 'imap:thread-3' }));
+    expect(queueCalls).toHaveLength(3);
+    expect(queueCalls[0]!.isAutoReplied).toBe(true);
+    expect('isAutoReplied' in queueCalls[1]!).toBe(false);
+    expect('isAutoReplied' in queueCalls[2]!).toBe(false);
+  });
+});
+
 describe('createInboxClassifierHook — sensitive-content pre-filter', () => {
   it('detects an OTP-shaped mail and skips the LLM, audit records the category', async () => {
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
@@ -281,6 +311,8 @@ describe('createInboxClassifierHook — sensitive-content pre-filter', () => {
     expect(items[0]?.bucket).toBe('requires_user');
     expect(items[0]?.classifierVersion).toBe('sensitive-prefilter');
     expect(items[0]?.reasonDe).toContain('OTP/2FA');
+    // A sensitive skip without a rule withholds none.
+    expect(items[0]?.ruleWithheld).toBeNull();
 
     const audit = inbox.listAuditForItem(items[0]!.id);
     expect(audit[0]?.actor).toBe('rule_engine');
@@ -299,28 +331,83 @@ describe('createInboxClassifierHook — sensitive-content pre-filter', () => {
     expect(inbox.listItems()[0]?.classifierVersion).toBe('sensitive-prefilter');
   });
 
-  it('rule short-circuit takes precedence over the sensitive pre-filter', async () => {
-    inbox.insertRule({
-      accountId: ACCOUNT.id,
-      matcherKind: 'from',
-      matcherValue: 'mustermann@example.com',
-      bucket: 'auto_handled',
-      action: 'archive',
-      source: 'on_demand',
+  // A rule that files a sensitive mail as handled does not apply, the
+  // owner's own included; the mail goes to "requires you" without a model, in every mode.
+  for (const mode of ['skip', 'mask', 'allow'] as const) {
+    it(`an auto_handled rule does not silence a sensitive mail (mode ${mode})`, async () => {
+      const ruleId = inbox.insertRule({
+        accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'mustermann@example.com',
+        bucket: 'auto_handled', action: 'archive', source: 'on_demand', name: 'Kunde Mustermann',
+      });
+      const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts, sensitiveMode: mode });
+      const outcome = await hook(ACCOUNT.id, envelope({ subject: 'Your code', snippet: 'OTP 482917' }));
+      expect(outcome).toBe('sensitive_skipped');
+      const item = inbox.listItems()[0]!;
+      expect(item.bucket).toBe('requires_user');
+      expect(item.classifierVersion).toBe('sensitive-prefilter');
+      expect(item.matchedRuleId).toBeUndefined();
+      expect(queue.enqueue).not.toHaveBeenCalled();
+      const payload = JSON.parse(inbox.listAuditForItem(item.id)[0]!.payloadJson) as Record<string, unknown>;
+      expect(payload['rule_withheld']).toBe(ruleId);
+      expect(payload['fail_reason']).toBe('rule_withheld_sensitive');
+      expect(payload['rule_name']).toBe('Kunde Mustermann');
+      expect(payload['sensitive_mode']).toBe(mode);
+      expect(item.ruleWithheld).toEqual({ id: ruleId, name: 'Kunde Mustermann', reason: 'rule_withheld_sensitive' });
+    });
+  }
+
+  it('a requires_user rule still files a sensitive mail, and the item names the rule', async () => {
+    const ruleId = inbox.insertRule({
+      accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'mustermann@example.com',
+      bucket: 'requires_user', action: 'show', source: 'on_demand', name: 'Kunde Mustermann',
     });
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
-    // Sensitive content present BUT rule matches first → archive path,
-    // no sensitive-prefilter audit category.
-    await hook(
-      ACCOUNT.id,
-      envelope({
-        subject: 'Your code',
-        snippet: 'OTP 482917',
-      }),
-    );
+    expect(await hook(ACCOUNT.id, envelope({ subject: 'Your code', snippet: 'OTP 482917' }))).toBe('rule_applied');
+    const item = inbox.listItems()[0]!;
+    expect(item.bucket).toBe('requires_user');
+    expect(item.matchedRuleId).toBe(ruleId);
+    expect(item.ruleWithheld).toBeNull();
+    const payload = JSON.parse(inbox.listAuditForItem(item.id)[0]!.payloadJson) as Record<string, unknown>;
+    expect(payload['rule_name']).toBe('Kunde Mustermann');
+  });
+
+  it('a withheld rule without a name is named by its id alone, and the name is the one it had then', async () => {
+    const ruleId = inbox.insertRule({
+      accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'mustermann@example.com',
+      bucket: 'auto_handled', action: 'archive', source: 'on_demand',
+    });
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    await hook(ACCOUNT.id, envelope({ subject: 'Your code', snippet: 'OTP 482917' }));
+    const item = inbox.listItems()[0]!;
+    expect(item.ruleWithheld).toEqual({ id: ruleId, name: null, reason: 'rule_withheld_sensitive' });
+    const payload = JSON.parse(inbox.listAuditForItem(item.id)[0]!.payloadJson) as Record<string, unknown>;
+    expect('rule_name' in payload).toBe(false);
+  });
+
+  it('a follow-up in the thread of a withheld item leaves what was withheld as it was', async () => {
+    const ruleId = inbox.insertRule({
+      accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'mustermann@example.com',
+      bucket: 'auto_handled', action: 'archive', source: 'on_demand', name: 'Kunde Mustermann',
+    });
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    await hook(ACCOUNT.id, envelope({ subject: 'Your code', snippet: 'OTP 482917' }));
+    // The same thread again, now not sensitive: the item is not classified again.
+    expect(await hook(ACCOUNT.id, envelope({ uid: 2, messageId: '<m2@x>', subject: 'Your code', snippet: 'Danke.' }))).toBe('duplicate');
     const items = inbox.listItems();
-    expect(items[0]?.bucket).toBe('auto_handled');
-    expect(items[0]?.classifierVersion).toMatch(/^rule:/);
+    expect(items).toHaveLength(1);
+    expect(items[0]!.ruleWithheld).toEqual({ id: ruleId, name: 'Kunde Mustermann', reason: 'rule_withheld_sensitive' });
+    expect(items[0]!.matchedRuleId).toBeUndefined();
+  });
+
+  it('an auto_handled rule still files a mail that is not sensitive', async () => {
+    const ruleId = inbox.insertRule({
+      accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'mustermann@example.com',
+      bucket: 'auto_handled', action: 'archive', source: 'on_demand',
+    });
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    expect(await hook(ACCOUNT.id, envelope({ subject: 'Wochenbericht', snippet: 'Anbei der Bericht.' }))).toBe('rule_applied');
+    expect(inbox.listItems()[0]!.bucket).toBe('auto_handled');
+    expect(inbox.listItems()[0]!.matchedRuleId).toBe(ruleId);
   });
 });
 
@@ -500,5 +587,56 @@ describe('createInboxClassifierHook — queue overflow dead-letter', () => {
     await hook(ACCOUNT.id, envelope());
     expect(notifyNewItem).toHaveBeenCalledTimes(1);
     expect(notifyNewItem.mock.calls[0]?.[0]).toMatchObject({ bucket: 'requires_user' });
+  });
+});
+
+describe('createInboxClassifierHook — a flagged mail on the rule path and in the push', () => {
+  const OTP = { subject: 'Your code', snippet: 'OTP 482917' };
+  const PLAIN = { subject: 'Wochenbericht', snippet: 'Anbei der Bericht.' };
+  function showRule(): void {
+    inbox.insertRule({
+      accountId: ACCOUNT.id, matcherKind: 'from', matcherValue: 'mustermann@example.com',
+      bucket: 'requires_user', action: 'show', source: 'on_demand',
+    });
+  }
+  const storedBody = (): string | null =>
+    inbox.listThreadMessages(ACCOUNT.id, 'imap:thread-1').find((m) => m.messageId === '<m1@x>')?.bodyMd ?? null;
+
+  it('a rule files a flagged mail under skip without its text, as the sensitive-skip branch does', async () => {
+    showRule();
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    expect(await hook(ACCOUNT.id, envelope(OTP))).toBe('rule_applied');
+    expect(storedBody()).toBeNull();
+  });
+
+  it('a rule still stores the text of a mail that is not flagged', async () => {
+    showRule();
+    expect(await createInboxClassifierHook({ state: inbox, rules, queue, accounts })(ACCOUNT.id, envelope(PLAIN))).toBe('rule_applied');
+    expect(storedBody()).toBe('Anbei der Bericht.');
+  });
+
+  it('a rule stores the text of a flagged mail under allow', async () => {
+    showRule();
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts, sensitiveMode: 'allow' });
+    expect(await hook(ACCOUNT.id, envelope(OTP))).toBe('rule_applied');
+    expect(storedBody()).toBe('OTP 482917');
+  });
+
+  it('tells the notifier a rule-filed flagged mail is flagged', async () => {
+    const notifyNewItem = vi.fn(async () => true);
+    showRule();
+    await createInboxClassifierHook({ state: inbox, rules, queue, accounts, notifier: { notifyNewItem } })(ACCOUNT.id, envelope(OTP));
+    expect(notifyNewItem.mock.calls[0]?.[1]).toEqual({ flagged: true });
+  });
+
+  it('tells the notifier a flagged mail is flagged on the sensitive-skip and dead-letter paths, and a plain one is not', async () => {
+    const notifyNewItem = vi.fn(async () => true);
+    const fullQueue: HookQueue = { enqueue: vi.fn(() => false) };
+    await createInboxClassifierHook({ state: inbox, rules, queue, accounts, notifier: { notifyNewItem } })(ACCOUNT.id, envelope(OTP));
+    await createInboxClassifierHook({ state: inbox, rules, queue: fullQueue, accounts, notifier: { notifyNewItem }, sensitiveMode: 'mask' })(
+      ACCOUNT.id, envelope({ ...OTP, messageId: '<m2@x>', threadKey: 'imap:thread-2' }));
+    await createInboxClassifierHook({ state: inbox, rules, queue: fullQueue, accounts, notifier: { notifyNewItem } })(
+      ACCOUNT.id, envelope({ ...PLAIN, messageId: '<m3@x>', threadKey: 'imap:thread-3' }));
+    expect(notifyNewItem.mock.calls.map((c) => (c as unknown[])[1])).toEqual([{ flagged: true }, { flagged: true }, { flagged: false }]);
   });
 });

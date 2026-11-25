@@ -34,13 +34,17 @@ import { Containment } from './containment.js';
 import { ContainmentMirror, ExactMirror, exactHeldAtBoot, exactMarkerOf, syncContainmentMirror, syncExactMarker } from './history-markers.js';
 import { exactMarkerOnDisk, isExactHeld, refuseDebug } from './exact-debug-refusal.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
-import { AuditLog } from './audit-log.js';
+import { AuditLog, recordMandateRevoked } from './audit-log.js';
+import { auditRetentionState, sqliteErrorCode, sweepAuditLog, type AuditSweepRecord } from './audit-retention.js';
+import type { AuditRetentionState } from '../contract/http.js';
 import { MandateEnds } from './mandate-ends.js';
 import { pauseEndedPlans } from './plan-pause.js';
-import { processErrorText } from './error-egress.js';
+import { isErrorTextReducedForProcess, processErrorText } from './error-egress.js';
+import { tableInLog } from './data-store-boot-log.js';
+import { fireBeforeRunGate } from './metered-request.js';
 import { SecretReleases } from './secret-releases.js';
 import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
-import { connectionTokenAllowed, connectionTokenHolders } from './profile-secret-view.js';
+import { connectionTokenHolders, resolveGuardAllows } from './profile-secret-view.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
 import { runOutsideGroup } from './run-group.js';
@@ -476,6 +480,8 @@ export class Engine {
     driveUploadOptedIn: (c: { backup_gdrive?: boolean | undefined }) => boolean;
   } | null = null;
   private _apiStore: import('./api-store.js').ApiStore | null = null;
+  /** Set once every stored API profile is loaded; until then {@link resolveGuard} cannot tell which vault names hold a connection's token. */
+  private _profilesKnown = false;
   private _artifactStore: import('./artifact-store.js').ArtifactStore | null = null;
   private _crm: import('./crm.js').CRM | null = null;
   private _subjectStore: import('./subject-store.js').SubjectStore | null = null;
@@ -510,6 +516,10 @@ export class Engine {
   private _startedAt = Date.now();
   /** Hourly debug-capture retention sweep; see `_pruneWireCaptures`. */
   private _wireRetentionTimer: ReturnType<typeof setInterval> | null = null;
+  /** Hourly actor-trail retention sweep; see `_sweepAuditLog`. */
+  private _auditRetentionTimer: ReturnType<typeof setInterval> | null = null;
+  /** The last actor-trail sweep, for the health word; null before the first. */
+  private _auditSweep: AuditSweepRecord | null = null;
   private _runRegistry: import('./run-registry.js').RunRegistry | null = null;
   private _runBufferManager: import('./run-buffer.js').RunBufferManager | null = null;
   private _runExecutor: import('./run-executor.js').RunExecutor | null = null;
@@ -916,7 +926,7 @@ export class Engine {
   /**
    * What the inbox reads through the mail registry. `confirmAutoReply`: an envelope from Graph's
    * watch carries no headers, so for every follow-up from someone else the hook asks for the full
-   * message, whose envelope reads Auto-Submitted. Looked up at call time, so a provider
+   * message, whose envelope reads the automatic-mail headers. Looked up at call time, so a provider
    * added or replaced later is the one asked. No provider: throw, and the hook reopens.
    */
   private _applyInboxMailLookups(bootOpts: Parameters<typeof import('../integrations/inbox/bootstrap.js').bootstrapInbox>[0]): void {
@@ -1041,6 +1051,8 @@ export class Engine {
         this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
         // The store as the inbox view reads it, for inbox_read.
         this._mailContext.hooks.inboxReader = runtime.inboxReader;
+        // Waiting rules for inbox_rule_propose.
+        this._mailContext.hooks.inboxRuleProposer = runtime.inboxRuleProposer;
       }
       this._inboxRuntime = runtime;
       this._inboxLlmRegion = newRegion;
@@ -1055,7 +1067,7 @@ export class Engine {
       console.error(
         '[lynox] Inbox classifier rebootstrap on provider-switch failed — '
         + 'classifier disabled until next restart:',
-        err,
+        processErrorText(err, true),
       );
       // No runtime to hand over to: what the old one still holds is surfaced as a failed
       // classification, still within the bound.
@@ -1372,6 +1384,14 @@ export class Engine {
     this._onboardingFlagStore = this.engineDb ? new OnboardingFlagStore(this.engineDb) : null;
     // The actor trail rides engine.db as well (v22), for the same reason: it is always opened.
     this._toolContext.auditLog = this.engineDb ? new AuditLog(this.engineDb.getDb()) : null;
+    // How long the trail keeps a row (audit-retention.ts): once now and then hourly, so the first
+    // row is deleted on the day it turns 365 days old, whether or not anyone acts on the instance.
+    if (this.engineDb !== null) {
+      this._sweepAuditLog();
+      // run-group-starter: boot code, before any run exists; the sweep reports no spend.
+      this._auditRetentionTimer = setInterval(() => this._sweepAuditLog(), 60 * 60_000);
+      this._auditRetentionTimer.unref();
+    }
     // And the end of each mandate (v24), which a later reader checks without a request.
     this._mandateEnds = this.engineDb ? new MandateEnds(this.engineDb.getDb()) : null;
     this._toolContext.mandateEnds = this._mandateEnds;
@@ -1473,6 +1493,17 @@ export class Engine {
       } catch (err) {
         process.stderr.write(`[lynox] workflow content-schema migration failed: ${err instanceof Error ? err.message : String(err)} — retry next boot\n`);
       }
+
+      // The workflow stamps from before the digest get theirs, once per engine.db (marker v69),
+      // AFTER the backfill and the content migration so it sees the definitions as they run.
+      // A failure leaves the marker at 0 and every stamp without a digest not holding: those
+      // workflows wait for the owner (fail closed) until a later boot passes.
+      try {
+        const stamped = this.runHistory.stampExistingWorkflows();
+        if (stamped !== null && stamped > 0) process.stderr.write(`[lynox] workflow stamps: ${stamped} definition(s) bound to their steps\n`);
+      } catch (err) {
+        process.stderr.write(`[lynox] workflow stamp pass failed: ${processErrorText(err)} — retry next boot\n`);
+      }
     }
 
     // Initialize thread store (shares DB connection with RunHistory)
@@ -1531,7 +1562,7 @@ export class Engine {
           try {
             promptStore.expireEndedMandates(mandateLive);
           } catch (err: unknown) {
-            process.stderr.write(`[lynox] closing ended mandates' questions failed: ${err instanceof Error ? err.message : String(err)}\n`);
+            process.stderr.write(`[lynox] closing ended mandates' questions failed: ${processErrorText(err)}\n`);
           }
         };
         sweepEnded();
@@ -1673,6 +1704,12 @@ export class Engine {
       runOutsideGroup(() => queueMicrotask(() => this.endEndedMandateRuns()));
     });
     this._mandateEnds?.onRevoke(() => this.endEndedMandateRuns());
+    // The revoke in the revoked person's trail. A throw is logged by `MandateEnds.revoke` and
+    // undoes nothing: the end is already written and every later request is refused by it.
+    this._mandateEnds?.onRevoke((mandateId) => {
+      const log = this.getAuditLog();
+      if (log !== null) recordMandateRevoked(log, mandateId);
+    });
     this._runSweepTimer = setInterval(() => this.endEndedMandateRuns(), 5 * 60_000);
     this._runSweepTimer.unref?.();
 
@@ -1689,8 +1726,9 @@ export class Engine {
     }
 
     // Configure persistent budget caps, HTTP rate limits and the egress policy.
-    // Called with or without RunHistory: the limits that count against it are
-    // skipped when it failed to open, the egress policy is applied regardless.
+    // Called with or without RunHistory. Without it the daily/monthly caps cannot be
+    // checked and refuse every run (session-budget.ts), and the send-rate limits that
+    // count against it refuse rather than send uncounted; the egress policy is applied regardless.
     // History subscriptions (toolEnd → recordToolCall) are set up per-Session in the constructor.
     configureBudgetAndRateLimits(this.runHistory, this.userConfig, this._toolContext);
   }
@@ -1725,6 +1763,10 @@ export class Engine {
     const secretResult = initSecrets(this.userConfig);
     this.secretVault = secretResult.vault;
     this.secretStore = secretResult.store;
+    // From the moment the store exists, a token of a connection whose mandate has ended is not
+    // handed out, to anyone. Set here, not after the profiles load: a guard set at the end of that
+    // block is never set when the block throws.
+    this.secretStore?.setResolveGuard((name) => this.resolveGuard(name));
     this.secretsBriefing = secretResult.secretsBriefing;
     for (const part of secretResult.briefingParts) {
       this.briefing = compose(
@@ -1916,6 +1958,9 @@ export class Engine {
         // Degraded (engine.db unavailable): fall back to the flat-JSON directory,
         // exactly as before S4b.
         loaded = this._apiStore.loadFromDirectory(apisDir);
+        // What a person changes from here on would land only in those files, which the next boot
+        // with engine.db does not read: refused with a plain reason instead.
+        this._apiStore.refuseChangesWithoutStore();
       }
       // Wire the in-memory store into tool context unconditionally — otherwise
       // a fresh install (zero profiles) leaves toolContext.apiStore undefined, so
@@ -1940,8 +1985,12 @@ export class Engine {
           process.stderr.write(`[lynox:vault-bindings] Migration failed, retried next boot: ${err instanceof Error ? err.message : String(err)}\n`);
         }
       }
-      // From here on a token of a connection whose mandate has ended is not handed out, to anyone.
-      this.secretStore?.setResolveGuard((name) => connectionTokenAllowed(this._apiStore, this._mandateEnds, name));
+      // The stored profiles are loaded: the guard set with the secret store answers by them, and by
+      // the entries it could not read (`resolveGuardAllows`).
+      this._profilesKnown = true;
+      // The LLM client was built before this, when the guard handed out only the environment's and
+      // the platform's names: a Vertex project id kept in the vault is read now.
+      if (this.secretStore?.holds('GCP_PROJECT_ID') === true) this._recreateClient();
       if (loaded > 0) {
         const store = this._apiStore;
         const apiContext = collectOwnBlocks(this.briefingOwnBlocks, () => store.formatForSystemPrompt());
@@ -1965,8 +2014,11 @@ export class Engine {
       if (suggestedContext) {
         this.briefing = this.briefing ? `${this.briefing}\n\n${suggestedContext}` : suggestedContext;
       }
-    } catch {
+    } catch (err: unknown) {
       this._apiStore = null;
+      // From here on the guard hands out no vault name that could hold a connection's token: say so,
+      // or the owner's own secrets look missing with no cause anywhere.
+      process.stderr.write(`[lynox:api-store] API profiles could not be loaded; until the next start only the environment's and the platform's own secrets are handed out: ${processErrorText(err)}\n`);
     }
 
     // Register builtin tools
@@ -2054,6 +2106,10 @@ export class Engine {
     // path every newly provisioned tenant takes. Falling back to the legacy tools here is not a
     // silent downgrade over the alternative — the alternative was silence with nothing working.
     this._legacyMemory = legacyMemoryReason(this.userConfig.durable_memory_enabled, this._knowledgeStore);
+    // The old tools here stand in for the durable ones, whose next boot with engine.db does not read
+    // what these write: a change is refused with a plain reason instead. With durable memory off the
+    // files are the memory, and they are written as before.
+    if (this._legacyMemory === 'store_missing' && this.engineDb === null) this.memory?.refuseChangesWithoutStore();
     if (this._legacyMemory === null) {
       this.registry
         .register(rememberTool)
@@ -2077,6 +2133,9 @@ export class Engine {
       const { TaskManager, setPipelineModeLookup } = await import('./task-manager.js');
       this._taskManager = new TaskManager(this.runHistory);
       this._toolContext.taskManager = this._taskManager;
+      // Without engine.db a to-do lands in history.db only, which the next boot with engine.db may
+      // not read: refused with a plain reason instead (`refuseTaskChangesWithoutStore`).
+      if (this.engineDb === null) this._taskManager.refuseTaskChangesWithoutStore();
       // Wire the pipeline-mode lookup so TaskManager can refuse to schedule
       // pipelines it may not run. Lazy-imported to avoid a tools→core cycle.
       // Fail-closed: if the import or wiring fails, install a lookup that
@@ -2114,15 +2173,34 @@ export class Engine {
       // constructor, which the operator scripts also run against a live store. A table
       // that fails stays readable but refuses inserts and upserts until a restart migrates
       // it; the rest of the store is unaffected.
+      // On an instance with an exact connection these lines name no table, and the database's
+      // text, which can quote one, is left out (data-store-boot-log.ts). `refuseDebug` has run by
+      // now (`_initPersistence`), so the marker is read.
+      const reducedLog = isErrorTextReducedForProcess();
       const sourceColumns = this._dataStore.ensureSourceColumns();
       for (const f of sourceColumns.failed) {
-        process.stderr.write(`[lynox] DataStore: table "${f.collection}" could not get its source columns and refuses writes until a restart migrates it: ${f.error}\n`);
+        process.stderr.write(`[lynox] DataStore: ${tableInLog(f.collection, reducedLog)} could not get its source columns and refuses writes until a restart migrates it${reducedLog ? '' : `: ${f.error}`}\n`);
       }
       if (sourceColumns.invalid.length > 0) {
         process.stderr.write(`[lynox] DataStore: skipped ${String(sourceColumns.invalid.length)} listed table name(s) that are not valid table names; they were left unchanged\n`);
       }
       if (sourceColumns.missing.length > 0) {
-        process.stderr.write(`[lynox] DataStore: listed table(s) without a database table: ${sourceColumns.missing.join(', ')}\n`);
+        process.stderr.write(reducedLog
+          ? `[lynox] DataStore: ${String(sourceColumns.missing.length)} listed table(s) without a database table\n`
+          : `[lynox] DataStore: listed table(s) without a database table: ${sourceColumns.missing.join(', ')}\n`);
+      }
+      // The opaque id a mandate's row in the instance trail names a table by. Every boot, so a
+      // table created without one (by an older build on this file) gets it here. Never thrown:
+      // a table without an id is named by its kind only.
+      const collectionIds = this._dataStore.ensureCollectionIds();
+      if (collectionIds.failed !== null) {
+        process.stderr.write(`[lynox] DataStore: tables could not get their ids; a mandate's rows name them by their kind only until a restart assigns them${reducedLog ? '' : `: ${collectionIds.failed}`}\n`);
+      }
+      if (collectionIds.indexFailed !== null) {
+        process.stderr.write(`[lynox] DataStore: the unique index on table ids could not be created${reducedLog ? '' : `: ${collectionIds.indexFailed}`}\n`);
+      }
+      for (const r of collectionIds.renumbered) {
+        process.stderr.write(`[lynox] DataStore: ${tableInLog(r.name, reducedLog)} shared its id with another and got a new one: ${r.from} -> ${r.to}\n`);
       }
       // Registered as soon as the store exists — all six, unconditionally. This
       // used to wait for `listCollections().length > 0`, which an instance with
@@ -2411,6 +2489,8 @@ export class Engine {
           this._mailContext.hooks.inboxLabelOf = runtime.inboxLabelOf;
           // The store as the inbox view reads it, for inbox_read.
           this._mailContext.hooks.inboxReader = runtime.inboxReader;
+          // Waiting rules for inbox_rule_propose.
+          this._mailContext.hooks.inboxRuleProposer = runtime.inboxRuleProposer;
           // Notify the user when a tracked mail follow-up's reminder falls due.
           // The hook is DECLARED (MailContext.checkDueFollowups fires it every
           // watcher tick, after marking the row reminded) but was never ASSIGNED —
@@ -2434,7 +2514,7 @@ export class Engine {
       } catch (err) {
         // Surface the failure so a silently-disabled feature does not
         // become a debugging black hole. Mail integration still works.
-        console.error('[lynox] Inbox bootstrap failed — feature disabled:', err);
+        console.error('[lynox] Inbox bootstrap failed — feature disabled:', processErrorText(err, true));
       }
     }
 
@@ -2610,7 +2690,8 @@ export class Engine {
           if (result.success) {
             process.stderr.write(`[lynox] Pre-update backup created: ${result.path}\n`);
           } else {
-            process.stderr.write(`[lynox] Pre-update backup failed: ${result.error ?? 'unknown'}\n`);
+            const { backupFailureDetail } = await import('./backup.js');
+            process.stderr.write(`[lynox] Pre-update backup failed${backupFailureDetail(result.error, 'unknown')}\n`);
           }
         }
 
@@ -2932,7 +3013,7 @@ export class Engine {
       try {
         end();
       } catch (err: unknown) {
-        process.stderr.write(`[lynox] ending ended mandates' ${what} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox] ending ended mandates' ${what} failed: ${processErrorText(err)}\n`);
       }
     }
   }
@@ -2967,6 +3048,16 @@ export class Engine {
   getLegacyMemoryReason(): LegacyMemoryReason | null { return this._legacyMemory; }
   getToolContext(): ToolContext { return this._toolContext; }
   getSecretStore(): SecretStore | null { return this.secretStore; }
+
+  /** The secret store's resolve guard: {@link resolveGuardAllows} over this engine's state. */
+  private resolveGuard(name: string): boolean {
+    return resolveGuardAllows({
+      profilesKnown: this._profilesKnown,
+      apiStore: this._apiStore,
+      ends: this._mandateEnds,
+      fromEnvironment: (n) => this.secretStore?.isEnvironmentSecret(n) === true,
+    }, name);
+  }
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }
 
   /**
@@ -3171,14 +3262,14 @@ export class Engine {
     return (delivery: DeliverySummary): void => {
       if (caller) {
         try { caller(delivery); } catch (err: unknown) {
-          process.stderr.write(`[escalation] recording the delivery failed: ${err instanceof Error ? err.message : String(err)}\n`);
+          process.stderr.write(`[escalation] recording the delivery failed: ${processErrorText(err)}\n`);
         }
       }
       if (this.userConfig.escalation_mail === false) return;
       for (const hook of this._hooks) {
         if (!hook.onEscalationReported) continue;
         try { hook.onEscalationReported(delivery); } catch (err: unknown) {
-          process.stderr.write(`[escalation] a hook failed on the delivery: ${err instanceof Error ? err.message : String(err)}\n`);
+          process.stderr.write(`[escalation] a hook failed on the delivery: ${processErrorText(err)}\n`);
         }
       }
     };
@@ -3370,10 +3461,15 @@ export class Engine {
   // ── Batch ──
 
   async batch(reqs: BatchRequest[], sessionConfig?: { systemPromptSuffix?: string | undefined }): Promise<string> {
+    const modelTier = this.config.model ?? 'deep';
+    // A batch is a paid model call outside `Session.run()`: the same admission as
+    // every other one — the daily and monthly spending caps, then the hooks.
+    const gate = await fireBeforeRunGate(this, modelTier);
+    if (gate.blockedReason !== null) throw new Error(gate.blockedReason);
     const result = await submitBatch(
       this.client, reqs,
       {
-        modelTier: this.config.model ?? 'deep',
+        modelTier,
         maxTokens: this.config.maxTokens ?? 8192,
         systemPrompt: this.config.systemPrompt,
         systemPromptSuffix: sessionConfig?.systemPromptSuffix,
@@ -3437,6 +3533,45 @@ export class Engine {
       process.stderr.write(`[lynox] wire snapshot prune failed (${err instanceof Error ? err.message : String(err)}) — old captures are NOT being removed\n`);
     }
     pruneWireSinks();
+  }
+
+  /**
+   * Delete what is past its time and fold the trail's old polls (`sweepAuditLog`). Best-effort: a
+   * failed step must not stop the engine, and it is reported rather than swallowed. A refused delete
+   * applies nothing; a refused day is left as it was while the other days fold. The next hour tries
+   * again.
+   */
+  private _sweepAuditLog(): void {
+    const db = this.engineDb?.getDb();
+    if (db === undefined) return;
+    // Monotonic, for the health word's "when did it last run": a host that slept or a wall clock that
+    // jumped must not make the last sweep look stale. The sweep itself works on wall time.
+    const at = performance.now();
+    let refused = false;
+    try {
+      const r = sweepAuditLog(db, Date.now(), (day, err) => {
+        refused = true;
+        // A fixed tag an operator can grep for: while a day stays unfolded, its polls are kept
+        // single past the 30-day fold (audit-retention.ts). The SQLite code keeps the cause
+        // where the error text is reduced.
+        process.stderr.write(`[lynox] AUDIT_FOLD_REFUSED day=${day} (${processErrorText(err)}${sqliteErrorCode(err)}) — that day's polls stay single rows\n`);
+      });
+      this._auditSweep = { at, refused, dayRows: r.dayRows };
+    } catch (err) {
+      this._auditSweep = { at, refused: true, dayRows: 0 };
+      process.stderr.write(`[lynox] audit log retention sweep failed (${processErrorText(err)}${sqliteErrorCode(err)}) — old trail rows are NOT being removed\n`);
+    }
+  }
+
+  /**
+   * The health body's `engine.audit_retention` word (audit-retention.ts, `auditRetentionState`);
+   * undefined without engine.db, where there is no trail to keep.
+   */
+  getAuditRetentionState(): AuditRetentionState | undefined {
+    const db = this.engineDb?.getDb();
+    // Closed at shutdown: no trail to keep any more, and not a stall.
+    if (db === undefined || !db.open) return undefined;
+    return auditRetentionState(db, Date.now(), this._auditSweep, performance.now());
   }
 
   /** Fire orchestrator shutdown hooks (for Pro extensions — includes worker pool shutdown). */
@@ -3556,6 +3691,10 @@ export class Engine {
     if (this._wireRetentionTimer) {
       clearInterval(this._wireRetentionTimer);
       this._wireRetentionTimer = null;
+    }
+    if (this._auditRetentionTimer) {
+      clearInterval(this._auditRetentionTimer);
+      this._auditRetentionTimer = null;
     }
 
     // Save file manifest for next session's diff

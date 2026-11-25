@@ -63,8 +63,9 @@ beforeEach(() => {
 		if (u.endsWith('/config')) return viewer === null ? new Response('', { status: 502 }) : reply({ managed: true, viewer });
 		if (u.endsWith('/bulk/runs')) return reply({ runs: [run] });
 		if (u.endsWith('/merges')) return reply({ merges: [MERGE] });
-		const page = /\/targets\?offset=(\d+)&limit=(\d+)$/.exec(u);
-		if (page) return reply({ targets: shownTargets.slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
+		// `changed=1`: as the engine serves it, the changed targets, the written ones first.
+		const page = /\/targets\?offset=(\d+)&limit=(\d+)(&changed=1)?$/.exec(u);
+		if (page) return reply({ targets: (page[3] ? shownTargets.filter((x) => x.change !== 'unchanged').sort((a, b) => Number(b.written === true) - Number(a.written === true) || a.seq - b.seq) : shownTargets).slice(Number(page[1]), Number(page[1]) + Number(page[2])) });
 		return reply(run);
 	}));
 });
@@ -103,7 +104,7 @@ const buttonByText = (text: string): HTMLButtonElement | undefined =>
 describe('a run\'s page as a mandate sees it', () => {
 	it('shows a preview without approving or taking a target out, and says who can act', async () => {
 		await renderDetail();
-		expect(target.textContent).toContain('Product/1');
+		expect(target.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/1');
 		expect(buttonByText(t('bulk.approve.approve'))).toBeUndefined();
 		expect(buttonByText(t('bulk.deselect.off'))).toBeUndefined();
 		expect(target.textContent).toContain(t('bulk.owner_only_notice'));
@@ -176,7 +177,7 @@ describe('a session whose reader the server has not named as the owner', () => {
 		it(`offers no act and says nothing about the owner on ${name}`, async () => {
 			viewer = answer;
 			await renderDetail();
-			expect(target.textContent).toContain('Product/1');
+			expect(target.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/1');
 			expect(buttonByText(t('bulk.approve.approve'))).toBeUndefined();
 			expect(buttonByText(t('bulk.deselect.off'))).toBeUndefined();
 			expect(target.textContent).not.toContain(t('bulk.owner_only_notice'));
@@ -319,5 +320,15 @@ describe('a sentence that names an act of the owner\'s', () => {
 		viewer = 'owner';
 		await renderList();
 		expect(target.textContent).toContain(t('bulk.intro'));
+	});
+});
+
+describe('the reason under a value lynox leaves out, as a mandate reads it', () => {
+	it('names the owner as the one who can still approve the other products', async () => {
+		run = makeRun({ total: 2, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 1 } });
+		shownTargets = [...TARGETS, { seq: 2, key: 'gid://shopify/Product/2', change: 'invalid', diff: { kind: 'none' } as BulkTarget['diff'], error: 'html_too_long', deselected: false }];
+		await renderDetail();
+		expect(target.textContent).toContain(t('bulk.invalid.html_too_long_mandate'));
+		expect(target.textContent).not.toContain(t('bulk.invalid.html_too_long'));
 	});
 });

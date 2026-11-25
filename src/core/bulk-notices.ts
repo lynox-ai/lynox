@@ -11,7 +11,8 @@
  * so has every sentence a bulk outcome is pushed with, refusals and atomic runs included.
  */
 import type { NoticeLanguage } from './notice-language.js';
-import { BULK_HALT_REASONS } from './bulk-ledger.js';
+import type { BulkTriggerEffect } from '../types/pipeline.js';
+import { BULK_HALT_REASONS, externalHostOf } from './bulk-ledger.js';
 
 export interface BulkApplyCounts {
   applied: number; foundAsPlanned: number; failed: number; conflicts: number;
@@ -19,6 +20,10 @@ export interface BulkApplyCounts {
 }
 
 export type BulkPhase = 'apply' | 'preview' | 'judge';
+
+/** Which filters a Shopify list names, for its sentences: its group (`both` = type and vendor), a
+ *  status alone, or a group read among one status (`group_status`). */
+export type ShopifyFilterKind = 'product_type' | 'vendor' | 'both' | 'status' | 'group_status';
 
 export interface BulkNotices {
   readonly applyDone: string;
@@ -28,10 +33,10 @@ export interface BulkNotices {
   readonly listWaiting: string;
   /** A filtered Shopify list that matched no product, by which filters it has: the finding and
    *  the next step, never the value (ux U-123). The task tool gives the same text to a model. */
-  listNoMatch(filters: 'product_type' | 'vendor' | 'both', many?: boolean): string;
+  listNoMatch(filters: ShopifyFilterKind, many?: boolean): string;
   /** A filtered list whose search listed products, every one of them spelled otherwise than the
    *  filter (`not_in_filter`, PRD shopify-preset §22.4): products exist, none as written. */
-  listNoneLeft(filters: 'product_type' | 'vendor' | 'both', many?: boolean): string;
+  listNoneLeft(filters: ShopifyFilterKind, many?: boolean): string;
   readonly judgeDone: string;
   applyCounts(c: BulkApplyCounts): string;
   previewCounts(read: number, invalid: number, unread: number, total: number): string;
@@ -51,6 +56,12 @@ export interface BulkNotices {
   notApproved(phase: string): string;
   /** A halted run that is written on only once resumed (B4). */
   readonly haltedResume: string;
+  /**
+   * A Shopify run halted because its connection does not yet cover `fields` (`shopifyConsentBlock`),
+   * the way on included (U-281). `nothingYet`: no target of the run was written or sent to, so
+   * the sentence may say that nothing was written.
+   */
+  consentOutdated(fields: readonly string[], nothingYet: boolean): string;
   /** A run another loop took over (B9). */
   readonly otherLoop: string;
   /** A run waiting for targets another loop holds (B10, recorded only). */
@@ -101,6 +112,20 @@ function applyCounts(c: BulkApplyCounts, w: CountWords): string {
   return `${c.sentUnknown > 0 ? `${w.unclear(String(c.sentUnknown))} ` : ''}${parts.join(', ')}`;
 }
 
+/** The Shopify fields a sentence names after "change" / "zu ändern", with their article (U-281). */
+const SHOPIFY_FIELD_NAMES: Readonly<Record<'de' | 'en', Readonly<Record<string, string>>>> = Object.freeze({
+  de: Object.freeze({ title: 'den Titel', descriptionHtml: 'die Beschreibung', seo_title: 'den SEO-Titel', seo_description: 'die SEO-Beschreibung', alt: 'die Alt-Texte der Bilder' }),
+  en: Object.freeze({ title: 'the title', descriptionHtml: 'the description', seo_title: 'the SEO title', seo_description: 'the SEO description', alt: 'the image alt texts' }),
+});
+
+/** `fields` by name, joined with "und"/"and"; "diese Felder"/"these fields" when one has no name here. */
+export function shopifyFieldsNamed(fields: readonly string[], lang: 'de' | 'en'): string {
+  const names = fields.map((f) => Object.hasOwn(SHOPIFY_FIELD_NAMES[lang], f) ? SHOPIFY_FIELD_NAMES[lang][f] : undefined);
+  if (names.length === 0 || names.some((n) => n === undefined)) return lang === 'de' ? 'diese Felder' : 'these fields';
+  const and = lang === 'de' ? ' und ' : ' and ';
+  return names.length === 1 ? names[0]! : `${names.slice(0, -1).join(', ')}${and}${names[names.length - 1]!}`;
+}
+
 const EN: BulkNotices = Object.freeze({
   applyDone: 'Bulk run done.',
   previewDone: 'Bulk preview done. The run is ready for review.',
@@ -108,14 +133,22 @@ const EN: BulkNotices = Object.freeze({
   listEmpty: 'Bulk list read done. The list holds no target that could be planned.',
   listWaiting: 'Bulk list read done. Review the targets, then start reading them.',
   // `many`: at least one filter lists values (ux U-175); one value each reads as it always did.
-  listNoMatch: (filters: 'product_type' | 'vendor' | 'both', many = false) => many
+  listNoMatch: (filters: ShopifyFilterKind, many = false) => filters === 'status'
+    ? `List read: no product has ${many ? 'any of the statuses' : 'the status'} in the filter. Check the products' status in the store, then ask lynox in a chat to plan the list again.`
+    : filters === 'group_status'
+    ? 'List read: no product matches both the group and the status in the filter. Check them in the store, then ask lynox in a chat to plan the list again.'
+    : many
     ? (filters === 'both'
       ? 'List read: no product has both a product type and a vendor in the filter. Check the values in the store, then ask lynox in a chat to plan the list again.'
       : `List read: no product has any of the ${filters === 'product_type' ? 'product types' : 'vendors'} in the filter. Check the values in the store, then ask lynox in a chat to plan the list again.`)
     : filters === 'both'
     ? 'List read: no product has both the product type and the vendor in the filter. Check both values in the store, then ask lynox in a chat to plan the list again.'
     : `List read: no product has the ${filters === 'product_type' ? 'product type' : 'vendor'} in the filter. Check the value in the store, then ask lynox in a chat to plan the list again.`,
-  listNoneLeft: (filters: 'product_type' | 'vendor' | 'both', many = false) => many
+  listNoneLeft: (filters: ShopifyFilterKind, many = false) => filters === 'status'
+    ? `Preview: products found, but none with ${many ? 'any of the statuses' : 'the status'} in the filter. Ask lynox in a chat to plan the list again.`
+    : filters === 'group_status'
+    ? 'Preview: products found, but none with both group and status as in the filter. Ask lynox in a chat to plan again with the spellings the store shows.'
+    : many
     ? (filters === 'both'
       ? 'Preview: products found, but none with both product type and vendor spelled as a value in the filter. Ask lynox in a chat to plan again with the spellings the store shows.'
       : `Preview: products found, but none with a ${filters === 'product_type' ? 'product type' : 'vendor'} spelled as one in the filter. Ask lynox in a chat to plan again with the spellings the store shows.`)
@@ -135,8 +168,9 @@ const EN: BulkNotices = Object.freeze({
     `Judged ${String(judged)}, invalid ${String(invalid)}, without a verdict ${String(unjudged)} of ${String(total)} targets.`,
   costs: (calls: number, eachUsd: number) =>
     `${String(calls)} API calls this pass, estimated $${(calls * eachUsd).toFixed(4)} ($${String(eachUsd)} each from the profile rate).`,
+  // The sentence alone: the push title names the stage and that it halted (U-324).
   halted: (phase: BulkPhase, reason: string) =>
-    `${phase === 'apply' ? 'Bulk run' : phase === 'preview' ? 'Bulk preview' : 'Bulk judge'} halted: ${reason}.`,
+    (phase === 'judge' && reason === BULK_HALT_REASONS.unavailable ? EN_JUDGE_UNAVAILABLE : enHaltReason(reason)) ?? `${reason}.`,
   previewStopped: 'Bulk preview stopped: the run was dropped, halted or moved on.',
   listStopped: 'Bulk list read stopped: the run was dropped, halted or moved on.',
   judgeStopped: 'Bulk judge stopped: the run was halted, superseded or moved on.',
@@ -144,6 +178,8 @@ const EN: BulkNotices = Object.freeze({
   effectMismatch: 'The trigger effect does not match the bulk run.',
   notApproved: (phase: string) => `Bulk run is ${phase}, not approved — nothing written.`,
   haltedResume: 'Bulk run is halted — resume it to continue.',
+  consentOutdated: (fields: readonly string[], nothingYet: boolean) =>
+    `${nothingYet ? 'lynox wrote nothing.' : 'lynox writes nothing more in this run; what it already wrote stays.'} This Shopify connection does not yet let lynox change ${shopifyFieldsNamed(fields, 'en')}. Reconnect Shopify (Settings → APIs), then ask lynox in the chat to plan the run again.`,
   otherLoop: 'Bulk run stopped by another loop.',
   otherLoopHolds: 'Bulk run waiting for targets another loop holds.',
   noJudgedRun: 'No judged bulk run with this id.',
@@ -161,6 +197,78 @@ const EN: BulkNotices = Object.freeze({
   judgeEnded: 'Bulk judge stopped.',
   writeError: 'The bulk write stopped on an error inside lynox.',
 });
+
+/**
+ * The English sentence for each stored reason a bulk run halts on: the counterpart of the German
+ * one below, in the words of the run page where the page has the same sentence (U-324). Keyed
+ * by the reason's name, so a new reason without an English sentence does not compile; looked up
+ * by the stored text, built on first use for the same import cycle as the German table.
+ */
+const EN_HALT_REASONS: Readonly<Record<keyof typeof BULK_HALT_REASONS, string>> = Object.freeze({
+  timeBudget: 'Time budget used up.',
+  failureRate: 'More than 5% of the targets failed.',
+  consecutiveFailures: 'Three targets in a row failed.',
+  stoppedByOwner: 'Stopped manually.',
+  maxTargets: 'Reached the approved maximum.',
+  awaitingStart: 'Waiting for you to start reading.',
+  expired: 'Approval expired.',
+  unavailable: 'Target system not reachable, or an error in lynox. The run can be continued; if it halts again right away, the target system is not reachable yet.',
+  credential: 'lynox finds no stored access to the target system. Reconnect it under Settings → APIs, or ask lynox in the chat to do so.',
+  unauthorized: 'The target system refused the stored access. Once it is reconnected under Settings → APIs, the run can be continued.',
+  blocked: 'This instance is not allowed to reach this target system.',
+  contract: 'A target is outside what the run may write.',
+  costCap: 'The run reached its AI spend limit.',
+  spendLimit: 'The daily or monthly AI budget has been reached.',
+  creditRefused: 'AI call refused: no credit, or the connection to lynox was interrupted.',
+  probeRequired: 'lynox writes further targets only once the probe is confirmed.',
+  mandateEnded: 'The access the run was planned through ended before it was approved. Nothing was written.',
+  markupAddedByShop: 'A written product contains markup lynox did not send; it was added in the store. The product and what you can do next are under Bulk runs.',
+  checksum: 'The run has changed since it was approved.',
+  atomicRolledBack: 'A target could not be written; every target written before it is undone. Nothing has changed.',
+  atomicRollbackIncomplete: 'A target could not be written, and undoing did not fully succeed. Check the marked targets under Bulk runs yourself.',
+  atomicStoppedRolledBack: 'Stopped manually; every target written before is undone. Nothing has changed.',
+  atomicStoppedRollbackIncomplete: 'Stopped manually, and undoing did not fully succeed. Check the marked targets under Bulk runs yourself.',
+  atomicTimeRolledBack: 'Time budget used up; every target written before is undone. Nothing has changed.',
+  atomicTimeRollbackIncomplete: 'Time budget used up, and undoing did not fully succeed. Check the marked targets under Bulk runs yourself.',
+  unrecorded: 'A read could not be recorded in the instance\'s log and was therefore not sent.',
+  runUnrecorded: 'The run could not be recorded in the instance\'s log; nothing read, nothing written.',
+  listed: 'List read. Waiting for the targets to be reviewed and reading to be started.',
+  listNotAList: 'A page of the list is not a list.',
+  listUnreadable: 'A page of the list could not be read.',
+  listTooLarge: 'The list is longer or larger than a bulk run can hold; nothing changed. Plan again with part of the list, if the source allows it.',
+  listNoProgress: 'A full page of the list held no new target.',
+  listFormWithdrawn: 'A bulk run is no longer allowed to read this list\'s address.',
+  listFilterWithdrawn: 'A bulk run is no longer allowed to read the list with this filter. lynox changed nothing.',
+  listOrder: 'A page of the list did not continue in ID order.',
+  listReadFailed: 'The store answered a page of the list with an error.',
+  shopInactive: 'The store is closed or frozen.',
+  storeAccessEnded: 'lynox could not renew its access to the store. Ask lynox in the chat to connect the store again, then the run can be continued.',
+  storeClientMisnamed: 'The store profile keeps the app credentials under other names. Have lynox fix the profile in the chat, then the run can be continued.',
+  formCost: 'The store refused a read as too costly.',
+  shopifyReadOff: 'Reading Shopify stores in a bulk run is switched off on this instance.',
+  shopifyWriteOff: 'Writing to Shopify stores in a bulk run is switched off on this instance. Once it is on again, the run can be continued.',
+  // Why a request to a store got no pass, one sentence per cause and what to do (U-232), as the German one says it.
+  shopifySelfHosted: 'lynox reaches Shopify stores only on instances that lynox runs. This instance is self-hosted, so the run cannot go on here.',
+  shopifyNotSetUp: 'Shopify is not set up on this instance. Only lynox can set it up. Once lynox has set up Shopify, you can continue the run.',
+  shopifyUnconfirmed: 'lynox could not confirm that this instance may reach Shopify. You can continue the run in a few minutes.',
+  shopifyNotCleared: 'Shopify is not cleared for this instance right now. Only lynox can clear it. Once lynox has cleared Shopify, you can continue the run.',
+  containmentUnwritable: 'lynox could not record that this run reads the store; nothing was sent. You can continue the run later.',
+  shopifyNoApiVersion: 'A setting for Shopify is missing in lynox. Only lynox can fix it (support@lynox.ai).',
+  // True for a run and for an undo alike, which go on differently: the page says how (U-232).
+  storeRequestRefused: 'lynox did not send a request of this run to the store: lynox does not let a request of this form through to Shopify. The run\'s page says how to go on.',
+  consentOutdated: 'This Shopify connection does not yet let lynox change these fields. Reconnect Shopify (Settings → APIs), then ask lynox in the chat to plan the run again.',
+  superseded: 'Another run with judging was started in its place. This one wrote nothing.',
+  discarded: 'You discarded this run. lynox wrote nothing.',
+  judgeModel: 'The AI provider of this run has no model for judging, or the operator does not allow it.',
+});
+let enHaltByText: ReadonlyMap<string, string> | undefined;
+function enHaltReason(reason: string): string | undefined {
+  enHaltByText ??= new Map(Object.entries(BULK_HALT_REASONS).map(([k, v]) => [v, EN_HALT_REASONS[k as keyof typeof BULK_HALT_REASONS]]));
+  return enHaltByText.get(reason);
+}
+
+/** A judging run halts as `unavailable` when its model call fails too, so its sentence names the model. */
+const EN_JUDGE_UNAVAILABLE = 'AI model or target system not reachable, or an error in lynox. The run can be continued; if it halts again right away, try again later.';
 
 /**
  * The German sentence for each stored reason a bulk run halts on. Built on first
@@ -203,17 +311,32 @@ function deHaltReason(reason: string): string | undefined {
     [BULK_HALT_REASONS.listed]: 'Liste gelesen. Wartet, bis die Ziele geprüft sind und das Lesen gestartet wird.',
     [BULK_HALT_REASONS.listNotAList]: 'Eine Seite der Liste ist keine Liste.',
     [BULK_HALT_REASONS.listUnreadable]: 'Eine Seite der Liste liess sich nicht lesen.',
-    [BULK_HALT_REASONS.listTooLarge]: 'Die Liste ist länger oder grösser, als ein Massenlauf fassen kann.',
+    // The way on for every list form: the reason alone does not tell a Shopify list from another (U-186).
+    [BULK_HALT_REASONS.listTooLarge]: 'Die Liste ist länger oder grösser, als ein Massenlauf fassen kann; nichts geändert. Neu planen mit einem Teil der Liste, falls die Quelle das zulässt.',
     [BULK_HALT_REASONS.listNoProgress]: 'Eine volle Seite der Liste brachte kein neues Ziel.',
     [BULK_HALT_REASONS.listFormWithdrawn]: 'Die Adresse der Liste darf ein Massenlauf nicht mehr lesen.',
     [BULK_HALT_REASONS.listFilterWithdrawn]: 'Mit diesem Filter darf ein Massenlauf die Liste nicht mehr lesen. Geändert hat lynox nichts.',
     [BULK_HALT_REASONS.listOrder]: 'Eine Seite der Liste ging nicht in der Reihenfolge der IDs weiter.',
     [BULK_HALT_REASONS.listReadFailed]: 'Der Shop hat eine Seite der Liste mit einem Fehler beantwortet.',
     [BULK_HALT_REASONS.shopInactive]: 'Der Shop ist geschlossen oder gesperrt.',
+    [BULK_HALT_REASONS.storeAccessEnded]: 'lynox konnte den Zugang zum Shop nicht erneuern. Bitte lynox im Chat, den Shop neu zu verbinden, dann lässt sich der Lauf fortsetzen.',
+    [BULK_HALT_REASONS.storeClientMisnamed]: 'Im Shop-Profil liegen die App-Zugangsdaten unter anderen Namen. Lass das Profil im Chat von lynox anpassen, dann lässt sich der Lauf fortsetzen.',
     [BULK_HALT_REASONS.formCost]: 'Der Shop hat eine Abfrage als zu aufwendig abgelehnt.',
     [BULK_HALT_REASONS.shopifyReadOff]: 'Lesen von Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet.',
     [BULK_HALT_REASONS.shopifyWriteOff]: 'Schreiben in Shopify-Shops per Massenlauf ist auf dieser Instanz ausgeschaltet. Ist es wieder an, lässt sich der Lauf fortsetzen.',
+    // Why a request to a store got no pass, one sentence per cause (U-232).
+    [BULK_HALT_REASONS.shopifySelfHosted]: 'Shopify-Shops erreicht lynox nur auf Instanzen, die lynox betreibt. Diese Instanz wird selbst betrieben, deshalb lässt sich der Lauf hier nicht fortsetzen.',
+    [BULK_HALT_REASONS.shopifyNotSetUp]: 'Shopify ist auf dieser Instanz nicht eingerichtet. Einrichten kann das nur lynox. Sobald lynox Shopify eingerichtet hat, kannst du den Lauf fortsetzen.',
+    [BULK_HALT_REASONS.shopifyUnconfirmed]: 'lynox konnte nicht bestätigen, dass diese Instanz Shopify erreichen darf. Du kannst den Lauf in ein paar Minuten fortsetzen.',
+    [BULK_HALT_REASONS.shopifyNotCleared]: 'Shopify ist für diese Instanz zurzeit nicht freigegeben. Freigeben kann nur lynox. Sobald lynox Shopify freigegeben hat, kannst du den Lauf fortsetzen.',
+    [BULK_HALT_REASONS.containmentUnwritable]: 'lynox konnte nicht festhalten, dass dieser Lauf den Shop liest; gesendet wurde nichts. Du kannst den Lauf später fortsetzen.',
+    [BULK_HALT_REASONS.shopifyNoApiVersion]: 'Für Shopify fehlt in lynox eine Einstellung. Beheben kann das nur lynox (support@lynox.ai).',
+    [BULK_HALT_REASONS.storeRequestRefused]: 'lynox hat eine Anfrage dieses Laufs nicht an den Shop gesendet: Ihre Form lässt lynox nicht zu Shopify durch. Wie es weitergeht, steht auf der Laufseite.',
+    // U-281, without the fields (the outcome's summary names them, `consentOutdated`).
+    [BULK_HALT_REASONS.consentOutdated]: 'Diese Shopify-Verbindung erlaubt lynox noch nicht, diese Felder zu ändern. Verbinde Shopify neu (Einstellungen → APIs) und lass den Lauf im Chat neu planen.',
     [BULK_HALT_REASONS.superseded]: 'An seiner Stelle wurde ein anderer Lauf mit Beurteilung gestartet. Dieser hat nichts geschrieben.',
+    // Said to the owner, on whose device a push lands (U-324).
+    [BULK_HALT_REASONS.discarded]: 'Du hast diesen Lauf verworfen. lynox hat nichts geschrieben.',
     [BULK_HALT_REASONS.judgeModel]: 'Der KI-Anbieter dieses Laufs hat kein Modell zum Beurteilen, oder der Betreiber erlaubt es nicht.',
   });
   return deHaltReasons[reason];
@@ -228,14 +351,22 @@ const DE: BulkNotices = Object.freeze({
   readDone: 'Lesen fertig. Als Nächstes werden die Ziele beurteilt.',
   listEmpty: 'Liste gelesen. Sie enthält kein Ziel, das sich planen lässt.',
   listWaiting: 'Liste gelesen. Prüf die Ziele und starte dann das Lesen.',
-  listNoMatch: (filters: 'product_type' | 'vendor' | 'both', many = false) => many
+  listNoMatch: (filters: ShopifyFilterKind, many = false) => filters === 'status'
+    ? `Liste gelesen: Kein Produkt hat ${many ? 'einen der Status' : 'den Status'} aus dem Filter. Prüf den Status der Produkte im Shop und bitte lynox im Chat, die Liste neu zu planen.`
+    : filters === 'group_status'
+    ? 'Liste gelesen: Kein Produkt passt zugleich zur Gruppe und zum Status aus dem Filter. Prüf beides im Shop und bitte lynox im Chat, die Liste neu zu planen.'
+    : many
     ? (filters === 'both'
       ? 'Liste gelesen: Kein Produkt hat zugleich einen Produkttyp und einen Anbieter aus dem Filter. Prüf die Werte im Shop und bitte lynox im Chat, die Liste neu zu planen.'
       : `Liste gelesen: Kein Produkt hat einen der ${filters === 'product_type' ? 'Produkttypen' : 'Anbieter'} aus dem Filter. Prüf die Werte im Shop und bitte lynox im Chat, die Liste neu zu planen.`)
     : filters === 'both'
     ? 'Liste gelesen: Kein Produkt hat zugleich Produkttyp und Anbieter aus dem Filter. Prüf beide Werte im Shop und bitte lynox im Chat, die Liste neu zu planen.'
     : `Liste gelesen: Kein Produkt hat den ${filters === 'product_type' ? 'Produkttyp' : 'Anbieter'} aus dem Filter. Prüf den Wert im Shop und bitte lynox im Chat, die Liste neu zu planen.`,
-  listNoneLeft: (filters: 'product_type' | 'vendor' | 'both', many = false) => many
+  listNoneLeft: (filters: ShopifyFilterKind, many = false) => filters === 'status'
+    ? `Vorschau: Produkte gefunden, aber keines hat ${many ? 'einen der Status' : 'den Status'} aus dem Filter. Bitte lynox im Chat, die Liste neu zu planen.`
+    : filters === 'group_status'
+    ? 'Vorschau: Produkte gefunden, aber bei keinem stimmen Gruppe und Status beide mit dem Filter überein. Bitte lynox im Chat, mit den Schreibweisen aus dem Shop neu zu planen.'
+    : many
     ? (filters === 'both'
       ? 'Vorschau: Produkte gefunden, aber bei keinem sind Produkttyp und Anbieter beide wie im Filter geschrieben. Bitte lynox im Chat, mit den Schreibweisen aus dem Shop neu zu planen.'
       : `Vorschau: Produkte gefunden, aber bei keinem ist der ${filters === 'product_type' ? 'Produkttyp' : 'Anbieter'} so geschrieben wie einer im Filter. Bitte lynox im Chat, mit den Schreibweisen aus dem Shop neu zu planen.`)
@@ -255,9 +386,9 @@ const DE: BulkNotices = Object.freeze({
     `Beurteilt ${String(judged)}, ungültig ${String(invalid)}, ohne Urteil ${String(unjudged)} von ${String(total)} Zielen.`,
   costs: (calls: number, eachUsd: number) =>
     `${String(calls)} API-Abrufe in diesem Durchgang, geschätzt $${(calls * eachUsd).toFixed(4)} (je $${String(eachUsd)} laut Profil).`,
+  // The sentence alone: the push title names the stage and that it halted (U-324).
   halted: (phase: BulkPhase, reason: string) =>
-    `${phase === 'apply' ? 'Massenlauf' : phase === 'preview' ? 'Vorschau' : 'Beurteilung'} angehalten: ${
-      (phase === 'judge' && reason === BULK_HALT_REASONS.unavailable ? DE_JUDGE_UNAVAILABLE : deHaltReason(reason)) ?? `${reason}.`}`,
+    (phase === 'judge' && reason === BULK_HALT_REASONS.unavailable ? DE_JUDGE_UNAVAILABLE : deHaltReason(reason)) ?? `${reason}.`,
   previewStopped: 'Vorschau beendet: Der Lauf wurde verworfen, angehalten oder ist weitergegangen.',
   listStopped: 'Lesen der Liste beendet: Der Lauf wurde verworfen, angehalten oder ist weitergegangen.',
   judgeStopped: 'Beurteilung beendet: Der Lauf wurde angehalten, ersetzt oder ist weitergegangen.',
@@ -266,6 +397,8 @@ const DE: BulkNotices = Object.freeze({
   // The ledger's phase is an English word, and the run page shows the phase (ux Rest-P B3).
   notApproved: () => 'Massenlauf nicht freigegeben; nichts geschrieben.',
   haltedResume: 'Massenlauf angehalten; geschrieben wird erst nach dem Fortsetzen.',
+  consentOutdated: (fields: readonly string[], nothingYet: boolean) =>
+    `${nothingYet ? 'lynox hat nichts geschrieben.' : 'lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt.'} Diese Shopify-Verbindung erlaubt lynox noch nicht, ${shopifyFieldsNamed(fields, 'de')} zu ändern. Verbinde Shopify neu (Einstellungen → APIs); dann bitte lynox im Chat, den Lauf neu zu planen.`,
   otherLoop: 'Massenlauf beendet: Ein anderer Durchgang bearbeitet ihn.',
   otherLoopHolds: 'Massenlauf wartet auf Ziele, die ein anderer Durchgang hält.',
   noJudgedRun: 'Diesen Massenlauf mit Beurteilung gibt es nicht.',
@@ -285,3 +418,61 @@ const DE: BulkNotices = Object.freeze({
 });
 
 export const BULK_NOTICES: Readonly<Record<NoticeLanguage, BulkNotices>> = Object.freeze({ en: EN, de: DE });
+
+/** How a run ended, as its push title says it (`RUN_END_LOOK` in the worker). */
+export type BulkPushEnd = 'success' | 'failed' | 'halted' | 'interrupted' | 'stopped' | 'discarded';
+
+const PUSH_STAGE: Readonly<Record<NoticeLanguage, Readonly<Record<BulkTriggerEffect, string>>>> = Object.freeze({
+  de: Object.freeze({ bulk_preview: 'Vorschau', bulk_judge: 'Beurteilung', bulk_apply: 'Massenlauf', bulk_undo: 'Rücknahme' }),
+  en: Object.freeze({ bulk_preview: 'Preview', bulk_judge: 'Judging', bulk_apply: 'Bulk run', bulk_undo: 'Undo' }),
+});
+const PUSH_END: Readonly<Record<NoticeLanguage, Readonly<Record<BulkPushEnd, string>>>> = Object.freeze({
+  de: Object.freeze({ success: 'fertig', failed: 'fehlgeschlagen', halted: 'angehalten', interrupted: 'unterbrochen', stopped: 'gestoppt', discarded: 'verworfen' }),
+  en: Object.freeze({ success: 'done', failed: 'failed', halted: 'halted', interrupted: 'interrupted', stopped: 'stopped', discarded: 'discarded' }),
+});
+
+/** Whether a run's stored halt reason is the owner's discard: its push ends "discarded" under
+ *  the stop mark, not "stopped" (U-324). */
+export function isDiscardReason(reason: string | null): boolean {
+  return reason === BULK_HALT_REASONS.discarded;
+}
+
+/**
+ * A bulk run's push title after its end mark: the stage and how it ended, and the host it works
+ * on where it has one (a store, a shop system's API), so the lock screen says which run halted
+ * where; never the run's id (U-324). A run on the data store or workspace files has no host, nor
+ * one whose run is gone (`targetSystem` null).
+ */
+export function bulkPushTitle(effect: BulkTriggerEffect, end: BulkPushEnd, targetSystem: string | null, lang: NoticeLanguage): string {
+  const host = targetSystem === null ? null : externalHostOf(targetSystem);
+  return `${PUSH_STAGE[lang][effect]} ${PUSH_END[lang][end]}${host === null || host === '' ? '' : ` · ${host}`}`;
+}
+
+/** A store's own cause a bulk run's start check names (U-232): the attach's causes, and a store
+ *  without the API version lynox writes to. */
+export type StoreReachCause = import('./shopify-host.js').StoreAttachRefusal | 'shopifyNoApiVersion';
+/**
+ * The start check's sentence for a store's own cause, in the run page's English (U-232): on
+ * approving, the run has not started, so the sentence says to approve again
+ * (`bulk.reach.approve.<cause>`); on writing on, the halt's own cause (`bulk.halt.<cause>`).
+ * The route also sends a code (`reach_approve_<cause>`, `reach_resume_<cause>`), by which the page
+ * says it in its language.
+ */
+export const BULK_STORE_REACH_REFUSALS: Readonly<Record<'approve' | 'resume', Readonly<Record<StoreReachCause, string>>>> = Object.freeze({
+  approve: {
+    shopifySelfHosted: 'lynox reaches Shopify stores only on instances that lynox runs. This instance is self-hosted, so this run cannot start here.',
+    shopifyNotSetUp: 'Shopify is not set up on this instance. Only lynox can set it up (support@lynox.ai); after that you can approve the run.',
+    shopifyUnconfirmed: 'lynox could not confirm that this instance may reach Shopify. Try approving again in a few minutes.',
+    shopifyNotCleared: 'Shopify is not cleared for this instance right now. Only lynox can clear it (support@lynox.ai); after that you can approve the run.',
+    containmentUnwritable: 'lynox could not record that this run reads the store; nothing was sent. Try approving again later.',
+    shopifyNoApiVersion: 'A setting for Shopify is missing in lynox. Only lynox can fix it (support@lynox.ai); until then the run cannot be approved.',
+  },
+  resume: {
+    shopifySelfHosted: 'lynox reaches Shopify stores only on instances that lynox runs. This instance is self-hosted, so the run cannot go on here.',
+    shopifyNotSetUp: 'Shopify is not set up on this instance. Only lynox can set it up (support@lynox.ai).',
+    shopifyUnconfirmed: 'lynox could not confirm that this instance may reach Shopify.',
+    shopifyNotCleared: 'Shopify is not cleared for this instance right now. Only lynox can clear it (support@lynox.ai).',
+    containmentUnwritable: 'lynox could not record that this run reads the store; nothing was sent.',
+    shopifyNoApiVersion: 'A setting for Shopify is missing in lynox. Only lynox can fix it (support@lynox.ai).',
+  },
+});

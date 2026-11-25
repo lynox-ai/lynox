@@ -37,7 +37,7 @@ export const SHOPIFY_MEDIA_PER_PRODUCT = 250;
  */
 export const SHOPIFY_READ_DOCUMENTS: Readonly<Record<ShopifyReadForm, string>> = Object.freeze({
   shopify_products_list: 'query($n: Int!, $q: String!) { products(first: $n, sortKey: ID, query: $q) { nodes { id } } }',
-  shopify_product_read: 'query($id: ID!) { product(id: $id) { id title descriptionHtml productType vendor tags seo { title description } } }',
+  shopify_product_read: 'query($id: ID!) { product(id: $id) { id title descriptionHtml productType vendor status tags seo { title description } } }',
   shopify_media_list: 'query($n: Int!, $q: String!, $m: Int!) { products(first: $n, sortKey: ID, query: $q) { nodes { id media(first: $m) { nodes { id mediaContentType } pageInfo { hasNextPage } } } } }',
   shopify_media_read: 'query($id: ID!) { node(id: $id) { ... on MediaImage { id alt } } }',
 });
@@ -80,9 +80,25 @@ export function shopifyGraphqlEndpoint(host: string): string | null {
   return `https://${host}/admin/api/${version}/graphql.json`;
 }
 
-/** The fields a Shopify list may be narrowed by, in the order `$q` names them (PRD shopify-preset §22). */
-export const SHOPIFY_LIST_FILTER_KEYS = ['product_type', 'vendor'] as const;
+/** The fields a Shopify list may be narrowed by, in the order `$q` names them (PRD shopify-preset §22).
+ *  `status` is a product's state in the store: without it the search lists every product, in every
+ *  status, gift cards included, so a run meant to leave drafts and archived products out names it. */
+export const SHOPIFY_LIST_FILTER_KEYS = ['product_type', 'vendor', 'status'] as const;
 export type ShopifyListFilterKey = (typeof SHOPIFY_LIST_FILTER_KEYS)[number];
+/** The values `status` takes, as the store's search spells them; the read answers them in capitals.
+ *  The four of the Admin API's `ProductStatus` (2026-10, read from the schema). */
+export const SHOPIFY_LIST_STATUS_VALUES = ['active', 'draft', 'archived', 'unlisted'] as const;
+
+/** Whether a `status` filter's value is one of {@link SHOPIFY_LIST_STATUS_VALUES} as written, or a list
+ *  of 2 or more different ones. Nothing else: no other word reaches the search under this key. */
+export function isShopifyStatusValues(value: unknown): value is ShopifyListFilterValue {
+  const known = (v: unknown): boolean => typeof v === 'string' && (SHOPIFY_LIST_STATUS_VALUES as readonly string[]).includes(v);
+  if (typeof value === 'string') return known(value);
+  return Array.isArray(value) && value.length >= 2 && value.every(known) && new Set(value).size === value.length;
+}
+
+/** The one sentence a refused `status` value gives. */
+export const SHOPIFY_STATUS_REFUSAL = `source_list.filters.status may hold ${SHOPIFY_LIST_STATUS_VALUES.join(', ')} as written, or a list of 2 or more different ones.`;
 /** How many values one filter may list: a store's groups. Measured on a development store
  *  (2026-11-06, Admin API 2026-10): 250 values of about 40 characters in one search, 13 362
  *  characters, listed exactly; the longest a list here can build (2 × 50 × 255) is not measured.
@@ -177,7 +193,7 @@ export function isShopifyListFilters(filters: unknown): filters is ShopifyListFi
   const keys = Object.keys(filters);
   return keys.length > 0
     && keys.every((k) => (SHOPIFY_LIST_FILTER_KEYS as readonly string[]).includes(k))
-    && keys.every((k) => isShopifyFilterValues((filters as Record<string, unknown>)[k]));
+    && keys.every((k) => (k === 'status' ? isShopifyStatusValues : isShopifyFilterValues)((filters as Record<string, unknown>)[k]));
 }
 
 /** `$q` of one list page: the products after `afterId`, then each filter as a quoted value, a list
@@ -241,13 +257,15 @@ export type ShopifyWriteForm = 'shopify_product' | 'shopify_media_alt';
 /**
  * One operation each, no fragment; the input object is a literal and only scalars are variables,
  * so no field outside the document can reach the store — a test pins it. `userErrors` is selected,
- * or a refusal could not be told from a success. `descriptionHtml` is not in the document: Shopify
- * stores the HTML it is sent unfiltered, `<script>` included, and rewrites its formatting, so
- * writing it waits for an allowlist the engine enforces and a comparison that normalises (PRD
- * shopify-preset §16.8 M6). A field the document does not name cannot be sent, nor cleared.
+ * or a refusal could not be told from a success. A field the document does not name cannot be sent,
+ * nor cleared. `descriptionHtml` is in it (PRD shopify-preset §21): Shopify stores the HTML it is
+ * sent unfiltered, `<script>` included, and rewrites its formatting (§16.8 M6), so it is written
+ * only through the engine's markup check, its canonical bytes and a comparison that normalises
+ * (`bulk-html.ts`, `html-tree.ts`); a run that does not set it sends no variable for it, which
+ * leaves the description untouched (§16.8 M10).
  */
 export const SHOPIFY_WRITE_DOCUMENTS: Readonly<Record<ShopifyWriteForm, string>> = Object.freeze({
-  shopify_product: 'mutation($id: ID!, $title: String, $seoTitle: String, $seoDescription: String) { productUpdate(product: {id: $id, title: $title, seo: {title: $seoTitle, description: $seoDescription}}) { product { id } userErrors { field message } } }',
+  shopify_product: 'mutation($id: ID!, $title: String, $descriptionHtml: String, $seoTitle: String, $seoDescription: String) { productUpdate(product: {id: $id, title: $title, descriptionHtml: $descriptionHtml, seo: {title: $seoTitle, description: $seoDescription}}) { product { id } userErrors { field message } } }',
   // `productUpdateMedia` is deprecated in favour of `fileUpdate` (PRD shopify-preset §16.3 item 3).
   shopify_media_alt: 'mutation($id: ID!, $alt: String) { fileUpdate(files: [{id: $id, alt: $alt}]) { files { id alt } userErrors { field message code } } }',
 });
@@ -255,6 +273,7 @@ export const SHOPIFY_WRITE_DOCUMENTS: Readonly<Record<ShopifyWriteForm, string>>
 /** A product field of the flat image and the variable that writes it, in the order a body names them. */
 const PRODUCT_WRITE_VARIABLES: ReadonlyArray<readonly [field: string, variable: string]> = [
   ['title', 'title'],
+  ['descriptionHtml', 'descriptionHtml'],
   ['seo_title', 'seoTitle'],
   ['seo_description', 'seoDescription'],
 ];
@@ -264,7 +283,7 @@ export const SHOPIFY_WRITABLE_FIELDS: readonly string[] = Object.freeze(PRODUCT_
 
 /**
  * The body that writes `after` to the product `gid`, or null when it does not fit: `gid` not a
- * product GID, a field that is not one of the three ({@link SHOPIFY_WRITABLE_FIELDS}), a value that is neither a string nor `null`,
+ * product GID, a field that is not one of {@link SHOPIFY_WRITABLE_FIELDS}, a value that is neither a string nor `null`,
  * no field at all, or one `seo` field without the other. Shopify clears the `seo` field a write
  * leaves out once the other is sent (measured, PRD shopify-preset §16.8 M10), so a body never
  * names only one; the read completes the pair before the run is approved. The variables follow

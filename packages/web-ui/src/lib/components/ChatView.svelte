@@ -2,6 +2,8 @@
 	import {
 		sendMessage,
 		retryFailedTurn,
+		sendHeldMessage,
+		removeHeldMessage,
 		abortRun,
 		replyPermission,
 		replyPermissionTabs,
@@ -30,6 +32,7 @@
 		submitMailConnect,
 		cancelMailConnect,
 		getChatError,
+		getUnmatchedAnswerCount,
 		getChatErrorDetail,
 		getRetryStatus,
 		getIsOffline,
@@ -95,6 +98,7 @@
 	import { looksLikeSecret } from '../utils/secret-shapes.js';
 	import { maskText } from '../utils/mask-text.js';
 	import { stripNowMarker, stripLoadedContext } from '../utils/now-marker.js';
+	import { scheduledTaskTurn } from '../utils/scheduled-task-turn.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { formatCountdown } from '../utils/time.js';
@@ -114,6 +118,7 @@
 	import OnboardingBasics from './OnboardingBasics.svelte';
 	import { canChooseModel, isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
+	import { speakHttpFailureText, transcribeFailureText } from './voice-failure.js';
 	import { currentQuote, currentGreeting, startWallClock } from '../stores/wall-clock.svelte.js';
 	import { createMicSession, MicSessionReleased } from '../utils/mic-session.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -123,7 +128,7 @@
 	import { isAutoSpeakEnabled } from '../stores/autospeak.svelte.js';
 	import { isVoiceAutoSendEnabled } from '../stores/voice-autosend.svelte.js';
 	import { goto, afterNavigate } from '$app/navigation';
-	import { onMount, tick } from 'svelte';
+	import { onMount, tick, untrack } from 'svelte';
 	import { isMistralPresetBase } from '../utils/mistral-endpoint.js';
 
 	// Welcome screen state
@@ -519,7 +524,7 @@
 
 	/** Tool call label: returns { action, subject } or null if hidden.
 	 *  Logic lives in `utils/tool-call-label.ts` so the per-tool rules
-	 *  (especially memory_recall's query/namespace fallback) are unit-tested
+	 *  (the subject each tool shows, and the bounds on it) are unit-tested
 	 *  outside this component. */
 	function toolCallLabel(tc: ToolCallInfo): { action: string; subject: string } | null {
 		return resolveToolCallLabel(tc.name, tc.input, t);
@@ -528,7 +533,7 @@
 	type GroupedBlock =
 		| { type: 'text'; text: string }
 		| { type: 'thinking'; text: string }
-		| { type: 'tools'; action: string; subjects: string[]; toolName: string; status: ToolCallInfo['status'] }
+		| { type: 'tools'; action: string; subjects: string[]; toolName: string; status: ToolCallInfo['status']; unsuccessful: boolean }
 		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> }
 		| { type: 'spawn'; spawnId: string };
 
@@ -660,8 +665,10 @@
 				if (last && last.type === 'tools' && last.action === label.action) {
 					if (label.subject && !last.subjects.includes(label.subject)) last.subjects.push(label.subject);
 					last.status = worstStatus(last.status, tc.status);
+					// One member that did not succeed makes the row say so, as one error makes it ✗.
+					if (tc.unsuccessful === true) last.unsuccessful = true;
 				} else {
-					result.push({ type: 'tools', action: label.action, subjects: label.subject ? [label.subject] : [], toolName: tc.name, status: tc.status });
+					result.push({ type: 'tools', action: label.action, subjects: label.subject ? [label.subject] : [], toolName: tc.name, status: tc.status, unsuccessful: tc.unsuccessful === true });
 				}
 			}
 		}
@@ -669,6 +676,10 @@
 	}
 
 	let inputText = $state('');
+	/** Whether something other than the person put text into the composer since it was last
+	 *  empty (a draft handed back, a prefill): such a message does not say it was typed. */
+	let composerPrefilled = false;
+	$effect(() => { if (inputText === '') composerPrefilled = false; });
 	let messagesEl: HTMLDivElement;
 	let autoScroll = $state(true);
 	// DK-UX: inline edit state for the untrusted-knowledge review chip (edit_approve).
@@ -1075,8 +1086,7 @@
 
 						if (!res.ok || !res.body) {
 							removePlaceholder(placeholderIdx);
-							if (res.status === 503) addToast(t('chat.whisper_unavailable'), 'error');
-							else addToast(t('chat.transcribe_failed'), 'error');
+							addToast(res.ok ? t('chat.transcribe_failed') : transcribeFailureText(res.status), 'error');
 							return;
 						}
 
@@ -1129,7 +1139,7 @@
 								// through `await sendMessage` would freeze the composer on
 								// "Transcribing…" for the entire answer.
 								transcribing = false;
-								void sendMessage(`🎤 ${trimmed}`, undefined, undefined, { typed: true });
+								void sendMessage(`🎤 ${trimmed}`, undefined, undefined, { typed: true, composedFromEmpty: true });
 							} else {
 								// Append rather than replace so a typed prefix isn't
 								// clobbered when the user dictates after typing.
@@ -1337,6 +1347,9 @@
 		for (let idx = 0; idx < batchAnswers.length; idx++) {
 			const prevPromptId = getPendingPermission()?.promptId;
 			void replyPermission(batchAnswers[idx]!); /* never rejects; a reply that does not arrive is reported */
+			// A question without its id is not answered (`replyPermission` brings the open one back
+			// instead), and that one is not the next of this batch: stop, so no later answer lands on it.
+			if (prevPromptId === undefined) break;
 			if (idx + 1 < batchAnswers.length) {
 				const arrived = await waitForNextPrompt(prevPromptId);
 				if (!arrived) break; // tool errored or completed early — stop sending
@@ -1509,7 +1522,7 @@
 		switch (err.code) {
 			case 'unavailable': return t('chat.speak_failed_unavailable');
 			case 'too_long':    return t('chat.speak_failed_too_long');
-			case 'http':        return `${t('chat.speak_failed_http')} ${String(err.status)}`;
+			case 'http':        return speakHttpFailureText(err.status);
 			case 'network':     return t('chat.speak_failed_network');
 			case 'stream':      return t('chat.speak_failed_stream');
 			case 'synth':       return t('chat.speak_failed_synth');
@@ -1658,6 +1671,15 @@
 	);
 	const pendingMailConnect = $derived(getPendingMailConnect());
 	const chatError = $derived(getChatError());
+	// After an answer that named no question, focus goes to the sentence, not to a button of the
+	// card that came back: that card may ask something else, and a button with focus is one key away.
+	let chatErrorBanner = $state<HTMLDivElement | null>(null);
+	// Runs on each such answer, and only then: not on a language switch or a later error.
+	let unmatchedSeen = untrack(() => getUnmatchedAnswerCount());
+	$effect(() => {
+		const n = getUnmatchedAnswerCount();
+		if (n > unmatchedSeen) { unmatchedSeen = n; untrack(() => chatErrorBanner)?.focus(); }
+	});
 	const chatErrorDetail = $derived(getChatErrorDetail());
 	const runInterrupted = $derived(getRunInterrupted());
 	const retryStatus = $derived(getRetryStatus());
@@ -1693,6 +1715,7 @@
 	function openPlanInNewChat() {
 		planInNewChat();
 		inputText = getContainedPrefill() ?? '';
+		composerPrefilled = inputText !== '';
 		void tick().then(() => {
 			if (!textareaEl) return;
 			autoResize({ target: textareaEl } as unknown as Event);
@@ -1814,6 +1837,7 @@
 	$effect(() => registerComposerDraft((text) => {
 		if (inputText.trim() !== '') return false;
 		inputText = text;
+		composerPrefilled = true;
 		focusInput();
 		return true;
 	}));
@@ -1824,6 +1848,7 @@
 	afterNavigate(() => {
 		// A chat opened with "Plan in a new chat" keeps its prefill until its first run.
 		inputText = getContainedPrefill() ?? '';
+		composerPrefilled = inputText !== '';
 		focusInput();
 		stopSpeech();
 		releaseMicNow();
@@ -1895,6 +1920,7 @@
 		// An open changeset review holds the send. Ask before clearing, so the text stays.
 		if (sendBlockedByReview()) return;
 		const files = pendingFiles.length > 0 ? [...pendingFiles] : undefined;
+		const fromEmpty = !composerPrefilled;
 		inputText = '';
 		pendingFiles = [];
 		if (textareaEl) textareaEl.style.height = 'auto';
@@ -1906,7 +1932,7 @@
 		// after) is what makes it robust.
 		pinToBottomFor(1500);
 		// Only text the user typed is marked: the stand-in for a files-only send is the app's.
-		await sendMessage(task || t('chat.analyze_files'), undefined, files, task ? { typed: true } : undefined);
+		await sendMessage(task || t('chat.analyze_files'), undefined, files, task ? { typed: true, ...(fromEmpty ? { composedFromEmpty: true } : {}) } : undefined);
 	}
 
 	function isAtBottom(): boolean {
@@ -2816,6 +2842,21 @@
 							{/if}
 						</div>
 					</div>
+				{:else if msg.role === 'user' && scheduledTaskTurn(stripLoadedContext(stripNowMarker(msg.content)))}
+					<!-- A scheduled run's opening turn: the engine wrote it, not the owner, so it is
+					     shown as the task it carries out, not as the owner's bubble (U-160). -->
+					{@const task = scheduledTaskTurn(stripLoadedContext(stripNowMarker(msg.content)))!}
+					<div class="rounded-[var(--radius-md)] border border-border bg-bg-muted px-4 py-2.5 text-sm" data-scheduled-task>
+						<div class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{t('chat.scheduled_task')}</div>
+						<div class="mt-1 font-medium text-text whitespace-pre-wrap break-words">{task.title}</div>
+						{#if task.description}
+							<div class="mt-1 text-text-muted whitespace-pre-wrap break-words">{task.description}</div>
+						{/if}
+						{#if task.question !== undefined}
+							<div class="mt-2 text-text-muted whitespace-pre-wrap break-words" data-scheduled-task-question><span class="text-text-subtle">{t('chat.scheduled_task_question')}</span> {task.question}</div>
+							<div class="mt-1 text-text-muted whitespace-pre-wrap break-words" data-scheduled-task-answer><span class="text-text-subtle">{t('chat.scheduled_task_answer')}</span> {task.answer}</div>
+						{/if}
+					</div>
 				{:else if msg.role === 'user'}
 					{@const userText = stripLoadedContext(stripNowMarker(msg.content))}
 					<div class="flex justify-end items-start gap-1.5">
@@ -2826,6 +2867,16 @@
 						{#if msg.createdAt}
 							{@const ts = formatMessageTime(msg.createdAt)}
 							{#if ts}<span class="mr-auto mt-2.5 shrink-0 text-[10px] text-text-subtle/50 select-none tabular-nums">{ts}</span>{/if}
+						{/if}
+						{#if msg.held}
+							<button
+								onclick={() => removeHeldMessage(msg)}
+								aria-label={t('chat.remove_held')}
+								title={t('chat.remove_held')}
+								class="mt-1 shrink-0 rounded-full p-1 text-text-subtle hover:text-danger hover:bg-danger/10 transition-colors"
+							>
+								<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
+							</button>
 						{/if}
 						{#if msg.queued}
 							<button
@@ -2838,8 +2889,8 @@
 							</button>
 						{/if}
 						<button
-							onclick={() => { if (msg.failed) void retryFailedTurn(msg, userText); /* never rejects; asks the server before sending again */ else void copyWithToast(userText); }}
-							class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left whitespace-pre-wrap break-words cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
+							onclick={() => { if (msg.held) void sendHeldMessage(msg); /* never rejects; asks the server before sending */ else if (msg.failed) void retryFailedTurn(msg, userText); /* never rejects; asks the server before sending again */ else void copyWithToast(userText); }}
+							class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left whitespace-pre-wrap break-words cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.held || msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
 						>
 							{#if hasVoicePrefix(userText)}
 								<svg xmlns="http://www.w3.org/2000/svg" class="inline-block h-3.5 w-3.5 mr-1.5 -mt-0.5 text-current opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d={MIC_SVG_PATH} /></svg>{stripVoicePrefix(userText)}
@@ -2848,6 +2899,8 @@
 							{/if}
 							{#if msg.failed}
 								<span class="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-danger/70 mt-1">{t('chat.send_failed')}</span>
+							{:else if msg.held}
+								<span class="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-text-subtle mt-1">{t('chat.send_held')}</span>
 							{:else if msg.queued}
 								<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle ml-2">{t('chat.queued')}</span>
 							{/if}
@@ -2915,8 +2968,14 @@
 										</svg>
 									{/if}
 									<span>{gBlock.action}{gBlock.subjects.length > 0 ? ': ' + gBlock.subjects.join(', ') : ''}</span>
-									{#if !isRunning}
-										<span aria-hidden="true" class="ml-auto md:ml-1 text-[11px] md:text-[10px] {isError ? 'text-danger' : 'text-success'}">{isError ? '✗' : '✓'}</span>
+									{#if isError}
+										<span aria-hidden="true" class="ml-auto md:ml-1 text-[11px] md:text-[10px] text-danger">✗</span><span class="sr-only">{t('chat.tool.status_error')}</span>
+									{:else if !isRunning && gBlock.unsuccessful}
+										<!-- A call that returned without doing what was asked: muted, in the row's own colour,
+										     not danger. The model reads the failure and usually deals with it in its answer. -->
+										<span class="ml-auto md:ml-1 text-[11px] md:text-[10px]">{t('chat.tool.unsuccessful')}</span>
+									{:else if !isRunning}
+										<span aria-hidden="true" class="ml-auto md:ml-1 text-[11px] md:text-[10px] text-success">✓</span><span class="sr-only">{t('chat.tool.status_done')}</span>
 									{/if}
 								</div>
 							{:else if gBlock.type === 'spawn'}
@@ -3232,7 +3291,7 @@
 			{/if}
 
 			{#if chatError}
-				<div role="alert" class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger flex items-center justify-between gap-3">
+				<div role="alert" tabindex="-1" bind:this={chatErrorBanner} class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger flex items-center justify-between gap-3">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" /></svg>
 					<!-- eslint-disable-next-line svelte/no-at-html-tags -- chatError is HTML-escaped right here before the one link substitution, which keeps http(s) and relative URLs only -->
 					<span class="flex-1">{@html chatError
@@ -3316,6 +3375,7 @@
 					<ChangesetReview
 						files={pendingChangeset}
 						onReview={(action, rolledBackFiles) => submitChangesetReview(action, rolledBackFiles)}
+						messageWaiting={queueLength > 0}
 					/>
 				{/if}
 			</div>
