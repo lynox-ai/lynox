@@ -67,6 +67,19 @@
 		return p.auth?.type === 'oauth2' && typeof p.auth.oauth?.preset_id === 'string' && p.auth.oauth.preset_id !== '';
 	}
 
+	// Whether the revocation view of this profile shows its own reconnect link (the markup below).
+	function viewLinks(view: ReturnType<typeof revocationView>): boolean {
+		return view !== null && (view.kind === 'revoked' || view.kind === 'ended' || view.kind === 'connectedAgain' || (view.kind === 'reconnected' && view.avertable));
+	}
+
+	// Never connected: the first connect is still to make, unless a revocation view already offers
+	// its own reconnect link, so the two never show together. An erasure past its hold shows no
+	// link of its own, and the first connect is then the way back.
+	function notYetConnected(p: ApiProfile): boolean {
+		return onBuiltInProvider(p) && (p.oauth_grant === undefined || p.oauth_grant === null)
+			&& !viewLinks(revocationView(p.oauth_grant, notices.get(p.id), now));
+	}
+
 	// A file the import of the earlier profiles waits on (`ApiStore.importWaitsOn`).
 	interface ImportWait { file: string; reason: 'unread' | 'malformed' | 'not_a_profile' | 'invalid_id'; deleteId: string | null; }
 	const WAIT_REASON: Record<ImportWait['reason'], string> = {
@@ -251,14 +264,14 @@
 						<button onclick={() => manageInChat(profile)}
 							aria-label={t('apis.manage_in_chat')}
 							title={t('apis.manage_in_chat')}
-							class="px-3 text-sm text-text-subtle hover:text-text hover:bg-bg-muted transition-colors border-l border-border">
+							class="shrink-0 px-3 text-sm text-text-subtle hover:text-text hover:bg-bg-muted transition-colors border-l border-border">
 							<Icon name="chat" size="xs" />
 						</button>
 						{#if isOwnerSession()}
 						<button onclick={() => deleteProfile(profile)}
 							disabled={deleting === profile.id}
 							aria-label={t('apis.delete')}
-							class="px-3 text-xs text-text-subtle hover:text-danger hover:bg-danger/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed border-l border-border">
+							class="shrink-0 px-3 text-xs text-text-subtle hover:text-danger hover:bg-danger/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed border-l border-border">
 							{t('apis.delete')}
 						</button>
 						{/if}
@@ -283,7 +296,7 @@
 									<p data-testid="api-erasure-avert">{t('apis.erasure_connected_again_avert')}</p>
 								{/if}
 							{/if}
-							{#if view.kind === 'revoked' || view.kind === 'ended' || view.kind === 'connectedAgain' || (view.kind === 'reconnected' && view.avertable)}
+							{#if viewLinks(view)}
 								{#if profile.reader_may_connect !== false}
 									<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
 									<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
@@ -330,8 +343,16 @@
 						</div>
 					{/if}
 					{#if onBuiltInProvider(profile) && isOwnerSession()}
+						<!-- No first connect on a profile a person with access set up: the view hides a connection the
+						     owner makes there from every reader, the owner included, so it would show as connected and
+						     carry nothing (`hiddenFromProfile`). -->
 						<div class="border-t border-border px-4 py-3">
-							<PresetClientForm profileId={profile.id} />
+							<PresetClientForm profileId={profile.id} connectHref={notYetConnected(profile) && !setUpByMember(profile) ? connectHref(getApiBase(), profile.id) : null} />
+						</div>
+					{:else if notYetConnected(profile) && profile.reader_may_connect === false}
+						<!-- The server says `false` only to a mandate, which connects only a profile it set up. -->
+						<div class="border-t border-border px-4 py-3 text-xs text-text-muted">
+							<p data-testid="api-connect-first-not-yours">{t('apis.connect_first_not_yours')}</p>
 						</div>
 					{/if}
 					<!-- The description is free text the profile was written with, a word or a sentence; under

@@ -68,13 +68,13 @@ const VIEWS = [
 describe('the settings views name the connection form for a built-in provider client secret', () => {
 	it.each(VIEWS)('%s shows the form advice for the marked 403', async (_v, load) => {
 		putReply = { status: 403, body: { error: 'x', code: 'preset_client_secret' } };
-		expect(await editAndSave(await load())).toContain('Enter it under “App credentials” in its profile (Settings → APIs)');
+		expect(await editAndSave(await load())).toContain('Enter it under “App credentials” in its connection (Settings → API connections)');
 	});
 
 	it.each(VIEWS)('%s names no form for the client secret of a provider lynox no longer offers', async (_v, load) => {
 		putReply = { status: 403, body: { error: 'x', code: 'retired_preset_client_secret' } };
 		const shown = await editAndSave(await load());
-		expect(shown).toContain('This name belongs to a built-in provider lynox no longer offers, so it can\'t be saved here. For a profile of your own, choose another name.');
+		expect(shown).toContain('This name belongs to a built-in provider lynox no longer offers, so it can\'t be saved here. For a connection of your own, choose another name.');
 		expect(shown).not.toContain('App credentials');
 	});
 
@@ -110,7 +110,7 @@ const ADD_FORMS = [
 describe('the add form of the settings views on a refused write', () => {
 	it.each(ADD_FORMS)('%s names the connection form, keeps the value, and can save again', async (_v, load, nameField, valueField) => {
 		putReply = { status: 403, body: { error: 'x', code: 'preset_client_secret' } };
-		expect(await addAndSave(await load(), nameField, valueField)).toContain('Enter it under “App credentials” in its profile (Settings → APIs)');
+		expect(await addAndSave(await load(), nameField, valueField)).toContain('Enter it under “App credentials” in its connection (Settings → API connections)');
 		// Not taken for a save: the typed value stays, and the button is free again.
 		expect((target.querySelector(valueField) as HTMLInputElement).value).toBe('typed-value');
 		const save = [...target.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Save');

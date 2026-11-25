@@ -1361,7 +1361,7 @@ export function memberRefusalText(refusal: MemberRefusal): string {
     case 'plan-owner-started':
       return `${lead}. This run of a workflow ${person} set up or changed was not started by a schedule of ${person}'s, so it does not use connections ${person} made with their own login. `
         + `${RUN_REFUSAL_FINAL} In your reply, say so. The person reading your reply is the owner of this instance, not ${person}. `
-        + `Tell them to connect ${provider} themselves under Settings → APIs and then ask lynox in a chat to do this step with that connection. `
+        + `Tell them to connect ${provider} themselves under Settings → API connections and then ask lynox in a chat to do this step with that connection. `
         + `Do not suggest running this workflow again, and do not ask ${person} to do anything. Do not ask for permission to try again.`;
     case 'plan-unlisted': return `${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. ${planRefusalFinal(person)}`;
     case 'plan-changed': return `${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. ${planRefusalFinal(person)}`;
@@ -1369,7 +1369,7 @@ export function memberRefusalText(refusal: MemberRefusal): string {
     case 'plan-other-member': return `${lead}, so it is not used in the run of a scheduled plan, only in ${person}'s own session. ${planRefusalFinalForRun()}`;
     case 'earlier-access': return `This connection (${provider}, profile ${shown}) was set up under an earlier access of ${person}'s, so it is not used now. Connect it again with api_setup action "connect".`;
     case 'not-owner': return `${lead}, so it is not used in this session.`;
-    case 'owner-live': return `${lead}, so lynox does not use it for you. Take it over in the chat once ${person}'s access has ended, or delete this profile under Settings → APIs and connect it yourself (that disconnects ${person}).`;
+    case 'owner-live': return `${lead}, so lynox does not use it for you. Take it over in the chat once ${person}'s access has ended, or delete this connection under Settings → API connections and connect it yourself (that disconnects ${person}).`;
     case 'owner-ended': return `${lead}. To let lynox use it for you, take it over: in the chat, ask to take over the connection ${shown} and confirm with "Allow".`;
     default: { const never: never = refusal.kind; return never; }
   }
@@ -1421,7 +1421,7 @@ export function memberRefusalOwnerNote(refusal: MemberRefusal, plan: string | un
   const { person, provider, shown, ended } = refusal;
   const named = planNamed(plan);
   const connEn = `${provider} (profile ${shown})`;
-  const connDe = `${provider} (Profil ${shown})`;
+  const connDe = `${provider} (Verbindung ${shown})`;
   // A plan's refusal once the access the connection was made under has ended (`connectionWaits`
   // asks that grant, not the person: they may hold a later access, so the words say which one):
   // the takeover is the owner's way, also
@@ -1451,20 +1451,20 @@ export function memberRefusalOwnerNote(refusal: MemberRefusal, plan: string | un
       const own = refusal.kind === 'plan-own-not-covered';
       return {
         en: `${named.en} did not use ${connEn}. ${person} set it up with their own login${own ? `, and ${person}'s access does not cover this plan` : `, so only ${person}'s own session uses it`}. `
-          + `If the plan should use this service, there are two ways: once ${person}'s access has ended, ask in a chat to take over the connection and confirm with ${ALLOW_EN}; or delete the profile under Settings → APIs and connect the service yourself, which disconnects ${person}. Otherwise the plan cannot run this step.`,
+          + `If the plan should use this service, there are two ways: once ${person}'s access has ended, ask in a chat to take over the connection and confirm with ${ALLOW_EN}; or delete the connection under Settings → API connections and connect the service yourself, which disconnects ${person}. Otherwise the plan cannot run this step.`,
         de: `${named.de} hat ${connDe} nicht genutzt. ${person} hat die Verbindung mit eigenem Login eingerichtet${own ? `, und der Zugang von ${person} deckt diesen Plan nicht` : `, deshalb nutzt sie nur die eigene Sitzung von ${person}`}. `
-          + `Soll der Plan diesen Dienst nutzen, gibt es zwei Wege: Sobald der Zugang von ${person} beendet ist, bitte im Chat darum, die Verbindung zu übernehmen, und bestätige mit ${ALLOW_DE}. Oder lösche das Profil unter Einstellungen → APIs und verbinde den Dienst selbst; das trennt ${person}. Sonst kann der Plan diesen Schritt nicht ausführen.`,
+          + `Soll der Plan diesen Dienst nutzen, gibt es zwei Wege: Sobald der Zugang von ${person} beendet ist, bitte im Chat darum, die Verbindung zu übernehmen, und bestätige mit ${ALLOW_DE}. Oder lösche die Verbindung unter Einstellungen → API-Verbindungen und verbinde den Dienst selbst; das trennt ${person}. Sonst kann der Plan diesen Schritt nicht ausführen.`,
       };
     }
     // The owner's own trigger (no plan): the model's words already speak to the owner, so the
     // English stays as it is; the German is the push's.
     case 'owner-live':
       return {
-        de: `${person} hat diese Verbindung (${provider}, Profil ${shown}) mit eigenem Login eingerichtet, deshalb nutzt lynox sie nicht für dich. Übernimm sie im Chat, sobald der Zugang von ${person} beendet ist, oder lösche dieses Profil unter Einstellungen → APIs und verbinde den Dienst selbst (das trennt ${person}).`,
+        de: `${person} hat diese Verbindung (${provider}, ${shown}) mit eigenem Login eingerichtet, deshalb nutzt lynox sie nicht für dich. Übernimm sie im Chat, sobald der Zugang von ${person} beendet ist, oder lösche diese Verbindung unter Einstellungen → API-Verbindungen und verbinde den Dienst selbst (das trennt ${person}).`,
       };
     case 'owner-ended':
       return {
-        de: `${person} hat diese Verbindung (${provider}, Profil ${shown}) mit eigenem Login eingerichtet. Damit lynox sie für dich nutzt, übernimm sie: Bitte im Chat darum, die Verbindung ${shown} zu übernehmen, und bestätige mit ${ALLOW_DE}.`,
+        de: `${person} hat diese Verbindung (${provider}, ${shown}) mit eigenem Login eingerichtet. Damit lynox sie für dich nutzt, übernimm sie: Bitte im Chat darum, die Verbindung ${shown} zu übernehmen, und bestätige mit ${ALLOW_DE}.`,
       };
     case 'plan-owner-started':
     case 'earlier-access':

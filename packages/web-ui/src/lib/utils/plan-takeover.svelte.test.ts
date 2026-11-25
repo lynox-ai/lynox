@@ -224,9 +224,9 @@ describe('T-3: a helper\'s own connection', () => {
 	it('names the service, the account and whose it is, verbatim in DE and EN', () => {
 		const p = preview({ connections: [{ id: 'c', profile: 'apf_1', provider: 'Shopify', account: 'laden.myshopify.com', by: 'ida@x.ch' }] });
 		const de = takeoverLines(p, fmt).find((l) => l.kind === 'connection')?.text;
-		expect(de).toBe('ida@x.ch hat Shopify mit einem eigenen Konto verbunden (laden.myshopify.com). Nach dem Übernehmen nutzt der Plan diese Verbindung nicht mehr. Braucht er sie, verbinde das Programm selbst mit deinem Konto: in den Einstellungen unter „APIs“ über „Neue API“. Sonst kann der Plan diesen Schritt nicht ausführen.');
+		expect(de).toBe('ida@x.ch hat Shopify mit einem eigenen Konto verbunden (laden.myshopify.com). Nach dem Übernehmen nutzt der Plan diese Verbindung nicht mehr. Braucht er sie, verbinde das Programm selbst mit deinem Konto: in den Einstellungen unter „API-Verbindungen“ über „Neue Verbindung“. Sonst kann der Plan diesen Schritt nicht ausführen.');
 		setLocale('en');
-		expect(takeoverLines(p, fmt).find((l) => l.kind === 'connection')?.text).toBe('ida@x.ch connected Shopify with an account of their own (laden.myshopify.com). After you take over, the plan no longer uses this connection. If it needs it, connect the service yourself with your own account: in Settings under “APIs”, via “New API”. Otherwise the plan cannot run this step.');
+		expect(takeoverLines(p, fmt).find((l) => l.kind === 'connection')?.text).toBe('ida@x.ch connected Shopify with an account of their own (laden.myshopify.com). After you take over, the plan no longer uses this connection. If it needs it, connect the service yourself with your own account: in Settings under “API connections”, via “New connection”. Otherwise the plan cannot run this step.');
 	});
 	it('without an account says the service alone, and without an owner someone with access', () => {
 		const p = preview({ connections: [{ id: 'c', profile: 'apf_1', provider: 'bexio', account: null, by: null }] });

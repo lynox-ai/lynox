@@ -179,7 +179,7 @@ const EN: BulkNotices = Object.freeze({
   notApproved: (phase: string) => `Bulk run is ${phase}, not approved — nothing written.`,
   haltedResume: 'Bulk run is halted — resume it to continue.',
   consentOutdated: (fields: readonly string[], nothingYet: boolean) =>
-    `${nothingYet ? 'lynox wrote nothing.' : 'lynox writes nothing more in this run; what it already wrote stays.'} This Shopify connection does not yet let lynox change ${shopifyFieldsNamed(fields, 'en')}. Reconnect Shopify (Settings → APIs), then ask lynox in the chat to plan the run again.`,
+    `${nothingYet ? 'lynox wrote nothing.' : 'lynox writes nothing more in this run; what it already wrote stays.'} This Shopify connection does not yet let lynox change ${shopifyFieldsNamed(fields, 'en')}. Reconnect Shopify (Settings → API connections), then ask lynox in the chat to plan the run again.`,
   otherLoop: 'Bulk run stopped by another loop.',
   otherLoopHolds: 'Bulk run waiting for targets another loop holds.',
   noJudgedRun: 'No judged bulk run with this id.',
@@ -213,8 +213,8 @@ const EN_HALT_REASONS: Readonly<Record<keyof typeof BULK_HALT_REASONS, string>> 
   awaitingStart: 'Waiting for you to start reading.',
   expired: 'Approval expired.',
   unavailable: 'Target system not reachable, or an error in lynox. The run can be continued; if it halts again right away, the target system is not reachable yet.',
-  credential: 'lynox finds no stored access to the target system. Reconnect it under Settings → APIs, or ask lynox in the chat to do so.',
-  unauthorized: 'The target system refused the stored access. Once it is reconnected under Settings → APIs, the run can be continued.',
+  credential: 'lynox finds no stored access to the target system. Reconnect it under Settings → API connections, or ask lynox in the chat to do so.',
+  unauthorized: 'The target system refused the stored access. Once it is reconnected under Settings → API connections, the run can be continued.',
   blocked: 'This instance is not allowed to reach this target system.',
   contract: 'A target is outside what the run may write.',
   costCap: 'The run reached its AI spend limit.',
@@ -256,7 +256,7 @@ const EN_HALT_REASONS: Readonly<Record<keyof typeof BULK_HALT_REASONS, string>> 
   shopifyNoApiVersion: 'A setting for Shopify is missing in lynox. Only lynox can fix it (support@lynox.ai).',
   // True for a run and for an undo alike, which go on differently: the page says how (U-232).
   storeRequestRefused: 'lynox did not send a request of this run to the store: lynox does not let a request of this form through to Shopify. The run\'s page says how to go on.',
-  consentOutdated: 'This Shopify connection does not yet let lynox change these fields. Reconnect Shopify (Settings → APIs), then ask lynox in the chat to plan the run again.',
+  consentOutdated: 'This Shopify connection does not yet let lynox change these fields. Reconnect Shopify (Settings → API connections), then ask lynox in the chat to plan the run again.',
   superseded: 'Another run with judging was started in its place. This one wrote nothing.',
   discarded: 'You discarded this run. lynox wrote nothing.',
   judgeModel: 'The AI provider of this run has no model for judging, or the operator does not allow it.',
@@ -288,8 +288,8 @@ function deHaltReason(reason: string): string | undefined {
     // ux U-105: the words of the run page (`bulk.halt.*`), so push and page say the same; neutral
     // as to person, since a mandate gets the same summary and only the owner resumes a run.
     [BULK_HALT_REASONS.unavailable]: 'Zielsystem nicht erreichbar oder Fehler in lynox. Der Lauf lässt sich fortsetzen; hält er gleich wieder an, ist das Zielsystem noch nicht erreichbar.',
-    [BULK_HALT_REASONS.credential]: 'lynox findet keinen gespeicherten Zugang zum Zielsystem. Verbinde ihn unter Einstellungen → APIs neu oder bitte lynox im Chat darum.',
-    [BULK_HALT_REASONS.unauthorized]: 'Das Zielsystem hat den gespeicherten Zugang abgelehnt. Ist er unter Einstellungen → APIs neu verbunden, lässt sich der Lauf fortsetzen.',
+    [BULK_HALT_REASONS.credential]: 'lynox findet keinen gespeicherten Zugang zum Zielsystem. Verbinde ihn unter Einstellungen → API-Verbindungen neu oder bitte lynox im Chat darum.',
+    [BULK_HALT_REASONS.unauthorized]: 'Das Zielsystem hat den gespeicherten Zugang abgelehnt. Ist er unter Einstellungen → API-Verbindungen neu verbunden, lässt sich der Lauf fortsetzen.',
     [BULK_HALT_REASONS.blocked]: 'Die Instanz darf dieses Zielsystem nicht erreichen.',
     [BULK_HALT_REASONS.contract]: 'Ein Ziel liegt ausserhalb dessen, was der Lauf schreiben darf.',
     [BULK_HALT_REASONS.costCap]: 'Der Lauf hat seine KI-Kostengrenze erreicht.',
@@ -333,7 +333,7 @@ function deHaltReason(reason: string): string | undefined {
     [BULK_HALT_REASONS.shopifyNoApiVersion]: 'Für Shopify fehlt in lynox eine Einstellung. Beheben kann das nur lynox (support@lynox.ai).',
     [BULK_HALT_REASONS.storeRequestRefused]: 'lynox hat eine Anfrage dieses Laufs nicht an den Shop gesendet: Ihre Form lässt lynox nicht zu Shopify durch. Wie es weitergeht, steht auf der Laufseite.',
     // U-281, without the fields (the outcome's summary names them, `consentOutdated`).
-    [BULK_HALT_REASONS.consentOutdated]: 'Diese Shopify-Verbindung erlaubt lynox noch nicht, diese Felder zu ändern. Verbinde Shopify neu (Einstellungen → APIs) und lass den Lauf im Chat neu planen.',
+    [BULK_HALT_REASONS.consentOutdated]: 'Diese Shopify-Verbindung lässt lynox diese Felder noch nicht ändern. Verbinde Shopify neu (Einstellungen → API-Verbindungen) und plane den Lauf im Chat neu.',
     [BULK_HALT_REASONS.superseded]: 'An seiner Stelle wurde ein anderer Lauf mit Beurteilung gestartet. Dieser hat nichts geschrieben.',
     // Said to the owner, on whose device a push lands (U-324).
     [BULK_HALT_REASONS.discarded]: 'Du hast diesen Lauf verworfen. lynox hat nichts geschrieben.',
@@ -398,7 +398,7 @@ const DE: BulkNotices = Object.freeze({
   notApproved: () => 'Massenlauf nicht freigegeben; nichts geschrieben.',
   haltedResume: 'Massenlauf angehalten; geschrieben wird erst nach dem Fortsetzen.',
   consentOutdated: (fields: readonly string[], nothingYet: boolean) =>
-    `${nothingYet ? 'lynox hat nichts geschrieben.' : 'lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt.'} Diese Shopify-Verbindung erlaubt lynox noch nicht, ${shopifyFieldsNamed(fields, 'de')} zu ändern. Verbinde Shopify neu (Einstellungen → APIs); dann bitte lynox im Chat, den Lauf neu zu planen.`,
+    `${nothingYet ? 'lynox hat nichts geschrieben.' : 'lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt.'} Diese Shopify-Verbindung erlaubt lynox noch nicht, ${shopifyFieldsNamed(fields, 'de')} zu ändern. Verbinde Shopify neu (Einstellungen → API-Verbindungen); dann bitte lynox im Chat, den Lauf neu zu planen.`,
   otherLoop: 'Massenlauf beendet: Ein anderer Durchgang bearbeitet ihn.',
   otherLoopHolds: 'Massenlauf wartet auf Ziele, die ein anderer Durchgang hält.',
   noJudgedRun: 'Diesen Massenlauf mit Beurteilung gibt es nicht.',

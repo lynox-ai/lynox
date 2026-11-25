@@ -334,7 +334,7 @@ export function engineLessPageText(kind: keyof typeof ENGINE_LESS_PAGE_HEADS, ma
 
 /**
  * Where a result page's one button leads. `apis` once the page knows the
- * profile — Settings → APIs shows the connection's state; `app` where it does not. The paths are
+ * profile — Settings → API connections shows the connection's state; `app` where it does not. The paths are
  * fixed here and a caller names only the kind, so no request value can become the target.
  */
 export type OAuthBack = 'apis' | 'app';

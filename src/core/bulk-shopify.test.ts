@@ -1554,7 +1554,7 @@ describe('applying a Shopify run', () => {
       expect(s.requests).toEqual([]);
       expect(s.products.get(10)!['descriptionHtml']).toBe('<p>1</p>');
       expect(ledger.getStatus(id)).toMatchObject({ applied: 0, failed: 0, sentUnknown: 0 });
-      expect(out.summary).toContain('lynox wrote nothing. This Shopify connection does not yet let lynox change the description. Reconnect Shopify (Settings → APIs), then ask lynox in the chat to plan the run again.');
+      expect(out.summary).toContain('lynox wrote nothing. This Shopify connection does not yet let lynox change the description. Reconnect Shopify (Settings → API connections), then ask lynox in the chat to plan the run again.');
     });
 
     it('writes the description once the connection was confirmed under the current text', async () => {

@@ -224,9 +224,9 @@ describe('a profile in the API store', () => {
 		await settle();
 		// The host alone, never the path or query; an address that does not parse names nothing.
 		expect(asked).toEqual([
-			'Das API-Profil für crm.kanzlei.example wirklich löschen?',
-			`API-Profil "${OWN}" wirklich löschen?`,
-			'Dieses API-Profil wirklich löschen?',
+			'Die API-Verbindung für crm.kanzlei.example wirklich löschen?',
+			`API-Verbindung „${OWN}“ wirklich löschen?`,
+			'Diese API-Verbindung wirklich löschen?',
 		]);
 	});
 
@@ -240,7 +240,7 @@ describe('a profile in the API store', () => {
 		await settle();
 		// A quote in the host, an opaque host (also one that would pass as a host name), no host, an
 		// over-long host: none of them is named.
-		expect(asked).toEqual([...Array.from({ length: 5 }, () => 'Dieses API-Profil wirklich löschen?'), 'Das API-Profil für [::1] wirklich löschen?']);
+		expect(asked).toEqual([...Array.from({ length: 5 }, () => 'Diese API-Verbindung wirklich löschen?'), 'Die API-Verbindung für [::1] wirklich löschen?']);
 	});
 
 	// The description shows in the opened card only, one card open at a time.

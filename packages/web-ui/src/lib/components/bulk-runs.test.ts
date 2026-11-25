@@ -281,8 +281,8 @@ describe('the approved unchecked-change texts', () => {
 
 	it('holds the five check-case sentences word for word', () => {
 		expect(line('bulk.halt.unauthorized_before_check')).toBe(entry('bulk.halt.unauthorized_before_check',
-			'Öffne Einstellungen → APIs und tippe beim Profil für {provider} auf das Chat-Symbol, um den Zugang neu zu verbinden. Danach kannst du nachprüfen.',
-			'Open Settings → APIs and tap the chat icon next to the profile for {provider} to reconnect the access. Then you can check again.'));
+			'Öffne Einstellungen → API-Verbindungen und tippe bei der Verbindung für {provider} auf das Chat-Symbol, um den Zugang neu zu verbinden. Danach kannst du nachprüfen.',
+			'Open Settings → API connections and tap the chat icon next to the connection for {provider} to reconnect the access. Then you can check again.'));
 		expect(line('bulk.halt.blocked_before_check_managed')).toBe(entry('bulk.halt.blocked_before_check_managed',
 			'Soll lynox {host} erreichen, schreib an support@lynox.ai. Danach kannst du nachprüfen.',
 			'If lynox should reach {host}, write to support@lynox.ai. Then you can check again.'));
@@ -739,12 +739,12 @@ describe('going on from a run that halted', () => {
 			}
 		}
 		// A step that does not promise going on still stands without a button.
-		expect(bulkHaltText(at('credential', noModel), true, DE, true)?.before).toContain('Einstellungen → APIs');
+		expect(bulkHaltText(at('credential', noModel), true, DE, true)?.before).toContain('Einstellungen → API-Verbindungen');
 	});
 
 	it('gives a refused access the step to reconnect it, and a missing model the start\'s own sentence', () => {
-		const reconnect = 'Öffne Einstellungen → APIs und tippe beim Profil für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden.';
-		expect(bulkHaltText(at('credential'), true, DE, true)?.before).toBe(`${reconnect} Gibt es dort kein Profil, bitte lynox im Chat, den Zugang einzurichten.`);
+		const reconnect = 'Öffne Einstellungen → API-Verbindungen und tippe bei der Verbindung für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden.';
+		expect(bulkHaltText(at('credential'), true, DE, true)?.before).toBe(`${reconnect} Gibt es dort keine, bitte lynox im Chat, den Zugang einzurichten.`);
 		// A refused access has a stored one, so no "no profile" clause, and the run continues after (ux U-105).
 		expect(bulkHaltText(at('unauthorized'), true, DE, true)?.before).toBe(`${reconnect} Danach kannst du fortsetzen.`);
 		expect(bulkHaltText(at('judgeModel'), true, DE, true)).toEqual({ cause: de['bulk.start.no_judge_model'], before: null });
@@ -860,7 +860,7 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('maxTargets', unclear), true, DE, true)?.check).toBe(one);
 		expect(bulkResumeText(w('unavailable', { ...unclear, sentUnknown: 3 }), true, EN, true)?.check).toBe('Check again looks in shop.example.invalid whether the changes are there; nothing is sent.');
 		// A halt's own step still comes first.
-		const reconnect = 'Öffne Einstellungen → APIs und tippe beim Profil für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden. Gibt es dort kein Profil, bitte lynox im Chat, den Zugang einzurichten.';
+		const reconnect = 'Öffne Einstellungen → API-Verbindungen und tippe bei der Verbindung für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden. Gibt es dort keine, bitte lynox im Chat, den Zugang einzurichten.';
 		expect(bulkResumeText(w('credential', unclear), true, DE, true)?.before).toBe(reconnect);
 		// Anything left to send: writing on, as before.
 		expect(bulkResumeKind(w('failureRate', { ...unclear, resumeSends: 1 }))).toBe('write');
@@ -884,7 +884,7 @@ describe('going on from a run that halted', () => {
 		expect([a?.before, a?.check, a?.after]).toEqual([null, check, 'Hält das Nachprüfen gleich wieder an, ist shop.example.invalid noch nicht erreichbar; versuch es später noch einmal.']);
 		// (b) No access: reconnecting comes first, as the check needs it too, and ends with checking.
 		const b = bulkResumeText(w('unauthorized', unclear), true, DE, true);
-		expect([b?.before, b?.check, b?.after]).toEqual(['Öffne Einstellungen → APIs und tippe beim Profil für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden. Danach kannst du nachprüfen.', check, null]);
+		expect([b?.before, b?.check, b?.after]).toEqual(['Öffne Einstellungen → API-Verbindungen und tippe bei der Verbindung für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden. Danach kannst du nachprüfen.', check, null]);
 		// (c) A blocked host: allowing it comes first, managed and self-hosted.
 		expect(bulkResumeText(w('blocked', unclear), true, DE, true)?.before).toBe('Soll lynox shop.example.invalid erreichen, schreib an support@lynox.ai. Danach kannst du nachprüfen.');
 		expect(bulkResumeText(w('blocked', unclear), false, DE, true)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du nachprüfen.');
@@ -985,11 +985,11 @@ describe('going on from a run that halted', () => {
 	it('words a halt for a connection that does not cover the run\'s fields', () => {
 		const none = { applied: 0, sentUnknown: 0 };
 		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, DE, false)).toEqual({
-			cause: 'lynox hat nichts geschrieben. Diese Shopify-Verbindung erlaubt lynox noch nicht, die Beschreibung zu ändern. Verbinde Shopify neu (Einstellungen → APIs).',
+			cause: 'lynox hat nichts geschrieben. Diese Shopify-Verbindung erlaubt lynox noch nicht, die Beschreibung zu ändern. Verbinde Shopify neu (Einstellungen → API-Verbindungen).',
 			before: null, check: null, after: null, kept: null, soFar: null, allows: null,
 		});
 		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['descriptionHtml'] }), true, EN, false)?.cause)
-			.toBe('lynox wrote nothing. This Shopify connection does not yet let lynox change the description. Reconnect Shopify (Settings → APIs).');
+			.toBe('lynox wrote nothing. This Shopify connection does not yet let lynox change the description. Reconnect Shopify (Settings → API connections).');
 		expect(bulkResumeText(w('consentOutdated', { ...none, consentFields: ['alt', 'descriptionHtml', 'title'] }), true, DE, false)?.cause)
 			.toContain('noch nicht, die Alt-Texte der Bilder, die Beschreibung und den Titel zu ändern.');
 		// A field this page has no name for, or none given: "these fields".
@@ -1025,8 +1025,8 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('unrecorded'), true, DE, true)?.cause).toBe('lynox konnte einen Zugriff auf shop.example.invalid nicht im Protokoll dieser Instanz festhalten. Deshalb hat lynox an dieser Stelle nicht weitergeschrieben.');
 		expect(bulkResumeText(w('maxTargets', { maxTargets: 40 }), true, EN, true)?.cause).toBe('The run reached the approved maximum: 40 targets.');
 		expect(bulkResumeText(w('maxTargets', { maxTargets: 1 }), true, DE, true)?.cause).toBe('Der Lauf hat die freigegebene Höchstzahl erreicht: ein Ziel.');
-		expect(bulkResumeText(w('unauthorized'), true, EN, true)?.before).toBe('Open Settings → APIs and tap the chat icon next to the profile for shop.example.invalid to reconnect the access. Then you can continue.');
-		expect(bulkResumeText(w('credential'), true, EN, true)?.before).toBe('Open Settings → APIs and tap the chat icon next to the profile for shop.example.invalid to reconnect the access. If there is no profile, ask lynox in the chat to set up the access.');
+		expect(bulkResumeText(w('unauthorized'), true, EN, true)?.before).toBe('Open Settings → API connections and tap the chat icon next to the connection for shop.example.invalid to reconnect the access. Then you can continue.');
+		expect(bulkResumeText(w('credential'), true, EN, true)?.before).toBe('Open Settings → API connections and tap the chat icon next to the connection for shop.example.invalid to reconnect the access. If there is no connection, ask lynox in the chat to set up the access.');
 		expect(bulkResumeText(w('unavailable'), true, EN, true)?.before).toBe('You can continue. If the run halts again right away, shop.example.invalid is not reachable yet; try again later.');
 		expect(bulkResumeText(w('blocked'), false, DE, true)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du fortsetzen.');
 		expect(bulkResumeText(w('blocked'), null, DE, true)?.before).toBe(bulkHaltText(at('blocked'), true, DE, true)?.before);
