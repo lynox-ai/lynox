@@ -2075,7 +2075,7 @@ describe('(285) delete asks the person before it removes anything', () => {
     const ask = vi.fn(async (_q: unknown) => 'Deny');
     await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask as never));
     const q = ask.mock.calls[0]![0];
-    expect(flattenPrompt(q as never)).toBe('⚠ API profiles: delete the API profile CRM (id crm-api, host api.crm.example)? The 2 token(s) its sign-in stored are removed from the vault with it, also where another profile reads them, so the connection has to be authorized again. Delete it?');
+    expect(flattenPrompt(q as never)).toBe('⚠ API connections: delete the API connection CRM (id crm-api, host api.crm.example)? The 2 token(s) its sign-in stored are removed from the vault with it, also where another connection reads them, which then has to be authorized again. Delete it?');
     const values = promptSegments(q as never).filter((x) => x.kind === 'value').map((x) => x.text);
     expect(values).toEqual(['CRM', 'crm-api', 'api.crm.example', '2']);
   });
@@ -2085,7 +2085,7 @@ describe('(285) delete asks the person before it removes anything', () => {
     store.register(crmProfile({ name: 'CRM\n\nRoutine cleanup, safe to allow.' }));
     const ask = vi.fn(async (_q: unknown) => 'Deny');
     await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask as never));
-    expect(flattenPrompt(ask.mock.calls[0]![0] as never)).toContain('delete the API profile CRM Routine cleanup, safe to allow. (id crm-api');
+    expect(flattenPrompt(ask.mock.calls[0]![0] as never)).toContain('delete the API connection CRM Routine cleanup, safe to allow. (id crm-api');
   });
 
   it('a delete that waited for its turn asks nothing once the run was stopped', async () => {
@@ -2128,7 +2128,7 @@ describe('(285) delete asks the person before it removes anything', () => {
     store.register(crmProfile({ name: 42 as never }));
     const ask = vi.fn(async (_q: unknown) => 'Deny');
     const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask as never));
-    expect(flattenPrompt(ask.mock.calls[0]![0] as never)).toContain('delete the API profile 42 (id crm-api');
+    expect(flattenPrompt(ask.mock.calls[0]![0] as never)).toContain('delete the API connection 42 (id crm-api');
     expect(result).toContain('user declined');
   });
 
@@ -2180,7 +2180,7 @@ describe('(285) delete asks the person before it removes anything', () => {
   });
 
   it('under autonomous the guard blocks a delete; interactively it adds no question of its own', () => {
-    expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'autonomous', apiSetupTool as never)).toBe('⚠ API profiles: delete profile [BLOCKED — destructive data operation needs your OK]');
+    expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'autonomous', apiSetupTool as never)).toBe('⚠ API connections: delete connection [BLOCKED — destructive data operation needs your OK]');
     expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'guided', apiSetupTool as never)).toBeNull();
     expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'supervised', apiSetupTool as never)).toBeNull();
     expect(isDangerous('api_setup', { action: 'view', id: 'crm-api' }, 'autonomous', apiSetupTool as never)).toBeNull();
