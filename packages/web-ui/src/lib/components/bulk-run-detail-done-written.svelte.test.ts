@@ -264,6 +264,7 @@ describe('the approval of an undo', () => {
 		undo(changes);
 		await render();
 		expect(target.textContent).toContain(sentence);
-		expect(target.textContent).not.toMatch(/\b1 Ziele\b|\b1 targets\b/);
+		// `\s` takes the no-break space too: one target never reads in the plural.
+		expect(target.textContent).not.toMatch(/\b1\sZiele\b|\b1\stargets\b/);
 	});
 });
