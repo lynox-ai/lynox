@@ -373,14 +373,14 @@ describe('bash after a search the provider ran in the same answer', () => {
     return [...(setDuringCall as ReadonlySet<string>)];
   }
 
-  it('counts the batch as started after outside content: a connected API\'s host stays out of the shell set', async () => {
+  it('after a provider search in the same answer, a connected API\'s host stays out of the shell set', async () => {
     await configured({ code: 0, out: () => 'ok' });
     const set = await runAnswer(searchCall, searchResult, bashCall);
     expect(set).not.toContain('api.vendor.example');
     expect(set, 'the host the owner typed, as a control').toContain('docs.example');
   });
 
-  it('CONTROL: the same answer without the search keeps the connected API\'s host in the shell set', async () => {
+  it('CONTROL: an answer with the bash call alone keeps the connected API\'s host in the shell set', async () => {
     await configured({ code: 0, out: () => 'ok' });
     const set = await runAnswer(bashCall);
     expect(set).toContain('api.vendor.example');
