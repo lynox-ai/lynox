@@ -2145,7 +2145,9 @@ describe('a local send whose write threw', () => {
     approve(runId);
     engineDb.getDb().prepare('UPDATE bulk_targets SET write_sent = 1, unknown_sends = 1 WHERE run_id = ?').run(runId);
     // This pass sends again (a local writer has no unclear-send check) and its write throws.
-    await runBulkEffect(runId, 'bulk_apply', effectDeps(memory(initial, new Set(['k000'])).writer));
+    const { writer, writes } = counting(memory(initial, new Set(['k000'])).writer);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    expect(writes.get('k000'), 'this pass sent').toBe(1);
     expect(sends(runId)).toEqual([{ seq: 0, write_sent: 1, unknown_sends: 1 }]);
   });
 });

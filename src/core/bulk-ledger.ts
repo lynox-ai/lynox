@@ -475,9 +475,9 @@ const WRITE_FAILED_SQL = `(change != 'invalid' AND applied_at IS NULL AND error 
 // a target (written, failed, halted, released) gives the claim back; past
 // {@link BULK_CLAIM_STALE_MS} a second loop may take the target ({@link BulkLedger.claimTarget}),
 // and from there on it counts as unclear, as it stands. A live but slow loop can still hold such
-// a claim (one request may take as long as the bound); the count then errs to the careful side,
-// "unclear" until its answer is booked. One bound parameter: the time before which a claim is
-// stale ({@link staleBefore}).
+// a claim (one request alone may take as long as the bound, a Retry-After wait twice as long);
+// the count then errs to the careful side, "unclear" until its answer is booked. One bound
+// parameter: the time before which a claim is stale ({@link staleBefore}).
 const UNCLEAR_SQL = "(unknown_sends > 0 AND applied_at IS NULL AND undone_at IS NULL AND (claimed_at IS NULL OR claimed_at < ?) AND (error IS NULL OR error != 'conflict'))";
 // {@link UNCLEAR_SQL} on a run: two bound parameters, 1 for an external run, then the stale time.
 // Every count that names or leaves out a run's unclear targets reads this one, so they move together.
@@ -542,8 +542,9 @@ export interface ActualImage { value: unknown; estimated: boolean }
 
 /** Per target, the unit of a run's time budget and of its approval window. */
 export const BULK_TARGET_BUDGET_MS = 5_000;
-/** A claim older than this is taken to belong to a dead loop. Longer than one target's
- *  budget, so a slow write is not mistaken for a dead one. */
+/** A claim older than this is stale: a second loop may take its target. Longer than one
+ *  target's budget, but not than every request a slow target can make (a request may take as
+ *  long, a Retry-After wait twice as long), so a live loop can still hold a stale claim. */
 export const BULK_CLAIM_STALE_MS = 30_000;
 /** The approval window: N targets × the per-target budget, plus this, capped at a day. */
 export const BULK_APPROVAL_SLACK_MS = 15 * 60_000;
@@ -3642,9 +3643,9 @@ export class BulkLedger {
   /**
    * Claim one target for writing (PRD §3.4). A single conditional UPDATE,
    * so test and set are one step: it succeeds only while the target is unapplied,
-   * unfailed and unclaimed — or claimed longer ago than {@link BULK_CLAIM_STALE_MS}, by
-   * a loop that died. Two loops on one ledger (a restart, a retry, a second trigger)
-   * therefore never both write a target.
+   * unfailed and unclaimed — or claimed longer ago than {@link BULK_CLAIM_STALE_MS}. Two
+   * loops on one ledger (a restart, a retry, a second trigger) never both hold a fresh claim;
+   * a live loop slower than the bound can lose its claim to a second one.
    */
   claimTarget(runId: string, seq: number, now: number = Date.now()): boolean {
     return this.engineDb.getDb().prepare(
