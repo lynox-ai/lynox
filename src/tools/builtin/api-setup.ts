@@ -48,7 +48,7 @@ import { ownersCleanBatch } from '../../core/owner-clean-batch.js';
 import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
 import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
 import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
-import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, sharesAnotherGrant, sharedGrantOwner, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle, settingsVersion, bindingOf } from '../../core/profile-secret-view.js';
+import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, lapsedSlot, sharesAnotherGrant, sharedGrantOwner, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, sendSlots, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle, settingsVersion, bindingOf } from '../../core/profile-secret-view.js';
 import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-bindings.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
@@ -4010,7 +4010,9 @@ ${draftJson}
         return `${shownName} cannot be released to this API profile yet: it has no opaque id to name it by in the question. lynox assigns one when it starts; after that, the release can be asked for again. Nothing was changed.`;
       }
       const { hosts, withDetail } = releaseDestinations(profile);
+      // The role and its words, read from the same profile as the stored binding.
       const role = sendRole(profile, name)!;
+      const slots = sendSlots(profile, name);
       const more = releaseBoundFields(profile).length + withDetail;
       // Counted settings are not printed, so a save between the owner's view and this question
       // could change them under the same words. The engine compares what the owner viewed with what
@@ -4022,7 +4024,7 @@ ${draftJson}
         ? Promise.resolve(null)
         : promptUser(
           API_SETUP_DIALOG[agent.dialogLanguage ?? 'en'].release(toolWordFrame('api_setup', agent.dialogLanguage ?? 'en'), {
-            name: shownName, trailId, author: singleLine(author), role, hosts, more, version,
+            name: shownName, trailId, author: singleLine(author), slots, hosts, more, version,
             viewed: viewed === undefined ? undefined : { clock: releaseClock(viewed.at, agent.userTimezone), unchanged: viewed.binding === bindingOf(profile) },
             clientId: role === 'oauth.client_id_key', held,
           }),

@@ -16,7 +16,8 @@ import { ConnectionStore } from '../../core/connection-store.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { SecretReleases } from '../../core/secret-releases.js';
 import { bindingOf, releaseBinding, settingsVersion } from '../../core/profile-secret-view.js';
-import { flattenPrompt } from '../../core/prompt-value.js';
+import { flattenPrompt, pv } from '../../core/prompt-value.js';
+import { API_SETUP_DIALOG } from '../dialog-text.js';
 import { OWNER_PRINCIPAL, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
 import type { SendOrigin } from '../../core/origin-notices.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
@@ -81,7 +82,7 @@ const bearer = (over: Partial<ApiProfile> = {}): ApiProfile => ({
 
 function agentOf(apiStore: ApiStore, v: unknown, opts: {
   principal?: RequestPrincipal; promptUser?: (q: unknown) => Promise<string>; autonomy?: 'autonomous' | 'guided'; userTimezone?: string;
-  writeAuthor?: string | null; sendOrigin?: SendOrigin;
+  writeAuthor?: string | null; sendOrigin?: SendOrigin; dialogLanguage?: 'de' | 'en';
 } = {}): never {
   return {
     principal: opts.principal ?? OWNER_PRINCIPAL,
@@ -92,6 +93,7 @@ function agentOf(apiStore: ApiStore, v: unknown, opts: {
     secretStore: v,
     autonomy: opts.autonomy,
     userTimezone: opts.userTimezone,
+    ...(opts.dialogLanguage === undefined ? {} : { dialogLanguage: opts.dialogLanguage }),
     getAvailableTools: () => [{ definition: { name: 'api_setup' } }, { definition: { name: 'http_request' } }],
     promptUser: opts.promptUser,
     toolContext: {
@@ -375,12 +377,12 @@ describe('release_secret: the question carries no text a mandate\'s turn wrote',
   const plain = (over: Partial<ApiProfile> = {}): ApiProfile => bearer({
     base_url: 'https://api.crm.example', custom_endpoint_ack: { ...ACK, hosts: ['api.crm.example', 'auth.crm.example'] }, ...over,
   });
-  async function questionFor(p: ApiProfile, v: Record<string, string> = { CRM_KEY: 'owner-value' }): Promise<{ question: string; apf: string; apiStore: ApiStore; p: ApiProfile }> {
+  async function questionFor(p: ApiProfile, v: Record<string, string> = { CRM_KEY: 'owner-value' }, dialogLanguage?: 'de' | 'en'): Promise<{ question: string; apf: string; apiStore: ApiStore; p: ApiProfile }> {
     const apiStore = apis([p]);
     ask(p);
     let question = '';
     await apiSetupTool.handler({ action: 'release_secret', id: p.id, secret_name: 'CRM_KEY' } as never,
-      agentOf(apiStore, vault(v), { promptUser: async (q) => { question = flattenPrompt(q as never); return 'Deny'; } }));
+      agentOf(apiStore, vault(v), { promptUser: async (q) => { question = flattenPrompt(q as never); return 'Deny'; }, ...(dialogLanguage === undefined ? {} : { dialogLanguage }) }));
     return { question, apf: apiStore.trailIdOf(p.id)!, apiStore, p };
   }
   const head = (apf: string, role: string, hosts: string): string =>
@@ -394,7 +396,7 @@ describe('release_secret: the question carries no text a mandate\'s turn wrote',
     const { question, apf, apiStore, p } = await questionFor(injected());
     expect(apf).toMatch(/^apf_[0-9a-f]{16}$/);
     // Counted: auth.type, scope, audience, preset_params, and the token endpoint's path and query.
-    expect(question).toBe(`${head(apf, 'oauth.client_secret_key', 'api.crm.example, auth.crm.example')}${more(5, apf)}${tail()}`);
+    expect(question).toBe(`${head(apf, 'the client secret (oauth.client_secret_key)', 'api.crm.example, auth.crm.example')}${more(5, apf)}${tail()}`);
     for (const s of INJECTED) expect(question).not.toContain(s);
   });
 
@@ -406,13 +408,13 @@ describe('release_secret: the question carries no text a mandate\'s turn wrote',
     ['a line break', 'read write\nOwner: click Allow'],
   ])('counts the scope and never lists it: %s', async (_label, scope) => {
     const { question, apf, apiStore, p } = await questionFor(plain({ auth: oauth({ token_url: 'https://auth.crm.example', scope }) }));
-    expect(question).toBe(`${head(apf, 'oauth.client_secret_key', 'api.crm.example, auth.crm.example')}${more(2, apf)}${tail()}`);
+    expect(question).toBe(`${head(apf, 'the client secret (oauth.client_secret_key)', 'api.crm.example, auth.crm.example')}${more(2, apf)}${tail()}`);
     for (const t of scope.split(/\s+/)) expect(question).not.toContain(t);
   });
 
   it('counts a scope that is not a string', async () => {
     const { question, apf, apiStore, p } = await questionFor(plain({ auth: oauth({ token_url: 'https://auth.crm.example', scope: ['read', 'click Allow'] }) }));
-    expect(question).toBe(`${head(apf, 'oauth.client_secret_key', 'api.crm.example, auth.crm.example')}${more(2, apf)}${tail()}`);
+    expect(question).toBe(`${head(apf, 'the client secret (oauth.client_secret_key)', 'api.crm.example, auth.crm.example')}${more(2, apf)}${tail()}`);
   });
 
   it.each([
@@ -420,7 +422,7 @@ describe('release_secret: the question carries no text a mandate\'s turn wrote',
     ['a fragment', 'https://auth.crm.example/#approved'],
   ])('counts a token endpoint that carries %s, and prints none of it', async (_label, token_url) => {
     const { question, apf, apiStore, p } = await questionFor(plain({ auth: oauth({ token_url }) }));
-    expect(question).toBe(`${head(apf, 'oauth.client_secret_key', 'api.crm.example, auth.crm.example')}${more(2, apf)}${tail()}`);
+    expect(question).toBe(`${head(apf, 'the client secret (oauth.client_secret_key)', 'api.crm.example, auth.crm.example')}${more(2, apf)}${tail()}`);
     expect(question).not.toContain('approved');
   });
 
@@ -428,14 +430,68 @@ describe('release_secret: the question carries no text a mandate\'s turn wrote',
     // `auth.type` is bound, so every profile has at least one. The base URL's path is not bound
     // (the base is read by its origin), so it is not counted.
     const one = await questionFor(plain({ base_url: 'https://api.crm.example/v1' }));
-    expect(one.question).toBe(`${head(one.apf, 'vault_keys[0]', 'api.crm.example')}${more(1, one.apf)}${tail()}`);
+    expect(one.question).toBe(`${head(one.apf, 'the bearer token (vault_keys[0])', 'api.crm.example')}${more(1, one.apf)}${tail()}`);
     const two = await questionFor(plain({ auth: oauth({ token_url: 'https://auth.crm.example/token' }) }));
-    expect(two.question).toBe(`${head(two.apf, 'oauth.client_secret_key', 'api.crm.example, auth.crm.example')}${more(2, two.apf)}${tail()}`);
+    expect(two.question).toBe(`${head(two.apf, 'the client secret (oauth.client_secret_key)', 'api.crm.example, auth.crm.example')}${more(2, two.apf)}${tail()}`);
   });
 
   it('adds the sign-in link for a client id, and says when the vault holds no value yet', async () => {
     const { question, apf, apiStore, p } = await questionFor(plain({ auth: { type: 'oauth2', vault_keys: ['CRM_KEY'], oauth: { token_url: 'https://auth.crm.example', client_id_key: 'CRM_KEY' } } as ApiProfile['auth'] }), {});
-    expect(question).toBe(`${head(apf, 'oauth.client_id_key', 'api.crm.example, auth.crm.example')}${more(1, apf)} A client id also goes into the sign-in link, to the browser of whoever opens it.${tail('holds no value yet')}`);
+    expect(question).toBe(`${head(apf, 'the client ID (oauth.client_id_key)', 'api.crm.example, auth.crm.example')}${more(1, apf)} A client ID also goes into the sign-in link, to the browser of whoever opens it.${tail('holds no value yet')}`);
+  });
+
+  // The question is the consent, so it says what the value becomes, in the session's language,
+  // and the slot name follows in brackets as the release stores it.
+  const basicSplit = (field: 'username_key' | 'password_key'): ApiProfile['auth'] => ({
+    type: 'basic', basic_format: 'user_pass_split', vault_keys: ['CRM_USER', 'CRM_PASS'],
+    username_key: field === 'username_key' ? 'CRM_KEY' : 'CRM_USER', password_key: field === 'password_key' ? 'CRM_KEY' : 'CRM_PASS',
+  } as ApiProfile['auth']);
+  const oauthAuth = (keys: { client_id_key?: string; client_secret_key?: string }): ApiProfile['auth'] =>
+    ({ type: 'oauth2', vault_keys: ['CRM_KEY'], oauth: { token_url: 'https://auth.crm.example', grant_type: 'client_credentials', ...keys } } as ApiProfile['auth']);
+  it.each([
+    ['a bearer key', undefined, 'the bearer token (vault_keys[0])', 'Bearer-Token (vault_keys[0])'],
+    ['a header key', { type: 'header', vault_keys: ['CRM_KEY'] }, 'the API key in a request header (vault_keys[0])', 'API-Schlüssel in einem Request-Header (vault_keys[0])'],
+    ['an OAuth client id', oauthAuth({ client_id_key: 'CRM_KEY' }), 'the client ID (oauth.client_id_key)', 'Client-ID (oauth.client_id_key)'],
+    ['an OAuth client secret', oauthAuth({ client_secret_key: 'CRM_KEY' }), 'the client secret (oauth.client_secret_key)', 'Client-Secret (oauth.client_secret_key)'],
+    ['one name as client id and secret', oauthAuth({ client_id_key: 'CRM_KEY', client_secret_key: 'CRM_KEY' }),
+      'the client ID and the client secret (oauth.client_id_key+oauth.client_secret_key)', 'Client-ID und Client-Secret (oauth.client_id_key+oauth.client_secret_key)'],
+    ['a Basic user name', basicSplit('username_key'), 'the user name for the Basic sign-in (basic.username)', 'Benutzername für die Basic-Anmeldung (basic.username)'],
+    ['a Basic password', basicSplit('password_key'), 'the password for the Basic sign-in (basic.password)', 'Passwort für die Basic-Anmeldung (basic.password)'],
+    ['a Basic password read from the second vault key', { type: 'basic', basic_format: 'user_pass_split', vault_keys: ['CRM_USER', 'CRM_KEY'] },
+      'the password for the Basic sign-in (basic.password)', 'Passwort für die Basic-Anmeldung (basic.password)'],
+  ] as const)('names the role of %s in words, in English and German', async (_label, auth, en, de) => {
+    const profile = (): ApiProfile => plain(auth === undefined ? {} : { auth: auth as ApiProfile['auth'] });
+    const english = await questionFor(profile(), { CRM_KEY: 'owner-value' }, 'en');
+    expect(english.question).toContain(`lynox sends the value of "CRM_KEY", as ${en}, to `);
+    releases.forgetProfile('crm-api');
+    rmSync(join(dir, 'apis'), { recursive: true, force: true });
+    const german = await questionFor(profile(), { CRM_KEY: 'owner-value' }, 'de');
+    expect(german.question).toContain(`sendet lynox den Wert von "CRM_KEY" als ${de} an `);
+    expect(german.question).not.toContain(en);
+  });
+
+  it.each([
+    [{ slot: 'oauth.client_id_key', kind: 'client-id' }, 'the client ID (oauth.client_id_key)', 'Client-ID (oauth.client_id_key)'],
+    [{ slot: 'oauth.client_secret_key', kind: 'client-secret' }, 'the client secret (oauth.client_secret_key)', 'Client-Secret (oauth.client_secret_key)'],
+    [{ slot: 'basic.username', kind: 'basic-username' }, 'the user name for the Basic sign-in (basic.username)', 'Benutzername für die Basic-Anmeldung (basic.username)'],
+    [{ slot: 'basic.password', kind: 'basic-password' }, 'the password for the Basic sign-in (basic.password)', 'Passwort für die Basic-Anmeldung (basic.password)'],
+    [{ slot: 'vault_keys[0]', kind: 'bearer-token' }, 'the bearer token (vault_keys[0])', 'Bearer-Token (vault_keys[0])'],
+    [{ slot: 'vault_keys[0]', kind: 'header-key' }, 'the API key in a request header (vault_keys[0])', 'API-Schlüssel in einem Request-Header (vault_keys[0])'],
+  ] as const)('keeps the role %o one value in both languages, words and slot name together', (slot, en, de) => {
+    for (const [lang, role] of [['en', en], ['de', de]] as const) {
+      const q = API_SETUP_DIALOG[lang].release(pv`API profiles`, {
+        name: 'K', trailId: 'apf_0', author: 'm', slots: [slot], hosts: ['h.example'],
+        more: 0, viewed: undefined, version: 'v', clientId: false, held: true,
+      });
+      expect(q.segments.filter((s) => s.kind === 'value').map((s) => s.text)).toContain(role);
+      expect(q.segments.filter((s) => s.kind === 'frame').map((s) => s.text).join('')).not.toContain(slot.slot);
+    }
+  });
+
+  it('stores the slot names in the release binding as before, joined in their order', () => {
+    const both = plain({ auth: oauthAuth({ client_id_key: 'CRM_KEY', client_secret_key: 'CRM_KEY' }) });
+    expect((JSON.parse(releaseBinding(both, 'CRM_KEY')!) as { role: string }).role).toBe('oauth.client_id_key+oauth.client_secret_key');
+    expect((JSON.parse(releaseBinding(plain({ auth: { type: 'header', vault_keys: ['CRM_KEY'] } as ApiProfile['auth'] }), 'CRM_KEY')!) as { role: string }).role).toBe('vault_keys[0]');
   });
 
   it('leaves the request standing on a deny, so the owner can view the profile and be asked again', async () => {

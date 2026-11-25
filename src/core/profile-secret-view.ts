@@ -789,18 +789,30 @@ export function settingsVersion(profile: ApiProfile): string {
  * and a mandate's turn resolves none (`agent.ts`), so a release could not reach it.
  */
 export function sendRole(profile: ApiProfile, name: string): string | null {
+  const slots = sendSlots(profile, name);
+  return slots.length > 0 ? slots.map((s) => s.slot).join('+') : null;
+}
+
+/** What a slot of {@link sendRole} is, for the words the owner reads; the engine picks it from the auth shape. */
+export type SendRoleKind = 'client-id' | 'client-secret' | 'basic-username' | 'basic-password' | 'bearer-token' | 'header-key';
+
+/** A slot {@link sendRole} names, with its kind: the slot name is what a release binding stores, the kind is only read. */
+export interface SendSlot { readonly slot: string; readonly kind: SendRoleKind }
+
+/** The slots {@link sendRole} is made of, in the same order; empty when it names none. */
+export function sendSlots(profile: ApiProfile, name: string): readonly SendSlot[] {
   const auth = profile.auth;
-  const roles: string[] = [];
+  const slots: SendSlot[] = [];
   if (auth?.type === 'oauth2') {
-    if (auth.oauth?.client_id_key === name) roles.push('oauth.client_id_key');
-    if (auth.oauth?.client_secret_key === name) roles.push('oauth.client_secret_key');
+    if (auth.oauth?.client_id_key === name) slots.push({ slot: 'oauth.client_id_key', kind: 'client-id' });
+    if (auth.oauth?.client_secret_key === name) slots.push({ slot: 'oauth.client_secret_key', kind: 'client-secret' });
   } else if (auth?.type === 'basic' && auth.basic_format === 'user_pass_split') {
-    if ((auth.username_key ?? auth.vault_keys?.[0]) === name) roles.push('basic.username');
-    if ((auth.password_key ?? auth.vault_keys?.[1]) === name) roles.push('basic.password');
+    if ((auth.username_key ?? auth.vault_keys?.[0]) === name) slots.push({ slot: 'basic.username', kind: 'basic-username' });
+    if ((auth.password_key ?? auth.vault_keys?.[1]) === name) slots.push({ slot: 'basic.password', kind: 'basic-password' });
   } else if (auth?.type === 'bearer' || auth?.type === 'header') {
-    if (auth.vault_keys?.[0] === name) roles.push('vault_keys[0]');
+    if (auth.vault_keys?.[0] === name) slots.push({ slot: 'vault_keys[0]', kind: auth.type === 'bearer' ? 'bearer-token' : 'header-key' });
   }
-  return roles.length > 0 ? roles.join('+') : null;
+  return slots;
 }
 
 /**
