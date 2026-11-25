@@ -23,7 +23,7 @@ import { isMandateAuthored } from './api-store.js';
 import { credentialEndpoints, secretBearingNames } from './profile-secret-view.js';
 import { OAUTH_PRESETS, isPresetClientSecretName, presetClientKeys, presetStoreHost } from './oauth-presets.js';
 import type { PromptText } from '../types/index.js';
-import { pv } from './prompt-value.js';
+import { BINDING_DIALOG, type DialogLanguage } from '../tools/dialog-text.js';
 import type { OwnerPrincipal } from './secret-releases.js';
 import { shapedForLog, VAULT_NAME_SHAPE } from './profile-value-shape.js';
 
@@ -220,11 +220,10 @@ export function hasInvisibleCharacters(value: string): boolean {
  * stored and validated state: the vault name from the profile being saved, `bound` from the
  * stored binding, `added` from {@link credentialEndpoints} of that profile.
  *
- * Customer-visible copy, approved by the business owner.
+ * Customer-visible copy (the English is the text the business owner approved), in the language of
+ * the session that asks
+ * (`language`, from the agent's `dialogLanguage`, never from the profile or the model).
  */
-export function bindingQuestion(name: string, bound: readonly string[], added: readonly string[]): PromptText {
-  if (bound.length === 0) {
-    return pv`${name} is stored in your vault and is not yet limited to any address.\n\nThis profile would send it to: ${added.join(', ')}.\n\nAllow ${name} to be sent there? From then on it goes only to the addresses you have allowed.`;
-  }
-  return pv`${name} is sent only to: ${bound.join(', ')}.\n\nThis profile would also send it to: ${added.join(', ')}.\n\nAllow ${name} to be sent there as well?`;
+export function bindingQuestion(name: string, bound: readonly string[], added: readonly string[], language: DialogLanguage): PromptText {
+  return BINDING_DIALOG[language].question(name, bound, added);
 }

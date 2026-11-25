@@ -1839,7 +1839,7 @@ async function askBindingGrowth(agent: IAgent, profile: ApiProfile, act: 'saved'
   const grow: Array<{ name: string; endpoints: string[] }> = [];
   for (const { name, bound } of needs) {
     if (agent.runSignal?.aborted) { noteOwnStopSentence(); return { refusal: `Blocked: profile "${profile.id}" was not ${act} — the run was stopped before the owner could be asked.` }; }
-    const answer = await agent.promptUser(pv`${bindingQuestion(name, bound, dest.filter((e) => !bound.includes(e)))}`, ['Allow', 'Deny', '\x00']);
+    const answer = await agent.promptUser(pv`${bindingQuestion(name, bound, dest.filter((e) => !bound.includes(e)), agent.dialogLanguage ?? 'en')}`, ['Allow', 'Deny', '\x00']);
     if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
       return { refusal: `Blocked: profile "${profile.id}" was not ${act} — the owner did not allow "${shapedForLog(name, DERIVED_NAME_SHAPE, 80)}" to go to its destinations.` };
     }
