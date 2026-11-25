@@ -84,6 +84,7 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'readExactHeld', contractFile: 'http.ts', twinPattern: valueTwin('readExactHeld') },
   { name: 'UsageSummaryPeriod', contractFile: 'http.ts', twinPattern: typeTwin('UsageSummaryPeriod') },
   { name: 'UsageSummaryResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageSummaryResponse') },
+  { name: 'UsagePlanSwitchCredit', contractFile: 'http.ts', twinPattern: typeTwin('UsagePlanSwitchCredit') },
   { name: 'HealthBody', contractFile: 'http.ts', twinPattern: typeTwin('HealthBody') },
   { name: 'TYPED_MIRRORS', contractFile: 'fixtures/mirrors.ts', twinPattern: valueTwin('TYPED_MIRRORS') },
   // K-W3 — auth + OAuth wire shapes.

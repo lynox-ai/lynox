@@ -38,6 +38,7 @@ comment says so.
 | `usage-status-response.hosted.json` | `UsageStatusResponse` | control plane, non-managed branch (pair test in the private repo) | engine `managed-hook.ts` `syncStatus()` |
 | `usage-status-response.comp.json` | `UsageStatusResponse` (comp account: metered balance, `spend_gate: none`) | control plane, comp branch (pair test in the private repo) | engine `managed-hook.ts` `syncStatus()` — driven in `src/core/managed-hook.test.ts` (clears the mirror) |
 | `usage-summary-response.managed.json` | `UsageSummaryResponse` | control plane (pair test in the private repo) | engine `src/core/managed-usage-summary.ts` — driven in its test |
+| `usage-summary-response.managed.plan-switch.json` | `UsageSummaryResponse` | control plane, rest of a period after a mid-period upgrade (pair test in the private repo) | engine `src/core/managed-usage-summary.ts` |
 | `usage-summary-response.not-managed.json` | `UsageSummaryResponse` | control plane, non-managed branch (pair test in the private repo) | engine `src/core/managed-usage-summary.ts` |
 | `health-body.json` | `HealthBody` | engine `src/server/http-api.ts` `_collectHealthMetrics()` — shape-verified in `src/server/http-api.test.ts` | control plane (pair test in the private repo) |
 | `health-body.with-sha.json` | `HealthBody` (non-null `build_sha` variant) | same serializer, `BUILD_SHA` build-arg set | control plane (pair test in the private repo) |
