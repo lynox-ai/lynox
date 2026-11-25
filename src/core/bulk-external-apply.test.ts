@@ -124,7 +124,7 @@ function serve(s: Shop): () => void {
 
 const url = (i: number | string): string => `https://${HOST}/products/${String(i)}`;
 
-function client(opts: { attach?: boolean; refuse?: StoreAttachRefusal; methods?: string[]; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean; connection?: (url: string, method: string) => AttachedConnection | null; renew?: (url: string) => Promise<'renewed' | 'not-run' | 'dead' | 'client-misnamed'>; reconnect?: 'ended' | 'client-misnamed' } = {}): ExternalClient {
+function client(opts: { attach?: boolean; refuse?: StoreAttachRefusal; methods?: string[]; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean; connection?: (url: string, method: string) => AttachedConnection | null; renew?: (url: string) => Promise<'renewed' | 'not-run' | 'ineligible' | 'dead' | 'client-misnamed'>; reconnect?: 'ended' | 'client-misnamed' } = {}): ExternalClient {
   return externalClient({
     contract: opts.contract ?? mintBulkContract(HOST, [0, 1, 2, 3, 'x'].map(url)),
     hostPolicy: createToolContext({}),
@@ -671,6 +671,25 @@ describe('applying an external run', () => {
       }
     });
 
+    for (const [renewal, reason] of [['ineligible', 'storeAccessEnded'], ['not-run', 'unauthorized']] as const) {
+      it(`a 401 whose renewal says ${renewal} halts the run with ${reason}, sent once, resumable`, async () => {
+        const s = shop();
+        s.special.set('PATCH /products/0', { status: 401 });
+        const restore = serve(s);
+        try {
+          const c = client({ renew: async () => renewal });
+          const runId = await approvedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+          const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+          expect(out.status).toBe('halted');
+          expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS[reason], applied: 0 });
+          expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
+          expect(ledger.listPending(runId)).toEqual([0, 1]);
+        } finally {
+          restore();
+        }
+      });
+    }
+
     it('a second 401 after the renewal halts the run as before, and nothing is renewed twice', async () => {
       const s = shop();
       s.special.set('PATCH /products/0', { status: 401 });
@@ -707,7 +726,7 @@ describe('applying an external run', () => {
       }
     });
 
-    for (const [renewal, why] of [['dead', 'ended'], ['client-misnamed', 'client-misnamed']] as const) {
+    for (const [renewal, why] of [['dead', 'ended'], ['ineligible', 'ended'], ['client-misnamed', 'client-misnamed']] as const) {
       it(`a 401 whose renewal says ${renewal} answers reconnect (${why}), sent once and reported refused once`, async () => {
         const s = shop();
         s.special.set('PATCH /products/0', { status: 401 });
