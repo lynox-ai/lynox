@@ -12532,7 +12532,7 @@ export class LynoxHTTPApi {
     this.addCpAdminRoute('POST /api/admin/owner-sessions/end', async (req, res, _params, body) => {
       const sessions = engine.getOwnerSessions();
       if (!sessions) {
-        errorResponse(res, 503, 'The store of owner sessions is not available.', 'owner_sessions_unavailable');
+        errorResponse(res, 503, 'The store of owner sessions is not available, so no session was ended. Restart the instance and try again.', 'owner_sessions_unavailable');
         return;
       }
       const asserted = body !== null && typeof body === 'object' ? (body as Record<string, unknown>)['generation'] : undefined;
@@ -12540,13 +12540,13 @@ export class LynoxHTTPApi {
         // The control plane's alone: on a self-hosted instance this route is the owner's admin
         // scope, and a raise far ahead would leave every later session past what a cookie can carry.
         if (!this._cpAdminRequests.has(req)) {
-          errorResponse(res, 403, 'Only the control plane re-asserts a generation.', 'owner_sessions_assert_cp_only');
+          errorResponse(res, 403, 'Only the control plane re-asserts a generation. To end the owner sessions, send the call without generation.', 'owner_sessions_assert_cp_only');
           return;
         }
         // Never past the clock in milliseconds, which is where a recreated engine.db starts: no
         // generation an end reaches is higher, and the counter stays far inside a safe integer.
         if (typeof asserted !== 'number' || !Number.isSafeInteger(asserted) || asserted < 0 || asserted > Date.now()) {
-          errorResponse(res, 400, 'Expected { generation?: a whole number from 0, not past the clock in milliseconds }.', 'invalid_owner_sessions_end');
+          errorResponse(res, 400, 'Expected { generation?: a whole number of milliseconds from 0, not later than now }.', 'invalid_owner_sessions_end');
           return;
         }
         jsonResponse(res, 200, { generation: sessions.raiseTo(asserted), ended: false });
@@ -12562,7 +12562,7 @@ export class LynoxHTTPApi {
     this.addStatic('user', 'POST /api/auth/owner-sessions/end', async (req, res) => {
       const sessions = engine.getOwnerSessions();
       if (!sessions) {
-        errorResponse(res, 503, 'The store of owner sessions is not available.', 'owner_sessions_unavailable');
+        errorResponse(res, 503, 'The store of owner sessions is not available, so no session was ended. Restart the instance and try again.', 'owner_sessions_unavailable');
         return;
       }
       const secret = process.env['LYNOX_HTTP_SECRET'];
