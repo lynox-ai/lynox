@@ -39,8 +39,9 @@ function hostedInstance(): boolean {
  * The key the engine publishes, in its own process, the live generation of the owner's sessions
  * under (core `src/core/owner-sessions.ts`, `OWNER_SESSIONS_GENERATION_KEY`). On a managed instance
  * the web UI runs in the engine's process and checks the same generation. Where nothing is
- * published (a web UI in a process of its own) this reader refuses no generation and mints 0, and
- * the engine still refuses a session of another generation on every `/api` request.
+ * published (a web UI in a process of its own, as in development) this reader refuses no generation
+ * and mints 0, and the engine still refuses a session of another generation on every `/api` request:
+ * such a web UI signs in only while the engine's generation is 0.
  */
 const OWNER_SESSIONS_GENERATION_KEY = Symbol.for('lynox.ownerSessionsGeneration');
 

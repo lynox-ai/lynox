@@ -26,8 +26,10 @@
  * that went missing would otherwise bring an older generation back, and with it every session ended
  * since. At open the higher of the two wins; every end and raise writes the file again. A value past
  * the clock in milliseconds is not one this code writes (the highest is a recreated file's, the clock
- * at that boot): it is told and ignored, so a file written by something else can force one new login
- * at most, never raise the generation past what a cookie can carry.
+ * at that boot, which a clock set back afterwards can leave ahead): it is told and held to the clock,
+ * so a file written by something else can force one new login at most, never raise the generation
+ * past what a cookie can carry, and a mirror ahead of a clock set back still ends what engine.db
+ * brought back.
  *
  * Not an agent tool, on purpose: ending every session is the owner's act through a route of its
  * own, never something a model can be talked into.
@@ -113,10 +115,10 @@ export class OwnerSessions {
 }
 
 /**
- * The generation in a mirror file, or null when there is none, it holds no whole number from 0, or
- * it is past the clock in milliseconds (told on stderr): see `OwnerSessions`.
+ * The generation in a mirror file, held to the clock in milliseconds (told on stderr when it was
+ * past it), or null when there is none or it holds no whole number from 0: see `OwnerSessions`.
  */
-export function readOwnerSessionsMirror(path: string, nowMs: number = Date.now()): number | null {
+function readOwnerSessionsMirror(path: string, nowMs: number = Date.now()): number | null {
   let text: string;
   try {
     text = readFileSync(path, 'utf8');
@@ -126,8 +128,8 @@ export function readOwnerSessionsMirror(path: string, nowMs: number = Date.now()
   const value = Number(text.trim());
   if (!Number.isSafeInteger(value) || value < 0) return null;
   if (value > nowMs) {
-    process.stderr.write('[lynox] the copy of the owner sessions\' generation is past the clock and was ignored\n');
-    return null;
+    process.stderr.write('[lynox] the copy of the owner sessions\' generation is past the clock and was held to it\n');
+    return nowMs;
   }
   return value;
 }

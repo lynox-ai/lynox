@@ -126,18 +126,25 @@ describe('OwnerSessions and the copy of the generation beside engine.db', () => 
     } finally { edb.close(); }
   });
 
-  it('ignores a copy past the clock, at the edge of a safe integer or an hour ahead, says so, and keeps the generation', () => {
-    const edb = open();
+  it('holds a copy past the clock, at the edge of a safe integer or an hour ahead, to the clock, says so, and ends what engine.db held', () => {
     const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      new OwnerSessions(edb.getDb()).raiseTo(5);
       for (const ahead of [String(Number.MAX_SAFE_INTEGER), String(Date.now() + 60 * 60 * 1000)]) {
-        err.mockClear();
-        writeFileSync(mirrorPath, ahead);
-        expect(new OwnerSessions(edb.getDb(), { mirrorPath }).generation()).toBe(5);
-        expect(err.mock.calls.some(([line]) => String(line).includes('past the clock'))).toBe(true);
+        const edb = open(`ahead-${ahead.length}.db`);
+        try {
+          new OwnerSessions(edb.getDb()).raiseTo(5);
+          err.mockClear();
+          writeFileSync(mirrorPath, ahead);
+          const before = Date.now();
+          const sessions = new OwnerSessions(edb.getDb(), { mirrorPath });
+          expect(sessions.generation()).toBeGreaterThanOrEqual(before);
+          expect(sessions.generation()).toBeLessThanOrEqual(Date.now());
+          expect(sessions.ended(5)).toBe(true);
+          expect(Number(readFileSync(mirrorPath, 'utf8'))).toBe(sessions.generation());
+          expect(err.mock.calls.some(([line]) => String(line).includes('past the clock'))).toBe(true);
+        } finally { edb.close(); }
       }
-    } finally { err.mockRestore(); edb.close(); }
+    } finally { err.mockRestore(); }
   });
 
   it('takes a copy written by something else when it is no later than the clock: one more login, and ends still work after it', () => {
@@ -190,7 +197,7 @@ describe('EngineDb.recreated', () => {
 });
 
 describe('the copy of the generation and the tool guard', () => {
-  it('asks before a tool writes the copy, as for every file the sessions rest on', async () => {
+  it('refuses the shell tool the copy, as every file the sessions rest on', async () => {
     const { isDangerous } = await import('../tools/permission-guard.js');
     expect(isDangerous('bash', { command: 'echo 9007199254740991 > ~/.lynox/owner-sessions-generation' }, 'autonomous')).toContain('lynox secret store');
   });
