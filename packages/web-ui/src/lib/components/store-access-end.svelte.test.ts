@@ -248,6 +248,7 @@ describe('the shell banner in a tab that stays open past an end', () => {
 	const END_B = '2099-01-20T12:00:30.000Z';
 	const RENEWED = '2099-02-20T12:00:00.000Z';
 	const SOON_LINE = (host: string, day: string): string => `Der Zugang von lynox zum Shop ${host} läuft am ${day} ab. Verbinde den Shop vorher neu, damit Läufe und Abfragen weiterlaufen. Erneut verbinden`;
+	const UNKNOWN_LINE = (host: string, day: string): string => `Der Zugang zu ${host} galt bis ${day}. Ob lynox ihn erneuert hat, kann diese Seite gerade nicht abfragen. Lade sie später neu. Erneut verbinden`;
 	const ENDED_LINE = (host: string): string => `lynox konnte den Zugang zum Shop ${host} nicht erneuern. Läufe und Abfragen an den Shop gehen erst wieder, wenn du ihn neu verbindest. Erneut verbinden`;
 	const A = (at: string, ended = false): Record<string, unknown> => shop('a', 'acme.myshopify.com', at, { store_access_ends: { host: 'acme.myshopify.com', ended, at } });
 	const B = shop('b', 'beta-shop.myshopify.com', END_B, { store_access_ends: { host: 'beta-shop.myshopify.com', ended: false, at: END_B } });
@@ -327,10 +328,11 @@ describe('the shell banner in a tab that stays open past an end', () => {
 		expect(shown()[0]).toBe('lynox\'s access to the store acme.myshopify.com runs out on January 20, 2099. Reconnect the store before then so runs and requests keep going. Reconnect');
 		setLocale('de');
 		await settle();
-		// 12:00:15 the open question is given up; nothing flips.
+		// 12:00:15 the open question is given up: A's end has passed and the page cannot tell what
+		// came of it, so its line says that; B's end is still ahead and keeps its date.
 		await vi.advanceTimersByTimeAsync(15_000);
 		await settle();
-		expect(shown()).toEqual([SOON_LINE('acme.myshopify.com', '20. Januar 2099'), SOON_LINE('beta-shop.myshopify.com', '20. Januar 2099')]);
+		expect(shown()).toEqual([UNKNOWN_LINE('acme.myshopify.com', '20. Januar 2099'), SOON_LINE('beta-shop.myshopify.com', '20. Januar 2099')]);
 		// 12:01:15: A's end and now B's have come since the last answer; one question asks for both.
 		await minutes(1);
 		expect(questions).toBe(3);
@@ -391,14 +393,41 @@ describe('the shell banner in a tab that stays open past an end', () => {
 	});
 
 
-	it('a question that fails changes nothing, and the next minute asks again', async () => {
+	it('a question that fails after an end says the page cannot tell, never a date ahead; the next answer replaces it', async () => {
 		answers = [[A(END_A)], 500, [A(RENEWED)]];
 		await open();
 		await minutes(2);
 		expect(questions).toBe(2);
-		expect(shown()).toEqual([SOON_LINE('acme.myshopify.com', '20. Januar 2099')]);
+		expect(shown()).toEqual([UNKNOWN_LINE('acme.myshopify.com', '20. Januar 2099')]);
+		setLocale('en');
+		await settle();
+		expect(shown()).toEqual(['Access to acme.myshopify.com was valid until January 20, 2099. This page cannot check right now whether lynox renewed it. Reload it later. Reconnect']);
+		setLocale('de');
+		await settle();
 		await minutes(1);
 		expect(questions).toBe(3);
 		expect(shown()).toEqual([SOON_LINE('acme.myshopify.com', '20. Februar 2099')]);
+	});
+
+	it('a failed question followed by the engine\'s "ended" reads ended', async () => {
+		answers = [[A(END_A)], 500, [A(END_A, true)]];
+		await open();
+		await minutes(2);
+		expect(shown()).toEqual([UNKNOWN_LINE('acme.myshopify.com', '20. Januar 2099')]);
+		await minutes(1);
+		expect(questions).toBe(3);
+		expect(shown()).toEqual([ENDED_LINE('acme.myshopify.com')]);
+		await minutes(5);
+		expect(questions).toBe(3);
+	});
+
+	it('a line the engine already called ended stays ended when a later question fails', async () => {
+		// A ended for the engine a day ago; B's end comes at 12:00:30, and the question at 12:01 fails.
+		answers = [[A('2099-01-19T12:00:00.000Z', true), B], 500];
+		await open();
+		expect(shown()).toEqual([ENDED_LINE('acme.myshopify.com'), SOON_LINE('beta-shop.myshopify.com', '20. Januar 2099')]);
+		await minutes(3);
+		expect(questions).toBe(2);
+		expect(shown()).toEqual([ENDED_LINE('acme.myshopify.com'), UNKNOWN_LINE('beta-shop.myshopify.com', '20. Januar 2099')]);
 	});
 });
