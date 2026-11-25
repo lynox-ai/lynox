@@ -146,6 +146,17 @@ export function writeRootsBesidesWorkspace(): string[] {
 export const READ_ONLY_ROOTS: readonly string[] = Object.freeze(['/app']);
 
 /**
+ * A path a file tool received, made absolute the way the tools read it: with isolation, a
+ * relative path is read from the context workspace (the model names a workspace file by its
+ * workspace path, and the process cwd is the image's `/app`); without isolation, from the
+ * process cwd as before. An absolute path is returned as it is.
+ */
+export function resolveToolPath(filePath: string): string {
+  const ws = getWorkspaceDir();
+  return ws === null ? resolve(filePath) : resolve(ws, filePath);
+}
+
+/**
  * Resolve a path and validate it's within allowed boundaries.
  * Throws if the path escapes the sandbox.
  * Returns the resolved real path.
@@ -162,7 +173,7 @@ export function validatePath(filePath: string, operation: 'read' | 'write'): str
 
   // Resolve the path, following symlinks where possible. A path under the old `<data>/workspace`
   // is mapped to the root first, then confined like any other (identity unless the root is external).
-  const resolved = translateLegacyWorkspacePath(resolve(filePath), resolveWorkspaceRoot());
+  const resolved = translateLegacyWorkspacePath(resolve(ws, filePath), resolveWorkspaceRoot());
   if (namesSidecarLabel(resolved)) {
     throw new Error(`Path '${filePath}' is in the workspace, which is reached only through its open directory, not by name.`);
   }

@@ -26,11 +26,13 @@ const WF = {
 	parameters: [], created_at: '2026-10-29', mode: 'autonomous', schedulable: true, confirmedAt: '2026-10-29T00:00:00Z',
 };
 
-function serve(run: { status: number; body: unknown }, wf: Record<string, unknown>): void {
+function serve(run: { status: number; body: unknown }, wf: Record<string, unknown>, later?: Record<string, unknown>): void {
+	let lists = 0;
 	vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
 		const path = new URL(String(input), 'http://localhost').pathname.replace(/^\/api/, '');
 		const method = init?.method ?? 'GET';
-		if (method === 'GET' && path === '/workflows/library') return new Response(JSON.stringify({ workflows: [wf], viewer: 'owner' }), { status: 200 });
+		// `later`: the list as a read after the first one answers it.
+		if (method === 'GET' && path === '/workflows/library') return new Response(JSON.stringify({ workflows: [lists++ > 0 && later ? later : wf], viewer: 'owner' }), { status: 200 });
 		if (method === 'POST' && path === `/workflows/${String(wf['id'])}/run`) return new Response(JSON.stringify(run.body), { status: run.status });
 		return new Response('{}', { status: 404 });
 	}));
@@ -44,8 +46,8 @@ async function settle(): Promise<void> {
 	}
 }
 
-async function open(wf: Record<string, unknown>, run: { status: number; body: unknown } = { status: 200, body: {} }): Promise<void> {
-	serve(run, wf);
+async function open(wf: Record<string, unknown>, run: { status: number; body: unknown } = { status: 200, body: {} }, later?: Record<string, unknown>): Promise<void> {
+	serve(run, wf, later);
 	const { default: WorkflowLibraryView } = await import('./WorkflowLibraryView.svelte');
 	component = mount(WorkflowLibraryView, { target });
 	await settle();
@@ -84,23 +86,24 @@ describe('the library names whom Run runs a workflow as', () => {
 });
 
 describe('a run refused because that person\'s access ended', () => {
-	it('names the person and the way out, a new workflow from the chat', async () => {
+	it('names the person and the way out, the workflow\'s takeover, and reads the list again so its button shows', async () => {
 		// The library still read the access as live; it ended before Run was pressed (a library that
 		// knows it ended turns Run off, workflow-library-ended-foreign.svelte.test.ts).
-		await open({ ...WF, runs_as: { person: 'eva@kanzlei.example', ended: false } }, { status: 403, body: { error: 'engine sentence', code: 'author_ended', runs_as: 'eva@kanzlei.example' } });
+		const eva = { person: 'eva@kanzlei.example' };
+		await open({ ...WF, runs_as: { ...eva, ended: false } }, { status: 403, body: { error: 'engine sentence', code: 'author_ended', runs_as: 'eva@kanzlei.example' } }, { ...WF, runs_as: { ...eva, ended: true } });
+		expect(target.querySelector('[data-testid="takeover-open"]')).toBeNull();
 		await pressRun();
 		const text = target.textContent ?? '';
-		expect(text).toContain('eva@kanzlei.example hat den Workflow „Monthly report“ angelegt oder zuletzt geändert, und der Zugang dieser Person ist beendet.');
-		// Not a copy: a copy keeps the mark of the steps it holds and is refused again (`upsertCopy`).
-		expect(text).toContain('auch nicht als Kopie');
-		expect(text).toContain('bitte lynox, dafür einen neuen Workflow zu schreiben, statt diesen zu kopieren oder zu ändern.');
+		expect(text).toContain('eva@kanzlei.example hat den Workflow Monthly report angelegt oder zuletzt geändert, und der Zugang dieser Person ist beendet. Er läuft erst wieder, wenn du ihn übernimmst: hier mit „Workflow übernehmen“.');
+		expect(text).not.toContain('auch nicht als Kopie');
 		expect(text).not.toContain('engine sentence');
+		expect(target.querySelector('[data-testid="takeover-open"]')?.textContent?.trim()).toBe('Workflow übernehmen');
 	});
 
 	it('without a name says "a person with access"', async () => {
 		await open(WF, { status: 403, body: { error: 'engine sentence', code: 'author_ended', runs_as: null } });
 		await pressRun();
-		expect(target.textContent ?? '').toContain('Eine Person mit Zugang hat den Workflow „Monthly report“ angelegt');
+		expect(target.textContent ?? '').toContain('Eine Person mit Zugang hat den Workflow Monthly report angelegt oder zuletzt geändert, und ihr Zugang ist beendet. Er läuft erst wieder, wenn du ihn übernimmst: hier mit „Workflow übernehmen“.');
 	});
 
 	it('CONTROL: another refusal still shows the engine\'s sentence', async () => {

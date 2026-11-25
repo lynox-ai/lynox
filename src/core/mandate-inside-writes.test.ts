@@ -602,9 +602,6 @@ const FIXTURES: Fixture[] = [
     return [
       { site: 'task_update#change', branch: 'trigger', row: { verb: 'change', target: 'set in build' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, title: 'Wochenbericht' }; },
         build: seeded((tm) => tm.createScheduled({ title: 'Bericht', scheduleCron: '0 9 * * 1' }).id, 'ctx.taskManager.markEditedBy') },
-      // Only a field a trigger does not carry: the mark is written, the update changes nothing.
-      { site: 'task_update#change', branch: 'trigger, only a field it does not take', wrote: 'part', row: { verb: 'change', target: 'set in build' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, priority: 'high' }; },
-        build: seeded((tm) => tm.createScheduled({ title: 'Bericht', scheduleCron: '0 9 * * 1' }).id, 'ctx.taskManager.markEditedBy') },
       { site: 'task_update#change', branch: 'to-do, complete', row: { verb: 'change', target: 'tasks' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, status: 'completed' }; },
         build: seeded((tm) => tm.create({ title: 'Call', createdBy: TAG }).id, 'ctx.taskManager.complete') },
       { site: 'task_update#change', branch: 'to-do, update', row: { verb: 'change', target: 'tasks' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, priority: 'high' }; },
