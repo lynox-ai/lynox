@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { BUILTIN_ROLES } from './roles.js';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -467,6 +468,17 @@ describe('steps whose target is set only when they run', () => {
       { id: 'unknown', task: 'Odd', role: 'toString', tools: ['read_file'] },
     ]);
     expect(marked(b)).toEqual(['collector', 'collector-replay'].map((step) => ({ step, profileId: null })));
+  });
+
+  it('a read-only role hands nothing on, even one whose grant names the request tool: the step keeps its own tools', () => {
+    // No built-in role is read-only with a grant of its own; one is added for this test, as `spawnInline` reads it.
+    BUILTIN_ROLES['readonly-sender'] = { model: 'fast', effort: 'low', autonomy: 'guided', description: 'test', readOnly: true, allowTools: ['http_request'] };
+    try {
+      const b = withConnections([{ id: 'ro', task: 'Look it up', role: 'readonly-sender', tools: ['read_file'] }]);
+      expect(marked(b)).toEqual([]);
+    } finally {
+      delete BUILTIN_ROLES['readonly-sender'];
+    }
   });
 
   it('a request whose address does not parse is marked without a profile: the model may send the request itself', () => {
