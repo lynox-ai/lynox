@@ -13,6 +13,7 @@
  */
 
 import type { NoticeLanguage } from '../core/notice-language.js';
+import type { SendRoleKind } from '../core/profile-secret-view.js';
 import { pv } from '../core/prompt-value.js';
 import type { PromptText } from '../types/agent.js';
 
@@ -462,14 +463,45 @@ export interface ApiSetupDialog {
   /**
    * `trailId`: the profile's opaque id; `more`: the settings that are part of the release but not
    * printed; `viewed`: when the owner last read the settings in a chat (`clock`) and whether they are
-   * unchanged since, absent when never read; `version`: the short settings version.
+   * unchanged since, absent when never read; `version`: the short settings version; `role`: the slot
+   * names as the release stores them, shown in brackets after the words for `roleKinds`.
    */
-  readonly release: (word: PromptText, p: { name: string; trailId: string; author: string; role: string; hosts: string[]; more: number; viewed: { clock: string; unchanged: boolean } | undefined; version: string; clientId: boolean; held: boolean }) => PromptText;
+  readonly release: (word: PromptText, p: { name: string; trailId: string; author: string; role: string; roleKinds: readonly SendRoleKind[]; hosts: string[]; more: number; viewed: { clock: string; unchanged: boolean } | undefined; version: string; clientId: boolean; held: boolean }) => PromptText;
   readonly adopt: (word: PromptText, p: { name: string; id: string; by: string; known: boolean; hosts: string[]; names: string[] }) => PromptText;
 }
 
 /** At most this many vault names are listed in an adoption question; the rest are counted. */
 const ADOPT_NAMES_SHOWN = 30;
+
+/**
+ * The words for each slot a vault key is released for: the release question is the consent, so it
+ * says what the value becomes, not only the field that holds it. Every kind has a word in each
+ * language; the slot names follow in brackets as the release stores them.
+ */
+const ROLE_WORDS: Readonly<Record<DialogLanguage, Readonly<Record<SendRoleKind, string>>>> = {
+  en: {
+    'client-id': 'the client ID',
+    'client-secret': 'the client secret',
+    'basic-username': 'the user name for the Basic sign-in',
+    'basic-password': 'the password for the Basic sign-in',
+    'bearer-token': 'the bearer token',
+    'header-key': 'the API key in a request header',
+  },
+  de: {
+    'client-id': 'Client-ID',
+    'client-secret': 'Client-Secret',
+    'basic-username': 'Benutzername für die Basic-Anmeldung',
+    'basic-password': 'Passwort für die Basic-Anmeldung',
+    'bearer-token': 'Bearer-Token',
+    'header-key': 'API-Schlüssel in einem Request-Header',
+  },
+};
+
+/** The role as the owner reads it: the words for each kind, then the slot names in brackets, one value. */
+export function roleText(language: DialogLanguage, kinds: readonly SendRoleKind[], role: string): string {
+  const words = kinds.map((k) => ROLE_WORDS[language][k]).join(language === 'de' ? ' und ' : ' and ');
+  return `${words} (${role})`;
+}
 
 export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> = {
   en: {
@@ -495,7 +527,7 @@ export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> 
           ? pv` These settings were last read in one of your chats at ${p.viewed.clock} and have not changed since (version ${p.version}).`
           : pv` These settings changed after they were last read in one of your chats at ${p.viewed.clock}; deny and view the profile again before you allow it (version ${p.version}).`;
       const clientIdSentence = p.clientId ? pv` A client id also goes into the sign-in link, to the browser of whoever opens it.` : '';
-      return pv`⚠ ${word}: release the vault key ${p.name} to API profile ${p.trailId}? It was set up in the session of ${p.author}. If you allow it, lynox sends the value of ${p.name}, as ${p.role}, to ${p.hosts.length > 0 ? p.hosts.join(', ') : 'no host it can name'}, with every request and run through this profile, your own and bulk runs included, until that mandate ends or you withdraw the release.${moreSentence}${versionSentence}${clientIdSentence} The vault ${p.held ? 'holds a value' : 'holds no value yet'} under this name. Any change to where the value goes ends the release. Release it?`;
+      return pv`⚠ ${word}: release the vault key ${p.name} to API profile ${p.trailId}? It was set up in the session of ${p.author}. If you allow it, lynox sends the value of ${p.name}, as ${roleText('en', p.roleKinds, p.role)}, to ${p.hosts.length > 0 ? p.hosts.join(', ') : 'no host it can name'}, with every request and run through this profile, your own and bulk runs included, until that mandate ends or you withdraw the release.${moreSentence}${versionSentence}${clientIdSentence} The vault ${p.held ? 'holds a value' : 'holds no value yet'} under this name. Any change to where the value goes ends the release. Release it?`;
     },
     adopt: (word, p) => {
       const shown = p.names.slice(0, ADOPT_NAMES_SHOWN).join(', ') + (p.names.length > ADOPT_NAMES_SHOWN ? ` and ${String(p.names.length - ADOPT_NAMES_SHOWN)} more` : '');
@@ -527,7 +559,7 @@ export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> 
           ? pv` Diese Einstellungen wurden zuletzt um ${p.viewed.clock} in einem deiner Chats gelesen und haben sich seither nicht geändert (Version ${p.version}).`
           : pv` Diese Einstellungen haben sich geändert, nachdem sie zuletzt um ${p.viewed.clock} in einem deiner Chats gelesen wurden; lehne ab und sieh dir das Profil erneut an, bevor du zustimmst (Version ${p.version}).`;
       const clientIdSentence = p.clientId ? pv` Eine Client-ID steht ausserdem im Anmeldelink und geht an den Browser dessen, der ihn öffnet.` : '';
-      return pv`⚠ ${word}: Den Vault-Schlüssel ${p.name} für das API-Profil ${p.trailId} freigeben? Es wurde in der Sitzung von ${p.author} eingerichtet. Wenn du zustimmst, sendet lynox den Wert von ${p.name} als ${p.role} an ${p.hosts.length > 0 ? p.hosts.join(', ') : 'keinen Host, den lynox benennen kann'}, bei jeder Anfrage und jedem Lauf über dieses Profil, auch bei deinen eigenen Läufen und bei Massenläufen, bis dieser Zugang endet oder du die Freigabe zurückziehst.${moreSentence}${versionSentence}${clientIdSentence} Unter diesem Namen ${p.held ? 'liegt im Vault ein Wert' : 'liegt im Vault noch kein Wert'}. Jede Änderung daran, wohin der Wert geht, beendet die Freigabe. Freigeben?`;
+      return pv`⚠ ${word}: Den Vault-Schlüssel ${p.name} für das API-Profil ${p.trailId} freigeben? Es wurde in der Sitzung von ${p.author} eingerichtet. Wenn du zustimmst, sendet lynox den Wert von ${p.name} als ${roleText('de', p.roleKinds, p.role)} an ${p.hosts.length > 0 ? p.hosts.join(', ') : 'keinen Host, den lynox benennen kann'}, bei jeder Anfrage und jedem Lauf über dieses Profil, auch bei deinen eigenen Läufen und bei Massenläufen, bis dieser Zugang endet oder du die Freigabe zurückziehst.${moreSentence}${versionSentence}${clientIdSentence} Unter diesem Namen ${p.held ? 'liegt im Vault ein Wert' : 'liegt im Vault noch kein Wert'}. Jede Änderung daran, wohin der Wert geht, beendet die Freigabe. Freigeben?`;
     },
     adopt: (word, p) => {
       const shown = p.names.slice(0, ADOPT_NAMES_SHOWN).join(', ') + (p.names.length > ADOPT_NAMES_SHOWN ? ` und ${String(p.names.length - ADOPT_NAMES_SHOWN)} weitere` : '');
