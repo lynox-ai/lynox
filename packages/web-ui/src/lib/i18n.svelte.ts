@@ -2831,7 +2831,17 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow_library.schedule_cron_hint': { de: 'Standard-Cron, z.B. „0 9 * * *“ = täglich um 9 Uhr.', en: 'Standard cron, e.g. "0 9 * * *" = every day at 9am.' },
 	'workflow_library.schedule_cron_required': { de: 'Bitte einen Cron-Zeitplan angeben.', en: 'Please enter a cron schedule.' },
 	'workflow_library.schedule_asks_title': { de: 'Diese Schritte können dir während des Laufs Fragen stellen. Auf jede Frage wartet der Lauf bis zu 24 Stunden, und solange er wartet, startet dieser Zeitplan keinen weiteren Lauf. Bleibt eine Frage unbeantwortet, endet der Lauf, bevor die nächsten Schritte laufen:', en: 'These steps may ask you questions while the workflow runs. The run waits up to 24 hours for each answer, and while it waits, this schedule starts no other run. If a question goes unanswered, the run ends before the next steps run:' },
-	'workflow_library.schedule_contract_title': { de: 'Dieser Workflow darf folgende ausgehende Aktionen durchführen:', en: 'This workflow may perform these outbound actions:' },
+	'workflow_library.schedule_contract_title': { de: 'Ohne Rückfrage darf dieser Workflow diese ausgehenden Aktionen durchführen:', en: 'Without asking, this workflow may perform these outgoing actions:' },
+	// In place of the list when a contract grants nothing (U-451). Reading stays possible: the grant
+	// only lifts the refusal of writes, so a sentence that said "no outgoing actions" would be false.
+	'workflow_library.contract_none': { de: 'Dieser Workflow hat keine Freigabe, ohne Rückfrage an andere Dienste zu schreiben. Lesen kann er weiterhin.', en: 'This workflow has no permission to write to other services without asking. It can still read from them.' },
+	// What a contract allows for a parameter, one line per facet, each value in a box (U-451).
+	'workflow_library.stamp.allowed_list': { de: 'erlaubt: {values}', en: 'allowed: {values}' },
+	'workflow_library.stamp.allowed_none': { de: 'kein Wert erlaubt', en: 'no value allowed' },
+	'workflow_library.stamp.allowed_pattern': { de: 'erlaubt: was ganz zum Muster {pattern} passt', en: 'allowed: what matches the pattern {pattern} in full' },
+	'workflow_library.stamp.allowed_range': { de: 'erlaubt: {min} bis {max}', en: 'allowed: {min} to {max}' },
+	'workflow_library.stamp.allowed_min': { de: 'erlaubt: mindestens {min}', en: 'allowed: at least {min}' },
+	'workflow_library.stamp.allowed_max': { de: 'erlaubt: höchstens {max}', en: 'allowed: at most {max}' },
 	'workflow_library.schedule_confirm': { de: 'Bestätigen & planen', en: 'Confirm & schedule' },
 	'workflow_library.scheduled': { de: 'Workflow geplant.', en: 'Workflow scheduled.' },
 	'workflow_library.schedule_failed': { de: 'Planen fehlgeschlagen.', en: 'Scheduling failed.' },

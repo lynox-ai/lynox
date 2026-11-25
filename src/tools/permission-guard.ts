@@ -758,6 +758,14 @@ export function isDangerous(toolName: string, input: unknown, autonomy?: Autonom
   return isDangerousDetailed(toolName, input, autonomy, entry, runId, contract, parentProvider)?.warning ?? null;
 }
 
+/** Whether a contract's four lists are each a list of strings, the only shape {@link contractGrants} reads. */
+export function contractIsReadable(contract: unknown): contract is Pick<CapabilityContract, 'grantedTools' | 'httpMethods' | 'hostPatterns' | 'pathPatterns'> {
+  if (typeof contract !== 'object' || contract === null) return false;
+  const c = contract as Record<string, unknown>;
+  const names = (v: unknown): boolean => Array.isArray(v) && v.every((x) => typeof x === 'string');
+  return names(c['grantedTools']) && names(c['httpMethods']) && names(c['hostPatterns']) && names(c['pathPatterns']);
+}
+
 /** A value matches if any glob pattern in the list matches it (empty list = no match). */
 function _matchesAnyGlob(value: string, patterns: string[] | undefined): boolean {
   if (!patterns || patterns.length === 0) return false;
@@ -782,7 +790,13 @@ function _matchesAnyGlob(value: string, patterns: string[] | undefined): boolean
  * gate (and its redirect re-validation) calls this to recognise the grant.
  */
 export function contractGrants(toolName: string, input: unknown, contract: CapabilityContract): boolean {
-  if (!contract.grantedTools?.includes(toolName)) return false;
+  // A contract grants only through its four lists, each a list of names as written. A stored one of
+  // another shape grants nothing: a string `grantedTools` would match by substring, a string
+  // `hostPatterns` would be read character by character (`*` alone, any host), and a nested list
+  // would be read through its first element. The stamp preview reads the same shape
+  // (`contractIsReadable`), so what it shows as granting nothing grants nothing here.
+  if (!contractIsReadable(contract)) return false;
+  if (!contract.grantedTools.includes(toolName)) return false;
   if (toolName !== 'http_request') return false;
   if (!input || typeof input !== 'object') return false;
 

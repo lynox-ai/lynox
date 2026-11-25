@@ -30,7 +30,7 @@ describe('parseStampPreview — what the view may show, or nothing', () => {
     expect(p.steps.map((s) => s.id)).toEqual(['fetch', 'post']);
     expect(p.steps[1]).toMatchObject({ tool: 'http_request', inputTemplate: { url: 'https://other.example/{{params.month}}' }, inputFrom: ['fetch'] });
     expect(p.contract).toEqual(['POST https://api.example.com/v1/reports']);
-    expect(p.parameters).toEqual([{ name: 'month', required: true, default: null }]);
+    expect(p.parameters).toEqual([{ name: 'month', required: true, default: null, allowed: null }]);
     expect(p.changedBy).toBe('mandate');
     expect(p.awaitsStamp).toBe(true);
   });
@@ -53,6 +53,39 @@ describe('parseStampPreview — what the view may show, or nothing', () => {
     expect(parseStampPreview(preview({ contract: { methods: ['POST'] } }))).toBeNull();
     expect(parseStampPreview(preview({ contract: null }))!.contract).toBeNull();
     expect(parseStampPreview(preview({ contract: undefined }))!.contract).toBeNull();
+  });
+});
+
+describe('parseStampPreview — what a contract allows for a parameter (U-451)', () => {
+  const withAllowed = (allowed: unknown): Record<string, unknown> => preview({ parameters: [{ name: 'month', required: true, default: null, allowed }] });
+
+  it('reads every rule whole, and a parameter without one as having none', () => {
+    const all = { enum: ['May', 3, true], regex: '[a-z]+', min: 1, max: 9 };
+    expect(parseStampPreview(withAllowed(all))!.parameters[0]!.allowed).toEqual(all);
+    expect(parseStampPreview(withAllowed({ enum: [] }))!.parameters[0]!.allowed).toEqual({ enum: [], regex: null, min: null, max: null });
+    expect(parseStampPreview(withAllowed(null))!.parameters[0]!.allowed).toBeNull();
+    expect(parseStampPreview(withAllowed(undefined))!.parameters[0]!.allowed).toBeNull();
+  });
+
+  it.each([
+    ['a list that is not an array', { enum: 'May' }],
+    ['a list with a value no parameter can be', { enum: ['May', { x: 1 }] }],
+    ['a pattern that is not text', { regex: 5 }],
+    ['a list with a value no parameter can equal', { enum: [{ v: 1 }] }],
+    ['a bound that is not a number', { min: [1] }],
+    ['a bound given as text', { min: '1' }],
+    ['an upper bound that is not a number', { max: { n: 1 } }],
+    ['rules that set nothing', {}],
+    ['rules that are not an object', 'May'],
+  ])('refuses the whole answer for %s, instead of dropping the rule', (_label, allowed) => {
+    expect(parseStampPreview(withAllowed(allowed))).toBeNull();
+  });
+
+  it('a changed rule is a changed setting', () => {
+    const before = parseStampPreview(withAllowed({ enum: ['May'] }))!;
+    const after = parseStampPreview(withAllowed({ enum: ['June'] }))!;
+    expect(stampChanges(before, after).settings).toBe(true);
+    expect(stampChanges(before, parseStampPreview(withAllowed({ enum: ['May'] }))!).settings).toBe(false);
   });
 });
 

@@ -23544,6 +23544,111 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         } finally { restore(); }
       });
 
+      describe('what the contract allows, as the run enforces it', () => {
+        const WITH = (contract: Record<string, unknown>, parameters: unknown[] = MANDATE_WF.parameters) => ({ ...structuredClone(MANDATE_WF), parameters, capabilityContract: contract });
+        async function previewOf(wf: unknown): Promise<Record<string, unknown>> {
+          const restore = shaped();
+          const h = hist();
+          h['getWorkflowExact']!.mockImplementation((id: string) => (id === 'wf-sched' ? structuredClone(wf) : undefined));
+          try {
+            const res = await jsonFetch('/api/workflows/wf-sched/stamp-preview');
+            expect(res.status).toBe(200);
+            return await res.json() as Record<string, unknown>;
+          } finally { restore(); }
+        }
+        const GRANT = { version: 1, grantedTools: ['http_request'], httpMethods: ['GET', 'POST'], hostPatterns: ['api.example.com'], pathPatterns: ['/upload'], paramConstraints: {} };
+
+        it('shows each parameter with the rules its contract sets for it, and none for a name the workflow does not have', async () => {
+          const params = [
+            { name: 'month', description: '', type: 'string', source: 'user_input', defaultValue: 'May' },
+            { name: 'count', description: '', type: 'number', source: 'user_input' },
+            { name: 'code', description: '', type: 'string', source: 'user_input' },
+            { name: 'free', description: '', type: 'string', source: 'user_input' },
+          ];
+          const shown = await previewOf(WITH({ ...GRANT, paramConstraints: { month: { enum: ['May', 'June', { x: 1 }, 5] }, count: { min: 1, max: 5, enum: [2, '3', 4] }, code: { regex: '[a-z]+' }, ghost: { enum: ['x'] } } }, params));
+          expect(shown['parameters']).toEqual([
+            // As written: a value of another kind than a supplied value has can still be the stored default's.
+            { name: 'month', required: false, default: 'May', allowed: { enum: ['May', 'June', 5], regex: null, min: null, max: null } },
+            { name: 'count', required: true, default: null, allowed: { enum: [2, '3', 4], regex: null, min: 1, max: 5 } },
+            { name: 'code', required: true, default: null, allowed: { enum: null, regex: '[a-z]+', min: null, max: null } },
+            { name: 'free', required: true, default: null, allowed: null },
+          ]);
+          expect(shown['contract']).toEqual(['GET https://api.example.com/upload', 'POST https://api.example.com/upload']);
+        });
+
+        it('shows a list that is not an array as one that admits nothing, as the run reads it', async () => {
+          const shown = await previewOf(WITH({ ...GRANT, paramConstraints: { month: { enum: 'May' } } }));
+          expect((shown['parameters'] as Array<Record<string, unknown>>)[0]!['allowed']).toEqual({ enum: [], regex: null, min: null, max: null });
+        });
+
+        const NONE = { enum: [], regex: null, min: null, max: null };
+        const one = async (type: string, rule: Record<string, unknown>): Promise<unknown> => {
+          const shown = await previewOf(WITH({ ...GRANT, paramConstraints: { v: rule } }, [{ name: 'v', description: '', type, source: 'user_input' }]));
+          return (shown['parameters'] as Array<Record<string, unknown>>)[0]!['allowed'];
+        };
+
+        it('a rule no value can meet is shown as admitting nothing, as the run refuses every value', async () => {
+          // A list with nothing a value can equal, also beside a rule that alone would admit values.
+          expect(await one('string', { enum: [{ v: 'x' }, null] })).toEqual(NONE);
+          expect(await one('string', { enum: [{ v: 'x' }], regex: 'a' })).toEqual(NONE);
+          // A lower bound no number reaches, an upper bound every number exceeds.
+          expect(await one('number', { min: '1e999' })).toEqual(NONE);
+          expect(await one('number', { max: '-1e999' })).toEqual(NONE);
+          // Bounds that cross.
+          expect(await one('number', { min: 5, max: 1 })).toEqual(NONE);
+          // A pattern that does not compile on its own, the one that could leave the run's anchors.
+          expect(await one('string', { regex: 'a)|(.*' })).toEqual(NONE);
+          // CONTROL: the same rules where a value can meet them.
+          expect(await one('number', { min: 1, max: 5 })).toEqual({ enum: null, regex: null, min: 1, max: 5 });
+          expect(await one('string', { regex: 'a|b' })).toEqual({ enum: null, regex: 'a|b', min: null, max: null });
+        });
+
+        it('a rule a supplied value never meets, but the stored default can, is shown as written, not as admitting nothing', async () => {
+          // The run checks the default as stored (a text '5' on a number parameter, a number 3 on a text one).
+          expect(await one('number', { enum: ['5'] })).toEqual({ enum: ['5'], regex: null, min: null, max: null });
+          expect(await one('string', { min: 1, max: 5 })).toEqual({ enum: null, regex: null, min: 1, max: 5 });
+          expect(await one('string', { enum: [true] })).toEqual({ enum: [true], regex: null, min: null, max: null });
+        });
+
+        it('a bound is shown as the comparison reads it, and one that reads as no number is not shown', async () => {
+          expect(await one('number', { max: '10' })).toEqual({ enum: null, regex: null, min: null, max: 10 });
+          expect(await one('number', { min: null, max: 3 })).toEqual({ enum: null, regex: null, min: 0, max: 3 });
+          expect(await one('number', { max: 'abc', min: 2 })).toEqual({ enum: null, regex: null, min: 2, max: null });
+          // Full-width digits read as no number: they bound nothing, so nothing is shown that reads as ten.
+          expect(await one('number', { max: '\uFF11\uFF10' })).toBeNull();
+          // An upper bound past every number bounds nothing either.
+          expect(await one('number', { max: '1e999' })).toBeNull();
+        });
+
+        it('a rule that sets nothing is shown as none, as the run enforces nothing for it', async () => {
+          const shown = await previewOf(WITH({ ...GRANT, paramConstraints: { month: {} } }));
+          expect((shown['parameters'] as Array<Record<string, unknown>>)[0]!['allowed']).toBeNull();
+          // CONTROL: the same parameter with one rule shows it.
+          const ruled = await previewOf(WITH({ ...GRANT, paramConstraints: { month: { enum: ['May'] } } }));
+          expect((ruled['parameters'] as Array<Record<string, unknown>>)[0]!['allowed']).toEqual({ enum: ['May'], regex: null, min: null, max: null });
+        });
+
+        it('a rule named like a property every object has is not shown for a parameter it does not name', async () => {
+          const params = [{ name: 'toString', description: '', type: 'string', source: 'user_input' }];
+          const shown = await previewOf(WITH({ ...GRANT, paramConstraints: {} }, params));
+          expect((shown['parameters'] as Array<Record<string, unknown>>)[0]!['allowed']).toBeNull();
+        });
+
+        it('a contract without the request tool, or without a host or a path, grants nothing and is shown as an empty list', async () => {
+          expect((await previewOf(WITH({ ...GRANT, grantedTools: ['bash', 'write_file'] })))['contract']).toEqual([]);
+          expect((await previewOf(WITH({ ...GRANT, pathPatterns: [] })))['contract']).toEqual([]);
+          expect((await previewOf(WITH({ ...GRANT, hostPatterns: [] })))['contract']).toEqual([]);
+          expect((await previewOf(WITH({ ...GRANT, grantedTools: 'http_request' })))['contract']).toEqual([]);
+          // Lists of another shape grant nothing at the run either (`contractGrants`), so they are shown as granting nothing.
+          expect((await previewOf(WITH({ ...GRANT, hostPatterns: [['evil.example']] })))['contract']).toEqual([]);
+          expect((await previewOf(WITH({ ...GRANT, hostPatterns: '*' })))['contract']).toEqual([]);
+          expect((await previewOf(WITH({ ...GRANT, httpMethods: undefined })))['contract']).toEqual([]);
+          // CONTROL: the same contract with the request tool lists its writes; without a contract, nothing.
+          expect((await previewOf(WITH(GRANT)))['contract']).toHaveLength(2);
+          expect((await previewOf(MANDATE_WF))['contract']).toBeNull();
+        });
+      });
+
       it('the preview shows each step as it runs, with the captured call and the tools it gets, and no secret', async () => {
         const restore = shaped();
         try {
@@ -23551,7 +23656,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
           expect(res.status).toBe(200);
           const shown = await res.json() as Record<string, unknown> & { steps: Array<Record<string, unknown>> };
           expect(shown).toMatchObject({ expect: 'digest-1', stampedAt: null, changedBy: 'mandate', awaitsStamp: true, mode: 'autonomous', onFailure: 'stop', limits: null, contract: null });
-          expect(shown['parameters']).toEqual([{ name: 'month', required: false, default: 'May' }]);
+          expect(shown['parameters']).toEqual([{ name: 'month', required: false, default: 'May', allowed: null }]);
           expect(shown.steps[0]).toEqual({ id: 's1', task: 'look up the report', tool: null, inputTemplate: null, tools: ['memory_recall'], model: null, role: null, roleGrant: null, effort: null, thinking: null, timeoutMs: null, inputFrom: null });
           expect(shown.steps[1]).toMatchObject({ id: 's2', tool: 'http_request', inputTemplate: MANDATE_WF.steps[1]!.input_template });
           // A step that names no tools gets the inline pool, and the replayed tool with it; never bash silently.

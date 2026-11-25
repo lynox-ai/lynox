@@ -3,6 +3,7 @@
 	import Icon from '../primitives/Icon.svelte';
 	import MarkedLine from './MarkedLine.svelte';
 	import { modeKey, onFailureKey, templateText, timeoutText, visible, type StampChanges, type StampPreview } from '../utils/workflow-stamp.js';
+	import { allowedLines } from '../utils/stamp-contract.js';
 
 	// What a workflow's stamp binds, as the owner is shown it before confirming: its mode, failure
 	// strategy, limits, parameters with their defaults and contract, and every step as it runs. The
@@ -53,12 +54,21 @@
 		<p class="text-[10px] uppercase tracking-widest text-text-subtle mt-3 mb-1">{t('workflow_library.params_title')}</p>
 		<ul class="space-y-0.5 text-xs font-mono">
 			{#each p.parameters as param, i (i)}
-				<li class={WRAP}><bdi>{visible(param.name)}</bdi>{param.required ? ' *' : ''}{param.default !== null ? ` = ${templateText(param.default)}` : ''}</li>
+				<li class={WRAP}><bdi>{visible(param.name)}</bdi>{param.required ? ' *' : ''}{param.default !== null ? ` = ${templateText(param.default)}` : ''}
+					<!-- What the contract allows for it, as the run enforces it at bind (U-451): one line per
+					     rule, in words, each value in a box. -->
+					{#each allowedLines(param.allowed) as line, j (j)}
+						<span data-testid="stamp-param-allowed" class="block pl-4 font-sans text-text-subtle"><MarkedLine text={line} /></span>
+					{/each}
+				</li>
 			{/each}
 		</ul>
 	{/if}
 
-	{#if p.contract !== null && p.contract.length > 0}
+	{#if p.contract !== null && p.contract.length === 0}
+		<!-- A contract that grants nothing says so, so the missing list does not read as unknown (U-451). -->
+		<p data-testid="stamp-contract-none" class="mt-3 text-xs text-text-subtle">{t('workflow_library.contract_none')}</p>
+	{:else if p.contract !== null}
 		<div class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 p-3 mt-3 text-xs">
 			<p class="font-medium mb-1 flex items-center gap-1"><Icon name="warning" size="xs" />{t('workflow_library.schedule_contract_title')}</p>
 			<ul class="space-y-0.5 text-text-subtle font-mono">

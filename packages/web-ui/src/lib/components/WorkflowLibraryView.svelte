@@ -9,6 +9,7 @@
 	import WorkflowTakeoverDialog from './WorkflowTakeoverDialog.svelte';
 	import MarkedLine from './MarkedLine.svelte';
 	import { shownValue, shownWhole } from '../utils/plan-takeover.js';
+	import { contractLines } from '../utils/stamp-contract.js';
 	import { attemptKey, clearAttemptKey, clearAllAttemptKeys, attemptIsOver } from '../utils/run-attempt-key.js';
 	import { composeRunNotice, refusalBanner } from '../utils/run-notice.js';
 	import { isMandateSession, isOwnerSession, loadSettingsViewer } from '../stores/settings-viewer.svelte.js';
@@ -30,14 +31,6 @@
 		description: string;
 		type: string;
 	}
-	// The resolved capability-contract (Slice B2) — the outbound writes a scheduled
-	// run is allowed to perform. Shown read-only in the consent surface.
-	interface WorkflowContract {
-		grantedTools?: string[];
-		httpMethods?: string[];
-		hostPatterns?: string[];
-		pathPatterns?: string[];
-	}
 	interface SavedWorkflow {
 		id: string;
 		name: string;
@@ -57,7 +50,8 @@
 		schedulable?: boolean;
 		askingSteps?: string[];
 		confirmedAt?: string;
-		capabilityContract?: WorkflowContract;
+		// The stored capability contract as the library route returns it, read only by `contractLines`.
+		capabilityContract?: unknown;
 		// A mandate built or changed it and the owner has not stamped what it now is (register 242).
 		// Absent from an engine before the stamp: then nothing waits.
 		awaitsStamp?: boolean;
@@ -172,6 +166,8 @@
 	// schedule + the param values the unattended run will use, and the single
 	// POST /api/tasks stamps the first-run-confirm + creates the cron task.
 	let scheduleModalWf = $state<SavedWorkflow | null>(null);
+	// The writes the plan dialog lists for the workflow's stored contract (`contractLines`).
+	const contractShown = $derived(scheduleModalWf === null ? null : contractLines(scheduleModalWf.capabilityContract));
 	/** The schedule dialog's own error: shown in the dialog, so a page error (a run, a delete) never lands
 	 *  there, and a refusal of the schedule is not covered by the dialog. */
 	let scheduleError = $state('');
@@ -339,26 +335,9 @@
 		}
 	}
 
-	/** One line per (method, URL) a stored contract enforces — the cross product, listed. */
-	function contractTuples(c: WorkflowContract): string[] {
-		const hosts = c.hostPatterns ?? [];
-		const paths = (c.pathPatterns ?? []).length > 0 ? c.pathPatterns ?? [] : [''];
-		return (c.httpMethods ?? []).flatMap((m) => hosts.flatMap((h) => paths.map((p) => `${m} https://${h}${p}`)));
-	}
-
 	function cancelScheduleModal(): void {
 		scheduleModalWf = null;
 		scheduleError = '';
-	}
-
-	// True only when the contract has at least one displayable outbound action —
-	// avoids rendering a scary-but-empty "may perform these actions" panel.
-	function contractHasRows(c: WorkflowContract): boolean {
-		return (
-			(c.httpMethods?.length ?? 0) > 0 ||
-			(c.hostPatterns?.length ?? 0) > 0 ||
-			(c.grantedTools ?? []).some((tool) => tool !== 'http_request')
-		);
 	}
 
 	function onScheduleKey(e: KeyboardEvent): void {
@@ -1001,16 +980,18 @@
 				</div>
 			{/if}
 
-			{#if scheduleModalWf.capabilityContract && contractHasRows(scheduleModalWf.capabilityContract)}
-				{@const c = scheduleModalWf.capabilityContract}
+			<!-- What the stored contract lets a run write without asking, as the engine grants it
+			     (`contractLines`): only `http_request`, only the methods, hosts and paths it names. A
+			     contract that grants nothing says so (U-451); no other tool is listed, none is granted. -->
+			{#if contractShown !== null && contractShown.length === 0}
+				<p data-testid="schedule-contract-none" class="mb-4 text-xs text-text-subtle">{t('workflow_library.contract_none')}</p>
+			{:else if contractShown !== null}
 				<div class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 p-3 mb-4 text-xs">
 					<p class="font-medium mb-1 flex items-center gap-1"><Icon name="warning" size="xs" />{t('workflow_library.schedule_contract_title')}</p>
 					<ul class="space-y-0.5 text-text-subtle font-mono">
-						{#each contractTuples(c) as line (line)}
-							<li>{line}</li>
-						{/each}
-						{#each (c.grantedTools ?? []).filter((tool) => tool !== 'http_request') as tool (tool)}
-							<li>{tool}</li>
+						<!-- Keyed by position: a cross product can list the same tuple twice. -->
+						{#each contractShown as line, i (i)}
+							<li class="break-all">{visible(line)}</li>
 						{/each}
 					</ul>
 				</div>
