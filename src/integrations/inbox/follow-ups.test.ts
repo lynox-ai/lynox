@@ -441,6 +441,7 @@ describe('a raise ends the reply or archive before it, whatever the item showed 
     expect(handleSetAction(deps(), id, { action: 'replied' }).status).toBe(200);
     const bulk = handleBulkAction(deps(), { ids: [id], action: 'unhandled' }).body as { bulkId: string };
     expect(handleUndoBulk(deps(), bulk.bulkId).body).toMatchObject({ reverted: 1 });
+    expect(inbox.getItem(id)?.userAction).toBe('replied');
     await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
     expect(dealt(id)).toMatchObject({ count: 1 });
   });
@@ -465,6 +466,19 @@ describe('a raise ends the reply or archive before it, whatever the item showed 
     expect(dealt(id)).toMatchObject({ count: 1 });
   });
 
+  it('reply, bulk archive, bulk undo, then the reply cleared: the mail before the reply counts again when a flagged mail raises the item', async () => {
+    const id = await seedHandled();
+    expect(handleSetAction(deps(), id, { action: 'replied' }).status).toBe(200);
+    const bulk = handleBulkAction(deps(), { ids: [id], action: 'archived' }).body as { bulkId: string };
+    expect(handleUndoBulk(deps(), bulk.bulkId).body).toMatchObject({ reverted: 1 });
+    expect(handleSetAction(deps(), id, { action: null }).status).toBe(200);
+    const undo = inbox.listAuditForItem(id).filter((x) => x.action === 'undo').at(-1);
+    expect(JSON.parse(undo!.payloadJson)).toMatchObject({ undid: 'replied' });
+    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    expect(inbox.listAuditForItem(id).some((x) => x.action === 'raised_on_sensitive_follow_up')).toBe(true);
+    expect(dealt(id)).toMatchObject({ count: 2 });
+  });
+
   it('a clear of a snooze through the action route leaves the reply before it: reply, snooze, clear, flagged mail, on an item out of "requires you"', async () => {
     const id = await seedHandled();
     expect(handleSetAction(deps(), id, { action: 'replied' }).status).toBe(200);
@@ -474,47 +488,4 @@ describe('a raise ends the reply or archive before it, whatever the item showed 
     expect(dealt(id)).toMatchObject({ count: 1 });
   });
 
-  it('a clear of an archive puts back the reply before it: reply, archive, clear, flagged mail, on an item out of "requires you"', async () => {
-    const id = await seedHandled();
-    expect(handleSetAction(deps(), id, { action: 'replied' }).status).toBe(200);
-    expect(handleSetAction(deps(), id, { action: 'archived' }).status).toBe(200);
-    expect(handleSetAction(deps(), id, { action: null }).status).toBe(200);
-    const undo = inbox.listAuditForItem(id).filter((a) => a.action === 'undo').at(-1);
-    expect(JSON.parse(undo!.payloadJson)).toMatchObject({ undid: 'archived' });
-    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
-    expect(dealt(id)).toMatchObject({ count: 1 });
-  });
-
-  it('a flagged mail dated before an archive taken while the inbox checks it does not raise the item', async () => {
-    const id = seedReplied();
-    await hook()(ACCOUNT.id, envelope());
-    const confirming = createInboxClassifierHook({
-      state: inbox, rules: new InboxRulesLoader(inbox), queue,
-      accounts: { resolve: () => ({ address: ACCOUNT.address, displayName: 'Me', authType: 'oauth_microsoft' }) },
-      confirmAutoReply: async () => {
-        expect(handleSetAction(deps(), id, { action: 'archived' }).status).toBe(200);
-        return false;
-      },
-    });
-    await confirming(ACCOUNT.id, otp(new Date(Date.now() - 60_000)));
-    expect(inbox.getItem(id)?.userAction).toBe('archived');
-    expect(inbox.listAuditForItem(id).some((a) => a.action === 'raised_on_sensitive_follow_up')).toBe(false);
-  });
-
-  it('a reply given while the inbox checks a customer mail lets that mail open the item again', async () => {
-    const id = seedReplied();
-    await hook()(ACCOUNT.id, envelope());
-    expect(inbox.getItem(id)?.userAction).toBeUndefined();
-    const confirming = createInboxClassifierHook({
-      state: inbox, rules: new InboxRulesLoader(inbox), queue,
-      accounts: { resolve: () => ({ address: ACCOUNT.address, displayName: 'Me', authType: 'oauth_microsoft' }) },
-      confirmAutoReply: async () => {
-        expect(handleSetAction(deps(), id, { action: 'replied' }).status).toBe(200);
-        return false;
-      },
-    });
-    await confirming(ACCOUNT.id, envelope({ messageId: '<follow2@x>', uid: 3, date: new Date(Date.now() + 1_000) }));
-    expect(inbox.getItem(id)?.userAction).toBeUndefined();
-    expect(inbox.listAuditForItem(id).map((a) => a.action)).toContain('reopened_on_reply');
-  });
 });

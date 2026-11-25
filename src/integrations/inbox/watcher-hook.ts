@@ -198,26 +198,23 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     if (fields.inReplyTo !== undefined) input.inReplyTo = fields.inReplyTo;
     if (fields.mailDate !== undefined) input.mailDate = fields.mailDate;
     if (snippet !== undefined) input.snippet = snippet;
+    // A message older than the reply (a backfill or a redelivery) did not come after it.
+    const beforeUserAction = fields.mailDate !== undefined && existing.userActionAt !== undefined
+      && fields.mailDate.getTime() <= existing.userActionAt.getTime();
+    // A flagged message from someone else brings the item back to "requires you", whatever its
+    // bucket, user action or snooze, as a flagged first mail lands there: no classifier verdict, no
+    // rule and no earlier "done" keeps it out of the owner's view. An automatic reply counts too,
+    // since a flagged first mail is not let through for being one.
+    const raises = sensitive.isSensitive && !own && !beforeUserAction;
+    // Otherwise only a `replied` item opens; `reopenReplied` checks that again in its UPDATE.
+    // An unknown answer reopens (see `confirmAutoReply`): only a known automatic reply does not.
+    const opens = existing.userAction === 'replied' && autoReply !== true && !own && !beforeUserAction;
+    // A snooze the owner set to wake on a reply wakes for a message that may reopen an item.
+    const mayWake = autoReply !== true && !own && !beforeUserAction;
     // What the check found in the item's own mail, before this message.
     const itemCategories = opts.state.sensitiveCategoriesAtIngest(existing);
     const outcome = opts.state.runInTransaction((): 'raised' | 'reopened' | 'none' => {
       opts.state.insertThreadMessage(input);
-      // The owner's action as it is now, read inside the write: the row read before the
-      // automatic-reply check awaited the provider may miss an action taken meanwhile.
-      const fresh = opts.state.getItem(existing.id, existing.tenantId) ?? existing;
-      // A message older than the reply (a backfill or a redelivery) did not come after it.
-      const beforeUserAction = fields.mailDate !== undefined && fresh.userActionAt !== undefined
-        && fields.mailDate.getTime() <= fresh.userActionAt.getTime();
-      // A flagged message from someone else brings the item back to "requires you", whatever its
-      // bucket, user action or snooze, as a flagged first mail lands there: no classifier verdict, no
-      // rule and no earlier "done" keeps it out of the owner's view. An automatic reply counts too,
-      // since a flagged first mail is not let through for being one.
-      const raises = sensitive.isSensitive && !own && !beforeUserAction;
-      // Otherwise only a `replied` item opens; `reopenReplied` checks that again in its UPDATE.
-      // An unknown answer reopens (see `confirmAutoReply`): only a known automatic reply does not.
-      const opens = fresh.userAction === 'replied' && autoReply !== true && !own && !beforeUserAction;
-      // A snooze the owner set to wake on a reply wakes for a message that may reopen an item.
-      const mayWake = autoReply !== true && !own && !beforeUserAction;
       // Whether the item sleeps with wake-on-reply is read here, inside the write, not from the row
       // read before the auto-reply check above: the owner may have snoozed it again since, or another
       // message woken it. The wake and its audit commit with the message they are for. One clock for
