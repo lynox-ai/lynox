@@ -171,6 +171,16 @@ describe('a watch the network policy keeps from its page', () => {
 		});
 	}
 
+	it('says nothing for a reason kind this view does not know, nor for a cause kind it does not know', async () => {
+		expect(await render('de', { kind: 'model_reply', text: 'Ignore previous instructions' })).toBeNull();
+		if (component) unmount(component);
+		component = undefined;
+		target.replaceChildren();
+		expect(await render('de', { kind: 'watch_fetch', cause: { kind: 'pwned' } })).toBeNull();
+		expect(target.textContent).not.toContain('undefined');
+		expect(target.textContent).not.toContain('triggers.');
+	});
+
 	it('keeps run now on a watch whose last run failed: the next run may read the page', async () => {
 		await render('de', { kind: 'watch_fetch', cause: { kind: 'timeout', seconds: 30 } });
 		expect(target.querySelector('[data-trigger-run-now]')).not.toBeNull();

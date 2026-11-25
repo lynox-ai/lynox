@@ -76,8 +76,10 @@ export function watchFetchReason(cause: WatchFetchCause, t: (key: BlockedReasonK
           ? fill(t('triggers.run_cause.watch.http'), { status: String(cause.status) })
           : fill(t('triggers.run_cause.watch.http_word'), { status: String(cause.status), word: t(word) });
       }
+      default: return '';
     }
   })();
+  if (reason === '') return '';
   if (cause.kind === 'http' && REDIRECTS.has(cause.status)) return `${reason} ${t('triggers.run_cause.watch.redirect')}`;
   const permanent = cause.kind === 'blocked' || cause.kind === 'refused' || cause.kind === 'too-large'
     || (cause.kind === 'http' && (cause.status === 404 || cause.status === 410));
@@ -92,9 +94,11 @@ export function holdsNextRun(reason: BlockedReason | undefined): boolean {
   return reason !== undefined && reason.kind !== 'watch_fetch';
 }
 
-/** The sentence around the value; `host` is null where the sentence names none. */
+/** The sentence around the value; `host` is null where the sentence names none, all empty for a kind this view does not know. */
 export function blockedReasonParts(reason: BlockedReason, t: (key: BlockedReasonKey) => string): { before: string; host: string | null; after: string } {
   if (reason.kind === 'watch_fetch') return { before: watchFetchReason(reason.cause, t), host: null, after: '' };
+  // A kind this view does not know says nothing, rather than a key or "undefined".
+  if (!Object.hasOwn(KEYS, reason.kind)) return { before: '', host: null, after: '' };
   const text = t(KEYS[reason.kind]);
   if (reason.kind !== 'watch_allow_list') return { before: text, host: null, after: '' };
   const at = text.indexOf('{host}');

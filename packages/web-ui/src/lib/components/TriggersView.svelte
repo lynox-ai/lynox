@@ -688,7 +688,9 @@
 							     apart as a value, as the plan views set apart what someone else wrote. -->
 							{#if trigger.blocked_reason}
 								{@const parts = blockedReasonParts(trigger.blocked_reason, t)}
+								{#if parts.before !== '' || parts.host !== null}
 								<p class="mt-1 text-xs text-warning break-words" data-blocked-reason={trigger.blocked_reason.kind}>{parts.before}{#if parts.host !== null}<bdi data-foreign-value class="inline-block max-w-full rounded-[var(--radius-sm)] border border-text-subtle bg-bg-muted px-1 font-mono">{#each hostLabels(parts.host) as label, i (i)}<span class="inline-block max-w-full [overflow-wrap:anywhere]">{label}</span><wbr />{/each}</bdi>{/if}{parts.after}</p>
+								{/if}
 							{/if}
 							<!-- A confirmed watch names its page too: its escalation leaves the address out when
 							     someone the owner let in set it up, and points here (PRD B6). -->

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { TaskManager, storedRunCause } from './task-manager.js';
+import { TriggerStore, triggerRecordToRow } from './trigger-store.js';
 import type { TriggerRecord } from '../types/index.js';
 
 /**
@@ -87,6 +88,33 @@ describe('a trigger run\'s stored cause', () => {
     tm.recordTaskRun(t.id, 'failed', 'failed');
     engine.getDb().prepare('UPDATE triggers SET last_run_cause = ? WHERE id = ?').run(JSON.stringify(forged), t.id);
     expect(storedRunCause(tm.getTrigger(t.id)!)).toBeNull();
+  });
+
+  it.each([
+    ['a __proto__ key', '{"kind":"watch_fetch","cause":{"kind":"other"},"__proto__":{}}'],
+    ['a __proto__ key in the cause', '{"kind":"watch_fetch","cause":{"kind":"other","__proto__":{"text":"x"}}}'],
+    ['a constructor key', '{"kind":"watch_fetch","cause":{"kind":"other"},"constructor":{}}'],
+    ['a duplicate kind whose last one is unknown', '{"kind":"watch_fetch","cause":{"kind":"other","kind":"pwned"}}'],
+    ['a status that overflows', '{"kind":"watch_fetch","cause":{"kind":"http","status":1e400}}'],
+  ])('a column written by hand as JSON with %s reads as no cause', (_label, raw) => {
+    const t = make();
+    tm.recordTaskRun(t.id, 'failed', 'failed');
+    engine.getDb().prepare('UPDATE triggers SET last_run_cause = ? WHERE id = ?').run(raw, t.id);
+    expect(storedRunCause(tm.getTrigger(t.id)!)).toBeNull();
+  });
+
+  it('a re-write of the row that changes its status or its watch clears the cause, one that changes neither keeps it', () => {
+    const t = make();
+    tm.recordTaskRun(t.id, 'failed with a cause', 'failed', { cause: NOT_FOUND });
+    const store = new TriggerStore(engine);
+    const row = triggerRecordToRow(tm.getTrigger(t.id)!);
+    store.upsert(row);
+    expect(storedRunCause(tm.getTrigger(t.id)!)).toEqual(NOT_FOUND);
+    store.upsert({ ...row, conditionJson: JSON.stringify({ schedule_cron: '0 10 * * *', watch_config: null }) });
+    expect(column(t.id)).toBeNull();
+    tm.recordTaskRun(t.id, 'failed with a cause', 'failed', { cause: NOT_FOUND });
+    store.upsert({ ...triggerRecordToRow(tm.getTrigger(t.id)!), lastRunStatus: 'success' });
+    expect(column(t.id)).toBeNull();
   });
 
   it('a column that is no JSON reads as no cause', () => {

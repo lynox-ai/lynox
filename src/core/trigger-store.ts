@@ -479,6 +479,10 @@ export class TriggerStore {
         last_run_at = excluded.last_run_at,
         last_run_result = excluded.last_run_result,
         last_run_status = excluded.last_run_status,
+        -- The stored cause explains the status and the address it was told for: a re-write that
+        -- changes either clears it, so a cause is never older than its status or its watch.
+        last_run_cause = CASE WHEN excluded.last_run_status IS triggers.last_run_status
+          AND excluded.condition_json IS triggers.condition_json THEN triggers.last_run_cause ELSE NULL END,
         notification_channel = excluded.notification_channel,
         max_retries = excluded.max_retries,
         retry_count = excluded.retry_count,

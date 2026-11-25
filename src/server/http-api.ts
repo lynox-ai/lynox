@@ -9686,7 +9686,7 @@ export class LynoxHTTPApi {
       const policyContext = engine.getToolContext();
       // Why the run does not do its work: a watch the policy refuses now holds the next run and is
       // told first; otherwise the cause the last failed run stored, read through its closed parser.
-      const refusedWatch = (trigger: TriggerRecord): { blocked_reason: BlockedReason } | null => {
+      const blockedReasonOf = (trigger: TriggerRecord): { blocked_reason: BlockedReason } | null => {
         let refused: BlockedReason | null = null;
         try { refused = watchRefusedNow(trigger, policyContext); } catch { refused = null; }
         const reason = refused ?? storedRunCause(trigger);
@@ -9726,9 +9726,9 @@ export class LynoxHTTPApi {
             // sets the name apart as a value. Any other title stays whole, the prefix included; so
             // does the title of a plan with no schedule, and one whose workflow was renamed since.
             ...(workflow !== undefined && (trigger.schedule_cron ?? '') !== '' && titleIsWorkflowName(trigger.title, workflow.name) ? { title_workflow: workflow.name } : {}),
-            // A watch the instance's network_policy keeps from its page, and why, as the poll would
-            // refuse it now: the view says so, with the way out (U-392).
-            ...(refusedWatch(trigger) ?? {}),
+            // Why the run does not do its work: a watch the instance's network_policy keeps from its
+            // page now, or the cause its last failed run stored. The view says it, with the way out.
+            ...(blockedReasonOf(trigger) ?? {}),
           };
         });
       // What the owner's stamp of each confirmed plan lists, and how each entry stands (B3), for the

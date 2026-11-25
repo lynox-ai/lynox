@@ -1342,7 +1342,7 @@ const MAX_RUN_RESULT_CHARS = 10_000;
 /**
  * Why a trigger's last run failed, as a cause lynox knows: stored with the run (`last_run_cause`)
  * and never read from its result, which can carry a model's reply or a page's text. Carries no
- * string of its own; a host the view names comes from the trigger's own watch address.
+ * string of its own.
  */
 export type RunCause = { kind: 'watch_fetch'; cause: WatchFetchCause };
 
