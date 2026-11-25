@@ -35,7 +35,7 @@ import { shownLinkDomain, verdictTextRefusalOf } from './bulk-judge.js';
 import { BULK_NOTICES, type BulkNotices } from './bulk-notices.js';
 import { shopifyBulkReadEnabled, shopifyContextOf, shopifyInFilter, shopifyListPage, shopifyNoMatchSentence, shopifyNoneLeftSentence, shopifyMediaListPage, shopifyPairedAfter, shopifyTargetBeforeImage } from './bulk-shopify.js';
 import { productTitleOf } from './shopify-saved-form.js';
-import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, shopifyGraphqlEndpoint } from './shopify-graphql.js';
+import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, isShopifyStoreHostName, shopifyGraphqlEndpoint } from './shopify-graphql.js';
 import {
   BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, externalHostOf,
   type BulkHaltReason, type BulkInvalidReason, type BulkLedger, type BulkListRun, type BulkRunForPreview,
@@ -69,6 +69,10 @@ export interface BulkPreviewOutcome {
   /** Engine-authored, counts only. Recorded as the trigger's run result. */
   summary: string;
   retryAt?: number | undefined;
+  /** Set on a `halted` outcome when the pass found its run no longer its own to read (gone,
+   *  ended before its approval, halted by another pass, or moved on). The summary then cannot say
+   *  which; the worker reads it from the ledger. */
+  gone?: true | undefined;
 }
 
 export interface BulkPreviewDeps {
@@ -136,7 +140,9 @@ function invalidFor(read: ExternalRead): BulkInvalidReason | null {
 function haltFor(read: ExternalRead): BulkHaltReason | null {
   switch (read.kind) {
     case 'no_credential': return BULK_HALT_REASONS.credential;
+    case 'store_refused': return BULK_HALT_REASONS[read.reason];
     case 'unauthorized': return BULK_HALT_REASONS.unauthorized;
+    case 'reconnect': return read.why === 'ended' ? BULK_HALT_REASONS.storeAccessEnded : BULK_HALT_REASONS.storeClientMisnamed;
     case 'blocked': return BULK_HALT_REASONS.blocked;
     case 'not_granted': return BULK_HALT_REASONS.contract;
     case 'unrecorded': return BULK_HALT_REASONS.unrecorded;
@@ -178,13 +184,19 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   // its list nor, once listed, its targets. Halted rather than skipped, so it frees its slot
   // and says why. Before the client is built: building it reads the list's form, and a form
   // that is no longer offered has no spec to read.
+  // The reason the run holds after a halt: a run that ended before its approval while this pass
+  // was reading (the owner discarded it) keeps its end, and the pass tells that end, not its own.
+  // Such a run is no longer this pass's own, and the worker is told so (`gone`).
+  const storedHalt = (reason: BulkHaltReason): string => ledger.getStatus(runId)?.haltReason ?? reason;
+  const goneIf = (held: string, reason: BulkHaltReason): { gone?: true } => (held === reason ? {} : { gone: true });
   if (list !== null && !isOfferedListSource(list.source)) {
     // A filtered Shopify list fails on its filters (a key or value the rule no longer takes), not on a
     // path; so does any other list whose form and path are still offered.
     const onFilters = list.source.form === SHOPIFY_FILTERED_LIST_FORM || isOfferedListPath(list.source);
     const withdrawn = onFilters ? BULK_HALT_REASONS.listFilterWithdrawn : BULK_HALT_REASONS.listFormWithdrawn;
     ledger.halt(runId, withdrawn);
-    return { status: 'halted', summary: summarize(ledger, runId, say.halted('preview', withdrawn), say) };
+    const held = storedHalt(withdrawn);
+    return { status: 'halted', ...goneIf(held, withdrawn), summary: summarize(ledger, runId, say.halted('preview', held), say) };
   }
   const shopify = list !== null && isShopifyListSource(list.source);
   // The form the run's targets are read and written with: a product's, or an image's.
@@ -193,7 +205,9 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   // was on sends nothing once it is off.
   if (shopify && !(deps.shopifyEnabled ?? shopifyBulkReadEnabled)()) return halt(BULK_HALT_REASONS.shopifyReadOff);
   const endpoint = shopify ? shopifyGraphqlEndpoint(host) : null;
-  if (shopify && endpoint === null) return halt(BULK_HALT_REASONS.unavailable);
+  // No endpoint: for a store's host the preset pins no API version, a setting of lynox's which
+  // resuming does not change; for any other host the store cannot be reached as one.
+  if (shopify && endpoint === null) return halt(isShopifyStoreHostName(host) ? BULK_HALT_REASONS.shopifyNoApiVersion : BULK_HALT_REASONS.unavailable);
   if (shopify && list.state === 'pending') return await readShopifyList(list);
   client = shopify
     ? deps.clientFor(run, undefined, { phase: 'read', targets: ledger.externalTargetKeys(runId) })
@@ -219,7 +233,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     if (deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk preview paused.');
     const current = ledger.getRunForPreview(runId);
     if (!current || current.phase !== 'planned' || current.haltReason !== null) {
-      return { status: 'halted', summary: summarize(ledger, runId, say.previewStopped, say) };
+      return { status: 'halted', gone: true, summary: summarize(ledger, runId, say.previewStopped, say) };
     }
     if (now() > deadline) return halt(BULK_HALT_REASONS.timeBudget);
     const target = ledger.loadExternalTarget(runId, seq);
@@ -317,7 +331,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   // (PRD shopify-preset §22.2 item 7): it says so as a list that listed none does.
   const noneLeft = list === null ? null : shopifyNoneLeftSentence(list.source.filters, ledger.getStatus(runId), say);
   if (!ledger.finishPreview(runId)) {
-    return { status: 'halted', summary: summarize(ledger, runId, say.previewStopped, say) };
+    return { status: 'halted', gone: true, summary: summarize(ledger, runId, say.previewStopped, say) };
   }
   return { status: 'done', summary: costed(summarize(ledger, runId, noneLeft ?? say.previewDone, say)) };
 
@@ -339,7 +353,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       if (deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read paused.');
       const current = ledger.getListRun(runId);
       if (!current || current.state !== 'pending' || current.phase !== 'planned' || current.haltReason !== null) {
-        return { status: 'halted', summary: summarize(ledger, runId, say.listStopped, say) };
+        return { status: 'halted', gone: true, summary: summarize(ledger, runId, say.listStopped, say) };
       }
       // The progress is kept page by page, so a tick that runs out of time goes on from here.
       if (now() > listDeadline) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read has pages left to read.');
@@ -361,7 +375,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
           const still = ledger.getListRun(runId);
           return still?.state === 'pending' && still.phase === 'planned' && still.haltReason === null
             ? halt(BULK_HALT_REASONS.listTooLarge)
-            : { status: 'halted', summary: summarize(ledger, runId, say.listStopped, say) };
+            : { status: 'halted', gone: true, summary: summarize(ledger, runId, say.listStopped, say) };
         }
         const answer = await listClient.get(listPageUrl(host!, source, next), deps.signal, cap);
         if (answer.kind === 'rate_limited') {
@@ -396,7 +410,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       });
       if (!recorded.ok) {
         if (recorded.reason === 'too_large') return halt(BULK_HALT_REASONS.listTooLarge);
-        return { status: 'halted', summary: summarize(ledger, runId, say.listStopped, say) };
+        return { status: 'halted', gone: true, summary: summarize(ledger, runId, say.listStopped, say) };
       }
       // A short page is the last one. A full page that adds nothing is a list that pages in
       // circles, or ignores the page asked for: it is not read to the page cap.
@@ -405,7 +419,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     }
     const closed = ledger.finishList(runId, (keys) => mintBulkContract(host!, keys, source.method ?? undefined));
     if (closed === 'moved') {
-      return { status: 'halted', summary: summarize(ledger, runId, say.listStopped, say) };
+      return { status: 'halted', gone: true, summary: summarize(ledger, runId, say.listStopped, say) };
     }
     return {
       status: 'done',
@@ -434,7 +448,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       if (deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read paused.');
       const current = ledger.getListRun(runId);
       if (!current || current.state !== 'pending' || current.phase !== 'planned' || current.haltReason !== null) {
-        return { status: 'halted', summary: summarize(ledger, runId, say.listStopped, say) };
+        return { status: 'halted', gone: true, summary: summarize(ledger, runId, say.listStopped, say) };
       }
       if (now() > listDeadline) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read has pages left to read.');
       const next = current.page + 1;
@@ -465,7 +479,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
           const still = ledger.getListRun(runId);
           return still?.state === 'pending' && still.phase === 'planned' && still.haltReason === null
             ? halt(BULK_HALT_REASONS.listTooLarge)
-            : { status: 'halted', summary: summarize(ledger, runId, say.listStopped, say) };
+            : { status: 'halted', gone: true, summary: summarize(ledger, runId, say.listStopped, say) };
         }
         const answer = await thisPage.graphqlRead(endpoint!, media
           ? { form: 'shopify_media_list', afterId: current.lastId }
@@ -500,7 +514,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       const recorded = ledger.recordListPage(runId, { page: next, items: page.items, bytes: got.bytes ?? 0, lastId: page.lastId });
       if (!recorded.ok) {
         if (recorded.reason === 'too_large') return halt(BULK_HALT_REASONS.listTooLarge);
-        return { status: 'halted', summary: summarize(ledger, runId, say.listStopped, say) };
+        return { status: 'halted', gone: true, summary: summarize(ledger, runId, say.listStopped, say) };
       }
       if (page.count < (media ? SHOPIFY_MEDIA_LIST_PAGE_SIZE : SHOPIFY_LIST_PAGE_SIZE)) break;
       // A full page whose ids were all unusable leaves the cursor where it was: the next page
@@ -509,7 +523,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     }
     const closed = ledger.finishList(runId, () => listReadContract(host!, source));
     if (closed === 'moved') {
-      return { status: 'halted', summary: summarize(ledger, runId, say.listStopped, say) };
+      return { status: 'halted', gone: true, summary: summarize(ledger, runId, say.listStopped, say) };
     }
     return {
       status: 'done',
@@ -519,7 +533,8 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
 
   function halt(reason: BulkHaltReason): BulkPreviewOutcome {
     ledger.halt(runId, reason);
-    return { status: 'halted', summary: costed(summarize(ledger, runId, say.halted('preview', reason), say)) };
+    const held = storedHalt(reason);
+    return { status: 'halted', ...goneIf(held, reason), summary: costed(summarize(ledger, runId, say.halted('preview', held), say)) };
   }
   // A pending outcome is recorded, never pushed, and its lead is English: so is its cost.
   function pending(retryAt: number, lead: string): BulkPreviewOutcome {

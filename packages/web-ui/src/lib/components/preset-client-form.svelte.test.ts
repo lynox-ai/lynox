@@ -199,6 +199,17 @@ describe('PresetClientForm', () => {
 		expect(target.textContent).toContain('https://tenant.example/api/oauth/callback');
 	});
 
+	it('puts the redirect address in one box of pieces, each its own inline-block, with `<wbr>` only after a dot or a slash (U-391)', async () => {
+		await open();
+		const box = target.querySelector<HTMLElement>('[data-testid="preset-redirect-uri"]')!;
+		expect(box.textContent).toBe('https://tenant.example/api/oauth/callback');
+		const W = (x: string): string => `<span class="inline-block max-w-full break-all">${x}</span>`;
+		expect(box.innerHTML.replace(/<!---->/g, '')).toBe(['https://', 'tenant.', 'example/', 'api/', 'oauth/', 'callback'].map(W).join('<wbr>'));
+		expect(box.classList.contains('inline-block') && box.classList.contains('max-w-full')).toBe(true);
+		// The text is the whole address, `<wbr>` adds no character, and the line keeps `select-all` for a copy.
+		expect(box.parentElement!.classList.contains('select-all')).toBe(true);
+	});
+
 	it('says the load failed, and shows no form, when the engine answers with an error', async () => {
 		getStatus = 500;
 		await open();
@@ -241,6 +252,17 @@ describe('PresetClientForm', () => {
 		button('Replace Client Secret')!.click();
 		flushSync();
 		expect(secretInput()).not.toBeNull();
+	});
+
+	it('keeps the replace button\'s label on one line, shaped as a button, and lets it move under the note instead', async () => {
+		getExtra = { client_id: 'client-1', client_secret_set: true };
+		await open();
+
+		const replace = button('Replace Client Secret')!;
+		expect(replace.classList.contains('whitespace-nowrap')).toBe(true);
+		// A border and padding, so it does not read as the note's next line.
+		expect(['border', 'border-border', 'px-3', 'py-1.5'].every((c) => replace.classList.contains(c))).toBe(true);
+		expect(replace.parentElement!.classList.contains('flex-wrap')).toBe(true);
 	});
 
 	it('keeps the client id field plain text that no browser fills or checks', async () => {

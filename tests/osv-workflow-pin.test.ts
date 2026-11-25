@@ -315,7 +315,8 @@ const PINNED: Readonly<Record<string, readonly string[]>> = {
     "jq -r '.errors[]? | \"::error::osv watch: \" + .' /tmp/osv-verdict.json",
     "jq -e 'has(\"blocking\") and has(\"below\") and ((.errors // [\"no verdict\"]) | length == 0)' /tmp/osv-verdict.json > /dev/null",
     "HIGH=$(jq '.blocking | length' /tmp/osv-verdict.json)",
-    "TOTAL=$(jq '(.blocking | length) + (.below | length)' /tmp/osv-verdict.json)",
+    "ACCEPTED=$(jq '(.accepted // []) | length' /tmp/osv-verdict.json)",
+    "TOTAL=$(jq '(.blocking | length) + (.below | length) + ((.accepted // []) | length)' /tmp/osv-verdict.json)",
   ],
 };
 
@@ -444,7 +445,8 @@ const PINNED_JOB: Readonly<Record<string, unknown>> = {
         "name": "Scan dependencies (high+critical hard-fail)",
         "run": "set -euo pipefail\nset +e\nosv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json\nOSV_RC=$?\nosv-scanner scan source --lockfile=docs/pnpm-lock.yaml --format=json --output-file=/tmp/osv-docs.json\nOSV_DOCS_RC=$?\nset -e\nnode scripts/osv-report-gate.mjs --report /tmp/osv.json --rc \"${OSV_RC}\" --report /tmp/osv-docs.json --rc \"${OSV_DOCS_RC}\"\n"
       }
-    ]
+    ],
+    "timeout-minutes": 45
   },
   "dep-scan-daily.yml:dep-scan": {
     "runs-on": "ubuntu-latest",

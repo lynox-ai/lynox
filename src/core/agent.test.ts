@@ -88,6 +88,9 @@ vi.mock('./observability.js', () => ({
 }));
 
 import { Agent, readForDiffPreview, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS, raceRunAbort, TOOL_ABANDONED_MESSAGE, toolStoppedMessage, TOOL_STOPPED_RESULT_NOTE } from './agent.js';
+import { UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
+import { OwnerKnownTargets } from './owner-known-targets.js';
+import { createStepStreamHandler } from '../orchestrator/runtime-adapter.js';
 import { InputRequiredError } from './input-required.js';
 import { askUserTool } from '../tools/builtin/ask-user.js';
 import type { WireSnapshot } from './wire-capture.js';
@@ -100,6 +103,8 @@ const danger = (warning: string): { warning: string; prompt: PromptText } => ({ 
 import type { PromptText } from '../types/index.js';
 import { buildDedupReference } from './tool-result-hygiene.js';
 import { TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
+import { SYSTEM_PROMPT, lockedTurnPrompt } from './prompts.js';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import { getBetasForProvider } from '../types/index.js';
 import { isDangerousDetailed } from '../tools/permission-guard.js';
 import { ToolCallTracker } from './output-guard.js';
@@ -122,6 +127,7 @@ import { createMailTools, InMemoryMailRegistry } from '../integrations/mail/tool
 import { createInboxReadTool } from '../integrations/mail/tools/inbox-read.js';
 import { currentCallTwins, noteCallConnection, runInCallSlot, type CallSlot } from './call-connection.js';
 import { readRunStop, withRunStop } from './run-stop.js';
+import { ownerNamed } from '../../tests/helpers/owner-named.js';
 
 function endTurnResponse(text: string) {
   return {
@@ -1817,8 +1823,8 @@ describe('Agent', () => {
       // list back to the 2-way ['Allow','Deny','\x00'] and the assertion on the
       // 3-way args fails — the wiring this test pins.
       vi.mocked(isDangerousDetailed).mockReturnValueOnce({
-        ...danger('⚠ spawn_agent: deep'),
-        payload: { message: '⚠ spawn_agent: deep', tier: 'deep', downgradeTo: 'balanced' },
+        ...danger('⚠ Delegation: deep'),
+        payload: { message: '⚠ Delegation: deep', tier: 'deep', downgradeTo: 'balanced' },
       });
       let consumed: unknown = undefined;
       const tool = makeTool('spawn_agent', vi.fn().mockImplementation((_input, agent) => {
@@ -1831,7 +1837,7 @@ describe('Agent', () => {
         .mockResolvedValueOnce(endTurnResponse('Done'));
       const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser });
       await agent.send('Spawn deep');
-      expect(promptUser).toHaveBeenCalledWith(frame('⚠ spawn_agent: deep'), ['Allow deep', 'Run on balanced', 'Cancel', '\x00'], expect.objectContaining({ signal: expect.any(AbortSignal) }));
+      expect(promptUser).toHaveBeenCalledWith(frame('⚠ Delegation: deep'), ['Allow deep', 'Run on balanced', 'Cancel', '\x00'], expect.objectContaining({ signal: expect.any(AbortSignal) }));
       expect(tool.handler).toHaveBeenCalled();
       expect(consumed).toBe('balanced');
     });
@@ -1857,8 +1863,8 @@ describe('Agent', () => {
 
     it('deep-consent 3-way GO: "Allow deep" proceeds WITHOUT a downgrade', async () => {
       vi.mocked(isDangerousDetailed).mockReturnValueOnce({
-        ...danger('⚠ spawn_agent: deep'),
-        payload: { message: '⚠ spawn_agent: deep', tier: 'deep', downgradeTo: 'balanced' },
+        ...danger('⚠ Delegation: deep'),
+        payload: { message: '⚠ Delegation: deep', tier: 'deep', downgradeTo: 'balanced' },
       });
       let consumed: unknown = 'untouched';
       const tool = makeTool('spawn_agent', vi.fn().mockImplementation((_input, agent) => {
@@ -1879,8 +1885,8 @@ describe('Agent', () => {
 
     it('deep-consent 3-way GO: "Cancel" denies — handler never runs', async () => {
       vi.mocked(isDangerousDetailed).mockReturnValueOnce({
-        ...danger('⚠ spawn_agent: deep'),
-        payload: { message: '⚠ spawn_agent: deep', tier: 'deep', downgradeTo: 'balanced' },
+        ...danger('⚠ Delegation: deep'),
+        payload: { message: '⚠ Delegation: deep', tier: 'deep', downgradeTo: 'balanced' },
       });
       const tool = makeTool('spawn_agent', vi.fn().mockResolvedValue('spawned'));
       const promptUser = vi.fn().mockResolvedValue('cancel');
@@ -2422,7 +2428,7 @@ describe('Agent', () => {
 
     // A reference in the path of a store request would be filled in after the path was read, so
     // a value such as `../../apps/x` would move the request out of `/admin/`. While store requests
-    // are refused, the request is refused before it is sent, every consent given. Once a
+    // need a store pass, the request is refused before it is sent, every consent given. Once a
     // pass carries them, the pass reads the finished URL (`store-pass.test.ts`, "refuses every
     // path outside /admin/, including one that resolves out of it").
     it('refuses a secret reference in the path of a store request before the value is filled in', async () => {
@@ -2438,7 +2444,7 @@ describe('Agent', () => {
       const result = (agent.getMessages()[2] as { content: Array<{ content: string; is_error: boolean }> }).content[0]!;
       expect(handler).not.toHaveBeenCalled();
       expect(result.is_error).toBe(true);
-      expect(result.content).toContain('Shopify is temporarily unavailable in lynox');
+      expect(result.content).toContain('only on an instance that lynox runs');
     });
 
     describe('a built-in provider\'s client secret', () => {
@@ -3465,6 +3471,11 @@ describe('Agent', () => {
         expect(await resultOf(makeTool('local_write', vi.fn(async () => 'Stored the note.')))).toBe('Stored the note.');
       }, 3000);
 
+      it('an answer a reader (failureOf) calls a failure keeps the sentence: the model reads what it read before', async () => {
+        const read: ToolEntry = { ...reader(vi.fn(async () => 'Error: two of five pages, then the fetch failed.')), failureOf: (a: string) => (a.startsWith('Error:') ? a : null) };
+        expect(await resultOf(read)).toBe(`Error: two of five pages, then the fetch failed.\n\n${TOOL_STOPPED_RESULT_NOTE}`);
+      }, 3000);
+
       it('a soft failure gets no sentence: a failure is no result that may be partial', async () => {
         const failing = reader(vi.fn(async () => { throw new ToolSoftFailure('Search failed: This operation was aborted', 'search failed'); }));
         expect(await resultOf(failing)).toBe('Search failed: This operation was aborted');
@@ -3559,6 +3570,71 @@ describe('Agent', () => {
 
   describe('recordToolCall sink', () => {
     type RecordedCall = { runId?: string | undefined; toolName: string; inputJson: string; outputJson: string; durationMs: number; isError: boolean };
+
+    it('records a call once when its success event throws, never again as an error, and gives the model its result', async () => {
+      const recorded: RecordedCall[] = [];
+      const steps: Array<{ toolName: string; isError: boolean }> = [];
+      // A step's recorder sits behind the agent's stream, as a run wires it; the stream throws
+      // once, after the step has written the result.
+      const step = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (r) => { steps.push({ toolName: r.toolName, isError: r.isError }); } });
+      let threw = false;
+      const onStream = async (e: StreamEvent): Promise<void> => {
+        step(e);
+        if (e.type === 'tool_result' && !threw) { threw = true; throw new Error('step recorder gone'); }
+      };
+      const tool = makeTool('ok_tool', vi.fn(async () => 'fine'));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu-ok', name: 'ok_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+      const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [tool], onStream, recordToolCall: (c) => { recorded.push(c as RecordedCall); } });
+      const logged: string[] = [];
+      const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => { logged.push(String(chunk)); return true; });
+      try {
+        await agent.send('go');
+      } finally {
+        spy.mockRestore();
+      }
+      expect(threw).toBe(true);
+      expect(recorded.filter(c => c.toolName === 'ok_tool').map(c => c.isError)).toEqual([false]);
+      expect(steps.filter(s => s.toolName === 'ok_tool').map(s => s.isError)).toEqual([false]);
+      // The model reads the call's own result, not the stream's error.
+      const block = agent.getMessages()
+        .flatMap(m => (Array.isArray((m as { content: unknown }).content) ? (m as { content: Array<{ type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }> }).content : []))
+        .find(b => b.type === 'tool_result' && b.tool_use_id === 'tu-ok');
+      expect(block?.is_error).toBeUndefined();
+      expect(JSON.stringify(block?.content)).toContain('fine');
+      // The log names the error's kind, never its text.
+      expect(logged.filter(l => l.includes('could not be delivered'))).toEqual(['[lynox:agent] a ok_tool call has settled, but its result event could not be delivered (Error)\n']);
+      expect(logged.join('')).not.toContain('step recorder gone');
+    });
+
+    it('records a failed call once when its error event throws, and gives the model the call\'s error, not the stream\'s', async () => {
+      const recorded: RecordedCall[] = [];
+      const onStream = async (e: StreamEvent): Promise<void> => {
+        if (e.type === 'tool_result') throw new Error('stream gone');
+      };
+      const tool = makeTool('bad_tool', vi.fn(async () => { throw new Error('tool broke'); }));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu-bad', name: 'bad_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+      const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [tool], onStream, recordToolCall: (c) => { recorded.push(c as RecordedCall); } });
+      const logged: string[] = [];
+      const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => { logged.push(String(chunk)); return true; });
+      try {
+        await agent.send('go');
+      } finally {
+        spy.mockRestore();
+      }
+      expect(recorded.filter(c => c.toolName === 'bad_tool').map(c => c.isError)).toEqual([true]);
+      const block = agent.getMessages()
+        .flatMap(m => (Array.isArray((m as { content: unknown }).content) ? (m as { content: Array<{ type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }> }).content : []))
+        .find(b => b.type === 'tool_result' && b.tool_use_id === 'tu-bad');
+      expect(block?.is_error).toBe(true);
+      expect(JSON.stringify(block?.content)).toContain('tool broke');
+      expect(JSON.stringify(block?.content)).not.toContain('stream gone');
+      expect(logged.filter(l => l.includes('could not be delivered'))).toEqual(['[lynox:agent] a bad_tool call has settled, but its result event could not be delivered (Error)\n']);
+      expect(logged.join('')).not.toContain('stream gone');
+    });
 
     describe('the connection a call resolved', () => {
       // Source-connection PRD, first build cut. The http resolver notes the profile
@@ -6393,6 +6469,9 @@ describe('a vault secret reference and the host it is sent to', () => {
       const agent = new Agent({
         name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool],
         secretStore: await vaultStore(), toolContext: boundContext(), promptUser,
+        // The owner named the host: the second GET follows the first one's response (foreign
+        // content), and only the secret question is under test here, not the read check.
+        ownerKnown: OwnerKnownTargets.of({ ownerTexts: () => [`call https://${OTHER}/c`] }),
       });
       await agent.send('go');
     } finally {
@@ -6421,12 +6500,15 @@ describe('a vault secret reference and the host it is sent to', () => {
       const agent = new Agent({
         name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool],
         secretStore: await vaultStore(), toolContext: boundContext(), promptUser,
+        // Both hosts named by the owner, so the second question is the secret one, not the read check.
+        ownerKnown: OwnerKnownTargets.of({ ownerTexts: () => [`call https://${OTHER}/c and https://93.184.216.36/c`] }),
       });
       await agent.send('go');
     } finally {
       restore();
     }
     expect(promptUser).toHaveBeenCalledTimes(2);
+    expect(flattenPrompt(promptUser.mock.calls[1]![0] as string | PromptText)).toContain('SERVICE_TOKEN');
     expect(flattenPrompt(promptUser.mock.calls[1]![0] as string | PromptText)).toContain('93.184.216.36');
   });
 
@@ -6643,7 +6725,7 @@ describe('a secret reference in a tool whose destination cannot be read', () => 
     const { agent, handler } = bashAgent(promptUser);
     await agent.send('go');
     const question = flattenPrompt(promptUser.mock.calls[0]![0] as string | PromptText);
-    expect(question).toContain('bash');
+    expect(question).toContain('Command wants to use secret(s)');
     expect(question).toContain('SERVICE_TOKEN');
     expect(question).toContain('wget --header');
     expect(handler).not.toHaveBeenCalled();
@@ -6715,6 +6797,123 @@ describe('a secret reference in a tool whose destination cannot be read', () => 
 });
 
 /**
+ * A call answered without running — a repeated call, a contained chat's refusal, a blocked call in
+ * a run nobody watches, a refusal with no one to ask — streams its answer like any other result.
+ * A stream that throws on that event must not take the answer's place: the model reads the call's
+ * own text, never the stream's error.
+ */
+describe('a call answered without running keeps its own answer when its result event throws', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+  afterEach(() => { vi.mocked(isDangerousDetailed).mockReturnValue(null); });
+
+  type ResultEvent = Extract<StreamEvent, { type: 'tool_result' }>;
+  const throwingStream = () => {
+    const seen: ResultEvent[] = [];
+    const onStream = async (e: StreamEvent): Promise<void> => {
+      if (e.type === 'tool_result') { seen.push(e); throw new Error('stream gone'); }
+    };
+    return { seen, onStream };
+  };
+  const modelBlock = (agent: Agent, id: string) => agent.getMessages()
+    .flatMap(m => (Array.isArray((m as { content: unknown }).content) ? (m as { content: Array<{ type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }> }).content : []))
+    .find(b => b.type === 'tool_result' && b.tool_use_id === id);
+  const sendQuietly = async (agent: Agent): Promise<string[]> => {
+    const logged: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => { logged.push(String(chunk)); return true; });
+    try {
+      await agent.send('go');
+    } finally {
+      spy.mockRestore();
+    }
+    return logged.filter(l => l.includes('could not be delivered'));
+  };
+  const expectOwnAnswer = (agent: Agent, id: string, seen: ResultEvent[], logged: string[], toolName: string) => {
+    const event = seen.find(e => e.toolUseId === id);
+    expect(event, 'the stream was handed the answer and threw').toBeDefined();
+    const block = modelBlock(agent, id);
+    expect(block?.is_error).toBe(true);
+    expect(String(block?.content)).toContain(event!.result);
+    expect(String(block?.content)).not.toContain('stream gone');
+    expect(logged).toEqual([`[lynox:agent] a ${toolName} call has settled, but its result event could not be delivered (Error)\n`]);
+  };
+
+  it('a repeated call: the model reads the escalation', async () => {
+    const handler = vi.fn().mockResolvedValue('API profile "wrong" not found.');
+    // 3 runs reach the limit, the 4th is answered by the guard, then the model stops.
+    for (let i = 0; i < 4; i++) {
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: `tu_${String(i)}`, name: 'test_lookup', input: { id: 'wrong' } }]));
+    }
+    mockProcess.mockResolvedValueOnce(endTurnResponse('Done'));
+    const { seen, onStream } = throwingStream();
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [makeTool('test_lookup', handler)], onStream });
+    const logged = await sendQuietly(agent);
+    expect(handler).toHaveBeenCalledTimes(3);
+    // The three runs went through the guarded success path; only the escalation is asserted here.
+    expectOwnAnswer(agent, 'tu_3', seen, logged.filter((_, i) => i === 3), 'test_lookup');
+    expect(logged).toHaveLength(4);
+  });
+
+  it('a repeated call to a name the model made up: the log line carries only a tool name\'s characters', async () => {
+    const made = 'no_such_tool\n[lynox:agent] forged line';
+    for (let i = 0; i < 4; i++) {
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: `tu_m${String(i)}`, name: made, input: {} }]));
+    }
+    mockProcess.mockResolvedValueOnce(endTurnResponse('Done'));
+    const { seen, onStream } = throwingStream();
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [], onStream });
+    const logged = await sendQuietly(agent);
+    expect(seen.map(e => e.toolUseId)).toEqual(['tu_m3']);
+    expect(logged).toEqual(['[lynox:agent] a no_such_tool??lynox:agent??forged?line call has settled, but its result event could not be delivered (Error)\n']);
+  });
+
+  it('a contained chat: the model reads the refusal', async () => {
+    const tool = makeTool('bash', vi.fn().mockResolvedValue('ran'));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_c', name: 'bash', input: { command: 'ls' } }]))
+      .mockResolvedValueOnce(endTurnResponse('Done'));
+    const { seen, onStream } = throwingStream();
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], onStream });
+    agent.currentThreadId = 't1';
+    (agent.toolContext as unknown as Record<string, unknown>)['containment'] = { isContained: ({ threadId }: { threadId?: string }) => threadId === 't1' };
+    const logged = await sendQuietly(agent);
+    expect(tool.handler).not.toHaveBeenCalled();
+    expect(seen.find(e => e.toolUseId === 'tu_c')?.contained).toBeDefined();
+    expect(String(modelBlock(agent, 'tu_c')?.content)).toContain('Not run: this chat');
+    expectOwnAnswer(agent, 'tu_c', seen, logged, 'bash');
+  });
+
+  it('a blocked call in a run nobody watches: the model reads the block', async () => {
+    vi.mocked(isDangerousDetailed).mockReturnValueOnce({ ...danger('Dangerous'), hardBlock: true });
+    const tool = makeTool('bash', vi.fn().mockResolvedValue('ran'));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_b', name: 'bash', input: { command: 'rm -rf /' } }]))
+      .mockResolvedValueOnce(endTurnResponse('Done'));
+    const { seen, onStream } = throwingStream();
+    const promptUser = vi.fn(async () => UNATTENDED_BLOCK_ANSWER);
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser, onStream });
+    const logged = await sendQuietly(agent);
+    expect(promptUser).toHaveBeenCalledTimes(1);
+    expect(tool.handler).not.toHaveBeenCalled();
+    expect(String(modelBlock(agent, 'tu_b')?.content)).toContain('in a run nobody watches it is not queued for approval');
+    expectOwnAnswer(agent, 'tu_b', seen, logged, 'bash');
+  });
+
+  it('no one to ask: the model reads the refusal', async () => {
+    vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous'));
+    const tool = makeTool('bash', vi.fn().mockResolvedValue('ran'));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_h', name: 'bash', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('Done'));
+    const { seen, onStream } = throwingStream();
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], onStream });
+    const logged = await sendQuietly(agent);
+    expect(tool.handler).not.toHaveBeenCalled();
+    expect(String(modelBlock(agent, 'tu_h')?.content)).toContain('Permission denied (non-interactive)');
+    expectOwnAnswer(agent, 'tu_h', seen, logged, 'bash');
+  });
+});
+
+/**
  * A run with no way to ask a person, whose model asks anyway. The real `ask_user` tool, the
  * real agent loop: the chain the fail-open ran through.
  */
@@ -6740,6 +6939,22 @@ describe('ask_user with no question path ends the run as "needs input"', () => {
     // The call beside it in the same batch finished rather than being cut off.
     expect(sibling.handler).toHaveBeenCalledTimes(1);
     expect(siblingFinished, 'the run ended only after its slow sibling settled').toBe(true);
+  });
+
+  it('the run still ends as "needs input" when delivering the call\'s result event throws', async () => {
+    // One model turn only: a second response queued here would outlive the test and answer the next one.
+    mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu_ask', name: 'ask_user', input: { question: 'Approve the refund?' } }]));
+    const onStream = async (e: StreamEvent): Promise<void> => {
+      if (e.type === 'tool_result') throw new Error('stream gone');
+    };
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [askUserTool], onStream });
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      await expect(agent.send('Process the refunds')).rejects.toThrow(InputRequiredError);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(mockProcess).toHaveBeenCalledTimes(1);
   });
 
   it('the error names the question, masked through the vault before it leaves the agent', async () => {
@@ -6832,6 +7047,30 @@ describe('ask_user with no question path ends the run as "needs input"', () => {
     expect(results[0]!.result).toContain('Needs input');
     expect(results[0]!.result).not.toContain('sk-live-SECRET');
     expect((results[0] as { toolUseId?: string }).toolUseId).toBe(gatedCall.id);
+  });
+
+  it('the refused gate still ends the run as "needs input" when delivering its result event throws', async () => {
+    // One model turn only: a second response queued here would outlive the test and answer the next one.
+    mockProcess.mockResolvedValueOnce(toolUseResponse([gatedCall]));
+    const promptUser = vi.fn((q: unknown) => Promise.reject(new InputRequiredError(flattenPrompt(q as Parameters<typeof flattenPrompt>[0]))));
+    let threw = false;
+    const onStream = async (e: StreamEvent): Promise<void> => {
+      if (e.type === 'tool_result') { threw = true; throw new Error('stream gone'); }
+    };
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [makeTool('run_cmd', vi.fn())], secretStore: gateStore(), promptUser, onStream });
+    const logged: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => { logged.push(String(chunk)); return true; });
+    let err: unknown;
+    try {
+      err = await agent.send('Fetch it').then(() => null, (e: unknown) => e);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(threw).toBe(true);
+    expect(err).toBeInstanceOf(InputRequiredError);
+    expect((err as Error).message).not.toContain('stream gone');
+    expect(mockProcess).toHaveBeenCalledTimes(1);
+    expect(logged.filter(l => l.includes('could not be delivered'))).toEqual(['[lynox:agent] a run_cmd call has settled, but its result event could not be delivered (Error)\n']);
   });
 
   it('ask_user\'s own result is streamed once, not again by the batch', async () => {
@@ -7029,7 +7268,7 @@ describe('write approvals in a tool batch', () => {
         .mockResolvedValueOnce(toolUseResponse([write('tu_1'), write('tu_2')]))
         .mockResolvedValueOnce(toolUseResponse([write('tu_3')]))
         .mockResolvedValueOnce(endTurnResponse('Done'));
-      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser });
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser, ownerKnown: ownerNamed('93.184.216.37') });
       await agent.send('go');
     } finally {
       restore();
@@ -7063,7 +7302,7 @@ describe('write approvals in a tool batch', () => {
           write('tu_3', 'https://93.184.216.37:443/contacts'),
         ]))
         .mockResolvedValueOnce(endTurnResponse('Done'));
-      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser });
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser, ownerKnown: ownerNamed('93.184.216.37') });
       await agent.send('go');
     } finally {
       restore();
@@ -7086,7 +7325,7 @@ describe('write approvals in a tool batch', () => {
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([write('tu_dup', 'contacts'), write('tu_dup', 'contacts'), write('tu_dup', 'notes')]))
         .mockResolvedValueOnce(endTurnResponse('Done'));
-      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser });
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser, ownerKnown: ownerNamed('93.184.216.37') });
       await agent.send('go');
     } finally {
       restore();
@@ -7112,7 +7351,7 @@ describe('write approvals in a tool batch', () => {
           write('tu_cut_off'),
         ]))
         .mockResolvedValueOnce(endTurnResponse('Done'));
-      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool, noop], promptUser });
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool, noop], promptUser, ownerKnown: ownerNamed('93.184.216.37') });
       await agent.send('go');
     } finally {
       restore();
@@ -7134,7 +7373,7 @@ describe('write approvals in a tool batch', () => {
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([write('tu_1', '/contacts'), write('tu_2', '/orders/7/cancel')]))
         .mockResolvedValueOnce(endTurnResponse('Done'));
-      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser });
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser, ownerKnown: ownerNamed('93.184.216.37') });
       await agent.send('go');
     } finally {
       restore();
@@ -7980,7 +8219,7 @@ describe('a child agent under its parent\'s review', () => {
       // The guard is mocked in this file; here it objects to every write, as the real one does
       // to a .env file.
       vi.mocked(isDangerousDetailed).mockClear();
-      vi.mocked(isDangerousDetailed).mockReturnValue({ warning: '⚠ write_file: write to sensitive path' });
+      vi.mocked(isDangerousDetailed).mockReturnValue({ warning: '⚠ File write: write to sensitive path' });
 
       const byChild = await write(child);
       expect(byChild.is_error).toBe(true);
@@ -8019,7 +8258,7 @@ describe('a child agent under its parent\'s review', () => {
       });
       const owner = new Agent({ name: 'parent', model: 'claude-sonnet-4-6', provider: 'anthropic', changesetManager: manager, changesetReviewedAfterRun: true });
       const child = new Agent({ name: 'child', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [overwrite], promptUser, changesetManager: owner.changeset });
-      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: '⚠ write_file: overwrite' });
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: '⚠ File write: overwrite' });
 
       const result = await (child as unknown as Exec)._executeOneInner({ type: 'tool_use', id: 'w1', name: 'write_file', input: { path: notes, content: 'x' } });
       expect(result.is_error).not.toBe(true);
@@ -8032,5 +8271,99 @@ describe('a child agent under its parent\'s review', () => {
       manager.cleanup();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// A locked turn (a mandate's) gets a tool's locked definition and guidance, and the prompt with
+// its key-collecting parts swapped (U-185). Chosen per request: the agent an owner's run built
+// is reused by a mandate's run and back, and each turn gets its own texts.
+describe('a locked turn\'s request', () => {
+  const MANDATE = { kind: 'mandate' as const, email: 'setup@example.org', mandateId: 'TEST-MANDATE-1' };
+  interface Sent { system: Array<{ text: string }>; tools: Array<{ name?: string; description?: string }>; messages: unknown[] }
+  const sent = (agent: Agent): Sent[] => (agent as unknown as {
+    client: { beta: { messages: { stream: { mock: { calls: unknown[][] } } } } };
+  }).client.beta.messages.stream.mock.calls.map((c) => c[0] as Sent);
+  // On the lock's surface, so a locked turn keeps it.
+  const guided = (): ToolEntry => ({
+    definition: { name: 'ask_secret', description: 'OWNER DESCRIPTION', input_schema: { type: 'object' as const, properties: { name: { type: 'string', description: 'n' } }, additionalProperties: true } },
+    lockedDefinition: { name: 'ask_secret', description: 'LOCKED DESCRIPTION', input_schema: { type: 'object' as const, properties: { name: { type: 'string', description: 'n' } }, additionalProperties: true } },
+    detailedGuidance: 'OWNER GUIDANCE',
+    lockedGuidance: 'LOCKED GUIDANCE',
+    handler: vi.fn().mockResolvedValue('ok'),
+  });
+  const OWNER_PART = SYSTEM_PROMPT.slice(SYSTEM_PROMPT.indexOf('1. Collect credentials ONLY via `ask_secret`.'), SYSTEM_PROMPT.indexOf('Never tabs.') + 'Never tabs.'.length);
+  const agentFor = (principal?: typeof MANDATE): Agent => new Agent({
+    name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [guided()], systemPrompt: SYSTEM_PROMPT,
+    briefing: 'Once they name it: walk them through creating the credential in their own account, have them store it with `ask_secret`, then call `api_setup`',
+    ...(principal ? { principal } : {}),
+  });
+
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('sends the locked definition and prompt to a mandate, the owner\'s to the owner', async () => {
+    for (const principal of [undefined, MANDATE] as const) {
+      vi.clearAllMocks();
+      mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+      const agent = agentFor(principal);
+      await agent.send('hi');
+      const req = sent(agent).at(-1)!;
+      const desc = req.tools.find((t) => t.name === 'ask_secret')!.description;
+      const system = req.system.map((b) => b.text).join('');
+      const wire = JSON.stringify(req.messages);
+      if (principal === undefined) {
+        expect(desc).toBe('OWNER DESCRIPTION');
+        expect(system).toBe(SYSTEM_PROMPT);
+        expect(wire).toContain('have them store it with `ask_secret`');
+      } else {
+        expect(desc).toBe('LOCKED DESCRIPTION');
+        expect(system).toBe(lockedTurnPrompt(SYSTEM_PROMPT));
+        expect(system).not.toContain(OWNER_PART);
+        expect(wire).toContain('that the owner of this instance has to store it');
+        expect(wire).not.toContain('have them store it with `ask_secret`');
+      }
+    }
+  });
+
+  it('a thread a mandate starts and the owner continues: each turn its own guidance, the owner\'s byte for byte', async () => {
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'ask_secret', input: { name: 'X_KEY' } }]))
+      .mockResolvedValueOnce(endTurnResponse('Done'))
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_2', name: 'ask_secret', input: { name: 'X_KEY' } }]))
+      .mockResolvedValueOnce(endTurnResponse('Done again'))
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_3', name: 'ask_secret', input: { name: 'X_KEY' } }]))
+      .mockResolvedValueOnce(endTurnResponse('Third'));
+    const agent = agentFor(MANDATE);
+    await agent.send('use it');
+    agent.principal = OWNER_PRINCIPAL;
+    await agent.send('use it again');
+    await agent.send('and once more');
+    const wire = JSON.stringify(agent.getMessages());
+    expect(wire.split(`${TOOL_GUIDANCE_MARKER} ask_secret: LOCKED GUIDANCE`).length - 1).toBe(1);
+    // The owner gets the owner's guidance once, though the mandate's turn already had its own.
+    expect(wire.split(`${TOOL_GUIDANCE_MARKER} ask_secret: OWNER GUIDANCE`).length - 1).toBe(1);
+    // The owner's last request: the owner's definition and the owner's prompt, as if no mandate had been there.
+    const last = sent(agent).at(-1)!;
+    expect(last.tools.find((t) => t.name === 'ask_secret')!.description).toBe('OWNER DESCRIPTION');
+    expect(last.system.map((b) => b.text).join('')).toBe(SYSTEM_PROMPT);
+  });
+
+  it('an empty locked guidance sends none in a locked turn; the owner still gets the owner\'s', async () => {
+    const tool = { ...guided(), lockedGuidance: '' };
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'ask_secret', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('Done'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], principal: MANDATE });
+    await agent.send('use it');
+    expect(JSON.stringify(agent.getMessages())).not.toContain(TOOL_GUIDANCE_MARKER);
+  });
+
+  it('a tool without a locked guidance gives a locked turn its detailedGuidance, as before', async () => {
+    const { lockedGuidance: _drop, ...tool } = guided();
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'ask_secret', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('Done'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], principal: MANDATE });
+    await agent.send('use it');
+    expect(JSON.stringify(agent.getMessages())).toContain(`${TOOL_GUIDANCE_MARKER} ask_secret: OWNER GUIDANCE`);
   });
 });

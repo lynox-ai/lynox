@@ -446,6 +446,31 @@ describe('save_workflow — workflow_id source', () => {
     }
   });
 
+  it('saves a copy of a plan whose step id an old plan_task cut longer than ids now are, as step-<n>', async () => {
+    // An old plan_task cut a phase name to 60 characters; the save takes 40. The model cannot choose
+    // ids here, so the copy runs the old id as its position, its references with it.
+    const long = 'fetch_all_ad_spend_numbers_for_every_campaign_in_march';
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-promote-old-id-'));
+    const history = new RunHistory(join(dir, 'h.db'));
+    const engine = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engine);
+    try {
+      storePipeline('plan-789', makePlan({ steps: [{ id: long, task: 'Fetch' }, { id: 'write', task: `Write {{${long}.result}}`, input_from: [long] }] }));
+      const result = await saveWorkflowTool.handler({ name: 'Saved Ad Report', workflow_id: 'plan-789' }, makeAgent({}, history));
+      const { workflow_id: copyId } = JSON.parse(result) as { workflow_id: string };
+      const saved = JSON.parse(history.getPlannedPipeline(copyId)!.manifest_json) as PlannedPipeline;
+      expect(saved.steps.map(st => st.id)).toEqual(['step-1', 'write']);
+      expect(saved.steps[1]!.input_from).toEqual(['step-1']);
+      expect(saved.steps[1]!.task).toBe('Write {{step-1.result}}');
+      // The source plan keeps its own ids.
+      expect(getPipeline('plan-789')!.steps[0]!.id).toBe(long);
+    } finally {
+      try { engine.close(); } catch { /* already closed */ }
+      history.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('drops a stamp the SOURCE carries, instead of spreading it into the copy', async () => {
     // The two tests above both start from a plan that has no `confirmedAt`, so
     // they pass whether the copy clears the field or merely fails to add one.

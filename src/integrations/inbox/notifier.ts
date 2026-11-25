@@ -19,11 +19,14 @@
 // channel that exposes the active tab's `document.visibilityState` to
 // the backend before each notify.
 
+import { noticeLanguage, type NoticeLanguage } from '../../core/notice-language.js';
 import type { NotificationRouter, NotificationMessage } from '../../core/notification-router.js';
 import type { InboxItem } from '../../types/index.js';
 
 export interface InboxNotifierOptions {
   router: NotificationRouter;
+  /** The instance's configured language, for the push of a flagged mail (`notice-language.ts`). */
+  language?: (() => string | undefined) | undefined;
   /**
    * Throttle thunks read on every fire so a settings UI change takes
    * effect without restart. `perMinute` defaults to 1, `perHour` to 10.
@@ -110,8 +113,32 @@ function parseHHMM(s: string): number | null {
   return h * 60 + mm;
 }
 
+/**
+ * What the push says for a mail the sensitive check flagged, in place of sender and subject: a lock
+ * screen shows the push to anyone near the device, and a sender such as a doctor's practice or a
+ * bank says enough next to "confidential". The item's reason is left out too, since it names the
+ * category the check found.
+ */
+export const FLAGGED_PUSH_TEXT: Readonly<Record<NoticeLanguage, string>> = {
+  de: 'Neue Mail mit vertraulichem Inhalt. Absender und Betreff siehst du in lynox.',
+  en: 'New mail with confidential content. Sender and subject are in lynox.',
+};
+
+/** The same for a reminder about such a mail: its title already says it is a reminder. */
+export const FLAGGED_REMINDER_TEXT: Readonly<Record<NoticeLanguage, string>> = {
+  de: 'Eine Mail mit vertraulichem Inhalt. Absender und Betreff siehst du in lynox.',
+  en: 'A mail with confidential content. Sender and subject are in lynox.',
+};
+
+export interface InboxNotifyOptions {
+  /** The sensitive check flagged this mail: the push names no subject or reason taken from it. */
+  flagged?: boolean;
+  /** Who wrote the message the push is for, when it is not the item's own sender (a follow-up). */
+  sender?: { address: string; name?: string | undefined } | undefined;
+}
+
 export interface InboxNotifier {
-  notifyNewItem(item: InboxItem): Promise<boolean>;
+  notifyNewItem(item: InboxItem, notifyOpts?: InboxNotifyOptions): Promise<boolean>;
 }
 
 /**
@@ -172,7 +199,7 @@ export function createInboxNotifier(opts: InboxNotifierOptions): InboxNotifier {
   }
 
   return {
-    async notifyNewItem(item: InboxItem): Promise<boolean> {
+    async notifyNewItem(item: InboxItem, notifyOpts: InboxNotifyOptions = {}): Promise<boolean> {
       // Defensive contract check — caller is expected to filter, but
       // a wider deploy of the notifier shouldn't blast every bucket.
       if (item.bucket !== 'requires_user') return false;
@@ -189,11 +216,14 @@ export function createInboxNotifier(opts: InboxNotifierOptions): InboxNotifier {
       // Treat empty-string fromName as missing — exactOptionalPropertyTypes
       // makes `undefined` the canonical "no value", but envelope parsers
       // sometimes set the field to '' when a header is present-but-empty.
-      const fromLabel = item.fromName !== undefined && item.fromName !== ''
-        ? sanitisePushText(item.fromName, 80)
-        : sanitisePushText(item.fromAddress, 80);
+      const sender = notifyOpts.sender ?? { address: item.fromAddress, name: item.fromName };
+      const fromLabel = sender.name !== undefined && sender.name !== ''
+        ? sanitisePushText(sender.name, 80)
+        : sanitisePushText(sender.address, 80);
       const subject = sanitisePushText(item.subject || item.reasonDe, 200);
-      const body = fromLabel ? `${fromLabel}: ${subject}` : subject;
+      const body = notifyOpts.flagged === true
+        ? FLAGGED_PUSH_TEXT[noticeLanguage(opts.language?.())]
+        : fromLabel ? `${fromLabel}: ${subject}` : subject;
       const msg: NotificationMessage = {
         title: 'Inbox',
         body,

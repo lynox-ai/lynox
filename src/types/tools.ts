@@ -8,6 +8,8 @@ import type { ModelTier } from './models.js';
 import type { UntrustedCause } from '../core/untrusted-signals.js';
 import type { CallApiCost, CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 import type { ContainedRefusalReason } from '../core/containment.js';
+import type { SendTarget } from '../core/send-target.js';
+import type { HostPolicyContext } from '../core/network-guard.js';
 
 export type ToolHandler<TInput = unknown> =
   (input: TInput, agent: IAgent) => Promise<string>;
@@ -44,6 +46,13 @@ export interface WarningPayload {
 
 export interface ToolEntry<TInput = unknown> {
   definition: BetaTool;
+  /**
+   * The definition a locked turn (a mandate's, `toolLockFor`) sends instead of `definition`,
+   * for a tool whose own text is written for the owner. The name and the input schema's
+   * properties stay those of `definition`: only descriptions differ, so a call the model makes
+   * reaches the same handler with the same input.
+   */
+  lockedDefinition?: BetaTool | undefined;
   handler:    ToolHandler<TInput>;
   /**
    * When true, the tool handles its own user confirmation via
@@ -86,6 +95,14 @@ export interface ToolEntry<TInput = unknown> {
    */
   redactInputForAudit?: ((input: TInput) => unknown) | undefined;
   /**
+   * For a tool that answers a call it did not carry out with an ordinary string (a refusal, a
+   * failed check): the reason, read from that answer, or null when the call was done. A reason
+   * makes the returned answer a soft failure, exactly as a thrown `ToolSoftFailure` with that
+   * answer would: the model reads the same text, the ledger records the reason, and the call is
+   * not shown as done. The tool reads only its own answer's form, never content it passed on.
+   */
+  failureOf?: ((answer: string) => string | null) | undefined;
+  /**
    * For a tool that writes a file named by its `path` field: the file it would write for that
    * path, resolved as its handler resolves it (the workspace, a link in it, the artifacts
    * directory), or `null` when the handler would refuse the path. The Permission Guard reads its
@@ -122,7 +139,12 @@ export interface ToolEntry<TInput = unknown> {
    */
   destructive?: {
     mode: 'data' | 'external';
-    check?: (input: TInput, ctx?: { autonomy?: AutonomyLevel | undefined; parentProvider?: ProviderConfigSnapshot | null | undefined }) => string | WarningPayload | null;
+    /**
+     * Whether a call is destructive, and how to word it. PURE and idempotent: the guard calls it
+     * more than once per call (the decision, a payload's re-read, and for a question in another
+     * language its wording), and every call must answer the same.
+     */
+    check?: (input: TInput, ctx?: { autonomy?: AutonomyLevel | undefined; parentProvider?: ProviderConfigSnapshot | null | undefined; /** The language a payload's message is written in. */ language?: 'de' | 'en' | undefined }) => string | WarningPayload | null;
   } | undefined;
   /**
    * What a call writes OUTSIDE the instance — sends, creates or changes something at a
@@ -158,6 +180,64 @@ export interface ToolEntry<TInput = unknown> {
    */
   storedMailRead?: ((input: TInput) => string | null) | undefined;
   /**
+   * Where a call SENDS to, as the person would name it: each mail address and each host the
+   * call delivers to, normalized (`send-target.ts`), or `null` for a call that sends to no
+   * target the model chose (a read). Read from the input as the model wrote it, before any
+   * secret is resolved. A declaration that throws means the targets are unknown, and unknown
+   * counts as foreign. A tool reads its targets with the same parser its handler sends with,
+   * so the list checked is the list sent. An empty list is no assurance: it says the input
+   * names no target, not that the call sends to none (a reply without an override still goes
+   * to the mail's sender). A reader never treats `[]` as owner-known.
+   */
+  sendTargets?: ((input: TInput) => readonly SendTarget[] | null) | undefined;
+  /**
+   * Like `sendTargets`, but read only while the conversation latch is set: once something from
+   * outside the owner's own words is in the conversation. For a call that is a plain read on a
+   * clean conversation and can carry data out only after foreign content arrived: its address
+   * can hold what the conversation holds, in the path, the host name or the query. Same contract
+   * as `sendTargets`. Read only when `sendTargets` is absent or returns `null` for the call (a
+   * tool whose writes declare targets and whose reads do not).
+   */
+  sendTargetsWhenLatched?: ((input: TInput) => readonly SendTarget[] | null) | undefined;
+  /**
+   * The address a read fetches, exactly as the input names it, when nothing else of the call can
+   * carry data (no body, no header the model set); otherwise `null`. While the latch is set, a
+   * call whose address a search in this conversation listed as a result
+   * (`IAgent.searchResultAddresses`) passes the origin check without a question: the provider
+   * wrote that address, not the model (which results come back still depends on the query; see
+   * `SearchResultAddresses`).
+   */
+  readAddress?: ((input: TInput) => string | null) | undefined;
+  /**
+   * Whether a read's address carries another address (`carriesAddress`). While the latch is set,
+   * such a read is asked about whatever its host, unless a search listed its exact address.
+   */
+  readCarriesAddress?: ((input: TInput) => boolean) | undefined;
+  /**
+   * A refusal the handler would give for this call anyway, read before anyone is asked about it:
+   * the call ends with this text as its error and nobody answers a question that cannot change
+   * the outcome. `null` means nothing: every check after it (where the targets come from, the
+   * guard's question) runs exactly as without this field. It can only refuse; no return value
+   * skips a question or lets a call through. A throw refuses the call with a fixed text, never
+   * the exception's message, and nothing runs. It reads the input as the model wrote it, before
+   * `secret:` references are resolved: where the handler would see another value, it returns
+   * `null`. The text is the tool's own wording, written by its code, never a value of the input
+   * taken as a whole.
+   */
+  refusesUnasked?: ((input: TInput, ctx: HostPolicyContext) => string | null) | undefined;
+  /**
+   * The address a call SAVES for later credentialed sends, exactly as the input names it: the
+   * token endpoint a profile the call saves will post a client ID and client secret to (`api_setup`
+   * create/update). Otherwise `null`. Where it is not `null`, the target `sendTargetsWhenLatched`
+   * declares for the call is checked as that save, not as a read: no exception for an address a
+   * search listed or for the host of a connected API, an address that carries another address
+   * (`carriesAddress`) is asked about whatever its host, and the question and the refusals say
+   * "save". `sendTargetsWhenLatched` must declare this address's host for the same input.
+   * Throws for an address that is set but cannot be read (not text): the call is then refused as
+   * an unreadable save, never let through.
+   */
+  credentialAddress?: ((input: TInput) => string | null) | undefined;
+  /**
    * When true, calling this tool ENDS the agent's turn: after the tool_result
    * is appended and checkpointed, the loop returns the turn's text instead of
    * looping back to the model. Use for terminal tools whose whole job is a
@@ -183,6 +263,11 @@ export interface ToolEntry<TInput = unknown> {
    * stacks with a later tool-availability classifier.
    */
   detailedGuidance?: string | undefined;
+  /**
+   * The guidance a locked turn gets instead of `detailedGuidance`, for a tool whose guidance is
+   * written for the owner. `''` sends none. Left out, a locked turn gets `detailedGuidance`.
+   */
+  lockedGuidance?: string | undefined;
   /**
    * What reversing this tool's effect takes — the declaration half of the undo
    * contract (PRD bulk-changes-reversible §1.4). A SEPARATE axis from

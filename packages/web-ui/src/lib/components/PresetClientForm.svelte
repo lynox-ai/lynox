@@ -9,6 +9,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf } from '../i18n.svelte.js';
 	import { presetProviderLabel } from '../utils/preset-provider-label.js';
+	import WholeValue from './WholeValue.svelte';
 
 	// `connectHref`: the engine's connect route for this profile, given by the page only while the
 	// profile has no grant and no revocation of one to show; with the secret saved, the form then
@@ -126,7 +127,7 @@
 
 		<div>
 			<p class="text-xs text-text-muted mb-1">{tf('integrations.preset_client_redirect_label', { provider })}</p>
-			<p class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-xs font-mono text-text-muted select-all break-all">{client.redirect_uri}</p>
+			<p class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-xs font-mono text-text-muted select-all"><WholeValue value={client.redirect_uri} kind="url" testid="preset-redirect-uri" /></p>
 		</div>
 
 		<label class="block">
@@ -154,11 +155,14 @@
 				/>
 			</label>
 		{:else}
-			<div class="flex items-center justify-between gap-3">
+			<!-- A button's label never breaks: where the line is too narrow for both, the button moves
+			     under the note as a whole. It looks like a button (border, padding), so under the note it
+			     does not read as the note's next line. -->
+			<div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
 				<p class="text-xs text-text-muted">{t('integrations.preset_client_secret_set')}</p>
 				<button
 					onclick={() => { replacing = true; }}
-					class="text-xs text-text-subtle hover:text-text-muted transition-colors"
+					class="whitespace-nowrap rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted hover:border-border-hover hover:text-text transition-colors"
 				>
 					{t('integrations.preset_client_replace')}
 				</button>
