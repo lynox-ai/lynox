@@ -66,12 +66,12 @@ afterEach(() => {
 });
 
 describe('bulk_plan takes a judge rule from a saved artifact', () => {
-  it('stores the artifact\'s text byte for byte, with the artifact, its version and the text\'s hash', async () => {
+  it('stores the artifact\'s text byte for byte, with the artifact, its version, the text\'s hash and its title', async () => {
     const saved = artifacts.save({ title: 'Regeln', content: RULE_TEXT, type: 'markdown' });
     const out = await plan({ rule_artifact: saved.id });
     const stored = ledger.getJudgeRuleForOwner(runId(out))!;
     expect(Buffer.from(stored.rule, 'utf8').equals(Buffer.from(RULE_TEXT, 'utf8'))).toBe(true);
-    expect(stored.source).toEqual({ artifact: saved.id, version: saved.version, sha256: sha(RULE_TEXT) });
+    expect(stored.source).toEqual({ artifact: saved.id, version: saved.version, sha256: sha(RULE_TEXT), title: 'Regeln' });
     // The planner is told where the rule came from, so it does not retype it as the rule.
     expect(out).toContain(`The rule is the text of artifact ${saved.id} (v${String(saved.version)}) as saved, unchanged.`);
   });
@@ -87,7 +87,7 @@ describe('bulk_plan takes a judge rule from a saved artifact', () => {
 
   it('carries the text and its source on every form that takes a judge: a data-store run and a run from a collection to a host', async () => {
     const saved = artifacts.save({ title: 'Regeln', content: RULE_TEXT, type: 'markdown' });
-    const source = { artifact: saved.id, version: saved.version, sha256: sha(RULE_TEXT) };
+    const source = { artifact: saved.id, version: saved.version, sha256: sha(RULE_TEXT), title: 'Regeln' };
     data.createCollection({ name: 'products', scope, columns: [{ name: 'sku', type: 'string' }, { name: 'title', type: 'string' }], uniqueKey: ['sku'] });
     data.insertRecords({ collection: 'products', records: [{ sku: 'A', title: 'old' }], stamp: TEST_STAMP });
     data.createCollection({ name: 'staged', scope, columns: [{ name: 'target', type: 'string' }], uniqueKey: ['target'] });
@@ -186,23 +186,33 @@ describe('a run whose rule came from an artifact starts only while the artifact 
     expect(judgeRuleSourceChanged(stored, artifacts)).toBeNull();
   });
 
-  it('refuses once the artifact is edited after the plan, and the run keeps the planned text', async () => {
+  it('refuses once the artifact is edited after the plan, naming it by its planned title, and the run keeps the planned text', async () => {
     const saved = artifacts.save({ title: 'Regeln', content: RULE_TEXT, type: 'markdown' });
     const id = runId(await plan({ rule_artifact: saved.id }));
-    const edited = artifacts.save({ title: 'Regeln', content: RULE_TEXT.replace('160', '150'), type: 'markdown', id: saved.id });
+    // Renamed with the edit: the owner is told the title they planned with, not the new one.
+    artifacts.save({ title: 'Umbenannt', content: RULE_TEXT.replace('160', '150'), type: 'markdown', id: saved.id });
     const stored = ledger.getJudgeRuleForOwner(id)!;
-    expect(judgeRuleSourceChanged(stored, artifacts))
-      .toBe(`The rule in artifact ${saved.id} changed since this run was planned (v${String(saved.version)}, now v${String(edited.version)}); the change may not be yours. Read the artifact, then plan the run again to judge by its text.`);
+    expect(judgeRuleSourceChanged(stored, artifacts)).toEqual({
+      code: 'rule_source_changed', title: 'Regeln',
+      message: "This run's rule has changed since it was planned. The change may not be yours. Read the rule under Artifacts, then ask lynox in the chat to plan the run again.",
+    });
     // Nothing switches to the newer text.
     expect(stored.rule).toBe(RULE_TEXT);
   });
 
-  it('refuses once the artifact is gone', async () => {
+  it('refuses once the artifact is gone, naming it by its planned title, and without a store by its code alone', async () => {
     const saved = artifacts.save({ title: 'Regeln', content: RULE_TEXT, type: 'markdown' });
     const stored = ledger.getJudgeRuleForOwner(runId(await plan({ rule_artifact: saved.id })))!;
     expect(artifacts.delete(saved.id)).toBe(true);
-    expect(judgeRuleSourceChanged(stored, artifacts)).toBe(`The artifact this run's rule was taken from (${saved.id}) is gone or cannot be read. Plan the run again.`);
-    expect(judgeRuleSourceChanged(stored, null)).toBe(`Saved artifacts cannot be read on this instance right now, so this run's rule cannot be checked against artifact ${saved.id}. Try again later.`);
+    expect(judgeRuleSourceChanged(stored, artifacts)).toEqual({
+      code: 'rule_source_gone', title: 'Regeln',
+      message: "The artifact with this run's rule has been deleted or cannot be read. Ask lynox in the chat to plan the run again.",
+    });
+    // No title and nothing the store said: only that it cannot be read now.
+    expect(judgeRuleSourceChanged(stored, null)).toEqual({
+      code: 'rule_source_unreadable',
+      message: "Saved artifacts cannot be read on this instance right now, so lynox cannot check this run's rule. Nothing was judged. Try again later.",
+    });
   });
 
   it('a typed rule is never refused for its source', () => {

@@ -13794,7 +13794,7 @@ describe('LynoxHTTPApi', () => {
         const sha = createHash('sha256').update(text, 'utf8').digest('hex');
         const fromArtifact = normalizeJudgeRule(
           { rule: text, schema: { title: { type: 'string', maxLength: 40 } } },
-          { source: { artifact: 'a1b2c3d4', version: 1, sha256: sha } },
+          { source: { artifact: 'a1b2c3d4', version: 1, sha256: sha, title: 'Regeln' } },
         );
         const id = bulkLedger.recordDryRun({
           createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
@@ -13804,15 +13804,31 @@ describe('LynoxHTTPApi', () => {
         const hash = bulkLedger.getJudgeRuleForOwner(id)!.hash;
         const engineRef = (api as unknown as { engine: { getArtifactStore: ReturnType<typeof vi.fn> } }).engine;
         const store = engineRef.getArtifactStore() as { get: ReturnType<typeof vi.fn> };
-        // Edited after the plan: refused, and the run waits as it was.
-        store.get.mockReturnValueOnce({ id: 'a1b2c3d4', version: 2, content: text.replace('keine', 'wenige'), type: 'markdown' });
+        type Refusal = { error: string; code?: string; title?: string };
+        // Edited and renamed after the plan: refused by its code, named by the planned title, and
+        // the run waits as it was.
+        store.get.mockReturnValueOnce({ id: 'a1b2c3d4', version: 2, title: 'Umbenannt', content: text.replace('keine', 'wenige'), type: 'markdown' });
         const refused = await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 });
         expect(refused.status).toBe(409);
-        expect(((await refused.json()) as { code?: string }).code).toBe('rule_source_changed');
+        expect((await refused.json()) as Refusal).toEqual({
+          code: 'rule_source_changed', title: 'Regeln',
+          error: "This run's rule has changed since it was planned. The change may not be yours. Read the rule under Artifacts, then ask lynox in the chat to plan the run again.",
+        });
         expect(bulkLedger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
-        // Gone: refused the same way.
+        // Gone: its own code, still named by the planned title.
         store.get.mockReturnValueOnce(null);
-        expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 })).status).toBe(409);
+        const gone = await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 });
+        expect(gone.status).toBe(409);
+        expect(((await gone.json()) as Refusal)).toMatchObject({ code: 'rule_source_gone', title: 'Regeln' });
+        // No store right now: its code, and neither a title nor anything the store said.
+        engineRef.getArtifactStore.mockReturnValueOnce(null);
+        const unreadable = await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 });
+        expect(unreadable.status).toBe(409);
+        expect((await unreadable.json()) as Refusal).toEqual({
+          code: 'rule_source_unreadable',
+          error: "Saved artifacts cannot be read on this instance right now, so lynox cannot check this run's rule. Nothing was judged. Try again later.",
+        });
+        expect(bulkLedger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
         // The same text: the start goes on to the checks it always had, and starts.
         store.get.mockReturnValueOnce({ id: 'a1b2c3d4', version: 2, content: text, type: 'markdown' });
         expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1.5 })).status).toBe(200);

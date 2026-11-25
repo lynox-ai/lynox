@@ -10950,8 +10950,9 @@ export class LynoxHTTPApi {
           });
           return;
         }
-        if (!read.ok && read.reason === 'rule_source_changed') {
-          errorResponse(res, 409, read.message, 'rule_source_changed');
+        if (!read.ok && read.reason === 'rule_source') {
+          const { code, message, title } = read.refusal;
+          errorResponse(res, 409, message, code, title !== undefined ? { title } : undefined);
           return;
         }
         if (!read.ok && read.reason === 'rule_refused') {

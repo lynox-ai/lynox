@@ -713,6 +713,26 @@ export function bulkLinkDomainShown(domain: string): string {
 	return chars.length <= BULK_LINK_DOMAIN_SHOWN_MAX ? chars.join('') : `${chars.slice(0, BULK_LINK_DOMAIN_SHOWN_MAX - 1).join('')}…`;
 }
 
+/** At most this many characters of an artifact's title in a start refusal. */
+export const BULK_RULE_SOURCE_TITLE_SHOWN_MAX = 64;
+/** The start refusals of a run whose rule came from a saved artifact, by the engine's code. */
+export const BULK_RULE_SOURCE_CODES: readonly string[] = ['rule_source_changed', 'rule_source_gone', 'rule_source_unreadable'];
+
+/** The owner's sentence for a start the engine refused because the rule's artifact changed, is
+ *  gone or cannot be read now; null for any other code. The artifact is named by the title it had
+ *  when the run was planned: an access can write a title, so it is shown as text only, its hidden
+ *  characters made visible, and cut with „…“ past {@link BULK_RULE_SOURCE_TITLE_SHOWN_MAX}
+ *  characters. Without a title, the sentence names none. */
+export function bulkRuleSourceText(code: string | undefined, title: string | undefined, i18n: BulkI18n): string | null {
+	if (code === 'rule_source_unreadable') return i18n.t('bulk.rule_source.unreadable');
+	if (code !== 'rule_source_changed' && code !== 'rule_source_gone') return null;
+	const which = code === 'rule_source_changed' ? 'changed' : 'gone';
+	if (typeof title !== 'string' || title === '') return i18n.t(`bulk.rule_source.${which}`);
+	const chars = [...bulkVisibleText(title)];
+	const shown = chars.length <= BULK_RULE_SOURCE_TITLE_SHOWN_MAX ? chars.join('') : `${chars.slice(0, BULK_RULE_SOURCE_TITLE_SHOWN_MAX - 1).join('')}…`;
+	return i18n.tf(`bulk.rule_source.${which}_titled`, { title: shown });
+}
+
 /** A list of more values than this is folded until the owner shows it all (ux U-175). */
 export const BULK_LIST_FILTER_UNFOLDED_MAX = 5;
 /** How many values a folded list shows before the count of the rest. */

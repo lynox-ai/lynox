@@ -73,6 +73,19 @@ export interface JudgeRuleSource {
   artifact: string;
   version: number;
   sha256: string;
+  /** The artifact's title as it was at planning, to name it to the owner later without reading it
+   *  again: once it is gone there is nothing to read. An access can write a title, so it is a
+   *  foreign value wherever it is shown. Absent for an artifact without a title. */
+  title?: string | undefined;
+}
+
+/** Why a run whose rule came from an artifact may not start, by code: the owner's page words each
+ *  code itself; `message` is the engine's English for any other reader. */
+export interface JudgeRuleSourceRefusal {
+  code: 'rule_source_changed' | 'rule_source_gone' | 'rule_source_unreadable';
+  message: string;
+  /** The title as planned ({@link JudgeRuleSource.title}); never on `rule_source_unreadable`. */
+  title?: string | undefined;
 }
 
 /** The artifact types whose content is text a rule can be: not a page, a diagram or a table. */
@@ -121,7 +134,10 @@ export function judgeRuleFromArtifact(
   }
   return {
     input: { ...rest, rule: artifact.content },
-    source: { artifact: artifact.id, version: artifact.version, sha256: sha256Of(artifact.content) },
+    source: {
+      artifact: artifact.id, version: artifact.version, sha256: sha256Of(artifact.content),
+      ...(artifact.title !== '' ? { title: artifact.title } : {}),
+    },
   };
 }
 
@@ -132,14 +148,22 @@ export function judgeRuleFromArtifact(
  * owner who edited the rule meant the edit, and starting on the old text would judge by a rule
  * they replaced.
  */
-export function judgeRuleSourceChanged(rule: Pick<JudgeRule, 'source'>, store: Pick<ArtifactStore, 'get'> | null): string | null {
+export function judgeRuleSourceChanged(rule: Pick<JudgeRule, 'source'>, store: Pick<ArtifactStore, 'get'> | null): JudgeRuleSourceRefusal | null {
   if (rule.source === undefined) return null;
-  if (store === null) return `Saved artifacts cannot be read on this instance right now, so this run's rule cannot be checked against artifact ${rule.source.artifact}. Try again later.`;
+  // Only the code: nothing the store said about why it could not be read.
+  if (store === null) {
+    return { code: 'rule_source_unreadable', message: "Saved artifacts cannot be read on this instance right now, so lynox cannot check this run's rule. Nothing was judged. Try again later." };
+  }
+  // Named by the title it had at planning, never by one read now.
+  const title = rule.source.title;
+  const titled = title !== undefined ? { title } : {};
   const now = store.get(rule.source.artifact);
-  if (now === null) return `The artifact this run's rule was taken from (${rule.source.artifact}) is gone or cannot be read. Plan the run again.`;
+  if (now === null) {
+    return { code: 'rule_source_gone', message: "The artifact with this run's rule has been deleted or cannot be read. Ask lynox in the chat to plan the run again.", ...titled };
+  }
   if (sha256Of(now.content) !== rule.source.sha256) {
     // Someone with access to this instance may have changed it, not only the owner.
-    return `The rule in artifact ${rule.source.artifact} changed since this run was planned (v${String(rule.source.version)}, now v${String(now.version)}); the change may not be yours. Read the artifact, then plan the run again to judge by its text.`;
+    return { code: 'rule_source_changed', message: "This run's rule has changed since it was planned. The change may not be yours. Read the rule under Artifacts, then ask lynox in the chat to plan the run again.", ...titled };
   }
   return null;
 }

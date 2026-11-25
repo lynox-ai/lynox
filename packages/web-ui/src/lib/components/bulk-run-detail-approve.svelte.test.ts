@@ -47,6 +47,8 @@ let posts: { url: string; body: unknown }[];
 let gets: string[];
 let refuseDeselect: string | null;
 let refuseResume: string | null;
+// The title a refused start names, as the engine sends it.
+let refuseTitle: string | undefined;
 // A run's own answer, by id, and an answer held back until the test lets it through.
 let runsById: Record<string, BulkRunDetailData>;
 let holds: Record<string, Promise<void>>;
@@ -64,6 +66,7 @@ beforeEach(() => {
 	gets = [];
 	refuseDeselect = null;
 	refuseResume = null;
+	refuseTitle = undefined;
 	runsById = {};
 	holds = {};
 	failIds = {};
@@ -83,7 +86,7 @@ beforeEach(() => {
 				const code = refuseResume;
 				// The engine names the run a judged start would end once; the start that names it passes.
 				if (code === 'supersede_required') refuseResume = null;
-				return reply({ error: 'engine English', code, ...(code === 'supersede_required' ? { supersedable: { id: 'r0', costUsd: 0.5 } } : {}) }, 409);
+				return reply({ error: 'engine English', code, ...(refuseTitle !== undefined ? { title: refuseTitle } : {}), ...(code === 'supersede_required' ? { supersedable: { id: 'r0', costUsd: 0.5 } } : {}) }, 409);
 			}
 			if (m) {
 				const seq = Number(m[1]);
@@ -1151,6 +1154,20 @@ describe('the allowed link domains of a judged list run', () => {
 		startButton()!.click();
 		await settle();
 		expect(target.textContent).toContain(t('bulk.start_domains.frozen'));
+		expect(target.textContent).not.toContain('engine English');
+	});
+
+	it('words a start refused for the rule\'s artifact in the page\'s own sentence, its title shown as text', async () => {
+		run = judged();
+		refuseResume = 'rule_source_changed';
+		refuseTitle = 'Regeln\u202Ealt';
+		await render();
+		type(field()!, 'mein-shop.ch');
+		type(capField(), '5');
+		startButton()!.click();
+		await settle();
+		expect(target.textContent).toContain(tf('bulk.rule_source.changed_titled', { title: 'Regeln⟨U+202E⟩alt' }));
+		expect(target.textContent).not.toContain('\u202E');
 		expect(target.textContent).not.toContain('engine English');
 	});
 
