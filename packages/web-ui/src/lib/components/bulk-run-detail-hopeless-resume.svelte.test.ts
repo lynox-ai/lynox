@@ -92,7 +92,7 @@ const blockLines = (b: HTMLButtonElement): string[] => [...b.closest('div.space-
 
 describe('writing on after a start check that can never pass', () => {
 	for (const cause of ['shopifySelfHosted', 'shopifyNoApiVersion'] as const) {
-		it(`goes off for ${cause} on a halted run, says the cause once under it, and sends no second resume`, async () => {
+		it(`goes off for ${cause} on a halted run, says the cause once before the buttons, and sends no second resume`, async () => {
 			refuseWith = `reach_resume_${cause}`;
 			await render();
 			const writeOn = (): HTMLButtonElement => button(t('bulk.resume.write'));

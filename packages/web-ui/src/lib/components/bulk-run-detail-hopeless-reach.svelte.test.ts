@@ -194,6 +194,24 @@ describe('the approval after a start check that can never pass', () => {
 		expect(target.querySelector('[data-testid="bulk-approve-hopeless"]')).toBeNull();
 	});
 
+	it('offers the approval again after a load the owner set off', async () => {
+		refuseWith = 'reach_approve_shopifyNoApiVersion';
+		await render();
+		approveButton().click();
+		await settle();
+		expect(approveButton().disabled).toBe(true);
+		const loadsBefore = runGets;
+		// Taking a target out goes through, but the run read after it does not show it: the page loads the run whole.
+		[...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === t('bulk.deselect.off'))!.click();
+		await settle();
+		expect(runGets).toBeGreaterThan(loadsBefore + 1);
+		expect(approveButton().disabled).toBe(false);
+		expect(target.querySelector('[data-testid="bulk-approve-hopeless"]')).toBeNull();
+		approveButton().click();
+		await settle();
+		expect(approvals).toBe(2);
+	});
+
 	it('says the cause in the page\'s language', async () => {
 		const before = getLocale();
 		setLocale('de');

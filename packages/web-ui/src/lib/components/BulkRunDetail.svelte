@@ -35,7 +35,7 @@
 	let actionError = $state('');
 	// A start check that can never pass refused approving or writing on this run (its id and the
 	// engine's code): both stay off for it, with the cause by the button, until the page shows
-	// another run or is opened again.
+	// another run, is opened again, or is loaded by the owner's own act.
 	let hopeless = $state<{ id: string; code: string } | null>(null);
 	let hopelessLine = $state<HTMLParagraphElement | null>(null);
 	let busy = $state(false);
@@ -186,6 +186,9 @@
 		if (!quiet) {
 			loading = true;
 			error = '';
+			// A load the owner set off asks the run anew: a cause lynox fixed meanwhile no longer
+			// keeps approving or writing on off, and the route answers again on the next press.
+			hopeless = null;
 		}
 		try {
 			const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(id)}`);
@@ -629,6 +632,8 @@
 		filterLine?.focus();
 	}
 	const resumeKind = $derived(run ? bulkResumeKind(run) : null);
+	// Writing on was refused for good: only where the page offers writing on at all.
+	const resumeHopeless = $derived(hopelessReason !== null && resumeKind !== null && resumeKind !== 'none' && resumeKind !== 'nothing');
 	const resumeText = $derived(run ? bulkResumeText(run, managed, i18n) : null);
 	const resumeWords = $derived(run ? bulkResumeWords(run, i18n) : null);
 	const rolledBack = $derived(run ? bulkRolledBackParts(run, view) : null);
@@ -1119,11 +1124,11 @@
 				<div class="space-y-3 border-t border-border pt-4">
 					<!-- After a start check that can never pass, nothing promises writing on: the halt's cause,
 					     the reason, and the buttons stay. -->
-					{#if resumeText.before && hopelessReason === null}
+					{#if resumeText.before && !resumeHopeless}
 						<p class="text-sm">{@render hostText(resumeText.before)}</p>
 					{/if}
 					<!-- The support link stands under the sentence that names support, which comes before the check. -->
-					{#if supportMail && hopelessReason === null}
+					{#if supportMail && !resumeHopeless}
 						<p class="text-sm"><a href={supportMail} class="{btnPlain} inline-block">{t('bulk.halt.support_mail')}</a></p>
 					{/if}
 					{#if resumeKind === 'none'}
@@ -1134,7 +1139,7 @@
 						{/if}
 					{:else if resumeKind === 'nothing'}
 						<p class="text-sm">{@render hostText(resumeText.check ?? '')}</p>
-					{:else if hopelessReason !== null}
+					{:else if resumeHopeless}
 						<p id="bulk-resume-hopeless" class="text-sm text-danger" tabindex="-1" bind:this={hopelessLine} data-testid="bulk-resume-hopeless">{hopelessReason}</p>
 						<div class="flex flex-wrap gap-2">
 							<button type="button" class={btnPrimary} disabled aria-describedby="bulk-resume-hopeless">{resumeKind === 'check' ? t('bulk.resume.check') : resumeWords!.button}</button>
