@@ -464,6 +464,17 @@ export type RunOnDelete =
 const STOPPED_BY_DELETE: ReadonlySet<string> = new Set(['run_workflow', 'run_agent']);
 
 /**
+ * Close the run's own question when its wait failed (the store threw before the question
+ * settled). Without it the row stays pending until its TTL and holds the thread's one open
+ * question. Fenced, like the withdraw on abort; false when the write failed too, so the caller
+ * keeps the withdraw on abort: an abort of the tool's signal (when it has one) can then still
+ * close it, otherwise its TTL does.
+ */
+export function expireFailedWait(store: { expirePrompt(id: string, reason: PromptClosedReason): boolean }, promptId: string): boolean {
+  try { store.expirePrompt(promptId, 'run_stopped'); return true; } catch { return false; }
+}
+
+/**
  * Withdraw a pending prompt when the run that asked it is aborted (`PromptMeta.signal`:
  * a Stop, or a sub-agent past its spawn time limit). Expiring the row settles the
  * prompt's wait and frees the session's single pending slot; it also makes an
@@ -5624,10 +5635,23 @@ export class LynoxHTTPApi {
           });
           res.write(`event: prompt\ndata: ${data}\n\n`);
         }
-        const outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
-        releaseWithdraw();
-        hasActivePendingPrompt = false;
-        resumeWallClock(); // human answered/dismissed — resume the compute budget
+        let outcome: Awaited<ReturnType<typeof promptStore.waitForSettled>>;
+        let withdrawStays = false;
+        try {
+          outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
+        } catch (err) {
+          // The wait failed before the question settled (its first read of the row threw), so the
+          // row is still pending: close it here. When that write fails too, the withdraw on abort
+          // stays: an abort of the tool's signal (when it has one) can still close it.
+          withdrawStays = !expireFailedWait(promptStore, promptId);
+          throw err;
+        } finally {
+          // Also when the wait throws (the store failed): the run no longer waits on this
+          // question, so it must not read as parked on it.
+          if (!withdrawStays) releaseWithdraw();
+          hasActivePendingPrompt = false;
+          resumeWallClock(); // human answered/dismissed — resume the compute budget
+        }
         if (outcome.status === 'answered') return outcome.row.answer ?? '__dismissed__';
         // Surface an explicit reason to the client — no silent 'n' default.
         if (!aborted && !res.writableEnded) {
@@ -5655,10 +5679,22 @@ export class LynoxHTTPApi {
             });
             res.write(`event: prompt_tabs\ndata: ${data}\n\n`);
           }
-          const outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
-          releaseWithdraw();
-          hasActivePendingPrompt = false;
-          resumeWallClock(); // human answered/dismissed — resume the compute budget
+          let outcome: Awaited<ReturnType<typeof promptStore.waitForSettled>>;
+          let withdrawStays = false;
+          try {
+            outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
+          } catch (err) {
+            // The wait failed before the question settled (its first read of the row threw), so the
+            // row is still pending: close it here. When that write fails too, the withdraw on abort
+            // stays: an abort of the tool's signal (when it has one) can still close it.
+            withdrawStays = !expireFailedWait(promptStore, promptId);
+            throw err;
+          } finally {
+            // As for promptUser: a throwing wait leaves the run unparked.
+            if (!withdrawStays) releaseWithdraw();
+            hasActivePendingPrompt = false;
+            resumeWallClock(); // human answered/dismissed — resume the compute budget
+          }
           if (outcome.status === 'answered' && outcome.row.answer) {
             try {
               const parsed = JSON.parse(outcome.row.answer) as unknown;
@@ -5725,10 +5761,22 @@ export class LynoxHTTPApi {
           });
           res.write(`event: secret_prompt\ndata: ${data}\n\n`);
         }
-        const row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
-        releaseWithdraw();
-        hasActivePendingPrompt = false;
-        resumeWallClock(); // human answered/dismissed — resume the compute budget
+        let row: Awaited<ReturnType<typeof promptStore.waitForAnswer>>;
+        let withdrawStays = false;
+        try {
+          row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
+        } catch (err) {
+          // The wait failed before the question settled (its first read of the row threw), so the
+          // row is still pending: close it here. When that write fails too, the withdraw on abort
+          // stays: an abort of the tool's signal (when it has one) can still close it.
+          withdrawStays = !expireFailedWait(promptStore, promptId);
+          throw err;
+        } finally {
+          // As for promptUser: a throwing wait leaves the run unparked.
+          if (!withdrawStays) releaseWithdraw();
+          hasActivePendingPrompt = false;
+          resumeWallClock(); // human answered/dismissed — resume the compute budget
+        }
         // answer_error wins over answer_saved when set — see SecretOutcome contract
         // (server-side rejection must not be mistranslated as a user cancel).
         if (row?.answer_error === 'managed_blocked') return 'managed_blocked';
@@ -5768,10 +5816,22 @@ export class LynoxHTTPApi {
           });
           res.write(`event: mail_connect_prompt\ndata: ${payload}\n\n`);
         }
-        const row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
-        releaseWithdraw();
-        hasActivePendingPrompt = false;
-        resumeWallClock(); // human answered/dismissed — resume the compute budget
+        let row: Awaited<ReturnType<typeof promptStore.waitForAnswer>>;
+        let withdrawStays = false;
+        try {
+          row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
+        } catch (err) {
+          // The wait failed before the question settled (its first read of the row threw), so the
+          // row is still pending: close it here. When that write fails too, the withdraw on abort
+          // stays: an abort of the tool's signal (when it has one) can still close it.
+          withdrawStays = !expireFailedWait(promptStore, promptId);
+          throw err;
+        } finally {
+          // As for promptUser: a throwing wait leaves the run unparked.
+          if (!withdrawStays) releaseWithdraw();
+          hasActivePendingPrompt = false;
+          resumeWallClock(); // human answered/dismissed — resume the compute budget
+        }
         // answer_saved === 1 means the consent step POSTed the account and the
         // route accepted it. No row (expired / session aborted) or a 0 flag is
         // a dismissal — the agent must NOT fall back to asking for the password

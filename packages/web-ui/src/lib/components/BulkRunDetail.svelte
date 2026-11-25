@@ -1128,6 +1128,9 @@
 					{#if resumeKind === 'none'}
 						<!-- An undo starts again from the page of the run it takes back: the words link to it where the run names it. -->
 						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2" data-testid="bulk-resume-none">{resumeWords!.none.before}{#if resumeWords!.none.link !== null}{#if run.sourceRunId !== null}<button type="button" class="underline text-accent hover:opacity-80" onclick={() => onOpen(run!.sourceRunId!)}>{resumeWords!.none.link}</button>{:else}{resumeWords!.none.link}{/if}{/if}{resumeWords!.none.after}</p>
+						{#if resumeText.kept}
+							<p class="text-sm text-text-muted" data-testid="bulk-resume-kept">{@render hostText(resumeText.kept)}</p>
+						{/if}
 					{:else if resumeKind === 'nothing'}
 						<p class="text-sm">{@render hostText(resumeText.check ?? '')}</p>
 					{:else}
