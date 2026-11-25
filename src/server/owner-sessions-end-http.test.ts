@@ -100,8 +100,8 @@ describe('ending the owner sessions (real engine)', () => {
     delete process.env['LYNOX_BILLING_TIER'];
     delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
     try { await fn(); } finally {
-      process.env['LYNOX_BILLING_TIER'] = tier;
-      process.env['LYNOX_MANAGED_INSTANCE_ID'] = id;
+      if (tier === undefined) delete process.env['LYNOX_BILLING_TIER']; else process.env['LYNOX_BILLING_TIER'] = tier;
+      if (id === undefined) delete process.env['LYNOX_MANAGED_INSTANCE_ID']; else process.env['LYNOX_MANAGED_INSTANCE_ID'] = id;
     }
   };
 
@@ -166,6 +166,25 @@ describe('ending the owner sessions (real engine)', () => {
       expect(auth.readSessionToken(live, SECRET)).toBeNull();
     } finally { spy.mockRestore(); }
     expect((await get(withCookie(live))).status).toBe(200);
+  });
+
+  it('keeps the copy of the generation beside engine.db as the engine moves it', async () => {
+    const { readFileSync } = await import('node:fs');
+    const mirror = join(dir, 'owner-sessions-generation');
+    expect(readFileSync(mirror, 'utf8')).toBe(String(sessionsOf().generation()));
+    const next = sessionsOf().endAll();
+    expect(readFileSync(mirror, 'utf8')).toBe(String(next));
+  });
+
+  it('lets the owner in again after a raise to a generation no later than the clock, and ends that one with the next end', async () => {
+    const raised = sessionsOf().raiseTo(Date.now() - 1000);
+    const login = auth.ownerSession(SECRET).token;
+    expect(genOf(login)).toBe(raised);
+    expect((await get(withCookie(login))).status).toBe(200);
+    const res = await post('/api/auth/owner-sessions/end', withCookie(login));
+    expect(res.status).toBe(200);
+    expect((await get(withCookie(login))).status).toBe(401);
+    expect((await get(withCookie(sessionCookieOf(res)!))).status).toBe(200);
   });
 
   it('mints every owner login in the live generation', async () => {

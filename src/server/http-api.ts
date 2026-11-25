@@ -3454,14 +3454,14 @@ export class LynoxHTTPApi {
 
   /**
    * Whether an owner cookie of this generation is refused: any generation but the live one
-   * (owner-sessions.ts). Without engine.db only generation 0 is live; a store that cannot be read
-   * refuses. A mandate's session is not touched: it ends with its mandate (`_mandateLive`).
+   * (owner-sessions.ts, `Engine.liveOwnerGeneration`, which has one of its own when engine.db did not
+   * open); a store that cannot be read refuses. A mandate's session is not touched: it ends with its
+   * mandate (`_mandateLive`).
    */
   private _ownerSessionEnded(generation: number): boolean {
-    const sessions = this.engine?.getOwnerSessions() ?? null;
-    if (sessions === null) return generation !== 0;
+    if (!this.engine) return generation !== 0;
     try {
-      return sessions.ended(generation);
+      return generation !== this.engine.liveOwnerGeneration();
     } catch {
       return true;
     }
@@ -3550,8 +3550,7 @@ export class LynoxHTTPApi {
     if (ageSec < LynoxHTTPApi.SESSION_REFRESH_AFTER_S) return;
     // In the live generation: the cookie being refreshed was just let in, so it is of that one; a
     // cookie of another was refused before this and is never refreshed into the live one.
-    const sessions = this.engine?.getOwnerSessions() ?? null;
-    LynoxHTTPApi._setOwnerSessionCookie(req, res, secret, sessions === null ? 0 : sessions.generation(), trustProxy);
+    LynoxHTTPApi._setOwnerSessionCookie(req, res, secret, this.engine ? this.engine.liveOwnerGeneration() : 0, trustProxy);
   }
 
   /** Mint the owner's session cookie in `generation`, signed now, and set it on the response. */

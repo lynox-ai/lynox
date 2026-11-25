@@ -8,13 +8,16 @@ import { reloadConfig } from '../core/config.js';
 
 /**
  * A boot on which engine.db cannot be opened has no store of the owner's sessions
- * (owner-sessions.ts): the engine and the web UI then let in generation 0 alike, so no page opens
- * on a cookie every `/api` call refuses.
+ * (owner-sessions.ts): it keeps a generation of its own in memory, past every one a cookie from
+ * before can carry, and the engine and the web UI let in that one alike: an old cookie is out, and
+ * a fresh login works, request after request.
  */
 describe('owner sessions when engine.db cannot be opened (real engine)', () => {
   const SECRET = `t-${randomBytes(12).toString('hex')}`;
   let api: LynoxHTTPApi;
   let dir: string;
+  let base: string;
+  let bootMs: number;
   const saved: Record<string, string | undefined> = {};
   const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE', 'LYNOX_MANAGED_INSTANCE_ID'];
   const KEY = Symbol.for('lynox.ownerSessionsGeneration');
@@ -38,8 +41,13 @@ describe('owner sessions when engine.db cannot be opened (real engine)', () => {
     reloadConfig();
     // A directory where the file should be: the open fails, and it is no corruption to set aside.
     mkdirSync(join(dir, 'engine.db'));
+    bootMs = Date.now();
     api = new LynoxHTTPApi();
     await api.init();
+    await api.start(0);
+    const addr = (api as unknown as { server: import('node:http').Server | null }).server?.address();
+    if (addr === null || addr === undefined || typeof addr === 'string') throw new Error('fixture: no port');
+    base = `http://127.0.0.1:${String(addr.port)}`;
   }, 120_000);
 
   afterAll(async () => {
@@ -56,13 +64,21 @@ describe('owner sessions when engine.db cannot be opened (real engine)', () => {
     }
   });
 
-  it('publishes generation 0, so the web UI lets in and mints only what the engine lets in', async () => {
+  it('refuses an old cookie and lets a fresh login in, in the engine and in the web UI, across two requests', async () => {
     expect((api as unknown as { engine: { getOwnerSessions: () => unknown } }).engine.getOwnerSessions()).toBeNull();
     const read = (globalThis as Record<symbol, unknown>)[KEY];
     expect(typeof read).toBe('function');
-    expect((read as () => unknown)()).toBe(0);
+    const live = (read as () => number)();
+    expect(live).toBeGreaterThanOrEqual(bootMs);
     const auth = await import('../../packages/web-ui/src/lib/server/auth.js');
-    expect(auth.readSessionToken(owner(0), SECRET)).not.toBeNull();
-    expect(auth.readSessionToken(owner(1), SECRET)).toBeNull();
+    const get = (token: string): Promise<Response> => fetch(`${base}/api/config`, { headers: { cookie: `lynox_session=${token}` } });
+    for (const old of [owner(0), owner(1)]) {
+      expect((await get(old)).status).toBe(401);
+      expect(auth.readSessionToken(old, SECRET)).toBeNull();
+    }
+    const fresh = auth.ownerSession(SECRET).token;
+    expect(auth.readSessionToken(fresh, SECRET)).not.toBeNull();
+    expect((await get(fresh)).status).toBe(200);
+    expect((await get(fresh)).status).toBe(200);
   });
 });

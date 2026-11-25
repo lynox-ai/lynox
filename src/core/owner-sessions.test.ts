@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
@@ -125,6 +125,50 @@ describe('OwnerSessions and the copy of the generation beside engine.db', () => 
       expect(readFileSync(mirrorPath, 'utf8')).toBe('5');
     } finally { edb.close(); }
   });
+
+  it('ignores a copy past the clock, at the edge of a safe integer or an hour ahead, says so, and keeps the generation', () => {
+    const edb = open();
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      new OwnerSessions(edb.getDb()).raiseTo(5);
+      for (const ahead of [String(Number.MAX_SAFE_INTEGER), String(Date.now() + 60 * 60 * 1000)]) {
+        err.mockClear();
+        writeFileSync(mirrorPath, ahead);
+        expect(new OwnerSessions(edb.getDb(), { mirrorPath }).generation()).toBe(5);
+        expect(err.mock.calls.some(([line]) => String(line).includes('past the clock'))).toBe(true);
+      }
+    } finally { err.mockRestore(); edb.close(); }
+  });
+
+  it('takes a copy written by something else when it is no later than the clock: one more login, and ends still work after it', () => {
+    const edb = open();
+    try {
+      const before = new OwnerSessions(edb.getDb());
+      before.endAll();
+      const injected = Date.now() - 1000;
+      writeFileSync(mirrorPath, String(injected));
+      const sessions = new OwnerSessions(edb.getDb(), { mirrorPath });
+      // The session of generation 1 is out; a login mints the injected one, and the next end ends that.
+      expect(sessions.ended(1)).toBe(true);
+      expect(sessions.ended(injected)).toBe(false);
+      expect(sessions.endAll()).toBe(injected + 1);
+      expect(sessions.ended(injected)).toBe(true);
+    } finally { edb.close(); }
+  });
+
+  it('keeps an end that engine.db took when the copy cannot be written, and says so', () => {
+    const edb = open();
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      // A file where the copy's directory should be: every write of the copy fails.
+      writeFileSync(join(dir, 'not-a-dir'), '');
+      const sessions = new OwnerSessions(edb.getDb(), { mirrorPath: join(dir, 'not-a-dir', 'owner-sessions-generation') });
+      err.mockClear();
+      expect(sessions.endAll()).toBe(1);
+      expect(new OwnerSessions(edb.getDb()).generation()).toBe(1);
+      expect(err.mock.calls.some(([line]) => String(line).includes('could not be written'))).toBe(true);
+    } finally { err.mockRestore(); edb.close(); }
+  });
 });
 
 describe('EngineDb.recreated', () => {
@@ -142,5 +186,12 @@ describe('EngineDb.recreated', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('the copy of the generation and the tool guard', () => {
+  it('asks before a tool writes the copy, as for every file the sessions rest on', async () => {
+    const { isDangerous } = await import('../tools/permission-guard.js');
+    expect(isDangerous('bash', { command: 'echo 9007199254740991 > ~/.lynox/owner-sessions-generation' }, 'autonomous')).toContain('lynox secret store');
   });
 });

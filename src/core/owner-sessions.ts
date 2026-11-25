@@ -24,13 +24,17 @@
  * Mirrored into a file of its own beside engine.db (`mirrorPath`, `owner-sessions-generation` in the
  * data directory), which no backup carries: a backup restored, a migration imported or an engine.db
  * that went missing would otherwise bring an older generation back, and with it every session ended
- * since. At open the higher of the two wins; every end and raise writes the file again.
+ * since. At open the higher of the two wins; every end and raise writes the file again. A value past
+ * the clock in milliseconds is not one this code writes (the highest is a recreated file's, the clock
+ * at that boot): it is told and ignored, so a file written by something else can force one new login
+ * at most, never raise the generation past what a cookie can carry.
  *
  * Not an agent tool, on purpose: ending every session is the owner's act through a route of its
  * own, never something a model can be talked into.
  */
 import type Database from 'better-sqlite3';
-import { readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { writeFileAtomicSync } from './atomic-write.js';
 import { processErrorText } from './error-egress.js';
 
 /** The process-wide key the engine publishes `generation` under, for the web UI in the same process. */
@@ -90,17 +94,8 @@ export class OwnerSessions {
     return stored;
   }
 
-  /** The mirrored generation, or null when there is no mirror or it does not hold a whole number. */
   private readMirror(): number | null {
-    if (this.mirrorPath === null) return null;
-    let text: string;
-    try {
-      text = readFileSync(this.mirrorPath, 'utf8');
-    } catch {
-      return null;
-    }
-    const value = Number(text.trim());
-    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+    return this.mirrorPath === null ? null : readOwnerSessionsMirror(this.mirrorPath);
   }
 
   /**
@@ -109,12 +104,30 @@ export class OwnerSessions {
    */
   private writeMirror(generation: number): void {
     if (this.mirrorPath === null) return;
-    const tmp = `${this.mirrorPath}.tmp`;
     try {
-      writeFileSync(tmp, String(generation), { mode: 0o600 });
-      renameSync(tmp, this.mirrorPath);
+      writeFileAtomicSync(this.mirrorPath, String(generation));
     } catch (err: unknown) {
       process.stderr.write(`[lynox] the copy of the owner sessions' generation could not be written: ${processErrorText(err)}\n`);
     }
   }
+}
+
+/**
+ * The generation in a mirror file, or null when there is none, it holds no whole number from 0, or
+ * it is past the clock in milliseconds (told on stderr): see `OwnerSessions`.
+ */
+export function readOwnerSessionsMirror(path: string, nowMs: number = Date.now()): number | null {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+  const value = Number(text.trim());
+  if (!Number.isSafeInteger(value) || value < 0) return null;
+  if (value > nowMs) {
+    process.stderr.write('[lynox] the copy of the owner sessions\' generation is past the clock and was ignored\n');
+    return null;
+  }
+  return value;
 }

@@ -38,7 +38,7 @@ import { AuditLog, recordMandateRevoked } from './audit-log.js';
 import { auditRetentionState, sqliteErrorCode, sweepAuditLog, type AuditSweepRecord } from './audit-retention.js';
 import type { AuditRetentionState } from '../contract/http.js';
 import { MandateEnds } from './mandate-ends.js';
-import { OwnerSessions, OWNER_SESSIONS_GENERATION_KEY } from './owner-sessions.js';
+import { OwnerSessions, OWNER_SESSIONS_GENERATION_KEY, readOwnerSessionsMirror } from './owner-sessions.js';
 import { pauseEndedPlans } from './plan-pause.js';
 import { isErrorTextReducedForProcess, processErrorText } from './error-egress.js';
 import { tableInLog } from './data-store-boot-log.js';
@@ -343,6 +343,8 @@ export class Engine {
   private engineDb: EngineDb | null = null;
   private _mandateEnds: MandateEnds | null = null;
   private _ownerSessions: OwnerSessions | null = null;
+  /** The live generation of a boot without engine.db (see where it is set); null while the store is there. */
+  private _ownerSessionsFallback: number | null = null;
   private securityAudit: import('./security-audit.js').SecurityAudit | null = null;
   private context: LynoxContext | null = null;
   private briefing: string | undefined = undefined;
@@ -1399,7 +1401,8 @@ export class Engine {
     this._toolContext.mandateEnds = this._mandateEnds;
     // And the live generation of the owner's sessions (v73). Published for the web UI, which runs in
     // this process on a managed instance and checks the same generation (`readSessionToken`).
-    this._ownerSessions = this.engineDb ? new OwnerSessions(this.engineDb.getDb(), { mirrorPath: join(getLynoxDir(), 'owner-sessions-generation') }) : null;
+    const ownerMirror = join(getLynoxDir(), 'owner-sessions-generation');
+    this._ownerSessions = this.engineDb ? new OwnerSessions(this.engineDb.getDb(), { mirrorPath: ownerMirror }) : null;
     if (this._ownerSessions !== null) {
       const sessions = this._ownerSessions;
       // A recreated engine.db starts again at generation 0, and a cookie of an earlier generation
@@ -1409,9 +1412,13 @@ export class Engine {
       // Reads engine.db on each call; once it is closed the call throws, and the web UI refuses.
       (globalThis as Record<symbol, unknown>)[OWNER_SESSIONS_GENERATION_KEY] = () => sessions.generation();
     } else {
-      // engine.db failed to open: only generation 0 is let in, by the engine (`_ownerSessionEnded`) and,
-      // published the same, by the web UI, so a page does not open on a cookie every `/api` call refuses.
-      (globalThis as Record<symbol, unknown>)[OWNER_SESSIONS_GENERATION_KEY] = () => 0;
+      // engine.db failed to open: a generation of this boot alone, kept in memory, past every one a
+      // cookie can carry (the clock in milliseconds, or the mirror if it is somehow higher). Every
+      // cookie from before is refused and a login mints this one, in the engine and, published the
+      // same, in the web UI; the next boot without engine.db asks for one more login.
+      const bootGeneration = Math.max(Date.now(), readOwnerSessionsMirror(ownerMirror) ?? 0);
+      this._ownerSessionsFallback = bootGeneration;
+      (globalThis as Record<symbol, unknown>)[OWNER_SESSIONS_GENERATION_KEY] = () => bootGeneration;
       process.stderr.write('[lynox] engine.db is unavailable: an end of the owner sessions cannot be stored or read on this boot\n');
     }
     // And the owner's releases of vault names to profiles a mandate wrote (v27).
@@ -2988,6 +2995,8 @@ export class Engine {
   getMandateEnds(): MandateEnds | null { return this._mandateEnds; }
   /** When the owner's sessions were last ended; null without engine.db, and then none can be ended. */
   getOwnerSessions(): OwnerSessions | null { return this._ownerSessions; }
+  /** The live generation of the owner's sessions: the store's, or this boot's without engine.db. Throws when the store cannot be read. */
+  liveOwnerGeneration(): number { return this._ownerSessions !== null ? this._ownerSessions.generation() : this._ownerSessionsFallback ?? 0; }
 
   /** Whether the plan's latest question was closed because a mandate ended. */
   private closedPromptOf(triggerId: string): boolean {

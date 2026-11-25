@@ -40,6 +40,7 @@ describe('owner sessions after a boot that recreated engine.db (real engine)', (
     try {
       await api?.shutdown();
     } finally {
+      delete (globalThis as Record<symbol, unknown>)[Symbol.for('lynox.ownerSessionsGeneration')];
       for (const [k, v] of Object.entries(saved)) {
         if (v === undefined) delete process.env[k];
         else process.env[k] = v;

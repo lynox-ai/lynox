@@ -170,9 +170,9 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
     why: 'who holds the one slot an export and an erasure share (`export-slot.ts`): across processes, since the export command runs beside the HTTP API. Bound to this container\'s running jobs, so it never travels',
   },
   {
-    name: 'owner-sessions-generation', kind: 'file', secret: false, backup: false, migrate: false, export: named('a technical note or cache the software keeps for itself; it holds none of your content'),
+    name: 'owner-sessions-generation', kind: 'file', secret: true, backup: false, migrate: false, export: named('a technical note or cache the software keeps for itself; it holds none of your content'),
     erase: keep('the live generation of the owner\'s sessions; it names a number, no content, and erasing it would let ended sessions back in'),
-    why: 'a copy of the live generation of the owner\'s sessions kept beside engine.db (`owner-sessions.ts`), so a restored, imported or missing engine.db cannot bring an older generation back and with it the sessions ended since. Carried by a backup it would go back with the backup, which is the one thing it is for not doing',
+    why: 'a copy of the live generation of the owner\'s sessions kept beside engine.db (`owner-sessions.ts`), so a restored, imported or missing engine.db cannot bring an older generation back and with it the sessions ended since. Carried by a backup it would go back with the backup, which is the one thing it is for not doing. `secret`, though it holds no secret: so a write to it by a tool asks first, as for every file the sessions rest on',
   },
   {
     name: 'secrets.json', kind: 'file', secret: true, backup: false, migrate: false, export: NEVER, erase: REMOVE,
