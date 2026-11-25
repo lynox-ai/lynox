@@ -235,6 +235,12 @@ describe('T-2: plans that then run for someone else', () => {
 			const own = (ids: string[]) => lines(ids.map((id) => change(id, 'mandate:ida@x.ch', null)));
 			expect(own(['1', '2', '3'])).toEqual([f2, 'Diese Pläne laufen danach unter deinem Namen statt unter dem von ida@x.ch: P1, P2, P3.']);
 			expect(own(['1', '3'])).toEqual([f2, 'Diese Pläne laufen danach unter deinem Namen statt unter dem von ida@x.ch: P1, P3.']);
+			// Part of F2's list: F2 names three plans, two of them then run under the owner's name.
+			const three = [...released, { id: '3', title: 'P3' }];
+			expect(lines([change('1', 'mandate:ida@x.ch', null), change('2', 'mandate:ida@x.ch', null)], { alsoReleased: three })).toEqual([
+				'Dieser Plan nutzt den Workflow „Rechnungen“, den ida@x.ch geändert hat. Übernimmst du den Plan, übernimmst du auch den Workflow. Dann laufen auch diese Pläne wieder: P1, P2, P3.',
+				'Diese Pläne laufen danach unter deinem Namen statt unter dem von ida@x.ch: P1, P2.',
+			]);
 			// One fewer: a released plan that runs no more is not in the group, so the lists differ.
 			expect(lines([change('1', 'mandate:ida@x.ch', null), change('2', 'mandate:ida@x.ch', null, true), change('3', 'mandate:ida@x.ch', null)]))
 				.toEqual([f2, 'Diese Pläne laufen danach unter deinem Namen statt unter dem von ida@x.ch: P1, P3.']);
