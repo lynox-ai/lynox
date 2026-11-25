@@ -531,7 +531,12 @@ const DE: WorkerNotices = Object.freeze({
 
 /** A cause no new attempt changes: the owner has to change the watch's address or delete it. */
 function watchFetchPermanent(cause: WatchFetchCause): boolean {
-  return cause.kind === 'blocked' || cause.kind === 'too-large' || (cause.kind === 'http' && (cause.status === 404 || cause.status === 410));
+  return cause.kind === 'blocked' || cause.kind === 'refused' || cause.kind === 'too-large' || (cause.kind === 'http' && (cause.status === 404 || cause.status === 410));
+}
+
+/** A redirect: a watch does not follow one, so the page is never read until the address changes. */
+function isRedirect(cause: WatchFetchCause): boolean {
+  return cause.kind === 'http' && (cause.status === 301 || cause.status === 302 || cause.status === 307 || cause.status === 308);
 }
 
 /** The word for the HTTP statuses an owner meets most, or none. */
@@ -541,6 +546,10 @@ function httpStatusWord(status: number, language: NoticeLanguage): string | unde
     403: ['access denied', 'Zugriff verweigert'],
     404: ['not found', 'nicht gefunden'],
     410: ['gone', 'entfernt'],
+    301: ['redirected', 'weitergeleitet'],
+    302: ['redirected', 'weitergeleitet'],
+    307: ['redirected', 'weitergeleitet'],
+    308: ['redirected', 'weitergeleitet'],
     429: ['too many requests', 'zu viele Anfragen'],
   };
   const pair = words[status] ?? (status >= 500 && status <= 599 ? ['server error', 'Fehler beim Server'] as const : undefined);
@@ -552,7 +561,9 @@ function watchFetchReasonEn(cause: WatchFetchCause): string {
   const reason = ((): string => {
     switch (cause.kind) {
       case 'blocked': return 'The address leads into a private or internal network, which a watch does not read.';
+      case 'refused': return 'lynox does not read pages at this address.';
       case 'unresolved': return 'The host name does not resolve.';
+      case 'tls': return "The server's certificate could not be verified. It may be misconfigured, or the connection may be intercepted.";
       case 'unreachable': return 'The server did not accept the connection.';
       case 'timeout': return `The server did not answer within ${String(cause.seconds)} seconds.`;
       case 'http': {
@@ -563,6 +574,7 @@ function watchFetchReasonEn(cause: WatchFetchCause): string {
       case 'other': return 'The page could not be loaded.';
     }
   })();
+  if (isRedirect(cause)) return `${reason} A watch does not follow a redirect. Open the address in a browser and enter the address you end up at, or delete the watch.`;
   return `${reason} ${watchFetchPermanent(cause) ? 'Trying again will not change that. Change the watch\'s address or delete the watch.' : 'The watch checks the page again next time.'}`;
 }
 
@@ -571,7 +583,9 @@ function watchFetchReasonDe(cause: WatchFetchCause): string {
   const reason = ((): string => {
     switch (cause.kind) {
       case 'blocked': return 'Die Adresse führt in ein privates oder internes Netz, das eine Beobachtung nicht liest.';
+      case 'refused': return 'lynox liest Seiten an dieser Adresse nicht.';
       case 'unresolved': return 'Der Hostname lässt sich nicht auflösen.';
+      case 'tls': return 'Das Zertifikat des Servers liess sich nicht prüfen. Es könnte falsch eingerichtet oder die Verbindung abgefangen sein.';
       case 'unreachable': return 'Der Server hat die Verbindung nicht angenommen.';
       case 'timeout': return `Der Server hat nicht innerhalb von ${String(cause.seconds)} Sekunden geantwortet.`;
       case 'http': {
@@ -582,6 +596,7 @@ function watchFetchReasonDe(cause: WatchFetchCause): string {
       case 'other': return 'Die Seite liess sich nicht laden.';
     }
   })();
+  if (isRedirect(cause)) return `${reason} Eine Beobachtung folgt keiner Weiterleitung. Öffne die Adresse im Browser und trage die Adresse ein, bei der du landest, oder lösche die Beobachtung.`;
   return `${reason} ${watchFetchPermanent(cause) ? 'Daran ändert ein neuer Versuch nichts. Ändere die Adresse der Beobachtung oder lösche sie.' : 'Die Beobachtung prüft die Seite beim nächsten Mal wieder.'}`;
 }
 

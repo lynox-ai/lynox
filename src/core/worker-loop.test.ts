@@ -608,7 +608,7 @@ describe('WorkerLoop', () => {
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
     const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
     const BLOCKED_DE = 'liess sich nicht lesen: Die Adresse führt in ein privates oder internes Netz, das eine Beobachtung nicht liest. Daran ändert ein neuer Versuch nichts. Ändere die Adresse der Beobachtung oder lösche sie.';
-    mockFetchPinned.mockClear();
+    mockFetchPinned.mockReset();
     // A private address the policy check refuses before any request: recorded, not thrown.
     await fire(makeTask({ id: 't-lit', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'http://127.0.0.1/admin', interval_minutes: 60 }) }));
     expect(vi.mocked(taskManager.recordTaskRun).mock.calls.at(-1)?.slice(1)).toEqual([`Die beobachtete Seite http://127.0.0.1/admin ${BLOCKED_DE}`, 'failed']);
@@ -632,6 +632,13 @@ describe('WorkerLoop', () => {
     expect(String(vi.mocked(taskManager.recordTaskRun).mock.calls.at(-1)?.[1])).toBe("The watched page http://127.0.0.1/admin could not be read: The address leads into a private or internal network, which a watch does not read. Trying again will not change that. Change the watch's address or delete the watch.");
     // Each queued answer was read: the three fetched pages were requested, the literal never.
     expect(mockFetchPinned).toHaveBeenCalledTimes(3);
+    // A key in the address of a private-address refusal is masked, as the run's catch masks a thrown one.
+    const key = ['ghp', 'Q'.repeat(36)].join('_');
+    await fire(makeTask({ id: 't-key', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: `http://127.0.0.1/feed?token=${key}`, interval_minutes: 60 }) }));
+    const recordedKey = String(vi.mocked(taskManager.recordTaskRun).mock.calls.at(-1)?.[1]);
+    expect(recordedKey).toContain('The watched page http://127.0.0.1/feed?token=');
+    expect(recordedKey).not.toContain(key);
+    mockFetchPinned.mockReset();
   });
 
   it('executeWatch hands the analysis model the stored URL without the characters that render as nothing', async () => {

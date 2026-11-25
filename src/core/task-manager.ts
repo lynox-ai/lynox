@@ -1381,9 +1381,9 @@ export function watchPolicyRefusal(url: string, ctx: HostPolicyContext | undefin
     }
     if (message.startsWith(HTTPS_REFUSAL_START)) return { why: 'this instance only reads HTTPS pages (enforce_https).', wayOut: 'Watch the https:// address instead.', shown: { kind: 'watch_https' } };
     const why = message.replace(/^Blocked:\s*/, '');
-    // A private or internal address: the poll tells it as lynox's own sentence, as a fetch refused
-    // for the same reason (`watch-fetch-cause.ts`).
-    const privateAddress = /^Blocked: (private IP address "|"[^"]*" resolves to private IP ")/.test(message);
+    // A private address literal (the host check resolves no name): the poll tells it as lynox's
+    // own sentence, as a fetch refused for the same reason (`watch-fetch-cause.ts`).
+    const privateAddress = message.startsWith('Blocked: private IP address "');
     return { why: `this instance's network settings refuse it: ${/[.!?]$/.test(why) ? why : `${why}.`}`, wayOut: '', shown: null, ...(privateAddress ? { privateAddress: true as const } : {}) };
   }
 }

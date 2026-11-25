@@ -4117,7 +4117,8 @@ export class WorkerLoop {
       const taskManager = this.engine.getTaskManager();
       if (taskManager) {
         this.#recordRun(taskManager, task.id, refusedBy.privateAddress === true
-          ? this.#notices().watchFetchFailed(config.url, { kind: 'blocked' })
+          // The address may carry a key; the run's catch masks a thrown failure, this one is recorded here.
+          ? maskSecretPatterns(this.#notices().watchFetchFailed(config.url, { kind: 'blocked' }), { includeGeneric: true })
           : `The watched page was not read: ${refusedBy.why}${refusedBy.wayOut === '' ? '' : ` ${refusedBy.wayOut}`}`, 'failed');
       }
       return;
@@ -4144,9 +4145,10 @@ export class WorkerLoop {
     // socket to that IP (closing the rebind window) + never follows redirects,
     // so it subsumes the protocol/host/IP SSRF checks we used to hand-roll here.
     let fetchResult: string;
+    const deadline = AbortSignal.timeout(WATCH_FETCH_TIMEOUT_MS);
     try {
       const res = await fetchPinned(config.url, {
-        signal: AbortSignal.timeout(WATCH_FETCH_TIMEOUT_MS),
+        signal: deadline,
         headers: { 'User-Agent': 'lynox-watch/1.0' },
       });
       if (!res.ok) {
@@ -4156,7 +4158,7 @@ export class WorkerLoop {
     } catch (err: unknown) {
       // The owner reads lynox's own sentence for the cause, in the instance's language; the raw
       // error goes with it as the cause, to the error report, and is not shown.
-      const cause = watchFetchCause(err, { timeoutSeconds: WATCH_FETCH_TIMEOUT_MS / 1000, maxBytes: WATCH_MAX_BODY_BYTES });
+      const cause = watchFetchCause(err, { timeoutSeconds: WATCH_FETCH_TIMEOUT_MS / 1000, maxBytes: WATCH_MAX_BODY_BYTES, timedOut: deadline.aborted });
       throw new Error(this.#notices().watchFetchFailed(config.url, cause), { cause: err });
     }
 
