@@ -52,6 +52,7 @@ export function bulkOne(key: string, n: number): string {
 const BULK_UNDO_HALT_WORDS: ReadonlySet<string> = new Set([
 	'bulk.halt.consentOutdated', 'bulk.halt.consentOutdated_more', 'bulk.halt.contract', 'bulk.halt.markupAddedByShop',
 	'bulk.halt.markupAddedByShop_before', 'bulk.halt.atomicRolledBack', 'bulk.halt.atomicTimeRolledBack', 'bulk.halt.discarded', 'bulk.halt.runUnrecorded',
+	'bulk.halt.storeRequestRefused', 'bulk.halt.storeRequestRefused_kept',
 ]);
 
 /** A halt sentence's key in the words of the run's kind: an undo's `_undo` form where it has one. */
@@ -253,7 +254,9 @@ const BULK_RESTART_AS_IS = new Set([
 	'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable',
 ]);
 /** Halts a restart would meet again on the same targets: the run has to be planned again. */
-const BULK_RESTART_NONE = new Set(['contract', 'listFormWithdrawn', 'listFilterWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff', 'shopifySelfHosted', 'shopifyNoApiVersion']);
+const BULK_RESTART_NONE = new Set(['contract', 'listFormWithdrawn', 'listFilterWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff', 'shopifySelfHosted', 'shopifyNoApiVersion',
+	// The store's pass refuses the request as it is formed: going on sends the same one again.
+	'storeRequestRefused']);
 
 /** The note beside a run no restart moves on: plan it again, as a rule. Not for a self-hosted
  *  instance, which no plan reaches a store from, and none for a missing setting of lynox's, whose
@@ -351,7 +354,7 @@ const BULK_RESUME_WRITE = new Set([
 ]);
 /** Halts writing on would not get past: the run has changed since it was approved (the engine
  *  refuses), or a target lies outside what it may write (it would halt there again). */
-const BULK_RESUME_NONE = new Set(['checksum', 'contract', 'consentOutdated']);
+const BULK_RESUME_NONE = new Set(['checksum', 'contract', 'consentOutdated', 'storeRequestRefused']);
 
 /** The fields a connection does not cover yet, by name with their article, joined with "und"/"and";
  *  "these fields" where one has no name on this page (U-281). */
@@ -434,9 +437,15 @@ export function bulkResumeText(
 		// Writing on meets the same refusal until the store is connected again or its profile fixed.
 		: key === 'storeAccessEnded' || key === 'storeClientMisnamed' ? `bulk.halt.${key}_before`
 		: BULK_STORE_CAUSES_GOING_ON.has(key) ? `bulk.halt.${key}_before`
+		// What a value carries is the owner's to take out before the run is planned again; an undo
+		// writes back what the store held, which has nothing to take out (U-232).
+		: key === 'storeRequestRefused' && run.kind !== 'undo' ? 'bulk.halt.storeRequestRefused_before'
 		: null;
 	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
-	if (kind === 'none') return { cause, before, check: null, after: null, kept: null, soFar: null, allows: null };
+	// What was written (or taken back) before the refused request stays; from it on nothing was
+	// sent. Said only where something was: before the first target the cause says it all.
+	const stays = key === 'storeRequestRefused' && run.applied > 0 ? i18n.t(bulkHaltKeyOf(run, 'bulk.halt.storeRequestRefused_kept')) : null;
+	if (kind === 'none') return { cause, before, check: null, after: null, kept: stays, soFar: null, allows: null };
 	// Nothing to send: no step before writing on applies, and what is left needs a new run.
 	if (kind === 'nothing') return { cause, before: null, check: i18n.tf(`bulk.resume.nothing_left${run.kind === 'undo' ? '_undo' : ''}`, vars), after: null, kept: null, soFar: null, allows: null };
 	// The next step is to check, not to continue: checking sends nothing, so the failures' "before

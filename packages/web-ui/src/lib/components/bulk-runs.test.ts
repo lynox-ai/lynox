@@ -567,6 +567,44 @@ describe('going on from a run that halted', () => {
 	const base = { phase: 'planned' as const, listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false };
 	const judged = { judge: { tier: 'fast', unjudged: 3 }, judgeServedBy: { provider: 'mistral', label: 'Mistral Medium' } } as unknown as Pick<BulkRunDetailData, 'judge' | 'judgeServedBy'>;
 
+	// U-232: a store's pass refused a request as it is formed. Its own cause in every phase, the
+	// content case before planning anew where the owner can take something out, and for a write or
+	// an undo what stays as it is. Planning anew itself is the note no restart moves on (`none`).
+	it('words a pass\'s refusal of a request: its cause, what to take out first, and what stays', () => {
+		const planned = { ...base, haltKey: 'storeRequestRefused', targetSystem: 'http:shop.example.invalid', costUsd: 0, costCapUsd: null };
+		expect(bulkRestartKind(planned)).toBe('none');
+		expect(bulkRestartNoneNote('storeRequestRefused')).toBe('bulk.restart.none');
+		expect(bulkHaltText(planned, true, DE)).toEqual({
+			cause: 'lynox hat eine Anfrage dieses Laufs nicht an den Shop gesendet: Ihre Form lässt lynox nicht zu Shopify durch.',
+			before: 'Steht in der Regel oder einem Wert etwas wie ein Zugangsschlüssel oder Token, nimm es heraus, bevor lynox den Lauf neu plant.',
+		});
+		expect(bulkResumeKind(w('storeRequestRefused'))).toBe('none');
+		expect(bulkResumeText(w('storeRequestRefused'), true, DE)).toEqual({
+			cause: 'lynox hat eine Anfrage dieses Laufs nicht an den Shop gesendet: Ihre Form lässt lynox nicht zu Shopify durch.',
+			before: 'Steht in der Regel oder einem Wert etwas wie ein Zugangsschlüssel oder Token, nimm es heraus, bevor lynox den Lauf neu plant.',
+			check: null, after: null,
+			kept: 'Was lynox vor dem Halt geschrieben hat, bleibt geschrieben. Ab dieser Anfrage hat lynox nichts mehr gesendet.',
+			soFar: null, allows: null,
+		});
+		// An undo writes back what the store held: nothing to take out, and what it took back stays.
+		expect(bulkResumeText(w('storeRequestRefused', { kind: 'undo' }), true, EN)).toEqual({
+			cause: 'lynox did not send a request of this undo to the store: lynox does not let a request of this form through to Shopify.',
+			before: null, check: null, after: null,
+			kept: 'What lynox took back before the halt stays taken back. From this request on, lynox sent nothing more.',
+			soFar: null, allows: null,
+		});
+		// Nothing written yet: nothing is said to stay. Another way to no write on says nothing of it either.
+		expect(bulkResumeText(w('storeRequestRefused', { applied: 0 }), true, DE)?.kept).toBeNull();
+		expect(bulkResumeText(w('storeRequestRefused', { kind: 'undo', applied: 0 }), true, EN)?.kept).toBeNull();
+		expect(bulkResumeText(w('contract'), true, DE)?.kept).toBeNull();
+		for (const [lang, i] of [['de', DE], ['en', EN]] as const) {
+			for (const run of [w('storeRequestRefused'), w('storeRequestRefused', { kind: 'undo' })]) {
+				for (const [part, text] of Object.entries(bulkResumeText(run, true, i)!)) if (text !== null) expect(text, `${lang} ${part}`).not.toMatch(/bulk\.|\{/);
+			}
+			for (const text of Object.values(bulkHaltText(planned, true, i)!)) if (text !== null) expect(text, lang).not.toMatch(/bulk\.|\{/);
+		}
+	});
+
 	it('moves a run on by what it does next, and refuses where a restart would halt again', () => {
 		for (const haltKey of AS_IS) expect(bulkRestartKind({ ...base, haltKey }), haltKey).toBe('read');
 		for (const haltKey of NONE) expect(bulkRestartKind({ ...base, haltKey }), haltKey).toBe('none');

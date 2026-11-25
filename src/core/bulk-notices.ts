@@ -254,6 +254,8 @@ const EN_HALT_REASONS: Readonly<Record<keyof typeof BULK_HALT_REASONS, string>> 
   shopifyNotCleared: 'Shopify is not cleared for this instance right now. Only lynox can clear it. Once lynox has cleared Shopify, you can continue the run.',
   containmentUnwritable: 'lynox could not record that this run reads the store; nothing was sent. You can continue the run later.',
   shopifyNoApiVersion: 'A setting for Shopify is missing in lynox. Only lynox can fix it (support@lynox.ai).',
+  // True for a run and for an undo alike, which go on differently: the page says how (U-232).
+  storeRequestRefused: 'lynox did not send a request of this run to the store: lynox does not let a request of this form through to Shopify. The run\'s page says how to go on.',
   consentOutdated: 'This Shopify connection does not yet let lynox change these fields. Reconnect Shopify (Settings → API connections), then ask lynox in the chat to plan the run again.',
   superseded: 'Another run with judging was started in its place. This one wrote nothing.',
   discarded: 'You discarded this run. lynox wrote nothing.',
@@ -329,6 +331,7 @@ function deHaltReason(reason: string): string | undefined {
     [BULK_HALT_REASONS.shopifyNotCleared]: 'Shopify ist für diese Instanz zurzeit nicht freigegeben. Freigeben kann nur lynox. Sobald lynox Shopify freigegeben hat, kannst du den Lauf fortsetzen.',
     [BULK_HALT_REASONS.containmentUnwritable]: 'lynox konnte nicht festhalten, dass dieser Lauf den Shop liest; gesendet wurde nichts. Du kannst den Lauf später fortsetzen.',
     [BULK_HALT_REASONS.shopifyNoApiVersion]: 'Für Shopify fehlt in lynox eine Einstellung. Beheben kann das nur lynox (support@lynox.ai).',
+    [BULK_HALT_REASONS.storeRequestRefused]: 'lynox hat eine Anfrage dieses Laufs nicht an den Shop gesendet: Ihre Form lässt lynox nicht zu Shopify durch. Wie es weitergeht, steht auf der Laufseite.',
     // U-281, without the fields (the outcome's summary names them, `consentOutdated`).
     [BULK_HALT_REASONS.consentOutdated]: 'Diese Shopify-Verbindung lässt lynox diese Felder noch nicht ändern. Verbinde Shopify neu (Einstellungen → API-Verbindungen) und plane den Lauf im Chat neu.',
     [BULK_HALT_REASONS.superseded]: 'An seiner Stelle wurde ein anderer Lauf mit Beurteilung gestartet. Dieser hat nichts geschrieben.',

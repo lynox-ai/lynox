@@ -19,7 +19,7 @@ import {
 } from './bulk-external.js';
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
 import type { AttachedConnection } from './bulk-connection.js';
-import { setPinnedTransportForTests, type PinnedTransportInput } from './network-guard.js';
+import { setPinnedTransportForTests, StoreRequestRefusedError, type PinnedTransportInput } from './network-guard.js';
 import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
 import { WorkerLoop } from './worker-loop.js';
 import { ApiStore } from './api-store.js';
@@ -404,22 +404,42 @@ describe('the preview effect', () => {
     }
   });
 
-  it('a store\'s refusal at the send stays blocked and a broken connection failed: neither names a cause of the store\'s', async () => {
+  it('a pass\'s refusal at the send is its own kind, the network policy\'s stays blocked, a broken connection failed: none names a cause of the store\'s', async () => {
     // The send-time refusals of a store request depend on the request (its path, body, headers),
-    // so they name no cause of the store's and offer no resume as one.
+    // so they name no cause of the store's and offer no resume as one; the pass's are told
+    // apart by their class, not their words.
+    const passRefusal = 'Blocked: request to a Shopify store refused: a store pass reaches only its own store. Do not retry it with changed headers or a changed address.';
     for (const [thrown, kind] of [
-      ['Blocked: request to a Shopify store refused: a store pass reaches only its own store. Do not retry it with changed headers or a changed address.', { kind: 'blocked' }],
-      [`Blocked: ${SHOPIFY_PAGES}`, { kind: 'blocked' }],
-      ['Blocked: hostname "shop.example" not in network allow-list', { kind: 'blocked' }],
-      ['socket hang up', { kind: 'failed' }],
+      [new StoreRequestRefusedError(passRefusal), { kind: 'store_request_refused' }],
+      [new Error(passRefusal), { kind: 'blocked' }],
+      [new Error(`Blocked: ${SHOPIFY_PAGES}`), { kind: 'blocked' }],
+      [new Error('Blocked: hostname "shop.example" not in network allow-list'), { kind: 'blocked' }],
+      [new Error('socket hang up'), { kind: 'failed' }],
     ] as const) {
-      const restore = setPinnedTransportForTests(async () => { throw new Error(thrown); });
+      const restore = setPinnedTransportForTests(async () => { throw thrown; });
       try {
         vi.mocked(dns.lookup).mockResolvedValue([{ address: '93.184.216.34', family: 4 }] as unknown as Awaited<ReturnType<typeof dns.lookup>>);
-        expect(await client().get(url(0)), thrown).toEqual(kind);
+        expect(await client().get(url(0)), thrown.message).toEqual(kind);
       } finally {
         restore();
       }
+    }
+  });
+
+  it('halts on a pass\'s refusal at the send with its own reason, not as blocked, and reads nothing past it', async () => {
+    let sends = 0;
+    const restore = setPinnedTransportForTests(async () => {
+      sends++;
+      throw new StoreRequestRefusedError('Blocked: request to a Shopify store refused: the body names an access token. Do not retry it with a changed body.');
+    });
+    try {
+      vi.mocked(dns.lookup).mockResolvedValue([{ address: '93.184.216.34', family: 4 }] as unknown as Awaited<ReturnType<typeof dns.lookup>>);
+      const runId = planRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '1' } })));
+      expect((await runBulkPreview(runId, previewDeps(client()))).status).toBe('halted');
+      expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.storeRequestRefused);
+      expect(sends).toBe(1);
+    } finally {
+      restore();
     }
   });
 
