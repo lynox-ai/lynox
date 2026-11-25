@@ -41,7 +41,7 @@ import { pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
 import { getLynoxDir, setDataDir } from '../core/config.js';
 import { EngineDb } from '../core/engine-db.js';
-import { ensureVaultKey, loadVaultKeyFromDotEnv } from '../core/engine-init.js';
+import { assertVaultKeyOpensVault, ensureVaultKey, loadVaultKeyFromDotEnv } from '../core/engine-init.js';
 import { SubjectStore, personNameTokens, isPersonSubsetSafe, makeSubjectExternalRefs } from '../core/subject-store.js';
 import type { SubjectExternalRefs } from '../core/subject-store.js';
 import { DataStore } from '../core/data-store.js';
@@ -524,6 +524,9 @@ export function main(): void {
   // that key the sweep stops here instead of writing under none.
   loadVaultKeyFromDotEnv();
   ensureVaultKey();
+  // The engine's own start check: a key the vault on disk refuses stops the run here, before
+  // a store opens, so no row is written under a key that is not the vault's.
+  assertVaultKeyOpensVault();
   const dir = getLynoxDir();
   const engineDb = new EngineDb(join(dir, 'engine.db'));   // ctor migrates on open (no-op)
   try {
