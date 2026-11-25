@@ -65,3 +65,59 @@ export function watchFetchCause(err: unknown, limits: { readonly timeoutSeconds:
   }
   return { kind: 'other' };
 }
+
+/**
+ * A watch run that could not read its page: the sentence the owner reads, with the cause it was
+ * told from, so the run's end can store the cause next to the sentence (`last_run_cause`). The
+ * raw error is the `cause` of the Error, as before.
+ */
+export class WatchFetchFailure extends Error {
+  constructor(message: string, readonly watchCause: WatchFetchCause, options?: { readonly cause?: unknown }) {
+    super(message, options);
+    this.name = 'WatchFetchFailure';
+  }
+}
+
+/** The largest values a stored cause may carry; one past these is no cause lynox wrote. */
+const MAX_TIMEOUT_SECONDS = 86_400;
+const MAX_MEGABYTES = 10_240;
+
+/** A whole number in [min, max], or null. */
+function boundedInteger(value: unknown, min: number, max: number): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max ? value : null;
+}
+
+/** Whether `value` is a plain object with exactly the keys `keys`. */
+function exactKeys(value: object, keys: readonly string[]): boolean {
+  const own = Object.keys(value);
+  return own.length === keys.length && keys.every((k) => Object.hasOwn(value, k));
+}
+
+/**
+ * A stored watch cause read back, or null when it is not one lynox writes: an unknown kind, a key
+ * more or less than its kind has, a number of the wrong type or outside its range. Nothing is
+ * passed through as stored and nothing falls back to `other`, so what the view words is always a
+ * cause this engine could have recorded.
+ */
+export function parseWatchFetchCause(value: unknown): WatchFetchCause | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const kind = (value as { kind?: unknown }).kind;
+  switch (kind) {
+    case 'blocked': case 'refused': case 'unresolved': case 'unreachable': case 'tls': case 'other':
+      return exactKeys(value, ['kind']) ? { kind } : null;
+    case 'timeout': {
+      const seconds = boundedInteger((value as { seconds?: unknown }).seconds, 1, MAX_TIMEOUT_SECONDS);
+      return seconds !== null && exactKeys(value, ['kind', 'seconds']) ? { kind, seconds } : null;
+    }
+    case 'http': {
+      const status = boundedInteger((value as { status?: unknown }).status, 100, 599);
+      return status !== null && exactKeys(value, ['kind', 'status']) ? { kind, status } : null;
+    }
+    case 'too-large': {
+      const megabytes = boundedInteger((value as { megabytes?: unknown }).megabytes, 1, MAX_MEGABYTES);
+      return megabytes !== null && exactKeys(value, ['kind', 'megabytes']) ? { kind, megabytes } : null;
+    }
+    default:
+      return null;
+  }
+}

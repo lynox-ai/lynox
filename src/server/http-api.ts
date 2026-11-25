@@ -159,7 +159,7 @@ import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { takeOver, takeoverPreview, workflowsCoveredByTakeover, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
 import { takeOverWorkflow, workflowTakeoverPreview, type WorkflowTakeoverDeps, type WorkflowTakeoverRefusal } from '../core/workflow-takeover.js';
 import { EngineLessRefused } from '../core/engine-less-refusal.js';
-import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerFieldsNotCarriedError, TriggerTierUnsupportedError, titleIsWorkflowName, isTriggerModelTierUpdate, triggerTakesModelTier, type BeforeTriggerWrite, type TaskManager, watchRefusedNow, type BlockedReason } from '../core/task-manager.js';
+import { BulkTriggerLockedError, ForeignTodoError, InvalidDueDateError, TodoHasForeignSubtasksError, TriggerFieldsNotCarriedError, TriggerTierUnsupportedError, titleIsWorkflowName, isTriggerModelTierUpdate, triggerTakesModelTier, type BeforeTriggerWrite, type TaskManager, watchRefusedNow, storedRunCause, type BlockedReason } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -451,8 +451,9 @@ export const WORKFLOW_TAKEOVER_REFUSALS: Record<WorkflowTakeoverRefusal | 'chang
  * paused it, and `paused_ended`, how and when each access ended: the view says it in full, where
  * the push had to shorten the name.
  */
-export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for' | 'last_escalation_at' | 'last_escalation_outcome'> & Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome'> & { paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
-  const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome, ...stored } = trigger;
+export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for' | 'last_escalation_at' | 'last_escalation_outcome' | 'last_run_cause'> & Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome'> & { paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
+  // The stored run cause leaves only as `blocked_reason`, parsed (`storedRunCause`), never as stored.
+  const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome, last_run_cause: _cause, ...stored } = trigger;
   // Whether a wakeup reached the owner, and the step to take when it did not (their push
   // subscription), are the owner's: a mandate reading them would be told about the owner's
   // devices as if they were its own, and could act on neither. An absent value leaves the JSON.
@@ -9684,13 +9685,13 @@ export class LynoxHTTPApi {
         : taskManager.listTriggers(status ? { status } : undefined);
       const bulkLedgerForList = engine.getBulkLedger() ?? engine.getBulkLedgerSwitchedOff?.() ?? null;
       const policyContext = engine.getToolContext();
-      const refusedWatch = (trigger: TriggerRecord): { blocked_reason: BlockedReason } | null => {
-        try {
-          const refused = watchRefusedNow(trigger, policyContext);
-          return refused === null ? null : { blocked_reason: refused };
-        } catch {
-          return null;
-        }
+      // Why the run does not do its work: a watch the policy refuses now holds the next run and is
+      // told first; otherwise the cause the last failed run stored, read through its closed parser.
+      const blockedReasonOf = (trigger: TriggerRecord): { blocked_reason: BlockedReason } | null => {
+        let refused: BlockedReason | null = null;
+        try { refused = watchRefusedNow(trigger, policyContext); } catch { refused = null; }
+        const reason = refused ?? storedRunCause(trigger);
+        return reason === null ? null : { blocked_reason: reason };
       };
       const triggers = rows
         .map((trigger) => {
@@ -9726,9 +9727,9 @@ export class LynoxHTTPApi {
             // sets the name apart as a value. Any other title stays whole, the prefix included; so
             // does the title of a plan with no schedule, and one whose workflow was renamed since.
             ...(workflow !== undefined && (trigger.schedule_cron ?? '') !== '' && titleIsWorkflowName(trigger.title, workflow.name) ? { title_workflow: workflow.name } : {}),
-            // A watch the instance's network_policy keeps from its page, and why, as the poll would
-            // refuse it now: the view says so, with the way out (U-392).
-            ...(refusedWatch(trigger) ?? {}),
+            // Why the run does not do its work: a watch the instance's network_policy keeps from its
+            // page now, or the cause its last failed run stored. The view says it, with the way out.
+            ...(blockedReasonOf(trigger) ?? {}),
           };
         });
       // What the owner's stamp of each confirmed plan lists, and how each entry stands (B3), for the

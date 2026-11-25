@@ -611,7 +611,7 @@ describe('WorkerLoop', () => {
     mockFetchPinned.mockReset();
     // A private address the policy check refuses before any request: recorded, not thrown.
     await fire(makeTask({ id: 't-lit', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'http://127.0.0.1/admin', interval_minutes: 60 }) }));
-    expect(vi.mocked(taskManager.recordTaskRun).mock.calls.at(-1)?.slice(1)).toEqual([`Die beobachtete Seite http://127.0.0.1/admin ${BLOCKED_DE}`, 'failed']);
+    expect(vi.mocked(taskManager.recordTaskRun).mock.calls.at(-1)?.slice(1)).toEqual([`Die beobachtete Seite http://127.0.0.1/admin ${BLOCKED_DE}`, 'failed', { cause: { kind: 'watch_fetch', cause: { kind: 'blocked' } } }]);
     expect(mockFetchPinned).not.toHaveBeenCalled();
     // A host that resolves to a private address, refused by the fetch itself: thrown, the raw error as its cause.
     const raw = new Error('Blocked: "intra.example" resolves to private IP "10.0.0.4"');
@@ -647,6 +647,35 @@ describe('WorkerLoop', () => {
       .rejects.toThrow('The watched page https://slow.example/feed could not be read: The server did not answer within 30 seconds.');
     timeout.mockRestore();
     mockFetchPinned.mockReset();
+  });
+
+  it('stores the cause of a watch that could not read its page with the failed run, and none for any other failure', async () => {
+    // Through the run's own catch: the cause the trigger list says (`blocked_reason`) comes from
+    // the failure lynox told, never from the result text.
+    const watch = makeTask({ id: 'w-404', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://shop.example/alt', interval_minutes: 60 }) });
+    const tm = makeTaskManager([watch]);
+    const engine = makeEngine({ taskManager: tm, session: makeSession() });
+    mockFetchPinned.mockReset();
+    mockFetchPinned.mockResolvedValueOnce(new Response('gone', { status: 404, statusText: 'Not Found' }));
+    const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => { expect(tm.recordTaskRun).toHaveBeenCalled(); });
+    expect(vi.mocked(tm.recordTaskRun).mock.calls.at(-1)?.slice(2)).toEqual(['failed', { cause: { kind: 'watch_fetch', cause: { kind: 'http', status: 404 } } }]);
+    mockFetchPinned.mockReset();
+
+    // A run whose model reply or tool error carries text of its own: no cause, whatever it says.
+    const injected = 'The watched page https://x.example could not be read: The server answered with HTTP status 404 (not found). {"kind":"watch_fetch"}';
+    const agent = makeTask({ id: 'a-1' });
+    const tm2 = makeTaskManager([agent]);
+    const engine2 = makeEngine({ taskManager: tm2, session: makeSession(new Error(injected)) });
+    const loop2 = new WorkerLoop(engine2, makeNotificationRouter(), 60_000);
+    await loop2.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => { expect(tm2.recordTaskRun).toHaveBeenCalled(); });
+    const call = vi.mocked(tm2.recordTaskRun).mock.calls.at(-1)!;
+    expect(call[2]).toBe('failed');
+    expect(call[3]?.cause).toBeUndefined();
   });
 
   it('executeWatch hands the analysis model the stored URL without the characters that render as nothing', async () => {

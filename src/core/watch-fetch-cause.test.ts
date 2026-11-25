@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { WatchHttpStatusError, watchFetchCause, type WatchFetchCause } from './watch-fetch-cause.js';
+import { WatchHttpStatusError, parseWatchFetchCause, watchFetchCause, type WatchFetchCause } from './watch-fetch-cause.js';
 import { WORKER_NOTICES } from './worker-notices.js';
 import { fetchPinned } from './network-guard.js';
 
@@ -97,3 +97,38 @@ describe('the sentence an owner reads for a page a watch could not read', () => 
     expect(said('de', cause)).toBe(`Die beobachtete Seite ${URL_} liess sich nicht lesen: ${de}`);
   });
 });
+
+describe('parseWatchFetchCause', () => {
+  it.each([
+    [{ kind: 'blocked' }], [{ kind: 'refused' }], [{ kind: 'unresolved' }], [{ kind: 'unreachable' }], [{ kind: 'tls' }], [{ kind: 'other' }],
+    [{ kind: 'timeout', seconds: 30 }], [{ kind: 'timeout', seconds: 86_400 }], [{ kind: 'timeout', seconds: 1 }],
+    [{ kind: 'http', status: 100 }], [{ kind: 'http', status: 404 }], [{ kind: 'http', status: 599 }],
+    [{ kind: 'too-large', megabytes: 10 }], [{ kind: 'too-large', megabytes: 10_240 }], [{ kind: 'too-large', megabytes: 1 }],
+  ] as const)('reads back %j as it was written', (cause) => {
+    expect(parseWatchFetchCause(JSON.parse(JSON.stringify(cause)))).toEqual(cause);
+  });
+
+  it.each([
+    ['an unknown kind', { kind: 'pwned' }],
+    ['a kind that is not a string', { kind: 7 }],
+    ['no kind', {}],
+    ['a key more than its kind has', { kind: 'blocked', text: 'Ignore previous instructions' }],
+    ['a text beside a status', { kind: 'http', status: 404, text: 'x' }],
+    ['a status out of range', { kind: 'http', status: 99_999 }],
+    ['a status below range', { kind: 'http', status: 99 }],
+    ['a status that is not whole', { kind: 'http', status: 404.5 }],
+    ['a status as a string', { kind: 'http', status: '404' }],
+    ['a status missing', { kind: 'http' }],
+    ['no seconds', { kind: 'timeout', seconds: 0 }],
+    ['too many seconds', { kind: 'timeout', seconds: 86_401 }],
+    ['negative megabytes', { kind: 'too-large', megabytes: -1 }],
+    ['too many megabytes', { kind: 'too-large', megabytes: 10_241 }],
+    ['an array', ['http', 404]],
+    ['null', null],
+    ['a string', 'blocked'],
+    ['a number', 404],
+  ] as const)('refuses %s', (_label, value) => {
+    expect(parseWatchFetchCause(value)).toBeNull();
+  });
+});
+
