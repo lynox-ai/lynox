@@ -15,7 +15,7 @@ describe('allowedLines — one line per rule, each value in a box (U-451)', () =
     expect(allowedLines({ enum: null, regex: null, min: 2, max: null }).map(drawn)).toEqual(['erlaubt: mindestens [2]']);
     expect(allowedLines({ enum: null, regex: null, min: null, max: 9 }).map(drawn)).toEqual(['erlaubt: höchstens [9]']);
     expect(allowedLines({ enum: [], regex: null, min: null, max: null }).map(drawn)).toEqual(['kein Wert erlaubt']);
-    expect(allowedLines({ enum: [true, 0], regex: null, min: null, max: null }).map(drawn)).toEqual(['erlaubt: [true], [0]']);
+    expect(allowedLines({ enum: ['0', 0], regex: null, min: null, max: null }).map(drawn)).toEqual(['erlaubt: [0], [0]']);
     expect(allowedLines(null)).toEqual([]);
   });
 
@@ -57,14 +57,14 @@ describe('contractLines — the writes a stored contract grants without asking',
     ['without a host', { ...GRANT, hostPatterns: [] }],
     ['without a method', { ...GRANT, httpMethods: [] }],
     ['whose tools are not a list', { ...GRANT, grantedTools: 'http_request' }],
+    ['whose hosts are text, read character by character at the run', { ...GRANT, hostPatterns: '*' }],
+    ['whose hosts are a nested list', { ...GRANT, hostPatterns: [['h.example']] }],
+    ['whose methods are missing', { ...GRANT, httpMethods: undefined }],
+    ['with one entry that is not a name', { ...GRANT, pathPatterns: ['/a', 7] }],
     ['that is not an object', 'http_request'],
     ['that is a list', [GRANT]],
   ])('a contract %s grants nothing', (_label, contract) => {
     expect(contractLines(contract)).toEqual([]);
-  });
-
-  it('a value that is not text is left out, not printed', () => {
-    expect(contractLines({ ...GRANT, hostPatterns: ['h.example', 7], pathPatterns: ['/a'], httpMethods: ['POST'] })).toEqual(['POST https://h.example/a']);
   });
 
   it('without a contract there is nothing to list', () => {

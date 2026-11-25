@@ -37,17 +37,19 @@ export function allowedLines(a: StampAllowed | null): string[] {
 }
 
 /**
- * The writes a stored contract lets a run make without asking, one line per method and URL, as
- * the engine grants them: only `http_request`, and only for a method, host and path the contract
- * names (no path is no grant, not the whole host), in the order the stamp preview lists them. Null without a contract; an empty list for a
- * contract that grants nothing, which the view says in a sentence. No other tool is listed: the
- * engine grants none.
+ * The writes a stored contract lets a run make without asking, one line per method and URL, read
+ * the way the engine grants them (`contractGrants`): only `http_request`, only a contract whose
+ * four lists (tools, methods, hosts, paths) are each a list of names, and only for a method, host
+ * and path it names (no path is no grant, not the whole host), in the order the stamp preview
+ * lists them. Null without a contract; an empty list for a contract that grants nothing, which the
+ * view says in a sentence. No other tool is listed: the engine grants none.
  */
 export function contractLines(contract: unknown): string[] | null {
 	if (contract === undefined || contract === null) return null;
 	if (typeof contract !== 'object' || Array.isArray(contract)) return [];
 	const c = contract as Record<string, unknown>;
-	const list = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
-	if (!list(c['grantedTools']).includes('http_request')) return [];
-	return list(c['hostPatterns']).flatMap((h) => list(c['pathPatterns']).flatMap((p) => list(c['httpMethods']).map((m) => `${m} https://${h}${p}`)));
+	const names = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === 'string');
+	const [tools, methods, hosts, paths] = [c['grantedTools'], c['httpMethods'], c['hostPatterns'], c['pathPatterns']];
+	if (!names(tools) || !names(methods) || !names(hosts) || !names(paths) || !tools.includes('http_request')) return [];
+	return hosts.flatMap((h) => paths.flatMap((p) => methods.map((m) => `${m} https://${h}${p}`)));
 }

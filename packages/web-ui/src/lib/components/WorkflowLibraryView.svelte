@@ -340,7 +340,6 @@
 		scheduleError = '';
 	}
 
-
 	function onScheduleKey(e: KeyboardEvent): void {
 		if (e.key === 'Enter') void submitSchedule();
 		if (e.key === 'Escape') cancelScheduleModal();

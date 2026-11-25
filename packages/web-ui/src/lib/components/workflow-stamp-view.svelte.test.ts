@@ -734,7 +734,7 @@ describe('what the contract allows, and a contract that grants nothing (U-451)',
 		expect(target.textContent).not.toContain('Ohne Rückfrage darf dieser Workflow');
 	});
 
-	it('a contract that grants writes lists them under a title that says they need no asking; without a contract there is neither', async () => {
+	it('a contract that grants writes lists them under a title that says they need no asking', async () => {
 		await openStamp(withParams('d1', [], ['POST https://api.example.com/upload']));
 		expect(target.textContent).toContain('Ohne Rückfrage darf dieser Workflow diese ausgehenden Aktionen durchführen:');
 		expect(target.textContent).toContain('POST https://api.example.com/upload');

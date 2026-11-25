@@ -51,10 +51,10 @@ export type StampThinking = (typeof STAMP_THINKING)[number];
  * enforces it at bind: every facet that is present holds. An empty list admits nothing.
  */
 export interface StampAllowed {
-  enum: Array<string | number | boolean> | null;
+  enum: Array<string | number> | null;
   regex: string | null;
-  min: number | string | null;
-  max: number | string | null;
+  min: number | null;
+  max: number | null;
 }
 
 export interface StampParameter {
@@ -93,21 +93,21 @@ const optMs = (v: unknown): number | null | typeof BAD =>
   v === undefined || v === null ? null : typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : BAD;
 /**
  * Absent or null is none; what a contract allows read whole is itself; anything else is BAD. A list
- * holds only values a bound parameter can be, a bound is a number or the text the run reads, and at
- * least one facet is set: the server sends none for a parameter the contract sets nothing for.
+ * holds only values a bound parameter can be (text or a number), a bound is a number, and at least
+ * one facet is set: the server sends none for a parameter the contract sets nothing for.
  */
 const optAllowed = (v: unknown): StampAllowed | null | typeof BAD => {
   if (v === undefined || v === null) return null;
   if (!isRecord(v)) return BAD;
   const values = v['enum'] ?? null;
-  if (values !== null && (!Array.isArray(values) || !values.every((x) => typeof x === 'string' || typeof x === 'number' || typeof x === 'boolean'))) return BAD;
+  if (values !== null && (!Array.isArray(values) || !values.every((x) => typeof x === 'string' || typeof x === 'number'))) return BAD;
   const regex = optStr(v['regex']);
-  const bound = (b: unknown): number | string | null | typeof BAD => (b === undefined || b === null ? null : typeof b === 'number' || typeof b === 'string' ? b : BAD);
+  const bound = (b: unknown): number | null | typeof BAD => (b === undefined || b === null ? null : typeof b === 'number' && Number.isFinite(b) ? b : BAD);
   const min = bound(v['min']);
   const max = bound(v['max']);
   if (regex === BAD || min === BAD || max === BAD) return BAD;
   if (values === null && regex === null && min === null && max === null) return BAD;
-  return { enum: values as Array<string | number | boolean> | null, regex, min, max };
+  return { enum: values as Array<string | number> | null, regex, min, max };
 };
 /** Absent or null is none; a grant read whole is itself; anything else is BAD. */
 const optGrant = (v: unknown): StampRoleGrant | null | typeof BAD => {
