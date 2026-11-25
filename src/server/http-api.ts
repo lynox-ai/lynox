@@ -145,6 +145,7 @@ import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson, externalHostOf } from '../core/bulk-ledger.js';
+import { judgeRuleSourceChanged } from '../core/bulk-judge-rule.js';
 import { BULK_LIST_NOTE, hasListPageUrl, isShopifyListSource, listPageUrl, shopifyListFiltersOf } from '../core/bulk-list.js';
 import { shopifyGraphqlEndpoint } from '../core/shopify-graphql.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../core/bulk-write-forms.js';
@@ -10910,6 +10911,15 @@ export class LynoxHTTPApi {
           // hook drops them — so such a tenant does not start one yet (PRD bulk-loop §3.1).
           if (bulkJudgeOwnKey()) {
             errorResponse(res, 409, 'A bulk run with a judge cannot be started on an instance with its own model key yet.', 'judge_unavailable');
+            return;
+          }
+          // A rule taken from an artifact starts only while the artifact still holds the text the run
+          // was planned with: the run judges by the planned text, never a newer one, and an owner who
+          // edited the rule since meant the edit.
+          const planned = ledger.getJudgeRuleForOwner(params['id']!);
+          const changed = planned === null ? null : judgeRuleSourceChanged(planned, engine.getArtifactStore());
+          if (changed !== null) {
+            errorResponse(res, 409, changed, 'rule_source_changed');
             return;
           }
         }
