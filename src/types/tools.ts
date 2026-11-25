@@ -9,6 +9,7 @@ import type { UntrustedCause } from '../core/untrusted-signals.js';
 import type { CallApiCost, CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 import type { ContainedRefusalReason } from '../core/containment.js';
 import type { SendTarget } from '../core/send-target.js';
+import type { HostPolicyContext } from '../core/network-guard.js';
 
 export type ToolHandler<TInput = unknown> =
   (input: TInput, agent: IAgent) => Promise<string>;
@@ -138,7 +139,12 @@ export interface ToolEntry<TInput = unknown> {
    */
   destructive?: {
     mode: 'data' | 'external';
-    check?: (input: TInput, ctx?: { autonomy?: AutonomyLevel | undefined; parentProvider?: ProviderConfigSnapshot | null | undefined }) => string | WarningPayload | null;
+    /**
+     * Whether a call is destructive, and how to word it. PURE and idempotent: the guard calls it
+     * more than once per call (the decision, a payload's re-read, and for a question in another
+     * language its wording), and every call must answer the same.
+     */
+    check?: (input: TInput, ctx?: { autonomy?: AutonomyLevel | undefined; parentProvider?: ProviderConfigSnapshot | null | undefined; /** The language a payload's message is written in. */ language?: 'de' | 'en' | undefined }) => string | WarningPayload | null;
   } | undefined;
   /**
    * What a call writes OUTSIDE the instance — sends, creates or changes something at a
@@ -187,11 +193,50 @@ export interface ToolEntry<TInput = unknown> {
   /**
    * Like `sendTargets`, but read only while the conversation latch is set: once something from
    * outside the owner's own words is in the conversation. For a call that is a plain read on a
-   * clean conversation and can carry data out only after foreign content arrived (a GET whose
-   * query a read page could have filled). Same contract as `sendTargets`; a tool declares one of
-   * the two, and `sendTargets` wins if both are set.
+   * clean conversation and can carry data out only after foreign content arrived: its address
+   * can hold what the conversation holds, in the path, the host name or the query. Same contract
+   * as `sendTargets`. Read only when `sendTargets` is absent or returns `null` for the call (a
+   * tool whose writes declare targets and whose reads do not).
    */
   sendTargetsWhenLatched?: ((input: TInput) => readonly SendTarget[] | null) | undefined;
+  /**
+   * The address a read fetches, exactly as the input names it, when nothing else of the call can
+   * carry data (no body, no header the model set); otherwise `null`. While the latch is set, a
+   * call whose address a search in this conversation listed as a result
+   * (`IAgent.searchResultAddresses`) passes the origin check without a question: the provider
+   * wrote that address, not the model (which results come back still depends on the query; see
+   * `SearchResultAddresses`).
+   */
+  readAddress?: ((input: TInput) => string | null) | undefined;
+  /**
+   * Whether a read's address carries another address (`carriesAddress`). While the latch is set,
+   * such a read is asked about whatever its host, unless a search listed its exact address.
+   */
+  readCarriesAddress?: ((input: TInput) => boolean) | undefined;
+  /**
+   * A refusal the handler would give for this call anyway, read before anyone is asked about it:
+   * the call ends with this text as its error and nobody answers a question that cannot change
+   * the outcome. `null` means nothing: every check after it (where the targets come from, the
+   * guard's question) runs exactly as without this field. It can only refuse; no return value
+   * skips a question or lets a call through. A throw refuses the call with a fixed text, never
+   * the exception's message, and nothing runs. It reads the input as the model wrote it, before
+   * `secret:` references are resolved: where the handler would see another value, it returns
+   * `null`. The text is the tool's own wording, written by its code, never a value of the input
+   * taken as a whole.
+   */
+  refusesUnasked?: ((input: TInput, ctx: HostPolicyContext) => string | null) | undefined;
+  /**
+   * The address a call SAVES for later credentialed sends, exactly as the input names it: the
+   * token endpoint a profile the call saves will post a client ID and client secret to (`api_setup`
+   * create/update). Otherwise `null`. Where it is not `null`, the target `sendTargetsWhenLatched`
+   * declares for the call is checked as that save, not as a read: no exception for an address a
+   * search listed or for the host of a connected API, an address that carries another address
+   * (`carriesAddress`) is asked about whatever its host, and the question and the refusals say
+   * "save". `sendTargetsWhenLatched` must declare this address's host for the same input.
+   * Throws for an address that is set but cannot be read (not text): the call is then refused as
+   * an unreadable save, never let through.
+   */
+  credentialAddress?: ((input: TInput) => string | null) | undefined;
   /**
    * When true, calling this tool ENDS the agent's turn: after the tool_result
    * is appended and checkpointed, the loop returns the turn's text instead of

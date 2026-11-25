@@ -16,6 +16,7 @@ import { createServer as createHttpServer, type IncomingMessage, type Server as 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { isIPv4 } from 'node:net';
 import { hostInSet, type CredentialRegistry, type DenialReason, type TunnelHandle } from './registry.js';
+import { hostForLog, targetForLog } from './log-host.js';
 import { ALLOWED_PORTS, credentialFromHeader, isCredential, isHelloRetryRequest, parseAuthority, parseClientHello, parseRegistration, pickAddress } from './policy.js';
 
 export interface ProxyLimits {
@@ -159,17 +160,19 @@ export class ShellProxy {
     const entry = cred === null ? null : this.deps.registry.lookup(cred);
     if (cred === null || entry === null) { this.reply(socket, 407, AUTHENTICATE); return; }
     const tag = credTag(cred);
-    const deny = (host: string, port: number, reason: DenialReason, detail = ''): void => {
+    // The log names a host the model chose only in part (log-host.ts); the denial the registry
+    // keeps goes back to the run, and keeps it whole.
+    const deny = (host: string, port: number, reason: DenialReason, detail = '', logged = hostForLog(entry.set, host)): void => {
       this.deps.registry.recordDenial(cred, host, port, reason);
-      this.deps.log(`deny cred=${tag} host=${JSON.stringify(host.slice(0, 255))} port=${String(port)} why=${reason}${detail}`);
+      this.deps.log(`deny cred=${tag} host=${JSON.stringify(logged)} port=${String(port)} why=${reason}${detail}`);
       this.reply(socket, 403);
     };
 
     // Plain http is answered here rather than left to fail on the network, so the engine can
     // tell the model to use https.
-    if (req.method !== 'CONNECT') { deny(req.target, 0, /^http:\/\//i.test(req.target) ? 'plain-http' : 'bad-target'); return; }
+    if (req.method !== 'CONNECT') { deny(req.target, 0, /^http:\/\//i.test(req.target) ? 'plain-http' : 'bad-target', '', targetForLog(entry.set, req.target)); return; }
     const target = parseAuthority(req.target);
-    if (!target.ok) { deny(req.target, 0, 'bad-target'); return; }
+    if (!target.ok) { deny(req.target, 0, 'bad-target', '', targetForLog(entry.set, req.target)); return; }
     const { host, port } = target.value;
 
     // 2. The port, 3. the name: both before anything is resolved.
@@ -179,7 +182,7 @@ export class ShellProxy {
     // The slot is taken now, before resolving, so parallel requests cannot all pass the cap.
     const opening = this.opening.get(cred) ?? 0;
     if (this.open >= this.limits.tunnelsTotal || this.deps.registry.tunnelCount(cred) + opening >= this.limits.tunnelsPerCred) {
-      this.deps.log(`busy cred=${tag} host=${host}`);
+      this.deps.log(`busy cred=${tag} host=${hostForLog(entry.set, host)}`);
       this.reply(socket, 503);
       return;
     }
@@ -202,7 +205,7 @@ export class ShellProxy {
         try {
           addresses = await this.deps.lookup(host);
         } catch {
-          this.deps.log(`unresolved cred=${tag} host=${host}`);
+          this.deps.log(`unresolved cred=${tag} host=${hostForLog(entry.set, host)}`);
           this.open--;
           this.reply(socket, 502);
           return;
@@ -213,14 +216,14 @@ export class ShellProxy {
       if (socket.destroyed) { this.open--; return; }
 
       // 5. Connect to exactly that address.
-      this.tunnel(socket, cred, tag, host, port, entry.set !== '*', picked.value, rest);
+      this.tunnel(socket, cred, tag, host, hostForLog(entry.set, host), port, entry.set !== '*', picked.value, rest);
     } finally {
       release();
     }
   }
 
   /** Called with a slot already counted in `open`; every path out of here gives it back once. */
-  private tunnel(client: Socket, cred: string, tag: string, host: string, port: number, checkName: boolean, ip: string, rest: Buffer): void {
+  private tunnel(client: Socket, cred: string, tag: string, host: string, loggedHost: string, port: number, checkName: boolean, ip: string, rest: Buffer): void {
     let upstream: Socket | null = null;
     let closed = false;
     const handle: TunnelHandle = {
@@ -262,11 +265,11 @@ export class ShellProxy {
     up.on('close', () => { handle.close(); });
     const refuse = (verdict: { why: DenialReason; name?: string }): void => {
       this.deps.registry.recordDenial(cred, verdict.name ?? host, port, verdict.why);
-      this.deps.log(`deny cred=${tag} host=${host} port=${String(port)} why=${verdict.why}`);
+      this.deps.log(`deny cred=${tag} host=${loggedHost} port=${String(port)} why=${verdict.why}`);
       handle.close();
     };
     const start = (): void => {
-      this.deps.log(`open cred=${tag} host=${host} ip=${ip} port=${String(port)}`);
+      this.deps.log(`open cred=${tag} host=${loggedHost} ip=${ip} port=${String(port)}`);
       client.setTimeout(this.limits.idleTimeoutMs, () => { handle.close(); });
       up.setTimeout(this.limits.idleTimeoutMs, () => { handle.close(); });
       client.pipe(up);

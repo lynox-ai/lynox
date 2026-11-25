@@ -54,6 +54,21 @@ export function formatCost(usd: number | null | undefined): string {
 }
 
 /**
+ * A known dollar amount with its number in the page's language: the sign stays `$`, the digits
+ * follow the language (DE `0,0076 $`, EN `$0.0076`). Four places below a cent, two from a cent on.
+ */
+export function formatUsdIn(usd: number, lang: 'de' | 'en'): string {
+	const places = usd !== 0 && Math.abs(usd) < 0.01 ? 4 : 2;
+	return new Intl.NumberFormat(lang === 'de' ? 'de-DE' : 'en-US', {
+		style: 'currency',
+		currency: 'USD',
+		currencyDisplay: 'narrowSymbol',
+		minimumFractionDigits: places,
+		maximumFractionDigits: places,
+	}).format(usd);
+}
+
+/**
  * Cost formatting for integer-cents input (Dashboard / budget contexts).
  * Sub-integer-cent precision is lost on the wire, so we render '< $0.01'
  * instead of '$0.00' to signal "non-zero but rounded".

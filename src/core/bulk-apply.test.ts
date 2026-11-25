@@ -481,6 +481,9 @@ describe('a target found already holding its value', () => {
     expect([u.applied, u.foundAsPlanned]).toEqual([2, 1]);
     // In the undo's head: one taken back by it ("written" there), one it found already back.
     expect(u.heads).toMatchObject({ written: 1, unchanged: 1, takenBack: 0 });
+    // In the source's head: the found one stays unchanged; both the run wrote are taken back, the
+    // one the undo found already back included (its old value is there again).
+    expect(ledger.getStatus(runId)!.heads).toMatchObject({ written: 0, unchanged: 1, takenBack: 2 });
     // Through the `unchanged` branch, not `takenBack`: an undo's own rows carry no `undone_at`
     // (the source's rows do), and the one it found is marked found and never sent to.
     // The undo plans newest first: its first row is the third target, the one found already back.
@@ -723,6 +726,28 @@ describe('the owner view', () => {
     const { runId } = recordMemoryRun(501);
     expect(ledger.getPreview(runId, { limit: 5000 })).toHaveLength(500);
     expect(ledger.getPreview(runId, { offset: 500 })).toHaveLength(1);
+  });
+
+  it('serves only the targets the plan changes when asked, the written ones first and then plan order, paged among them', () => {
+    // Eight targets, two of them changed late in the plan: the page that names what a run wrote
+    // finds them without loading the unchanged ones before them.
+    const targets: PlannedTarget[] = Array.from({ length: 8 }, (_, i) => {
+      const key = `k${String(i)}`;
+      return { key, before: { absent: false, value: `v${String(i)}` }, after: i === 5 || i === 7 ? `w${String(i)}` : `v${String(i)}` };
+    });
+    const { id } = ledger.recordDryRun({ createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'mem', targets });
+    expect(ledger.getStatus(id)!.changes).toMatchObject({ update: 2, unchanged: 6 });
+    expect(ledger.getPreview(id, { changed: true }).map((t) => [t.key, t.change])).toEqual([['k5', 'update'], ['k7', 'update']]);
+    expect(ledger.getPreview(id, { changed: true, offset: 1, limit: 1 }).map((t) => t.key)).toEqual(['k7']);
+    // Control: without it, every target in plan order.
+    expect(ledger.getPreview(id).map((t) => t.key)).toEqual(['k0', 'k1', 'k2', 'k3', 'k4', 'k5', 'k6', 'k7']);
+    expect(ledger.getPreview(id, { changed: false, limit: 2 }).map((t) => t.key)).toEqual(['k0', 'k1']);
+    // Once the run wrote the later one, it comes first among the changed; plan order stays without it.
+    approve(id);
+    expect(ledger.claimTarget(id, 7)).toBe(true);
+    ledger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 7, 'ok');
+    expect(ledger.getPreview(id, { changed: true }).map((t) => [t.key, t.written])).toEqual([['k7', true], ['k5', false]]);
+    expect(ledger.getPreview(id).map((t) => t.key).slice(5)).toEqual(['k5', 'k6', 'k7']);
   });
 });
 
@@ -2153,6 +2178,17 @@ describe('a local send whose write threw', () => {
     const inner = memory(initial).writer;
     const readFails: TargetWriter = { async read() { throw new Error(`read ${MARK}`); }, write: (k, a) => inner.write(k, a) };
     await runBulkEffect(runId, 'bulk_apply', effectDeps(readFails));
+    expect(sends(runId)).toEqual([{ seq: 0, write_sent: 1, unknown_sends: 1 }]);
+  });
+
+  it('books only its own send as answered, and keeps the one a loop that died left', async () => {
+    const { runId, initial } = recordMemoryRun(1);
+    approve(runId);
+    engineDb.getDb().prepare('UPDATE bulk_targets SET write_sent = 1, unknown_sends = 1 WHERE run_id = ?').run(runId);
+    // This pass sends again (a local writer has no unclear-send check) and its write throws.
+    const { writer, writes } = counting(memory(initial, new Set(['k000'])).writer);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    expect(writes.get('k000'), 'this pass sent').toBe(1);
     expect(sends(runId)).toEqual([{ seq: 0, write_sent: 1, unknown_sends: 1 }]);
   });
 });

@@ -369,7 +369,7 @@ describe('a save that cannot derive the authorize host says so', () => {
   // disclosure depend on whether an unrelated parameter happened to validate,
   // with no trace in either direction. Refusing the save was the other
   // candidate and is worse: a provider retired from the register would make
-  // every profile naming it unsaveable, including the update removing the field.
+  // every profile naming it unsaveable, even a save that keeps the provider.
   const saveWith = async (oauth: Record<string, unknown>, over: Partial<ApiProfile> = {}, prompt?: (q: unknown) => Promise<string>): Promise<string> => {
     const agent = agentWith(new ApiStore());
     if (prompt) (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = prompt;
@@ -1255,11 +1255,12 @@ describe('a save cannot take a profile off its built-in provider', () => {
     expect(store.get('vetted-api')?.description).toBe('changed');
   });
 
-  it('lets a profile off a provider the engine no longer knows', async () => {
-    // A preset retired from the register cannot connect anyway; holding the profile to it
-    // would make even the save that repairs it impossible.
+  it('lets a profile off a provider id this engine never had', async () => {
+    // Such an id cannot connect; holding the profile to it would make even the save that
+    // repairs a mistyped id impossible. A provider this engine once shipped is different and
+    // stays held (`RETIRED_PRESET_IDS`, api-setup-retired-preset.test.ts).
     const store = new ApiStore();
-    store.register({ ...prior, auth: { ...prior.auth!, oauth: { ...prior.auth!.oauth!, preset_id: 'retired-shop' } } });
+    store.register({ ...prior, auth: { ...prior.auth!, oauth: { ...prior.auth!.oauth!, preset_id: 'never-shipped' } } });
     const agent = agentWith(store);
     (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async () => 'allow';
     const reply = await apiSetupTool.handler({ action: 'update', profile: {
@@ -1432,6 +1433,71 @@ describe('connect refuses before the link what the route would refuse', () => {
     const owner = await connect(agentWith(ownerStore));
     expect(owner).toContain('It opens ');
     expect(owner).not.toContain('a button that continues to');
+  });
+});
+
+// Whether the client pair is stored is asked without reading it out, where the store
+// can answer that way, so the check is not recorded as a credential read.
+describe('connect asks whether the client pair is there without reading it', () => {
+  const KEYS = ['EXAMPLE_SHOP_CLIENT_ID', 'EXAMPLE_SHOP_CLIENT_SECRET'];
+  const scoped = (): ApiProfile => {
+    const base = shopProfile();
+    return { ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, scope: 'read_orders' } } };
+  };
+  /** A store that answers `holds`, and records every name it is asked to read out. */
+  function holding(held: readonly string[], read: string[]): Record<string, unknown> {
+    return {
+      holds: (name: string) => held.includes(name),
+      resolve: (name: string) => { read.push(name); return null; },
+      extractSecretNames: (input: unknown): string[] => [...JSON.stringify(input).matchAll(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g)].map((m) => m[1]!),
+      resolveSecretRefs: (input: unknown): unknown => {
+        for (const m of JSON.stringify(input).matchAll(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g)) read.push(m[1]!);
+        return input;
+      },
+    };
+  }
+  const withStore = (store: ApiStore, secretStore: unknown): never => ({ ...(agentWith(store) as object), secretStore } as never);
+
+  it('hands out the link on holds alone, and reads neither half of the pair', async () => {
+    const store = new ApiStore();
+    store.register(scoped());
+    const read: string[] = [];
+    const result = await connect(withStore(store, holding(KEYS, read)));
+    expect(result).toContain('/api/oauth/connect/shop-api');
+    expect(read.filter((n) => KEYS.includes(n))).toEqual([]);
+  });
+
+  it('says what is missing from the holds answer', async () => {
+    const store = new ApiStore();
+    store.register(scoped());
+    const read: string[] = [];
+    const result = await connect(withStore(store, holding(['EXAMPLE_SHOP_CLIENT_ID'], read)));
+    expect(result).toContain('the vault has no value for EXAMPLE_SHOP_CLIENT_SECRET');
+    expect(read.filter((n) => KEYS.includes(n))).toEqual([]);
+  });
+
+  it('an infrastructure secret never counts as the profile\'s client secret, even where the vault holds it', async () => {
+    const store = new ApiStore();
+    const base = scoped();
+    expect(store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, client_secret_key: 'LYNOX_SHOP_SECRET' } } })).toBe(true);
+    const read: string[] = [];
+    const result = await connect(withStore(store, holding([...KEYS, 'LYNOX_SHOP_SECRET'], read)));
+    // Counted as missing, so the reply is the one for a profile whose app is not where it reads it.
+    expect(result).not.toContain('/api/oauth/connect/shop-api');
+    expect(result).toContain('reads its app from names of its own');
+  });
+
+  it('a run whose scope leaves the secret out is not sent to enter it again, and nothing is recorded as denied', async () => {
+    const { scopeSecretStore } = await import('../../core/secret-scope.js');
+    const store = new ApiStore();
+    store.register(scoped());
+    const denied: string[] = [];
+    const result = await connect(withStore(store, scopeSecretStore(holding(KEYS, []) as never, ['EXAMPLE_SHOP_CLIENT_ID'], (n) => denied.push(n))));
+    expect(result).toContain('EXAMPLE_SHOP_CLIENT_SECRET is outside the secrets this run may see');
+    expect(result).toContain('Do not ask the user to enter it again');
+    expect(result).not.toContain('the vault has no value');
+    expect(result).not.toContain('ask_secret');
+    expect(denied).toEqual([]);
   });
 });
 

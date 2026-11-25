@@ -86,7 +86,8 @@ describe('ContextPanel header for every tool defined by a literal name', () => {
 			component = mount(ContextPanel, { target });
 			flushSync();
 			const shown = target.querySelector('aside span.text-xs.font-medium')?.textContent;
-			const chat = toolCallLabel(name, {}, t)?.action ?? name;
+			// The panel names a call without its input, so it reads the chat's word for no input.
+			const chat = toolCallLabel(name, undefined, t)?.action ?? name;
 			if (shown !== chat) differ.push(`${name}: panel ${shown}, chat ${chat}`);
 			unmount(component);
 			component = undefined;

@@ -114,9 +114,23 @@ describe('the stamp of a watch whose stored address hides characters', () => {
 		expect(target.querySelector('[data-stamp-watch-stored]')).toBeNull();
 		expect(target.querySelector('[data-stamp-watch-stored-hint]')).toBeNull();
 		const parsed = new URL(url);
-		expect(target.querySelector('[data-stamp-watch] span.font-medium.text-text')?.textContent).toBe('https://shop.example');
+		expect([...target.querySelectorAll('[data-stamp-watch] span.font-medium.text-text')].map((h) => h.textContent).join('')).toBe('https://shop.example');
 		expect(block()).toContain(`https://shop.example${parsed.pathname}${parsed.search}${parsed.hash}`);
 		expect(target.textContent).not.toContain('oben markiert');
 		expect(target.querySelector('[data-stamp-confirm-button]')?.textContent?.trim()).toBe('Bestätigen');
+	});
+
+	it('keeps the host whole in the preview and in the stored line: it breaks only after a dot or slash, not at a hyphen', async () => {
+		const pieces = (el: Element | null): string[] => [...(el?.querySelectorAll('span.break-all') ?? [])].map((s) => s.textContent ?? '');
+		watchUrl = 'https://preise.lieferant-beispiel.ch/heizoel';
+		await open();
+		const preview = target.querySelector('[data-testid="stamp-watch-address"]');
+		expect(preview?.classList.contains('inline-block')).toBe(true);
+		expect(pieces(preview)).toEqual(['https://', 'preise.', 'lieferant-beispiel.', 'ch', '/', 'heizoel']);
+		if (component) unmount(component);
+		component = undefined;
+		watchUrl = 'https://preise.lieferant-beispiel.ch/x/../heizoel';
+		await open();
+		expect(pieces(target.querySelector('[data-stamp-watch-host]'))).toEqual(['https://', 'preise.', 'lieferant-beispiel.', 'ch']);
 	});
 });
