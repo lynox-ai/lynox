@@ -27,6 +27,27 @@ describe('the vault-binding question', () => {
       .toBe('CRM_KEY is sent only to: api.crm.example.\n\nThis profile would also send it to: eu.crm.example, x.example.\n\nAllow CRM_KEY to be sent there as well?');
   });
 
+  it('keeps the English segments as they were, frame and value alike', () => {
+    expect(bindingQuestion('K', [], ['a.example']).segments).toEqual([
+      { kind: 'value', text: 'K' },
+      { kind: 'frame', text: ' is stored in your vault and is not yet limited to any address.\n\nThis profile would send it to: ' },
+      { kind: 'value', text: 'a.example' },
+      { kind: 'frame', text: '.\n\nAllow ' },
+      { kind: 'value', text: 'K' },
+      { kind: 'frame', text: ' to be sent there? From then on it goes only to the addresses you have allowed.' },
+    ]);
+    expect(bindingQuestion('K', ['a.example'], ['b.example']).segments).toEqual([
+      { kind: 'value', text: 'K' },
+      { kind: 'frame', text: ' is sent only to: ' },
+      { kind: 'value', text: 'a.example' },
+      { kind: 'frame', text: '.\n\nThis profile would also send it to: ' },
+      { kind: 'value', text: 'b.example' },
+      { kind: 'frame', text: '.\n\nAllow ' },
+      { kind: 'value', text: 'K' },
+      { kind: 'frame', text: ' to be sent there as well?' },
+    ]);
+  });
+
   it('reads in German for a German session, in both forms', () => {
     expect(flattenPrompt(bindingQuestion('CRM_KEY', [], ['api.crm.example'], 'de')))
       .toBe('CRM_KEY liegt in deinem Vault und ist noch an keine Adresse gebunden.\n\nDieses Profil würde den Wert senden an: api.crm.example.\n\nDarf CRM_KEY dorthin gesendet werden? Danach geht der Wert nur noch an die Adressen, die du erlaubt hast.');
