@@ -33,8 +33,9 @@
 	let loading = $state(true);
 	let error = $state('');
 	let actionError = $state('');
-	// A start check that can never pass refused approving this run (its id and the engine's code):
-	// the approval stays off for it, with the cause under it, until the page shows another run.
+	// A start check that can never pass refused approving or writing on this run (its id and the
+	// engine's code): both stay off for it, with the cause by the button, until the page shows
+	// another run, is opened again, or is loaded by the owner's own act.
 	let hopeless = $state<{ id: string; code: string } | null>(null);
 	let hopelessLine = $state<HTMLParagraphElement | null>(null);
 	let busy = $state(false);
@@ -185,6 +186,9 @@
 		if (!quiet) {
 			loading = true;
 			error = '';
+			// A load the owner set off asks the run anew: a cause lynox fixed meanwhile no longer
+			// keeps approving or writing on off, and the route answers again on the next press.
+			hopeless = null;
 		}
 		try {
 			const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(id)}`);
@@ -318,7 +322,7 @@
 				maxTargets: oneFirst ? 1 : maxTargets,
 				...(run.writeForm === 'unmeasured' ? { unmeasuredConfirmed: unmeasuredOk } : {}),
 			});
-			return (await approvalHopeless(id, r)) ? '' : refusalOf(r);
+			return (await reachHopeless(id, r)) ? '' : refusalOf(r);
 		});
 	}
 
@@ -395,15 +399,15 @@
 		return act(async (id) => {
 			if (!run?.checksum) return t('common.load_failed');
 			const r = await post(`/bulk/runs/${encodeURIComponent(id)}/approve`, { checksum: run.checksum });
-			return (await approvalHopeless(id, r)) ? '' : refusalOf(r);
+			return (await reachHopeless(id, r)) ? '' : refusalOf(r);
 		});
 	}
 
-	/** Approving again would meet the same refusal: the approval goes off for this run, and its cause
-	 *  is said under it instead of as the act's error line (the act then answers an empty error, so
-	 *  the run is not reloaded). The button that was pressed goes off under the focus, so the focus
-	 *  moves to the cause. */
-	async function approvalHopeless(id: string, r: { ok: boolean; body: PostBody }): Promise<boolean> {
+	/** Approving or writing on again would meet the same refusal: both go off for this run, and the
+	 *  cause is said by the button instead of as the act's error line (the act then answers an
+	 *  empty error, so the run is not reloaded). The button that was pressed goes off under the focus,
+	 *  so the focus moves to the cause. */
+	async function reachHopeless(id: string, r: { ok: boolean; body: PostBody }): Promise<boolean> {
 		if (r.ok || !bulkReachHopeless(r.body.code)) return false;
 		// The page moved to another run while the approval was out: neither its state nor its focus.
 		if (runId !== id) return true;
@@ -423,7 +427,8 @@
 			const confirmed = await post(`/bulk/runs/${encodeURIComponent(id)}/confirm-probe`);
 			if (!confirmed.ok) return refusalOf(confirmed);
 			if (runId !== id) return null;
-			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(id)}/resume`, { checksum: shown, maxTargets }));
+			const r = await post(`/bulk/runs/${encodeURIComponent(id)}/resume`, { checksum: shown, maxTargets });
+			return (await reachHopeless(id, r)) ? '' : refusalOf(r);
 		});
 	}
 
@@ -532,7 +537,8 @@
 			} else if (kind !== 'write' && kind !== 'check') {
 				return t('common.load_failed');
 			}
-			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(id)}/resume`, body));
+			const r = await post(`/bulk/runs/${encodeURIComponent(id)}/resume`, body);
+			return (await reachHopeless(id, r)) ? '' : refusalOf(r);
 		});
 	}
 
@@ -630,6 +636,9 @@
 		filterLine?.focus();
 	}
 	const resumeKind = $derived(run ? bulkResumeKind(run) : null);
+	// Writing on was refused for good: only where the page offers writing on at all. A refusal that
+	// answers after a load the owner set off can meet a run that halted otherwise meanwhile.
+	const resumeHopeless = $derived(hopelessReason !== null && resumeKind !== null && resumeKind !== 'none' && resumeKind !== 'nothing');
 	const resumeText = $derived(run ? bulkResumeText(run, managed, i18n, failureMarked) : null);
 	const resumeWords = $derived(run ? bulkResumeWords(run, i18n) : null);
 	const rolledBack = $derived(run ? bulkRolledBackParts(run, view) : null);
@@ -1118,11 +1127,13 @@
 				{/if}
 			{:else if resumeKind !== null && resumeText}
 				<div class="space-y-3 border-t border-border pt-4">
-					{#if resumeText.before}
+					<!-- After a start check that can never pass, nothing promises writing on: the halt's cause,
+					     the reason, and the buttons stay. -->
+					{#if resumeText.before && !resumeHopeless}
 						<p class="text-sm">{@render hostText(resumeText.before)}</p>
 					{/if}
 					<!-- The support link stands under the sentence that names support, which comes before the check. -->
-					{#if supportMail}
+					{#if supportMail && !resumeHopeless}
 						<p class="text-sm"><a href={supportMail} class="{btnPlain} inline-block">{t('bulk.halt.support_mail')}</a></p>
 					{/if}
 					{#if resumeKind === 'none'}
@@ -1133,6 +1144,12 @@
 						{/if}
 					{:else if resumeKind === 'nothing'}
 						<p class="text-sm">{@render hostText(resumeText.check ?? '')}</p>
+					{:else if resumeHopeless}
+						<p id="bulk-resume-hopeless" class="text-sm text-danger" tabindex="-1" bind:this={hopelessLine} data-testid="bulk-resume-hopeless">{hopelessReason}</p>
+						<div class="flex flex-wrap gap-2">
+							<button type="button" class={btnPrimary} disabled aria-describedby="bulk-resume-hopeless">{resumeKind === 'check' ? t('bulk.resume.check') : resumeWords!.button}</button>
+							<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
+						</div>
 					{:else}
 						{#if resumeText.soFar}
 							<p class="text-sm">{@render hostText(resumeText.soFar)}</p>
@@ -1257,9 +1274,13 @@
 						{t('bulk.probe.targets')}
 					</label>
 					<div class="flex flex-wrap gap-2">
-						<button type="button" class={btnPrimary} disabled={busy || !probeOk} onclick={confirmProbeAndResume}>{t('bulk.probe.continue')}</button>
+						<button type="button" class={btnPrimary} disabled={busy || !probeOk || hopelessReason !== null}
+							aria-describedby={hopelessReason !== null ? 'bulk-probe-hopeless' : undefined} onclick={confirmProbeAndResume}>{t('bulk.probe.continue')}</button>
 						<button type="button" class={btnPlain} disabled={busy} onclick={planUndo}>{t('bulk.probe.undo_one')}</button>
 					</div>
+					{#if hopelessReason !== null}
+						<p id="bulk-probe-hopeless" class="text-sm text-danger" tabindex="-1" bind:this={hopelessLine} data-testid="bulk-probe-hopeless">{hopelessReason}</p>
+					{/if}
 				</div>
 			{:else if run.kind === 'undo' && run.phase === 'previewed'}
 				<div class="space-y-3 border-t border-border pt-4">

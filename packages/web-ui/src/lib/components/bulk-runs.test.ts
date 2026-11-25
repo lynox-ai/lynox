@@ -1156,14 +1156,14 @@ describe('going on from a run that halted', () => {
 		for (const code of ['reach_approve_credential', 'reach_later_shopifyNotCleared', 'planner_unknown', 'reach_approve_constructor']) expect([code, bulkReachRefusalKey(code)]).toEqual([code, null]);
 	});
 
-	it('takes the approval away only where approving can never pass: self-hosted, no API version', () => {
+	it('takes approving and writing on away only where they can never pass: self-hosted, no API version', () => {
 		const hopeless = ['shopifySelfHosted', 'shopifyNoApiVersion'];
 		for (const k of ['shopifySelfHosted', 'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable', 'shopifyNoApiVersion']) {
 			expect([k, bulkReachHopeless(`reach_approve_${k}`)]).toEqual([k, hopeless.includes(k)]);
-			// Writing on is not approving: its refusal keeps the page as it is.
-			expect([k, bulkReachHopeless(`reach_resume_${k}`)]).toEqual([k, false]);
+			// Writing on meets the same start check: the same causes take it away.
+			expect([k, bulkReachHopeless(`reach_resume_${k}`)]).toEqual([k, hopeless.includes(k)]);
 		}
-		for (const code of [undefined, 'reach_approve_credential', 'planner_unknown', 'reach_approve_constructor', 'xreach_approve_shopifySelfHosted']) expect([code, bulkReachHopeless(code)]).toEqual([code, false]);
+		for (const code of [undefined, 'reach_approve_credential', 'reach_resume_credential', 'planner_unknown', 'reach_approve_constructor', 'reach_undo_shopifySelfHosted', 'reach_resumex_shopifySelfHosted', 'xreach_approve_shopifySelfHosted', 'xreach_resume_shopifySelfHosted']) expect([code, bulkReachHopeless(code)]).toEqual([code, false]);
 	});
 
 	it('words the five halts that had only the engine\'s reason, in both languages', () => {

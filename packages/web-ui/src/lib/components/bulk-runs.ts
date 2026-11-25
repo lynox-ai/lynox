@@ -1438,11 +1438,11 @@ export function bulkReachRefusalKey(code: string): string | null {
 	return m[1] === 'approve' ? `bulk.reach.approve.${m[2]!}` : `bulk.halt.${m[2]!}`;
 }
 
-/** Whether a start check refused approving on a store's cause that no wait and no retry clears
- *  (the instance is self-hosted; the store's preset pins no API version): the page then offers no
- *  approval for that run, and the cause stands as the reason. */
+/** Whether a start check refused approving or writing on, on a store's cause that no wait and no
+ *  retry clears (the instance is self-hosted; the store's preset pins no API version): the page then
+ *  offers neither for that run, and the cause stands as the reason. */
 export function bulkReachHopeless(code: string | undefined): boolean {
-	const m = code === undefined ? null : /^reach_approve_([A-Za-z]+)$/.exec(code);
+	const m = code === undefined ? null : /^reach_(?:approve|resume)_([A-Za-z]+)$/.exec(code);
 	return m !== null && BULK_STORE_CAUSES_NO_WAY_ON.has(m[1]!);
 }
 
