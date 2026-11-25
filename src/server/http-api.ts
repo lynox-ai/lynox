@@ -9496,7 +9496,8 @@ export class LynoxHTTPApi {
       const marked = new Map(foreignConnectionSteps.map((f) => [f.step, f.profileId] as const));
       // A step whose literal call goes to a profile some mandate connected is marked, whoever it was,
       // with the profile, so the view can name the person where a connection below is that profile.
-      const steps = (await stepsShown(planned)).map((st) => ({ ...st, foreignConnection: marked.has(st.id), connectionProfile: marked.get(st.id) ?? null }));
+      // A step marked without a profile is one whose target is set only when it runs: it may use one.
+      const steps = (await stepsShown(planned)).map((st) => ({ ...st, foreignConnection: marked.has(st.id), connectionProfile: marked.get(st.id) ?? null, targetAtRun: marked.has(st.id) && marked.get(st.id) === null }));
       // Everything the stamp binds beside the steps, as the stamp preview shows it: the takeover stamps it too.
       jsonResponse(res, 200, { ...preview, ...stampShown(planned), steps, refusal: null });
     }, ownerOnly('see what taking over a workflow would do')));

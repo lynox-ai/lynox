@@ -7,7 +7,7 @@ import {
 	type BulkI18n, type BulkRunDetailData, type BulkMarkupItem, bulkMarkupItemText, bulkMarkupList, bulkMandateI18n,
 	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
 	bulkSentenceParts, bulkSecretInContextKey,
-	bulkRestartNoneNote, bulkReachRefusalKey,
+	bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -325,7 +325,8 @@ describe('the approved unchecked-change texts', () => {
 		expect(line('bulk.approve.confirm_first')).toBe(entry('bulk.approve.confirm_first',
 			'Setz zuerst das Häkchen oben, dann kannst du freigeben.', 'Tick the box above first, then you can approve.'));
 		const page = readFileSync(fileURLToPath(new URL('./BulkRunDetail.svelte', import.meta.url)), 'utf8');
-		expect(page).toContain(`aria-describedby={run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}`);
+		// A start check that can never pass names its cause first: ticking the box would not help.
+		expect(page).toContain(`aria-describedby={hopelessReason !== null ? 'bulk-approve-hopeless' : run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}`);
 		expect(page).toContain(`<p id="bulk-approve-confirm-first" `);
 	});
 
@@ -1108,6 +1109,16 @@ describe('going on from a run that halted', () => {
 		}
 		// Any other code, or a cause that is not a store's, keeps the engine's sentence.
 		for (const code of ['reach_approve_credential', 'reach_later_shopifyNotCleared', 'planner_unknown', 'reach_approve_constructor']) expect([code, bulkReachRefusalKey(code)]).toEqual([code, null]);
+	});
+
+	it('takes the approval away only where approving can never pass: self-hosted, no API version', () => {
+		const hopeless = ['shopifySelfHosted', 'shopifyNoApiVersion'];
+		for (const k of ['shopifySelfHosted', 'shopifyNotSetUp', 'shopifyUnconfirmed', 'shopifyNotCleared', 'containmentUnwritable', 'shopifyNoApiVersion']) {
+			expect([k, bulkReachHopeless(`reach_approve_${k}`)]).toEqual([k, hopeless.includes(k)]);
+			// Writing on is not approving: its refusal keeps the page as it is.
+			expect([k, bulkReachHopeless(`reach_resume_${k}`)]).toEqual([k, false]);
+		}
+		for (const code of [undefined, 'reach_approve_credential', 'planner_unknown', 'reach_approve_constructor', 'xreach_approve_shopifySelfHosted']) expect([code, bulkReachHopeless(code)]).toEqual([code, false]);
 	});
 
 	it('words the five halts that had only the engine\'s reason, in both languages', () => {

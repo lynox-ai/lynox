@@ -1102,8 +1102,8 @@ export class InboxStateDb {
   ): { total: number; reverted: number; skipped: number } {
     const earliest = now.getTime() - withinMs;
     const rows = this.db
-      .prepare<[string, number], { id: string; item_id: string; prior_user_action: string | null; prior_user_action_at: number | null; action: string }>(
-        `SELECT id, item_id, prior_user_action, prior_user_action_at, action
+      .prepare<[string, number], { id: string; tenant_id: string; item_id: string; prior_user_action: string | null; prior_user_action_at: number | null; action: string }>(
+        `SELECT id, tenant_id, item_id, prior_user_action, prior_user_action_at, action
          FROM inbox_user_action_log
          WHERE bulk_id = ? AND undone_at IS NULL AND performed_at >= ?`,
       )
@@ -1129,6 +1129,18 @@ export class InboxStateDb {
           row.action,
         ) as { changes: number };
         reverted += r.changes;
+        // The item's audit says it was put back: the action log is pruned after minutes, and a
+        // later count of the mail since the owner last dealt with the thread reads the audit.
+        if (r.changes > 0) {
+          this.appendAudit({
+            tenantId: row.tenant_id,
+            itemId: row.item_id,
+            action: 'undo',
+            actor: 'user',
+            payloadJson: JSON.stringify({ intent: 'bulk_undo', bulk_id: bulkId, undid: row.action, restored: row.prior_user_action }),
+            createdAt: now,
+          });
+        }
       }
     });
     txn();
