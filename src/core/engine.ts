@@ -1399,7 +1399,7 @@ export class Engine {
     this._toolContext.mandateEnds = this._mandateEnds;
     // And the live generation of the owner's sessions (v73). Published for the web UI, which runs in
     // this process on a managed instance and checks the same generation (`readSessionToken`).
-    this._ownerSessions = this.engineDb ? new OwnerSessions(this.engineDb.getDb()) : null;
+    this._ownerSessions = this.engineDb ? new OwnerSessions(this.engineDb.getDb(), { mirrorPath: join(getLynoxDir(), 'owner-sessions-generation') }) : null;
     if (this._ownerSessions !== null) {
       const sessions = this._ownerSessions;
       // A recreated engine.db starts again at generation 0, and a cookie of an earlier generation
@@ -1409,9 +1409,9 @@ export class Engine {
       // Reads engine.db on each call; once it is closed the call throws, and the web UI refuses.
       (globalThis as Record<symbol, unknown>)[OWNER_SESSIONS_GENERATION_KEY] = () => sessions.generation();
     } else {
-      // engine.db failed to open: only generation 0, the cookies of today, is let in. A file that is
-      // simply missing starts fresh at 0 as well; both lose an earlier end until the control plane
-      // re-asserts it (`POST /api/admin/owner-sessions/end` with `generation`).
+      // engine.db failed to open: only generation 0 is let in, by the engine (`_ownerSessionEnded`) and,
+      // published the same, by the web UI, so a page does not open on a cookie every `/api` call refuses.
+      (globalThis as Record<symbol, unknown>)[OWNER_SESSIONS_GENERATION_KEY] = () => 0;
       process.stderr.write('[lynox] engine.db is unavailable: an end of the owner sessions cannot be stored or read on this boot\n');
     }
     // And the owner's releases of vault names to profiles a mandate wrote (v27).

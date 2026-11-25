@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
@@ -35,12 +36,18 @@ describe('OwnerSessions', () => {
     expect(sessions.ended(1)).toBe(true);
   });
 
-  it('counts two ends through two handles on the same file as two steps', () => {
+  it('counts ends through two connections to the same file as two steps, with nothing kept in memory', () => {
     const one = new OwnerSessions(edb.getDb());
-    const two = new OwnerSessions(edb.getDb());
-    one.endAll();
-    expect(two.endAll()).toBe(2);
-    expect(one.generation()).toBe(2);
+    const other = new Database(join(dir, 'engine.db'));
+    try {
+      const two = new OwnerSessions(other);
+      one.endAll();
+      expect(two.endAll()).toBe(2);
+      expect(one.generation()).toBe(2);
+      expect(one.ended(1)).toBe(true);
+    } finally {
+      other.close();
+    }
   });
 
   it('raises the generation to one handed in, and never lowers it', () => {
@@ -67,6 +74,56 @@ describe('OwnerSessions', () => {
     new OwnerSessions(edb.getDb()).endAll();
     edb.deleteAllData();
     expect(new OwnerSessions(edb.getDb()).generation()).toBe(1);
+  });
+});
+
+describe('OwnerSessions and the copy of the generation beside engine.db', () => {
+  let dir: string;
+  let mirrorPath: string;
+  const open = (file = 'engine.db'): EngineDb => new EngineDb(join(dir, file));
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-owner-sessions-mirror-'));
+    mirrorPath = join(dir, 'owner-sessions-generation');
+  });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it('writes the copy at open and with every end and raise', () => {
+    const edb = open();
+    try {
+      const sessions = new OwnerSessions(edb.getDb(), { mirrorPath });
+      expect(readFileSync(mirrorPath, 'utf8')).toBe('0');
+      sessions.endAll();
+      expect(readFileSync(mirrorPath, 'utf8')).toBe('1');
+      sessions.raiseTo(9);
+      expect(readFileSync(mirrorPath, 'utf8')).toBe('9');
+    } finally { edb.close(); }
+  });
+
+  it('takes the copy when engine.db went back, as a restored or a missing engine.db does', () => {
+    const first = open();
+    new OwnerSessions(first.getDb(), { mirrorPath }).endAll();
+    new OwnerSessions(first.getDb(), { mirrorPath }).endAll();
+    first.close();
+    // Another engine.db, at generation 0: what a restored backup from before the ends brings.
+    const restored = open('restored.db');
+    try {
+      const sessions = new OwnerSessions(restored.getDb(), { mirrorPath });
+      expect(sessions.generation()).toBe(2);
+      expect(sessions.ended(0)).toBe(true);
+    } finally { restored.close(); }
+  });
+
+  it('keeps engine.db when it is ahead of the copy, and ignores a copy that holds no generation', () => {
+    const edb = open();
+    try {
+      new OwnerSessions(edb.getDb()).raiseTo(5);
+      writeFileSync(mirrorPath, '3');
+      expect(new OwnerSessions(edb.getDb(), { mirrorPath }).generation()).toBe(5);
+      expect(readFileSync(mirrorPath, 'utf8')).toBe('5');
+      writeFileSync(mirrorPath, 'not a number');
+      expect(new OwnerSessions(edb.getDb(), { mirrorPath }).generation()).toBe(5);
+      expect(readFileSync(mirrorPath, 'utf8')).toBe('5');
+    } finally { edb.close(); }
   });
 });
 

@@ -83,6 +83,7 @@ describe('ending the owner sessions (real engine)', () => {
     try {
       await api?.shutdown();
     } finally {
+      delete (globalThis as Record<symbol, unknown>)[Symbol.for('lynox.ownerSessionsGeneration')];
       for (const [k, v] of Object.entries(saved)) {
         if (v === undefined) delete process.env[k];
         else process.env[k] = v;
@@ -92,14 +93,44 @@ describe('ending the owner sessions (real engine)', () => {
     }
   });
 
-  it('lets in a cookie of today, without a generation, until the first end, and then refuses it in the engine and in the web UI', async () => {
+  /** Run `fn` as a self-hosted instance, where a cookie without a principal is the owner's. */
+  const selfHosted = async (fn: () => Promise<void>): Promise<void> => {
+    const tier = process.env['LYNOX_BILLING_TIER'];
+    const id = process.env['LYNOX_MANAGED_INSTANCE_ID'];
+    delete process.env['LYNOX_BILLING_TIER'];
+    delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
+    try { await fn(); } finally {
+      process.env['LYNOX_BILLING_TIER'] = tier;
+      process.env['LYNOX_MANAGED_INSTANCE_ID'] = id;
+    }
+  };
+
+  it('lets in cookies of today, without a generation and without a principal, until the first end, and then refuses them in the engine and in the web UI', async () => {
     expect(sessionsOf().generation()).toBe(0);
     const today = ownerOf(0);
+    const bare = signed(null);
     expect((await get(withCookie(today))).status).toBe(200);
     expect(auth.readSessionToken(today, SECRET)).not.toBeNull();
+    await selfHosted(async () => {
+      expect((await get(withCookie(bare))).status).toBe(200);
+      expect(auth.readSessionToken(bare, SECRET)).not.toBeNull();
+    });
+    // Generation 0 has one form only, today's: an explicit `gen: 0` is a shape neither reader knows.
+    const explicit = signed({ v: 1, kind: 'owner', gen: 0 });
+    expect((await get(withCookie(explicit))).status).toBe(401);
+    expect(auth.readSessionToken(explicit, SECRET)).toBeNull();
+    // A refresh in generation 0 mints today's bytes, which both readers let in.
+    const refreshed = sessionCookieOf(await get(withCookie(ownerOf(0, Math.floor(Date.now() / 1000) - 2 * 24 * 60 * 60))));
+    expect(refreshed).toBeDefined();
+    expect(JSON.parse(Buffer.from(refreshed!.split('.')[1]!, 'base64url').toString('utf8'))).toEqual({ v: 1, kind: 'owner' });
+    expect((await get(withCookie(refreshed!))).status).toBe(200);
     sessionsOf().endAll();
     expect((await get(withCookie(today))).status).toBe(401);
     expect(auth.readSessionToken(today, SECRET)).toBeNull();
+    await selfHosted(async () => {
+      expect((await get(withCookie(bare))).status).toBe(401);
+      expect(auth.readSessionToken(bare, SECRET)).toBeNull();
+    });
   });
 
   it('lets in only the live generation: an older one and a higher one are refused alike', async () => {
@@ -124,6 +155,17 @@ describe('ending the owner sessions (real engine)', () => {
       expect((await get(withCookie(signed(principal)))).status).toBe(401);
       expect(auth.readSessionToken(signed(principal), SECRET)).toBeNull();
     }
+  });
+
+  it('refuses every owner session while the store cannot be read', async () => {
+    const live = ownerOf(sessionsOf().generation());
+    expect((await get(withCookie(live))).status).toBe(200);
+    const spy = vi.spyOn(sessionsOf(), 'generation').mockImplementation(() => { throw new Error('the database is closed'); });
+    try {
+      expect((await get(withCookie(live))).status).toBe(401);
+      expect(auth.readSessionToken(live, SECRET)).toBeNull();
+    } finally { spy.mockRestore(); }
+    expect((await get(withCookie(live))).status).toBe(200);
   });
 
   it('mints every owner login in the live generation', async () => {
@@ -156,7 +198,7 @@ describe('ending the owner sessions (real engine)', () => {
     ]);
     expect([owner.status, cp.status]).toEqual([200, 200]);
     expect(sessionsOf().generation()).toBe(before + 2);
-    const seen = [((await owner.json()) as { generation: number }).generation, ((await cp.json()) as { generation: number }).generation].sort();
+    const seen = [((await owner.json()) as { generation: number }).generation, ((await cp.json()) as { generation: number }).generation].sort((a, b) => a - b);
     expect(seen).toEqual([before + 1, before + 2]);
     expect(genOf(auth.ownerSession(SECRET).token)).toBe(before + 2);
     expect(genOf(auth.createSessionToken(SECRET, auth.OWNER_SESSION_PRINCIPAL))).toBe(before + 2);
@@ -178,7 +220,7 @@ describe('ending the owner sessions (real engine)', () => {
     const live = sessionsOf().generation();
     const lower = await cpEnd(JSON.stringify({ generation: live - 1 }));
     expect(await lower.json()).toEqual({ generation: live, ended: false });
-    for (const bad of [-1, 1.5, '3', null]) {
+    for (const bad of [-1, 1.5, '3', null, Date.now() + 60_000]) {
       expect((await cpEnd(JSON.stringify({ generation: bad }))).status).toBe(400);
     }
     expect(sessionsOf().generation()).toBe(live);
@@ -187,6 +229,16 @@ describe('ending the owner sessions (real engine)', () => {
     const raised = await cpEnd(JSON.stringify({ generation: live + 5 }));
     expect(await raised.json()).toEqual({ generation: live + 5, ended: false });
     expect((await get(withCookie(cookie))).status).toBe(401);
+  });
+
+  it('lets only the control plane re-assert a generation: on a self-hosted instance the admin bearer is the owner\'s', async () => {
+    await selfHosted(async () => {
+      const live = sessionsOf().generation();
+      const res = await cpEnd(JSON.stringify({ generation: live + 3 }));
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { code?: string }).code).toBe('owner_sessions_assert_cp_only');
+      expect(sessionsOf().generation()).toBe(live);
+    });
   });
 
   it('ends a stolen session that keeps ending the owner sessions, once the control plane ends them', async () => {
@@ -235,23 +287,6 @@ describe('ending the owner sessions (real engine)', () => {
     const stale = await get(withCookie(ownerOf(live - 1, dayOld)));
     expect(stale.status).toBe(401);
     expect(sessionCookieOf(stale)).toBeUndefined();
-  });
-
-  it('refuses an ended cookie without a principal where such a cookie is the owner\'s (self-hosted), as generation 0', async () => {
-    const tier = process.env['LYNOX_BILLING_TIER'];
-    const id = process.env['LYNOX_MANAGED_INSTANCE_ID'];
-    delete process.env['LYNOX_BILLING_TIER'];
-    delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
-    try {
-      // Live generation above 0 by now: the bare cookie of generation 0 is out, in both readers.
-      expect(sessionsOf().generation()).toBeGreaterThan(0);
-      const bare = signed(null);
-      expect((await get(withCookie(bare))).status).toBe(401);
-      expect(auth.readSessionToken(bare, SECRET)).toBeNull();
-    } finally {
-      process.env['LYNOX_BILLING_TIER'] = tier;
-      process.env['LYNOX_MANAGED_INSTANCE_ID'] = id;
-    }
   });
 
   it('leaves the instance secret as it was: its bearer still gets in, and a usage sync still carries it', async () => {
