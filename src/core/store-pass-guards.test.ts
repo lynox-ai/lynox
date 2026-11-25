@@ -265,6 +265,16 @@ describe('the refresh pass is minted in one place, for a bound connection, over 
     expect(callers).toEqual(['core/store-token-refresh.ts']);
     expect(refresh().match(/storeRefreshPassFor\(/g) ?? []).toHaveLength(2); // the definition and runRefresh's call
   });
+
+  it('the window\'s own check, which reads the access token, is asked in one place: a 401\'s renewal inside the window', () => {
+    const callers = sources(SRC)
+      .filter((p) => /\bconnectionStillIneligible\(/.test(readFileSync(p, 'utf-8').replace(/export function connectionStillIneligible\(/, '')))
+      .map((p) => relative(SRC, p).replace(/\\/g, '/'));
+    expect(callers).toEqual(['core/store-token-refresh.ts']);
+    const src = refresh();
+    expect(src.match(/connectionStillIneligible\(/g) ?? []).toHaveLength(2); // the definition and the window's call
+    expect(src).toContain("if (trigger === 'unauthorized' && lastIneligible.has(profileId) && connectionStillIneligible(profileId, ctx)) {");
+  });
 });
 
 describe('the store binding has a subkey of its own (R1-7)', () => {

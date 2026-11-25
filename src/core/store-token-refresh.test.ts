@@ -49,8 +49,11 @@ const ID = 'shop-acme';
 const ORIGIN = 'https://acme.myshopify.com';
 const KEY = 'vault-key-of-this-instance';
 const SCOPE = 'read_products,write_products';
-const bind = (id: string, origin: string, value: string): string | null =>
-  createHmac('sha256', KEY).update(`${id}|${origin}|${value}`).digest('hex');
+const bind = (id: string, origin: string, value: string): string | null => {
+  // As the engine's: a value that is not a string throws (`Buffer.byteLength`), it is never hashed as text.
+  if (typeof value !== 'string') throw new TypeError('the value to bind is not a string');
+  return createHmac('sha256', KEY).update(`${id}|${origin}|${value}`).digest('hex');
+};
 
 const ENV = {
   LYNOX_SHOPIFY_EXCHANGE: '1',
@@ -625,6 +628,16 @@ describe('the refresh of an expiring store connection', () => {
     expect(store.save({ ...p, oauth_grant: { ...p.oauth_grant!, state: 'connected', store_binding: bind(ID, ORIGIN, 'at-old')! } } as ApiProfile).ok).toBe(true);
     expect(await refreshStoreToken(ID, 'unauthorized', ctx())).toBe('not-run');
     expect(hold.calls).toHaveLength(1);
+  });
+
+  it('inside the window after an unrenewable refresh, a profile that names its refresh slot elsewhere meanwhile reads that nothing ran', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vault.delete(refreshTokenKey(ID));
+    expect(await refreshStoreToken(ID, 'due', ctx())).toBe('ineligible');
+    const p = profile();
+    expect(store.save({ ...p, auth: { ...p.auth, oauth: { ...p.auth!.oauth, refresh_token_key: 'SOME_OTHER_SLOT' } } } as ApiProfile).ok).toBe(true);
+    expect(await refreshStoreToken(ID, 'unauthorized', ctx())).toBe('not-run');
+    expect(hold.calls).toHaveLength(0);
   });
 
   it('a profile that names its refresh slot elsewhere is not the connection\'s cause: nothing ran, and nothing says to connect again', async () => {

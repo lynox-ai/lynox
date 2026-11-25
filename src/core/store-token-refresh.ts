@@ -392,9 +392,12 @@ function clientStillMisnamed(profileId: string, ctx: StoreRefreshContext): boole
  * Asked only for a 401's renewal, never for a token found due: one value is read, the access token
  * the request already sent, for its digest; for the refresh token and the client it only asks
  * whether they are there (`holds`, no `secretAccess` event, where the store has it). It writes,
- * logs and sends nothing, mints no pass and asks the control plane nothing. One difference, in the
- * safe direction: an empty value counts as there for `holds` and as missing for the pass, so such
- * a profile reads `not-run` here, never ended.
+ * logs and sends nothing, mints no pass and asks the control plane nothing. Two differences from
+ * the pass. An empty value counts as there for `holds` and as missing for the pass, so such a
+ * profile reads `not-run` here, never ended. And steps 0 to 3 (the exchange switch, the control
+ * plane, the profile's auth type and token endpoint) are not asked again: one of them changed
+ * inside these 60 s reads "connect again" where the pass would read that nothing ran. That is a
+ * wording only, and the connect it asks for is checked on its own.
  */
 export function connectionStillIneligible(profileId: string, ctx: StoreRefreshContext): boolean {
   const digestOf = ctx.toolContext.storeBindingDigest;
