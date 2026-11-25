@@ -3,7 +3,7 @@ import { MailStateDb } from '../mail/state.js';
 import { InboxStateDb } from './state.js';
 import { InboxRulesLoader } from './rules-loader.js';
 import { createInboxClassifierHook, type HookQueue } from './watcher-hook.js';
-import { handleGetItem, handleGetItemFull, handleListItems } from './api.js';
+import { handleBulkAction, handleGetItem, handleGetItemFull, handleListItems, handleSetAction, handleSetSnooze, handleUndoBulk } from './api.js';
 import type { MailAccountConfig, MailEnvelope } from '../mail/provider.js';
 import type { SensitiveMode } from './sensitive-content.js';
 
@@ -220,7 +220,7 @@ describe('only mail since the owner last dealt with the thread is counted', () =
 describe('what does not count as dealing with the thread', () => {
   const otp = { subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' };
 
-  it('an archive undone in bulk (no audit) does not hide the mail before it when a flagged mail raises the item', async () => {
+  it('an archive written before undos were logged, then undone in bulk, does not hide the mail before it when a flagged mail raises the item', async () => {
     const id = inbox.insertItem({
       accountId: ACCOUNT.id, channel: 'email', threadKey: THREAD, bucket: 'auto_handled', confidence: 0.9,
       reasonDe: 'Newsletter', classifiedAt: new Date('2026-11-03T08:00:00Z'), classifierVersion: 'v1',
@@ -300,8 +300,8 @@ describe('the two remaining paths: stored text and a single undo', () => {
   });
 });
 
-describe('an archive undone without an audit stays undone when a later action precedes a raise', () => {
-  it('archive, undo in bulk, snooze, then a flagged mail raises: the mail before the archive still counts', async () => {
+describe('an archive written before undos were logged stays undone when a later action precedes a raise', () => {
+  it('archive, undo in bulk without a trace, snooze, then a flagged mail raises: the mail before the archive still counts', async () => {
     const id = seedReplied();
     await hook()(ACCOUNT.id, envelope());
     // Archived and undone in bulk: the bulk undo leaves the archive audit and writes none of its own.
@@ -313,5 +313,96 @@ describe('an archive undone without an audit stays undone when a later action pr
     expect(inbox.getItem(id)?.userAction).toBeUndefined();
     const [f] = followUpsOnEveryRoute(id) as Array<Record<string, unknown>>;
     expect(f).toMatchObject({ count: 2 });
+  });
+});
+
+describe('a raise ends the reply or archive before it, whatever the item showed when the mail came', () => {
+  const otp = (at: Date, id = '<otp@x>') => envelope({ messageId: id, uid: 9, date: at, subject: 'Ihr Code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' });
+  const dealt = (id: string): Record<string, unknown> | undefined => (followUpsOnEveryRoute(id) as Array<Record<string, unknown> | undefined>)[0];
+
+  it('an archive taken while the inbox checks the mail for an automatic reply: named as the action the raise ended, the mail before it not counted', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    expect(inbox.getItem(id)?.userAction).toBeUndefined();
+    const confirming = createInboxClassifierHook({
+      state: inbox, rules: new InboxRulesLoader(inbox), queue,
+      accounts: { resolve: () => ({ address: ACCOUNT.address, displayName: 'Me', authType: 'oauth_microsoft' }) },
+      confirmAutoReply: async () => {
+        // The owner archives the item while the provider is asked.
+        expect(handleSetAction(deps(), id, { action: 'archived' }).status).toBe(200);
+        return false;
+      },
+    });
+    await confirming(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    const raise = inbox.listAuditForItem(id).find((a) => a.action === 'raised_on_sensitive_follow_up');
+    expect(JSON.parse(raise!.payloadJson)).toMatchObject({ prior_user_action: 'archived' });
+    expect(dealt(id)).toMatchObject({ count: 1 });
+  });
+
+  it('reply, snooze with wake on reply, then a flagged mail wakes and raises it: the answered mail is not counted', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    expect(handleSetAction(deps(), id, { action: 'replied' }).status).toBe(200);
+    expect(handleSetSnooze(deps(), id, { until: new Date(Date.now() + 86_400_000).toISOString() }).status).toBe(200);
+    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    expect(inbox.getItem(id)?.userAction).toBeUndefined();
+    expect(dealt(id)).toMatchObject({ count: 1 });
+  });
+
+  it('reply, then snoozed through the API action route, then a flagged mail raises: the answered mail is counted once, not again', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    expect(handleSetAction(deps(), id, { action: 'replied' }).status).toBe(200);
+    expect(handleSetAction(deps(), id, { action: 'snoozed' }).status).toBe(200);
+    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    const raise = inbox.listAuditForItem(id).find((a) => a.action === 'raised_on_sensitive_follow_up');
+    expect(JSON.parse(raise!.payloadJson)).toMatchObject({ prior_user_action: 'snoozed' });
+    expect(dealt(id)).toMatchObject({ count: 1 });
+  });
+
+  it('archive, bulk undo, snooze, then a flagged mail raises: the mail before the archive still counts', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    expect(handleSetAction(deps(), id, { action: 'archived' }).status).toBe(200);
+    expect(handleSetAction(deps(), id, { action: null }).status).toBe(200);
+    const bulk = handleBulkAction(deps(), { ids: [id], action: 'archived' }).body as { bulkId: string };
+    expect(handleUndoBulk(deps(), bulk.bulkId).body).toMatchObject({ reverted: 1 });
+    expect(inbox.getItem(id)?.userAction).toBeUndefined();
+    expect(handleSetAction(deps(), id, { action: 'snoozed' }).status).toBe(200);
+    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    expect(dealt(id)).toMatchObject({ count: 2 });
+  });
+
+  it('a bulk undo puts back the reply that was pending before the bulk: reply, bulk archive, bulk undo, flagged mail', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    expect(handleSetAction(deps(), id, { action: 'replied' }).status).toBe(200);
+    const bulk = handleBulkAction(deps(), { ids: [id], action: 'archived' }).body as { bulkId: string };
+    expect(handleUndoBulk(deps(), bulk.bulkId).body).toMatchObject({ reverted: 1 });
+    expect(inbox.getItem(id)?.userAction).toBe('replied');
+    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    expect(dealt(id)).toMatchObject({ count: 1 });
+  });
+
+  it('reply, then marked unhandled in bulk, then a flagged mail raises: the mail before the reply still counts', async () => {
+    const id = seedReplied();
+    await hook()(ACCOUNT.id, envelope());
+    expect(handleSetAction(deps(), id, { action: 'replied' }).status).toBe(200);
+    expect((handleBulkAction(deps(), { ids: [id], action: 'unhandled' }).body as { applied: string[] }).applied).toEqual([id]);
+    await hook()(ACCOUNT.id, otp(new Date(Date.now() + 1_000)));
+    expect(dealt(id)).toMatchObject({ count: 2 });
+  });
+
+  it('every bulk action and its undo leave an audit row, so the count does not depend on the pruned action log', () => {
+    const id = seedReplied();
+    const a = handleBulkAction(deps(), { ids: [id], action: 'unhandled' }).body as { bulkId: string };
+    const b = handleBulkAction(deps(), { ids: [id], action: 'archived' }).body as { bulkId: string };
+    handleUndoBulk(deps(), b.bulkId);
+    const rows = inbox.listAuditForItem(id).map((r) => ({ action: r.action, ...JSON.parse(r.payloadJson) as Record<string, unknown> }));
+    expect(rows).toEqual([
+      expect.objectContaining({ action: 'undo', intent: 'unhandled', bulk_id: a.bulkId }),
+      expect.objectContaining({ action: 'archived', bulk_id: b.bulkId, undo_logged: true }),
+      expect.objectContaining({ action: 'undo', intent: 'bulk_undo', bulk_id: b.bulkId, undid: 'archived', restored: 'unhandled' }),
+    ]);
   });
 });

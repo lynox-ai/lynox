@@ -124,19 +124,43 @@ function lastHandledAt(
   };
   // A reply (through lynox, recorded by the system) or an archive (by the owner) dealt with the
   // thread only if a follow-up then opened the item again: an open item whose last reply or archive
-  // is followed by nothing had it undone (a bulk undo leaves no audit), and counts from before it.
-  // A raise names the action it ended (`prior_user_action`): one that ended none comes after an
-  // undone action, and a clear of a snooze undoes nothing the owner answered.
-  let pending: Date | undefined;
+  // is followed by nothing had it undone, and counts from before it. Every undo writes an audit row,
+  // the bulk undo and bulk "unhandled" too; an undo of a bulk action puts back what was pending
+  // before that bulk. A clear of a snooze undoes nothing the owner answered.
+  // A raise ends a pending reply or archive whatever the item showed when the mail came (a snooze,
+  // a wake, an action taken meanwhile): the undos are all in the audit. Except for an action written
+  // before undos were (no `undo_logged`): a bulk undo of it left no trace, so only a raise that
+  // names it as the action it ended (`prior_user_action`) ends it.
+  type Pending = { at: Date | undefined; logged: boolean } | undefined;
+  let pending: Pending;
+  const beforeBulk = new Map<string, Pending>();
+  const remember = (p: Record<string, unknown>): void => {
+    const bulk = p['bulk_id'];
+    if (typeof bulk === 'string' && !beforeBulk.has(bulk)) beforeBulk.set(bulk, pending);
+  };
   for (const a of audit) {
-    if (a.action === 'replied' || a.action === 'archived') pending = a.createdAt;
-    else if (a.action === 'undo' && payloadOf(a)['intent'] !== 'unsnooze') pending = undefined;
-    else if (a.action === 'reopened_on_reply') {
-      later(pending);
+    const p = payloadOf(a);
+    if (a.action === 'replied' || a.action === 'archived') {
+      remember(p);
+      pending = { at: a.createdAt, logged: p['undo_logged'] === true };
+    } else if (a.action === 'snoozed') {
+      remember(p);
+    } else if (a.action === 'undo') {
+      const intent = p['intent'];
+      if (intent === 'unsnooze') continue;
+      if (intent === 'bulk_undo') {
+        const bulk = p['bulk_id'];
+        pending = typeof bulk === 'string' ? beforeBulk.get(bulk) : undefined;
+        continue;
+      }
+      remember(p);
+      pending = undefined;
+    } else if (a.action === 'reopened_on_reply') {
+      later(pending?.at);
       pending = undefined;
     } else if (a.action === 'raised_on_sensitive_follow_up') {
-      const prior = payloadOf(a)['prior_user_action'];
-      if (prior === 'replied' || prior === 'archived') later(pending);
+      const prior = p['prior_user_action'];
+      if (pending?.logged === true || prior === 'replied' || prior === 'archived') later(pending?.at);
       pending = undefined;
     }
   }

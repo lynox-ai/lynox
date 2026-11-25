@@ -539,19 +539,20 @@ export function handleBulkAction(deps: InboxApiDeps, body: BulkActionBody): ApiR
       performedAt,
     });
     deps.state.updateUserAction(id, body.action, performedAt, item.tenantId);
-    // 'unhandled' is a soft revert and is not in InboxAuditAction —
-    // the inbox_user_action_log row already records the per-id state
-    // change with the shared bulk_id, so we skip the audit row for it.
-    if (body.action === 'archived' || body.action === 'snoozed') {
-      deps.state.appendAudit({
-        tenantId: item.tenantId,
-        itemId: id,
-        action: body.action,
-        actor: 'user',
-        payloadJson: JSON.stringify({ bulk_id: bulkId, at: performedAt.toISOString() }),
-        createdAt: performedAt,
-      });
-    }
+    // Every bulk action leaves an audit row, 'unhandled' as an 'undo' as on the single route: the
+    // action log is pruned after minutes, and what the owner undid must still read as undone when
+    // the inbox later counts the mail since the owner last dealt with the thread (`follow-ups.ts`).
+    // `undo_logged`: an undo of this action writes an audit row too (see `handleUndoBulk`).
+    deps.state.appendAudit({
+      tenantId: item.tenantId,
+      itemId: id,
+      action: body.action === 'unhandled' ? 'undo' : body.action,
+      actor: 'user',
+      payloadJson: JSON.stringify(body.action === 'unhandled'
+        ? { intent: 'unhandled', bulk_id: bulkId, at: performedAt.toISOString() }
+        : { bulk_id: bulkId, at: performedAt.toISOString(), undo_logged: true }),
+      createdAt: performedAt,
+    });
     applied.push(id);
   }
   return { status: 200, body: { bulkId, applied, skipped } };
@@ -559,10 +560,8 @@ export function handleBulkAction(deps: InboxApiDeps, body: BulkActionBody): ApiR
 
 /**
  * Reverse a bulk action within the UNDO window (default 60s). Returns
- * 410 once expired. The per-id `undone_at` flag on `inbox_user_action_log`
- * is the undo audit trail; we do NOT write per-item rows into
- * `inbox_audit_log` for the undo path (the FK there is per-item, and
- * the row's prior state is already snapshot in user_action_log).
+ * 410 once expired. Each item put back gets an 'undo' audit row naming the bulk
+ * (`intent: 'bulk_undo'`), written with the revert: the action log is pruned after minutes.
  */
 export function handleUndoBulk(deps: InboxApiDeps, bulkId: string): ApiResponse {
   const { total, reverted, skipped } = deps.state.undoBulkActionCounted(bulkId);
@@ -672,7 +671,8 @@ export function handleSetAction(deps: InboxApiDeps, id: string, body: SetActionB
       itemId: id,
       action: body.action,
       actor: 'user',
-      payloadJson: JSON.stringify({ at: (at ?? new Date()).toISOString() }),
+      // `undo_logged`: every undo of this action writes an audit row (here and in bulk).
+      payloadJson: JSON.stringify({ at: (at ?? new Date()).toISOString(), undo_logged: true }),
     });
   }
   return { status: 200, body: { ok: true } };

@@ -258,8 +258,10 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
             prior_bucket: existing.bucket,
             prior_classifier_version: existing.classifierVersion,
             prior_reason_de: existing.reasonDe,
-            prior_user_action: existing.userAction ?? null,
-            prior_snooze_until: existing.snoozeUntil?.toISOString() ?? null,
+            // Read inside this write (`current`), not from the row read before the automatic-reply
+            // check awaited the provider: the owner may have acted on the item meanwhile.
+            prior_user_action: (current ?? existing).userAction ?? null,
+            prior_snooze_until: (current ?? existing).snoozeUntil?.toISOString() ?? null,
             prior_sensitive_categories: itemCategories,
             follow_up_sensitive_categories: sensitive.categories,
           }),
