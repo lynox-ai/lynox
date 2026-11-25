@@ -498,3 +498,20 @@ describe('a successor without an engine.db stub gets one before relations move t
   });
 });
 
+describe('a replaced stub hands on only what is still visible', () => {
+  it('a victim stub already deleted in engine.db keeps its hidden edges when the consolidation mirror retires it', () => {
+    const engine = new EngineDb(join(tmp(), 'engine.db'), '');
+    closers.push(() => engine.close());
+    const mem = new MemoryGraphStore(engine);
+    engine.getDb().prepare("INSERT INTO subjects (id, kind, name) VALUES ('s1','person','Alice'),('s2','organization','Acme')").run();
+    for (const k of ['victim', 'keeper']) mem.upsertStub({ id: k, text: k, namespace: 'knowledge', scopeType: 'context', scopeId: 'c' });
+    new RelationshipStore(engine).createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_at', description: 'CTO', sourceMemoryId: 'victim' });
+    mem.deactivateByIds(['victim']);
+    expect(engineSources(engine)).toEqual([]);
+
+    mem.markSuperseded('victim', 'keeper', { carryRelationships: true });
+    expect(engineSources(engine)).toEqual([]);
+    expect((engine.getDb().prepare('SELECT source_memory_id AS s FROM relationships').get() as { s: string }).s).toBe('victim');
+  });
+});
+
