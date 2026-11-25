@@ -424,6 +424,9 @@ export const BULK_HALT_REASONS = {
   shopifyUnconfirmed: 'lynox could not confirm that this instance may reach Shopify; the run can be resumed in a few minutes',
   shopifyNotCleared: 'Shopify is not cleared for this instance right now; only lynox can clear it',
   containmentUnwritable: 'lynox could not record that this run reads the store, so nothing was sent',
+  // The store's pass refused a request as it is formed (`StoreRequestRefusedError`): nothing was
+  // sent, and the same request would be refused again, so the run has to be planned again.
+  storeRequestRefused: 'lynox did not send a request of this run to the store: it does not let a request of this form through to Shopify',
   shopifyNoApiVersion: 'a setting for Shopify is missing in lynox; lynox has to fix this',
   // Fixed like every reason: the fields are named in the outcome's summary, not here.
   consentOutdated: 'the Shopify connection does not yet let lynox change a field this run writes; nothing was written in this call',

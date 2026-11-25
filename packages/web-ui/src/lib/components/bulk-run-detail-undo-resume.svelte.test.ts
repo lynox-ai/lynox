@@ -182,6 +182,27 @@ describe('a halted undo continuing would not help', () => {
 		expect(buttonByText(t('bulk.resume.none_undo_link'))).toBeUndefined();
 	});
 
+	// U-232: a store's pass refused a request as it is formed. An undo has nothing to take out and
+	// starts again from its run's page; a write takes it out and plans anew. Each says what stays.
+	it('says, under the way on, what stays after a pass refused a request: taken back for an undo, written for a write', async () => {
+		const kept = (): string | undefined => target.querySelector('[data-testid="bulk-resume-kept"]')?.textContent ?? undefined;
+		await render({ haltKey: 'storeRequestRefused' });
+		expect(none()).toBe(sentence('bulk.resume.none_undo'));
+		expect(kept()).toBe(t('bulk.halt.storeRequestRefused_kept_undo'));
+		expect(target.textContent).not.toContain(t('bulk.halt.storeRequestRefused_before'));
+		unmount(component!);
+		component = undefined;
+		await render({ kind: 'apply', sourceRunId: null, haltKey: 'storeRequestRefused' });
+		expect(none()).toBe(t('bulk.resume.none'));
+		expect(kept()).toBe(t('bulk.halt.storeRequestRefused_kept'));
+		expect(target.textContent).toContain(t('bulk.halt.storeRequestRefused_before'));
+		unmount(component!);
+		component = undefined;
+		// Another halt no writing on gets past says nothing of what stays.
+		await render({ kind: 'apply', sourceRunId: null, haltKey: 'contract' });
+		expect(kept()).toBeUndefined();
+	});
+
 	it('control: a halted write still says to plan it again in a chat', async () => {
 		await render({ kind: 'apply', sourceRunId: null, haltKey: 'consentOutdated' });
 		expect(none()).toBe(t('bulk.resume.none'));
@@ -211,6 +232,7 @@ describe('a halted undo names its halt as taking back', () => {
 		['a connection that does not cover the field, nothing undone', { haltKey: 'consentOutdated', applied: 0, consentFields: ['seo_title'] }, () => tf('bulk.halt.consentOutdated_undo', consent), () => tf('bulk.halt.consentOutdated', consent)],
 		['a connection that does not cover the field, some undone', { haltKey: 'consentOutdated', consentFields: ['seo_title'] }, () => tf('bulk.halt.consentOutdated_more_undo', consent), () => tf('bulk.halt.consentOutdated_more', consent)],
 		['a discarded undo', { phase: 'aborted', haltKey: 'discarded' }, () => t('bulk.halt.discarded_undo'), () => t('bulk.halt.discarded')],
+		['a request the store\'s pass refused', { haltKey: 'storeRequestRefused' }, () => t('bulk.halt.storeRequestRefused_undo'), () => t('bulk.halt.storeRequestRefused')],
 	];
 	for (const [name, o, undo, write] of undoCases) {
 		it(`words ${name} in undo words, and a write in its own`, async () => {
