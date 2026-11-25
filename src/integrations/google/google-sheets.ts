@@ -153,15 +153,22 @@ function chosenOption(answer: string, options: readonly string[]): string | unde
 }
 
 /**
+ * What a formula can do, said the same wherever a question shows one. The functions are examples,
+ * never a list to check against: others fetch too, and the address may be built from other cells,
+ * so a formula with no address written in it is not a formula that fetches nothing.
+ */
+const FORMULA_FETCHES = pv`A formula can make Google fetch an address and send data from the sheet with it: functions such as IMPORTXML, IMPORTHTML, IMPORTDATA, IMPORTFEED, IMPORTRANGE and IMAGE do, and other functions can too. The address need not be written out, since a formula can build it from other cells.`;
+
+/**
  * What the question adds: why it asks, then each cell and its whole formula as a value. A
  * formula is never shortened, since the address in it is what the owner decides on; a line
  * break in it is not kept, so it cannot draw another cell's line.
  */
 function formulaNote(formulas: readonly FormulaCell[]): PromptText {
   const n = formulas.length;
-  const head = n === 1
-    ? pv`This chat has read content from outside lynox, such as a web page, an email or a file. 1 of these cells starts like a formula, and Google runs a formula when it is written. A formula can make Google fetch an address named in it, with data from the sheet in that address.`
-    : pv`This chat has read content from outside lynox, such as a web page, an email or a file. ${n} of these cells start like a formula, and Google runs a formula when it is written. A formula can make Google fetch an address named in it, with data from the sheet in that address.`;
+  const head = joinPrompts([n === 1
+    ? pv`This chat has read content from outside lynox, such as a web page, an email or a file. 1 of these cells starts like a formula, and Google runs a formula when it is written.`
+    : pv`This chat has read content from outside lynox, such as a web page, an email or a file. ${n} of these cells start like a formula, and Google runs a formula when it is written.`, FORMULA_FETCHES], ' ');
   const lines = formulas.slice(0, FORMULAS_SHOWN).map(({ cell, formula }) => pv`${cell}: ${singleLine(formula)}`);
   // With some only counted, the question offers no "Write as formulas" and says why, and how
   // to get it: each call is asked about on its own, so a call with at most FORMULAS_SHOWN shows
@@ -185,10 +192,12 @@ const PURE_FORMAT_TYPES = new Set([
 ]);
 
 /**
- * The parts of a cell format that change only how a cell looks, never what it reads as. Left out
- * on purpose: `numberFormat` (its pattern can show literal text or hide the value),
- * `textFormat.link` (a link to any address), `hyperlinkDisplayType` and `textDirection` (both
- * change how existing text reads). A part missing here is shown in full.
+ * The parts of a cell format that show no text and no address of their own: colours, borders,
+ * spacing, alignment and text style. They can still make data hard to see (white on white, a tiny
+ * size), which the plain question covers as it covers merges. Left out on purpose, so shown:
+ * `numberFormat` (its pattern shows literal text in place of the value), `textFormat.link` (a
+ * link to any address), `hyperlinkDisplayType` and `textDirection` (both change how existing text
+ * reads). A part missing here is shown in full.
  */
 const FORMAT_FIELDS = new Set(['backgroundColor', 'backgroundColorStyle', 'borders', 'padding', 'horizontalAlignment', 'verticalAlignment', 'wrapStrategy', 'textRotation']);
 const TEXT_FORMAT_FIELDS = new Set(['bold', 'italic', 'underline', 'strikethrough', 'fontFamily', 'fontSize', 'foregroundColor', 'foregroundColorStyle']);
@@ -243,8 +252,16 @@ function maskPaths(fields: string): string[] | null {
   return paths !== null && i === fields.length ? paths : null;
 }
 
-/** Whether a full mask path lies inside one of the parts of a cell format that only change looks. */
+/**
+ * Paths that name a whole format, or its whole text format. Such a mask writes exactly what the
+ * cell holds under it and clears the rest of the range, so it is pure when the cell holds
+ * looks-only parts alone: clearing a pattern or a link shows more, never less.
+ */
+const WHOLE_FORMAT_PATHS = new Set(['userEnteredFormat', 'userEnteredFormat.textFormat']);
+
+/** Whether a full mask path lies inside one of the looks-only parts, or names a whole format. */
 function looksOnlyPath(path: string): boolean {
+  if (WHOLE_FORMAT_PATHS.has(path)) return true;
   const [root, field, sub] = path.split('.');
   if (root !== 'userEnteredFormat' || field === undefined) return false;
   if (FORMAT_FIELDS.has(field)) return true;
@@ -296,11 +313,13 @@ export const FORMAT_REQUESTS_SHOWN = 5;
 export const FORMAT_LINE_MAX = 1000;
 
 /**
- * A character a reader cannot see, or that changes how the text around it reads (format and
- * direction characters, separators, combining marks, fillers, any space but the plain one),
- * written as its escape, so nothing in a request can hide in a short line.
+ * A character a reader cannot see, or that changes how the text around it reads, written as its
+ * escape, so nothing in a request can hide in a short line: the hidden class of
+ * `core/hidden-chars.ts` (default-ignorables, controls, format characters, separators, the
+ * braille blank, noncharacters), plus unassigned code points, combining marks and every space but
+ * the plain one. Unlike there, nothing is let through in place: a request is no text to read.
  */
-const UNSEEN = /[\p{Cf}\p{Cc}\p{Zl}\p{Zp}\p{Mn}\p{Me}ᅟᅠㅤﾠ]|[^\S ]/gu;
+const UNSEEN = /[\p{Default_Ignorable_Code_Point}\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Noncharacter_Code_Point}\p{Cn}\p{Mn}\p{Me}\u2800]|[^\S ]/gu;
 function seen(text: string): string {
   return text.replace(UNSEEN, (c) => {
     const cp = c.codePointAt(0)!;
@@ -330,11 +349,15 @@ function formatRequestsNote(requests: readonly unknown[]): { note: PromptText } 
   const n = shown.length;
   const lines = shown.map(requestLine);
   if (n > FORMAT_REQUESTS_SHOWN || lines.some((l) => l.length > FORMAT_LINE_MAX)) {
-    return { refusal: `Error: this chat has read content from outside lynox, so a "format" call is asked about with every request that can write cell content or a rule shown in full. This call has ${n} such request(s); a question shows at most ${FORMAT_REQUESTS_SHOWN}, each at most ${FORMAT_LINE_MAX} characters as shown. Split it: send pure formatting (borders, merges, sizes, bands, colours, bold) in one call, and at most ${FORMAT_REQUESTS_SHOWN} requests that write cells per call, each small enough to show in full (fewer cells or rows per request). Nothing was sent.` };
+    return { refusal: `Error: this chat has read content from outside lynox, so a "format" call is asked about with every request that can write cell content or a rule shown in full. This call has ${n} such request(s); a question shows at most ${FORMAT_REQUESTS_SHOWN}, each at most ${FORMAT_LINE_MAX} characters as shown. Split it: send pure formatting (borders, merges, sizes, bands, colours, bold) in one call, and at most ${FORMAT_REQUESTS_SHOWN} of the other requests per call, each small enough to show in full (fewer cells or rows per request). A repeatCell is pure formatting when its cell sets only colours, borders, padding, alignment, wrapping, rotation and text style (bold, italic, underline, strikethrough, font, size, text colour); number formats, links and text direction count as the other requests. Nothing was sent.` };
   }
-  const head = n === 1
-    ? pv`This chat has read content from outside lynox, such as a web page, an email or a file. 1 of these requests can write cell content or a rule, which can hold a formula, and Google runs a formula on its side. A formula can make Google fetch an address named in it, with data from the sheet in that address. It is shown here in full:`
-    : pv`This chat has read content from outside lynox, such as a web page, an email or a file. ${n} of these requests can write cell content or a rule, which can hold a formula, and Google runs a formula on its side. A formula can make Google fetch an address named in it, with data from the sheet in that address. They are shown here in full:`;
+  const head = joinPrompts([
+    n === 1
+      ? pv`This chat has read content from outside lynox, such as a web page, an email or a file. 1 of these requests can write cell content or a rule, or change what a cell reads as, such as a number pattern, a link, the text direction or hidden rows. Content and rules can hold a formula, and Google runs a formula on its side.`
+      : pv`This chat has read content from outside lynox, such as a web page, an email or a file. ${n} of these requests can write cell content or a rule, or change what a cell reads as, such as a number pattern, a link, the text direction or hidden rows. Content and rules can hold a formula, and Google runs a formula on its side.`,
+    FORMULA_FETCHES,
+    n === 1 ? pv`It is shown here in full:` : pv`They are shown here in full:`,
+  ], ' ');
   const shownLines = lines.map((l) => (l.type === null ? pv`request: ${l.body}` : pv`${l.type}: ${l.body}`));
   const rest = requests.length - n;
   const more = rest === 0 ? [] : [rest === 1 ? pv`and 1 formatting request that writes no cell content` : pv`and ${rest} formatting requests that write no cell content`];
