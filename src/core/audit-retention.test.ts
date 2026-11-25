@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { EngineDb } from './engine-db.js';
 import { AuditLog, newCorrelationId } from './audit-log.js';
 import {
-  AUDIT_RETENTION_MS, FOLDED_POLLS, FOLD_DAYS_PER_SWEEP, FOLD_STALL_AFTER_MS, RETENTION_ACTION, RETENTION_ACTOR, SWEEP_STALE_AFTER_MS,
+  AUDIT_RETENTION_MS, FOLDED_POLLS, FOLD_DAYS_PER_SWEEP, FOLD_STALL_AFTER_MS, RETENTION_ACTION, RETENTION_ACTOR, STALL_PROBE_SQL, SWEEP_STALE_AFTER_MS,
   auditRetentionState, sqliteErrorCode, sweepAuditLog,
 } from './audit-retention.js';
 import { buildTrail, INTERFACE_POLLS, readTrailPage, type TrailEvent, type TrailSources } from './audit-trail-view.js';
@@ -281,11 +281,16 @@ describe('the actor trail keeps what it holds for a set time', () => {
     const onTime = new Date(NOW - FOLD_STALL_AFTER_MS + 60 * 60_000).toISOString();
     const folded = { at: NOW - 60_000, refused: false, dayRows: 1 };
 
-    it('says ok when no poll is past its fold, before any sweep and after one', () => {
+    it('says ok when no poll is past its fold, after a sweep that folded nothing', () => {
       read(ana, PROVIDERS, onTime);
       read(ana, 'GET /api/inbox/items', behind);
-      expect(auditRetentionState(engine.getDb(), NOW, null)).toBe('ok');
       expect(auditRetentionState(engine.getDb(), NOW, { at: NOW, refused: false, dayRows: 0 })).toBe('ok');
+    });
+
+    it('says stalled before any sweep and once the last is too old, even with nothing behind', () => {
+      expect(auditRetentionState(engine.getDb(), NOW, null)).toBe('stalled');
+      expect(auditRetentionState(engine.getDb(), NOW, { at: NOW - SWEEP_STALE_AFTER_MS - 1, refused: false, dayRows: 0 })).toBe('stalled');
+      expect(auditRetentionState(engine.getDb(), NOW, { at: NOW - SWEEP_STALE_AFTER_MS, refused: false, dayRows: 0 })).toBe('ok');
     });
 
     it('says stalled when the last sweep was refused, even with nothing behind', () => {
@@ -310,10 +315,16 @@ describe('the actor trail keeps what it holds for a set time', () => {
     });
 
     it('says ok for a poll 33 days old less an hour, stalled for one a minute past', () => {
+      const idle = { at: NOW, refused: false, dayRows: 0 };
       read(ana, PROVIDERS, onTime);
-      expect(auditRetentionState(engine.getDb(), NOW, null)).toBe('ok');
+      expect(auditRetentionState(engine.getDb(), NOW, idle)).toBe('ok');
       read(ana, PROVIDERS, behind);
-      expect(auditRetentionState(engine.getDb(), NOW, null)).toBe('stalled');
+      expect(auditRetentionState(engine.getDb(), NOW, idle)).toBe('stalled');
+    });
+
+    it('asks the trail with two seeks on the fold index, not a walk over old rows', () => {
+      const plan = (engine.getDb().prepare(`EXPLAIN QUERY PLAN ${STALL_PROBE_SQL}`).all(...FOLDED_POLLS, behind) as { detail: string }[]).map((r) => r.detail);
+      expect(plan).toEqual([expect.stringMatching(/^SEARCH audit_log USING (COVERING )?INDEX idx_audit_log_poll_fold \(action=\? AND ts<\?\)$/)]);
     });
   });
 

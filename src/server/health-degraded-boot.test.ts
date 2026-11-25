@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
+import { Engine } from '../core/engine.js';
 
 /**
  * `/api/health` after a boot in which engine.db or history.db could not be opened.
@@ -118,6 +119,19 @@ describe('/api/health names whether the instance log keeps its retention', () =>
 
   it('says ok after a boot whose sweep ran', async () => {
     expect(word((await bootAndProbe(null)).body)).toBe('ok');
+  }, 60_000);
+
+  it('says stalled, and keeps the rest of the body, when the trail cannot be asked', async () => {
+    const spy = vi.spyOn(Engine.prototype, 'getAuditRetentionState').mockImplementation(() => { throw new Error('SQLITE_IOERR secret-path'); });
+    try {
+      const r = await bootAndProbe(null);
+      expect(word(r.body)).toBe('stalled');
+      expect(r.body['status']).toBe('ok');
+      expect(Object.keys(r.body).sort()).toEqual(CONTRACT_KEYS);
+      expect(r.text).not.toContain('secret-path');
+    } finally {
+      spy.mockRestore();
+    }
   }, 60_000);
 
   it('leaves the word out when engine.db could not be opened, and says nothing more', async () => {

@@ -3567,7 +3567,8 @@ export class Engine {
    */
   getAuditRetentionState(): AuditRetentionState | undefined {
     const db = this.engineDb?.getDb();
-    if (db === undefined) return undefined;
+    // Closed at shutdown: no trail to keep any more, and not a stall.
+    if (db === undefined || !db.open) return undefined;
     return auditRetentionState(db, Date.now(), this._auditSweep);
   }
 

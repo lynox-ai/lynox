@@ -84,6 +84,8 @@ interface FirstRow {
 const POLL_IN = FOLDED_POLLS.map(() => '?').join(', ');
 /** The reads a fold may take; `idx_audit_log_poll_fold` covers exactly these. */
 const FOLDABLE = `phase = 'read' AND poll_count IS NULL AND action IN (${POLL_IN})`;
+/** Whether a foldable poll is older than a bound; read by the health route. Exported for its plan test. */
+export const STALL_PROBE_SQL = `SELECT 1 FROM audit_log WHERE ${FOLDABLE} AND ts < ? LIMIT 1`;
 
 /**
  * Delete what is past its time, then fold the polls of up to `FOLD_DAYS_PER_SWEEP` past days, oldest
@@ -116,7 +118,6 @@ export function sweepAuditLog(
   return { folded, dayRows, deleted };
 }
 
-/** The ISO bound of the day after `day` (`YYYY-MM-DD`). */
 /** What the engine keeps of its last sweep, for {@link auditRetentionState}. */
 export interface AuditSweepRecord {
   /** When it ran (ms). */
@@ -128,23 +129,22 @@ export interface AuditSweepRecord {
 }
 
 /**
- * The `engine.audit_retention` word of the health body. `stalled` when the last sweep was refused
- * (a day or the delete), or when a poll is still single past `FOLD_STALL_AFTER_MS` and the sweeps
- * are not folding: none ran within `SWEEP_STALE_AFTER_MS`, or the last one wrote no day row. A
- * backlog that sweeps are working through (a first run over a long history folds seven days an
- * hour) is `ok`, so a deploy does not raise an alarm on its own.
+ * The `engine.audit_retention` word of the health body. `stalled` when no sweep ran within
+ * `SWEEP_STALE_AFTER_MS` (the engine sweeps once at boot, right after engine.db opens, then hourly),
+ * when the last sweep was refused (a day or the delete), or when a poll is still single past
+ * `FOLD_STALL_AFTER_MS` and the last sweep wrote no day row. A backlog that sweeps are working
+ * through (a first run over a long history folds seven days an hour) is `ok`, so a deploy does not
+ * raise an alarm on its own. The backlog query is `idx_audit_log_poll_fold`'s own predicate, so it
+ * stays two index seeks on a long trail.
  */
 export function auditRetentionState(
   db: Database.Database,
   now: number,
   last: AuditSweepRecord | null,
 ): AuditRetentionState {
-  if (last?.refused === true) return 'stalled';
-  const behind = db.prepare(`SELECT 1 FROM audit_log WHERE ${FOLDABLE} AND ts < ? LIMIT 1`)
-    .get(...FOLDED_POLLS, new Date(now - FOLD_STALL_AFTER_MS).toISOString());
-  if (behind === undefined) return 'ok';
-  const folding = last !== null && last.dayRows > 0 && now - last.at <= SWEEP_STALE_AFTER_MS;
-  return folding ? 'ok' : 'stalled';
+  if (last === null || now - last.at > SWEEP_STALE_AFTER_MS || last.refused) return 'stalled';
+  const behind = db.prepare(STALL_PROBE_SQL).get(...FOLDED_POLLS, new Date(now - FOLD_STALL_AFTER_MS).toISOString());
+  return behind !== undefined && last.dayRows === 0 ? 'stalled' : 'ok';
 }
 
 /**
@@ -156,6 +156,7 @@ export function sqliteErrorCode(err: unknown): string {
   return typeof code === 'string' && /^SQLITE_[A-Z_]+$/.test(code) ? ` code=${code}` : '';
 }
 
+/** The ISO bound of the day after `day` (`YYYY-MM-DD`). */
 function nextDay(day: string): string {
   return new Date(Date.parse(`${day}T00:00:00.000Z`) + DAY_MS).toISOString().slice(0, 10);
 }

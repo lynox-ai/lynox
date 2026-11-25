@@ -6,6 +6,7 @@ import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
 import { EngineDb } from './engine-db.js';
 import { RETENTION_ACTION } from './audit-retention.js';
+import { _resetErrorEgress, reduceErrorTextForProcess } from './error-egress.js';
 import type { LynoxConfig } from '../types/index.js';
 
 /**
@@ -28,6 +29,7 @@ describe('Engine boot — the actor trail is wired', () => {
     engines.length = 0;
     for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
     saved.clear();
+    _resetErrorEgress();
     for (const d of dirs) rmSync(d, { recursive: true, force: true });
     dirs.length = 0;
     reloadConfig();
@@ -97,13 +99,22 @@ describe('Engine boot — the actor trail is wired', () => {
       expect(n).toEqual({ poll_count: 1 });
     });
 
-    it('says stalled when the boot sweep was refused a day, and logs the SQLite code but not the refusal text', async () => {
+    it('says stalled when the boot sweep was refused a day; with the error text reduced, the line keeps the SQLite code and drops the text', async () => {
+      reduceErrorTextForProcess();
       const { engine, stderr } = await bootOn((db) => {
         oldPoll(db, new Date(Date.now() - 40 * DAY).toISOString());
         db.exec("CREATE TRIGGER refuse_day_rows BEFORE INSERT ON audit_log WHEN NEW.poll_count IS NOT NULL BEGIN SELECT RAISE(ABORT, 'refused by test'); END;");
       });
       expect(engine.getAuditRetentionState()).toBe('stalled');
       expect(stderr).toMatch(/AUDIT_FOLD_REFUSED day=\S+ \(.*code=SQLITE_CONSTRAINT_TRIGGER\)/);
+      expect(stderr).not.toContain('refused by test');
+    });
+
+    it('says nothing once the engine is shut down, rather than stalled', async () => {
+      const { engine } = await bootOn(() => undefined);
+      expect(engine.getAuditRetentionState()).toBe('ok');
+      await engine.shutdown();
+      expect(engine.getAuditRetentionState()).toBeUndefined();
     });
 
     it('says stalled when the boot sweep could not delete, and logs the SQLite code', async () => {
