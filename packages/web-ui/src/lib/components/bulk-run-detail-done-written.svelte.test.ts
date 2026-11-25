@@ -245,19 +245,26 @@ describe('a run that waits for its start', () => {
 });
 
 describe('the approval of an undo', () => {
-	it('says one target in the singular and several in the plural', () => {
-		expect(tf('bulk.undo.approve_explain_one', { n: '1' })).toBe('1 Ziel bekommt seinen Wert von vorher zurück. Hat es seither jemand geändert, bleibt es, wie es ist.');
-		setLocale('en');
-		expect(tf('bulk.undo.approve_explain_one', { n: '1' })).toBe('1 target gets its previous value back. If someone has changed it since then, it stays as it is.');
-		expect(tf('bulk.undo.approve_explain', { n: '3' })).toMatch(/^3 targets get their previous value back/);
-	});
+	// The number and its word never break apart: a no-break space between them (U+00A0).
+	const NB = String.fromCharCode(0xa0);
+	const undo = (changes: { update: number; create: number }): void => {
+		run = makeRun({ kind: 'undo', phase: 'previewed', sourceRunId: 's1', undone: 0, undoneBy: null, targetSystem: SHOP, total: changes.update + changes.create, applied: 0,
+			changes: { ...changes, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = Array.from({ length: changes.update + changes.create }, (_, i) => writtenAt(i + 1));
+	};
 
-	it('shows the singular on the page of an undo of one target', async () => {
-		run = makeRun({ kind: 'undo', phase: 'previewed', sourceRunId: 's1', undone: 0, undoneBy: null, targetSystem: SHOP, total: 1, applied: 0,
-			changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
-		targets = [writtenAt(1)];
+	it.each([
+		['de', { update: 1, create: 0 }, `1${NB}Ziel bekommt seinen Wert von vorher zurück. Hat es seither jemand geändert, bleibt es, wie es ist.`],
+		['en', { update: 1, create: 0 }, `1${NB}target gets its previous value back. If someone has changed it since then, it stays as it is.`],
+		['de', { update: 0, create: 1 }, `1${NB}Ziel bekommt seinen Wert von vorher zurück. Hat es seither jemand geändert, bleibt es, wie es ist.`],
+		['de', { update: 2, create: 1 }, `3${NB}Ziele bekommen ihren Wert von vorher zurück. Ziele, die seither jemand geändert hat, bleiben, wie sie sind.`],
+		['en', { update: 2, create: 1 }, `3${NB}targets get their previous value back. Targets that someone has changed since then stay as they are.`],
+	] as const)('says it in %s for %o, with a no-break space after the number', async (locale, changes, sentence) => {
+		setLocale(locale);
+		undo(changes);
 		await render();
-		expect(target.textContent).toContain(t('bulk.undo.approve_explain_one'));
-		expect(target.textContent).not.toContain('1 Ziele');
+		expect(target.textContent).toContain(sentence);
+		// `\s` takes the no-break space too: one target never reads in the plural.
+		expect(target.textContent).not.toMatch(/\b1\sZiele\b|\b1\stargets\b/);
 	});
 });
