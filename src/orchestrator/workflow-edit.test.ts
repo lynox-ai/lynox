@@ -29,6 +29,18 @@ describe('applyModifications (shared workflow-step mutation)', () => {
     expect(runStepIds(s)[2]!.task).toBe('Send {{a.result}}');
   });
 
+  it('renaming a stored step foo.result where no step foo exists moves {{foo.result}} with it, so the plan still saves', () => {
+    const s: InlinePipelineStep[] = [
+      { id: 'foo.result', task: 'R' },
+      { id: 'send', task: 'Send {{foo.result}}', input_from: ['foo.result'] },
+    ];
+    expect(applyModifications(s, [{ action: 'rename_step', step_id: '#1', value: 'fetch' }])).toBeNull();
+    expect(s.map(st => st.id)).toEqual(['fetch', 'send']);
+    expect(s[1]!.input_from).toEqual(['fetch']);
+    // The placeholder names the step whole, as a run of the stored plan reads it (`step-id.test.ts`).
+    expect(s[1]!.task).toBe('Send {{fetch}}');
+  });
+
   it('renaming step a beside a stored a.result still moves {{a.result}} with a (CONTROL)', () => {
     const s: InlinePipelineStep[] = [
       { id: 'a', task: 'A' },

@@ -290,9 +290,26 @@ describe('a run of a plan stored before step ids had a shape (runStepIds)', () =
 
   it('leaves such a placeholder alone also in a run whose copy dropped step a', () => {
     const stored = [{ id: 'a', task: 'A' }, { id: 'a.result', task: 'R' }, { id: 'send', task: '{{a.result}}', input_from: ['a.result'] }];
-    const out = runStepIds([stored[1]!, stored[2]!], stepRunNames(stored));
+    const out = runStepIds([stored[1]!, stored[2]!], stepRunNames(stored), stored.map(s => s.id));
     expect(out.map(s => s.id)).toEqual(['step-2', 'send']);
     expect(out[1]!.task).toBe('{{a.result}}');
+  });
+
+  it('moves {{foo.result}} to a stored step foo.result where no step foo exists, as before the rule', () => {
+    const out = runStepIds([{ id: 'foo.result', task: 'R' }, { id: 'send', task: 'Send {{foo.result}}', input_from: ['foo.result'] }]);
+    expect(out.map(s => s.id)).toEqual(['step-1', 'send']);
+    // The placeholder names the step whole, as it did before run names; it now names its run name.
+    expect(out[1]!.task).toBe('Send {{step-1}}');
+  });
+
+  it('reads the head against step ids, not against other stored ids that begin with it', () => {
+    // foo.result and foo.costUsd both begin with `foo.`, but neither is a step foo: both placeholders move.
+    const out = runStepIds([
+      { id: 'foo.result', task: 'R' },
+      { id: 'foo.costUsd', task: 'C' },
+      { id: 'send', task: '{{foo.result.result}} {{foo.costUsd.result}}', input_from: ['foo.result', 'foo.costUsd'] },
+    ]);
+    expect(out[2]!.task).toBe('{{step-1.result}} {{step-2.result}}');
   });
 
   it('moves {{Fetch it.result}} to step "Fetch it", not to a stored step "Fetch it.result", where both ids are outside the shape', () => {
