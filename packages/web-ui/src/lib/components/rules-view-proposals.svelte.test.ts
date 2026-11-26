@@ -300,15 +300,12 @@ describe('RulesView — the description kind', () => {
 		expect(target.textContent).toContain(t('inbox.rules_match_description'));
 	});
 
-	it.each([
-		['archive', 'Mit „Automatisch archivieren“ greift eine Beschreibungsregel nur, wenn auch der Klassifikator die Mail so einordnet. Sonst hält lynox die Regel zurück und zeigt dir die Mail.'],
-		['silent', 'Mit „Lesen markieren & ausblenden“ greift eine Beschreibungsregel nur, wenn auch der Klassifikator die Mail so einordnet. Sonst hält lynox die Regel zurück und zeigt dir die Mail.'],
-	] as const)('names the chosen handled option "%s" in the hint', async (preset, sentence) => {
+	it('names the chosen handled option in the hint', async () => {
 		await render({ viewer: 'owner', rules: [] });
 		await openForm();
 		await choose('rule-match-kind', 'matches_description');
-		await choose('rule-then-preset', preset);
-		expect(byTestId('rules-handled-hint')?.textContent).toBe(sentence);
+		await choose('rule-then-preset', 'archive');
+		expect(byTestId('rules-handled-hint')?.textContent).toBe('Mit „Als erledigt ablegen“ greift eine Beschreibungsregel nur, wenn auch der Klassifikator die Mail so einordnet. Sonst hält lynox die Regel zurück und zeigt dir die Mail.');
 	});
 
 	it('shows no handled hint for "keep under Needs you", nor for a fixed rule', async () => {
@@ -439,10 +436,11 @@ describe('RulesView — a form a link opened', () => {
 		pageUrl.href = PREFILL;
 		await render({ viewer: 'owner', rules: [] });
 		expect(textInputs()[1]!.value).toBe('chef@firma.example');
-		expect(thenRadios()).toHaveLength(3);
+		expect(thenRadios()).toHaveLength(2);
 		expect(thenRadios().filter((r) => r.checked)).toEqual([]);
 		expect(save().disabled).toBe(true);
 		expect(byTestId('rules-then-choose-hint')?.textContent).toBe(t('inbox.rules_then_choose_hint'));
+		expect(byTestId('rules-then-effect')).toBeNull();
 		// A submit without a choice sends nothing.
 		target.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
 		await settle();
@@ -650,5 +648,44 @@ describe('RulesView — the count and the bucket of a rule', () => {
 		expect(byTestId('rules-confirm-text')!.textContent).toBe('Regel „Lieferantenrechnungen“ bestätigen? Wenn Absender ist „rechnung@lieferant.example“, dann „Erledigt“. Sie wirkt, sobald du bestätigst.');
 		expect(byTestId('rules-proposal')!.textContent).toContain('→ Erledigt');
 		expect(byTestId('rules-proposal')!.textContent).not.toContain(t('inbox.zone_handled'));
+	});
+});
+
+describe('RulesView — what a "then" choice says it does', () => {
+	it('offers "file as handled" and "keep under Needs you" only, nothing that names the mailbox', async () => {
+		await render({ viewer: 'owner', rules: [] });
+		await openForm();
+		const offered = [...target.querySelectorAll<HTMLInputElement>('input[name="rule-then-preset"]')].map((r) => r.value);
+		expect(offered).toEqual(['archive', 'escalate']);
+		const labels = [...target.querySelectorAll('input[name="rule-then-preset"]')].map((r) => r.closest('label')!.textContent!.trim());
+		expect(labels).toEqual(['Als erledigt ablegen', 'Immer unter „Braucht dich“ behalten']);
+	});
+
+	it('says under "file as handled" where the mail goes and that the mailbox stays as it is, and nothing under the other choice', async () => {
+		await render({ viewer: 'owner', rules: [] });
+		await openForm();
+		expect(byTestId('rules-then-effect')?.textContent).toBe('lynox legt die Mail unter „Erledigt heute“ ab. In deinem Postfach bleibt sie unverändert.');
+		// A screen reader reads the sentence with the choice it belongs to.
+		const effectId = byTestId('rules-then-effect')!.id;
+		expect(effectId).not.toBe('');
+		expect(target.querySelector('input[name="rule-then-preset"][value="archive"]')!.getAttribute('aria-describedby')).toBe(effectId);
+		await choose('rule-then-preset', 'escalate');
+		expect(byTestId('rules-then-effect')).toBeNull();
+		expect(target.querySelector('input[name="rule-then-preset"][value="archive"]')!.getAttribute('aria-describedby')).toBeNull();
+		await choose('rule-then-preset', 'archive');
+		expect(byTestId('rules-then-effect')).not.toBeNull();
+	});
+
+	it('says the same in English, with the zone named as the English inbox names it', async () => {
+		setLocale('en');
+		await render({ viewer: 'owner', rules: [] });
+		await openForm();
+		expect(byTestId('rules-then-effect')?.textContent).toBe('lynox files the mail under “Handled today”. It stays unchanged in your mailbox.');
+	});
+
+	it.each(['archive', 'mark_read'])('shows a stored handled rule with action "%s" as "file as handled"', async (action) => {
+		await render({ viewer: 'owner', rules: [{ ...confirmed, action }] });
+		expect(target.textContent).toContain('→ Als erledigt ablegen');
+		expect(target.textContent).not.toContain(t('inbox.rules_then_other'));
 	});
 });

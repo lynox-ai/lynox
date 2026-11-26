@@ -24331,6 +24331,23 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
           expect((shown['parameters'] as Array<Record<string, unknown>>)[0]!['allowed']).toBeNull();
         });
 
+        it('a rule every object inherits is not shown, as the run does not enforce it', async () => {
+          // What a polluted prototype would carry: an entry with real rules, which `in` would read.
+          const proto = Object.prototype as Record<string, unknown>;
+          const params = [{ name: 'inherited', description: '', type: 'string', source: 'user_input' }];
+          proto['inherited'] = { enum: ['only-this'] };
+          let shown: Record<string, unknown>;
+          try {
+            shown = await previewOf(WITH({ ...GRANT, paramConstraints: {} }, params));
+          } finally {
+            delete proto['inherited'];
+          }
+          expect((shown['parameters'] as Array<Record<string, unknown>>)[0]!['allowed']).toBeNull();
+          // CONTROL: the same rule as the contract's own entry is shown.
+          const own = await previewOf(WITH({ ...GRANT, paramConstraints: { inherited: { enum: ['only-this'] } } }, params));
+          expect((own['parameters'] as Array<Record<string, unknown>>)[0]!['allowed']).toEqual({ enum: ['only-this'], regex: null, min: null, max: null });
+        });
+
         it('a contract without the request tool, or without a host or a path, grants nothing and is shown as an empty list', async () => {
           expect((await previewOf(WITH({ ...GRANT, grantedTools: ['bash', 'write_file'] })))['contract']).toEqual([]);
           expect((await previewOf(WITH({ ...GRANT, pathPatterns: [] })))['contract']).toEqual([]);

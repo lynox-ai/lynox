@@ -391,7 +391,8 @@ export function reviewedContractShapeError(contract: CapabilityContract, steps: 
     }
   }
   for (const name of referenced) {
-    if (!(name in contract.paramConstraints)) return `parameter ${shownParamName(name)} flows into a tool call and is not bound to a value.`;
+    // Its own entry, as the run reads it (`bindWorkflowParameters`): a name every object has is not bound.
+    if (!Object.hasOwn(contract.paramConstraints, name)) return `parameter ${shownParamName(name)} flows into a tool call and is not bound to a value.`;
   }
   return null;
 }
