@@ -348,6 +348,12 @@ export class MicrosoftAuth {
     this.drop();
   }
 
+  /**
+   * One refresh at a time; concurrent callers share it. Because it is shared, it
+   * takes no caller's stop signal: the callers waiting on it can belong to
+   * different runs, or to none, and one run's stop would fail the others. The request
+   * carries its own 30 s limit instead.
+   */
   private async refresh(): Promise<void> {
     if (this.refreshInFlight) return this.refreshInFlight;
     this.refreshInFlight = this.doRefresh().finally(() => {

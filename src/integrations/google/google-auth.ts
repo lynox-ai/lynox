@@ -1241,6 +1241,10 @@ export class GoogleAuth {
   // round-trip. Without this guard, N parallel getAccessToken() calls during
   // an expiry window fire N parallel refresh POSTs to Google, racing to set
   // tokenData and risking rate-limit responses on the refresh endpoint.
+  // Because it is shared, the refresh takes no caller's stop signal: the callers
+  // waiting on it can belong to different runs, or to none, and one run's stop
+  // would fail the others. The control-plane request and the direct one each
+  // carry their own 30 s limit instead.
   private async _refreshToken(): Promise<void> {
     if (this.refreshInFlight) return this.refreshInFlight;
     this.refreshInFlight = this._doRefresh().finally(() => {
