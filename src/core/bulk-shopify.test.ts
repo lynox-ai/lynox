@@ -3120,8 +3120,17 @@ describe('shopifyMediaAccess', () => {
     expect(shopifyMediaAccess(profile({ asked_scope: asked, granted_scope: asked }), HOST)).toBe('unbound');
     expect(shopifyMediaAccess(profile({ granted_scope: ['read_products'] }), HOST)).toBe('unbound');
     expect(shopifyMediaAccess(profile(undefined), HOST)).toBe('unbound');
-    // A refresh that left no refresh token, or one that failed otherwise, is no revocation.
-    expect(shopifyMediaAccess(profile({ asked_scope: asked, granted_scope: asked, state: 'refresh-dead' }), HOST)).toBe('unbound');
+    // A refresh that left no refresh token is no revocation.
+    expect(shopifyMediaAccess(profile({ asked_scope: asked, granted_scope: asked, state: 'no-refresh' }), HOST)).toBe('unbound');
+  });
+
+  it('is expired where the store refused to renew the token, before the binding that refresh took away', () => {
+    // What the refresh leaves: the binding gone, the grant `refresh-dead`.
+    expect(shopifyMediaAccess(profile({ asked_scope: asked, granted_scope: asked, state: 'refresh-dead' }), HOST)).toBe('expired');
+    expect(shopifyMediaAccess(profile({ ...live, state: 'refresh-dead' }), HOST)).toBe('expired');
+    // A revocation stays one; the refresh never overwrites it.
+    expect(shopifyMediaAccess(profile({ state: 'revoked', asked_scope: asked, granted_scope: asked }), HOST)).toBe('revoked');
+    expect(shopifyMediaAccess(profile({ ...live, state: 'refresh-dead' }), 'other.myshopify.com')).toBe('no_connection');
   });
 
   it('keeps the scope cases on a bound grant, and no_connection before everything', () => {
