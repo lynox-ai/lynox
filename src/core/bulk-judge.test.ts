@@ -1241,6 +1241,39 @@ describe('against the real managed hook (PRD §6(e)): what reaches the control p
     expect(h.calls).toHaveLength(1);
     expect(Math.ceil(provisional[0]! * 100)).toBeLessThanOrEqual(2);
   });
+
+  it('within the balance, a call whose own worst case does not fit is refused, though the default amount would fit', async () => {
+    // Kills: a judge that asks the gate without its worst case. The balance is above the default
+    // single-call amount, so that gate would admit a call the balance cannot carry.
+    let balance = 16;
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, json: async () => ({ allowed: true, balance_cents: balance, spend_gate: 'balance', overrun_hold: true }),
+    })));
+    // A large title makes this call's worst case far above the balance.
+    const big = 'w'.repeat(300_000);
+    store.insertRecords({ collection: 'products', records: [{ sku: 'Y', title: big, note: 'n' }, { sku: 'Z', title: big, note: 'n' }], stamp: TEST_STAMP });
+    async function judgeOnce(sku: string, supersedes?: string): Promise<{ asked: (number | undefined)[]; h: Harness; id: string }> {
+      const id = await plan([sku]);
+      expect(start(id, 5, supersedes).ok).toBe(true);
+      const { host, hook } = await hookHost();
+      const asked: (number | undefined)[] = [];
+      const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.001 }), {
+        gate: (tier, maxCostCents) => { asked.push(maxCostCents); return fireBeforeRunGate(host as never, tier, { maxCostCents }); },
+        report: (gateRunId, usd, tier) => reportMeteredCost(host as never, gateRunId, usd, tier),
+      });
+      await runBulkJudge(id, h.deps);
+      await hook.onShutdown?.();
+      return { asked, h, id };
+    }
+    const refused = await judgeOnce('Z');
+    expect(refused.asked[0]).toBeGreaterThan(balance);
+    expect(refused.h.calls).toHaveLength(0);
+    expect(ledger.getStatus(refused.id)!.haltReason).toBe(BULK_HALT_REASONS.creditRefused);
+    // Control: the same call on a twin target, with a balance that carries its worst case, goes through.
+    balance = refused.asked[0]! + 1;
+    const carried = await judgeOnce('Y', refused.id);
+    expect(carried.h.calls).toHaveLength(1);
+  });
 });
 
 describe('judgeWorstCaseUsd — an upper bound on what one call can cost', () => {
