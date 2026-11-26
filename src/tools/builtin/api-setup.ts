@@ -38,7 +38,7 @@ import { recordSessionCost } from '../../core/session-budget.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
-import { pv, singleLine } from '../../core/prompt-value.js';
+import { flattenPrompt, pv, singleLine } from '../../core/prompt-value.js';
 import type { PromptText } from '../../types/agent.js';
 import { toolWordFrame } from '../tool-words.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
@@ -1400,18 +1400,28 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     // `MODEL_MAP.balanced` — so a real customer's $0.3848 Sonnet extraction was
     // reported to the control plane as Haiku spend, and every per-tier breakdown
     // understated `balanced` by exactly the helper calls it could not see.
+    // Also charged to this run's cost ceiling, like the agent's own helper calls: the ceiling
+    // counts it, and the run stops at its next check once it is reached.
+    agent.chargeExternalCost?.(costUsd);
     debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, costUsd, result.tier);
   } catch (err: unknown) {
     // A stopped call has no reply to book: its bound goes to the session cap, never to the
     // tenant debit (`aborted-call.ts`), and the engine reports the stop.
     if (err instanceof ExtractionStoppedError) {
-      if (err.abortedCost !== undefined) recordSessionCost(agent.sessionCounters, err.abortedCost.upperBoundUsd);
+      if (err.abortedCost !== undefined) {
+        // And to this run's ceiling, as a bound it counts but does not bill.
+        agent.chargeExternalCapOnlyCost?.(err.abortedCost.upperBoundUsd);
+        recordSessionCost(agent.sessionCounters, err.abortedCost.upperBoundUsd);
+      }
       throw err;
     }
     // A refused extraction still paid for its reply: book it here, once, as the success
     // path above does. Undefined when the call never reached the model.
     const spent = extractionSpendOf(err);
-    if (spent) debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, spent.costUsd, spent.tier);
+    if (spent) {
+      agent.chargeExternalCost?.(spent.costUsd);
+      debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, spent.costUsd, spent.tier);
+    }
     if (err instanceof BudgetError) {
       return `Error: extraction budget exceeded (estimated $${err.estimatedCostUsd.toFixed(4)} > $${DOCS_EXTRACT_BUDGET_USD.toFixed(2)}). Try a smaller / more focused docs URL.`;
     }
@@ -2724,7 +2734,13 @@ ${draftJson}
           presetNoteFor?.(l),
         ].filter((part): part is string => part !== undefined && part !== '').join('\n\n');
         const disclosure = disclosureIn('en');
-        if (!agent.promptUser) {
+        // An autonomous run (a trigger, a worker task) has a `promptUser`, but it only parks the
+        // question as a notification for later: nobody is there to weigh a change to where a
+        // credential goes while the run that asked for it waits. So it is treated like a run with
+        // no prompt at all, the same as the binding question (`askBindingGrowth`), `release_secret`
+        // and `adopt_connection`. The delete questions further down are not of this kind: they
+        // take something away, and under `autonomous` the permission guard acts first (`destructive`).
+        if (agent.autonomy === 'autonomous' || !agent.promptUser) {
           // Two halves, two answers, because they fail in opposite directions.
           // The egress half has to refuse the SAVE: a stored profile with a
           // non-vetted host is one a later request attaches a credential to, so
@@ -2746,7 +2762,7 @@ ${draftJson}
           }
           // A change to where a credential goes or what it may do, with nobody to accept it: refused.
           if (widens) {
-            return `Blocked: profile "${profile.id}" not saved. The save changes its scopes, provider parameters, addresses, grant or the secrets it reads, and that needs the user's acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved. Tell the user in one sentence that the profile was not saved because this change needs their acceptance, and that they can save it again by asking lynox in a chat where they can answer. Do not try to save it in another way.`;
+            return `Blocked: profile "${profile.id}" not saved. The save changes its scopes, provider parameters, addresses, grant or the secrets it reads, and that needs the user's acceptance — but no interactive prompt is available (autonomous/background mode). Nothing was saved. Tell the user in one sentence that the profile was not saved because this change needs their acceptance, name in a few words what the save would have changed (from the list below), and tell them they can save it by asking lynox for it in a chat, since a scheduled or background run cannot ask them. Do not try to save it in another way.\n\nThis save changes:\n${securityChanges(prior, profile, 'en').map((c) => `- ${flattenPrompt(c.text)}`).join('\n')}`;
           }
         } else {
           const answer = await agent.promptUser(

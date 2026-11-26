@@ -815,19 +815,24 @@ describe('the markup a target changes (1010)', () => {
 		expect(target.querySelector('[data-testid="bulk-markup"]')!.textContent).toContain(`<p class="x"> ${t('bulk.markup.in_template')}`);
 	});
 
-	it('lists on an undo what it writes back, and says where that lies outside the allowlist', async () => {
+	it('lists on an undo what it writes back in the target\'s own row, says where that lies outside the allowlist, and keeps no list apart', async () => {
 		run = makeRun({ kind: 'undo', sourceRunId: 'r0', total: 1, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
 		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'update', diff: fieldsDiff('Neu', 'Alt'), error: null, deselected: false,
 			markupChanges: [{ field: 'descriptionHtml', added: [script], removed: [], addsOutsideAllowlist: true }] }];
 		await render();
-		const undo = target.querySelectorAll('[data-testid="bulk-undo-markup"]');
-		expect(undo).toHaveLength(1);
+		// The markup stands in the target's row of the table, once; the list under the approval is gone (U-466).
+		expect(target.querySelectorAll('[data-testid="bulk-undo-markup"]')).toHaveLength(0);
+		expect(target.querySelectorAll('[data-testid="bulk-markup"]')).toHaveLength(1);
+		const rows = target.querySelectorAll('[data-testid="bulk-target-row"]');
+		expect(rows).toHaveLength(1);
+		const row = rows[0]!;
+		expect(row.querySelector('[data-testid="bulk-markup"]')).not.toBeNull();
 		// The product is named by its admin link; the markup it writes back is listed as text.
-		expect(undo[0]!.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/1');
-		expect(codes(undo[0]!)).toEqual(['<script>steal()</script>']);
-		expect(undo[0]!.textContent).toContain(t('bulk.markup.restores'));
-		expect(undo[0]!.querySelector('[data-testid="bulk-markup-restores-note"]')?.textContent).toBe(t('bulk.markup.restores_note_active'));
-		expect(undo[0]!.querySelector('[data-testid="bulk-markup-restores-note"]')?.className).toBe('text-warning');
+		expect(row.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/1');
+		expect(codes(row)).toEqual(['<script>steal()</script>']);
+		expect(row.textContent).toContain(t('bulk.markup.restores'));
+		expect(row.querySelector('[data-testid="bulk-markup-restores-note"]')?.textContent).toBe(t('bulk.markup.restores_note_active'));
+		expect(row.querySelector('[data-testid="bulk-markup-restores-note"]')?.className).toBe('text-warning');
 		expect(target.querySelectorAll('script')).toHaveLength(0);
 	});
 
@@ -837,7 +842,7 @@ describe('the markup a target changes (1010)', () => {
 		targets = [{ seq: 1, key: 'gid://shopify/Product/1', change: 'update', diff: fieldsDiff('Neu', 'Alt'), error: null, deselected: false,
 			markupChanges: [{ field: 'descriptionHtml', added: [table], removed: [], addsOutsideAllowlist: true, addsOnlyPassive: true }] }];
 		await render();
-		const note = target.querySelector('[data-testid="bulk-undo-markup"] [data-testid="bulk-markup-restores-note"]');
+		const note = target.querySelector('[data-testid="bulk-target-row"] [data-testid="bulk-markup-restores-note"]');
 		expect(note?.textContent).toBe(t('bulk.markup.restores_note'));
 		// Neutral, as the head and the footnote: not a warning about the owner's own table.
 		expect(note?.className).toBe('text-text-subtle');
@@ -2315,5 +2320,267 @@ describe('verdicts that differ from the rest of the run', () => {
 		await render();
 		expect(outlierCount()).toBeUndefined();
 		expect(target.querySelector('[data-testid="bulk-outlier"]')).toBeNull();
+	});
+});
+
+// An undo the owner approves lists its targets as a write does (U-466): each product by its title
+// with its admin link, its field as a word, and the value it has now beside the one the undo writes
+// back. The entries it deletes stay in their own box under the approval.
+describe('approving an undo, per target (U-466)', () => {
+	const seoDiff = (now: string, back: string): BulkTarget['diff'] =>
+		({ kind: 'fields', fields: [{ field: 'seo_title', before: now, after: back }] }) as BulkTarget['diff'];
+	const undoTargets = (): BulkTarget[] => [
+		{ seq: 0, key: 'gid://shopify/Product/1', change: 'update', diff: seoDiff('Neu 1', 'Alt 1'), error: null, deselected: false, title: 'Snowboard Blau' },
+		{ seq: 1, key: 'gid://shopify/Product/2', change: 'update', diff: seoDiff('Neu 2', 'Alt 2'), error: null, deselected: false, title: 'Snowboard Rot', undoOpen: true },
+		{ seq: 2, key: 'gid://shopify/Product/3', change: 'delete', diff: { kind: 'none' } as BulkTarget['diff'], error: null, deselected: false },
+	];
+	const undoRun = (o: Partial<BulkRunDetailData> = {}): BulkRunDetailData =>
+		makeRun({ kind: 'undo', sourceRunId: 'r0', probeConfirmed: true, total: 3, changes: { update: 2, create: 0, delete: 1, unchanged: 0, invalid: 0 }, ...o });
+	const created = (seq: number): BulkTarget =>
+		({ seq, key: `gid://shopify/Product/${seq + 1}`, change: 'delete', diff: { kind: 'none' } as BulkTarget['diff'], error: null, deselected: false });
+	const rows = (): Element[] => [...target.querySelectorAll('[data-testid="bulk-target-row"]')];
+	const takeOut = (): HTMLButtonElement[] => [...target.querySelectorAll('button')].filter((b) => b.textContent?.trim() === t('bulk.deselect.off'));
+	const explain = (): string | null | undefined => target.querySelector('[data-testid="bulk-undo-approve-explain"]')?.textContent;
+	const approveButton = (): HTMLButtonElement | undefined => buttonByText(t('bulk.undo.approve'));
+	const german = (): void => { const was = getLocale(); setLocale('de'); onTestFinished(() => setLocale(was)); };
+	const english = (): void => { const was = getLocale(); setLocale('en'); onTestFinished(() => setLocale(was)); };
+
+	it('lists each target it gives a value back by title, admin link, field as a word and the value now and back, and leaves the entry it deletes to the box', async () => {
+		run = undoRun();
+		targets = undoTargets();
+		await render();
+		expect(rows()).toHaveLength(2);
+		const first = rows()[0]!;
+		expect(first.querySelector('[data-testid="bulk-target-title"]')?.textContent).toBe('Snowboard Blau');
+		expect(first.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/1');
+		// The field as the owner reads it, never its raw name.
+		expect(first.querySelector('[data-testid="bulk-field-name"]')?.textContent).toBe(`${t('bulk.field.shopify.seo_title')}:`);
+		expect(first.textContent).not.toContain('seo_title');
+		expect(first.querySelector('del')?.textContent).toBe('Neu 1');
+		expect(first.querySelector('ins')?.textContent).toBe('Alt 1');
+		const heads = [...target.querySelectorAll('th')].map((h) => h.textContent);
+		expect(heads).toContain(t('bulk.undo.now_back'));
+		expect(heads).not.toContain(t('bulk.preview.before_after'));
+		// The count over the table leaves the deleted entry out, as the table does.
+		expect(target.textContent).toContain(tf('bulk.preview.title', { k: '2', n: '2' }));
+		// The entry it deletes is not a row; it stands in the box under the approval, as before.
+		const rowLinks = rows().map((r) => r.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href'));
+		expect(rowLinks).not.toContain('https://demo.myshopify.com/admin/products/3');
+		const box = target.querySelector('[data-testid="bulk-undo-creates"]')?.parentElement;
+		expect(box?.querySelector('[data-testid="bulk-target-admin"]')?.getAttribute('href')).toBe('https://demo.myshopify.com/admin/products/3');
+	});
+
+	it('stacks an undo\'s row under its name on a narrow screen and keeps its roles, and leaves the write\'s table as it was', async () => {
+		run = undoRun();
+		targets = undoTargets();
+		await render();
+		const row = rows()[0]!;
+		expect(row.getAttribute('role')).toBe('row');
+		expect(row.className).toContain('block sm:table-row');
+		expect([...row.children].map((c) => c.getAttribute('role'))).toEqual(['cell', 'cell']);
+		expect([...row.children].map((c) => c.className)).toEqual(['block sm:table-cell pt-1.5 sm:pb-1.5 pr-3', 'block sm:table-cell pb-1.5 pt-1 sm:pt-1.5']);
+		// The column head moves into the row where the table head is hidden.
+		expect(target.querySelector('thead')?.className).toBe('hidden sm:table-header-group');
+		expect(row.children[1]!.querySelector('.sm\\:hidden')?.textContent).toBe(t('bulk.undo.now_back'));
+		unmount(component!);
+		component = undefined;
+		run = makeRun();
+		targets = TARGETS.map((x) => ({ ...x }));
+		await render();
+		const writeRow = rows()[0]!;
+		expect(writeRow.className).not.toContain('block');
+		expect([...writeRow.children].map((c) => c.className)).toEqual(['py-1.5 pr-3', 'py-1.5']);
+		expect(target.querySelector('thead')?.className ?? '').toBe('');
+		expect(target.querySelector('.sm\\:hidden')).toBeNull();
+		expect([...target.querySelectorAll('th')].map((h) => h.textContent)).toContain(t('bulk.preview.before_after'));
+	});
+
+	it('takes a target out of the undo of a run that is not atomic through the same route, and the sentence counts only the targets left', async () => {
+		german();
+		run = undoRun({ total: 2, changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = undoTargets().filter((x) => x.change !== 'delete').map((x) => ({ ...x, undoOpen: undefined }));
+		await render();
+		expect(explain()).toBe(tf('bulk.undo.approve_explain', { n: '2' }));
+		expect(takeOut()).toHaveLength(2);
+		expect(target.querySelector('[data-testid="bulk-undo-atomic"]')).toBeNull();
+		takeOut()[1]!.click();
+		await settle();
+		expect(posts.filter((p) => p.url.endsWith('/bulk/runs/r1/targets/1/deselect'))).toHaveLength(1);
+		expect(explain()).toBe(t('bulk.undo.approve_explain_one'));
+		expect(rows()[1]!.textContent).toContain(t('bulk.deselect.taken_out'));
+		expect(buttonByText(t('bulk.deselect.on'))).toBeDefined();
+		expect(approveButton()?.disabled).toBe(false);
+	});
+
+	it('offers no target out of the undo of an atomic run, and says why once over the table', async () => {
+		run = undoRun({ atomic: true });
+		targets = undoTargets();
+		await render();
+		expect(rows()).toHaveLength(2);
+		expect(takeOut()).toHaveLength(0);
+		const atomic = target.querySelectorAll('[data-testid="bulk-undo-atomic"]');
+		expect(atomic).toHaveLength(1);
+		expect(atomic[0]!.textContent).toBe(t('bulk.deselect.refused.atomic_undo'));
+		// Over the table, not under it.
+		expect(atomic[0]!.compareDocumentPosition(target.querySelector('table')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		expect(target.textContent!.split(t('bulk.deselect.refused.atomic_undo'))).toHaveLength(2);
+	});
+
+	it('locks the approval once every target is taken out and nothing is left to delete, says why in German, and points the button at it', async () => {
+		german();
+		run = undoRun({ total: 2, changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = undoTargets().filter((x) => x.change !== 'delete');
+		await render();
+		takeOut()[0]!.click();
+		await settle();
+		// One target left: the approval still writes it back.
+		expect(approveButton()?.disabled).toBe(false);
+		takeOut()[0]!.click();
+		await settle();
+		expect(explain()).toBe('Du hast alle Ziele herausgenommen, die einen Wert zurückbekämen; darum schreibt diese Rücknahme nichts. Nimm eines wieder auf, oder lass sie mit „Nicht jetzt“ liegen.');
+		expect(approveButton()?.disabled).toBe(true);
+		expect(approveButton()?.getAttribute('aria-describedby')).toBe('bulk-undo-approve-explain');
+	});
+
+	it('says in English that an undo with every target taken out writes nothing, and keeps it locked', async () => {
+		english();
+		run = undoRun({ total: 2, deselected: 2, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 } });
+		targets = undoTargets().filter((x) => x.change !== 'delete').map((x) => ({ ...x, deselected: true }));
+		await render();
+		expect(explain()).toBe('You took out every target that would get a value back, so this undo writes nothing. Put one back, or leave it with “Not now”.');
+		expect(approveButton()?.disabled).toBe(true);
+	});
+
+	for (const [lang, sentence] of [
+		['de', 'Du hast alle Ziele herausgenommen, die einen Wert zurückbekämen; die Rücknahme löscht nur noch den Eintrag unten.'],
+		['en', 'You took out every target that would get a value back; the undo now only deletes the entry below.'],
+	] as const) {
+		it(`says the undo only deletes the entry left once the owner took out every target that gets a value back, and keeps the approval (${lang})`, async () => {
+			if (lang === 'de') german(); else english();
+			run = undoRun({ deselected: 2, changes: { update: 0, create: 0, delete: 1, unchanged: 0, invalid: 0 } });
+			targets = undoTargets().map((x) => (x.change === 'delete' ? x : { ...x, deselected: true }));
+			await render();
+			expect(explain()).toBe(sentence);
+			// The entry is still deleted: the approval stays.
+			expect(approveButton()?.disabled).toBe(false);
+		});
+	}
+
+	it('names several entries left to delete by their number', async () => {
+		german();
+		run = undoRun({ total: 4, deselected: 2, changes: { update: 0, create: 0, delete: 2, unchanged: 0, invalid: 0 } });
+		targets = [...undoTargets().map((x) => (x.change === 'delete' ? x : { ...x, deselected: true })), created(3)];
+		await render();
+		expect(explain()).toBe(tf('bulk.undo.only_deletes', { n: '2' }));
+		expect(approveButton()?.disabled).toBe(false);
+	});
+
+	for (const [lang, sentence] of [
+		['de', 'Diese Rücknahme schreibt keine Werte zurück; sie löscht nur den Eintrag unten.'],
+		['en', 'This undo writes no value back; it only deletes the entry below.'],
+	] as const) {
+		it(`says of the undo of a run that only created an entry that it writes no value back, not that a target was taken out, and shows no table (${lang})`, async () => {
+			if (lang === 'de') german(); else english();
+			run = undoRun({ total: 1, changes: { update: 0, create: 0, delete: 1, unchanged: 0, invalid: 0 } });
+			targets = [created(2)];
+			await render();
+			expect(explain()).toBe(sentence);
+			expect(explain()).not.toBe(t('bulk.undo.only_deletes_one'));
+			expect(rows()).toHaveLength(0);
+			expect(approveButton()?.disabled).toBe(false);
+		});
+	}
+
+	it('names several entries of a run that only created them by their number', async () => {
+		german();
+		run = undoRun({ total: 2, changes: { update: 0, create: 0, delete: 2, unchanged: 0, invalid: 0 } });
+		targets = [created(2), created(3)];
+		await render();
+		expect(explain()).toBe(tf('bulk.undo.deletes_only', { n: '2' }));
+	});
+
+	// The plan refuses a target whose value back the shop kept with markup of its own
+	// (`shop_added_markup`): with every target so, none gets a value back, though none is taken out.
+	const refused = (): BulkTarget[] => undoTargets().filter((x) => x.change !== 'delete')
+		.map((x) => ({ ...x, change: 'invalid' as const, diff: { kind: 'none' } as BulkTarget['diff'], error: 'shop_added_markup', undoOpen: undefined }));
+
+	it('says in German that an undo whose every target is refused writes nothing and why, not that the owner took one out, locks the approval, points the button at it and lists the targets', async () => {
+		german();
+		run = undoRun({ total: 2, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 2 } });
+		targets = refused();
+		await render();
+		expect(explain()).toBe('Diese Rücknahme schreibt nichts: Kein Ziel bekommt seinen Wert von vorher zurück. Der Grund steht bei jedem Ziel. Verwirf sie, oder lass sie mit „Nicht jetzt“ liegen.');
+		expect(explain()).not.toContain('Du hast');
+		expect(approveButton()?.disabled).toBe(true);
+		expect(approveButton()?.getAttribute('aria-describedby')).toBe('bulk-undo-approve-explain');
+		expect(rows()).toHaveLength(2);
+		expect(rows().map((r) => r.textContent)).toEqual([expect.stringContaining('Snowboard Blau'), expect.stringContaining('Snowboard Rot')]);
+	});
+
+	it('heads only a row that shows values with the column on a narrow screen, not a row that only gives its reason', async () => {
+		german();
+		run = undoRun({ total: 4, changes: { update: 2, create: 0, delete: 0, unchanged: 0, invalid: 2 } });
+		// A row of fields and a row of text lines both show values; the two refused rows only their reason.
+		targets = [...refused(), { ...undoTargets()[0]!, seq: 2 }, { ...undoTargets()[0]!, seq: 3, diff: { kind: 'text', from: 0, removed: ['alt'], added: ['neu'] } }];
+		await render();
+		const labels = rows().map((r) => r.querySelector('[data-testid="bulk-values-label"]')?.textContent ?? null);
+		expect(labels).toEqual([null, null, 'Jetzt → zurück auf', 'Jetzt → zurück auf']);
+	});
+
+	it('says of an undo whose every target is refused that it only deletes the entry left, not that it writes no value back for a source that only created, and keeps the approval', async () => {
+		german();
+		run = undoRun({ total: 3, changes: { update: 0, create: 0, delete: 1, unchanged: 0, invalid: 2 } });
+		targets = [...refused(), created(2)];
+		await render();
+		expect(explain()).toBe('Kein Ziel bekommt seinen Wert von vorher zurück; die Rücknahme löscht nur noch den Eintrag unten.');
+		expect(explain()).not.toBe(t('bulk.undo.deletes_only_one'));
+		expect(rows()).toHaveLength(2);
+		// Deleting the entry is a write: the approval stays.
+		expect(approveButton()?.disabled).toBe(false);
+		expect(approveButton()?.getAttribute('aria-describedby')).toBeNull();
+	});
+
+	for (const [lang, hint] of [
+		['de', 'Offen, ob die Änderung beim Anbieter angekommen ist. Die Rücknahme sieht hier zuerst nach.'],
+		['en', 'Unclear whether the change reached the provider. Taking back checks here first.'],
+	] as const) {
+		it(`says under the name of a target whose write was never confirmed that the undo checks it first, not under a written one (${lang})`, async () => {
+			if (lang === 'de') german(); else english();
+			run = undoRun({ undoOpen: 1 });
+			targets = undoTargets();
+			await render();
+			const [written, open] = rows();
+			expect(open!.querySelector('[data-testid="bulk-undo-row-open"]')?.textContent).toBe(hint);
+			// Under the name, in the target's cell.
+			expect(open!.children[0]!.querySelector('[data-testid="bulk-undo-row-open"]')).not.toBeNull();
+			expect(written!.querySelector('[data-testid="bulk-undo-row-open"]')).toBeNull();
+		});
+	}
+
+	it('drops the hint from a target whose write was never confirmed once the owner takes it out', async () => {
+		run = undoRun({ undoOpen: 1 });
+		targets = undoTargets();
+		await render();
+		expect(rows()[1]!.querySelector('[data-testid="bulk-undo-row-open"]')).not.toBeNull();
+		takeOut()[1]!.click();
+		await settle();
+		expect(rows()[1]!.textContent).toContain(t('bulk.deselect.taken_out'));
+		expect(rows()[1]!.querySelector('[data-testid="bulk-undo-row-open"]')).toBeNull();
+	});
+
+	it('control: a write\'s row shows no such hint, and its approval keeps its own head', async () => {
+		run = makeRun();
+		targets = TARGETS.map((x) => (x.seq === 1 ? { ...x, undoOpen: true } : { ...x }));
+		await render();
+		expect(target.querySelector('[data-testid="bulk-undo-row-open"]')).toBeNull();
+		expect(buttonByText(t('bulk.undo.approve'))).toBeUndefined();
+		expect(target.textContent).toContain(tf('bulk.preview.title', { k: '3', n: '3' }));
+	});
+
+	it('heads the column "Jetzt → zurück auf" in German and "Now → back to" in English', () => {
+		german();
+		expect(t('bulk.undo.now_back')).toBe('Jetzt → zurück auf');
+		setLocale('en');
+		expect(t('bulk.undo.now_back')).toBe('Now → back to');
 	});
 });

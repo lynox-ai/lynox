@@ -1120,15 +1120,20 @@ describe('who mints a Shopify read grant', () => {
     visit(sf);
     return found;
   }
+  /** The whole source tree, parsed once for both counts. Parsing every file is the slow part
+   *  (seconds on a quiet machine), so the two tests that count over the tree share one pass. */
+  let tree: Record<string, Found> | null = null;
   function count(key: keyof Found): Record<string, number> {
     const root = join(__dirname, '..');
+    tree ??= Object.fromEntries(sources(root).map((f) => [f.slice(root.length + 1), scan(f, readFileSync(f, 'utf8'))]));
     const out: Record<string, number> = {};
-    for (const f of sources(root)) {
-      const n = scan(f, readFileSync(f, 'utf8'))[key];
-      if (n > 0) out[f.slice(root.length + 1)] = n;
-    }
+    for (const [f, found] of Object.entries(tree)) if (found[key] > 0) out[f] = found[key];
     return out;
   }
+  /** A pass over the whole tree takes about twice as long on a busy shared runner as on a quiet
+   *  one, and the default ten seconds were overrun there. The bound stays: a pass that takes over
+   *  a minute still fails, a slow one does not. */
+  const TREE_SCAN_MS = 60_000;
 
   it('sees a call, an alias, a destructure, a property, a re-export and an escape — and not a comment', () => {
     for (const text of ['x = withShopifyRead(a, b, c)', "import { withShopifyRead as g } from './p.js'", 'const { withShopifyRead: w } = await import(m)', "pg['withShopifyRead'](a)", 'export { withShopifyRead } from "./p.js"', 'with\\u0053hopifyRead(a)']) {
@@ -1151,13 +1156,13 @@ describe('who mints a Shopify read grant', () => {
     expect(count('mint')).toEqual({ 'tools/permission-guard.ts': 1, 'core/bulk-external-writer.ts': 2 });
     const callers = sources(join(__dirname, '..')).filter((f) => /\bbulkRunContract\b/.test(readFileSync(f, 'utf8'))).map((f) => f.slice(join(__dirname, '..').length + 1));
     expect(callers.sort()).toEqual(['core/bulk-external-writer.ts', 'core/worker-loop.ts']);
-  });
+  }, TREE_SCAN_MS);
 
   it('is handed a phase written out only by the preview, for its list pages and its read', () => {
     // permission-guard: the three members of the phase type. bulk-preview: the list page (of
     // products or of images) and the read.
     expect(count('phase')).toEqual({ 'tools/permission-guard.ts': 3, 'core/bulk-preview.ts': 3 });
-  });
+  }, TREE_SCAN_MS);
 });
 
 describe('shopifyPairedAfter', () => {

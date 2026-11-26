@@ -247,8 +247,12 @@ describe('every tool the engine can build is classified by where its result come
    */
   const MARKS_ITS_RESULT: Readonly<Record<string, { readonly file: string; readonly wraps: number }>> = {
     inbox_read: { file: 'integrations/mail/tools/inbox-read.ts', wraps: 2 },
+    mail_reply: { file: 'integrations/mail/tools/mail-reply.ts', wraps: 2 },
+    mail_send: { file: 'integrations/mail/tools/mail-send.ts', wraps: 1 },
     recall_tool_result: { file: 'tools/builtin/recall-tool-result.ts', wraps: 1 },
+    set_thread_context: { file: 'tools/builtin/set-thread-context.ts', wraps: 2 },
     spawn_agent: { file: 'tools/builtin/spawn.ts', wraps: 2 },
+    subjects_merge: { file: 'tools/builtin/subjects-merge.ts', wraps: 2 },
   };
 
   /** Tools that return no text from outside, each with what they do return. */
@@ -287,8 +291,10 @@ describe('every tool the engine can build is classified by where its result come
 
   /** Tools whose results are not classified yet. */
   const NOT_YET_CLASSIFIED: ReadonlySet<string> = new Set([
-    'google_calendar', 'mail_reply', 'mail_send', 'memory_promote', 'run_workflow', 'save_workflow',
-    'set_thread_context', 'subjects_merge', 'task_update', 'update_workflow_steps',
+    'google_calendar', 'memory_promote', 'run_workflow',
+    // Returns the name it was given, ids and counts, and the names of the parameters the session
+    // analysis found; those names are not checked for a shape yet. Tracked privately.
+    'save_workflow',
   ]);
 
   const classes = (): ReadonlyArray<readonly [string, ReadonlySet<string>]> => [

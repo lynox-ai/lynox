@@ -43,6 +43,8 @@ import { pauseEndedPlans } from './plan-pause.js';
 import { isErrorTextReducedForProcess, processErrorText } from './error-egress.js';
 import { tableInLog } from './data-store-boot-log.js';
 import { fireBeforeRunGate } from './metered-request.js';
+import type { RunAdmission } from './run-admission.js';
+export type { RunAdmission } from './run-admission.js';
 import { SecretReleases } from './secret-releases.js';
 import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
 import { connectionTokenHolders, resolveGuardAllows } from './profile-secret-view.js';
@@ -176,6 +178,13 @@ export interface RunContext {
   failure?: RunFailure | undefined;
   /** The run group this report belongs to (see `run-group.ts`). Absent: its own group. */
   runGroupId?: string | undefined;
+  /**
+   * Set on admission only, by a caller that cannot bound its spend while it runs (a single
+   * model call, a saved workflow): the most the call may cost, in US cents. A hook that
+   * admits runs only within a balance refuses the call unless this much is free. Absent: a
+   * run whose spend the engine bounds itself, with the ceiling the hook hands back.
+   */
+  maxCostCents?: number | undefined;
 }
 
 /**
@@ -184,7 +193,9 @@ export interface RunContext {
  */
 export interface LynoxHooks {
   onInit?(engine: Engine): Promise<void>;
-  onBeforeRun?(runId: string, context: RunContext): void | Promise<void>;
+  /** Throwing refuses the run. Returning a {@link RunAdmission} bounds what the admitted run
+   *  may spend and hands over what to give back when it ends; nothing admits it unchanged. */
+  onBeforeRun?(runId: string, context: RunContext): void | RunAdmission | Promise<void | RunAdmission>;
   onBeforeCreateAgent?(tools: ToolEntry[]): ToolEntry[];
   onAfterRun?(runId: string, costUsd: number, context: RunContext): void;
   onShutdown?(): Promise<void>;
@@ -3495,7 +3506,9 @@ export class Engine {
     const modelTier = this.config.model ?? 'deep';
     // A batch is a paid model call outside `Session.run()`: the same admission as
     // every other one — the daily and monthly spending caps, then the hooks.
-    const gate = await fireBeforeRunGate(this, modelTier);
+    // Its spend is not bounded while it runs, so a hook that admits only within the balance
+    // refuses it: no amount of free balance is known to cover it.
+    const gate = await fireBeforeRunGate(this, modelTier, { maxCostCents: Number.POSITIVE_INFINITY });
     if (gate.blockedReason !== null) throw new Error(gate.blockedReason);
     const result = await submitBatch(
       this.client, reqs,

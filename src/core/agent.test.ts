@@ -583,7 +583,7 @@ describe('Agent', () => {
       });
       const result = await agent.send('Question');
       expect(result).toBe('The answer is 42');
-      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', 0, undefined, undefined, expect.any(Function), { principal: { kind: 'owner' }, runId: undefined }, null);
+      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', 0, undefined, undefined, expect.any(Function), { principal: { kind: 'owner' }, runId: undefined }, null, { onRefused: undefined });
       // The fifth argument is read when the extraction RETURNS, so it must follow the agent's
       // flag after the call, not report the value it had when the call was made.
       const cancelled = memory.maybeUpdate.mock.calls[0]?.[4] as () => boolean;
@@ -898,7 +898,7 @@ describe('Agent', () => {
 
       // The end_turn path passes the turn text to maybeUpdate; the endsTurn path
       // must do the same (only the tool-count differs — one tool ran this turn).
-      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', expect.any(Number), undefined, undefined, expect.any(Function), { principal: { kind: 'owner' }, runId: undefined }, null);
+      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', expect.any(Number), undefined, undefined, expect.any(Function), { principal: { kind: 'owner' }, runId: undefined }, null, { onRefused: undefined });
     });
 
     it('a non-endsTurn tool still continues the loop (contrast)', async () => {
@@ -1190,7 +1190,7 @@ describe('Agent', () => {
       const viaGuard = makeMemory();
       const b = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], memory: viaGuard, costGuard: { maxBudgetUSD: 100, maxIterations: 2 } });
       expect(await b.send('go')).toContain('Response stopped');
-      expect(viaGuard.maybeUpdate).toHaveBeenCalledWith('Let me check.', expect.any(Number), undefined, undefined, expect.any(Function), { principal: { kind: 'owner' }, runId: undefined }, null);
+      expect(viaGuard.maybeUpdate).toHaveBeenCalledWith('Let me check.', expect.any(Number), undefined, undefined, expect.any(Function), { principal: { kind: 'owner' }, runId: undefined }, null, { onRefused: undefined });
     });
 
     it('safeToolNames: allowlist, dedupe, order, cap at 8', () => {
@@ -6226,6 +6226,23 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
     await agent.send('export the workflow');
     expect(agent.sawExternalContentTool).toBe(true);
   });
+
+  // Both return stored text a prior turn may have brought in from outside: task_update the same
+  // row task_list reads back, update_workflow_steps the stored name and every step's task.
+  for (const [tool, result] of [
+    ['task_update', 'Task updated: "Weekly report" (last result: ...)'],
+    ['update_workflow_steps', '✓ Updated workflow "Report" (1 step).\n\n1. a: Send the report'],
+  ] as const) {
+    it(`sets sawExternalContentTool when ${tool} runs (stored read-back)`, async () => {
+      const t = makeTool(tool, vi.fn().mockResolvedValue(result));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name: tool, input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [t] });
+      await agent.send('change it');
+      expect(agent.sawExternalContentTool).toBe(true);
+    });
+  }
 
   it('F5: conversationSawUntrusted is STICKY across turns — an untrusted read taints later clean runs', async () => {
     const fetchTool = makeTool('fetch_page', vi.fn().mockResolvedValue(

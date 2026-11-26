@@ -389,7 +389,7 @@ export type StreamEvent =
   // `subAgent`/`subAgentId` are set when the error was raised inside a spawned
   // child and forwarded by `spawn` — same stamp as `tool_call`/`tool_result`.
   | { type: 'error';       message: string; fatal?: boolean | undefined; agent: string; subAgent?: string | undefined; subAgentId?: string | undefined }
-  | { type: 'warning';     code: string; detail?: string | undefined; agent: string }
+  | { type: 'warning';     code: string; detail?: string | undefined; agent: string; reason?: string | undefined }
   // `afterTurnEnd`: the failed attempt had already sent its `turn_end` (its reply reached
   // `message_delta`), so a consumer that marks call boundaries at `turn_end` knows the end it
   // saw was this attempt's own, not the previous call's.

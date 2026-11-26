@@ -12580,7 +12580,7 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
-    it('GET /api/triggers names a helper that set a trigger up or changed it last, by the name a session may read, another helper to a helper as another mandate, and the owner\'s own by none', async () => {
+    it('GET /api/triggers names a helper that set a trigger up or changed it last, by the name a session may read, another helper to a helper as another mandate, a helper\'s own address under another grant as its own, and the owner\'s own by none', async () => {
       const AT = '2026-11-10T00:00:00.000Z';
       const rows = [
         { id: 'trg-anna', title: 'Preise beobachten', created_by: 'mandate:anna@example.com', created_mandate_id: 'grant-a', created_at: AT },
@@ -12594,8 +12594,11 @@ describe('LynoxHTTPApi', () => {
         { id: 'trg-old', title: 'Alt' },
         // A helper's mark from before grant ids were stored: whose grant it was is not known.
         { id: 'trg-legacy', title: 'Ohne Grant', created_by: 'mandate:anna@example.com' },
+        // Bea's address under an earlier grant, and with no grant id: hers, as the trigger masking reads it.
+        { id: 'trg-bea-old', title: 'Früher', created_by: 'mandate:bea@example.com', created_mandate_id: 'grant-b-old', created_at: AT },
+        { id: 'trg-bea-legacy', title: 'Alt von Bea', created_by: 'mandate:bea@example.com' },
       ];
-      const shown: Record<string, string> = { 'grant-a': 'Anna A.', 'grant-b': 'Bea B.' };
+      const shown: Record<string, string> = { 'grant-a': 'Anna A.', 'grant-b': 'Bea B.', 'grant-b-old': 'Beatrice (old grant)' };
       const reads: string[] = [];
       // A helper's read is recorded in the trail before it is answered, so the trail takes rows too.
       let trail: { displayNameOf: (id: string) => string | null; record: () => void } | null = { displayNameOf: (id) => { reads.push(id); return shown[id] ?? null; }, record: () => undefined };
@@ -12618,9 +12621,11 @@ describe('LynoxHTTPApi', () => {
             'trg-own': [],
             'trg-old': [],
             'trg-legacy': [{ kind: 'set_up_by', name: 'anna@example.com', takenOver: false }],
+            'trg-bea-old': [{ kind: 'set_up_by', name: 'Beatrice (old grant)', takenOver: false }],
+            'trg-bea-legacy': [{ kind: 'set_up_by', name: 'bea@example.com', takenOver: false }],
           });
           // Two triggers of grant-a, one request: the trail is read once per grant.
-          expect([...reads].sort()).toEqual(['grant-a', 'grant-b']);
+          expect([...reads].sort()).toEqual(['grant-a', 'grant-b', 'grant-b-old']);
           // A helper reads its own grant's name, and another grant as another mandate: not its own,
           // never whose. (Whether the row's own fields still carry the other address is the
           // route's field question, not the setup lines'.)
@@ -12629,8 +12634,15 @@ describe('LynoxHTTPApi', () => {
           expect(bea.byId['trg-anna']).toEqual([{ kind: 'set_up_by', name: 'other mandate', takenOver: false }]);
           expect(bea.byId['trg-taken']).toEqual([{ kind: 'set_up_by', name: 'other mandate', takenOver: true }]);
           expect(bea.byId['trg-bea']).toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }]);
-          // Without a grant id it cannot be told to be hers or another's: it says neither.
+          // Another address without a grant id: not hers, and not whose.
           expect(bea.byId['trg-legacy']).toEqual([{ kind: 'set_up_by', name: 'some mandate', takenOver: false }]);
+          // Her own address under another grant or none: hers, named as her own grant.
+          const readsAsBea = reads.length;
+          const beaAgain = await setupOf();
+          expect(beaAgain.byId['trg-bea-old']).toEqual([{ kind: 'set_up_by', name: 'Bea B.', takenOver: false }]);
+          expect(beaAgain.byId['trg-bea-legacy']).toEqual([{ kind: 'set_up_by', name: 'Bea B.', takenOver: false }]);
+          expect(reads.slice(readsAsBea)).not.toContain('grant-b-old');
+          expect(beaAgain.text).not.toContain('Beatrice (old grant)');
           expect(bea.text).not.toContain('Anna A.');
           expect(JSON.stringify(Object.values(bea.byId))).not.toContain('anna@example.com');
           // A session no scope names (a mandate without a grant): no lines at all, no read of the
@@ -12638,7 +12650,7 @@ describe('LynoxHTTPApi', () => {
           api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'bea@example.com' }) as RequestPrincipal);
           const readsBefore = reads.length;
           const none = await setupOf();
-          for (const id of ['trg-anna', 'trg-bea', 'trg-taken', 'trg-edit-taken', 'trg-own', 'trg-old', 'trg-legacy']) expect(none.byId[id]).toEqual([]);
+          for (const id of ['trg-anna', 'trg-bea', 'trg-taken', 'trg-edit-taken', 'trg-own', 'trg-old', 'trg-legacy', 'trg-bea-old', 'trg-bea-legacy']) expect(none.byId[id]).toEqual([]);
           expect(reads.length).toBe(readsBefore);
           for (const name of Object.values(shown)) expect(none.text).not.toContain(name);
           // A trail that cannot be read costs the owner the names, not the list: the address stands in.
@@ -20090,6 +20102,21 @@ describe('metered audio routes: managed credit gate + debit', () => {
       expect(mockSpeakStream).not.toHaveBeenCalled();
     });
 
+    it('a refusal within the balance gets the voice sentence; a plain refusal keeps its own text', async () => {
+      // Kills: the voice sentence on every refusal, and the hook's budget text on a refusal within the balance.
+      repayRateWindow();
+      const { RunAdmissionRefusedError } = await import('../core/run-admission.js');
+      mockEngineHooks = [{ onBeforeRun: () => { throw new RunAdmissionRefusedError('AI budget for this period reached.'); } }];
+      const held = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello' }) });
+      expect(held.status).toBe(402);
+      expect(((await held.json()) as { error: string }).error).toBe('Not enough AI budget is free for voice right now. If another task is running, try again once it has finished; otherwise buy a credit pack or wait for your next billing cycle.');
+      repayRateWindow();
+      mockEngineHooks = [{ onBeforeRun: () => { throw new Error('AI budget for this period reached.'); } }];
+      const plain = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello' }) });
+      expect(((await plain.json()) as { error: string }).error).toBe('AI budget for this period reached.');
+      expect(mockSpeakStream).not.toHaveBeenCalled();
+    });
+
     it('blocks with 402 when the control plane is stale (fail-closed)', async () => {
       mockEngineHooks = [{ onBeforeRun: vi.fn(() => { throw new Error('Managed control plane temporarily unreachable'); }) }];
       const res = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text: 'hello' }) });
@@ -20228,6 +20255,23 @@ describe('metered audio routes: managed credit gate + debit', () => {
       expect(costArg).toBeCloseTo(0.0013, 6);
     });
 
+    it('admits the request on the length text-prep turns it into, not on the raw length', async () => {
+      // Kills: admitting on the raw length, or on a fixed expansion factor (a table of arrows
+      // grows about eightfold in prep, and the call is billed on the prepared characters).
+      repayRateWindow();
+      const { prepareForSpeech } = await vi.importActual<typeof import('../core/speak.js')>('../core/speak.js');
+      const text = `| a | b |\n|---|---|\n| ${'↓'.repeat(9_900)} | x |`;
+      const prepared = prepareForSpeech(text, 'de').length;
+      expect(prepared, 'positive control: prep grows this text beyond a 1.5x factor').toBeGreaterThan(text.length * 1.5);
+      const onBeforeRun = vi.fn();
+      mockEngineHooks = [{ onBeforeRun }];
+      mockSpeakStream.mockResolvedValue({ characters: prepared, model: 'voxtral-tts', voice: 'default', latencyMs: 10, ttfbMs: 5 });
+      const res = await jsonFetch('/api/speak', { method: 'POST', body: JSON.stringify({ text, lang: 'de' }) });
+      expect(res.status).toBe(200);
+      await readSse(res);
+      expect((onBeforeRun.mock.calls[0]![1] as { maxCostCents?: number }).maxCostCents).toBe(Math.ceil(prepared * 13 / 1_000_000 * 100));
+    });
+
     it('refuses a model other than the pinned one before the budget gate', async () => {
       repayRateWindow();
       const { VOXTRAL_TTS_MODEL } = await vi.importActual<typeof import('../core/speak.js')>('../core/speak.js');
@@ -20307,6 +20351,18 @@ describe('metered audio routes: managed credit gate + debit', () => {
       expect(body.error).toContain('AI budget');
       // Gate fired before any provider work — STT was never invoked.
       expect(mockExtractSessionContext).not.toHaveBeenCalled();
+      expect(mockTranscribeWithStream).not.toHaveBeenCalled();
+    });
+
+    it('a transcription refused within the balance gets the voice sentence', async () => {
+      // Kills: the STT route passing the hook's budget text through on a refusal within the balance.
+      repayRateWindow();
+      const { RunAdmissionRefusedError } = await import('../core/run-admission.js');
+      mockEngineHooks = [{ onBeforeRun: () => { throw new RunAdmissionRefusedError('AI budget for this period reached.'); } }];
+      mockGetActiveTranscribeProvider.mockReturnValue({ name: 'mistral-voxtral' });
+      const res = await jsonFetch('/api/transcribe', { method: 'POST', body: JSON.stringify({ audio: Buffer.from('x').toString('base64') }) });
+      expect(res.status).toBe(402);
+      expect(((await res.json()) as { error: string }).error).toBe('Not enough AI budget is free for voice right now. If another task is running, try again once it has finished; otherwise buy a credit pack or wait for your next billing cycle.');
       expect(mockTranscribeWithStream).not.toHaveBeenCalled();
     });
 
@@ -24321,6 +24377,23 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
           expect((shown['parameters'] as Array<Record<string, unknown>>)[0]!['allowed']).toBeNull();
         });
 
+        it('a rule every object inherits is not shown, as the run does not enforce it', async () => {
+          // What a polluted prototype would carry: an entry with real rules, which `in` would read.
+          const proto = Object.prototype as Record<string, unknown>;
+          const params = [{ name: 'inherited', description: '', type: 'string', source: 'user_input' }];
+          proto['inherited'] = { enum: ['only-this'] };
+          let shown: Record<string, unknown>;
+          try {
+            shown = await previewOf(WITH({ ...GRANT, paramConstraints: {} }, params));
+          } finally {
+            delete proto['inherited'];
+          }
+          expect((shown['parameters'] as Array<Record<string, unknown>>)[0]!['allowed']).toBeNull();
+          // CONTROL: the same rule as the contract's own entry is shown.
+          const own = await previewOf(WITH({ ...GRANT, paramConstraints: { inherited: { enum: ['only-this'] } } }, params));
+          expect((own['parameters'] as Array<Record<string, unknown>>)[0]!['allowed']).toEqual({ enum: ['only-this'], regex: null, min: null, max: null });
+        });
+
         it('a contract without the request tool, or without a host or a path, grants nothing and is shown as an empty list', async () => {
           expect((await previewOf(WITH({ ...GRANT, grantedTools: ['bash', 'write_file'] })))['contract']).toEqual([]);
           expect((await previewOf(WITH({ ...GRANT, pathPatterns: [] })))['contract']).toEqual([]);
@@ -25844,6 +25917,7 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
     };
     const HELD = { status: 409, code: 'review_pending', runId: 'run-held', runs: 0 };
     const RAN = { status: 200, code: undefined, runId: undefined, runs: 1 };
+    const OWNER_REVIEW = { status: 409, code: 'review_pending_owner', runId: undefined, runs: 0 };
     const card = async (id = OWN): Promise<{ hasChanges: boolean; runId?: string }> =>
       (await (await jsonFetch(`/api/sessions/${id}/changeset`)).json()) as { hasChanges: boolean; runId?: string };
     const answer = (action: string, id = OWN): Promise<Response> =>
@@ -25866,10 +25940,34 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       expect(await outcome(await send())).toEqual(RAN);
     });
 
-    it('does not hold a mandate on the owner\'s review, and gives it no card, even when the mandate ran last', async () => {
-      review(OWNER_PRINCIPAL, { lastRun: MANDATE });
+    it('does not hold a mandate on the owner\'s review and gives it no card, but refuses its run with the way on, so the owner\'s backups stay', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL, { lastRun: MANDATE });
       asMandate();
       expect(await card()).toEqual({ hasChanges: false, files: [] });
+      expect(await outcome(await send()), 'not held on a card it cannot see: refused').toEqual(OWNER_REVIEW);
+      expect(await outcome(await send({ shows_changeset_review: undefined })), 'whatever the client').toEqual(OWNER_REVIEW);
+      expect(csm.isEmpty(), 'the owner\'s review is still there').toBe(false);
+      expect(csm.hasOriginal(file), 'with its backup').toBe(true);
+      // The owner can still roll their change back, and then the mandate runs.
+      api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+      expect((await answer('rollback')).status).toBe(200);
+      expect(readFileSync(file, 'utf-8')).toBe('before');
+      asMandate();
+      expect(await outcome(await send())).toEqual(RAN);
+    });
+
+    it('control: a mandate under the owner\'s review runs in a new conversation of its own', async () => {
+      review(OWNER_PRINCIPAL, { lastRun: MANDATE });
+      asMandate();
+      expect(await outcome(await send()), 'positive control: refused here').toEqual(OWNER_REVIEW);
+      // Another conversation is another session, without the owner's review.
+      sessionRanBy(MANDATE, { getChangesetManager: vi.fn(() => null) });
+      expect(await outcome(await send())).toEqual(RAN);
+    });
+
+    it('control: the owner\'s review that the card does not show (its only file was deleted) does not refuse the mandate', async () => {
+      review(OWNER_PRINCIPAL, { lastRun: MANDATE, change: 'delete' });
+      asMandate();
       expect(await outcome(await send())).toEqual(RAN);
     });
 
@@ -26027,14 +26125,77 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       expect(await res.text(), 'not "stopped partway"').not.toContain('rollback_aborted');
     });
 
-    it('a rollback that stops partway answers with its own refusal, and the hold ends', async () => {
-      const { csm } = review(OWNER_PRINCIPAL);
+    it('a rollback that stops partway answers with its own refusal, keeps the review and its backups, and the hold stays', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
       vi.spyOn(csm, 'rollbackAll').mockImplementation(() => { throw new Error('stopped'); });
       const res = await answer('rollback');
       expect(res.status).toBe(500);
-      expect(((await res.json()) as { code?: string }).code).toBe('rollback_aborted');
+      expect(await res.json()).toMatchObject({ code: 'rollback_aborted', notRestored: ['a.txt'] });
+      expect(csm.isEmpty(), 'the review stays').toBe(false);
+      expect(csm.hasOriginal(file), 'with its backup').toBe(true);
+      expect(await outcome(await send())).toEqual(HELD);
+    });
+
+    it('when the second of two restores throws, the first is done, the second keeps its backup, and a second rollback finishes the job', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
+      const other = join(dirname(file), 'b.txt');
+      writeFileSync(other, 'b before', 'utf-8');
+      csm.backupBeforeWrite(other);
+      writeFileSync(other, 'b after', 'utf-8');
+      const inner = csm as unknown as { _rollbackOne: (abs: string, entry: unknown) => boolean };
+      const real = inner._rollbackOne.bind(csm);
+      const one = vi.spyOn(inner, '_rollbackOne').mockImplementation((abs, entry) => {
+        if (abs === other) throw new Error('disk full');
+        return real(abs, entry);
+      });
+      const res = await answer('rollback');
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ code: 'rollback_aborted', notRestored: ['b.txt'] });
+      expect(readFileSync(file, 'utf-8'), 'the first file is restored').toBe('before');
+      expect(readFileSync(other, 'utf-8'), 'the second still carries the change').toBe('b after');
+      expect(csm.hasOriginal(other), 'and keeps its backup').toBe(true);
+      expect(csm.hasOriginal(file), 'the restored file is no longer held').toBe(false);
+      expect(await outcome(await send()), 'the hold stays while files are half restored').toEqual(HELD);
+      one.mockRestore();
+      const again = await answer('rollback');
+      expect(again.status).toBe(200);
+      expect(await again.json()).toMatchObject({ ok: true, notRestored: [] });
+      expect(readFileSync(other, 'utf-8')).toBe('b before');
       expect(csm.isEmpty()).toBe(true);
       expect(await outcome(await send())).toEqual(RAN);
+    });
+
+    it('a partial rollback whose second chosen restore throws keeps that file\'s backup and forgets the first', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
+      const other = join(dirname(file), 'b.txt');
+      writeFileSync(other, 'b before', 'utf-8');
+      csm.backupBeforeWrite(other);
+      writeFileSync(other, 'b after', 'utf-8');
+      const inner = csm as unknown as { _rollbackOne: (abs: string, entry: unknown) => boolean };
+      const real = inner._rollbackOne.bind(csm);
+      vi.spyOn(inner, '_rollbackOne').mockImplementation((abs, entry) => {
+        if (abs === other) throw new Error('disk full');
+        return real(abs, entry);
+      });
+      const res = await jsonFetch(`/api/sessions/${OWN}/changeset/review`, { method: 'POST', body: JSON.stringify({ action: 'partial', runId: 'run-held', rolledBackFiles: ['a.txt', 'b.txt'] }) });
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ code: 'rollback_aborted', notRestored: ['b.txt'] });
+      expect(readFileSync(file, 'utf-8'), 'the first chosen file is restored').toBe('before');
+      expect(csm.hasOriginal(file), 'and no longer held').toBe(false);
+      expect(csm.hasOriginal(other), 'the second keeps its backup').toBe(true);
+    });
+
+    it('a partial rollback that stops partway names only the chosen files it has not restored', async () => {
+      const { csm, file } = review(OWNER_PRINCIPAL);
+      const other = join(dirname(file), 'b.txt');
+      writeFileSync(other, 'b before', 'utf-8');
+      csm.backupBeforeWrite(other);
+      writeFileSync(other, 'b after', 'utf-8');
+      vi.spyOn(csm, 'rollbackFiles').mockImplementation(() => { throw new Error('stopped'); });
+      const res = await jsonFetch(`/api/sessions/${OWN}/changeset/review`, { method: 'POST', body: JSON.stringify({ action: 'partial', runId: 'run-held', rolledBackFiles: ['b.txt'] }) });
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ code: 'rollback_aborted', notRestored: ['b.txt'] });
+      expect(csm.isEmpty()).toBe(false);
     });
   });
 

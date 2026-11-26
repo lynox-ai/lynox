@@ -120,8 +120,8 @@ import { buildTrail, readTrailPage, trailSourceDeps, trailSources } from '../cor
 import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
 import { UndecryptableTextError } from '../core/engine-db.js';
 import {
-  PERSON_ERASURE_CONFIRM, erasePerson, previewPersonErasure,
-  type PersonErasureDeps, type PersonErasurePreview, type PersonErasureRefusal, type PersonErasureResult,
+  PERSON_ERASURE_CONFIRM, erasePerson, personErasureSetAsideCopies, previewPersonErasure,
+  type PersonErasureDeps, type PersonErasurePreview, type PersonErasureSetAsideCopy, type PersonErasureRefusal, type PersonErasureResult,
 } from '../core/person-erasure.js';
 import { durableMemoryState } from '../core/memory-tool-set.js';
 import { migrationCeiling } from '../core/migration-ceiling.js';
@@ -709,6 +709,10 @@ function resolveRunWallClockMs(): number {
 }
 /** Hard per-request input cap for POST /api/speak to bound Mistral cost + latency. */
 const SPEAK_MAX_TEXT_CHARS = 10_000;
+/** The 402 a voice request (speech or transcription) gets when it is refused only because what is
+ *  free of the balance cannot cover it, while runs are admitted only within the balance. */
+const VOICE_HOLD_REFUSAL =
+  'Not enough AI budget is free for voice right now. If another task is running, try again once it has finished; otherwise buy a credit pack or wait for your next billing cycle.';
 /**
  * Mistral's list price for Voxtral TTS 3 (`voxtral-mini-tts-3-0`): $13 per million characters,
  * docs.mistral.ai/inference/pricing, read 2026-11-08. No usage headers exposed — billed client-side.
@@ -5215,6 +5219,15 @@ export class LynoxHTTPApi {
         errorResponse(res, 409, 'The changes of the last run wait for a review', 'review_pending', { runId: heldBy.runId });
         return;
       }
+      // A review the sender may not answer (a mandate, under the owner's review in its own
+      // conversation) is not held for it above, so it is not left waiting on a card it cannot
+      // see. But its run would replace that review, and the owner's changes would stand with no
+      // way back. Refused instead, whatever the client, with the way on: the owner answers, or
+      // the mandate starts a new conversation, which has a review of its own.
+      if (heldBy !== null && !mayAnswerReview(heldBy, this._principalOf(req)) && heldBy.hasChanges()) {
+        errorResponse(res, 409, 'This conversation still has changes waiting for the owner\'s review', 'review_pending_owner');
+        return;
+      }
 
       // Global concurrency cap (Tier 2, AC6). Bound how many chat runs execute
       // at once across all threads — many parallel headless runs would otherwise
@@ -6735,6 +6748,10 @@ export class LynoxHTTPApi {
       // which the answer must say. Cleared once it returned, so a throw after a finished rollback
       // is not reported as one that stopped partway.
       let rollbackStarted = false;
+      // The files the rollback was asked to restore, by name: all of them, or the ones chosen.
+      // A rollback that stops partway names those of them it has not restored yet.
+      let asked: Set<string> | null = null;
+      let aborted = false;
       try {
         let accepted: number | null = 0;
         let rolledBack: number | null = 0;
@@ -6777,6 +6794,7 @@ export class LynoxHTTPApi {
           }
 
           if (toRollback.length > 0) {
+            asked = new Set(toRollback.map((abs) => nameOf(abs)));
             rollbackStarted = true;
             const left = csm.rollbackFiles(toRollback);
             rollbackStarted = false;
@@ -6789,11 +6807,16 @@ export class LynoxHTTPApi {
         jsonResponse(res, 200, { ok: true, accepted, rolledBack, notRestored });
       } catch (err) {
         if (!rollbackStarted) throw err;
-        errorResponse(res, 500, 'The rollback stopped partway', 'rollback_aborted');
+        // Stopped partway: what it restored is forgotten, the rest keeps its backup and stays
+        // in the review, and so does the hold on the next message. A second rollback can finish
+        // the job; the answer names what is left.
+        aborted = true;
+        const left = csm.pendingNames().filter((name) => asked === null || asked.has(name));
+        errorResponse(res, 500, 'The rollback stopped partway', 'rollback_aborted', { notRestored: left });
       } finally {
-        // Every answer ends the review, a failed one too: the hold on the next message never
-        // outlives it.
-        csm.cleanup();
+        // Every other answer ends the review, a failed one too: the hold on the next message
+        // never outlives it.
+        if (!aborted) csm.cleanup();
       }
     }, OWN));
 
@@ -9824,8 +9847,8 @@ export class LynoxHTTPApi {
         : taskManager.listTriggers(status ? { status } : undefined);
       const bulkLedgerForList = engine.getBulkLedger() ?? engine.getBulkLedgerSwitchedOff?.() ?? null;
       // Who set each trigger up or changed it last, when that was a mandate: lines as on an
-      // approval card, named by the same rule (in these lines a mandate sees another grant as
-      // another mandate, never whose; the row's stored tags are `triggerForRoute`'s question),
+      // approval card, named by the same rule (in these lines a mandate sees another address's
+      // grant as another mandate, never whose; the row's stored tags are `triggerForRoute`'s question),
       // from the marks on the trigger itself — the card also reads its workflow's. The owner's
       // own setup has no line. No session, no lines.
       const setupScope = approvalScopeOf(principal);
@@ -11422,6 +11445,16 @@ export class LynoxHTTPApi {
       noStoreJson(res, 403, { error: 'On a managed instance a person is erased from the web app, signed in as the owner', code: 'session_required' });
       return true;
     };
+    // The set-aside copies the answer names (file names only); null when the data directory
+    // could not be listed, so the answer says the copies could not be checked rather than nothing.
+    const setAsideCopies = (): PersonErasureSetAsideCopy[] | null => {
+      try {
+        return personErasureSetAsideCopies(getLynoxDir());
+      } catch (err: unknown) {
+        process.stderr.write(`[privacy] person erasure: set-aside copies not listed (${err instanceof Error ? err.name : 'unknown'})\n`);
+        return null;
+      }
+    };
     const readIds = (v: unknown): string[] | null =>
       v === undefined ? [] : Array.isArray(v) && v.length <= 10_000 && v.every(x => typeof x === 'string' && x.length <= 200) ? v as string[] : null;
 
@@ -11442,7 +11475,7 @@ export class LynoxHTTPApi {
         throw err;
       }
       if ('refused' in preview) { personErasureRefusal(res, preview); return; }
-      noStoreJson(res, 200, preview);
+      noStoreJson(res, 200, { ...preview, setAsideCopies: setAsideCopies() });
     }, ownerOnly('erase a person\'s data'));
 
     this.addStatic('user', 'POST /api/privacy/person-erasure', async (req, res, _params, body) => {
@@ -11533,7 +11566,8 @@ export class LynoxHTTPApi {
         try { log?.record(closing); } catch { /* the attempt row stands alone, which reads as "did not finish" */ }
       }
       process.stderr.write(`[privacy] person erasure: erased=${String(result.erased)} done=${result.done.join(',')} failed=${result.failed ?? '-'}\n`);
-      const { error, ...rest } = result;
+      const { error, ...erased } = result;
+      const rest = { ...erased, setAsideCopies: setAsideCopies() };
       if (!result.erased) {
         // 500 on any failed step: a client reading the status alone must not conclude the person
         // is gone. `done` and `failed` say how far it got; a new preview shows what is left, and
@@ -11909,7 +11943,7 @@ export class LynoxHTTPApi {
     // rationale (stream mode is mandatory to hit the 1.5 s TTFA target on
     // replies > ~200 chars).
     this.addStatic('user', 'POST /api/speak', async (_req, res, _params, body) => {
-      const { hasSpeakProvider, speakStream, isVoiceLanguageTag, VOXTRAL_TTS_MODEL } = await import('../core/speak.js');
+      const { hasSpeakProvider, speakStream, isVoiceLanguageTag, prepareForSpeech, VOXTRAL_TTS_MODEL } = await import('../core/speak.js');
       if (!hasSpeakProvider()) {
         errorResponse(res, 503, 'TTS not available (set MISTRAL_API_KEY)');
         return;
@@ -11981,9 +12015,16 @@ export class LynoxHTTPApi {
       // gate checks the instance's daily and monthly spending caps first, on
       // every instance. The matching debit fires after synthesis below, keyed on
       // this run id.
-      const gate = await fireBeforeRunGate(engine, 'fast');
+      // Admitted on this request's own cost, in cents, rounded up: the text as text-prep turns
+      // it into what is billed per character. Prep is deterministic and runs again inside the
+      // call with the same language, and it can lengthen a text several times over (a table of
+      // arrows becomes words), so the raw length is not a bound.
+      const preparedChars = prepareForSpeech(text, lang ?? 'auto').length;
+      const gate = await fireBeforeRunGate(engine, 'fast', {
+        maxCostCents: Math.ceil(preparedChars * SPEAK_USD_PER_CHAR * 100),
+      });
       if (gate.blockedReason) {
-        errorResponse(res, 402, gate.blockedReason);
+        errorResponse(res, 402, gate.refusedWithinBalance ? VOICE_HOLD_REFUSAL : gate.blockedReason);
         return;
       }
 
@@ -12098,9 +12139,9 @@ export class LynoxHTTPApi {
       const sttSpends = getActiveTranscribeProvider()?.name !== 'whisper-cpp';
       const sttGate = sttSpends
         ? await fireBeforeRunGate(engine, 'fast')
-        : { runId: randomUUID(), blockedReason: null, capReached: null };
+        : { runId: randomUUID(), blockedReason: null, capReached: null, refusedWithinBalance: false };
       if (sttGate.blockedReason) {
-        errorResponse(res, 402, sttGate.blockedReason);
+        errorResponse(res, 402, sttGate.refusedWithinBalance ? VOICE_HOLD_REFUSAL : sttGate.blockedReason);
         return;
       }
 
@@ -14957,7 +14998,8 @@ export class LynoxHTTPApi {
 
       // Knowledge graph (entities + relations). `knowledge_graph_may_be_incomplete` says the block
       // was not read in full: the layer threw, it is missing although it was not switched off (its
-      // database or the embedding model failed to open at boot), or a read cap was reached.
+      // database or the embedding model failed to open at boot), or a read cap was reached. It is
+      // also set while remembered texts or mentions are stored: the block does not carry them yet.
       // `enabled` is the setting, as on the durable knowledge block: whether the graph is
       // switched on in the config.
       const graphEnabled = engine.getUserConfig().knowledge_graph_enabled !== false;
@@ -15016,7 +15058,20 @@ export class LynoxHTTPApi {
           // store; what it returned may be partial.
           // The same holds when the subject graph is on but its store never opened.
           const fellBack = kg.readFallbackCount !== fallbacksBefore || kg.subjectGraphUnavailable;
-          exportData['knowledge_graph_may_be_incomplete'] = truncated || relationCapHit || fellBack;
+          // Remembered texts and their mentions (both stores) are held but not in this block, so
+          // while any is stored the block is not the whole of the graph. A count that cannot be
+          // taken, or a missing engine.db, cannot show there are none.
+          let textsHeld = true;
+          try {
+            const engineDb = engine.getEngineDb();
+            if (engineDb) {
+              const { countEngineMemoryRows } = await import('../core/memory-graph-store.js');
+              textsHeld = kg.countHeldMemoryTexts() > 0 || countEngineMemoryRows(engineDb) > 0;
+            }
+          } catch {
+            process.stderr.write('⚠ /api/export: remembered texts could not be counted — knowledge graph marked incomplete\n');
+          }
+          exportData['knowledge_graph_may_be_incomplete'] = truncated || relationCapHit || fellBack || textsHeld;
         } catch {
           exportData['knowledge_graph'] = { entities: [], relationships: [], enabled: graphEnabled };
           exportData['knowledge_graph_may_be_incomplete'] = true;
@@ -15257,6 +15312,47 @@ export class LynoxHTTPApi {
         exportData['workspace'] = { present: true, files: [], bytes: 0, skipped: [], unreadable: [], changed_during_export: [], may_be_incomplete: true, error: err instanceof Error ? err.name : 'error' };
       }
       if (!omitted) exportData['workspace_archive'] = '/api/export/workspace';
+
+      // A database set aside as corrupt (`<name>.corrupt-<ms>`: by the boot for history.db and
+      // engine.db, by a restore for any of the four) leaves an empty or restored one in its
+      // place. The blocks read from it then look complete while older data sits in the set-aside
+      // file. Name the file (not its content) and mark every block read from that database:
+      // history.db holds the threads; engine.db the durable knowledge, and the knowledge graph
+      // while the subject graph is on; agent-memory.db the knowledge graph otherwise; datastore.db
+      // the contacts, deals and tables. A data directory that cannot be listed marks all of them.
+      {
+        let setAside: Set<string>;
+        try {
+          const { getLynoxDir } = await import('../core/config.js');
+          const { listSetAsideStores } = await import('../core/set-aside-stores.js');
+          const found = listSetAsideStores(getLynoxDir());
+          if (found.length > 0) exportData['set_aside_databases'] = found;
+          setAside = new Set(found.map((s) => s.database));
+        } catch (err: unknown) {
+          exportData['set_aside_databases_unknown'] = err instanceof Error ? err.name : 'error';
+          setAside = new Set(['history.db', 'engine.db', 'datastore.db', 'agent-memory.db']);
+        }
+        if (setAside.has('history.db')) exportData['threads_may_be_incomplete'] = true;
+        // A set-aside engine.db is marked whatever the subject graph: it still holds remembered
+        // texts, and while those are stored the block is not the whole of the graph.
+        if (setAside.has('agent-memory.db') || setAside.has('engine.db')) {
+          exportData['knowledge_graph_may_be_incomplete'] = true;
+        }
+        if (setAside.has('engine.db')) {
+          const durable = exportData['durable_knowledge'];
+          if (durable !== null && typeof durable === 'object') {
+            exportData['durable_knowledge'] = { ...(durable as Record<string, unknown>), may_be_incomplete: true };
+          }
+        }
+        if (setAside.has('datastore.db')) {
+          exportData['contacts_may_be_incomplete'] = true;
+          exportData['deals_may_be_incomplete'] = true;
+          exportData['datastore_may_be_incomplete'] = true;
+        }
+        if (setAside.size > 0) {
+          process.stderr.write('⚠ /api/export: a database was set aside as corrupt — blocks read from it marked incomplete\n');
+        }
+      }
 
       // For the control plane, the act is the handover: its `done` row is written before the
       // body leaves, so a connection that drops while it streams does not erase it — and after

@@ -1,5 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import type { IMemory, MemoryNamespace, MemoryScopeRef } from '../types/index.js';
+import type { IMemory, MemoryExtractionRetry, MemoryNamespace, MemoryScopeRef } from '../types/index.js';
 import { ALL_NAMESPACES } from '../types/index.js';
 import { createLLMClient, getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveTierModel } from './tier-resolver.js';
@@ -609,7 +609,7 @@ export class Memory implements IMemory {
     return true;
   }
 
-  async maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined, cancelled?: (() => boolean) | undefined, actor?: InstanceActor | undefined, auditLog?: AuditLog | null | undefined): Promise<void> {
+  async maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined, cancelled?: (() => boolean) | undefined, actor?: InstanceActor | undefined, auditLog?: AuditLog | null | undefined, heldRetry?: MemoryExtractionRetry | undefined): Promise<void> {
     try {
       if (!finalAnswer || finalAnswer.length < 50) return;
 
@@ -617,16 +617,19 @@ export class Memory implements IMemory {
       // rarely produce extractable project knowledge worth a Haiku call
       if (toolsUsed !== undefined && toolsUsed === 0 && finalAnswer.length < 300) return;
 
-      this._extractionTurnCount++;
+      // A retry is the same turn's extraction once more: the throttle already let it through.
+      if (heldRetry?.isRetry !== true) {
+        this._extractionTurnCount++;
 
-      // Throttle: exponential backoff when extraction returns nothing (1, 2, 4, 8, max 16 turns)
-      const skipInterval = Math.min(2 ** this._emptyExtractionStreak, 16);
-      const turnsSinceLast = this._extractionTurnCount - this._lastExtractionTurn;
-      if (this._lastExtractionTurn >= 0 && this._emptyExtractionStreak > 0 && turnsSinceLast < skipInterval) {
-        return;
+        // Throttle: exponential backoff when extraction returns nothing (1, 2, 4, 8, max 16 turns)
+        const skipInterval = Math.min(2 ** this._emptyExtractionStreak, 16);
+        const turnsSinceLast = this._extractionTurnCount - this._lastExtractionTurn;
+        if (this._lastExtractionTurn >= 0 && this._emptyExtractionStreak > 0 && turnsSinceLast < skipInterval) {
+          return;
+        }
+
+        this._lastExtractionTurn = this._extractionTurnCount;
       }
-
-      this._lastExtractionTurn = this._extractionTurnCount;
 
       // Truncate to limit injection surface and token cost
       const extractionLimit = this._extractionLimit ?? MAX_EXTRACTION_INPUT;
@@ -646,7 +649,16 @@ export class Memory implements IMemory {
       // the onBeforeRun hook throws). Blocked → skip the extraction entirely
       // (fail-closed), matching the KnowledgeLayer extractor.
       const extractGate = await fireBeforeRunGate(this.meteredHost, 'fast');
-      if (extractGate.blockedReason !== null) return;
+      if (extractGate.blockedReason !== null) {
+        // Refused only because a run holds the balance: hand the caller one retry for when it
+        // is given back. The retry is never deferred again; refused again, it stays skipped.
+        if (extractGate.refusedWithinBalance && heldRetry?.isRetry !== true && heldRetry?.onRefused) {
+          heldRetry.onRefused(() => {
+            void this.maybeUpdate(finalAnswer, toolsUsed, sourceThreadId, sourceRunId, cancelled, actor, auditLog, { isRetry: true });
+          });
+        }
+        return;
+      }
 
       const fast = resolveTierModel('fast', getActiveProvider());
       const fastClient = clientForTierSnapshot(fast, this.client, getActiveProvider());

@@ -15,11 +15,64 @@
 import type { ConsentKey } from '../contract/prompt.js';
 import type { NoticeLanguage } from '../core/notice-language.js';
 import type { SendRoleKind, SendSlot } from '../core/profile-secret-view.js';
-import { pv } from '../core/prompt-value.js';
+import { pv, singleLine } from '../core/prompt-value.js';
 import type { PromptText } from '../types/agent.js';
 
 /** The language a confirmation dialog is asked in. */
 export type DialogLanguage = NoticeLanguage;
+
+/** The quotation marks of each dialog language, opening and closing: a value is quoted as its
+ *  readers write it. */
+export const QUOTE_MARKS: Readonly<Record<DialogLanguage, readonly [open: string, close: string]>> = { en: ['“', '”'], de: ['„', '“'] };
+
+/** `\` and every character that reads as a double quotation mark (the straight one, both
+ *  languages' marks, and their lookalikes), so a value cannot close the marks around it. */
+const QUOTE_LIKE = /[\\"“”„‟″‶＂〝〞〟〃ˮ״❝❞❠ʺ˝˵˶⹂🙶🙷🙸‴‷⁗\u{030B}\u{030E}\u{030F}]/gu;
+
+/** `text` as it stands between a dialog's quotation marks: each quote-like character escaped. */
+export function escapeQuoted(text: string): string {
+  return text.replace(QUOTE_LIKE, (c) => `\\${c}`);
+}
+
+/** Whether `text` already ends a sentence (or a `[…]` marker), so no full stop is added after it. */
+export function endsSentence(text: string): boolean {
+  return /[.!?…\]]$/u.test(text.trimEnd());
+}
+
+/** The longest a profile's name is shown in a question, "…" included and before escaping: a long
+ *  name cannot push the disclosure after it out of view. Counted as a reader counts characters (a
+ *  flag or an emoji with its modifier is one), and in code points too, since one such character
+ *  can carry any number of marks. */
+const PROFILE_NAME_MAX = 64;
+const PROFILE_NAME_CODE_POINTS_MAX = 256;
+
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+const codePoints = (text: string): number => Array.from(text).length;
+
+/** A profile's name as a question quotes it: on one line, composed (so a letter written with a
+ *  separate mark is one letter, not a letter and an escaped mark), within both limits, then
+ *  escaped. Only a bounded head of the name is segmented, however long the name is. A name that
+ *  is not a string (a tool's input is not checked for its type) is shown as its text, so the
+ *  question is still asked. */
+function shownName(name: string): string {
+  // Composing costs more than linear time on a long run of marks, so only a raw head is composed.
+  // Composing joins at most four code units into one code point, so three times the head below
+  // (1542 units) still holds more than the limit once composed, or the whole name.
+  const raw = singleLine(String(name)).trimStart();
+  const text = raw.slice(0, 3 * (2 * PROFILE_NAME_CODE_POINTS_MAX + 2)).normalize('NFC').trimEnd();
+  // Twice the limit in code units holds more than the limit in code points, or the whole name.
+  const head = text.slice(0, 2 * PROFILE_NAME_CODE_POINTS_MAX + 2);
+  const chars = Array.from(GRAPHEMES.segment(head), (g) => g.segment);
+  // A head shorter than the name holds more code points than the limit, so the name is cut.
+  if (chars.length <= PROFILE_NAME_MAX && codePoints(head) <= PROFILE_NAME_CODE_POINTS_MAX) return escapeQuoted(text);
+  let shown = '';
+  for (const c of chars.slice(0, PROFILE_NAME_MAX - 1)) {
+    if (codePoints(shown + c) > PROFILE_NAME_CODE_POINTS_MAX - 1) break;
+    shown += c;
+  }
+  return escapeQuoted(`${shown}…`);
+}
 
 /** The guard's fixed sentence parts (`_detectDanger`). */
 export interface GuardText {
@@ -357,18 +410,18 @@ export interface SpawnDialog {
 
 export const SPAWN_DIALOG: Readonly<Record<DialogLanguage, SpawnDialog>> = {
   en: {
-    children: (count) => count === 1 ? 'One child would run' : `${count} children would run`,
-    tierUnknownBand: 'a model gated as DEEP (or an unregistered custom model whose cost band the engine cannot prove)',
-    tierDeep: 'the DEEP tier (a stronger reasoning model, more capable but more expensive)',
-    tailDowngrade: 'Allow only if the work genuinely needs deep; otherwise choose "Run on balanced".',
+    children: (count) => count === 1 ? '1 subtask would run' : `${count} subtasks would run`,
+    tierUnknownBand: 'a model in the Deep tier (or an unregistered custom model whose cost band the engine cannot prove)',
+    tierDeep: 'the Deep tier (a stronger model, more thorough but more expensive)',
+    tailDowngrade: 'Allow this only if the task really needs the Deep tier. Otherwise choose “Run on Balanced”.',
     tailPinned: 'A model profile pins a specific endpoint and cannot be substituted down — allow only if you want this run on that model.',
     sentence: (word, children, tier, costUsd, providers, tail) => `⚠ ${word}: ${children} on ${tier}. Estimated model cost for this session: about $${costUsd}. Provider: ${providers}. ${tail}`,
   },
   de: {
     children: (count) => count === 1 ? 'Eine Teilaufgabe würde' : `${count} Teilaufgaben würden`,
-    tierUnknownBand: 'einem Modell der Stufe Tief (oder einem nicht registrierten eigenen Modell, dessen Kostenrahmen lynox nicht belegen kann)',
-    tierDeep: 'der Stufe Tief (ein stärkeres Denkmodell, leistungsfähiger, aber teurer)',
-    tailDowngrade: 'Erlaube das nur, wenn die Arbeit wirklich die Stufe Tief braucht; sonst wähle „Mit Ausgewogen ausführen“.',
+    tierUnknownBand: 'einem Modell der Stufe „Tief“ (oder einem nicht registrierten eigenen Modell, dessen Kostenrahmen lynox nicht belegen kann)',
+    tierDeep: 'der Stufe „Tief“ (einem stärkeren Modell, gründlicher, aber teurer)',
+    tailDowngrade: 'Erlaube das nur, wenn die Aufgabe die Stufe „Tief“ wirklich braucht. Sonst wähle „Mit Ausgewogen ausführen“.',
     tailPinned: 'Ein Modellprofil legt einen bestimmten Endpunkt fest und lässt sich nicht herabstufen. Erlaube das nur, wenn dieser Lauf auf diesem Modell laufen soll.',
     sentence: (word, children, tier, costUsd, providers, tail) => `⚠ ${word}: ${children} auf ${tier} laufen. Geschätzte Modellkosten für diese Sitzung: etwa $${costUsd}. Anbieter: ${providers}. ${tail}`,
   },
@@ -426,22 +479,22 @@ export const PRESET_NOTE: Readonly<Record<DialogLanguage, PresetNote>> = {
   en: {
     unknownProvider: (known) => `No authorization address could be derived: this connection names a provider this engine does not have built in, so there is nothing here to disclose or accept. It knows: ${known}.`,
     noProviders: 'No authorization address could be derived: this engine has no built-in providers yet, so there is nothing here to disclose or accept.',
-    badPreset: (id, detail) => `No authorization address could be derived: the built-in provider "${id}" is defined wrongly in this engine — ${detail}. Nothing on this connection fixes that; report it.`,
-    missingParam: (id, describe, name) => `No authorization address could be derived: the provider "${id}" needs ${describe} (auth.oauth.preset_params.${name}), which this connection does not supply. Set it with api_setup update — the host is disclosed then.`,
-    refusedParam: (id, describe, name) => `No authorization address could be derived: the value this connection supplies for ${describe} (auth.oauth.preset_params.${name}) is not one the provider "${id}" accepts. Correct it with api_setup update — the host is disclosed then.`,
+    badPreset: (id, detail) => `No authorization address could be derived: the built-in provider “${id}” is defined wrongly in this engine — ${detail}. Nothing on this connection fixes that; report it.`,
+    missingParam: (id, describe, name) => `No authorization address could be derived: the provider “${id}” needs ${describe} (auth.oauth.preset_params.${name}), which this connection does not supply. Set it with api_setup update — the host is disclosed then.`,
+    refusedParam: (id, describe, name) => `No authorization address could be derived: the value this connection supplies for ${describe} (auth.oauth.preset_params.${name}) is not one the provider “${id}” accepts. Correct it with api_setup update — the host is disclosed then.`,
   },
   de: {
     unknownProvider: (known) => `Es liess sich keine Anmeldeadresse ableiten: Diese Verbindung nennt einen Anbieter, den lynox nicht eingebaut hat, daher gibt es hier nichts offenzulegen oder anzunehmen. Eingebaut sind: ${known}.`,
     noProviders: 'Es liess sich keine Anmeldeadresse ableiten: lynox hat noch keine eingebauten Anbieter, daher gibt es hier nichts offenzulegen oder anzunehmen.',
-    badPreset: (id, detail) => `Es liess sich keine Anmeldeadresse ableiten: Der eingebaute Anbieter "${id}" ist in lynox falsch definiert — ${detail}. An dieser Verbindung lässt sich das nicht beheben; melde es.`,
-    missingParam: (id, describe, name) => `Es liess sich keine Anmeldeadresse ableiten: Der Anbieter "${id}" braucht ${describe} (auth.oauth.preset_params.${name}), und diese Verbindung gibt es nicht an. Setze es mit api_setup update — dann wird der Host offengelegt.`,
-    refusedParam: (id, describe, name) => `Es liess sich keine Anmeldeadresse ableiten: Der Wert, den diese Verbindung für ${describe} (auth.oauth.preset_params.${name}) angibt, ist keiner, den der Anbieter "${id}" annimmt. Korrigiere ihn mit api_setup update — dann wird der Host offengelegt.`,
+    badPreset: (id, detail) => `Es liess sich keine Anmeldeadresse ableiten: Der eingebaute Anbieter „${id}“ ist in lynox falsch definiert — ${detail}. An dieser Verbindung lässt sich das nicht beheben; melde es.`,
+    missingParam: (id, describe, name) => `Es liess sich keine Anmeldeadresse ableiten: Der Anbieter „${id}“ braucht ${describe} (auth.oauth.preset_params.${name}), und diese Verbindung gibt es nicht an. Setze es mit api_setup update — dann wird der Host offengelegt.`,
+    refusedParam: (id, describe, name) => `Es liess sich keine Anmeldeadresse ableiten: Der Wert, den diese Verbindung für ${describe} (auth.oauth.preset_params.${name}) angibt, ist keiner, den der Anbieter „${id}“ annimmt. Korrigiere ihn mit api_setup update — dann wird der Host offengelegt.`,
   },
 };
 
 /** The German for a provider parameter's description (`OAuthPresetParam.describe`), keyed by the English. */
 const PRESET_PARAM_DESCRIBE_DE: Readonly<Record<string, string>> = {
-  'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case': 'die myshopify.com-Subdomain des Stores in Kleinbuchstaben, z. B. "my-store" für my-store.myshopify.com',
+  'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case': 'die myshopify.com-Subdomain des Stores in Kleinbuchstaben, z. B. „my-store“ für my-store.myshopify.com',
 };
 
 /** A provider parameter's description in `language`; English as written. */
@@ -510,7 +563,7 @@ export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> 
       const changeList = changes.reduce<PromptText | undefined>((acc, c) => acc === undefined ? pv`\n- ${c}` : pv`${acc}\n- ${c}`, undefined);
       const changeBlock = changeList === undefined ? pv`` : pv`This save changes:${changeList}\n\n`;
       const disclosureBlock = disclosure === '' ? pv`` : pv`${disclosure}\n\n`;
-      return pv`⚠ ${word}: saving "${name}" needs your acceptance.\n\n${changeBlock}${disclosureBlock}Accept and save this connection?`;
+      return pv`⚠ ${word}: saving “${shownName(name)}” needs your acceptance.\n\n${changeBlock}${disclosureBlock}Accept and save this connection?`;
     },
     outsideSubProcessors: (oauth, _hosts, disclosures) => `This engine will send data${oauth ? ' — and, for its OAuth token, the managed access_token —' : ''} to host(s) outside lynox's listed sub-processors:\n\n${disclosures}`,
     redirect: (hosts) => `You will be sent to ${hosts.join(' and ')} in your own browser to authorize this connection. You sign in there, to that provider — not to lynox — and what comes back is stored here for this connection.`,
@@ -540,7 +593,7 @@ export const API_SETUP_DIALOG: Readonly<Record<DialogLanguage, ApiSetupDialog>> 
       const changeList = changes.reduce<PromptText | undefined>((acc, c) => acc === undefined ? pv`\n- ${c}` : pv`${acc}\n- ${c}`, undefined);
       const changeBlock = changeList === undefined ? pv`` : pv`Das Speichern ändert:${changeList}\n\n`;
       const disclosureBlock = disclosure === '' ? pv`` : pv`${disclosure}\n\n`;
-      return pv`⚠ ${word}: Zum Speichern von „${name}“ braucht es deine Zustimmung.\n\n${changeBlock}${disclosureBlock}Diese Verbindung annehmen und speichern?`;
+      return pv`⚠ ${word}: Zum Speichern von „${shownName(name)}“ braucht es deine Zustimmung.\n\n${changeBlock}${disclosureBlock}Diese Verbindung annehmen und speichern?`;
     },
     outsideSubProcessors: (oauth, hosts, disclosures) => `lynox sendet Daten${oauth ? ' – und für das OAuth-Token das verwaltete access_token –' : ''} an Hosts ausserhalb der aufgeführten Unterauftragsverarbeiter von lynox: ${hosts.join(', ')}.\n\n${disclosures}`,
     redirect: (hosts) => `Zur Freigabe dieser Verbindung öffnet sich ${hosts.join(' und ')} in deinem eigenen Browser. Du meldest dich dort beim Anbieter an, nicht bei lynox, und was zurückkommt, wird hier für diese Verbindung gespeichert.`,
@@ -689,6 +742,6 @@ export const SECURITY_CHANGE_WORDS: Readonly<Record<DialogLanguage, SecurityChan
  * equal. The keys themselves are the wire (`src/contract/prompt.ts`).
  */
 export const CONSENT_LABELS: Readonly<Record<DialogLanguage, Readonly<Record<ConsentKey, string>>>> = {
-  en: { allow: 'Allow', deny: 'Deny', deep: 'Allow deep', balanced: 'Run on balanced', cancel: 'Cancel' },
+  en: { allow: 'Allow', deny: 'Deny', deep: 'Allow Deep', balanced: 'Run on Balanced', cancel: 'Cancel' },
   de: { allow: 'Erlauben', deny: 'Ablehnen', deep: 'Stufe Tief erlauben', balanced: 'Mit Ausgewogen ausführen', cancel: 'Abbrechen' },
 };

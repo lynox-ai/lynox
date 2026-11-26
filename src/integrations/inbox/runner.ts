@@ -28,6 +28,7 @@ export { scrubErrorMessage } from './sensitive-content.js';
 import { scrubErrorMessage as _scrubErrorMessage } from './sensitive-content.js';
 import type { InboxCostBudget } from './cost-budget.js';
 import { fireBeforeRunGate, type HookHost } from '../../core/metered-request.js';
+import { SINGLE_CALL_WORST_CASE_CENTS } from '../../core/run-admission.js';
 import type { InboxNotifier } from './notifier.js';
 import type { InboxStateDb, ThreadMessageInput } from './state.js';
 import type { InboxRulesLoader } from './rules-loader.js';
@@ -227,7 +228,9 @@ export function buildInboxRunner(opts: BuildInboxRunnerOptions): ClassifierQueue
       // The instance's daily and monthly spending caps, on every instance; then the
       // managed credit gate: a credit-exhausted (or control-plane-stale →
       // fail-closed) managed tenant must not drive the pool key per inbound mail.
-      const gate = await fireBeforeRunGate(meteredHost ?? null, 'fast');
+      // One admission covers up to two calls (the description-rule check and the classifier),
+      // so its worst case is two single calls.
+      const gate = await fireBeforeRunGate(meteredHost ?? null, 'fast', { maxCostCents: 2 * SINGLE_CALL_WORST_CASE_CENTS });
       if (gate.blockedReason !== null) {
         return budgetExceededVerdict(
           gate.capReached === 'daily' ? 'Tägliches KI-Budget erreicht — manuell prüfen.'

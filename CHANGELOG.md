@@ -63,7 +63,9 @@
 - `GET /api/export` has three new fields. `knowledge_graph_may_be_incomplete`
   is `true` when the knowledge graph could not be read: reading it failed, it
   did not open at boot although it is switched on, a read fell back to the
-  older store, or an entity reached the per-entity relation limit. While the
+  older store, or an entity reached the per-entity relation limit. It is also
+  `true` while remembered texts or their mentions are stored, since this
+  export does not carry those yet. While the
   graph is switched off the block is empty with `enabled: false` and the flag
   `true`: switching it off deletes nothing, and what it held is not read there
   yet. `secrets` now also lists names
@@ -71,6 +73,28 @@
   `secrets_may_be_incomplete` is `true` when the secret store or its vault did
   not open. `secrets_note` says that only secret names are exported, never
   values.
+- When a database was set aside as corrupt (`<name>.corrupt-<ms>`: by the boot
+  for `history.db` and `engine.db`, by a restore for those and `datastore.db`
+  and `agent-memory.db`, and an `engine.db.migration-tmp.corrupt-<ms>` left by
+  older builds), `GET /api/export` now names the set-aside files in
+  `set_aside_databases` (names only) and marks the blocks read from that
+  database incomplete: the threads for `history.db`; durable knowledge for
+  `engine.db`, and the knowledge graph too; the
+  knowledge graph for `agent-memory.db`; contacts, deals and tables for
+  `datastore.db`. Until now the database opened in its place exported as
+  complete, while the older data sat in the set-aside file. When the data
+  directory cannot be listed, `set_aside_databases_unknown` is set and all
+  of those blocks are marked.
+- The person erasure's preview and answer now name the set-aside copies of the
+  databases it deletes in (`engine.db`, its `migration-tmp` staging copy, and
+  `agent-memory.db`) in `setAsideCopies` (file names only, never content):
+  each copy with the `-wal` and `-shm` beside it in `companions`, and a `-wal`
+  or `-shm` whose copy is gone as a copy itself. The web app lists them under
+  "Not covered" with the way to them for the instance's hosting; self-hosted,
+  the companions are named with it. Such a copy may still hold data about the
+  person, and the erasure does not reach it; until now the answer did not say
+  so. When the data directory cannot be listed, `setAsideCopies` is `null` and
+  the web app says the copies could not be checked.
 
 ### Changed: web UI
 

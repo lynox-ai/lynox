@@ -1170,6 +1170,16 @@ export class AgentMemoryDb {
     return row.cnt;
   }
 
+  /**
+   * Every stored remembered text and every mention of an entity in one, active or not: the rows
+   * of `memories` plus the rows of `mentions`. The data export does not carry these texts yet, so
+   * it reads a count above zero as "the graph block is not the whole of what is held".
+   */
+  countMemoryTextRows(): number {
+    const row = this.db.prepare('SELECT (SELECT COUNT(*) FROM memories) + (SELECT COUNT(*) FROM mentions) AS n').get() as { n: number };
+    return row.n;
+  }
+
   /** Cosine similarity search over memory embeddings with in-place scoring. */
   findSimilarMemories(
     embedding: number[],
@@ -1568,6 +1578,13 @@ export class AgentMemoryDb {
       `).run(randomUUID(), props.metricName, props.scopeType ?? null, props.scopeId ?? null,
         props.value, props.sampleCount ?? 1, window, now);
     }
+  }
+
+  /** One metric row by name and scope (the default window), or `undefined`. */
+  getMetric(metricName: string, scopeType: string, scopeId: string, window = 'all_time'): MetricRow | undefined {
+    return this.db.prepare(`
+      SELECT * FROM metrics WHERE metric_name = ? AND window = ? AND scope_type = ? AND scope_id = ?
+    `).get(metricName, window, scopeType, scopeId) as MetricRow | undefined;
   }
 
   getMetrics(metricName?: string | undefined, window?: string | undefined): MetricRow[] {

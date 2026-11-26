@@ -877,6 +877,9 @@ export interface BulkTarget {
 	contextField?: string | undefined;
 	/** With `new_link_domain`: the domain the refused link points to, as the engine recorded it. */
 	linkDomain?: string | undefined;
+	/** With `verdict_invalid`: the field of the rule the model's answer broke, the rule's kind and
+	 *  its bound, all from the rule (never the answer). Absent on older rows. */
+	refusalDetail?: BulkRefusalDetail | undefined;
 	/** Per HTML field an `update` target changes: the elements and comments its new value adds and
 	 *  removes, each with its full value (PRD shopify-preset §20.2 item 5, sec-core M3). Computed by
 	 *  the engine from the parser's tree; the page only lists it, as text. */
@@ -887,6 +890,10 @@ export interface BulkTarget {
 	hiddenAdds?: { field: string; codePoints: number[]; html?: true | undefined }[] | undefined;
 	/** HTML fields not checked for hidden characters: too large or too complex to read. */
 	hiddenUnchecked?: string[] | undefined;
+	/** An undo's target that takes back a write never confirmed: of it, it is open whether the
+	 *  change reached the provider, and the undo checks it first. Set only where it holds; an older
+	 *  engine sends none. */
+	undoOpen?: true | undefined;
 }
 
 /** One element or comment a new value adds or removes, as the engine's parser read it. */
@@ -1215,9 +1222,24 @@ export function bulkUndoExplainText(run: Pick<BulkRunDetailData, 'undoableParts'
 
 /** The undo approval's count sentence. `n` is every target the undo gives a value back; of those,
  *  `undoOpen` take back a write that was never confirmed, so they are not counted as getting a
- *  value back but named as checked first. */
-export function bulkUndoApproveText(run: Pick<BulkRunDetailData, 'changes' | 'undoOpen'>, i18n: BulkI18n): string {
+ *  value back but named as checked first. The counts leave out the targets the owner took out.
+ *  Where none gets a value back, the sentence says why: the owner took out every target that got
+ *  one (`tookOut`, one of the listed targets is taken out); no listed target gets its previous value back, say because the shop kept markup of
+ *  its own on each (`listed`, the table holds a target, none taken out); or a source that only
+ *  created entries. With no entry to delete either, the approval is locked. */
+export function bulkUndoApproveText(
+	run: Pick<BulkRunDetailData, 'changes' | 'undoOpen'>,
+	i18n: BulkI18n,
+	opts: { tookOut?: boolean; listed?: boolean } = {},
+): string {
 	const n = run.changes.update + run.changes.create;
+	if (n === 0) {
+		const deletes = run.changes.delete;
+		const { tookOut = false, listed = false } = opts;
+		if (deletes === 0) return i18n.t(tookOut ? 'bulk.undo.all_taken_out' : 'bulk.undo.nothing_back');
+		const key = tookOut ? 'bulk.undo.only_deletes' : (listed ? 'bulk.undo.none_back_deletes' : 'bulk.undo.deletes_only');
+		return i18n.tf(bulkOne(key, deletes), { n: String(deletes) });
+	}
 	const open = Math.min(run.undoOpen ?? 0, n);
 	if (open === 0) return i18n.tf(bulkOne('bulk.undo.approve_explain', n), { n: String(n) });
 	const openOne = open === 1 ? '_one' : '';
@@ -1591,6 +1613,58 @@ export function bulkRollbackLeft(run: Pick<BulkRun, 'phase' | 'haltKey'>, target
 	return bulkRollbackIncomplete(run) && target.written === true && target.undone !== true;
 }
 
+/** Per target the owner still writes: how many OTHER targets get the same new value in the same
+ *  field. A judge can give different products one value (three products with one SEO title), and
+ *  the preview showed each row alone. Only text values count, a target's own text such as a
+ *  product's title or an image's alt text; a target that writes a list, a number or a flag into a
+ *  field is not counted for that field at all. Field changes only, by their exact new text; an
+ *  empty or missing value is no value, though a target that clears the field still writes it. On
+ *  a run without a judge, a field in which every target that writes it gets one value is not marked:
+ *  that is the order („set every SEO title to …“), not a duplicate. A judged run has no fixed
+ *  value, so one value for all its targets is marked. A target that shares values in several
+ *  fields counts its largest group. Targets without a shared value are absent. A field the judge
+ *  fills from a fixed list of choices (`choiceFields`) is not counted either: many targets getting
+ *  the same choice is what such a field is for. */
+export function bulkSameValueOthers(
+	targets: readonly Pick<BulkTarget, 'seq' | 'change' | 'diff' | 'deselected'>[],
+	{ judged, choiceFields }: { judged: boolean; choiceFields?: ReadonlySet<string> },
+): Map<number, number> {
+	// Per field: who writes it, and who gets which value.
+	const byField = new Map<string, { writers: Set<number>; values: Map<string, Set<number>> }>();
+	for (const x of targets) {
+		if (x.deselected || (x.change !== 'update' && x.change !== 'create') || x.diff.kind !== 'fields') continue;
+		for (const { field, after } of x.diff.fields) {
+			// A list, a number or a flag is no target's own text, and neither is one of a field's choices.
+			if (after !== null && after !== undefined && typeof after !== 'string') continue;
+			if (choiceFields?.has(field) === true) continue;
+			let f = byField.get(field);
+			if (f === undefined) { f = { writers: new Set(), values: new Map() }; byField.set(field, f); }
+			// Every target that writes the field counts toward „all“, also one that clears it.
+			f.writers.add(x.seq);
+			if (typeof after !== 'string' || after.trim() === '') continue;
+			const seqs = f.values.get(after);
+			if (seqs === undefined) f.values.set(after, new Set([x.seq]));
+			else seqs.add(x.seq);
+		}
+	}
+	const others = new Map<number, number>();
+	for (const { writers, values } of byField.values()) {
+		for (const seqs of values.values()) {
+			if (seqs.size < 2) continue;
+			// One value for every target that writes this field: the order itself, unless a judge chose it.
+			if (!judged && seqs.size === writers.size) continue;
+			for (const seq of seqs) others.set(seq, Math.max(others.get(seq) ?? 0, seqs.size - 1));
+		}
+	}
+	return others;
+}
+
+/** The fields a judged run's rule fills from a fixed list of choices (an `enum` in its schema). */
+export function bulkChoiceFields(rule: Pick<NonNullable<BulkRunDetailData['judgeRule']>, 'schema'> | null): Set<string> {
+	if (rule === null) return new Set();
+	return new Set(Object.entries(rule.schema.properties).filter(([, shape]) => bulkFieldChoices(shape) !== null).map(([field]) => field));
+}
+
 /** How many targets the owner still writes whose SEO text gains an `&`: the products
  *  the preview's line names. One the owner took out is not counted. */
 export function bulkSeoEntityCount(targets: readonly Pick<BulkTarget, 'seoEntityFields' | 'deselected'>[]): number {
@@ -1691,6 +1765,43 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
 	new_img: 'new_img', not_canonical: 'not_canonical',
 	comment_added: 'comment_added_shopify', html_too_long: 'html_too_long',
 };
+/** The rule a model's answer broke, as the engine keeps it with `verdict_invalid`. */
+export interface BulkRefusalDetail {
+	field: string;
+	kind: string;
+	limit?: number | undefined;
+}
+/** The rule kinds the page words; a kind it does not know reads as the sentence without a field. */
+export const BULK_REFUSAL_KINDS: readonly string[] = ['required', 'type', 'enum', 'pattern', 'maxLength', 'minLength', 'minimum', 'maximum', 'maxItems'];
+/** Kinds whose sentence names the rule's bound. */
+const BULK_REFUSAL_BOUNDED: ReadonlySet<string> = new Set(['maxLength', 'minLength', 'minimum', 'maximum', 'maxItems']);
+
+/**
+ * The sentence for an answer the rule refused, unfilled, and the rule it broke (with its bound)
+ * as the text for its `{rule}`; null where the engine kept no such detail or its kind is not one
+ * the page words: the caller then reads the sentence without a field. The page splits the
+ * sentence at `{field}` before anything is filled ({@link bulkSentenceParts}) and puts the field
+ * in as it names fields elsewhere (a readable name, or the rule's own name set apart).
+ */
+export function bulkRefusalSentence(
+	detail: BulkRefusalDetail | undefined, shopify: boolean, i18n: BulkI18n,
+): { template: string; rule: string } | null {
+	if (detail === undefined || !BULK_REFUSAL_KINDS.includes(detail.kind)) return null;
+	const bounded = BULK_REFUSAL_BOUNDED.has(detail.kind);
+	if (bounded && (detail.limit === undefined || !Number.isFinite(detail.limit))) return null;
+	const rule = bounded ? i18n.tf(`bulk.invalid.refusal.${detail.kind}`, { n: String(detail.limit) }) : i18n.t(`bulk.invalid.refusal.${detail.kind}`);
+	return { template: i18n.t(shopify ? 'bulk.invalid.verdict_refused' : 'bulk.invalid.verdict_refused_target'), rule };
+}
+
+/** {@link bulkRefusalSentence} as text: the field by its readable name, or the rule's own name. */
+export function bulkRefusalText(
+	detail: BulkRefusalDetail | undefined, shopify: boolean, host: string | null, i18n: BulkI18n,
+): string | null {
+	const sentence = bulkRefusalSentence(detail, shopify, i18n);
+	if (sentence === null || detail === undefined) return null;
+	return fillTemplate(sentence.template, { field: bulkFieldNamesText(host, [detail.field], (k) => i18n.t(k)), rule: sentence.rule });
+}
+
 /** Reasons with a sentence of their own on every run, not only on Shopify: the HTML check's refusals
  *  of tags the page reads, whose way out differs from planning again, and of links, in a
  *  shortcode as much as in HTML. */
@@ -1716,12 +1827,19 @@ export function bulkInvalidText(
 	 *  With `before_has_shop_markup`: the date of the earlier write, already formatted, or null.
 	 *  `listForm`: the stored list form; `judgesHtml`: the run's rule decides an HTML field;
 	 *  `startDomains`: the run takes allowed link domains at the start of judging ({@link bulkTakesStartDomains});
-	 *  `linkDomain`: with `new_link_domain`, the domain the refused link points to. */
+	 *  `linkDomain`: with `new_link_domain`, the domain the refused link points to;
+	 *  `refusal`: with `verdict_invalid`, the field and rule the answer broke ({@link bulkRefusalText}). */
 	context?: {
 		field: string | undefined; host: string | null; dataStore: boolean; markedDate?: string | null | undefined;
 		listForm?: string | null | undefined; judgesHtml?: boolean | undefined; startDomains?: boolean; linkDomain?: string | undefined;
+		refusal?: BulkRefusalDetail | undefined;
 	},
 ): string {
+	// An answer the rule refused names the field and the rule it broke, on every run.
+	if (reason === 'verdict_invalid') {
+		const refused = bulkRefusalText(context?.refusal, shopify, context?.host ?? null, i18n);
+		if (refused !== null) return refused;
+	}
 	// The description an earlier run wrote and the store added markup to: named
 	// by that run's date, so the owner can find it; without the date where the run is gone.
 	if (reason === 'before_has_shop_markup') {
