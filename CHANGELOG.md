@@ -61,14 +61,19 @@
   while entries the owner rejected or that were superseded are stored, since
   the export does not carry those yet.
 - `GET /api/export` has three new fields. `knowledge_graph_may_be_incomplete`
-  is `true` when the knowledge graph could not be read: reading it failed, it
-  did not open at boot although it is switched on, a read fell back to the
-  older store, or an entity reached the per-entity relation limit. It is also
+  is `true` when the knowledge graph was not read in full: reading it failed,
+  a read fell back to the older store, the subject graph is on without
+  `engine.db`, or an entity reached the per-entity relation limit. It is also
   `true` while remembered texts or their mentions are stored, since this
-  export does not carry those yet. While the
-  graph is switched off the block is empty with `enabled: false` and the flag
-  `true`: switching it off deletes nothing, and what it held is not read there
-  yet. `secrets` now also lists names
+  export does not carry those yet. While the graph is switched off, or on
+  without its layer, the export still reads what the graph holds, since
+  switching it off deletes nothing: the block carries those entities and
+  relations with `enabled: false` (or `true`). `agent-memory.db` is opened
+  read-only for that: no migration and no checkpoint, so the file and its
+  `-wal` stay as they are; SQLite may create the `-shm`, and an empty `-wal`
+  where none was, beside them. A file from a newer build is left unread, and
+  one that cannot be read gives an empty block, both with the flag `true`; one
+  stamped with an older schema is read, and the flag is `true`. `secrets` now also lists names
   written to the vault after boot (mail and OAuth credentials, for example).
   `secrets_may_be_incomplete` is `true` when the secret store or its vault did
   not open. `secrets_note` says that only secret names are exported, never

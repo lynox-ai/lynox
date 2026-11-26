@@ -12,6 +12,7 @@ import { EngineDb } from '../core/engine-db.js';
 import { SubjectStore } from '../core/subject-store.js';
 import { KnowledgeStore } from '../core/knowledge-store.js';
 import Database from 'better-sqlite3';
+import { AgentMemoryDb } from '../core/agent-memory-db.js';
 
 /**
  * The engine opens its stores at boot and goes on without each one whose open fails. The
@@ -140,13 +141,18 @@ describe('export with the stores down at boot (real engine)', () => {
     expect(body.durable_knowledge.enabled, 'switched on').toBe(true);
   }, 60_000);
 
-  it('marks the knowledge graph incomplete when it is missing without being switched off', async () => {
+  it('reads the knowledge graph without its layer when the layer is missing, and marks it while engine.db is down', async () => {
     expect(h.engine().getUserConfig().knowledge_graph_enabled, 'fixture: not switched off').not.toBe(false);
     expect(h.engine().getKnowledgeLayer(), 'fixture: no layer without the history database').toBeNull();
+    // What the graph held before this boot; no layer holds the file now.
+    const db = new AgentMemoryDb(join(h.dir(), 'agent-memory.db'));
+    db.createEntity({ canonicalName: 'Alice', entityType: 'person', scopeType: 'global', scopeId: 'global' });
+    db.close();
 
     const body = await h.exportBody();
-    expect(body.knowledge_graph).toEqual({ entities: [], relationships: [], enabled: true });
-    expect(body.knowledge_graph_may_be_incomplete, 'the graph was not read, not empty').toBe(true);
+    const graph = body.knowledge_graph as unknown as { entities: Array<{ canonicalName: string }>; enabled: boolean };
+    expect(graph.entities.map(e => e.canonicalName), 'read from its store without the layer').toEqual(['Alice']);
+    expect(body.knowledge_graph_may_be_incomplete, 'engine.db did not open: the texts it may hold cannot be counted').toBe(true);
     expect(body.knowledge_graph.enabled, 'not switched off').toBe(true);
   }, 60_000);
 });
@@ -407,15 +413,39 @@ describe('export with the knowledge graph switched off (real engine)', () => {
     writeFileSync(join(dir, 'config.json'), JSON.stringify({ knowledge_graph_enabled: false }));
   }, false);
 
-  it('says the graph is off and marks it incomplete, since what it held is not read', async () => {
+  it('says the graph is off and, with nothing held, reads it as complete', async () => {
     expect(h.engine().getUserConfig().knowledge_graph_enabled, 'fixture: switched off').toBe(false);
     expect(h.engine().getKnowledgeLayer(), 'fixture: no layer while it is off').toBeNull();
 
     const body = await h.exportBody();
-    expect(body.knowledge_graph).toEqual({ entities: [], relationships: [], enabled: false });
-    expect(body.knowledge_graph_may_be_incomplete, 'off: what it held may still be stored and was not read').toBe(true);
+    expect(body.knowledge_graph).toMatchObject({ entities: [], relationships: [], enabled: false });
+    expect(body.knowledge_graph_may_be_incomplete, 'off, and the graph never held anything: read in full').toBe(false);
     expect(body.durable_knowledge.enabled, 'durable memory is off too').toBe(false);
     expect(body.durable_knowledge.may_be_incomplete, 'nothing durable is held, read in full').toBe(false);
+  }, 60_000);
+});
+
+describe('export with the knowledge graph switched off after it held entities and relations (real engine)', () => {
+  // Written while it was on, then switched off: switching it off deletes nothing.
+  const h = harness((dir) => {
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ knowledge_graph_enabled: false }));
+    const db = new AgentMemoryDb(join(dir, 'agent-memory.db'));
+    const alice = db.createEntity({ canonicalName: 'Alice', entityType: 'person', scopeType: 'global', scopeId: 'global' });
+    const acme = db.createEntity({ canonicalName: 'ACME', entityType: 'organization', scopeType: 'global', scopeId: 'global' });
+    db.createRelation(alice, acme, 'works_at', 'Alice works at ACME', 'm-not-stored');
+    db.close();
+  }, false);
+
+  it('carries what the graph still holds, says it is off, and reads it as complete', async () => {
+    expect(h.engine().getUserConfig().knowledge_graph_enabled, 'fixture: switched off').toBe(false);
+    expect(h.engine().getKnowledgeLayer(), 'fixture: no layer while it is off').toBeNull();
+
+    const body = await h.exportBody();
+    const graph = body.knowledge_graph as unknown as { entities: Array<{ canonicalName: string }>; relationships: Array<{ description: string }>; enabled: boolean };
+    expect(graph.entities.map(e => e.canonicalName).sort()).toEqual(['ACME', 'Alice']);
+    expect(graph.relationships.map(r => r.description)).toEqual(['Alice works at ACME']);
+    expect(graph.enabled, 'switched off').toBe(false);
+    expect(body.knowledge_graph_may_be_incomplete, 'read in full, and no remembered text is held').toBe(false);
   }, 60_000);
 });
 
@@ -427,15 +457,15 @@ describe('export with the knowledge graph switched off and durable memory on (re
     db.close();
   }, true);
 
-  it('marks only the graph: durable knowledge is read in full under its own setting', async () => {
+  it('reads durable knowledge in full under its own setting while the graph is off', async () => {
     expect(h.engine().getUserConfig().knowledge_graph_enabled, 'fixture: graph off').toBe(false);
     expect(h.engine().getUserConfig().durable_memory_enabled, 'fixture: durable memory on').toBe(true);
     expect(h.engine().getKnowledgeLayer(), 'fixture: no graph layer').toBeNull();
     expect(h.engine().getKnowledgeStore(), 'fixture: the durable store opened').not.toBeNull();
 
     const body = await h.exportBody();
-    expect(body.knowledge_graph).toEqual({ entities: [], relationships: [], enabled: false });
-    expect(body.knowledge_graph_may_be_incomplete, 'graph off: not read').toBe(true);
+    expect(body.knowledge_graph).toMatchObject({ entities: [], relationships: [], enabled: false });
+    expect(body.knowledge_graph_may_be_incomplete, 'off, and the graph holds nothing: read in full').toBe(false);
     expect(body.durable_knowledge.enabled, 'durable memory on').toBe(true);
     expect(body.durable_knowledge.entries.map((e) => e.text)).toEqual(['Quotes are valid for 30 days']);
     expect(body.durable_knowledge.may_be_incomplete, 'the graph being off does not mark durable knowledge').toBe(false);

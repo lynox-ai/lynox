@@ -340,6 +340,60 @@ const MIGRATIONS: string[] = [
 /** The migration index (0-based) of v8, which moves relations to the end of their chain. */
 const REPOINT_MIGRATION_INDEX = 7;
 
+/** The schema version the migrations above bring a file to. */
+export const AGENT_MEMORY_SCHEMA_VERSION = MIGRATIONS.length;
+
+// ── Reads on a bare handle ────────────────────────────────────
+// The queries the data export needs, on any connection to an agent-memory.db: the store's own
+// (through the methods below) or a read-only one the export opens while the graph is switched
+// off and no store exists. One copy of each query, so the two paths cannot drift apart.
+
+/** The version stamped into `schema_version`; throws when the table cannot be read. */
+export function agentMemoryVersionOn(db: Database.Database): number {
+  const row = db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number | null } | undefined;
+  return row?.v ?? 0;
+}
+
+export function listEntitiesOn(db: Database.Database, opts?: { type?: string | undefined; limit?: number | undefined; offset?: number | undefined }): EntityRow[] {
+  const limit = Math.min(Math.max(opts?.limit ?? 50, 1), 200);
+  const offset = Math.max(opts?.offset ?? 0, 0);
+  if (opts?.type) {
+    return db.prepare(`
+      SELECT * FROM entities WHERE entity_type = ? ORDER BY mention_count DESC LIMIT ? OFFSET ?
+    `).all(opts.type, limit, offset) as EntityRow[];
+  }
+  return db.prepare(`
+    SELECT * FROM entities ORDER BY mention_count DESC LIMIT ? OFFSET ?
+  `).all(limit, offset) as EntityRow[];
+}
+
+export function entityCountOn(db: Database.Database): number {
+  return (db.prepare('SELECT COUNT(*) as cnt FROM entities').get() as { cnt: number }).cnt;
+}
+
+export function activeMemoryCountOn(db: Database.Database): number {
+  return (db.prepare('SELECT COUNT(*) as cnt FROM memories WHERE is_active = 1').get() as { cnt: number }).cnt;
+}
+
+/** Every row of `memories` (active or not) plus every row of `mentions`. */
+export function memoryTextRowsOn(db: Database.Database): number {
+  return (db.prepare('SELECT (SELECT COUNT(*) FROM memories) + (SELECT COUNT(*) FROM mentions) AS n').get() as { n: number }).n;
+}
+
+/** An entity's relations for the data export, those of a retired source included and marked. */
+export function entityRelationsForExportOn(db: Database.Database, entityId: string, limit = 50): Array<RelationRow & { source_deleted: 0 | 1 }> {
+  const safeLimit = Math.max(1, Math.min(limit, 200));
+  return db.prepare(`
+    SELECT r.*, CASE WHEN ${sourceDeletedSql('r')} THEN 1 ELSE 0 END AS source_deleted FROM relations r
+    WHERE r.from_entity_id = ? OR r.to_entity_id = ?
+    ORDER BY r.created_at DESC LIMIT ?
+  `).all(entityId, entityId, safeLimit) as Array<RelationRow & { source_deleted: 0 | 1 }>;
+}
+
+export function relationCountOn(db: Database.Database): number {
+  return (db.prepare(`SELECT COUNT(*) as cnt FROM relations r WHERE ${sourceKeptSql('r')}`).get() as { cnt: number }).cnt;
+}
+
 // ── Database Class ──────────────────────────────────────────────
 
 /**
@@ -397,8 +451,7 @@ export class AgentMemoryDb {
 
   private _getVersion(): number {
     try {
-      const row = this.db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number } | undefined;
-      return row?.v ?? 0;
+      return agentMemoryVersionOn(this.db);
     } catch {
       return 0;
     }
@@ -541,21 +594,11 @@ export class AgentMemoryDb {
   }
 
   listEntities(opts?: { type?: string | undefined; limit?: number | undefined; offset?: number | undefined }): EntityRow[] {
-    const limit = Math.min(Math.max(opts?.limit ?? 50, 1), 200);
-    const offset = Math.max(opts?.offset ?? 0, 0);
-    if (opts?.type) {
-      return this.db.prepare(`
-        SELECT * FROM entities WHERE entity_type = ? ORDER BY mention_count DESC LIMIT ? OFFSET ?
-      `).all(opts.type, limit, offset) as EntityRow[];
-    }
-    return this.db.prepare(`
-      SELECT * FROM entities ORDER BY mention_count DESC LIMIT ? OFFSET ?
-    `).all(limit, offset) as EntityRow[];
+    return listEntitiesOn(this.db, opts);
   }
 
   getEntityCount(): number {
-    const row = this.db.prepare('SELECT COUNT(*) as cnt FROM entities').get() as { cnt: number };
-    return row.cnt;
+    return entityCountOn(this.db);
   }
 
   getMemoryCount(): number {
@@ -1166,8 +1209,7 @@ export class AgentMemoryDb {
   }
 
   getActiveMemoryCount(): number {
-    const row = this.db.prepare('SELECT COUNT(*) as cnt FROM memories WHERE is_active = 1').get() as { cnt: number };
-    return row.cnt;
+    return activeMemoryCountOn(this.db);
   }
 
   /**
@@ -1176,8 +1218,7 @@ export class AgentMemoryDb {
    * it reads a count above zero as "the graph block is not the whole of what is held".
    */
   countMemoryTextRows(): number {
-    const row = this.db.prepare('SELECT (SELECT COUNT(*) FROM memories) + (SELECT COUNT(*) FROM mentions) AS n').get() as { n: number };
-    return row.n;
+    return memoryTextRowsOn(this.db);
   }
 
   /** Cosine similarity search over memory embeddings with in-place scoring. */
@@ -1391,17 +1432,11 @@ export class AgentMemoryDb {
    * the export until the reap removes it.
    */
   getEntityRelationsForExport(entityId: string, limit = 50): Array<RelationRow & { source_deleted: 0 | 1 }> {
-    const safeLimit = Math.max(1, Math.min(limit, 200));
-    return this.db.prepare(`
-      SELECT r.*, CASE WHEN ${sourceDeletedSql('r')} THEN 1 ELSE 0 END AS source_deleted FROM relations r
-      WHERE r.from_entity_id = ? OR r.to_entity_id = ?
-      ORDER BY r.created_at DESC LIMIT ?
-    `).all(entityId, entityId, safeLimit) as Array<RelationRow & { source_deleted: 0 | 1 }>;
+    return entityRelationsForExportOn(this.db, entityId, limit);
   }
 
   getRelationCount(): number {
-    const row = this.db.prepare(`SELECT COUNT(*) as cnt FROM relations r WHERE ${sourceKeptSql('r')}`).get() as { cnt: number };
-    return row.cnt;
+    return relationCountOn(this.db);
   }
 
   /**

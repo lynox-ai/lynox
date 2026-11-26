@@ -104,7 +104,7 @@ import type { ApprovalStore } from '../core/approval-store.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
 import { RECORD_EXPORT_PAGE_MAX } from '../core/data-store.js';
-import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion, TriggerRecord, PlannedPipeline, ChangesetDiff } from '../types/index.js';
+import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, TabQuestion, TriggerRecord, PlannedPipeline, ChangesetDiff } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
 import { acquireSlot, readSlot, sweepSlot, type HeldSlot } from '../core/export-slot.js';
 import { sweepStaleExports } from '../core/export-archive.js';
@@ -171,7 +171,6 @@ import { mintBrokerStartToken } from '../integrations/google/broker-start-mint.j
 import { isBrokerMode, hasControlPlaneInstanceId } from '../integrations/google/broker-mode.js';
 import { hostPolicyOf } from '../core/tool-context.js';
 import { InputRequiredError, isInputRequired } from '../core/input-required.js';
-import { EXPORT_RELATIONS_PER_ENTITY } from '../core/knowledge-layer.js';
 import { parseAcknowledged, removeBackupsOutside, removeOwedEntries, sameUnknownSet, scanDataDir, type WorkspaceErasure, type WorkspaceWalk } from '../core/data-dir-erase.js';
 import type { WorkspaceAccess } from '../core/workspace-access.js';
 import type { StagedArchive, WorkspaceManifest } from '../core/workspace-export.js';
@@ -14979,60 +14978,22 @@ export class LynoxHTTPApi {
       }
 
       // Knowledge graph (entities + relations). `knowledge_graph_may_be_incomplete` says the block
-      // was not read in full: the layer threw, it is missing although it was not switched off (its
-      // database or the embedding model failed to open at boot), or a read cap was reached. It is
-      // also set while remembered texts or mentions are stored: the block does not carry them yet.
-      // `enabled` is the setting, as on the durable knowledge block: whether the graph is
-      // switched on in the config.
+      // is not the whole of what the graph holds: a read threw, fell back or reached a cap, or
+      // remembered texts or mentions are stored, which the block does not carry yet. `enabled` is
+      // the setting, as on the durable knowledge block: whether the graph is switched on in the
+      // config.
       const graphEnabled = engine.getUserConfig().knowledge_graph_enabled !== false;
       const kg = engine.getKnowledgeLayer();
       if (kg) {
         const fallbacksBefore = kg.readFallbackCount;
         try {
-          // Page through ALL entities. A single { limit: 200 } call silently
-          // dropped every entity past the first 200 from a user's GDPR export
-          // (an Art. 15/20 completeness gap, on the legacy KG today and the
-          // subject-graph once the flag flips). The page cap bounds a runaway
-          // loop. The per-entity relation read is capped too (newest first); an entity
-          // that returns the cap may hold more, and the block is then marked.
-          const PAGE = 200;
-          const MAX_PAGES = 1000;
-          const entities: EntityRecord[] = [];
-          let truncated = true;
-          for (let page = 0; page < MAX_PAGES; page++) {
-            const batch = await kg.listEntities({ limit: PAGE, offset: page * PAGE });
-            entities.push(...batch);
-            if (batch.length < PAGE) { truncated = false; break; }
-          }
-          if (truncated) {
-            // Surfaced, not silent: hitting the cap means the export may be
-            // incomplete (an Art.15/20 gap) — log so it's observable, never drop quietly.
-            process.stderr.write(`⚠ /api/export: entity export hit the ${MAX_PAGES * PAGE}-row cap — dump may be incomplete\n`);
-          }
+          const { EXPORT_RELATIONSHIPS_NOTE, collectGraphForExport } = await import('../core/graph-export.js');
+          const { entities, relationships, truncated, relationCapHit } = await collectGraphForExport(kg);
           const stats = await kg.stats();
-          // Collect all relations by iterating entity relations. Relations whose
-          // source memory was deleted are still stored, so they are exported too,
-          // marked `sourceDeleted` and explained in `relationships_note`.
-          const relationSet = new Map<string, unknown>();
-          let relationCapHit = false;
-          for (const entity of entities) {
-            const relations = await kg.getEntityRelationsForExport(entity.id);
-            if (relations.length >= EXPORT_RELATIONS_PER_ENTITY) relationCapHit = true;
-            for (const rel of relations) {
-              // The source is part of the key: the legacy store keeps one row per
-              // assertion, and a deleted one must not stand in for a live one.
-              const key = `${rel.fromEntityId}:${rel.toEntityId}:${rel.relationType}:${rel.sourceMemoryId}`;
-              if (!relationSet.has(key)) {
-                relationSet.set(key, rel);
-              }
-            }
-          }
           exportData['knowledge_graph'] = {
             entities,
-            relationships: [...relationSet.values()],
-            relationships_note: 'sourceDeleted: the memory this relation was derived from was removed, '
-              + 'or replaced by a newer memory that contradicts it. '
-              + 'The relation is no longer shown or used, and is removed at the next cleanup.',
+            relationships,
+            relationships_note: EXPORT_RELATIONSHIPS_NOTE,
             stats,
             enabled: graphEnabled,
           };
@@ -15059,17 +15020,32 @@ export class LynoxHTTPApi {
           exportData['knowledge_graph_may_be_incomplete'] = true;
           process.stderr.write('⚠ /api/export: knowledge graph read failed — exported empty and marked incomplete\n');
         }
-      } else if (graphEnabled) {
-        exportData['knowledge_graph'] = { entities: [], relationships: [], enabled: true };
-        exportData['knowledge_graph_may_be_incomplete'] = true;
-        process.stderr.write('⚠ /api/export: knowledge graph unavailable — exported empty and marked incomplete\n');
       } else {
-        // Switched off: no layer was opened. Switching it off deletes nothing, so what it held
-        // while it was on may still be stored, and the export is the answer to an access
-        // request. Without a layer it is not read here, so the block says the graph is off and
-        // marks itself incomplete rather than reading as empty.
-        exportData['knowledge_graph'] = { entities: [], relationships: [], enabled: false };
-        exportData['knowledge_graph_may_be_incomplete'] = true;
+        // No layer: the graph is switched off, or it is on and its layer did not start (its
+        // database or the embedding model failed at boot). Switching it off deletes nothing, and
+        // the export is the answer to an access request, so what the graph still holds is read
+        // here from its stores, the way the layer reads them, without opening a layer.
+        if (graphEnabled) process.stderr.write('⚠ /api/export: knowledge graph layer unavailable — read from its stores\n');
+        try {
+          const { EXPORT_RELATIONSHIPS_NOTE, readHeldGraph } = await import('../core/graph-export.js');
+          const held = await readHeldGraph({
+            agentMemoryFile: join(getLynoxDir(), 'agent-memory.db'),
+            engineDb: engine.getEngineDb(),
+            subjectGraph: engine.getUserConfig().subject_graph_enabled === true,
+          });
+          exportData['knowledge_graph'] = {
+            entities: held.entities,
+            relationships: held.relationships,
+            relationships_note: EXPORT_RELATIONSHIPS_NOTE,
+            stats: held.stats,
+            enabled: graphEnabled,
+          };
+          exportData['knowledge_graph_may_be_incomplete'] = held.mayBeIncomplete;
+        } catch {
+          exportData['knowledge_graph'] = { entities: [], relationships: [], enabled: graphEnabled };
+          exportData['knowledge_graph_may_be_incomplete'] = true;
+          process.stderr.write('⚠ /api/export: held knowledge graph read failed — exported empty and marked incomplete\n');
+        }
       }
 
       // Durable knowledge store (entries + the always-loaded memory blocks).
