@@ -27,7 +27,8 @@ function sandbox(otherUid = false): string {
   mkdirSync(bin);
   writeFileSync(join(bin, 'node'), [
     '#!/bin/sh',
-    'if [ "$1" = "-e" ]; then exec "$REAL_NODE" "$@"; fi',
+    '[ "$1" = "--disable-sigusr1" ] || { echo "node started without --disable-sigusr1: $*" >&2; exit 97; }',
+    'if [ "$2" = "-e" ]; then exec "$REAL_NODE" "$@"; fi',
     'echo "ENGINE_STARTED"',
   ].join('\n') + '\n', { mode: 0o755 });
   if (otherUid) {

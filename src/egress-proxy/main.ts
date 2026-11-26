@@ -15,6 +15,7 @@ import { lookup } from 'node:dns/promises';
 import { CredentialRegistry } from './registry.js';
 import { parseDenyIps } from './policy.js';
 import { ShellProxy, createAdminServer } from './server.js';
+import { assertSignalDebuggerOff } from '../core/signal-debugger.js';
 
 export const SHELL_INTERFACE = 'shell0';
 export const ADMIN_INTERFACE = 'admin0';
@@ -65,7 +66,7 @@ export async function main(): Promise<void> {
 }
 
 if (process.argv[1] && /egress-proxy\/main\.js$/.test(process.argv[1])) {
-  main().catch((err: unknown) => {
+  Promise.resolve().then(() => { assertSignalDebuggerOff('egress-proxy'); return main(); }).catch((err: unknown) => {
     process.stderr.write(`[egress-proxy] fatal: ${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);
   });
