@@ -335,6 +335,19 @@ export function diffPreviewText(rawPath: string): string {
   return readForDiffPreview(resolveWritablePath(rawPath));
 }
 
+/**
+ * The file a tool with `ToolEntry.writeTarget` writes for this call's `path`, or null when it
+ * writes none; undefined for any other tool, and for a call without a path (the handler's own
+ * check refuses that one). Resolved once per call, for the guard and the handler alike.
+ */
+export function writeTargetFor(tool: ToolEntry, input: unknown): string | null | undefined {
+  if (tool.writeTarget === undefined) return undefined;
+  if (input === null || typeof input !== 'object' || !('path' in input)) return undefined;
+  const path = (input as { path: unknown }).path;
+  if (typeof path !== 'string') return undefined;
+  return tool.writeTarget(path);
+}
+
 export const TOOL_AUDIT_INPUT_MAX_CHARS = 2000;
 
 export type SendStopCause = 'end_turn' | 'max_tokens' | 'iteration_cap' | 'budget_cap' | 'absolute_cap';
@@ -5513,6 +5526,10 @@ export class Agent implements IAgent {
     // Skip diff preview and permission prompt only where the user reviews the run afterwards
     // (`changesetReviewedAfterRun`). A child under its parent's review is asked as without one.
     const reviewedLater = mutatesFile && this._reviewedAfterRun && this.changesetManager?.active === true;
+    // The file a write tool writes, resolved ONCE for this call: the guard below judges this file
+    // and the handler writes exactly it (`ToolCallContext`). Resolved again in the handler, a link
+    // set while the call waits for its answer would send the write to a file nobody judged.
+    const writeTarget = writeTargetFor(tool, tc.input);
     if (mutatesFile && !reviewedLater && this.promptUser) {
       // Show diff preview before permission prompt (non-changeset mode)
       try {
@@ -5560,7 +5577,7 @@ export class Agent implements IAgent {
       : isDangerousDetailed(tc.name, tc.input, this.autonomy, tool, this.currentRunId, this.governingContract().contract, {
         provider: inherits.provider, apiKey: undefined, apiBaseURL: undefined,
         openaiModelId: inherits.openaiModelId, openaiAuth: undefined, modelPinnedByProfile: inherits.modelPinnedByProfile,
-      }, this.dialogLanguage);
+      }, this.dialogLanguage, writeTarget);
     // Self-confirming tools: only honour BLOCKED warnings (autonomous mode), skip generic warnings
     const effectiveSignal = (selfConfirming && signal && !signal.warning.includes('[BLOCKED')) ? null : signal;
     // A run nobody watches may hand a queueable call to its owner instead of asking or being
@@ -5886,7 +5903,7 @@ export class Agent implements IAgent {
       // thenable's `then` runs once, not once per reader.
       const rawResult = Promise.resolve(runInCallSlot(callSlot, () => this.workerPool && this.workerPool.isWorkerSafe(tc.name)
         ? this.workerPool.execute(tc.name, processedInput)
-        : tool.handler(processedInput, this)));
+        : writeTarget === undefined ? tool.handler(processedInput, this) : tool.handler(processedInput, this, { writeTarget })));
       if (trail !== null) { Agent._trailOnSettle(rawResult, trail, callSlot); trailWatched = true; }
       // Per-tool timeout: race an async handler against a wall-clock cap so a
       // handler that never settles can't hang the run. A rejection here is

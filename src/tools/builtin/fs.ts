@@ -1,6 +1,6 @@
 import { openSync, closeSync, constants, fstatSync, ftruncateSync, readSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
 import { dirname, resolve, basename, join, isAbsolute, relative } from 'node:path';
-import type { ToolEntry, IAgent } from '../../types/index.js';
+import type { ToolEntry, IAgent, ToolCallContext } from '../../types/index.js';
 import { getWorkspaceDir, isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
 import { getLynoxDir } from '../../core/config.js';
 import { getWorkspaceRoot, namesSidecarLabel } from '../../core/workspace-root.js';
@@ -349,6 +349,44 @@ function writeTargetOf(rawPath: string, tool: 'write_file' | 'edit_file'): strin
   }
 }
 
+/** The file write_file or edit_file writes for `rawPath`, resolved by name now (links followed),
+ *  as `writeTargetOf` resolves it for the guard. Throws the handler's refusal. */
+function resolveNow(rawPath: string, tool: 'write_file' | 'edit_file'): Target {
+  if (isWorkspaceActive()) return isolatedTarget(rawPath, 'write');
+  return { kind: 'path', path: tool === 'edit_file' ? resolveWritablePath(rawPath) : cliWriteTarget(rawPath) };
+}
+
+/** Said when the file the guard judged is not the file the path names any more. */
+function changedRefusal(rawPath: string): string {
+  return `${rawPath} changed after it was checked; nothing was written. Call again to have it checked anew.`;
+}
+
+/**
+ * The file a write of this call goes to. With the engine's resolution (`call.writeTarget`, the
+ * file the permission guard judged), exactly that file: a workspace file through the workspace's
+ * open directory, mapped from the path by name only, any other file by the resolved path, each
+ * walked with O_NOFOLLOW by the write, so a link set after the judgement is refused, never
+ * followed. The path is not resolved again: a second resolution would follow such a link to a
+ * file nobody judged. Resolved to nothing writable (`null`), the call is refused; the path is
+ * resolved again only to say why, and nothing is written either way. Without a resolution (a
+ * direct call), the path is resolved here.
+ */
+function judgedTarget(rawPath: string, call: ToolCallContext | undefined, tool: 'write_file' | 'edit_file'): Target {
+  const judged = call?.writeTarget;
+  if (judged === undefined) return resolveNow(rawPath, tool);
+  if (judged === null) {
+    resolveNow(rawPath, tool);
+    throw new Error(changedRefusal(rawPath));
+  }
+  const base = isWorkspaceActive() ? reachWorkspace(rawPath) : null;
+  if (base !== null && toWorkspaceRel(rawPath, base.ws).kind === 'inside') {
+    const target = isolatedTarget(rawPath, 'write');
+    if (target.kind !== 'anchored' || target.shown !== judged) throw new Error(changedRefusal(rawPath));
+    return target;
+  }
+  return { kind: 'path', path: judged };
+}
+
 /**
  * The refusal for a link on the way to an artifact. A retry by the same path meets the same link (a
  * dead one stays unresolved), so the text names the way out: a new artifact, under a fresh name no
@@ -636,7 +674,7 @@ export const writeFileTool: ToolEntry<WriteFileInput> = {
       required: ['path', 'content'],
     },
   },
-  handler: async (input: WriteFileInput, agent: IAgent): Promise<string> => {
+  handler: async (input: WriteFileInput, agent: IAgent, call?: ToolCallContext): Promise<string> => {
     try {
       const contentBytes = Buffer.byteLength(input.content, 'utf-8');
       if (agent.sessionCounters.writeBytes + contentBytes > MAX_WRITE_BYTES_PER_SESSION) {
@@ -650,28 +688,22 @@ export const writeFileTool: ToolEntry<WriteFileInput> = {
       // basename; relative → workspace-relative but confined — a `..` must NOT
       // escape, see confineToWorkspace).
       // With active workspace: resolve normally (validatePath enforces boundaries)
-      if (isWorkspaceActive()) {
-        const target = isolatedTarget(input.path, 'write');
-        if (target.kind === 'anchored') {
-          refuseEvictionPlaceholder(input.content, target.shown);
-          writeInPlace(target, input.content, true);
-          agent.sessionCounters.writeBytes += contentBytes;
-          return `Written to ${target.shown}`;
-        }
-        refuseEvictionPlaceholder(input.content, target.path);
-        if (isInArtifactsRoot(target.path)) {
-          writeArtifactFile(target.path, input.content, true);
-        } else {
-          writeResolvedFile(target.path, input.content, true);
-        }
+      // Either way the file the guard judged, when the engine resolved it (`judgedTarget`).
+      const target = judgedTarget(input.path, call, 'write_file');
+      if (target.kind === 'anchored') {
+        refuseEvictionPlaceholder(input.content, target.shown);
+        writeInPlace(target, input.content, true);
         agent.sessionCounters.writeBytes += contentBytes;
-        return `Written to ${target.path}`;
+        return `Written to ${target.shown}`;
       }
-      const realPath = cliWriteTarget(input.path);
-      refuseEvictionPlaceholder(input.content, realPath);
-      writeResolvedFile(realPath, input.content, true);
+      refuseEvictionPlaceholder(input.content, target.path);
+      if (isInArtifactsRoot(target.path)) {
+        writeArtifactFile(target.path, input.content, true);
+      } else {
+        writeResolvedFile(target.path, input.content, true);
+      }
       agent.sessionCounters.writeBytes += contentBytes;
-      return `Written to ${realPath}`;
+      return `Written to ${target.path}`;
     } catch (err: unknown) {
       const cause = err instanceof Error ? err : new Error(String(err));
       throw new Error(`write_file: ${cause.message}`, { cause });
@@ -699,17 +731,12 @@ export const editFileTool: ToolEntry<EditFileInput> = {
       required: ['path', 'old_string', 'new_string'],
     },
   },
-  handler: async (input: EditFileInput, agent: IAgent): Promise<string> => {
+  handler: async (input: EditFileInput, agent: IAgent, call?: ToolCallContext): Promise<string> => {
     try {
       if (input.old_string === input.new_string) {
         throw new Error('old_string and new_string are identical — nothing to change.');
       }
-      let target: Target;
-      if (isWorkspaceActive()) {
-        target = isolatedTarget(input.path, 'write');
-      } else {
-        target = { kind: 'path', path: resolveWritablePath(input.path) };
-      }
+      const target = judgedTarget(input.path, call, 'edit_file');
       const realPath = target.kind === 'anchored' ? target.shown : target.path;
       // In the workspace the read and the write both go through its open directory.
       let fd: number;
@@ -725,7 +752,9 @@ export const editFileTool: ToolEntry<EditFileInput> = {
       } else {
         try {
           // O_NONBLOCK: a FIFO at the file must not hold the process until a writer comes.
-          fd = openSync(realPath, constants.O_RDONLY | constants.O_NONBLOCK);
+          // O_NOFOLLOW: the path is resolved, so a link at the file was set after that; it is
+          // refused here as the write refuses it, before anything is compared with it.
+          fd = openSync(realPath, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0));
         } catch (err) {
           if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
             throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
