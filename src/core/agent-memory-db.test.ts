@@ -163,6 +163,18 @@ describe('AgentMemoryDb', () => {
   // ── Memory Operations ────────────────────────────────────────
 
   describe('memories', () => {
+    it('counts every stored text and every mention, a superseded text included', () => {
+      expect(db.countMemoryTextRows()).toBe(0);
+      const id1 = db.createMemory({ text: 'old', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+      const id2 = db.createMemory({ text: 'new', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [0, 1, 0] });
+      db.supersedMemory(id1, id2);
+      expect(db.getMemory(id1)!.is_active, 'fixture: the old text is no longer active').toBe(0);
+      expect(db.countMemoryTextRows(), 'two texts, one of them superseded').toBe(2);
+      const entity = db.createEntity({ canonicalName: 'Test', entityType: 'concept', scopeType: 'global', scopeId: 'g' });
+      db.createMention(id2, entity);
+      expect(db.countMemoryTextRows(), 'two texts and one mention').toBe(3);
+    });
+
     it('creates and retrieves memory', () => {
       const id = db.createMemory({
         text: 'Hello world',

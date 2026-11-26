@@ -1650,6 +1650,14 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * How many remembered texts and mentions the legacy store holds ({@link AgentMemoryDb.countMemoryTextRows}).
+   * The data export does not carry them, so it marks its graph block incomplete while this is above zero.
+   */
+  countHeldMemoryTexts(): number {
+    return this.db.countMemoryTextRows();
+  }
+
+  /**
    * The subject graph is switched on but its store is missing (engine.db did not open at boot).
    * Every read then answers from the legacy store alone, without a fallback being logged, and
    * what only engine.db holds is not in it.

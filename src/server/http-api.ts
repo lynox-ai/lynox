@@ -14980,7 +14980,8 @@ export class LynoxHTTPApi {
 
       // Knowledge graph (entities + relations). `knowledge_graph_may_be_incomplete` says the block
       // was not read in full: the layer threw, it is missing although it was not switched off (its
-      // database or the embedding model failed to open at boot), or a read cap was reached.
+      // database or the embedding model failed to open at boot), or a read cap was reached. It is
+      // also set while remembered texts or mentions are stored: the block does not carry them yet.
       // `enabled` is the setting, as on the durable knowledge block: whether the graph is
       // switched on in the config.
       const graphEnabled = engine.getUserConfig().knowledge_graph_enabled !== false;
@@ -15039,7 +15040,18 @@ export class LynoxHTTPApi {
           // store; what it returned may be partial.
           // The same holds when the subject graph is on but its store never opened.
           const fellBack = kg.readFallbackCount !== fallbacksBefore || kg.subjectGraphUnavailable;
-          exportData['knowledge_graph_may_be_incomplete'] = truncated || relationCapHit || fellBack;
+          // Remembered texts and their mentions (both stores) are held but not in this block, so
+          // while any is stored the block is not the whole of the graph. A count that cannot be
+          // taken, or a missing engine.db, cannot show there are none.
+          let textsHeld = true;
+          try {
+            const engineDb = engine.getEngineDb();
+            if (engineDb) {
+              const { countEngineMemoryRows } = await import('../core/memory-graph-store.js');
+              textsHeld = kg.countHeldMemoryTexts() > 0 || countEngineMemoryRows(engineDb) > 0;
+            }
+          } catch { /* stays marked */ }
+          exportData['knowledge_graph_may_be_incomplete'] = truncated || relationCapHit || fellBack || textsHeld;
         } catch {
           exportData['knowledge_graph'] = { entities: [], relationships: [], enabled: graphEnabled };
           exportData['knowledge_graph_may_be_incomplete'] = true;

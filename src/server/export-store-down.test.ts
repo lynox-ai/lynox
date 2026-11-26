@@ -217,6 +217,7 @@ describe('export with every store open, durable memory off, then the CRM gone (r
       listEntities: ({ offset }: { offset: number }) => Promise.resolve(offset === 0 ? [{ id: 'a' }] : []),
       stats: () => Promise.resolve({}),
       getEntityRelationsForExport: () => Promise.resolve(Array.from({ length: count }, (_, i) => rel(i))),
+      countHeldMemoryTexts: () => 0,
     });
     try {
       h.engine().knowledgeLayer = stub(EXPORT_RELATIONS_PER_ENTITY - 1);
@@ -229,6 +230,44 @@ describe('export with every store open, durable memory off, then the CRM gone (r
       expect(at.knowledge_graph.relationships).toHaveLength(EXPORT_RELATIONS_PER_ENTITY);
       expect(at.knowledge_graph_may_be_incomplete, 'at the cap, the entity may hold more').toBe(true);
     } finally {
+      h.engine().knowledgeLayer = saved;
+    }
+  }, 60_000);
+
+  it('marks the knowledge graph incomplete while remembered texts are stored, in either store, since the block does not carry them', async () => {
+    const saved = h.engine().knowledgeLayer;
+    const stub = (count: () => number) => ({
+      readFallbackCount: 0,
+      subjectGraphUnavailable: false,
+      listEntities: () => Promise.resolve([]),
+      stats: () => Promise.resolve({}),
+      getEntityRelationsForExport: () => Promise.resolve([]),
+      countHeldMemoryTexts: count,
+    });
+    const engineDb = (h.engine().getEngineDb() as EngineDb | null);
+    expect(engineDb, 'fixture: engine.db opened').not.toBeNull();
+    const raw = engineDb!.getDb();
+    try {
+      h.engine().knowledgeLayer = stub(() => 0);
+      const none = await h.exportBody();
+      expect(none.knowledge_graph_may_be_incomplete, 'no texts in either store: read in full').toBe(false);
+
+      h.engine().knowledgeLayer = stub(() => 1);
+      const legacy = await h.exportBody();
+      expect(legacy.knowledge_graph_may_be_incomplete, 'a text or mention in agent-memory.db is not in the block').toBe(true);
+
+      h.engine().knowledgeLayer = stub(() => 0);
+      raw.prepare("INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES ('m-held', 'held text', 'knowledge', 'global', 'global')").run();
+      const engineHeld = await h.exportBody();
+      expect(engineHeld.knowledge_graph_may_be_incomplete, 'a text in engine.db is not in the block').toBe(true);
+      raw.prepare("DELETE FROM memories WHERE id = 'm-held'").run();
+
+      h.engine().knowledgeLayer = stub(() => { throw new Error('count failed'); });
+      const failed = await h.exportBody();
+      expect(failed.knowledge_graph_may_be_incomplete, 'a count that fails cannot show there are none').toBe(true);
+      expect(failed.knowledge_graph.enabled, 'the block itself was still written').toBe(true);
+    } finally {
+      raw.prepare("DELETE FROM memories WHERE id = 'm-held'").run();
       h.engine().knowledgeLayer = saved;
     }
   }, 60_000);
@@ -296,6 +335,7 @@ describe('export with every store open, durable memory off, then the CRM gone (r
         listEntities: () => Promise.resolve([]),
         stats: () => Promise.resolve({}),
         getEntityRelationsForExport: () => Promise.resolve([]),
+        countHeldMemoryTexts: () => 0,
       };
       const steady = await h.exportBody();
       expect(steady.knowledge_graph_may_be_incomplete, 'fallbacks before the export do not count').toBe(false);

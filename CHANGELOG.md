@@ -63,7 +63,9 @@
 - `GET /api/export` has three new fields. `knowledge_graph_may_be_incomplete`
   is `true` when the knowledge graph could not be read: reading it failed, it
   did not open at boot although it is switched on, a read fell back to the
-  older store, or an entity reached the per-entity relation limit. While the
+  older store, or an entity reached the per-entity relation limit. It is also
+  `true` while remembered texts or their mentions are stored, since the export
+  does not carry those yet. While the
   graph is switched off the block is empty with `enabled: false` and the flag
   `true`: switching it off deletes nothing, and what it held is not read there
   yet. `secrets` now also lists names
