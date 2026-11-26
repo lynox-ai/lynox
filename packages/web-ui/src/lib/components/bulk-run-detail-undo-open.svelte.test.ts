@@ -185,13 +185,14 @@ describe('the resume block after a halt on failures', () => {
 describe('the undo offer and approval sentences', () => {
 	it('keep each number with its word: a no-break space between them, in both languages', () => {
 		const keys = ['bulk.undo.approve_explain', 'bulk.undo.approve_explain_one', 'bulk.undo.approve_written', 'bulk.undo.approve_written_one',
-			'bulk.undo.approve_open_more', 'bulk.undo.approve_open_only', 'bulk.undo.explain_open', 'bulk.undo.explain_open_only'];
+			'bulk.undo.approve_open_more', 'bulk.undo.approve_open_only', 'bulk.undo.explain_open', 'bulk.undo.explain_open_only',
+			'bulk.undo.creates', 'bulk.undo.creates_one'];
 		for (const lang of ['de', 'en'] as const) {
 			setLocale(lang);
 			for (const k of keys) {
 				const s = t(k);
-				expect(s, `${lang} ${k}`).toMatch(/(\{[nw]\}|\b1)\u00a0\S/);
-				expect(s, `${lang} ${k}`).not.toMatch(/(\{[nw]\}|\b1) /);
+				expect(s, `${lang} ${k}`).toMatch(/(\{[nwk]\}|\b1)\u00a0\S/);
+				expect(s, `${lang} ${k}`).not.toMatch(/(\{[nwk]\}|\b1) /);
 			}
 		}
 		setLocale('de');
