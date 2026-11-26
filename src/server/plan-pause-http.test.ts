@@ -150,6 +150,25 @@ describe('the pause is held to its takeover (real engine)', () => {
     expect(db().prepare('SELECT * FROM triggers WHERE id = ?').get(id)).toEqual(before);
   });
 
+  it('without the store of access ends, neither shows the preview nor takes the plan over, and nothing is written', async () => {
+    const id = pausedPlan();
+    const before = db().prepare('SELECT * FROM triggers WHERE id = ?').get(id);
+    // CONTROL: with the store the preview is there.
+    expect((await ask('GET', `/api/triggers/${id}/takeover-preview`, ownerCookie)).status).toBe(200);
+    const saved = engine.getMandateEnds.bind(engine);
+    for (const missing of [null, undefined]) {
+      Object.assign(engine, { getMandateEnds: () => missing });
+      try {
+        // Without it every person would read as ended: a live person's plan would say their access ended.
+        expect((await ask('GET', `/api/triggers/${id}/takeover-preview`, ownerCookie)).status).toBe(503);
+        expect((await ask('POST', `/api/triggers/${id}/takeover`, ownerCookie, { expect: 'x' })).status).toBe(503);
+      } finally {
+        Object.assign(engine, { getMandateEnds: saved });
+      }
+    }
+    expect(db().prepare('SELECT * FROM triggers WHERE id = ?').get(id)).toEqual(before);
+  });
+
   it('only the owner takes a plan over or sees its preview', async () => {
     const id = pausedPlan();
     const post = await ask('POST', `/api/triggers/${id}/takeover`, mandateCookie, { expect: 'x' });
@@ -533,4 +552,41 @@ describe('the boot sweep, switched off and failing (real engine)', () => {
       } finally { endRow.mockRestore(); err.mockRestore(); restore(); }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   }, 180_000);
+});
+
+describe('the workflow library with an unreadable definition (real engine)', () => {
+  it('answers 200 and lists the readable workflows when one stored definition is not valid JSON, and says the left-out one on stderr by its id', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-library-unreadable-'));
+    const warn = vi.spyOn(console, 'warn');
+    try {
+      const { api, base, engine } = await up(dir);
+      try {
+        const { loginSession } = await import('../../packages/web-ui/src/lib/server/auth.js');
+        const owner = loginSession(SECRET, null)?.token;
+        if (owner === undefined) throw new Error('fixture: no cookie');
+        const history = engine.getRunHistory()!;
+        const wf = (id: string, name: string): void => history.insertPlannedPipeline({
+          id, name, goal: 'g', steps: [{ id: 's1', task: 't' }], reasoning: '', estimatedCost: 0,
+          createdAt: '2026-01-01T00:00:00.000Z', template: true,
+        }, null);
+        wf('wf-good', 'Readable');
+        wf('wf-bad', 'Unreadable');
+        engine.getEngineDb()!.getDb().prepare("UPDATE workflows SET definition_json = '{\"steps\": [\"FX-blob' WHERE id = 'wf-bad'").run();
+        (api as unknown as Inner).rateCounts.clear();
+        const res = await fetch(`${base}/api/workflows/library`, { headers: { cookie: `lynox_session=${owner}` } });
+        expect(res.status).toBe(200);
+        const ids = ((await res.json()) as { workflows: Array<{ id: string }> }).workflows.map((w) => w.id);
+        expect(ids).toContain('wf-good');
+        expect(ids).not.toContain('wf-bad');
+        const said = warn.mock.calls.map((c) => String(c[0])).filter((line) => line.includes('wf-bad'));
+        expect(said).toEqual(['[lynox:http] workflow wf-bad not readable, left out of the library']);
+        expect(warn.mock.calls.flat().join(' ')).not.toContain('FX-blob');
+      } finally {
+        await api.shutdown();
+      }
+    } finally {
+      warn.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

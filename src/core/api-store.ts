@@ -27,8 +27,10 @@ import { OAUTH_PRESETS, presetClientKeys, presetScopeRequest } from './oauth-pre
 import { isShopifyAdminUrl } from './shopify-host.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { MANDATE_TAG_PREFIX, isMandateTag } from './request-principal.js';
+import { normalizeHostName, normalizeHostTarget } from './send-target.js';
 import { credentialBearing, credentialHosts, slotConflicts, slotNames, type SlotConflict } from './profile-secret-view.js';
 import { processErrorText, reducedErrorText } from './error-egress.js';
+import { engineLessSentence, type EngineLessReader } from './engine-less-refusal.js';
 
 // ── Errors ──
 
@@ -52,6 +54,8 @@ export class ApiProfileUnlinkError extends Error {
 // `loadFromDirectory`) — that's what makes the `unregister` path safe to
 // hand the id into `join(apisDir, …)`.
 const PROFILE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+/** The shape of an opaque profile id (`newApiTrailId`): reserved for new profile ids, see `_admit`. */
+export const OPAQUE_PROFILE_ID_SHAPE = /^apf_[0-9a-f]{16}$/;
 
 /** The auth types a briefing line may name; anything else a stored profile holds is left out. */
 const BRIEFING_AUTH_TYPES: ReadonlySet<string> = new Set(['none', 'basic', 'bearer', 'header', 'query', 'oauth2']);
@@ -255,6 +259,14 @@ export interface ApiProfile {
    * from the input; the owner's save removes it, and says so.
    */
   created_by?: string | undefined;
+  /**
+   * The host of `base_url` when the owner saved this profile in a turn that had taken in no
+   * foreign content (`api_setup`). Written by the engine only, like `created_by`: a value in the
+   * input is dropped, and an `api_setup` create or update in any other turn removes it. Saves that
+   * keep the stored profile's `base_url` (refine, a token save, the OAuth callback) keep it. Read by `readKnownHosts`: the owner
+   * chose this host, so a read from it after foreign content is not asked about.
+   */
+  owner_clean_host?: string | undefined;
   auth?: ApiAuth | undefined;
   rate_limit?: ApiRateLimit | undefined;
   description: string;
@@ -427,6 +439,24 @@ export interface OAuthGrantRecord {
    */
   granted_scope?: string[] | undefined;
   /**
+   * The scopes the authorize link asked for, as the person confirmed them on the consent page:
+   * written only by the connect callback, from the signed state of the confirmed start, never from
+   * the profile. A save over the profile changes `auth.oauth.scope` for the NEXT link and leaves
+   * this as it is, so a scope added without a new consent never reads as asked. A renewal keeps
+   * it. Absent on every grant from before it was recorded, which reads as nothing asked.
+   */
+  asked_scope?: string[] | undefined;
+  /**
+   * The version of the customer text the consent page showed and the person confirmed
+   * (`consentNoticeVersion`), and when: written only by the connect callback, from the signed state
+   * of the confirmed start, never from the profile, a tool or a client. A start whose page showed
+   * no text records none. Absent on every grant from before it was recorded, which reads as
+   * confirmed under no text: a Shopify bulk run then writes only the fields an earlier text named
+   * (`shopifyConsentBlock`).
+   */
+  consent_version?: string | undefined;
+  consented_at?: string | undefined;
+  /**
    * The binding of this grant's access token to the profile and the store the provider signed
    * for (PRD-SHOPIFY-CONTAINMENT-ERASURE Appendix B, B4): `EngineDb.storeBindingDigest` over the
    * profile id, the store origin and the token. Written by the callback in the same save as the
@@ -435,6 +465,15 @@ export interface OAuthGrantRecord {
    * pointed at another store does not.
    */
   store_binding?: string | undefined;
+  /**
+   * When the refresh token of an expiring store connection runs out, epoch milliseconds, from the
+   * `refresh_token_expires_in` of the exchange or refresh that stored it. Absent: unknown, or a
+   * token that does not expire. Written by the engine alone (`store-token-refresh.ts`, the connect
+   * callback).
+   */
+  refresh_expires_at?: number | undefined;
+  /** The {@link refresh_expires_at} the owner was last told about (`claimStoreReconnectHints`). */
+  reconnect_hint_for?: number | undefined;
   /**
    * The connection's current grant (PRD connection-attribution A1/A2): an opaque id for one
    * epoch of the connection, recorded in engine.db `connection_grants`. Not OAuth-specific —
@@ -894,6 +933,11 @@ function notRegisteredAtBoot(c: SlotConflict, x: string, y: string): string {
   return `${c.why} So profile "${loser}" is not registered and cannot be used. ${kept} To use it again, store its credential under a name of its own, point the profile at that name, then save the corrected profile with api_setup update.`;
 }
 
+/** A profile's `base_url` host in the form a read's target carries, or `null`. */
+export function profileReadHost(profile: Pick<ApiProfile, 'base_url'>): string | null {
+  return typeof profile.base_url === 'string' ? normalizeHostTarget(profile.base_url)?.value ?? null : null;
+}
+
 /** The hostname a profile maps to, or `null` for a `base_url` that does not parse. */
 function hostOf(profile: ApiProfile): string | null {
   try {
@@ -1257,24 +1301,17 @@ const ENGINE_LESS_HEADS = {
   connect: "This engine is running without engine.db, which it could not open when it was started, so lynox does not connect API accounts now: the connection would be lost once the engine opens engine.db again. Nothing was sent to the provider, and nothing is connected later on its own; once someone has restarted the engine, the account has to be connected again.",
   renew: "This engine is running without engine.db, which it could not open when it was started, so lynox does not renew an API connection's access now: the renewed access would be lost once the engine opens engine.db again. Nothing was sent to the provider.",
 } as const;
-/** True for every reader: it lasts until a restart, and the log says why. */
-const ENGINE_LESS_LASTS = "This does not end on its own: it lasts until someone restarts the engine and the engine can open all its files again; the log the engine writes at start says why it could not.";
-/**
- * For the model only: without it, models measured on these refusals offered to do it after the
- * restart, which nothing in lynox would carry out. An HTTP answer is read by a person or a
- * program, not by the model, so it gets no such advice; the JSON error body is also capped at 600
- * characters, which the sentences with it would exceed.
- */
-const ENGINE_LESS_TO_MODEL = "Do not retry and do not offer to do it later on your own: nothing will remind you after the restart. Tell the user it did not happen; after the restart they can ask again. Do not ask whether to try again later either; if they want that, they ask after the restart.";
 
 export type EngineLessKind = keyof typeof ENGINE_LESS_HEADS;
 /** `model`: a tool result the model reads. `client`: an HTTP answer (a JSON error or an OAuth page). */
-export type EngineLessReader = 'model' | 'client';
+export type { EngineLessReader };
 
-/** The refusal of `kind` for `reader`; both readers' sentences are built from the same parts. */
+/**
+ * The refusal of `kind` for `reader`; both readers' sentences are built from the same parts, which
+ * memory and tasks share (`engine-less-refusal.ts`).
+ */
 export function engineLessText(kind: EngineLessKind, reader: EngineLessReader): string {
-  const told = `${ENGINE_LESS_HEADS[kind]} ${ENGINE_LESS_LASTS}`;
-  return reader === 'model' ? `${told} ${ENGINE_LESS_TO_MODEL}` : told;
+  return engineLessSentence(ENGINE_LESS_HEADS[kind], reader);
 }
 
 /** A save the store refused, with the reason it gives the caller. */
@@ -1451,6 +1488,37 @@ function missingRequiredField(profile: unknown): boolean {
     (typeof p['name'] !== 'string' && typeof p['name'] !== 'number') || !p['description'];
 }
 
+/**
+ * The catalog's step for a provider the user names, and what a locked turn (a mandate's) reads in
+ * its place (U-185): there `ask_secret` stores nothing, and only the owner of this instance
+ * stores keys. The owner's briefing carries the first; `lockedTurnBriefing` swaps it.
+ */
+const CATALOG_OWNER_STORE_STEP = 'walk them through creating the credential in their own account, have them store it with `ask_secret`, then call';
+const CATALOG_LOCKED_STORE_STEP = 'tell them which credential the API needs and that the owner of this instance has to store it, then call';
+
+/** What `Session` appends where it cuts a briefing that is too long (`session.ts`). */
+export const BRIEFING_CUT_MARKER = '\n[...truncated]';
+/** A cut-off start of the owner's step shorter than this is too generic to tell apart from other text. */
+const MIN_CUT_STEP = 20;
+
+/**
+ * The briefing a locked turn gets: the catalog's store step swapped, the rest as it is. `Session`
+ * cuts a long briefing before this runs, so the step can also stand cut off at the very end; then
+ * the cut-off start is swapped for the whole locked step, because what is left of the owner's
+ * step can still name `ask_secret`.
+ */
+export function lockedTurnBriefing(briefing: string): string {
+  const swapped = briefing.split(CATALOG_OWNER_STORE_STEP).join(CATALOG_LOCKED_STORE_STEP);
+  const cut = swapped.endsWith(BRIEFING_CUT_MARKER);
+  const head = cut ? swapped.slice(0, -BRIEFING_CUT_MARKER.length) : swapped;
+  for (let n = CATALOG_OWNER_STORE_STEP.length - 1; n >= MIN_CUT_STEP; n--) {
+    if (head.endsWith(CATALOG_OWNER_STORE_STEP.slice(0, n))) {
+      return head.slice(0, -n) + CATALOG_LOCKED_STORE_STEP + (cut ? BRIEFING_CUT_MARKER : '');
+    }
+  }
+  return swapped;
+}
+
 export class ApiStore {
   private readonly profiles = new Map<string, ApiProfile>();
   /**
@@ -1554,6 +1622,29 @@ export class ApiStore {
    */
   trailIdOf(id: string): string | undefined {
     return this.connStore?.trailIdOf(id);
+  }
+
+  /** The `id` of the profile with the opaque id `trailId`; undefined without engine.db or once it is deleted. */
+  idOfTrailId(trailId: string): string | undefined {
+    return this.connStore?.slugOfTrailId(trailId);
+  }
+
+  /**
+   * What the owner last saw of a profile a mandate wrote, by `view`: the digest of its
+   * release-bound settings (`bindingOf`) and when. The release question compares it with the
+   * settings it asks about, so a save between the view and the question is named there. Kept in
+   * memory only: after a restart the question says nothing about a view, and names the way to one.
+   */
+  private readonly ownerViews = new Map<string, { binding: string; at: Date }>();
+
+  /** Record that the owner viewed profile `id` with release-bound settings `binding`. */
+  noteOwnerView(id: string, binding: string, at: Date): void {
+    this.ownerViews.set(id, { binding, at });
+  }
+
+  /** The owner's last view of profile `id`, or undefined when the owner has not viewed it. */
+  ownerViewOf(id: string): { binding: string; at: Date } | undefined {
+    return this.ownerViews.get(id);
   }
 
   /** A fresh opaque id for a save to pass as `SaveOptions.trailId`; undefined without engine.db. */
@@ -2457,6 +2548,12 @@ export class ApiStore {
       // hand the id directly to `join(apisDir, …)` without a second check.
       return `invalid id (must match ${PROFILE_ID_PATTERN.source})`;
     }
+    // The shape of an opaque profile id is reserved for new ids: the owner's release question names
+    // a profile by it, and an id spelled the same would be another profile under that name. Only a
+    // save is refused; a stored profile that already has such an id still loads.
+    if (mode === 'save' && OPAQUE_PROFILE_ID_SHAPE.test(profile.id) && !this.profiles.has(profile.id)) {
+      return 'invalid id: "apf_" followed by 16 hex digits is the shape of an opaque profile id and is reserved';
+    }
     // A stored entry that could not be read holds every name it carries: weighed before anything
     // else that measures names, in both modes, since none of those checks can see it.
     const unreadableRefusal = this._unreadableRefusal(profile, mode);
@@ -3165,6 +3262,38 @@ export class ApiStore {
    * server-side only after an out-of-band human confirmation at profile save
    * (see api_setup + endpoint-allowlist.CustomEndpointAck), never from agent input.
    */
+  /**
+   * The hosts a read may reach after foreign content without a question, because the owner chose
+   * them for a connected API: the exact host of a profile's `base_url` (no subdomain, no suffix),
+   * when the owner accepted that host at a save (`custom_endpoint_ack.hosts`) or saved the profile
+   * in their own chat, in a tool batch that began before any foreign content and in a conversation
+   * without a server tool the provider ran itself, such as its web search (`owner_clean_host`,
+   * bound to the host it was saved with). A profile a mandate wrote never counts, nor does a
+   * listed sub-processor host on its own. For
+   * reads only: a send's targets never consult this.
+   */
+  readKnownHosts(): Set<string> {
+    const hosts = new Set<string>();
+    for (const profile of this.profiles.values()) {
+      const host = profileReadHost(profile);
+      if (host === null || isMandateAuthored(profile)) continue;
+      const ack = profile.custom_endpoint_ack;
+      const accepted = ack?.accepted === true && Array.isArray(ack.hosts) && ack.hosts.some((h) => normalizeHostName(String(h)) === host);
+      if (accepted || profile.owner_clean_host === host) hosts.add(host);
+    }
+    return hosts;
+  }
+
+  /** The `base_url` host of every profile, counted for reads or not: what a question may point at. */
+  profileHosts(): Set<string> {
+    const hosts = new Set<string>();
+    for (const profile of this.profiles.values()) {
+      const host = profileReadHost(profile);
+      if (host !== null) hosts.add(host);
+    }
+    return hosts;
+  }
+
   getAcceptedEgressHosts(): Set<string> {
     const hosts = new Set<string>();
     for (const profile of this.profiles.values()) {
@@ -3390,7 +3519,7 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
     // would be the very thing the section forbids.
     if (cat.connect_when_user_asks.length > 0) {
       lines.push('');
-      lines.push('Connect ONLY after the user names one of these providers — this is the "without the user explicitly asking" carve-out of the rule above, not a second list to offer from. Never name one yourself: if the user says only what kind of tool it is, ask which product they use and wait. Once they name it: walk them through creating the credential in their own account, have them store it with `ask_secret`, then call `api_setup` action=bootstrap with the docs_url (an entry that names a built-in preset says to create the profile directly instead). `bootstrap` derives base_url from the DOCS host, which is wrong for every entry here — take the API base from the entry, or ask the user for their own site when it says so:');
+      lines.push('Connect ONLY after the user names one of these providers — this is the "without the user explicitly asking" carve-out of the rule above, not a second list to offer from. Never name one yourself: if the user says only what kind of tool it is, ask which product they use and wait. Once they name it: ' + CATALOG_OWNER_STORE_STEP + ' `api_setup` action=bootstrap with the docs_url (an entry that names a built-in preset says to create the profile directly instead). `bootstrap` derives base_url from the DOCS host, which is wrong for every entry here — take the API base from the entry, or ask the user for their own site when it says so:');
       for (const api of cat.connect_when_user_asks) {
         lines.push(`- ${api.name} (${api.category}, auth=${api.auth_type}) — ${api.value_prop} Docs: ${api.docs_url}`);
       }

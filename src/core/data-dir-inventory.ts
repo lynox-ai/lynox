@@ -170,6 +170,11 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
     why: 'who holds the one slot an export and an erasure share (`export-slot.ts`): across processes, since the export command runs beside the HTTP API. Bound to this container\'s running jobs, so it never travels',
   },
   {
+    name: 'owner-sessions-generation', kind: 'file', secret: true, backup: false, migrate: false, export: named('a technical note or cache the software keeps for itself; it holds none of your content'),
+    erase: keep('the live generation of the owner\'s sessions; it names a number, no content, and erasing it would let ended sessions back in'),
+    why: 'a copy of the live generation of the owner\'s sessions kept beside engine.db (`owner-sessions.ts`), so a restored, imported or missing engine.db cannot bring an older generation back and with it the sessions ended since. Carried by a backup it would go back with the backup, which is the one thing it is for not doing. `secret`, though it holds no secret: so the shell tool is refused it and a file tool asks first, as for every file the sessions rest on',
+  },
+  {
     name: 'secrets.json', kind: 'file', secret: true, backup: false, migrate: false, export: NEVER, erase: REMOVE,
     why: 'plaintext import/export staging for the vault, not a store — it is written on demand and is not expected to persist',
   },
@@ -324,3 +329,12 @@ export const ERASE_BY_STEP = eraseBy('step');
 export const ERASE_BY_REMOVE = eraseBy('remove');
 /** Erasure: entries the route leaves alone, each with a reason. */
 export const ERASE_KEPT = eraseBy('keep');
+
+/**
+ * The file in a backup directory's root where the backup list keeps its answers across restarts
+ * (`backup.ts`). Not a backup: it holds each backup's folder name, a digest of its manifest and the
+ * provenance shown. The erasure removes it with the backups (`data-dir-erase.ts`).
+ */
+export const BACKUP_LIST_PROOF_FILE = '.list-provenance.json';
+/** The temporary file a write of `BACKUP_LIST_PROOF_FILE` leaves when the process dies before its rename: `<file>.<pid>.<12 hex>.tmp`. */
+export const BACKUP_LIST_PROOF_TMP = /^\.list-provenance\.json\.\d+\.[0-9a-f]{12}\.tmp$/;

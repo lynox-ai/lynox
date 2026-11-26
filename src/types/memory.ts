@@ -61,6 +61,14 @@ export interface IMemory {
   updateScoped(ns: MemoryNamespace, oldText: string, newText: string, scope: MemoryScopeRef): Promise<boolean>;
   // Phase 3: auto-classification support
   setActiveScopes?(scopes: MemoryScopeRef[]): void;
+  /**
+   * The refusal a person's or the model's change to memory gets on an engine that started without
+   * engine.db (`Memory.refuseChangesWithoutStore`), or `null` when it may go ahead. Asked by the
+   * entrances (the memory tools, the memory routes) before anything is written, an erasure by
+   * pattern through them included. Deleting all of the instance's data and purging a thread do not
+   * ask, and neither does the engine's own upkeep (expiry, garbage collection).
+   */
+  engineLessRefusal?(reader: 'model' | 'client'): string | null;
 }
 
 // === Knowledge Graph ===

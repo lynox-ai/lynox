@@ -23,12 +23,17 @@ interface FakeClient {
   append: ReturnType<typeof vi.fn>;
   /** imapflow's selected mailbox, `false` when none is. Left unset unless a test needs it. */
   mailbox?: { path: string } | false;
+  /** imapflow's session state. SELECTED unless a test plays a server BYE (LOGOUT). */
+  state: string;
+  states: { SELECTED: string; LOGOUT: string };
 }
 
 function makeFakeClient(): FakeClient {
   const release = vi.fn();
   return {
     usable: true,
+    state: 'SELECTED',
+    states: { SELECTED: 'SELECTED', LOGOUT: 'LOGOUT' },
     connect: vi.fn().mockResolvedValue(undefined),
     logout: vi.fn().mockResolvedValue(undefined),
     close: vi.fn(),
@@ -298,6 +303,37 @@ describe('ImapSmtpProvider — LYNOX_MAIL_INSECURE_TLS opt-in', () => {
   });
 });
 
+describe('ImapSmtpProvider — list: reply headers', () => {
+  const env = (uid: number) => ({ date: new Date('2026-11-24T08:00:00Z'), subject: 'Re: Offerte', messageId: `<r${String(uid)}@example.com>`, inReplyTo: '<first@example.com>', from: [{ address: 'a@example.com' }], to: [{ address: 'me@example.com' }], cc: [] });
+
+  it('asks for References and reads its ids, keyed by the Message-ID when the server gives no thread id', async () => {
+    probe.search.mockResolvedValue([1]);
+    probe.fetch.mockImplementation(() => asyncIterFrom([{
+      ...makeFetchMessage({ uid: 1, envelope: env(1) }),
+      headers: Buffer.from('References: <root@example.com>\r\n <first@example.com>\r\n\r\n'),
+    }]));
+    const [e] = await new ImapSmtpProvider(ACCOUNT, credResolver).list({ folder: 'INBOX', limit: 10 });
+    const query = probe.fetch.mock.calls[0]?.[1] as { headers?: string[] };
+    expect(query.headers, 'without the header no reply on such a server finds its thread').toContain('references');
+    expect(e).toMatchObject({ threadKey: '<r1@example.com>', inReplyTo: '<first@example.com>', references: ['<root@example.com>', '<first@example.com>'] });
+  });
+
+  it('keeps the server thread id as the key when the server gives one', async () => {
+    probe.search.mockResolvedValue([2]);
+    probe.fetch.mockImplementation(() => asyncIterFrom([{ ...makeFetchMessage({ uid: 2, envelope: env(2) }), threadId: 'T-42' }]));
+    const [e] = await new ImapSmtpProvider(ACCOUNT, credResolver).list({ folder: 'INBOX', limit: 10 });
+    expect(e).toMatchObject({ threadKey: 'T-42', references: [] });
+  });
+
+  it('asks for References when it searches too', async () => {
+    probe.search.mockResolvedValue([1]);
+    probe.fetch.mockImplementation(() => asyncIterFrom([makeFetchMessage({ uid: 1 })]));
+    await new ImapSmtpProvider(ACCOUNT, credResolver).search({ text: 'x' });
+    const query = probe.fetch.mock.calls[0]?.[1] as { headers?: string[] };
+    expect(query.headers).toContain('references');
+  });
+});
+
 describe('ImapSmtpProvider — list: automatic mail', () => {
   it('marks an out-of-office reply as isAutoReplied, other automatic mail only as isAutoReply', async () => {
     probe.search.mockResolvedValue([1, 2, 3]);
@@ -320,6 +356,28 @@ describe('ImapSmtpProvider — list: automatic mail', () => {
     await new ImapSmtpProvider(ACCOUNT, credResolver).search({ text: 'x' });
     const query = probe.fetch.mock.calls[0]?.[1] as { headers?: string[] };
     expect(query.headers).toContain('auto-submitted');
+  });
+
+  it('marks the autoresponder headers and a folded bounce, and leaves a person with X-Auto-Response-Suppress answerable', async () => {
+    const raw: Record<number, string> = {
+      1: 'X-Autoreply: yes\r\n',
+      2: 'X-Autorespond: office@example.com\r\n',
+      3: 'Precedence: auto_reply\r\n',
+      // Folded, as mail servers write it: report-type on the continuation line.
+      4: 'Content-Type: multipart/report;\r\n\treport-type=delivery-status;\r\n\tboundary="b:1"\r\n',
+      5: 'X-Auto-Response-Suppress: All\r\n',
+    };
+    probe.search.mockResolvedValue([1, 2, 3, 4, 5]);
+    probe.fetch.mockImplementation(() => asyncIterFrom(Object.entries(raw).map(([uid, h]) => ({
+      ...makeFetchMessage({ uid: Number(uid), envelope: { date: new Date(`2026-04-1${uid}T08:00:00Z`), subject: `m${uid}`, messageId: `<m${uid}@example.com>`, from: [{ address: 'a@example.com' }], to: [{ address: 'me@example.com' }], cc: [] } }),
+      headers: Buffer.from(`${h}\r\n`),
+    }))));
+    const byUid = new Map((await new ImapSmtpProvider(ACCOUNT, credResolver).list({ folder: 'INBOX', limit: 10 })).map((e) => [e.uid, e]));
+    for (const uid of [1, 2, 3]) expect(byUid.get(uid), `uid ${String(uid)}`).toMatchObject({ isAutoReply: true, isAutoReplied: true });
+    expect(byUid.get(4), 'a bounce is automatic, not a reply').toMatchObject({ isAutoReply: true, isAutoReplied: false });
+    expect(byUid.get(5), 'a person with X-Auto-Response-Suppress stays answerable').toMatchObject({ isAutoReply: false, isAutoReplied: false });
+    const query = probe.fetch.mock.calls[0]?.[1] as { headers?: string[] };
+    for (const h of ['x-autoreply', 'x-autorespond', 'precedence', 'content-type']) expect(query.headers, h).toContain(h);
   });
 });
 
@@ -439,6 +497,17 @@ describe('ImapSmtpProvider — fetch', () => {
     expect(msg.attachments[0]?.partId).toBe('2');
   });
 
+  it('marks a fetched autoresponder reply as automatic in the envelope that the reply refusal reads', async () => {
+    probe.fetchOne.mockResolvedValue({ ...makeFetchMessage({ uid: 43 }), headers: Buffer.from('Precedence: auto_reply\r\n\r\n') });
+    probe.fetch.mockImplementation(() => asyncIterFrom([
+      { ...makeFetchMessage({ uid: 43 }), bodyParts: new Map([['1', Buffer.from('I am away.')]]) } as FetchMessageObject,
+    ]));
+    const msg = await new ImapSmtpProvider(ACCOUNT, credResolver).fetch({ uid: 43 });
+    expect(msg.envelope).toMatchObject({ isAutoReply: true, isAutoReplied: true });
+    const query = probe.fetchOne.mock.calls[0]?.[1] as { headers?: string[] };
+    expect(query.headers).toContain('precedence');
+  });
+
   it('falls back to text/html stripped to plain when no text/plain part exists', async () => {
     probe.fetchOne.mockResolvedValue(makeFetchMessage({
       uid: 7,
@@ -478,9 +547,22 @@ describe('ImapSmtpProvider — fetch', () => {
       probe.mailbox = mailbox;
       const err = await provider.fetch({ uid: 999 }).then(() => null, (e: unknown) => e);
       expect(err, `fetchOne → ${String(result)}`).toBeInstanceOf(MailError);
-      expect((err as MailError).code).toBe('unknown');
+      expect((err as MailError).code).toBe('connection_dropped');
+      expect((err as MailError).message, 'says what to do next').toBe('IMAP fetch INBOX: the connection dropped before message uid=999 was read. Nothing was read. Try again in a moment.');
       expect((err as MailError).message).toContain('the connection dropped before message uid=999 was read');
     }
+  });
+
+  // A server BYE moves imapflow to LOGOUT but leaves `mailbox` set until the socket closes; its
+  // FETCH then runs nothing and `fetchOne` answers `false`, the value of an absent message.
+  it('a server BYE before the message is read is a dropped connection, not an absent message', async () => {
+    probe.fetchOne.mockResolvedValue(false);
+    probe.mailbox = { path: 'INBOX' };
+    probe.state = probe.states.LOGOUT;
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const err = await provider.fetch({ uid: 999 }).then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(MailError);
+    expect((err as MailError).code).toBe('connection_dropped');
   });
 
   it('control: fetchOne false with the mailbox still selected is an absent message', async () => {
@@ -499,7 +581,22 @@ describe('ImapSmtpProvider — fetch', () => {
     const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
     const err = await provider.fetch({ uid: 42 }).then(() => null, (e: unknown) => e);
     expect(err).toBeInstanceOf(MailError);
-    expect((err as MailError).code).toBe('unknown');
+    expect((err as MailError).code).toBe('connection_dropped');
+    expect((err as MailError).message).toContain('the connection dropped before part 1 was read');
+  });
+
+  it('a server BYE before the body part is read is a failure, not an empty mail', async () => {
+    probe.fetch.mockImplementation(() => asyncIterFrom([]));
+    probe.mailbox = { path: 'INBOX' };
+    // fetchOne ran while the session was selected; the BYE comes before the part fetch.
+    probe.fetchOne.mockImplementation(async () => {
+      probe.state = probe.states.LOGOUT;
+      return makeFetchMessage({ uid: 42 });
+    });
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const err = await provider.fetch({ uid: 42 }).then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(MailError);
+    expect((err as MailError).code).toBe('connection_dropped');
     expect((err as MailError).message).toContain('the connection dropped before part 1 was read');
   });
 
@@ -612,16 +709,16 @@ describe('ImapSmtpProvider — search', () => {
     // mailbox was empty.
     const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
     const cases = [
-      { result: undefined, says: 'the connection dropped before the search ran' },
-      { result: false, says: 'the search failed' },
+      { result: undefined, says: 'the connection dropped before the search ran', code: 'connection_dropped' },
+      { result: false, says: 'the search failed', code: 'unknown' },
     ] as const;
-    for (const { result, says } of cases) {
+    for (const { result, says, code } of cases) {
       probe.search.mockResolvedValue(result);
       probe.fetch.mockClear();
       for (const [name, run] of [['list', () => provider.list({ limit: 10 })], ['search', () => provider.search({ from: 'alice' })]] as const) {
         const err = await run().then(() => null, (e: unknown) => e);
         expect(err, `${name} with search → ${String(result)}`).toBeInstanceOf(MailError);
-        expect((err as MailError).code).toBe('unknown');
+        expect((err as MailError).code).toBe(code);
         expect((err as MailError).message).toContain(says);
       }
       expect(probe.fetch, 'nothing is fetched').not.toHaveBeenCalled();
@@ -636,8 +733,40 @@ describe('ImapSmtpProvider — search', () => {
     for (const [name, run] of [['list', () => provider.list({ limit: 10 })], ['search', () => provider.search({ from: 'alice' })]] as const) {
       const err = await run().then(() => null, (e: unknown) => e);
       expect(err, name).toBeInstanceOf(MailError);
-      expect((err as MailError).code).toBe('unknown');
+      expect((err as MailError).code).toBe('connection_dropped');
       expect((err as MailError).message).toContain('the connection dropped before the messages were fetched');
+    }
+  });
+
+  it('reports a server BYE before the search as a dropped connection, in list and search', async () => {
+    // After a BYE imapflow keeps `mailbox` set, and its SEARCH answers `false` without running.
+    probe.search.mockImplementation(async () => {
+      probe.state = probe.states.LOGOUT;
+      return false;
+    });
+    probe.mailbox = { path: 'INBOX' };
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    for (const [name, run] of [['list', () => provider.list({ limit: 10 })], ['search', () => provider.search({ from: 'alice' })]] as const) {
+      probe.state = probe.states.SELECTED;
+      const err = await run().then(() => null, (e: unknown) => e);
+      expect(err, name).toBeInstanceOf(MailError);
+      expect((err as MailError).code).toBe('connection_dropped');
+      expect((err as MailError).message).toContain('the connection dropped before or while the search ran');
+    }
+  });
+
+  it('reports a server BYE between the search and the fetch as a failure', async () => {
+    probe.search.mockImplementation(async () => {
+      probe.state = probe.states.LOGOUT;
+      return [1, 2];
+    });
+    probe.mailbox = { path: 'INBOX' };
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    for (const [name, run] of [['list', () => provider.list({ limit: 10 })], ['search', () => provider.search({ from: 'alice' })]] as const) {
+      probe.state = probe.states.SELECTED;
+      const err = await run().then(() => null, (e: unknown) => e);
+      expect(err, name).toBeInstanceOf(MailError);
+      expect((err as MailError).code).toBe('connection_dropped');
     }
   });
 
@@ -1026,12 +1155,12 @@ describe('ImapSmtpProvider — watch', () => {
 
       probe.search.mockResolvedValue(undefined);
       await vi.advanceTimersByTimeAsync(60_000);
-      expect(watcher.lastError(ACCOUNT.id)?.code, 'a dropped mailbox is not an ok poll').toBe('unknown');
+      expect(watcher.lastError(ACCOUNT.id)?.code, 'a dropped mailbox is not an ok poll').toBe('connection_dropped');
 
       probe.search.mockResolvedValue([1]);
       probe.mailbox = false;
       await vi.advanceTimersByTimeAsync(60_000);
-      expect(watcher.lastError(ACCOUNT.id)?.code, 'a fetch after a dropped connection is not an ok poll').toBe('unknown');
+      expect(watcher.lastError(ACCOUNT.id)?.code, 'a fetch after a dropped connection is not an ok poll').toBe('connection_dropped');
 
       probe.search.mockResolvedValue([]);
       await vi.advanceTimersByTimeAsync(60_000);

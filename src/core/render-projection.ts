@@ -77,6 +77,9 @@ export interface RenderedToolCall {
   input: unknown;
   result?: string;
   status: 'running' | 'done' | 'error';
+  /** The call returned, but the tool recorded it as not done (a soft failure: a refusal, a
+   *  failed check, a non-zero exit). Set only on a `done` call; absent otherwise. */
+  unsuccessful?: true;
 }
 
 export type RenderedContentBlock =
@@ -372,10 +375,14 @@ function mergeAssistantInto(into: RenderedMessage, add: RenderedMessage): void {
  *   into one message (the UI-ready default). Pass `false` for a raw,
  *   per-iteration view — the debug export wants the granular row-by-row truth,
  *   not the merged bubble the chat renders (#4).
+ * @param opts.unsuccessfulToolUseIds — tool calls the ledger records as failed. The stored
+ *   tool_result of a soft failure carries no `is_error` (the model must read it as a plain
+ *   answer), so the ledger is the only place that knows; a `done` call in this set is marked
+ *   `unsuccessful`. A call stored with `is_error` stays `error`.
  */
 export function projectMessages(
   records: ThreadMessageRecord[],
-  opts?: { mergeTurns?: boolean },
+  opts?: { mergeTurns?: boolean; unsuccessfulToolUseIds?: ReadonlySet<string> | undefined },
 ): RenderedMessage[] {
   const mergeTurns = opts?.mergeTurns ?? true;
   const out: RenderedMessage[] = [];
@@ -404,6 +411,7 @@ export function projectMessages(
           const text = toolResultContentToString(block.content);
           target.result = stripSafetyMarkers(text);
           target.status = block.is_error ? 'error' : 'done';
+          if (target.status === 'done' && opts?.unsuccessfulToolUseIds?.has(id) === true) target.unsuccessful = true;
         }
         continue;
       }

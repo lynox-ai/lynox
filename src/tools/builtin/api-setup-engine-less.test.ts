@@ -63,7 +63,7 @@ function agentFor(store: ApiStore): never {
     principal: OWNER_PRINCIPAL,
     sessionCounters: { httpRequests: 0 },
     secretStore: undefined,
-    promptUser: vi.fn(async () => 'Yes'),
+    promptUser: vi.fn(async () => 'allow'),
     toolContext: {
       auditLog: testAuditLog().log,
       apiStore: store,

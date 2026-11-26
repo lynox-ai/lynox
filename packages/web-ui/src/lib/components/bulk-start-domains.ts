@@ -52,8 +52,6 @@ export interface StartDomainLines {
 	domains: string[];
 	/** The lines (0-based, empty lines counted) that name no host. */
 	badLines: number[];
-	/** Those of them with a shared suffix on its own (`myshopify.com`), which say so. */
-	sharedLines: number[];
 	tooMany: boolean;
 }
 
@@ -61,18 +59,16 @@ export interface StartDomainLines {
 export function readStartDomainLines(text: string): StartDomainLines {
 	const domains: string[] = [];
 	const badLines: number[] = [];
-	const sharedLines: number[] = [];
 	text.split('\n').forEach((line, i) => {
 		for (const part of line.split(',')) {
 			if (part.trim().length === 0) continue;
 			const r = readStartDomain(part);
 			if ('refused' in r) {
 				if (!badLines.includes(i)) badLines.push(i);
-				if (r.refused === 'shared' && !sharedLines.includes(i)) sharedLines.push(i);
 			} else if (!domains.includes(r.host)) {
 				domains.push(r.host);
 			}
 		}
 	});
-	return { domains, badLines, sharedLines, tooMany: domains.length > START_DOMAINS_MAX };
+	return { domains, badLines, tooMany: domains.length > START_DOMAINS_MAX };
 }

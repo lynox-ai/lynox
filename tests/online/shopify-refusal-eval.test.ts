@@ -288,7 +288,7 @@ const ONLY = process.env['SHOP_EVAL_CASES']?.split(',').map((x) => x.trim());
 const runs = CASES.filter((c) => !ONLY || ONLY.includes(c.key)).flatMap((c) => Array.from({ length: RUNS }, (_, i) => ({ c, i, label: `${c.key} #${String(i)}` })));
 const PROVIDERS = process.env['SHOP_EVAL_PROVIDERS']?.split(',').map((x) => x.trim());
 const skipProvider = (p: string): boolean => PROVIDERS !== undefined && !PROVIDERS.includes(p);
-const base = { maxIterations: 10, systemPrompt: SYSTEM, promptUser: async () => 'Allow', promptSecret: async () => 'canceled' as const };
+const base = { maxIterations: 10, systemPrompt: SYSTEM, promptUser: async () => 'allow', promptSecret: async () => 'canceled' as const };
 
 const ANTHROPIC_KEY = process.env['ANTHROPIC_API_KEY'];
 describe.skipIf(!ANTHROPIC_KEY || skipProvider('haiku'))('shopify refusal — Anthropic (Haiku)', () => {
