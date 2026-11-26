@@ -74,6 +74,11 @@ describe('the review card after a rollback stopped partway', () => {
 		expect(p?.textContent).toContain(tf('changeset.not_restored_more', { files: '', n: '2' }));
 	});
 
+	it('renders two files of the same name without failing', async () => {
+		const root = await render({ rollbackStopped: ['a.md', 'a.md'] });
+		expect(root.querySelector('[data-testid="changeset-rollback-stopped"]')?.querySelectorAll('span.inline-block').length).toBe(2);
+	});
+
 	it('says nothing of the kind without a stopped rollback', async () => {
 		const root = await render({});
 		expect(root.textContent, 'positive control: the card is there').toContain('notes.md');

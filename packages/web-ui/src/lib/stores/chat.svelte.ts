@@ -3642,7 +3642,7 @@ async function loadChangeset(): Promise<boolean> {
 			pendingChangeset = data.files;
 			pendingChangesetRunId = data.runId ?? null;
 		}
-		if (rollbackStopped && (!data.hasChanges || rollbackStopped.runId !== (data.runId ?? null))) rollbackStopped = null;
+		if (rollbackStopped && (!(data.hasChanges && data.files.length > 0) || rollbackStopped.runId !== (data.runId ?? null))) rollbackStopped = null;
 		return true;
 	} catch { return false; /* best-effort — don't block UX */ }
 	finally { changesetLoading = false; }
@@ -3689,6 +3689,9 @@ export async function submitChangesetReview(
 		addToast(t('changeset.review_unsent'), 'error', 5000);
 		return;
 	}
+	// The card as it was answered: a rollback that stops partway brings back what is left of it.
+	const shown = pendingChangeset;
+	const shownRunId = pendingChangesetRunId;
 	if (!stale()) {
 		pendingChangeset = null;
 		pendingChangesetRunId = null;
@@ -3727,6 +3730,13 @@ export async function submitChangesetReview(
 		if (stale()) return;
 		// Nothing named: the throw came after the last file was back, and there is nothing to retry.
 		rollbackStopped = left.length > 0 ? { runId: typeof body['runId'] === 'string' ? body['runId'] : null, files: left } : null;
+		// Until the server's card arrives, the card shows what is left of the one answered, so the
+		// sentence is on screen even when that fetch fails.
+		const rest = (shown ?? []).filter((f) => left.includes(f.file));
+		if (rest.length > 0) {
+			pendingChangeset = rest;
+			pendingChangesetRunId = shownRunId;
+		}
 		// Nothing left (the throw came after the last file was back): the review is over.
 		if (await fetchChangeset() && !stale() && pendingChangeset === null) drainQueueSoon(100);
 		return;

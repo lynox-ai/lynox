@@ -129,7 +129,7 @@
 			<p class="mt-1 text-xs text-text-muted" data-testid="changeset-message-waiting">{t('changeset.message_waiting')}</p>
 		{/if}
 		{#if rollbackStopped && rollbackStopped.length > 0}
-			<p class="mt-1 text-xs text-warning" role="alert" data-testid="changeset-rollback-stopped">{stoppedParts[0] ?? ''}{#each rollbackStopped.slice(0, STOPPED_SHOWN) as name, i (name)}{i > 0 ? ', ' : ''}<span class="inline-block max-w-full break-all font-mono">{name}</span>{/each}{stoppedMore}{stoppedParts[1] ?? ''}</p>
+			<p class="mt-1 text-xs text-warning" role="alert" data-testid="changeset-rollback-stopped">{stoppedParts[0] ?? ''}{#each rollbackStopped.slice(0, STOPPED_SHOWN) as name, i (i)}{i > 0 ? ', ' : ''}<span class="inline-block max-w-full break-all font-mono">{name}</span>{/each}{stoppedMore}{stoppedParts[1] ?? ''}</p>
 		{/if}
 	</div>
 

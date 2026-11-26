@@ -263,6 +263,35 @@ describe('a rollback the server could not do', () => {
 		expect(runTasks).toEqual(['next step', 'next step']);
 	});
 
+	it('when the card cannot be fetched after a stopped rollback, it still shows what is left, and only the files the server named', async () => {
+		runAnswers = ['held'];
+		card = [...notes, { file: 'prices.csv', status: 'modified', diff: '-1\n+2' }];
+		await store.sendMessage('next step');
+		await settle();
+		expect(store.getPendingChangeset()?.map((f) => f.file), 'positive control: both files shown').toEqual(['notes.md', 'prices.csv']);
+		reviewAnswer = { status: 500, body: { error: 'The rollback stopped partway', code: 'rollback_aborted', notRestored: ['prices.csv', 'never-shown.md'] } };
+		changesetStatus = 500;
+		await store.submitChangesetReview('rollback');
+		await wait(200);
+		await settle();
+		expect(store.getPendingChangeset()?.map((f) => f.file), 'the restored file is not claimed, an unshown one is not made up').toEqual(['prices.csv']);
+		expect(store.getRollbackStopped()).toEqual(['prices.csv', 'never-shown.md']);
+		expect(runTasks, 'the held message keeps waiting').toEqual(['next step']);
+	});
+
+	it('the sentence is dropped when the server says the review shows no files', async () => {
+		await openReview();
+		reviewAnswer = { status: 500, body: { error: 'The rollback stopped partway', code: 'rollback_aborted', notRestored: ['notes.md'] } };
+		await store.submitChangesetReview('rollback');
+		await settle();
+		expect(store.getRollbackStopped(), 'positive control').toEqual(['notes.md']);
+		card = [];
+		reviewAnswer = { status: 409, body: { error: 'A run is in progress' } };
+		await store.submitChangesetReview('rollback');
+		await settle();
+		expect(store.getRollbackStopped()).toBeNull();
+	});
+
 	it('the sentence of a stopped rollback is not shown on the review of a later run', async () => {
 		await openReview();
 		reviewAnswer = { status: 500, body: { error: 'The rollback stopped partway', code: 'rollback_aborted', notRestored: ['notes.md'] } };
