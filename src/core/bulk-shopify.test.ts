@@ -3124,7 +3124,7 @@ describe('shopifyMediaAccess', () => {
     expect(shopifyMediaAccess(profile({ asked_scope: asked, granted_scope: asked, state: 'no-refresh' }), HOST)).toBe('unbound');
   });
 
-  it('is expired where the store refused to renew the token, before the binding that refresh took away', () => {
+  it('is expired where a refresh of the token failed, before the binding that refresh took away', () => {
     // What the refresh leaves: the binding gone, the grant `refresh-dead`.
     expect(shopifyMediaAccess(profile({ asked_scope: asked, granted_scope: asked, state: 'refresh-dead' }), HOST)).toBe('expired');
     expect(shopifyMediaAccess(profile({ ...live, state: 'refresh-dead' }), HOST)).toBe('expired');

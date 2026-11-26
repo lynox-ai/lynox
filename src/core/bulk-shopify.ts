@@ -44,10 +44,11 @@ import { MANDATE_TAG_PREFIX, isMandateTag } from './request-principal.js';
  *   absent): it came into the slot some other way than the connect callback, which alone writes
  *   the binding. The write refuses every request on it (`http.ts`, step 7) until the store is
  *   connected again.
- * - `expired`: the store refused to renew the connection's token (`oauth_grant.state`
- *   `refresh-dead`, which the refresh writes and which also drops the binding). The answer does
- *   not tell an expired token from a revoked or spent one, so no cause is named; only a new
- *   connect helps. Checked before the binding, which that refresh took away.
+ * - `expired`: a refresh of the connection's token failed (`oauth_grant.state` `refresh-dead`,
+ *   which the refresh writes and which also drops the binding). It is written for several causes
+ *   (the store refused the token, its answer was not usable, the new token could not be stored)
+ *   and the grant does not record which, so no cause is named; only a new connect helps, since
+ *   no refresh runs without the binding. Checked before the binding, which that refresh took away.
  * The dead states come before the scope: on a connection that cannot write at all, adding a
  * scope changes nothing.
  */
