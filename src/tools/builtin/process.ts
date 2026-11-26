@@ -35,6 +35,23 @@ export function sessionAnalysisFailed(err: unknown): string {
     '(a workflow saved that way takes no parameters).';
 }
 
+/**
+ * Reads save_workflow's own answer for a call that saved nothing, so the run history records it as
+ * a failed call and not as a saved workflow. The reason is a fixed phrase per kind of answer and
+ * never text from the answer: a refusal can carry a workflow id the model passed, a thrown error's
+ * message, or a cause the provider reported. A saved or already reusable workflow is answered in
+ * JSON and reads as done.
+ */
+export function saveWorkflowFailure(answer: string): string | null {
+  if (answer === SESSION_PARAM_NAME_REFUSAL) return 'not saved: a parameter name outside the accepted form';
+  if (answer.startsWith('Error: The analysis of this session failed:')) return 'not saved: the session analysis failed';
+  if (answer.startsWith('No tool calls found in this session.') || answer.startsWith('No actionable steps were found in this session.')) {
+    return 'not saved: nothing in this session to save';
+  }
+  if (answer.startsWith('Error')) return 'not saved: an error stopped the save';
+  return null;
+}
+
 // Dependencies accessed via agent.toolContext (runHistory, userConfig)
 
 // === save_workflow ===
@@ -442,4 +459,5 @@ export const saveWorkflowTool: ToolEntry<SaveWorkflowInput> = {
       return `Error saving workflow: ${getErrorMessage(err)}`;
     }
   },
+  failureOf: saveWorkflowFailure,
 };
