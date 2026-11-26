@@ -982,20 +982,20 @@ describe('going on from a run that halted', () => {
 	it('words a halt for a connection that may not change products, for the owner and for a mandate', () => {
 		const none = { applied: 0, sentUnknown: 0 };
 		expect(bulkResumeKind(w('productWriteNotAsked'))).toBe('none');
-		expect(bulkResumeText(w('productWriteNotAsked', none), true, DE)).toEqual({
+		expect(bulkResumeText(w('productWriteNotAsked', none), true, DE, false)).toEqual({
 			cause: 'lynox hat nichts geschrieben. Diese Shopify-Verbindung darf keine Produkte ändern. Prüfe in den App-Einstellungen in Shopify, dass die App Produkte ändern darf, und bitte lynox dann im Chat, Shopify mit dieser Erlaubnis neu zu verbinden.',
 			before: null, check: null, after: null, kept: null, soFar: null, allows: null,
 		});
-		expect(bulkResumeText(w('productWriteNotAsked', none), true, EN)?.cause)
+		expect(bulkResumeText(w('productWriteNotAsked', none), true, EN, false)?.cause)
 			.toBe('lynox wrote nothing. This Shopify connection may not change products. Check in the app settings in Shopify that the app may change products, then ask lynox in the chat to connect Shopify again with that permission.');
 		for (const o of [{ applied: 1, sentUnknown: 0 }, { applied: 0, sentUnknown: 1 }]) {
-			expect(bulkResumeText(w('productWriteNotAsked', o), true, DE)!.cause).toBe('lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt. Diese Shopify-Verbindung darf keine Produkte ändern. Prüfe in den App-Einstellungen in Shopify, dass die App Produkte ändern darf, und bitte lynox dann im Chat, Shopify mit dieser Erlaubnis neu zu verbinden.');
-			expect(bulkResumeText(w('productWriteNotAsked', o), true, EN)!.cause).toBe('lynox writes nothing more in this run; what it already wrote stays. This Shopify connection may not change products. Check in the app settings in Shopify that the app may change products, then ask lynox in the chat to connect Shopify again with that permission.');
-			expect(bulkResumeText(w('productWriteNotAsked', o), true, bulkMandateI18n(EN))!.cause.startsWith('lynox writes nothing more in this run; what it already wrote stays.')).toBe(true);
+			expect(bulkResumeText(w('productWriteNotAsked', o), true, DE, false)!.cause).toBe('lynox schreibt in diesem Lauf nichts mehr; was schon geschrieben ist, bleibt. Diese Shopify-Verbindung darf keine Produkte ändern. Prüfe in den App-Einstellungen in Shopify, dass die App Produkte ändern darf, und bitte lynox dann im Chat, Shopify mit dieser Erlaubnis neu zu verbinden.');
+			expect(bulkResumeText(w('productWriteNotAsked', o), true, EN, false)!.cause).toBe('lynox writes nothing more in this run; what it already wrote stays. This Shopify connection may not change products. Check in the app settings in Shopify that the app may change products, then ask lynox in the chat to connect Shopify again with that permission.');
+			expect(bulkResumeText(w('productWriteNotAsked', o), true, bulkMandateI18n(EN), false)!.cause.startsWith('lynox writes nothing more in this run; what it already wrote stays.')).toBe(true);
 		}
-		expect(bulkResumeText(w('productWriteNotAsked', none), true, bulkMandateI18n(DE))?.cause)
+		expect(bulkResumeText(w('productWriteNotAsked', none), true, bulkMandateI18n(DE), false)?.cause)
 			.toBe('lynox hat nichts geschrieben. Diese Shopify-Verbindung darf keine Produkte ändern. Das ändert sich nur, wenn der Inhaber dieser Instanz Shopify mit dieser Erlaubnis neu verbindet; bitte den Inhaber darum und lass den Lauf danach im Chat neu planen.');
-		expect(bulkResumeText(w('productWriteNotAsked', none), true, bulkMandateI18n(EN))?.cause)
+		expect(bulkResumeText(w('productWriteNotAsked', none), true, bulkMandateI18n(EN), false)?.cause)
 			.toBe('lynox wrote nothing. This Shopify connection may not change products. This only changes when the owner of this instance connects Shopify again with that permission; ask the owner to do so, then ask lynox in the chat to plan the run again.');
 	});
 
