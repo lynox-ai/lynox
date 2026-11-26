@@ -966,7 +966,8 @@
 											{/if}
 										</td>
 										<td role="cell" class={undoApproving ? 'block sm:table-cell pb-1.5 pt-1 sm:pt-1.5' : 'py-1.5'}>
-											{#if undoApproving}<div class="sm:hidden text-xs text-text-subtle">{t('bulk.undo.now_back')}</div>{/if}
+											<!-- The column's head by the values on a narrow screen: only over a row that shows a pair of values. -->
+											{#if undoApproving && (target.diff.kind === 'fields' || target.diff.kind === 'text')}<div class="sm:hidden text-xs text-text-subtle" data-testid="bulk-values-label">{t('bulk.undo.now_back')}</div>{/if}
 											{#if target.diff.kind === 'fields'}
 												{#each target.diff.fields as f (f.field)}
 													<!-- A long value without spaces (HTML, a URL) breaks inside the cell instead of running past it. -->

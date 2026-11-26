@@ -2457,6 +2457,15 @@ describe('approving an undo, per target (U-466)', () => {
 		expect(rows().map((r) => r.textContent)).toEqual([expect.stringContaining('Snowboard Blau'), expect.stringContaining('Snowboard Rot')]);
 	});
 
+	it('heads only a row that shows values with the column on a narrow screen, not a row that only gives its reason', async () => {
+		german();
+		run = undoRun({ total: 3, changes: { update: 1, create: 0, delete: 0, unchanged: 0, invalid: 2 } });
+		targets = [...refused(), { ...undoTargets()[0]!, seq: 2 }];
+		await render();
+		const labels = rows().map((r) => r.querySelector('[data-testid="bulk-values-label"]')?.textContent ?? null);
+		expect(labels).toEqual([null, null, 'Jetzt → zurück auf']);
+	});
+
 	it('says of an undo whose every target is refused that it only deletes the entry left, not that it writes no value back for a source that only created, and keeps the approval', async () => {
 		german();
 		run = undoRun({ total: 3, changes: { update: 0, create: 0, delete: 1, unchanged: 0, invalid: 2 } });
