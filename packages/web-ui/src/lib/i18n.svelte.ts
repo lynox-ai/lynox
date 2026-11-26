@@ -509,7 +509,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.invalid.refusal.maximum': { de: 'Der Wert ist grösser als {n}', en: 'the value is greater than {n}' },
 	'bulk.invalid.refusal.minimum': { de: 'Der Wert ist kleiner als {n}', en: 'the value is less than {n}' },
 	'bulk.invalid.refusal.maxItems': { de: 'Die Liste hat mehr als {n} Einträge', en: 'the list has more than {n} entries' },
-	'bulk.invalid.refusal.enum': { de: 'Der Wert ist nicht einer der erlaubten Werte', en: 'the value is not one of the allowed values' },
+	'bulk.invalid.refusal.enum': { de: 'Der Wert gehört nicht zu den erlaubten Werten', en: 'the value is not one of the allowed values' },
 	'bulk.invalid.refusal.pattern': { de: 'Der Wert hat nicht die verlangte Form', en: 'the value is not in the required form' },
 	'bulk.invalid.refusal.type': { de: 'Der Wert hat den falschen Typ', en: 'the value has the wrong type' },
 	'bulk.invalid.refusal.required': { de: 'Das Feld fehlt', en: 'the field is missing' },

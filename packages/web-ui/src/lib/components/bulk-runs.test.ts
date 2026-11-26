@@ -8,7 +8,7 @@ import {
 	bulkFieldLabelKey, bulkFieldNamesText, bulkLinkDomainShown, BULK_LINK_DOMAIN_SHOWN_MAX, bulkIsShopifyHost, bulkListFilterText, bulkListStatusText, bulkInvalidText, bulkSkippedHead, bulkOne,
 	bulkSentenceParts, bulkSecretInContextKey,
 	bulkRestartNoneNote, bulkReachRefusalKey, bulkReachHopeless, bulkArtifactTitle, bulkRuleSourceKey, bulkRuleFromArtifactKey, BULK_RULE_SOURCE_CODES,
-	bulkRefusalText, BULK_REFUSAL_KINDS,
+	bulkRefusalText, bulkRefusalSentence, BULK_REFUSAL_KINDS,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, BULK_UNMEASURED_NOTE_ONE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -2181,6 +2181,25 @@ describe('the sentence for an answer the rule refused', () => {
 			expect(de[`bulk.invalid.refusal.${kind}`], kind).toBeDefined();
 			expect(en[`bulk.invalid.refusal.${kind}`], kind).toBeDefined();
 			expect(bulkRefusalText({ field: 'title', kind, limit: 2 }, false, null, EN), kind).not.toContain('bulk.invalid');
+		}
+	});
+
+	it('words each rule kind as agreed, in German and English', () => {
+		const agreed: Record<string, [string, string]> = {
+			maxLength: ['Der Text ist länger als 2 Zeichen', 'the text is longer than 2 characters'],
+			minLength: ['Der Text ist kürzer als 2 Zeichen', 'the text is shorter than 2 characters'],
+			maximum: ['Der Wert ist grösser als 2', 'the value is greater than 2'],
+			minimum: ['Der Wert ist kleiner als 2', 'the value is less than 2'],
+			maxItems: ['Die Liste hat mehr als 2 Einträge', 'the list has more than 2 entries'],
+			enum: ['Der Wert gehört nicht zu den erlaubten Werten', 'the value is not one of the allowed values'],
+			pattern: ['Der Wert hat nicht die verlangte Form', 'the value is not in the required form'],
+			type: ['Der Wert hat den falschen Typ', 'the value has the wrong type'],
+			required: ['Das Feld fehlt', 'the field is missing'],
+		};
+		expect(Object.keys(agreed).sort()).toEqual([...BULK_REFUSAL_KINDS].sort());
+		for (const [kind, [deRule, enRule]] of Object.entries(agreed)) {
+			expect(bulkRefusalSentence({ field: 'title', kind: kind as never, limit: 2 }, false, DE)?.rule, kind).toBe(deRule);
+			expect(bulkRefusalSentence({ field: 'title', kind: kind as never, limit: 2 }, false, EN)?.rule, kind).toBe(enRule);
 		}
 	});
 
