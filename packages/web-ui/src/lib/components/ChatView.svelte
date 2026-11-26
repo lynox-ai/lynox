@@ -44,6 +44,7 @@
 		getContextBudget,
 		getCompactionOffer,
 		getPendingChangeset,
+		getRollbackStopped,
 		sendBlockedByReview,
 		getChangesetLoading,
 		submitChangesetReview,
@@ -858,6 +859,7 @@
 	);
 
 	const pendingChangeset = $derived(getPendingChangeset());
+	const rollbackStopped = $derived(getRollbackStopped());
 	const changesetLoading = $derived(getChangesetLoading());
 
 	const UNSUPPORTED_FORMATS = new Set(['image/heic', 'image/heif']);
@@ -3392,6 +3394,7 @@
 						files={pendingChangeset}
 						onReview={(action, rolledBackFiles) => submitChangesetReview(action, rolledBackFiles)}
 						messageWaiting={queueLength > 0}
+						{rollbackStopped}
 					/>
 				{/if}
 			</div>
