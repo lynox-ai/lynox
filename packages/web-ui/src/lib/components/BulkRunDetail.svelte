@@ -678,7 +678,12 @@
 	// Counted over the loaded targets: a preview the owner approves is loaded whole.
 	const seoEntity = $derived(approving ? bulkSeoEntityCount(targets) : 0);
 	// Same: a preview the owner approves is loaded whole, so every target that shares a value is here.
-	const sameValue = $derived(approving ? bulkSameValueOthers(targets, { judged: (run?.judge ?? null) !== null, choiceFields: bulkChoiceFields(run?.judgeRule ?? null) }) : new Map<number, number>());
+	// A judged run whose rule this viewer is not sent cannot tell a field of fixed choices from a text,
+	// so it marks nothing rather than every common choice.
+	const sameValueJudged = $derived((run?.judge ?? null) !== null);
+	const sameValue = $derived(approving && !(sameValueJudged && (run?.judgeRule ?? null) === null)
+		? bulkSameValueOthers(targets, { judged: sameValueJudged, choiceFields: bulkChoiceFields(run?.judgeRule ?? null) })
+		: new Map<number, number>());
 	// The table on one run line's verdicts alone (U-417), for this run only; the line above the table says so.
 	let spreadShown = $state<{ run: string; kind: BulkMarkerKind } | null>(null);
 	const spreadKind = $derived(approving && run !== null && spreadShown?.run === run.id ? spreadShown.kind : null);

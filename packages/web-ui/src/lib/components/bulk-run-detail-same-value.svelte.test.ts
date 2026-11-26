@@ -143,7 +143,7 @@ describe('a preview where several targets get one new value', () => {
 	});
 
 	it('marks every target of a judged run that gives all of them one value', async () => {
-		run = makeRun({ judge: { tier: 'standard', unjudged: 0 } });
+		run = makeRun({ judge: { tier: 'standard', unjudged: 0 }, judgeRule: { rule: 'Gib jedem Produkt einen SEO-Titel.', schema: { properties: { seo_title: { type: 'string', maxLength: 70 } } }, tier: 'standard' } });
 		targets = [1, 2, 3, 4].map((seq) => tgt(seq, fields(['seo_title', SAME])));
 		await render();
 		for (const seq of [1, 2, 3, 4]) expect(chipOf(seq)).toBe('gleich wie bei 3 anderen');
@@ -165,6 +165,17 @@ describe('a preview where several targets get one new value', () => {
 		// The two that share a title are marked for the title alone, not as the same as 2 others for the choice.
 		expect([1, 2, 3, 4].map(chipOf)).toEqual(['gleich wie bei einem anderen', 'gleich wie bei einem anderen', null, null]);
 		expect(target.querySelector('[data-testid="bulk-same-value-count"]')?.textContent).toBe('2 Produkte bekommen denselben Wert wie ein anderes Produkt. Sie sind in der Vorschau markiert.');
+	});
+
+	it('marks nothing on a judged run whose rule the viewer is not sent, rather than every common choice', async () => {
+		// The page is sent a judged run's rule only for its owner; without it, a choice field looks like a text.
+		run = makeRun({ judge: { tier: 'standard', unjudged: 0 }, judgeRule: null, total: 3, maxTargets: 3 });
+		targets = [1, 2, 3].map((seq) => tgt(seq, fields(['product_type', 'Shampoo'])));
+		await render();
+		// The preview is there, and only the marks are not.
+		expect(target.querySelectorAll('tbody tr')).toHaveLength(3);
+		expect(target.querySelector('[data-testid="bulk-same-value"]')).toBeNull();
+		expect(target.querySelector('[data-testid="bulk-same-value-count"]')).toBeNull();
 	});
 
 	it('does not mark a run that is past its preview', async () => {
