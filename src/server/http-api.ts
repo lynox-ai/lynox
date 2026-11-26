@@ -6022,8 +6022,9 @@ export class LynoxHTTPApi {
           // stuck on a hung tool". Stops updating as soon as the SSE write
           // gate (aborted/writableEnded) closes — which is exactly when we
           // want the stale clock to start counting.
+          // Only this run's own slot.
           const slot = this.runningSessions.get(sessionId);
-          if (slot) slot.lastEventAt = Date.now();
+          if (slot && slot.takeover === takeover) slot.lastEventAt = Date.now();
           // Mirror liveness into the registry so /api/runs/active + stale-run
           // detection see a fresh heartbeat for this run.
           runRegistry?.touch(runId);
@@ -6211,7 +6212,8 @@ export class LynoxHTTPApi {
         // timer already fired) — guard the clear so we never touch a stale id.
         if (streamTimeout !== undefined) clearTimeout(streamTimeout);
         clearInterval(keepaliveTimer);
-        this.runningSessions.delete(sessionId);
+        // Only this run's own slot.
+        if (this.runningSessions.get(sessionId)?.takeover === takeover) this.runningSessions.delete(sessionId);
         // Free the concurrency slot + abort handle (idempotent). The next queued
         // /run can now reserve a slot.
         runExecutor?.release(runId);

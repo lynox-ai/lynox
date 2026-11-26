@@ -106,6 +106,21 @@ const mockSetApiKey = vi.fn();
 const mockGetApiStore = vi.fn().mockReturnValue(null);
 const mockSecretIsEnvironment = vi.fn().mockReturnValue(false);
 
+// Document extraction, held on demand: a test pushes a promise and the next upload's extraction
+// waits on it.
+const { extractHolds } = vi.hoisted(() => ({ extractHolds: [] as Array<Promise<void>> }));
+vi.mock('../core/document-extract.js', async (importActual) => {
+  const actual = await importActual<typeof import('../core/document-extract.js')>();
+  return {
+    ...actual,
+    extractDocumentText: async (...args: Parameters<typeof actual.extractDocumentText>) => {
+      const hold = extractHolds.shift();
+      if (hold) await hold;
+      return actual.extractDocumentText(...args);
+    },
+  };
+});
+
 // Capture-telemetry recorder — the funnel/proposal emit sites are fire-and-forget; this
 // records every call so a test can assert an event actually fired (the RF-GAP1/GAP2
 // regression guard: the events existed as types but no site emitted them).
@@ -4765,6 +4780,185 @@ describe('LynoxHTTPApi', () => {
       } finally {
         if (prev === undefined) delete process.env['LYNOX_RUN_WALL_CLOCK_MS'];
         else process.env['LYNOX_RUN_WALL_CLOCK_MS'] = prev;
+      }
+    });
+
+    // A run waiting on its own question counts against the run cap until it is answered,
+    // stopped or expires.
+    it('counts runs waiting on their own questions against the run cap', async () => {
+      const { db, store } = await promptDb();
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown; getRunExecutor: () => unknown } }).engine;
+      const originalGetPromptStore = engineRef.getPromptStore;
+      const originalGetRunExecutor = engineRef.getRunExecutor;
+      const { RunExecutor } = await import('../core/run-executor.js');
+      const ex = new RunExecutor(5);
+      engineRef.getPromptStore = (): unknown => store;
+      engineRef.getRunExecutor = (): unknown => ex;
+      const slots = (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+      const sids = ['waiting-cap-1', 'waiting-cap-2', 'waiting-cap-3', 'waiting-cap-4', 'waiting-cap-5'];
+      const open: Response[] = [];
+      try {
+        for (const sid of sids) {
+          repayRateWindow();
+          mockSessionRun.mockImplementationOnce(async () => {
+            const promptUser = mockSessionInstance.promptUser as (q: string, o?: string[]) => Promise<string>;
+            return `settled:${await promptUser('Which repo did you mean?', ['lynox', 'other'])}`;
+          });
+          const res = await jsonFetch(`/api/sessions/${sid}/run`, {
+            method: 'POST',
+            body: JSON.stringify({ task: 'sort the invoices', protocol: 1 }),
+          });
+          expect(res.status).toBe(200);
+          open.push(res);
+          for (let i = 0; i < 400 && !store.getPending(sid); i++) await new Promise<void>((r) => setTimeout(r, 5));
+          expect(store.getPending(sid), 'positive control: the run waits on its question').toBeDefined();
+        }
+        expect(ex.activeCount, 'positive control: five runs are held').toBe(5);
+        repayRateWindow();
+        const sixth = await jsonFetch('/api/sessions/waiting-cap-6/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'something else', protocol: 1 }),
+        });
+        expect(sixth.status).toBe(429);
+        expect(await sixth.json()).toEqual({ error: 'run_queue_full', capacity: 5 });
+        // A stopped run gives its place back.
+        const stop = await jsonFetch('/api/sessions/waiting-cap-1/abort', { method: 'POST' });
+        expect(stop.status, await stop.text()).toBe(200);
+        await expectSlotReclaimed(slots, 'waiting-cap-1');
+        for (let i = 0; i < 400 && ex.activeCount === 5; i++) await new Promise<void>((r) => setTimeout(r, 5));
+        expect(ex.activeCount).toBe(4);
+        expect(ex.atCapacity()).toBe(false);
+      } finally {
+        for (const sid of sids) {
+          await jsonFetch(`/api/sessions/${sid}/abort`, { method: 'POST' }).then((r) => r.text()).catch(() => undefined);
+        }
+        for (const sid of sids) await expectSlotReclaimed(slots, sid);
+        for (const res of open) await res.body?.cancel().catch(() => undefined);
+        engineRef.getPromptStore = originalGetPromptStore;
+        engineRef.getRunExecutor = originalGetRunExecutor;
+        db.close();
+      }
+    });
+
+    // A run that ends only releases the slot it owns.
+    it('does not release a slot a finishing run no longer owns', async () => {
+      const slots = (api as unknown as { runningSessions: Map<string, { takeover: unknown }> }).runningSessions;
+      const sid = 'own-slot-1';
+      let openA!: () => void;
+      let openB!: () => void;
+      extractHolds.push(new Promise<void>((r) => { openA = r; }), new Promise<void>((r) => { openB = r; }));
+      let finishA: ((v: string) => void) | undefined;
+      let finishB: ((v: string) => void) | undefined;
+      mockSessionRun
+        .mockImplementationOnce(() => new Promise<string>((r) => { finishA = r; }))
+        .mockImplementationOnce(() => new Promise<string>((r) => { finishB = r; }));
+      const files = [{ name: 'notes.txt', type: 'text/plain', data: Buffer.from('hello').toString('base64') }];
+      const send = (task: string): Promise<Response> => {
+        repayRateWindow();
+        return jsonFetch(`/api/sessions/${sid}/run`, { method: 'POST', body: JSON.stringify({ task, files, protocol: 1 }) });
+      };
+      const wait = async (done: () => boolean): Promise<void> => {
+        for (let i = 0; i < 400 && !done(); i++) await new Promise<void>((r) => setTimeout(r, 5));
+      };
+      let a: Promise<Response> | undefined;
+      let b: Promise<Response> | undefined;
+      try {
+        a = send('first');
+        await wait(() => extractHolds.length === 1);
+        b = send('second');
+        await wait(() => extractHolds.length === 0);
+        expect(extractHolds.length, 'positive control: setup reached').toBe(0);
+        expect(slots.has(sid), 'positive control: no slot set').toBe(false);
+        openA();
+        await wait(() => finishA !== undefined);
+        const slotA = slots.get(sid);
+        expect(slotA, 'positive control: first slot set').toBeDefined();
+        openB();
+        await wait(() => finishB !== undefined);
+        const slotB = slots.get(sid);
+        expect(slotB, 'positive control: slot replaced').not.toBe(slotA);
+        finishA!('first done');
+        await (await a).text();
+        expect(slots.get(sid), 'the current slot stays').toBe(slotB);
+        repayRateWindow();
+        const third = await jsonFetch(`/api/sessions/${sid}/run`, { method: 'POST', body: JSON.stringify({ task: 'third', protocol: 1 }) });
+        expect(third.status).toBe(409);
+        await third.text();
+      } finally {
+        openA?.();
+        openB?.();
+        extractHolds.length = 0;
+        finishA?.('first done');
+        finishB?.('second done');
+        await a?.then((r) => r.text()).catch(() => undefined);
+        await b?.then((r) => r.text()).catch(() => undefined);
+        await expectSlotReclaimed(slots, sid);
+      }
+    });
+
+    // A run's heartbeat refreshes only the slot it owns.
+    it('refreshes only its own slot on a heartbeat', async () => {
+      const slots = (api as unknown as { runningSessions: Map<string, { lastEventAt: number }> }).runningSessions;
+      const sid = 'own-beat-1';
+      let openA!: () => void;
+      let openB!: () => void;
+      extractHolds.push(new Promise<void>((r) => { openA = r; }), new Promise<void>((r) => { openB = r; }));
+      let finishA: ((v: string) => void) | undefined;
+      let finishB: ((v: string) => void) | undefined;
+      mockSessionRun
+        .mockImplementationOnce(() => new Promise<string>((r) => { finishA = r; }))
+        .mockImplementationOnce(() => new Promise<string>((r) => { finishB = r; }));
+      const files = [{ name: 'notes.txt', type: 'text/plain', data: Buffer.from('hello').toString('base64') }];
+      const send = (task: string): Promise<Response> => {
+        repayRateWindow();
+        return jsonFetch(`/api/sessions/${sid}/run`, { method: 'POST', body: JSON.stringify({ task, files, protocol: 1 }) });
+      };
+      const wait = async (done: () => boolean): Promise<void> => {
+        for (let i = 0; i < 400 && !done(); i++) await new Promise<void>((r) => setTimeout(r, 5));
+      };
+      // Only the heartbeat's interval is faked: sockets and the waits above keep real time, and
+      // the slot's clock is read against a marker rather than a faked Date.
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+      let a: Promise<Response> | undefined;
+      let b: Promise<Response> | undefined;
+      try {
+        a = send('first');
+        await wait(() => extractHolds.length === 1);
+        b = send('second');
+        await wait(() => extractHolds.length === 0);
+        expect(extractHolds.length, 'positive control: setup reached').toBe(0);
+        openA();
+        await wait(() => finishA !== undefined);
+        const slotA = slots.get(sid);
+        expect(slotA, 'positive control: first slot set').toBeDefined();
+        // The first run's heartbeats fall on 10 s, 20 s, ...
+        slotA!.lastEventAt = 1;
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(slotA!.lastEventAt, 'a heartbeat refreshes the run\'s own slot').toBeGreaterThan(1);
+        await vi.advanceTimersByTimeAsync(5_000);
+        // The second run starts at 15 s, so its own heartbeats fall on 25 s, 35 s, ...
+        openB();
+        await wait(() => finishB !== undefined);
+        const slotB = slots.get(sid);
+        expect(slotB, 'positive control: slot replaced').not.toBe(slotA);
+        slotB!.lastEventAt = 1;
+        // 20 s: only the first run's heartbeat is due.
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(slotB!.lastEventAt, 'another run\'s heartbeat leaves the slot as it was').toBe(1);
+        // 25 s: the second run's own heartbeat refreshes it.
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(slotB!.lastEventAt, 'positive control: the slot\'s own heartbeat refreshes it').toBeGreaterThan(1);
+      } finally {
+        // Real timers first, so a failure above cannot leave the file on faked intervals.
+        vi.useRealTimers();
+        openA?.();
+        openB?.();
+        extractHolds.length = 0;
+        finishA?.('first done');
+        finishB?.('second done');
+        await a?.then((r) => r.text()).catch(() => undefined);
+        await b?.then((r) => r.text()).catch(() => undefined);
+        await expectSlotReclaimed(slots, sid);
       }
     });
 
