@@ -36,7 +36,8 @@ const WORDING: ReadonlyArray<readonly [key: string, de: string, en: string]> = [
 	['inbox.rule_withheld_from_subject', 'Feste Regel aus dem Betreff', 'Fixed rule from subject'],
 	['inbox.rules_then_escalate', 'Immer unter „Braucht dich“ behalten', 'Always keep under “Needs you”'],
 	['inbox.rules_then_archive', 'Als erledigt ablegen', 'File as handled'],
-	['inbox.rules_then_archive_effect', 'lynox legt die Mail unter „{zone}“ ab. In deinem Postfach bleibt sie unverändert.', 'lynox files the mail under “{zone}”. It stays unchanged in your mailbox.'],
+	['inbox.rules_then_archive_effect', 'lynox legt die Mail unter „{zone}“ ab, ausser sie wirkt sensibel; dann kommt sie unter „{needs}“. In deinem Postfach bleibt sie unverändert.', 'lynox files the mail under “{zone}”, unless it looks sensitive; then it goes to “{needs}”. It stays unchanged in your mailbox.'],
+	['inbox.rules_then_archive_effect_description', 'lynox legt die Mail unter „{zone}“ ab, ausser sie wirkt sensibel oder wie von einer Person weitergeleitet; dann kommt sie unter „{needs}“. In deinem Postfach bleibt sie unverändert.', 'lynox files the mail under “{zone}”, unless it looks sensitive or looks like a person forwarded it; then it goes to “{needs}”. It stays unchanged in your mailbox.'],
 	['inbox.rule_withheld_classifier_unnamed', 'Regel zurückgehalten: Der Klassifikator ordnete diese Mail anders ein, darum zeigt lynox sie dir. Soll die Regel hier immer greifen, mach daraus eine feste Regel.', 'Rule held back: the classifier sorted this mail differently, so lynox shows it to you. If the rule should always apply here, turn it into a fixed rule.'],
 	['inbox.rule_withheld_unchecked_unnamed', 'Regel zurückgehalten: Die Prüfung konnte nicht laufen, etwa wegen fehlendem KI-Budget oder Guthaben, darum zeigt lynox dir die Mail. Soll die Regel ohne Prüfung greifen, mach daraus eine feste Regel.', 'Rule held back: the check could not run, for example because of no AI budget or credit, so lynox shows you the mail. If the rule should apply without a check, turn it into a fixed rule.'],
 	['inbox.rule_withheld_sensitive_unnamed', 'Regel zurückgehalten: Diese Mail wirkt sensibel. Eine Regel legt solche Mails nie als erledigt ab, darum zeigt lynox sie dir.', 'Rule held back: this mail looks sensitive. A rule never files such mail as handled, so lynox shows it to you.'],
@@ -95,12 +96,23 @@ describe('inbox rules wording', () => {
 		for (const probe of probes) expect(probe).toMatch(MAILBOX_EFFECT);
 	});
 
-	it('names the zone a handled rule files into as the inbox does', () => {
-		setLocale('de');
-		expect(tf('inbox.rules_then_archive_effect', { zone: t('inbox.zone_handled') })).toContain(`„${t('inbox.zone_handled')}“`);
-		setLocale('en');
-		expect(tf('inbox.rules_then_archive_effect', { zone: t('inbox.zone_handled') })).toContain(`“${t('inbox.zone_handled')}”`);
-	});
+	it.each(['inbox.rules_then_archive_effect', 'inbox.rules_then_archive_effect_description'])(
+		'%s names both zones as the inbox does, from the zone keys and not as written-out names',
+		(key) => {
+			for (const [locale, open, close] of [['de', '„', '“'], ['en', '“', '”']] as const) {
+				setLocale(locale);
+				const zones = { zone: t('inbox.zone_handled'), needs: t('inbox.zone_needs_you') };
+				const said = tf(key, zones);
+				expect(said, `${locale} handled`).toContain(`${open}${zones.zone}${close}`);
+				expect(said, `${locale} needs you`).toContain(`${open}${zones.needs}${close}`);
+				// The template carries the placeholders, so a zone renamed in the inbox is renamed here too.
+				expect(t(key), `${locale} template`).toContain(`${open}{zone}${close}`);
+				expect(t(key), `${locale} template`).toContain(`${open}{needs}${close}`);
+				expect(t(key), `${locale} template`).not.toContain(zones.zone);
+				expect(t(key), `${locale} template`).not.toContain(zones.needs);
+			}
+		},
+	);
 
 	it('names the bucket of a rule that escalates as the inbox does', () => {
 		setLocale('de');
