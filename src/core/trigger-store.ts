@@ -1439,6 +1439,20 @@ export class TriggerStore {
   }
 
   /**
+   * Every plan of a workflow that may still run: `target_workflow_id = ?`, not completed and not
+   * stopped, switched off ones included (switched on again, they run without a new stamp). No limit:
+   * the workflow's stamp counts whom their questions reach, and a plan left out is a person missed.
+   */
+  getPlansOfWorkflow(workflowId: string): TriggerRecord[] {
+    const rows = this.db.prepare(
+      `SELECT ${TRIGGER_READ_COLS} FROM triggers
+       WHERE target_workflow_id = ? AND status != 'completed' AND status != ?
+       ORDER BY created_at DESC`,
+    ).all(workflowId, STOPPED) as TriggerFullDbRow[];
+    return rows.map(triggerDbRowToRecord);
+  }
+
+  /**
    * S3e read-cutover: triggers actively referencing a workflow (legacy
    * `getTriggersByPipelineId` — the destructive-edit guard). `target_workflow_id =
    * ? AND enabled != 0 AND status != 'completed' AND status != 'stopped' ORDER BY

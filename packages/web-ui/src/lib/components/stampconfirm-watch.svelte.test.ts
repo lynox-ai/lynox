@@ -172,16 +172,31 @@ describe('the stamp of a plan says whom its questions reach besides the owner', 
 		target.innerHTML = '';
 		setLocale('en');
 		await open();
-		expect(target.querySelector('[data-stamp-asks]')?.textContent).toBe('You and lena@kanzlei.example can answer this plan’s questions. Whoever answers first steers the run.');
+		const en = target.querySelector('[data-stamp-asks]');
+		expect(en?.textContent).toBe('You and lena@kanzlei.example can answer this plan’s questions. Whoever answers first steers the run.');
+		expect([...en!.querySelectorAll('[data-foreign-value]')].map((b) => b.textContent)).toEqual(['lena@kanzlei.example']);
 	});
 
-	it('says nothing for a plan that asks only the owner, or a value of another shape, and the preview stands', async () => {
+	it('says nothing for a plan that asks only the owner, and the preview stands', async () => {
 		watchUrl = 'https://shop.example/preise';
-		for (const value of [undefined, null, '', 42]) {
+		for (const value of [undefined, null]) {
 			asks = value;
 			await open();
 			expect(target.querySelector('[data-stamp-asks]')).toBeNull();
 			expect(target.querySelector('[data-stamp-watch]')).not.toBeNull();
+			if (component) unmount(component);
+			component = undefined;
+			target.innerHTML = '';
+		}
+	});
+
+	it('refuses a preview whose answerer has another shape: a fault never reads as only the owner answering', async () => {
+		watchUrl = 'https://shop.example/preise';
+		for (const value of ['', 42, { email: 'lena@kanzlei.example' }]) {
+			asks = value;
+			await open();
+			expect(target.querySelector('[data-stamp-failed]')).not.toBeNull();
+			expect(target.querySelector('[data-stamp-watch]')).toBeNull();
 			if (component) unmount(component);
 			component = undefined;
 			target.innerHTML = '';

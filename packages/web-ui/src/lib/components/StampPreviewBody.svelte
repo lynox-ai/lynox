@@ -3,7 +3,7 @@
 	import Icon from '../primitives/Icon.svelte';
 	import MarkedLine from './MarkedLine.svelte';
 	import { fillTemplate } from '../i18n-fill.js';
-	import { shownValue } from '../utils/plan-takeover.js';
+	import { shownWhole } from '../utils/plan-takeover.js';
 	import { modeKey, onFailureKey, templateText, timeoutText, visible, type StampChanges, type StampPreview } from '../utils/workflow-stamp.js';
 	import { allowedLines } from '../utils/stamp-contract.js';
 	import { effortName, thinkingName, tierName } from '../utils/tier-words.js';
@@ -54,7 +54,7 @@
 		{/if}
 		{#if p.asks}
 			<!-- Who may answer its questions on a schedule besides the owner: a name only when it is one person; with more, each plan's stamp says who. -->
-			<dt class="sr-only">{t('workflow_library.stamp.asks')}</dt><dd data-testid="stamp-asks" data-asks-count={p.asks.count} class="col-span-2 {WRAP}"><MarkedLine text={p.asks.name !== null ? fillTemplate(t('workflow_library.stamp.asks_one'), { name: shownValue(p.asks.name) }) : fillTemplate(t('workflow_library.stamp.asks_many'), { n: String(p.asks.count) })} /></dd>
+			<dt class="sr-only">{t('workflow_library.stamp.asks')}</dt><dd data-testid="stamp-asks" data-asks-count={p.asks.count} class="col-span-2 {WRAP}"><MarkedLine text={p.asks.name !== null ? fillTemplate(t('workflow_library.stamp.asks_one'), { name: shownWhole(p.asks.name) }) : fillTemplate(t('workflow_library.stamp.asks_many'), { n: String(p.asks.count) })} /></dd>
 		{/if}
 		{#if p.onFailure}
 			{@const key = onFailureKey(p.onFailure)}

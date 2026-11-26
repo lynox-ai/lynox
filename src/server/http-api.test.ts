@@ -24678,7 +24678,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
 
     it('says whom the questions of a plan and of a workflow reach besides the owner, as the run reads it', async () => {
       const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
-      const saved = { h: ref['getRunHistory'], a: ref['getApiStore'], e: ref['getMandateEnds'], t: ref['getTaskManager'] };
+      const saved = { h: ref['getRunHistory'], a: ref['getApiStore'], e: ref['getMandateEnds'] };
       const EVA = 'M-EVA';
       const ARNO = 'M-ARNO';
       const asking = { id: 'wf-arno', name: 'W', goal: 'g', reasoning: 'r', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z', executed: false, template: true, confirmedAt: '2026-10-07T00:00:00.000Z', mode: 'interactive', steps: [{ id: 's1', task: 'ask', tools: ['ask_user'] }] };
@@ -24686,7 +24686,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       mockGetPipeline.mockImplementation((id: string) => (id === 'wf-arno' ? planned : undefined));
       const arnoWf = { createdBy: 'mandate:arno@kanzlei.example', createdMandateId: ARNO, createdAt: '2026-10-01 00:00:00', mandateEditor: null, mandateEditorId: null, mandateEditedAt: null };
       let authorship: Record<string, unknown> = arnoWf;
-      const plan = (id: string, by: string, mid: string | undefined, at: string): Record<string, unknown> => ({ id, effect: 'run_workflow', pipeline_id: 'wf-arno', title: 'Report', description: 'Weekly', created_by: by, ...(mid ? { created_mandate_id: mid } : {}), created_at: at });
+      const plan = (id: string, by: string, mid: string | undefined, at: string, over: Record<string, unknown> = {}): Record<string, unknown> => ({ id, effect: 'run_workflow', pipeline_id: 'wf-arno', title: 'Report', description: 'Weekly', created_by: by, ...(mid ? { created_mandate_id: mid } : {}), created_at: at, ...over });
       let plans: Array<Record<string, unknown>> = [];
       let live = (_id: string): boolean => true;
       ref['getRunHistory'] = () => ({
@@ -24697,10 +24697,11 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         workflowStampDigest: () => 'd'.repeat(64),
         workflowStampState: () => 'holds',
         workflowMandateShaped: () => true,
+        // Every plan of the workflow that may still run, as the store reads them: no limit.
+        getPlansOfWorkflow: (id: string) => plans.filter((t) => t['pipeline_id'] === id),
       });
       ref['getApiStore'] = () => ({ knownProfiles: () => [] });
       ref['getMandateEnds'] = () => ({ isLive: (id: string) => live(id), record: (): void => {} });
-      ref['getTaskManager'] = () => ({ listTriggers: () => plans });
       const planAsks = async (id: string): Promise<unknown> => ((await (await jsonFetch(`/api/tasks/${id}/stamp-preview`)).json()) as { asks: unknown }).asks;
       const workflowAsks = async (): Promise<unknown> => ((await (await jsonFetch('/api/workflows/wf-arno/stamp-preview')).json()) as { asks: unknown }).asks;
       try {
@@ -24736,8 +24737,46 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         expect([await planAsks('p-eva'), await workflowAsks()]).toEqual([null, null]);
         planned = { ...asking, mode: 'autonomous', steps: [{ id: 's1', task: 'look', tools: ['memory_recall'] }] };
         expect([await planAsks('p-eva'), await workflowAsks()]).toEqual([null, null]);
+        planned = asking;
+        // A webhook never asks (an asking workflow is refused on an event): not named, not counted.
+        plans = [plan('p-hook', 'mandate:eva@kanzlei.example', EVA, '2026-10-05T00:00:00.000Z', { source: 'webhook' })];
+        expect([await planAsks('p-hook'), await workflowAsks()]).toEqual([null, { count: 1, name: 'arno@kanzlei.example' }]);
+        // An agent plan asks through ask_user under its mandate: named. A watch has no tools: not.
+        plans = [plan('p-agent', 'mandate:eva@kanzlei.example', EVA, '2026-10-05T00:00:00.000Z', { effect: 'run_agent', pipeline_id: undefined }),
+          plan('p-watch', 'mandate:eva@kanzlei.example', EVA, '2026-10-05T00:00:00.000Z', { effect: 'run_agent', source: 'watch', pipeline_id: undefined })];
+        expect([await planAsks('p-agent'), await planAsks('p-watch')]).toEqual(['eva@kanzlei.example', null]);
       } finally {
-        ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e; ref['getTaskManager'] = saved.t;
+        ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
+        mockGetPipeline.mockReset();
+      }
+    });
+
+    it('refuses a confirm when the person its questions reach changed since the preview, with nothing else changed', async () => {
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const saved = { h: ref['getRunHistory'], a: ref['getApiStore'], e: ref['getMandateEnds'] };
+      const asking = { id: 'wf-arno', name: 'W', goal: 'g', reasoning: 'r', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z', executed: false, template: true, confirmedAt: '2026-10-07T00:00:00.000Z', mode: 'interactive', steps: [{ id: 's1', task: 'ask', tools: ['ask_user'] }] };
+      mockGetPipeline.mockImplementation((id: string) => (id === 'wf-arno' ? asking : undefined));
+      // Arno changed the workflow after Eva's plan: the plan asks Arno.
+      const arnoWf = { createdBy: 'mandate:arno@kanzlei.example', createdMandateId: 'M-ARNO', createdAt: '2026-10-01 00:00:00', mandateEditor: 'mandate:arno@kanzlei.example', mandateEditorId: 'M-ARNO', mandateEditedAt: '2026-10-06 00:00:00' };
+      let trigger: Record<string, unknown> = { id: 'p-eva', effect: 'run_workflow', pipeline_id: 'wf-arno', title: 'Report', description: 'Weekly', created_by: 'mandate:eva@kanzlei.example', created_mandate_id: 'M-EVA', created_at: '2026-10-05T00:00:00.000Z', mandate_editor: 'mandate:eva@kanzlei.example', mandate_editor_id: 'M-EVA', mandate_edited_at: '2026-10-05 00:00:00' };
+      ref['getRunHistory'] = () => ({ getTrigger: (id: string) => (id === 'p-eva' ? trigger : undefined), getPlannedPipeline: () => undefined, getWorkflowAuthorship: () => arnoWf, getWorkflowExact: () => asking });
+      ref['getApiStore'] = () => ({ knownProfiles: () => [] });
+      ref['getMandateEnds'] = () => ({ isLive: () => true, record: (): void => {} });
+      try {
+        mockConfirmTrigger.mockClear();
+        const shown = await (await jsonFetch('/api/tasks/p-eva/stamp-preview')).json() as { expect: string; asks: unknown };
+        expect(shown.asks).toBe('arno@kanzlei.example');
+        // Eva changes her plan again, with no field the preview shows: her mark is now the later one.
+        trigger = { ...trigger, mandate_edited_at: '2026-10-08 00:00:00' };
+        expect(((await (await jsonFetch('/api/tasks/p-eva/stamp-preview')).json()) as { asks: unknown }).asks).toBe('eva@kanzlei.example');
+        expect((await ownerSessionFetch('/api/tasks/p-eva/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(409);
+        expect(mockConfirmTrigger).not.toHaveBeenCalled();
+        // Confirmed from the preview that names Eva: stamped.
+        const again = await (await jsonFetch('/api/tasks/p-eva/stamp-preview')).json() as { expect: string };
+        mockConfirmTrigger.mockReturnValueOnce({ ...trigger, confirmed_at: '2026-10-09T00:00:00.000Z' });
+        expect((await ownerSessionFetch('/api/tasks/p-eva/confirm', { method: 'POST', body: JSON.stringify({ expect: again.expect }) })).status).toBe(200);
+      } finally {
+        ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
         mockGetPipeline.mockReset();
       }
     });

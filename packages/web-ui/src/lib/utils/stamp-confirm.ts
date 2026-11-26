@@ -65,9 +65,12 @@ export function readPreview(raw: unknown): StampPreview | null {
 	if (w !== null && !(isObj(w) && strOrNull(w['name']) && typeof w['confirmed'] === 'boolean' && (w['ended'] === undefined || typeof w['ended'] === 'boolean'))) return null;
 	const c = raw['connections'];
 	if (!Array.isArray(c) || !c.every((e) => isObj(e) && typeof e['id'] === 'string' && typeof e['profile'] === 'string' && typeof e['provider'] === 'string' && strOrNull(e['account']))) return null;
-	// Who else answers only informs: a value of another shape shows no line, and the preview stands.
-	const asks = typeof raw['asks'] === 'string' && raw['asks'] !== '' ? raw['asks'] : null;
-	return { ...(raw as unknown as StampPreview), asks };
+	// Who else answers is part of what the owner consents to: absent or null (an older engine, a plan
+	// that asks only the owner) is no line; any other shape refuses the preview, so a fault never
+	// reads as "only you".
+	const a = raw['asks'];
+	if (a !== undefined && a !== null && !(typeof a === 'string' && a !== '')) return null;
+	return { ...(raw as unknown as StampPreview), asks: typeof a === 'string' ? a : null };
 }
 
 /** The fields of a trigger row the stamp predicates read (`GET /api/triggers`). */

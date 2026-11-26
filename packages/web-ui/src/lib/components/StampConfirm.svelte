@@ -12,7 +12,7 @@
 	import { tierName } from '../utils/tier-words.js';
 	import WatchAddress from './WatchAddress.svelte';
 	import WholeValue from './WholeValue.svelte';
-	import { setApart, shownValue } from '../utils/plan-takeover.js';
+	import { setApart, shownWhole } from '../utils/plan-takeover.js';
 	import { confirmable, connectionsParts, hiddenIn, hiddenNote, hidesText, paramsOf, readPreview, shownAs, type StampPreview } from '../utils/stamp-confirm.js';
 
 	interface Props {
@@ -166,7 +166,7 @@
 		{/if}
 		{#if preview.asks}
 			<!-- Whom the plan's questions reach besides the owner once stamped, as the run reads it. -->
-			<p class="break-words" data-stamp-asks><MarkedLine text={tf('stamp.asks', { name: shownValue(preview.asks) })} /></p>
+			<p class="break-words" data-stamp-asks><MarkedLine text={tf('stamp.asks', { name: shownWhole(preview.asks) })} /></p>
 		{/if}
 		{#if sentence}
 			<!-- One connection per line: in a run of boxes, where one ends and the next begins is lost. -->

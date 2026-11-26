@@ -40,7 +40,7 @@ import type { StoreExchangeRefusal } from '../tools/builtin/http.js';
 import { accessTokenKey, lapsedSlots, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { ApiProfile, OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
-import { planAsks, planOfTrigger, stampEntriesFor, workflowAsks, stampExpect, stampListState, stampProfiles, stampSubject, stampUsesConnections, type StampListShown, type WorkflowScheduleRefusalKind } from '../core/plan-stamp.js';
+import { planAsks, planOfTrigger, stampEntriesFor, workflowAsks, workflowAsksOnSchedule, stampExpect, stampListState, stampProfiles, stampSubject, stampUsesConnections, type StampListShown, type WorkflowScheduleRefusalKind } from '../core/plan-stamp.js';
 import { workflowAwaitsStampResult } from '../core/workflow-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
@@ -364,11 +364,6 @@ function stampShown(planned: PlannedPipeline): {
     })),
     runs: runsFrom(planned),
   };
-}
-
-/** Whether a workflow's questions reach anyone on a schedule: an interactive one a schedule may run. */
-function asksOnSchedule(planned: PlannedPipeline): boolean {
-  return planned.mode === 'interactive' && isSchedulableWorkflow(planned);
 }
 
 /** Where a workflow may run, as the stamp says it: `anywhere` is a chat, a schedule and an agent in
@@ -2866,30 +2861,27 @@ export class LynoxHTTPApi {
   }
 
   /**
-   * Whom the questions of a plan that runs an interactive workflow reach besides the owner, once
-   * the stamp holds, as the address the view names: read by `planAsks`, the run's own reading. Null
-   * for every other plan, and for one that asks only the owner.
+   * Who besides the owner may answer the questions of a plan once it is stamped, as the address the
+   * view names: read by `planAsks`, the run's own reading. Null for a plan that asks only the owner,
+   * or none at all.
    */
   async #planAsksShown(trigger: TriggerRecord): Promise<string | null> {
     const history = this.engine?.getRunHistory();
-    if (!history || trigger.effect !== 'run_workflow' || !trigger.pipeline_id) return null;
-    const planned = history.getWorkflowExact(trigger.pipeline_id);
-    if (planned === undefined || !asksOnSchedule(planned)) return null;
+    if (!history) return null;
     const p = await planAsks(trigger, history, (id) => this._mandateLive(id));
     return p !== undefined && p.kind === 'mandate' ? p.email : null;
   }
 
   /**
    * Who may be asked an interactive workflow's questions besides the owner when it runs on a
-   * schedule (`workflowAsks`): how many people, and the address only when it is one — with more,
-   * each plan's own stamp says who it is. Null when that is no one, or the workflow does not ask
-   * on a schedule.
+   * schedule (`workflowAsks`, over every plan of it that may still run): how many people, and the
+   * address only when it is one — with more, each plan's own stamp says who it is. Null when that is
+   * no one, or the workflow does not ask on a schedule.
    */
   async #workflowAsksShown(planned: PlannedPipeline): Promise<{ count: number; name: string | null } | null> {
     const history = this.engine?.getRunHistory();
-    if (!history || !asksOnSchedule(planned)) return null;
-    const plans = this.engine?.getTaskManager()?.listTriggers?.() ?? [];
-    const asked = (await workflowAsks(planned.id, plans, history, (id) => this._mandateLive(id))).filter((p) => p.kind === 'mandate');
+    if (!history || !workflowAsksOnSchedule(planned)) return null;
+    const asked = (await workflowAsks(planned.id, history.getPlansOfWorkflow(planned.id), history, (id) => this._mandateLive(id))).filter((p) => p.kind === 'mandate');
     if (asked.length === 0) return null;
     return { count: asked.length, name: asked.length === 1 && asked[0]!.kind === 'mandate' ? asked[0]!.email : null };
   }
@@ -10430,7 +10422,7 @@ export class LynoxHTTPApi {
       // (The list row carries the ids already, `triggerForRoute`; the preview does not repeat them.)
       const { created_mandate_id: _created, mandate_editor_id: _editor, ...subject } = stampSubject(trigger, listed?.wf ?? null);
       jsonResponse(res, 200, {
-        expect: stampExpect(trigger, listed?.wf ?? null, entries),
+        expect: stampExpect(trigger, listed?.wf ?? null, entries, asks),
         subject,
         by,
         workflow,
@@ -10459,10 +10451,12 @@ export class LynoxHTTPApi {
       const current = engine.getRunHistory()?.getTrigger(params['id']!);
       if (!current) { errorResponse(res, 404, 'Trigger not found'); return; }
       const listed = await this.#stampListFor(current);
+      const asks = await this.#planAsksShown(current);
       // Read again after the await, and stamp with no await in between: what is compared is
-      // what is stamped.
+      // what is stamped. Whom the questions reach is read from `current`; a mandate's change since
+      // moves its change time, which the subject does not hold, so that refuses as well.
       const now = engine.getRunHistory()?.getTrigger(params['id']!);
-      if (!now || stampExpect(now, listed?.wf ?? null, listed?.entries ?? []) !== expected) {
+      if (!now || (now.mandate_edited_at ?? null) !== (current.mandate_edited_at ?? null) || stampExpect(now, listed?.wf ?? null, listed?.entries ?? [], asks) !== expected) {
         errorResponse(res, 409, 'The connections this schedule would be confirmed with changed since you looked. Look at them again, then confirm.', 'changed');
         return;
       }

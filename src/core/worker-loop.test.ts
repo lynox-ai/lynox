@@ -1334,11 +1334,12 @@ describe('WorkerLoop', () => {
     });
 
     it('runs a workflow plan for the person its stamp says its questions reach, by the same reading', async () => {
-      // The plan's stamp names whom the run's questions reach (`planAsks`); the run acts for
-      // `currentPlanOf`. Both read the plan one way: a tie goes to the schedule, the later mark wins,
-      // the owner's plan on a mandate's workflow acts for that mandate, an ended member runs nothing.
+      // The plan's stamp names whom the run's questions reach (`planActsFor`, under `planAsks`); the
+      // run acts for `currentPlanOf`. Both read the plan one way: a tie goes to the schedule, the
+      // later mark wins, the owner's plan on a mandate's workflow acts for that mandate, an ended
+      // member runs nothing.
       vi.useRealTimers();
-      const { planAsks } = await import('./plan-stamp.js');
+      const { planActsFor } = await import('./plan-stamp.js');
       const AT = '2026-10-08T00:00:00.000Z';
       const ARNO_ID = FIXTURE_GRANT_IDS['mandate:arno@kanzlei.example']!;
       const arnoWf = (createdAt: string, editedAt: string | null = null) => ({
@@ -1346,12 +1347,13 @@ describe('WorkerLoop', () => {
         mandateEditor: editedAt === null ? null : 'mandate:arno@kanzlei.example', mandateEditorId: editedAt === null ? null : ARNO_ID, mandateEditedAt: editedAt,
         coveredCreatedBy: null, coveredCreatedId: null, coveredCreatedAt: null, coveredEditedBy: null, coveredEditedId: null, coveredEditedAt: null,
       });
+      let ended = false;
       const run = async (task: TriggerRecord, authorship: ReturnType<typeof arnoWf>, live: (id: string) => boolean): Promise<{ ran: string | null; stamp: string | null }> => {
         const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
         _resetPipelineStore();
         const template = { id: 'wf-arno', name: 'W', goal: 'g', steps: [{ id: 's', task: 'do' }], reasoning: 'saved', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z', executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous', confirmedAt: AT };
         storePipeline('wf-arno', template as unknown as PlannedPipeline);
-        const { loop, engine } = setup(task);
+        const { loop, engine, tm } = setup(task);
         const history = {
           workflowStampState: STAMPED_IF_CONFIRMED,
           getPlannedPipeline: () => ({ id: 'wf-arno', manifest_json: JSON.stringify(template) }),
@@ -1367,7 +1369,8 @@ describe('WorkerLoop', () => {
         mockRunManifest.mockReset();
         mockRunManifest.mockImplementation(async () => { const of = currentPlanOf(); ran = of?.kind === 'mandate' ? of.email : null; return makeRunState({ runId: 'ok', status: 'completed' }); });
         await (loop as unknown as { executeTask: (t: TriggerRecord, c: number | null) => Promise<void> }).executeTask(task, null);
-        const asked = await planAsks(task, history as unknown as Parameters<typeof planAsks>[1], live);
+        ended = vi.mocked(tm.recordTaskRun).mock.calls.some((c) => c[1] === PLAN_ENDED_RESULT);
+        const asked = await planActsFor(task, history as unknown as Parameters<typeof planActsFor>[1], live);
         return { ran, stamp: asked?.kind === 'mandate' ? asked.email : null };
       };
       const evaPlan = (createdAt: string): TriggerRecord => makeTask({ id: 'po-wf', effect: 'run_workflow', pipeline_id: 'wf-arno', confirmed_at: AT, created_by: 'mandate:eva@kanzlei.example', created_at: createdAt });
@@ -1383,6 +1386,7 @@ describe('WorkerLoop', () => {
       expect(await run(ownerPlan, arnoWf('2026-10-01 00:00:00'), all)).toEqual({ ran: 'arno@kanzlei.example', stamp: 'arno@kanzlei.example' });
       // Arno's access ended: the run does not start, and the stamp names no one.
       expect(await run(evaPlan('2026-10-05T00:00:00.000Z'), arnoWf('2026-10-01 00:00:00'), (id) => id !== ARNO_ID)).toEqual({ ran: null, stamp: null });
+      expect(ended).toBe(true);
     });
 
     it('refuses a mandate\'s start by hand of a plan that acts for another mandate, and runs the one for itself', async () => {

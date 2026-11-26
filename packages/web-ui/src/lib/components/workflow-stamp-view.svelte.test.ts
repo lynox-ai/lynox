@@ -898,11 +898,21 @@ describe('the stamp says who else may answer its questions when it runs on a sch
 		expect(line!.querySelector('[data-foreign-value]')).toBeNull();
 	});
 
-	it('no one, an engine that sends no such field, or a value of another shape: no line, and the preview stands', async () => {
-		for (const asks of [undefined, null, { count: 0, name: null }, { count: 2, name: 'lena@kanzlei.example' }, { count: 1, name: null }, { count: 1.5, name: 'x' }, 'lena@kanzlei.example']) {
+	it('no one, or an engine that sends no such field: no line, and the preview stands', async () => {
+		for (const asks of [undefined, null]) {
 			expect(await asksLine(asks)).toBeNull();
 			expect(q('stamp-step')).not.toBeNull();
 			expect(q('stamp-confirm')?.hasAttribute('disabled')).toBe(false);
+			again();
+		}
+	});
+
+	it('a value of another shape refuses the preview: a fault never reads as only the owner answering', async () => {
+		for (const asks of [{ count: 0, name: null }, { count: 2, name: 'lena@kanzlei.example' }, { count: 1, name: null }, { count: 1.5, name: 'x' }, 'lena@kanzlei.example']) {
+			expect(await asksLine(asks)).toBeNull();
+			expect(q('stamp-step')).toBeNull();
+			expect(q('stamp-confirm')?.hasAttribute('disabled')).toBe(true);
+			expect(target.textContent).toContain('Laden fehlgeschlagen');
 			again();
 		}
 	});
