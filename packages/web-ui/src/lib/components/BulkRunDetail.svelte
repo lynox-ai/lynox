@@ -1339,7 +1339,7 @@
 					<!-- The targets that get a value back are in the table above, each with the markup it writes
 					     back; the entries the source created are listed here. With nothing left to write, the
 					     sentence says why the approval is locked. -->
-					<p id="bulk-undo-approve-explain" class="text-sm" data-testid="bulk-undo-approve-explain">{bulkUndoApproveText(run, i18n, undoTookOut)}</p>
+					<p id="bulk-undo-approve-explain" class="text-sm" data-testid="bulk-undo-approve-explain">{bulkUndoApproveText(run, i18n, { tookOut: undoTookOut, listed: listed.length > 0 })}</p>
 					{#if run.changes.delete > 0}
 						<div class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
 							<p data-testid="bulk-undo-creates">{run.changes.delete === 1 ? t('bulk.undo.creates_one') : tf('bulk.undo.creates', { k: String(run.changes.delete) })}</p>

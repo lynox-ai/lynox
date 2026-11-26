@@ -2439,6 +2439,37 @@ describe('approving an undo, per target (U-466)', () => {
 		expect(explain()).toBe(tf('bulk.undo.deletes_only', { n: '2' }));
 	});
 
+	// The plan refuses a target whose value back the shop kept with markup of its own
+	// (`shop_added_markup`): with every target so, none gets a value back, though none is taken out.
+	const refused = (): BulkTarget[] => undoTargets().filter((x) => x.change !== 'delete')
+		.map((x) => ({ ...x, change: 'invalid' as const, diff: { kind: 'none' } as BulkTarget['diff'], error: 'shop_added_markup', undoOpen: undefined }));
+
+	it('says in German that an undo whose every target is refused writes nothing and why, not that the owner took one out, locks the approval, points the button at it and lists the targets', async () => {
+		german();
+		run = undoRun({ total: 2, changes: { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 2 } });
+		targets = refused();
+		await render();
+		expect(explain()).toBe('Diese Rücknahme schreibt nichts: Kein Ziel bekommt seinen Wert von vorher zurück. Der Grund steht bei jedem Ziel. Verwirf sie, oder lass sie mit „Nicht jetzt“ liegen.');
+		expect(explain()).not.toContain('Du hast');
+		expect(approveButton()?.disabled).toBe(true);
+		expect(approveButton()?.getAttribute('aria-describedby')).toBe('bulk-undo-approve-explain');
+		expect(rows()).toHaveLength(2);
+		expect(rows().map((r) => r.textContent)).toEqual([expect.stringContaining('Snowboard Blau'), expect.stringContaining('Snowboard Rot')]);
+	});
+
+	it('says of an undo whose every target is refused that it only deletes the entry left, not that it writes no value back for a source that only created, and keeps the approval', async () => {
+		german();
+		run = undoRun({ total: 3, changes: { update: 0, create: 0, delete: 1, unchanged: 0, invalid: 2 } });
+		targets = [...refused(), created(2)];
+		await render();
+		expect(explain()).toBe('Kein Ziel bekommt seinen Wert von vorher zurück; die Rücknahme löscht nur noch den Eintrag unten.');
+		expect(explain()).not.toBe(t('bulk.undo.deletes_only_one'));
+		expect(rows()).toHaveLength(2);
+		// Deleting the entry is a write: the approval stays.
+		expect(approveButton()?.disabled).toBe(false);
+		expect(approveButton()?.getAttribute('aria-describedby')).toBeNull();
+	});
+
 	for (const [lang, hint] of [
 		['de', 'Offen, ob die Änderung beim Anbieter angekommen ist. Die Rücknahme sieht hier zuerst nach.'],
 		['en', 'Unclear whether the change reached the provider. Taking back checks here first.'],

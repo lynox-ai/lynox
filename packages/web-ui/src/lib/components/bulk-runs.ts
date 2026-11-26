@@ -1216,15 +1216,22 @@ export function bulkUndoExplainText(run: Pick<BulkRunDetailData, 'undoableParts'
 /** The undo approval's count sentence. `n` is every target the undo gives a value back; of those,
  *  `undoOpen` take back a write that was never confirmed, so they are not counted as getting a
  *  value back but named as checked first. The counts leave out the targets the owner took out.
- *  Where none gets a value back: nothing left to write at all (the approval is locked); only the
- *  entries the undo deletes left, because the owner took out every other target (`tookOut`, one
- *  of the targets that get a value back is taken out); or a source that only created entries. */
-export function bulkUndoApproveText(run: Pick<BulkRunDetailData, 'changes' | 'undoOpen'>, i18n: BulkI18n, tookOut = false): string {
+ *  Where none gets a value back, the sentence says why: the owner took out every target that got
+ *  one (`tookOut`, one of the listed targets is taken out); no listed target gets its previous value back, say because the shop kept markup of
+ *  its own on each (`listed`, the table holds a target, none taken out); or a source that only
+ *  created entries. With no entry to delete either, the approval is locked. */
+export function bulkUndoApproveText(
+	run: Pick<BulkRunDetailData, 'changes' | 'undoOpen'>,
+	i18n: BulkI18n,
+	opts: { tookOut?: boolean; listed?: boolean } = {},
+): string {
 	const n = run.changes.update + run.changes.create;
 	if (n === 0) {
 		const deletes = run.changes.delete;
-		if (deletes === 0) return i18n.t('bulk.undo.all_taken_out');
-		return i18n.tf(bulkOne(tookOut ? 'bulk.undo.only_deletes' : 'bulk.undo.deletes_only', deletes), { n: String(deletes) });
+		const { tookOut = false, listed = false } = opts;
+		if (deletes === 0) return i18n.t(tookOut ? 'bulk.undo.all_taken_out' : 'bulk.undo.nothing_back');
+		const key = tookOut ? 'bulk.undo.only_deletes' : (listed ? 'bulk.undo.none_back_deletes' : 'bulk.undo.deletes_only');
+		return i18n.tf(bulkOne(key, deletes), { n: String(deletes) });
 	}
 	const open = Math.min(run.undoOpen ?? 0, n);
 	if (open === 0) return i18n.tf(bulkOne('bulk.undo.approve_explain', n), { n: String(n) });

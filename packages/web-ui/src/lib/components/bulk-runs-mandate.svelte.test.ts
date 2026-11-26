@@ -190,6 +190,31 @@ describe('an undo\'s approval as a reader who is not the owner sees it (U-466)',
 		}
 	}
 
+	// The owner took out every target that gets a value back; with no entry to delete, or one.
+	for (const deletes of [0, 1]) {
+		it(`never tells a mandate "you took out" on an undo the owner took every target out of (${String(deletes)} to delete): each row names the owner, the approval and its sentence stay the owner's`, async () => {
+			const was = getLocale();
+			setLocale('de');
+			try {
+				run = makeRun({ kind: 'undo', sourceRunId: 'r0', atomic: false, total: 1 + deletes, deselected: 1, changes: { update: 0, create: 0, delete: deletes, unchanged: 0, invalid: 0 } });
+				shownTargets = [
+					{ ...UNDO[0]!, deselected: true },
+					...(deletes === 1 ? [{ seq: 1, key: 'gid://shopify/Product/2', change: 'delete', diff: { kind: 'none' } as BulkTarget['diff'], error: null, deselected: false } as BulkTarget] : []),
+				];
+				await renderDetail();
+				expect(target.querySelector('[data-testid="bulk-target-title"]')?.textContent).toBe('Snowboard Blau');
+				expect(target.textContent).toContain('Vom Inhaber herausgenommen.');
+				expect(target.textContent).toContain(t('bulk.owner_only_notice'));
+				expect(target.querySelector('[data-testid="bulk-undo-approve-explain"]')).toBeNull();
+				expect(buttonByText(t('bulk.undo.approve'))).toBeUndefined();
+				expect(target.textContent).not.toContain('Du hast');
+				expect(target.textContent).not.toContain('Von dir');
+			} finally {
+				setLocale(was);
+			}
+		});
+	}
+
 	it('control: offers the owner the same undo\'s target out', async () => {
 		viewer = 'owner';
 		run = makeRun({ kind: 'undo', sourceRunId: 'r0', atomic: false });
