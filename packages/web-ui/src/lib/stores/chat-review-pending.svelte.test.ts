@@ -30,6 +30,10 @@ let reviewAnswer: { status: number; body: unknown };
 let holdFirstRun: Promise<void> | null;
 /** The review the server holds belongs to a later run (`run-8`). */
 let laterRun: boolean;
+/** The server says the review has changes but lists no file. */
+let cardEmptyButChanged: boolean;
+/** The server has no session any more (404). */
+let changesetGone: boolean;
 
 const notes = [{ file: 'notes.md', status: 'modified', diff: '-a\n+b' }];
 
@@ -57,7 +61,8 @@ function serve(): void {
 		}
 		if (url.endsWith('/changeset')) {
 			if (changesetStatus !== 200) return json({ error: 'no' }, changesetStatus);
-			return json({ hasChanges: card.length > 0, runId: laterRun ? 'run-8' : 'run-7', files: card });
+			if (changesetGone) return json({ error: 'Session not found' }, 404);
+			return json({ hasChanges: card.length > 0 || cardEmptyButChanged, runId: laterRun ? 'run-8' : 'run-7', files: card });
 		}
 		return json({ messages: [], activeRun: null });
 	}));
@@ -86,6 +91,8 @@ beforeEach(async () => {
 	reviewAnswer = { status: 200, body: { ok: true, accepted: 1, rolledBack: 0, notRestored: [] } };
 	holdFirstRun = null;
 	laterRun = false;
+	cardEmptyButChanged = false;
+	changesetGone = false;
 	serve();
 });
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -279,6 +286,21 @@ describe('a rollback the server could not do', () => {
 		expect(runTasks, 'the held message keeps waiting').toEqual(['next step']);
 	});
 
+	it.each([
+		['no review open any more', (): void => { card = []; }],
+		['no session any more', (): void => { changesetGone = true; }],
+	] as const)('the card shown for the meantime goes when the server answers with %s, and the held message is sent', async (_case, serverState) => {
+		await openReview();
+		reviewAnswer = { status: 500, body: { error: 'The rollback stopped partway', code: 'rollback_aborted', notRestored: ['notes.md'] } };
+		serverState();
+		await store.submitChangesetReview('rollback');
+		await wait(200);
+		await settle();
+		expect(store.getPendingChangeset(), 'no card the server denied').toBeNull();
+		expect(store.getRollbackStopped()).toBeNull();
+		expect(runTasks, 'the held message goes').toEqual(['next step', 'next step']);
+	});
+
 	it('the sentence is dropped when the server says the review shows no files', async () => {
 		await openReview();
 		reviewAnswer = { status: 500, body: { error: 'The rollback stopped partway', code: 'rollback_aborted', notRestored: ['notes.md'] } };
@@ -286,6 +308,7 @@ describe('a rollback the server could not do', () => {
 		await settle();
 		expect(store.getRollbackStopped(), 'positive control').toEqual(['notes.md']);
 		card = [];
+		cardEmptyButChanged = true;
 		reviewAnswer = { status: 409, body: { error: 'A run is in progress' } };
 		await store.submitChangesetReview('rollback');
 		await settle();

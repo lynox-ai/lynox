@@ -3672,6 +3672,9 @@ export async function submitChangesetReview(
 	const stale = (): boolean => sessionId !== sid || _resumeGeneration !== gen;
 	// The server refuses an answer whose run is not the one holding the changes now.
 	const body: Record<string, unknown> = { action, runId: pendingChangesetRunId };
+	// The card as it was answered: a rollback that stops partway brings back what is left of it.
+	const shown = pendingChangeset;
+	const shownRunId = pendingChangesetRunId;
 	if (action === 'partial' && rolledBackFiles) {
 		body['rolledBackFiles'] = rolledBackFiles;
 	}
@@ -3689,9 +3692,6 @@ export async function submitChangesetReview(
 		addToast(t('changeset.review_unsent'), 'error', 5000);
 		return;
 	}
-	// The card as it was answered: a rollback that stops partway brings back what is left of it.
-	const shown = pendingChangeset;
-	const shownRunId = pendingChangesetRunId;
 	if (!stale()) {
 		pendingChangeset = null;
 		pendingChangesetRunId = null;
@@ -3733,12 +3733,24 @@ export async function submitChangesetReview(
 		// Until the server's card arrives, the card shows what is left of the one answered, so the
 		// sentence is on screen even when that fetch fails.
 		const rest = (shown ?? []).filter((f) => left.includes(f.file));
+		// Read back after the assignment: the state holds its own proxy of `rest`, not `rest`.
+		let provisional: typeof pendingChangeset = null;
 		if (rest.length > 0) {
 			pendingChangeset = rest;
 			pendingChangesetRunId = shownRunId;
+			provisional = pendingChangeset;
 		}
-		// Nothing left (the throw came after the last file was back): the review is over.
-		if (await fetchChangeset() && !stale() && pendingChangeset === null) drainQueueSoon(100);
+		const answered = await fetchChangeset();
+		if (!answered || stale()) return;
+		// The server answered without a card (none open any more, or no session): the card shown
+		// for the meantime claims a review it just denied, so it goes, and so does the sentence.
+		if (provisional !== null && pendingChangeset === provisional) {
+			pendingChangeset = null;
+			pendingChangesetRunId = null;
+			rollbackStopped = null;
+		}
+		// Nothing left: the review is over.
+		if (pendingChangeset === null) drainQueueSoon(100);
 		return;
 	}
 	// The answer did nothing. Closing the review silently would read as done: say so, and show
