@@ -247,11 +247,35 @@ export function connectionShopHost(row: ConnectionRow | undefined): string | nul
 }
 
 /**
+ * Every string in `value`, each value and each key on its own. The resolver substitutes in each
+ * string value separately (`resolveInputTemplate`), so that is how the check reads them; read as one
+ * stringified text instead, a `{{` left open in one string would run on into the next and hide a
+ * reference there behind the first one's `params`, and JSON's escapes would change a name the
+ * resolver reads raw. Keys are never substituted; they are read too, as before, because the step's
+ * input is shown to its model. One list is filled as the walk goes, so the cost is one visit per
+ * string at any depth.
+ */
+function fieldStrings(value: unknown, into: string[] = []): string[] {
+  if (typeof value === 'string') {
+    into.push(value);
+  } else if (Array.isArray(value)) {
+    for (const v of value) fieldStrings(v, into);
+  } else if (value !== null && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      into.push(k);
+      fieldStrings(v, into);
+    }
+  }
+  return into;
+}
+
+/**
  * Where a webhook run's step would execute with something an event can choose outside its task
  * text, or `null` when nothing does. Only a step's
- * `task` fences a value as untrusted; a captured call's `input_template` and every other field
- * resolve a placeholder raw into what a tool executes with, so a third party would choose a URL,
- * a path or an argument. Refused there: a mapped param, the whole `params` object, and any
+ * `task` fences a value as untrusted; a captured call's `input_template` resolves a placeholder raw
+ * into what a tool executes with, so a third party would choose a URL, a path or an argument. The
+ * other fields resolve nothing; they are read as well, which can only refuse more.
+ * Refused outside the task: a mapped param, the whole `params` object, and any
  * reference that is not to `params` at all — an earlier step's output (`{{s1.result}}`), which an
  * event's text can steer. An unmapped param is the owner's own value.
  */
@@ -275,8 +299,7 @@ export function mappedValueOutsideTaskText(steps: readonly InlinePipelineStep[],
   };
   for (const [at, step] of steps.entries()) {
     const { task: _task, ...rest } = step;
-    const text = JSON.stringify(rest);
-    for (const { inner } of placeholders(text)) {
+    for (const { inner } of fieldStrings(rest).flatMap((text) => placeholders(text))) {
       // Split as the resolver does (`getByPath`, on `.` only): `{{params[0].result}}` names the
       // context key `params[0]`, not `params`.
       const segments = inner.trim().split('.').map((x) => x.trim());

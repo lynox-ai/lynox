@@ -283,6 +283,8 @@ function regateFlatProfiles(apisDir: string, mode: 'check' | 'strip', replaced: 
 
 /** State of an in-progress migration session. */
 interface MigrationSession {
+  /** Random, handed to the source in the handshake; an abort must name it. */
+  id: string;
   keypair: EphemeralKeypair;
   challengeNonce: Buffer;
   transferKey: Buffer | null;
@@ -417,7 +419,9 @@ export class MigrationImporter {
     const signature = signHandshake(serverPubKey, signingKey);
     zeroize(signingKey); // Key material no longer needed
 
+    const id = randomBytes(16).toString('hex');
     this.session = {
+      id,
       keypair,
       challengeNonce,
       transferKey: null,
@@ -432,7 +436,23 @@ export class MigrationImporter {
       signature,
       challengeNonce: challengeNonce.toString('hex'),
       acceptsPlainStores: this.acceptPlainStores,
+      sessionId: id,
     };
+  }
+
+  /**
+   * End the session the source names, if it has not received a manifest yet: the source stopped
+   * before sending its data, and a new attempt should not wait for the session to expire.
+   * Synchronous, so nothing can set a manifest between the check and the cleanup.
+   * - `aborted`: the session was this one and had no manifest; it is gone.
+   * - `none`: there is no session, or another one (a newer attempt's) — left as it is.
+   * - `in-transfer`: the session has its manifest; a running transfer is not cut off.
+   */
+  abortBeforeManifest(sessionId: string): 'aborted' | 'none' | 'in-transfer' {
+    if (!this.isActive || !this.session || this.session.id !== sessionId) return 'none';
+    if (this.session.manifest !== null) return 'in-transfer';
+    this.cleanup();
+    return 'aborted';
   }
 
   /**

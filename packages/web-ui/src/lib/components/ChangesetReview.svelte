@@ -38,9 +38,13 @@
 	let {
 		files,
 		onReview,
+		messageWaiting = false,
 	}: {
 		files: ChangesetFileInfo[];
 		onReview: (action: 'accept' | 'rollback' | 'partial', rolledBackFiles?: string[]) => void;
+		/** A message of this chat waits for this review: the card says so, since the waiting bubble
+		 *  can sit far above it. */
+		messageWaiting?: boolean;
 	} = $props();
 
 	let expandedFile = $state<string | null>(null);
@@ -107,6 +111,9 @@
 				{/if}
 			</div>
 		</div>
+		{#if messageWaiting}
+			<p class="mt-1 text-xs text-text-muted" data-testid="changeset-message-waiting">{t('changeset.message_waiting')}</p>
+		{/if}
 	</div>
 
 	<!-- File list -->

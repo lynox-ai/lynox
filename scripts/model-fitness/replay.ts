@@ -17,6 +17,9 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLLMClient } from '../../src/core/llm-client.js';
+import { calculateCost, hasKnownPricing } from '../../src/core/pricing.js';
+import { MODEL_MAP, ownEntry } from '../../src/types/models.js';
+import type { ModelTier } from '../../src/types/models.js';
 
 const MISTRAL_BASE = 'https://api.mistral.ai/v1';
 const FIREWORKS_BASE = 'https://api.fireworks.ai/inference/v1';
@@ -28,6 +31,9 @@ interface Candidate {
   apiBaseURL?: string;
   keyName: 'anthropic' | 'mistral' | 'fireworks';
   expect: 'inline' | 'escalate';
+  /** The Anthropic stage this model holds today or is a candidate for. The cost comparison reads
+   *  `MODEL_MAP` and `STAGE_SUCCESSOR`; the suite holds both of each stage in this list, tagged. */
+  stage?: ModelTier;
 }
 
 // The main-slot candidates for the balanced/main floor (R1/R3), measured through their REAL
@@ -41,7 +47,17 @@ interface Candidate {
 export const CANDIDATES: Candidate[] = [
   { label: 'ministral-14b (control)', provider: 'openai', modelId: 'ministral-14b-2512', apiBaseURL: MISTRAL_BASE, keyName: 'mistral', expect: 'inline' },
   { label: 'mistral-medium', provider: 'openai', modelId: 'mistral-medium-2604', apiBaseURL: MISTRAL_BASE, keyName: 'mistral', expect: 'escalate' },
-  { label: 'haiku-4.5', provider: 'anthropic', modelId: 'claude-haiku-4-5-20251001', keyName: 'anthropic', expect: 'escalate' },
+  { label: 'haiku-4.5', provider: 'anthropic', modelId: 'claude-haiku-4-5-20251001', keyName: 'anthropic', expect: 'escalate', stage: 'fast' },
+  // The Claude 5.5 change, one line per stage: today's model (MODEL_MAP), the max-quality
+  // model of the stage where there is one, and its 5.5 successor (STAGE_SUCCESSOR). Same
+  // floor hypothesis as the rest, decided per body via --expect.
+  { label: 'haiku-5.5', provider: 'anthropic', modelId: 'claude-haiku-5-5', keyName: 'anthropic', expect: 'escalate', stage: 'fast' },
+  { label: 'sonnet-4.6', provider: 'anthropic', modelId: 'claude-sonnet-4-6', keyName: 'anthropic', expect: 'escalate', stage: 'balanced' },
+  { label: 'sonnet-5', provider: 'anthropic', modelId: 'claude-sonnet-5', keyName: 'anthropic', expect: 'escalate', stage: 'balanced' },
+  { label: 'sonnet-5.5', provider: 'anthropic', modelId: 'claude-sonnet-5-5', keyName: 'anthropic', expect: 'escalate', stage: 'balanced' },
+  { label: 'opus-4.6', provider: 'anthropic', modelId: 'claude-opus-4-6', keyName: 'anthropic', expect: 'escalate', stage: 'deep' },
+  { label: 'opus-5', provider: 'anthropic', modelId: 'claude-opus-5', keyName: 'anthropic', expect: 'escalate', stage: 'deep' },
+  { label: 'opus-5.5', provider: 'anthropic', modelId: 'claude-opus-5-5', keyName: 'anthropic', expect: 'escalate', stage: 'deep' },
   // Fireworks GLM = the balanced preset's main-slot model, via the REAL Fireworks endpoint
   // (local dev key) — the faithful prod path, not an OpenRouter proxy. 5.3 since the provider
   // withdrew glm-5p2.
@@ -61,6 +77,84 @@ export const CANDIDATES: Candidate[] = [
   { label: 'gpt-oss-120b (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/gpt-oss-120b', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
   { label: 'minimax-m3 (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/minimax-m3', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
 ];
+
+/** The 5.5 model each stage would move to; today's model is `MODEL_MAP[stage]`. */
+export const STAGE_SUCCESSOR: Record<ModelTier, string> = {
+  fast: 'claude-haiku-5-5',
+  balanced: 'claude-sonnet-5-5',
+  deep: 'claude-opus-5-5',
+};
+
+/**
+ * Prices that depend on the prompt's length, which `getPricing(model)` cannot see (it takes
+ * no prompt length; the registry entry carries the short-prompt card only, see the note on
+ * `claude-haiku-5-5` in src/types/models.ts). Haiku 5.5, migration guide: "$0.10 / $0.50 per
+ * MTok input / output when the prompt is 100K tokens or fewer, and $0.50 / $2.50 when it is
+ * longer"; cache reads and writes are multiples of the input rate, so they scale with it.
+ */
+export const LONG_PROMPT_PRICING: Record<string, { overTokens: number; factor: number }> = {
+  'claude-haiku-5-5': { overTokens: 100_000, factor: 5 },
+};
+
+export interface TurnUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_input_tokens?: number | undefined;
+  cache_read_input_tokens?: number | undefined;
+}
+
+/**
+ * What one replayed turn cost, in USD: the usage the provider reported times the model's
+ * price, cache writes and reads included. `priced: false` means the registry has no price for
+ * the id and the figure is the conservative fallback rate, which must not be quoted as a cost.
+ */
+export function turnCostUSD(modelId: string, usage: TurnUsage): { usd: number; priced: boolean } {
+  const base = calculateCost(modelId, usage);
+  const prompt = usage.input_tokens + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
+  const long = ownEntry(LONG_PROMPT_PRICING, modelId);
+  const usd = long !== undefined && prompt > long.overTokens ? base * long.factor : base;
+  return { usd, priced: hasKnownPricing(modelId) };
+}
+
+/** Prompt length above which a provider may bill a long-context card the registry does not carry. */
+export const LONG_CONTEXT_WARN_TOKENS = 200_000;
+
+export interface PricedRun { how: string; usd: number; priced: boolean; hasUsage: boolean; promptTokens: number }
+
+/**
+ * The mean cost per turn of one candidate's runs. Only runs that answered AND reported usage
+ * count: an errored run has no reply, and a reply without usage would enter as $0 and pull
+ * the mean down. `priced` is false when any run fell back to the conservative rate;
+ * `longContext` when a prompt was long enough that a long-context card may apply.
+ */
+export function meanTurnCost(runs: readonly PricedRun[]): { mean: number; counted: number; priced: boolean; longContext: boolean } | undefined {
+  const counted = runs.filter(r => r.how !== 'ERROR' && r.hasUsage);
+  if (counted.length === 0) return undefined;
+  return {
+    mean: counted.reduce((sum, r) => sum + r.usd, 0) / counted.length,
+    counted: counted.length,
+    priced: runs.every(r => r.priced),
+    longContext: counted.some(r => r.promptTokens > LONG_CONTEXT_WARN_TOKENS),
+  };
+}
+
+/**
+ * Cost per turn of today's model against its 5.5 successor, per stage, from the mean cost
+ * per valid turn of each candidate. A stage is left out when either side has no valid turn;
+ * `ratio` is successor / today, so above 1 means the change makes the stage dearer.
+ */
+export function compareStageCost(perModel: ReadonlyMap<string, number>): Array<{ stage: ModelTier; today: string; successor: string; todayUsd: number; successorUsd: number; ratio: number }> {
+  const out: Array<{ stage: ModelTier; today: string; successor: string; todayUsd: number; successorUsd: number; ratio: number }> = [];
+  for (const stage of Object.keys(STAGE_SUCCESSOR) as ModelTier[]) {
+    const today = MODEL_MAP[stage];
+    const successor = STAGE_SUCCESSOR[stage];
+    const todayUsd = perModel.get(today);
+    const successorUsd = perModel.get(successor);
+    if (todayUsd === undefined || successorUsd === undefined || todayUsd <= 0) continue;
+    out.push({ stage, today, successor, todayUsd, successorUsd, ratio: successorUsd / todayUsd });
+  }
+  return out;
+}
 
 interface RawBody {
   model: string; provider: string;
@@ -146,7 +240,7 @@ async function judgeSpokenEscalation(text: string, judgeKey: string): Promise<bo
   return out.includes('ESCALATE');
 }
 
-async function replayOne(c: Candidate, body: RawBody, key: string, judgeKey: string): Promise<{ how: string; tools: string[]; ms: number; text: string; inTok: number; outTok: number; error?: string }> {
+async function replayOne(c: Candidate, body: RawBody, key: string, judgeKey: string): Promise<{ how: string; tools: string[]; ms: number; text: string; inTok: number; outTok: number; usd: number; priced: boolean; hasUsage: boolean; promptTokens: number; error?: string }> {
   const started = Date.now();
   try {
     const client = createLLMClient({
@@ -169,15 +263,23 @@ async function replayOne(c: Candidate, body: RawBody, key: string, judgeKey: str
     const content = (final.content ?? []) as ContentBlock[];
     const text = content.filter(b => b.type === 'text').map(b => b.text ?? '').join('\n');
     const spawn = classifySpawn(content);
-    const u = (final as { usage?: { input_tokens?: number; output_tokens?: number } }).usage;
+    const u = (final as { usage?: { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number } }).usage;
+    const usage: TurnUsage = {
+      input_tokens: u?.input_tokens ?? 0,
+      output_tokens: u?.output_tokens ?? 0,
+      cache_creation_input_tokens: u?.cache_creation_input_tokens ?? 0,
+      cache_read_input_tokens: u?.cache_read_input_tokens ?? 0,
+    };
+    const cost = turnCostUSD(c.modelId, usage);
     let how: string;
     if (spawn.deep) how = 'spawn_agent{deep}';
     else if (await judgeSpokenEscalation(text, judgeKey)) how = 'judge:offer';
     else if (spawn.delegated) how = 'spawn_agent{not-deep}';
     else how = 'inline';
-    return { how, tools: spawn.tools, ms: Date.now() - started, text, inTok: u?.input_tokens ?? 0, outTok: u?.output_tokens ?? 0 };
+    const promptTokens = usage.input_tokens + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
+    return { how, tools: spawn.tools, ms: Date.now() - started, text, inTok: usage.input_tokens, outTok: usage.output_tokens, usd: cost.usd, priced: cost.priced, hasUsage: u !== undefined, promptTokens };
   } catch (err) {
-    return { how: 'ERROR', tools: [], ms: Date.now() - started, text: '', inTok: 0, outTok: 0, error: err instanceof Error ? err.message : String(err) };
+    return { how: 'ERROR', tools: [], ms: Date.now() - started, text: '', inTok: 0, outTok: 0, usd: 0, priced: hasKnownPricing(c.modelId), hasUsage: false, promptTokens: 0, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -210,6 +312,8 @@ async function main(): Promise<void> {
   /** Gate bookkeeping: the control's verdict decides whether this run may be quoted at all. */
   let controlVerdict: string | undefined;
   let controlSeen = false;
+  /** Mean cost per valid turn, by model id, for the stage comparison at the end. */
+  const meanUsd = new Map<string, number>();
 
   for (const c of candidates) {
     const expect = bodyExpect ?? c.expect;
@@ -237,8 +341,24 @@ async function main(): Promise<void> {
     const perRunIn = results.map(r => r.inTok).join('/');
     const avgOut = Math.round(results.reduce((s, r) => s + r.outTok, 0) / results.length);
     console.log(`      ↳ tools: ${toolsSeen.length ? JSON.stringify(toolsSeen.join(', ')) : '(none)'}  ·  tok in per run: ${perRunIn}  ·  avg out: ${avgOut}`);
+    // Cost per turn, per run like the tokens: a cached repeat is cheaper than the cold call.
+    // Errored runs are left out of the mean; their spend, if any, is not in the reply.
+    const cost = meanTurnCost(results);
+    if (cost) {
+      if (cost.priced) meanUsd.set(c.modelId, cost.mean);
+      console.log(`      ↳ usd per turn: ${results.filter(r => r.how !== 'ERROR' && r.hasUsage).map(r => r.usd.toFixed(5)).join('/')}  ·  mean ${cost.mean.toFixed(5)} over ${String(cost.counted)}`
+        + `${cost.priced ? '' : '  ⚠ no registered price, fallback rate — not a cost'}`
+        + `${cost.longContext ? `  ⚠ prompt over ${String(LONG_CONTEXT_WARN_TOKENS)} tokens: a long-context card the registry does not carry may apply` : ''}`);
+    }
     const snip = (results.find(r => r.text)?.text ?? '').replace(/\s+/g, ' ').slice(0, 320);
     console.log(`      ↳ response head: ${JSON.stringify(snip)}`);
+  }
+  const stages = compareStageCost(meanUsd);
+  if (stages.length > 0) {
+    console.log('\nCost per turn, today → 5.5 (mean of valid turns on this body):');
+    for (const st of stages) {
+      console.log(`  ${st.stage.padEnd(9)} ${st.today} $${st.todayUsd.toFixed(5)} → ${st.successor} $${st.successorUsd.toFixed(5)}  ×${st.ratio.toFixed(2)}${st.ratio > 1 ? '  ▲ dearer' : ''}`);
+    }
   }
   // The acceptance gate used to be this sentence, printed unconditionally: it never read the
   // control's row, never noticed --only had filtered the control out, and the script exited 0
