@@ -438,8 +438,10 @@ describe('approving a preview', () => {
 		targets = [alt(1), alt(2)];
 		await render();
 		const block = [...target.querySelectorAll('h2')].find((h) => h.textContent === t('bulk.approve.title'))!.parentElement!;
-		expect(block.textContent).toContain(t('bulk.approve.shopify_visible'));
-		expect(t('bulk.approve.shopify_visible')).not.toMatch(/Titel|SEO|title/i);
+		// The sentence as the page renders it for this run: about what the run writes, no field named.
+		const live = [...block.querySelectorAll('p')].find((p) => p.textContent === t('bulk.approve.shopify_visible'));
+		expect(live?.textContent).toBe('Bei veröffentlichten Produkten ist alles, was dieser Lauf schreibt, sofort live in deinem Shop.');
+		expect(block.textContent).not.toMatch(/Titel|SEO/);
 	});
 });
 
