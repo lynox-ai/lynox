@@ -1609,6 +1609,58 @@ export function bulkRollbackLeft(run: Pick<BulkRun, 'phase' | 'haltKey'>, target
 	return bulkRollbackIncomplete(run) && target.written === true && target.undone !== true;
 }
 
+/** Per target the owner still writes: how many OTHER targets get the same new value in the same
+ *  field. A judge can give different products one value (three products with one SEO title), and
+ *  the preview showed each row alone. Only text values count, a target's own text such as a
+ *  product's title or an image's alt text; a target that writes a list, a number or a flag into a
+ *  field is not counted for that field at all. Field changes only, by their exact new text; an
+ *  empty or missing value is no value, though a target that clears the field still writes it. On
+ *  a run without a judge, a field in which every target that writes it gets one value is not marked:
+ *  that is the order („set every SEO title to …“), not a duplicate. A judged run has no fixed
+ *  value, so one value for all its targets is marked. A target that shares values in several
+ *  fields counts its largest group. Targets without a shared value are absent. A field the judge
+ *  fills from a fixed list of choices (`choiceFields`) is not counted either: many targets getting
+ *  the same choice is what such a field is for. */
+export function bulkSameValueOthers(
+	targets: readonly Pick<BulkTarget, 'seq' | 'change' | 'diff' | 'deselected'>[],
+	{ judged, choiceFields }: { judged: boolean; choiceFields?: ReadonlySet<string> },
+): Map<number, number> {
+	// Per field: who writes it, and who gets which value.
+	const byField = new Map<string, { writers: Set<number>; values: Map<string, Set<number>> }>();
+	for (const x of targets) {
+		if (x.deselected || (x.change !== 'update' && x.change !== 'create') || x.diff.kind !== 'fields') continue;
+		for (const { field, after } of x.diff.fields) {
+			// A list, a number or a flag is no target's own text, and neither is one of a field's choices.
+			if (after !== null && after !== undefined && typeof after !== 'string') continue;
+			if (choiceFields?.has(field) === true) continue;
+			let f = byField.get(field);
+			if (f === undefined) { f = { writers: new Set(), values: new Map() }; byField.set(field, f); }
+			// Every target that writes the field counts toward „all“, also one that clears it.
+			f.writers.add(x.seq);
+			if (typeof after !== 'string' || after.trim() === '') continue;
+			const seqs = f.values.get(after);
+			if (seqs === undefined) f.values.set(after, new Set([x.seq]));
+			else seqs.add(x.seq);
+		}
+	}
+	const others = new Map<number, number>();
+	for (const { writers, values } of byField.values()) {
+		for (const seqs of values.values()) {
+			if (seqs.size < 2) continue;
+			// One value for every target that writes this field: the order itself, unless a judge chose it.
+			if (!judged && seqs.size === writers.size) continue;
+			for (const seq of seqs) others.set(seq, Math.max(others.get(seq) ?? 0, seqs.size - 1));
+		}
+	}
+	return others;
+}
+
+/** The fields a judged run's rule fills from a fixed list of choices (an `enum` in its schema). */
+export function bulkChoiceFields(rule: Pick<NonNullable<BulkRunDetailData['judgeRule']>, 'schema'> | null): Set<string> {
+	if (rule === null) return new Set();
+	return new Set(Object.entries(rule.schema.properties).filter(([, shape]) => bulkFieldChoices(shape) !== null).map(([field]) => field));
+}
+
 /** How many targets the owner still writes whose SEO text gains an `&`: the products
  *  the preview's line names. One the owner took out is not counted. */
 export function bulkSeoEntityCount(targets: readonly Pick<BulkTarget, 'seoEntityFields' | 'deselected'>[]): number {
