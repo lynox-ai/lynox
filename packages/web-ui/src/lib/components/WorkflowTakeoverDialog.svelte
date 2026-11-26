@@ -156,7 +156,7 @@
 			// head of the dialog rather than to the page behind it, unless something outside the
 			// dialog took it meanwhile, such as an overlay above it. After a change it goes to the
 			// first changed part, brought into sight: that is what the owner has to read again. The
-			// line that says why stays in view above it, in the dialog's head.
+			// line above, which says why, may scroll out of sight then (it carries role=status).
 			await tick();
 			if (dialog?.isConnected === true && keyIsOurs()) {
 				const mark = toMark ? dialog.querySelector<HTMLElement>('[data-stamp-changed]') : null;
@@ -179,11 +179,10 @@
 	data-testid="takeover-dialog"
 >
 	<!-- The head (title, the line that says what moved, an error) and the buttons stay in view; only
-	     what is shown scrolls between them, so on a phone neither the line nor the buttons leave. A
-	     long title scrolls within its own bound, so the line and the error are always whole. -->
+	     what is shown scrolls between them, so on a phone neither the line nor the buttons leave. -->
 	<div data-dialog-frame class="w-full max-w-2xl rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] flex flex-col">
 		<div data-dialog-head class="shrink-0">
-		<h2 id="workflow-takeover-title" bind:this={heading} tabindex="-1" class="text-sm font-medium mb-1 break-words max-h-[20vh] overflow-y-auto"><MarkedLine text={tf('workflow_library.takeover.title', { name: shownValue(preview?.workflow.name ?? workflow.name) })} mono={false} /></h2>
+		<h2 id="workflow-takeover-title" bind:this={heading} tabindex="-1" class="text-sm font-medium mb-1 break-words"><MarkedLine text={tf('workflow_library.takeover.title', { name: shownValue(preview?.workflow.name ?? workflow.name) })} mono={false} /></h2>
 		{#if changedLine}
 			<p role="status" data-testid="takeover-changed" class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 px-3 py-2 text-xs mb-3">{changedLine}</p>
 		{/if}
