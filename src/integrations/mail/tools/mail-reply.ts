@@ -31,6 +31,7 @@ import { namedTarget, withoutAddresses } from '../../../core/audit-log.js';
 import { currentCallFiling, currentCallOwnerKnownFor, currentCallTargetOrigin } from '../../../core/call-connection.js';
 import { UNATTENDED_BLOCK_ANSWER } from '../../../core/prompt-store.js';
 import { noticeLanguage } from '../../../core/notice-language.js';
+import { wrapUntrustedData } from '../../../core/data-boundary.js';
 import { originAsk, originDenied, originRefusedMandate, originRefusedUnattended, originReplyAsk, originReplyToAsk, originUnreadable, type OriginTargets, type SendOrigin } from '../../../core/origin-notices.js';
 import { normalizeMailTarget } from '../../../core/send-target.js';
 import { NOT_MARKED_MESSAGE } from '../../../core/approval-filing.js';
@@ -46,6 +47,14 @@ export interface MailReplyToolInput {
   folder?: string | undefined;
   /** Reply-all behaviour: include all original To and Cc recipients. */
   reply_all?: boolean | undefined;
+}
+
+/**
+ * An error whose text the mail provider (or a server behind it) wrote: the sentence is lynox's,
+ * the text follows in one marked block.
+ */
+function errorWithText(head: string, text: string): string {
+  return `${head} The error text:\n${wrapUntrustedData(text, 'mail_reply')}`;
 }
 
 /**
@@ -129,8 +138,14 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
           try { agent.onOriginRefused?.({ targets, noun: 'mail', origin }); } catch { /* the refusal stands */ }
           return text;
         };
+        // What the model reads: the sender of the mail being answered is that sender's own text, so
+        // the sentence says only that it came from content lynox read, and the sender follows in a
+        // marked block. The owner's question above still names the sender (`originAsk`).
+        const shownOrigin: SendOrigin = { kind: 'readContent' };
+        const withSender = (text: string): string =>
+          `${text}\n\nThat content is the mail being answered. Its sender, as the mail gives it:\n${wrapUntrustedData(prepared.filing.original.from, 'mail_reply')}`;
         if (unnamed.length > 0 && agent.principal.kind !== 'owner') {
-          return refused(originRefusedMandate(targets, origin, 'mail'));
+          return refused(withSender(originRefusedMandate(targets, shownOrigin, 'mail')));
         }
         const lang = agent.noticeLanguage ?? noticeLanguage(undefined);
         // A reply whose one unnamed recipient is the address it goes to by default says so in its
@@ -153,11 +168,11 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
             : originAsk('mail_reply', input, 'mail', targets, origin, lang);
         const question = unnamed.length > 0 ? pv`${prepared.preview}\n\n${ask}` : prepared.preview;
         const answer = await agent.promptUser(question, ['Yes', 'No'], unnamed.length > 0 ? { blocked: true } : undefined);
-        if (answer === UNATTENDED_BLOCK_ANSWER) return refused(originRefusedUnattended(targets, origin));
+        if (answer === UNATTENDED_BLOCK_ANSWER) return refused(withSender(originRefusedUnattended(targets, shownOrigin)));
         if (!isApproval(answer)) {
           // A no to the question where a recipient comes from is said as such, so the model does
           // not try another recipient.
-          return unnamed.length > 0 ? originDenied(targets, origin, 'mail') : 'mail_reply cancelled by user.';
+          return unnamed.length > 0 ? withSender(originDenied(targets, shownOrigin, 'mail')) : 'mail_reply cancelled by user.';
         }
 
         // Owner-named in the log only when the dispatcher checked every recipient and found it
@@ -166,8 +181,8 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
       } catch (err: unknown) {
         // A confirmation nobody can answer ends the run; as text, the model would work around it.
         if (isInputRequired(err)) throw err;
-        if (err instanceof MailError) return `mail_reply error (${err.code}): ${err.message}`;
-        return `mail_reply error: ${getErrorMessage(err)}`;
+        if (err instanceof MailError) return errorWithText(`mail_reply error (${err.code}).`, err.message);
+        return errorWithText('mail_reply error.', getErrorMessage(err));
       }
     },
   };
@@ -324,7 +339,7 @@ export async function prepareReply(
   try {
     sendingAddress = await resolveSendingAddress(sendProvider);
   } catch (err) {
-    return { ok: false, message: `mail_reply error: could not read the sending address: ${err instanceof Error ? err.message : String(err)}` };
+    return { ok: false, message: errorWithText('mail_reply error: could not read the sending address. Nothing was sent.', err instanceof Error ? err.message : String(err)) };
   }
 
   // Reply-all: union with original To + Cc, minus our own address and
