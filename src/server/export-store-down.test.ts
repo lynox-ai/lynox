@@ -274,7 +274,8 @@ describe('export with every store open, durable memory off, then the CRM gone (r
       expect(legacyRow?.['text'], 'a replaced text of agent-memory.db, masked').toMatch(/^Alice's key is (?!sk-ant-)/);
       expect(text.includes(key), 'the key is not in the export').toBe(false);
       expect(legacyRow && 'embedding' in legacyRow, 'no embedding').toBe(false);
-      const engineRow = memories['engine.db']!.memories.find(m => m['id'] === 'm-held');
+      expect(memories['engine.db']!.memories.map(m => m['id']), 'the one text engine.db holds, once').toEqual(['m-held']);
+      const engineRow = memories['engine.db']!.memories[0];
       expect(engineRow?.['text'], 'engine.db, decrypted and masked').toMatch(/^Bob prefers mornings, key (?!sk-ant-)/);
       expect(body.knowledge_graph_may_be_incomplete, 'both stores read in full').toBe(false);
 

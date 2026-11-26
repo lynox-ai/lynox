@@ -183,7 +183,8 @@ export const MEMORY_TEXT_EXPORT_CAP = 20_000;
 
 export const MEMORY_TEXTS_RELATIONSHIPS_NOTE = 'source_deleted: 1 when the memory this relation was derived from '
   + 'was removed or replaced by a newer memory that contradicts it; the relation is no longer shown or used. '
-  + 'An empty source_memory_id means no source was recorded, or the memory it came from was deleted.';
+  + 'With source_deleted 0, a source_memory_id that names no row in memories, or none at all, means the memory it '
+  + 'came from was deleted, or that no source was recorded.';
 
 type ExportRow = Record<string, unknown>;
 
