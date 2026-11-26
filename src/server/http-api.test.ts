@@ -20200,7 +20200,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       }
     });
 
-    it('GET /api/export caps the entity page-loop at MAX_PAGES (no runaway on a full-page-forever store)', async () => {
+    it('GET /api/export caps the entity page-loop at MAX_PAGES (no runaway on a full-page-forever store) and marks the graph incomplete', async () => {
       // A store that always returns a full PAGE would loop forever without the
       // MAX_PAGES bound — assert the loop stops at the 1000-page cap.
       const full = Array.from({ length: 200 }, (_, i) => ({
@@ -20221,6 +20221,8 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         const res = await jsonFetch('/api/export');
         expect(res.status).toBe(200);
         expect(listEntities).toHaveBeenCalledTimes(1000);
+        const body = await res.json() as { knowledge_graph_may_be_incomplete: boolean };
+        expect(body.knowledge_graph_may_be_incomplete, 'the cap stopped the read, so the graph may hold more').toBe(true);
       });
     });
 
