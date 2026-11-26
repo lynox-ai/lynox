@@ -105,7 +105,8 @@ describe('sendTargets on the sending tools', () => {
   it('google_drive names the address a share sends to, and nothing for other actions', () => {
     const tool = createDriveTool(() => null);
     expect(values(tool.sendTargets?.({ action: 'share', file_id: 'f', email: 'Anna@Firma.ch' }))).toEqual(['anna@firma.ch']);
-    expect(values(tool.sendTargets?.({ action: 'share', file_id: 'f' }))).toEqual([]);
+    // A share without an address is unreadable, never an empty list: nobody can see whom it goes to.
+    expect(() => tool.sendTargets?.({ action: 'share', file_id: 'f' })).toThrow();
     expect(tool.sendTargets?.({ action: 'search', query: 'x' })).toBeNull();
     expect(tool.sendTargets?.({ action: 'move', file_id: 'f', target_folder_id: 'g' })).toBeNull();
   });

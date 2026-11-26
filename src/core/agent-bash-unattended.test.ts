@@ -88,7 +88,7 @@ describe('a bash rule, end to end through the agent', () => {
   });
 
   it('an unattended run with a question channel asks about the rule and runs on yes', async () => {
-    const r = await run('ssh user@host', { autonomous: true, answer: 'Allow' });
+    const r = await run('ssh user@host', { autonomous: true, answer: 'allow' });
     expect(r.promptUser).toHaveBeenCalledTimes(1);
     expect(flattenPrompt(r.promptUser!.mock.calls[0]![0] as string | PromptText)).toContain('remote shell access');
     expect(r.ran).toBe(true);
@@ -97,7 +97,7 @@ describe('a bash rule, end to end through the agent', () => {
   // `[BLOCKED]` is not a refusal where a person can be asked: it cannot be lifted by a
   // declaration, but it is put to the person. Pinned so that nobody reads it as more.
   it('a blocked rule is a question to a person when there is a channel, and stops on no', async () => {
-    const r = await run('sudo ls', { autonomous: true, answer: 'Deny' });
+    const r = await run('sudo ls', { autonomous: true, answer: 'deny' });
     expect(r.promptUser).toHaveBeenCalledTimes(1);
     expect(flattenPrompt(r.promptUser!.mock.calls[0]![0] as string | PromptText)).toContain('[BLOCKED');
     expect(r.ran).toBe(false);
@@ -110,7 +110,7 @@ describe('a bash rule, end to end through the agent', () => {
   });
 
   it('in a chat, a rule only CRITICAL_BASH lists is asked about, and stops on no', async () => {
-    const r = await run('docker exec app ls', { autonomous: false, answer: 'Deny' });
+    const r = await run('docker exec app ls', { autonomous: false, answer: 'deny' });
     expect(r.promptUser).toHaveBeenCalledTimes(1);
     expect(flattenPrompt(r.promptUser!.mock.calls[0]![0] as string | PromptText)).toContain('container execution');
     expect(r.ran).toBe(false);

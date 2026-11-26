@@ -127,6 +127,10 @@ export function applyConstraint(
   if (c.regex !== undefined) {
     let re: RegExp;
     try {
+      // The pattern must compile on its own first: one that does not (`a)|(.*`)
+      // can close the group below and leave the anchors on one branch only, so
+      // `^(?:a)|(.*)$` would admit any value while the pattern reads as narrow.
+      new RegExp(String(c.regex));
       // Anchor to a FULL match (the type contract: the value must fully satisfy
       // the pattern) so an un-anchored author pattern can't match a substring
       // and let a re-target value smuggle an unconstrained prefix/suffix.

@@ -262,3 +262,18 @@ describe('a contract\'s stored values in a refusal', () => {
     expect(bindWorkflowParameters(n, { n: '50' }, { constraints: { n: { max: 10 } } })).toEqual({ ok: false, error: 'Parameter "n" must be <= 10.' });
   });
 });
+
+describe('a pattern that does not compile on its own', () => {
+  const schema: ProcessParameter[] = [{ name: 'v', description: '', type: 'string', source: 'user_input' } as ProcessParameter];
+
+  it('is refused, though inside the run\'s anchors it compiles and would admit any value', () => {
+    const r = bindWorkflowParameters(schema, { v: 'anything at all' }, { constraints: { v: { regex: 'a)|(.*' } } });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toBe('Parameter "v" has an invalid constraint pattern.');
+  });
+
+  it('CONTROL: a pattern that compiles on its own still holds in full', () => {
+    expect(bindWorkflowParameters(schema, { v: 'b' }, { constraints: { v: { regex: 'a|b' } } }).ok).toBe(true);
+    expect(bindWorkflowParameters(schema, { v: 'ab' }, { constraints: { v: { regex: 'a|b' } } }).ok).toBe(false);
+  });
+});

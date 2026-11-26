@@ -304,7 +304,7 @@ describe('VoiceSettings', () => {
 		'/voice/info': {
 			speech_service_off: false,
 			stt: { available: true, provider: 'mistral', config_value: 'mistral', env_override: null, providers: [{ id: 'auto', name: 'Auto', available: true }, mistral] },
-			tts: { available: true, provider: 'mistral', config_value: null, config_voice: 'paul', env_override: null, voices: [{ id: 'paul', language: 'de' }], providers: [{ id: 'auto', name: 'Auto', available: true }, mistral] },
+			tts: { available: true, provider: 'mistral', config_value: null, config_voice: 'paul', env_override: null, voices: [{ id: 'paul', language: 'de', description: 'Paul - Neutral' }], providers: [{ id: 'auto', name: 'Auto', available: true }, mistral] },
 		},
 		'/config': { transcription_provider: 'mistral', tts_provider: 'auto', tts_voice: 'paul', viewer },
 	});
@@ -319,7 +319,7 @@ describe('VoiceSettings', () => {
 			// The server names Mistral in English; the page shows it in the UI language (de here).
 			line(t('voice.stt_heading'), 'Mistral Voxtral (EU-Endpunkt)'),
 			line(t('voice.tts_heading'), 'Auto'),
-			line(t('voice.tts_voice'), 'paul (de)'),
+			line(t('voice.tts_voice'), 'Paul - Neutral (Deutsch)'),
 		]);
 	});
 
@@ -340,7 +340,7 @@ describe('VoiceSettings', () => {
 		expect(rows()).toEqual([
 			line(t('voice.stt_heading'), 'Mistral Voxtral (EU-Endpunkt)'),
 			line(t('voice.tts_heading'), 'Mistral Voxtral (EU-Endpunkt)'),
-			line(t('voice.tts_voice'), 'paul (de)'),
+			line(t('voice.tts_voice'), 'Paul - Neutral (Deutsch)'),
 		]);
 	});
 

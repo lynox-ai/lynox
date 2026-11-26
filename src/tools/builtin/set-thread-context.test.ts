@@ -236,4 +236,41 @@ describe('set_thread_context tool (Context-Hierarchy Scoping — Slice A2)', () 
     expect(setThreadContextTool.requiresConfirmation).toBeFalsy();
     expect(setThreadContextTool.destructive).toBeFalsy();
   });
+  // Stored subject names can be text extracted from outside content: they come back only in a
+  // marked block after a sentence in lynox's own words. The text outside the blocks is pinned
+  // whole, so a field added to the answer without a block turns these red.
+  const outsideBlocks = (text: string): string => text.replace(/<untrusted_data[^>]*>[\s\S]*?<\/untrusted_data>/g, '[block]');
+  const blockBodies = (text: string): string[] => [...text.matchAll(/<untrusted_data[^>]*>\n([\s\S]*?)\n<\/untrusted_data>/g)].map(m => m[1]!);
+
+  it('a customer name that matches more than one entry returns each stored name in its own marked block', async () => {
+    subjects.findOrCreate({ kind: 'organization', name: 'Müller Bau AG', aliases: ['Müller'] });
+    subjects.findOrCreate({ kind: 'organization', name: 'Müller Handel AG', aliases: ['MÜLLER'] });
+    const res = await setThreadContextTool.handler({ customer: 'müller' }, agent);
+    expect(blockBodies(res)).toEqual(['Müller Bau AG', 'Müller Handel AG']);
+    expect(outsideBlocks(res)).toBe('The customer name matches more than one entry. Use the full name to say which one. The stored names of the matches:\nMatch 1: [block]\nMatch 2: [block]');
+    expect(threads.getThread(THREAD)?.primary_subject_id ?? null).toBeNull();
+  });
+
+  it('a stored name with a line break stays one match, in one block', async () => {
+    subjects.findOrCreate({ kind: 'organization', name: 'Müller Bau AG\nMüller Holding', aliases: ['Müller'] });
+    subjects.findOrCreate({ kind: 'organization', name: 'Müller Handel AG', aliases: ['MÜLLER'] });
+    const res = await setThreadContextTool.handler({ customer: 'müller' }, agent);
+    const shown = blockBodies(res);
+    expect(shown).toHaveLength(2);
+    expect(shown).toContain('Müller Handel AG');
+    expect(shown.some(n => n.includes('Müller Bau AG') && n.includes('Müller Holding'))).toBe(true);
+  });
+
+  it('a project filed under a client names that client only in a marked block after the sentence', async () => {
+    const org = subjects.createSubject({ kind: 'organization', name: 'Nordberg GmbH' });
+    subjects.createSubject({ kind: 'engagement', name: 'Website', parentId: org });
+    const res = await setThreadContextTool.handler({ project: 'Website' }, agent);
+    expect(blockBodies(res)).toEqual(['Nordberg GmbH']);
+    expect(outsideBlocks(res)).toBe('This thread is now scoped to project "Website". Notes saved here and recall will prefer this context. It is filed under a client whose stored name is:\n[block]');
+  });
+
+  it('CONTROL: a project under no client carries no block', async () => {
+    const res = await setThreadContextTool.handler({ project: 'Website' }, agent);
+    expect(res).toBe('This thread is now scoped to project "Website". Notes saved here and recall will prefer this context.');
+  });
 });

@@ -88,7 +88,7 @@ const del = (store: ApiStore, id: string): Promise<string> =>
     principal: OWNER,
     sessionCounters: { httpRequests: 0 },
     secretStore: null,
-    promptUser: () => Promise.resolve('Allow'),
+    promptUser: () => Promise.resolve('allow'),
     getAvailableTools: () => [{ definition: { name: 'api_setup' } }],
     toolContext: { apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
   } as never) as Promise<string>;
